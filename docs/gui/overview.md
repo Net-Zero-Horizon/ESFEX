@@ -9,7 +9,7 @@ Desktop application for building, editing, and validating power system configura
 
 ```bash
 # Install ESFEX with GUI dependencies (PySide6, QWebEngine, Leaflet)
-pip install "esfex[gui]"
+pip install esfex
 
 # Start with a blank project
 esfex studio
@@ -24,7 +24,7 @@ esfex studio -c config.yaml --system "isla_juventud"
 ### System Requirements
 
 - Python 3.10 or later
-- PySide6 6.5+ (installed automatically with the `[gui]` extra)
+- PySide6 6.5+ (included in the core install)
 - A display capable of 1280x720 or higher (1920x1080 recommended)
 - Internet connection for base map tiles and workflow data fetching (offline tile caching is supported after first load)
 

@@ -147,7 +147,7 @@ Settings (`.vscode/settings.json`):
             "type": "debugpy",
             "request": "launch",
             "module": "esfex.cli",
-            "args": ["editor", "-c", "${workspaceFolder}/configs/example.yaml"],
+            "args": ["studio", "-c", "${workspaceFolder}/configs/example.yaml"],
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },

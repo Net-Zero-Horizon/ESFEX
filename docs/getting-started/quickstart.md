@@ -502,7 +502,7 @@ print(df.to_string(index=False))
 ## Step 6: Launch the GUI Editor (Optional)
 
 ```bash
-pip install "esfex[gui]"
+pip install esfex
 esfex studio -c my_system.yaml
 ```
 

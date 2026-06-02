@@ -10,8 +10,11 @@ All commands are accessed through the `esfex` entry point, built with [Typer](ht
 | `esfex validate` | Validate a configuration file |
 | `esfex export` | Export results to different formats |
 | `esfex studio` | Launch the GIS-based Studio |
+| `esfex precompile` | Build a Julia sysimage for faster startup |
 | `esfex plugin` | Manage plugins (install, enable, disable, list) |
 | `esfex info` | Show version and system information |
+| `esfex train-demand-model` | Train the demand-estimation ML model |
+| `esfex build-demand-dataset` | Download and consolidate hourly demand data |
 
 ---
 
@@ -27,7 +30,7 @@ esfex run -c CONFIG [OPTIONS]
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--config` | `-c` | Path | *required* | Path to YAML configuration file |
-| `--mode` | `-m` | String | `development` | Simulation mode: `development` or `unit_commitment` |
+| `--mode` | `-m` | String | `development` | Simulation mode: `development`, `unit_commitment`, or `economic_dispatch` |
 | `--solver` | `-s` | String | `highs` | Solver: `highs`, `cbc`, `glpk`, `gurobi`, `cplex`, `scip`, `xpress` |
 | `--output` | `-o` | Path | `./results` | Output directory for results |
 | `--years` | `-y` | Integer | from config | Number of years to simulate |
@@ -263,7 +266,7 @@ esfex studio [OPTIONS]
 Requires PySide6 and QWebEngine:
 
 ```bash
-pip install "esfex[gui]"
+pip install esfex
 ```
 
 ### Options

@@ -58,7 +58,7 @@ Optional dependency groups enable additional functionality. Combine multiple ext
 === "Studio"
 
     ```bash
-    pip install "esfex[gui]"
+    pip install esfex
     ```
 
     Adds **PySide6** (>= 6.5) for the interactive GIS-based grid editor. The GUI allows you to place nodes, generators, batteries, and transmission lines on an OpenStreetMap-based map, configure equipment parameters through forms, and export the system as a YAML configuration file.
@@ -82,7 +82,7 @@ Optional dependency groups enable additional functionality. Combine multiple ext
 === "Full Installation"
 
     ```bash
-    pip install "esfex[gui,viz,sensitivity,workflows]"
+    pip install "esfex[viz,sensitivity,workflows]"
     ```
 
     Installs all optional features.
@@ -102,7 +102,7 @@ source .venv/bin/activate   # Linux/macOS
 # .venv\Scripts\activate    # Windows
 
 # Install in editable mode with development dependencies
-pip install -e ".[dev,gui,viz,sensitivity]"
+pip install -e ".[dev,viz,sensitivity]"
 ```
 
 The `dev` extras include:

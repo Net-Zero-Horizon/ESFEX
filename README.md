@@ -82,7 +82,7 @@ ESFEX is implemented as a hybrid system: **Python** handles configuration, data 
 
 - **Two-stage decomposition** — Master Problem (all years simultaneously, representative days/periods) + Operational Dispatch (year-by-year, full chronological year). Investments are operationally validated before acceptance.
 - **Rolling horizon dispatch** — Configurable overlapping time windows with boundary-condition propagation (battery SOC, generator status) and automatic result stitching.
-- **Two simulation modes** — `development` (LP, continuous commitment + investment), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
+- **Three simulation modes** — `development` (LP, continuous commitment + investment), `economic_dispatch` (LP, fixed fleet), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
 - **Unit decommissioning planning** — Age-based retirement plus NPV-based retirement for flexible phase-out / retention of the unit inventory.
 
 ### Power System Modeling
@@ -116,7 +116,7 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 - **GIS-based Studio** — A PySide6 + Leaflet.js map for visually building power systems: place nodes, generators, batteries, and transmission lines with polyline routing. Includes resource-assessment wizards for rooftop solar, utility-scale PV, wind, and OTEC availability profiles.
 - **Plugin system** — Directory-based plugins with simulation lifecycle hooks, GUI integration, and Julia overlay modules for custom constraints.
-- **CLI** — `run`, `validate`, `export`, `studio`, `precompile`, `info`, and `plugin` commands with Rich formatting and progress tracking.
+- **CLI** — `run`, `validate`, `export`, `studio`, `precompile`, `info` and `plugin` commands (plus `train-demand-model` / `build-demand-dataset` demand-data utilities) with Rich formatting and progress tracking.
 - **HDF5 output** — Structured results with derived metrics (LCOE, VALCOE, capacity factor) exportable to CSV, Excel, and JSON.
 
 ---
@@ -183,7 +183,7 @@ esfex precompile
 
 ### Solvers
 
-ESFEX defaults to the open-source **HiGHS** solver. Gurobi, CPLEX, CBC, and GLPK are also supported and selectable per run (`--solver`) or in the config. Ipopt is used for the nonlinear ACOPF formulations.
+ESFEX defaults to the open-source **HiGHS** solver. Gurobi, CPLEX, CBC, GLPK, SCIP, and Xpress are also supported and selectable per run (`--solver`) or in the config. Ipopt is used for the nonlinear ACOPF formulations.
 
 ---
 
@@ -310,7 +310,7 @@ mkdocs serve
 - **Python** ≥ 3.10 (3.10, 3.11, 3.12 supported)
 - **Julia** ≥ 1.9 (managed via `juliacall`)
 - Core Python: NumPy, Pandas, SciPy, h5py, Pydantic, NetworkX, Typer, Rich, PySide6
-- A supported solver: HiGHS (default, open-source), or Gurobi / CPLEX / CBC / GLPK
+- A supported solver: HiGHS (default, open-source), or Gurobi / CPLEX / CBC / GLPK / SCIP / Xpress
 
 ---
 

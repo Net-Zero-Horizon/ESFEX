@@ -4,7 +4,7 @@
 Install ESFEX with GUI dependencies:
 
 ```bash
-pip install "esfex[gui]"
+pip install esfex
 ```
 
 This installs PySide6 and QWebEngine. Requires Python 3.10+ and a display of at least 1280x720 (1920x1080 recommended).

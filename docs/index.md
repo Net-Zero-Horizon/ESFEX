@@ -4,7 +4,7 @@
 
 # ESFEX
 
-**Renewable Energy Flexibility — Power System Optimization Model**
+**Energy System Flexibility — Power System Optimization Model**
 
 ESFEX is an open-source power system planning framework that co-optimizes generation, storage, and transmission investment over multi-decade horizons while capturing the operational flexibility constraints that arise in systems with high shares of variable renewable energy. It couples a strategic capacity expansion planner (Master Problem) with a detailed operational dispatch engine through a two-stage decomposition, bridging the gap between long-term investment planning tools and short-term production cost models while explicitly addressing the epistemic uncertainity of the process.
 
@@ -67,7 +67,7 @@ The currently implemented sector coupling modules are:
 
 - **GIS-based Studio** — PySide6 + Leaflet.js map for visually building power systems: place nodes, generators, batteries, transmission lines with polyline routing. Includes resource assessment wizards for solar rooftop, solar PV utility-scale, wind and OTEC availability profiles.
 - **Plugin system** — Directory-based plugins with simulation lifecycle hooks, GUI integration, and Julia overlay modules for custom constraints.
-- **CLI** — `esfex run`, `validate`, `export`, `editor`, `info` commands with Rich formatting and progress tracking.
+- **CLI** — `esfex run`, `validate`, `export`, `studio`, `precompile`, `info`, and `plugin` commands with Rich formatting and progress tracking.
 - **HDF5 output** — Structured results with derived metrics (LCOE, VALLCOE, capacity factor) exportable to CSV, Excel, and JSON.
 
 
@@ -133,7 +133,7 @@ esfex run -c my_system.yaml --years 25 --verbose
 esfex export -r results/output.h5 -f csv
 
 # Launch the Studio
-pip install "esfex[gui]"
+pip install esfex
 esfex studio
 ```
 
