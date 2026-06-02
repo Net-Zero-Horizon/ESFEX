@@ -2884,9 +2884,9 @@ class MainWindow(QMainWindow):
             self._update_window_title()
 
     def _update_window_title(self):
-        base = "ESFEX"
+        base = "ReflexPy"
         if self._config_path:
-            base = f"{Path(self._config_path).name} — ESFEX"
+            base = f"{Path(self._config_path).name} — ReflexPy"
         if self._modified:
             base = "• " + base  # bullet prefix; • is clearer than *
         self.setWindowTitle(base)

@@ -1,6 +1,6 @@
 # ESFEX frente a modelos de referencia del sector — comparación exhaustiva
 
-*Preparado 2026-06-01. Los datos de ESFEX están anclados en el árbol fuente `esfex`
+*Preparado 2026-06-01. Los datos de ESFEX están anclados en el árbol fuente `reflexpy`
 (README + inspección de código); los datos de los comparadores fueron verificados contra
 documentación oficial, GitHub/PyPI/Zenodo y artículos fuente (estado a inicios de 2026).
 Las afirmaciones aproximadas o sujetas a verificación van marcadas.*
@@ -35,11 +35,11 @@ funcionalidades inusualmente amplio e integrado, orientado a investigación.**
 
 ## 1. Qué es ESFEX realmente (anclado en el código)
 
-| Atributo | ESFEX (`esfex`) |
+| Atributo | ESFEX (`reflexpy`) |
 |---|---|
 | Tipo | **Expansión de capacidad + despacho operativo + OPF multi-formulación**, enfoque en flexibilidad |
 | Autor / madurez | Autor único (M. Soto Calvo, trabajo doctoral); licencia **MIT**; estado **alfa** (~v0.1.x); ~155k líneas Python + ~18k Julia; 53 archivos de test, validación IEEE |
-| **Arquitectura** | **Híbrida: Python (`esfex`) = CLI, configuración, I/O, GUI, orquestación; Julia (JuMP) = modelos de optimización**. Puente `juliacall` (PythonCall.jl) |
+| **Arquitectura** | **Híbrida: Python (`reflexpy`) = CLI, configuración, I/O, GUI, orquestación; Julia (JuMP) = modelos de optimización**. Puente `juliacall` (PythonCall.jl) |
 | Clases de problema | LP / MILP (despacho, UC, expansión) y NLP / QCP / cónico (AC-OPF, SOCP/SDP/QC) |
 | Solvers | **HiGHS (por defecto)**; Gurobi/CPLEX/Xpress/SCIP/CBC/GLPK (LP/MILP); **Ipopt** (NLP); SCS/Clarabel/MOSEK (cónico) |
 | **Formulaciones de flujo (6, vía `power_flow_mode`)** | `dcopf` (DC-OPF base de ciclos + pérdidas PWL); `dcopf_ac_verify` (DC + verificación AC Newton-Raphson); `acopf_soc` (relajación cónica de 2º orden); `acopf_qc` (relajación cuadrática-convexa + McCormick); `acopf_sdp` (relajación semidefinida — *bloqueada por escalado numérico*); `acopf_polar` (NLP exacto V,θ); `acopf_rect` (NLP exacto Vr,Vi) |

@@ -1,6 +1,6 @@
 # CLI Reference
 
-All commands are accessed through the `esfex` entry point, built with [Typer](https://typer.tiangolo.com/) and formatted with [Rich](https://rich.readthedocs.io/).
+All commands are accessed through the `reflexpy` entry point, built with [Typer](https://typer.tiangolo.com/) and formatted with [Rich](https://rich.readthedocs.io/).
 
 ## Commands Overview
 
@@ -377,10 +377,10 @@ Plugins are discovered from:
 
 ```bash
 # Install from GitHub
-esfex plugin install --git https://github.com/user/esfex-weather
+esfex plugin install --git https://github.com/user/reflex-weather
 
 # Install from GitHub with a custom directory name
-esfex plugin install --git https://github.com/user/esfex-weather --name weather_plugin
+esfex plugin install --git https://github.com/user/reflex-weather --name weather_plugin
 
 # Install from ZIP file
 esfex plugin install --zip weather_plugin.zip
@@ -425,7 +425,7 @@ Enabled plugin: weather_forecast
 
 ### Plugin CLI Extensions
 
-Plugins can register CLI sub-commands under `esfex`. Registered commands appear automatically when the plugin is enabled.
+Plugins can register CLI sub-commands under `reflexpy`. Registered commands appear automatically when the plugin is enabled.
 
 
 ---
@@ -503,6 +503,6 @@ esfex --install-completion fish
 After installation, restart your shell:
 
 ```bash
-esfex ru<TAB>     # completes to "esfex run"
+reflexpy ru<TAB>     # completes to "esfex run"
 esfex run -<TAB>  # shows available options
 ```

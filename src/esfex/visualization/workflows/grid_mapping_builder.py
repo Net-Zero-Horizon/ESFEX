@@ -644,14 +644,18 @@ def _create_generator(
 
     # Pull in operating defaults by canonical fuel; never override
     # explicit values from the source.
-    #   - min_power: scaled to MW from rated × min_power_frac.
+    #   - min_power: kept as fraction of rated (schema + Julia expect
+    #     a fraction; multiplying by rated produces MW absolute, which
+    #     Julia then re-multiplies by rated giving an impossible floor
+    #     and forcing gen_status=0 in UC mode → silent 70% load shed).
     #   - ramp_up / ramp_down: kept as fraction/hour (Julia semantics).
-    #   - start_up_cost: scaled to absolute $ per cold start.
+    #   - start_up_cost: scaled to absolute $ per cold start (schema
+    #     expects $/node).
     gen_defaults = estimate_generator_defaults(
         _normalize_fuel_key(mapped_fuel)
     )
     rp = float(gen.capacity_mw or 0)
-    min_power_mw = rp * gen_defaults.get("min_power_frac", 0.0)
+    min_power_frac = gen_defaults.get("min_power_frac", 0.0)
     start_up_cost = rp * gen_defaults.get("start_up_cost_per_mw", 0.0)
 
     state.generators[inst_id] = GuiGeneratorInstance(
@@ -669,7 +673,7 @@ def _create_generator(
         longitude=gen.longitude,
         eff_at_rated=gen_defaults.get("eff_at_rated", 0.35),
         eff_at_min=gen_defaults.get("eff_at_min", 0.25),
-        min_power=min_power_mw,
+        min_power=min_power_frac,
         ramp_up=gen_defaults.get("ramp_up_frac", 0.0),
         ramp_down=gen_defaults.get("ramp_down_frac", 0.0),
         min_up=int(gen_defaults.get("min_up_h", 0)),

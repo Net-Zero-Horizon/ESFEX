@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Completed the [Single-Node Tutorial](single-system.md) or familiarity with basic ESFEX configuration
-- ESFEX installed: `pip install esfex`
+- ESFEX installed: `pip install reflexpy`
 - Python 3.10+ with `h5py`, `numpy`, and `matplotlib` for results analysis
 
 ---

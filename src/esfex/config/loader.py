@@ -172,11 +172,25 @@ def _convert_generator(unit_key: str, data: dict[str, Any]) -> GeneratorConfig:
     for field in _reservoir_fields:
         if field in data:
             kwargs[field] = data[field]
+    # Authoritative per-node bus assignment from the GUI / serializer.
+    # Without this the bridge adapter falls back to coarser heuristics
+    # (transmission_line endpoints, default bus per node, etc.) which
+    # silently leaves multi-bus-per-node thermal plants un-anchored —
+    # observed empirically as 70% load shed in cuba_link.yaml UC runs.
+    if "bus_id_per_node" in data:
+        kwargs["bus_id_per_node"] = data["bus_id_per_node"]
+    if "bus_index" in data:
+        kwargs["bus_index"] = data["bus_index"]
     return GeneratorConfig(**kwargs)
 
 
 def _convert_battery(unit_key: str, data: dict[str, Any]) -> BatteryConfig:
     """Convert a storage unit definition to BatteryConfig."""
+    extra: dict[str, Any] = {}
+    if "bus_id_per_node" in data:
+        extra["bus_id_per_node"] = data["bus_id_per_node"]
+    if "bus_index" in data:
+        extra["bus_index"] = data["bus_index"]
     return BatteryConfig(
         name=data.get("name", unit_key),
         type="Storage",
@@ -215,6 +229,7 @@ def _convert_battery(unit_key: str, data: dict[str, Any]) -> BatteryConfig:
         MaxDischargePower=data["MaxDischargePower"],
         availability_file=data.get("Availability"),
         current_type=data.get("current_type", "DC"),
+        **extra,
     )
 
 

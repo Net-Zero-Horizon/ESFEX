@@ -936,7 +936,7 @@ def create_plugin(ctx):
 
 
 class TestConfigSchema:
-    def test_esfex_config_accepts_plugins_dict(self):
+    def test_reflex_config_accepts_plugins_dict(self):
         """ESFEXConfig.plugins field accepts arbitrary dict."""
         from esfex.config.schema import ESFEXConfig
 

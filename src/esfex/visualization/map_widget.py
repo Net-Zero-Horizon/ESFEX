@@ -151,7 +151,7 @@ class MapWidget(QWebEngineView):
         css = generate_map_css().replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
         self._run_js(
             f"var s=document.createElement('style');"
-            f"s.id='esfex-theme';"
+            f"s.id='reflex-theme';"
             f"s.textContent='{css}';"
             f"document.head.appendChild(s);"
         )

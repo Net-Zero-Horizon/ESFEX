@@ -14,7 +14,7 @@ ESFEX plugins extend the framework without modifying its core source code. A plu
 The `PluginManager` scans three locations in order:
 
 1. **User plugins directory**: `~/.esfex/plugins/`
-2. **Project-local directory**: `<project_dir>/.esfex/plugins/`
+2. **Project-local directory**: `<project_dir>/.reflexpy/plugins/`
 3. **Environment variable**: directories listed in `$ESFEX_PLUGIN_PATH` (colon-separated on Linux/macOS, semicolon-separated on Windows)
 
 Each subdirectory containing both a `plugin.json` and an `__init__.py` is recognized as a valid plugin. Discovery happens on startup; the first plugin found with a given name wins (duplicates are skipped with a debug log).
@@ -60,7 +60,7 @@ JSON manifest describing the plugin:
     "version": "1.0.0",
     "description": "Track CO2 emissions per generator and export annual carbon reports",
     "author": "Jane Doe",
-    "url": "https://github.com/janedoe/esfex-carbon-tracker",
+    "url": "https://github.com/janedoe/reflex-carbon-tracker",
     "category": "analysis",
     "priority": 0,
     "requires_plugins": [],
@@ -440,7 +440,7 @@ class CarbonTrackerPlugin(ESFEXPlugin):
         return [app]
 ```
 
-Registers the command as `esfex carbon_tracker report results.h5`.
+Registers the command as `reflexpy carbon_tracker report results.h5`.
 
 
 ---
@@ -832,7 +832,7 @@ Copy into any scan location:
 cp -r carbon_tracker/ ~/.esfex/plugins/carbon_tracker/
 
 # Project-local installation
-cp -r carbon_tracker/ /path/to/project/.esfex/plugins/carbon_tracker/
+cp -r carbon_tracker/ /path/to/project/.reflexpy/plugins/carbon_tracker/
 ```
 
 ### Install from ZIP
@@ -860,7 +860,7 @@ All paths are validated against Zip Slip (CWE-22) before extraction.
 Install directly from a git repository:
 
 ```bash
-esfex plugin install --git https://github.com/user/esfex-carbon-tracker.git
+esfex plugin install --git https://github.com/user/reflex-carbon-tracker.git
 ```
 
 Only `https://` and `git://` URL schemes are accepted. Git hooks are disabled during clone to prevent pre-checkout remote code execution.
@@ -886,7 +886,7 @@ esfex plugin list
 esfex plugin install --zip /path/to/plugin.zip
 
 # Install from git
-esfex plugin install --git https://github.com/user/esfex-plugin.git
+esfex plugin install --git https://github.com/user/reflex-plugin.git
 
 # Uninstall
 esfex plugin uninstall carbon_tracker
@@ -949,7 +949,7 @@ def plugin_context(tmp_path):
 @pytest.fixture
 def plugin(plugin_context):
     """Create an instance of the plugin."""
-    # Import here to avoid import errors if esfex is not installed
+    # Import here to avoid import errors if reflexpy is not installed
     from carbon_tracker import create_plugin
 
     p = create_plugin(plugin_context)

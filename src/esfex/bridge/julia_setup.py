@@ -289,7 +289,7 @@ def get_julia_version() -> Optional[str]:
 # ── Sysimage build ────────────────────────────────────────────────
 
 
-def precompile_esfex(force: bool = False) -> Optional[Path]:
+def precompile_reflex(force: bool = False) -> Optional[Path]:
     """Build the Julia sysimage for faster startup.
 
     Uses PackageCompiler.jl to create a native sysimage containing

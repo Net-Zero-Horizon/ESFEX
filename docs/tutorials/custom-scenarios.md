@@ -598,10 +598,10 @@ with open("base_system.yaml") as f:
     base_config = yaml.safe_load(f)
 
 # Read parameters from environment or defaults
-re_target = float(os.environ.get("ESFEX_RE_TARGET", "0.60"))
-demand_growth = float(os.environ.get("ESFEX_DEMAND_GROWTH", "0.02"))
-carbon_price = float(os.environ.get("ESFEX_CARBON_PRICE", "10.0"))
-output_dir = os.environ.get("ESFEX_OUTPUT_DIR", "results/default")
+re_target = float(os.environ.get("REFLEX_RE_TARGET", "0.60"))
+demand_growth = float(os.environ.get("REFLEX_DEMAND_GROWTH", "0.02"))
+carbon_price = float(os.environ.get("REFLEX_CARBON_PRICE", "10.0"))
+output_dir = os.environ.get("REFLEX_OUTPUT_DIR", "results/default")
 
 # Modify config
 config = copy.deepcopy(base_config)
@@ -610,13 +610,13 @@ config["systems"]["island"]["demand_growth"] = demand_growth
 config["systems"]["island"]["penalties"]["co2_cost"] = carbon_price
 
 # Write temporary config
-tmp_config = f"/tmp/esfex_config_{os.getpid()}.yaml"
+tmp_config = f"/tmp/reflex_config_{os.getpid()}.yaml"
 with open(tmp_config, "w") as f:
     yaml.safe_dump(config, f, default_flow_style=False)
 
 # Run simulation
 subprocess.run([
-    "esfex", "run",
+    "reflexpy", "run",
     "-c", tmp_config,
     "-o", output_dir,
     "--years", "25",
@@ -630,7 +630,7 @@ os.unlink(tmp_config)
 Usage:
 
 ```bash
-ESFEX_RE_TARGET=0.80 ESFEX_CARBON_PRICE=50 ESFEX_OUTPUT_DIR=results/green \
+REFLEX_RE_TARGET=0.80 REFLEX_CARBON_PRICE=50 REFLEX_OUTPUT_DIR=results/green \
   python run_parameterized.py
 ```
 

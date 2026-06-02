@@ -453,7 +453,11 @@ def apply_realistic_generator_defaults(
         if rp <= 0:
             continue
 
-        target_min = rp * d.get("min_power_frac", 0.0)
+        # NOTE: min_power on the schema / Julia model is a *fraction* of
+        # rated, not MW absolute. Storing MW here caused 70% UC-mode load
+        # shed on cuba.yaml because Julia re-multiplies by rated and gets
+        # an impossible floor.
+        target_min_frac = d.get("min_power_frac", 0.0)
         target_ru = d.get("ramp_up_frac", 0.0)
         target_rd = d.get("ramp_down_frac", 0.0)
         target_mup = int(d.get("min_up_h", 0))
@@ -463,15 +467,16 @@ def apply_realistic_generator_defaults(
         target_e_rated = d.get("eff_at_rated", 0.35)
         target_e_min = d.get("eff_at_min", 0.25)
 
-        # min_power: fix if 0 (and tech needs > 0) OR equal to rp
-        # (forced to full capacity) — both nonsensical for dispatch.
+        # min_power (as a fraction 0–1): fix if 0 and the tech requires
+        # a non-zero technical minimum, OR if the unit is forced to run
+        # at 100 % (cur_min == 1.0) while the tech can turn down lower.
         cur_min = float(getattr(gen, "min_power", 0) or 0)
         bad_min = (
-            (cur_min == 0 and target_min > 0)
-            or (cur_min >= rp - 1e-6 and target_min < rp)
+            (cur_min == 0 and target_min_frac > 0)
+            or (cur_min >= 1.0 - 1e-6 and target_min_frac < 1.0)
         )
         if force or bad_min:
-            gen.min_power = target_min
+            gen.min_power = target_min_frac
             counts["min_power"] += 1
 
         # ramp rates: a literal 0 is infeasible (the unit can't move).

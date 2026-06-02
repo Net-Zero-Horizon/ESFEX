@@ -426,6 +426,7 @@ class Orchestrator:
         # --- 5. Merge generators ----------------------------------------
         merged_gens: dict[str, GeneratorConfig] = {}
         for si, (sname, sys) in enumerate(zip(sys_names, systems)):
+            sys_off = offsets[sname]
             for gkey, gen in sys.generators.items():
                 new_key = f"{sname}__{gkey}"
                 d = gen.model_dump(by_alias=True)
@@ -438,12 +439,18 @@ class Orchestrator:
                             d[alias if alias in d else field_name] = _pad_int(val, si)
                         else:
                             d[alias if alias in d else field_name] = _pad(val, si)
+                # Shift bus_id_per_node keys by system offset so the per-node
+                # bus mapping points at the merged-system indices.
+                bipn = d.get("bus_id_per_node")
+                if isinstance(bipn, dict) and sys_off:
+                    d["bus_id_per_node"] = {int(k) + sys_off: v for k, v in bipn.items()}
                 d["name"] = f"{sname}/{gen.name}"
                 merged_gens[new_key] = GeneratorConfig(**d)
 
         # --- 6. Merge batteries -----------------------------------------
         merged_bats: dict[str, BatteryConfig] = {}
         for si, (sname, sys) in enumerate(zip(sys_names, systems)):
+            sys_off = offsets[sname]
             for bkey, bat in sys.batteries.items():
                 new_key = f"{sname}__{bkey}"
                 d = bat.model_dump(by_alias=True)
@@ -455,6 +462,9 @@ class Orchestrator:
                             d[alias if alias in d else field_name] = _pad_int(val, si)
                         else:
                             d[alias if alias in d else field_name] = _pad(val, si)
+                bipn = d.get("bus_id_per_node")
+                if isinstance(bipn, dict) and sys_off:
+                    d["bus_id_per_node"] = {int(k) + sys_off: v for k, v in bipn.items()}
                 d["name"] = f"{sname}/{bat.name}"
                 merged_bats[new_key] = BatteryConfig(**d)
 

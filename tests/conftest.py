@@ -48,6 +48,14 @@ def fixtures_dir():
 
 
 @pytest.fixture
+def small_system_config(fixtures_dir):
+    """Load the small 2-node test system configuration."""
+    config_path = fixtures_dir / "small_system.yaml"
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+
+
+@pytest.fixture
 def sample_demand():
     """Generate sample demand data (24 hours × 2 nodes)."""
     np.random.seed(42)

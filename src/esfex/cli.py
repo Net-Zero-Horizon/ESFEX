@@ -541,7 +541,7 @@ def precompile(
     from esfex.bridge.julia_setup import (
         _find_sysimage,
         _sysimage_is_stale,
-        precompile_esfex,
+        precompile_reflex,
     )
 
     # Check current state
@@ -556,7 +556,7 @@ def precompile(
     else:
         console.print("[bold]Building Julia sysimage (this may take 5-10 minutes)...[/bold]")
 
-    path = precompile_esfex(force=force)
+    path = precompile_reflex(force=force)
 
     if path:
         console.print(f"\n[green]Sysimage built successfully:[/green] {path}")
@@ -784,7 +784,14 @@ def build_demand_dataset(
 
 
 def _entrypoint() -> None:
-    """CLI entrypoint (registered in pyproject)."""
+    """CLI entrypoint (registered in pyproject).
+
+    Runs the legacy-user-dir migration check before dispatching to the typer
+    app. Tests that import ``app`` directly bypass this check so a stale
+    ``~/.reflexpy/`` on the developer's host does not fail the suite.
+    """
+    from esfex.paths import check_legacy_user_dirs
+    check_legacy_user_dirs()
     app()
 
 
