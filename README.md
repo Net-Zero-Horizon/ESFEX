@@ -15,6 +15,9 @@
   <a href="https://codecov.io/gh/msotocalvo/ESFEX">
     <img src="https://codecov.io/gh/msotocalvo/ESFEX/branch/main/graph/badge.svg" alt="codecov">
   </a>
+  <a href="https://esfex.readthedocs.io/">
+    <img src="https://readthedocs.org/projects/esfex/badge/?version=latest" alt="Documentation">
+  </a>
   <a href="https://doi.org/10.5281/zenodo.20504838">
     <img src="https://zenodo.org/badge/1256767759.svg" alt="DOI">
   </a>
@@ -30,8 +33,14 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
   </a>
+  <a href="https://api.reuse.software/info/github.com/msotocalvo/ESFEX">
+    <img src="https://api.reuse.software/badge/github.com/msotocalvo/ESFEX" alt="REUSE status">
+  </a>
   <a href="https://github.com/astral-sh/ruff">
     <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff">
+  </a>
+  <a href="https://pepy.tech/project/esfex">
+    <img src="https://static.pepy.tech/badge/esfex" alt="Downloads">
   </a>
   <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status">
 </p>

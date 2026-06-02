@@ -45,3 +45,8 @@ gurobi.log
 .vscode/
 .idea/
 *.swp
+
+# Coverage data
+.coverage
+.coverage.*
+coverage.xml

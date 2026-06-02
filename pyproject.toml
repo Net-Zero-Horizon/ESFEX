@@ -138,3 +138,50 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["esfex"]
+# Line coverage targets the unit-testable surface. Three classes of code are
+# excluded because they cannot be meaningfully exercised by unit tests in CI;
+# they are validated separately (interactively or via integration/Julia tests):
+#   1. Qt/presentation — widgets, panels, charts, wizards, dialogs, main window.
+#   2. Julia-bound integration glue — the optimization orchestrator and the
+#      juliacall adapters/AC bridge (covered by the `julia`-marked tests).
+#   3. Optional resource-assessment / demand pipelines that require heavy extras
+#      (pvlib, atlite, geopandas, xgboost) and external data or network access.
+omit = [
+    # 1. Qt / presentation
+    "*/esfex/visualization/app.py",
+    "*/esfex/visualization/main_window.py",
+    "*/esfex/visualization/map_widget.py",
+    "*/esfex/visualization/sld_widget.py",
+    "*/esfex/visualization/run_output_view.py",
+    "*/esfex/visualization/python_console.py",
+    "*/esfex/visualization/scripting_api.py",
+    "*/esfex/visualization/panels/*",
+    "*/esfex/visualization/workflows/*_steps.py",
+    "*/esfex/visualization/workflows/*_charts.py",
+    "*/esfex/visualization/workflows/*_wizard.py",
+    "*/esfex/visualization/workflows/risk_panels.py",
+    "*/esfex/visualization/**/gui_dialog.py",
+    "*/esfex/visualization/**/*_dialog.py",
+    # 2. Julia-bound integration glue (exercised by `julia`-marked tests)
+    "*/esfex/runner.py",
+    "*/esfex/bridge/adapters.py",
+    "*/esfex/analysis/native_ac_bridge.py",
+    # 3. Optional resource-assessment / demand pipelines (heavy extras + data)
+    "*/esfex/visualization/workflows/*_analysis.py",
+    "*/esfex/visualization/workflows/*_fetchers.py",
+    "*/esfex/models/demand_real_data.py",
+    "*/esfex/models/demand_training.py",
+    "*/esfex/models/demand_zonal_fetchers.py",
+    "*/esfex/models/ecvi_gridded.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+]

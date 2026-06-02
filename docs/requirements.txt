@@ -1,0 +1,4 @@
+# Documentation build dependencies (used by ReadTheDocs and `mkdocs serve`).
+# mkdocs-material bundles mkdocs and pymdown-extensions.
+mkdocs-material>=9.5
+mkdocs-autorefs>=1.0
