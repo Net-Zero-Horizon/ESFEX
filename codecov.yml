@@ -1,0 +1,32 @@
+# Codecov configuration for ESFEX.
+# Coverage is reported but never fails CI or blocks merges — it is a signal,
+# not a gate (matches the lint job's informational stance).
+
+coverage:
+  precision: 1
+  round: down
+  range: "50...90"
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+# Only Python source under the package counts toward coverage; tests,
+# bundled JS/HTML resources, the Julia tree and docs are excluded.
+ignore:
+  - "tests/**"
+  - "tools/**"
+  - "docs/**"
+  - "src/esfex/visualization/resources/**"
+  - "src/esfex/julia/**"
+  - "src/esfex/icons/**"

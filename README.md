@@ -12,6 +12,12 @@
   <a href="https://github.com/msotocalvo/ESFEX/actions/workflows/ci.yml">
     <img src="https://github.com/msotocalvo/ESFEX/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
+  <a href="https://codecov.io/gh/msotocalvo/ESFEX">
+    <img src="https://codecov.io/gh/msotocalvo/ESFEX/branch/main/graph/badge.svg" alt="codecov">
+  </a>
+  <a href="https://doi.org/10.5281/zenodo.20504838">
+    <img src="https://zenodo.org/badge/1256767759.svg" alt="DOI">
+  </a>
   <a href="https://www.python.org/downloads/">
     <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg" alt="Python">
   </a>
@@ -23,9 +29,6 @@
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
-  </a>
-  <a href="https://doi.org/10.5281/zenodo.20504838">
-    <img src="https://zenodo.org/badge/1256767759.svg" alt="DOI">
   </a>
   <a href="https://github.com/astral-sh/ruff">
     <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff">
@@ -47,7 +50,7 @@
 
 ## Overview
 
-**ESFEX** (Energy System FlEXibility) is an open-source power system planning framework that co-optimizes generation, storage, and transmission investment over multi-decade horizons while explicitly capturing the operational flexibility constraints that arise in systems with high shares of variable renewable energy.
+**ESFEX** (Energy System Flexibility) is an open-source power system planning framework that co-optimizes generation, storage, and transmission investment over multi-decade horizons while explicitly capturing the operational flexibility constraints that arise in systems with high shares of variable renewable energy.
 
 It couples a strategic **capacity expansion planner** (Master Problem) with a detailed **operational dispatch engine** through a two-stage decomposition — bridging the gap between long-term investment planning tools and short-term production cost models. Investment decisions are validated operationally (ramp rates, minimum stable generation, storage cycling, demand response, sector coupling) *before* being accepted, so the plan that ESFEX produces is one the system can actually operate.
 
@@ -56,7 +59,7 @@ ESFEX is implemented as a hybrid system: **Python** handles configuration, data 
 ### Target Applications
 
 - **Island power systems and isolated grids** transitioning from diesel dependence to high RE penetration
-- **Regional transmission planning** with DC power flow, N-1 security, and transmission investment
+- **Regional transmission planning** with DC and AC power flows, N-1 security, and transmission investment
 - **Sector coupling studies** combining electricity, hydrogen (electrolyzer), fuel logistics (primary energy), and electric vehicles (V2G)
 - **Policy analysis** evaluating RE targets, CO₂ budgets, storage mandates, and technology cost trajectories
 - **Near-optimal space exploration** via MGA (Hop-Skip-Jump) or SPORES (per-objective sweep) for robust investment strategies under uncertainty
@@ -70,7 +73,7 @@ ESFEX is implemented as a hybrid system: **Python** handles configuration, data 
 
 - **Two-stage decomposition** — Master Problem (all years simultaneously, representative days/periods) + Operational Dispatch (year-by-year, full chronological year). Investments are operationally validated before acceptance.
 - **Rolling horizon dispatch** — Configurable overlapping time windows with boundary-condition propagation (battery SOC, generator status) and automatic result stitching.
-- **Three simulation modes** — `development` (LP, continuous commitment + investment), `economic_dispatch` (LP, fixed fleet), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
+- **Two simulation modes** — `development` (LP, continuous commitment + investment), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
 - **Unit decommissioning planning** — Age-based retirement plus NPV-based retirement for flexible phase-out / retention of the unit inventory.
 
 ### Power System Modeling
@@ -311,8 +314,7 @@ If you use ESFEX in academic work, please cite:
   title   = {ESFEX: Energy System FlEXibility — Power System Optimization},
   author  = {Soto Calvo, Manuel and Lee, Han Soo},
   year    = {2026},
-  doi     = {10.5281/zenodo.20504838},
-  url     = {https://doi.org/10.5281/zenodo.20504838},
+  url     = {https://github.com/msotocalvo/ESFEX},
   version = {0.1.0},
   license = {Apache-2.0}
 }
