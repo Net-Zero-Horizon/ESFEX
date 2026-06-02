@@ -18,7 +18,14 @@ import pytest
 # on CI machines (or anywhere PySide6 is not installed).
 # ---------------------------------------------------------------------------
 
-_PYSIDE6_AVAILABLE = "PySide6" in sys.modules or "PySide6.QtCore" in sys.modules
+# Detect whether a *working* PySide6 is importable (not merely whether the
+# name is already in sys.modules) so a real, functional Qt is preferred and
+# the stubs below are only installed when Qt is genuinely absent.
+try:
+    import PySide6.QtWidgets  # noqa: F401
+    _PYSIDE6_AVAILABLE = True
+except Exception:
+    _PYSIDE6_AVAILABLE = False
 
 if not _PYSIDE6_AVAILABLE:
     # Create minimal stubs so ``from PySide6.QtCore import QObject, Signal``

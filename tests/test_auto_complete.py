@@ -23,7 +23,15 @@ import pytest
 # Stub PySide6 + i18n before any visualization imports
 # ---------------------------------------------------------------------------
 
-_PYSIDE6_AVAILABLE = "PySide6" in sys.modules or "PySide6.QtCore" in sys.modules
+# Detect whether a *working* PySide6 is importable (not merely whether the
+# name is already in sys.modules) so a real, functional Qt is preferred and
+# the partial stubs below — which would otherwise leak into sibling test
+# modules via sys.modules — are only installed when Qt is genuinely absent.
+try:
+    import PySide6.QtWidgets  # noqa: F401
+    _PYSIDE6_AVAILABLE = True
+except Exception:
+    _PYSIDE6_AVAILABLE = False
 
 if not _PYSIDE6_AVAILABLE:
     _qtcore = ModuleType("PySide6.QtCore")
