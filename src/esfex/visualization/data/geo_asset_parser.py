@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from esfex.visualization.data.gui_model import (
     EndpointRef,
+    FuelEntryParams,
     FuelStorageParams,
     GeoPoint,
     GuiACDCConverter,
@@ -413,14 +414,15 @@ def _ensure_fuel_entry_at(
         fuels = [fuels] if fuels else []
 
     entry_id = f"fuel_entry_{len(state.fuel_entry_points)}"
+    _mir = _prop_float(p, "max_import_rate", "import_rate", "capacity", default=0.0)
+    _ic = _prop_float(p, "import_cost", "cost", default=0.0)
     state.fuel_entry_points.append(GuiFuelEntryPoint(
         name=name,
         fuels=fuels,
         node=node_idx,
         coordinate=GeoPoint(lat, lng, name),
-        max_import_rate=_prop_float(p, "max_import_rate", "import_rate",
-                                    "capacity", default=0.0),
-        import_cost=_prop_float(p, "import_cost", "cost", default=0.0),
+        fuel_params={f: FuelEntryParams(max_import_rate=_mir, import_cost=_ic)
+                     for f in fuels},
     ))
     result.fuel_entries_added += 1
     return node_idx, entry_id
@@ -580,14 +582,15 @@ def apply_assignments(
                 fuels = _prop(p, "fuels", "fuel", "Fuel", "Fuels", default=[])
                 if isinstance(fuels, str):
                     fuels = [fuels] if fuels else []
+                _mir = _prop_float(p, "max_import_rate", "import_rate", "capacity")
+                _ic = _prop_float(p, "import_cost", "cost")
                 state.fuel_entry_points.append(GuiFuelEntryPoint(
                     name=name,
                     fuels=fuels,
                     node=node_idx,
                     coordinate=GeoPoint(lat, lng, name),
-                    max_import_rate=_prop_float(p, "max_import_rate",
-                                                "import_rate", "capacity"),
-                    import_cost=_prop_float(p, "import_cost", "cost"),
+                    fuel_params={f: FuelEntryParams(max_import_rate=_mir, import_cost=_ic)
+                                 for f in fuels},
                 ))
                 result.fuel_entries_added += 1
 
