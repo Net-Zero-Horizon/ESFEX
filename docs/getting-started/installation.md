@@ -23,7 +23,7 @@ If `python` points to Python 2, try `python3 --version` instead. On Windows, you
 Install the core package from PyPI:
 
 ```bash
-pip install reflexpy
+pip install esfex
 ```
 
 This installs the core dependencies:
@@ -93,8 +93,8 @@ For contributing to ESFEX or running from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/esfex.git
-cd reflexpy
+git clone https://github.com/msotocalvo/ESFEX.git
+cd esfex
 
 # Create a virtual environment (recommended)
 python -m venv .venv
@@ -303,7 +303,7 @@ sudo apt install libxcb-xinerama0 libxkbcommon-x11-0 libegl1 libxcb-cursor0
 sudo dnf install libxcb libxkbcommon-x11 mesa-libEGL
 ```
 
-**Headless servers**: If you are running on a server without a display (e.g., for batch simulations), the GUI is not needed. Install only the core package or use `reflexpy[viz]` for generating figures without the interactive editor.
+**Headless servers**: If you are running on a server without a display (e.g., for batch simulations), the GUI is not needed. Install only the core package or use `esfex[viz]` for generating figures without the interactive editor.
 
 ### macOS
 
@@ -434,7 +434,7 @@ If you upgrade ESFEX and encounter import errors:
 
 ```bash
 # Reinstall with dependencies
-pip install --force-reinstall reflexpy
+pip install --force-reinstall esfex
 
 # Clear Julia cached environment
 rm -rf ~/.julia/environments/pyjuliapkg

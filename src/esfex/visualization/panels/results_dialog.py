@@ -1038,7 +1038,7 @@ class ResultsDialog(QDialog):
         # so a chart that fully reloads its DOM still finds the colours.
         return (
             "window._currentThemeColors = " + colors_js + "; "
-            "try { localStorage.setItem('reflex_theme_colors', "
+            "try { localStorage.setItem('esfex_theme_colors', "
             + json.dumps(colors_js) + "); } catch (_) {} "
             "if (typeof applyTheme === 'function') { "
             "applyTheme(window._currentThemeColors); "

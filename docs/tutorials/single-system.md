@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- ESFEX installed: `pip install reflexpy`
+- ESFEX installed: `pip install esfex`
 - A working solver (HiGHS is included by default)
 - Python 3.10+ with `h5py`, `numpy`, and `matplotlib` for results analysis
 

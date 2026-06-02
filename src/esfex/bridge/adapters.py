@@ -796,10 +796,10 @@ class PowerSystemAdapter:
         # the merged system instead of config.primary_system).
         system_config_override = kwargs.pop("system_config", None)
         if isinstance(config, ESFEXConfig):
-            self.reflex_config = config
+            self.esfex_config = config
             self.system_config = system_config_override or config.primary_system
         else:
-            self.reflex_config = None
+            self.esfex_config = None
             self.system_config = system_config_override or config
 
         self.demand = demand
@@ -917,7 +917,7 @@ class PowerSystemAdapter:
         # Get num_nodes from NodeConfig or calculate from connections matrix
         import math
         num_nodes = sys.nodes.num_nodes or int(math.sqrt(len(sys.nodes.nodes_connections)))
-        temporal = self.reflex_config.temporal if self.reflex_config else TemporalConfig()
+        temporal = self.esfex_config.temporal if self.esfex_config else TemporalConfig()
         resolution_hours = getattr(temporal, 'resolution_hours', 1)
 
         # ── Optional internal network reduction ──
@@ -925,15 +925,15 @@ class PowerSystemAdapter:
         # before model construction.  The reduction is stored on self so
         # post-solve result expansion can recover original-topology values.
         self._reduction_map = None
-        if (self.reflex_config is not None
-                and getattr(self.reflex_config, "network_reduction", None) is not None
-                and self.reflex_config.network_reduction.enabled
+        if (self.esfex_config is not None
+                and getattr(self.esfex_config, "network_reduction", None) is not None
+                and self.esfex_config.network_reduction.enabled
                 and sys.buses):
             from esfex.topology import reduce_network
             import time as _t
             t0 = _t.perf_counter()
             kron_flag = bool(getattr(
-                self.reflex_config.network_reduction, "kron_deg3", False
+                self.esfex_config.network_reduction, "kron_deg3", False
             ))
             reduced_sys, self._reduction_map = reduce_network(
                 sys, kron_deg3=kron_flag,
@@ -1350,7 +1350,7 @@ class PowerSystemAdapter:
         jl_temporal = convert_temporal_config(temporal, self.hours)
 
         # Get solver config
-        solver = self.reflex_config.solver if self.reflex_config else SolverConfig()
+        solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
 
         # Create CO2 factors dictionary from fuels config
         fuel_co2 = {}
@@ -1435,7 +1435,7 @@ class PowerSystemAdapter:
             )
 
         # Get N-1 security settings — only enable for applicable modes
-        n1 = self.reflex_config.n1_security if self.reflex_config else N1SecurityConfig()
+        n1 = self.esfex_config.n1_security if self.esfex_config else N1SecurityConfig()
         n1_enabled = n1.enabled and self.mode in n1.apply_to_modes
 
         # Rolling-horizon boundary conditions for the seam with the previous
@@ -1713,7 +1713,7 @@ class PowerSystemAdapter:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             out_dir = os.environ.get("ESFEX_IIS_DIR", "/tmp")
             os.makedirs(out_dir, exist_ok=True)
-            lp_path = os.path.join(out_dir, f"reflex_infeasible_{ts}.lp")
+            lp_path = os.path.join(out_dir, f"esfex_infeasible_{ts}.lp")
             jl.seval(f'write_to_file({model_var}, "{lp_path}")')
             logger.error(f"Infeasible LP written to: {lp_path}")
             jl.seval(f"compute_conflict!({model_var})")
@@ -1736,7 +1736,7 @@ class PowerSystemAdapter:
                 logger.error("Sample IIS constraints:")
                 for nm in names:
                     logger.error(f"  IIS: {nm}")
-                iis_path = os.path.join(out_dir, f"reflex_iis_{ts}.txt")
+                iis_path = os.path.join(out_dir, f"esfex_iis_{ts}.txt")
                 with open(iis_path, "w") as fh:
                     for nm in jl.seval("_conf_cons"):
                         fh.write(str(nm) + "\n")
@@ -1909,10 +1909,10 @@ class MasterProblemAdapter:
         """
         system_config_override = kwargs.pop("system_config", None)
         if isinstance(config, ESFEXConfig):
-            self.reflex_config = config
+            self.esfex_config = config
             self.system_config = system_config_override or config.primary_system
         else:
-            self.reflex_config = None
+            self.esfex_config = None
             self.system_config = system_config_override or config
 
         self._config_path = config_path
@@ -1989,7 +1989,7 @@ class MasterProblemAdapter:
         self._jl_scenarios = None
 
         # Get solver config
-        self._solver = self.reflex_config.solver if self.reflex_config else SolverConfig()
+        self._solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
 
         logger.debug(f"MasterProblemAdapter initialized: {len(years)} years, base_year={base_year}")
 
@@ -2074,15 +2074,15 @@ class MasterProblemAdapter:
 
         # ── Optional internal network reduction ──
         self._reduction_map = None
-        if (self.reflex_config is not None
-                and getattr(self.reflex_config, "network_reduction", None) is not None
-                and self.reflex_config.network_reduction.enabled
+        if (self.esfex_config is not None
+                and getattr(self.esfex_config, "network_reduction", None) is not None
+                and self.esfex_config.network_reduction.enabled
                 and sys.buses):
             from esfex.topology import reduce_network
             import time as _t
             t0 = _t.perf_counter()
             kron_flag = bool(getattr(
-                self.reflex_config.network_reduction, "kron_deg3", False
+                self.esfex_config.network_reduction, "kron_deg3", False
             ))
             reduced_sys, self._reduction_map = reduce_network(
                 sys, kron_deg3=kron_flag,
@@ -3644,8 +3644,8 @@ class PrimaryEnergyAdapter:
         # Get temporal resolution for correct energy-to-fuel conversion.
         # When resolution_hours > 1, gen_output (MW) × resolution_hours = MWh per timestep.
         res_hours = 1.0
-        if hasattr(power_system, 'reflex_config') and power_system.reflex_config:
-            temporal = getattr(power_system.reflex_config, 'temporal', None)
+        if hasattr(power_system, 'esfex_config') and power_system.esfex_config:
+            temporal = getattr(power_system.esfex_config, 'temporal', None)
             if temporal:
                 res_hours = float(getattr(temporal, 'resolution_hours', 1))
         jl._pe_resolution_hours = res_hours

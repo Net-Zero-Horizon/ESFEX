@@ -244,7 +244,7 @@ Year (8760 hours)
 
 ```
 src/esfex/
-+-- __init__.py          # Package entry: load_config, REFLEXConfig
++-- __init__.py          # Package entry: load_config, ESFEXConfig
 +-- cli.py               # CLI commands (typer)
 +-- runner.py             # Orchestrator
 +-- zones.py              # Development zone preprocessor
@@ -263,7 +263,7 @@ src/esfex/
 |   +-- ev.py             # EV fleet modeling (S-curve adoption)
 |   +-- solar_rooftop.py  # Rooftop solar adoption
 +-- plugins/
-|   +-- protocol.py       # Plugin base class (REFLEXPlugin)
+|   +-- protocol.py       # Plugin base class (ESFEXPlugin)
 |   +-- manager.py        # Plugin discovery, loading, lifecycle
 |   +-- availability_generator/  # Built-in plugin: solar/wind profiles
 +-- sensitivity/
@@ -306,13 +306,13 @@ ESFEX includes a directory-based plugin system. Plugins extend ESFEX without mod
 Plugins are discovered from three locations, in order:
 
 1. `~/.esfex/plugins/` -- user-level plugins
-2. `<project_dir>/.reflexpy/plugins/` -- project-level plugins
+2. `<project_dir>/.esfex/plugins/` -- project-level plugins
 3. Directories listed in the `$ESFEX_PLUGIN_PATH` environment variable
 
 Each plugin is a directory containing:
 
 - `plugin.json` -- metadata (name, version, description, dependencies)
-- `__init__.py` -- factory function `create_plugin(context) -> REFLEXPlugin`
+- `__init__.py` -- factory function `create_plugin(context) -> ESFEXPlugin`
 
 ### Plugin Hooks
 

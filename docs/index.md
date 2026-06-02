@@ -98,7 +98,7 @@ The currently implemented sector coupling modules are:
 | Plugin / extension system | Yes | No | No | No | No | No | No |
 | Solver backend | JuMP | Linopy | JuMP | Pyomo | GAMS | HiGHS/GLPK | GLPK/CBC |
 | Primary language | Python + Julia | Python | Julia | Python | GAMS | AMPL + Python | MathProg |
-| License | GPL-3.0 | MIT | GPL-2.0 | Apache-2.0 | GPL-3.0 | LGPL-3.0 | Apache-2.0 |
+| License | Apache-2.0 | MIT | GPL-2.0 | Apache-2.0 | GPL-3.0 | LGPL-3.0 | Apache-2.0 |
 
 *PyPSA performs an ACPF via Newton-Raphson, not a full ACOPF
 
@@ -121,7 +121,7 @@ All numbered references **[N]** link to the [full bibliography](reference/biblio
 
 ```bash
 # Install
-pip install reflexpy
+pip install esfex
 
 # Validate a configuration file
 esfex validate -c my_system.yaml
@@ -185,7 +185,7 @@ for year in results:
 | Python support | 3.10, 3.11, 3.12 |
 | Julia support | 1.9+ (via juliacall) |
 | Default solver | HiGHS (open-source LP/MIP) |
-| License | MIT |
+| License | Apache-2.0 |
 | Status | Active development |
 
 
@@ -197,12 +197,12 @@ for year in results:
 If you use ESFEX in academic work, please cite:
 
 ```bibtex
-@software{reflex2026,
+@software{esfex2026,
   title   = {ESFEX: Energy System FlEXibility — Power System Optimization},
   author  = {Soto Calvo, Manuel & Han Soo, Lee},
   year    = {2026},
-  url     = {https://github.com/user/reflexpy},
-  license = {GPL-3.0},
+  url     = {https://github.com/msotocalvo/ESFEX},
+  license = {Apache-2.0},
   version = {0.1.0}
 }
 ```
@@ -213,7 +213,7 @@ If you use ESFEX in academic work, please cite:
 
 ## License
 
-Released under the [GPL-3.0 License](https://opensource.org/licenses/MIT).
+Released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
 
 
 ---

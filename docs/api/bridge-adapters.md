@@ -15,7 +15,7 @@ Python config (Pydantic)
 For operational dispatch:
 
 ```
-REFLEXConfig / SystemConfig
+ESFEXConfig / SystemConfig
     --> PowerSystemAdapter._create_input()
         --> convert_generator_config() per generator
         --> convert_battery_config() per battery
@@ -30,7 +30,7 @@ REFLEXConfig / SystemConfig
 For capacity expansion:
 
 ```
-REFLEXConfig / SystemConfig + years + demand
+ESFEXConfig / SystemConfig + years + demand
     --> MasterProblemAdapter._create_input()
         --> convert generators, batteries, technologies, battery_technologies
         --> convert_network_config() for transmission
@@ -51,7 +51,7 @@ Wraps the operational dispatch model (`power_system.jl`). Solves short-horizon e
 class PowerSystemAdapter:
     def __init__(
         self,
-        config: Union[REFLEXConfig, SystemConfig],
+        config: Union[ESFEXConfig, SystemConfig],
         demand: np.ndarray,              # (hours x nodes) in MW
         hours: int,
         num_nodes: int,
@@ -69,7 +69,7 @@ class PowerSystemAdapter:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `config` | `REFLEXConfig` or `SystemConfig` | System configuration. If `REFLEXConfig`, temporal and solver settings are extracted automatically. |
+| `config` | `ESFEXConfig` or `SystemConfig` | System configuration. If `ESFEXConfig`, temporal and solver settings are extracted automatically. |
 | `demand` | `np.ndarray` | Demand array for the current window, shape `(hours, num_nodes)` in MW. |
 | `hours` | `int` | Number of timesteps in this window. |
 | `num_nodes` | `int` | Number of geographic nodes. |
@@ -171,7 +171,7 @@ Wraps the capacity expansion model (`master_problem.jl`). Determines optimal inv
 class MasterProblemAdapter:
     def __init__(
         self,
-        config: Union[REFLEXConfig, SystemConfig],
+        config: Union[ESFEXConfig, SystemConfig],
         years: List[int],
         base_year: int,
         demand: np.ndarray,

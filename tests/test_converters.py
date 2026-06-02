@@ -52,7 +52,7 @@ from esfex.config.schema import CostCurveBlock, CostCurveConfig
 # ---------------------------------------------------------------------------
 
 _PATCH_GET_JULIA = "esfex.bridge.julia_setup.get_julia"
-_PATCH_GET_REFLEX = "esfex.bridge.julia_setup.get_esfex_module"
+_PATCH_GET_ESFEX = "esfex.bridge.julia_setup.get_esfex_module"
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def mock_jl():
 
 
 @pytest.fixture
-def mock_reflex():
+def mock_esfex():
     """Create a mock ESFEX Julia module."""
     return MagicMock()
 
@@ -415,7 +415,7 @@ class TestJuliaToPyDict:
 class TestConvertScenario:
     """Tests for convert_scenario()."""
 
-    def test_creates_julia_scenario(self, mock_reflex):
+    def test_creates_julia_scenario(self, mock_esfex):
         scenario = {
             "name": "base",
             "probability": 0.5,
@@ -425,40 +425,40 @@ class TestConvertScenario:
             },
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        mock_reflex.Scenario.assert_called_once()
-        call_args = mock_reflex.Scenario.call_args[0]
+        mock_esfex.Scenario.assert_called_once()
+        call_args = mock_esfex.Scenario.call_args[0]
         assert call_args[0] == "base"
         assert call_args[1] == 0.5
 
-    def test_default_multipliers(self, mock_reflex):
+    def test_default_multipliers(self, mock_esfex):
         scenario = {
             "name": "default",
             "probability": 1.0,
             "multipliers": {},
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_reflex.ScenarioMultipliers.call_args[0]
+        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
         for arg in sm_call:
             assert arg == 1.0
 
-    def test_missing_multipliers_key_uses_defaults(self, mock_reflex):
+    def test_missing_multipliers_key_uses_defaults(self, mock_esfex):
         scenario = {
             "name": "no_mult",
             "probability": 0.3,
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        mock_reflex.Scenario.assert_called_once()
+        mock_esfex.Scenario.assert_called_once()
 
-    def test_multiplier_values_passed_correctly(self, mock_reflex):
+    def test_multiplier_values_passed_correctly(self, mock_esfex):
         scenario = {
             "name": "high_fuel",
             "probability": 0.7,
@@ -476,10 +476,10 @@ class TestConvertScenario:
             },
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_reflex.ScenarioMultipliers.call_args[0]
+        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
         assert sm_call[0] == 0.5   # invest_cost_renewables
         assert sm_call[1] == 1.5   # invest_cost_conventional
         assert sm_call[2] == 2.0   # fuel_cost
@@ -491,26 +491,26 @@ class TestConvertScenario:
         assert sm_call[8] == 1.4   # fuel_price_growth
         assert sm_call[9] == 3.0   # carbon_price
 
-    def test_probability_is_float(self, mock_reflex):
+    def test_probability_is_float(self, mock_esfex):
         scenario = {"name": "test", "probability": 1}
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        call_args = mock_reflex.Scenario.call_args[0]
+        call_args = mock_esfex.Scenario.call_args[0]
         assert isinstance(call_args[1], float)
 
-    def test_ten_multiplier_arguments(self, mock_reflex):
+    def test_ten_multiplier_arguments(self, mock_esfex):
         scenario = {
             "name": "test",
             "probability": 1.0,
             "multipliers": {},
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_reflex.ScenarioMultipliers.call_args[0]
+        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
         assert len(sm_call) == 10
 
 
@@ -1043,88 +1043,88 @@ class TestConvertTemporalConfig:
         tc.reserve_resolution = overrides.get("reserve_resolution", 4)
         return tc
 
-    def test_passes_hours_parameter(self, mock_reflex):
+    def test_passes_hours_parameter(self, mock_esfex):
         tc = self._make_temporal()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[0] == 8760
 
-    def test_passes_resolution_hours(self, mock_reflex):
+    def test_passes_resolution_hours(self, mock_esfex):
         tc = self._make_temporal(resolution_hours=3)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=2920)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[1] == 3
 
-    def test_passes_rolling_horizon_hours(self, mock_reflex):
+    def test_passes_rolling_horizon_hours(self, mock_esfex):
         tc = self._make_temporal(rolling_horizon_hours=48)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[2] == 48
 
-    def test_passes_overlap_hours(self, mock_reflex):
+    def test_passes_overlap_hours(self, mock_esfex):
         tc = self._make_temporal(overlap_hours=12)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[3] == 12
 
-    def test_passes_investment_resolution(self, mock_reflex):
+    def test_passes_investment_resolution(self, mock_esfex):
         tc = self._make_temporal(investment_resolution=4380)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[4] == 4380
 
-    def test_passes_primary_energy_resolution(self, mock_reflex):
+    def test_passes_primary_energy_resolution(self, mock_esfex):
         tc = self._make_temporal(primary_energy_resolution=12)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[5] == 12
 
-    def test_passes_battery_soc_resolution(self, mock_reflex):
+    def test_passes_battery_soc_resolution(self, mock_esfex):
         tc = self._make_temporal(battery_soc_resolution=3)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[6] == 3
 
-    def test_passes_ev_resolution(self, mock_reflex):
+    def test_passes_ev_resolution(self, mock_esfex):
         tc = self._make_temporal(ev_resolution=12)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[7] == 12
 
-    def test_passes_reserve_resolution(self, mock_reflex):
+    def test_passes_reserve_resolution(self, mock_esfex):
         tc = self._make_temporal(reserve_resolution=8)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[8] == 8
 
-    def test_defaults_for_optional_resolutions(self, mock_reflex):
+    def test_defaults_for_optional_resolutions(self, mock_esfex):
         """When temporal config lacks optional resolution attrs, defaults apply."""
         tc = MagicMock(spec=[
             "resolution_hours", "rolling_horizon_hours", "overlap_hours",
@@ -1136,21 +1136,21 @@ class TestConvertTemporalConfig:
         tc.investment_resolution = 8760
         tc.primary_energy_resolution = 24
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert call_args[6] == 6   # battery_soc_resolution default
         assert call_args[7] == 6   # ev_resolution default
         assert call_args[8] == 4   # reserve_resolution default
 
-    def test_total_argument_count(self, mock_reflex):
+    def test_total_argument_count(self, mock_esfex):
         tc = self._make_temporal()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_temporal_config(tc, hours=8760)
 
-        call_args = mock_reflex.TemporalConfig.call_args[0]
+        call_args = mock_esfex.TemporalConfig.call_args[0]
         assert len(call_args) == 9
 
 
@@ -1187,68 +1187,68 @@ class TestConvertTransmissionLineData:
         dc.voltage_level_kv = 220.0
         return dc
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         line = self._make_line()
         dc = self._make_dc_config()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transmission_line_data(line, dc)
 
-        mock_reflex.TransmissionLineData.assert_called_once()
+        mock_esfex.TransmissionLineData.assert_called_once()
 
-    def test_uses_from_bus_when_available(self, mock_reflex):
+    def test_uses_from_bus_when_available(self, mock_esfex):
         line = self._make_line(from_bus=2, to_bus=3)
         dc = self._make_dc_config()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transmission_line_data(line, dc)
 
-        call_args = mock_reflex.TransmissionLineData.call_args[0]
+        call_args = mock_esfex.TransmissionLineData.call_args[0]
         assert call_args[1] == 3  # 2+1
         assert call_args[2] == 4  # 3+1
 
-    def test_skips_when_bus_indices_missing(self, mock_reflex):
+    def test_skips_when_bus_indices_missing(self, mock_esfex):
         """Without resolved from_bus/to_bus the converter refuses to emit the line
         (mixing bus/node indices used to silently corrupt topology)."""
         line = self._make_line(from_bus=None, to_bus=None, from_node=0, to_node=1)
         dc = self._make_dc_config()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             result = convert_transmission_line_data(line, dc)
 
         assert result is None
-        mock_reflex.TransmissionLineData.assert_not_called()
+        mock_esfex.TransmissionLineData.assert_not_called()
 
-    def test_line_id_passed(self, mock_reflex):
+    def test_line_id_passed(self, mock_esfex):
         line = self._make_line(line_id="my_line")
         dc = self._make_dc_config()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transmission_line_data(line, dc)
 
-        call_args = mock_reflex.TransmissionLineData.call_args[0]
+        call_args = mock_esfex.TransmissionLineData.call_args[0]
         assert call_args[0] == "my_line"
 
-    def test_fallback_reactance_from_length(self, mock_reflex):
+    def test_fallback_reactance_from_length(self, mock_esfex):
         """When reactance_pu is 0 or None, compute from length and dc_config."""
         line = self._make_line(reactance_pu=0, length_km=200.0)
         dc = self._make_dc_config()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transmission_line_data(line, dc)
 
-        call_args = mock_reflex.TransmissionLineData.call_args[0]
+        call_args = mock_esfex.TransmissionLineData.call_args[0]
         expected_reactance = (200.0 * 0.0003) / 100.0
         assert call_args[4] == pytest.approx(expected_reactance)
 
-    def test_capacity_passed(self, mock_reflex):
+    def test_capacity_passed(self, mock_esfex):
         line = self._make_line(capacity_mw=750.0)
         dc = self._make_dc_config()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transmission_line_data(line, dc)
 
-        call_args = mock_reflex.TransmissionLineData.call_args[0]
+        call_args = mock_esfex.TransmissionLineData.call_args[0]
         assert call_args[3] == 750.0
 
 
@@ -1275,70 +1275,70 @@ class TestConvertTransformerData:
         t.resistance_pu = overrides.get("resistance_pu", None)
         return t
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         trafo = self._make_trafo()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        mock_reflex.TransformerData.assert_called_once()
+        mock_esfex.TransformerData.assert_called_once()
 
-    def test_tap_ratio_calculation(self, mock_reflex):
+    def test_tap_ratio_calculation(self, mock_esfex):
         trafo = self._make_trafo(from_voltage_kv=220.0, to_voltage_kv=110.0)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        call_args = mock_reflex.TransformerData.call_args[0]
+        call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[9] == pytest.approx(2.0)
 
-    def test_resistance_derived_from_losses(self, mock_reflex):
+    def test_resistance_derived_from_losses(self, mock_esfex):
         trafo = self._make_trafo(impedance_pu=0.1, losses_fraction=0.01, resistance_pu=None)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        call_args = mock_reflex.TransformerData.call_args[0]
+        call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[7] == pytest.approx(0.001)
 
-    def test_explicit_resistance_used_when_provided(self, mock_reflex):
+    def test_explicit_resistance_used_when_provided(self, mock_esfex):
         trafo = self._make_trafo(resistance_pu=0.005)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        call_args = mock_reflex.TransformerData.call_args[0]
+        call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[7] == pytest.approx(0.005)
 
-    def test_reactance_derived(self, mock_reflex):
+    def test_reactance_derived(self, mock_esfex):
         """x_pu = sqrt(z^2 - r^2)."""
         trafo = self._make_trafo(impedance_pu=0.1, losses_fraction=0.01, resistance_pu=None)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        call_args = mock_reflex.TransformerData.call_args[0]
+        call_args = mock_esfex.TransformerData.call_args[0]
         r_pu = 0.01 * 0.1
         x_pu = math.sqrt(0.1**2 - r_pu**2)
         assert call_args[8] == pytest.approx(x_pu)
 
-    def test_index_conversion(self, mock_reflex):
+    def test_index_conversion(self, mock_esfex):
         trafo = self._make_trafo(from_bus=0, to_bus=3)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        call_args = mock_reflex.TransformerData.call_args[0]
+        call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[1] == 1  # 0+1
         assert call_args[2] == 4  # 3+1
 
-    def test_name_passed(self, mock_reflex):
+    def test_name_passed(self, mock_esfex):
         trafo = self._make_trafo(name="HV_trafo")
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_transformer_data(trafo)
 
-        call_args = mock_reflex.TransformerData.call_args[0]
+        call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[0] == "HV_trafo"
 
 
@@ -1350,7 +1350,7 @@ class TestConvertTransformerData:
 class TestConvertInterSystemLink:
     """Tests for convert_inter_system_link()."""
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         link = {
             "from_system": "sys_a",
             "to_system": "sys_b",
@@ -1358,12 +1358,12 @@ class TestConvertInterSystemLink:
             "to_node": 1,
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_inter_system_link(link)
 
-        mock_reflex.InterSystemLink.assert_called_once()
+        mock_esfex.InterSystemLink.assert_called_once()
 
-    def test_system_names_passed(self, mock_reflex):
+    def test_system_names_passed(self, mock_esfex):
         link = {
             "from_system": "alpha",
             "to_system": "beta",
@@ -1371,14 +1371,14 @@ class TestConvertInterSystemLink:
             "to_node": 0,
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_inter_system_link(link)
 
-        call_args = mock_reflex.InterSystemLink.call_args[0]
+        call_args = mock_esfex.InterSystemLink.call_args[0]
         assert call_args[0] == "alpha"
         assert call_args[1] == "beta"
 
-    def test_index_conversion_from_node(self, mock_reflex):
+    def test_index_conversion_from_node(self, mock_esfex):
         link = {
             "from_system": "a",
             "to_system": "b",
@@ -1386,14 +1386,14 @@ class TestConvertInterSystemLink:
             "to_node": 5,
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_inter_system_link(link)
 
-        call_args = mock_reflex.InterSystemLink.call_args[0]
+        call_args = mock_esfex.InterSystemLink.call_args[0]
         assert call_args[2] == 3  # 2+1
         assert call_args[3] == 6  # 5+1
 
-    def test_uses_from_bus_over_from_node(self, mock_reflex):
+    def test_uses_from_bus_over_from_node(self, mock_esfex):
         link = {
             "from_system": "a",
             "to_system": "b",
@@ -1403,14 +1403,14 @@ class TestConvertInterSystemLink:
             "to_bus": 7,
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_inter_system_link(link)
 
-        call_args = mock_reflex.InterSystemLink.call_args[0]
+        call_args = mock_esfex.InterSystemLink.call_args[0]
         assert call_args[2] == 4  # 3+1
         assert call_args[3] == 8  # 7+1
 
-    def test_default_values(self, mock_reflex):
+    def test_default_values(self, mock_esfex):
         link = {
             "from_system": "a",
             "to_system": "b",
@@ -1418,10 +1418,10 @@ class TestConvertInterSystemLink:
             "to_node": 0,
         }
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_inter_system_link(link)
 
-        call_args = mock_reflex.InterSystemLink.call_args[0]
+        call_args = mock_esfex.InterSystemLink.call_args[0]
         assert call_args[4] == 0.0                  # existing_capacity_mw
         assert call_args[5] == 0.0                  # max_investment_mw
         # investment_cost_per_mw default is $1e6, scaled to M$ before Julia.
@@ -1465,30 +1465,30 @@ class TestConvertACDCConverterData:
         c.degradation_rate = overrides.get("degradation_rate", 0.005)
         return c
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         conv = self._make_conv()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_acdc_converter_data(conv)
 
-        mock_reflex.ACDCConverterData.assert_called_once()
+        mock_esfex.ACDCConverterData.assert_called_once()
 
-    def test_name_passed_as_string(self, mock_reflex):
+    def test_name_passed_as_string(self, mock_esfex):
         conv = self._make_conv(name="my_converter")
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_acdc_converter_data(conv)
 
-        call_args = mock_reflex.ACDCConverterData.call_args[0]
+        call_args = mock_esfex.ACDCConverterData.call_args[0]
         assert call_args[0] == "my_converter"
 
-    def test_falls_back_to_from_node(self, mock_reflex):
+    def test_falls_back_to_from_node(self, mock_esfex):
         conv = self._make_conv(from_bus=None, from_node=2, to_bus=None, to_node=4)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_acdc_converter_data(conv)
 
-        call_args = mock_reflex.ACDCConverterData.call_args[0]
+        call_args = mock_esfex.ACDCConverterData.call_args[0]
         assert call_args[2] == 3  # 2+1
         assert call_args[3] == 5  # 4+1
 
@@ -1528,30 +1528,30 @@ class TestConvertFreqConverterData:
         c.degradation_rate = overrides.get("degradation_rate", 0.005)
         return c
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         conv = self._make_conv()
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_freq_converter_data(conv)
 
-        mock_reflex.FrequencyConverterData.assert_called_once()
+        mock_esfex.FrequencyConverterData.assert_called_once()
 
-    def test_name_passed(self, mock_reflex):
+    def test_name_passed(self, mock_esfex):
         conv = self._make_conv(name="freq_50_60")
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_freq_converter_data(conv)
 
-        call_args = mock_reflex.FrequencyConverterData.call_args[0]
+        call_args = mock_esfex.FrequencyConverterData.call_args[0]
         assert call_args[0] == "freq_50_60"
 
-    def test_frequency_values(self, mock_reflex):
+    def test_frequency_values(self, mock_esfex):
         conv = self._make_conv(from_frequency_hz=50.0, to_frequency_hz=60.0)
 
-        with patch(_PATCH_GET_REFLEX, return_value=mock_reflex):
+        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_freq_converter_data(conv)
 
-        call_args = mock_reflex.FrequencyConverterData.call_args[0]
+        call_args = mock_esfex.FrequencyConverterData.call_args[0]
         assert call_args[3] == 50.0
         assert call_args[4] == 60.0
 
@@ -1593,58 +1593,58 @@ class TestConvertGeneratorConfig:
         g.current_type = "AC"
         return g
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         gen = self._make_gen()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen)
 
-        mock_reflex.GeneratorConfig.assert_called_once()
+        mock_esfex.GeneratorConfig.assert_called_once()
 
-    def test_name_type_fuel_passed(self, mock_reflex):
+    def test_name_type_fuel_passed(self, mock_esfex):
         gen = self._make_gen()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen)
 
-        call_args = mock_reflex.GeneratorConfig.call_args[0]
+        call_args = mock_esfex.GeneratorConfig.call_args[0]
         assert call_args[0] == "solar"
         assert call_args[1] == "renewable"
         assert call_args[2] == "solar"
 
-    def test_default_availability_when_none(self, mock_reflex):
+    def test_default_availability_when_none(self, mock_esfex):
         """When availability is None, ones matrix should be used."""
         gen = self._make_gen(num_nodes=2)
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen, availability=None)
 
-        mock_reflex.GeneratorConfig.assert_called_once()
+        mock_esfex.GeneratorConfig.assert_called_once()
 
-    def test_reservable_passed(self, mock_reflex):
+    def test_reservable_passed(self, mock_esfex):
         gen = self._make_gen()
         gen.reservable = True
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen)
 
-        call_args = mock_reflex.GeneratorConfig.call_args[0]
+        call_args = mock_esfex.GeneratorConfig.call_args[0]
         # reservable is arg index 18 (after 17 vector args + availability matrix)
         assert True in [arg is True for arg in call_args]
 
@@ -1684,70 +1684,70 @@ class TestConvertBatteryConfig:
         b.throughput_degradation_cost = [5.0] * num_nodes
         return b
 
-    def test_creates_julia_struct(self, mock_reflex):
+    def test_creates_julia_struct(self, mock_esfex):
         bat = self._make_bat()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_battery_config(bat)
 
-        mock_reflex.BatteryConfig.assert_called_once()
+        mock_esfex.BatteryConfig.assert_called_once()
 
-    def test_name_passed(self, mock_reflex):
+    def test_name_passed(self, mock_esfex):
         bat = self._make_bat()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_battery_config(bat)
 
-        call_args = mock_reflex.BatteryConfig.call_args[0]
+        call_args = mock_esfex.BatteryConfig.call_args[0]
         assert call_args[0] == "li_ion"
 
-    def test_soc_min_derived_from_max_dod(self, mock_reflex):
+    def test_soc_min_derived_from_max_dod(self, mock_esfex):
         """soc_min = 1 - max_DoD, so DoD=0.8 gives soc_min=0.2."""
         bat = self._make_bat()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_battery_config(bat)
 
-        mock_reflex.BatteryConfig.assert_called_once()
+        mock_esfex.BatteryConfig.assert_called_once()
 
-    def test_spillage_false_passed(self, mock_reflex):
+    def test_spillage_false_passed(self, mock_esfex):
         bat = self._make_bat()
         bat.spillage = False
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_battery_config(bat)
 
-        call_args = mock_reflex.BatteryConfig.call_args[0]
+        call_args = mock_esfex.BatteryConfig.call_args[0]
         # spillage (False) should be in the args
         assert False in list(call_args)
 
-    def test_current_type_passed(self, mock_reflex):
+    def test_current_type_passed(self, mock_esfex):
         bat = self._make_bat()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_battery_config(bat)
 
-        call_args = mock_reflex.BatteryConfig.call_args[0]
+        call_args = mock_esfex.BatteryConfig.call_args[0]
         assert "DC" in list(call_args)
 
 
@@ -1801,33 +1801,33 @@ class TestConvertGeneratorConfigReservoir:
         g.reservoir_invest_max = [200.0] * num_nodes
         return g
 
-    def test_reservoir_gen_creates_julia_struct(self, mock_reflex):
+    def test_reservoir_gen_creates_julia_struct(self, mock_esfex):
         gen = self._make_reservoir_gen()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen)
 
-        mock_reflex.GeneratorConfig.assert_called_once()
+        mock_esfex.GeneratorConfig.assert_called_once()
 
-    def test_reservoir_fields_in_call_args(self, mock_reflex):
+    def test_reservoir_fields_in_call_args(self, mock_esfex):
         gen = self._make_reservoir_gen()
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen)
 
-        call_args = mock_reflex.GeneratorConfig.call_args[0]
+        call_args = mock_esfex.GeneratorConfig.call_args[0]
         # reservoir_spillage_allowed (True) should be in the args
         assert True in list(call_args)
 
-    def test_reservoir_empty_fields_defaults(self, mock_reflex):
+    def test_reservoir_empty_fields_defaults(self, mock_esfex):
         """When reservoir lists are empty, converter should fill with zeros."""
         gen = self._make_reservoir_gen()
         gen.reservoir_capacity = []
@@ -1843,26 +1843,26 @@ class TestConvertGeneratorConfigReservoir:
         mock_jl = MagicMock()
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen)
 
-        mock_reflex.GeneratorConfig.assert_called_once()
+        mock_esfex.GeneratorConfig.assert_called_once()
 
-    def test_inflow_parameter_passed(self, mock_reflex):
+    def test_inflow_parameter_passed(self, mock_esfex):
         """When inflow array is provided, it should be passed to Julia."""
         gen = self._make_reservoir_gen()
         mock_jl = MagicMock()
         inflow = np.ones((24, 2)) * 10.0
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             convert_generator_config(gen, inflow=inflow)
 
-        mock_reflex.GeneratorConfig.assert_called_once()
+        mock_esfex.GeneratorConfig.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1876,7 +1876,7 @@ class TestBlocksToJuliaCostSegments:
     def test_single_block(self):
         """One block -> CostSegment called once, push! called once."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_push = MagicMock()
         mock_jl_vec = MagicMock()
 
@@ -1892,22 +1892,22 @@ class TestBlocksToJuliaCostSegments:
         blocks = [CostCurveBlock(fraction=1.0, price=50.0)]
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             result = blocks_to_julia_cost_segments(blocks)
 
         assert result is mock_jl_vec
         # Price is scaled by COST_SCALE (USD → M$) before reaching Julia.
-        mock_reflex.CostSegment.assert_called_once_with(1.0, 50.0 * COST_SCALE)
+        mock_esfex.CostSegment.assert_called_once_with(1.0, 50.0 * COST_SCALE)
         mock_push.assert_called_once_with(
-            mock_jl_vec, mock_reflex.CostSegment.return_value
+            mock_jl_vec, mock_esfex.CostSegment.return_value
         )
 
     def test_multiple_blocks(self):
         """Three blocks -> CostSegment called 3x, push! called 3x."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_push = MagicMock()
         mock_jl_vec = MagicMock()
 
@@ -1925,7 +1925,7 @@ class TestBlocksToJuliaCostSegments:
             MagicMock(name="seg1"),
             MagicMock(name="seg2"),
         ]
-        mock_reflex.CostSegment.side_effect = seg_returns
+        mock_esfex.CostSegment.side_effect = seg_returns
 
         blocks = [
             CostCurveBlock(fraction=0.3, price=40.0),
@@ -1934,19 +1934,19 @@ class TestBlocksToJuliaCostSegments:
         ]
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             result = blocks_to_julia_cost_segments(blocks)
 
         assert result is mock_jl_vec
-        assert mock_reflex.CostSegment.call_count == 3
+        assert mock_esfex.CostSegment.call_count == 3
         assert mock_push.call_count == 3
 
         # Verify each CostSegment was created with correct args (price in M$).
-        mock_reflex.CostSegment.assert_any_call(0.3, 40.0 * COST_SCALE)
-        mock_reflex.CostSegment.assert_any_call(0.4, 60.0 * COST_SCALE)
-        mock_reflex.CostSegment.assert_any_call(0.3, 80.0 * COST_SCALE)
+        mock_esfex.CostSegment.assert_any_call(0.3, 40.0 * COST_SCALE)
+        mock_esfex.CostSegment.assert_any_call(0.4, 60.0 * COST_SCALE)
+        mock_esfex.CostSegment.assert_any_call(0.3, 80.0 * COST_SCALE)
 
         # Verify push! was called with the vector and each segment
         for seg in seg_returns:
@@ -1955,7 +1955,7 @@ class TestBlocksToJuliaCostSegments:
     def test_empty_blocks(self):
         """Empty list -> no CostSegment calls, returns empty vector."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_jl_vec = MagicMock()
 
         def seval_side_effect(expr):
@@ -1966,13 +1966,13 @@ class TestBlocksToJuliaCostSegments:
         mock_jl.seval.side_effect = seval_side_effect
 
         with (
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
         ):
             result = blocks_to_julia_cost_segments([])
 
         assert result is mock_jl_vec
-        mock_reflex.CostSegment.assert_not_called()
+        mock_esfex.CostSegment.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2059,7 +2059,7 @@ class TestBuildGenCostCurvesDict:
     def test_multi_segment_curve(self):
         """Generator with multi-segment curve -> outer dict has entry."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
 
@@ -2098,7 +2098,7 @@ class TestBuildGenCostCurvesDict:
 
         with (
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_NORMALIZE, return_value=multi_blocks),
         ):
             result = build_gen_cost_curves_dict(
@@ -2116,7 +2116,7 @@ class TestBuildGenCostCurvesDict:
     def test_bus_mapping(self):
         """Verify bus_to_node mapping computes correct bus index."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
 
@@ -2161,7 +2161,7 @@ class TestBuildGenCostCurvesDict:
 
         with (
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_NORMALIZE, return_value=multi_blocks),
         ):
             result = build_gen_cost_curves_dict(
@@ -2182,7 +2182,7 @@ class TestBuildGenCostCurvesDict:
     def test_gen_to_bus_override(self):
         """When gen_to_bus provides a mapping, it overrides bus_to_node scan."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
 
@@ -2225,7 +2225,7 @@ class TestBuildGenCostCurvesDict:
 
         with (
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_NORMALIZE, return_value=multi_blocks),
         ):
             result = build_gen_cost_curves_dict(
@@ -2282,7 +2282,7 @@ class TestBuildBatCostCurvesDict:
     def test_multi_segment_discharge(self):
         """Battery with stepwise discharge curve -> outer dict has entry."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
 
@@ -2322,7 +2322,7 @@ class TestBuildBatCostCurvesDict:
 
         with (
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_NORMALIZE, return_value=multi_blocks),
         ):
             result = build_bat_cost_curves_dict(
@@ -2378,7 +2378,7 @@ class TestBuildBatCostCurvesDict:
     def test_bus_mapping(self):
         """Verify bus_to_node mapping works for batteries."""
         mock_jl = MagicMock()
-        mock_reflex = MagicMock()
+        mock_esfex = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
 
@@ -2422,7 +2422,7 @@ class TestBuildBatCostCurvesDict:
 
         with (
             patch(_PATCH_GET_JULIA, return_value=mock_jl),
-            patch(_PATCH_GET_REFLEX, return_value=mock_reflex),
+            patch(_PATCH_GET_ESFEX, return_value=mock_esfex),
             patch(_PATCH_NORMALIZE, return_value=multi_blocks),
         ):
             result = build_bat_cost_curves_dict(

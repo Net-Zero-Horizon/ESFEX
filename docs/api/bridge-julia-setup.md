@@ -177,10 +177,10 @@ def get_julia_version() -> Optional[str]
 
 Get the Julia version string (e.g., `"1.10.2"`). Returns `None` if Julia is not available.
 
-### precompile_reflex
+### precompile_esfex
 
 ```python
-def precompile_reflex() -> None
+def precompile_esfex() -> None
 ```
 
 Precompile the ESFEX Julia module for faster startup. Calls `Pkg.precompile()` in the ESFEX project environment.
@@ -198,7 +198,7 @@ using PackageCompiler
 julia_path = "src/esfex/julia"
 create_sysimage(
     [:JuMP, :HiGHS, :Graphs, :LinearAlgebra];
-    sysimage_path="reflex_sysimage.so",
+    sysimage_path="esfex_sysimage.so",
     project=julia_path,
     precompile_execution_file="src/esfex/julia/src/precompile_workload.jl"
 )
@@ -209,11 +209,11 @@ create_sysimage(
 Set the `PYTHON_JULIACALL_SYSIMAGE` environment variable before importing any ESFEX modules:
 
 ```bash
-export PYTHON_JULIACALL_SYSIMAGE="/path/to/reflex_sysimage.so"
+export PYTHON_JULIACALL_SYSIMAGE="/path/to/esfex_sysimage.so"
 python -m esfex.cli run --config myconfig.yaml
 ```
 
-`precompile_reflex()` provides a simpler but slower alternative using Julia's built-in precompilation system without creating a sysimage.
+`precompile_esfex()` provides a simpler but slower alternative using Julia's built-in precompilation system without creating a sysimage.
 
 ---
 
@@ -261,7 +261,7 @@ Harmless. Occurs when the Julia session already has the ESFEX module loaded (e.g
 Normal behavior. Julia compiles all code on first use. To speed up subsequent runs:
 1. Keep the Julia session alive (use the ESFEX Studio which maintains state).
 2. Build a sysimage (see above).
-3. Run `precompile_reflex()` once after installation.
+3. Run `precompile_esfex()` once after installation.
 
 **`Manifest.toml` corruption**
 

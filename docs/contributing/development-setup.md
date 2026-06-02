@@ -17,7 +17,7 @@
 
 ```bash
 git clone https://github.com/your-org/esfex.git
-cd reflexpy
+cd esfex
 ```
 
 
@@ -137,8 +137,8 @@ Settings (`.vscode/settings.json`):
             "args": ["run", "-c", "${workspaceFolder}/configs/example.yaml"],
             "cwd": "${workspaceFolder}",
             "env": {
-                "REFLEX_LOG_LEVEL": "DEBUG",
-                "REFLEX_JULIA_THREADS": "4"
+                "ESFEX_LOG_LEVEL": "DEBUG",
+                "ESFEX_JULIA_THREADS": "4"
             },
             "justMyCode": false
         },
@@ -249,7 +249,7 @@ Set breakpoints in `runner.py` or `adapters.py` to inspect the simulation loop. 
 ## Project Structure
 
 ```
-reflexpy/
+esfex/
 ├── src/esfex/
 │   ├── __init__.py              # Package exports
 │   ├── cli.py                   # CLI (Typer)
@@ -451,10 +451,10 @@ with h5py.File("output/results_system.h5", "r") as f:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `REFLEX_JULIA_THREADS` | Julia thread count | 4 |
-| `REFLEX_SOLVER` | Override default solver | `highs` |
-| `REFLEX_SYSIMAGE` | Path to Julia system image | None |
-| `REFLEX_LOG_LEVEL` | Logging level | `INFO` |
+| `ESFEX_JULIA_THREADS` | Julia thread count | 4 |
+| `ESFEX_SOLVER` | Override default solver | `highs` |
+| `ESFEX_SYSIMAGE` | Path to Julia system image | None |
+| `ESFEX_LOG_LEVEL` | Logging level | `INFO` |
 | `ESFEX_PLUGIN_PATH` | Extra plugin search directories (colon-separated) | None |
 
 
@@ -517,7 +517,7 @@ Mitigation strategies for large multi-node, multi-year simulations:
 
 ```bash
 # Reduce Julia threads (each thread has its own model copy)
-export REFLEX_JULIA_THREADS=2
+export ESFEX_JULIA_THREADS=2
 
 # Use a smaller rolling horizon window in config
 # temporal.window_hours: 48  (instead of 168)

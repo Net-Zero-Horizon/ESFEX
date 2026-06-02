@@ -1,4 +1,4 @@
-/* REFLEX Results Dashboard — Plotly frontend.
+/* ESFEX Results Dashboard — Plotly frontend.
  *
  * State machine:
  *   QWebChannel handshake → bootstrap() → loader.get_meta()
