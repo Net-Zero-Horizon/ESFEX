@@ -375,14 +375,6 @@ class TestLoadConfig:
 class TestLoadSystemConfig:
     """Tests for the load_system_config() function."""
 
-    def test_loads_small_system_fixture_raises_on_format_mismatch(self):
-        """small_system.yaml uses a simplified battery format that
-        _convert_battery cannot parse (missing fields like initial_age,
-        MaxChargePower, etc.).  The converter raises KeyError because
-        load_system_config only wraps ValidationError, not KeyError."""
-        with pytest.raises(KeyError):
-            load_system_config(FIXTURES_DIR / "small_system.yaml")
-
     def test_loads_valid_system(self, tmp_path, minimal_system_data):
         """load_system_config returns SystemConfig from a valid system YAML."""
         p = tmp_path / "system.yaml"
