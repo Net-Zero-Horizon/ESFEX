@@ -21,8 +21,8 @@
   <a href="https://doi.org/10.5281/zenodo.20504838">
     <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20504838.svg" alt="DOI">
   </a>
-  <a href="https://www.python.org/downloads/">
-    <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg" alt="Python">
+  <a href="https://pypi.org/project/esfex/">
+    <img src="https://img.shields.io/pypi/pyversions/esfex.svg" alt="Python versions">
   </a>
   <a href="https://julialang.org/">
     <img src="https://img.shields.io/badge/Julia-1.9%2B-9558B2.svg" alt="Julia">
@@ -41,6 +41,9 @@
   </a>
   <a href="https://pypi.org/project/esfex/">
     <img src="https://img.shields.io/pypi/v/esfex.svg" alt="PyPI">
+  </a>
+  <a href="https://github.com/msotocalvo/ESFEX/commits/main">
+    <img src="https://img.shields.io/github/last-commit/msotocalvo/ESFEX.svg" alt="Last commit">
   </a>
   <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status">
 </p>
