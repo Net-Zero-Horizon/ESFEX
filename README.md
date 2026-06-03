@@ -42,6 +42,9 @@
   <a href="https://pypi.org/project/esfex/">
     <img src="https://img.shields.io/pypi/v/esfex.svg" alt="PyPI">
   </a>
+  <a href="https://pepy.tech/project/esfex">
+    <img src="https://static.pepy.tech/badge/esfex" alt="Downloads">
+  </a>
   <a href="https://github.com/Net-Zero-Horizon/ESFEX/commits/main">
     <img src="https://img.shields.io/github/last-commit/Net-Zero-Horizon/ESFEX.svg" alt="Last commit">
   </a>
