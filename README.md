@@ -154,6 +154,23 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 ESFEX is a hybrid Python/Julia package. Python ≥ 3.10 and a working Julia ≥ 1.9 installation are required; the Julia dependencies are managed automatically through `juliacall` on first run.
 
+### From PyPI
+
+```bash
+pip install esfex
+```
+
+### Conda / Mamba
+
+Create an environment where conda-forge supplies the native dependencies (Qt,
+the Julia bridge, HDF5, BLAS) and ESFEX is installed from PyPI on top:
+
+```bash
+conda env create -f environment.yml   # or: mamba env create -f environment.yml
+conda activate esfex
+esfex info
+```
+
 ### From source (development mode)
 
 ```bash

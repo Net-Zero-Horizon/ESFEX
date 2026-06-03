@@ -5,17 +5,16 @@
 # conda-forge recipe for ESFEX, in the conda-forge/staged-recipes layout.
 #
 # STATUS: ready, but BLOCKED. conda-forge requires every run dependency to be
-# available on conda-forge. These ESFEX dependencies are currently published
-# on PyPI only (not on conda-forge), so they are commented out below and the
-# recipe cannot be submitted/built until they land on conda-forge:
+# available on conda-forge. juliacall ships there as `pyjuliacall` (wired up
+# below); the four companion packages below are published on PyPI only, so
+# they stay commented out and the recipe cannot be submitted/built until they
+# land on conda-forge:
 #
-#     juliacall, windrex, solarex, rooftex, evrex
+#     windrex, solarex, rooftex, evrex
 #
-# Once those exist on conda-forge, uncomment them in `requirements: run:` and:
-#   1. Publish esfex to PyPI (the CI `publish` job does this on release).
-#   2. Fill `source.sha256` below with the sha256 of the PyPI sdist:
-#        curl -sL <sdist-url> | openssl sha256
-#   3. Open a PR adding `recipe/` to https://github.com/conda-forge/staged-recipes
+# Once those exist on conda-forge, uncomment them in `requirements: run:` and
+# open a PR adding `recipe/` to https://github.com/conda-forge/staged-recipes.
+# (source.sha256 below is already filled for the esfex 0.1.0 PyPI sdist.)
 # ---------------------------------------------------------------------------
 
 package:
@@ -24,7 +23,7 @@ package:
 
 source:
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: 0000000000000000000000000000000000000000000000000000000000000000  # TODO: fill after PyPI publish
+  sha256: 3ffae27ed94128ec0888309fcf2a753511ed32fbeff67cd942f539237ae4b736  # esfex 0.1.0 sdist
 
 build:
   noarch: python
@@ -56,8 +55,8 @@ requirements:
     - superqt >=0.6.0
     - markdown >=3.4
     - ptyprocess >=0.7.0  # [unix]
+    - pyjuliacall >=0.9.14   # conda-forge package name for juliacall
     # --- PyPI-only, NOT yet on conda-forge: uncomment when available ---
-    # - juliacall >=0.9.14
     # - windrex >=0.1.0
     # - solarex >=0.1.0
     # - rooftex >=0.1.0

@@ -1,0 +1,44 @@
+# Conda environment for ESFEX.
+#
+# conda-forge provides the heavy / native dependencies as pre-built binaries
+# (Qt, the Julia bridge, HDF5, BLAS/LAPACK, …) — far smoother than building
+# them from source with pip. ESFEX itself and its four companion packages
+# (windrex, solarex, rooftex, evrex), which are published on PyPI only, are
+# installed with pip into the same environment.
+#
+# Usage:
+#   conda env create -f environment.yml      # or: mamba env create -f ...
+#   conda activate esfex
+#   esfex info
+#
+# For the optional resource-assessment workflows (solar/wind/OTEC), conda also
+# handles the GDAL/GEOS/PROJ stack cleanly:
+#   conda install -c conda-forge geopandas rasterio pvlib atlite duckdb
+#   pip install "esfex[workflows]"
+name: esfex
+channels:
+  - conda-forge
+dependencies:
+  - python >=3.10,<3.13
+  - pip
+  # Core scientific stack (conda-forge binaries)
+  - numpy >=1.24.0
+  - pandas >=2.0.0
+  - scipy >=1.10.0
+  - h5py >=3.8.0
+  - networkx >=3.0
+  - pyyaml >=6.0
+  - pydantic >=2.0.0
+  - openpyxl >=3.1.0
+  - typer >=0.9.0
+  - rich >=13.0.0
+  - psutil >=5.9.0
+  - markdown >=3.4
+  - ptyprocess >=0.7.0
+  # GUI (Qt) and the Python<->Julia bridge
+  - pyside6 >=6.5.0
+  - superqt >=0.6.0
+  - pyjuliacall >=0.9.14   # 'juliacall' is packaged as 'pyjuliacall' on conda-forge
+  # ESFEX + its PyPI-only companion packages (windrex/solarex/rooftex/evrex)
+  - pip:
+      - esfex
