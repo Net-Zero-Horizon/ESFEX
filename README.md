@@ -39,6 +39,9 @@
   <a href="https://github.com/astral-sh/ruff">
     <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff">
   </a>
+  <a href="https://pypi.org/project/esfex/">
+    <img src="https://img.shields.io/pypi/v/esfex.svg" alt="PyPI">
+  </a>
   <a href="https://pepy.tech/project/esfex">
     <img src="https://static.pepy.tech/badge/esfex" alt="Downloads">
   </a>
