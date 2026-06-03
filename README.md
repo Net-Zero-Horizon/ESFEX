@@ -203,7 +203,7 @@ esfex precompile
 
 ### Solvers
 
-ESFEX defaults to the open-source **HiGHS** solver. Gurobi, CPLEX, CBC, GLPK, SCIP, and Xpress are also supported and selectable per run (`--solver`) or in the config. Ipopt is used for the nonlinear ACOPF formulations.
+ESFEX supports ten solver backends, selectable per run (`--solver`) or in the config: **HiGHS** (default), CBC, GLPK, Gurobi, CPLEX, SCIP, and Xpress for LP/MIP problems; Clarabel and SCS for conic relaxations; and Ipopt for the nonlinear ACOPF formulations.
 
 ---
 
@@ -334,7 +334,7 @@ mkdocs serve
 - **Python** ≥ 3.10 (3.10, 3.11, 3.12 supported)
 - **Julia** ≥ 1.9 (managed via `juliacall`)
 - Core Python: NumPy, Pandas, SciPy, h5py, Pydantic, NetworkX, Typer, Rich, PySide6
-- A supported solver: HiGHS (default, open-source), or Gurobi / CPLEX / CBC / GLPK / SCIP / Xpress
+- A supported solver: HiGHS (default, open-source), or Gurobi / CPLEX / CBC / GLPK / SCIP / Xpress / Clarabel / SCS / Ipopt
 
 ---
 

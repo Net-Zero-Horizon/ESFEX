@@ -31,7 +31,7 @@ esfex run -c CONFIG [OPTIONS]
 |--------|-------|------|---------|-------------|
 | `--config` | `-c` | Path | *required* | Path to YAML configuration file |
 | `--mode` | `-m` | String | `development` | Simulation mode: `development`, `unit_commitment`, or `economic_dispatch` |
-| `--solver` | `-s` | String | `highs` | Solver: `highs`, `cbc`, `glpk`, `gurobi`, `cplex`, `scip`, `xpress` |
+| `--solver` | `-s` | String | `highs` | Solver: `highs`, `cbc`, `glpk`, `gurobi`, `cplex`, `scip`, `xpress` (LP/MIP); `clarabel`, `scs` (conic); `ipopt` (NLP ACOPF) |
 | `--output` | `-o` | Path | `./results` | Output directory for results |
 | `--years` | `-y` | Integer | from config | Number of years to simulate |
 | `--verbose` | `-v` | Flag | `false` | Enable verbose output (DEBUG-level logging) |

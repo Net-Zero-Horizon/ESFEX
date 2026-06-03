@@ -278,7 +278,8 @@ class TemporalConfig(BaseModel):
 
 ```python
 class SolverConfig(BaseModel):
-    name: Literal["highs", "cbc", "glpk", "gurobi", "cplex", "scip", "xpress"] = "highs"
+    name: Literal["highs", "cbc", "glpk", "gurobi", "cplex", "scip", "xpress",
+                  "clarabel", "scs", "ipopt"] = "highs"
     threads: int = 4
     time_limit: int = 10800            # Seconds (0 = unlimited)
     gap: float = 0.01                  # MIP optimality gap

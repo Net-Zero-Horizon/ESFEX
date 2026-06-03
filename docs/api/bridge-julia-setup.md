@@ -139,7 +139,7 @@ Create a configured JuMP optimizer in Julia. Delegates to `ESFEX.create_optimize
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `solver` | `str` | `"highs"` | Solver name. Options: `"highs"`, `"gurobi"`, `"cplex"`, `"scip"`, `"xpress"`, `"cbc"`, `"glpk"`. |
+| `solver` | `str` | `"highs"` | Solver name. Options: `"highs"`, `"gurobi"`, `"cplex"`, `"scip"`, `"xpress"`, `"cbc"`, `"glpk"` (LP/MIP); `"clarabel"`, `"scs"` (conic); `"ipopt"` (NLP ACOPF). |
 | `threads` | `int` | `4` | Number of solver threads. |
 | `time_limit` | `float` | `3600.0` | Maximum solve time in seconds. |
 | `gap` | `float` | `0.01` | MIP optimality gap tolerance. |
