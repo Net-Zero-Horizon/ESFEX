@@ -225,6 +225,10 @@ for year in results:
 
 ## The Studio
 
+<p align="center">
+  <img src="docs/assets/studio-screenshot.png" alt="ESFEX Studio — GIS-based power system designer" width="900"/>
+</p>
+
 ESFEX ships with an interactive, map-based **Studio** for building and editing power-system configurations visually instead of hand-writing YAML.
 
 ```bash
