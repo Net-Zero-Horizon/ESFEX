@@ -19,7 +19,7 @@
     <img src="https://readthedocs.org/projects/esfex/badge/?version=latest" alt="Documentation">
   </a>
   <a href="https://doi.org/10.5281/zenodo.20504838">
-    <img src="https://zenodo.org/badge/1256767759.svg" alt="DOI">
+    <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20504838.svg" alt="DOI">
   </a>
   <a href="https://www.python.org/downloads/">
     <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg" alt="Python">
@@ -41,9 +41,6 @@
   </a>
   <a href="https://pypi.org/project/esfex/">
     <img src="https://img.shields.io/pypi/v/esfex.svg" alt="PyPI">
-  </a>
-  <a href="https://pepy.tech/project/esfex">
-    <img src="https://static.pepy.tech/badge/esfex" alt="Downloads">
   </a>
   <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status">
 </p>
