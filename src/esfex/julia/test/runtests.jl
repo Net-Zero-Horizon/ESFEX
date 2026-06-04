@@ -15,6 +15,10 @@
 
 using Test
 using ESFEX
+using JuMP: optimize!, termination_status
+# Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
+# the optimizer type without the world-age @eval import (see _load_solver_module).
+import Ipopt
 
 @testset "ESFEX" begin
 
@@ -371,6 +375,128 @@ using ESFEX
             mga0 = MGAResult(MasterProblemResult[], 0, 0.05, 1.0,
                              Float64[], Float64[])
             @test mga0.objective_labels == String[]
+        end
+    end
+
+    # =======================================================================
+    # Integration: build and SOLVE small models end to end in pure Julia.
+    # Unlike the pure-function tests above, these drive the model-construction
+    # core (create_power_system -> build_variables!/build_objective!/
+    # add_*_constraints! -> extract_solution) and the standalone DCOPF/ACOPF
+    # benchmark solvers. HiGHS solves the LPs; Ipopt solves the ACOPF NLP.
+    # =======================================================================
+    @testset "integration" begin
+
+        # GeneratorConfig has 39 positional fields; this keeps the boilerplate
+        # in one place. Per-bus vectors are sized to `nb`; `avail` is the
+        # [hours x buses] availability matrix. All reservoir fields are zeroed
+        # (no hydro), reservable=false.
+        function mkgen(name, type, fuel, rated, fcost, avail; nb, H)
+            z = zeros(nb)
+            GeneratorConfig(
+                name, type, fuel, rated, zeros(nb),
+                fill(0.5, nb), fill(0.4, nb), ones(nb), ones(nb), z, z, z,
+                fcost, z, z, z, z, z, avail, false,
+                fill(30.0, nb), z, z, z, 50.0, "AC",
+                z, z, z, z, zeros(H, nb), z, z, z, z, false, z, z, z,
+            )
+        end
+
+        @testset "economic dispatch (single bus)" begin
+            H = 2
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "ed", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([50.0, 60.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test res.total_demand ≈ 110.0
+            @test res.total_generation ≈ 110.0 atol = 1e-6   # gen serves all load
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6      # nothing shed
+            @test isfinite(res.objective) && res.objective > 0
+            @test size(res.gen_output) == (1, 1, H)
+        end
+
+        @testset "two-bus transmission + renewable + battery" begin
+            H = 2; N = 2
+            gas  = mkgen("GasCC", "Non-renewable", "Gas", [100.0, 0.0],
+                         [3.0e-5, 3.0e-5], ones(H, N); nb = N, H = H)
+            wind = mkgen("Wind", "Renewable", "Wind", [0.0, 80.0],
+                         [0.0, 0.0], [0.0 0.6; 0.0 0.9]; nb = N, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            line = TransmissionLineData("L12", 1, 2, 150.0, 0.1, 0.01, 0.0,
+                                        100.0, 220.0, 1, 50.0, "AC")
+            net = NetworkConfig(N, N, buses, [1, 2],
+                                [0.0 150.0; 150.0 0.0], [0.0 100.0; 100.0 0.0],
+                                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                [line], TransformerData[], ACDCConverterData[],
+                                FrequencyConverterData[], 0.1)
+            bat = BatteryConfig("Li1", [0.0, 40.0], [0.0, 20.0], [0.0, 20.0],
+                                [0.95, 0.95], [0.95, 0.95], [0.0, 0.1], [1.0, 1.0],
+                                [0.5, 0.5], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
+                                [0.0, 0.0], [0.0, 0.0], [10.0, 10.0], [0.0, 0.0],
+                                [0.0, 0.0], 0.0, 100.0, [0.0, 0.0], [0.0, 0.0],
+                                false, "AC", [0.0, 0.0], [0.0, 0.0], [0.0, 0.0])
+            input = PowerSystemInput(
+                name = "2bus", year = 2025, network = net,
+                generators = [gas, wind], batteries = [bat],
+                demand = [30.0 70.0; 40.0 90.0],
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test res.total_demand ≈ 230.0
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6   # demand fully served
+            # Generation need not equal demand: the battery's initial SOC can
+            # supply net energy, and the resistive line adds losses.
+            @test isfinite(res.total_generation) && res.total_generation > 0.0
+            @test 0.0 < res.re_penetration ≤ 1.0          # wind contributes
+            @test haskey(res.power_flow, (1, 2))          # line flow extracted
+        end
+
+        @testset "solve_dcopf benchmark" begin
+            # Cheap gen at bus 1 supplies a bus-2 load across one line.
+            r = solve_dcopf(num_buses = 2, demand = [0.0, 100.0],
+                            gen_bus = [1, 2], gen_cost = [10.0, 50.0],
+                            gen_max = [200.0, 200.0], line_from = [1],
+                            line_to = [2], line_x = [0.1], line_cap = [150.0],
+                            slack_bus = 1, base_impedance = 100.0)
+            @test r["status"] == "OPTIMAL"
+            @test r["total_cost"] ≈ 1000.0           # 100 MW * $10
+            @test r["line_flows_mw"][1] ≈ 100.0      # all load flows over the line
+            @test r["gen_dispatch_list"][1] ≈ 100.0  # cheap unit covers it
+            @test r["gen_dispatch_list"][2] ≈ 0.0 atol = 1e-6
+        end
+
+        @testset "solve_acopf benchmark" begin
+            r = solve_acopf(num_buses = 2, demand_p = [0.0, 80.0],
+                            demand_q = [0.0, 20.0], shunt_g = [0.0, 0.0],
+                            shunt_b = [0.0, 0.0], gen_bus = [1],
+                            gen_cost = [20.0], gen_pmax = [200.0],
+                            gen_pmin = [0.0], gen_qmax = [100.0],
+                            gen_qmin = [-100.0], line_from = [1], line_to = [2],
+                            line_r = [0.01], line_x = [0.1], line_b = [0.0],
+                            line_cap = [200.0], slack_bus = 1, base_mva = 100.0)
+            @test r["status"] in ("LOCALLY_SOLVED", "OPTIMAL")
+            @test r["total_cost"] > 0
+            @test length(r["vm_pu"]) == 2
+            @test all(0.85 .≤ r["vm_pu"] .≤ 1.15)    # within voltage bounds
+            @test r["gen_dispatch_list"][1] > 0       # slack gen supplies load
         end
     end
 
