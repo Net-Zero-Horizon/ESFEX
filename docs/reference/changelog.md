@@ -170,6 +170,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [0.1.1] --- 2026-06-04
+
+### Fixed
+
+- **Grid Builder demand forecast crash**: the per-node demand forecast read
+  `latitude`/`longitude` on grid nodes, but `GuiNode` exposes its geographic
+  position as `centroid_lat`/`centroid_lng`. Running the forecast raised
+  `AttributeError: 'GuiNode' object has no attribute 'latitude'`.
+- **Fuel-entry-point duplication crash**: duplicating a fuel entry point nudged
+  `coordinate.latitude`/`.longitude`, but `GeoPoint` uses `lat`/`lng`, so the
+  action raised an `AttributeError`.
+- **GeoJSON fuel-entry import**: fuel entry points were constructed with invalid
+  `max_import_rate`/`import_cost` keyword arguments; these are now passed through
+  the `fuel_params` mapping.
+- **GeoJSON node import**: nodes are now created from `Point` features and snapped
+  to the nearest existing node by great-circle (haversine) distance to the
+  centroid, instead of always attaching to the first node.
+
+### Changed
+
+- Native Julia test suite expanded from a handful of smoke tests to full
+  unit and end-to-end model-solve coverage; Julia core coverage is now reported
+  to Codecov under a dedicated `julia` flag.
+
+---
+
 ## [0.1.0] --- 2025-XX-XX
 
 ### Added

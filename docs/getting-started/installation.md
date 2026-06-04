@@ -247,7 +247,7 @@ esfex info
 Expected output for a fresh installation:
 
 ```
-ESFEX version 0.1.0
+ESFEX version 0.1.1
 Python: 3.12.0
 Julia: Available via juliacall
 
@@ -261,7 +261,7 @@ You can also verify that the Python package imported correctly:
 
 ```python
 python -c "import esfex; print(esfex.__version__)"
-# Expected: 0.1.0
+# Expected: 0.1.1
 ```
 
 To verify the Julia backend is functional, run a quick validation:
