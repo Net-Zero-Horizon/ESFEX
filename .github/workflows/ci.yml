@@ -84,6 +84,40 @@ jobs:
         with:
           files: ./coverage.xml
           slug: Net-Zero-Horizon/ESFEX
+          flags: python
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # ------------------------------------------------------------------ #
+  # Julia core — native ESFEX.jl unit tests with line coverage. The     #
+  # full LP/MIP/NLP model builds and solves are exercised end-to-end by #
+  # the `julia`-marked Python tests; this job covers the .jl sources.   #
+  # ------------------------------------------------------------------ #
+  julia:
+    name: Julia core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.11"
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+        with:
+          project: src/esfex/julia
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          project: src/esfex/julia
+      - uses: julia-actions/julia-processcoverage@v1
+        with:
+          directories: src/esfex/julia/src
+      - name: Upload Julia coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          slug: Net-Zero-Horizon/ESFEX
+          flags: julia
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
         continue-on-error: true

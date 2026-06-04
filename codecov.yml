@@ -21,12 +21,25 @@ comment:
   behavior: default
   require_changes: false
 
-# Only Python source under the package counts toward coverage; tests,
-# bundled JS/HTML resources, the Julia tree and docs are excluded.
+# Coverage is reported per language via flags: `python` (pytest, coverage.xml)
+# and `julia` (Pkg.test, lcov.info). carryforward keeps a flag's last result
+# when a run doesn't re-upload it.
+flags:
+  python:
+    paths:
+      - "src/esfex"
+    carryforward: true
+  julia:
+    paths:
+      - "src/esfex/julia/src"
+    carryforward: true
+
+# Tests, bundled JS/HTML resources, docs and icons are excluded. (The Julia
+# tree is no longer ignored — its line coverage is uploaded under the `julia`
+# flag.)
 ignore:
   - "tests/**"
   - "tools/**"
   - "docs/**"
   - "src/esfex/visualization/resources/**"
-  - "src/esfex/julia/**"
   - "src/esfex/icons/**"

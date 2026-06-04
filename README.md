@@ -13,7 +13,7 @@
     <img src="https://github.com/Net-Zero-Horizon/ESFEX/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
   <a href="https://codecov.io/gh/Net-Zero-Horizon/ESFEX">
-    <img src="https://codecov.io/gh/Net-Zero-Horizon/ESFEX/branch/main/graph/badge.svg" alt="codecov">
+    <img src="https://codecov.io/gh/Net-Zero-Horizon/ESFEX/branch/main/graph/badge.svg?flag=python" alt="codecov (python)">
   </a>
   <a href="https://esfex.readthedocs.io/">
     <img src="https://readthedocs.org/projects/esfex/badge/?version=latest" alt="Documentation">
