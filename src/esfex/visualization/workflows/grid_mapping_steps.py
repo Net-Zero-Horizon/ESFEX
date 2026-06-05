@@ -4021,9 +4021,16 @@ class GridMappingDemandStep(QWidget):
       3. Bus Distribution — building footprints → demand fractions
     """
 
+    # Carries a no-arg callable from a worker thread to the GUI thread. Worker
+    # threads (country detection, World Bank fetch, demand forecast) must never
+    # touch Qt widgets directly; they emit their UI updates through this signal,
+    # which Qt delivers as a queued call on the main thread.
+    _ui_call = Signal(object)
+
     def __init__(self, model=None, all_states=None, map_widget=None,
                  parent=None):
         super().__init__(parent)
+        self._ui_call.connect(self._on_ui_call)
         self._model = model
         self._all_states = all_states or {}
         self._map_widget = map_widget
@@ -4381,21 +4388,21 @@ class GridMappingDemandStep(QWidget):
                     _iso2_to_iso3,
                 )
                 iso3 = _iso2_to_iso3(cc)
-                self._combo_country.blockSignals(True)
-                self._combo_country.clear()
-                self._combo_country.addItem(
-                    f"{name} ({iso3})", {"iso2": cc, "iso3": iso3, "name": name}
-                )
-                self._combo_country.blockSignals(False)
-                self._lbl_forecast_status.setText(
-                    f"Country: {name} ({iso3})"
-                )
+                self._ui_call.emit(lambda cc=cc, iso3=iso3, name=name: (
+                    self._combo_country.blockSignals(True),
+                    self._combo_country.clear(),
+                    self._combo_country.addItem(
+                        f"{name} ({iso3})",
+                        {"iso2": cc, "iso3": iso3, "name": name}),
+                    self._combo_country.blockSignals(False),
+                    self._lbl_forecast_status.setText(f"Country: {name} ({iso3})"),
+                ))
             except Exception as exc:
-                self._lbl_forecast_status.setText(
-                    f"Country detection failed: {exc}"
-                )
+                self._ui_call.emit(lambda e=exc: self._lbl_forecast_status.setText(
+                    f"Country detection failed: {e}"))
             finally:
-                self._btn_detect_country.setEnabled(True)
+                self._ui_call.emit(
+                    lambda: self._btn_detect_country.setEnabled(True))
 
         threading.Thread(target=_do_detect, daemon=True).start()
 
@@ -4456,12 +4463,14 @@ class GridMappingDemandStep(QWidget):
                         )
 
                 self._wb_data = wb
-                self._forecast_progress.setValue(40)
-                self._lbl_forecast_status.setText(
-                    f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                    f"Pop={wb.get('population', 0):,.0f}. "
-                    f"Fetching ERA5 temperature..."
-                )
+                self._ui_call.emit(lambda wb=wb: (
+                    self._forecast_progress.setValue(40),
+                    self._lbl_forecast_status.setText(
+                        f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
+                        f"Pop={wb.get('population', 0):,.0f}. "
+                        f"Fetching ERA5 temperature..."
+                    ),
+                ))
 
                 # ── ERA5 via Open-Meteo ──
                 south, west, north, east = self._bounds
@@ -4488,23 +4497,42 @@ class GridMappingDemandStep(QWidget):
                     "lon": lon,
                     "year": weather_year,
                 }
-                self._forecast_progress.setValue(60)
-                self._lbl_forecast_status.setText(
-                    f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                    f"Pop={wb.get('population', 0):,.0f}, "
-                    f"kWh/cap={wb.get('electric_consumption_kwh_capita', 0):,.0f}. "
-                    f"ERA5: {len(temp)} hours ({weather_year}). "
-                    f"Ready to forecast."
+                self._ui_call.emit(
+                    lambda wb=wb, temp=temp, weather_year=weather_year: (
+                        self._forecast_progress.setValue(60),
+                        self._lbl_forecast_status.setText(
+                            f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
+                            f"Pop={wb.get('population', 0):,.0f}, "
+                            "kWh/cap="
+                            f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}. "
+                            f"ERA5: {len(temp)} hours ({weather_year}). "
+                            f"Ready to forecast."
+                        ),
+                        self._btn_forecast.setEnabled(True),
+                        self._btn_fetch_data.setEnabled(True),
+                    )
                 )
-                self._btn_forecast.setEnabled(True)
-                self._btn_fetch_data.setEnabled(True)
 
             except Exception as exc:
-                self._lbl_forecast_status.setText(f"Fetch error: {exc}")
-                self._btn_fetch_data.setEnabled(True)
-                self._forecast_progress.setValue(0)
+                self._ui_call.emit(lambda e=exc: (
+                    self._lbl_forecast_status.setText(f"Fetch error: {e}"),
+                    self._btn_fetch_data.setEnabled(True),
+                    self._forecast_progress.setValue(0),
+                ))
 
         threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _on_ui_call(self, fn):
+        """Run a worker-thread-supplied callable on the GUI thread.
+
+        Connected to ``_ui_call``; because the widget lives on the main thread,
+        emits from a worker thread are delivered here as a queued call, so the
+        wrapped widget updates execute safely on the GUI thread.
+        """
+        try:
+            fn()
+        except Exception:
+            logger.exception("Deferred GUI update failed")
 
     def _run_forecast(self):
         """Run ML demand forecast using collected data."""
@@ -4601,62 +4629,62 @@ class GridMappingDemandStep(QWidget):
         import threading
 
         def _do_forecast():
+            # Heavy compute runs here; every widget update is marshalled to the
+            # GUI thread via _ui_call (touching widgets here would crash Qt).
             try:
                 builder = DemandProfileBuilder(cfg)
                 result = builder.build(
                     proxy, macro, meteo,
-                    progress_callback=lambda p, m: (
-                        self._forecast_progress.setValue(65 + int(p * 0.30)),
-                        self._lbl_forecast_status.setText(m),
+                    progress_callback=lambda p, m: self._ui_call.emit(
+                        lambda p=p, m=m: (
+                            self._forecast_progress.setValue(65 + int(p * 0.30)),
+                            self._lbl_forecast_status.setText(m),
+                        )
                     ),
                 )
-                self._forecast_result = result
-                self._forecast_progress.setValue(95)
-
-                # Populate results table
-                self._forecast_table.setRowCount(num_nodes)
-                for i, node in enumerate(nodes):
-                    peak = result.peak_mw[i] if i < len(result.peak_mw) else 0
-                    gwh = result.annual_gwh[i] if i < len(result.annual_gwh) else 0
-                    lf = result.load_factor[i] if i < len(result.load_factor) else 0
-                    self._forecast_table.setItem(
-                        i, 0, QTableWidgetItem(node.name))
-                    self._forecast_table.setItem(
-                        i, 1, QTableWidgetItem(f"{peak:.1f}"))
-                    self._forecast_table.setItem(
-                        i, 2, QTableWidgetItem(f"{gwh:.1f}"))
-                    self._forecast_table.setItem(
-                        i, 3, QTableWidgetItem(f"{lf:.3f}"))
-
-                self._lbl_forecast_summary.setText(
-                    f"<b>System total:</b> Peak={result.total_peak_mw:.1f} MW, "
-                    f"Annual={result.total_annual_gwh:.1f} GWh, "
-                    f"LF={result.total_load_factor:.3f} "
-                    f"&mdash; Source: {result.demand_source}"
+                self._ui_call.emit(
+                    lambda: self._populate_forecast_results(
+                        result, nodes, num_nodes)
                 )
-                self._lbl_forecast_summary.setStyleSheet(
-                    "color: #27ae60; padding: 4px;"
-                )
-                self._forecast_progress.setValue(100)
-                self._lbl_forecast_status.setText("Forecast complete.")
-
-                # Enable bus distribution
-                has_eligible = len(self._targets) > 0
-                self._btn_fetch_bld.setEnabled(
-                    has_eligible and self._bounds is not None
-                )
-                self._btn_apply.setEnabled(True)
-
             except Exception as exc:
                 logger.exception("Demand forecast failed")
-                self._lbl_forecast_status.setText(
-                    f"Forecast error: {exc}"
-                )
-                self._forecast_progress.setValue(0)
-
-            self._btn_forecast.setEnabled(True)
+                self._ui_call.emit(lambda e=exc: (
+                    self._lbl_forecast_status.setText(f"Forecast error: {e}"),
+                    self._forecast_progress.setValue(0),
+                ))
+            self._ui_call.emit(lambda: self._btn_forecast.setEnabled(True))
 
         threading.Thread(target=_do_forecast, daemon=True).start()
+
+    def _populate_forecast_results(self, result, nodes, num_nodes):
+        """Render the forecast table + summary on the GUI thread."""
+        self._forecast_result = result
+        self._forecast_progress.setValue(95)
+
+        self._forecast_table.setRowCount(num_nodes)
+        for i, node in enumerate(nodes):
+            peak = result.peak_mw[i] if i < len(result.peak_mw) else 0
+            gwh = result.annual_gwh[i] if i < len(result.annual_gwh) else 0
+            lf = result.load_factor[i] if i < len(result.load_factor) else 0
+            self._forecast_table.setItem(i, 0, QTableWidgetItem(node.name))
+            self._forecast_table.setItem(i, 1, QTableWidgetItem(f"{peak:.1f}"))
+            self._forecast_table.setItem(i, 2, QTableWidgetItem(f"{gwh:.1f}"))
+            self._forecast_table.setItem(i, 3, QTableWidgetItem(f"{lf:.3f}"))
+
+        self._lbl_forecast_summary.setText(
+            f"<b>System total:</b> Peak={result.total_peak_mw:.1f} MW, "
+            f"Annual={result.total_annual_gwh:.1f} GWh, "
+            f"LF={result.total_load_factor:.3f} "
+            f"&mdash; Source: {result.demand_source}"
+        )
+        self._lbl_forecast_summary.setStyleSheet("color: #27ae60; padding: 4px;")
+        self._forecast_progress.setValue(100)
+        self._lbl_forecast_status.setText("Forecast complete.")
+
+        # Enable bus distribution
+        has_eligible = len(self._targets) > 0
+        self._btn_fetch_bld.setEnabled(has_eligible and self._bounds is not None)
+        self._btn_apply.setEnabled(True)
 
     # ==================================================================
     # Section 2: Eligible nodes detection (for bus distribution)
