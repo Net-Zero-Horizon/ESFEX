@@ -170,7 +170,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
-## [0.1.3] --- 2026-06-05
+## [0.1.2] --- 2026-06-05
 
 ### Added
 
