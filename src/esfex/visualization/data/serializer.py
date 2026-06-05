@@ -2080,6 +2080,9 @@ def config_to_global_settings(
         g.mp_stochastic = getattr(mp, 'stochastic', False)
         g.mp_representative_days = getattr(mp, 'representative_days', 5)
         g.mp_min_day_separation = getattr(mp, 'min_day_separation', 5)
+        g.mp_solver_method = getattr(mp, 'solver_method', 'monolithic')
+        g.mp_benders_max_iterations = getattr(mp, 'benders_max_iterations', 50)
+        g.mp_benders_tolerance = getattr(mp, 'benders_tolerance', 1e-4)
         g.mp_use_tsam = getattr(mp, 'use_tsam', False)
         g.mp_tsam_num_periods = getattr(mp, 'tsam_num_periods', 10)
         g.mp_tsam_method = getattr(mp, 'tsam_method', 'kmedoids')
@@ -2197,6 +2200,9 @@ def global_settings_to_config_dict(
     config_dict["master_problem"]["stochastic"] = g.mp_stochastic
     config_dict["master_problem"]["representative_days"] = g.mp_representative_days
     config_dict["master_problem"]["min_day_separation"] = g.mp_min_day_separation
+    config_dict["master_problem"]["solver_method"] = g.mp_solver_method
+    config_dict["master_problem"]["benders_max_iterations"] = g.mp_benders_max_iterations
+    config_dict["master_problem"]["benders_tolerance"] = g.mp_benders_tolerance
     config_dict["master_problem"]["use_tsam"] = g.mp_use_tsam
     config_dict["master_problem"]["tsam_num_periods"] = g.mp_tsam_num_periods
     config_dict["master_problem"]["tsam_method"] = g.mp_tsam_method

@@ -458,6 +458,29 @@ class GlobalSettingsForm(QWidget):
         self._mp_min_sep.editingFinished.connect(self._on_changed)
         mpl.addRow(tr("global_form.mp_min_sep"), self._mp_min_sep)
 
+        # Master-problem solver method: monolithic (default) or Benders
+        # decomposition. The two Benders settings below only apply to "benders".
+        self._mp_solver_method = QComboBox()
+        self._mp_solver_method.addItem(
+            tr("global_form.mp_solver_monolithic"), "monolithic")
+        self._mp_solver_method.addItem(
+            tr("global_form.mp_solver_benders"), "benders")
+        self._mp_solver_method.currentIndexChanged.connect(
+            self._on_solver_method_changed)
+        mpl.addRow(tr("global_form.mp_solver_method"), self._mp_solver_method)
+
+        self._mp_benders_max_iter = QSpinBox()
+        self._mp_benders_max_iter.setRange(1, 1000)
+        self._mp_benders_max_iter.editingFinished.connect(self._on_changed)
+        mpl.addRow(tr("global_form.mp_benders_max_iter"), self._mp_benders_max_iter)
+
+        self._mp_benders_tol = QDoubleSpinBox()
+        self._mp_benders_tol.setDecimals(6)
+        self._mp_benders_tol.setRange(1e-6, 1.0)
+        self._mp_benders_tol.setSingleStep(1e-4)
+        self._mp_benders_tol.editingFinished.connect(self._on_changed)
+        mpl.addRow(tr("global_form.mp_benders_tol"), self._mp_benders_tol)
+
         # TSAM sub-section
         self._mp_use_tsam = QCheckBox(tr("global_form.mp_use_tsam"))
         self._mp_use_tsam.toggled.connect(self._on_tsam_toggled)
@@ -834,6 +857,11 @@ class GlobalSettingsForm(QWidget):
         self._mp_stochastic.setChecked(g.mp_stochastic)
         self._mp_rep_days.setValue(g.mp_representative_days)
         self._mp_min_sep.setValue(g.mp_min_day_separation)
+        _sm_idx = self._mp_solver_method.findData(g.mp_solver_method)
+        self._mp_solver_method.setCurrentIndex(_sm_idx if _sm_idx >= 0 else 0)
+        self._mp_benders_max_iter.setValue(g.mp_benders_max_iterations)
+        self._mp_benders_tol.setValue(g.mp_benders_tolerance)
+        self._update_benders_enabled()
         self._mp_use_tsam.setChecked(g.mp_use_tsam)
         self._mp_tsam_num_periods.setValue(g.mp_tsam_num_periods)
         idx = self._mp_tsam_method.findText(g.mp_tsam_method)
@@ -922,6 +950,17 @@ class GlobalSettingsForm(QWidget):
         """Enable/disable TSAM-specific fields and trigger change."""
         self._update_tsam_enabled(checked)
         self._on_changed()
+
+    def _on_solver_method_changed(self, *_):
+        """Enable the Benders settings only when the Benders solver is selected."""
+        self._update_benders_enabled()
+        self._on_changed()
+
+    def _update_benders_enabled(self):
+        """Toggle Benders sub-fields enabled state to match the solver method."""
+        is_benders = self._mp_solver_method.currentData() == "benders"
+        self._mp_benders_max_iter.setEnabled(is_benders)
+        self._mp_benders_tol.setEnabled(is_benders)
 
     def _update_tsam_enabled(self, enabled: bool):
         """Toggle TSAM sub-fields enabled state."""
@@ -1084,6 +1123,9 @@ class GlobalSettingsForm(QWidget):
         g.mp_stochastic = self._mp_stochastic.isChecked()
         g.mp_representative_days = self._mp_rep_days.value()
         g.mp_min_day_separation = self._mp_min_sep.value()
+        g.mp_solver_method = self._mp_solver_method.currentData()
+        g.mp_benders_max_iterations = self._mp_benders_max_iter.value()
+        g.mp_benders_tolerance = self._mp_benders_tol.value()
         g.mp_use_tsam = self._mp_use_tsam.isChecked()
         g.mp_tsam_num_periods = self._mp_tsam_num_periods.value()
         g.mp_tsam_method = self._mp_tsam_method.currentText()

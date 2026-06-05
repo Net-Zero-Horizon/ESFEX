@@ -775,6 +775,10 @@ class GuiGlobalSettings:
     mp_stochastic: bool = False
     mp_representative_days: int = 5
     mp_min_day_separation: int = 5
+    # Master-problem solver: "monolithic" or "benders" (+ Benders settings)
+    mp_solver_method: str = "monolithic"
+    mp_benders_max_iterations: int = 50
+    mp_benders_tolerance: float = 1e-4
     mp_use_tsam: bool = False
     mp_tsam_num_periods: int = 10
     mp_tsam_method: str = "kmedoids"
