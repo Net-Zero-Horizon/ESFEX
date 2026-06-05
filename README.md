@@ -36,6 +36,9 @@
   <a href="https://api.reuse.software/info/github.com/Net-Zero-Horizon/ESFEX">
     <img src="https://api.reuse.software/badge/github.com/Net-Zero-Horizon/ESFEX" alt="REUSE status">
   </a>
+  <a href="https://www.bestpractices.dev/projects/13101">
+    <img src="https://www.bestpractices.dev/projects/13101/badge" alt="OpenSSF Best Practices">
+  </a>
   <a href="https://github.com/astral-sh/ruff">
     <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff">
   </a>
