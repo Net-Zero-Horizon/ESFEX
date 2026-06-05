@@ -4794,14 +4794,18 @@ class GridMappingDemandStep(QWidget):
             self._rules_table.removeRow(row)
 
     def _run_classify_and_distribute(self):
-        """Classify buildings then assign each to its nearest bus."""
+        """Classify buildings and assign each to its nearest bus.
+
+        The work runs in a background ``ClassifyDistributeWorker`` so the window
+        stays responsive even for whole-country footprint sets (the previous
+        synchronous version froze the UI on hundreds of thousands of buildings).
+        """
         if self._buildings_gdf is None or self._buildings_gdf.empty:
             self._lbl_status.setText("No buildings loaded.")
             return
 
         from esfex.visualization.workflows.demand_analysis import (
-            classify_buildings,
-            compute_classification_summary,
+            ClassifyDistributeWorker,
         )
 
         self._btn_run.setEnabled(False)
@@ -4813,11 +4817,28 @@ class GridMappingDemandStep(QWidget):
 
         rules = self._get_rules()
         fallback = self._spin_fallback.value()
-        self._classified_gdf = classify_buildings(
-            self._buildings_gdf, rules, fallback,
+        self._classify_worker = ClassifyDistributeWorker(
+            self._buildings_gdf, rules, fallback, list(self._targets),
         )
+        self._classify_worker.progress.connect(self._on_classify_dist_progress)
+        self._classify_worker.finished.connect(self._on_classify_dist_done)
+        self._classify_worker.error.connect(self._on_classify_dist_error)
+        self._classify_worker.start()
 
-        summary = compute_classification_summary(self._classified_gdf)
+    def _on_classify_dist_progress(self, pct, msg):
+        self._progress.setValue(pct)
+        if msg:
+            self._lbl_status.setText(msg)
+
+    def _on_classify_dist_error(self, msg):
+        self._lbl_status.setText(f"Classification failed: {msg}")
+        self._progress.setValue(0)
+        self._btn_run.setEnabled(True)
+
+    def _on_classify_dist_done(self, assignments, summary):
+        """Render assignments + classification summary on the GUI thread."""
+        self._assignments = list(assignments)
+
         cls_lines = []
         for _, r in summary.iterrows():
             cls_lines.append(
@@ -4826,64 +4847,7 @@ class GridMappingDemandStep(QWidget):
                 f"w={r['total_weight']:.1f}"
             )
 
-        self._progress.setValue(40)
-        self._lbl_status.setText("Assigning buildings to nearest buses...")
-
-        gdf = self._classified_gdf
-        bld_lats = gdf.geometry.centroid.y.values
-        bld_lngs = gdf.geometry.centroid.x.values
-        bld_weights = gdf["demand_weight"].values
-
-        rows = []
-        for target in self._targets:
-            node_name = target["node_name"]
-            buses = sorted(target["buses"], key=lambda b: b.bus_id)
-            n_buses = len(buses)
-            if n_buses == 0:
-                continue
-
-            bus_lats = np.array([b.latitude for b in buses])
-            bus_lngs = np.array([b.longitude for b in buses])
-
-            n_bld = len(bld_lats)
-            chunk_size = max(
-                1, min(100_000, 500_000_000 // max(n_buses, 1)),
-            )
-            bus_weights = np.zeros(n_buses)
-            nearest = np.empty(n_bld, dtype=np.intp)
-
-            for start in range(0, n_bld, chunk_size):
-                end = min(start + chunk_size, n_bld)
-                dlat = bld_lats[start:end, None] - bus_lats[None, :]
-                dlng = bld_lngs[start:end, None] - bus_lngs[None, :]
-                dists = dlat ** 2 + dlng ** 2
-                chunk_nearest = np.argmin(dists, axis=1)
-                nearest[start:end] = chunk_nearest
-                np.add.at(
-                    bus_weights, chunk_nearest, bld_weights[start:end],
-                )
-
-            total = bus_weights.sum()
-            if total > 0:
-                bus_fractions = bus_weights / total
-            else:
-                bus_fractions = np.full(n_buses, 1.0 / n_buses)
-
-            for i, bus in enumerate(buses):
-                count = int((nearest == i).sum())
-                self._assignments.append({
-                    "node_name": node_name,
-                    "node_index": target["node_index"],
-                    "bus_id": bus.bus_id,
-                    "bus_name": bus.name,
-                    "old_fraction": bus.demand_fraction,
-                    "new_fraction": float(bus_fractions[i]),
-                    "building_count": count,
-                })
-                rows.append(self._assignments[-1])
-
-        self._progress.setValue(80)
-
+        rows = self._assignments
         self._results_table.setRowCount(len(rows))
         for row_idx, a in enumerate(rows):
             self._results_table.setItem(
@@ -4902,9 +4866,10 @@ class GridMappingDemandStep(QWidget):
                 QTableWidgetItem(f"{a['new_fraction']:.4f}"))
 
         self._progress.setValue(100)
-        total_w = summary["total_weight"].sum()
+        total_bld = int(summary["count"].sum()) if not summary.empty else 0
+        total_w = summary["total_weight"].sum() if not summary.empty else 0.0
         self._lbl_status.setText(
-            f"Classified {len(gdf):,} buildings "
+            f"Classified {total_bld:,} buildings "
             f"({'; '.join(cls_lines)}; total weight: {total_w:.1f}). "
             f"Assigned to {len(rows)} buses."
         )

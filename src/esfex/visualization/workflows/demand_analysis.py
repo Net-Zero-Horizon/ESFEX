@@ -95,43 +95,51 @@ def classify_buildings(
     result["demand_weight"] = 0.0
     result["rule_color"] = "#95a5a6"  # grey fallback
 
-    areas = result["footprint_area_m2"].values
+    n = len(result)
+    areas = pd.to_numeric(result["footprint_area_m2"], errors="coerce").to_numpy(
+        dtype=float
+    )
+
     has_floors = "num_floors" in result.columns
-    floors = result["num_floors"].values if has_floors else None
+    if has_floors:
+        floors = pd.to_numeric(result["num_floors"], errors="coerce").to_numpy(
+            dtype=float
+        )
+        # NaN / missing floor data is treated as "no floor information" (0),
+        # matching the previous per-row `pd.notna(...) else 0` logic.
+        nf = np.where(np.isnan(floors), 0, floors).astype(np.intp)
+    else:
+        nf = np.zeros(n, dtype=np.intp)
 
-    types = result["building_type"].values.copy()
-    weights = result["demand_weight"].values.copy()
-    colors = result["rule_color"].values.copy()
+    types = np.full(n, "Unclassified", dtype=object)
+    weights = np.zeros(n, dtype=float)
+    colors = np.full(n, "#95a5a6", dtype=object)
+    unmatched = np.ones(n, dtype=bool)
 
-    for i in range(len(result)):
-        area = areas[i]
-        nf = int(floors[i]) if (has_floors and pd.notna(floors[i])) else 0
-        matched = False
+    # Vectorised first-match-wins classification. Rules are applied in order;
+    # each rule only claims buildings not already matched by an earlier rule.
+    # This reproduces the previous per-building Python loop exactly — including
+    # that a floor-constrained rule matches any building that *has* floor data
+    # (nf > 0) and falls in the area band, while skipping buildings with no
+    # floor data (see test_floor_outside_range_falls_to_area_check /
+    # test_floor_rule_skipped_when_no_floor_data) — but runs as numpy mask ops
+    # instead of a Python loop over hundreds of thousands of rows, which froze
+    # the Grid Builder UI on whole-country footprint sets.
+    for rule in rules:
+        area_ok = (areas >= rule.area_min_m2) & (areas < rule.area_max_m2)
+        if rule.min_floors > 0:
+            match = unmatched & area_ok & (nf > 0)
+        else:
+            match = unmatched & area_ok
+        if not match.any():
+            continue
+        types[match] = rule.name
+        weights[match] = areas[match] * rule.weight_per_m2
+        colors[match] = rule.color
+        unmatched &= ~match
 
-        for rule in rules:
-            # Floor-based check (if building has floor data and rule uses floors)
-            if nf > 0 and rule.min_floors > 0:
-                if rule.min_floors <= nf <= rule.max_floors:
-                    if rule.area_min_m2 <= area < rule.area_max_m2:
-                        types[i] = rule.name
-                        weights[i] = area * rule.weight_per_m2
-                        colors[i] = rule.color
-                        matched = True
-                        break
-
-            # Area-only check
-            if not matched and rule.area_min_m2 <= area < rule.area_max_m2:
-                # If rule has floor constraint but building has no floor data, skip
-                if rule.min_floors > 0 and nf == 0:
-                    continue
-                types[i] = rule.name
-                weights[i] = area * rule.weight_per_m2
-                colors[i] = rule.color
-                matched = True
-                break
-
-        if not matched:
-            weights[i] = area * fallback_weight_per_m2
+    # Buildings that matched no rule get the fallback weight density.
+    weights[unmatched] = areas[unmatched] * fallback_weight_per_m2
 
     result["building_type"] = types
     result["demand_weight"] = weights
@@ -159,6 +167,122 @@ def compute_classification_summary(gdf) -> pd.DataFrame:
         .reset_index()
         .sort_values("count", ascending=False)
     )
+
+
+class ClassifyDistributeWorker(QThread):
+    """Classify building footprints and distribute them to buses off the UI thread.
+
+    The Grid Builder's bus-distribution step used to run classification and the
+    nearest-bus assignment synchronously on the GUI thread, which froze the
+    window for whole-country footprint sets (hundreds of thousands of
+    buildings). This worker performs the same computation in the background and
+    emits the finished assignments + classification summary for the GUI to
+    render.
+
+    Emits
+    -----
+    finished(assignments: list[dict], summary: DataFrame)
+        ``assignments`` mirrors the dicts the GUI builds (node_name, node_index,
+        bus_id, bus_name, old_fraction, new_fraction, building_count).
+    error(str)
+        Message if classification/assignment fails.
+    progress(int, str)
+        Percent + status message.
+    """
+
+    finished = Signal(object, object)  # assignments, summary_df
+    error = Signal(str)
+    progress = Signal(int, str)
+
+    def __init__(
+        self,
+        buildings_gdf,
+        rules: list[BuildingTypeRule],
+        fallback_weight_per_m2: float,
+        targets: list,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._gdf = buildings_gdf
+        self._rules = rules
+        self._fallback = fallback_weight_per_m2
+        self._targets = targets
+
+    def run(self):
+        try:
+            self.progress.emit(10, "Classifying buildings...")
+            classified = classify_buildings(
+                self._gdf, self._rules, self._fallback,
+            )
+            summary = compute_classification_summary(classified)
+
+            self.progress.emit(40, "Assigning buildings to nearest buses...")
+            # Centroids are computed once and reused for both axes (the old
+            # code evaluated ``.centroid`` twice — once per coordinate).
+            centroids = classified.geometry.centroid
+            bld_lats = centroids.y.to_numpy()
+            bld_lngs = centroids.x.to_numpy()
+            bld_weights = classified["demand_weight"].to_numpy()
+            n_bld = len(bld_lats)
+
+            assignments: list[dict] = []
+            n_targets = max(1, len(self._targets))
+            for ti, target in enumerate(self._targets):
+                buses = sorted(target["buses"], key=lambda b: b.bus_id)
+                n_buses = len(buses)
+                if n_buses == 0:
+                    continue
+
+                bus_lats = np.array([b.latitude for b in buses])
+                bus_lngs = np.array([b.longitude for b in buses])
+
+                chunk_size = max(
+                    1, min(100_000, 500_000_000 // max(n_buses, 1)),
+                )
+                bus_weights = np.zeros(n_buses)
+                nearest = np.empty(n_bld, dtype=np.intp)
+
+                for start in range(0, n_bld, chunk_size):
+                    end = min(start + chunk_size, n_bld)
+                    dlat = bld_lats[start:end, None] - bus_lats[None, :]
+                    dlng = bld_lngs[start:end, None] - bus_lngs[None, :]
+                    dists = dlat ** 2 + dlng ** 2
+                    chunk_nearest = np.argmin(dists, axis=1)
+                    nearest[start:end] = chunk_nearest
+                    # bincount accumulates far faster than np.add.at.
+                    bus_weights += np.bincount(
+                        chunk_nearest,
+                        weights=bld_weights[start:end],
+                        minlength=n_buses,
+                    )
+
+                total = bus_weights.sum()
+                if total > 0:
+                    bus_fractions = bus_weights / total
+                else:
+                    bus_fractions = np.full(n_buses, 1.0 / n_buses)
+
+                counts = np.bincount(nearest, minlength=n_buses)
+                for i, bus in enumerate(buses):
+                    assignments.append({
+                        "node_name": target["node_name"],
+                        "node_index": target["node_index"],
+                        "bus_id": bus.bus_id,
+                        "bus_name": bus.name,
+                        "old_fraction": bus.demand_fraction,
+                        "new_fraction": float(bus_fractions[i]),
+                        "building_count": int(counts[i]),
+                    })
+
+                self.progress.emit(
+                    40 + int(55 * (ti + 1) / n_targets),
+                    "Assigning buildings to nearest buses...",
+                )
+
+            self.progress.emit(100, "")
+            self.finished.emit(assignments, summary)
+        except Exception as exc:  # noqa: BLE001 - reported to the GUI
+            self.error.emit(str(exc))
 
 
 class ClusteringWorker(QThread):
