@@ -110,8 +110,8 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 - **Electrolyzer (P2H₂)** — Power-to-hydrogen with capacity investment, load-dependent efficiency, ramp constraints, and coupling to both the electrical balance and hydrogen demand.
 - **Primary energy supply chain** — Multi-fuel import nodes, storage tanks, and transport links (pipelines/tankers) coupled to generator fuel consumption.
-- **Electric vehicles** — Multi-method fleet adoption, multi-category vehicles (passenger, bus, truck…), time-of-day charging, and bidirectional V2G optimization.
-- **Rooftop solar** — Stochastic adoption with behind-the-meter generation modeled as negative demand.
+- **Electric vehicles** — Multi-method fleet adoption, multi-category vehicles (passenger, bus, truck…), time-of-day charging, and bidirectional V2G optimization, via [evrex](https://github.com/Net-Zero-Horizon/evrex).
+- **Rooftop solar** — Stochastic adoption with behind-the-meter generation modeled as negative demand, via [rooftex](https://github.com/Net-Zero-Horizon/rooftex).
 - **Flexible sectoral demand** — Sector-specific criticality and temporal flexibility for demand-side participation in system balancing.
 
 ### Planning and Analysis
@@ -123,7 +123,7 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 ### Tools and Interface
 
-- **GIS-based Studio** — A PySide6 + Leaflet.js map for visually building power systems: place nodes, generators, batteries, and transmission lines with polyline routing. Includes resource-assessment wizards for rooftop solar, utility-scale PV, wind, and OTEC availability profiles.
+- **GIS-based Studio** — A PySide6 + Leaflet.js map for visually building power systems: place nodes, generators, batteries, and transmission lines with polyline routing. Includes resource-assessment wizards for rooftop solar, utility-scale PV ([solarex](https://github.com/Net-Zero-Horizon/solarex)), wind ([windrex](https://github.com/Net-Zero-Horizon/windrex)), and OTEC ([OTEX](https://github.com/Net-Zero-Horizon/OTEX)) availability profiles.
 - **Plugin system** — Directory-based plugins with simulation lifecycle hooks, GUI integration, and Julia overlay modules for custom constraints.
 - **CLI** — `run`, `validate`, `export`, `studio`, `precompile`, `info` and `plugin` commands (plus `train-demand-model` / `build-demand-dataset` demand-data utilities) with Rich formatting and progress tracking.
 - **HDF5 output** — Structured results with derived metrics (LCOE, VALCOE, capacity factor) exportable to CSV, Excel, and JSON.
@@ -262,7 +262,7 @@ esfex studio                     # start from a blank canvas
 esfex studio -c my_system.yaml   # open an existing configuration
 ```
 
-Place nodes, generators, batteries, and transmission lines directly on a Leaflet map with geographic routing, edit element parameters through validated forms, and run resource-assessment wizards (rooftop solar, utility PV, wind, OTEC) to generate availability profiles. The Studio writes standard ESFEX YAML that the CLI and Python API consume unchanged.
+Place nodes, generators, batteries, and transmission lines directly on a Leaflet map with geographic routing, edit element parameters through validated forms, and run resource-assessment wizards (rooftop solar, utility PV via [solarex](https://github.com/Net-Zero-Horizon/solarex), wind via [windrex](https://github.com/Net-Zero-Horizon/windrex), OTEC via [OTEX](https://github.com/Net-Zero-Horizon/OTEX)) to generate availability profiles. The Studio writes standard ESFEX YAML that the CLI and Python API consume unchanged.
 
 ---
 
