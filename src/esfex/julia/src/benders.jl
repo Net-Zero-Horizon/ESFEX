@@ -977,6 +977,12 @@ function create_benders_subproblem(
         pwl_loss_segments = input.transmission_loss_segments,
         gen_cost_curves = input.gen_cost_curves,
         bat_cost_curves = input.bat_cost_curves,
+        # Rolling-horizon seam slots: not applicable inside a representative-day
+        # subproblem (each day is solved fresh). Empty Dicts make the shared
+        # power_system.jl constraint builders take their no-boundary paths
+        # instead of erroring on a missing field.
+        generator_output_prev = Dict{Int, Dict{Int, Float64}}(),
+        reservoir_level_prev = Dict{Int, Dict{Int, Float64}}(),
     )
 
     # =========================================================================
@@ -2037,6 +2043,20 @@ function run_benders_decomposition(
         if verbose_benders
             @info "  Added $(cuts_added) cuts"
         end
+    end
+
+    # If the loop broke before any successful master solve, no lower bound was
+    # ever established. Surface a clear, actionable error instead of crashing on
+    # an empty lb_history (BoundsError).
+    if isempty(lb_history)
+        error(
+            "Benders master problem was infeasible/unsolved on the first " *
+            "iteration; no lower bound was established. This usually means the " *
+            "investment master is over-constrained — e.g. an RE-penetration " *
+            "target the candidate technologies cannot meet, or too tight an " *
+            "investment budget. A debug LP was written to " *
+            "/tmp/benders_master_failed_iter*.lp."
+        )
     end
 
     # Reached max iterations without convergence

@@ -1872,6 +1872,11 @@ class MasterProblemAdapter:
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
+        # Master-problem solver method and Benders settings
+        solver_method: str = "monolithic",
+        benders_max_iterations: int = 50,
+        benders_tolerance: float = 1e-4,
+        benders_lol_penalty_cap: float = 1000.0,
         **kwargs,
     ):
         """
@@ -1982,11 +1987,21 @@ class MasterProblemAdapter:
         self.stochastic_scenarios = stochastic_scenarios or []
         self.kwargs = kwargs
 
+        # Master-problem solver method ("monolithic" | "benders") and settings.
+        self.solver_method = str(solver_method or "monolithic").lower()
+        self.benders_max_iterations = int(benders_max_iterations)
+        self.benders_tolerance = float(benders_tolerance)
+        self.benders_lol_penalty_cap = float(benders_lol_penalty_cap)
+
         self._jl_model = None
         self._jl_vars = None
         self._jl_input = None
         self._jl_targets = None
         self._jl_scenarios = None
+        # Benders state (populated only when solver_method == "benders")
+        self._benders_result = None
+        self._benders_solution = None
+        self._benders_use_rep_days = True
 
         # Get solver config
         self._solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
@@ -2361,6 +2376,7 @@ class MasterProblemAdapter:
             gen_cost_curves=jl_gen_cost_curves,
             bat_cost_curves=jl_bat_cost_curves,
             tech_cost_curves=jl_tech_cost_curves,
+            benders_lol_penalty_cap=scale_cost(self.benders_lol_penalty_cap),
         )
 
         return jl_input
@@ -2377,6 +2393,17 @@ class MasterProblemAdapter:
         logger.debug("Building Julia MasterProblem model...")
 
         self._jl_input = self._create_input()
+
+        if self.solver_method == "benders":
+            # Benders builds its own investment master and per-day subproblems
+            # internally during solve(); here we only need the input ready.
+            self._benders_use_rep_days = use_representative_days
+            logger.debug(
+                "MasterProblem will be solved by Benders decomposition "
+                f"(max_iter={self.benders_max_iterations}, "
+                f"tol={self.benders_tolerance})"
+            )
+            return
 
         if self.use_stochastic and self.stochastic_scenarios:
             jl_scenarios = self._build_julia_scenarios()
@@ -2446,6 +2473,9 @@ class MasterProblemAdapter:
         """
         jl = get_julia()
 
+        if self.solver_method == "benders":
+            return self._solve_benders()
+
         if self._jl_model is None:
             raise RuntimeError("Model not built. Call build_model() first.")
 
@@ -2495,6 +2525,47 @@ class MasterProblemAdapter:
             )
             return 0
 
+    def _solve_benders(self) -> int:
+        """Solve the master problem by Benders decomposition.
+
+        Runs the full investment-master / operational-subproblem iteration in
+        Julia and stores the recovered ``MasterProblemResult`` for downstream
+        extraction. Returns a PuLP-compatible status code (1 = optimal).
+        """
+        ESFEX = get_esfex_module()
+        if self._jl_input is None:
+            raise RuntimeError("Model not built. Call build_model() first.")
+
+        logger.info(
+            "Solving MasterProblem by Benders decomposition "
+            f"(max_iter={self.benders_max_iterations}, "
+            f"tol={self.benders_tolerance})..."
+        )
+        self._benders_result = ESFEX.run_benders_decomposition(
+            self._jl_input,
+            max_iterations=self.benders_max_iterations,
+            tolerance=self.benders_tolerance,
+            use_representative_days=self._benders_use_rep_days,
+            verbose_benders=self._solver.verbose,
+        )
+        self._benders_solution = self._benders_result.solution
+
+        status_str = str(self._benders_solution.status)
+        gap = float(self._benders_result.gap)
+        iters = int(self._benders_result.iterations)
+        obj = float(self._benders_result.objective) * COST_UNSCALE
+        logger.info(
+            f"Benders finished: {status_str} in {iters} iteration(s), "
+            f"gap={gap * 100:.4f}%, objective={obj:,.2f}"
+        )
+        if "OPTIMAL" in status_str:
+            return 1
+        elif "INFEASIBLE" in status_str:
+            return -1
+        elif "UNBOUNDED" in status_str:
+            return -2
+        return 0
+
     def get_solution_values(self) -> Dict[str, Any]:
         """
         Extract all solution values from the solved model.
@@ -2502,6 +2573,11 @@ class MasterProblemAdapter:
         Returns:
             Dictionary with investment decisions and costs
         """
+        if self.solver_method == "benders":
+            if self._benders_solution is None:
+                raise RuntimeError("Benders not solved. Call solve() first.")
+            return self._convert_result(self._benders_solution)
+
         ESFEX = get_esfex_module()
 
         if self._jl_model is None:

@@ -1488,6 +1488,30 @@ class MasterProblemConfig(BaseModel):
     representative_days: int = Field(default=5, ge=1)
     min_day_separation: int = Field(default=5, ge=1)
 
+    # Master-problem solver method.
+    #   "monolithic" — single model coupling investment + representative-day
+    #                  operations (default).
+    #   "benders"    — Benders decomposition: investment-only master with theta[y]
+    #                  recourse and per-representative-day dispatch subproblems.
+    #                  Beneficial for very large problems.
+    solver_method: Literal["monolithic", "benders"] = Field(
+        default="monolithic",
+        description="Master-problem solver: 'monolithic' or 'benders'.",
+    )
+    benders_max_iterations: int = Field(
+        default=50, ge=1,
+        description="Maximum Benders iterations (benders solver only).",
+    )
+    benders_tolerance: float = Field(
+        default=1e-4, gt=0.0,
+        description="Relative optimality-gap tolerance for Benders convergence.",
+    )
+    benders_lol_penalty_cap: float = Field(
+        default=1000.0, ge=0.0,
+        description="Cap on the loss-of-load penalty ($/MW per timestep) inside "
+        "Benders subproblems for numerical stability (0 disables the cap).",
+    )
+
     # TSAM (Time-Series Aggregation Method)
     use_tsam: bool = Field(
         default=False,

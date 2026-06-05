@@ -408,6 +408,82 @@ class TestMasterProblemSolve:
 
         assert result.objective >= 0
 
+    @pytest.mark.julia
+    def test_benders_decomposition_solves(self, julia_setup, simple_network, simple_generators, simple_batteries, simple_demand):
+        """Benders decomposition runs end to end and returns a valid solution.
+
+        Validates the optional ``benders`` master solver: the algorithm builds
+        the investment master + per-representative-day subproblems, iterates,
+        and recovers a MasterProblemResult. The objective is compared to the
+        monolithic representative-day solve for the same case (logged; the two
+        formulations need not match exactly, see issue #2).
+        """
+        jl, ESFEX = julia_setup
+        from esfex.bridge.converters import py_to_julia_matrix
+
+        # Single year: the simple 48-hour demand covers one year, so every year
+        # has representative days (a multi-year case would need demand spanning
+        # all years).
+        years = [2025]
+        jl_years = jl.seval(f"Int64[{', '.join(map(str, years))}]")
+
+        def make_input():
+            return ESFEX.MasterProblemInput(
+                years=jl_years,
+                base_year=2025,
+                system_name="test",
+                network=simple_network,
+                generators=simple_generators,
+                batteries=simple_batteries,
+                base_demand=py_to_julia_matrix(simple_demand),
+                discount_rate=0.05,
+                max_annual_investment=5e8,
+                target_re_penetration=0.0,
+                initial_re_penetration=0.0,
+                representative_days_per_year=2,
+                min_day_separation=1,
+                slack_penalty=1e9,
+                verbose=False,
+            )
+
+        # Monolithic representative-day reference solve.
+        mono_in = make_input()
+        model, mvars, _ = ESFEX.create_master_problem(
+            mono_in, use_representative_days=True,
+        )
+        jl.seval("using JuMP")
+        jl.seval("global _bz_model")
+        jl._bz_model = model
+        jl.seval("optimize!(_bz_model)")
+        mono_status = str(jl.seval("termination_status(_bz_model)"))
+        assert "OPTIMAL" in mono_status or "LOCALLY_SOLVED" in mono_status
+        mono_obj = float(ESFEX.extract_master_solution(model, mvars, mono_in).objective)
+
+        # Benders solve.
+        bres = ESFEX.run_benders_decomposition(
+            make_input(),
+            max_iterations=40,
+            tolerance=1e-3,
+            use_representative_days=True,
+            verbose_benders=False,
+        )
+
+        # It must actually iterate and return a usable optimal solution.
+        assert int(bres.iterations) >= 1
+        assert len(list(bres.lb_history)) >= 1
+        sol_status = str(bres.solution.status)
+        assert "OPTIMAL" in sol_status or "LOCALLY_SOLVED" in sol_status
+        b_obj = float(bres.objective)
+        assert np.isfinite(b_obj) and b_obj >= 0.0
+
+        rel = abs(b_obj - mono_obj) / max(abs(mono_obj), 1.0)
+        logger.info(
+            "Benders obj=%.0f vs monolithic=%.0f (rel=%.2f%%, iters=%d, gap=%.3f%%)",
+            b_obj, mono_obj, rel * 100, int(bres.iterations), float(bres.gap) * 100,
+        )
+        # Same investment problem -> same ballpark (loose: formulations differ).
+        assert 0.1 * mono_obj <= b_obj <= 10.0 * mono_obj
+
     def test_investment_within_budget(self, julia_setup, simple_network, simple_generators, simple_batteries, simple_demand):
         """Test that investments stay within budget constraint."""
         jl, ESFEX = julia_setup
