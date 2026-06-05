@@ -170,6 +170,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ---
 
+## [0.1.3] --- 2026-06-05
+
+### Fixed
+
+- **Grid Builder demand-forecast crash**: the forecast step's worker threads
+  (country detection, World Bank/ERA5 fetch, ML forecast) updated Qt widgets
+  directly, violating Qt's main-thread-only GUI rule and segfaulting
+  (`Cannot create children for a parent that is in a different thread`). The
+  heavy work still runs off the GUI thread, but every widget update is now
+  marshalled to the main thread via a queued signal.
+
+---
+
 ## [0.1.2] --- 2026-06-05
 
 ### Added
