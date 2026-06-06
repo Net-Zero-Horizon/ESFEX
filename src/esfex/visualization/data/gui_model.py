@@ -1322,6 +1322,22 @@ class GuiModel(QObject):
         if len(self._inter_system_links) < before:
             self.interSystemLinkRemoved.emit(link_id)
 
+    def remove_links_for_system(self, system_name: str) -> list[str]:
+        """Remove every inter-system link referencing ``system_name``.
+
+        Called when a system is deleted so its links do not survive as orphans
+        (``from_system``/``to_system`` no longer loaded, otherwise silently
+        dropped by the runner). Each removal emits ``interSystemLinkRemoved`` so
+        the tree is pruned too. Returns the removed link ids.
+        """
+        removed = [
+            lk.link_id for lk in self._inter_system_links
+            if lk.from_system == system_name or lk.to_system == system_name
+        ]
+        for link_id in removed:
+            self.remove_inter_system_link(link_id)
+        return removed
+
     def update_inter_system_link(self, link_id: str, **kwargs):
         self.checkpoint()
         for lk in self._inter_system_links:

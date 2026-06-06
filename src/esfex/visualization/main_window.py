@@ -2294,6 +2294,10 @@ class MainWindow(QMainWindow):
             other = next(n for n in self._all_states if n != system_name)
             self._switch_to_system(other)
         del self._all_states[system_name]
+        # Remove inter-system links that reference the deleted system, otherwise
+        # they survive as orphans (from_system/to_system no longer loaded) and
+        # are silently dropped by the runner.
+        self.model.remove_links_for_system(system_name)
         # Remove from simulation list
         g = self.model.global_settings
         if system_name in g.systems_to_simulate:

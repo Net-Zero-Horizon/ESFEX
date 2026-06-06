@@ -110,6 +110,30 @@ class TestModelConstruction:
         assert model.inter_system_links is model._inter_system_links
 
 
+class TestRemoveLinksForSystem:
+    """Deleting a system must take its inter-system links with it (#5)."""
+
+    def test_removes_only_links_touching_system(self, model):
+        model.add_inter_system_link("transmission", "A", "B", 0, 0)
+        model.add_inter_system_link("fuel_route", "B", "C", 1, 1)
+        keep = model.add_inter_system_link("transmission", "A", "C", 2, 2)
+        removed = model.remove_links_for_system("B")
+        assert len(removed) == 2
+        assert [lk.link_id for lk in model.inter_system_links] == [keep]
+
+    def test_no_links_for_unreferenced_system(self, model):
+        model.add_inter_system_link("transmission", "A", "C", 0, 0)
+        assert model.remove_links_for_system("Z") == []
+        assert len(model.inter_system_links) == 1
+
+    def test_emits_removed_signal(self, model):
+        lid = model.add_inter_system_link("transmission", "A", "B", 0, 0)
+        seen = []
+        model.interSystemLinkRemoved.connect(seen.append)
+        model.remove_links_for_system("A")
+        assert seen == [lid]
+
+
 class TestUndoRedo:
     def test_checkpoint_pushes_when_not_suspended(self):
         m = GuiModel()
