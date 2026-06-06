@@ -301,6 +301,10 @@ class ElementTreePanel(QWidget):
         if sys_item is None:
             return
         sys_item.setText(0, new_name)
+        # Keep the item's stored id in sync with the new name, otherwise the
+        # context menu (and every other action) emits the stale old name —
+        # e.g. deleting a renamed system would target a missing key and fail.
+        sys_item.setData(0, 100, ("system", new_name))
         font = sys_item.font(0)
         font.setBold(True)
         sys_item.setFont(0, font)

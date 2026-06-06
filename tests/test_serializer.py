@@ -2036,6 +2036,34 @@ class TestForecastDemandSerialization:
         assert all(p.endswith(".csv") and Path(p).exists() for p in dp)
 
 
+class TestDeletedSystemPruning:
+    """A deleted system must not survive the save and reappear on reload."""
+
+    def test_deleted_system_is_pruned_from_yaml(self, tmp_path):
+        import copy
+
+        config = _make_esfex_config()
+        config.systems["SecondSystem"] = copy.deepcopy(
+            config.systems["TestSystem"])
+        config.meta_network.systems = ["TestSystem", "SecondSystem"]
+
+        states = config_to_gui_states(config)
+        assert set(states) == {"TestSystem", "SecondSystem"}
+        # Simulate deleting "SecondSystem" in the GUI.
+        del states["SecondSystem"]
+
+        out = tmp_path / "out.yaml"
+        gui_state_to_yaml(states=states, base_config=config, output_path=out)
+        data = yaml.safe_load(out.read_text())
+
+        # The deleted system is gone from both the systems map and the list...
+        assert "SecondSystem" not in data["systems"]
+        assert "SecondSystem" not in data["meta_network"]["systems"]
+        # ...so reloading does not resurrect it.
+        reloaded = config_to_gui_states(ESFEXConfig(**data))
+        assert set(reloaded) == {"TestSystem"}
+
+
 # =====================================================================
 # Cost curve serialization helpers
 # =====================================================================

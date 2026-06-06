@@ -2305,6 +2305,12 @@ def gui_state_to_yaml(
     else:
         config_dict["meta_network"]["systems"] = list(states.keys())
 
+    # Drop systems that were deleted in the GUI. config_dict is a full copy of
+    # base_config, so a deleted system still carries its whole definition here;
+    # without this prune it survives the save and reappears on the next load.
+    for _stale in [s for s in config_dict.get("systems", {}) if s not in states]:
+        del config_dict["systems"][_stale]
+
     # Re-apply bus role + demand_fraction redistribution right before
     # serialization.  The Grid Builder runs this in its Phase 10, but
     # any buses added afterwards by `_ensure_bus_at` (transformer

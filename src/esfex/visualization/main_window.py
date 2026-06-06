@@ -2289,11 +2289,15 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+        # Guard against a stale/unknown id so deletion can never silently abort
+        # (e.g. a tree item whose stored id was left out of sync by a rename).
+        if system_name not in self._all_states:
+            return
         # If deleting the current system, switch to another first
         if system_name == self._current_system_name:
             other = next(n for n in self._all_states if n != system_name)
             self._switch_to_system(other)
-        del self._all_states[system_name]
+        self._all_states.pop(system_name, None)
         # Remove inter-system links that reference the deleted system, otherwise
         # they survive as orphans (from_system/to_system no longer loaded) and
         # are silently dropped by the runner.
