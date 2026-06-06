@@ -4356,53 +4356,86 @@ class GridMappingDemandStep(QWidget):
     # ==================================================================
 
     def _detect_country(self):
-        """Detect country from polygon centroid via Nominatim."""
+        """Detect the region's countries offline, with a Nominatim fallback.
+
+        Tests the grid node coordinates (or a sample of the region's bounding
+        box) against the bundled country polygons, so a region spanning several
+        countries surfaces all of them and territories (Puerto Rico, ...) are
+        not folded into their sovereign state. Nominatim is only used when the
+        offline lookup finds nothing.
+        """
         if self._bounds is None:
             return
 
         self._btn_detect_country.setEnabled(False)
         self._lbl_forecast_status.setText("Detecting country...")
 
-        south, west, north, east = self._bounds
-        lat = (south + north) / 2.0
-        lon = (west + east) / 2.0
+        # Prefer the actual node coordinates; fall back to a bbox sample.
+        points: list[tuple[float, float]] = []
+        if self._model is not None:
+            for nd in self._model.state.nodes:
+                lat = getattr(nd, "centroid_lat", None)
+                lng = getattr(nd, "centroid_lng", None)
+                if lat is not None and lng is not None and (lat or lng):
+                    points.append((lat, lng))
+        bounds = self._bounds
 
         import threading
 
+        def _populate(countries: list[dict]):
+            self._combo_country.blockSignals(True)
+            self._combo_country.clear()
+            for c in countries:
+                self._combo_country.addItem(
+                    f"{c['name']} ({c['iso3']})", c)
+            self._combo_country.blockSignals(False)
+            if len(countries) == 1:
+                c = countries[0]
+                self._lbl_forecast_status.setText(
+                    f"Country: {c['name']} ({c['iso3']})")
+            else:
+                self._lbl_forecast_status.setText(
+                    f"{len(countries)} countries detected — select one")
+            self._btn_detect_country.setEnabled(True)
+
         def _do_detect():
             try:
+                from esfex.visualization.workflows.country_detection import (
+                    detect_countries, sample_bbox,
+                )
+                pts = points or sample_bbox(bounds, n=8)
+                countries = detect_countries(pts)
+                if countries:
+                    self._ui_call.emit(
+                        lambda c=countries: _populate(c))
+                    return
+                # Offline lookup empty (e.g. an entirely offshore region) —
+                # fall back to Nominatim on the centroid, in English.
                 import requests
-                url = (
-                    f"https://nominatim.openstreetmap.org/reverse"
-                    f"?lat={lat}&lon={lon}&format=json&zoom=3"
-                )
+                south, west, north, east = bounds
+                lat = (south + north) / 2.0
+                lon = (west + east) / 2.0
                 resp = requests.get(
-                    url, headers={"User-Agent": "ESFEX-Grid/1.0"},
-                    timeout=10,
+                    "https://nominatim.openstreetmap.org/reverse",
+                    params={"lat": lat, "lon": lon, "format": "json",
+                            "zoom": 3, "accept-language": "en"},
+                    headers={"User-Agent": "ESFEX-Grid/1.0"}, timeout=10,
                 )
-                data = resp.json()
-                cc = data.get("address", {}).get("country_code", "").upper()
-                name = data.get("address", {}).get("country", cc)
-                # Map ISO2 → ISO3
+                addr = resp.json().get("address", {})
+                cc = addr.get("country_code", "").upper()
+                name = addr.get("country", cc)
                 from esfex.visualization.workflows.demand_estimation_fetchers import (
                     _iso2_to_iso3,
                 )
                 iso3 = _iso2_to_iso3(cc)
-                self._ui_call.emit(lambda cc=cc, iso3=iso3, name=name: (
-                    self._combo_country.blockSignals(True),
-                    self._combo_country.clear(),
-                    self._combo_country.addItem(
-                        f"{name} ({iso3})",
-                        {"iso2": cc, "iso3": iso3, "name": name}),
-                    self._combo_country.blockSignals(False),
-                    self._lbl_forecast_status.setText(f"Country: {name} ({iso3})"),
-                ))
+                self._ui_call.emit(lambda c=[{"iso2": cc, "iso3": iso3,
+                                              "name": name}]: _populate(c))
             except Exception as exc:
-                self._ui_call.emit(lambda e=exc: self._lbl_forecast_status.setText(
-                    f"Country detection failed: {e}"))
-            finally:
-                self._ui_call.emit(
-                    lambda: self._btn_detect_country.setEnabled(True))
+                self._ui_call.emit(lambda e=exc: (
+                    self._lbl_forecast_status.setText(
+                        f"Country detection failed: {e}"),
+                    self._btn_detect_country.setEnabled(True),
+                ))
 
         threading.Thread(target=_do_detect, daemon=True).start()
 
