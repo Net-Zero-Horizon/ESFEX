@@ -551,6 +551,61 @@ import Ipopt
             @test rc.objective < ri.objective - 0.5
         end
 
+        @testset "head dependence limits power at low reservoir level" begin
+            # A reservoir held at a low level (10% full) with ample inflow to
+            # meet demand. With no head effect the turbine reaches nameplate
+            # power; with head_min_factor = 0.3 the low head caps output near
+            # 0.3 + 0.7*0.1 = 0.37 of rated, so the unit cannot serve the load
+            # and must spill water / lean on gas.
+            H = 2
+            mkhead(factor) = GeneratorConfig(
+                "Hydro", "Renewable", "Water", [100.0], [0.0],
+                [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
+                [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
+                [1000.0], [0.1], [0.0], [1.0], fill(80.0, H, 1),
+                [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [0.0],
+                [0.0], "", 0, [factor],  # min_release, cascade_*, head_min_factor
+            )
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0],
+                        [1.0], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            demand = reshape(fill(80.0, H), H, 1)
+            mkinput(h) = PowerSystemInput(
+                name = "head", year = 2025, network = net,
+                generators = [h, gas],
+                batteries = BatteryConfig[], demand = demand,
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+
+            mf, vf = create_power_system(mkinput(mkhead(1.0)))   # no head effect
+            optimize!(mf)
+            @test string(termination_status(mf)) == "OPTIMAL"
+            rf = extract_solution(mf, vf, mkinput(mkhead(1.0)))
+            hydro_full = sum(rf.gen_output[1, 1, :])
+
+            md, vd = create_power_system(mkinput(mkhead(0.3)))   # head-limited
+            optimize!(md)
+            @test string(termination_status(md)) == "OPTIMAL"
+            rd = extract_solution(md, vd, mkinput(mkhead(0.3)))
+            hydro_derated = sum(rd.gen_output[1, 1, :])
+
+            # Without the head limit the unit serves the full 80 MW load each
+            # hour; with it, output is throttled by the low head.
+            @test hydro_full > 150.0
+            # Hour 1 starts at the fixed initial level (10% full), so the cap is
+            # deterministic: 0.3 + 0.7*0.1 = 0.37 of the 100 MW rating.
+            @test rd.gen_output[1, 1, 1] <= 37.0 + 1e-3
+            # Aggregate: head-limited hydro produces far less over the window.
+            @test hydro_full > hydro_derated * 1.5
+            # The throttled hydro is replaced by gas -> more expensive.
+            @test rd.objective > rf.objective + 0.5
+        end
+
         @testset "two-bus transmission + renewable + battery" begin
             H = 2; N = 2
             gas  = mkgen("GasCC", "Non-renewable", "Gas", [100.0, 0.0],

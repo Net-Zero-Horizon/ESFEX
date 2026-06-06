@@ -398,12 +398,19 @@ struct GeneratorConfig
     # cascade topology links whole hydro plants, not individual nodes.
     cascade_downstream::String
     cascade_delay_hours::Int
+    # Head dependence (per node). Power-availability factor at the MINIMUM
+    # reservoir level, in (0,1]. 1.0 = no head effect (nameplate power at any
+    # level). Below 1.0, available turbine power scales linearly from
+    # head_min_factor*rated at the minimum level up to rated at the maximum
+    # level — a depleted reservoir means low head means less peak power.
+    reservoir_head_min_factor::Vector{Float64}
 end
 
 # Backward-compatible constructors. The struct grew over time, so older call
 # sites pass fewer positional arguments and the newer fields take neutral
 # defaults: reservoir_min_release = zeros, cascade_downstream = "" (terminal),
-# cascade_delay_hours = 0. Dispatch is by argument count (39 / 40 / full 42).
+# cascade_delay_hours = 0, reservoir_head_min_factor = ones (no head effect).
+# Dispatch is by argument count (39 / 40 / 42 / full 43).
 
 # 39-arg: through risk_coefficient.
 function GeneratorConfig(
@@ -428,11 +435,11 @@ function GeneratorConfig(
         reservoir_turbine_efficiency, reservoir_evaporation_rate,
         reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
         reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
-        zeros(Float64, n), "", 0,  # min_release, cascade_downstream, cascade_delay_hours
+        zeros(Float64, n), "", 0, ones(Float64, n),  # min_release, cascade_*, head_min_factor
     )
 end
 
-# 40-arg: through reservoir_min_release (cascade defaults to none).
+# 40-arg: through reservoir_min_release (cascade + head default to none).
 function GeneratorConfig(
     name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
     ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
@@ -445,6 +452,7 @@ function GeneratorConfig(
     reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
     reservoir_min_release,
 )
+    n = length(rated_power)
     return GeneratorConfig(
         name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
         ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
@@ -455,7 +463,36 @@ function GeneratorConfig(
         reservoir_turbine_efficiency, reservoir_evaporation_rate,
         reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
         reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
-        reservoir_min_release, "", 0,  # cascade_downstream, cascade_delay_hours
+        reservoir_min_release, "", 0, ones(Float64, n),  # cascade_*, head_min_factor
+    )
+end
+
+# 42-arg: through cascade_delay_hours (head defaults to no effect).
+function GeneratorConfig(
+    name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
+    ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
+    fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+    reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
+    frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
+    reservoir_min_level, reservoir_max_level, reservoir_inflow,
+    reservoir_turbine_efficiency, reservoir_evaporation_rate,
+    reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
+    reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
+    reservoir_min_release, cascade_downstream, cascade_delay_hours,
+)
+    n = length(rated_power)
+    return GeneratorConfig(
+        name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
+        ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
+        fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+        reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
+        frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
+        reservoir_min_level, reservoir_max_level, reservoir_inflow,
+        reservoir_turbine_efficiency, reservoir_evaporation_rate,
+        reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
+        reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
+        reservoir_min_release, cascade_downstream, cascade_delay_hours,
+        ones(Float64, n),  # reservoir_head_min_factor
     )
 end
 

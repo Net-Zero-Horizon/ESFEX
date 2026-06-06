@@ -947,7 +947,8 @@ function create_benders_subproblem(
                 gen.reservoir_invest_cost, gen.reservoir_invest_max,
                 gen.risk_coefficient,
                 gen.reservoir_min_release,
-                gen.cascade_downstream, gen.cascade_delay_hours
+                gen.cascade_downstream, gen.cascade_delay_hours,
+                gen.reservoir_head_min_factor
             )
         else
             gen

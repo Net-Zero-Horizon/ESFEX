@@ -2059,6 +2059,12 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
             η_pump = gen.reservoir_pump_efficiency[b]
             min_release_b = b <= length(gen.reservoir_min_release) ?
                 gen.reservoir_min_release[b] : 0.0
+            head_min_factor_b = b <= length(gen.reservoir_head_min_factor) ?
+                gen.reservoir_head_min_factor[b] : 1.0
+            rated_b = gen.rated_power[b]
+            # Usable storage span (constant; reservoir investment is not folded
+            # into the head fraction to keep the bound linear).
+            head_span = (max_level_frac - min_level_frac) * res_cap
 
             # Total reservoir capacity (existing + investment)
             total_res_cap = if is_dev && gen.reservoir_invest_max[b] > 0
@@ -2164,6 +2170,22 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
                         vars.gen_output[g, b, t] / η_turbine + spillage_term >=
                         min_release_b,
                         base_name = "res_min_release_g$(g)_b$(b)_t$(t)")
+                end
+
+                # Head dependence: a low reservoir means low head means reduced
+                # peak turbine power. The available power scales linearly with
+                # the fill level, from head_min_factor*rated at the minimum
+                # level up to rated at the maximum. Evaluated at the start-of-
+                # step level — linear in level, so the model stays an LP.
+                #   gen <= rated*(hmf + (1-hmf)*(level - min*cap)/span)
+                if head_min_factor_b < 1.0 && rated_b > 0 && head_span > 0
+                    @constraint(model,
+                        vars.gen_output[g, b, t] <=
+                        rated_b * head_min_factor_b +
+                        rated_b * (1.0 - head_min_factor_b) *
+                        (vars.reservoir_level[g, b, t] - min_level_frac * res_cap) /
+                        head_span,
+                        base_name = "res_head_limit_g$(g)_b$(b)_t$(t)")
                 end
             end
 

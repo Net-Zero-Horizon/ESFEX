@@ -1884,7 +1884,8 @@ function add_day_operational_constraints!(
                 gen.reservoir_invest_cost, gen.reservoir_invest_max,
                 gen.risk_coefficient,
                 gen.reservoir_min_release,
-                gen.cascade_downstream, gen.cascade_delay_hours
+                gen.cascade_downstream, gen.cascade_delay_hours,
+                gen.reservoir_head_min_factor
             )
         else
             gen
@@ -3545,7 +3546,8 @@ function apply_scenario_multipliers(
             gen.reservoir_invest_cost, gen.reservoir_invest_max,
             gen.risk_coefficient,
             gen.reservoir_min_release,
-            gen.cascade_downstream, gen.cascade_delay_hours
+            gen.cascade_downstream, gen.cascade_delay_hours,
+            gen.reservoir_head_min_factor
         ))
     end
 
