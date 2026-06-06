@@ -993,6 +993,9 @@ function create_benders_subproblem(
     add_battery_constraints!(sp_model, ps_vars, day_input;
         capacity_override_power=total_cap_bat_power,
         capacity_override_energy=total_cap_bat_energy)
+    # Reservoir water balance — keep the Benders subproblem consistent with the
+    # monolithic master (no-op when the day has no reservoir variables).
+    add_reservoir_constraints!(sp_model, ps_vars, day_input)
     add_reserve_constraints!(sp_model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         demand_scale=1.0)

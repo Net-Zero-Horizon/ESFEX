@@ -1581,6 +1581,26 @@ function create_day_ps_vars!(
         end
     end
 
+    # Reservoir hydro variables for the representative day. Only created when at
+    # least one generator has a reservoir, so all-thermal/RE systems are not
+    # bloated. add_reservoir_constraints! enforces the water balance + cyclic
+    # level so hydro is energy-limited in the master (not treated as firm MW).
+    has_any_reservoir = any(any(g.reservoir_capacity .> 0) for g in input.generators)
+    reservoir_level = nothing
+    reservoir_spillage = nothing
+    reservoir_pump = nothing
+    if has_any_reservoir
+        reservoir_level = @variable(model,
+            [g=1:n_gen, b=buses_of_gen[g], t=1:(hours+1)],
+            lower_bound = 0, base_name = "$(prefix)_res_level")
+        reservoir_spillage = @variable(model,
+            [g=1:n_gen, b=buses_of_gen[g], t=1:hours],
+            lower_bound = 0, base_name = "$(prefix)_res_spill")
+        reservoir_pump = @variable(model,
+            [g=1:n_gen, b=buses_of_gen[g], t=1:hours],
+            lower_bound = 0, base_name = "$(prefix)_res_pump")
+    end
+
     return PowerSystemVariables(
         gen_output, gen_status, nothing, nothing,  # no startup/shutdown
         curtailment, fre_penetration_loss,
@@ -1593,7 +1613,10 @@ function create_day_ps_vars!(
         loss_of_inertia = loss_of_inertia_var,
         loss_of_load_sectoral = loss_of_load_sectoral,
         gen_seg_output = gen_seg_output,
-        bat_seg_discharge = bat_seg_discharge
+        bat_seg_discharge = bat_seg_discharge,
+        reservoir_level = reservoir_level,
+        reservoir_spillage = reservoir_spillage,
+        reservoir_pump = reservoir_pump
     )
 end
 
@@ -1905,6 +1928,10 @@ function add_day_operational_constraints!(
         capacity_override_energy=total_cap_bat_energy,
         initial_soc_overrides=initial_soc_overrides,
         final_soc_targets=final_soc_targets)
+    # Reservoir water balance / cyclic level — gives hydro an energy budget in
+    # the master (previously omitted, so hydro was over-credited as firm MW).
+    # No-op when the day has no reservoir variables.
+    add_reservoir_constraints!(model, ps_vars, day_input)
     add_reserve_constraints!(model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         demand_scale=1.0)  # demand already scaled in demand_slice

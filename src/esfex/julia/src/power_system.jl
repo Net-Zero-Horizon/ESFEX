@@ -2455,7 +2455,11 @@ function add_curtailment_constraints!(model, vars::PowerSystemVariables, input;
             for b in node_buses[ni]
                 for g in vars.gens_at_bus[b]
                     gen = input.generators[g]
-                    if gen.type == "Renewable"
+                    # Reservoir hydro is dispatchable (energy-limited by the
+                    # water balance), not a must-take variable renewable, so it
+                    # is excluded from availability-based curtailment accounting
+                    # — consistent with add_generator_constraints!.
+                    if gen.type == "Renewable" && gen.reservoir_capacity[b] <= 0
                         avail = gen.availability[t, b]
                         if capacity_override !== nothing && haskey(capacity_override, (g, b))
                             add_to_expression!(available_renewable,

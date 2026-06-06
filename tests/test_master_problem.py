@@ -409,6 +409,87 @@ class TestMasterProblemSolve:
         assert result.objective >= 0
 
     @pytest.mark.julia
+    def test_master_reservoir_energy_budget(self, julia_setup, simple_network, simple_batteries, simple_demand):
+        """The master enforces the reservoir water budget (hydro is energy-limited).
+
+        Differential test: same system, scarce vs. abundant reservoir inflow. The
+        water balance is now modelled in the master, so scarce inflow forces the
+        expensive thermal backup -> strictly higher objective. Without the balance
+        (the previous behaviour, hydro = firm MW) the two would be identical.
+        """
+        jl, ESFEX = julia_setup
+        from esfex.bridge.converters import py_to_julia_matrix, py_to_julia_vector
+
+        hours = simple_demand.shape[0]
+        jl_years = jl.seval("Int64[2025]")
+        z2 = lambda: py_to_julia_vector([0.0, 0.0])
+        o2 = lambda: py_to_julia_vector([1.0, 1.0])
+        avail2 = py_to_julia_matrix(np.ones((hours, 2)))
+
+        def make_hydro(inflow_mw):
+            inflow = np.zeros((hours, 2))
+            inflow[:, 0] = inflow_mw  # inflow only at bus 1
+            return ESFEX.GeneratorConfig(
+                "Hydro", "Renewable", "Hydro",
+                py_to_julia_vector([80.0, 0.0]),     # rated_power (turbine), bus 1
+                z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
+                py_to_julia_vector([0.001, 0.001]),  # fuel_cost (~0, cheap)
+                z2(), z2(), z2(), z2(), z2(), avail2, True,
+                py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
+                50.0, "AC",
+                py_to_julia_vector([400.0, 0.0]),    # reservoir_capacity (MWh) bus 1
+                py_to_julia_vector([0.5, 0.0]),      # initial level fraction
+                z2(), o2(),                          # min / max level fraction
+                py_to_julia_matrix(inflow),          # inflow
+                o2(), z2(), z2(), o2(),              # turbine_eff, evap, pump_cap, pump_eff
+                True,                                # spillage_allowed (avoid infeasibility)
+                z2(), z2(), o2(),                    # res invest cost/max, risk
+            )
+
+        gas = ESFEX.GeneratorConfig(
+            "Gas", "Non-renewable", "Gas",
+            py_to_julia_vector([200.0, 200.0]),  # rated_power
+            z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
+            py_to_julia_vector([200.0, 200.0]),  # fuel_cost (expensive backup)
+            z2(), z2(), py_to_julia_vector([5.0, 5.0]), z2(), z2(), avail2, True,
+            py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
+            50.0, "AC",
+            z2(), z2(), z2(), o2(), py_to_julia_matrix(np.zeros((hours, 2))),
+            o2(), z2(), z2(), o2(), False, z2(), z2(), o2(),
+        )
+
+        def solve_with_inflow(inflow_mw):
+            jl_gens = jl.seval("GeneratorConfig[]")
+            jl.seval("push!")(jl_gens, make_hydro(inflow_mw))
+            jl.seval("push!")(jl_gens, gas)
+            jl_input = ESFEX.MasterProblemInput(
+                years=jl_years, base_year=2025, network=simple_network,
+                generators=jl_gens, batteries=simple_batteries,
+                base_demand=py_to_julia_matrix(simple_demand),
+                representative_days_per_year=2, min_day_separation=1,
+                target_re_penetration=0.0, initial_re_penetration=0.0,
+                slack_penalty=1e9, verbose=False,
+            )
+            model, mvars, _ = ESFEX.create_master_problem(
+                jl_input, use_representative_days=True)
+            jl.seval("using JuMP")
+            jl.seval("global _hm")
+            jl._hm = model
+            jl.seval("optimize!(_hm)")
+            assert "OPTIMAL" in str(jl.seval("termination_status(_hm)"))
+            return float(ESFEX.extract_master_solution(model, mvars, jl_input).objective)
+
+        obj_scarce = solve_with_inflow(1.0)     # almost no water -> costly gas
+        obj_plenty = solve_with_inflow(60.0)    # abundant water -> hydro covers load
+        logger.info(
+            "reservoir budget: obj(scarce inflow)=%.1f vs obj(plenty)=%.1f",
+            obj_scarce, obj_plenty,
+        )
+        # Water budget binds: scarce inflow is strictly more expensive. If the
+        # master ignored the reservoir balance, the two would be equal.
+        assert obj_scarce > obj_plenty * 1.05
+
+    @pytest.mark.julia
     def test_benders_decomposition_solves(self, julia_setup, simple_network, simple_generators, simple_batteries, simple_demand):
         """Benders decomposition runs end to end and returns a valid solution.
 
