@@ -2333,6 +2333,13 @@ mutable struct MasterProblemVariables
     # period_boundary = 0..K where 0 = year start, K = after last period
     inter_period_soc::Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}
 
+    # Inter-period reservoir-level linking (TSAM seasonal hydro): year_idx =>
+    # (gen_idx, node_idx, period_boundary) => VariableRef. Same chronological
+    # chain as inter_period_soc, but tracks reservoir energy (MWh-eq) so water
+    # can be carried across representative periods (e.g. filled in spring and
+    # drawn down in summer) instead of being cyclic within each period.
+    inter_period_reservoir::Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}
+
     # Reservoir capacity investment: year => gen_idx => Vector{VariableRef} (per node, MWh)
     reservoir_investment::Dict{Int, Dict{Int, Vector{VariableRef}}}
 

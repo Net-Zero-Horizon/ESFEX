@@ -466,6 +466,7 @@ function build_master_variables!(
         fuel_storage_investment,
         fuel_transport_investment,
         Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}(),  # inter_period_soc (TSAM)
+        Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}(),  # inter_period_reservoir (TSAM seasonal hydro)
         reservoir_investment,
         years_per_inv_period
     )
@@ -1641,6 +1642,9 @@ function add_day_operational_constraints!(
     # TSAM inter-period SOC linking overrides (optional)
     initial_soc_overrides::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
     final_soc_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
+    # TSAM inter-period reservoir-level linking overrides (optional, seasonal hydro)
+    initial_reservoir_overrides::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
+    final_reservoir_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
     # Inter-system DC-OPF: external flow contributions at border buses
     # (bus, hour) => AffExpr to add to flow_sum in KCL
     external_injections::Union{Nothing, Dict{Tuple{Int,Int}, AffExpr}} = nothing
@@ -1931,8 +1935,11 @@ function add_day_operational_constraints!(
         final_soc_targets=final_soc_targets)
     # Reservoir water balance / cyclic level — gives hydro an energy budget in
     # the master (previously omitted, so hydro was over-credited as firm MW).
-    # No-op when the day has no reservoir variables.
-    add_reservoir_constraints!(model, ps_vars, day_input)
+    # When TSAM seasonal linking is active the cyclic closure is replaced by a
+    # chronological chain across periods (overrides below). No-op with no reservoir.
+    add_reservoir_constraints!(model, ps_vars, day_input;
+        initial_reservoir_overrides=initial_reservoir_overrides,
+        final_reservoir_targets=final_reservoir_targets)
     add_reserve_constraints!(model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         demand_scale=1.0)  # demand already scaled in demand_slice
@@ -2548,6 +2555,9 @@ function add_tsam_periods_validation!(
     n_buses = input.network.num_buses
     b2n = input.network.bus_to_node
     timesteps_per_day = 24 ÷ input.temporal_resolution_hours
+    # Seasonal hydro: any reservoir unit makes the inter-period reservoir chain
+    # relevant (gated on the same tsam_inter_period_linking flag as batteries).
+    has_reservoir = any(any(g.reservoir_capacity .> 0) for g in input.generators)
 
     for y_idx in 1:num_years
         period_starts = input.tsam_period_start_hours[y_idx]
@@ -2601,6 +2611,38 @@ function add_tsam_periods_validation!(
             end
         end
 
+        # --- Create inter-period reservoir-level boundary variables ---
+        # One chronological chain of energy levels per reservoir gen-node, so
+        # water can be moved across seasons. Bounded by the existing reservoir
+        # capacity (investment expansion is not reflected at the boundary, the
+        # same simplification used for batteries above).
+        if input.tsam_inter_period_linking && has_reservoir
+            vars.inter_period_reservoir[y_idx] = Dict{Tuple{Int,Int,Int}, VariableRef}()
+
+            for g in 1:length(input.generators)
+                gen = input.generators[g]
+                for n in 1:n_buses
+                    res_cap = gen.reservoir_capacity[n]
+                    res_cap > 0 || continue
+                    lo = gen.reservoir_min_level[n] * res_cap
+                    hi = gen.reservoir_max_level[n] * res_cap
+
+                    for p in 0:K
+                        v = @variable(model,
+                            lower_bound = lo, upper_bound = hi,
+                            base_name = "reslvl_bnd_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                        vars.inter_period_reservoir[y_idx][(g, n, p)] = v
+                    end
+
+                    # Year-cyclic: reservoir level at year end == year start
+                    @constraint(model,
+                        vars.inter_period_reservoir[y_idx][(g, n, K)] ==
+                        vars.inter_period_reservoir[y_idx][(g, n, 0)],
+                        base_name = "reslvl_year_cyclic_y$(y_idx)_g$(g)_n$(n)")
+                end
+            end
+        end
+
         # --- Process each period in chronological order ---
         for (chrono_idx, period_idx) in enumerate(chrono_order)
             start_hour = period_starts[period_idx]
@@ -2616,31 +2658,48 @@ function add_tsam_periods_validation!(
             # Create PowerSystemVariables for this period
             ps_vars = create_day_ps_vars!(model, input, y_idx, chrono_idx, hours)
 
-            # Build SOC override dicts if inter-period linking is active
+            # Build inter-period override dicts when seasonal linking is active.
+            # Batteries chain SOC, reservoirs chain water level; both attach the
+            # period start to the previous boundary and its end to the next.
             tech_output = nothing
             tech_curt_cost = AffExpr(0.0)
+
+            soc_initial = nothing
+            soc_final = nothing
             if input.tsam_inter_period_linking && n_bat > 0
-                initial_overrides = Dict{Tuple{Int,Int}, Any}()
-                final_targets = Dict{Tuple{Int,Int}, Any}()
+                soc_initial = Dict{Tuple{Int,Int}, Any}()
+                soc_final = Dict{Tuple{Int,Int}, Any}()
                 for b in 1:n_bat
                     for n in 1:n_buses
-                        initial_overrides[(b, n)] = vars.inter_period_soc[y_idx][(b, n, chrono_idx - 1)]
-                        final_targets[(b, n)] = vars.inter_period_soc[y_idx][(b, n, chrono_idx)]
+                        soc_initial[(b, n)] = vars.inter_period_soc[y_idx][(b, n, chrono_idx - 1)]
+                        soc_final[(b, n)] = vars.inter_period_soc[y_idx][(b, n, chrono_idx)]
                     end
                 end
-
-                tech_output, tech_curt_cost = add_day_operational_constraints!(
-                    model, ps_vars, vars, input, y_idx, chrono_idx,
-                    day_demand, start_hour;
-                    initial_soc_overrides=initial_overrides,
-                    final_soc_targets=final_targets
-                )
-            else
-                tech_output, tech_curt_cost = add_day_operational_constraints!(
-                    model, ps_vars, vars, input, y_idx, chrono_idx,
-                    day_demand, start_hour
-                )
             end
+
+            res_initial = nothing
+            res_final = nothing
+            if input.tsam_inter_period_linking && has_reservoir
+                res_initial = Dict{Tuple{Int,Int}, Any}()
+                res_final = Dict{Tuple{Int,Int}, Any}()
+                for g in 1:length(input.generators)
+                    gen = input.generators[g]
+                    for n in 1:n_buses
+                        gen.reservoir_capacity[n] > 0 || continue
+                        res_initial[(g, n)] = vars.inter_period_reservoir[y_idx][(g, n, chrono_idx - 1)]
+                        res_final[(g, n)] = vars.inter_period_reservoir[y_idx][(g, n, chrono_idx)]
+                    end
+                end
+            end
+
+            tech_output, tech_curt_cost = add_day_operational_constraints!(
+                model, ps_vars, vars, input, y_idx, chrono_idx,
+                day_demand, start_hour;
+                initial_soc_overrides=soc_initial,
+                final_soc_targets=soc_final,
+                initial_reservoir_overrides=res_initial,
+                final_reservoir_targets=res_final
+            )
 
             # Calculate weighted operational cost (with tech curtailment penalty)
             day_cost = calculate_day_operational_cost_tsam(

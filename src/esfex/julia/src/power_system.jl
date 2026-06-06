@@ -1975,7 +1975,14 @@ For generators with `reservoir_capacity[n] > 0`, tracks water level (MWh-equival
 
 Cyclic constraint ensures end-of-horizon level matches initial level (within tolerance).
 """
-function add_reservoir_constraints!(model, vars::PowerSystemVariables, input)
+function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
+    # TSAM seasonal hydro linking: when present, the reservoir starts a period
+    # at the boundary level handed in (initial_reservoir_overrides[(g,b)]) and
+    # ends it exactly at the next boundary (final_reservoir_targets[(g,b)]),
+    # forming a chronological chain across representative periods instead of
+    # being cyclic within the period.
+    initial_reservoir_overrides::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
+    final_reservoir_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing)
     if vars.reservoir_level === nothing
         return  # No reservoir generators
     end
@@ -2034,13 +2041,21 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input)
                 res_cap
             end
 
-            # Initial level — override with rolling-horizon seam value
-            # when present; otherwise fall back to configured initial fraction.
+            # Initial level. Precedence: TSAM seasonal boundary variable >
+            # rolling-horizon seam value > configured initial fraction.
+            seasonal_init = initial_reservoir_overrides === nothing ? nothing :
+                get(initial_reservoir_overrides, (g, b), nothing)
             prev_level = get(get(input.reservoir_level_prev, g, Dict{Int,Float64}()), b, NaN)
             initial_level_energy = isnan(prev_level) ? initial_level_frac * res_cap : prev_level
-            @constraint(model,
-                vars.reservoir_level[g, b, 1] == initial_level_energy,
-                base_name = "res_initial_g$(g)_b$(b)")
+            if seasonal_init !== nothing
+                @constraint(model,
+                    vars.reservoir_level[g, b, 1] == seasonal_init,
+                    base_name = "res_initial_g$(g)_b$(b)")
+            else
+                @constraint(model,
+                    vars.reservoir_level[g, b, 1] == initial_level_energy,
+                    base_name = "res_initial_g$(g)_b$(b)")
+            end
 
             for t in 1:hours
                 # Level bounds
@@ -2096,14 +2111,24 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input)
                 end
             end
 
-            # Cyclic constraint: end level ≈ initial level (within soc_end_tolerance)
-            soc_tol = input.soc_end_tolerance
-            @constraint(model,
-                vars.reservoir_level[g, b, hours+1] >= initial_level_energy * (1.0 - soc_tol),
-                base_name = "res_end_lower_g$(g)_b$(b)")
-            @constraint(model,
-                vars.reservoir_level[g, b, hours+1] <= initial_level_energy * (1.0 + soc_tol),
-                base_name = "res_end_upper_g$(g)_b$(b)")
+            # End level. With TSAM seasonal linking the period end is pinned to
+            # the next chronological boundary variable (water carries over);
+            # otherwise the reservoir is cyclic within the period (end ≈ start).
+            seasonal_final = final_reservoir_targets === nothing ? nothing :
+                get(final_reservoir_targets, (g, b), nothing)
+            if seasonal_final !== nothing
+                @constraint(model,
+                    vars.reservoir_level[g, b, hours+1] == seasonal_final,
+                    base_name = "res_end_seasonal_g$(g)_b$(b)")
+            else
+                soc_tol = input.soc_end_tolerance
+                @constraint(model,
+                    vars.reservoir_level[g, b, hours+1] >= initial_level_energy * (1.0 - soc_tol),
+                    base_name = "res_end_lower_g$(g)_b$(b)")
+                @constraint(model,
+                    vars.reservoir_level[g, b, hours+1] <= initial_level_energy * (1.0 + soc_tol),
+                    base_name = "res_end_upper_g$(g)_b$(b)")
+            end
         end
     end
 end

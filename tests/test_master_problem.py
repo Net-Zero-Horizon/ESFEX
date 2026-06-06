@@ -490,6 +490,101 @@ class TestMasterProblemSolve:
         assert obj_scarce > obj_plenty * 1.05
 
     @pytest.mark.julia
+    def test_master_reservoir_seasonal_linking(self, julia_setup, simple_network, simple_batteries):
+        """TSAM inter-period linking lets a reservoir store water across seasons.
+
+        Differential test over two representative periods — a wet, low-demand
+        period followed by a dry, high-demand one. With seasonal linking the
+        reservoir banks the surplus inflow from period 1 and releases it in
+        period 2, displacing expensive gas. Without linking each period is
+        cyclic, so the dry period gets no hydro and must run gas for the whole
+        load -> strictly more expensive.
+        """
+        jl, ESFEX = julia_setup
+        from esfex.bridge.converters import py_to_julia_matrix, py_to_julia_vector
+
+        hours = 48
+        jl_years = jl.seval("Int64[2025]")
+        z2 = lambda: py_to_julia_vector([0.0, 0.0])
+        o2 = lambda: py_to_julia_vector([1.0, 1.0])
+        avail2 = py_to_julia_matrix(np.ones((hours, 2)))
+
+        # Seasonal demand at bus 1: low in period 1 (h 1-24), high in period 2.
+        demand = np.zeros((hours, 2))
+        demand[:24, 0] = 20.0
+        demand[24:, 0] = 90.0
+        # Inflow at bus 1: abundant in period 1, none in period 2.
+        inflow = np.zeros((hours, 2))
+        inflow[:24, 0] = 50.0
+
+        # 39-arg form (reservoir_min_release defaults to 0 via the compat ctor).
+        hydro = ESFEX.GeneratorConfig(
+            "Hydro", "Renewable", "Hydro",
+            py_to_julia_vector([100.0, 0.0]),    # rated turbine, bus 1
+            z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
+            py_to_julia_vector([0.001, 0.001]),  # ~free water
+            z2(), z2(), z2(), z2(), z2(), avail2, True,
+            py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
+            50.0, "AC",
+            py_to_julia_vector([2000.0, 0.0]),   # reservoir_capacity (MWh)
+            py_to_julia_vector([0.5, 0.0]),      # initial level fraction
+            z2(), o2(),                          # min / max level fraction
+            py_to_julia_matrix(inflow),
+            o2(), z2(), z2(), o2(),              # turbine_eff, evap, pump_cap, pump_eff
+            True,                                # spillage_allowed
+            z2(), z2(), o2(),                    # res invest cost/max, risk
+        )
+
+        gas = ESFEX.GeneratorConfig(
+            "Gas", "Non-renewable", "Gas",
+            py_to_julia_vector([200.0, 200.0]),
+            z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
+            py_to_julia_vector([200.0, 200.0]),  # expensive backup
+            z2(), z2(), py_to_julia_vector([5.0, 5.0]), z2(), z2(), avail2, True,
+            py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
+            50.0, "AC",
+            z2(), z2(), z2(), o2(), py_to_julia_matrix(np.zeros((hours, 2))),
+            o2(), z2(), z2(), o2(), False, z2(), z2(), o2(),
+        )
+
+        def solve(linking):
+            jl_gens = jl.seval("GeneratorConfig[]")
+            jl.seval("push!")(jl_gens, hydro)
+            jl.seval("push!")(jl_gens, gas)
+            jl_input = ESFEX.MasterProblemInput(
+                years=jl_years, base_year=2025, network=simple_network,
+                generators=jl_gens, batteries=simple_batteries,
+                base_demand=py_to_julia_matrix(demand),
+                representative_days_per_year=2, min_day_separation=1,
+                target_re_penetration=0.0, initial_re_penetration=0.0,
+                slack_penalty=1e9, verbose=False,
+                use_tsam=True,
+                tsam_period_start_hours=jl.seval("[[1, 25]]"),
+                tsam_period_weights=jl.seval("[[1.0, 1.0]]"),
+                tsam_chronological_order=jl.seval("[[1, 2]]"),
+                tsam_inter_period_linking=linking,
+            )
+            model, mvars, _ = ESFEX.create_master_problem(
+                jl_input, use_representative_days=True)
+            jl.seval("using JuMP")
+            jl.seval("global _sl")
+            jl._sl = model
+            jl.seval("optimize!(_sl)")
+            assert "OPTIMAL" in str(jl.seval("termination_status(_sl)"))
+            return float(ESFEX.extract_master_solution(model, mvars, jl_input).objective)
+
+        obj_link = solve(True)
+        obj_nolink = solve(False)
+        logger.info(
+            "seasonal hydro: obj(linking)=%.1f vs obj(no linking)=%.1f",
+            obj_link, obj_nolink,
+        )
+        # Seasonal storage is strictly cheaper: banked spring water cuts the
+        # summer gas bill. Without inter-period linking the two would differ
+        # only if the chain genuinely moves water across periods.
+        assert obj_nolink > obj_link * 1.05
+
+    @pytest.mark.julia
     def test_benders_decomposition_solves(self, julia_setup, simple_network, simple_generators, simple_batteries, simple_demand):
         """Benders decomposition runs end to end and returns a valid solution.
 
