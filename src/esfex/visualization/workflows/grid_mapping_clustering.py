@@ -22,6 +22,8 @@ from typing import Any
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
+from esfex.visualization.workflows.place_naming import name_positions_by_region
+
 logger = logging.getLogger(__name__)
 
 
@@ -272,6 +274,27 @@ class NodeClusteringWorker(QThread):
     def cancel(self):
         self._cancelled = True
 
+    def _apply_region_names(self, result: ClusterResult) -> ClusterResult:
+        """Replace generic node names with OSM region names (best-effort)."""
+        if not result.node_positions or self._cancelled:
+            return result
+        self.progress.emit(95, "Naming nodes from OpenStreetMap...")
+        named = name_positions_by_region(
+            result.node_positions,
+            cancelled=lambda: self._cancelled,
+            progress=lambda done, total: self.progress.emit(
+                95 + int(5 * done / max(total, 1)),
+                f"Naming nodes ({done}/{total})...",
+            ),
+        )
+        return ClusterResult(named, result.n_clusters, result.criterion_used)
+
+    def _finish(self, result: ClusterResult):
+        """Apply region names and emit, unless cancelled."""
+        if self._cancelled:
+            return
+        self.finished.emit(self._apply_region_names(result))
+
     def run(self):
         try:
             dispatch = {
@@ -291,8 +314,7 @@ class NodeClusteringWorker(QThread):
             # Single criterion — run directly
             if len(valid) == 1:
                 result = dispatch[valid[0]]()
-                if not self._cancelled:
-                    self.finished.emit(result)
+                self._finish(result)
                 return
 
             # Multiple criteria — run each, then consensus merge
@@ -323,7 +345,7 @@ class NodeClusteringWorker(QThread):
             # If only one criterion produced results, use it directly
             if len(sub_results) == 1:
                 r = sub_results[0]
-                self.finished.emit(ClusterResult(
+                self._finish(ClusterResult(
                     r.node_positions,
                     r.n_clusters,
                     "+".join(valid),
@@ -333,8 +355,7 @@ class NodeClusteringWorker(QThread):
             # Consensus merge: pool all candidate positions, re-cluster
             self.progress.emit(75, "Merging criteria (consensus clustering)...")
             merged = self._consensus_merge(sub_results, valid)
-            if not self._cancelled:
-                self.finished.emit(merged)
+            self._finish(merged)
 
         except Exception as exc:
             logger.exception("NodeClusteringWorker error")

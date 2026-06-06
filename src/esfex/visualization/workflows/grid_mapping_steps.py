@@ -1514,6 +1514,11 @@ class GridMappingBuildStep(QWidget):
         self._cluster_progress.setValue(100)
 
         with self._model.suspend_checkpoints():
+            # The Grid Builder defines the full node set, so drop any
+            # placeholder node(s) created with the system (e.g. the default
+            # "Node 0") — otherwise they duplicate the computed nodes.
+            while self._model.state.nodes:
+                self._model.remove_node(len(self._model.state.nodes) - 1)
             for lat, lng, name in result.node_positions:
                 idx = self._model.add_node(name)
                 self._model.update_node(
