@@ -2018,6 +2018,8 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input)
             evap_rate = gen.reservoir_evaporation_rate[b]
             pump_cap = gen.reservoir_pump_capacity[b]
             η_pump = gen.reservoir_pump_efficiency[b]
+            min_release_b = b <= length(gen.reservoir_min_release) ?
+                gen.reservoir_min_release[b] : 0.0
 
             # Total reservoir capacity (existing + investment)
             total_res_cap = if is_dev && gen.reservoir_invest_max[b] > 0
@@ -2082,6 +2084,16 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input)
                     pump_term -
                     spillage_term,
                     base_name = "res_dynamics_g$(g)_b$(b)_t$(t)")
+
+                # Minimum environmental / ecological release: the water leaving
+                # the reservoir (turbined + spilled) must meet the mandatory
+                # downstream flow. Met by generating and/or spilling.
+                if min_release_b > 0
+                    @constraint(model,
+                        vars.gen_output[g, b, t] / η_turbine + spillage_term >=
+                        min_release_b,
+                        base_name = "res_min_release_g$(g)_b$(b)_t$(t)")
+                end
             end
 
             # Cyclic constraint: end level ≈ initial level (within soc_end_tolerance)

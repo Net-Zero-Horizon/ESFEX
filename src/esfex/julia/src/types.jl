@@ -387,6 +387,39 @@ struct GeneratorConfig
     reservoir_invest_cost::Vector{Float64}
     reservoir_invest_max::Vector{Float64}
     risk_coefficient::Vector{Float64}     # Geographic risk derating per node (0-1)
+    # Mandatory minimum release (MW-eq) per node — ecological / minimum
+    # environmental flow. Default 0 is neutral. (Minimum stable generation is
+    # already handled by the existing `min_power` field.)
+    reservoir_min_release::Vector{Float64}
+end
+
+# Backward-compatible constructor: existing 39-argument call sites keep working;
+# the reservoir_min_release field defaults to neutral zeros sized to the per-node
+# vectors. New code passes all 40 arguments to set it.
+function GeneratorConfig(
+    name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
+    ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
+    fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+    reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
+    frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
+    reservoir_min_level, reservoir_max_level, reservoir_inflow,
+    reservoir_turbine_efficiency, reservoir_evaporation_rate,
+    reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
+    reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
+)
+    n = length(rated_power)
+    return GeneratorConfig(
+        name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
+        ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
+        fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+        reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
+        frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
+        reservoir_min_level, reservoir_max_level, reservoir_inflow,
+        reservoir_turbine_efficiency, reservoir_evaporation_rate,
+        reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
+        reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
+        zeros(Float64, n),  # reservoir_min_release
+    )
 end
 
 """

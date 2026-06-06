@@ -1878,7 +1878,8 @@ function add_day_operational_constraints!(
                 gen.reservoir_evaporation_rate, gen.reservoir_pump_capacity,
                 gen.reservoir_pump_efficiency, gen.reservoir_spillage_allowed,
                 gen.reservoir_invest_cost, gen.reservoir_invest_max,
-                gen.risk_coefficient
+                gen.risk_coefficient,
+                gen.reservoir_min_release
             )
         else
             gen
@@ -3482,7 +3483,8 @@ function apply_scenario_multipliers(
             gen.reservoir_evaporation_rate, gen.reservoir_pump_capacity,
             gen.reservoir_pump_efficiency, gen.reservoir_spillage_allowed,
             gen.reservoir_invest_cost, gen.reservoir_invest_max,
-            gen.risk_coefficient
+            gen.risk_coefficient,
+            gen.reservoir_min_release
         ))
     end
 
