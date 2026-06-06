@@ -3973,8 +3973,11 @@ class MainWindow(QMainWindow):
         self.element_tree.remove_node(index)
 
     def _on_model_node_updated(self, index: int):
-        # Nodes are logical only (no map markers); tree label is static
-        pass
+        # Nodes have no map marker, but the element tree label must follow a
+        # rename done in the attributes panel.
+        node = self.model.get_node(index)
+        if node is not None:
+            self.element_tree.update_node(index, node.name)
 
     def _on_model_gen_updated(self, instance_id: str):
         inst = self.model.state.generators.get(instance_id)

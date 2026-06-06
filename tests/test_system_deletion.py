@@ -66,3 +66,22 @@ def test_remove_renamed_system_by_current_id(tree):
     tree.remove_system(eid)
     assert "Region1" not in tree._system_items
     assert "Keep" in tree._system_items
+
+
+def _node_label(tree, node_id):
+    root = tree._get_root("nodes")
+    for i in range(root.childCount()):
+        child = root.child(i)
+        if child.data(0, 100) == ("node", str(node_id)):
+            return child.text(0)
+    return None
+
+
+def test_update_node_changes_tree_label(tree):
+    """Renaming a node in the attributes panel must refresh its tree label (#9)."""
+    tree.add_system("Sys")
+    tree.set_current_system("Sys")
+    tree.add_node(0, "Node 0")
+    assert _node_label(tree, 0) == "Node 0"
+    tree.update_node(0, "Bus Capital")
+    assert _node_label(tree, 0) == "Bus Capital"

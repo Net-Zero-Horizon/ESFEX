@@ -365,6 +365,12 @@ class ElementTreePanel(QWidget):
         self._remove_child(root, "node", str(node_id))
         self._update_count(root)
 
+    def update_node(self, node_id: int, label: str, info: str = ""):
+        root = self._get_root("nodes")
+        if root is None:
+            return
+        self._update_child(root, "node", str(node_id), label, info)
+
     # --- Buses ---
 
     def add_bus(self, bus_id: str, name: str, info: str = ""):
