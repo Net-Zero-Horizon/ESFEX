@@ -2309,6 +2309,10 @@ class MainWindow(QMainWindow):
         self.element_tree.remove_system(system_name)
         self._update_map_actions_state()
         self._sync_systems_to_form()
+        # The map is a multi-system view (every system in _all_states is drawn),
+        # so re-render it from the now-updated set; otherwise the deleted
+        # system's markers linger until the next full reload.
+        self.model.stateLoaded.emit()
 
     # ------------------------------------------------------------------
     # Undo / Redo
