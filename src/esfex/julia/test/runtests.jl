@@ -428,6 +428,68 @@ import Ipopt
             @test size(res.gen_output) == (1, 1, H)
         end
 
+        @testset "reservoir minimum release binds" begin
+            # A single reservoir-hydro unit on a flat, low demand. Without a
+            # minimum release it simply turbines to meet load (no spill). A
+            # min release above the natural turbined flow must FORCE extra
+            # water out — turbined power is capped by demand, so the surplus
+            # is spilled. The constraint is gen_output/η + spill >= min_release.
+            H = 4
+            # 40-field GeneratorConfig: a dispatchable reservoir unit. Plenty of
+            # stored water, no inflow (pure draw-down), spillage allowed.
+            mkhydro(minrel) = GeneratorConfig(
+                "Hydro", "Renewable", "Water", [100.0], [0.0],
+                [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
+                [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
+                [500.0], [200.0], [0.0], [500.0], zeros(H, 1),
+                [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [0.0],
+                [minrel],
+            )
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            demand = reshape(fill(10.0, H), H, 1)
+            mkinput(g) = PowerSystemInput(
+                name = "hyd", year = 2025, network = net, generators = [g],
+                batteries = BatteryConfig[], demand = demand,
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+
+            # Baseline: no minimum release.
+            m0, v0 = create_power_system(mkinput(mkhydro(0.0)))
+            optimize!(m0)
+            @test string(termination_status(m0)) == "OPTIMAL"
+            r0 = extract_solution(m0, v0, mkinput(mkhydro(0.0)))
+            @test r0.reservoir_spillage !== nothing
+            spill0 = sum(r0.reservoir_spillage)
+            @test spill0 ≈ 0.0 atol = 1e-6          # nothing forced out
+
+            # Floor of 20 MW-eq > the 10 MW it would naturally turbine.
+            minrel = 20.0
+            m1, v1 = create_power_system(mkinput(mkhydro(minrel)))
+            optimize!(m1)
+            @test string(termination_status(m1)) == "OPTIMAL"
+            r1 = extract_solution(m1, v1, mkinput(mkhydro(minrel)))
+            # Generation is unchanged — the unit still serves only the load
+            # (plus network losses) each hour; the floor forces extra water out
+            # as spill, it does not raise output.
+            for t in 1:H
+                @test isapprox(r1.gen_output[1, 1, t], r0.gen_output[1, 1, t];
+                               atol = 1e-6)
+            end
+            # The constraint binds every hour: gen/η_turbine + spill >= min_release.
+            for t in 1:H
+                @test r1.gen_output[1, 1, t] / 1.0 +
+                      r1.reservoir_spillage[1, 1, t] >= minrel - 1e-6
+            end
+            # And it genuinely changed the solution: spillage appears only when
+            # the floor is imposed.
+            @test sum(r1.reservoir_spillage) > spill0 + 1.0
+        end
+
         @testset "two-bus transmission + renewable + battery" begin
             H = 2; N = 2
             gas  = mkgen("GasCC", "Non-renewable", "Gas", [100.0, 0.0],
