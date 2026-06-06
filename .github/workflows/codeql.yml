@@ -1,0 +1,38 @@
+name: CodeQL
+
+# Static security + quality analysis of the Python sources. Runs on every push
+# to main (so it is applied before each release, which is cut from main), on
+# pull requests, and weekly. Results appear under Security → Code scanning.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"  # Mondays, 03:27 UTC
+
+jobs:
+  analyze:
+    name: Analyze (Python)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # Run the security rules plus the broader quality rules.
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

@@ -38,6 +38,10 @@ A contribution is acceptable when it meets **all** of the following.
   ```
 - New or changed code should carry **type hints**; they are checked with
   **mypy** (`[tool.mypy]` in `pyproject.toml`).
+- Pull requests and pushes to `main` are scanned by **CodeQL**
+  (security + quality static analysis); please review and address any new
+  [Code scanning](https://github.com/Net-Zero-Horizon/ESFEX/security/code-scanning)
+  alerts your change introduces.
 - Match the style, naming and structure of the surrounding code.
 
 ### Tests
