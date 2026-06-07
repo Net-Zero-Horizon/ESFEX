@@ -642,6 +642,7 @@
     "storage_invest_cost": "Costo Inv. Almac. ($/unid.):",
     "transport_cost": "Costo Transporte ($/unid./km):",
     "transport_losses": "Pérdidas Transporte (frac):",
+    "transport_transit_days_per_100km": "Tiempo de Tránsito (días/100km):",
     "max_storage_inv": "Inv. Máx. Almac./Nodo (unid.):",
     "max_transport_inv": "Inv. Máx. Transp./Arco (unid.):"
   },

@@ -845,6 +845,10 @@ class PrimaryEnergySourceConfig(BaseModel):
     storage_investment_cost: float = Field(description="$/unit storage capacity")
     transport_cost: float = Field(description="$/unit/km transport cost")
     transport_losses: float = Field(description="Loss fraction per 100km")
+    transport_transit_days_per_100km: float = Field(
+        default=0.0, ge=0,
+        description="Source->tank replenishment lead time, in days per 100 km "
+        "of route distance. 0 = instantaneous transport.")
     max_storage_investment_per_node: float
     max_transport_investment_per_arc: float
 

@@ -642,6 +642,7 @@
     "storage_invest_cost": "貯蔵投資コスト ($/単位):",
     "transport_cost": "輸送コスト ($/単位/km):",
     "transport_losses": "輸送損失 (frac):",
+    "transport_transit_days_per_100km": "輸送リードタイム (日/100km):",
     "max_storage_inv": "ノード当たり最大貯蔵投資 (単位):",
     "max_transport_inv": "アーク当たり最大輸送投資 (単位):"
   },

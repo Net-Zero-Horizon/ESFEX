@@ -83,6 +83,14 @@ class FuelSourceForm(QWidget):
         self._transport_losses.editingFinished.connect(self._on_changed)
         fl_sys.addRow(tr("fuel_source_form.transport_losses"), self._transport_losses)
 
+        self._transit_days = QDoubleSpinBox()
+        self._transit_days.setRange(0, 365)
+        self._transit_days.setDecimals(2)
+        self._transit_days.editingFinished.connect(self._on_changed)
+        fl_sys.addRow(
+            tr("fuel_source_form.transport_transit_days_per_100km"),
+            self._transit_days)
+
         self._max_storage_inv = QDoubleSpinBox()
         self._max_storage_inv.setRange(0, 1e9)
         self._max_storage_inv.setDecimals(2)
@@ -126,6 +134,7 @@ class FuelSourceForm(QWidget):
             ("storage_investment_cost", self._storage_invest_cost),
             ("transport_cost", self._transport_cost),
             ("transport_losses", self._transport_losses),
+            ("transport_transit_days_per_100km", self._transit_days),
             ("max_storage_investment_per_node", self._max_storage_inv),
             ("max_transport_investment_per_arc", self._max_transport_inv),
         ]
@@ -167,6 +176,8 @@ class FuelSourceForm(QWidget):
         self._storage_invest_cost.setValue(source.storage_investment_cost)
         self._transport_cost.setValue(source.transport_cost)
         self._transport_losses.setValue(source.transport_losses)
+        self._transit_days.setValue(
+            getattr(source, "transport_transit_days_per_100km", 0.0))
         self._max_storage_inv.setValue(source.max_storage_investment_per_node)
         self._max_transport_inv.setValue(source.max_transport_investment_per_arc)
 

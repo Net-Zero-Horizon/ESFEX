@@ -642,6 +642,7 @@
     "storage_invest_cost": "Storage Inv. Cost ($/unit):",
     "transport_cost": "Transport Cost ($/unit/km):",
     "transport_losses": "Transport Losses (frac):",
+    "transport_transit_days_per_100km": "Transit Lead Time (days/100km):",
     "max_storage_inv": "Max Storage Inv/Node (units):",
     "max_transport_inv": "Max Transport Inv/Arc (units):"
   },

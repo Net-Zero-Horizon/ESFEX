@@ -943,6 +943,8 @@ def _system_to_gui_state(sys: SystemConfig) -> GuiSystemState:
                 storage_investment_cost=src_cfg.storage_investment_cost,
                 transport_cost=src_cfg.transport_cost,
                 transport_losses=src_cfg.transport_losses,
+                transport_transit_days_per_100km=getattr(
+                    src_cfg, "transport_transit_days_per_100km", 0.0),
                 max_storage_investment_per_node=src_cfg.max_storage_investment_per_node,
                 max_transport_investment_per_arc=src_cfg.max_transport_investment_per_arc,
             )
@@ -3089,6 +3091,7 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "storage_investment_cost": src.storage_investment_cost,
                 "transport_cost": src.transport_cost,
                 "transport_losses": src.transport_losses,
+                "transport_transit_days_per_100km": src.transport_transit_days_per_100km,
                 "max_storage_investment_per_node": src.max_storage_investment_per_node,
                 "max_transport_investment_per_arc": src.max_transport_investment_per_arc,
             }

@@ -419,6 +419,74 @@ def test_primary_energy_solves():
     assert "OPTIMAL" in status
 
 
+@pytest.mark.julia
+def test_transport_transit_delay_causes_supply_stress():
+    """A source->tank transport lead time delays fuel arrival (#13, phase A).
+
+    Differential: two nodes over three primary periods. Node 2 starts with an
+    empty tank, has no local supply, and has fuel demand that can only be met by
+    transport from node 1. With no transit time the demand is met immediately;
+    with a transit delay the period-1 demand cannot be served (the shipment is
+    still in transit) so the penalised fuel shortfall raises the objective.
+    """
+    from esfex.bridge.julia_setup import get_esfex_module, get_julia
+    from esfex.bridge.converters import py_to_julia_matrix, py_to_julia_vector
+
+    jl = get_julia()
+    ESFEX = get_esfex_module()
+
+    def solve(transit_days_per_100km):
+        fuel = ESFEX.FuelConfig(
+            "Gas", 10.0, 0.0, 10.0, 0.0,
+            py_to_julia_vector([1000.0, 0.0]),   # supply only at node 1
+            py_to_julia_vector([100.0, 10.0]),   # storage capacity
+            py_to_julia_vector([0.5, 0.0]),      # node 2 tank starts empty
+            0.0,                                 # min_storage_level
+            py_to_julia_vector([0.0, 0.0]),      # import_cost
+            0.0,                                 # transport_cost
+            0.0,                                 # transport_losses (isolate the delay)
+            transit_days_per_100km,
+        )
+        jl._f = fuel
+        fuels = jl.seval("FuelConfig[_f]")
+        infra = ESFEX.FuelInfrastructureConfig(
+            1000.0, 10.0, 0.5, 50.0, 1.0, 1.0, 20.0, 30.0, -1.0)
+        jl._i = infra
+        infra_dict = jl.seval(
+            'Dict{String,FuelInfrastructureConfig}("Gas"=>_i)')
+        ne = ESFEX.NonElectricDemandConfig(
+            "Industrial", "Gas",
+            py_to_julia_vector([0.0, 36500.0]),  # demand only at node 2
+            0.0, py_to_julia_vector([1 / 12] * 12))
+        jl._n = ne
+        ne_demands = jl.seval("NonElectricDemandConfig[_n]")
+        distances = np.array([[0.0, 100.0], [100.0, 0.0]])
+        inp = ESFEX.PrimaryEnergyInput(
+            2025, 2025, 2, 72, fuels, infra_dict, ne_demands,
+            py_to_julia_matrix(distances),
+            jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
+            24, 72, 0.05, 1000.0, 1.0, "development",
+            jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
+            jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
+            jl.seval("nothing"))
+        m = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
+        jl._m = m
+        jl._in = inp
+        jl.seval("""
+        vars, temporal, prices = create_primary_energy_model(_m, _in)
+        ct = get_primary_energy_objective_terms(vars, _in, temporal, prices)
+        @objective(_m, Min, sum(values(ct)))
+        set_silent(_m); optimize!(_m)
+        """)
+        assert "OPTIMAL" in str(jl.seval("termination_status(_m)"))
+        return float(jl.seval("objective_value(_m)"))
+
+    obj_instant = solve(0.0)
+    obj_delayed = solve(1.0)  # 1 day / 100 km -> 1 primary period over a 100 km route
+    # The lead time strands the period-1 demand, adding penalised shortfall.
+    assert obj_delayed > obj_instant + 1.0
+
+
 # =============================================================================
 # Integration Tests
 # =============================================================================

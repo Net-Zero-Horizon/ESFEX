@@ -101,6 +101,23 @@ T^{received}_{f,r,p} = T_{f,r,p} \cdot (1 - \lambda^{trans}_f \cdot d_r / 100)
 
 where \(\lambda^{trans}_f\) is the loss rate per 100 km for fuel \(f\) and \(d_r\) is the route distance in km. This captures pipeline leakage, evaporation during tanker transport, and similar physical losses.
 
+### Transport Lead Time
+
+A plant runs from a local tank (its node storage), which the generator draws down hour by hour — so **tank → generator is instantaneous**. The supply stress lives upstream: replenishing that tank from the source takes time. Each fuel carries a lead time \(\delta_f\) in **days per 100 km** of route distance; the per-route delay in primary periods is
+
+\[
+\tau_{f,r} = \mathrm{round}\!\left( \frac{\delta_f \cdot d_r / 100}{\Delta_p} \right)
+\tag{PE-3b}
+\]
+
+where \(\Delta_p\) is the period length in days. Fuel dispatched on route \(r\) at period \(p\) then arrives at the destination at period \(p + \tau_{f,r}\), so the **received inflow** at node \(n\), period \(p\), uses the *shifted* transport variable:
+
+\[
+T^{received}_{f,r,p} = T_{f,r,\,p-\tau_{f,r}} \cdot (1 - \lambda^{trans}_f \cdot d_r / 100), \qquad p - \tau_{f,r} \ge 1
+\]
+
+Shipments dispatched before the window (\(p - \tau_{f,r} < 1\)) fall outside it and are not counted in that window (a small boundary effect that storage buffers; the rolling horizon carries the rest). With \(\delta_f = 0\) the inflow reduces to PE-3 (instantaneous transport, the default). Combined with a source disruption and a finite tank, a lead time reproduces real supply stress: a cut drains the tank while the next shipment is still in transit, and if the tank empties the penalised fuel shortfall curtails generation.
+
 ### Storage
 
 Fuel storage provides temporal flexibility between supply scheduling and consumption. Storage is modeled at two scales:

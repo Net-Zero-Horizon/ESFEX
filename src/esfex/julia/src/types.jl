@@ -1728,6 +1728,25 @@ struct FuelConfig
     import_cost::Vector{Float64}
     transport_cost::Float64
     transport_losses::Float64
+    # Source -> plant-tank replenishment lead time, in days per 100 km of route
+    # distance (symmetric with transport_losses). 0 = instantaneous (the prior
+    # behaviour). The per-route delay in primary periods is derived from this
+    # and the route's distance, then the transport inflow is shifted by it.
+    transport_transit_days_per_100km::Float64
+end
+
+# Backward-compatible constructor: 11-arg call sites (before the transit field)
+# keep working, defaulting the transit time to 0 (instantaneous transport).
+function FuelConfig(
+    name, price_base, price_growth_rate, energy_content, emission_factor,
+    max_availability, storage_capacity, initial_storage_level, min_storage_level,
+    import_cost, transport_cost, transport_losses,
+)
+    return FuelConfig(
+        name, price_base, price_growth_rate, energy_content, emission_factor,
+        max_availability, storage_capacity, initial_storage_level, min_storage_level,
+        import_cost, transport_cost, transport_losses, 0.0,
+    )
 end
 
 """

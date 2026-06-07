@@ -581,18 +581,33 @@ function add_primary_energy_constraints!(
                 transport_in = AffExpr(0.0)
                 transport_out = AffExpr(0.0)
 
+                days_in_p = length(temporal.hours_in_primary_period[p]) / 24.0
                 for (r, route) in enumerate(input.transport_routes)
                     if !haskey(route.fuel_params, fuel_name)
                         continue
                     end
                     fparams = route.fuel_params[fuel_name]
 
-                    if route.to_node == n  # inflow to this node
+                    if route.to_node == n  # inflow to this node, after the transit delay
                         loss_factor = 1.0 - (fparams.transport_losses * route.distance_km / 100.0)
-                        add_to_expression!(transport_in,
-                            vars.fuel_transport_periodic[fuel_name][r, p], loss_factor)
+                        # Replenishment lead time (source -> plant tank): fuel
+                        # dispatched at period p_src = p - transit_periods arrives
+                        # now. Derived from the fuel's days-per-100km and the
+                        # route distance. Shipments dispatched before the window
+                        # (p_src < 1) fall outside it and are not counted here —
+                        # a small boundary effect; storage buffers it.
+                        transit_days = fuel.transport_transit_days_per_100km *
+                            route.distance_km / 100.0
+                        transit_periods = days_in_p > 0 ?
+                            round(Int, transit_days / days_in_p) : 0
+                        p_src = p - transit_periods
+                        if p_src >= 1
+                            add_to_expression!(transport_in,
+                                vars.fuel_transport_periodic[fuel_name][r, p_src],
+                                loss_factor)
+                        end
                     end
-                    if route.from_node == n  # outflow from this node
+                    if route.from_node == n  # outflow from this node (dispatched now)
                         add_to_expression!(transport_out,
                             vars.fuel_transport_periodic[fuel_name][r, p])
                     end

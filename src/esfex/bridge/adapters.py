@@ -3495,6 +3495,7 @@ class PrimaryEnergyAdapter:
                 py_to_julia_vector(scale_cost_list(fuel_cfg.get('import_cost', [0.0] * n))),
                 scale_cost(float(fuel_cfg.get('transport_cost', 0.0))),
                 float(fuel_cfg.get('transport_losses', 0.0)),
+                float(fuel_cfg.get('transport_transit_days_per_100km', 0.0)),
             )
             jl.seval("push!")(jl_fuels, jl_fuel)
 

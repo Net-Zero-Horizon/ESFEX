@@ -409,6 +409,7 @@ class GuiFuelSource:
     storage_investment_cost: float = 0.0
     transport_cost: float = 0.0
     transport_losses: float = 0.0
+    transport_transit_days_per_100km: float = 0.0  # source->tank lead time
     max_storage_investment_per_node: float = 0.0
     max_transport_investment_per_arc: float = 0.0
 
