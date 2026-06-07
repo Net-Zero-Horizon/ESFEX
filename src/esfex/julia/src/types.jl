@@ -1733,10 +1733,21 @@ struct FuelConfig
     # behaviour). The per-route delay in primary periods is derived from this
     # and the route's distance, then the transport inflow is shifted by it.
     transport_transit_days_per_100km::Float64
+    # Source disruption: during the hour window [disruption_start_hour,
+    # disruption_end_hour) the source's availability is scaled to
+    # disruption_availability (0 = full cut, 1 = none). end <= start disables it.
+    # Lets a supply cut (terminal down for N days) be configured; combined with
+    # the transit lead time and a finite tank it reproduces supply stress.
+    disruption_start_hour::Int
+    disruption_end_hour::Int
+    disruption_availability::Float64
 end
 
-# Backward-compatible constructor: 11-arg call sites (before the transit field)
-# keep working, defaulting the transit time to 0 (instantaneous transport).
+# Backward-compatible constructors. Older call sites pass fewer positional args;
+# the newer fields take neutral defaults (transit = 0 instantaneous; no
+# disruption). Dispatch is by argument count (12 / 13 / full 16).
+
+# 12-arg: through transport_losses.
 function FuelConfig(
     name, price_base, price_growth_rate, energy_content, emission_factor,
     max_availability, storage_capacity, initial_storage_level, min_storage_level,
@@ -1745,7 +1756,21 @@ function FuelConfig(
     return FuelConfig(
         name, price_base, price_growth_rate, energy_content, emission_factor,
         max_availability, storage_capacity, initial_storage_level, min_storage_level,
-        import_cost, transport_cost, transport_losses, 0.0,
+        import_cost, transport_cost, transport_losses, 0.0, 0, 0, 1.0,
+    )
+end
+
+# 13-arg: through transport_transit_days_per_100km (no disruption).
+function FuelConfig(
+    name, price_base, price_growth_rate, energy_content, emission_factor,
+    max_availability, storage_capacity, initial_storage_level, min_storage_level,
+    import_cost, transport_cost, transport_losses, transport_transit_days_per_100km,
+)
+    return FuelConfig(
+        name, price_base, price_growth_rate, energy_content, emission_factor,
+        max_availability, storage_capacity, initial_storage_level, min_storage_level,
+        import_cost, transport_cost, transport_losses, transport_transit_days_per_100km,
+        0, 0, 1.0,
     )
 end
 

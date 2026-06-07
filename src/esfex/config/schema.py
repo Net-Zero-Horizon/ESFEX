@@ -849,6 +849,17 @@ class PrimaryEnergySourceConfig(BaseModel):
         default=0.0, ge=0,
         description="Source->tank replenishment lead time, in days per 100 km "
         "of route distance. 0 = instantaneous transport.")
+    disruption_start_hour: int = Field(
+        default=0, ge=0,
+        description="Supply-disruption window start hour (inclusive).")
+    disruption_end_hour: int = Field(
+        default=0, ge=0,
+        description="Supply-disruption window end hour (exclusive). "
+        "end <= start disables the disruption.")
+    disruption_availability: float = Field(
+        default=1.0, ge=0, le=1,
+        description="Availability fraction during the disruption window "
+        "(0 = full cut, 1 = none).")
     max_storage_investment_per_node: float
     max_transport_investment_per_arc: float
 

@@ -643,6 +643,9 @@
     "transport_cost": "Costo Transporte ($/unid./km):",
     "transport_losses": "Pérdidas Transporte (frac):",
     "transport_transit_days_per_100km": "Tiempo de Tránsito (días/100km):",
+    "disruption_start_hour": "Inicio Disrupción (hora):",
+    "disruption_end_hour": "Fin Disrupción (hora):",
+    "disruption_availability": "Disponibilidad en Disrupción (0-1):",
     "max_storage_inv": "Inv. Máx. Almac./Nodo (unid.):",
     "max_transport_inv": "Inv. Máx. Transp./Arco (unid.):"
   },

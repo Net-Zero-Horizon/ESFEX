@@ -73,6 +73,22 @@ S_{f,n,p} \leq \bar{S}_{f,n,p} + X^{supply}_{f,n,p}
 
 where \(\bar{S}_{f,n,p}\) is the maximum supply capacity and \(X^{supply}_{f,n,p}\) is an excess supply slack variable (penalized) that allows soft constraint violation when the supply infrastructure is insufficient. The supply limit may vary by period to capture seasonal availability (e.g., reduced LNG deliveries in winter due to shipping constraints).
 
+#### Source Disruption
+
+A source can be configured with a disruption window — an hour range
+\([h^{start}, h^{end})\) over which its availability is scaled to a fraction
+\(a \in [0,1]\) (\(a = 0\) is a full cut). The per-period supply cap is reduced
+by the share of the period's hours that fall inside the window:
+
+\[
+\bar{S}^{disrupted}_{f,n,p} = \bar{S}_{f,n,p} \cdot \big( 1 - \phi_{f,p}(1 - a) \big),
+\qquad
+\phi_{f,p} = \frac{\left|\{ h \in p : h^{start} \le h < h^{end} \}\right|}{|p|}
+\tag{PE-1b}
+\]
+
+where \(\phi_{f,p}\) is the fraction of period \(p\)'s hours under the disruption. This models a supply-side shock (a terminal or pipeline down for several days). On its own it forces the consuming node onto its tank; together with the transport lead time (PE-3b) — the next shipment still in transit — and a finite tank, it reproduces real fuel-supply stress, with the penalised shortfall curtailing generation once the tank empties.
+
 ### Transport
 
 Fuel transport is modeled through explicit routes connecting pairs of nodes. Each route \(r\) has:

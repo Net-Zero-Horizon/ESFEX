@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -91,6 +92,25 @@ class FuelSourceForm(QWidget):
             tr("fuel_source_form.transport_transit_days_per_100km"),
             self._transit_days)
 
+        self._disruption_start = QSpinBox()
+        self._disruption_start.setRange(0, 8784)
+        self._disruption_start.editingFinished.connect(self._on_changed)
+        fl_sys.addRow(
+            tr("fuel_source_form.disruption_start_hour"), self._disruption_start)
+
+        self._disruption_end = QSpinBox()
+        self._disruption_end.setRange(0, 8784)
+        self._disruption_end.editingFinished.connect(self._on_changed)
+        fl_sys.addRow(
+            tr("fuel_source_form.disruption_end_hour"), self._disruption_end)
+
+        self._disruption_avail = QDoubleSpinBox()
+        self._disruption_avail.setRange(0, 1)
+        self._disruption_avail.setDecimals(3)
+        self._disruption_avail.editingFinished.connect(self._on_changed)
+        fl_sys.addRow(
+            tr("fuel_source_form.disruption_availability"), self._disruption_avail)
+
         self._max_storage_inv = QDoubleSpinBox()
         self._max_storage_inv.setRange(0, 1e9)
         self._max_storage_inv.setDecimals(2)
@@ -135,6 +155,9 @@ class FuelSourceForm(QWidget):
             ("transport_cost", self._transport_cost),
             ("transport_losses", self._transport_losses),
             ("transport_transit_days_per_100km", self._transit_days),
+            ("disruption_start_hour", self._disruption_start),
+            ("disruption_end_hour", self._disruption_end),
+            ("disruption_availability", self._disruption_avail),
             ("max_storage_investment_per_node", self._max_storage_inv),
             ("max_transport_investment_per_arc", self._max_transport_inv),
         ]
@@ -178,6 +201,12 @@ class FuelSourceForm(QWidget):
         self._transport_losses.setValue(source.transport_losses)
         self._transit_days.setValue(
             getattr(source, "transport_transit_days_per_100km", 0.0))
+        self._disruption_start.setValue(
+            int(getattr(source, "disruption_start_hour", 0)))
+        self._disruption_end.setValue(
+            int(getattr(source, "disruption_end_hour", 0)))
+        self._disruption_avail.setValue(
+            getattr(source, "disruption_availability", 1.0))
         self._max_storage_inv.setValue(source.max_storage_investment_per_node)
         self._max_transport_inv.setValue(source.max_transport_investment_per_arc)
 

@@ -410,6 +410,9 @@ class GuiFuelSource:
     transport_cost: float = 0.0
     transport_losses: float = 0.0
     transport_transit_days_per_100km: float = 0.0  # source->tank lead time
+    disruption_start_hour: int = 0                  # supply-disruption window start
+    disruption_end_hour: int = 0                    # supply-disruption window end
+    disruption_availability: float = 1.0            # availability during the window (0-1)
     max_storage_investment_per_node: float = 0.0
     max_transport_investment_per_arc: float = 0.0
 

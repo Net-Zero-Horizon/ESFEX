@@ -487,6 +487,69 @@ def test_transport_transit_delay_causes_supply_stress():
     assert obj_delayed > obj_instant + 1.0
 
 
+@pytest.mark.julia
+def test_source_disruption_cuts_supply():
+    """A per-period source disruption reduces availability (#13, phase C).
+
+    Differential: one node with ample fuel availability, demand each period and
+    an empty tank. With no disruption the supply meets the demand; cutting the
+    source to zero over the first period (hours 1-24) strands that period's
+    demand, so the penalised shortfall raises the objective.
+    """
+    from esfex.bridge.julia_setup import get_esfex_module, get_julia
+    from esfex.bridge.converters import py_to_julia_matrix, py_to_julia_vector
+
+    jl = get_julia()
+    ESFEX = get_esfex_module()
+
+    def solve(disrupt):
+        start, end, avail = (1, 25, 0.0) if disrupt else (0, 0, 1.0)
+        fuel = ESFEX.FuelConfig(
+            "Gas", 10.0, 0.0, 10.0, 0.0,
+            py_to_julia_vector([365000.0]),  # ample availability
+            py_to_julia_vector([10.0]),      # small tank
+            py_to_julia_vector([0.0]),       # empty tank
+            0.0, py_to_julia_vector([0.0]), 0.0, 0.0,
+            0.0,                             # transit
+            start, end, avail,               # disruption window
+        )
+        jl._f = fuel
+        fuels = jl.seval("FuelConfig[_f]")
+        infra = ESFEX.FuelInfrastructureConfig(
+            1000.0, 10.0, 0.5, 50.0, 1.0, 1.0, 20.0, 30.0, -1.0)
+        jl._i = infra
+        infra_dict = jl.seval(
+            'Dict{String,FuelInfrastructureConfig}("Gas"=>_i)')
+        ne = ESFEX.NonElectricDemandConfig(
+            "Industrial", "Gas", py_to_julia_vector([36500.0]),
+            0.0, py_to_julia_vector([1 / 12] * 12))
+        jl._n = ne
+        ne_demands = jl.seval("NonElectricDemandConfig[_n]")
+        inp = ESFEX.PrimaryEnergyInput(
+            2025, 2025, 1, 72, fuels, infra_dict, ne_demands,
+            py_to_julia_matrix(np.array([[0.0]])),
+            jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
+            24, 72, 0.05, 1000.0, 1.0, "development",
+            jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
+            jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
+            jl.seval("nothing"))
+        m = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
+        jl._m = m
+        jl._in = inp
+        jl.seval("""
+        vars, temporal, prices = create_primary_energy_model(_m, _in)
+        ct = get_primary_energy_objective_terms(vars, _in, temporal, prices)
+        @objective(_m, Min, sum(values(ct)))
+        set_silent(_m); optimize!(_m)
+        """)
+        assert "OPTIMAL" in str(jl.seval("termination_status(_m)"))
+        return float(jl.seval("objective_value(_m)"))
+
+    obj_normal = solve(False)
+    obj_disrupted = solve(True)
+    assert obj_disrupted > obj_normal + 1.0
+
+
 # =============================================================================
 # Integration Tests
 # =============================================================================

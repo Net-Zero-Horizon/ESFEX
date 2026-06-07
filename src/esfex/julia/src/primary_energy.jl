@@ -160,10 +160,23 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
             annual_avail = fuel.max_availability[n]
 
             for p in temporal.primary_period_indices
-                hours_in_p = length(temporal.hours_in_primary_period[p])
+                hrs = temporal.hours_in_primary_period[p]
+                hours_in_p = length(hrs)
                 # Scale availability proportionally to this period's duration relative to full year
                 fraction = hours_in_p / scaling_base_hours
-                max_supply_periodic[fuel.name][n][p] = annual_avail * fraction
+                # Source disruption: scale availability by the fraction of this
+                # period's hours that fall inside the disruption window (reduced
+                # to disruption_availability there).
+                disruption_mult = 1.0
+                if fuel.disruption_end_hour > fuel.disruption_start_hour && hours_in_p > 0
+                    n_cut = count(h -> fuel.disruption_start_hour <= h <
+                                       fuel.disruption_end_hour, hrs)
+                    frac_cut = n_cut / hours_in_p
+                    disruption_mult = (1.0 - frac_cut) +
+                        frac_cut * fuel.disruption_availability
+                end
+                max_supply_periodic[fuel.name][n][p] =
+                    annual_avail * fraction * disruption_mult
             end
         end
     end

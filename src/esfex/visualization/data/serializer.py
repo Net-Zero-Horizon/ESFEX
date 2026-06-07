@@ -945,6 +945,10 @@ def _system_to_gui_state(sys: SystemConfig) -> GuiSystemState:
                 transport_losses=src_cfg.transport_losses,
                 transport_transit_days_per_100km=getattr(
                     src_cfg, "transport_transit_days_per_100km", 0.0),
+                disruption_start_hour=getattr(src_cfg, "disruption_start_hour", 0),
+                disruption_end_hour=getattr(src_cfg, "disruption_end_hour", 0),
+                disruption_availability=getattr(
+                    src_cfg, "disruption_availability", 1.0),
                 max_storage_investment_per_node=src_cfg.max_storage_investment_per_node,
                 max_transport_investment_per_arc=src_cfg.max_transport_investment_per_arc,
             )
@@ -3092,6 +3096,9 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "transport_cost": src.transport_cost,
                 "transport_losses": src.transport_losses,
                 "transport_transit_days_per_100km": src.transport_transit_days_per_100km,
+                "disruption_start_hour": src.disruption_start_hour,
+                "disruption_end_hour": src.disruption_end_hour,
+                "disruption_availability": src.disruption_availability,
                 "max_storage_investment_per_node": src.max_storage_investment_per_node,
                 "max_transport_investment_per_arc": src.max_transport_investment_per_arc,
             }
