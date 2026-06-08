@@ -7,6 +7,53 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.1.6] — 2026-06-08
+
+### Performance
+
+- **"Building network" no longer hangs on country-scale regions** — four
+  independent O(n²) hot paths in the Grid Builder build pipeline are now
+  linear: bus snapping (over-wide candidate window), disconnected-component
+  bridging and equipment chaining (linear nearest-bus scans → projected
+  KD-tree), line removal (per-fix list rebuild → batched), and per-edge bridge
+  detection in electrical-parameter inference (a BFS per edge → a single
+  iterative Tarjan pass). A ~25k-feature import (e.g. Japan) that previously
+  hung for 20+ minutes now completes in seconds.
+
+### Added
+
+- **Demand visualizer** — a reusable Plotly demand chart (Grid Builder and node
+  panel) with a date x-axis that auto-scales on zoom, a red mean line, and a
+  deep "Demand statistics" panel.
+- **Complete, functional built networks** — generators are assigned a fuel and a
+  technology from a powerplantmatching-style taxonomy (CCGT/OCGT, steam and
+  combustion engines, run-of-river/reservoir/pumped hydro, PV, on/offshore
+  wind), lines get capacities and impedances from a standard line-type catalog
+  (PyPSA-style r/x/c per km with an N-1 derate), and nodes are filled with
+  default operating reserves and transmission losses. No more orphan generators
+  without a fuel or technology.
+- **Per-phase build timing** — the Grid Builder result panel now reports a
+  "Timing" breakdown (seconds per build phase).
+
+### Changed
+
+- **Fuel Entry Point and Fuel Source unified** into a single "Fuel Source"
+  concept across the model and the Studio GUI.
+
+### Fixed
+
+- **OSM fetch timeout on large regions** — the Grid Builder tiles large Overpass
+  queries (e.g. Japan) into sub-requests instead of failing on a single
+  monolithic query, and normalizes wrapped longitudes so the WRI/GEM/GridFinder
+  layers return data for areas crossing the ±180° meridian.
+- **"Naming nodes" hang** — the node-naming step is time-boxed and the
+  subsequent rendering no longer freezes the UI after large-region builds.
+- **"Lines toward a centroid" after a rebuild** — the node-assignment spatial
+  index cached on the centroid *count*, so a rebuild with re-clustered
+  centroids of the same count reused a stale tree and collapsed the network
+  toward the wrong centroids. It is now keyed on centroid content with a
+  projected metric and exact-haversine refinement.
+
 ## [0.1.5] — 2026-06-06
 
 ### Fixed
@@ -125,6 +172,7 @@ MGA/SPORES, stochastic programming, Sobol sensitivity, and a GIS-based Studio.
 Includes the unit-commitment load-shed fix, the test/coverage expansion, and
 full packaging (CI, Apache-2.0, REUSE-compliant).
 
+[0.1.6]: https://github.com/Net-Zero-Horizon/ESFEX/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Net-Zero-Horizon/ESFEX/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Net-Zero-Horizon/ESFEX/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Net-Zero-Horizon/ESFEX/compare/v0.1.2...v0.1.3
