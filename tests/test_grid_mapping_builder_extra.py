@@ -249,7 +249,7 @@ class TestCreateFuelsAndTechnologies:
         fuel_remap, tech_remap = gmb._create_fuels_and_technologies(
             model, gens, result)
         assert fuel_remap["coal"] == "Coal"
-        assert tech_remap["coal"] is not None
+        assert tech_remap[("Coal ST", "Coal")] is not None
         assert result.fuels_created == 1
         assert result.technologies_created == 1
         assert "Coal" in model.state.fuels
@@ -267,7 +267,7 @@ class TestCreateFuelsAndTechnologies:
         fuel_remap, tech_remap = gmb._create_fuels_and_technologies(
             model, gens, result)
         assert fuel_remap["Other"] == "Other"
-        assert tech_remap["Other"] is not None
+        assert tech_remap[("Other", "Other")] is not None
         assert "Other" in model.state.fuels
         assert result.fuels_created == 1 and result.technologies_created == 1
 
@@ -280,7 +280,7 @@ class TestCreateFuelsAndTechnologies:
         fuel_remap, tech_remap = gmb._create_fuels_and_technologies(
             model, gens, result)
         assert fuel_remap["Other"] == "Other"
-        assert tech_remap["Other"] is not None
+        assert tech_remap[("Other", "Other")] is not None
 
     def test_reuses_existing_fuel(self):
         state = _make_state()
@@ -303,48 +303,76 @@ class TestCreateFuelsAndTechnologies:
         assert fuel_remap["Magic Dust"] == "Magic_Dust"
         assert result.fuels_created == 1
         # Unknown canonical → a generic technology is created (never None).
-        assert tech_remap["Magic Dust"] is not None
+        assert tech_remap[("Other", "Magic_Dust")] is not None
         assert result.technologies_created == 1
 
-    def test_existing_tech_fuel_reference_updated(self):
+    def test_existing_tech_by_name_reused(self):
         state = _make_state()
         state.fuels["Coal"] = GuiFuel(fuel_id="Coal", name="Coal")
-        # Existing tech references the coal fuel by normalized name but with
-        # a different id → triggers the consistency update branch.
+        # Existing tech with the catalog name but an inconsistent fuel id is
+        # reused (matched by name) and its fuel is made consistent.
         state.technologies["t0"] = GuiTechnology(
-            tech_id="t0", name="Coal Plant", category="Non-renewable",
+            tech_id="t0", name="Coal Steam Turbine", category="Non-renewable",
             fuel="coal")
         model = MockGuiModel(state)
         result = ParseResult()
         gens = [_feat("generator", fuel="coal")]
         _, tech_remap = gmb._create_fuels_and_technologies(
             model, gens, result)
-        assert tech_remap["coal"] == "t0"
+        assert tech_remap[("Coal ST", "Coal")] == "t0"
         assert state.technologies["t0"].fuel == "Coal"
         assert result.technologies_created == 0
 
 
 # ======================================================================
-# _estimate_line_capacity
+# Standard-line-type capacity / impedance (PyPSA catalog methodology)
 # ======================================================================
 
 
-class TestEstimateLineCapacity:
-    @pytest.mark.parametrize("kv,expected", [
-        (765, 2000.0),
-        (500, 2000.0),
-        (400, 1000.0),
-        (345, 1000.0),
-        (230, 500.0),
-        (220, 500.0),
-        (132, 200.0),
-        (110, 200.0),
-        (33, 50.0),
-        (11, 10.0),
-        (0, 10.0),
+class TestStandardLineTypeCapacity:
+    @pytest.mark.parametrize("kv,expected_mw", [
+        # sqrt(3) * V * I_nom(nearest type) * 0.7  (per circuit)
+        (110, 98.7),
+        (220, 344.1),
+        (380, 1188.7),
+        (500, 1819.1),
     ])
-    def test_thresholds(self, kv, expected):
-        assert gmb._estimate_line_capacity(kv) == expected
+    def test_thermal_capacity(self, kv, expected_mw):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_capacity_mw,
+        )
+        assert estimate_line_capacity_mw(kv) == pytest.approx(expected_mw, rel=0.02)
+
+    def test_capacity_increases_with_voltage(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_capacity_mw,
+        )
+        caps = [estimate_line_capacity_mw(v) for v in (66, 110, 220, 380, 500, 750)]
+        assert caps == sorted(caps)  # strictly increasing with voltage
+
+    def test_circuits_scale_capacity(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_capacity_mw,
+        )
+        one = estimate_line_capacity_mw(220, num_circuits=1)
+        two = estimate_line_capacity_mw(220, num_circuits=2)
+        assert two == pytest.approx(2 * one)
+
+    def test_voltage_snaps_to_nearest_type(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            _nearest_std_line_type,
+        )
+        assert _nearest_std_line_type(400)[0] == 380.0   # 400 -> 380
+        assert _nearest_std_line_type(230)[0] == 220.0   # 230 -> 220
+        assert _nearest_std_line_type(345)[0] == 380.0   # 345 -> 380 (closer)
+
+    def test_impedance_from_same_type(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_rxb_per_km,
+        )
+        r, x, b = estimate_line_rxb_per_km(380)
+        assert r == pytest.approx(0.030) and x == pytest.approx(0.246)
+        assert b > 0  # susceptance derived from the type capacitance
 
 
 # ======================================================================
@@ -525,7 +553,7 @@ class TestCreateGenerator:
         gen = _feat("generator", name="G1", capacity_mw=10.0, fuel="solar")
         gmb._create_generator(
             state, gen, 5.0, result, {}, None,
-            fuel_remap={"solar": "Sun"}, tech_remap={"solar": "tech_0"})
+            fuel_remap={"solar": "Sun"}, tech_remap={("PV", "Sun"): "tech_0"})
         inst = next(iter(state.generators.values()))
         assert inst.fuel == "Sun"
         assert inst.technology_id == "tech_0"
@@ -665,7 +693,9 @@ class TestCreateLine:
                      line_coords=[(21.0, -82.0), (22.0, -83.0)])
         gmb._create_line(state, line, 5.0, result, {}, None)
         gl = state.transmission_lines[-1]
-        assert gl.capacity_mw == 2000.0
+        # Thermal rating of the nearest (500 kV) standard type:
+        # sqrt(3) * 500 * 3.0 kA * 0.7 ~= 1819 MW.
+        assert gl.capacity_mw == pytest.approx(1819.1, rel=0.01)
 
 
 # ======================================================================
@@ -1436,3 +1466,59 @@ class TestOSMFuelDetection:
         feat = self._fetcher()._process_element(
             tags=tags, lat=0.5, lng=0.5, osm_id="node/1")
         assert feat is not None and feat.fuel == expected
+
+
+class TestTechnologyClassification:
+    """powerplantmatching-style technology labels: generators sharing a fuel
+    map to distinct technologies (CCGT vs OCGT, steam turbine vs engine, hydro
+    sub-types) with realistic efficiencies."""
+
+    @pytest.mark.parametrize("fuel,hint,cap,expected", [
+        ("naturalgas", "", 300.0, "CCGT"),         # large gas -> CCGT
+        ("naturalgas", "", 30.0, "OCGT"),          # small gas -> OCGT
+        ("naturalgas", "OCGT", 500.0, "OCGT"),     # hint overrides capacity
+        ("naturalgas", "combined cycle", 5.0, "CCGT"),
+        ("coal", "", 0.0, "Coal ST"),
+        ("fuel_oil", "", 0.0, "Oil ST"),
+        ("diesel", "", 0.0, "Combustion Engine"),
+        ("diesel", "steam turbine", 0.0, "Oil ST"),
+        ("water", "pumped storage", 0.0, "Pumped Storage"),
+        ("water", "run-of-river", 0.0, "Run-Of-River"),
+        ("water", "", 0.0, "Reservoir"),
+        ("sun", "", 0.0, "PV"),
+        ("wind", "", 0.0, "Onshore Wind"),
+        ("wind", "offshore", 0.0, "Offshore Wind"),
+        ("nuclear", "", 0.0, "Nuclear"),
+        ("magicdust", "", 0.0, "Other"),
+    ])
+    def test_classify(self, fuel, hint, cap, expected):
+        assert gmb.classify_technology(fuel, "", hint, cap) == expected
+
+    def test_catalog_entry_per_label(self):
+        # Every label classify_technology can return has a catalog entry.
+        for spec in gmb._TECH_CATALOG.values():
+            assert spec["fuel"] and spec["name"] and spec["category"]
+        assert gmb._TECH_CATALOG["CCGT"]["eff_at_rated"] > \
+            gmb._TECH_CATALOG["OCGT"]["eff_at_rated"]
+
+
+def test_build_creates_distinct_gas_technologies():
+    """A large and a small gas plant must end up on CCGT and OCGT
+    respectively — not collapsed into one gas technology."""
+    model = MockGuiModel(_make_state(buses={}))
+    feats = [
+        _feat("substation", name="S1", voltage_kv=220.0),
+        _feat("generator", name="BigGas", capacity_mw=400.0, fuel="gas"),
+        _feat("generator", name="Peaker", capacity_mw=40.0, fuel="gas"),
+        _feat("generator", name="CoalU", capacity_mw=600.0, fuel="coal"),
+    ]
+    gmb.build_grid_from_features(model, feats)
+    techs = {t.name for t in model.state.technologies.values()}
+    assert "CCGT" in techs and "OCGT" in techs and "Coal Steam Turbine" in techs
+    by_name = {g.name: g for g in model.state.generators.values()}
+    ccgt = next(t.tech_id for t in model.state.technologies.values()
+                if t.name == "CCGT")
+    ocgt = next(t.tech_id for t in model.state.technologies.values()
+                if t.name == "OCGT")
+    assert by_name["BigGas"].technology_id == ccgt
+    assert by_name["Peaker"].technology_id == ocgt

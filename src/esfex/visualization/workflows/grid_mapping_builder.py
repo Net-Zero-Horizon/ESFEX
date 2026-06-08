@@ -47,6 +47,7 @@ from esfex.visualization.workflows.grid_mapping_fetchers import GridFeature
 from esfex.visualization.workflows.grid_mapping_quality import (
     estimate_battery_efficiencies,
     estimate_generator_defaults,
+    estimate_line_capacity_mw,
     estimate_line_pu_params,
     estimate_transformer_impedance_pu,
     estimate_transformer_losses_fraction,
@@ -132,6 +133,89 @@ _TECH_DEFAULTS: dict[str, dict] = {
     "other":      {"name": "Other Generator",   "category": "Non-renewable", "eff_at_rated": 0.35, "eff_at_min": 0.25, "life_time": 25},
 }
 
+# Technology catalog keyed by the powerplantmatching-style technology label.
+# Each entry binds a distinct generation technology to its canonical fuel and
+# realistic round-trip efficiencies, so the builder no longer collapses every
+# generator of a fuel into one technology (e.g. CCGT vs OCGT, steam turbine vs
+# reciprocating engine, run-of-river vs reservoir).
+#   tech_key -> {name, category, fuel(canonical key), eff_at_rated, eff_at_min, life_time}
+_TECH_CATALOG: dict[str, dict] = {
+    "PV":            {"name": "Solar PV",                "category": "Renewable",     "fuel": "sun",        "eff_at_rated": 1.00, "eff_at_min": 1.00, "life_time": 25},
+    "Onshore Wind":  {"name": "Onshore Wind",            "category": "Renewable",     "fuel": "wind",       "eff_at_rated": 1.00, "eff_at_min": 1.00, "life_time": 25},
+    "Offshore Wind": {"name": "Offshore Wind",           "category": "Renewable",     "fuel": "wind",       "eff_at_rated": 1.00, "eff_at_min": 1.00, "life_time": 27},
+    "Run-Of-River":  {"name": "Run-of-River Hydro",      "category": "Renewable",     "fuel": "water",      "eff_at_rated": 0.90, "eff_at_min": 0.85, "life_time": 60},
+    "Reservoir":     {"name": "Reservoir Hydro",         "category": "Renewable",     "fuel": "water",      "eff_at_rated": 0.90, "eff_at_min": 0.85, "life_time": 60},
+    "Pumped Storage":{"name": "Pumped-Storage Hydro",    "category": "Renewable",     "fuel": "water",      "eff_at_rated": 0.80, "eff_at_min": 0.75, "life_time": 60},
+    "Geothermal":    {"name": "Geothermal",              "category": "Renewable",     "fuel": "geothermal", "eff_at_rated": 0.90, "eff_at_min": 0.85, "life_time": 30},
+    "CCGT":          {"name": "CCGT",                    "category": "Non-renewable", "fuel": "naturalgas", "eff_at_rated": 0.58, "eff_at_min": 0.45, "life_time": 30},
+    "OCGT":          {"name": "OCGT",                    "category": "Non-renewable", "fuel": "naturalgas", "eff_at_rated": 0.40, "eff_at_min": 0.28, "life_time": 25},
+    "Coal ST":       {"name": "Coal Steam Turbine",      "category": "Non-renewable", "fuel": "coal",       "eff_at_rated": 0.40, "eff_at_min": 0.30, "life_time": 40},
+    "Oil ST":        {"name": "Fuel-Oil Steam Turbine",  "category": "Non-renewable", "fuel": "fuel_oil",   "eff_at_rated": 0.35, "eff_at_min": 0.28, "life_time": 35},
+    "Combustion Engine": {"name": "Diesel Engine",       "category": "Non-renewable", "fuel": "diesel",     "eff_at_rated": 0.42, "eff_at_min": 0.30, "life_time": 25},
+    "Nuclear":       {"name": "Nuclear",                 "category": "Non-renewable", "fuel": "nuclear",    "eff_at_rated": 0.33, "eff_at_min": 0.33, "life_time": 60},
+    "Biomass ST":    {"name": "Biomass Steam Turbine",   "category": "Non-renewable", "fuel": "biomass",    "eff_at_rated": 0.30, "eff_at_min": 0.20, "life_time": 25},
+    "Biogas Engine": {"name": "Biogas Engine",           "category": "Non-renewable", "fuel": "biogas",     "eff_at_rated": 0.40, "eff_at_min": 0.30, "life_time": 20},
+    "Waste-to-Energy": {"name": "Waste-to-Energy",       "category": "Non-renewable", "fuel": "waste",      "eff_at_rated": 0.25, "eff_at_min": 0.18, "life_time": 25},
+    "Other":         {"name": "Other Generator",         "category": "Non-renewable", "fuel": "other",      "eff_at_rated": 0.35, "eff_at_min": 0.25, "life_time": 25},
+}
+
+# Capacity (MW) below which an unlabelled gas plant is assumed to be an open-
+# cycle peaker rather than a combined-cycle plant (powerplantmatching heuristic).
+_OCGT_MAX_MW = 100.0
+
+
+def classify_technology(
+    canonical_fuel: str,
+    gen_type: str = "",
+    tech_hint: str = "",
+    capacity_mw: float = 0.0,
+) -> str:
+    """Map a generator to a powerplantmatching-style technology label.
+
+    Uses the canonical fuel plus any technology hint string (from GEM's
+    Technology column / OSM generator:method) and a capacity heuristic to
+    distinguish technologies that share a fuel (CCGT vs OCGT, steam turbine vs
+    reciprocating engine, hydro sub-types). Always returns a key present in
+    ``_TECH_CATALOG``.
+    """
+    t = (tech_hint or "").lower()
+    if canonical_fuel == "sun":
+        return "PV"
+    if canonical_fuel == "wind":
+        return "Offshore Wind" if "offshore" in t else "Onshore Wind"
+    if canonical_fuel == "water":
+        if "pump" in t:
+            return "Pumped Storage"
+        if "run" in t or "ror" in t:
+            return "Run-Of-River"
+        return "Reservoir"
+    if canonical_fuel == "naturalgas":
+        if "ocgt" in t or "open" in t or "peak" in t:
+            return "OCGT"
+        if "ccgt" in t or "combined" in t:
+            return "CCGT"
+        return "OCGT" if (0 < capacity_mw < _OCGT_MAX_MW) else "CCGT"
+    if canonical_fuel == "coal":
+        return "Coal ST"
+    if canonical_fuel == "fuel_oil":
+        return "Oil ST"
+    if canonical_fuel == "diesel":
+        # Large/steam-tagged oil units are steam turbines, not engines.
+        if "steam" in t or "boiler" in t:
+            return "Oil ST"
+        return "Combustion Engine"
+    if canonical_fuel == "nuclear":
+        return "Nuclear"
+    if canonical_fuel == "biomass":
+        return "Biomass ST"
+    if canonical_fuel == "biogas":
+        return "Biogas Engine"
+    if canonical_fuel == "waste":
+        return "Waste-to-Energy"
+    if canonical_fuel == "geothermal":
+        return "Geothermal"
+    return "Other"
+
 
 def _find_existing_fuel(state: GuiSystemState, canonical_key: str) -> str | None:
     """Find an existing fuel whose normalized name matches *canonical_key*."""
@@ -161,44 +245,45 @@ def _find_existing_technology(
     return None
 
 
+def _find_tech_by_name(state: GuiSystemState, name: str) -> str | None:
+    """Find an existing technology by its display name."""
+    for tid, tech in state.technologies.items():
+        if tech.name == name:
+            return tid
+    return None
+
+
+def _gen_raw_fuel(g) -> str:
+    """The generator's fuel, routing undetected fuels to the 'Other' bucket."""
+    return g.fuel if (g.fuel and g.fuel not in ("None", "none")) else "Other"
+
+
 def _create_fuels_and_technologies(
     model: GuiModel,
     generators: list[GridFeature],
     result: ParseResult,
-) -> tuple[dict[str, str], dict[str, str | None]]:
-    """Auto-create fuels and technologies for each unique fuel found.
+) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
+    """Auto-create fuels and per-technology generation technologies.
 
-    Fuel-first approach with consistency guarantee: every technology
-    created will reference an existing fuel, and every fuel found in
-    generators will have a corresponding technology.
-
-    Uses ``model.add_fuel()`` / ``model.add_technology()`` so the proper
-    Qt signals are emitted and the element tree updates automatically.
+    Each generator is classified into a powerplantmatching-style technology
+    (CCGT/OCGT, coal/oil steam turbine, combustion engine, hydro sub-types, …)
+    via :func:`classify_technology`, so generators sharing a fuel still map to
+    distinct technologies with realistic efficiencies — instead of collapsing
+    every generator of a fuel into one technology.
 
     Returns ``(fuel_remap, tech_remap)`` where:
-    - ``fuel_remap[fetcher_fuel]`` = canonical ``fuel_id`` to use
-    - ``tech_remap[fetcher_fuel]`` = ``tech_id`` (or None)
+    - ``fuel_remap[raw_fuel]`` = canonical ``fuel_id``
+    - ``tech_remap[(tech_key, fuel_id)]`` = ``tech_id``
+
+    Every generator is guaranteed both a fuel and a technology.
     """
     state = model.state
     fuel_remap: dict[str, str] = {}
-    tech_remap: dict[str, str | None] = {}
+    tech_remap: dict[tuple[str, str], str] = {}
 
-    def _has_fuel(g) -> bool:
-        return bool(g.fuel) and g.fuel not in ("None", "none")
-
-    unique_fuels = {g.fuel for g in generators if _has_fuel(g)}
-    # Generators whose fuel could not be detected still need a fuel AND a
-    # technology, otherwise they end up referencing a non-existent "Other"
-    # fuel with no technology. Route them through the catalog "Other" entry.
-    if any(not _has_fuel(g) for g in generators):
-        unique_fuels.add("Other")
-
-    for raw_fuel in sorted(unique_fuels):
+    # ── Pass 1: ensure a fuel exists for every raw fuel ──────────────
+    for raw_fuel in sorted({_gen_raw_fuel(g) for g in generators}):
         canonical = _normalize_fuel_key(raw_fuel)
-        if canonical == "none":
-            continue
-
-        # ── Step 1: Ensure fuel exists ────────────────────────────
         fuel_id = _find_existing_fuel(state, canonical)
         if fuel_id:
             logger.debug("Fuel '%s' → existing '%s'", raw_fuel, fuel_id)
@@ -206,8 +291,7 @@ def _create_fuels_and_technologies(
             d = _FUEL_DEFAULTS[canonical]
             fuel_id = d["fuel_id"]
             model.add_fuel(
-                fuel_id, d["name"],
-                unit=d.get("unit"),
+                fuel_id, d["name"], unit=d.get("unit"),
                 emission_factor=d.get("emission_factor", 0.0),
                 energy_content=d.get("energy_content"),
                 price_base=d.get("price_base", 0.0),
@@ -216,13 +300,11 @@ def _create_fuels_and_technologies(
             logger.info("Created fuel '%s' from '%s'", fuel_id, raw_fuel)
         else:
             # Unknown fuel: keep its name but give it the catalog "Other"
-            # numeric defaults so it is actually solvable (non-zero energy
-            # content / price), not a bare 0-everything fuel.
+            # numeric defaults so it is solvable (non-zero energy/price).
             fuel_id = raw_fuel.replace(" ", "_")
             od = _FUEL_DEFAULTS["other"]
             model.add_fuel(
-                fuel_id, raw_fuel,
-                unit=od["unit"],
+                fuel_id, raw_fuel, unit=od["unit"],
                 emission_factor=od["emission_factor"],
                 energy_content=od["energy_content"],
                 price_base=od["price_base"],
@@ -231,49 +313,42 @@ def _create_fuels_and_technologies(
             logger.info("Created generic fuel '%s' from '%s'", fuel_id, raw_fuel)
         fuel_remap[raw_fuel] = fuel_id
 
-        # ── Step 2: Ensure technology exists (referencing fuel_id) ─
-        tech_id = _find_existing_technology(state, fuel_id, canonical)
-        if tech_id:
-            # Ensure the existing technology's fuel reference is consistent
-            tech = state.technologies[tech_id]
-            if tech.fuel != fuel_id:
-                model.update_technology(tech_id, fuel=fuel_id)
-                logger.info(
-                    "Updated tech '%s' fuel: '%s' → '%s'",
-                    tech_id, tech.fuel, fuel_id,
-                )
-            logger.debug("Tech for '%s' → existing '%s'", raw_fuel, tech_id)
-        elif canonical in _TECH_DEFAULTS:
-            tdef = _TECH_DEFAULTS[canonical]
-            tech_id = model.add_technology(
-                name=tdef["name"],
-                category=tdef["category"],
-                fuel=fuel_id,
-                life_time=tdef.get("life_time", 25),
-                eff_at_rated=tdef.get("eff_at_rated", 0.35),
-                eff_at_min=tdef.get("eff_at_min", 0.25),
-            )
-            result.technologies_created += 1
-            logger.info("Created technology '%s' (%s)", tech_id, tdef["name"])
-        else:
-            # No catalog default and no existing tech: create a generic
-            # technology so the generator is never left without one (the
-            # solver needs a tech reference for every generator).
+    # ── Pass 2: ensure a technology exists per (tech_key, fuel) ───────
+    for g in generators:
+        raw_fuel = _gen_raw_fuel(g)
+        fuel_id = fuel_remap[raw_fuel]
+        canonical = _normalize_fuel_key(raw_fuel)
+        tech_key = classify_technology(
+            canonical, g.gen_type, g.technology, g.capacity_mw)
+        key = (tech_key, fuel_id)
+        if key in tech_remap:
+            continue
+
+        spec = _TECH_CATALOG.get(tech_key, _TECH_CATALOG["Other"])
+        # A generic "Other" tech on an unknown fuel should name and reference
+        # that fuel, not the catalog 'Other' fuel.
+        if tech_key == "Other" and canonical not in _FUEL_DEFAULTS:
             fuel_name = (state.fuels[fuel_id].name
                          if fuel_id in state.fuels else fuel_id)
+            tech_name = f"{fuel_name} Generator"
+        else:
+            tech_name = spec["name"]
+
+        tech_id = _find_tech_by_name(state, tech_name)
+        if tech_id:
+            if state.technologies[tech_id].fuel != fuel_id:
+                model.update_technology(tech_id, fuel=fuel_id)
+        else:
             tech_id = model.add_technology(
-                name=f"{fuel_name} Generator",
-                category="Non-renewable",
-                fuel=fuel_id,
-                life_time=25,
-                eff_at_rated=0.35,
-                eff_at_min=0.25,
+                name=tech_name, category=spec["category"], fuel=fuel_id,
+                life_time=spec.get("life_time", 25),
+                eff_at_rated=spec.get("eff_at_rated", 0.35),
+                eff_at_min=spec.get("eff_at_min", 0.25),
             )
             result.technologies_created += 1
-            logger.info(
-                "Created generic technology '%s' for fuel '%s'",
-                tech_id, fuel_id)
-        tech_remap[raw_fuel] = tech_id
+            logger.info("Created technology '%s' (%s/%s)",
+                        tech_id, tech_key, fuel_id)
+        tech_remap[key] = tech_id
 
     return fuel_remap, tech_remap
 
@@ -662,13 +737,16 @@ def _create_generator(
     # Phase 2 runs before lines (Phase 4) exist, so the true backbone
     # (inter-node line endpoints) is unknown at this point.
 
-    # Map fuel to canonical fuel_id and resolve technology. A generator with
-    # no detected fuel is routed through the catalog "Other" entry (created in
-    # _create_fuels_and_technologies) so it gets a real fuel AND technology
-    # instead of a dangling "Other" reference with technology_id=None.
-    raw_fuel = gen.fuel if (gen.fuel and gen.fuel not in ("None", "none")) else "Other"
+    # Map fuel to canonical fuel_id and resolve the classified technology.
+    # A generator with no detected fuel is routed through the catalog "Other"
+    # entry (created in _create_fuels_and_technologies) so it gets a real fuel
+    # AND technology instead of a dangling reference with technology_id=None.
+    raw_fuel = _gen_raw_fuel(gen)
     mapped_fuel = (fuel_remap or {}).get(raw_fuel, raw_fuel) or "Other"
-    mapped_tech = (tech_remap or {}).get(raw_fuel)
+    tech_key = classify_technology(
+        _normalize_fuel_key(raw_fuel), gen.gen_type, gen.technology,
+        gen.capacity_mw)
+    mapped_tech = (tech_remap or {}).get((tech_key, mapped_fuel))
     if mapped_tech is None:
         # Last-resort: reuse any technology already bound to the mapped fuel.
         mapped_tech = _find_existing_technology(
@@ -821,12 +899,14 @@ def _create_line(
 
     v = line.voltage_kv if line.voltage_kv > 0 else None
 
-    # Compute effective capacity: explicit > SIL estimate, scaled by num_circuits
+    # Effective capacity: explicit OSM rating if present, else the thermal
+    # rating of the nearest standard line type (consistent with the impedance
+    # derived from the same type, with the N-1 security derate applied).
     if line.capacity_mw > 0:
-        per_circuit = line.capacity_mw
+        effective_cap = line.capacity_mw * max(1, line.num_circuits)
     else:
-        per_circuit = _estimate_line_capacity(line.voltage_kv)
-    effective_cap = per_circuit * max(1, line.num_circuits)
+        effective_cap = estimate_line_capacity_mw(
+            line.voltage_kv, line.num_circuits)
 
     # Compute geometric length and physical impedance/susceptance.
     # ``length_km`` left None for cases without an explicit voltage —
@@ -869,24 +949,6 @@ def _create_line(
         susceptance_pu=b_pu,
     ))
     result.lines_added += 1
-
-
-def _estimate_line_capacity(voltage_kv: float) -> float:
-    """Rough capacity estimate from voltage level (MW).
-
-    Uses typical SIL (surge impedance loading) approximations.
-    """
-    if voltage_kv >= 500:
-        return 2000.0
-    if voltage_kv >= 345:
-        return 1000.0
-    if voltage_kv >= 220:
-        return 500.0
-    if voltage_kv >= 110:
-        return 200.0
-    if voltage_kv >= 33:
-        return 50.0
-    return 10.0
 
 
 # ── Phase 5: Transformer ────────────────────────────────────────────

@@ -131,23 +131,25 @@ def test_reason_fuel_entry_and_unknown():
 
 
 @pytest.mark.parametrize("v,expected", [
-    (500.0, (0.020, 0.290, 5.20)),
-    (600.0, (0.020, 0.290, 5.20)),
-    (345.0, (0.030, 0.330, 4.10)),
-    (220.0, (0.060, 0.400, 2.90)),
-    (110.0, (0.120, 0.420, 2.70)),
-    (66.0, (0.200, 0.430, 2.60)),
-    (33.0, (0.300, 0.440, 2.50)),
-    (10.0, (0.500, 0.450, 2.40)),
-    (0.0, (0.500, 0.450, 2.40)),
+    # Nearest standard type; b = omega(50Hz) * C(nF) -> microsiemens/km.
+    (500.0, (0.020, 0.270, 4.084)),
+    (600.0, (0.020, 0.270, 4.084)),   # nearest 500
+    (345.0, (0.030, 0.246, 4.335)),   # nearest 380
+    (220.0, (0.060, 0.301, 3.927)),
+    (110.0, (0.095, 0.380, 2.890)),
+    (66.0,  (0.150, 0.400, 2.765)),
+    (33.0,  (0.250, 0.400, 2.670)),
+    (10.0,  (0.250, 0.400, 2.670)),   # nearest 33
+    (0.0,   (0.095, 0.380, 2.890)),   # <=0 -> 110 default type
 ])
 def test_estimate_line_rxb_per_km(v, expected):
-    assert Q.estimate_line_rxb_per_km(v) == expected
+    assert Q.estimate_line_rxb_per_km(v) == pytest.approx(expected, rel=1e-3)
 
 
 def test_estimate_line_rxb_negative_fallback():
-    # Negative voltage hits none of the >= rows and returns the last row tail.
-    assert Q.estimate_line_rxb_per_km(-5.0) == (0.500, 0.450, 2.40)
+    # Non-positive voltage falls back to the 110 kV default standard type.
+    assert Q.estimate_line_rxb_per_km(-5.0) == pytest.approx(
+        (0.095, 0.380, 2.890), rel=1e-3)
 
 
 # ── estimate_line_pu_params ──────────────────────────────────────────
@@ -162,9 +164,10 @@ def test_estimate_line_pu_zero_guards():
 def test_estimate_line_pu_values():
     r, x, b = Q.estimate_line_pu_params(220.0, 100.0, base_mva=100.0)
     z_base = (220.0 ** 2) / 100.0
-    assert r == pytest.approx((0.060 * 100.0) / z_base)
-    assert x == pytest.approx((0.400 * 100.0) / z_base)
-    assert b == pytest.approx((2.90 * 1e-6 * 100.0) * z_base)
+    rk, xk, bk = Q.estimate_line_rxb_per_km(220.0)
+    assert r == pytest.approx((rk * 100.0) / z_base)
+    assert x == pytest.approx((xk * 100.0) / z_base)
+    assert b == pytest.approx((bk * 1e-6 * 100.0) * z_base)
 
 
 # ── estimate_transformer_impedance_pu ────────────────────────────────

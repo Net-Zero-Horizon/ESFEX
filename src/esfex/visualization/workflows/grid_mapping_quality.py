@@ -105,16 +105,36 @@ def reason_incomplete(f: "GridFeature") -> str:
 # voltage class. Values are order-of-magnitude figures from utility
 # planning handbooks; calibrated for ACSR conductors and standard
 # tower geometry. (R, X) in ohm/km, B in microsiemens/km.
-_LINE_RXB_PER_KM: list[tuple[float, float, float, float]] = [
-    # (v_kv_min, r_per_km, x_per_km, b_uS_per_km)
-    (500.0, 0.020, 0.290, 5.20),
-    (345.0, 0.030, 0.330, 4.10),
-    (220.0, 0.060, 0.400, 2.90),
-    (110.0, 0.120, 0.420, 2.70),
-    (66.0,  0.200, 0.430, 2.60),
-    (33.0,  0.300, 0.440, 2.50),
-    (0.0,   0.500, 0.450, 2.40),
+# Canonical overhead AC standard line types per nominal voltage level,
+# derived from the PyPSA standard line-type library (MIT-licensed). Each row is
+# the representative bundled conductor for that level. A feature's line is
+# mapped to the type with the *closest* nominal voltage (PyPSA-Earth's
+# approach), and both the per-km impedance AND the thermal current rating come
+# from the same row, so capacity and impedance stay mutually consistent.
+#   (V_nom_kV, r_ohm/km, x_ohm/km, c_nF/km, i_nom_kA per circuit)
+_STD_LINE_TYPES: list[tuple[float, float, float, float, float]] = [
+    (33.0,  0.250, 0.400, 8.5,  0.40),
+    (66.0,  0.150, 0.400, 8.8,  0.50),
+    (110.0, 0.095, 0.380, 9.2,  0.74),   # 305-AL1/39-ST1A 110
+    (132.0, 0.090, 0.370, 9.3,  0.74),
+    (220.0, 0.060, 0.301, 12.5, 1.29),   # Al/St 240/40 2-bundle 220
+    (300.0, 0.040, 0.265, 13.2, 1.935),  # Al/St 240/40 3-bundle 300
+    (380.0, 0.030, 0.246, 13.8, 2.58),   # Al/St 240/40 4-bundle 380
+    (500.0, 0.020, 0.270, 13.0, 3.00),
+    (750.0, 0.013, 0.276, 13.1, 4.16),   # Al/St 560/50 4-bundle 750
 ]
+
+# N-1 security derate applied to the thermal rating (PyPSA-Earth s_max_pu).
+_LINE_SECURITY_FACTOR = 0.7
+_OMEGA_50HZ = 2.0 * 3.141592653589793 * 50.0  # rad/s, for shunt susceptance
+
+
+def _nearest_std_line_type(
+    voltage_kv: float,
+) -> tuple[float, float, float, float, float]:
+    """Standard line type whose nominal voltage is closest to *voltage_kv*."""
+    v = voltage_kv if voltage_kv and voltage_kv > 0 else 110.0
+    return min(_STD_LINE_TYPES, key=lambda t: abs(t[0] - v))
 
 
 def estimate_line_rxb_per_km(
@@ -122,13 +142,30 @@ def estimate_line_rxb_per_km(
 ) -> tuple[float, float, float]:
     """Return (R, X, B) per km for an overhead AC line at *voltage_kv*.
 
-    R, X in ohm/km, B in microsiemens/km. Pick the row whose voltage
-    threshold is the highest one ≤ ``voltage_kv``.
+    R, X in ohm/km, B in microsiemens/km, taken from the nearest standard
+    line type. Shunt susceptance B = omega * C is derived from the type's
+    per-km capacitance at 50 Hz.
     """
-    for v_min, r, x, b in _LINE_RXB_PER_KM:
-        if voltage_kv >= v_min:
-            return (r, x, b)
-    return _LINE_RXB_PER_KM[-1][1:]  # fallback (shouldn't reach)
+    _v, r, x, c_nf, _i = _nearest_std_line_type(voltage_kv)
+    b_uS_km = _OMEGA_50HZ * c_nf * 1e-3  # omega * C(nF) -> microsiemens/km
+    return (r, x, b_uS_km)
+
+
+def estimate_line_capacity_mw(
+    voltage_kv: float,
+    num_circuits: int = 1,
+) -> float:
+    """Thermal capacity (MW) from the nearest standard line type.
+
+    Apparent power per circuit S = sqrt(3) * V * I_nom (MVA), derated by the
+    N-1 security factor and scaled by the number of parallel circuits. This
+    replaces the previous voltage-step lookup so capacity is consistent with
+    the impedance taken from the same line type.
+    """
+    v_nom, _r, _x, _c, i_nom = _nearest_std_line_type(voltage_kv)
+    v = voltage_kv if voltage_kv and voltage_kv > 0 else v_nom
+    s_per_circuit = (3.0 ** 0.5) * v * i_nom  # MVA (MW at unity power factor)
+    return s_per_circuit * _LINE_SECURITY_FACTOR * max(1, num_circuits)
 
 
 def estimate_line_pu_params(
