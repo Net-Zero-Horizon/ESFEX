@@ -17,6 +17,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -1545,25 +1546,44 @@ class GridMappingBuildStep(QWidget):
         self._lbl_cluster_status.setText(msg)
 
     def _on_clustering_done(self, result):
+        # Naming finished. Paint its 100% state + the next-step labels BEFORE
+        # the (synchronous) node creation + build take over the main thread,
+        # otherwise the UI freezes on the last-painted naming message
+        # ("Naming nodes N-1/N") and looks stuck on the last node.
         self._cluster_progress.setValue(100)
+        self._lbl_cluster_status.setText(
+            f"Creating {len(result.node_positions)} nodes…"
+        )
+        self._lbl_build_status.setText("Building network…")
+        QApplication.processEvents()
 
-        with self._model.suspend_checkpoints():
-            # The Grid Builder defines the full node set, so drop any
-            # placeholder node(s) created with the system (e.g. the default
-            # "Node 0") — otherwise they duplicate the computed nodes.
-            while self._model.state.nodes:
-                self._model.remove_node(len(self._model.state.nodes) - 1)
-            for lat, lng, name in result.node_positions:
-                idx = self._model.add_node(name)
-                self._model.update_node(
-                    idx, centroid_lat=lat, centroid_lng=lng,
-                )
+        # Block per-element model signals while creating the nodes: otherwise
+        # every add_node renders a map marker + tree row synchronously, which
+        # freezes the UI for large regions. The pipeline repaints the whole
+        # network once via the single stateLoaded emitted at the end of
+        # _run_auto_connect.
+        self._model.blockSignals(True)
+        try:
+            with self._model.suspend_checkpoints():
+                # The Grid Builder defines the full node set, so drop any
+                # placeholder node(s) created with the system (e.g. the default
+                # "Node 0") — otherwise they duplicate the computed nodes.
+                while self._model.state.nodes:
+                    self._model.remove_node(len(self._model.state.nodes) - 1)
+                for lat, lng, name in result.node_positions:
+                    idx = self._model.add_node(name)
+                    self._model.update_node(
+                        idx, centroid_lat=lat, centroid_lng=lng,
+                    )
+        finally:
+            self._model.blockSignals(False)
 
         self._lbl_cluster_status.setText(
             f"Created {result.n_clusters} nodes via "
             f"{result.criterion_used} clustering."
         )
-        # Don't emit stateLoaded here — _run_build will emit at the end
+        QApplication.processEvents()
+        # Don't emit stateLoaded here — _run_auto_connect emits once at the end
         self._run_build()
 
     def _on_clustering_error(self, error_msg: str):
@@ -1613,14 +1633,22 @@ class GridMappingBuildStep(QWidget):
                 )
 
         try:
-            with self._model.suspend_checkpoints():
-                result = build_grid_from_features(
-                    model=self._model,
-                    features=self._features,
-                    bus_strategy=self._config.get("bus_strategy", "per_voltage"),
-                    snap_threshold_km=self._config.get("snap_threshold_km", 5.0),
-                    target_node=None,
-                )
+            # Block per-element signals so the hundreds of buses/generators/
+            # lines created by the build don't each render synchronously and
+            # freeze the UI; the final stateLoaded (in _run_auto_connect)
+            # repaints the whole network once.
+            self._model.blockSignals(True)
+            try:
+                with self._model.suspend_checkpoints():
+                    result = build_grid_from_features(
+                        model=self._model,
+                        features=self._features,
+                        bus_strategy=self._config.get("bus_strategy", "per_voltage"),
+                        snap_threshold_km=self._config.get("snap_threshold_km", 5.0),
+                        target_node=None,
+                    )
+            finally:
+                self._model.blockSignals(False)
 
             summary = result.summary()
             if skip_log:
