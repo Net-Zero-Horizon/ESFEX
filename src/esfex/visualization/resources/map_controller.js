@@ -649,25 +649,47 @@ if (document.readyState === 'loading') {
 }
 
 function initializeMap() {
+    // Constrain the map to a single copy of the world: no horizontal world
+    // wrapping/copies and no zooming out past 1x world size. This also keeps
+    // drawn coordinates within [-180, 180] (panning onto a wrapped copy of the
+    // globe used to yield out-of-range longitudes).
+    // Web Mercator world extent (latitude is clamped at ~±85.0511°).
+    var WORLD_BOUNDS = L.latLngBounds([[-85.0511, -180], [85.0511, 180]]);
     map = L.map('map', {
         center: [20, 0],
         zoom: 2,
         zoomControl: true,
+        worldCopyJump: false,
+        maxBounds: WORLD_BOUNDS,
+        maxBoundsViscosity: 1.0,
     });
+
+    // Limit zoom-out so the world never shrinks below the viewport (1x world).
+    // ``inside=true`` returns the smallest zoom at which the view still fits
+    // *inside* the world — i.e. the world fully covers the viewport — which is
+    // exactly the floor we want. (The default, inside=false, only guarantees
+    // the world is visible *with margin*, letting it shrink to a fraction of
+    // the view surrounded by grey.)
+    function _clampMinZoom() {
+        if (!map.getSize().x) { return; }  // container not laid out yet
+        map.setMinZoom(map.getBoundsZoom(WORLD_BOUNDS, true));
+    }
+    map.whenReady(_clampMinZoom);
+    map.on('load resize', _clampMinZoom);
 
     // Base map layers
     baseMaps = {
         'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            maxZoom: 19, noWrap: true, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }),
         'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            maxZoom: 18, attribution: '&copy; Esri'
+            maxZoom: 18, noWrap: true, attribution: '&copy; Esri'
         }),
         'Terrain': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-            maxZoom: 17, subdomains: 'abc', attribution: '&copy; OpenTopoMap'
+            maxZoom: 17, noWrap: true, subdomains: 'abc', attribution: '&copy; OpenTopoMap'
         }),
         'Dark': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            maxZoom: 19, subdomains: 'abcd', attribution: '&copy; CartoDB'
+            maxZoom: 19, noWrap: true, subdomains: 'abcd', attribution: '&copy; CartoDB'
         }),
         // Offline: vector world countries (Natural Earth 1:110m) bundled
         // locally. No network requests, just country polygons over a

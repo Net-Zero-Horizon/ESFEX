@@ -48,6 +48,9 @@ Per-release notes are also published on the
   layers return data for areas crossing the ±180° meridian.
 - **"Naming nodes" hang** — the node-naming step is time-boxed and the
   subsequent rendering no longer freezes the UI after large-region builds.
+- **Map zoom-out and world wrapping** — the Grid Builder map is constrained to a
+  single copy of the world: it no longer zooms out below 1× world size or pans
+  onto wrapped copies of the globe (which produced out-of-range longitudes).
 - **"Lines toward a centroid" after a rebuild** — the node-assignment spatial
   index cached on the centroid *count*, so a rebuild with re-clustered
   centroids of the same count reused a stale tree and collapsed the network
