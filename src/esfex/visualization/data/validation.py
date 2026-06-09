@@ -5254,6 +5254,15 @@ def validate_network_integrity(
                     queue.append(nb)
         components.append(comp)
 
+    # Demand is estimated in a later workflow step — at build/simplification
+    # time no bus carries demand yet, so a "generation but no demand" check
+    # would fire for every generation island and is pure noise. Only run the
+    # demand-vs-generation classification once demand actually exists somewhere
+    # in the network.
+    network_has_demand = any(
+        bus.demand_fraction > 0 for bus in state.buses.values()
+    )
+
     # Classify each component
     for comp in components:
         comp_gen_cap = sum(
@@ -5271,6 +5280,11 @@ def validate_network_integrity(
             for bid in comp if bid in state.buses
         )
         comp_has_demand = comp_demand_frac > 0
+
+        if not network_has_demand:
+            # Demand not estimated yet — nothing meaningful to say about
+            # demand/generation balance.
+            continue
 
         if comp_has_demand and not comp_has_gen:
             bus_list = ", ".join(sorted(comp)[:5])

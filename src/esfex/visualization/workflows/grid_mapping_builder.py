@@ -163,6 +163,26 @@ _TECH_CATALOG: dict[str, dict] = {
 # cycle peaker rather than a combined-cycle plant (powerplantmatching heuristic).
 _OCGT_MAX_MW = 100.0
 
+# Tight cap (km) for snapping a transmission-line endpoint to a bus. A real
+# endpoint sits on the substation it terminates at or on a shared junction
+# node, so a small tolerance captures the true topology; the old 5 km Bus snap
+# over-reached and collapsed whole short lines onto a single bus (dropped as
+# self-loops). Applied only after merge + split have captured the real
+# connections, so tightening removes the over-reach without fragmenting. (#16)
+_LINE_ENDPOINT_SNAP_CAP_KM = 0.5
+
+# Faithful mode: line endpoints only share a bus when they are the SAME OSM
+# node (coincident within this tiny tolerance, ~OSM coordinate precision).
+# Everything else becomes its own bus and is merged later by clustering.
+_FAITHFUL_JUNCTION_SNAP_KM = 0.05
+
+# Faithful mode: buses within this distance and at the same voltage are the
+# same physical station and are clustered into one. A "same station" radius,
+# not a reach distance — exposed in the GUI with this sensible default so the
+# user can widen it if large substations still fragment, or tighten it if two
+# distinct stations merge.
+_FAITHFUL_STATION_CLUSTER_KM = 1.0
+
 
 def classify_technology(
     canonical_fuel: str,
@@ -362,6 +382,9 @@ def build_grid_from_features(
     bus_strategy: str = "per_voltage",
     snap_threshold_km: float = 5.0,
     target_node: int | None = None,
+    faithful: bool = False,
+    station_radius_km: float = _FAITHFUL_STATION_CLUSTER_KM,
+    min_capacity_mw: float = 0.0,
 ) -> ParseResult:
     """Create GUI elements from fetched grid features.
 
@@ -396,6 +419,24 @@ def build_grid_from_features(
     substations = [f for f in active if f.feature_type == "substation"]
     generators = [f for f in active if f.feature_type == "generator"]
     batteries = [f for f in active if f.feature_type == "battery"]
+
+    # Enforce the "Min gen capacity" filter as a firm contract on the built
+    # network. The fetch-time filter keeps generators of unknown capacity
+    # (capacity_mw == 0, common in OSM); those would otherwise enter the model
+    # at 0 MW and violate the minimum. When the minimum is > 0, drop every
+    # generator that cannot be shown to meet it (including unknown = 0 MW).
+    # A minimum of 0 means "include all" (the documented behaviour).
+    if min_capacity_mw > 0:
+        n_before = len(generators)
+        generators = [
+            g for g in generators if float(g.capacity_mw or 0.0) >= min_capacity_mw
+        ]
+        n_dropped = n_before - len(generators)
+        if n_dropped:
+            result.warnings.append(
+                f"Min gen capacity: dropped {n_dropped} generator(s) below "
+                f"{min_capacity_mw:g} MW (including unknown-capacity units)."
+            )
     lines = [f for f in active if f.feature_type == "line"]
     transformers = [f for f in active if f.feature_type == "transformer"]
     converters = [f for f in active if f.feature_type == "converter"]
@@ -446,11 +487,62 @@ def build_grid_from_features(
             result.warnings.append(f"Battery '{bat.name}': {exc}")
 
     # ── Phase 4: Lines → GuiTransmissionLine ──────────────────────
+    # Capture real topology first (#16): split any line where a substation
+    # bus sits ON it (an OSM way passing through a station without a node
+    # there). This connects mid-line substations from the real geometry, so
+    # the network no longer fragments into pieces the auto-connect would have
+    # to bridge with fabricated straight lines.
+    try:
+        from esfex.visualization.workflows.grid_mapping_topology import (
+            merge_contiguous_line_segments,
+            split_lines_at_substations,
+        )
+        # 1) Merge OSM's fragmented segments into whole lines, so short
+        #    segments don't collapse onto a single bus (→ self-loop → dropped),
+        #    which was silently deleting real connectivity.
+        n_segments = len(lines)
+        lines = merge_contiguous_line_segments(lines)
+        if len(lines) != n_segments:
+            result.warnings.append(
+                f"Topology: merged {n_segments} segments → "
+                f"{len(lines)} contiguous lines."
+            )
+        # 2) Split the merged lines where a substation sits on them.
+        sub_buses = [
+            (bid, b.latitude, b.longitude, b.voltage_kv)
+            for bid, b in state.buses.items()
+        ]
+        n_before_split = len(lines)
+        lines = split_lines_at_substations(lines, sub_buses)
+        if len(lines) != n_before_split:
+            result.warnings.append(
+                f"Topology: split overpassing lines "
+                f"({n_before_split} → {len(lines)} segments)."
+            )
+    except Exception as exc:
+        logger.warning("Line topology pre-processing skipped (non-fatal): %s", exc)
 
+    # Line endpoints snap with a TIGHT tolerance, independent of the general
+    # substation Bus snap. With merge (whole lines) + split (substations on
+    # lines) already done, the real connections are captured, so a line
+    # endpoint only connects to a bus it genuinely sits on (a substation
+    # termination or an exact junction) — otherwise it becomes its own bus.
+    # The previous 5 km snap collapsed any line spanning <5 km near a single
+    # bus onto that bus (from_bus == to_bus → dropped), silently deleting real
+    # lines. (#16)
+    # Faithful mode: a tiny snap so each line endpoint becomes its own bus
+    # (only EXACTLY-coincident OSM junction nodes share); a later clustering
+    # pass merges the ones that are the same physical station. This removes the
+    # magic "reach" distance entirely — connectivity comes from coincidence,
+    # not from how far a line is allowed to reach for a bus.
+    line_snap_km = (
+        _FAITHFUL_JUNCTION_SNAP_KM if faithful
+        else min(snap_threshold_km, _LINE_ENDPOINT_SNAP_CAP_KM)
+    )
     for line in lines:
         try:
             _create_line(
-                state, line, snap_threshold_km,
+                state, line, line_snap_km,
                 result, centroids, target_node,
             )
         except Exception as exc:
@@ -514,53 +606,84 @@ def build_grid_from_features(
         result.fuels_created += fc.get("fuels_added", 0)
         result.technologies_created += fc.get("techs_added", 0)
 
-        # Phase 10: Infer bus roles + redistribute demand_fraction.
-        # Without this, every bus is "load" with full demand fraction,
-        # producing physically nonsensical bus-balance constraints in
-        # the operational LP (HV junctions forced to serve load they
-        # have no path to).
-        br = repair_bus_roles_and_demand(model.state)
-        if br.get("buses_role_changed"):
-            result.warnings.append(
-                f"Bus roles inferred: {br['buses_role_changed']} buses re-assigned"
-                f" (load → connection / mixed) across "
-                f"{br.get('nodes_redistributed', 0)} nodes"
-            )
+        # Faithful mode (#16): STOP here. The following passes fabricate
+        # connectivity to make the network electrically solvable — they
+        # re-route buses, tie buses to a per-node "hub" (a star-coupling that
+        # can span the whole node, i.e. hundreds of km, ignoring any distance
+        # limit), and add reserves. That is the opposite of representing the
+        # real OSM grid. In faithful mode the built network is exactly the OSM
+        # topology (substations + real line traces); turning it into a solvable
+        # model is a separate, explicit step the user opts into later.
+        if not faithful:
+            # Phase 10: Infer bus roles + redistribute demand_fraction.
+            # Without this, every bus is "load" with full demand fraction,
+            # producing physically nonsensical bus-balance constraints in
+            # the operational LP (HV junctions forced to serve load they
+            # have no path to).
+            br = repair_bus_roles_and_demand(model.state)
+            if br.get("buses_role_changed"):
+                result.warnings.append(
+                    f"Bus roles inferred: {br['buses_role_changed']} buses "
+                    f"re-assigned (load → connection / mixed) across "
+                    f"{br.get('nodes_redistributed', 0)} nodes"
+                )
 
-        # Phase 11: Guarantee short electrical coupling demand → supply
-        # inside each node.  OSM imports leave some demand buses 10+
-        # zig-zag hops from generation (no direct step-up), which makes
-        # the DC-OPF keep angles at 0 and shed at VOLL despite ample
-        # in-node generation.  Insert a direct transformer/line where the
-        # path is too long.  Runs AFTER role/demand repair so supply and
-        # demand buses are correctly identified.
-        nc = repair_node_internal_coupling(model.state)
-        if nc.get("buses_coupled"):
-            result.transformers_added += nc.get("transformers_added", 0)
-            result.warnings.append(
-                f"Node star-coupling: {nc['buses_coupled']} bus(es) tied to "
-                f"their node hub across {nc.get('nodes_restructured',0)} node(s) "
-                f"(+{nc.get('transformers_added',0)} TR, "
-                f"+{nc.get('lines_added',0)} line) — were >2 hops from the hub"
-            )
+            # Phase 11: Guarantee short electrical coupling demand → supply
+            # inside each node.  OSM imports leave some demand buses 10+
+            # zig-zag hops from generation (no direct step-up), which makes
+            # the DC-OPF keep angles at 0 and shed at VOLL despite ample
+            # in-node generation.  Insert a direct transformer/line where the
+            # path is too long.  Runs AFTER role/demand repair so supply and
+            # demand buses are correctly identified.
+            nc = repair_node_internal_coupling(model.state)
+            if nc.get("buses_coupled"):
+                result.transformers_added += nc.get("transformers_added", 0)
+                result.warnings.append(
+                    f"Node star-coupling: {nc['buses_coupled']} bus(es) tied to "
+                    f"their node hub across {nc.get('nodes_restructured',0)} "
+                    f"node(s) (+{nc.get('transformers_added',0)} TR, "
+                    f"+{nc.get('lines_added',0)} line) — were >2 hops from hub"
+                )
     except Exception as exc:
         result.warnings.append(f"Fuel/bus consistency repair: {exc}")
 
     # ── Phase 12: Node operating defaults (reserves + losses) ─────
     # Fill the operational fields the build leaves at 0 so the produced
-    # network is complete and behaves with a security margin.
-    try:
-        from esfex.visualization.workflows.grid_mapping_quality import (
-            apply_node_operational_defaults,
-        )
-        nd = apply_node_operational_defaults(model.state)
-        if nd.get("reserves") or nd.get("losses"):
-            result.warnings.append(
-                f"Node defaults: reserves set on {nd.get('reserves', 0)} node(s), "
-                f"losses on {nd.get('losses', 0)} node(s)"
+    # network is complete and behaves with a security margin. Skipped in
+    # faithful mode (that is a solvability concern, not real OSM topology).
+    if not faithful:
+        try:
+            from esfex.visualization.workflows.grid_mapping_quality import (
+                apply_node_operational_defaults,
             )
-    except Exception as exc:
-        result.warnings.append(f"Node operational defaults: {exc}")
+            nd = apply_node_operational_defaults(model.state)
+            if nd.get("reserves") or nd.get("losses"):
+                result.warnings.append(
+                    f"Node defaults: reserves set on {nd.get('reserves', 0)} "
+                    f"node(s), losses on {nd.get('losses', 0)} node(s)"
+                )
+        except Exception as exc:
+            result.warnings.append(f"Node operational defaults: {exc}")
+
+    # ── Faithful topology finalize: cluster same-station buses ────────────
+    # Merge buses that are the same physical node (coincident junctions, a line
+    # endpoint sitting on a substation, duplicate substation buses) so the real
+    # topology is connected — without ever snapping a line to a far bus.
+    if faithful:
+        try:
+            from esfex.visualization.workflows.grid_mapping_topology import (
+                cluster_nearby_buses,
+            )
+            cl = cluster_nearby_buses(
+                model.state, tol_m=station_radius_km * 1000.0)
+            if cl.get("merged"):
+                result.warnings.append(
+                    f"Topology: clustered {cl['merged']} bus(es) into their "
+                    f"station, removed {cl.get('selfloops_dropped', 0)} "
+                    f"internal self-loop line(s)."
+                )
+        except Exception as exc:
+            result.warnings.append(f"Bus clustering: {exc}")
 
     return result
 

@@ -55,27 +55,26 @@ def test_battery_complete_requires_power_or_energy():
     assert not Q.is_feature_complete(feat("battery"))
 
 
-def test_line_needs_geometry_and_voltage():
+def test_line_needs_only_geometry():
+    # Topology (#16): a line is kept on geometry alone — a missing voltage is
+    # inferred during the build, never a reason to delete a real connection.
     coords = [(0.0, 0.0), (1.0, 1.0)]
     assert Q.is_feature_complete(feat("line", line_coords=coords, voltage_kv=110))
-    # one point only → incomplete
+    assert Q.is_feature_complete(feat("line", line_coords=coords, voltage_kv=0))
+    # one point only → no drawable geometry → incomplete
     assert not Q.is_feature_complete(
         feat("line", line_coords=[(0.0, 0.0)], voltage_kv=110))
-    # no voltage → incomplete
-    assert not Q.is_feature_complete(feat("line", line_coords=coords, voltage_kv=0))
 
 
-def test_transformer_either_side():
+def test_topology_kept_without_voltage():
+    # Transformers / converters / substations are topology and are never
+    # dropped for a missing voltage (it is inferred/defaulted at build time).
+    assert Q.is_feature_complete(feat("transformer"))
     assert Q.is_feature_complete(feat("transformer", voltage_kv=220))
-    assert Q.is_feature_complete(feat("transformer", voltage_kv_secondary=110))
-    assert not Q.is_feature_complete(feat("transformer"))
-
-
-def test_substation_and_converter():
+    assert Q.is_feature_complete(feat("substation"))
     assert Q.is_feature_complete(feat("substation", voltage_kv=220))
-    assert not Q.is_feature_complete(feat("substation"))
+    assert Q.is_feature_complete(feat("converter"))
     assert Q.is_feature_complete(feat("converter", voltage_kv=500))
-    assert not Q.is_feature_complete(feat("converter"))
 
 
 def test_fuel_entry_storage_need_name():
@@ -107,17 +106,17 @@ def test_reason_battery():
 def test_reason_line():
     assert Q.reason_incomplete(feat("line")) == "no geometry"
     coords = [(0.0, 0.0), (1.0, 1.0)]
-    assert Q.reason_incomplete(feat("line", line_coords=coords)) == "no voltage"
+    # geometry present (even without voltage) → complete, no reason
+    assert Q.reason_incomplete(feat("line", line_coords=coords)) == ""
     assert Q.reason_incomplete(
         feat("line", line_coords=coords, voltage_kv=110)) == ""
 
 
-def test_reason_transformer_substation_converter():
-    assert Q.reason_incomplete(
-        feat("transformer")) == "no voltage on either side"
-    assert Q.reason_incomplete(feat("transformer", voltage_kv=220)) == ""
-    assert Q.reason_incomplete(feat("substation")) == "no voltage"
-    assert Q.reason_incomplete(feat("converter")) == "no voltage"
+def test_reason_topology_never_incomplete():
+    # topology kept regardless of voltage → no reason string
+    assert Q.reason_incomplete(feat("transformer")) == ""
+    assert Q.reason_incomplete(feat("substation")) == ""
+    assert Q.reason_incomplete(feat("converter")) == ""
 
 
 def test_reason_fuel_entry_and_unknown():

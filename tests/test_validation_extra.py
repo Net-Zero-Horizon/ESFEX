@@ -1269,12 +1269,29 @@ def test_validate_network_integrity_disconnected_demand():
 
 
 def test_validate_network_integrity_isolated_generation():
+    # Demand exists elsewhere in the network (so it has been estimated): a
+    # separate component holding only generation is then genuinely isolated.
+    nodes = [_node(0, peak=10.0)]
+    buses = {
+        "a": _bus("a", node=0, df=0.0),               # gen-only component
+        "d": _bus("d", node=0, df=1.0, role="load"),  # demand elsewhere
+    }
+    gens = {"g": _gen("g", bus="a", node=0, rated=50.0)}
+    st = _state(nodes=nodes, buses=buses, generators=gens)
+    issues = V.validate_network_integrity(st)
+    assert any("Isolated generation" in i.message for i in issues)
+
+
+def test_isolated_generation_suppressed_when_no_demand_yet():
+    # Demand is estimated in a later workflow step. Before it runs, no bus
+    # carries demand, so the "generation but no demand" check would fire for
+    # every generation island — pure noise. It must stay silent in that state.
     nodes = [_node(0)]
     buses = {"a": _bus("a", node=0, df=0.0)}
     gens = {"g": _gen("g", bus="a", node=0, rated=50.0)}
     st = _state(nodes=nodes, buses=buses, generators=gens)
     issues = V.validate_network_integrity(st)
-    assert any("Isolated generation" in i.message for i in issues)
+    assert not any("Isolated generation" in i.message for i in issues)
 
 
 # ══════════════════════════════════════════════════════════════════

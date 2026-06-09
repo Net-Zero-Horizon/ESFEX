@@ -241,6 +241,33 @@ class TestFindExisting:
 # ======================================================================
 
 
+class TestMinCapacityBuildFilter:
+    def test_drops_below_min_and_unknown_capacity(self):
+        # min_capacity is a firm contract on the built network: a known unit
+        # below the floor AND an unknown-capacity unit (capacity_mw == 0, which
+        # the fetch filter lets through) are both dropped; above-floor kept.
+        model = MockGuiModel(_make_state(buses={}))
+        feats = [
+            _feat("generator", name="big", fuel="coal", capacity_mw=100.0),
+            _feat("generator", name="small", fuel="coal", capacity_mw=0.4),
+            _feat("generator", name="unknown", fuel="coal", capacity_mw=0.0),
+        ]
+        gmb.build_grid_from_features(model, feats, min_capacity_mw=1.0)
+        names = {g.name for g in model.state.generators.values()}
+        assert names == {"big"}
+
+    def test_zero_min_includes_all(self):
+        # Documented behaviour: min_capacity == 0 keeps every generator,
+        # including unknown-capacity ones.
+        model = MockGuiModel(_make_state(buses={}))
+        feats = [
+            _feat("generator", name="big", fuel="coal", capacity_mw=100.0),
+            _feat("generator", name="unknown", fuel="coal", capacity_mw=0.0),
+        ]
+        gmb.build_grid_from_features(model, feats, min_capacity_mw=0.0)
+        assert len(model.state.generators) == 2
+
+
 class TestCreateFuelsAndTechnologies:
     def test_creates_default_fuel_and_tech(self):
         model = MockGuiModel(_make_state())
@@ -1655,3 +1682,45 @@ def test_spatial_bus_index_matches_linear_scan():
         # within the search window the grid must find the true nearest
         if bdist <= 5.0 / 111.0 + 0.5:
             assert gid == best[0]
+
+
+def test_overpassing_substation_yields_connected_network():
+    """End-to-end (#16): a line passing over a mid-route substation is split so
+    the substation connects to both segments — the network is connected from
+    real geometry, with no fabricated bridge."""
+    from collections import Counter
+    model = MockGuiModel(_make_state(buses={}))
+    feats = [
+        _feat("substation", name="Smid", lat=21.0, lng=-81.5, voltage_kv=220.0),
+        _feat("line", name="L", lat=21.0, lng=-82.0, voltage_kv=220.0,
+              line_coords=[(21.0, -82.0), (21.0, -81.0)]),
+    ]
+    gmb.build_grid_from_features(model, feats, snap_threshold_km=5.0)
+    s = model.state
+    # the line was split at the overpassing substation → two segments
+    assert len(s.transmission_lines) == 2
+    # both segments terminate on the same (substation) bus → A—S—B connected
+    uses = Counter()
+    for ln in s.transmission_lines:
+        uses[ln.from_bus] += 1
+        uses[ln.to_bus] += 1
+    assert max(uses.values()) == 2  # the shared substation bus
+
+
+def test_line_near_one_substation_is_not_collapsed():
+    """A line spanning ~3 km with one end at a substation must NOT collapse
+    onto that single bus (both endpoints snapping to it → dropped self-loop).
+    The tight line-endpoint snap gives the far end its own bus so the real
+    line survives. (#16)"""
+    model = MockGuiModel(_make_state(buses={}))
+    feats = [
+        _feat("substation", name="S", lat=21.0, lng=-82.0, voltage_kv=220.0),
+        # ~3.1 km east of S — beyond the 0.5 km line-snap, within the old 5 km.
+        _feat("line", name="L", lat=21.0, lng=-82.0, voltage_kv=220.0,
+              line_coords=[(21.0, -82.0), (21.0, -81.97)]),
+    ]
+    gmb.build_grid_from_features(model, feats, snap_threshold_km=5.0)
+    s = model.state
+    assert len(s.transmission_lines) == 1  # survived, not dropped
+    ln = s.transmission_lines[0]
+    assert ln.from_bus != ln.to_bus  # two distinct buses, no collapse

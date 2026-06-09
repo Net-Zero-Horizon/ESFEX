@@ -38,25 +38,25 @@ def is_feature_complete(f: "GridFeature") -> bool:
     accepted; the heuristics module fills the rest.
     """
     t = f.feature_type
+    # TOPOLOGY elements (lines, transformers, converters, substations) define
+    # the network graph. They are NEVER dropped for a missing voltage — OSM
+    # very often omits the voltage tag, and dropping these for that reason
+    # deletes the grid's edges/nodes, fragmenting the network so badly it can
+    # only be "reconnected" by fabricating artificial lines. Voltage is
+    # inferred / defaulted during the build instead. Only a missing GEOMETRY
+    # (a line that cannot be drawn at all) makes a topology element unusable.
+    if t == "line":
+        return len(f.line_coords) >= 2  # geometry only; voltage inferred
+    if t in ("transformer", "converter", "substation"):
+        return True  # keep — voltage inferred/defaulted during build
+    # NON-topology elements are attached to a bus and do not affect
+    # connectivity, so dropping a genuinely-empty one is safe.
     if t == "generator":
         # Need positive capacity AND some idea of fuel/type
         return f.capacity_mw > 0 and bool(f.fuel or f.gen_type)
     if t == "battery":
         # Need either power or energy capacity
         return f.capacity_mw > 0 or f.energy_mwh > 0
-    if t == "line":
-        # Need a real geometry AND a voltage (capacity is derivable)
-        return (
-            len(f.line_coords) >= 2
-            and f.voltage_kv > 0
-        )
-    if t == "transformer":
-        # Need at least one of the two sides; the other is inferable
-        return f.voltage_kv > 0 or f.voltage_kv_secondary > 0
-    if t == "substation":
-        return f.voltage_kv > 0
-    if t == "converter":
-        return f.voltage_kv > 0
     if t in ("fuel_entry", "fuel_storage"):
         # These come from OSM tagging; presence of a name is the floor
         return bool(f.name)
@@ -79,22 +79,14 @@ def reason_incomplete(f: "GridFeature") -> str:
         if f.capacity_mw <= 0 and f.energy_mwh <= 0:
             return "no power or energy capacity"
     elif t == "line":
+        # Topology: only missing GEOMETRY is disqualifying; voltage is inferred.
         if len(f.line_coords) < 2:
             return "no geometry"
-        if f.voltage_kv <= 0:
-            return "no voltage"
-    elif t == "transformer":
-        if f.voltage_kv <= 0 and f.voltage_kv_secondary <= 0:
-            return "no voltage on either side"
-    elif t == "substation":
-        if f.voltage_kv <= 0:
-            return "no voltage"
-    elif t == "converter":
-        if f.voltage_kv <= 0:
-            return "no voltage"
     elif t in ("fuel_entry", "fuel_storage"):
         if not f.name:
             return "no name"
+    # transformer / converter / substation are never incomplete (kept as
+    # topology; voltage inferred during the build).
     return ""
 
 

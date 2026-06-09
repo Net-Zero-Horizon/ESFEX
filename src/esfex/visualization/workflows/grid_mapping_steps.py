@@ -140,13 +140,9 @@ class GridMappingSourceFetchStep(QWidget):
         )
         src_lay.addWidget(self._chk_gem)
 
-        self._chk_gridfinder = QCheckBox("GridFinder (Predicted Grid Routes)")
-        self._chk_gridfinder.setChecked(False)
-        self._chk_gridfinder.setToolTip(
-            "Predicted transmission/distribution line routes from satellite "
-            "imagery. Useful for regions with sparse OSM data."
-        )
-        src_lay.addWidget(self._chk_gridfinder)
+        # GridFinder (predicted line routes) is intentionally not offered:
+        # it carries only ML-predicted geometry — no voltage, no capacity —
+        # so mixing it with the real OSM topology adds more noise than signal.
 
         layout.addWidget(src_group)
 
@@ -187,16 +183,6 @@ class GridMappingSourceFetchStep(QWidget):
             "Minimum generator capacity. Set to 0 to include all."
         )
         filter_form.addRow("Min gen capacity:", self._spin_min_capacity)
-
-        self._spin_snap = QDoubleSpinBox()
-        self._spin_snap.setRange(0.1, 100.0)
-        self._spin_snap.setValue(5.0)
-        self._spin_snap.setDecimals(1)
-        self._spin_snap.setSuffix(" km")
-        self._spin_snap.setToolTip(
-            "Distance threshold for snapping new elements to existing buses."
-        )
-        filter_form.addRow("Bus snap:", self._spin_snap)
         settings_grid.addWidget(filter_widget, 1, 0)
 
         # Columns 2–3 — Element Types (4+4 split)
@@ -308,15 +294,6 @@ class GridMappingSourceFetchStep(QWidget):
         self._progress_layout.addWidget(self._lbl_gem)
         self._progress_layout.addWidget(self._bar_gem)
         self._progress_layout.addWidget(self._status_gem)
-
-        # GridFinder
-        self._lbl_gf = QLabel("GridFinder:")
-        self._bar_gf = QProgressBar()
-        self._bar_gf.setRange(0, 100)
-        self._status_gf = QLabel("")
-        self._progress_layout.addWidget(self._lbl_gf)
-        self._progress_layout.addWidget(self._bar_gf)
-        self._progress_layout.addWidget(self._status_gf)
 
         layout.addWidget(self._progress_group)
 
@@ -483,11 +460,9 @@ class GridMappingSourceFetchStep(QWidget):
                 "osm": self._chk_osm.isChecked(),
                 "wri": self._chk_wri.isChecked(),
                 "gem": self._chk_gem.isChecked(),
-                "gridfinder": self._chk_gridfinder.isChecked(),
             },
             "min_voltage_kv": self._spin_min_voltage.value(),
             "min_capacity_mw": self._spin_min_capacity.value(),
-            "snap_threshold_km": self._spin_snap.value(),
             "element_types": element_types,
             "bus_strategy": (
                 "per_voltage" if self._radio_per_voltage.isChecked()
@@ -545,7 +520,6 @@ class GridMappingSourceFetchStep(QWidget):
     def _start_fetch(self, bounds, config, polygon):
         from esfex.visualization.workflows.grid_mapping_fetchers import (
             GEMGridFetcher,
-            GridFinderFetcher,
             OSMGridFetcher,
             WRIGridFetcher,
         )
@@ -556,17 +530,15 @@ class GridMappingSourceFetchStep(QWidget):
         etypes = config["element_types"]
 
         # Reset progress bars
-        for bar in (self._bar_osm, self._bar_wri, self._bar_gem, self._bar_gf):
+        for bar in (self._bar_osm, self._bar_wri, self._bar_gem):
             bar.setValue(0)
-        for lbl in (self._status_osm, self._status_wri, self._status_gem,
-                     self._status_gf):
+        for lbl in (self._status_osm, self._status_wri, self._status_gem):
             lbl.setText("")
 
         # Hide unused sources
         osm_on = sources.get("osm", False)
         wri_on = sources.get("wri", False)
         gem_on = sources.get("gem", False)
-        gf_on = sources.get("gridfinder", False)
 
         self._lbl_osm.setVisible(osm_on)
         self._bar_osm.setVisible(osm_on)
@@ -579,10 +551,6 @@ class GridMappingSourceFetchStep(QWidget):
         self._lbl_gem.setVisible(gem_on)
         self._bar_gem.setVisible(gem_on)
         self._status_gem.setVisible(gem_on)
-
-        self._lbl_gf.setVisible(gf_on)
-        self._bar_gf.setVisible(gf_on)
-        self._status_gf.setVisible(gf_on)
 
         if osm_on:
             self._pending += 1
@@ -636,21 +604,6 @@ class GridMappingSourceFetchStep(QWidget):
             self._fetchers.append(fetcher)
             fetcher.start()
 
-        if gf_on:
-            self._pending += 1
-            fetcher = GridFinderFetcher(bounds)
-            fetcher.progress.connect(
-                lambda pct, msg: self._on_progress("gridfinder", pct, msg)
-            )
-            fetcher.finished.connect(
-                lambda feats: self._on_finished("gridfinder", feats)
-            )
-            fetcher.error.connect(
-                lambda err: self._on_error("gridfinder", err)
-            )
-            self._fetchers.append(fetcher)
-            fetcher.start()
-
         if self._pending == 0:
             self._summary_label.setText("No sources selected.")
             self.fetchFinished.emit()
@@ -686,8 +639,6 @@ class GridMappingSourceFetchStep(QWidget):
             return self._bar_wri, self._status_wri
         if source == "gem":
             return self._bar_gem, self._status_gem
-        if source == "gridfinder":
-            return self._bar_gf, self._status_gf
         return None, None
 
     def _finalize(self):
@@ -1139,64 +1090,13 @@ class GridMappingBuildStep(QWidget):
         build_lay = QVBoxLayout(build_group)
         build_lay.addWidget(QLabel(
             "Create buses, generators, lines, transformers and converters "
-            "from the fetched features, then auto-connect isolated "
-            "sub-networks using transformer chains and bridges."
+            "from the fetched features."
         ))
 
-        # Two-column body: left = auto-connect numeric params,
-        # right = build / simplify options.
-        build_cols = QHBoxLayout()
-
-        # ─ Left column: auto-connect parameters ─────────────────────
-        build_left = QVBoxLayout()
-        config_form = QFormLayout()
-        config_form.setContentsMargins(0, 0, 0, 0)
-
-        self._spin_max_iter = QSpinBox()
-        self._spin_max_iter.setRange(1, 100)
-        self._spin_max_iter.setValue(20)
-        self._spin_max_iter.setToolTip(
-            "Maximum number of check/fix iterations. The loop stops "
-            "early when no issues remain."
-        )
-        config_form.addRow("Max iterations:", self._spin_max_iter)
-
-        self._spin_voltage_ratio = QDoubleSpinBox()
-        self._spin_voltage_ratio.setRange(1.1, 10.0)
-        self._spin_voltage_ratio.setValue(1.5)
-        self._spin_voltage_ratio.setDecimals(1)
-        self._spin_voltage_ratio.setToolTip(
-            "Bus-to-bus lines whose endpoint voltage ratio exceeds this "
-            "threshold are replaced with a transformer chain."
-        )
-        config_form.addRow("Voltage mismatch ratio:", self._spin_voltage_ratio)
-
-        self._spin_max_distance = QDoubleSpinBox()
-        self._spin_max_distance.setRange(10.0, 10000.0)
-        self._spin_max_distance.setValue(100.0)
-        self._spin_max_distance.setDecimals(0)
-        self._spin_max_distance.setSuffix(" km")
-        self._spin_max_distance.setToolTip(
-            "Maximum interconnection distance. Components beyond this "
-            "distance form independent local networks instead of being "
-            "bridged to the main network (e.g. islands)."
-        )
-        config_form.addRow("Max interconnection distance:", self._spin_max_distance)
-
-        self._spin_lv_voltage = QDoubleSpinBox()
-        self._spin_lv_voltage.setRange(0.001, 1500.0)
-        self._spin_lv_voltage.setValue(0.48)
-        self._spin_lv_voltage.setDecimals(3)
-        self._spin_lv_voltage.setSuffix(" kV")
-        self._spin_lv_voltage.setToolTip(
-            "Voltage level for auto-created LV buses in equipment chains."
-        )
-        config_form.addRow("LV bus voltage:", self._spin_lv_voltage)
-
-        build_left.addLayout(config_form)
-        build_left.addStretch()
-
-        # ─ Right column: build / simplify options ───────────────────
+        # Single-column body: build / simplify options. The old left column of
+        # auto-connect numeric parameters (max iterations, voltage mismatch
+        # ratio, LV bus voltage, max interconnection distance) was retired with
+        # the fabricating pipeline — faithful import does not use any of them.
         build_right = QVBoxLayout()
 
         # Availability profiles: synthetic by default (instant);
@@ -1224,19 +1124,39 @@ class GridMappingBuildStep(QWidget):
         avail_box.addStretch()
         build_right.addLayout(avail_box)
 
-        self._chk_skip_incomplete = QCheckBox(
-            "Skip incomplete elements during build"
+        # Faithful import is now the ONLY build mode (#16): the built network
+        # is always the real OSM topology — substations and the actual line
+        # traces — with no fabricated connectivity (no bus-role inference, no
+        # node star-coupling, no generator step-up chains, no long bridges).
+        # The legacy fabricating pipeline produced geographically distorted
+        # networks and has been retired, so there is no longer a toggle.
+
+        # Station merge radius (#16): the ONE meaningful tolerance in faithful
+        # mode. Buses of the same voltage within this distance are the same
+        # physical station and are clustered into one. It is a "same station"
+        # radius, NOT a reach distance — the default connects each line endpoint
+        # to its substation without inventing links. Widen it if large
+        # substations still fragment; tighten it if two distinct stations merge.
+        radius_row = QHBoxLayout()
+        radius_row.setContentsMargins(0, 0, 0, 0)
+        radius_row.addWidget(QLabel("Station merge radius:"))
+        self._spin_station_radius = QDoubleSpinBox()
+        self._spin_station_radius.setRange(0.05, 5.0)
+        self._spin_station_radius.setValue(1.0)
+        self._spin_station_radius.setSingleStep(0.25)
+        self._spin_station_radius.setDecimals(2)
+        self._spin_station_radius.setSuffix(" km")
+        self._spin_station_radius.setToolTip(
+            "Faithful import only. Buses of the same voltage within this radius\n"
+            "are treated as one physical station and merged — this is what\n"
+            "connects each line endpoint to its substation. It is a 'same\n"
+            "station' tolerance, not a reach: lines are never snapped to a far\n"
+            "bus. Increase it if large substations still split into separate\n"
+            "components; decrease it if two distinct stations get merged."
         )
-        self._chk_skip_incomplete.setChecked(False)
-        self._chk_skip_incomplete.setToolTip(
-            "Discards features that lack key properties before building:\n"
-            "  • Generator without capacity or fuel\n"
-            "  • Battery without power or energy capacity\n"
-            "  • Line without voltage or geometry\n"
-            "  • Substation/transformer/converter without voltage\n"
-            "Skipped elements are reported in the result log."
-        )
-        build_right.addWidget(self._chk_skip_incomplete)
+        radius_row.addWidget(self._spin_station_radius)
+        radius_row.addStretch(1)
+        build_right.addLayout(radius_row)
 
         # Simplification level (was a separate step; now implicit so the
         # GUI only ever paints the final, simplified state once).
@@ -1291,9 +1211,7 @@ class GridMappingBuildStep(QWidget):
         build_right.addLayout(simp_form)
         build_right.addStretch()
 
-        build_cols.addLayout(build_left, 1)
-        build_cols.addLayout(build_right, 1)
-        build_lay.addLayout(build_cols)
+        build_lay.addLayout(build_right)
 
         self._btn_build = QPushButton("Build Network")
         self._btn_build.setStyleSheet(
@@ -1596,42 +1514,8 @@ class GridMappingBuildStep(QWidget):
         from esfex.visualization.workflows.grid_mapping_builder import (
             build_grid_from_features,
         )
-        from esfex.visualization.workflows.grid_mapping_quality import (
-            is_feature_complete, reason_incomplete,
-        )
 
         self._lbl_build_status.setText("Building network...")
-
-        # Optionally drop features that lack key properties before
-        # handing off to the builder. We mutate ``include`` rather than
-        # filter the list so the Review step's user toggles are kept
-        # in sync.
-        skip_log: list[str] = []
-        if self._chk_skip_incomplete.isChecked():
-            n_before = sum(1 for f in self._features if f.include)
-            skip_counts: dict[str, int] = {}
-            for f in self._features:
-                if not f.include:
-                    continue
-                if not is_feature_complete(f):
-                    f.include = False
-                    skip_counts[f.feature_type] = (
-                        skip_counts.get(f.feature_type, 0) + 1
-                    )
-                    skip_log.append(
-                        f"  · {f.feature_type} '{f.name or f.osm_id}': "
-                        f"{reason_incomplete(f)}"
-                    )
-            n_skipped = n_before - sum(1 for f in self._features if f.include)
-            if n_skipped:
-                summary_line = ", ".join(
-                    f"{n} {t}" for t, n in sorted(skip_counts.items())
-                )
-                skip_log.insert(
-                    0,
-                    f"Skipped {n_skipped} incomplete element(s): "
-                    f"{summary_line}",
-                )
 
         try:
             # Block per-element signals so the hundreds of buses/generators/
@@ -1649,6 +1533,9 @@ class GridMappingBuildStep(QWidget):
                         bus_strategy=self._config.get("bus_strategy", "per_voltage"),
                         snap_threshold_km=self._config.get("snap_threshold_km", 5.0),
                         target_node=None,
+                        faithful=True,
+                        station_radius_km=self._spin_station_radius.value(),
+                        min_capacity_mw=self._config.get("min_capacity_mw", 0.0),
                     )
                     _dt = time.perf_counter() - _t0
                     self._phase_timings.append(("Build network", _dt))
@@ -1657,13 +1544,6 @@ class GridMappingBuildStep(QWidget):
                 self._model.blockSignals(False)
 
             summary = result.summary()
-            if skip_log:
-                summary = (
-                    "── Pre-build filter ──\n"
-                    + "\n".join(skip_log)
-                    + "\n\n"
-                    + summary
-                )
             self._lbl_build_status.setText("Build complete. Running auto-connect...")
             self._result_text.setPlainText(summary)
 
@@ -1675,10 +1555,12 @@ class GridMappingBuildStep(QWidget):
             self._btn_build.setEnabled(True)
             return
 
-        # Automatically run auto-connect after building
-        self._run_auto_connect()
+        # Automatically run the post-build pass after building. Faithful mode
+        # is always on, so auto-connect never fabricates connectivity — this
+        # only runs parameter inference, simplification and cleanup.
+        self._run_auto_connect(faithful=True)
 
-    def _run_auto_connect(self):
+    def _run_auto_connect(self, faithful: bool = False):
         """Run iterative auto-connect, then simplify, then redraw once.
 
         The full pipeline runs against the model state without emitting
@@ -1693,7 +1575,6 @@ class GridMappingBuildStep(QWidget):
             rebuild_visual_wire_lines,
         )
 
-        connect_summary = ""
         simplify_summary = ""
         island_summary = ""
         n_created = 0
@@ -1711,37 +1592,26 @@ class GridMappingBuildStep(QWidget):
                 logger.info("Grid build phase '%s': %.1fs", label, _dt)
 
         try:
-            # Phase 1: auto-connect
-            with self._model.suspend_checkpoints():
-                n_created, connect_log = _timed(
-                    "Auto-connect",
-                    lambda: iterative_auto_connect(
-                        self._model, self._model.state,
-                        max_iterations=self._spin_max_iter.value(),
-                        voltage_mismatch_ratio=self._spin_voltage_ratio.value(),
-                        lv_voltage_kv=self._spin_lv_voltage.value(),
-                        max_connection_km=self._spin_max_distance.value(),
-                    ),
-                )
-            connect_summary = "\n".join(connect_log)
+            # Phase 1: auto-connect is SKIPPED — faithful import is the only
+            # build mode now, and it must never fabricate connectivity
+            # (voltage transformer chains, generator step-up chains, long
+            # bridges) that does not exist in OSM. The map is just the real
+            # topology built above.
+            n_created = 0
 
             # Phase 1b: infer missing electrical parameters (capacities,
             # impedances) from the connected gen / demand. Without this,
             # lines and transformers built from sources lacking voltage
-            # or rated MVA stay at 0 and break downstream power-flow.
+            # or rated MVA stay at 0 and break downstream power-flow. This
+            # runs silently — its tally is no longer shown in the log.
             from esfex.visualization.workflows.grid_mapping_inference import (
                 infer_electrical_params,
             )
             with self._model.suspend_checkpoints():
-                infer_report = _timed(
+                _timed(
                     "Parameter inference",
                     lambda: infer_electrical_params(self._model.state),
                 )
-            connect_summary = (
-                connect_summary
-                + ("\n" if connect_summary else "")
-                + f"Param inference: {infer_report.summary()}"
-            )
 
             # Phase 2: simplification (no GUI emit yet)
             level = self._combo_simplify.currentData() or 0
@@ -1898,8 +1768,9 @@ class GridMappingBuildStep(QWidget):
 
         prev = self._result_text.toPlainText()
         sections = [prev] if prev else []
-        if connect_summary:
-            sections.append("\u2500\u2500 Auto-Connect \u2500\u2500\n" + connect_summary)
+        # The Auto-Connect section is intentionally not shown: faithful import
+        # never fabricates connections, so it carried only a "skipped" notice
+        # and the parameter-inference tallies (which still run silently).
         if simplify_summary:
             sections.append("\u2500\u2500 Simplification \u2500\u2500\n" + simplify_summary)
         if island_summary:
@@ -2465,6 +2336,7 @@ def iterative_auto_connect(
     voltage_mismatch_ratio: float = 1.5,
     lv_voltage_kv: float = 0.48,
     max_connection_km: float = 100.0,
+    bridge_disconnected: bool = True,
 ) -> tuple[int, list[str]]:
     """Iteratively connect and validate the network until electrically consistent.
 
@@ -2491,6 +2363,16 @@ def iterative_auto_connect(
     log: list[str] = []
     total_created = 0
 
+    # When fabrication is disabled (the real-topology method, #16) equipment
+    # may only be chained to a *nearby* HV bus; equipment whose nearest bus is
+    # farther than this is left unconnected (its island is dropped) rather than
+    # reconnected with a long artificial line.
+    _NO_FABRICATE_MAX_KM = 5.0
+    equip_max_km = (
+        max_connection_km if bridge_disconnected
+        else min(max_connection_km, _NO_FABRICATE_MAX_KM)
+    )
+
     for iteration in range(1, max_iterations + 1):
         log.append(f"── Iteration {iteration} ──")
         created = 0
@@ -2510,19 +2392,31 @@ def iterative_auto_connect(
             log.extend(fix_log)
 
         # ── Phase 3-4: Connectivity ──────────────────────────────
-        conn_issues = _check_connectivity(state, idx=idx)
-        if conn_issues:
+        # Real-topology method (#16): do NOT fabricate bridges between
+        # disconnected components. Connectivity comes from the real geometry
+        # (lines split at the substations they cross); whatever remains
+        # disconnected is the genuine topology, kept (largest component) or
+        # dropped by drop_isolated_components — never glued with invented
+        # straight lines.
+        if bridge_disconnected:
+            conn_issues = _check_connectivity(state, idx=idx)
+            if conn_issues:
+                log.append(
+                    f"  Connectivity audit: {len(conn_issues)} "
+                    f"isolated components"
+                )
+                n, fix_log = _fix_disconnected_components(
+                    model, state, conn_issues,
+                    lv_voltage_kv=lv_voltage_kv,
+                    max_connection_km=max_connection_km,
+                )
+                created += n
+                log.extend(fix_log)
+        elif iteration == 1:
             log.append(
-                f"  Connectivity audit: {len(conn_issues)} "
-                f"isolated components"
+                "  Connectivity: real-topology mode — not fabricating bridges "
+                "(largest component kept, remote islands dropped)."
             )
-            n, fix_log = _fix_disconnected_components(
-                model, state, conn_issues,
-                lv_voltage_kv=lv_voltage_kv,
-                max_connection_km=max_connection_km,
-            )
-            created += n
-            log.extend(fix_log)
 
         # ── Phase 5-6: Transformer connection lines ──────────────
         tr_audits = _audit_all_transformers(state, idx=idx)
@@ -2576,7 +2470,7 @@ def iterative_auto_connect(
             n, fix_log = _fix_unchained_equipment(
                 model, state, failed_equip,
                 lv_voltage_kv=lv_voltage_kv,
-                max_connection_km=max_connection_km,
+                max_connection_km=equip_max_km,
             )
             created += n
             log.extend(fix_log)
