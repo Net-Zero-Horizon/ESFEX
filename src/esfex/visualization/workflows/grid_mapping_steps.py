@@ -993,11 +993,15 @@ class GridMappingBuildStep(QWidget):
         self._combo_system.setToolTip(
             "Choose which system to assign the built elements to."
         )
-        sys_lay.addWidget(self._combo_system, 1)
+        sys_lay.addWidget(self._combo_system)
 
         self._btn_new_system = QPushButton("New System...")
         self._btn_new_system.clicked.connect(self._on_new_system)
         sys_lay.addWidget(self._btn_new_system)
+
+        # Keep the combo + button left-justified instead of stretching the
+        # combo across the whole window.
+        sys_lay.addStretch(1)
 
         layout.addWidget(sys_group)
 
@@ -1067,8 +1071,12 @@ class GridMappingBuildStep(QWidget):
         node_right.addWidget(self._lbl_criterion_info)
         node_right.addStretch()
 
-        node_cols.addLayout(node_left, 1)
-        node_cols.addLayout(node_right, 1)
+        # Narrow the left ("Cluster size") column from an even 50/50 split to
+        # ~40/60 so the criteria column sits closer — roughly halving the gap
+        # between the two columns while leaving the right column enough width
+        # for the word-wrapped criterion description.
+        node_cols.addLayout(node_left, 2)
+        node_cols.addLayout(node_right, 3)
         node_lay.addWidget(self._node_options_widget)
 
         # Clustering progress bar — full width below the two columns
