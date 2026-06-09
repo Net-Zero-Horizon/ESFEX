@@ -1778,6 +1778,8 @@ class MacroEconomicStep(QWidget):
             node_lats=[n["lat"] for n in nodes],
             node_lons=[n["lon"] for n in nodes],
             node_names=[n["name"] for n in nodes],
+            area_polygon=bi.get("area_polygon", []) or [],
+            bounds=bi.get("bounds", None),
         )
         buildings_gdf = proxy_results.get("buildings")
         if buildings_gdf is not None and hasattr(buildings_gdf, "__len__"):

@@ -110,6 +110,10 @@ class DemandEstimationConfig:
     # ML engine control
     force_archetype: bool = False   # True → skip ML even if model available
     ml_engine: str = "auto"         # "auto" | "tft" | "xgboost"
+    # Prefer the spatial demand-DENSITY model (predicts MW/km² per node) over
+    # the national-shape model when it is available. This is what makes the
+    # per-node forecast genuinely spatial instead of ~total/num_nodes.
+    use_density_model: bool = True
 
 
 @dataclass
@@ -132,6 +136,11 @@ class ProxyData:
     node_lats: list[float] = field(default_factory=list)
     node_lons: list[float] = field(default_factory=list)
     node_names: list[str] = field(default_factory=list)
+
+    # Study region (for per-node area / Voronoi partition in the density model).
+    # area_polygon: drawn domain ring as [(lat, lon), …]; bounds: (S, W, N, E).
+    area_polygon: list[tuple[float, float]] = field(default_factory=list)
+    bounds: Optional[tuple[float, float, float, float]] = None
 
 
 @dataclass
@@ -674,13 +683,25 @@ class DemandProfileBuilder:
         meteo: MeteoData,
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> DemandEstimationResult:
-        """Dispatch to ML or archetype engine."""
-        if not self._cfg.force_archetype and self._ml_available():
-            try:
-                return self._build_ml(proxy, macro, meteo, progress_callback)
-            except Exception as exc:
-                logger.warning("ML engine failed, falling back to archetype: %s", exc)
-                self._warnings.append(f"ML fallback to archetype: {exc}")
+        """Dispatch to density → shape-ML → archetype engines (in that order)."""
+        if not self._cfg.force_archetype:
+            # Preferred: spatial demand-density model (per-node MW/km²).
+            if (getattr(self._cfg, "use_density_model", True)
+                    and self._cfg.ml_engine in ("auto", "xgboost", "density", "ml")
+                    and self._density_available()):
+                try:
+                    return self._build_density(proxy, macro, meteo, progress_callback)
+                except Exception as exc:
+                    logger.warning(
+                        "Density engine failed, falling back to shape-ML: %s", exc)
+                    self._warnings.append(f"Density fallback: {exc}")
+            # Fallback: national-shape ML model.
+            if self._ml_available():
+                try:
+                    return self._build_ml(proxy, macro, meteo, progress_callback)
+                except Exception as exc:
+                    logger.warning("ML engine failed, falling back to archetype: %s", exc)
+                    self._warnings.append(f"ML fallback to archetype: {exc}")
         return self._build_archetype(proxy, macro, meteo, progress_callback)
 
     @staticmethod
@@ -688,6 +709,14 @@ class DemandProfileBuilder:
         try:
             from esfex.models.demand_ml import DemandMLModel
             return DemandMLModel.is_available()
+        except ImportError:
+            return False
+
+    @staticmethod
+    def _density_available() -> bool:
+        try:
+            from esfex.models.demand_density_ml import DemandDensityModel
+            return DemandDensityModel.is_available()
         except ImportError:
             return False
 
@@ -797,6 +826,167 @@ class DemandProfileBuilder:
                 )
 
         emit(100, "ML demand estimation complete.")
+        return result
+
+    # ── Density Engine (spatial per-node MW/km²) ─────────────────────────────
+
+    def _build_density(
+        self,
+        proxy: ProxyData,
+        macro: MacroData,
+        meteo: MeteoData,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> DemandEstimationResult:
+        """Spatial pipeline: predict hourly demand DENSITY (MW/km²) per node,
+        multiply by node area, and calibrate the national total to the macro
+        estimate. The per-node split comes entirely from the density model, so
+        it no longer collapses to total/num_nodes."""
+        import numpy as np
+        from esfex.models.demand_density_ml import (
+            DemandDensityModel,
+            build_density_features,
+            compute_node_areas_km2,
+            sample_node_densities,
+        )
+
+        def emit(pct: int, msg: str) -> None:
+            if progress_callback:
+                progress_callback(pct, msg)
+
+        hpy = self._cfg.hours_per_year
+        num_nodes = self._cfg.num_nodes
+        if num_nodes <= 0:
+            num_nodes = max(len(proxy.node_lats), 1)
+            self._cfg.num_nodes = num_nodes
+        years = self._cfg.simulation_years
+
+        emit(5, "Loading demand-density model…")
+        model = DemandDensityModel.load_bundled()
+
+        emit(10, "Computing spatial weights…")
+        w_spatial = self._compute_spatial_weights(proxy)
+
+        emit(15, "Estimating national demand…")
+        base_annual_mwh = self._estimate_annual_demand(w_spatial, proxy, macro)
+        base_annual_mwh = self._calibrate_annual(base_annual_mwh)
+        annual_traj = self._compute_annual_trajectory(base_annual_mwh, macro, proxy)
+        national_year_mwh = annual_traj.sum(axis=1)   # (years,) MWh
+
+        emit(20, "Partitioning study area into node territories…")
+        areas = np.asarray(
+            compute_node_areas_km2(
+                list(proxy.node_lats), list(proxy.node_lons),
+                polygon_latlon=list(proxy.area_polygon) or None,
+                bounds=proxy.bounds,
+            ),
+            dtype=np.float64,
+        )
+        if areas.size != num_nodes:
+            areas = np.full(num_nodes, max(float(areas.sum()) / max(num_nodes, 1), 1.0))
+
+        # Cell-averaged socio density from gridded rasters (GPW pop, GDP 0.25°),
+        # matching how the model was trained. Falls back per node to
+        # population-derived density when rasters are unavailable / all-ocean.
+        emit(25, "Sampling population & GDP rasters per node…")
+        try:
+            sampled = sample_node_densities(
+                list(proxy.node_lats), list(proxy.node_lons),
+                year=self._cfg.base_year,
+                polygon_latlon=list(proxy.area_polygon) or None,
+                bounds=proxy.bounds,
+            )
+        except Exception as exc:
+            logger.warning("Raster density sampling failed (%s); deriving from population.", exc)
+            sampled = [None] * num_nodes
+        if len(sampled) != num_nodes:
+            sampled = [None] * num_nodes
+        n_sampled = sum(1 for s in sampled if s)
+        if n_sampled:
+            logger.info("Density: raster-sampled socio for %d/%d node(s).",
+                        n_sampled, num_nodes)
+
+        if len(meteo.temperature_hourly) >= hpy:
+            temp_h = np.array(meteo.temperature_hourly[:hpy], dtype=np.float64)
+        else:
+            temp_h = np.full(hpy, 20.0, dtype=np.float64)
+
+        gdp_pc = max(float(macro.gdp_per_capita), 1.0)
+        pop_total = float(macro.population)
+
+        emit(30, "Density inference…")
+        base_mw = np.zeros((hpy, num_nodes), dtype=np.float64)   # base-year MW
+        for ni in range(num_nodes):
+            area = max(float(areas[ni]), 1e-3)
+            # Prefer raster-sampled densities; fall back to population/area.
+            s = sampled[ni] if ni < len(sampled) else None
+            if s and s.get("pop_density"):
+                pop_density = float(s["pop_density"])         # people / km²
+                gpc = float(s["gdp_per_cap"]) if s.get("gdp_per_cap") else gdp_pc
+                gdp_density = (
+                    float(s["gdp_density"]) if s.get("gdp_density")
+                    else gpc * pop_density)                   # USD / km²
+            else:
+                node_pop = max(pop_total * float(w_spatial[ni]), 1.0)
+                pop_density = node_pop / area
+                gpc = gdp_pc
+                gdp_density = gpc * pop_density
+            lat = proxy.node_lats[ni] if ni < len(proxy.node_lats) else 0.0
+            lon = proxy.node_lons[ni] if ni < len(proxy.node_lons) else 0.0
+
+            feats = build_density_features(
+                latitude=lat, longitude=lon,
+                log_pop_density=math.log10(max(pop_density, 1e-6)),
+                log_gdp_density=math.log10(max(gdp_density, 1e-6)),
+                log_gdp_per_cap=math.log10(max(gpc, 1.0)),
+                temperature_hourly=temp_h,
+                base_year=self._cfg.base_year,
+                feature_order=model.feature_names,
+                country_iso=macro.country_iso,
+                hdd_base=self._cfg.hdd_base_temp,
+                cdd_base=self._cfg.cdd_base_temp,
+                train_ranges=model.train_ranges,
+            )
+            density = model.predict_density_mw_per_km2(feats)   # (hpy,) MW/km²
+            base_mw[:, ni] = density * area                     # MW
+
+            emit(30 + int(55 * (ni + 1) / num_nodes),
+                 f"Node {ni + 1}/{num_nodes} complete")
+
+        # Calibrate to the macro national total per year, preserving the
+        # density model's spatial + temporal pattern exactly.
+        base_total_mwh = float(base_mw.sum())
+        hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
+        if base_total_mwh > 0:
+            for y in range(years):
+                hourly_all[y] = base_mw * (national_year_mwh[y] / base_total_mwh)
+        else:
+            self._warnings.append(
+                "Density model produced zero demand; using uncalibrated output.")
+            for y in range(years):
+                hourly_all[y] = base_mw
+
+        demand = hourly_all[0]
+        demand_my = hourly_all.reshape(-1, num_nodes)
+
+        emit(92, "Computing metrics…")
+        result = self._compute_metrics(demand, demand_my, w_spatial)
+        result.config = self._cfg
+        result.resolution_hours = self._cfg.resolution_hours
+        self._demand_source = "ml_density"
+        result.demand_source = self._demand_source
+        result.warnings = list(self._warnings)
+        result.level0_annual_mwh_by_year = [
+            float(national_year_mwh[y]) for y in range(years)
+        ]
+
+        if self._cfg.resolution_hours != 1.0:
+            result.demand = _resample_array(result.demand, self._cfg.resolution_hours)
+            if result.demand_multi_year is not None:
+                result.demand_multi_year = _resample_array(
+                    result.demand_multi_year, self._cfg.resolution_hours
+                )
+
+        emit(100, "Density demand estimation complete.")
         return result
 
     # ── Archetype Engine (original pipeline) ─────────────────────────────────

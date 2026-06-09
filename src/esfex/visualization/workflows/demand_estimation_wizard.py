@@ -211,6 +211,9 @@ class DemandEstimationWizard(QDialog):
                 proxy_results=self._step_proxy.get_proxy_results(),
                 proxy_weights=self._step_proxy.get_proxy_weights(),
                 meteo_data=self._step_proxy.get_meteo_data(),
+                # Study region → per-node area (Voronoi) for the density model.
+                bounds=self._step_scope.get_bounds(),
+                area_polygon=self._step_scope.get_polygon_coords(),
                 **sat_params,
             )
 
