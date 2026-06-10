@@ -239,6 +239,19 @@ esfex precompile
 
 ESFEX supports ten solver backends, selectable per run (`--solver`) or in the config: **HiGHS** (default), CBC, GLPK, Gurobi, CPLEX, SCIP, and Xpress for LP/MIP problems; Clarabel and SCS for conic relaxations; and Ipopt for the nonlinear ACOPF formulations.
 
+Only the **open-source** solvers are bundled (HiGHS, GLPK, Clarabel, SCS,
+Ipopt). The **commercial** solvers (Gurobi, CPLEX, Xpress) are *not* installed by
+default — they require a license that is the user's responsibility. They remain
+selectable: install the corresponding Julia package into the ESFEX Julia
+environment and ESFEX loads it on demand, e.g.
+
+```julia
+# with a valid license/GRB_LICENSE_FILE already configured
+using Pkg; Pkg.activate(joinpath(dirname(pathof(ESFEX)))); Pkg.add("Gurobi")
+```
+
+This keeps the default install smaller and free of license-locked binaries.
+
 ---
 
 ## Quick Start
