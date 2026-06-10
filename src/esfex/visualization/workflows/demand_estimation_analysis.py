@@ -246,6 +246,15 @@ class DemandEstimationResult:
     demand_source: str = ""
     warnings: list[str] = field(default_factory=list)
 
+    # Spatial demand — per 0.25° cell (density engine only): cell centroid +
+    # its node + base-year annual demand. Lets the bus-level distribution use
+    # the model's own spatial demand (assign each cell to its nearest bus)
+    # instead of a building-footprint proxy.
+    cell_lats: list[float] = field(default_factory=list)
+    cell_lons: list[float] = field(default_factory=list)
+    cell_nodes: list[int] = field(default_factory=list)
+    cell_annual_mwh: list[float] = field(default_factory=list)
+
     config: DemandEstimationConfig = field(
         default_factory=DemandEstimationConfig
     )
@@ -965,6 +974,7 @@ class DemandProfileBuilder:
         # ── Per-year, per-node: per-cell density inference → node demand ──
         emit(32, "Per-cell density inference (per year, GDP+pop+CMIP6)…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
+        cell_annual = np.zeros(idx.size, dtype=np.float64)   # base-year MWh/cell
         for y in range(years):
             yr = base_year + y
             pd_y = np.maximum(base_pd * pop_factor[y], 1e-6)     # population evolves
@@ -985,6 +995,8 @@ class DemandProfileBuilder:
                     hdd_base=self._cfg.hdd_base_temp, cdd_base=self._cfg.cdd_base_temp,
                 )                                            # (n_cells_nd, hpy) MW
                 hourly_all[y, :, nd] = cell_mw.sum(axis=0)
+                if y == 0:
+                    cell_annual[a] = cell_mw.sum(axis=1)     # MWh per cell, base yr
             emit(32 + int(58 * (y + 1) / years), f"Year {yr}: {idx.size} cells")
 
         # ── Anchoring: scale to a national override if set, else raw model ─
@@ -993,7 +1005,9 @@ class DemandProfileBuilder:
                       if self._cfg.national_demand_gwh > 0
                       else self._cfg.known_annual_gwh)
         if target_gwh > 0 and base_gwh > 0:
-            hourly_all *= target_gwh / base_gwh
+            scale = target_gwh / base_gwh
+            hourly_all *= scale
+            cell_annual *= scale
             logger.info("Density: anchored base-year to %.0f GWh "
                         "(raw model integral %.0f GWh).", target_gwh, base_gwh)
         else:
@@ -1029,6 +1043,12 @@ class DemandProfileBuilder:
         result.level0_annual_mwh_by_year = [
             float(hourly_all[y].sum()) for y in range(years)
         ]
+        # Spatial demand per cell → bus-level distribution can assign each cell
+        # to its nearest bus instead of using a building-footprint proxy.
+        result.cell_lats = [float(v) for v in alat]
+        result.cell_lons = [float(v) for v in alon]
+        result.cell_nodes = [int(v) for v in a_node]
+        result.cell_annual_mwh = [float(v) for v in cell_annual]
 
         if self._cfg.resolution_hours != 1.0:
             result.demand = _resample_array(result.demand, self._cfg.resolution_hours)

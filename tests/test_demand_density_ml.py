@@ -14,6 +14,7 @@ import pytest
 
 from esfex.models.demand_density_ml import (
     DemandDensityModel,
+    allocate_demand_capacitated,
     build_density_features,
     compute_node_areas_km2,
     gdp_density_point,
@@ -46,6 +47,57 @@ _FEATURE_ORDER = [
     "is_weekend", "is_holiday", "days_to_next_holiday", "days_from_prev_holiday",
     "latitude", "longitude",
 ]
+
+
+class TestCapacitatedAllocation:
+    """Capacity-constrained demand→bus transport (substation territories)."""
+
+    def test_conserves_total_demand(self):
+        served = allocate_demand_capacitated(
+            cell_lats=[0.0, 0.1, 0.2], cell_lons=[0.0, 0.1, 0.2],
+            cell_demand=[10.0, 20.0, 30.0],
+            bus_lats=[0.0, 0.2], bus_lons=[0.0, 0.2],
+            bus_cap=[100.0, 100.0])
+        assert served.sum() == pytest.approx(60.0)
+
+    def test_single_bus_gets_all(self):
+        served = allocate_demand_capacitated(
+            [0.0, 1.0], [0.0, 1.0], [5.0, 7.0],
+            [0.5], [0.5], [1000.0])
+        assert served.tolist() == pytest.approx([12.0])
+
+    def test_proximity_when_uncapacitated(self):
+        # Two far-apart clusters, ample capacity → each bus serves its own.
+        served = allocate_demand_capacitated(
+            cell_lats=[0.0, 0.0, 10.0, 10.0],
+            cell_lons=[0.0, 0.1, 0.0, 0.1],
+            cell_demand=[10.0, 10.0, 10.0, 10.0],
+            bus_lats=[0.0, 10.0], bus_lons=[0.05, 0.05],
+            bus_cap=[1000.0, 1000.0])
+        assert served[0] == pytest.approx(20.0, abs=1e-6)
+        assert served[1] == pytest.approx(20.0, abs=1e-6)
+
+    def test_spillover_when_nearest_saturates(self):
+        # All demand sits next to bus 0, but bus 0 cannot hold it all → the
+        # excess must spill to the farther bus 1 (Voronoi could never do this).
+        served = allocate_demand_capacitated(
+            cell_lats=[0.0, 0.0, 0.0], cell_lons=[0.0, 0.01, 0.02],
+            cell_demand=[40.0, 40.0, 40.0],
+            bus_lats=[0.0, 5.0], bus_lons=[0.0, 0.0],
+            bus_cap=[50.0, 1000.0], headroom=1.0)
+        assert served[0] == pytest.approx(50.0, abs=1e-6)
+        assert served[1] == pytest.approx(70.0, abs=1e-6)
+        assert served.sum() == pytest.approx(120.0)
+
+    def test_empty_buses(self):
+        served = allocate_demand_capacitated(
+            [0.0], [0.0], [10.0], [], [], [])
+        assert served.size == 0
+
+    def test_no_cells(self):
+        served = allocate_demand_capacitated(
+            [], [], [], [0.0, 1.0], [0.0, 1.0], [10.0, 10.0])
+        assert served.tolist() == [0.0, 0.0]
 
 
 class TestNodeAreas:
@@ -273,6 +325,13 @@ class TestSSPGdpTrajectory:
         assert 8_000 < lvl[0] / 1000.0 < 40_000
         # The trajectory is NOT a frozen constant — socio + climate move it.
         assert lvl.std() / lvl.mean() > 1e-4
+
+        # Spatial demand is exposed per cell for the bus-level distribution:
+        # cells exist and their base-year demand sums to the node total.
+        assert len(res.cell_lats) == len(res.cell_lons) == len(res.cell_annual_mwh) > 0
+        cell_gwh = sum(res.cell_annual_mwh) / 1000.0
+        node_gwh = float(np.asarray(res.annual_gwh).sum())
+        assert cell_gwh == pytest.approx(node_gwh, rel=1e-3)
 
 
 @pytest.mark.skipif(

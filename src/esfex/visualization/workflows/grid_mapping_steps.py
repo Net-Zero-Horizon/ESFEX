@@ -4437,13 +4437,14 @@ class GridMappingDemandStep(QWidget):
         # Section 3: Bus Distribution (existing logic preserved)
         # ==============================================================
         dist_group = QGroupBox(
-            "3. Bus Distribution (building footprint density)"
+            "3. Bus Distribution (spatial demand or building footprints)"
         )
         dg = QVBoxLayout(dist_group)
         dg.addWidget(QLabel(
-            "Distribute each node\u2019s forecast demand among its busbars "
-            "using building footprint density. Only nodes with \u2265 2 buses "
-            "need distribution."
+            "Distribute each node\u2019s forecast demand among its busbars. "
+            "Prefer \u201cDistribute by spatial demand\u201d (uses the model\u2019s "
+            "per-cell demand directly); building footprints remain as an "
+            "alternative. Only nodes with \u2265 2 buses need distribution."
         ))
 
         # Building source
@@ -4497,6 +4498,20 @@ class GridMappingDemandStep(QWidget):
         self._btn_fetch_bld.setEnabled(False)
         self._btn_fetch_bld.clicked.connect(self._fetch_buildings)
         dist_btn_row.addWidget(self._btn_fetch_bld)
+        # Alternative: distribute by the density model's own per-cell demand
+        # (the actual forecast demand, not a building-footprint proxy).
+        self._btn_spatial_dist = QPushButton("Distribute by spatial demand")
+        self._btn_spatial_dist.setToolTip(
+            "Assign each 0.25° demand-density cell from the forecast to its\n"
+            "nearest bus and split each node's demand by the cells' demand.\n"
+            "Uses the model's actual spatial demand instead of building\n"
+            "footprints. Requires the density-engine forecast to be run first."
+        )
+        self._btn_spatial_dist.setStyleSheet(
+            "font-size: 11px; font-weight: bold; padding: 4px 8px;"
+        )
+        self._btn_spatial_dist.clicked.connect(self._distribute_by_spatial_demand)
+        dist_btn_row.addWidget(self._btn_spatial_dist)
         self._bld_progress = QProgressBar()
         self._bld_progress.setRange(0, 100)
         dist_btn_row.addWidget(self._bld_progress, 1)
@@ -5193,23 +5208,7 @@ class GridMappingDemandStep(QWidget):
                 f"w={r['total_weight']:.1f}"
             )
 
-        rows = self._assignments
-        self._results_table.setRowCount(len(rows))
-        for row_idx, a in enumerate(rows):
-            self._results_table.setItem(
-                row_idx, 0, QTableWidgetItem(a["node_name"]))
-            self._results_table.setItem(
-                row_idx, 1,
-                QTableWidgetItem(f"{a['bus_id']} ({a['bus_name']})"))
-            self._results_table.setItem(
-                row_idx, 2,
-                QTableWidgetItem(f"{a['building_count']:,}"))
-            self._results_table.setItem(
-                row_idx, 3,
-                QTableWidgetItem(f"{a['old_fraction']:.4f}"))
-            self._results_table.setItem(
-                row_idx, 4,
-                QTableWidgetItem(f"{a['new_fraction']:.4f}"))
+        self._render_assignments_table()
 
         self._progress.setValue(100)
         total_bld = int(summary["count"].sum()) if not summary.empty else 0
@@ -5217,10 +5216,129 @@ class GridMappingDemandStep(QWidget):
         self._lbl_status.setText(
             f"Classified {total_bld:,} buildings "
             f"({'; '.join(cls_lines)}; total weight: {total_w:.1f}). "
-            f"Assigned to {len(rows)} buses."
+            f"Assigned to {len(self._assignments)} buses."
         )
         self._btn_run.setEnabled(True)
-        self._btn_apply.setEnabled(len(rows) > 0)
+        self._btn_apply.setEnabled(len(self._assignments) > 0)
+
+    def _render_assignments_table(self):
+        """Render ``self._assignments`` into the bus-fraction results table.
+        The 3rd column shows the per-bus building count or demand cell count."""
+        rows = self._assignments
+        self._results_table.setRowCount(len(rows))
+        for row_idx, a in enumerate(rows):
+            self._results_table.setItem(row_idx, 0, QTableWidgetItem(a["node_name"]))
+            self._results_table.setItem(
+                row_idx, 1, QTableWidgetItem(f"{a['bus_id']} ({a['bus_name']})"))
+            self._results_table.setItem(
+                row_idx, 2, QTableWidgetItem(f"{a.get('building_count', 0):,}"))
+            self._results_table.setItem(
+                row_idx, 3, QTableWidgetItem(f"{a['old_fraction']:.4f}"))
+            self._results_table.setItem(
+                row_idx, 4, QTableWidgetItem(f"{a['new_fraction']:.4f}"))
+
+    def _distribute_by_spatial_demand(self):
+        """Distribute each node's demand among its buses using the density
+        model's per-cell spatial demand, solved as a *capacitated transport*
+        problem rather than a nearest/Voronoi assignment.
+
+        A substation does not only carry the demand of its own cell: it serves a
+        distribution territory whose size is bounded by its capacity. So per node
+        we solve a min-cost flow — cells (sources, weighted by their forecast
+        demand) → load buses (sinks, capacity = transformer MVA, with a
+        voltage-scaled fallback) — minimising total feeder distance subject to
+        every cell being served and no bus exceeding its capacity. Demand spills
+        to the next substation once the nearest one saturates, which a hard
+        Voronoi split cannot represent. Produces the same ``self._assignments``
+        the Apply step consumes."""
+        import numpy as np, math
+        from esfex.models.demand_density_ml import allocate_demand_capacitated
+        res = getattr(self, "_forecast_result", None)
+        cells = getattr(res, "cell_annual_mwh", None) if res is not None else None
+        if not cells:
+            self._lbl_bld_status.setText(
+                "Run the demand forecast (Auto/XGBoost engine) first — no "
+                "spatial-demand cells available.")
+            return
+        state = self._model.state if self._model else None
+        nodes = list(state.nodes) if state else []
+        if not nodes:
+            self._lbl_bld_status.setText("No nodes in the active system.")
+            return
+
+        clat = np.asarray(res.cell_lats, dtype=float)
+        clon = np.asarray(res.cell_lons, dtype=float)
+        cann = np.asarray(res.cell_annual_mwh, dtype=float)
+
+        # Assign each cell to its nearest node (projected) — preserves the
+        # density model's validated per-node totals; the transport only splits
+        # within a node.
+        nlat = np.array([nd.centroid_lat for nd in nodes], dtype=float)
+        nlon = np.array([nd.centroid_lng for nd in nodes], dtype=float)
+        mlng0 = 111.320 * math.cos(math.radians(float(np.mean(clat))))
+        cx = clon * mlng0; cy = clat * 110.540
+        nx = nlon * mlng0; ny = nlat * 110.540
+        cell_node = np.array([
+            int(np.argmin((nx - cx[i]) ** 2 + (ny - cy[i]) ** 2))
+            for i in range(len(clat))
+        ])
+
+        # Per-bus capacity: sum of MVA of transformers touching the bus, with a
+        # voltage-kV fallback scaled into the MVA range (so a node mixing
+        # MVA-rated and fallback buses stays consistent).
+        mva: dict[str, float] = {}
+        for tr in state.transformers:
+            m = float(getattr(tr, "rated_power_mva", 0.0) or 0.0)
+            for bid in (tr.from_bus, tr.to_bus):
+                if bid:
+                    mva[bid] = mva.get(bid, 0.0) + m
+        load_buses_all = [b for b in state.buses.values()
+                          if b.role in ("load", "mixed")]
+        have = [b for b in load_buses_all if mva.get(b.bus_id, 0.0) > 0]
+        if have:
+            mean_v = float(np.mean([max(float(b.voltage_kv), 1.0) for b in have]))
+            sc = (sum(mva[b.bus_id] for b in have) / len(have)) / max(mean_v, 1.0)
+        else:
+            sc = 1.0
+
+        def cap_of(b):
+            m = mva.get(b.bus_id, 0.0)
+            return m if m > 0 else max(float(b.voltage_kv), 1.0) * sc
+
+        self._assignments = []
+        n_nodes = 0
+        for ni, nd in enumerate(nodes):
+            bs = [b for b in state.buses.values()
+                  if b.parent_node == nd.index and b.role in ("load", "mixed")]
+            if len(bs) < 2:
+                continue          # single-bus nodes need no split
+            n_nodes += 1
+            sel = np.where(cell_node == ni)[0]
+            if sel.size:
+                served = allocate_demand_capacitated(
+                    clat[sel], clon[sel], cann[sel],
+                    [b.latitude for b in bs], [b.longitude for b in bs],
+                    [cap_of(b) for b in bs])
+                tot = float(np.sum(served))
+            else:
+                served = None
+                tot = 0.0
+            for j, b in enumerate(bs):
+                d = float(served[j]) if served is not None else 0.0
+                new_frac = (d / tot) if tot > 0 else (1.0 / len(bs))
+                self._assignments.append({
+                    "node_name": nd.name, "bus_id": b.bus_id, "bus_name": b.name,
+                    "building_count": int(round(d)),   # MWh/yr served by the bus
+                    "old_fraction": b.demand_fraction, "new_fraction": new_frac,
+                })
+
+        self._render_assignments_table()
+        self._progress.setValue(100)
+        self._btn_apply.setEnabled(len(self._assignments) > 0)
+        self._lbl_bld_status.setText(
+            f"Capacitated-transport distribution: {len(self._assignments)} bus "
+            f"fraction(s) across {n_nodes} multi-bus node(s) from "
+            f"{len(res.cell_lats)} demand cells.")
 
     def _apply_all(self):
         """Apply forecast demand to nodes + bus fractions to model."""

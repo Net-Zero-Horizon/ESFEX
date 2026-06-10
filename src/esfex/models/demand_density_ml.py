@@ -686,6 +686,74 @@ def fetch_cmip6_node_temps(
     return out
 
 
+def allocate_demand_capacitated(
+    cell_lats, cell_lons, cell_demand,
+    bus_lats, bus_lons, bus_cap,
+    headroom: float = 1.25,
+) -> np.ndarray:
+    """Capacity-constrained allocation of cell demand to buses (substations).
+
+    Solves the capacitated transportation problem — minimise the total
+    feeder distance Σ x(c,b)·d(c,b) subject to every cell's demand being fully
+    served (Σ_b x = D_c) and no bus serving beyond its capacity (Σ_c x ≤ cap_b).
+    Unlike a Voronoi/nearest assignment this lets a large substation draw demand
+    from farther away and spills demand to the next substation when the nearest
+    one is full — i.e. a bus no longer carries only its immediate cell.
+
+    Returns the per-bus served demand (same units as ``cell_demand``)."""
+    cell_demand = np.asarray(cell_demand, dtype=np.float64)
+    nb = len(bus_cap)
+    nc = len(cell_demand)
+    if nb == 0:
+        return np.zeros(0)
+    if nb == 1:
+        return np.array([float(cell_demand.sum())])
+    if nc == 0:
+        return np.zeros(nb)
+
+    cap = np.asarray(bus_cap, dtype=np.float64).copy()
+    cap[~np.isfinite(cap) | (cap < 0)] = 0.0
+    if cap.sum() <= 0:
+        cap = np.ones(nb)
+    Dtot = float(cell_demand.sum())
+    # Substations have headroom; guarantee feasibility (total cap ≥ demand).
+    if cap.sum() < headroom * Dtot and Dtot > 0:
+        cap = cap * (headroom * Dtot / cap.sum())
+
+    mean_lat = float(np.mean(cell_lats))
+    mlng = 111.320 * math.cos(math.radians(mean_lat))
+    cx = np.asarray(cell_lons) * mlng; cy = np.asarray(cell_lats) * 110.540
+    bx = np.asarray(bus_lons) * mlng; by = np.asarray(bus_lats) * 110.540
+    dist = np.sqrt((cx[:, None] - bx[None, :]) ** 2
+                   + (cy[:, None] - by[None, :]) ** 2)        # (nc, nb) km
+
+    try:
+        from scipy.optimize import linprog
+        from scipy.sparse import lil_matrix
+        nv = nc * nb
+        A_eq = lil_matrix((nc, nv))
+        for c in range(nc):
+            A_eq[c, c * nb:(c + 1) * nb] = 1.0
+        A_ub = lil_matrix((nb, nv))
+        for b in range(nb):
+            A_ub[b, b::nb] = 1.0          # variables (c·nb + b) for all c
+        res = linprog(
+            dist.ravel(), A_ub=A_ub.tocsr(), b_ub=cap,
+            A_eq=A_eq.tocsr(), b_eq=cell_demand,
+            bounds=(0.0, None), method="highs",
+        )
+        if res.success:
+            return np.asarray(res.x).reshape(nc, nb).sum(axis=0)
+    except Exception as exc:  # pragma: no cover - solver/env dependent
+        logger.warning("Capacitated transport failed (%s); capacity-weighted "
+                       "fallback.", exc)
+
+    # Fallback: capacity-weighted inverse-distance (gravity) share.
+    w = cap[None, :] / np.maximum(dist, 1e-3) ** 2
+    w = w / w.sum(axis=1, keepdims=True)
+    return (cell_demand[:, None] * w).sum(axis=0)
+
+
 def _ssp_gdp_total_nearest(lat: float, lon: float, year: int, ssp: str) -> Optional[float]:
     """Per-cell SSP GDP TOTAL (USD) for the NEAREST 5-year step (no interpolation,
     matching the pipeline's nearest-year stepping). Falls back to the historical
