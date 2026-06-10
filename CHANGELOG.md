@@ -7,6 +7,41 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.1.7] — 2026-06-10
+
+### Added
+
+- **Faithful OSM import as the only build mode** — the Grid Builder now always
+  reconstructs the network from the source topology (substations, lines,
+  transformers). The "skip incomplete" / "faithful import" toggles, the
+  GridFinder source, and the dead snapping/interconnection parameters are gone;
+  Step 2 is simpler and the build no longer emits spurious "isolated
+  generation / no demand" warnings.
+- **Spatially-explicit demand forecasting** — node demand comes from a trained
+  hourly XGBoost density model evaluated per 0.25° grid cell: each cell's
+  demand density (driven by SSP population and GDP rasters plus CMIP6
+  multi-year climate) is multiplied by the cell area and summed per node, then
+  anchored to a national total. This replaces the previous "national total ÷
+  node count" proxy and produces realistic spatial and inter-annual variation.
+- **Capacitated-transport distribution of demand to buses** — within a node,
+  demand is split among load buses by solving a capacitated transportation
+  problem (cells → buses, capacity = transformer MVA with a voltage-scaled
+  fallback) instead of a Voronoi/nearest assignment. A bus serves a
+  distribution territory bounded by its capacity, and demand spills to the next
+  substation once the nearest one saturates.
+
+### Changed
+
+- **Grid Builder Step 2 layout** tidied (Target System / Node Placement), and
+  the demand step exposes an SSP-scenario selector in place of a fixed GDP
+  growth rate.
+
+### Tested
+
+- **End-to-end solvability** of the faithfully-built network (build → solve →
+  validate), plus unit coverage for the per-cell density inference and the
+  capacitated demand→bus allocation.
+
 ## [0.1.6] — 2026-06-08
 
 ### Performance
