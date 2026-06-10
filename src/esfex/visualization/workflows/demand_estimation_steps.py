@@ -796,6 +796,12 @@ class ProxyDataStep(QWidget):
             self._combo_ssp.addItem(ssp, ssp)
         self._combo_ssp.setCurrentIndex(1)
         self._combo_ssp.setMaximumWidth(90)
+        self._combo_ssp.setToolTip(
+            "Shared Socioeconomic Pathway. Drives both the CMIP6 climate\n"
+            "projections and the gridded GDP trajectory that the demand\n"
+            "forecast follows year by year (replacing a fixed growth rate).\n"
+            "SSP2 = middle-of-the-road."
+        )
         clim_form.addRow(tr("wizard_demest.ssp_scenario"), self._combo_ssp)
 
         self._spin_year = QSpinBox()
@@ -1314,6 +1320,11 @@ class ProxyDataStep(QWidget):
         d["lon"] = self._spin_lon.value()
         return d
 
+    def get_ssp_scenario(self) -> str:
+        """Selected SSP scenario (e.g. 'SSP2'). Drives both the CMIP6 climate
+        and the gridded GDP trajectory used by the demand-density model."""
+        return self._combo_ssp.currentData() or "SSP2"
+
     def get_saturation_params(self) -> dict:
         return {
             "efficiency_saturation": self._spin_eff_sat.value(),
@@ -1772,6 +1783,7 @@ class MacroEconomicStep(QWidget):
             efficiency_base_level=bi.get("efficiency_base_level", 0.0),
             electrification_saturation=bi.get("electrification_saturation", 1.0),
             electrification_base_level=bi.get("electrification_base_level", 0.0),
+            ssp_scenario=bi.get("ssp_scenario", "ssp2"),
         )
 
         proxy = ProxyData(

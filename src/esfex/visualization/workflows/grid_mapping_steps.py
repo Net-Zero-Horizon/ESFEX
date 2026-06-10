@@ -4342,16 +4342,21 @@ class GridMappingDemandStep(QWidget):
 
         fg.addLayout(config_grid)
 
-        # GDP growth + elasticity (collapsible row)
+        # GDP scenario + elasticity (collapsible row). GDP growth is no longer
+        # a fixed user rate — it follows the gridded SSP GDP trajectory (real,
+        # non-linear, per node). The user picks the SSP scenario instead.
         growth_row = QHBoxLayout()
-        growth_row.addWidget(QLabel("GDP growth:"))
-        self._spin_gdp_growth = QDoubleSpinBox()
-        self._spin_gdp_growth.setRange(-0.10, 0.20)
-        self._spin_gdp_growth.setDecimals(3)
-        self._spin_gdp_growth.setSingleStep(0.005)
-        self._spin_gdp_growth.setValue(0.030)
-        self._spin_gdp_growth.setSuffix(" /yr")
-        growth_row.addWidget(self._spin_gdp_growth)
+        growth_row.addWidget(QLabel("GDP scenario:"))
+        self._combo_gdp_ssp = QComboBox()
+        for ssp in ["SSP1", "SSP2", "SSP3", "SSP4", "SSP5"]:
+            self._combo_gdp_ssp.addItem(ssp, ssp)
+        self._combo_gdp_ssp.setCurrentIndex(1)   # SSP2
+        self._combo_gdp_ssp.setToolTip(
+            "Shared Socioeconomic Pathway for the GDP trajectory. The demand\n"
+            "forecast follows the gridded SSP GDP path (per node, year by year),\n"
+            "replacing a fixed growth rate. SSP2 = middle-of-the-road."
+        )
+        growth_row.addWidget(self._combo_gdp_ssp)
 
         growth_row.addWidget(QLabel("Elasticity:"))
         self._spin_elasticity = QDoubleSpinBox()
@@ -4835,14 +4840,17 @@ class GridMappingDemandStep(QWidget):
             simulation_years=self._spin_horizon.value(),
             num_nodes=num_nodes,
             national_demand_gwh=self._spin_national_gwh.value(),
-            gdp_growth_rate=self._spin_gdp_growth.value(),
             demand_gdp_elasticity=self._spin_elasticity.value(),
             efficiency_improvement=self._spin_efficiency.value(),
             ml_engine=engine_key,
             force_archetype=(engine_key == "archetype"),
+            # GDP trajectory follows the gridded SSP rasters (not a fixed rate).
+            ssp_scenario=self._combo_gdp_ssp.currentData() or "SSP2",
         )
 
-        # Build proxy data from nodes
+        # Build proxy data from nodes. The drawn-area bounds give the density
+        # model the study region for the per-node area partition and the SSP
+        # GDP / population raster sampling.
         proxy = ProxyData(
             building_weights=[1.0 / num_nodes] * num_nodes,
             population_weights=[1.0 / num_nodes] * num_nodes,
@@ -4854,6 +4862,7 @@ class GridMappingDemandStep(QWidget):
             node_lats=[n.centroid_lat for n in nodes],
             node_lons=[n.centroid_lng for n in nodes],
             node_names=[n.name for n in nodes],
+            bounds=self._bounds,
         )
 
         # Build macro data from WB fetch
@@ -4868,7 +4877,6 @@ class GridMappingDemandStep(QWidget):
             electric_consumption_kwh_capita=wb.get(
                 "electric_consumption_kwh_capita", 2000.0
             ),
-            gdp_growth_rate=self._spin_gdp_growth.value(),
         )
 
         # Build meteo data from ERA5 fetch

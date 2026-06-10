@@ -214,6 +214,8 @@ class DemandEstimationWizard(QDialog):
                 # Study region → per-node area (Voronoi) for the density model.
                 bounds=self._step_scope.get_bounds(),
                 area_polygon=self._step_scope.get_polygon_coords(),
+                # SSP scenario → gridded GDP trajectory (density model).
+                ssp_scenario=self._step_proxy.get_ssp_scenario(),
                 **sat_params,
             )
 

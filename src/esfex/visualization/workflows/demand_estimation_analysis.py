@@ -107,6 +107,11 @@ class DemandEstimationConfig:
     cmip6_ssp_pathway: str = "ssp245"
     cmip6_gcm_model: str = "ACCESS-CM2"
 
+    # SSP scenario for the gridded GDP trajectory used by the density model
+    # ("ssp1".."ssp5"). The future per-node GDP path is read from the
+    # GDP{year}_ssp{N} rasters, replacing any fixed GDP growth rate.
+    ssp_scenario: str = "ssp2"
+
     # ML engine control
     force_archetype: bool = False   # True → skip ML even if model available
     ml_engine: str = "auto"         # "auto" | "tft" | "xgboost"
@@ -837,16 +842,21 @@ class DemandProfileBuilder:
         meteo: MeteoData,
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> DemandEstimationResult:
-        """Spatial pipeline: predict hourly demand DENSITY (MW/km²) per node,
-        multiply by node area, and calibrate the national total to the macro
-        estimate. The per-node split comes entirely from the density model, so
-        it no longer collapses to total/num_nodes."""
+        """Per-CELL spatial pipeline (the authoritative use of the density
+        model). For every 0.25° grid cell of the study region, predict a demand
+        DENSITY (MW/km²) from the cell's own population/GDP density + climate +
+        calendar, multiply by the cell area, and SUM the cells of each node.
+        The trajectory comes from re-running the model each year with that
+        year's gridded SSP GDP (nearest 5-year step, no interpolation); the
+        level is the raw model integral, optionally anchored to a national
+        demand override."""
         import numpy as np
         from esfex.models.demand_density_ml import (
             DemandDensityModel,
-            build_density_features,
-            compute_node_areas_km2,
-            sample_node_densities,
+            region_cells_025,
+            sample_cells_socio,
+            predict_region_cell_demand,
+            fetch_cmip6_node_temps,
         )
 
         def emit(pct: int, msg: str) -> None:
@@ -859,114 +869,155 @@ class DemandProfileBuilder:
             num_nodes = max(len(proxy.node_lats), 1)
             self._cfg.num_nodes = num_nodes
         years = self._cfg.simulation_years
+        base_year = self._cfg.base_year
+        ssp = getattr(self._cfg, "ssp_scenario", "ssp2")
+        poly = list(proxy.area_polygon) or None
+        bnds = proxy.bounds
 
         emit(5, "Loading demand-density model…")
         model = DemandDensityModel.load_bundled()
 
-        emit(10, "Computing spatial weights…")
-        w_spatial = self._compute_spatial_weights(proxy)
+        # ── 0.25° grid cells over the study region ─────────────────
+        emit(12, "Enumerating 0.25° grid cells…")
+        clats, clons, careas = region_cells_025(
+            polygon_latlon=poly, bounds=bnds,
+            node_lats=list(proxy.node_lats), node_lons=list(proxy.node_lons))
+        if len(clats) == 0:
+            raise ValueError("No 0.25° cells in the study region for density inference.")
 
-        emit(15, "Estimating national demand…")
-        base_annual_mwh = self._estimate_annual_demand(w_spatial, proxy, macro)
-        base_annual_mwh = self._calibrate_annual(base_annual_mwh)
-        annual_traj = self._compute_annual_trajectory(base_annual_mwh, macro, proxy)
-        national_year_mwh = annual_traj.sum(axis=1)   # (years,) MWh
-
-        emit(20, "Partitioning study area into node territories…")
-        areas = np.asarray(
-            compute_node_areas_km2(
-                list(proxy.node_lats), list(proxy.node_lons),
-                polygon_latlon=list(proxy.area_polygon) or None,
-                bounds=proxy.bounds,
-            ),
-            dtype=np.float64,
-        )
-        if areas.size != num_nodes:
-            areas = np.full(num_nodes, max(float(areas.sum()) / max(num_nodes, 1), 1.0))
-
-        # Cell-averaged socio density from gridded rasters (GPW pop, GDP 0.25°),
-        # matching how the model was trained. Falls back per node to
-        # population-derived density when rasters are unavailable / all-ocean.
-        emit(25, "Sampling population & GDP rasters per node…")
-        try:
-            sampled = sample_node_densities(
-                list(proxy.node_lats), list(proxy.node_lons),
-                year=self._cfg.base_year,
-                polygon_latlon=list(proxy.area_polygon) or None,
-                bounds=proxy.bounds,
-            )
-        except Exception as exc:
-            logger.warning("Raster density sampling failed (%s); deriving from population.", exc)
-            sampled = [None] * num_nodes
-        if len(sampled) != num_nodes:
-            sampled = [None] * num_nodes
-        n_sampled = sum(1 for s in sampled if s)
-        if n_sampled:
-            logger.info("Density: raster-sampled socio for %d/%d node(s).",
-                        n_sampled, num_nodes)
+        # ── Assign each cell to its nearest node (projected) ─────────
+        nlat = np.asarray(proxy.node_lats, dtype=np.float64)
+        nlon = np.asarray(proxy.node_lons, dtype=np.float64)
+        mean_lat = float(np.mean(clats))
+        mlng = 111320.0 * math.cos(math.radians(mean_lat))
+        nx = nlon * mlng; ny = nlat * 110540.0
+        cx = clons * mlng; cy = clats * 110540.0
+        cell_node = np.array([
+            int(np.argmin((nx - cx[i]) ** 2 + (ny - cy[i]) ** 2))
+            for i in range(len(clats))
+        ])
 
         if len(meteo.temperature_hourly) >= hpy:
             temp_h = np.array(meteo.temperature_hourly[:hpy], dtype=np.float64)
         else:
             temp_h = np.full(hpy, 20.0, dtype=np.float64)
 
-        gdp_pc = max(float(macro.gdp_per_capita), 1.0)
-        pop_total = float(macro.population)
+        # ── Active cells (base-year population or GDP) ─────────────
+        emit(20, "Sampling population & GDP per cell…")
+        from esfex.models.demand_density_ml import _ssp_gdp_total_nearest
+        log_pd0, _gd0, _gpc0, keep = sample_cells_socio(
+            clats, clons, careas, base_year, ssp)
+        idx = np.where(keep)[0]
+        if idx.size == 0:
+            raise ValueError("No populated/economic cells in the study region.")
+        alat = clats[idx]; alon = clons[idx]; aarea = careas[idx]
+        a_node = cell_node[idx]
+        base_pd = np.power(10.0, log_pd0[idx])           # people/km² (spatial)
 
-        emit(30, "Density inference…")
-        base_mw = np.zeros((hpy, num_nodes), dtype=np.float64)   # base-year MW
-        for ni in range(num_nodes):
-            area = max(float(areas[ni]), 1e-3)
-            # Prefer raster-sampled densities; fall back to population/area.
-            s = sampled[ni] if ni < len(sampled) else None
-            if s and s.get("pop_density"):
-                pop_density = float(s["pop_density"])         # people / km²
-                gpc = float(s["gdp_per_cap"]) if s.get("gdp_per_cap") else gdp_pc
-                gdp_density = (
-                    float(s["gdp_density"]) if s.get("gdp_density")
-                    else gpc * pop_density)                   # USD / km²
-            else:
-                node_pop = max(pop_total * float(w_spatial[ni]), 1.0)
-                pop_density = node_pop / area
-                gpc = gdp_pc
-                gdp_density = gpc * pop_density
-            lat = proxy.node_lats[ni] if ni < len(proxy.node_lats) else 0.0
-            lon = proxy.node_lons[ni] if ni < len(proxy.node_lons) else 0.0
+        # Per-cell GDP density (USD/km²) at each 5-year SSP step spanning the
+        # horizon → geometrically interpolated per year (GDP compounds; smooth
+        # so the model isn't whipped across XGBoost split thresholds by 5-yr
+        # jumps). GDP AND population are the demand-trend drivers.
+        def _floor5(yv):
+            return (yv // 5) * 5
+        last_year = base_year + max(years - 1, 0)
+        step_years = list(range(_floor5(base_year), _floor5(last_year) + 6, 5))
+        gdp_step: dict[int, "np.ndarray"] = {}
+        for st in step_years:
+            st_c = min(max(st, 2025), 2100)
+            arr = np.zeros(idx.size, dtype=np.float64)
+            for k in range(idx.size):
+                gt = _ssp_gdp_total_nearest(float(alat[k]), float(alon[k]), st_c, ssp)
+                arr[k] = (gt / max(float(aarea[k]), 1e-6)) if gt else 0.0
+            gdp_step[st] = arr
 
-            feats = build_density_features(
-                latitude=lat, longitude=lon,
-                log_pop_density=math.log10(max(pop_density, 1e-6)),
-                log_gdp_density=math.log10(max(gdp_density, 1e-6)),
-                log_gdp_per_cap=math.log10(max(gpc, 1.0)),
-                temperature_hourly=temp_h,
-                base_year=self._cfg.base_year,
-                feature_order=model.feature_names,
-                country_iso=macro.country_iso,
-                hdd_base=self._cfg.hdd_base_temp,
-                cdd_base=self._cfg.cdd_base_temp,
-                train_ranges=model.train_ranges,
-            )
-            density = model.predict_density_mw_per_km2(feats)   # (hpy,) MW/km²
-            base_mw[:, ni] = density * area                     # MW
+        def _gdp_dens_year(yv):
+            lo = _floor5(yv); hi = lo + 5
+            a = gdp_step.get(lo); b = gdp_step.get(hi)
+            if a is None and b is None:
+                return np.zeros(idx.size)
+            if a is None:
+                return b.copy()
+            if b is None:
+                return a.copy()
+            f = (yv - lo) / 5.0
+            out = a.copy()
+            both = (a > 0) & (b > 0)
+            out[both] = a[both] * np.power(b[both] / a[both], f)
+            only_b = (a <= 0) & (b > 0)
+            out[only_b] = b[only_b]
+            return out
 
-            emit(30 + int(55 * (ni + 1) / num_nodes),
-                 f"Node {ni + 1}/{num_nodes} complete")
+        # Population growth (SSP / UN WPP per-year rates from the projection
+        # table) applied to the base spatial population.
+        pop_factor = np.ones(years, dtype=np.float64)
+        for y in range(1, years):
+            pg = macro.pop_growth_by_year.get(base_year + y, 0.0)
+            pop_factor[y] = pop_factor[y - 1] * (1.0 + pg)
 
-        # Calibrate to the macro national total per year, preserving the
-        # density model's spatial + temporal pattern exactly.
-        base_total_mwh = float(base_mw.sum())
+        # ── Per-node CMIP6 multi-year climate (hourly profile shape) ──
+        emit(28, "Fetching CMIP6 climate per node…")
+        cmip6 = fetch_cmip6_node_temps(
+            list(proxy.node_lats), list(proxy.node_lons), base_year, years)
+        n_cmip6 = sum(1 for c in cmip6 if c)
+        cells_by_node = [np.where(a_node == nd)[0] for nd in range(num_nodes)]
+
+        # ── Per-year, per-node: per-cell density inference → node demand ──
+        emit(32, "Per-cell density inference (per year, GDP+pop+CMIP6)…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
-        if base_total_mwh > 0:
-            for y in range(years):
-                hourly_all[y] = base_mw * (national_year_mwh[y] / base_total_mwh)
+        for y in range(years):
+            yr = base_year + y
+            pd_y = np.maximum(base_pd * pop_factor[y], 1e-6)     # population evolves
+            gd_y = np.maximum(_gdp_dens_year(yr), 1e-3)          # GDP evolves (smooth)
+            gpc_y = np.maximum(gd_y / pd_y, 1e-3)
+            lpd = np.log10(pd_y); lgd = np.log10(gd_y); lgpc = np.log10(gpc_y)
+            for nd in range(num_nodes):
+                a = cells_by_node[nd]
+                if a.size == 0:
+                    continue
+                ct = cmip6[nd]
+                temp_ny = (np.asarray(ct[yr], dtype=np.float64)
+                           if (ct and yr in ct) else temp_h)
+                cell_mw = predict_region_cell_demand(
+                    model, alat[a], alon[a], aarea[a],
+                    lpd[a], lgd[a], lgpc[a],
+                    temp_ny, yr, country_iso=macro.country_iso,
+                    hdd_base=self._cfg.hdd_base_temp, cdd_base=self._cfg.cdd_base_temp,
+                )                                            # (n_cells_nd, hpy) MW
+                hourly_all[y, :, nd] = cell_mw.sum(axis=0)
+            emit(32 + int(58 * (y + 1) / years), f"Year {yr}: {idx.size} cells")
+
+        # ── Anchoring: scale to a national override if set, else raw model ─
+        base_gwh = float(hourly_all[0].sum()) / 1000.0
+        target_gwh = (self._cfg.national_demand_gwh
+                      if self._cfg.national_demand_gwh > 0
+                      else self._cfg.known_annual_gwh)
+        if target_gwh > 0 and base_gwh > 0:
+            hourly_all *= target_gwh / base_gwh
+            logger.info("Density: anchored base-year to %.0f GWh "
+                        "(raw model integral %.0f GWh).", target_gwh, base_gwh)
         else:
-            self._warnings.append(
-                "Density model produced zero demand; using uncalibrated output.")
-            for y in range(years):
-                hourly_all[y] = base_mw
+            logger.info("Density: raw model magnitude (no override): "
+                        "%.0f GWh, %.0f MW peak.",
+                        base_gwh, float(hourly_all[0].sum(axis=1).max()))
 
         demand = hourly_all[0]
         demand_my = hourly_all.reshape(-1, num_nodes)
+        node_base = hourly_all[0].sum(axis=0)
+        tot = float(node_base.sum())
+        w_spatial = (node_base / tot) if tot > 0 else np.full(num_nodes, 1.0 / num_nodes)
+
+        if years > 1:
+            nat = hourly_all.reshape(years, -1).sum(axis=1)
+            if nat[0] > 0 and nat[-2] > 0:
+                g0 = 100.0 * (nat[1] / nat[0] - 1.0)
+                gN = 100.0 * (nat[-1] / nat[-2] - 1.0)
+                clim = (f"CMIP6 climate {n_cmip6}/{num_nodes} nodes"
+                        if n_cmip6 else "fixed weather year (CMIP6 unavailable)")
+                self._warnings.append(
+                    f"Demand trajectory: model on SSP-{ssp} GDP + {clim}, "
+                    f"{g0:.1f}%/yr → {gN:.1f}%/yr over {years} yr "
+                    f"({idx.size} cells).")
 
         emit(92, "Computing metrics…")
         result = self._compute_metrics(demand, demand_my, w_spatial)
@@ -976,7 +1027,7 @@ class DemandProfileBuilder:
         result.demand_source = self._demand_source
         result.warnings = list(self._warnings)
         result.level0_annual_mwh_by_year = [
-            float(national_year_mwh[y]) for y in range(years)
+            float(hourly_all[y].sum()) for y in range(years)
         ]
 
         if self._cfg.resolution_hours != 1.0:

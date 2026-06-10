@@ -16,8 +16,19 @@ from esfex.models.demand_density_ml import (
     DemandDensityModel,
     build_density_features,
     compute_node_areas_km2,
+    gdp_density_point,
     sample_node_densities,
+    sample_node_gdp_density,
+    sample_node_pop_and_area,
+    _normalize_ssp,
 )
+
+
+def _gdp_ssp_available() -> bool:
+    try:
+        return gdp_density_point(23.1, -82.4, 2030, "ssp2") is not None
+    except Exception:
+        return False
 
 
 def _pop_raster_available() -> bool:
@@ -69,6 +80,36 @@ class TestNodeAreas:
         assert 0 < a_poly < a_bbox
 
 
+class TestCellGrid:
+    def test_cell_area_decreases_toward_poles(self):
+        from esfex.models.demand_density_ml import cell_area_km2
+        eq = float(cell_area_km2(0.0))
+        mid = float(cell_area_km2(45.0))
+        hi = float(cell_area_km2(70.0))
+        # A 0.25° cell at the equator is ~770 km²; it shrinks with |lat|.
+        assert 600 < eq < 900
+        assert eq > mid > hi > 0
+
+    def test_region_cells_aligned_and_inside_bounds(self):
+        from esfex.models.demand_density_ml import region_cells_025
+        lats, lons, areas = region_cells_025(bounds=(19.8, -85.0, 23.3, -74.0))
+        assert len(lats) == len(lons) == len(areas) > 0
+        # Centroids sit on the global 0.25° grid (…, x.125, x.375, …).
+        frac = np.modf(np.abs(lats) / 0.25)[0]
+        assert np.allclose(frac, 0.5, atol=1e-6)
+        assert areas.min() > 0
+        # Roughly covers the Cuba bounding box span.
+        assert lats.min() >= 19.5 and lats.max() <= 23.6
+
+    def test_region_cells_clipped_to_polygon(self):
+        from esfex.models.demand_density_ml import region_cells_025
+        # A small triangle → fewer cells than its bounding box.
+        poly = [(21.0, -80.0), (21.0, -78.0), (23.0, -79.0)]
+        latp, lonp, _ = region_cells_025(polygon_latlon=poly)
+        latb, lonb, _ = region_cells_025(bounds=(21.0, -80.0, 23.0, -78.0))
+        assert 0 < len(latp) < len(latb)
+
+
 class TestDensityFeatures:
     def test_shape_and_order(self):
         temp = np.full(8760, 28.0)
@@ -118,6 +159,23 @@ class TestRasterSampling:
         not DemandDensityModel.is_available(),
         reason="density model not present",
     )
+    def test_populated_area_excludes_ocean(self):
+        # An ocean-padded bbox: the populated area summed over nodes must be a
+        # small fraction of the full region (most of the Cuba bbox is sea), so
+        # sparse island/coastal nodes are not over-forecast.
+        from esfex.models.demand_density_ml import (
+            _region_ring, _polygon_area_km2,
+        )
+        lats = [23.1, 21.7]; lons = [-82.4, -82.8]  # Havana, Isla de la Juventud
+        pa = sample_node_pop_and_area(lats, lons, 2025, bounds=self._CUBA, grid=120)
+        assert len(pa) == 2
+        pop_area_total = sum(a for _d, a in pa)
+        ring, _ml, region_area = _region_ring(lats, lons, None, self._CUBA)
+        # Inhabited land is a small slice of the ocean-heavy bbox.
+        assert 0 < pop_area_total < 0.5 * region_area
+        # Each node has a positive population density.
+        assert all(d and d > 0 for d, _a in pa)
+
     def test_raster_breaks_even_split_with_equal_weights(self):
         # With equal proxy weights the population-derived path collapses to an
         # exact even split (total/num_nodes); raster-sampled density must not.
@@ -147,6 +205,76 @@ class TestRasterSampling:
         assert abs(res.annual_gwh[0] - res.annual_gwh[1]) > 100.0
 
 
+class TestSSPNormalization:
+    def test_normalize_variants(self):
+        assert _normalize_ssp("ssp2") == "2"
+        assert _normalize_ssp("SSP245") == "2"
+        assert _normalize_ssp(3) == "3"
+        assert _normalize_ssp("nonsense") == "2"   # default
+
+
+@pytest.mark.skipif(
+    not _gdp_ssp_available(),
+    reason="SSP GDP rasters not available",
+)
+class TestSSPGdpTrajectory:
+    _CUBA = (19.8, -85.0, 23.3, -74.0)
+
+    def test_gdp_density_increases_and_interpolates(self):
+        v25 = gdp_density_point(23.1, -82.4, 2025, "ssp2")
+        v27 = gdp_density_point(23.1, -82.4, 2027, "ssp2")
+        v30 = gdp_density_point(23.1, -82.4, 2030, "ssp2")
+        # SSP2 GDP grows; an interpolated year sits between its bracketing steps.
+        assert v25 < v30
+        assert v25 < v27 < v30
+
+    def test_node_gdp_density_differentiated(self):
+        out = sample_node_gdp_density(
+            [23.1, 20.3], [-82.4, -77.0], 2035, "ssp2", bounds=self._CUBA, grid=50)
+        assert all(o and o > 0 for o in out)
+        assert out[0] != out[1]
+
+    @pytest.mark.skipif(
+        not DemandDensityModel.is_available(), reason="density model not present")
+    def test_multi_year_trajectory_evolves_with_socio_and_climate(self):
+        # The multi-year demand is the model re-run each year with that year's
+        # evolving SSP GDP + population (the trend drivers) and CMIP6 climate
+        # (the inter-annual variability). It must NOT be a frozen constant line
+        # (the old fixed-rate problem). CMIP6 is fetched live; if the network is
+        # unavailable it falls back to the base weather year — the build still
+        # produces a valid per-year trajectory either way.
+        from esfex.visualization.workflows.demand_estimation_analysis import (
+            DemandProfileBuilder, DemandEstimationConfig,
+            ProxyData, MacroData, MeteoData,
+        )
+        years = 4
+        cfg = DemandEstimationConfig(
+            base_year=2025, simulation_years=years, num_nodes=2,
+            national_demand_gwh=0.0, ssp_scenario="ssp2",
+        )
+        proxy = ProxyData(
+            node_lats=[23.1, 20.3], node_lons=[-82.4, -77.0],
+            node_names=["Havana", "East"], bounds=self._CUBA,
+        )
+        macro = MacroData(
+            country_iso="CU", gdp_per_capita=9500.0, population=11_000_000.0,
+            electric_consumption_kwh_capita=1300.0, electricity_access_pct=100.0,
+            urbanization_pct=77.0,
+            pop_growth_by_year={2025 + i: -0.003 for i in range(years)},
+        )
+        meteo = MeteoData(temperature_hourly=list(np.full(8760, 27.0)))
+        res = DemandProfileBuilder(cfg).build(proxy, macro, meteo)
+
+        assert res.demand_source == "ml_density"
+        lvl = np.asarray(res.level0_annual_mwh_by_year)
+        assert len(lvl) == years
+        assert np.all(lvl > 0)
+        # Country-scale magnitude from the per-cell integral (Cuba ~20 TWh band).
+        assert 8_000 < lvl[0] / 1000.0 < 40_000
+        # The trajectory is NOT a frozen constant — socio + climate move it.
+        assert lvl.std() / lvl.mean() > 1e-4
+
+
 @pytest.mark.skipif(
     not DemandDensityModel.is_available(),
     reason="demand_density_hourly_xgb.json not present in MODELS_DIR",
@@ -165,6 +293,45 @@ class TestDensityModelEndToEnd:
         dens = model.predict_density_mw_per_km2(X)
         assert dens.shape == (8760,)
         assert np.all(dens > 0)
+
+    def test_absolute_demand_from_model_integral_without_override(self):
+        # With NO national-demand override, the national total is the SUM of the
+        # per-node density×area integrals — the density model is absolute, so no
+        # external kWh/capita estimate or calibration is used.
+        from esfex.visualization.workflows.demand_estimation_analysis import (
+            DemandProfileBuilder, DemandEstimationConfig,
+            ProxyData, MacroData, MeteoData,
+        )
+        nodes = {"Havana": (23.1, -82.4), "Santiago": (20.02, -75.82),
+                 "Camaguey": (21.38, -77.92), "SantaClara": (22.4, -79.97)}
+        names = list(nodes)
+        lats = [nodes[k][0] for k in names]; lons = [nodes[k][1] for k in names]
+        n = len(names)
+        cfg = DemandEstimationConfig(
+            base_year=2025, simulation_years=1, num_nodes=n,
+            national_demand_gwh=0.0, ssp_scenario="SSP2",   # no override
+        )
+        proxy = ProxyData(
+            building_weights=[1 / n] * n, population_weights=[1 / n] * n,
+            node_lats=lats, node_lons=lons, node_names=names,
+            bounds=(19.8, -85.0, 23.3, -74.0),
+        )
+        macro = MacroData(
+            country_iso="CU", gdp_per_capita=9500.0, population=11_000_000.0,
+            electric_consumption_kwh_capita=1400.0,
+            electricity_access_pct=100.0, urbanization_pct=77.0,
+        )
+        h = np.arange(8760); temp = 26 + 4 * np.sin(2 * np.pi * (h % 24 - 15) / 24)
+        meteo = MeteoData(temperature_hourly=list(temp))
+        res = DemandProfileBuilder(cfg).build(proxy, macro, meteo)
+        assert res.demand_source == "ml_density"
+        # A positive, country-scale total falls out of the integral (Cuba is
+        # ~20 TWh / ~3 GW; allow a wide band for model + grid tolerance).
+        assert 8_000 < res.total_annual_gwh < 35_000
+        assert 1_500 < res.total_peak_mw < 5_000
+        # Realistic load factor (not a flat profile).
+        lf = res.total_annual_gwh * 1000 / 8760 / res.total_peak_mw
+        assert 0.5 < lf < 0.9
 
     def test_build_density_is_differentiated_and_calibrated(self):
         from esfex.visualization.workflows.demand_estimation_analysis import (
