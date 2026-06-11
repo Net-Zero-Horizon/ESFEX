@@ -1210,8 +1210,10 @@ function _drawEdge(layer, edge, busH) {
         var labelX = mid.x;
         var labelY = mid.y;
 
-        // Offset for IEC symbols
-        if (edgeType === 'transformer') labelX = mid.x + 34;  // beside the vertical symbol
+        // Offset for IEC symbols. The transformer label sits BELOW its symbol,
+        // centred on the transformer's own X, so it never reaches across into a
+        // neighbouring (e.g. parallel) transformer.
+        if (edgeType === 'transformer') labelY = mid.y + 34;
         else if (edgeType === 'converter') labelY = mid.y + 32;
 
         // Place label avoiding ALL obstacles (buses, edges, equipment, other labels)
