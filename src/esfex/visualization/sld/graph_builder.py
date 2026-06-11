@@ -688,13 +688,42 @@ def _apply_grid_layout(
     #
     # Horizontal bars: edges exit/enter from TOP or BOTTOM of the bar.
     # Bar runs at y = bus.y + busH/2 across [bus.x, bus.x + bar_len]. ──
+
+    # ── Terminal slots: spread each bus's connections ALONG its bar instead
+    #    of stacking them all at the centre. Terminals are ordered by the
+    #    other endpoint's centre X, so left-going connections attach on the
+    #    left of the bar and right-going on the right (fewer crossings). ──
+    _TERM_PAD = 24
+    bus_center_x = {gid: c["x"] + c["width"] / 2 for gid, c in bus_index.items()}
+    bus_edge_list: dict[str, list[tuple[str, str]]] = {gid: [] for gid in bus_index}
+    for _e in elk_edges:
+        s0, t0 = _e["sources"][0], _e["targets"][0]
+        if s0 in bus_edge_list:
+            bus_edge_list[s0].append((_e["id"], t0))
+        if t0 in bus_edge_list:
+            bus_edge_list[t0].append((_e["id"], s0))
+    term_x: dict[tuple[str, str], float] = {}
+    for gid, lst in bus_edge_list.items():
+        c = bus_index[gid]
+        lst.sort(key=lambda e: bus_center_x.get(e[1], c["x"]))
+        n = len(lst)
+        x0 = c["x"] + _TERM_PAD
+        x1 = c["x"] + c["width"] - _TERM_PAD
+        if x1 <= x0:
+            x0, x1 = c["x"], c["x"] + c["width"]
+        for i, (eid, _other) in enumerate(lst):
+            frac = (i + 0.5) / n if n else 0.5
+            term_x[(gid, eid)] = x0 + frac * (x1 - x0)
+
     for edge in elk_edges:
         src = bus_index.get(edge["sources"][0])
         tgt = bus_index.get(edge["targets"][0])
         if not src or not tgt:
             continue
-        sx = src["x"] + src["width"] / 2
-        tx = tgt["x"] + tgt["width"] / 2
+        sx = term_x.get((edge["sources"][0], edge["id"]),
+                        src["x"] + src["width"] / 2)
+        tx = term_x.get((edge["targets"][0], edge["id"]),
+                        tgt["x"] + tgt["width"] / 2)
         # Default: exit src bottom, enter tgt top (DOWN-direction layout).
         sy = src["y"] + _BUS_H
         ty = tgt["y"]
@@ -723,9 +752,17 @@ def _apply_grid_layout(
             # Multi-row transformers (non-adjacent levels) fall through to the
             # side-channel route below so they don't pierce intermediate bars.
             upper, lower = (src, tgt) if src["y"] < tgt["y"] else (tgt, src)
+            upper_gid = (edge["sources"][0] if upper is src
+                         else edge["targets"][0])
             ox0 = max(upper["x"], lower["x"])
             ox1 = min(upper["x"] + upper["width"], lower["x"] + lower["width"])
-            cx = (ox0 + ox1) / 2 if ox1 > ox0 else (upper["x"] + upper["width"] / 2)
+            # Use this transformer's own terminal slot (distinct per parallel
+            # transformer) clamped into the bars' overlap, so multiple
+            # transformers between the same two bars don't stack on one line.
+            cx = term_x.get((upper_gid, edge["id"]),
+                            upper["x"] + upper["width"] / 2)
+            if ox1 > ox0:
+                cx = min(max(cx, ox0), ox1)
             edge["properties"]["transformerVertical"] = True
             edge["sections"] = [{
                 "startPoint": {"x": cx, "y": upper["y"] + _BUS_H},
