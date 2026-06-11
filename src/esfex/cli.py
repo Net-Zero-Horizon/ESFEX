@@ -19,10 +19,15 @@ app = typer.Typer(
     help="ESFEX: Energy System FlEXibility — Power System Optimization",
     add_completion=False,
 )
-# Force UTF-8 output to avoid cp1252 UnicodeEncodeError on Windows
+# Force UTF-8 output to avoid cp1252 UnicodeEncodeError on Windows.
+# Under pythonw.exe (the console-less GUI launcher) there is no console,
+# so sys.stdout/sys.stderr are None — guard before reconfiguring, or the
+# whole module fails to import and the Studio never opens.
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _force_blocking_stdio() -> None:
