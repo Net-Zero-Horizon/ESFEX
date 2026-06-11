@@ -712,3 +712,42 @@ def test_adaptive_spacing_grows_dense_gap():
     sparse = _gap(1)
     dense = _gap(20)
     assert dense >= sparse
+
+
+def test_multi_row_edge_routes_through_column_gap():
+    """An edge spanning >1 voltage row must NOT drop straight through the
+    bars in between — its long vertical run is offset into a column gap."""
+    state = GuiSystemState()
+    state.nodes = [GuiNode(index=0, name="N0")]
+    state.buses = {
+        "h": _bus("h", 0, 400.0, "H"),
+        "m": _bus("m", 0, 220.0, "M"),
+        "l": _bus("l", 0, 110.0, "L"),
+    }
+    # Cross-voltage line 400 -> 110 skips the 220 row in between.
+    state.transmission_lines = [GuiTransmissionLine(
+        line_id="X", from_bus="h", to_bus="l",
+        capacity_mw=100.0, voltage_kv=400.0)]
+    out = gb.build_elk_graph(state, merge_level=1)
+    ch = {c["id"]: c for c in out["elkGraph"]["children"]}
+    mid = [c for c in ch.values()
+           if c["properties"]["voltageKv"] == 220.0][0]
+    mid_x0, mid_x1 = mid["x"], mid["x"] + mid["width"]
+    bends = out["elkGraph"]["edges"][0]["sections"][0]["bendPoints"]
+    assert len(bends) == 4                       # channel route
+    chx = bends[1]["x"]
+    assert chx == bends[2]["x"]                  # vertical channel segment
+    assert not (mid_x0 <= chx <= mid_x1), (chx, mid_x0, mid_x1)
+
+
+def test_adjacent_row_edge_keeps_simple_z_route():
+    """Adjacent-row edges keep the compact 2-bend Z route (no channel)."""
+    state = GuiSystemState()
+    state.nodes = [GuiNode(index=0, name="N0")]
+    state.buses = {"h": _bus("h", 0, 220.0, "H"), "l": _bus("l", 0, 110.0, "L")}
+    state.transmission_lines = [GuiTransmissionLine(
+        line_id="X", from_bus="h", to_bus="l",
+        capacity_mw=100.0, voltage_kv=220.0)]
+    out = gb.build_elk_graph(state, merge_level=1)
+    bends = out["elkGraph"]["edges"][0]["sections"][0]["bendPoints"]
+    assert len(bends) == 2

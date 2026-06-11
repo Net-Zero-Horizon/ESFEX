@@ -759,13 +759,43 @@ def _apply_grid_layout(
             # Same row → both exit the bottom face and dip to the lane
             # below as a clean U (no segment crossing a bar).
             ty = tgt["y"] + _BUS_H
-        lane = edge_lane_y.get(edge["id"], (sy + ty) / 2)
+
+        sv = float(src["properties"].get("voltageKv", 0.0) or 0.0)
+        tv = float(tgt["properties"].get("voltageKv", 0.0) or 0.0)
+        rows_apart = abs(v_to_row.get(sv, 0) - v_to_row.get(tv, 0))
+
         edge["properties"]["precomputedRoute"] = True
-        edge["sections"] = [{
-            "startPoint": {"x": sx, "y": sy},
-            "endPoint": {"x": tx, "y": ty},
-            "bendPoints": [
-                {"x": sx, "y": lane},
-                {"x": tx, "y": lane},
-            ],
-        }]
+        if rows_apart >= 2:
+            # Multi-row edge: a straight vertical drop at sx/tx would pierce
+            # the bars of the rows in between. Route the long vertical run in
+            # a column GAP (between node columns), which is guaranteed clear
+            # of any bar, then step horizontally in to each endpoint.
+            src_node = int(src["properties"].get("parentNode", 0) or 0)
+            if tx >= sx:
+                channel_x = (node_x_left.get(src_node, sx)
+                             + node_col_w.get(src_node, 0.0) + _COL_GAP_X / 2)
+            else:
+                channel_x = node_x_left.get(src_node, sx) - _COL_GAP_X / 2
+            down = sy < ty
+            y_src = sy + _LANE_MARGIN_Y if down else sy - _LANE_MARGIN_Y
+            y_tgt = ty - _LANE_MARGIN_Y if down else ty + _LANE_MARGIN_Y
+            edge["sections"] = [{
+                "startPoint": {"x": sx, "y": sy},
+                "endPoint": {"x": tx, "y": ty},
+                "bendPoints": [
+                    {"x": sx, "y": y_src},
+                    {"x": channel_x, "y": y_src},
+                    {"x": channel_x, "y": y_tgt},
+                    {"x": tx, "y": y_tgt},
+                ],
+            }]
+        else:
+            lane = edge_lane_y.get(edge["id"], (sy + ty) / 2)
+            edge["sections"] = [{
+                "startPoint": {"x": sx, "y": sy},
+                "endPoint": {"x": tx, "y": ty},
+                "bendPoints": [
+                    {"x": sx, "y": lane},
+                    {"x": tx, "y": lane},
+                ],
+            }]
