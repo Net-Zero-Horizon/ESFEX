@@ -766,13 +766,15 @@ def _apply_grid_layout(
 
         edge["properties"]["precomputedRoute"] = True
 
-        if edge["properties"].get("edgeType") == "transformer" and src["y"] != tgt["y"]:
-            # Transformers connect two voltage bars in the SAME node column, so
-            # draw a CLEAN VERTICAL connection: one shared X inside the bars'
-            # horizontal overlap, exit the upper bar's bottom face and enter the
-            # lower bar's top face. The symbol then sits between the bars and is
-            # always oriented vertically (the JS side draws stubs + windings,
-            # so the line no longer passes over the symbol).
+        is_xfmr = edge["properties"].get("edgeType") == "transformer"
+        if is_xfmr and rows_apart == 1:
+            # Transformer between ADJACENT voltage levels: clean vertical
+            # connection at one shared X inside the two bars' horizontal
+            # overlap — exit the upper bar's bottom, enter the lower bar's top.
+            # The symbol sits between the bars, always vertical (the JS side
+            # draws stubs + windings, so no line crosses the symbol).
+            # Multi-row transformers (non-adjacent levels) fall through to the
+            # side-channel route below so they don't pierce intermediate bars.
             upper, lower = (src, tgt) if src["y"] < tgt["y"] else (tgt, src)
             ox0 = max(upper["x"], lower["x"])
             ox1 = min(upper["x"] + upper["width"], lower["x"] + lower["width"])

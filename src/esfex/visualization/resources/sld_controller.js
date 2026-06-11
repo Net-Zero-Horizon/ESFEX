@@ -1148,7 +1148,8 @@ function _drawEdge(layer, edge, busH) {
     // vertical, with short stubs from each bar to a winding. The Python side
     // routes transformers as a clean vertical (shared X), so the symbol never
     // gets a line drawn across it.
-    if (edgeType === 'transformer') {
+    if (edgeType === 'transformer' && props.transformerVertical) {
+        // Adjacent-level transformer: clean vertical between the two bars.
         var txx = sec0.startPoint.x;
         var yA = sec0.startPoint.y, yB = secLast.endPoint.y;
         var yTop = Math.min(yA, yB), yBot = Math.max(yA, yB);
@@ -1164,13 +1165,22 @@ function _drawEdge(layer, edge, busH) {
             .attr('d', 'M' + txx + ',' + (cBot + r) + ' L' + txx + ',' + yBot)
             .attr('fill', 'none').attr('stroke', color)
             .attr('stroke-width', strokeW).attr('stroke-linecap', 'round');
-        // Coupled windings (IEC two-winding transformer).
         g.append('circle').attr('cx', txx).attr('cy', cTop).attr('r', r)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
         g.append('circle').attr('cx', txx).attr('cy', cBot).attr('r', r)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
         _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2);
         mid = { x: txx, y: tmid };   // label sits beside the symbol
+    } else if (edgeType === 'transformer') {
+        // Non-adjacent transformer routed in a side channel: place the two
+        // coupled windings on the channel's vertical run (the polyline is
+        // already drawn) so the symbol sits on the line, never on a bar.
+        var r2 = 11, off2 = 8;
+        g.append('circle').attr('cx', mid.x).attr('cy', mid.y - off2).attr('r', r2)
+            .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
+        g.append('circle').attr('cx', mid.x).attr('cy', mid.y + off2).attr('r', r2)
+            .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
+        _addObstacle(mid.x - r2 - 2, mid.y - off2 - r2 - 2, mid.x + r2 + 2, mid.y + off2 + r2 + 2);
     }
 
     // Converter IEC symbol (square with ~/= or ~/Hz)
