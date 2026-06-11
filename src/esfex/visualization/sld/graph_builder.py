@@ -351,9 +351,16 @@ def build_elk_graph(
     for rec in edge_records:
         etype = rec["etype"]
         cap = rec["capacity"]
+        # A transmission line must join two buses of the SAME voltage; if the
+        # data connects different voltages (e.g. 110↔138), flag it so the SLD
+        # marks the line as a data inconsistency instead of drawing it as normal.
+        sv = group_meta.get(rec["src"], {}).get("voltage_kv", 0.0)
+        tv = group_meta.get(rec["tgt"], {}).get("voltage_kv", 0.0)
+        mismatch = (etype == "transmission" and sv and tv and sv != tv)
         if etype == "transmission":
             color = get_voltage_color(rec["voltage"])
-            label = f"{cap:.0f} MW"
+            label = (f"{cap:.0f} MW  ⚠ {sv:g}/{tv:g} kV" if mismatch
+                     else f"{cap:.0f} MW")
         elif etype == "transformer":
             color = colors.get("transformer", "#9B59B6")
             label = f"{cap:.0f} MVA"
@@ -371,7 +378,8 @@ def build_elk_graph(
                 "voltageKv": rec["voltage"],
                 "capacityMw": cap,
                 "nCircuits": 1,
-                "color": color,
+                "color": "#E74C3C" if mismatch else color,
+                "voltageMismatch": bool(mismatch),
                 "label": label,
             },
         })

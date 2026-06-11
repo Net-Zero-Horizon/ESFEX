@@ -1128,7 +1128,10 @@ function _drawEdge(layer, edge, busH) {
     // Edge path. Vertical transformers draw their own stubs around the
     // symbol (below) so no line crosses over the windings.
     var strokeW = edgeType === 'transmission' ? 2.5 : 2;
-    var dash = edgeType === 'converter' ? '8,4' : 'none';
+    // Dashed for converters; dashed + red (colour set in Python) flags a
+    // transmission line whose two buses are at DIFFERENT voltages (data error).
+    var dash = props.voltageMismatch ? '6,4'
+             : (edgeType === 'converter' ? '8,4' : 'none');
     if (!props.transformerVertical) {
         g.append('path')
             .attr('class', 'edge-path')
