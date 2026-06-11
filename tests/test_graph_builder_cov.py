@@ -308,7 +308,9 @@ def test_transmission_self_loop_and_invalid_bus_skipped():
     assert out["elkGraph"]["edges"] == []
 
 
-def test_transmission_with_wiring_endpoint_excluded():
+def test_transmission_with_wiring_endpoint_is_kept():
+    # A line ALWAYS connects bus-to-bus; the visual endpoint hint (here a
+    # transformer) must NOT drop it (doing so left bars electrically isolated).
     state = _state_two_nodes()
     line = GuiTransmissionLine(
         line_id="L0", from_bus="b0", to_bus="b1", capacity_mw=10.0)
@@ -316,7 +318,8 @@ def test_transmission_with_wiring_endpoint_excluded():
                                      element_id="t0")
     state.transmission_lines = [line]
     out = gb.build_elk_graph(state)
-    assert out["elkGraph"]["edges"] == []
+    assert len(out["elkGraph"]["edges"]) == 1
+    assert out["elkGraph"]["edges"][0]["properties"]["edgeType"] == "transmission"
 
 
 def test_line_between_same_node_voltage_buses_appears():

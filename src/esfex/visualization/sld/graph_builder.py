@@ -205,10 +205,6 @@ def build_elk_graph(
     # two real buses, so the schematic stays electrically faithful (parallel
     # elements are NOT collapsed into an N× symbol).
     valid_bus_ids = included_buses
-    _wiring_types = {
-        "transformer", "generator", "battery", "electrolyzer",
-        "acdc_converter", "freq_converter", "fuel_entry", "fuel_storage",
-    }
 
     edge_records: list[dict] = []
     edge_count: dict[str, int] = {gid: 0 for gid in group_meta}
@@ -226,15 +222,14 @@ def build_elk_graph(
         edge_count[tgt_gid] += 1
 
     for line in state.transmission_lines:
+        # A line ALWAYS connects bus-to-bus (the geographic-network rule:
+        # every element joins the grid through a bus). from_bus/to_bus are the
+        # electrical endpoints; from_endpoint/to_endpoint are only visual hints
+        # (which symbol the wire was drawn to) and must NOT gate the edge —
+        # gating on them dropped real bus-to-bus lines and left bars isolated.
         if (line.from_bus not in valid_bus_ids
                 or line.to_bus not in valid_bus_ids
                 or line.from_bus == line.to_bus):
-            continue
-        from_ep = line.from_endpoint
-        to_ep = line.to_endpoint
-        if from_ep and from_ep.element_type in _wiring_types:
-            continue
-        if to_ep and to_ep.element_type in _wiring_types:
             continue
         sg = bus_to_group.get(line.from_bus)
         tg = bus_to_group.get(line.to_bus)
