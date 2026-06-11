@@ -449,23 +449,37 @@ def _apply_grid_layout(
     #      intermediate bars. Line-connected buses share their neighbour's row.
     volt = {c["id"]: float(c["properties"].get("voltageKv", 0.0) or 0.0)
             for c in elk_children}
-    parent_of: dict[str, str] = {}
+    # Each bus may be the LV side of several transformers; collect ALL its
+    # higher-voltage parents and use LONGEST-PATH layering (depth = 1 + the max
+    # parent depth). This keeps the most transformers adjacent — e.g. a 110 kV
+    # bus fed by both a 220 and a 400 sits below the 220 (deepest), so the
+    # 220→110 transformer is a 1-row drop; only the 400→110 'shortcut' spans.
+    parents: dict[str, list[str]] = {}
     for edge in elk_edges:
         if edge["properties"].get("edgeType") != "transformer":
             continue
         a, b = edge["sources"][0], edge["targets"][0]
-        hi, lo = (a, b) if volt.get(a, 0.0) >= volt.get(b, 0.0) else (b, a)
-        if lo not in parent_of or volt.get(hi, 0.0) > volt.get(parent_of[lo], 0.0):
-            parent_of[lo] = hi
+        if volt.get(a, 0.0) == volt.get(b, 0.0):
+            continue                       # same voltage → no parent relation
+        hi, lo = (a, b) if volt.get(a, 0.0) > volt.get(b, 0.0) else (b, a)
+        parents.setdefault(lo, []).append(hi)
     depth: dict[str, int] = {}
+    parent_of: dict[str, str] = {}         # layout parent = the deepest one
 
     def _depth_of(g: str, seen: frozenset) -> int:
         if g in depth:
             return depth[g]
-        if g not in parent_of or g in seen:
+        ps = [p for p in parents.get(g, []) if p not in seen]
+        if not ps:
             depth[g] = 0
             return 0
-        depth[g] = _depth_of(parent_of[g], seen | {g}) + 1
+        best_p, best_d = None, -1
+        for p in ps:
+            d = _depth_of(p, seen | {g})
+            if d > best_d:
+                best_d, best_p = d, p
+        depth[g] = best_d + 1
+        parent_of[g] = best_p
         return depth[g]
 
     for c in elk_children:
@@ -784,26 +798,29 @@ def _apply_grid_layout(
         edge["properties"]["precomputedRoute"] = True
 
         is_xfmr = edge["properties"].get("edgeType") == "transformer"
-        if is_xfmr and rows_apart == 1:
-            # Transformer between ADJACENT voltage levels: clean vertical
-            # connection at one shared X inside the two bars' horizontal
-            # overlap — exit the upper bar's bottom, enter the lower bar's top.
-            # The symbol sits between the bars, always vertical (the JS side
-            # draws stubs + windings, so no line crosses the symbol).
-            # Multi-row transformers (non-adjacent levels) fall through to the
-            # side-channel route below so they don't pierce intermediate bars.
+        if is_xfmr:
+            # A transformer is ALWAYS drawn as a clean vertical between its two
+            # bars whenever they share an X span: one shared X inside the bars'
+            # overlap, exit the upper bar's bottom, enter the lower bar's top.
+            # The JS draws stubs + the two windings, so the line terminates at
+            # the symbol (never crosses it) and every transformer looks the
+            # same. Only the rare transformer whose bars don't overlap in X at
+            # all falls through to the channel route.
             upper, lower = (src, tgt) if src["y"] < tgt["y"] else (tgt, src)
             upper_gid = (edge["sources"][0] if upper is src
                          else edge["targets"][0])
             ox0 = max(upper["x"], lower["x"])
             ox1 = min(upper["x"] + upper["width"], lower["x"] + lower["width"])
-            # Use this transformer's own terminal slot (distinct per parallel
-            # transformer) clamped into the bars' overlap, so multiple
-            # transformers between the same two bars don't stack on one line.
-            cx = term_x.get((upper_gid, edge["id"]),
-                            upper["x"] + upper["width"] / 2)
             if ox1 > ox0:
+                # Bars overlap: use this transformer's own terminal slot
+                # (distinct per parallel transformer), clamped to the overlap.
+                cx = term_x.get((upper_gid, edge["id"]), (ox0 + ox1) / 2.0)
                 cx = min(max(cx, ox0), ox1)
+            else:
+                # No X overlap: drop from the upper bar centre, landing on the
+                # lower bar's nearest point — still a consistent vertical symbol.
+                uc = upper["x"] + upper["width"] / 2.0
+                cx = min(max(uc, lower["x"]), lower["x"] + lower["width"])
             edge["properties"]["transformerVertical"] = True
             edge["sections"] = [{
                 "startPoint": {"x": cx, "y": upper["y"] + _BUS_H},
