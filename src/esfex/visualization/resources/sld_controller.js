@@ -1125,43 +1125,52 @@ function _drawEdge(layer, edge, busH) {
     _addObstacle(secLast.endPoint.x - 6, secLast.endPoint.y - 6,
                  secLast.endPoint.x + 6, secLast.endPoint.y + 6);
 
-    // Edge path
+    // Edge path. Vertical transformers draw their own stubs around the
+    // symbol (below) so no line crosses over the windings.
     var strokeW = edgeType === 'transmission' ? 2.5 : 2;
     var dash = edgeType === 'converter' ? '8,4' : 'none';
-    g.append('path')
-        .attr('class', 'edge-path')
-        .attr('d', pathD)
-        .attr('fill', 'none')
-        .attr('stroke', color)
-        .attr('stroke-width', strokeW)
-        .attr('stroke-dasharray', dash)
-        .attr('stroke-linecap', 'round')
-        .attr('stroke-linejoin', 'round');
+    if (!props.transformerVertical) {
+        g.append('path')
+            .attr('class', 'edge-path')
+            .attr('d', pathD)
+            .attr('fill', 'none')
+            .attr('stroke', color)
+            .attr('stroke-width', strokeW)
+            .attr('stroke-dasharray', dash)
+            .attr('stroke-linecap', 'round')
+            .attr('stroke-linejoin', 'round');
+    }
 
     // Midpoint for symbols and labels
     var mid = _edgeMidpoint(sections);
 
-    // Transformer IEC symbol (two overlapping circles) — vertical orientation
+    // Transformer: two coupled windings sitting BETWEEN the two bars, always
+    // vertical, with short stubs from each bar to a winding. The Python side
+    // routes transformers as a clean vertical (shared X), so the symbol never
+    // gets a line drawn across it.
     if (edgeType === 'transformer') {
-        var r = 13, off = 9;
-        // Determine if edge is mostly vertical or horizontal
-        var edgeDx = Math.abs(sec0.startPoint.x - secLast.endPoint.x);
-        var edgeDy = Math.abs(sec0.startPoint.y - secLast.endPoint.y);
-        if (edgeDy > edgeDx) {
-            // Vertical edge: circles stacked vertically
-            g.append('circle').attr('cx', mid.x).attr('cy', mid.y - off).attr('r', r)
-                .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-            g.append('circle').attr('cx', mid.x).attr('cy', mid.y + off).attr('r', r)
-                .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        } else {
-            // Horizontal edge: circles side by side
-            g.append('circle').attr('cx', mid.x - off).attr('cy', mid.y).attr('r', r)
-                .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-            g.append('circle').attr('cx', mid.x + off).attr('cy', mid.y).attr('r', r)
-                .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        }
-        // Register transformer symbol as obstacle
-        _addObstacle(mid.x - r - 2, mid.y - off - r - 2, mid.x + r + 2, mid.y + off + r + 2);
+        var txx = sec0.startPoint.x;
+        var yA = sec0.startPoint.y, yB = secLast.endPoint.y;
+        var yTop = Math.min(yA, yB), yBot = Math.max(yA, yB);
+        var tmid = (yTop + yBot) / 2;
+        var r = 12, off = 8;
+        var cTop = tmid - off, cBot = tmid + off;
+        // Stubs: upper bar → top winding, bottom winding → lower bar.
+        g.append('path').attr('class', 'edge-path')
+            .attr('d', 'M' + txx + ',' + yTop + ' L' + txx + ',' + (cTop - r))
+            .attr('fill', 'none').attr('stroke', color)
+            .attr('stroke-width', strokeW).attr('stroke-linecap', 'round');
+        g.append('path').attr('class', 'edge-path')
+            .attr('d', 'M' + txx + ',' + (cBot + r) + ' L' + txx + ',' + yBot)
+            .attr('fill', 'none').attr('stroke', color)
+            .attr('stroke-width', strokeW).attr('stroke-linecap', 'round');
+        // Coupled windings (IEC two-winding transformer).
+        g.append('circle').attr('cx', txx).attr('cy', cTop).attr('r', r)
+            .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
+        g.append('circle').attr('cx', txx).attr('cy', cBot).attr('r', r)
+            .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
+        _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2);
+        mid = { x: txx, y: tmid };   // label sits beside the symbol
     }
 
     // Converter IEC symbol (square with ~/= or ~/Hz)
@@ -1192,7 +1201,7 @@ function _drawEdge(layer, edge, busH) {
         var labelY = mid.y;
 
         // Offset for IEC symbols
-        if (edgeType === 'transformer') labelY = mid.y + 24;
+        if (edgeType === 'transformer') labelX = mid.x + 34;  // beside the vertical symbol
         else if (edgeType === 'converter') labelY = mid.y + 32;
 
         // Place label avoiding ALL obstacles (buses, edges, equipment, other labels)

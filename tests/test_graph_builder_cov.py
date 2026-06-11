@@ -555,7 +555,10 @@ def test_layout_columns_left_to_right_by_node_order():
     assert by_node[0]["x"] < by_node[1]["x"]
 
 
-def test_inter_row_edge_has_z_shaped_section():
+def test_transformer_routes_as_clean_vertical():
+    """A transformer between two voltage bars in the same node is drawn as a
+    clean vertical connection (shared X, no Z bends), so the JS side can sit
+    the winding symbol between the bars with stubs (no line across it)."""
     state = GuiSystemState()
     state.nodes = [GuiNode(index=0, name="N")]
     state.buses = {"hv": _bus("hv", 0, 220.0), "lv": _bus("lv", 0, 110.0)}
@@ -564,16 +567,11 @@ def test_inter_row_edge_has_z_shaped_section():
     out = gb.build_elk_graph(state, merge_level=1)
     edge = out["elkGraph"]["edges"][0]
     assert edge["properties"]["precomputedRoute"] is True
-    sections = edge["sections"]
-    assert len(sections) == 1
-    sec = sections[0]
-    assert "startPoint" in sec and "endPoint" in sec
-    assert len(sec["bendPoints"]) == 2
-    # bend points share the lane Y
-    assert sec["bendPoints"][0]["y"] == sec["bendPoints"][1]["y"]
-    # start/end X line up with the bend X's (vertical drop then climb)
-    assert sec["bendPoints"][0]["x"] == sec["startPoint"]["x"]
-    assert sec["bendPoints"][1]["x"] == sec["endPoint"]["x"]
+    assert edge["properties"]["transformerVertical"] is True
+    sec = edge["sections"][0]
+    assert sec["bendPoints"] == []                       # straight, no Z
+    assert sec["startPoint"]["x"] == sec["endPoint"]["x"]  # vertical
+    assert sec["startPoint"]["y"] != sec["endPoint"]["y"]
 
 
 def test_same_row_edge_dips_below_row():

@@ -765,6 +765,26 @@ def _apply_grid_layout(
         rows_apart = abs(v_to_row.get(sv, 0) - v_to_row.get(tv, 0))
 
         edge["properties"]["precomputedRoute"] = True
+
+        if edge["properties"].get("edgeType") == "transformer" and src["y"] != tgt["y"]:
+            # Transformers connect two voltage bars in the SAME node column, so
+            # draw a CLEAN VERTICAL connection: one shared X inside the bars'
+            # horizontal overlap, exit the upper bar's bottom face and enter the
+            # lower bar's top face. The symbol then sits between the bars and is
+            # always oriented vertically (the JS side draws stubs + windings,
+            # so the line no longer passes over the symbol).
+            upper, lower = (src, tgt) if src["y"] < tgt["y"] else (tgt, src)
+            ox0 = max(upper["x"], lower["x"])
+            ox1 = min(upper["x"] + upper["width"], lower["x"] + lower["width"])
+            cx = (ox0 + ox1) / 2 if ox1 > ox0 else (upper["x"] + upper["width"] / 2)
+            edge["properties"]["transformerVertical"] = True
+            edge["sections"] = [{
+                "startPoint": {"x": cx, "y": upper["y"] + _BUS_H},
+                "endPoint": {"x": cx, "y": lower["y"]},
+                "bendPoints": [],
+            }]
+            continue
+
         if rows_apart >= 2:
             # Multi-row edge: a straight vertical drop at sx/tx would pierce
             # the bars of the rows in between. Route the long vertical run in
