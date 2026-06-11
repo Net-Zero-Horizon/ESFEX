@@ -39,6 +39,8 @@ dependencies:
   # GUI (Qt) and the Python<->Julia bridge
   - pyside6 >=6.5.0
   - superqt >=0.6.0
+  - qt6-webengine >=6.5.0   # native WebEngine runtime for the Studio map widget
+                            # (pyside6 ships only the bindings, not Qt6WebEngineCore.dll)
   - pyjuliacall >=0.9.14   # 'juliacall' is packaged as 'pyjuliacall' on conda-forge
   # ESFEX + its PyPI-only companion packages (windrex/solarex/rooftex/evrex)
   - pip:

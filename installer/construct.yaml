@@ -45,6 +45,11 @@ specs:
   # GUI (Qt)
   - pyside6 >=6.5.0
   - superqt >=0.6.0
+  # QtWebEngine runtime (Qt6WebEngineCore.dll + QtWebEngineProcess.exe). The
+  # conda-forge ``pyside6`` package ships the *bindings* (QtWebEngineCore.pyd)
+  # but NOT the native WebEngine library, so without this the Studio map widget
+  # crashes at import with "DLL load failed while importing QtWebEngineCore".
+  - qt6-webengine >=6.5.0
   # NOTE: Julia is NOT bundled here — conda-forge has no win-64 ``julia``
   # package. The Python<->Julia bridge (``juliacall``) is pip-installed with
   # ESFEX in post_install and downloads/instantiates Julia on first run via
