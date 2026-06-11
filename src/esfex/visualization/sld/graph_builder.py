@@ -492,101 +492,87 @@ def _apply_grid_layout(
         if n not in state_node_order:
             state_node_order.append(n)
 
-    # ── 2. For each (node, voltage) cell with multiple buses, lay them
-    #      out in an internal sub-grid (≈ sqrt(N) wide) so they don't
-    #      stretch into a single huge horizontal stripe. We pre-compute
-    #      each cell's bounding box.
-    def _cell_layout(buses: list[dict]) -> tuple[float, float, list[tuple[float, float, dict]]]:
-        """Return (cell_w, cell_h, [(dx, dy, bus_dict), ...])."""
-        n = len(buses)
-        if n == 0:
-            return 0.0, 0.0, []
-        # Square-ish sub-grid; cap at 8 cols so very crowded substations
-        # still render in a reasonable aspect ratio.
-        cols = min(max(1, int(math.ceil(math.sqrt(n)))), 8)
-        rows = int(math.ceil(n / cols))
-        # Per-row metrics
-        sub_row_h: list[float] = []
-        sub_row_w: list[float] = []
-        for r in range(rows):
-            chunk = buses[r * cols:(r + 1) * cols]
-            sub_row_h.append(max(b["height"] for b in chunk))
-            sub_row_w.append(
-                sum(b["width"] for b in chunk)
-                + _INTRA_NODE_GAP_X * (len(chunk) - 1)
-            )
-        cell_w = max(sub_row_w)
-        cell_h = sum(sub_row_h) + _INTRA_NODE_GAP_X * (rows - 1)
-        # Place each bus relative to (0, 0) at the cell's top-left
-        placements: list[tuple[float, float, dict]] = []
-        y_cursor = 0.0
-        for r in range(rows):
-            chunk = buses[r * cols:(r + 1) * cols]
-            row_w = sub_row_w[r]
-            x_cursor = (cell_w - row_w) / 2  # center each sub-row
-            for b in chunk:
-                placements.append((x_cursor, y_cursor, b))
-                x_cursor += b["width"] + _INTRA_NODE_GAP_X
-            y_cursor += sub_row_h[r] + _INTRA_NODE_GAP_X
-        return cell_w, cell_h, placements
-
-    # Build a cache of cell layouts keyed by (node_idx, voltage)
-    cell_cache: dict[tuple[int, float], tuple[float, float, list]] = {}
-    for key, buses in buses_by_node_volt.items():
-        cell_cache[key] = _cell_layout(buses)
-
-    # Per-node column width = max cell width across the node's voltages
-    node_col_w: dict[int, float] = {}
-    for node_idx in state_node_order:
-        max_w = float(_BUS_LABEL_PAD + _BUS_H + 12)
-        for v in sorted_voltages:
-            cell = cell_cache.get((node_idx, v))
-            if cell and cell[0] > max_w:
-                max_w = cell[0]
-        node_col_w[node_idx] = max_w
-
-    # Per-row height = max cell height in that row
+    # ── 2. Row heights (the tallest bar in each row). ──
     row_h: dict[int, float] = {}
-    for v in sorted_voltages:
-        max_h = 0.0
-        for node_idx in state_node_order:
-            cell = cell_cache.get((node_idx, v))
-            if cell and cell[1] > max_h:
-                max_h = cell[1]
-        row_h[v_to_row[v]] = max_h
+    for c in elk_children:
+        r = row_of[c["id"]]
+        row_h[r] = max(row_h.get(r, 0.0), c["height"])
 
-    # ── 4. Compute X cursor per node column ──
+    # ── 3. X via a per-node TRANSFORMER-TREE layout. Each HV parent bar is
+    #      centred over — and widened to span — the LV children it feeds, so a
+    #      transformer drops straight down to its child (X-aligned). Leaves take
+    #      sequential slots; substations are placed left to right. ──
+    from collections import defaultdict as _dd
+    children_of: dict[str, list[str]] = _dd(list)
+    for _child, _par in parent_of.items():
+        children_of[_par].append(_child)
+    bus_w0 = {c["id"]: c["width"] for c in elk_children}
+    node_of = {c["id"]: int(c["properties"].get("parentNode", 0) or 0)
+               for c in elk_children}
+    bus_left: dict[str, float] = {}
+    bus_wide: dict[str, float] = {}
+
     node_x_left: dict[int, float] = {}
+    node_col_w: dict[int, float] = {}
     cursor_x = 0.0
     for node_idx in state_node_order:
-        node_x_left[node_idx] = cursor_x
-        cursor_x += node_col_w[node_idx] + _COL_GAP_X
+        nset = {g for g, nd in node_of.items() if nd == node_idx}
+        leaf_cursor = [cursor_x]
+        placed: set[str] = set()
 
-    # ── 5a. Compute Y per voltage row with a placeholder gap height; we
-    #       refine in 5b once we know how many lanes each gap needs (after
-    #       interval-coloring the edges, which requires final bus X). ──
+        def _place(gid: str, nset=nset, placed=placed, leaf_cursor=leaf_cursor):
+            placed.add(gid)
+            kids = [k for k in children_of.get(gid, [])
+                    if k in nset and k not in placed]
+            if not kids:
+                xl = leaf_cursor[0]
+                bus_left[gid] = xl
+                bus_wide[gid] = bus_w0[gid]
+                leaf_cursor[0] += bus_w0[gid] + _INTRA_NODE_GAP_X
+                return xl, xl + bus_w0[gid]
+            spans = [_place(k) for k in kids]
+            left = min(s[0] for s in spans)
+            right = max(s[1] for s in spans)
+            w = max(bus_w0[gid], right - left)
+            cx = (left + right) / 2.0
+            xl = cx - w / 2.0
+            bus_left[gid] = xl
+            bus_wide[gid] = w
+            return xl, xl + w
+
+        roots = [g for g in nset
+                 if g not in parent_of or parent_of[g] not in nset]
+        for r in roots:
+            if r not in placed:
+                _place(r)
+        for g in nset:                       # leftover (cycles / orphans)
+            if g not in placed:
+                _place(g)
+
+        if nset:
+            nl = min(bus_left[g] for g in nset)
+            nr = max(bus_left[g] + bus_wide[g] for g in nset)
+        else:
+            nl, nr = cursor_x, cursor_x + _BUS_MIN_LEN
+        node_x_left[node_idx] = nl
+        node_col_w[node_idx] = max(nr - nl, _BUS_MIN_LEN)
+        cursor_x = nr + _COL_GAP_X
+
+    # ── 4. Y per row (cumulative; 5b later grows gaps by lane demand). ──
     row_y: dict[int, float] = {}
     cursor_y = 0.0
     sorted_v_list = list(sorted_voltages)
-    for i, v in enumerate(sorted_v_list):
-        ridx = v_to_row[v]
-        row_y[ridx] = cursor_y
-        if i < len(sorted_v_list) - 1:
-            cursor_y += row_h[ridx] + _ROW_SPACING_Y
-        else:
-            cursor_y += row_h[ridx]
+    for i, r in enumerate(sorted_v_list):
+        row_y[r] = cursor_y
+        cursor_y += row_h.get(r, 0.0) + (
+            _ROW_SPACING_Y if i < len(sorted_v_list) - 1 else 0.0)
 
-    # ── 6. Place each bus from its cell layout, centering the cell
-    #      within the node column at the row's Y. ──
-    for (node_idx, v), buses in buses_by_node_volt.items():
-        col_left = node_x_left[node_idx]
-        col_w = node_col_w[node_idx]
-        cell_w, cell_h, placements = cell_cache[(node_idx, v)]
-        y_top = row_y[v_to_row[v]]
-        x_origin = col_left + (col_w - cell_w) / 2
-        for dx, dy, b in placements:
-            b["x"] = x_origin + dx
-            b["y"] = y_top + dy
+    # ── 5. Apply x / width / y to every bus. ──
+    for c in elk_children:
+        g = c["id"]
+        c["x"] = bus_left.get(g, 0.0)
+        c["width"] = bus_wide.get(g, c["width"])
+        c["y"] = row_y[row_of[g]]
 
     # ── 7. Edge routing with per-edge lane assignment.
     #      Each inter-row edge gets its own horizontal lane Y in the
@@ -693,11 +679,8 @@ def _apply_grid_layout(
         else:
             cursor_y += row_h[ridx]
 
-    for (node_idx, v), buses in buses_by_node_volt.items():
-        _cw, _ch, placements = cell_cache[(node_idx, v)]
-        y_top = row_y[v_to_row[v]]
-        for _dx, dy, b in placements:
-            b["y"] = y_top + dy
+    for c in elk_children:
+        c["y"] = row_y[row_of[c["id"]]]
 
     # Resolve lane Y per gap. Cross-row lanes are spread across the gap but
     # start BELOW the upper row's same-row band so the two lane families
