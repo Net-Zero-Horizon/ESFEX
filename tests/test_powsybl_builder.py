@@ -106,3 +106,28 @@ def test_svg_generation_has_busbar_and_feeder_structure(tmp_path):
 def test_empty_state_returns_network_without_error():
     n = pb.build_powsybl_network(GuiSystemState())
     assert len(n.get_buses()) == 0
+
+
+def test_build_model_returns_idmap():
+    n, idmap = pb.build_powsybl_model(_state())
+    assert idmap["generators"] == {"G1": "GG1"}
+    assert idmap["lines"] == {"L12": "LL12"}
+    assert set(idmap["loads"]) == {"a220", "a110", "b220"}
+
+
+def test_generate_sld_svg_injects_operational_snapshot():
+    snap = {"generators": {"G1": {"output_mw": 87.0, "capacity_mw": 100.0}},
+            "batteries": {}, "loads": {}, "lines": {}, "nodes": {}}
+    svg, meta = pb.generate_sld_svg(_state(), "S0", snapshot=snap)
+    assert "<svg" in svg
+    assert len(meta) > 0                      # element→svg-id map for selection
+
+
+def test_snapshot_value_appears_only_when_provided():
+    snap = {"generators": {"G1": {"output_mw": 87.0}},
+            "batteries": {}, "loads": {}, "lines": {}, "nodes": {}}
+    with_svg, _ = pb.generate_sld_svg(_state(), "S0", snapshot=snap)
+    without_svg, _ = pb.generate_sld_svg(_state(), "S0", snapshot=None)
+    # Generation injects into the grid → load-convention negative feeder P.
+    assert "-87 MW" in with_svg          # injected generation value is drawn
+    assert "-87 MW" not in without_svg   # ...only when the snapshot supplies it

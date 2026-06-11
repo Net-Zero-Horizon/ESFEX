@@ -52,9 +52,22 @@ def build_powsybl_network(state: "GuiSystemState", network_id: str = "esfex"):
 
     Raises ``ImportError`` if pypowsybl is unavailable.
     """
+    return build_powsybl_model(state, network_id)[0]
+
+
+def build_powsybl_model(state: "GuiSystemState", network_id: str = "esfex"):
+    """Build the network and the ESFEX-id → PowSyBl-id maps.
+
+    Returns ``(network, idmap)`` where ``idmap`` has keys ``generators``,
+    ``batteries``, ``loads``, ``lines`` (each an ESFEX-id → PowSyBl-id dict).
+    The maps let an operational snapshot inject terminal P/Q onto the right
+    elements for PowSyBl's native feeder annotations.
+    """
     import pypowsybl.network as pp_net
 
     n = pp_net.create_empty(network_id)
+    idmap: dict[str, dict[str, str]] = {
+        "generators": {}, "batteries": {}, "loads": {}, "lines": {}}
 
     nodes = {nd.index: nd for nd in state.nodes}
     buses = dict(state.buses)
@@ -91,7 +104,7 @@ def build_powsybl_network(state: "GuiSystemState", network_id: str = "esfex"):
         node_buses.setdefault(node_idx, []).append(bus_id)
 
     if not bus_pid:
-        return n      # nothing electrical to draw
+        return n, idmap      # nothing electrical to draw
 
     def _rep_bus(node_idx: int, bus_hint: Optional[str]) -> Optional[str]:
         """Resolve the bus an injection attaches to: its own bus if valid,
@@ -109,11 +122,13 @@ def build_powsybl_network(state: "GuiSystemState", network_id: str = "esfex"):
         if not b:
             continue
         p = float(g.rated_power or 0.0)
+        pp_id = _sid("G", gid)
         n.create_generators(
-            id=_sid("G", gid), voltage_level_id=bus_vl[b], bus_id=bus_pid[b],
+            id=pp_id, voltage_level_id=bus_vl[b], bus_id=bus_pid[b],
             name=(g.name or gid), max_p=max(p, 1.0), min_p=0.0,
             target_p=p, target_v=float(buses[b].voltage_kv or 1.0),
             voltage_regulator_on=True)
+        idmap["generators"][gid] = pp_id
 
     # ── Injections: batteries (modelled as PowSyBl batteries) ──
     for bid, bat in state.batteries.items():
@@ -121,12 +136,14 @@ def build_powsybl_network(state: "GuiSystemState", network_id: str = "esfex"):
         if not b:
             continue
         p = float(getattr(bat, "rated_power", 0.0) or 0.0)
+        pp_id = _sid("BAT", bid)
         try:
             n.create_batteries(
-                id=_sid("BAT", bid), voltage_level_id=bus_vl[b],
+                id=pp_id, voltage_level_id=bus_vl[b],
                 bus_id=bus_pid[b], name=(bat.name or bid),
                 max_p=max(p, 1.0), min_p=-max(p, 1.0), target_p=0.0,
                 target_q=0.0)
+            idmap["batteries"][bid] = pp_id
         except Exception as exc:                       # pragma: no cover
             log.debug("battery %s skipped: %s", bid, exc)
 
@@ -147,22 +164,26 @@ def build_powsybl_network(state: "GuiSystemState", network_id: str = "esfex"):
         if getattr(bus, "role", "") not in ("load", "mixed"):
             continue
         frac = float(getattr(bus, "demand_fraction", 0.0) or 0.0)
+        pp_id = _sid("LD", bus_id)
         n.create_loads(
-            id=_sid("LD", bus_id), voltage_level_id=bus_vl[bus_id],
+            id=pp_id, voltage_level_id=bus_vl[bus_id],
             bus_id=bus_pid[bus_id], name=f"Load {bus.name or bus_id}",
             p0=max(frac * 100.0, 1.0), q0=0.0)
+        idmap["loads"][bus_id] = pp_id
 
     # ── Lines (inter-bus, any voltage) ──
     for ln in state.transmission_lines:
         a, b = ln.from_bus, ln.to_bus
         if a not in bus_pid or b not in bus_pid or a == b:
             continue
+        pp_id = _sid("L", ln.line_id)
         try:
             n.create_lines(
-                id=_sid("L", ln.line_id),
+                id=pp_id,
                 voltage_level1_id=bus_vl[a], bus1_id=bus_pid[a],
                 voltage_level2_id=bus_vl[b], bus2_id=bus_pid[b],
                 r=_DEF_R, x=_DEF_X, g1=_DEF_G, b1=_DEF_B, g2=_DEF_G, b2=_DEF_B)
+            idmap["lines"][ln.line_id] = pp_id
         except Exception as exc:                       # pragma: no cover
             log.debug("line %s skipped: %s", ln.line_id, exc)
 
@@ -184,7 +205,63 @@ def build_powsybl_network(state: "GuiSystemState", network_id: str = "esfex"):
         except Exception as exc:                       # pragma: no cover
             log.debug("transformer %s skipped: %s", tr.name, exc)
 
-    return n
+    return n, idmap
+
+
+def generate_sld_svg(
+    state: "GuiSystemState",
+    container_id: str,
+    snapshot: Optional[dict] = None,
+    use_name: bool = True,
+) -> tuple[str, str]:
+    """Render the SLD of a substation (or voltage level) to ``(svg, metadata)``.
+
+    When ``snapshot`` (an ESFEX operational timestep) is given, the per-element
+    flows are injected onto the network terminals so PowSyBl draws its native
+    feeder P annotations (active-power arrows) — no separate overlay layer.
+    ``metadata`` is PowSyBl's element→SVG-id JSON, used for click selection.
+    """
+    from pypowsybl.network import SldParameters
+
+    n, idmap = build_powsybl_model(state)
+    has_ops = bool(snapshot) and _inject_snapshot(n, idmap, snapshot)
+    params = SldParameters(
+        use_name=use_name,
+        topological_coloring=True,
+        display_current_feeder_info=has_ops,
+        active_power_unit="MW",
+        tooltip_enabled=True,
+    )
+    svg = n.get_single_line_diagram(container_id, params)
+    return svg.svg, svg.metadata
+
+
+def _inject_snapshot(n, idmap: dict, snapshot: dict) -> bool:
+    """Push snapshot flows onto terminals (P, sign = grid convention).
+    Returns True if anything was injected."""
+    touched = False
+    gens = snapshot.get("generators", {})
+    for gid, vals in gens.items():
+        pp = idmap["generators"].get(gid)
+        if pp is None:
+            continue
+        try:                                  # generation: P injected → negative
+            n.update_generators(id=pp, p=-float(vals.get("output_mw", 0.0) or 0.0))
+            touched = True
+        except Exception:                     # pragma: no cover
+            pass
+    for bid, vals in snapshot.get("batteries", {}).items():
+        pp = idmap["batteries"].get(bid)
+        if pp is None:
+            continue
+        net_p = float(vals.get("discharge_mw", 0.0) or 0.0) - \
+            float(vals.get("charge_mw", 0.0) or 0.0)
+        try:
+            n.update_batteries(id=pp, p=-net_p)
+            touched = True
+        except Exception:                     # pragma: no cover
+            pass
+    return touched
 
 
 def substation_ids(state: "GuiSystemState") -> list[str]:
