@@ -9,6 +9,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Net-Zero-Horizon/ESFEX/releases/latest">
+    <img src="https://img.shields.io/github/v/release/Net-Zero-Horizon/ESFEX?label=Windows%20installer&logo=windows&logoColor=white&color=0078D6" alt="Windows installer">
+  </a>
   <a href="https://github.com/Net-Zero-Horizon/ESFEX/actions/workflows/ci.yml">
     <img src="https://github.com/Net-Zero-Horizon/ESFEX/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
@@ -52,6 +55,12 @@
     <img src="https://img.shields.io/github/last-commit/Net-Zero-Horizon/ESFEX.svg" alt="Last commit">
   </a>
   <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Net-Zero-Horizon/ESFEX/releases/latest">
+    <img src="https://img.shields.io/badge/Download-ESFEX%20Studio%20for%20Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download ESFEX Studio for Windows">
+  </a>
 </p>
 
 <p align="center">
