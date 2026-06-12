@@ -73,6 +73,13 @@ def run_studio(config=None, system: str | None = None) -> MainWindow:
     if theme_name == "System":
         theme_name = "Light"
     font_size = prefs.get("general", {}).get("font_size", None)
+    if font_size is None:
+        # No explicit user override → scale the base font with the screen so
+        # all GUI text (toolbar, side/bottom panels, forms) stays proportionate
+        # across display sizes. Neutral (1.0) on a 1080p screen.
+        from esfex.visualization.ui_scale import font_scale
+        base_body = get_theme_by_name(theme_name).typography.size_body
+        font_size = round(base_body * font_scale())
     apply_theme(app, get_theme_by_name(theme_name), font_size=font_size)
     splash.restyle()
     splash.set_progress(35, tr("splash.creating_editor"))

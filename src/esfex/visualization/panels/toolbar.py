@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QComboBox, QLabel, QToolBar
+from PySide6.QtWidgets import QComboBox, QToolBar
 from PySide6.QtGui import QPainter
 
 from esfex.visualization.i18n import tr
@@ -69,27 +69,19 @@ class EditorToolbar(QToolBar):
     def __init__(self, parent=None):
         super().__init__("Editor Tools", parent)
         self.setMovable(False)
-        self.setIconSize(QSize(32, 32))
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-
-        # Make the overflow (>>) button visible and prominent
-        self.setStyleSheet("""
-            QToolBarExtension {
-                background-color: #2980b9;
-                border-radius: 4px;
-                margin: 4px 2px;
-                padding: 4px 8px;
-                min-width: 28px;
-                min-height: 28px;
-            }
-            QToolBarExtension::icon {
-                width: 20px;
-                height: 20px;
-            }
-            QToolBarExtension:hover {
-                background-color: #3498db;
-            }
-        """)
+        # Responsive sizing. The bar is COMPACT at its minimum (so it fits the
+        # default window width) and grows to FILL wider windows. The button/
+        # label TEXT scales WITH the icon — its font-size is tied to the icon
+        # size in the stylesheet (the theme QSS, not the widget font, drives
+        # toolbutton text), so the whole bar expands as one unit.
+        # ``_fit_icon_to_width`` (from resizeEvent) picks the largest icon whose
+        # laid-out width still fits the current bar, between these bounds.
+        from esfex.visualization.ui_scale import scaled
+        self._min_icon = min(20, scaled(20))    # compact floor (fits 1400 px)
+        self._max_icon = 44                      # cap so icons never get huge
+        self._cur_icon = None
+        self._apply_icon_scale(self._min_icon)
 
         # Drawing mode actions (mutually exclusive)
         self._mode_group = QActionGroup(self)
@@ -300,11 +292,11 @@ class EditorToolbar(QToolBar):
 
         self.addSeparator()
 
-        # Layer selector
-        self._lbl_layer = QLabel(" " + tr("toolbar.layer") + " ")
-        self._lbl_layer.setStyleSheet("background: transparent;")
-        self.addWidget(self._lbl_layer)
+        # Layer selector. The descriptive label is folded into the combo's
+        # tooltip (instead of a separate text label) to keep the toolbar
+        # compact enough to fit the default window width.
         self._layer_combo = QComboBox()
+        self._layer_combo.setToolTip(tr("toolbar.layer"))
         self._layer_combo.addItems([
             tr("layers.all"),
             tr("layers.electrical"),
@@ -314,11 +306,9 @@ class EditorToolbar(QToolBar):
         self._layer_combo.currentTextChanged.connect(self._on_layer_changed)
         self.addWidget(self._layer_combo)
 
-        # Base map selector
-        self._lbl_basemap = QLabel(" " + tr("toolbar.base_map") + " ")
-        self._lbl_basemap.setStyleSheet("background: transparent;")
-        self.addWidget(self._lbl_basemap)
+        # Base map selector (label likewise folded into the tooltip)
         self._basemap_combo = QComboBox()
+        self._basemap_combo.setToolTip(tr("toolbar.base_map"))
         for key, label_key in self._basemap_items():
             self._basemap_combo.addItem(tr(label_key), key)
         self._basemap_combo.currentIndexChanged.connect(self._on_basemap_changed)
@@ -332,6 +322,59 @@ class EditorToolbar(QToolBar):
             (self._act_results, "results.png"),
             (self._act_risk, "risk.png"),
         ])
+
+    def _apply_icon_scale(self, icon: int) -> None:
+        """Set the icon size and tie the button/combo font + overflow button to
+        it, so the whole bar scales as one. No-op if the size is unchanged."""
+        icon = int(icon)
+        if icon == self._cur_icon:
+            return
+        self._cur_icon = icon
+        fpx = max(7, round(icon * 0.45))
+        self.setIconSize(QSize(icon, icon))
+        ext, eic = icon + 8, icon
+        self.setStyleSheet(f"""
+            QToolBar QToolButton {{ font-size: {fpx}px; padding: 2px 4px; }}
+            QToolBar QComboBox {{ font-size: {fpx}px; padding: 1px 3px; }}
+            QToolBarExtension {{
+                background-color: #2980b9;
+                border-radius: 4px;
+                margin: 4px 2px;
+                padding: 4px 8px;
+                min-width: {ext}px;
+                min-height: {ext}px;
+            }}
+            QToolBarExtension::icon {{
+                width: {eic}px;
+                height: {eic}px;
+            }}
+            QToolBarExtension:hover {{
+                background-color: #3498db;
+            }}
+        """)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_icon_to_width()
+
+    def _fit_icon_to_width(self) -> None:
+        """Grow/shrink the icon (and, with it, the text) so the bar fills the
+        available width without overflowing. ``sizeHint().width()`` reflects the
+        new style synchronously, so this converges in one pass and adapts to the
+        current language/theme automatically."""
+        w = self.width()
+        if w < 100:
+            return
+        lo, hi = self._min_icon, self._max_icon
+        guard = 0
+        # Grow to fill (leave a little breathing room so the >> never appears).
+        while self._cur_icon < hi and self.sizeHint().width() < w - 30 and guard < 80:
+            self._apply_icon_scale(self._cur_icon + 1)
+            guard += 1
+        # Shrink if we overflow.
+        while self._cur_icon > lo and self.sizeHint().width() > w - 8 and guard < 160:
+            self._apply_icon_scale(self._cur_icon - 1)
+            guard += 1
 
     def refresh_icons(self):
         """Reload all toolbar icons (call after theme change)."""
@@ -366,9 +409,9 @@ class EditorToolbar(QToolBar):
             action.setText(tr(text_key))
             action.setToolTip(tr(tip_key))
 
-        # Combo box labels (layer and basemap) — store widget refs
-        self._lbl_layer.setText(" " + tr("toolbar.layer") + " ")
-        self._lbl_basemap.setText(" " + tr("toolbar.base_map") + " ")
+        # Combo box descriptions live in the tooltips (compact toolbar).
+        self._layer_combo.setToolTip(tr("toolbar.layer"))
+        self._basemap_combo.setToolTip(tr("toolbar.base_map"))
 
         # Rebuild layer combo items (preserve current index)
         idx = self._layer_combo.currentIndex()
