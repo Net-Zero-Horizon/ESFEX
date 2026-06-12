@@ -1,0 +1,6 @@
+# Include the documentation tree in the sdist so that, when the wheel is built
+# FROM the sdist (the default `python -m build` flow used in CI), setup.py can
+# copy docs/ into esfex/docs and the in-app documentation viewer ships with the
+# package. docs/ lives at the repo root (for MkDocs/ReadTheDocs and the README
+# links), outside the package, so it is not picked up automatically.
+graft docs
