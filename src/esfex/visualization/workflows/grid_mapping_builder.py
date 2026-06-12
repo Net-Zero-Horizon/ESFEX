@@ -615,6 +615,19 @@ def build_grid_from_features(
         # topology (substations + real line traces); turning it into a solvable
         # model is a separate, explicit step the user opts into later.
         if not faithful:
+            # Phase 9b: Tie co-located voltage levels with an auto-transformer.
+            # Voltage-aware line endpoints (#18) can leave a substation with a
+            # separate bus per voltage level; connect adjacent levels so a bus
+            # never sits next to a different voltage without a transformer.
+            vt = _connect_colocated_voltage_levels(
+                model.state, result, snap_threshold_km,
+            )
+            if vt:
+                result.warnings.append(
+                    f"Voltage consistency: inserted {vt} auto-transformer(s) "
+                    f"between co-located voltage levels at substations"
+                )
+
             # Phase 10: Infer bus roles + redistribute demand_fraction.
             # Without this, every bus is "load" with full demand fraction,
             # producing physically nonsensical bus-balance constraints in
@@ -1009,15 +1022,26 @@ def _create_line(
     lat1, lng1 = line.line_coords[0]
     lat2, lng2 = line.line_coords[-1]
 
-    # Find/create buses at endpoints
+    # Find/create buses at endpoints. A bus has a SINGLE voltage, so a line
+    # must terminate on a bus of its OWN voltage (different voltages require a
+    # transformer). Pass the line's voltage so `_ensure_bus_at` snaps only to a
+    # same-voltage bus and any new endpoint bus inherits the line voltage —
+    # instead of attaching to whatever bus is geographically nearest, which used
+    # to put e.g. 110 kV lines straight onto 132/138 kV substation buses. (#18)
+    line_props: dict = {
+        "frequency_hz": line.frequency_hz,
+        "current_type": line.current_type,
+    }
+    if line.voltage_kv and line.voltage_kv > 0:
+        line_props["voltage_kv"] = line.voltage_kv
     from_idx, from_bus = _ensure_bus_at(
         state, lat1, lng1, f"{line.name} Start",
-        snap_km, result,
+        snap_km, result, props=line_props,
         centroids=centroids, force_node=force_node,
     )
     to_idx, to_bus = _ensure_bus_at(
         state, lat2, lng2, f"{line.name} End",
-        snap_km, result,
+        snap_km, result, props=line_props,
         centroids=centroids, force_node=force_node,
     )
 
@@ -1088,6 +1112,93 @@ def _create_line(
         susceptance_pu=b_pu,
     ))
     result.lines_added += 1
+
+
+def _connect_colocated_voltage_levels(
+    state: GuiSystemState, result: ParseResult, radius_km: float,
+) -> int:
+    """Tie co-located different-voltage buses with an auto-transformer.
+
+    Voltage-aware line endpoints (#18) can leave a substation with a separate
+    bus per voltage level — correct, but electrically disconnected. For each
+    cluster of buses that sit at the same place (same node, within
+    ``radius_km``), connect *adjacent* voltage levels (sorted high→low) with a
+    transformer, unless one already bridges those two levels. This avoids both
+    a full mesh and duplicates. Non-faithful mode only.
+    """
+    if not state.buses:
+        return 0
+
+    by_node: dict[int, list[str]] = {}
+    for bid, b in state.buses.items():
+        if (b.voltage_kv or 0) > 0:
+            by_node.setdefault(int(b.parent_node), []).append(bid)
+
+    added = 0
+    for node, bids in by_node.items():
+        # Union-find: cluster buses that are co-located (≤ radius_km apart).
+        parent = {bid: bid for bid in bids}
+
+        def _find(x, parent=parent):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(len(bids)):
+            ba = state.buses[bids[i]]
+            for j in range(i + 1, len(bids)):
+                bb = state.buses[bids[j]]
+                if _haversine_km(ba.latitude, ba.longitude,
+                                 bb.latitude, bb.longitude) <= radius_km:
+                    parent[_find(bids[i])] = _find(bids[j])
+
+        clusters: dict[str, list[str]] = {}
+        for bid in bids:
+            clusters.setdefault(_find(bid), []).append(bid)
+
+        for members in clusters.values():
+            # One representative bus per distinct (normalized) voltage.
+            by_v: dict[float, str] = {}
+            for bid in members:
+                v = _normalize_voltage_kv(state.buses[bid].voltage_kv)
+                by_v.setdefault(v, bid)
+            if len(by_v) < 2:
+                continue
+            mset = set(members)
+            # Voltage-level pairs already bridged by a transformer in-cluster.
+            bridged: set[frozenset] = set()
+            for tr in state.transformers:
+                if tr.from_bus in mset and tr.to_bus in mset:
+                    bridged.add(frozenset((
+                        _normalize_voltage_kv(state.buses[tr.from_bus].voltage_kv),
+                        _normalize_voltage_kv(state.buses[tr.to_bus].voltage_kv),
+                    )))
+            volts = sorted(by_v.keys(), reverse=True)
+            for k in range(len(volts) - 1):
+                v_hi, v_lo = volts[k], volts[k + 1]
+                if frozenset((v_hi, v_lo)) in bridged:
+                    continue
+                bus_hi, bus_lo = by_v[v_hi], by_v[v_lo]
+                auto_mva = 100.0
+                ratio = v_hi / v_lo if v_lo > 0 else 2.0
+                bh = state.buses[bus_hi]
+                state.transformers.append(GuiTransformer(
+                    name=f"Auto TR {v_hi:.0f}/{v_lo:.0f}kV",
+                    from_bus=bus_hi, to_bus=bus_lo,
+                    from_node=node, to_node=node,
+                    from_voltage_kv=v_hi, to_voltage_kv=v_lo,
+                    rated_power_mva=auto_mva,
+                    impedance_pu=estimate_transformer_impedance_pu(auto_mva, ratio),
+                    losses_fraction=estimate_transformer_losses_fraction(auto_mva),
+                    latitude=bh.latitude, longitude=bh.longitude,
+                ))
+                bridged.add(frozenset((v_hi, v_lo)))
+                added += 1
+
+    if added:
+        result.transformers_added += added
+    return added
 
 
 # ── Phase 5: Transformer ────────────────────────────────────────────

@@ -1724,3 +1724,86 @@ def test_line_near_one_substation_is_not_collapsed():
     assert len(s.transmission_lines) == 1  # survived, not dropped
     ln = s.transmission_lines[0]
     assert ln.from_bus != ln.to_bus  # two distinct buses, no collapse
+
+
+# ======================================================================
+# Voltage consistency at buses (#18)
+# ======================================================================
+
+
+def _mismatch_lines(state) -> list[str]:
+    """Lines joining buses of different voltage with no transformer between."""
+    tr_pairs = {frozenset((t.from_bus, t.to_bus)) for t in state.transformers}
+    bad = []
+    for ln in state.transmission_lines:
+        fb = state.buses.get(ln.from_bus)
+        tb = state.buses.get(ln.to_bus)
+        if fb and tb and (fb.voltage_kv or 0) > 0 and (tb.voltage_kv or 0) > 0:
+            if abs(gmb._normalize_voltage_kv(fb.voltage_kv)
+                   - gmb._normalize_voltage_kv(tb.voltage_kv)) > 1e-6:
+                if frozenset((ln.from_bus, ln.to_bus)) not in tr_pairs:
+                    bad.append(ln.line_id)
+    return bad
+
+
+class TestVoltageConsistency:
+    def test_line_endpoint_buses_inherit_line_voltage(self):
+        # Part 1: a line's new endpoint buses take the LINE's voltage, not the
+        # old hard-coded 220 kV default — proving the voltage is passed through.
+        state = _make_state(buses={})
+        result = ParseResult()
+        line = _feat("line", name="L", voltage_kv=66.0,
+                     line_coords=[(21.0, -82.10), (21.10, -82.0)])
+        gmb._create_line(state, line, 0.1, result, {}, 0)
+        assert len(state.transmission_lines) == 1
+        ln = state.transmission_lines[0]
+        assert state.buses[ln.from_bus].voltage_kv == 66.0
+        assert state.buses[ln.to_bus].voltage_kv == 66.0
+        assert ln.voltage_kv == 66.0
+
+    def test_connect_colocated_voltage_levels_adds_transformer(self):
+        # Part 2: two co-located buses at different voltages get an auto-TR.
+        state = _make_state(buses={
+            "b132": GuiBus(bus_id="b132", parent_node=0, voltage_kv=132.0,
+                           latitude=21.0, longitude=-82.0),
+            "b110": GuiBus(bus_id="b110", parent_node=0, voltage_kv=110.0,
+                           latitude=21.0001, longitude=-82.0001),
+        })
+        result = ParseResult()
+        n = gmb._connect_colocated_voltage_levels(state, result, 1.0)
+        assert n == 1
+        assert len(state.transformers) == 1
+        tr = state.transformers[0]
+        assert {tr.from_voltage_kv, tr.to_voltage_kv} == {132.0, 110.0}
+        assert tr.from_voltage_kv == 132.0  # HV is the from side
+        # Idempotent: the level pair is now bridged, so a second run adds none.
+        assert gmb._connect_colocated_voltage_levels(state, result, 1.0) == 0
+
+    def test_no_transformer_for_far_apart_buses(self):
+        # Different voltage but NOT co-located → no fabricated transformer.
+        state = _make_state(buses={
+            "b132": GuiBus(bus_id="b132", parent_node=0, voltage_kv=132.0,
+                           latitude=21.0, longitude=-82.0),
+            "b110": GuiBus(bus_id="b110", parent_node=0, voltage_kv=110.0,
+                           latitude=22.0, longitude=-83.0),
+        })
+        result = ParseResult()
+        assert gmb._connect_colocated_voltage_levels(state, result, 1.0) == 0
+        assert len(state.transformers) == 0
+
+    def test_three_levels_chain_not_mesh(self):
+        # 220/132/110 co-located → adjacent-level chain (2 TR), not a mesh (3).
+        state = _make_state(buses={
+            "b220": GuiBus(bus_id="b220", parent_node=0, voltage_kv=220.0,
+                           latitude=21.0, longitude=-82.0),
+            "b132": GuiBus(bus_id="b132", parent_node=0, voltage_kv=132.0,
+                           latitude=21.0001, longitude=-82.0),
+            "b110": GuiBus(bus_id="b110", parent_node=0, voltage_kv=110.0,
+                           latitude=21.0002, longitude=-82.0),
+        })
+        result = ParseResult()
+        n = gmb._connect_colocated_voltage_levels(state, result, 1.0)
+        assert n == 2
+        pairs = {frozenset((t.from_voltage_kv, t.to_voltage_kv))
+                 for t in state.transformers}
+        assert pairs == {frozenset((220.0, 132.0)), frozenset((132.0, 110.0))}
