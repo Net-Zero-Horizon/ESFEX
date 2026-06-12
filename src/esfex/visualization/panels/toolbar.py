@@ -79,7 +79,7 @@ class EditorToolbar(QToolBar):
         # laid-out width still fits the current bar, between these bounds.
         from esfex.visualization.ui_scale import scaled
         self._min_icon = min(20, scaled(20))    # compact floor (fits 1400 px)
-        self._max_icon = 44                      # cap so icons never get huge
+        self._max_icon = 28                      # gentle cap (avoid oversized chrome)
         self._cur_icon = None
         self._apply_icon_scale(self._min_icon)
 
