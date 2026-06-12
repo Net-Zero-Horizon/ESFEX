@@ -21,7 +21,18 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.i18n import tr
 
-_DOCS_DIR = Path(__file__).resolve().parents[4] / "docs"
+def _resolve_docs_dir() -> Path:
+    """Locate the Markdown docs. A pip-installed package ships a snapshot at
+    ``esfex/docs`` (copied in by setup.py); a source checkout uses the repo-root
+    ``docs/``."""
+    here = Path(__file__).resolve()
+    packaged = here.parents[2] / "docs"          # installed wheel: esfex/docs
+    if (packaged / "index.md").exists():
+        return packaged
+    return here.parents[4] / "docs"              # source checkout: repo-root docs
+
+
+_DOCS_DIR = _resolve_docs_dir()
 
 # Display names for documentation sections (ordered).
 _SECTIONS: list[tuple[str, str]] = [
