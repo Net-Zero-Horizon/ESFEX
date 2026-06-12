@@ -1826,14 +1826,22 @@ function _drawMinimap() {
     var ch = svg.node().clientHeight;
     if (!cw || !ch || cw < 10 || ch < 10) return;   // dims not ready; fitView redraws
 
-    var maxW = Math.min(360, cw * 0.42);
-    var maxH = Math.min(160, ch * 0.34);
-    var ms = Math.min(maxW / db.w, maxH / db.h);
-    var mmW = db.w * ms, mmH = db.h * ms;
+    // The panel size scales with the window so it never overgrows a small
+    // viewport (and overlaps the SLD): the height is a fraction of the window
+    // height, capped to keep a consistent size on large screens; the width
+    // varies with the diagram aspect, also a capped fraction of the window.
+    var FIXED_H = Math.max(60, Math.min(140, ch * 0.16));
+    var maxW = Math.min(720, cw * 0.55);
+    var ms = Math.min(maxW / db.w, FIXED_H / db.h);
+    var contentW = db.w * ms, contentH = db.h * ms;
+    var mmW = contentW;                   // panel width varies with the diagram
+    var mmH = FIXED_H;                     // panel height is fixed
+    var contentYoff = (mmH - contentH) / 2;   // centre content in the fixed box
     var pad = 8;
     var ox = 12;
     var oy = ch - mmH - 2 * pad - 12;     // bottom-left corner
-    _minimapBox = { ox: ox, oy: oy, ms: ms, mmW: mmW, mmH: mmH, pad: pad };
+    _minimapBox = { ox: ox, oy: oy, ms: ms, mmW: mmW, mmH: mmH,
+                    contentYoff: contentYoff, contentH: contentH, pad: pad };
 
     var mm = svg.append('g').attr('class', 'sld-minimap')
         .attr('transform', 'translate(' + ox + ',' + oy + ')')
@@ -1851,8 +1859,10 @@ function _drawMinimap() {
         .attr('rx', 6).attr('fill', '#FFFFFF').attr('fill-opacity', 0.92)
         .attr('stroke', T.groupBorder).attr('stroke-width', 1);
 
-    // Scaled diagram content (lines first, then bars on top).
-    var content = mm.append('g');
+    // Scaled diagram content (lines first, then bars on top), centred
+    // vertically inside the fixed-height panel.
+    var content = mm.append('g')
+        .attr('transform', 'translate(0,' + contentYoff + ')');
     var edges = (currentLayouted && currentLayouted.edges) || [];
     edges.forEach(function(e) {
         var col = (e.properties && e.properties.color) || T.edgeLine;
@@ -1915,12 +1925,13 @@ function _updateMinimapViewport() {
     var t = d3.zoomTransform(svg.node());
     if (!t.k) return;
     var cw = svg.node().clientWidth, ch = svg.node().clientHeight;
-    var db = diagramBounds, ms = _minimapBox.ms, mmW = _minimapBox.mmW, mmH = _minimapBox.mmH;
+    var db = diagramBounds, ms = _minimapBox.ms, mmW = _minimapBox.mmW;
+    var top = _minimapBox.contentYoff, bot = top + _minimapBox.contentH;
     var vx = ((-t.x) / t.k - db.x) * ms;
-    var vy = ((-t.y) / t.k - db.y) * ms;
+    var vy = ((-t.y) / t.k - db.y) * ms + top;   // content is offset within the panel
     var vw = (cw / t.k) * ms, vh = (ch / t.k) * ms;
-    var x2 = Math.min(mmW, vx + vw), y2 = Math.min(mmH, vy + vh);
-    vx = Math.max(0, vx); vy = Math.max(0, vy);
+    var x2 = Math.min(mmW, vx + vw), y2 = Math.min(bot, vy + vh);
+    vx = Math.max(0, vx); vy = Math.max(top, vy);
     vr.attr('x', vx).attr('y', vy)
         .attr('width', Math.max(2, x2 - vx)).attr('height', Math.max(2, y2 - vy));
 }
