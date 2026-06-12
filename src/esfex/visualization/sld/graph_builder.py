@@ -24,6 +24,7 @@ import logging
 from typing import Any
 
 from esfex.visualization.data.gui_model import GuiSystemState
+from esfex.visualization.sld.router import GridRouter, Obstacles
 from esfex.visualization.sld.voltage_colors import get_voltage_color
 
 log = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ _INTRA_NODE_GAP_X = 24   # Gap between adjacent bars at the same
                          # (substation, voltage) — only used when a
                          # node has multiple groups at one voltage
                          # (rare with merge enabled).
-_LANE_STEP_Y = 14        # Vertical spacing between adjacent edge lanes
+_LANE_STEP_Y = 28        # Vertical spacing between adjacent edge lanes
                          # within a row gap (each edge gets its own lane Y
                          # for the horizontal segment, eliminating overlap)
 _LANE_MARGIN_Y = 30      # Margin from row edges to first/last lane
@@ -405,7 +406,7 @@ def build_elk_graph(
     # nodes) with an O(n) grid: rows = voltage levels (HV at top, LV at
     # bottom), columns = geographic nodes (left-to-right by node index).
     # Each bus sits at the (voltage row, node column) intersection.
-    _apply_grid_layout(elk_children, elk_edges, state)
+    _apply_grid_layout(elk_children, elk_edges, state, bus_equipment)
     elk_graph: dict[str, Any] = {
         "id": "root",
         "children": elk_children,
@@ -446,6 +447,7 @@ def _apply_grid_layout(
     elk_children: list[dict],
     elk_edges: list[dict],
     state: GuiSystemState,
+    bus_equipment: dict[str, list[dict]] | None = None,
 ) -> None:
     """In-place: assign x/y/sections using a voltage-row × node-column grid.
 
@@ -792,6 +794,172 @@ def _apply_grid_layout(
             term_x[(gid, eid)] = x0 + (centre / total) * span if total else (x0 + x1) / 2
             cum += w
 
+    # ── 7c. Spanning circuits.  A line whose two buses sit in different node
+    #       columns with a THIRD substation column between them cannot dip into
+    #       any inter-row gap (or hop a neighbouring row) without crossing that
+    #       middle substation's transformer legs / equipment — there is no clear
+    #       horizontal Y inside a populated gap.  Route every such line through
+    #       the TOP clear band (above every bar) using vertical risers dropped
+    #       into the empty column GAPS beside each endpoint, exactly how real
+    #       SLDs carry long inter-substation circuits around the substations
+    #       they pass.  The column gaps are clear of bars, legs and equipment
+    #       across the full height, and the terminal ordering already parks a
+    #       spanning line's slot at the bar end facing its gap, so the short
+    #       header from the slot to the riser stays clear too. ──
+    node_span_x = {ni: (node_x_left.get(ni, 0.0),
+                        node_x_left.get(ni, 0.0) + node_col_w.get(ni, 0.0))
+                   for ni in state_node_order}
+
+    def _spans_a_substation(s_gid: str, t_gid: str) -> bool:
+        sn = node_of.get(s_gid)
+        tn = node_of.get(t_gid)
+        if sn == tn:
+            return False
+        sxx = bus_center_x.get(s_gid, 0.0)
+        txx = bus_center_x.get(t_gid, 0.0)
+        lo, hi = (sxx, txx) if sxx <= txx else (txx, sxx)
+        for ni in state_node_order:
+            if ni == sn or ni == tn:
+                continue
+            x0, x1 = node_span_x[ni]
+            if lo < (x0 + x1) / 2.0 < hi:    # a substation column sits between
+                return True
+        return False
+
+    band_intervals: list[tuple[float, float, dict]] = []
+    for _e in elk_edges:
+        if _e["properties"].get("edgeType") == "transformer":
+            continue
+        s0, t0 = _e["sources"][0], _e["targets"][0]
+        if s0 not in bus_index or t0 not in bus_index:
+            continue
+        if _spans_a_substation(s0, t0):
+            sxx = bus_center_x[s0]
+            txx = bus_center_x[t0]
+            band_intervals.append((min(sxx, txx), max(sxx, txx), _e))
+    band_lane_idx: dict[str, int] = {}
+    band_intervals.sort(key=lambda t: t[0])
+    band_ends: list[float] = []
+    for x_left, x_right, _e in band_intervals:
+        assigned = -1
+        for i, end in enumerate(band_ends):
+            if end + LANE_X_MARGIN < x_left:
+                assigned = i
+                break
+        if assigned == -1:
+            assigned = len(band_ends)
+            band_ends.append(x_right)
+        else:
+            band_ends[assigned] = x_right
+        band_lane_idx[_e["id"]] = assigned
+    band_set = set(band_lane_idx)
+    # First band lane sits clear above the top row's own same-row lanes.
+    top_band_base = (row_y.get(top_r, 0.0) - _LANE_MARGIN_Y
+                     - (same_row_lane_count.get(top_r, 0) + 1) * _LANE_STEP_Y)
+
+    # ── 7d. Obstacle map + orthogonal router.  Build the full set of physical
+    #       obstacles (busbars, transformer legs, equipment stubs) so any line
+    #       whose cheap lane route would cross an element can instead be routed
+    #       AROUND every element with an A* search on the clear channels. The
+    #       transformer leg X is computed exactly as the emit step below does. ──
+    obstacle_bars = [(c["x"], c["x"] + c["width"], c["y"], c["y"] + _BUS_H, c["id"])
+                     for c in elk_children]
+    obstacle_vlegs: list[tuple[float, float, float]] = []
+    xfmr_vert: dict[str, tuple[float, float, float]] = {}
+    for _e in elk_edges:
+        if _e["properties"].get("edgeType") != "transformer":
+            continue
+        _s = bus_index.get(_e["sources"][0])
+        _t = bus_index.get(_e["targets"][0])
+        if not _s or not _t:
+            continue
+        _up, _lo = (_s, _t) if _s["y"] < _t["y"] else (_t, _s)
+        _up_gid = _e["sources"][0] if _up is _s else _e["targets"][0]
+        _ox0 = max(_up["x"], _lo["x"])
+        _ox1 = min(_up["x"] + _up["width"], _lo["x"] + _lo["width"])
+        if _ox1 > _ox0:
+            _cx = term_x.get((_up_gid, _e["id"]), (_ox0 + _ox1) / 2.0)
+            _cx = min(max(_cx, _ox0), _ox1)
+        else:
+            _uc = _up["x"] + _up["width"] / 2.0
+            _cx = min(max(_uc, _lo["x"]), _lo["x"] + _lo["width"])
+        _seg = (_cx, _up["y"] + _BUS_H, _lo["y"])
+        xfmr_vert[_e["id"]] = _seg
+        obstacle_vlegs.append(_seg)
+    # Equipment stubs (vertical) below each bar — positions replicate the JS
+    # ``_getEquipStubPositions`` layout (evenly spaced, 72 px pitch, centred).
+    _EQ_PITCH = 72.0
+    for _gid, _eqs in (bus_equipment or {}).items():
+        _c = bus_index.get(_gid)
+        if not _c or not _eqs:
+            continue
+        _n = len(_eqs)
+        _start = _c["x"] + (_c["width"] - _n * _EQ_PITCH) / 2.0 + _EQ_PITCH / 2.0
+        _yt = _c["y"] + _BUS_H
+        _yb = _yt + _STUB_LEN + _EQUIP_SIZE
+        for _i in range(_n):
+            obstacle_vlegs.append((_start + _i * _EQ_PITCH, _yt, _yb))
+
+    # Horizontal lane tracks: clear lanes inside every inter-row channel, plus
+    # generous bands above the top row and below the bottom-most element.
+    router_lane_ys: list[float] = []
+    for _i in range(len(sorted_v_list) - 1):
+        _ra, _rb = sorted_v_list[_i], sorted_v_list[_i + 1]
+        _ylo = row_y[_ra] + row_h.get(_ra, 0.0)
+        _yhi = row_y[_rb]
+        _yy = _ylo + _LANE_MARGIN_Y
+        _any = False
+        while _yy < _yhi - _LANE_MARGIN_Y + 0.5:
+            router_lane_ys.append(_yy)
+            _yy += _LANE_STEP_Y
+            _any = True
+        if not _any:
+            router_lane_ys.append((_ylo + _yhi) / 2.0)
+    _top_y = row_y[sorted_v_list[0]] if sorted_v_list else 0.0
+    _bot_y = max([row_y[r] + row_h.get(r, 0.0) for r in sorted_v_list] +
+                 [s[2] for s in obstacle_vlegs] + [_top_y])
+    for _k in range(1, 41):
+        router_lane_ys.append(_top_y - _LANE_MARGIN_Y - _k * _LANE_STEP_Y)
+    for _k in range(0, 41):
+        router_lane_ys.append(_bot_y + _LANE_MARGIN_Y + _k * _LANE_STEP_Y)
+
+    # Vertical tracks: clear gaps between bars in every row, bar-edge corridors,
+    # and the wide inter-node column gaps.
+    router_x_tracks: list[float] = []
+    _rows_bars: dict[int, list[tuple[float, float]]] = {}
+    for _c in elk_children:
+        _rows_bars.setdefault(row_of[_c["id"]], []).append(
+            (_c["x"], _c["x"] + _c["width"]))
+    for _r, _ivs in _rows_bars.items():
+        _ivs.sort()
+        router_x_tracks.append(_ivs[0][0] - _COL_GAP_X / 2.0)
+        for _a, _b in zip(_ivs, _ivs[1:]):
+            router_x_tracks.append((_a[1] + _b[0]) / 2.0)
+        router_x_tracks.append(_ivs[-1][1] + _COL_GAP_X / 2.0)
+        for _x0, _x1 in _ivs:
+            router_x_tracks.append(_x0 - _INTRA_NODE_GAP_X / 2.0)
+            router_x_tracks.append(_x1 + _INTRA_NODE_GAP_X / 2.0)
+    for _ni in state_node_order:
+        router_x_tracks.append(node_x_left.get(_ni, 0.0) - _COL_GAP_X / 2.0)
+        router_x_tracks.append(node_x_left.get(_ni, 0.0)
+                               + node_col_w.get(_ni, 0.0) + _COL_GAP_X / 2.0)
+
+    _obstacles = Obstacles(obstacle_bars, obstacle_vlegs)
+    _router = GridRouter(_obstacles, router_lane_ys, router_x_tracks, _LANE_STEP_Y)
+
+    def _segments_clear(pts, s_gid, t_gid):
+        """True if every segment of an orthogonal polyline avoids all bars/legs."""
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            if abs(y0 - y1) < 0.5:
+                if _obstacles.h_blocked(x0, x1, y0):
+                    return False
+            elif abs(x0 - x1) < 0.5:
+                if _obstacles.v_blocked(x0, y0, y1, ignore_bars={s_gid, t_gid}):
+                    return False
+            else:
+                return False
+        return True
+
     for edge in elk_edges:
         src = bus_index.get(edge["sources"][0])
         tgt = bus_index.get(edge["targets"][0])
@@ -855,7 +1023,33 @@ def _apply_grid_layout(
             }]
             continue
 
-        if rows_apart >= 2:
+        # Build the cheap "simple" route first (start, bends…, end). Then test
+        # it against every obstacle; only if it would cross something do we fall
+        # back to the A* router that goes AROUND the obstacles.
+        sgid = edge["sources"][0]
+        tgid = edge["targets"][0]
+        if edge["id"] in band_set:
+            # Spanning circuit → carry it over the TOP band, around the
+            # substations it passes. Risers sit in the clear gaps facing the
+            # interior; the headers exit each bar's top face by its slot.
+            sn = node_of.get(sgid, 0)
+            tn = node_of.get(tgid, 0)
+            if tx >= sx:
+                s_riser = (node_x_left.get(sn, sx) + node_col_w.get(sn, 0.0)
+                           + _COL_GAP_X / 2)
+                t_riser = node_x_left.get(tn, tx) - _COL_GAP_X / 2
+            else:
+                s_riser = node_x_left.get(sn, sx) - _COL_GAP_X / 2
+                t_riser = (node_x_left.get(tn, tx) + node_col_w.get(tn, 0.0)
+                           + _COL_GAP_X / 2)
+            band_y = top_band_base - band_lane_idx[edge["id"]] * _LANE_STEP_Y
+            s_head = src["y"] - _LANE_MARGIN_Y
+            t_head = tgt["y"] - _LANE_MARGIN_Y
+            s_face, t_face = src["y"], tgt["y"]
+            pts = [(sx, s_face), (sx, s_head), (s_riser, s_head),
+                   (s_riser, band_y), (t_riser, band_y),
+                   (t_riser, t_head), (tx, t_head), (tx, t_face)]
+        elif rows_apart >= 2:
             # Multi-row edge: a straight vertical drop at sx/tx would pierce
             # the bars of the rows in between. Route the long vertical run in
             # a column GAP (between node columns), which is guaranteed clear
@@ -869,23 +1063,30 @@ def _apply_grid_layout(
             down = sy < ty
             y_src = sy + _LANE_MARGIN_Y if down else sy - _LANE_MARGIN_Y
             y_tgt = ty - _LANE_MARGIN_Y if down else ty + _LANE_MARGIN_Y
-            edge["sections"] = [{
-                "startPoint": {"x": sx, "y": sy},
-                "endPoint": {"x": tx, "y": ty},
-                "bendPoints": [
-                    {"x": sx, "y": y_src},
-                    {"x": channel_x, "y": y_src},
-                    {"x": channel_x, "y": y_tgt},
-                    {"x": tx, "y": y_tgt},
-                ],
-            }]
+            s_face, t_face = sy, ty
+            pts = [(sx, sy), (sx, y_src), (channel_x, y_src),
+                   (channel_x, y_tgt), (tx, y_tgt), (tx, ty)]
         else:
             lane = edge_lane_y.get(edge["id"], (sy + ty) / 2)
-            edge["sections"] = [{
-                "startPoint": {"x": sx, "y": sy},
-                "endPoint": {"x": tx, "y": ty},
-                "bendPoints": [
-                    {"x": sx, "y": lane},
-                    {"x": tx, "y": lane},
-                ],
-            }]
+            s_face, t_face = sy, ty
+            pts = [(sx, sy), (sx, lane), (tx, lane), (tx, ty)]
+
+        if not _segments_clear(pts, sgid, tgid):
+            sn = node_of.get(sgid, 0)
+            tn = node_of.get(tgid, 0)
+            wx0 = min(sx, tx, node_x_left.get(sn, sx),
+                      node_x_left.get(tn, tx)) - _COL_GAP_X
+            wx1 = max(sx, tx,
+                      node_x_left.get(sn, sx) + node_col_w.get(sn, 0.0),
+                      node_x_left.get(tn, tx) + node_col_w.get(tn, 0.0)) + _COL_GAP_X
+            routed = _router.route(sx, s_face, sgid, tx, t_face, tgid,
+                                   x_window=(wx0, wx1))
+            if routed and len(routed) >= 2:
+                _router.commit(routed)
+                pts = routed
+
+        edge["sections"] = [{
+            "startPoint": {"x": pts[0][0], "y": pts[0][1]},
+            "endPoint": {"x": pts[-1][0], "y": pts[-1][1]},
+            "bendPoints": [{"x": p[0], "y": p[1]} for p in pts[1:-1]],
+        }]

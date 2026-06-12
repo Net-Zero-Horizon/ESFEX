@@ -713,3 +713,121 @@ def test_adjacent_row_edge_keeps_simple_z_route():
     out = gb.build_elk_graph(state)
     bends = out["elkGraph"]["edges"][0]["sections"][0]["bendPoints"]
     assert len(bends) == 2
+
+
+# ── Obstacle-avoidance routing (lines never cross elements) ──────────
+
+
+def _count_element_crossings(out):
+    """Recompute the physical obstacle map from a built graph and count how
+    many transmission lines have a segment that crosses a bar or a leg."""
+    from esfex.visualization.sld.router import Obstacles
+    g = out["elkGraph"]
+    bus = {c["id"]: c for c in g["children"]}
+    bars = [(c["x"], c["x"] + c["width"], c["y"], c["y"] + gb._BUS_H, c["id"])
+            for c in g["children"]]
+    vlegs = []
+    for e in g["edges"]:
+        if e["properties"].get("transformerVertical"):
+            s = e["sections"][0]
+            vlegs.append((s["startPoint"]["x"], s["startPoint"]["y"],
+                          s["endPoint"]["y"]))
+    for gid, eqs in out["busEquipment"].items():
+        c = bus.get(gid)
+        if not c or not eqs:
+            continue
+        n = len(eqs)
+        start = c["x"] + (c["width"] - n * 72.0) / 2 + 36.0
+        yt = c["y"] + gb._BUS_H
+        yb = yt + gb._STUB_LEN + gb._EQUIP_SIZE
+        for i in range(n):
+            vlegs.append((start + i * 72.0, yt, yb))
+    ob = Obstacles(bars, vlegs)
+    crossings = 0
+    for e in g["edges"]:
+        if e["properties"].get("transformerVertical"):
+            continue
+        sg, tg = e["sources"][0], e["targets"][0]
+        s = e["sections"][0]
+        pts = ([(s["startPoint"]["x"], s["startPoint"]["y"])]
+               + [(p["x"], p["y"]) for p in s["bendPoints"]]
+               + [(s["endPoint"]["x"], s["endPoint"]["y"])])
+        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+            if abs(y0 - y1) < 0.5:
+                if ob.h_blocked(x0, x1, y0):
+                    crossings += 1
+                    break
+            elif abs(x0 - x1) < 0.5:
+                if ob.v_blocked(x0, y0, y1, ignore_bars={sg, tg}):
+                    crossings += 1
+                    break
+            else:
+                crossings += 1
+                break
+    return crossings
+
+
+def _three_level_node(node, prefix):
+    """One substation column with 220 → 110 → 33 kV bars + transformers."""
+    buses = {
+        f"{prefix}h": GuiBus(bus_id=f"{prefix}h", parent_node=node,
+                             voltage_kv=220.0),
+        f"{prefix}m": GuiBus(bus_id=f"{prefix}m", parent_node=node,
+                             voltage_kv=110.0),
+        f"{prefix}l": GuiBus(bus_id=f"{prefix}l", parent_node=node,
+                             voltage_kv=33.0),
+    }
+    xfmrs = [
+        GuiTransformer(name="", from_bus=f"{prefix}h", to_bus=f"{prefix}m",
+                       from_node=node, to_node=node, from_voltage_kv=220.0,
+                       to_voltage_kv=110.0, rated_power_mva=150.0),
+        GuiTransformer(name="", from_bus=f"{prefix}m", to_bus=f"{prefix}l",
+                       from_node=node, to_node=node, from_voltage_kv=110.0,
+                       to_voltage_kv=33.0, rated_power_mva=80.0),
+    ]
+    return buses, xfmrs
+
+
+def test_middle_row_spanning_line_avoids_transformer_legs():
+    """A 110 kV line that spans a third substation must NOT cross the
+    transformer legs hanging in the middle — it routes around them."""
+    state = GuiSystemState()
+    state.nodes = [GuiNode(index=i, name=f"S{i}") for i in range(3)]
+    state.buses = {}
+    state.transformers = []
+    for i, p in enumerate(("a", "b", "c")):
+        b, x = _three_level_node(i, p)
+        state.buses.update(b)
+        state.transformers.extend(x)
+    # 110 kV line a→c spans substation b in the middle row.
+    state.transmission_lines = [
+        GuiTransmissionLine(line_id="m_ac", from_bus="am", to_bus="cm",
+                            capacity_mw=150.0, voltage_kv=110.0),
+    ]
+    out = gb.build_elk_graph(state)
+    assert _count_element_crossings(out) == 0
+
+
+def test_no_element_crossings_in_a_dense_single_substation():
+    """Many 110 kV buses fanning off 220 kV parents, meshed together: the
+    router keeps every line off the transformer legs."""
+    state = GuiSystemState()
+    state.nodes = [GuiNode(index=0, name="S0")]
+    state.buses = {"h": GuiBus(bus_id="h", parent_node=0, voltage_kv=220.0)}
+    state.transformers = []
+    mids = []
+    for i in range(6):
+        bid = f"m{i}"
+        state.buses[bid] = GuiBus(bus_id=bid, parent_node=0, voltage_kv=110.0)
+        state.transformers.append(GuiTransformer(
+            name="", from_bus="h", to_bus=bid, from_node=0, to_node=0,
+            from_voltage_kv=220.0, to_voltage_kv=110.0, rated_power_mva=100.0))
+        mids.append(bid)
+    # Mesh the 110 kV buses (several spanning circuits).
+    state.transmission_lines = [
+        GuiTransmissionLine(line_id=f"L{a}{b}", from_bus=mids[a], to_bus=mids[b],
+                            capacity_mw=50.0, voltage_kv=110.0)
+        for a, b in ((0, 3), (1, 4), (2, 5), (0, 5))
+    ]
+    out = gb.build_elk_graph(state)
+    assert _count_element_crossings(out) == 0
