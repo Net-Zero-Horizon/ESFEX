@@ -8,8 +8,13 @@
 name: Windows installer
 
 on:
-  push:
-    tags: ["v*"]
+  # Build whenever a GitHub Release is published (the same trigger that drives
+  # the PyPI publish in ci.yml). This fires regardless of whether the tag was
+  # pushed first or created by the release UI, so publishing a release always
+  # produces the installer. (A bare tag push without a release does not — and
+  # shouldn't — build an installer.)
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
