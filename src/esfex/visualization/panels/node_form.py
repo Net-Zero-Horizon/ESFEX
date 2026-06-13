@@ -70,6 +70,18 @@ class NodeForm(QWidget):
         # ── Tab 1: Demand ─────────────────────────────────────────
         self._build_demand_tab()
 
+        # The technology combo lists the system's technology catalog
+        # (``state.technologies``). Keep it in sync when that catalog changes
+        # while this panel is open — otherwise a newly created technology
+        # wouldn't be selectable until the node is reopened.
+        for _sig in ("technologyAdded", "technologyRemoved", "technologyUpdated"):
+            getattr(self._model, _sig).connect(self._on_system_tech_changed)
+
+    def _on_system_tech_changed(self, *_args):
+        """Refresh the technology combo when system technologies change."""
+        if self._current_node is not None:
+            self._populate_tech_combo(self._current_node)
+
     # ==============================================================
     # General tab construction
     # ==============================================================
@@ -707,26 +719,35 @@ class NodeForm(QWidget):
         "fuel_transport", "transformation",
     ]
 
+    # Catalog category (Renewable / Non-renewable / Storage / Electrolyzer)
+    # → per-node investment category used by the table/combo.
+    _CATALOG_CAT_MAP = {
+        "renewable": "generation",
+        "non-renewable": "generation",
+        "storage": "storage",
+        "electrolyzer": "fuel",
+    }
+
     def _populate_tech_combo(self, node_idx: int):
-        """Fill the technology combo from generators/batteries at this node."""
+        """Fill the technology combo from the system technology catalog.
+
+        Lists every ``GuiTechnology`` defined in the system (``state.
+        technologies``) that the node hasn't added yet, so a technology
+        created anywhere in the system is immediately selectable here.
+        """
+        self._tech_combo.blockSignals(True)
         self._tech_combo.clear()
-        names = set()
-        for inst in self._model.state.generators.values():
-            if inst.node == node_idx:
-                names.add(inst.name)
-        for inst in self._model.state.batteries.values():
-            if inst.node == node_idx:
-                names.add(inst.name)
-        for inst in self._model.state.electrolyzers.values():
-            if inst.node == node_idx:
-                names.add(inst.name)
-        # Exclude already-added technologies
         node = self._model.get_node(node_idx)
-        existing = set()
-        if node:
-            existing = {t.name for t in node.technologies}
-        for n in sorted(names - existing):
-            self._tech_combo.addItem(n)
+        existing = {t.name for t in node.technologies} if node else set()
+        techs = sorted(
+            self._model.state.technologies.values(),
+            key=lambda t: t.name.lower(),
+        )
+        for tech in techs:
+            if tech.name in existing:
+                continue
+            self._tech_combo.addItem(tech.name, tech.tech_id)
+        self._tech_combo.blockSignals(False)
 
     def _populate_tech_table(self, node):
         self._tech_table.blockSignals(True)
@@ -762,18 +783,21 @@ class NodeForm(QWidget):
         name = self._tech_combo.currentText()
         if not name:
             return
-        # Infer category from equipment type
-        category = "generation"
-        for inst in self._model.state.batteries.values():
-            if inst.node == self._current_node and inst.name == name:
-                category = "storage"
-                break
-        for inst in self._model.state.electrolyzers.values():
-            if inst.node == self._current_node and inst.name == name:
-                category = "fuel"
-                break
+        # Resolve the catalog entry to copy its category + investment defaults.
+        tech_id = self._tech_combo.currentData()
+        catalog = self._model.state.technologies.get(tech_id) if tech_id else None
+        if catalog is None:
+            catalog = next(
+                (t for t in self._model.state.technologies.values()
+                 if t.name == name), None)
+        category = self._CATALOG_CAT_MAP.get(
+            (catalog.category if catalog else "").lower(), "generation")
 
-        tech = NodeTechnology(name=name, category=category)
+        tech = NodeTechnology(
+            name=name, category=category,
+            invest_cost=catalog.invest_cost if catalog else 0.0,
+            invest_max=catalog.invest_max_power if catalog else 0.0,
+        )
         node.technologies.append(tech)
         self._populate_tech_table(node)
         self._populate_tech_combo(self._current_node)
