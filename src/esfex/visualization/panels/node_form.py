@@ -194,6 +194,10 @@ class NodeForm(QWidget):
         self._demand_load_btn = QPushButton(tr("node_form.load_csv"))
         self._demand_load_btn.clicked.connect(self._on_load_demand_csv)
         path_row.addWidget(self._demand_load_btn)
+        self._demand_forecast_btn = QPushButton(tr("node_form.forecast"))
+        self._demand_forecast_btn.setToolTip(tr("node_form.forecast_tip"))
+        self._demand_forecast_btn.clicked.connect(self._on_forecast_demand)
+        path_row.addWidget(self._demand_forecast_btn)
         demand_layout.addLayout(path_row)
 
         self._demand_hours_label = QLabel(tr("node_form.hours"))
@@ -384,6 +388,23 @@ class NodeForm(QWidget):
 
         self._update_demand_display(node.demand)
         self._model.nodeUpdated.emit(self._current_node)
+
+    def _on_forecast_demand(self):
+        """Open the single-node demand-forecast dialog for the current node."""
+        if self._current_node is None:
+            return
+        node = self._model.get_node(self._current_node)
+        if node is None:
+            return
+        from esfex.visualization.workflows.node_demand_forecast import (
+            NodeDemandForecastDialog,
+        )
+        NodeDemandForecastDialog(self._model, self._current_node, self).exec()
+        # Reflect whatever the forecast/apply wrote back onto the node.
+        node = self._model.get_node(self._current_node)
+        if node is not None and node.demand is not None:
+            self._update_demand_display(node.demand)
+            self._model.nodeUpdated.emit(self._current_node)
 
     def _update_demand_display(self, demand: GuiNodeDemand):
         if demand.data is not None and demand.csv_path:

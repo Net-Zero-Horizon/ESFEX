@@ -10,10 +10,9 @@ explicit Cancel):
 * The map widget would also keep its draw mode active when a wizard
   using polygon drawing was closed without finishing.
 
-``cleanup_wizard`` centralises the cleanup that the two well-behaved
-wizards (``demand_estimation_wizard``, ``ev_wizard``) already did
-manually. Each wizard's ``closeEvent`` should call it before delegating
-to ``super().closeEvent(event)``.
+``cleanup_wizard`` centralises the cleanup that well-behaved wizards
+(e.g. ``ev_wizard``) already did manually. Each wizard's ``closeEvent``
+should call it before delegating to ``super().closeEvent(event)``.
 """
 
 from __future__ import annotations

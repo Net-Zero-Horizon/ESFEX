@@ -1355,8 +1355,8 @@ class DemandProfileBuilder:
         """Scale base-year annual demand to match known annual energy.
 
         Only scales if known_annual_gwh is set.  Peak-based calibration
-        is handled post-build in the CalibrationStep where the actual
-        load profile shape is available.
+        is handled post-build (observed-data validation/correction in the
+        demand step) where the actual load profile shape is available.
         """
         if self._cfg.known_annual_gwh <= 0:
             return annual_mwh

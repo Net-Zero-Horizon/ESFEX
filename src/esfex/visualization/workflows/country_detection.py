@@ -24,12 +24,61 @@ from esfex.visualization.workflows.grid_mapping_fetchers import _point_in_polygo
 _RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 
+# ISO-3166 alpha-2 → alpha-3 country codes. This lives here (the country
+# utilities module) so it survives the removal of the obsolete standalone
+# demand-estimation wizard, which used to host it. Callers: grid_mapping_steps
+# (forecast country detection) and ``_iso3_to_iso2`` below.
+_ISO2_TO_ISO3: dict[str, str] = {
+    "AD": "AND", "AE": "ARE", "AF": "AFG", "AG": "ATG", "AL": "ALB",
+    "AM": "ARM", "AO": "AGO", "AR": "ARG", "AT": "AUT", "AU": "AUS",
+    "AZ": "AZE", "BA": "BIH", "BB": "BRB", "BD": "BGD", "BE": "BEL",
+    "BF": "BFA", "BG": "BGR", "BH": "BHR", "BI": "BDI", "BJ": "BEN",
+    "BN": "BRN", "BO": "BOL", "BR": "BRA", "BS": "BHS", "BT": "BTN",
+    "BW": "BWA", "BY": "BLR", "BZ": "BLZ", "CA": "CAN", "CD": "COD",
+    "CF": "CAF", "CG": "COG", "CH": "CHE", "CI": "CIV", "CL": "CHL",
+    "CM": "CMR", "CN": "CHN", "CO": "COL", "CR": "CRI", "CU": "CUB",
+    "CV": "CPV", "CY": "CYP", "CZ": "CZE", "DE": "DEU", "DJ": "DJI",
+    "DK": "DNK", "DM": "DMA", "DO": "DOM", "DZ": "DZA", "EC": "ECU",
+    "EE": "EST", "EG": "EGY", "ER": "ERI", "ES": "ESP", "ET": "ETH",
+    "FI": "FIN", "FJ": "FJI", "FM": "FSM", "FR": "FRA", "GA": "GAB",
+    "GB": "GBR", "GD": "GRD", "GE": "GEO", "GH": "GHA", "GM": "GMB",
+    "GN": "GIN", "GQ": "GNQ", "GR": "GRC", "GT": "GTM", "GW": "GNB",
+    "GY": "GUY", "HN": "HND", "HR": "HRV", "HT": "HTI", "HU": "HUN",
+    "ID": "IDN", "IE": "IRL", "IL": "ISR", "IN": "IND", "IQ": "IRQ",
+    "IR": "IRN", "IS": "ISL", "IT": "ITA", "JM": "JAM", "JO": "JOR",
+    "JP": "JPN", "KE": "KEN", "KG": "KGZ", "KH": "KHM", "KI": "KIR",
+    "KM": "COM", "KN": "KNA", "KP": "PRK", "KR": "KOR", "KW": "KWT",
+    "KZ": "KAZ", "LA": "LAO", "LB": "LBN", "LC": "LCA", "LI": "LIE",
+    "LK": "LKA", "LR": "LBR", "LS": "LSO", "LT": "LTU", "LU": "LUX",
+    "LV": "LVA", "LY": "LBY", "MA": "MAR", "MD": "MDA", "ME": "MNE",
+    "MG": "MDG", "MH": "MHL", "MK": "MKD", "ML": "MLI", "MM": "MMR",
+    "MN": "MNG", "MR": "MRT", "MT": "MLT", "MU": "MUS", "MV": "MDV",
+    "MW": "MWI", "MX": "MEX", "MY": "MYS", "MZ": "MOZ", "NA": "NAM",
+    "NE": "NER", "NG": "NGA", "NI": "NIC", "NL": "NLD", "NO": "NOR",
+    "NP": "NPL", "NR": "NRU", "NZ": "NZL", "OM": "OMN", "PA": "PAN",
+    "PE": "PER", "PG": "PNG", "PH": "PHL", "PK": "PAK", "PL": "POL",
+    "PR": "PRI", "PT": "PRT", "PW": "PLW", "PY": "PRY", "QA": "QAT",
+    "RO": "ROU",
+    "RS": "SRB", "RU": "RUS", "RW": "RWA", "SA": "SAU", "SB": "SLB",
+    "SC": "SYC", "SD": "SDN", "SE": "SWE", "SG": "SGP", "SI": "SVN",
+    "SK": "SVK", "SL": "SLE", "SM": "SMR", "SN": "SEN", "SO": "SOM",
+    "SR": "SUR", "SS": "SSD", "ST": "STP", "SV": "SLV", "SY": "SYR",
+    "SZ": "SWZ", "TC": "TCA", "TD": "TCD", "TG": "TGO", "TH": "THA",
+    "TJ": "TJK", "TL": "TLS", "TM": "TKM", "TN": "TUN", "TO": "TON",
+    "TR": "TUR", "TT": "TTO", "TV": "TUV", "TZ": "TZA", "UA": "UKR",
+    "UG": "UGA", "US": "USA", "UY": "URY", "UZ": "UZB", "VA": "VAT",
+    "VC": "VCT", "VE": "VEN", "VN": "VNM", "VU": "VUT", "WS": "WSM",
+    "YE": "YEM", "ZA": "ZAF", "ZM": "ZMB", "ZW": "ZWE",
+}
+
+
+def _iso2_to_iso3(iso2: str) -> str:
+    return _ISO2_TO_ISO3.get(iso2.upper(), iso2)
+
+
 @lru_cache(maxsize=1)
 def _iso3_to_iso2() -> dict[str, str]:
     """Reverse of the ISO2→ISO3 table, for the few callers that want ISO2."""
-    from esfex.visualization.workflows.demand_estimation_fetchers import (
-        _ISO2_TO_ISO3,
-    )
     return {iso3: iso2 for iso2, iso3 in _ISO2_TO_ISO3.items()}
 
 

@@ -1714,11 +1714,9 @@ class MainWindow(QMainWindow):
         self._act_ev_v2g.triggered.connect(self._on_ev_v2g_workflow)
         workflows_menu.addAction(self._act_ev_v2g)
 
-        self._act_demand_estimation = QAction(tr("menu.demand_estimation"), self)
-        self._act_demand_estimation.triggered.connect(
-            self._on_demand_estimation_workflow
-        )
-        workflows_menu.addAction(self._act_demand_estimation)
+        # The standalone "Demand Estimation" workflow was retired: per-node
+        # demand forecasting now lives on the node panel ("Forecast" button)
+        # and the Grid Builder's demand step.
 
         workflows_menu.addSeparator()
 
@@ -1790,7 +1788,6 @@ class MainWindow(QMainWindow):
         self._act_wind.setText(tr("menu.wind"))
         self._act_solar_pv.setText(tr("menu.solar_pv"))
         self._act_ev_v2g.setText(tr("menu.ev_v2g"))
-        self._act_demand_estimation.setText(tr("menu.demand_estimation"))
         self._act_financial.setText(tr("menu.financial_analysis"))
 
         # Plugins menu actions
@@ -2543,20 +2540,6 @@ class MainWindow(QMainWindow):
         self._open_wizard("_ev_wizard", lambda: EVWizardDialog(
             map_widget=self.map_widget, model=self.model, parent=self,
         ))
-
-    def _on_demand_estimation_workflow(self):
-        """Open the Demand Estimation wizard."""
-        from esfex.visualization.workflows.demand_estimation_wizard import (
-            DemandEstimationWizard,
-        )
-        self._open_wizard(
-            "_demand_estimation_wizard",
-            lambda: DemandEstimationWizard(
-                map_widget=self.map_widget,
-                all_states=self._all_states,
-                parent=self,
-            ),
-        )
 
     def _on_financial_workflow(self):
         """Open the Financial Analysis wizard."""

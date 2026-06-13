@@ -4484,6 +4484,9 @@ class GridMappingDemandStep(QWidget):
         self._forecast_worker = None
         # User-supplied observed hourly demand per node index (validation).
         self._observed: dict[int, "GuiNodeDemand"] = {}
+        # When set (single-node mode, launched from the node panel) the whole
+        # step — forecast, validation, distribution — is scoped to this node.
+        self._target_node: int | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -4727,6 +4730,7 @@ class GridMappingDemandStep(QWidget):
         dist_group = QGroupBox(
             "3. Bus Distribution (spatial demand or building footprints)"
         )
+        self._dist_group = dist_group   # toggled in single-node mode
         dg = QVBoxLayout(dist_group)
         _dist_intro = QLabel(
             "Distribute each node\u2019s forecast demand among its busbars. "
@@ -4859,6 +4863,55 @@ class GridMappingDemandStep(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def _nodes_in_scope(self):
+        """Nodes this step operates on: the single target node when scoped
+        (node-panel mode), otherwise every node in the active system."""
+        state = self._model.state if self._model else None
+        if state is None:
+            return []
+        if self._target_node is not None:
+            node = self._model.get_node(self._target_node)
+            return [node] if node is not None else []
+        return list(state.nodes)
+
+    def set_single_node(self, model, node_index: int):
+        """Scope the whole step to one node (launched from its attributes panel).
+
+        Derives a study region from the node's own electrical infrastructure:
+        the bounding box of its load/mixed buses (padded), or — when the node
+        has no buses yet — a box around its centroid. Hides the bus-distribution
+        section when the node has fewer than two demand-carrying buses.
+        """
+        self._target_node = node_index
+        node = model.get_node(node_index)
+        buses = [
+            b for b in model.state.buses.values()
+            if b.parent_node == node_index and b.role in ("load", "mixed")
+            and (b.latitude or b.longitude)
+        ] if node is not None else []
+        if buses:
+            lats = [b.latitude for b in buses]
+            lons = [b.longitude for b in buses]
+            s, w, n, e = min(lats), min(lons), max(lats), max(lons)
+            # Pad to a minimum span so the density model has ≥1 grid cell.
+            pad_lat = max(0.05, (0.3 - (n - s)) / 2.0)
+            pad_lon = max(0.05, (0.3 - (e - w)) / 2.0)
+            bounds = (s - pad_lat, w - pad_lon, n + pad_lat, e + pad_lon)
+        elif node is not None:
+            r = 0.25
+            bounds = (node.centroid_lat - r, node.centroid_lng - r,
+                      node.centroid_lat + r, node.centroid_lng + r)
+        else:
+            bounds = None
+        # Adaptive infrastructure filter: distribution only makes sense with ≥2
+        # demand-carrying buses to split between.
+        load_buses = [
+            b for b in model.state.buses.values()
+            if b.parent_node == node_index and b.role in ("load", "mixed")
+        ] if node is not None else []
+        self._dist_group.setVisible(len(load_buses) >= 2)
+        self.set_inputs(bounds, model, self._all_states)
+
     def set_inputs(self, bounds, model, all_states):
         """Called by wizard when navigating to this step."""
         self._model = model
@@ -4916,7 +4969,7 @@ class GridMappingDemandStep(QWidget):
         # Prefer the actual node coordinates; fall back to a bbox sample.
         points: list[tuple[float, float]] = []
         if self._model is not None:
-            for nd in self._model.state.nodes:
+            for nd in self._nodes_in_scope():
                 lat = getattr(nd, "centroid_lat", None)
                 lng = getattr(nd, "centroid_lng", None)
                 if lat is not None and lng is not None and (lat or lng):
@@ -4967,7 +5020,7 @@ class GridMappingDemandStep(QWidget):
                 addr = resp.json().get("address", {})
                 cc = addr.get("country_code", "").upper()
                 name = addr.get("country", cc)
-                from esfex.visualization.workflows.demand_estimation_fetchers import (
+                from esfex.visualization.workflows.country_detection import (
                     _iso2_to_iso3,
                 )
                 iso3 = _iso2_to_iso3(cc)
@@ -5131,7 +5184,7 @@ class GridMappingDemandStep(QWidget):
             self._btn_forecast.setEnabled(True)
             return
 
-        nodes = list(state.nodes)
+        nodes = self._nodes_in_scope()
         num_nodes = len(nodes)
         if num_nodes == 0:
             self._lbl_forecast_status.setText("No nodes in system.")
@@ -5535,7 +5588,7 @@ class GridMappingDemandStep(QWidget):
         if state is None:
             return
 
-        for node in state.nodes:
+        for node in self._nodes_in_scope():
             buses = [
                 b for b in state.buses.values()
                 if b.parent_node == node.index and b.role in ("load", "mixed")
@@ -5764,7 +5817,7 @@ class GridMappingDemandStep(QWidget):
                 "spatial-demand cells available.")
             return
         state = self._model.state if self._model else None
-        nodes = list(state.nodes) if state else []
+        nodes = self._nodes_in_scope() if state else []
         if not nodes:
             self._lbl_bld_status.setText("No nodes in the active system.")
             return
@@ -5863,7 +5916,7 @@ class GridMappingDemandStep(QWidget):
             cfg_path = getattr(self.window(), "_config_path", None)
             out_dir = (Path(cfg_path).parent if cfg_path else Path.cwd()) / "demand"
             applied_demand += write_forecast_demand_csvs(
-                state.nodes, self._forecast_result, out_dir)
+                self._nodes_in_scope(), self._forecast_result, out_dir)
 
         # Apply bus fractions
         skipped_connection = 0
