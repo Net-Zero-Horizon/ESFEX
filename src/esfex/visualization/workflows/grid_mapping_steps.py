@@ -4907,6 +4907,21 @@ class GridMappingDemandStep(QWidget):
             ),
         )
 
+        # Wire the per-year SSP growth rates into the macro so the demand
+        # trajectory is non-linear. Without these the density engine sees a
+        # FLAT population, and — if it falls back to the shape-ML engine —
+        # ``_compute_annual_trajectory`` uses the constant scalar GDP rate,
+        # producing an almost-linear curve. The standalone demand wizard
+        # already wires these; the grid-mapping step was missing them.
+        ssp_key = self._combo_gdp_ssp.currentData() or "SSP2"
+        try:
+            from esfex.models.demand_projection import _ssp_growth_rates
+            macro.gdp_growth_by_year = _ssp_growth_rates(ssp_key, "gdp")
+            macro.pop_growth_by_year = _ssp_growth_rates(ssp_key, "pop")
+        except Exception as exc:  # bundled multipliers should always resolve
+            logger.warning("SSP growth-rate wiring failed (%s); "
+                           "trajectory falls back to scalar rates.", exc)
+
         # Build meteo data from ERA5 fetch
         era5 = self._era5_data
         temp_h = era5.get("temperature_hourly", [])
