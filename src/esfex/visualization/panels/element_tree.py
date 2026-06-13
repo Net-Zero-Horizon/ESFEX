@@ -938,7 +938,6 @@ class ElementTreePanel(QWidget):
                 ("freq_converter", tr("tree_ctx.add_freq")),
                 ("transmission", tr("tree_ctx.add_transmission")),
                 ("fuel_storage", tr("tree_ctx.add_fuel_storage")),
-                ("fuel_transport", tr("tree_ctx.add_fuel_transport")),
             ]
             action_map = {}
             for tech_type, label in _TECH_ACTIONS:

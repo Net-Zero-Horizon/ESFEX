@@ -206,7 +206,6 @@
     "add_freq": "Add Freq. Converter",
     "add_transmission": "Add Transmission",
     "add_fuel_storage": "Add Fuel Storage",
-    "add_fuel_transport": "Add Fuel Transport",
     "parse_to_elements": "Parse to System Elements...",
     "change_target_system": "Change Target System...",
     "duplicate": "Duplicate",

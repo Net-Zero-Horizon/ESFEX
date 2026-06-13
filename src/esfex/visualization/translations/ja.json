@@ -206,7 +206,6 @@
     "add_freq": "周波数変換器を追加",
     "add_transmission": "送電線を追加",
     "add_fuel_storage": "燃料貯蔵を追加",
-    "add_fuel_transport": "燃料輸送を追加",
     "parse_to_elements": "システム要素に変換...",
     "change_target_system": "対象システムを変更...",
     "duplicate": "複製",
