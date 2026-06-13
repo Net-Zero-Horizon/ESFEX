@@ -4280,11 +4280,13 @@ class GridMappingDemandStep(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
 
-        layout.addWidget(QLabel(
+        _hdr = QLabel(
             "<b>Step 6: Demand Forecast & Distribution</b><br>"
             "Generate hourly demand profiles per node using ML models, "
             "then distribute among busbars via building density."
-        ))
+        )
+        _hdr.setWordWrap(True)
+        layout.addWidget(_hdr)
 
         # ==============================================================
         # Section 1: Demand Forecast Configuration
@@ -4292,8 +4294,10 @@ class GridMappingDemandStep(QWidget):
         forecast_group = QGroupBox("1. Demand Forecast")
         fg = QVBoxLayout(forecast_group)
 
-        # Country + base config (2 columns)
+        # Country + base config (2 columns). Tighter columns: half the default
+        # 6 px horizontal gap between columns.
         config_grid = QGridLayout()
+        config_grid.setHorizontalSpacing(3)
 
         config_grid.addWidget(QLabel("Country:"), 0, 0)
         self._combo_country = QComboBox()
@@ -4346,6 +4350,10 @@ class GridMappingDemandStep(QWidget):
         # a fixed user rate — it follows the gridded SSP GDP trajectory (real,
         # non-linear, per node). The user picks the SSP scenario instead.
         growth_row = QHBoxLayout()
+        # Tighter inter-column gap so the three label+widget pairs (GDP /
+        # Elasticity / Efficiency) fit within the default window width even on
+        # HiDPI screens where the proportional fonts make each pair wider.
+        growth_row.setSpacing(3)
         growth_row.addWidget(QLabel("GDP scenario:"))
         self._combo_gdp_ssp = QComboBox()
         for ssp in ["SSP1", "SSP2", "SSP3", "SSP4", "SSP5"]:
@@ -4440,12 +4448,17 @@ class GridMappingDemandStep(QWidget):
             "3. Bus Distribution (spatial demand or building footprints)"
         )
         dg = QVBoxLayout(dist_group)
-        dg.addWidget(QLabel(
+        _dist_intro = QLabel(
             "Distribute each node\u2019s forecast demand among its busbars. "
             "Prefer \u201cDistribute by spatial demand\u201d (uses the model\u2019s "
             "per-cell demand directly); building footprints remain as an "
             "alternative. Only nodes with \u2265 2 buses need distribution."
-        ))
+        )
+        # Without word-wrap this long line demands ~1233 px on a single row,
+        # which forced the whole scroll panel (and every section above it) to
+        # that width and produced a permanent horizontal scrollbar.
+        _dist_intro.setWordWrap(True)
+        dg.addWidget(_dist_intro)
 
         # Building source
         src_row = QHBoxLayout()
