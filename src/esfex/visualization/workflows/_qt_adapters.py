@@ -35,13 +35,32 @@ class QtWindAnalyzer(QThread):
 
     def run(self):
         try:
-            from windrex import WindAnalyzer
+            from windrex import TurbineSpec, WindAnalyzer, WindConfig
 
-            config = replace(
-                self._wind_config,
-                bounds=self._bounds,
-                mcda=self._mcda_config,
-            )
+            fat = self._wind_config
+            if hasattr(fat, "bounds") and hasattr(fat, "mcda"):
+                # Already a windrex.WindConfig — just fill in bounds + MCDA.
+                config = replace(fat, bounds=self._bounds, mcda=self._mcda_config)
+            else:
+                # esfex's GUI WindConfig (turbine as a key string, hub_height, …)
+                # → build the windrex.WindConfig the analyzer expects (turbine as
+                # a TurbineSpec, hub_height_m, bounds, mcda).
+                turbine = TurbineSpec(
+                    key=getattr(fat, "turbine", ""),
+                    rated_power_mw=getattr(fat, "turbine_capacity_mw", 3.0),
+                    hub_height_m=getattr(fat, "hub_height", 80),
+                    wind_speeds=list(getattr(fat, "wind_speeds", []) or []),
+                    power_curve=list(getattr(fat, "power_curve", []) or []),
+                )
+                config = WindConfig(
+                    bounds=self._bounds,
+                    turbine=turbine,
+                    hub_height_m=getattr(fat, "hub_height", 80),
+                    grid_resolution=getattr(fat, "grid_resolution", 0.25),
+                    data_source=getattr(fat, "data_source", "open_meteo"),
+                    year=getattr(fat, "year", 2023),
+                    mcda=self._mcda_config,
+                )
             self._analyzer = WindAnalyzer(
                 config, transmission_lines=self._transmission_lines,
             )
