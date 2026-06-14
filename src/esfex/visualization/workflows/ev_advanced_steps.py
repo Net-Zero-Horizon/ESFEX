@@ -440,6 +440,14 @@ class EVV2GPotentialStep(QWidget):
     def set_fleet(self, fleet: dict[str, int]):
         self._fleet = fleet
 
+    def set_input_provider(self, fn):
+        """Callable returning the live fleet (consolidated layout).
+
+        Invoked at Run time so V2G uses the fleet from the sibling Charging
+        Demand step (generated after the user enters the combined step).
+        """
+        self._input_provider = fn
+
     def _read_connected_profile(self) -> list[float]:
         profile = []
         for row in range(4):
@@ -454,6 +462,11 @@ class EVV2GPotentialStep(QWidget):
         return profile
 
     def _run_analysis(self):
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            fleet = provider()
+            if fleet:
+                self.set_fleet(fleet)
         if not self._fleet or sum(self._fleet.values()) == 0:
             QMessageBox.warning(
                 self, tr("wizard_ev.title"), tr("wizard_ev.no_fleet_data")
@@ -999,7 +1012,20 @@ class EVIntegrationStep(QWidget):
 
         self._preview.setPlainText(header + text)
 
+    def set_input_provider(self, fn):
+        """Callable returning set_inputs() args (consolidated layout).
+
+        Invoked at Apply time so Integration uses the live Grid Impact result
+        from its sibling plus the upstream selection/macro/V2G data.
+        """
+        self._input_provider = fn
+
     def _apply_to_model(self):
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            args = provider()
+            if args:
+                self.set_inputs(*args)
         if self._model is None or not self._ev_config:
             return
 

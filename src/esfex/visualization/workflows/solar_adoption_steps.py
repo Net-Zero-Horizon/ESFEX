@@ -1133,8 +1133,21 @@ class IntegrationStep(QWidget):
         # Enable/disable apply based on model availability
         self._btn_apply.setEnabled(self._model is not None and self._curve is not None)
 
+    def set_input_provider(self, fn):
+        """Callable returning set_inputs() kwargs (consolidated layout).
+
+        Invoked at Apply time so Integration uses the live scenario selection
+        from the sibling Scenario Comparison step.
+        """
+        self._input_provider = fn
+
     def _apply_to_model(self):
         """Write adoption parameters into the GUI model's rooftop solar config."""
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            kwargs = provider()
+            if kwargs:
+                self.set_inputs(**kwargs)
         if self._model is None or self._curve is None:
             return
 

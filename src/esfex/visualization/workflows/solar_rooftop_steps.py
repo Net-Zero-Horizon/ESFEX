@@ -470,7 +470,20 @@ class AnalysisStep(QWidget):
             f"shading={'ON' if config.enable_shading else 'OFF'}"
         )
 
+    def set_input_provider(self, fn):
+        """Callable returning set_inputs() args (consolidated layout).
+
+        Invoked at Run time so the analysis uses the live sibling Config + the
+        buildings/solar data fetched in the prior container.
+        """
+        self._input_provider = fn
+
     def _run_analysis(self):
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            args = provider()
+            if args:
+                self.set_inputs(*args)
         from esfex.visualization.workflows.solar_analysis import SolarRooftopAnalyzer
 
         self._btn_run.setEnabled(False)
