@@ -1345,6 +1345,16 @@
     "apply": "Aplicar como dominio",
     "no_polygon": "El geo asset seleccionado no tiene ningún polígono para usar como dominio."
   },
+  "domain": {
+    "draw_group": "Dibujar dominio",
+    "geo_hint": "Importa un GeoAsset (Shapefile/GeoJSON/KML) para usar su límite como dominio.",
+    "status_none": "Sin dominio definido. Dibuja un polígono o aplica un GeoAsset importado.",
+    "draw_hint": "Haz clic en el mapa para colocar vértices; haz clic en el primer vértice para cerrar el polígono. Pulsa ESC para cancelar.",
+    "invalid": "Polígono no válido. Haz clic en Dibujar dominio para reintentar.",
+    "no_map": "No hay mapa disponible.",
+    "status_polygon": "Polígono: {n} vértices · ~{area:.1f} km²",
+    "status_geoasset": "GeoAsset '{name}': {n} vértices · ~{area:.1f} km²"
+  },
   "messages": {
     "export_project_title": "Proyecto Exportado",
     "export_project_done": "Se exportaron {n} archivo(s) de datos a:\n{path}",
@@ -1889,6 +1899,7 @@
     "draw_on_map": "Dibujar en Mapa",
     "manual_coords": "Coordenadas Manuales",
     "draw_rect": "Dibujar Rectángulo en Mapa",
+    "draw_domain": "Dibujar dominio",
     "apply_coords": "Aplicar Coordenadas",
     "show_on_map": "Mostrar en Mapa",
     "run_analysis": "Ejecutar Análisis",

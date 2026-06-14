@@ -200,54 +200,18 @@ class DomainFetchStep(QWidget):
     def __init__(self, map_widget, parent=None, geo_assets_provider=None):
         super().__init__(parent)
         self._map_widget = map_widget
-        self._geo_assets_provider = geo_assets_provider
-        self._bounds: Optional[tuple[float, float, float, float]] = None
-        self._polygon: list[tuple[float, float]] = []
         self._buildings_gdf = None
         self._fetcher = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(tr("wizard_demand.step2_instruction")))
 
-        # Draw on map
-        draw_group = QGroupBox(tr("wizard_common.draw_on_map"))
-        draw_lay = QVBoxLayout(draw_group)
-        self._btn_draw = QPushButton(tr("wizard_common.draw_rect"))
-        self._btn_draw.clicked.connect(self._start_drawing)
-        draw_lay.addWidget(self._btn_draw)
-        self._draw_status = QLabel("")
-        draw_lay.addWidget(self._draw_status)
-        layout.addWidget(draw_group)
-
-        from esfex.visualization.workflows._domain_geoasset_control import (
-            GeoAssetDomainControl,
+        # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
+        from esfex.visualization.workflows._domain_definition import (
+            DomainDefinitionWidget,
         )
-        self._geo_domain_ctl = GeoAssetDomainControl(self._geo_assets_provider)
-        self._geo_domain_ctl.domainPicked.connect(self._apply_domain_polygon)
-        layout.addWidget(self._geo_domain_ctl)
-
-        # Manual coordinates
-        manual_group = QGroupBox(tr("wizard_common.manual_coords"))
-        form = QFormLayout(manual_group)
-        self._spin_south = self._coord_spin(-90, 90)
-        self._spin_north = self._coord_spin(-90, 90)
-        self._spin_west = self._coord_spin(-180, 180)
-        self._spin_east = self._coord_spin(-180, 180)
-        form.addRow(tr("wizard_common.south_lat"), self._spin_south)
-        form.addRow(tr("wizard_common.north_lat"), self._spin_north)
-        form.addRow(tr("wizard_common.west_lng"), self._spin_west)
-        form.addRow(tr("wizard_common.east_lng"), self._spin_east)
-
-        btn_row = QHBoxLayout()
-        self._btn_apply = QPushButton(tr("wizard_common.apply_coords"))
-        self._btn_apply.clicked.connect(self._apply_manual)
-        btn_row.addWidget(self._btn_apply)
-        self._btn_show = QPushButton(tr("wizard_common.show_on_map"))
-        self._btn_show.clicked.connect(self._show_on_map)
-        self._btn_show.setEnabled(False)
-        btn_row.addWidget(self._btn_show)
-        form.addRow(btn_row)
-        layout.addWidget(manual_group)
+        self._domain = DomainDefinitionWidget(map_widget, geo_assets_provider)
+        layout.addWidget(self._domain)
 
         # Building source + fetch
         fetch_group = QGroupBox(tr("wizard_demand.building_source"))
@@ -275,115 +239,17 @@ class DomainFetchStep(QWidget):
         fetch_lay.addWidget(self._status)
         layout.addWidget(fetch_group)
 
-        # Area info
-        self._area_label = QLabel("")
-        self._area_label.setStyleSheet("font-weight: bold; padding: 8px;")
-        layout.addWidget(self._area_label)
-
         layout.addStretch()
 
-        # Connect bridge signal for rectangle draw
-        bridge = self._map_widget.bridge
-        bridge.rectangleDrawn.connect(self._on_rectangle_drawn)
-        self._map_widget.install_draw_cancel_handler(self, self._btn_draw)
-
-    def _coord_spin(self, min_val, max_val):
-        spin = QDoubleSpinBox()
-        spin.setRange(min_val, max_val)
-        spin.setDecimals(6)
-        spin.setSingleStep(0.01)
-        return spin
-
-    def _start_drawing(self):
-        self._draw_status.setText(tr("wizard_demand.drawing_status"))
-        self._btn_draw.setEnabled(False)
-        wizard = self.window()
-        if wizard:
-            wizard.showMinimized()
-        self._map_widget.enable_rectangle_draw()
-
-    def _on_rectangle_drawn(self, bounds_json: str):
-        data = json.loads(bounds_json)
-        south, west = float(data["south"]), float(data["west"])
-        north, east = float(data["north"]), float(data["east"])
-        self._bounds = (south, west, north, east)
-        self._polygon = []   # drawn rectangle is bbox-only
-        self._spin_south.setValue(south)
-        self._spin_north.setValue(north)
-        self._spin_west.setValue(west)
-        self._spin_east.setValue(east)
-        self._draw_status.setText(
-            f"S={south:.4f}  W={west:.4f}  N={north:.4f}  E={east:.4f}"
-        )
-        self._btn_draw.setEnabled(True)
-        self._btn_show.setEnabled(True)
-        self._update_area()
-        self._show_on_map()
-        self._map_widget.disable_rectangle_draw()
-        wizard = self.window()
-        if wizard:
-            wizard.showNormal()
-            wizard.raise_()
-            wizard.activateWindow()
-
-    def _apply_manual(self):
-        s = self._spin_south.value()
-        n = self._spin_north.value()
-        w = self._spin_west.value()
-        e = self._spin_east.value()
-        if n <= s or e <= w:
-            QMessageBox.warning(
-                self,
-                tr("wizard_common.invalid_domain_title"),
-                tr("wizard_demand.invalid_domain_msg"),
-            )
-            return
-        self._bounds = (s, w, n, e)
-        self._polygon = []   # manual bbox
-        self._btn_show.setEnabled(True)
-        self._update_area()
-
-    def _apply_domain_polygon(self, poly):
-        """Domain from an imported GeoAsset polygon (bbox fetch + polygon clip)."""
-        from esfex.visualization.workflows.geo_domain import domain_bounds
-
-        self._polygon = list(poly)
-        s, w, n, e = domain_bounds(self._polygon)
-        self._bounds = (s, w, n, e)
-        self._spin_south.setValue(s)
-        self._spin_north.setValue(n)
-        self._spin_west.setValue(w)
-        self._spin_east.setValue(e)
-        self._draw_status.setText(
-            f"Domain polygon: {len(self._polygon)} vertices")
-        self._btn_show.setEnabled(True)
-        self._update_area()
-        try:
-            self._map_widget.show_domain_polygon(self._polygon)
-        except Exception:
-            self._show_on_map()
-
     def get_polygon(self) -> list[tuple[float, float]]:
-        return self._polygon
+        return self._domain.get_polygon()
 
-    def _show_on_map(self):
-        if self._bounds:
-            s, w, n, e = self._bounds
-            self._map_widget.show_demand_domain(s, w, n, e)
-            self._map_widget.fit_bounds(s, w, n, e)
-
-    def _update_area(self):
-        if not self._bounds:
-            return
-        s, w, n, e = self._bounds
-        lat_mid = (s + n) / 2.0
-        lat_km = (n - s) * 111.32
-        lon_km = (e - w) * 111.32 * math.cos(math.radians(lat_mid))
-        area = lat_km * lon_km
-        self._area_label.setText(tr("wizard_demand.approx_area", area=f"{area:.2f}"))
+    def get_bounds(self):
+        return self._domain.get_bounds()
 
     def _fetch_buildings(self):
-        if self._bounds is None:
+        bounds = self._domain.get_bounds()
+        if bounds is None:
             QMessageBox.warning(
                 self,
                 tr("wizard_common.no_domain_title"),
@@ -398,7 +264,7 @@ class DomainFetchStep(QWidget):
         self._status.setText(tr("wizard_demand.fetching"))
         self._progress.setValue(0)
 
-        self._fetcher = BuildingFetcher(source, self._bounds)
+        self._fetcher = BuildingFetcher(source, bounds)
         self._fetcher.progress.connect(self._on_progress)
         self._fetcher.finished.connect(self._on_finished)
         self._fetcher.error.connect(self._on_error)
@@ -410,12 +276,13 @@ class DomainFetchStep(QWidget):
 
     def _on_finished(self, gdf):
         # Clip fetched buildings to the precise domain polygon (if any).
-        if self._polygon and len(self._polygon) >= 3 and gdf is not None and len(gdf) > 0:
+        poly = self._domain.get_polygon()
+        if poly and len(poly) >= 3 and gdf is not None and len(gdf) > 0:
             try:
                 from esfex.visualization.workflows.geo_domain import (
                     domain_shapely,
                 )
-                gdf = gdf[gdf.geometry.intersects(domain_shapely(self._polygon))]
+                gdf = gdf[gdf.geometry.intersects(domain_shapely(poly))]
             except Exception:
                 pass
         self._buildings_gdf = gdf

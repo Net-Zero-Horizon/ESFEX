@@ -1396,6 +1396,16 @@
     "apply": "ドメインとして適用",
     "no_polygon": "選択したジオアセットにはドメインとして使用できるポリゴンがありません。"
   },
+  "domain": {
+    "draw_group": "ドメインを描画",
+    "geo_hint": "GeoAsset（Shapefile/GeoJSON/KML）をインポートして、その境界をドメインとして使用します。",
+    "status_none": "ドメインが未定義です。ポリゴンを描画するか、インポートした GeoAsset を適用してください。",
+    "draw_hint": "地図をクリックして頂点を配置し、最初の頂点をクリックしてポリゴンを閉じます。ESC でキャンセルします。",
+    "invalid": "ポリゴンが無効です。「ドメインを描画」をクリックして再試行してください。",
+    "no_map": "地図が利用できません。",
+    "status_polygon": "ポリゴン: {n} 頂点 · 約 {area:.1f} km²",
+    "status_geoasset": "GeoAsset '{name}': {n} 頂点 · 約 {area:.1f} km²"
+  },
   "messages": {
     "export_project_title": "プロジェクトをエクスポートしました",
     "export_project_done": "{n}個のデータファイルをエクスポートしました:\n{path}",
@@ -1940,6 +1950,7 @@
     "draw_on_map": "マップ上で描画",
     "manual_coords": "座標手動入力",
     "draw_rect": "マップ上に矩形を描画",
+    "draw_domain": "ドメインを描画",
     "apply_coords": "座標を適用",
     "show_on_map": "マップに表示",
     "run_analysis": "分析を実行",

@@ -1384,6 +1384,16 @@
     "apply": "Apply as domain",
     "no_polygon": "The selected geo asset has no polygon to use as a domain."
   },
+  "domain": {
+    "draw_group": "Draw domain",
+    "geo_hint": "Import a GeoAsset (Shapefile/GeoJSON/KML) to use its boundary as the domain.",
+    "status_none": "No domain defined. Draw a polygon or apply an imported GeoAsset.",
+    "draw_hint": "Click on the map to place vertices; click the first vertex to close the polygon. Press ESC to cancel.",
+    "invalid": "Invalid polygon. Click Draw domain to retry.",
+    "no_map": "No map available.",
+    "status_polygon": "Polygon: {n} vertices · ~{area:.1f} km²",
+    "status_geoasset": "GeoAsset '{name}': {n} vertices · ~{area:.1f} km²"
+  },
   "messages": {
     "export_project_title": "Project Exported",
     "export_project_done": "Exported {n} data file(s) to:\n{path}",
@@ -1928,6 +1938,7 @@
     "draw_on_map": "Draw on Map",
     "manual_coords": "Manual Coordinates",
     "draw_rect": "Draw Rectangle on Map",
+    "draw_domain": "Draw domain",
     "apply_coords": "Apply Coordinates",
     "show_on_map": "Show on Map",
     "run_analysis": "Run Analysis",

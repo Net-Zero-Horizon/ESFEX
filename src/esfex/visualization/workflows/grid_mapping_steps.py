@@ -92,32 +92,18 @@ class GridMappingSourceFetchStep(QWidget):
         region_group = QGroupBox("Region")
         region_lay = QVBoxLayout(region_group)
         region_lay.addWidget(QLabel(
-            "Draw a polygon on the map to define the extraction area. "
-            "Click vertices to form the boundary, then click the first "
-            "vertex to close."
+            "Define the extraction area: draw a polygon on the map or apply an "
+            "imported GeoAsset."
         ))
-        draw_row = QHBoxLayout()
-        self._btn_draw = QPushButton("Draw Polygon on Map")
-        self._btn_draw.setStyleSheet("font-size: 11px; padding: 6px 16px;")
-        self._btn_draw.setMinimumWidth(180)
-        self._btn_draw.clicked.connect(self._start_drawing)
-        draw_row.addWidget(self._btn_draw)
-        self._draw_status = QLabel("")
-        self._draw_status.setWordWrap(True)
-        draw_row.addWidget(self._draw_status, 1)
-        region_lay.addLayout(draw_row)
-
-        self._area_label = QLabel("")
-        self._area_label.setStyleSheet("font-weight: bold;")
-        region_lay.addWidget(self._area_label)
-
-        # Use an imported GeoAsset polygon as the domain instead of drawing.
-        from esfex.visualization.workflows._domain_geoasset_control import (
-            GeoAssetDomainControl,
+        # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
+        from esfex.visualization.workflows._domain_definition import (
+            DomainDefinitionWidget,
         )
-        self._geo_domain_ctl = GeoAssetDomainControl(self._geo_assets_provider)
-        self._geo_domain_ctl.domainPicked.connect(self._apply_domain_polygon)
-        region_lay.addWidget(self._geo_domain_ctl)
+        self._domain = DomainDefinitionWidget(
+            self._map_widget, self._geo_assets_provider
+        )
+        self._domain.domainChanged.connect(self._on_domain_changed)
+        region_lay.addWidget(self._domain)
 
         layout.addWidget(region_group)
 
@@ -323,122 +309,15 @@ class GridMappingSourceFetchStep(QWidget):
         scroll.setWidget(scroll_content)
         outer_layout.addWidget(scroll)
 
-        # Connect map bridge for polygon drawing
-        self._awaiting_polygon = False
-        if self._map_widget:
-            self._map_widget.bridge.domainPolygonDrawn.connect(
-                self._on_polygon_drawn,
-            )
-            # ESC during draw fires modeReset — reset our UI so the user
-            # can click "Draw Polygon" again instead of being stuck
-            # waiting for a polygon that was cancelled.
-            self._map_widget.bridge.modeReset.connect(
-                self._on_polygon_draw_cancelled,
-            )
-
     # ------------------------------------------------------------------
-    # Region drawing
+    # Region (domain) — driven by the shared DomainDefinitionWidget
     # ------------------------------------------------------------------
 
-    def _start_drawing(self):
-        if not self._map_widget:
-            self._draw_status.setText("No map widget available.")
-            return
-        self._draw_status.setText(
-            "Click on the map to place vertices. "
-            "Click the first vertex to close the polygon. "
-            "Press ESC to cancel."
-        )
-        self._btn_draw.setEnabled(False)
-        self._awaiting_polygon = True
-        wizard = self.window()
-        if wizard:
-            wizard.showMinimized()
-        self._map_widget.enable_domain_polygon_draw()
-
-    def _on_polygon_draw_cancelled(self):
-        """ESC pressed mid-draw — reset UI so user can retry."""
-        if not self._awaiting_polygon:
-            return
-        self._awaiting_polygon = False
-        self._draw_status.setText("Drawing cancelled. Click Draw Polygon to retry.")
-        self._btn_draw.setEnabled(True)
-        wizard = self.window()
-        if wizard:
-            wizard.showNormal()
-            wizard.raise_()
-            wizard.activateWindow()
-
-    def _on_polygon_drawn(self, geojson_str: str):
-        self._awaiting_polygon = False
-        data = json.loads(geojson_str)
-        coords_raw = data.get("geometry", {}).get("coordinates", [[]])
-        if not coords_raw or not coords_raw[0]:
-            self._draw_status.setText("Invalid polygon. Try again.")
-            self._btn_draw.setEnabled(True)
-            return
-
-        ring = coords_raw[0]
-        # Leaflet returns longitudes outside [-180, 180] when the world map has
-        # been panned across a copy of the globe (e.g. scrolling east to reach
-        # Japan puts it near +487 instead of +127). Normalise so the resulting
-        # bbox is valid for the Overpass API and the global plant-database
-        # filters — otherwise Overpass rejects it (static error) and the
-        # bbox-filtered DataFrames match nothing (0 results).
-        def _norm_lng(x: float) -> float:
-            return ((float(x) + 180.0) % 360.0) - 180.0
-
-        poly = [
-            (max(-90.0, min(90.0, float(c[1]))), _norm_lng(c[0]))
-            for c in ring
-        ]
-        self._apply_domain_polygon(poly)
-
-        wizard = self.window()
-        if wizard:
-            wizard.showNormal()
-            wizard.raise_()
-            wizard.activateWindow()
-
-    def _apply_domain_polygon(self, poly: list[tuple[float, float]]):
-        """Set the study domain from a polygon — drawn on the map OR dissolved
-        from an imported GeoAsset. (Imported assets are already valid WGS84, so
-        unlike the drawn path they are NOT longitude-normalized.)"""
-        from esfex.visualization.workflows.geo_domain import domain_bounds
-
-        self._polygon = list(poly)
-        self._bounds = domain_bounds(self._polygon)
-        n_verts = len(self._polygon)
-        s, w, n, e = self._bounds
-        self._draw_status.setText(
-            f"Polygon: {n_verts} vertices, "
-            f"bbox ({s:.3f}, {w:.3f}) to ({n:.3f}, {e:.3f})"
-        )
-        self._btn_draw.setEnabled(True)
-        self._btn_fetch.setEnabled(True)
-        self._update_area()
-
-        if self._map_widget:
-            self._map_widget.show_domain_polygon(self._polygon)
-            self._map_widget.disable_domain_polygon_draw()
-
-    def _update_area(self):
-        if len(self._polygon) < 3:
-            return
-        mid_lat = sum(p[0] for p in self._polygon) / len(self._polygon)
-        cos_lat = math.cos(math.radians(mid_lat))
-        pts_km = [
-            (p[0] * 111.32, p[1] * 111.32 * cos_lat)
-            for p in self._polygon
-        ]
-        n = len(pts_km)
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += pts_km[i][0] * pts_km[j][1]
-            area -= pts_km[j][0] * pts_km[i][1]
-        area = abs(area) / 2.0
-        self._area_label.setText(f"Region area: ~{area:.0f} km\u00b2")
+    def _on_domain_changed(self):
+        """The shared widget set a new domain (drawn polygon or GeoAsset)."""
+        self._polygon = self._domain.get_polygon()
+        self._bounds = self._domain.get_bounds()
+        self._btn_fetch.setEnabled(self._bounds is not None)
 
     # ------------------------------------------------------------------
     # Public API (called by wizard)

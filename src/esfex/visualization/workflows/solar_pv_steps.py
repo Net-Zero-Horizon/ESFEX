@@ -69,181 +69,27 @@ class SolarPVDomainStep(QWidget):
     def __init__(self, map_widget, parent=None, geo_assets_provider=None):
         super().__init__(parent)
         self._map_widget = map_widget
-        self._geo_assets_provider = geo_assets_provider
-        self._bounds: Optional[tuple[float, float, float, float]] = None
-        self._polygon: list[tuple[float, float]] = []
 
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(tr("wizard_solar_pv.domain_desc")))
 
-        layout.addWidget(
-            QLabel(
-                tr("wizard_solar_pv.domain_desc")
-            )
+        # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
+        from esfex.visualization.workflows._domain_definition import (
+            DomainDefinitionWidget,
         )
-
-        # Draw on map
-        draw_group = QGroupBox(tr("wizard_common.draw_on_map"))
-        draw_lay = QVBoxLayout(draw_group)
-        self._btn_draw = QPushButton(tr("wizard_common.draw_rect"))
-        self._btn_draw.clicked.connect(self._start_drawing)
-        draw_lay.addWidget(self._btn_draw)
-        self._draw_status = QLabel("")
-        draw_lay.addWidget(self._draw_status)
-        layout.addWidget(draw_group)
-
-        # Use an imported GeoAsset polygon as the domain (precise, no bbox).
-        from esfex.visualization.workflows._domain_geoasset_control import (
-            GeoAssetDomainControl,
-        )
-        self._geo_domain_ctl = GeoAssetDomainControl(self._geo_assets_provider)
-        self._geo_domain_ctl.domainPicked.connect(self._apply_domain_polygon)
-        layout.addWidget(self._geo_domain_ctl)
-
-        # Manual coordinates
-        manual_group = QGroupBox(tr("wizard_common.manual_coords"))
-        form = QFormLayout(manual_group)
-
-        self._spin_south = self._coord_spin(-90, 90, "South latitude")
-        self._spin_north = self._coord_spin(-90, 90, "North latitude")
-        self._spin_west = self._coord_spin(-180, 180, "West longitude")
-        self._spin_east = self._coord_spin(-180, 180, "East longitude")
-
-        form.addRow(tr("wizard_common.south_lat"), self._spin_south)
-        form.addRow(tr("wizard_common.north_lat"), self._spin_north)
-        form.addRow(tr("wizard_common.west_lng"), self._spin_west)
-        form.addRow(tr("wizard_common.east_lng"), self._spin_east)
-
-        btn_row = QHBoxLayout()
-        self._btn_apply = QPushButton(tr("wizard_common.apply_coords"))
-        self._btn_apply.clicked.connect(self._apply_manual)
-        btn_row.addWidget(self._btn_apply)
-
-        self._btn_show = QPushButton(tr("wizard_common.show_on_map"))
-        self._btn_show.clicked.connect(self._show_on_map)
-        self._btn_show.setEnabled(False)
-        btn_row.addWidget(self._btn_show)
-        form.addRow(btn_row)
-
-        layout.addWidget(manual_group)
-
-        # Area info
-        self._area_label = QLabel("")
-        self._area_label.setStyleSheet("font-weight: bold; padding: 8px;")
-        layout.addWidget(self._area_label)
-
+        self._domain = DomainDefinitionWidget(map_widget, geo_assets_provider)
+        self._domain.domainChanged.connect(self.domainChanged)
+        layout.addWidget(self._domain)
         layout.addStretch()
 
-        # Connect bridge signal
-        bridge = self._map_widget.bridge
-        bridge.rectangleDrawn.connect(self._on_rectangle_drawn)
-        self._map_widget.install_draw_cancel_handler(self, self._btn_draw)
-
-    def _coord_spin(self, min_val, max_val, tooltip):
-        spin = QDoubleSpinBox()
-        spin.setRange(min_val, max_val)
-        spin.setDecimals(6)
-        spin.setSingleStep(0.01)
-        spin.setToolTip(tooltip)
-        return spin
-
-    def _start_drawing(self):
-        self._draw_status.setText(tr("wizard_solar.draw_status"))
-        self._btn_draw.setEnabled(False)
-        wizard = self.window()
-        if wizard:
-            wizard.showMinimized()
-        self._map_widget.enable_rectangle_draw()
-
-    def _on_rectangle_drawn(self, bounds_json: str):
-        data = json.loads(bounds_json)
-        south = float(data["south"])
-        west = float(data["west"])
-        north = float(data["north"])
-        east = float(data["east"])
-        self._bounds = (south, west, north, east)
-        self._polygon = []   # a drawn rectangle is bbox-only (no polygon clip)
-        self._spin_south.setValue(south)
-        self._spin_north.setValue(north)
-        self._spin_west.setValue(west)
-        self._spin_east.setValue(east)
-        self._draw_status.setText(
-            f"Domain: ({south:.4f}, {west:.4f}) to ({north:.4f}, {east:.4f})"
-        )
-        self._btn_draw.setEnabled(True)
-        self._btn_show.setEnabled(True)
-        self._update_area()
-        self._show_on_map()
-        self._map_widget.disable_rectangle_draw()
-        wizard = self.window()
-        if wizard:
-            wizard.showNormal()
-            wizard.raise_()
-            wizard.activateWindow()
-        self.domainChanged.emit()
-
-    def _apply_manual(self):
-        s = self._spin_south.value()
-        n = self._spin_north.value()
-        w = self._spin_west.value()
-        e = self._spin_east.value()
-        if n <= s or e <= w:
-            QMessageBox.warning(
-                self,
-                tr("wizard_common.invalid_domain_title"),
-                tr("wizard_solar.invalid_domain_msg"),
-            )
-            return
-        self._bounds = (s, w, n, e)
-        self._polygon = []   # manual bbox (no polygon clip)
-        self._btn_show.setEnabled(True)
-        self._update_area()
-        self.domainChanged.emit()
-
-    def _show_on_map(self):
-        if self._bounds:
-            s, w, n, e = self._bounds
-            self._map_widget.show_solar_pv_domain(s, w, n, e)
-
-    def _update_area(self):
-        if not self._bounds:
-            return
-        s, w, n, e = self._bounds
-        lat_mid = (s + n) / 2.0
-        lat_km = (n - s) * 111.32
-        lon_km = (e - w) * 111.32 * math.cos(math.radians(lat_mid))
-        area = lat_km * lon_km
-        self._area_label.setText(f"Approximate area: {area:.2f} km\u00b2")
-
-    def _apply_domain_polygon(self, poly):
-        """Set the domain from an imported GeoAsset polygon: the bbox drives the
-        coarse fetch, the polygon trims results to the exact boundary."""
-        from esfex.visualization.workflows.geo_domain import domain_bounds
-
-        self._polygon = list(poly)
-        s, w, n, e = domain_bounds(self._polygon)
-        self._bounds = (s, w, n, e)
-        self._spin_south.setValue(s)
-        self._spin_north.setValue(n)
-        self._spin_west.setValue(w)
-        self._spin_east.setValue(e)
-        self._draw_status.setText(
-            f"Domain polygon: {len(self._polygon)} vertices")
-        self._btn_show.setEnabled(True)
-        self._update_area()
-        try:
-            self._map_widget.show_domain_polygon(self._polygon)
-        except Exception:
-            self._show_on_map()
-        self.domainChanged.emit()
-
     def get_bounds(self) -> tuple[float, float, float, float]:
-        return self._bounds  # type: ignore[return-value]
+        return self._domain.get_bounds()  # type: ignore[return-value]
 
     def get_polygon(self) -> list[tuple[float, float]]:
-        return self._polygon
+        return self._domain.get_polygon()
 
     def is_valid(self) -> bool:
-        if self._bounds is None:
+        if not self._domain.is_defined():
             QMessageBox.warning(
                 self,
                 tr("wizard_solar_pv.domain_required_title"),

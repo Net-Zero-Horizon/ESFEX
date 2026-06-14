@@ -66,12 +66,6 @@ class EVDomainStep(QWidget):
     def __init__(self, map_widget, parent=None, geo_assets_provider=None):
         super().__init__(parent)
         self._map_widget = map_widget
-        self._geo_assets_provider = geo_assets_provider
-        self._bounds: Optional[tuple[float, float, float, float]] = None
-        # Imported-area outline kept as a visual reference only: the OSM
-        # charging-station / road-density aggregates are computed by evrex over
-        # the bounding box, so EV stays bbox-approximated (no point-level clip).
-        self._polygon: list[tuple[float, float]] = []
         self._fetchers: list = []
 
         layout = QVBoxLayout(self)
@@ -79,37 +73,16 @@ class EVDomainStep(QWidget):
         # Description
         layout.addWidget(QLabel(tr("wizard_ev.domain_instruction")))
 
-        # -- Domain group --
-        domain_grp = QGroupBox(tr("wizard_ev.domain_title"))
-        dg_layout = QHBoxLayout(domain_grp)
-
-        self._btn_draw = QPushButton(tr("wizard_common.draw_on_map"))
-        self._btn_draw.clicked.connect(self._start_drawing)
-        dg_layout.addWidget(self._btn_draw)
-
-        form = QFormLayout()
-        self._spin_south = QDoubleSpinBox(); self._spin_south.setRange(-90, 90); self._spin_south.setDecimals(4)
-        self._spin_north = QDoubleSpinBox(); self._spin_north.setRange(-90, 90); self._spin_north.setDecimals(4)
-        self._spin_west = QDoubleSpinBox(); self._spin_west.setRange(-180, 180); self._spin_west.setDecimals(4)
-        self._spin_east = QDoubleSpinBox(); self._spin_east.setRange(-180, 180); self._spin_east.setDecimals(4)
-        form.addRow(tr("wizard_common.south_lat"), self._spin_south)
-        form.addRow(tr("wizard_common.north_lat"), self._spin_north)
-        form.addRow(tr("wizard_common.west_lng"), self._spin_west)
-        form.addRow(tr("wizard_common.east_lng"), self._spin_east)
-        dg_layout.addLayout(form)
-
-        self._btn_apply = QPushButton(tr("wizard_common.apply_coords"))
-        self._btn_apply.clicked.connect(self._apply_manual)
-        dg_layout.addWidget(self._btn_apply)
-        layout.addWidget(domain_grp)
-
-        # -- Imported GeoAsset as domain --
-        from esfex.visualization.workflows._domain_geoasset_control import (
-            GeoAssetDomainControl,
+        # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
+        # The polygon outline / bbox drives the OSM fetch; EV aggregates
+        # (charging stations, road density) remain bbox-based since evrex returns
+        # counts, not per-point geometries.
+        from esfex.visualization.workflows._domain_definition import (
+            DomainDefinitionWidget,
         )
-        self._geo_domain_ctl = GeoAssetDomainControl(self._geo_assets_provider)
-        self._geo_domain_ctl.domainPicked.connect(self._apply_domain_polygon)
-        layout.addWidget(self._geo_domain_ctl)
+        self._domain = DomainDefinitionWidget(map_widget, geo_assets_provider)
+        self._domain.domainChanged.connect(self.domainChanged)
+        layout.addWidget(self._domain)
 
         # -- Auto-detect group --
         detect_grp = QGroupBox(tr("wizard_ev.autodetect_title"))
@@ -166,74 +139,12 @@ class EVDomainStep(QWidget):
         # -- OSM results --
         self._osm_results: dict = {}
 
-        # Connect map rectangle signal
-        if hasattr(map_widget, 'bridge'):
-            bridge = map_widget.bridge
-            if hasattr(bridge, 'rectangleDrawn'):
-                bridge.rectangleDrawn.connect(self._on_rectangle_drawn)
-            map_widget.install_draw_cancel_handler(self, self._btn_draw)
-
-    def _start_drawing(self):
-        self._btn_draw.setEnabled(False)
-        wizard = self.window()
-        if wizard:
-            wizard.showMinimized()
-        self._map_widget.enable_rectangle_draw()
-
-    def _on_rectangle_drawn(self, bounds_json: str):
-        data = json.loads(bounds_json)
-        self._bounds = (
-            float(data["south"]), float(data["west"]),
-            float(data["north"]), float(data["east"]),
-        )
-        self._spin_south.setValue(self._bounds[0])
-        self._spin_west.setValue(self._bounds[1])
-        self._spin_north.setValue(self._bounds[2])
-        self._spin_east.setValue(self._bounds[3])
-        self._polygon = []  # drawn rectangle is bbox-only
-        self._btn_draw.setEnabled(True)
-        self._map_widget.disable_rectangle_draw()
-        wizard = self.window()
-        if wizard:
-            wizard.showNormal()
-            wizard.raise_()
-            wizard.activateWindow()
-        self.domainChanged.emit()
-
-    def _apply_manual(self):
-        self._bounds = (
-            self._spin_south.value(), self._spin_west.value(),
-            self._spin_north.value(), self._spin_east.value(),
-        )
-        self._polygon = []  # manual bbox
-        self.domainChanged.emit()
-
-    def _apply_domain_polygon(self, poly):
-        """Apply an imported GeoAsset polygon as the domain.
-
-        The polygon outline is shown for reference and its bounding box drives
-        the OSM fetch; EV aggregates (charging stations, road density) remain
-        bbox-based since evrex returns counts, not per-point geometries.
-        """
-        if not poly or len(poly) < 3:
-            return
-        from esfex.visualization.workflows.geo_domain import domain_bounds
-        self._polygon = list(poly)
-        s, w, n, e = domain_bounds(self._polygon)
-        self._bounds = (s, w, n, e)
-        self._spin_south.setValue(s)
-        self._spin_west.setValue(w)
-        self._spin_north.setValue(n)
-        self._spin_east.setValue(e)
-        if hasattr(self._map_widget, "show_domain_polygon"):
-            self._map_widget.show_domain_polygon(self._polygon)
-        self.domainChanged.emit()
-
     def get_polygon(self) -> list[tuple[float, float]]:
-        return self._polygon
+        return self._domain.get_polygon()
 
     def _fetch_osm_data(self):
-        if self._bounds is None:
+        bounds = self._domain.get_bounds()
+        if bounds is None:
             QMessageBox.warning(self, tr("wizard_ev.title"), tr("wizard_ev.no_domain"))
             return
 
@@ -246,7 +157,7 @@ class EVDomainStep(QWidget):
         self._detect_progress.setValue(0)
         self._pending_fetches = 2
 
-        self._cs_fetcher = OSMChargingStationFetcher(self._bounds, parent=self)
+        self._cs_fetcher = OSMChargingStationFetcher(bounds, parent=self)
         self._cs_fetcher.progress.connect(
             lambda p, m: self._detect_progress.setValue(p // 2)
         )
@@ -254,7 +165,7 @@ class EVDomainStep(QWidget):
         self._cs_fetcher.error.connect(self._on_fetch_error)
         self._cs_fetcher.start()
 
-        self._road_fetcher = OSMRoadNetworkFetcher(self._bounds, parent=self)
+        self._road_fetcher = OSMRoadNetworkFetcher(bounds, parent=self)
         self._road_fetcher.progress.connect(
             lambda p, m: self._detect_progress.setValue(50 + p // 2)
         )
@@ -291,7 +202,7 @@ class EVDomainStep(QWidget):
             self._btn_fetch.setEnabled(True)
 
     def get_bounds(self) -> Optional[tuple]:
-        return self._bounds
+        return self._domain.get_bounds()
 
     def get_transport_context(self) -> TransportContext:
         cats = list(DEFAULT_CATEGORIES)
@@ -321,7 +232,7 @@ class EVDomainStep(QWidget):
         )
 
     def is_valid(self) -> bool:
-        if self._bounds is None:
+        if not self._domain.is_defined():
             QMessageBox.warning(self, tr("wizard_ev.title"), tr("wizard_ev.no_domain"))
             return False
         return True
