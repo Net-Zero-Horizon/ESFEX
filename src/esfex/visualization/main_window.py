@@ -3023,6 +3023,9 @@ class MainWindow(QMainWindow):
 
         src_base = (str(Path(self._config_path).parent)
                     if self._config_path else None)
+        progress = self._make_progress_dialog(
+            tr("messages.export_project_title"),
+            tr("messages.exporting_project_msg", path=Path(path).name))
         try:
             report = export_project(
                 self._all_states, self._loaded_config, path,
@@ -3035,10 +3038,12 @@ class MainWindow(QMainWindow):
                 src_base=src_base,
             )
         except Exception as e:
+            progress.close()
             QMessageBox.critical(
                 self, tr("common.error"),
                 tr("messages.export_project_error", e=e))
             return
+        progress.close()
 
         msg = tr("messages.export_project_done", n=len(report.bundled), path=path)
         if report.missing:
@@ -6867,6 +6872,28 @@ class MainWindow(QMainWindow):
                 warnings.append(iss)
         return errors, warnings
 
+    def _make_progress_dialog(self, title: str, label: str):
+        """A modal, cancel-less, indeterminate progress dialog for long file
+        operations (load / save / export).
+
+        Sized 20% larger than its natural size so the label and progress bar
+        don't overlap on HiDPI screens where the proportional fonts widen them.
+        """
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication, QProgressDialog
+
+        dlg = QProgressDialog(label, None, 0, 0, self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.show()
+        QApplication.processEvents()
+        sz = dlg.size()
+        dlg.setMinimumSize(int(sz.width() * 1.2), int(sz.height() * 1.2))
+        dlg.resize(int(sz.width() * 1.2), int(sz.height() * 1.2))
+        QApplication.processEvents()
+        return dlg
+
     def _load_config_file(self, path: str):
         """Load a YAML config and populate the GUI.
 
@@ -6877,20 +6904,10 @@ class MainWindow(QMainWindow):
         no good ETA. The dialog is window-modal and non-cancelable
         (cancelling mid-load isn't atomic for the model rebuild path).
         """
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication, QProgressDialog
+        from PySide6.QtWidgets import QApplication
 
-        progress = QProgressDialog(
-            f"Loading {Path(path).name}…", None, 0, 0, self,
-        )
-        progress.setWindowTitle("Loading")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setCancelButton(None)
-        # Show immediately rather than using setMinimumDuration: with
-        # an indeterminate range, setValue() never gets called so the
-        # Qt-side auto-show heuristic won't fire reliably.
-        progress.show()
-        QApplication.processEvents()
+        progress = self._make_progress_dialog(
+            "Loading", f"Loading {Path(path).name}…")
 
         def _phase(text: str):
             progress.setLabelText(text)
@@ -7008,12 +7025,18 @@ class MainWindow(QMainWindow):
                 if ret != QMessageBox.Yes:
                     return
 
-            gui_state_to_yaml(
-                self._all_states, self._loaded_config, path,
-                inter_system_links=self.model.inter_system_links,
-                global_settings=self.model.global_settings,
-                stochastic_scenarios=self.model.stochastic_scenarios,
-            )
+            progress = self._make_progress_dialog(
+                tr("messages.saving_title"),
+                tr("messages.saving_msg", path=Path(path).name))
+            try:
+                gui_state_to_yaml(
+                    self._all_states, self._loaded_config, path,
+                    inter_system_links=self.model.inter_system_links,
+                    global_settings=self.model.global_settings,
+                    stochastic_scenarios=self.model.stochastic_scenarios,
+                )
+            finally:
+                progress.close()
             self._config_path = path
             # State on disk now matches in-memory state.
             self._clear_modified()
