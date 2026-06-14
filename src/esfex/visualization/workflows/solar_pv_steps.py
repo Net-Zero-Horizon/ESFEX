@@ -839,7 +839,27 @@ class SolarPVAnalysisStep(QWidget):
         self._btn_run.setEnabled(True)
         self._summary = None
 
+    def set_input_provider(self, fn):
+        """Provide a callable returning the set_inputs() args tuple.
+
+        When the analysis shares a step with its input siblings (consolidated
+        two-column layout), the provider is invoked at Run time so the analysis
+        always uses the live sibling values instead of a stale push.
+        """
+        self._input_provider = fn
+
     def _run_analysis(self):
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            args = provider()
+            if not args or args[0] is None:
+                QMessageBox.warning(
+                    self,
+                    tr("wizard_solar_pv.domain_required_title"),
+                    tr("wizard_solar_pv.domain_required_msg"),
+                )
+                return
+            self.set_inputs(*args)
         # Check CDS API credentials only for ERA5/atlite data source
         if self._solar_config.data_source == "era5_atlite":
             from pathlib import Path as _Path

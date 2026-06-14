@@ -760,8 +760,22 @@ class WindWakeLayoutStep(QWidget):
         self._capacity_mw = capacity_mw
         self._max_workers = max_workers
 
+    def set_input_provider(self, fn):
+        """Callable returning set_inputs() args (consolidated layout).
+
+        Invoked at Calculate time so the wake uses the live wind rose from the
+        sibling Characterization step (the user may pick a different cell after
+        entering the step).
+        """
+        self._input_provider = fn
+
     def _calculate(self):
         """Launch wake computation on background thread."""
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            args = provider()
+            if args:
+                self.set_inputs(*args)
         import numpy as np
 
         from windrex import WindRoseData

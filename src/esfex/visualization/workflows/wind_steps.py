@@ -835,7 +835,26 @@ class WindAnalysisStep(QWidget):
         self._btn_run.setEnabled(True)
         self._summary = None
 
+    def set_input_provider(self, fn):
+        """Callable returning the set_inputs() args tuple (consolidated layout).
+
+        Invoked at Run time so the analysis uses the live sibling Criteria + the
+        prior Domain/Config instead of a stale push.
+        """
+        self._input_provider = fn
+
     def _run_analysis(self):
+        provider = getattr(self, "_input_provider", None)
+        if provider is not None:
+            args = provider()
+            if not args or args[0] is None:
+                QMessageBox.warning(
+                    self,
+                    tr("wizard_otec.domain_required_title"),
+                    tr("wizard_otec.domain_required_msg"),
+                )
+                return
+            self.set_inputs(*args)
         # Check CDS API credentials only for ERA5/atlite data source
         if self._wind_config.data_source == "era5_atlite":
             from pathlib import Path as _Path

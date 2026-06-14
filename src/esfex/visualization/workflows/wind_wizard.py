@@ -21,7 +21,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -46,25 +45,18 @@ from esfex.visualization.workflows.wind_advanced_steps import (
     WindFinancialStep,
     WindWakeLayoutStep,
 )
+from esfex.visualization.workflows._two_column_step import TwoColumnStep
 
-# Phase A steps
-_PHASE_A_NAMES = [
-    lambda: tr("wizard_wind.step1"),
-    lambda: tr("wizard_wind.step2"),
-    lambda: tr("wizard_wind.step3"),
-    lambda: tr("wizard_wind.step4"),
-    lambda: tr("wizard_wind.step5"),
+# Consolidated two-column steps
+_STEP_NAMES = [
+    lambda: tr("wizard_wind.step_setup"),
+    lambda: tr("wizard_wind.step_suitability"),
+    lambda: tr("wizard_wind.step_results_econ"),
+    lambda: tr("wizard_wind.step_refinement"),
 ]
 
-# Phase B steps
-_PHASE_B_NAMES = [
-    lambda: tr("wizard_wind.step6"),
-    lambda: tr("wizard_wind.step7"),
-    lambda: tr("wizard_wind.step8"),
-    lambda: tr("wizard_wind.step9"),
-]
-
-_PHASE_A_COUNT = len(_PHASE_A_NAMES)
+# Index of the container that holds the (long-running) Analysis step.
+_ANALYSIS_STEP = 1
 
 
 class WindWizard(QDialog):
@@ -99,59 +91,18 @@ class WindWizard(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        # Step indicator bar — Phase A
-        self._indicator_bar_a = QHBoxLayout()
+        # Single 4-dot step indicator bar
+        self._indicator_bar = QHBoxLayout()
         self._step_labels: list[QLabel] = []
-
-        phase_a_lbl = QLabel("A")
-        phase_a_lbl.setStyleSheet(
-            "background-color: #8e44ad; color: white; "
-            "border-radius: 10px; padding: 2px 6px; font-weight: bold;"
-        )
-        phase_a_lbl.setFixedWidth(24)
-        phase_a_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._indicator_bar_a.addWidget(phase_a_lbl)
-
-        for i, name_fn in enumerate(_PHASE_A_NAMES):
+        for i, name_fn in enumerate(_STEP_NAMES):
             lbl = QLabel(f"  {i+1}. {name_fn()}  ")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet(
                 self._step_style(is_current=(i == 0), is_done=False)
             )
             self._step_labels.append(lbl)
-            self._indicator_bar_a.addWidget(lbl)
-
-        layout.addLayout(self._indicator_bar_a)
-
-        # Phase separator
-        sep_row = QHBoxLayout()
-        phase_sep = QFrame()
-        phase_sep.setFrameShape(QFrame.Shape.HLine)
-        phase_sep.setStyleSheet("color: #444;")
-        sep_row.addWidget(phase_sep)
-        layout.addLayout(sep_row)
-
-        # Step indicator bar — Phase B
-        self._indicator_bar_b = QHBoxLayout()
-
-        phase_b_lbl = QLabel("B")
-        phase_b_lbl.setStyleSheet(
-            "background-color: #16a085; color: white; "
-            "border-radius: 10px; padding: 2px 6px; font-weight: bold;"
-        )
-        phase_b_lbl.setFixedWidth(24)
-        phase_b_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._indicator_bar_b.addWidget(phase_b_lbl)
-
-        for j, name_fn in enumerate(_PHASE_B_NAMES):
-            idx = _PHASE_A_COUNT + j
-            lbl = QLabel(f"  {idx+1}. {name_fn()}  ")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(self._step_style(is_current=False, is_done=False))
-            self._step_labels.append(lbl)
-            self._indicator_bar_b.addWidget(lbl)
-
-        layout.addLayout(self._indicator_bar_b)
+            self._indicator_bar.addWidget(lbl)
+        layout.addLayout(self._indicator_bar)
 
         # Separator below indicators
         sep = QWidget()
@@ -162,32 +113,32 @@ class WindWizard(QDialog):
         # Stacked widget for step pages
         self._stack = QStackedWidget()
 
-        # Phase A steps
+        # Underlying step widgets (reused unchanged inside two-column containers)
         self._step_domain = WindDomainStep(
             self._map_widget, geo_assets_provider=self._geo_assets_provider)
         self._step_config = WindConfigStep()
         self._step_criteria = CriteriaConfigStep()
         self._step_analysis = WindAnalysisStep()
         self._step_results = WindResultsStep(self._map_widget, self._model)
-
-        # Phase B steps
         self._step_characterization = WindCharacterizationStep()
         self._step_financial = WindFinancialStep()
         self._step_wake = WindWakeLayoutStep()
         self._step_availability = WindAvailabilityStep(model=self._model)
 
+        # Analysis pulls inputs live from sibling Criteria + prior Domain/Config;
+        # Wake pulls the live wind rose from sibling Characterization (C4).
+        self._step_analysis.set_input_provider(self._analysis_inputs)
+        self._step_wake.set_input_provider(self._wake_inputs)
+
+        # Four two-column containers
         self._steps = [
-            # Phase A
-            self._step_domain,
-            self._step_config,
-            self._step_criteria,
-            self._step_analysis,
-            self._step_results,
-            # Phase B
-            self._step_characterization,
-            self._step_financial,
-            self._step_wake,
-            self._step_availability,
+            TwoColumnStep(self._step_domain, self._step_config),
+            TwoColumnStep(self._step_criteria, self._step_analysis),
+            TwoColumnStep(self._step_results, self._step_financial),
+            TwoColumnStep(
+                [self._step_characterization, self._step_wake],
+                self._step_availability,
+            ),
         ]
         for step in self._steps:
             self._stack.addWidget(step)
@@ -220,66 +171,54 @@ class WindWizard(QDialog):
     # Navigation
     # ------------------------------------------------------------------
 
+    def _analysis_inputs(self):
+        """Live inputs for the Analysis step (set_inputs args tuple)."""
+        return (
+            self._step_domain.get_bounds(),
+            self._step_config.get_config(),
+            self._step_criteria.get_config(),
+            self._get_transmission_lines(),
+            self._step_domain.get_polygon(),
+        )
+
+    def _wake_inputs(self):
+        """Live inputs for the Wake step (set_inputs args tuple)."""
+        config = self._step_config.get_config()
+        summary = self._step_analysis.get_summary()
+        turbine = self._step_config.get_turbine_spec()
+        rotor_d = turbine.rotor_diameter_m if turbine else 126.0
+        workers = config.effective_workers if config else 0
+        return (
+            self._step_characterization.get_wind_rose(),
+            rotor_d,
+            summary.cf_avg if summary else 0.30,
+            config.turbine_capacity_mw if config else 3.0,
+            workers,
+        )
+
     def _go_next(self):
         step = self._steps[self._current_step]
         if not step.is_valid():
             return
 
-        # Transition logic
-        if self._current_step == 0:
-            # Domain → Wind Config: nothing to pass
-            pass
-        elif self._current_step == 1:
-            # Wind Config → Criteria: nothing to pass
-            pass
-        elif self._current_step == 2:
-            # Criteria → Analysis: pass all inputs
-            transmission_lines = self._get_transmission_lines()
-            self._step_analysis.set_inputs(
-                self._step_domain.get_bounds(),
-                self._step_config.get_config(),
-                self._step_criteria.get_config(),
-                transmission_lines,
-                polygon=self._step_domain.get_polygon(),
-            )
-        elif self._current_step == 3:
-            # Analysis → Results: pass summary + config
-            self._step_results.set_results(
-                self._step_analysis.get_summary(),
-                self._step_config.get_config(),
-            )
-        elif self._current_step == 4:
-            # Results → Characterization: pass hourly data
-            summary = self._step_analysis.get_summary()
-            hourly_data = summary.hourly_data if summary else None
-            self._step_characterization.set_inputs(hourly_data, summary)
-        elif self._current_step == 5:
-            # Characterization → Financial: pass capacity and CF
+        # Push data across container boundaries (same calls as before, grouped).
+        if self._current_step == 1:
+            # Suitability → Results & Economics: feed Results + Financial.
             summary = self._step_analysis.get_summary()
             config = self._step_config.get_config()
+            self._step_results.set_results(summary, config)
             capacity_mw = config.turbine_capacity_mw if config else 3.0
             cf_avg = summary.cf_avg if summary else 0.30
             workers = config.effective_workers if config else 0
             self._step_financial.set_inputs(capacity_mw, cf_avg, workers)
-        elif self._current_step == 6:
-            # Financial → Wake: pass wind rose and turbine specs
+        elif self._current_step == 2:
+            # Results & Economics → Refinement: feed Characterization, Wake, Availability.
+            summary = self._step_analysis.get_summary()
             config = self._step_config.get_config()
-            summary = self._step_analysis.get_summary()
-            turbine = self._step_config.get_turbine_spec()
-            rotor_d = turbine.rotor_diameter_m if turbine else 126.0
-            workers = config.effective_workers if config else 0
-            self._step_wake.set_inputs(
-                wind_rose=self._step_characterization.get_wind_rose(),
-                rotor_diameter=rotor_d,
-                capacity_factor=summary.cf_avg if summary else 0.30,
-                capacity_mw=config.turbine_capacity_mw if config else 3.0,
-                max_workers=workers,
-            )
-        elif self._current_step == 7:
-            # Wake → Availability: pass hourly data and config
-            summary = self._step_analysis.get_summary()
             hourly_data = summary.hourly_data if summary else None
-            config = self._step_config.get_config()
+            self._step_characterization.set_inputs(hourly_data, summary)
+            # Wake gets seeded here; its provider refreshes the wind rose at Run.
+            self._step_wake.set_inputs(*self._wake_inputs())
             self._step_availability.set_inputs(hourly_data, config, summary)
 
         if self._current_step < len(self._steps) - 1:
@@ -302,7 +241,6 @@ class WindWizard(QDialog):
             lbl.setStyleSheet(self._step_style(
                 is_current=(i == idx),
                 is_done=(i < idx),
-                is_phase_b=(i >= _PHASE_A_COUNT),
             ))
 
         # Update buttons
@@ -316,9 +254,14 @@ class WindWizard(QDialog):
             except RuntimeError:
                 pass
             self._btn_next.clicked.connect(self.accept)
-        elif idx == 3:
-            # Analysis step: only enable Next when analysis is done
+        elif idx == _ANALYSIS_STEP:
+            # Suitability holds the Analysis: only enable Next once it has run.
             self._btn_next.setText(tr("wizard_wind.next"))
+            try:
+                self._btn_next.clicked.disconnect()
+            except RuntimeError:
+                pass
+            self._btn_next.clicked.connect(self._go_next)
             self._btn_next.setEnabled(self._step_analysis.is_valid())
         else:
             self._btn_next.setText(tr("wizard_wind.next"))
@@ -380,13 +323,10 @@ class WindWizard(QDialog):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _step_style(
-        is_current: bool, is_done: bool, is_phase_b: bool = False,
-    ) -> str:
+    def _step_style(is_current: bool, is_done: bool) -> str:
         if is_current:
-            color = "#16a085" if is_phase_b else "#8e44ad"
             return (
-                f"background-color: {color}; color: white; "
+                "background-color: #8e44ad; color: white; "
                 "border-radius: 4px; padding: 4px 8px; font-weight: bold;"
             )
         if is_done:
