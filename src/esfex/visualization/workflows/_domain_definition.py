@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -52,9 +53,13 @@ class DomainDefinitionWidget(QWidget):
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
+        _equal = QSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
 
-        # ── Left column: draw a polygon ──
+        # ── Left box: draw a polygon ──
         draw_group = QGroupBox(tr("domain.draw_group"))
+        draw_group.setSizePolicy(_equal)
         draw_lay = QVBoxLayout(draw_group)
         self._btn_draw = QPushButton(tr("wizard_common.draw_domain"))
         self._btn_draw.clicked.connect(self._start_drawing)
@@ -65,21 +70,11 @@ class DomainDefinitionWidget(QWidget):
         draw_lay.addStretch()
         row.addWidget(draw_group, 1)
 
-        # ── Right column: apply an imported GeoAsset ──
-        right = QWidget()
-        right_lay = QVBoxLayout(right)
-        right_lay.setContentsMargins(0, 0, 0, 0)
+        # ── Right box: apply an imported GeoAsset (equal-sized rectangle) ──
         self._geo_ctl = GeoAssetDomainControl(geo_assets_provider)
+        self._geo_ctl.setSizePolicy(_equal)
         self._geo_ctl.domainPicked.connect(self._on_geoasset_picked)
-        right_lay.addWidget(self._geo_ctl)
-        # Hint shown when the GeoAsset control hides itself (no polygon assets),
-        # so the two-column balance is preserved.
-        self._geo_hint = QLabel(tr("domain.geo_hint"))
-        self._geo_hint.setWordWrap(True)
-        self._geo_hint.setStyleSheet("color: gray; font-style: italic; padding: 6px;")
-        right_lay.addWidget(self._geo_hint)
-        right_lay.addStretch()
-        row.addWidget(right, 1)
+        row.addWidget(self._geo_ctl, 1)
 
         # Bridge wiring for polygon drawing.
         if self._map_widget is not None and hasattr(self._map_widget, "bridge"):
@@ -89,23 +84,12 @@ class DomainDefinitionWidget(QWidget):
             if hasattr(bridge, "modeReset"):
                 bridge.modeReset.connect(self._on_cancelled)
 
-        self._sync_geo_hint()
-
-    # ------------------------------------------------------------------
-    # GeoAsset visibility hint
-    # ------------------------------------------------------------------
-    def _sync_geo_hint(self):
-        """Show the hint only while the GeoAsset control is hidden."""
-        self._geo_hint.setVisible(not self._geo_ctl.isVisibleTo(self))
-
     def showEvent(self, event):
         super().showEvent(event)
         self._geo_ctl.refresh()
-        self._sync_geo_hint()
 
     def refresh_assets(self):
         self._geo_ctl.refresh()
-        self._sync_geo_hint()
 
     # ------------------------------------------------------------------
     # Polygon drawing

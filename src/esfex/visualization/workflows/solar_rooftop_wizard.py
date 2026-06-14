@@ -138,7 +138,11 @@ class SolarRooftopWizard(QDialog):
 
         # Four two-column containers
         self._steps = [
-            TwoColumnStep(self._step_domain, self._step_data),
+            # Domain (with its own two columns) on top, data sources below.
+            TwoColumnStep(
+                self._step_domain, self._step_data,
+                orientation=Qt.Orientation.Vertical, sizes=[230, 470],
+            ),
             TwoColumnStep(self._step_config, self._step_analysis),
             TwoColumnStep(self._step_results, self._step_macro),
             TwoColumnStep(

@@ -124,15 +124,25 @@ def test_geoasset_then_draw_overrides(app):
     assert w.get_polygon() != geo_poly
 
 
-def test_empty_provider_hides_control_shows_hint(app):
+def test_empty_provider_shows_hint_inside_box(app):
     w = DomainDefinitionWidget(_FakeMap(), geo_assets_provider=lambda: {})
     w.show()
     w.refresh_assets()
-    assert not w._geo_ctl.isVisibleTo(w)
-    assert w._geo_hint.isVisibleTo(w)
+    # The GeoAsset box stays visible (equal rectangle); picker hidden, hint shown.
+    assert w._geo_ctl.isVisibleTo(w)
+    assert not w._geo_ctl._row.isVisibleTo(w._geo_ctl)
+    assert w._geo_ctl._hint.isVisibleTo(w._geo_ctl)
     # drawing still works with no assets
     _emit_drawn(w, _DRAWN_RING)
     assert w.is_defined()
+
+
+def test_provider_with_assets_shows_picker(app):
+    w = DomainDefinitionWidget(_FakeMap(), geo_assets_provider=_provider_one)
+    w.show()
+    w.refresh_assets()
+    assert w._geo_ctl._row.isVisibleTo(w._geo_ctl)
+    assert not w._geo_ctl._hint.isVisibleTo(w._geo_ctl)
 
 
 def test_invalid_polygon_ignored(app):

@@ -13,8 +13,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from esfex.visualization.i18n import tr
@@ -33,13 +36,27 @@ class GeoAssetDomainControl(QGroupBox):
         super().__init__(tr("geo_domain.group"), parent)
         self._provider = geo_assets_provider
 
-        row = QHBoxLayout(self)
+        lay = QVBoxLayout(self)
+
+        # Picker row (combo + apply); hidden when there are no polygon assets.
+        self._row = QWidget()
+        row = QHBoxLayout(self._row)
+        row.setContentsMargins(0, 0, 0, 0)
         self._combo = QComboBox()
         self._combo.setMinimumWidth(160)
         row.addWidget(self._combo, 1)
         self._btn = QPushButton(tr("geo_domain.apply"))
         self._btn.clicked.connect(self._on_apply)
         row.addWidget(self._btn)
+        lay.addWidget(self._row)
+
+        # Hint shown in place of the picker when no polygon assets exist, so the
+        # box stays the same size as the "Draw domain" box beside it.
+        self._hint = QLabel(tr("domain.geo_hint"))
+        self._hint.setWordWrap(True)
+        self._hint.setStyleSheet("color: gray; font-style: italic;")
+        lay.addWidget(self._hint)
+        lay.addStretch()
 
         self.refresh()
 
@@ -52,7 +69,11 @@ class GeoAssetDomainControl(QGroupBox):
             return {}
 
     def refresh(self):
-        """Repopulate from the provider; hide when no polygon assets exist."""
+        """Repopulate from the provider; show the hint when no polygon assets.
+
+        The group box itself stays visible so it remains an equal-sized
+        rectangle next to the "Draw domain" box.
+        """
         self._combo.blockSignals(True)
         self._combo.clear()
         count = 0
@@ -62,7 +83,8 @@ class GeoAssetDomainControl(QGroupBox):
                 self._combo.addItem(getattr(info, "name", asset_id), asset_id)
                 count += 1
         self._combo.blockSignals(False)
-        self.setVisible(count > 0)
+        self._row.setVisible(count > 0)
+        self._hint.setVisible(count == 0)
 
     def showEvent(self, event):
         super().showEvent(event)

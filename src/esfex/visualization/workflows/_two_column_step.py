@@ -21,12 +21,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
 
 
-def _build_column(content) -> QWidget:
-    """Return a single widget, or a vertical splitter stacking a list of them."""
+def _build_column(content, sub_orientation=Qt.Orientation.Vertical) -> QWidget:
+    """Return a single widget, or a splitter stacking a list of them."""
     if isinstance(content, (list, tuple)):
         if len(content) == 1:
             return content[0]
-        col = QSplitter(Qt.Orientation.Vertical)
+        col = QSplitter(sub_orientation)
         col.setChildrenCollapsible(False)
         for w in content:
             col.addWidget(w)
@@ -37,9 +37,10 @@ def _build_column(content) -> QWidget:
 class TwoColumnStep(QWidget):
     """Pair two columns of existing step widgets in a horizontal splitter."""
 
-    def __init__(self, left, right, *, sizes=None, parent=None):
+    def __init__(self, left, right, *, sizes=None,
+                 orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(parent)
-        # Preserve order: left column children first, then right column.
+        # Preserve order: left/top column children first, then right/bottom.
         self._children: list[QWidget] = []
         for side in (left, right):
             if isinstance(side, (list, tuple)):
@@ -47,12 +48,18 @@ class TwoColumnStep(QWidget):
             else:
                 self._children.append(side)
 
+        # A list inside a pane stacks perpendicular to the main split.
+        sub = (
+            Qt.Orientation.Horizontal
+            if orientation == Qt.Orientation.Vertical
+            else Qt.Orientation.Vertical
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = QSplitter(orientation)
         self._splitter.setChildrenCollapsible(False)
-        self._splitter.addWidget(_build_column(left))
-        self._splitter.addWidget(_build_column(right))
+        self._splitter.addWidget(_build_column(left, sub))
+        self._splitter.addWidget(_build_column(right, sub))
         if sizes:
             self._splitter.setSizes(list(sizes))
         else:
