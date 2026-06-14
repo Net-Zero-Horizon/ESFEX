@@ -397,6 +397,8 @@ class GridMappingSourceFetchStep(QWidget):
         wizard = self.window()
         if wizard:
             wizard.showNormal()
+            wizard.raise_()
+            wizard.activateWindow()
 
     def _apply_domain_polygon(self, poly: list[tuple[float, float]]):
         """Set the study domain from a polygon — drawn on the map OR dissolved
@@ -419,8 +421,6 @@ class GridMappingSourceFetchStep(QWidget):
         if self._map_widget:
             self._map_widget.show_domain_polygon(self._polygon)
             self._map_widget.disable_domain_polygon_draw()
-            wizard.raise_()
-            wizard.activateWindow()
 
     def _update_area(self):
         if len(self._polygon) < 3:
