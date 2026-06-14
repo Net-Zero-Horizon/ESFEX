@@ -7,6 +7,40 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.1.13] — 2026-06-14
+
+### Added
+
+- **Imported GeoAssets as workflow domains** — every area workflow (Grid
+  Builder, Solar PV, Wind, Rooftop, EV, Demand) can define its study area from
+  an imported GeoAsset (Shapefile/GeoJSON/KML/GPKG), dissolved into one boundary,
+  instead of only a hand-drawn region. Fetched features are clipped to the exact
+  polygon (no bbox contamination); GeoAssets persist self-contained in the
+  project YAML/`.esfexp`.
+- **Standardized domain definition** — one shared two-column control (draw a
+  polygon **or** apply a GeoAsset) across all workflows, with equal-sized
+  selector boxes and mutual exclusivity (last action wins).
+- **Portable `.esfexp` project bundles** — export/import a complete project
+  (config + demand + availability profiles) as a single self-contained file,
+  with a progress dialog for load/save/export.
+
+### Changed
+
+- **Consolidated workflow wizards** — Solar PV, Wind, Rooftop and EV collapse
+  from 8–9 single-column steps to 4 content-aware steps: related light panels
+  sit side by side, wider panels (tables, charts) take full-width rows, and each
+  step scrolls vertically only when needed so nothing is squashed or overflows.
+- Toolbar: visible **Layer** / **Base Map** captions above their selectors, font
+  scaling with the rest of the bar, and +20% headroom on the icon-scaling cap.
+
+### Fixed
+
+- **Wind workflow restored** — reconciled the GUI wind config with the current
+  `windrex` API (fat GUI `WindConfig`; the analyzer adapter now builds the slim
+  `windrex.WindConfig` it needs), and fixed turbine selection
+  (`specific_power`). The Wind assessment runs end-to-end again.
+- Grid Builder: `NameError` when applying a GeoAsset as the domain.
+
 ## [0.1.7] — 2026-06-10
 
 ### Added
