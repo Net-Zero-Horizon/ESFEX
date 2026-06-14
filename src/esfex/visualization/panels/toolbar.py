@@ -85,7 +85,7 @@ class EditorToolbar(QToolBar):
         # laid-out width still fits the current bar, between these bounds.
         from esfex.visualization.ui_scale import scaled
         self._min_icon = min(20, scaled(20))    # compact floor (fits 1400 px)
-        self._max_icon = 28                      # gentle cap (avoid oversized chrome)
+        self._max_icon = 34                      # gentle cap (+20% headroom)
         self._cur_icon = None
         self._apply_icon_scale(self._min_icon)
 
@@ -337,7 +337,8 @@ class EditorToolbar(QToolBar):
         selectors add minimal width to an already crowded toolbar.
         """
         from PySide6.QtWidgets import QSizePolicy
-        label.setStyleSheet("font-size: 8px; padding: 0; margin: 0;")
+        # Font size is driven by the toolbar-wide QSS (QToolBar QLabel rule in
+        # _apply_icon_scale) so the caption scales with the rest of the bar.
         combo.setMaximumWidth(108)
         w = QWidget()
         w.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
@@ -361,6 +362,7 @@ class EditorToolbar(QToolBar):
         self.setStyleSheet(f"""
             QToolBar QToolButton {{ font-size: {fpx}px; padding: 2px 4px; }}
             QToolBar QComboBox {{ font-size: {fpx}px; padding: 1px 3px; }}
+            QToolBar QLabel {{ font-size: {fpx}px; padding: 0; margin: 0; }}
             QToolBarExtension {{
                 background-color: #2980b9;
                 border-radius: 4px;
