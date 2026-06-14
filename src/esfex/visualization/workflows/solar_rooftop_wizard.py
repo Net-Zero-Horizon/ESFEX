@@ -45,7 +45,7 @@ from esfex.visualization.workflows.solar_adoption_steps import (
     MacroDataStep,
     ScenarioComparisonStep,
 )
-from esfex.visualization.workflows._two_column_step import TwoColumnStep
+from esfex.visualization.workflows._workflow_step import WorkflowStep
 
 # Consolidated two-column steps
 _STEP_NAMES = [
@@ -136,19 +136,18 @@ class SolarRooftopWizard(QDialog):
         self._step_adoption.modelsFinished.connect(self._populate_compare)
         self._step_integration.set_input_provider(self._integration_inputs)
 
-        # Four two-column containers
+        # Four consolidated steps. Two columns only for the light, chart-free
+        # Config | Analysis pair; wide panels (data fetch, results, macro,
+        # adoption charts) get full-width rows and scroll vertically when tall.
         self._steps = [
-            # Domain (with its own two columns) on top, data sources below.
-            TwoColumnStep(
-                self._step_domain, self._step_data,
-                orientation=Qt.Orientation.Vertical, sizes=[230, 470],
-            ),
-            TwoColumnStep(self._step_config, self._step_analysis),
-            TwoColumnStep(self._step_results, self._step_macro),
-            TwoColumnStep(
-                [self._step_adoption, self._step_compare],
+            WorkflowStep([self._step_domain, self._step_data]),
+            WorkflowStep([(self._step_config, self._step_analysis)]),
+            WorkflowStep([self._step_results, self._step_macro]),
+            WorkflowStep([
+                self._step_adoption,
+                self._step_compare,
                 self._step_integration,
-            ),
+            ]),
         ]
         for step in self._steps:
             self._stack.addWidget(step)

@@ -45,7 +45,7 @@ from esfex.visualization.workflows.solar_pv_advanced_steps import (
     SolarCharacterizationStep,
     SolarFinancialStep,
 )
-from esfex.visualization.workflows._two_column_step import TwoColumnStep
+from esfex.visualization.workflows._workflow_step import WorkflowStep
 
 # Consolidated two-column steps
 _STEP_NAMES = [
@@ -129,15 +129,18 @@ class SolarPVWizard(QDialog):
         # prior-container Domain/Config at Run time (consolidated layout).
         self._step_analysis.set_input_provider(self._analysis_inputs)
 
-        # Four two-column containers
+        # Four consolidated steps. Two columns only for the light, chart-free
+        # Criteria | Analysis pair; wide panels (config table, charts) get their
+        # own full-width row and the step scrolls vertically when tall.
         self._steps = [
-            TwoColumnStep(self._step_domain, self._step_config),
-            TwoColumnStep(self._step_criteria, self._step_analysis),
-            TwoColumnStep(self._step_results, self._step_financial),
-            TwoColumnStep(
-                [self._step_characterization, self._step_array],
+            WorkflowStep([self._step_domain, self._step_config]),
+            WorkflowStep([(self._step_criteria, self._step_analysis)]),
+            WorkflowStep([self._step_results, self._step_financial]),
+            WorkflowStep([
+                self._step_characterization,
+                self._step_array,
                 self._step_availability,
-            ),
+            ]),
         ]
         for step in self._steps:
             self._stack.addWidget(step)

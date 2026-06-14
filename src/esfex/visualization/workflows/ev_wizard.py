@@ -132,12 +132,12 @@ class EVWizardDialog(QDialog):
         self._step_grid = EVGridImpactStep(parent=self)
         self._step_integration = EVIntegrationStep(model=self._model, parent=self)
 
-        from esfex.visualization.workflows._two_column_step import TwoColumnStep
+        from esfex.visualization.workflows._workflow_step import WorkflowStep
 
-        # Intra-container wiring (consolidated layout):
-        #  - Domain feeds Macro bounds live (same container).
-        #  - Adoption finishing populates the sibling Results + Scenario Select.
-        #  - V2G pulls the live fleet from sibling Charging at Run time.
+        # Intra-step wiring (consolidated layout):
+        #  - Domain feeds Macro bounds live (same step).
+        #  - Adoption finishing populates the Results + Scenario Select panels.
+        #  - V2G pulls the live fleet from the Charging panel at Run time.
         #  - Integration pulls the live Grid Impact result at Apply time.
         self._step_domain.domainChanged.connect(self._sync_macro_bounds)
         self._step_adoption.modelsFinished.connect(self._on_models_finished)
@@ -145,15 +145,18 @@ class EVWizardDialog(QDialog):
         self._step_v2g.set_input_provider(self._v2g_fleet)
         self._step_integration.set_input_provider(self._integration_inputs)
 
-        # Four two-column containers
+        # Four consolidated steps. These panels carry fleet tables, scroll-area
+        # macro forms and matplotlib charts, so each gets its own full-width row
+        # and the step scrolls vertically when tall.
         self._steps = [
-            TwoColumnStep(self._step_domain, self._step_macro),
-            TwoColumnStep(
+            WorkflowStep([self._step_domain, self._step_macro]),
+            WorkflowStep([
                 self._step_adoption,
-                [self._step_results, self._step_scenario],
-            ),
-            TwoColumnStep(self._step_charging, self._step_v2g),
-            TwoColumnStep(self._step_grid, self._step_integration),
+                self._step_results,
+                self._step_scenario,
+            ]),
+            WorkflowStep([self._step_charging, self._step_v2g]),
+            WorkflowStep([self._step_grid, self._step_integration]),
         ]
         for step in self._steps:
             self._stack.addWidget(step)
