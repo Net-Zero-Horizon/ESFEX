@@ -67,6 +67,8 @@ class GridMappingSourceFetchStep(QWidget):
         self._geo_assets_provider = geo_assets_provider
         self._features: list = []
         self._fetchers: list = []
+        self._finalize_worker = None
+        self._fetch_t0: float = 0.0
         self._pending: int = 0
         self._errors: list[str] = []
         self._polygon: list[tuple[float, float]] = []
@@ -381,6 +383,9 @@ class GridMappingSourceFetchStep(QWidget):
         from esfex.visualization.workflows._wizard_utils import stop_thread
         for f in self._fetchers:
             stop_thread(f)
+        if self._finalize_worker is not None:
+            stop_thread(self._finalize_worker)
+            self._finalize_worker = None
 
     # ------------------------------------------------------------------
     # Fetch logic
@@ -394,6 +399,8 @@ class GridMappingSourceFetchStep(QWidget):
             self._summary_label.setText("No sources selected.")
             return
 
+        import time
+        self._fetch_t0 = time.perf_counter()
         self._btn_fetch.setEnabled(False)
         self._btn_fetch.setText("Fetching...")
         self._progress_group.setVisible(True)
@@ -535,27 +542,25 @@ class GridMappingSourceFetchStep(QWidget):
         return None, None
 
     def _finalize(self):
+        # Polygon clip + dedup over country-scale feature sets would freeze the
+        # GUI thread, so run them in a worker (the fetchers already are). The UI
+        # is only touched back in _on_finalize_done.
+        import time
         from esfex.visualization.workflows.grid_mapping_fetchers import (
-            deduplicate_features,
-            filter_features_by_polygon,
+            FetchFinalizeWorker,
         )
 
-        if self._features and self._polygon:
-            before = len(self._features)
-            self._features = filter_features_by_polygon(
-                self._features, self._polygon,
-            )
-            logger.info(
-                "Polygon filter: %d → %d features",
-                before, len(self._features),
-            )
+        self._fetch_elapsed = time.perf_counter() - (self._fetch_t0 or
+                                                      time.perf_counter())
+        self._summary_label.setText("Processing results…")
+        worker = FetchFinalizeWorker(self._features, self._polygon, self)
+        worker.finished.connect(self._on_finalize_done)
+        self._finalize_worker = worker
+        worker.start()
 
-        if self._features:
-            self._features = deduplicate_features(self._features)
-
-        counts: dict[str, int] = {}
-        for f in self._features:
-            counts[f.feature_type] = counts.get(f.feature_type, 0) + 1
+    def _on_finalize_done(self, features: list, counts: dict, timings: dict):
+        self._features = features
+        self._finalize_worker = None
 
         parts = []
         for ftype in ["substation", "generator", "battery", "line",
@@ -565,9 +570,16 @@ class GridMappingSourceFetchStep(QWidget):
             if c:
                 parts.append(f"{c} {ftype}(s)")
 
+        elapsed = getattr(self, "_fetch_elapsed", 0.0)
+        logger.info(
+            "Grid fetch timing: fetch+parse=%.1fs, polygon_filter=%.1fs, "
+            "deduplicate=%.1fs", elapsed,
+            timings.get("polygon_filter", 0.0), timings.get("deduplicate", 0.0))
+
         if parts:
             self._summary_label.setText(
                 f"Found {len(self._features)} features: " + ", ".join(parts)
+                + f"  (fetch {elapsed:.0f}s)"
             )
         else:
             self._summary_label.setText(

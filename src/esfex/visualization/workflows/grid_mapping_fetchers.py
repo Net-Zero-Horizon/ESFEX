@@ -634,6 +634,49 @@ def deduplicate_features(
     )
 
 
+class FetchFinalizeWorker(QThread):
+    """Off-thread aggregation of fetched features: polygon clip + dedup + count.
+
+    The OSM/GEM/WRI fetchers already run on their own threads, but the
+    post-fetch ``filter_features_by_polygon`` + ``deduplicate_features`` used to
+    run on the GUI thread — a hard freeze on country-scale feature sets (these
+    receive *no* GIL time slices because they ARE the main thread). This moves
+    them off the main thread; the step touches Qt widgets only in the
+    ``finished`` callback.
+    """
+
+    finished = Signal(object, object, object)  # (features, counts, timings)
+
+    def __init__(self, features: list, polygon: list, parent=None):
+        super().__init__(parent)
+        self._features = features
+        self._polygon = polygon
+
+    def run(self):
+        import time as _time
+
+        timings: dict[str, float] = {}
+        feats = self._features
+
+        if feats and self._polygon:
+            t0 = _time.perf_counter()
+            before = len(feats)
+            feats = filter_features_by_polygon(feats, self._polygon)
+            timings["polygon_filter"] = _time.perf_counter() - t0
+            logger.info("Polygon filter: %d → %d features", before, len(feats))
+
+        if feats:
+            t0 = _time.perf_counter()
+            feats = deduplicate_features(feats)
+            timings["deduplicate"] = _time.perf_counter() - t0
+
+        counts: dict[str, int] = {}
+        for f in feats:
+            counts[f.feature_type] = counts.get(f.feature_type, 0) + 1
+
+        self.finished.emit(feats, counts, timings)
+
+
 def _overpass_error_snippet(text: str) -> str:
     """Pull the human-readable message out of an Overpass HTML error page."""
     if not text:
