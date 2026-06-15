@@ -1406,6 +1406,42 @@ def _find_dead_end_buses(
     removed_lines: set[str] = set()
     max_iterations = len(active_buses)
 
+    # Precompute, once, the data that is invariant across iterations (the loop
+    # only removes equipment-free / demand-free buses and their stub lines, so
+    # equipment, demand and the bus→lines incidence never change). This turns
+    # the former O(buses · (equipment + lines)) per-iteration scans into O(1)
+    # lookups — the key speedup for large systems.
+    node_by_index = {n.index: n for n in state.nodes}
+
+    def _has_demand(bid: str) -> bool:
+        bus = state.buses.get(bid)
+        if not bus or bus.demand_fraction <= 0:
+            return False
+        node = node_by_index.get(bus.parent_node)
+        return bool(node) and (node.demand.peak_mw > 0
+                               or node.demand.total_mwh > 0)
+
+    # Buses that must be kept (generation, storage, electrolyzer, or demand).
+    keep_buses: set[str] = set()
+    for g in state.generators.values():
+        if g.rated_power > 0:
+            keep_buses.add(g.bus)
+    for b in state.batteries.values():
+        if b.rated_power > 0:
+            keep_buses.add(b.bus)
+    for e in state.electrolyzers.values():
+        keep_buses.add(e.bus)
+    for bid in state.buses:
+        if _has_demand(bid):
+            keep_buses.add(bid)
+
+    # Lines touching each bus (a self-loop lands in both endpoint lists, but the
+    # `removed_lines` guard below de-dups it just as the old full scan did).
+    lines_by_bus: dict[str, list] = defaultdict(list)
+    for ln in state.transmission_lines:
+        lines_by_bus[ln.from_bus].append(ln)
+        lines_by_bus[ln.to_bus].append(ln)
+
     for iteration in range(max_iterations):
         if progress_callback:
             progress_callback(
@@ -1420,26 +1456,22 @@ def _find_dead_end_buses(
             degree = len(adj.get(bus_id, set()))
             if degree > 1:
                 continue
-
-            if _bus_has_useful_equipment(state, bus_id):
-                continue
-            if _bus_has_demand(state, bus_id):
+            if bus_id in keep_buses:
                 continue
 
             bus = state.buses.get(bus_id)
             bus_name = bus.name if bus else bus_id
 
-            for ln in state.transmission_lines:
+            for ln in lines_by_bus.get(bus_id, ()):
                 if ln.line_id in removed_lines:
                     continue
-                if ln.from_bus == bus_id or ln.to_bus == bus_id:
-                    if ln.from_bus in active_buses and ln.to_bus in active_buses:
-                        actions.append(SimplificationAction(
-                            action_type="remove_line",
-                            element_id=ln.line_id,
-                            reason=f"Stub line to dead-end bus '{bus_name}'",
-                        ))
-                        removed_lines.add(ln.line_id)
+                if ln.from_bus in active_buses and ln.to_bus in active_buses:
+                    actions.append(SimplificationAction(
+                        action_type="remove_line",
+                        element_id=ln.line_id,
+                        reason=f"Stub line to dead-end bus '{bus_name}'",
+                    ))
+                    removed_lines.add(ln.line_id)
 
             actions.append(SimplificationAction(
                 action_type="remove_bus",
