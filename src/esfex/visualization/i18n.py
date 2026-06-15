@@ -25,6 +25,8 @@ _LANGUAGE_NAMES: dict[str, str] = {
     "en": "English",
     "es": "Español",
     "ja": "日本語",
+    "fr": "Français",
+    "pt": "Português",
 }
 
 _current_lang: str = "en"

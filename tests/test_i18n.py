@@ -295,3 +295,65 @@ class TestRealTranslationFiles:
         init_i18n("es")
         result = tr("properties.n_selected", n=3)
         assert "3" in result
+
+
+# ===========================================================================
+# Cross-language parity (en is the canonical key set)
+# ===========================================================================
+
+
+class TestLanguageParity:
+    """Every shipped language must mirror en.json's keys and preserve the
+    interpolation placeholders / Qt mnemonics of each string."""
+
+    import json
+    import re
+
+    _PLACEHOLDER = re.compile(r"\{[^}]*\}")
+    _MNEMONIC = re.compile(r"&(?=\w)")  # '&X' accelerator, not ' & ' (= "and")
+
+    def _load(self, code):
+        import json
+        return _flatten(
+            json.loads((_TRANSLATIONS_DIR / f"{code}.json").read_text("utf-8")))
+
+    def _codes(self):
+        return sorted(p.stem for p in _TRANSLATIONS_DIR.glob("*.json"))
+
+    def test_fr_and_pt_are_shipped(self):
+        codes = self._codes()
+        assert "fr" in codes and "pt" in codes
+
+    def test_all_languages_match_english_keys(self):
+        en_keys = set(self._load("en"))
+        for code in self._codes():
+            if code == "en":
+                continue
+            keys = set(self._load(code))
+            missing = en_keys - keys
+            extra = keys - en_keys
+            assert not missing, f"{code}.json missing {len(missing)}: {sorted(missing)[:10]}"
+            assert not extra, f"{code}.json has {len(extra)} extra: {sorted(extra)[:10]}"
+
+    def test_placeholders_preserved_in_all_languages(self):
+        from collections import Counter
+        en = self._load("en")
+        for code in self._codes():
+            if code == "en":
+                continue
+            other = self._load(code)
+            for k, v in en.items():
+                a = Counter(self._PLACEHOLDER.findall(v))
+                b = Counter(self._PLACEHOLDER.findall(other[k]))
+                assert a == b, f"{code}.json placeholder mismatch at {k!r}: {a} vs {b}"
+
+    def test_qt_mnemonics_preserved_in_all_languages(self):
+        en = self._load("en")
+        for code in self._codes():
+            if code == "en":
+                continue
+            other = self._load(code)
+            for k, v in en.items():
+                a = len(self._MNEMONIC.findall(v))
+                b = len(self._MNEMONIC.findall(other[k]))
+                assert a == b, f"{code}.json mnemonic mismatch at {k!r}: {a} vs {b}"
