@@ -221,21 +221,20 @@ class _BusyOverlay(QWidget):
         c.move(x, y)
 
 
-def _grow_dialog_area(dialog, area_factor: float) -> None:
-    """Enlarge a dialog's area by ``area_factor`` (e.g. 1.2 → +20%).
+def _resize_dialog(dialog, *, width_factor: float = 1.0,
+                   height_factor: float = 1.0) -> None:
+    """Scale a dialog's natural size by per-axis factors (never shrinking).
 
-    Each linear dimension is scaled by ``sqrt(area_factor)`` so the *area* grows
-    by the requested factor. Computed from the dialog's own ``sizeHint`` so it
-    adapts to translated label lengths. ``QInputDialog`` honours a wider width
-    via ``resize`` but pins its height unless a minimum is set, so we set both.
+    Sizes are derived from the dialog's own ``sizeHint`` so they adapt to
+    translated label/title lengths. The window frame wraps the widget, so a
+    wider widget gives the title bar more room — this is the right lever for a
+    clipped window title. ``QInputDialog`` honours a wider width via ``resize``
+    but pins its height unless a minimum is set, so we set both.
     """
-    import math
-
     dialog.adjustSize()
     hint = dialog.sizeHint()
-    scale = math.sqrt(max(area_factor, 1.0))
-    w = int(round(hint.width() * scale))
-    h = int(round(hint.height() * scale))
+    w = int(round(hint.width() * max(width_factor, 1.0)))
+    h = int(round(hint.height() * max(height_factor, 1.0)))
     dialog.resize(w, h)
     dialog.setMinimumSize(w, h)
 
@@ -2198,7 +2197,9 @@ class MainWindow(QMainWindow):
         dialog.setInputMode(QInputDialog.TextInput)
         dialog.setWindowTitle(tr("messages.new_system_title"))
         dialog.setLabelText(tr("messages.new_system_prompt"))
-        _grow_dialog_area(dialog, 1.44)  # +20% over the previous +20% (1.2×1.2)
+        # Widen the dialog so the window title isn't clipped: +20% width on top
+        # of the prior growth (≈1.44× the natural width), keeping the +20% height.
+        _resize_dialog(dialog, width_factor=1.44, height_factor=1.2)
         if not dialog.exec():
             return
         name = dialog.textValue()
