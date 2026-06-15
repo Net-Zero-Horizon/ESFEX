@@ -2198,7 +2198,7 @@ class MainWindow(QMainWindow):
         dialog.setInputMode(QInputDialog.TextInput)
         dialog.setWindowTitle(tr("messages.new_system_title"))
         dialog.setLabelText(tr("messages.new_system_prompt"))
-        _grow_dialog_area(dialog, 1.2)  # +20% window area
+        _grow_dialog_area(dialog, 1.44)  # +20% over the previous +20% (1.2×1.2)
         if not dialog.exec():
             return
         name = dialog.textValue()

@@ -27,16 +27,17 @@ def _input_dialog():
     return d
 
 
-def test_grows_area_by_twenty_percent(qapp):
+@pytest.mark.parametrize("factor", [1.2, 1.44])
+def test_grows_area_by_factor(qapp, factor):
     d = _input_dialog()
     base = d.sizeHint()
     base_area = base.width() * base.height()
 
-    _grow_dialog_area(d, 1.2)
+    _grow_dialog_area(d, factor)
     s = d.size()
     ratio = (s.width() * s.height()) / base_area
-    # Linear dims scale by sqrt(1.2); integer rounding keeps area within ~3%.
-    assert ratio == pytest.approx(1.2, abs=0.05)
+    # Linear dims scale by sqrt(factor); integer rounding keeps area close.
+    assert ratio == pytest.approx(factor, abs=0.05)
 
 
 def test_sets_minimum_size_so_height_sticks(qapp):
