@@ -114,6 +114,7 @@ nav:
     - Results Export: user-guide/results-export.md
     - Solver Guide: user-guide/solver-guide.md
     - Development Zones: user-guide/development-zones.md
+    - Custom Constraints: user-guide/custom-constraints.md
   - GUI Editor:
     - Overview: gui/overview.md
     - Map Editor: gui/map-editor.md

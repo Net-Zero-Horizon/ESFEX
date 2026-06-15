@@ -292,6 +292,11 @@ Override only needed hooks -- all have no-op defaults.
 | `get_cli_commands()` | `list[typer.Typer]` | Register CLI sub-commands under `esfex {name} ...` |
 | `get_config_schema()` | `type[BaseModel]` | Pydantic model for plugin configuration validation |
 
+A common use of `get_julia_modules()` is registering a custom optimization
+constraint type via `ESFEX.register_constraint_hook!` — see
+[Custom Constraints](../user-guide/custom-constraints.md) and the
+`examples/plugins/custom_constraint_example/` plugin.
+
 ## Plugin Menu Items
 
 Active plugins register menu items under the **Plugins** menu (below "Manage Plugins...") via the `get_menu_items()` hook.
