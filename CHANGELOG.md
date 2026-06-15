@@ -7,6 +7,39 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.0] — 2026-06-15
+
+### Added
+
+- **User-defined optimization constraints** — add custom linear constraints to
+  the operational *and* investment models, either declaratively in the config
+  (`custom_constraints`) or via plugin Julia overlays, editable from a GUI dialog.
+- **French and Portuguese GUI translations** — `fr` and `pt` join English,
+  Spanish and Japanese, in exact key parity (placeholders and Qt mnemonics
+  preserved); the Preferences language list discovers them automatically.
+- **GPU-accelerated demand inference** — XGBoost demand/density prediction runs
+  on a CUDA GPU when one is available (auto-detected, large-batch only), with
+  CPU fallback and an `ESFEX_XGB_DEVICE` override (~2.6× on realistic batches).
+
+### Changed
+
+- **Grid Builder is responsive on country-scale regions** — the "Building
+  network" pipeline and the Step-1 fetch aggregation (polygon clip + dedup) now
+  run on worker threads with live per-stage status and per-phase timings, so the
+  Studio no longer freezes; the network build was also de-quadratized.
+- **Availability profiles** — weather-based capacity factors are now the default
+  for wind/solar. Queries are de-duplicated per ~11 km location and fetched
+  concurrently with retry/backoff, so cost scales with distinct locations, not
+  generator count (a full-Japan build dropped from >30 min to ~1 min). A failed
+  weather fetch leaves the unit without a profile rather than fabricating a flat
+  value; thermal/hydro keep synthetic profiles.
+- Project **status promoted from alpha to beta**.
+
+### Fixed
+
+- Grid Builder simplification: O(n²) dead-end bus pruning made linear.
+- "Create new system" dialog widened so its window title is no longer clipped.
+
 ## [0.1.13] — 2026-06-14
 
 ### Added

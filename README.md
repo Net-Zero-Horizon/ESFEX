@@ -27,9 +27,6 @@
   <a href="https://julialang.org/">
     <img src="https://img.shields.io/badge/Julia-1.9%2B-9558B2.svg" alt="Julia">
   </a>
-  <a href="https://jump.dev/">
-    <img src="https://img.shields.io/badge/optimization-JuMP-2C8C3C.svg" alt="JuMP">
-  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
   </a>
@@ -48,10 +45,7 @@
   <a href="https://pepy.tech/project/esfex">
     <img src="https://static.pepy.tech/badge/esfex" alt="Downloads">
   </a>
-  <a href="https://github.com/Net-Zero-Horizon/ESFEX/commits/main">
-    <img src="https://img.shields.io/github/last-commit/Net-Zero-Horizon/ESFEX.svg" alt="Last commit">
-  </a>
-  <img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status">
+  <img src="https://img.shields.io/badge/status-beta-yellow.svg" alt="Status">
 </p>
 
 <p align="center">
