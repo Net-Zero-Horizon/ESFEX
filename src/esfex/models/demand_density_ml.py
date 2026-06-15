@@ -106,12 +106,13 @@ class DemandDensityModel:
         ``features`` must have columns in ``self.feature_names`` order.
         Returns a 1-D array of MW/km² (= ``10 ** model_output``).
         """
-        import xgboost as xgb
+        from esfex.models.xgb_device import predict as _xgb_predict
 
         if self._model is None:
             raise RuntimeError("Model not loaded. Call load_bundled() first.")
-        dm = xgb.DMatrix(features, feature_names=self.feature_names)
-        log_density = np.asarray(self._model.predict(dm), dtype=np.float64)
+        log_density = np.asarray(
+            _xgb_predict(self._model, features, feature_names=self.feature_names),
+            dtype=np.float64)
         return np.power(10.0, log_density)
 
 
@@ -312,8 +313,6 @@ def predict_region_cell_demand(
     own socio features + the (shared) hourly climate/calendar, then multiply by
     the cell area. This integrates the non-linear density correctly per cell —
     the authoritative use of the model — instead of averaging."""
-    import xgboost as xgb
-
     hpy = 8760
     n = len(lats)
     if n == 0:
@@ -380,7 +379,8 @@ def predict_region_cell_demand(
             else:
                 raise ValueError(f"Unknown density feature {name}")
         X = np.column_stack(cols)
-        pred = model._model.predict(xgb.DMatrix(X, feature_names=feature_order))
+        from esfex.models.xgb_device import predict as _xgb_predict
+        pred = _xgb_predict(model._model, X, feature_names=feature_order)
         dens = np.power(10.0, np.asarray(pred, dtype=np.float64)).reshape(m, hpy)
         out[s:e] = dens * areas[s:e, None]
     return out

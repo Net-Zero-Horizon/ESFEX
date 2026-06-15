@@ -248,9 +248,9 @@ class DemandMLModel:
             raise RuntimeError("Model not loaded.")
 
         if self._engine == "xgboost":
-            import xgboost as xgb
-            dmatrix = xgb.DMatrix(features, feature_names=FEATURE_COLS)
-            predictions = self._model.predict(dmatrix)
+            from esfex.models.xgb_device import predict as _xgb_predict
+            predictions = _xgb_predict(
+                self._model, features, feature_names=FEATURE_COLS)
         elif self._engine == "tft":
             predictions = self._model.predict_hourly_features(features)
         else:
@@ -272,9 +272,9 @@ class DemandMLModel:
             raise RuntimeError("Model not loaded.")
 
         if self._engine == "xgboost":
-            import xgboost as xgb
-            dmatrix = xgb.DMatrix(features, feature_names=FEATURE_COLS)
-            predictions = self._model.predict(dmatrix)
+            from esfex.models.xgb_device import predict as _xgb_predict
+            predictions = _xgb_predict(
+                self._model, features, feature_names=FEATURE_COLS)
         elif self._engine == "tft":
             predictions = self._model.predict_hourly_features(features)
         else:
