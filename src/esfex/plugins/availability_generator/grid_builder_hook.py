@@ -52,15 +52,16 @@ _WIND_HINTS = frozenset({"wind", "eolic", "eolica", "eolico"})
 _WEATHER_CELL_DEG = 0.1
 
 # Bounded concurrency for the remaining unique fetches. Each call is network-
-# bound (~30 s server-side; the GIL is released during I/O), so the pool size,
-# not CPU, sets throughput. Open-Meteo's free budget is ~600 req/min: with W
-# workers at ~30 s/call the peak rate is ~2·W req/min, so even 16 workers
-# (~32 req/min) sits far below it. We still cap concurrency because the backend
-# does no retry/throttling — over-bursting earns HTTP 429s, which (now that we no
-# longer fabricate flat profiles) become silently missing generators. Pair the
-# cap with retry-on-failure (see ``_fetch_one_weather_cf``). Override with the
-# ESFEX_AVAILABILITY_WORKERS environment variable.
-_WEATHER_MAX_WORKERS = 16
+# bound (~30 s server-side; the GIL is released during I/O). Open-Meteo's free
+# budget is ~600 req/min, so the rate limit is not the binding constraint here;
+# we follow the same default the rest of the app uses for its worker pools —
+# ``cpu_count - 2`` (leaving two cores for the UI/main thread). We still cap
+# because the backend does no retry/throttling — over-bursting earns HTTP 429s,
+# which (now that we no longer fabricate flat profiles) become silently missing
+# generators. Pair the cap with retry-on-failure (see ``_fetch_one_weather_cf``).
+# Override with the ESFEX_AVAILABILITY_WORKERS environment variable.
+def _default_max_workers() -> int:
+    return max(1, (os.cpu_count() or 4) - 2)
 
 # Retry transient weather-fetch failures (429 / 5xx / timeouts) with exponential
 # backoff + jitter, since the backends issue a bare ``requests.get`` with no
@@ -71,8 +72,9 @@ _WEATHER_BACKOFF_S = 2.0
 
 
 def _resolve_max_workers(total: int) -> int:
-    """Worker count for the fetch pool: never more than the work, env-overridable."""
-    cap = _WEATHER_MAX_WORKERS
+    """Worker count for the fetch pool: ``cpu_count - 2`` by default, never more
+    than the work, env-overridable via ESFEX_AVAILABILITY_WORKERS."""
+    cap = _default_max_workers()
     override = os.environ.get("ESFEX_AVAILABILITY_WORKERS")
     if override:
         try:

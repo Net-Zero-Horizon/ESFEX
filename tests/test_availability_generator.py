@@ -595,7 +595,20 @@ class TestGridBuilderHookDedup:
         assert gbh._resolve_max_workers(100) == 3   # env cap wins
         assert gbh._resolve_max_workers(2) == 2      # never more than the work
         monkeypatch.setenv("ESFEX_AVAILABILITY_WORKERS", "garbage")
-        assert gbh._resolve_max_workers(100) == gbh._WEATHER_MAX_WORKERS
+        # Non-integer override ignored → falls back to the cpu_count-2 default.
+        assert gbh._resolve_max_workers(1000) == gbh._default_max_workers()
+
+    def test_default_workers_is_cpu_minus_two(self, monkeypatch):
+        from esfex.plugins.availability_generator import grid_builder_hook as gbh
+
+        monkeypatch.delenv("ESFEX_AVAILABILITY_WORKERS", raising=False)
+        monkeypatch.setattr(gbh.os, "cpu_count", lambda: 10)
+        assert gbh._default_max_workers() == 8
+        assert gbh._resolve_max_workers(1000) == 8
+        monkeypatch.setattr(gbh.os, "cpu_count", lambda: 1)
+        assert gbh._default_max_workers() == 1   # floored at 1
+        monkeypatch.setattr(gbh.os, "cpu_count", lambda: None)
+        assert gbh._default_max_workers() == 2   # None → assume 4 cores
 
     def test_synthetic_fuel_still_written_under_weather_mode(self):
         from esfex.plugins.availability_generator import grid_builder_hook as gbh
