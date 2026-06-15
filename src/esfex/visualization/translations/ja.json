@@ -43,7 +43,8 @@
     "about": "ESFEXについて...",
     "edit": "&編集",
     "undo": "元に戻す",
-    "redo": "やり直し"
+    "redo": "やり直し",
+    "custom_constraints": "カスタム制約…"
   },
   "shortcuts_dialog": {
     "title": "キーボードショートカット",
@@ -1390,6 +1391,26 @@
     "warning": "警告",
     "info": "情報",
     "enable": "有効化"
+  },
+  "custom_constraints": {
+    "title": "カスタム制約",
+    "intro": "このシステムに適用されるユーザー定義の最適化制約。",
+    "edit_title": "制約を編集",
+    "name": "名前",
+    "target": "モデル",
+    "sense": "符号",
+    "rhs": "RHS",
+    "summary": "式",
+    "terms": "項（係数 × 変数）:",
+    "col_variable": "変数",
+    "col_index": "インデックス",
+    "col_coeff": "係数",
+    "index_hint": "インデックス: カンマ区切りの名前。軸を合計するには 'all'。例: gen_output → 'GasCC, all'、tech_investment → '2030, SolarPV, all'。",
+    "add_term": "項を追加",
+    "remove_term": "項を削除",
+    "add": "追加",
+    "edit": "編集",
+    "remove": "削除"
   },
   "geo_domain": {
     "group": "インポートした領域をドメインとして使用",

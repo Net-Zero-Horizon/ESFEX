@@ -26,6 +26,8 @@ from esfex.visualization.data.gui_model import (
     GuiBus,
     GuiDCPowerFlow,
     GuiDemandSector,
+    GuiCustomConstraint,
+    GuiCustomConstraintTerm,
     GuiDevelopmentZone,
     GuiElectrolyzerInstance,
     GuiEVCategory,
@@ -1890,12 +1892,29 @@ def _system_to_gui_state(sys: SystemConfig,
             conv.to_node, conv.latitude, conv.longitude,
         ) or conv.to_bus
 
+    custom_constraints = [
+        GuiCustomConstraint(
+            name=cc.name, type=cc.type, target=cc.target,
+            sense=cc.sense, rhs=cc.rhs,
+            terms=[
+                GuiCustomConstraintTerm(
+                    variable=t.variable, index=list(t.index),
+                    coefficient=t.coefficient,
+                )
+                for t in cc.terms
+            ],
+            params=dict(cc.params or {}),
+        )
+        for cc in (sys.custom_constraints or [])
+    ]
+
     state = GuiSystemState(
         name=sys.name,
         map_center=map_center,
         map_zoom=sys.map_zoom or 7,
         nodes=nodes,
         buses=buses,
+        custom_constraints=custom_constraints,
         _next_bus_id=next_bus_id,
         generators=generators,
         batteries=batteries,
@@ -3034,6 +3053,23 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                     nd = entry.node_data[0] if entry.node_data else None
                     sys_dict["freq_converters"][ci]["invest_cost"] = nd.invest_cost if nd else 0.0
                     sys_dict["freq_converters"][ci]["invest_max_power"] = nd.invest_max if nd else 0.0
+
+    # User-defined custom constraints
+    if state.custom_constraints:
+        sys_dict["custom_constraints"] = []
+        for cc in state.custom_constraints:
+            cd = {
+                "name": cc.name, "type": cc.type, "target": cc.target,
+                "sense": cc.sense, "rhs": cc.rhs,
+                "terms": [
+                    {"variable": t.variable, "index": list(t.index),
+                     "coefficient": t.coefficient}
+                    for t in cc.terms
+                ],
+            }
+            if cc.params:
+                cd["params"] = dict(cc.params)
+            sys_dict["custom_constraints"].append(cd)
 
     # Development zones
     if state.development_zones:

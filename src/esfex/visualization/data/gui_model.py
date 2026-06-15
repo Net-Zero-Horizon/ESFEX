@@ -359,6 +359,26 @@ class GuiFrequencyConverter:
 
 
 @dataclass
+class GuiCustomConstraintTerm:
+    """One term of a linear user constraint (coefficient × decision variable)."""
+    variable: str = "gen_output"
+    index: list = field(default_factory=list)   # names (str) | int | "all"
+    coefficient: float = 1.0
+
+
+@dataclass
+class GuiCustomConstraint:
+    """A user-defined optimization constraint (see CustomConstraintConfig)."""
+    name: str = ""
+    type: str = "linear"
+    target: str = "operational"
+    sense: str = "<="
+    rhs: float = 0.0
+    terms: list[GuiCustomConstraintTerm] = field(default_factory=list)
+    params: dict = field(default_factory=dict)
+
+
+@dataclass
 class GuiDevelopmentZone:
     name: str
     technology: str
@@ -1005,6 +1025,7 @@ class GuiSystemState:
     acdc_converters: list[GuiACDCConverter] = field(default_factory=list)
     freq_converters: list[GuiFrequencyConverter] = field(default_factory=list)
     development_zones: list[GuiDevelopmentZone] = field(default_factory=list)
+    custom_constraints: list[GuiCustomConstraint] = field(default_factory=list)
     fuel_entry_points: list[GuiFuelEntryPoint] = field(default_factory=list)
     fuel_storages: dict[str, GuiFuelStorage] = field(default_factory=dict)
     fuel_transport_routes: list[GuiFuelTransportRoute] = field(default_factory=list)

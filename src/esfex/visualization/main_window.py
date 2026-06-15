@@ -1694,6 +1694,13 @@ class MainWindow(QMainWindow):
         self._act_redo.triggered.connect(self._on_redo)
         edit_menu.addAction(self._act_redo)
 
+        edit_menu.addSeparator()
+        self._act_custom_constraints = QAction(
+            tr("menu.custom_constraints"), self)
+        self._act_custom_constraints.triggered.connect(
+            self._on_custom_constraints)
+        edit_menu.addAction(self._act_custom_constraints)
+
         # ── Workflows menu ──
         self._workflows_menu = menu_bar.addMenu(tr("menu.workflows"))
         workflows_menu = self._workflows_menu
@@ -2276,6 +2283,19 @@ class MainWindow(QMainWindow):
 
     def _on_redo(self):
         self.model.redo()
+
+    def _on_custom_constraints(self):
+        """Open the user-defined optimization constraints editor for the
+        current system."""
+        from PySide6.QtWidgets import QDialog
+        from esfex.visualization.panels.custom_constraints_dialog import (
+            CustomConstraintsDialog,
+        )
+        state = self.model.state
+        dlg = CustomConstraintsDialog(state.custom_constraints, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            state.custom_constraints = dlg.result_constraints()
+            self.model.dataMutated.emit()
 
     def _on_undo_changed(self):
         self._act_undo.setEnabled(self.model.can_undo)

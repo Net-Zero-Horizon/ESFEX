@@ -43,7 +43,8 @@
     "about": "About ESFEX...",
     "edit": "&Edit",
     "undo": "Undo",
-    "redo": "Redo"
+    "redo": "Redo",
+    "custom_constraints": "Custom Constraints…"
   },
   "shortcuts_dialog": {
     "title": "Keyboard Shortcuts",
@@ -1378,6 +1379,26 @@
     "warning": "Warning",
     "info": "Info",
     "enable": "Enable"
+  },
+  "custom_constraints": {
+    "title": "Custom Constraints",
+    "intro": "User-defined optimization constraints applied to this system.",
+    "edit_title": "Edit Constraint",
+    "name": "Name",
+    "target": "Model",
+    "sense": "Sense",
+    "rhs": "RHS",
+    "summary": "Expression",
+    "terms": "Terms (coefficient × variable):",
+    "col_variable": "Variable",
+    "col_index": "Index",
+    "col_coeff": "Coefficient",
+    "index_hint": "Index: names separated by commas, with 'all' to sum over an axis — e.g. gen_output → 'GasCC, all'; tech_investment → '2030, SolarPV, all'.",
+    "add_term": "Add Term",
+    "remove_term": "Remove Term",
+    "add": "Add",
+    "edit": "Edit",
+    "remove": "Remove"
   },
   "geo_domain": {
     "group": "Use imported area as domain",

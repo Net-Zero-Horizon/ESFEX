@@ -43,7 +43,8 @@
     "about": "Acerca de ESFEX...",
     "edit": "&Editar",
     "undo": "Deshacer",
-    "redo": "Rehacer"
+    "redo": "Rehacer",
+    "custom_constraints": "Restricciones Personalizadas…"
   },
   "shortcuts_dialog": {
     "title": "Atajos de Teclado",
@@ -1339,6 +1340,26 @@
     "warning": "Advertencia",
     "info": "Info",
     "enable": "Habilitar"
+  },
+  "custom_constraints": {
+    "title": "Restricciones Personalizadas",
+    "intro": "Restricciones de optimización definidas por el usuario para este sistema.",
+    "edit_title": "Editar Restricción",
+    "name": "Nombre",
+    "target": "Modelo",
+    "sense": "Sentido",
+    "rhs": "RHS",
+    "summary": "Expresión",
+    "terms": "Términos (coeficiente × variable):",
+    "col_variable": "Variable",
+    "col_index": "Índice",
+    "col_coeff": "Coeficiente",
+    "index_hint": "Índice: nombres separados por comas, con 'all' para sumar sobre un eje — p.ej. gen_output → 'GasCC, all'; tech_investment → '2030, SolarPV, all'.",
+    "add_term": "Añadir Término",
+    "remove_term": "Quitar Término",
+    "add": "Añadir",
+    "edit": "Editar",
+    "remove": "Quitar"
   },
   "geo_domain": {
     "group": "Usar área importada como dominio",
