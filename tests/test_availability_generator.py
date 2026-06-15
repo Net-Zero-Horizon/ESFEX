@@ -562,6 +562,41 @@ class TestGridBuilderHookDedup:
             assert gens["w0"].availability_file is None
             assert not (Path(tmp) / "w0_availability.csv").exists()
 
+    def test_transient_failure_is_retried_then_succeeds(self):
+        from esfex.plugins.availability_generator import grid_builder_hook as gbh
+
+        gens = {"w0": self._gen(35.0, 139.0)}
+        state = SimpleNamespace(generators=gens)
+
+        calls = {"n": 0}
+
+        def flaky(lat, lng, year, source, rated_power_mw=1.0):
+            calls["n"] += 1
+            if calls["n"] < 3:          # fail the first two attempts
+                raise RuntimeError("HTTP 429 Too Many Requests")
+            return np.full(8760, 0.45)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("windrex.compute_wind_hourly_cf", flaky, create=True), \
+                patch.object(gbh.time, "sleep", lambda *_: None):  # no real wait
+            written = gbh.generate_for_grid_build(
+                state, Path(tmp), use_weather_data=True)
+
+            # Retried up to the 3rd attempt, then the real profile is written.
+            assert calls["n"] == 3
+            assert "w0" in written
+            data = np.loadtxt(written["w0"], delimiter=",")
+            assert np.allclose(data, 0.45)
+
+    def test_env_override_caps_workers(self, monkeypatch):
+        from esfex.plugins.availability_generator import grid_builder_hook as gbh
+
+        monkeypatch.setenv("ESFEX_AVAILABILITY_WORKERS", "3")
+        assert gbh._resolve_max_workers(100) == 3   # env cap wins
+        assert gbh._resolve_max_workers(2) == 2      # never more than the work
+        monkeypatch.setenv("ESFEX_AVAILABILITY_WORKERS", "garbage")
+        assert gbh._resolve_max_workers(100) == gbh._WEATHER_MAX_WORKERS
+
     def test_synthetic_fuel_still_written_under_weather_mode(self):
         from esfex.plugins.availability_generator import grid_builder_hook as gbh
 

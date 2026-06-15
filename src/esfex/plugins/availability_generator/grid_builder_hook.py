@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
+import random
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -49,9 +52,35 @@ _WIND_HINTS = frozenset({"wind", "eolic", "eolica", "eolico"})
 _WEATHER_CELL_DEG = 0.1
 
 # Bounded concurrency for the remaining unique fetches. Each call is network-
-# bound (the GIL is released during I/O), so a small pool gives a large speedup
-# while staying well under the weather backends' request-rate limits.
-_WEATHER_MAX_WORKERS = 8
+# bound (~30 s server-side; the GIL is released during I/O), so the pool size,
+# not CPU, sets throughput. Open-Meteo's free budget is ~600 req/min: with W
+# workers at ~30 s/call the peak rate is ~2·W req/min, so even 16 workers
+# (~32 req/min) sits far below it. We still cap concurrency because the backend
+# does no retry/throttling — over-bursting earns HTTP 429s, which (now that we no
+# longer fabricate flat profiles) become silently missing generators. Pair the
+# cap with retry-on-failure (see ``_fetch_one_weather_cf``). Override with the
+# ESFEX_AVAILABILITY_WORKERS environment variable.
+_WEATHER_MAX_WORKERS = 16
+
+# Retry transient weather-fetch failures (429 / 5xx / timeouts) with exponential
+# backoff + jitter, since the backends issue a bare ``requests.get`` with no
+# retry of their own. This lets us raise concurrency without turning the
+# occasional rate-limit blip into a permanently profile-less generator.
+_WEATHER_RETRIES = 3
+_WEATHER_BACKOFF_S = 2.0
+
+
+def _resolve_max_workers(total: int) -> int:
+    """Worker count for the fetch pool: never more than the work, env-overridable."""
+    cap = _WEATHER_MAX_WORKERS
+    override = os.environ.get("ESFEX_AVAILABILITY_WORKERS")
+    if override:
+        try:
+            cap = max(1, int(override))
+        except ValueError:
+            logger.warning(
+                "Ignoring non-integer ESFEX_AVAILABILITY_WORKERS=%r", override)
+    return max(1, min(cap, total))
 
 
 def _profile_kind(canonical_fuel: str) -> str:
@@ -254,7 +283,7 @@ def _prefetch_weather_cfs(
 
     done = 0
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(_WEATHER_MAX_WORKERS, total)
+        max_workers=_resolve_max_workers(total)
     ) as ex:
         for fut in concurrent.futures.as_completed(
             [ex.submit(_work, k) for k in keys]
@@ -284,8 +313,11 @@ def _fetch_one_weather_cf(
     weather_year: int,
     weather_source: str,
 ) -> Optional[np.ndarray]:
-    """Query the weather backend for one location. ``None`` → use flat default.
+    """Query the weather backend for one location.
 
+    ``None`` (backend not installed) → the caller uses the flat default. A
+    transient failure (429 / 5xx / timeout) is retried with backoff; if every
+    attempt fails the exception propagates so the caller skips that generator.
     Runs on a worker thread; must not touch Qt or shared mutable state.
     """
     if kind == "solar":
@@ -294,20 +326,37 @@ def _fetch_one_weather_cf(
         except ImportError:
             logger.debug("solarex unavailable — using flat default")
             return None
-        return np.asarray(compute_solar_hourly_cf(
+        query = lambda: np.asarray(compute_solar_hourly_cf(  # noqa: E731
             gen.latitude, gen.longitude, weather_year, weather_source,
         ))
-    if kind == "wind":
+    elif kind == "wind":
         try:
             from windrex import compute_wind_hourly_cf
         except ImportError:
             logger.debug("windrex unavailable — using flat default")
             return None
-        return np.asarray(compute_wind_hourly_cf(
+        query = lambda: np.asarray(compute_wind_hourly_cf(  # noqa: E731
             gen.latitude, gen.longitude, weather_year, weather_source,
             rated_power_mw=max(gen.rated_power, 1.0),
         ))
-    return None
+    else:
+        return None
+
+    label = f"{kind} @ ({gen.latitude:.3f}, {gen.longitude:.3f})"
+    last_exc: Optional[Exception] = None
+    for attempt in range(_WEATHER_RETRIES):
+        try:
+            return query()
+        except Exception as exc:  # transient network / rate-limit errors
+            last_exc = exc
+            if attempt < _WEATHER_RETRIES - 1:
+                delay = _WEATHER_BACKOFF_S * (2 ** attempt) * (0.5 + random.random())
+                logger.debug(
+                    "Weather fetch retry %d/%d for %s in %.1fs (%s)",
+                    attempt + 1, _WEATHER_RETRIES - 1, label, delay, exc)
+                time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _default_for_kind(kind: str) -> float:
