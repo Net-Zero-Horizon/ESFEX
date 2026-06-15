@@ -1520,7 +1520,7 @@ class GridMappingBuildStep(QWidget):
                 return
             # Drop the territory overlay before drawing the real network.
             self._clear_voronoi()
-            self._run_build()
+            self._start_build(None)  # manual nodes — keep existing nodes
 
     def _start_clustering(self):
         from esfex.visualization.workflows.grid_mapping_clustering import (
@@ -1578,327 +1578,141 @@ class GridMappingBuildStep(QWidget):
         self._lbl_cluster_status.setText(msg)
 
     def _on_clustering_done(self, result):
-        # Naming finished. Paint its 100% state + the next-step labels BEFORE
-        # the (synchronous) node creation + build take over the main thread,
-        # otherwise the UI freezes on the last-painted naming message
-        # ("Naming nodes N-1/N") and looks stuck on the last node.
+        # Naming finished. Hand the heavy node-creation + build off to a worker
+        # thread so the GUI stays responsive (large systems used to freeze the
+        # Studio for tens of minutes here).
         self._cluster_progress.setValue(100)
-        self._lbl_cluster_status.setText(
-            f"Creating {len(result.node_positions)} nodes…"
-        )
-        self._lbl_build_status.setText("Building network…")
-        QApplication.processEvents()
-
-        # Block per-element model signals while creating the nodes: otherwise
-        # every add_node renders a map marker + tree row synchronously, which
-        # freezes the UI for large regions. The pipeline repaints the whole
-        # network once via the single stateLoaded emitted at the end of
-        # _run_auto_connect.
-        self._model.blockSignals(True)
-        try:
-            with self._model.suspend_checkpoints():
-                # The Grid Builder defines the full node set, so drop any
-                # placeholder node(s) created with the system (e.g. the default
-                # "Node 0") — otherwise they duplicate the computed nodes.
-                while self._model.state.nodes:
-                    self._model.remove_node(len(self._model.state.nodes) - 1)
-                for lat, lng, name in result.node_positions:
-                    idx = self._model.add_node(name)
-                    self._model.update_node(
-                        idx, centroid_lat=lat, centroid_lng=lng,
-                    )
-        finally:
-            self._model.blockSignals(False)
-
         self._lbl_cluster_status.setText(
             f"Created {result.n_clusters} nodes via "
             f"{result.criterion_used} clustering."
         )
-        QApplication.processEvents()
-        # Don't emit stateLoaded here — _run_auto_connect emits once at the end
-        self._run_build()
+        self._start_build(result.node_positions)
 
     def _on_clustering_error(self, error_msg: str):
         self._cluster_progress.setVisible(False)
         self._lbl_cluster_status.setText(f"Clustering error: {error_msg}")
         self._btn_build.setEnabled(True)
 
-    def _run_build(self):
-        from esfex.visualization.workflows.grid_mapping_builder import (
-            build_grid_from_features,
-        )
+    def _start_build(self, node_positions):
+        """Start the build pipeline on a background worker.
 
-        self._lbl_build_status.setText("Building network...")
-
-        try:
-            # Block per-element signals so the hundreds of buses/generators/
-            # lines created by the build don't each render synchronously and
-            # freeze the UI; the final stateLoaded (in _run_auto_connect)
-            # repaints the whole network once.
-            self._phase_timings = []
-            self._model.blockSignals(True)
-            try:
-                with self._model.suspend_checkpoints():
-                    _t0 = time.perf_counter()
-                    result = build_grid_from_features(
-                        model=self._model,
-                        features=self._features,
-                        bus_strategy=self._config.get("bus_strategy", "per_voltage"),
-                        snap_threshold_km=self._config.get("snap_threshold_km", 5.0),
-                        target_node=None,
-                        faithful=True,
-                        station_radius_km=self._spin_station_radius.value(),
-                        min_capacity_mw=self._config.get("min_capacity_mw", 0.0),
-                    )
-                    _dt = time.perf_counter() - _t0
-                    self._phase_timings.append(("Build network", _dt))
-                    logger.info("Grid build phase 'Build network': %.1fs", _dt)
-            finally:
-                self._model.blockSignals(False)
-
-            summary = result.summary()
-            self._lbl_build_status.setText("Build complete. Running auto-connect...")
-            self._result_text.setPlainText(summary)
-
-            self._built = True
-
-        except Exception as exc:
-            logger.exception("Grid mapping build error")
-            self._lbl_build_status.setText(f"Error: {exc}")
-            self._btn_build.setEnabled(True)
-            return
-
-        # Automatically run the post-build pass after building. Faithful mode
-        # is always on, so auto-connect never fabricates connectivity — this
-        # only runs parameter inference, simplification and cleanup.
-        self._run_auto_connect(faithful=True)
-
-    def _run_auto_connect(self, faithful: bool = False):
-        """Run iterative auto-connect, then simplify, then redraw once.
-
-        The full pipeline runs against the model state without emitting
-        ``stateLoaded`` until the very end \u2014 the GUI only repaints
-        once, on the final simplified topology. This avoids the
-        redraw-then-mutate-then-redraw race that was leaving orphan
-        markers when simplification ran as a separate step.
+        ``node_positions`` is the auto-clustering result, or ``None`` to build
+        on the user's existing (manual) nodes. Widget values are captured here
+        on the main thread; the worker never touches a Qt widget.
         """
-        from esfex.visualization.data.validation import (
-            apply_simplification_level, SimplificationConfig,
-            drop_dangling_refs, drop_isolated_components,
-            rebuild_visual_wire_lines,
+        from esfex.visualization.workflows.grid_mapping_build_worker import (
+            BuildParams,
+            GridBuildWorker,
         )
 
-        simplify_summary = ""
-        island_summary = ""
-        n_created = 0
+        self._lbl_build_status.setText("Building network\u2026")
+        main_window = self.window()
+        params = BuildParams(
+            node_positions=node_positions,
+            n_clusters=len(node_positions) if node_positions else 0,
+            criterion_used="",
+            features=self._features,
+            config=self._config,
+            station_radius_km=self._spin_station_radius.value(),
+            simplify_level=self._combo_simplify.currentData() or 0,
+            min_component=self._spin_min_component.value(),
+            gen_availability=self._chk_gen_availability.isChecked(),
+            use_weather=self._chk_use_weather.isChecked(),
+            cfg_path=getattr(main_window, "_config_path", None),
+        )
 
-        if not hasattr(self, "_phase_timings"):
-            self._phase_timings = []
+        # Block per-element signals so the thousands of created elements don't
+        # each render synchronously; the worker mutates state and we repaint
+        # once via stateLoaded when it finishes.
+        self._model.blockSignals(True)
 
-        def _timed(label, fn):
-            _t0 = time.perf_counter()
-            try:
-                return fn()
-            finally:
-                _dt = time.perf_counter() - _t0
-                self._phase_timings.append((label, _dt))
-                logger.info("Grid build phase '%s': %.1fs", label, _dt)
-
+        # Indeterminate progress + repurpose the Build button as Cancel.
+        self._cluster_progress.setRange(0, 0)
+        self._cluster_progress.setVisible(True)
+        self._btn_build.setText("Cancel")
         try:
-            # Phase 1: auto-connect is SKIPPED — faithful import is the only
-            # build mode now, and it must never fabricate connectivity
-            # (voltage transformer chains, generator step-up chains, long
-            # bridges) that does not exist in OSM. The map is just the real
-            # topology built above.
-            n_created = 0
+            self._btn_build.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._btn_build.clicked.connect(self._on_build_cancel)
+        self._btn_build.setEnabled(True)
 
-            # Phase 1b: infer missing electrical parameters (capacities,
-            # impedances) from the connected gen / demand. Without this,
-            # lines and transformers built from sources lacking voltage
-            # or rated MVA stay at 0 and break downstream power-flow. This
-            # runs silently — its tally is no longer shown in the log.
-            from esfex.visualization.workflows.grid_mapping_inference import (
-                infer_electrical_params,
-            )
-            with self._model.suspend_checkpoints():
-                _timed(
-                    "Parameter inference",
-                    lambda: infer_electrical_params(self._model.state),
-                )
+        self._build_worker = GridBuildWorker(self._model, params, self)
+        self._build_worker.progress.connect(self._on_build_progress)
+        self._build_worker.finished.connect(self._on_build_done)
+        self._build_worker.error.connect(self._on_build_error)
+        self._build_worker.start()
 
-            # Phase 2: simplification (no GUI emit yet)
-            level = self._combo_simplify.currentData() or 0
-            self._lbl_build_status.setText(
-                f"Simplifying (level {level})..."
-            )
-            with self._model.suspend_checkpoints():
-                simp_log, _issues = _timed(
-                    f"Simplification (level {level})",
-                    lambda: apply_simplification_level(
-                        self._model, level, SimplificationConfig(),
-                    ),
-                )
-            simplify_summary = "\n".join(simp_log)
+    def _on_build_progress(self, text: str):
+        self._lbl_build_status.setText(text)
 
-            # Phase 2b: drop isolated debris components. Always run —
-            # even with min_buses=1 we report component sizes so the
-            # user can diagnose why "isolated" elements survive.
-            min_size = self._spin_min_component.value()
-            with self._model.suspend_checkpoints():
-                counts = _timed(
-                    "Drop isolated components",
-                    lambda: drop_isolated_components(
-                        self._model.state, min_buses=min_size,
-                        keep_largest=True,
-                    ),
-                )
-            island_lines: list[str] = []
-            n_total = counts.get("_components_total", 0)
-            n_dropped = counts.get("_components_dropped", 0)
-            top_sizes = counts.get("_top_sizes", [])
-            island_lines.append(
-                f"Components: {n_total} total "
-                f"(largest = {counts.get('_largest_size', 0)} buses, "
-                f"top sizes: {top_sizes})"
-            )
-            island_lines.append(
-                f"Threshold: drop components with < {min_size} bus(es), "
-                f"keeping the largest"
-            )
-            if n_dropped == 0:
-                island_lines.append(
-                    "→ Nothing dropped. If you still see isolated "
-                    "elements, they are NOT in their own component "
-                    "(probably broken endpoints — see below)."
-                )
-            else:
-                island_lines.append(
-                    f"→ Dropped {n_dropped} component(s): "
-                    f"{counts['buses']} bus(es), "
-                    f"{counts['lines']} line(s), "
-                    f"{counts['transformers']} transformer(s), "
-                    f"{counts['converters']} converter(s), "
-                    f"{counts['generators']} generator(s), "
-                    f"{counts['batteries']} battery(ies)"
-                    + (f", {counts['electrolyzers']} electrolyzer(s)"
-                       if counts.get('electrolyzers') else "")
-                )
+    def _on_build_cancel(self):
+        worker = getattr(self, "_build_worker", None)
+        if worker is not None and worker.isRunning():
+            self._lbl_build_status.setText("Cancelling\u2026")
+            self._btn_build.setEnabled(False)
+            worker.cancel()
 
-            # Phase 2c: hard sweep — anything still pointing at a
-            # missing bus dies now. Catches ghosts left by every
-            # earlier step (simplification, prune, equipment merge).
-            with self._model.suspend_checkpoints():
-                ref_counts = _timed(
-                    "Drop dangling refs",
-                    lambda: drop_dangling_refs(self._model.state),
-                )
-            n_dangling = sum(ref_counts.values())
-            if n_dangling > 0:
-                island_lines.append(
-                    f"Dangling-reference sweep removed: "
-                    f"{ref_counts['lines']} line(s), "
-                    f"{ref_counts['transformers']} transformer(s), "
-                    f"{ref_counts['converters']} converter(s), "
-                    f"{ref_counts['generators']} generator(s), "
-                    f"{ref_counts['batteries']} battery(ies)"
-                    + (f", {ref_counts['electrolyzers']} electrolyzer(s)"
-                       if ref_counts.get('electrolyzers') else "")
-                    + " with broken bus refs."
-                )
+    def _restore_build_button(self):
+        self._cluster_progress.setRange(0, 100)
+        self._cluster_progress.setVisible(False)
+        self._btn_build.setText("Build Network")
+        try:
+            self._btn_build.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._btn_build.clicked.connect(self._do_build)
+        self._btn_build.setEnabled(True)
 
-            # Phase 2d: rebuild visual wire-lines. Transformers/equipment
-            # render through ``EndpointRef``-decorated lines, not the
-            # legacy ``from_bus``/``to_bus`` strings. Without this pass
-            # the bus graph can be fully connected but the map shows
-            # transformers as floating dots between unconnected buses.
-            with self._model.suspend_checkpoints():
-                n_wires = _timed(
-                    "Rebuild visual wires",
-                    lambda: rebuild_visual_wire_lines(self._model.state),
-                )
-            if n_wires:
-                island_lines.append(
-                    f"Rebuilt {n_wires} visual wire-line(s) "
-                    f"(transformer / equipment connections)."
-                )
+    def _on_build_done(self, res: dict):
+        # Back on the main thread: unblock signals and repaint once.
+        self._model.blockSignals(False)
+        self._build_worker = None
+        self._phase_timings = res.get("phase_timings", [])
+        self._model.stateLoaded.emit()
 
-            # Phase 2e: optional availability-profile generation.
-            if (self._chk_gen_availability.isChecked()
-                    and self._model.state.generators):
-                self._lbl_build_status.setText(
-                    "Generating availability profiles..."
-                )
-                from esfex.plugins.availability_generator.grid_builder_hook import (
-                    generate_for_grid_build,
-                )
-                # Pick output dir: alongside the loaded YAML if known,
-                # else a sibling 'availability' folder.
-                main_window = self.window()
-                cfg_path = getattr(main_window, "_config_path", None)
-                if cfg_path:
-                    out_dir = Path(cfg_path).parent / "availability"
-                else:
-                    out_dir = Path.cwd() / "availability"
-                with self._model.suspend_checkpoints():
-                    written = generate_for_grid_build(
-                        self._model.state,
-                        out_dir,
-                        use_weather_data=self._chk_use_weather.isChecked(),
-                    )
-                if written:
-                    island_lines.append(
-                        f"Generated {len(written)} availability "
-                        f"profile(s) under {out_dir}."
-                    )
-            island_summary = "\n".join(island_lines)
-
-        except Exception as exc:
-            logger.exception("Build pipeline error during connect/simplify")
-            self._lbl_build_status.setText(
-                f"Network built, but post-processing failed: {exc}"
-            )
-
-        finally:
-            # Phase 3: single emit so the GUI paints the final state.
-            # Even on failure we still emit so the user sees the partial
-            # network instead of a blank canvas.
-            self._model.stateLoaded.emit()
-
-        # Status + log assembly
-        if n_created == 0:
-            head = "Network built and fully connected"
-        else:
-            head = (
-                f"Network built. Auto-connect created/modified "
-                f"{n_created} element(s)"
-            )
-        level = self._combo_simplify.currentData() or 0
-        if level > 0:
-            head += f"; simplified at level {level}."
-        else:
-            head += "; cleanup pass applied."
-        self._lbl_build_status.setText(head)
-
-        prev = self._result_text.toPlainText()
-        sections = [prev] if prev else []
-        # The Auto-Connect section is intentionally not shown: faithful import
-        # never fabricates connections, so it carried only a "skipped" notice
-        # and the parameter-inference tallies (which still run silently).
-        if simplify_summary:
-            sections.append("\u2500\u2500 Simplification \u2500\u2500\n" + simplify_summary)
-        if island_summary:
-            sections.append("\u2500\u2500 Isolated Cleanup \u2500\u2500\n" + island_summary)
-        timings = getattr(self, "_phase_timings", None)
-        if timings:
-            total_s = sum(dt for _, dt in timings)
-            timing_lines = [f"  {label}: {dt:.1f}s" for label, dt in timings]
+        # Assemble the result text.
+        sections = []
+        if res.get("build_summary"):
+            sections.append(res["build_summary"])
+        if res.get("simplify_summary"):
+            sections.append(
+                "\u2500\u2500 Simplification \u2500\u2500\n" + res["simplify_summary"])
+        if res.get("island_summary"):
+            sections.append(
+                "\u2500\u2500 Isolated Cleanup \u2500\u2500\n" + res["island_summary"])
+        if self._phase_timings:
+            total_s = sum(dt for _, dt in self._phase_timings)
+            timing_lines = [f"  {label}: {dt:.1f}s" for label, dt in self._phase_timings]
             timing_lines.append(f"  Total: {total_s:.1f}s")
             sections.append(
                 "\u2500\u2500 Timing \u2500\u2500\n" + "\n".join(timing_lines))
         self._result_text.setPlainText("\n\n".join(sections))
 
+        if res.get("cancelled"):
+            self._lbl_build_status.setText("Build cancelled (partial network shown).")
+        else:
+            level = res.get("simplify_level", 0)
+            head = "Network built"
+            head += (f"; simplified at level {level}." if level > 0
+                     else "; cleanup pass applied.")
+            self._lbl_build_status.setText(head)
+
+        self._built = True
         self._connected = True
+        self._restore_build_button()
         self.buildFinished.emit()
+
+    def _on_build_error(self, msg: str):
+        self._model.blockSignals(False)
+        self._build_worker = None
+        # Show whatever partial network was built before the failure.
+        try:
+            self._model.stateLoaded.emit()
+        except Exception:
+            pass
+        self._lbl_build_status.setText(f"Error: {msg}")
+        self._restore_build_button()
 
 
 # =====================================================================

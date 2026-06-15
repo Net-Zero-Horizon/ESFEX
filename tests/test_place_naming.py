@@ -71,21 +71,25 @@ def test_build_replaces_placeholder_node_no_duplicate(qapp):
     """The computed nodes replace the system's default placeholder ("Node 0"),
     rather than being appended next to it (#10 duplicate-Node-0)."""
     from esfex.visualization.data.gui_model import GuiModel
-    from esfex.visualization.workflows.grid_mapping_clustering import (
-        ClusterResult,
-    )
-    from esfex.visualization.workflows.grid_mapping_steps import (
-        GridMappingBuildStep,
+    from esfex.visualization.workflows.grid_mapping_build_worker import (
+        BuildParams,
+        GridBuildWorker,
     )
 
     model = GuiModel()
     model.add_node("Node 0")  # the placeholder created with every new system
-    step = GridMappingBuildStep(model=model)
-    step._run_build = lambda: None  # skip the heavy OSM build
 
-    step._on_clustering_done(ClusterResult(
+    # The node-creation step (drop placeholder + create the computed nodes) now
+    # runs inside the build worker; exercise it synchronously with no features.
+    params = BuildParams(
         node_positions=[(10.0, -66.0, "Caracas"), (8.0, -63.0, "Guayana")],
-        n_clusters=2, criterion_used="test"))
+        n_clusters=2, criterion_used="test", features=[], config={},
+        station_radius_km=2.0, simplify_level=0, min_component=1,
+        gen_availability=False, use_weather=False, cfg_path=None,
+    )
+    model.blockSignals(True)
+    GridBuildWorker(model, params)._run()
+    model.blockSignals(False)
 
     names = [n.name for n in model.state.nodes]
     assert names == ["Caracas", "Guayana"]
