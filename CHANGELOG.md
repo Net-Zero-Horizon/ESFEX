@@ -7,6 +7,19 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.1] — 2026-06-19
+
+### Fixed
+
+- **Windows: Studio launch crash from a Qt DLL conflict** — on systems with
+  another Qt on PATH (a conda `qt-main`/`pyqt`/`qt6`, common in base Anaconda),
+  `esfex studio` failed with `ImportError: DLL load failed while importing
+  QtWidgets: the specified procedure could not be found`. PySide6's own bundled
+  Qt is now put first on the DLL search path (and the conda dirs are skipped
+  entirely when PySide6 is self-contained), so a foreign Qt can no longer shadow
+  it. The error message for this case now explains the real cause (Qt conflict /
+  wrong environment) instead of the misleading "reinstall PySide6".
+
 ## [0.2.0] — 2026-06-15
 
 ### Added
