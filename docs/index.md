@@ -1,7 +1,3 @@
-<div align="center">
-  <img src="assets/esfex.png" alt="ESFEX logo" width="500">
-</div>
-
 # ESFEX
 
 **Energy System Flexibility — Power System Optimization Model**
