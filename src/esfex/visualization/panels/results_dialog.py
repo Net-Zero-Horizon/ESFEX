@@ -45,6 +45,7 @@ from esfex.visualization.panels.results_charts import (
     _detect_capabilities,
 )
 from esfex.visualization.theme import current_theme
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,7 @@ class _BusyOverlay(QWidget):
 
         self._label = QLabel("Loading charts...")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet("color: #2C3E50; font-size: 13px; background: transparent;")
+        self._label.setStyleSheet(scale_qss_fonts("color: #2C3E50; font-size: 13px; background: transparent;"))
         vbox.addWidget(self._label)
 
         self._progress = QProgressBar()
@@ -223,7 +224,7 @@ class _BusyOverlay(QWidget):
                 f"background: {c.surface_primary}; border-radius: 8px;"
             )
             self._label.setStyleSheet(
-                f"color: {c.text_primary}; font-size: 13px; background: transparent;"
+                scale_qss_fonts(f"color: {c.text_primary}; font-size: 13px; background: transparent;")
             )
             self._progress.setStyleSheet(f"""
                 QProgressBar {{
@@ -1158,7 +1159,7 @@ class ResultsDialog(QDialog):
         theme = current_theme()
         c = theme.colors
         t = theme.typography
-        self.setStyleSheet(f"""
+        self.setStyleSheet(scale_qss_fonts(f"""
             /* Sidebar */
             QWidget#dashboardSidebar {{
                 background-color: {c.surface_secondary};
@@ -1303,7 +1304,7 @@ class ResultsDialog(QDialog):
                 width: 1px;
                 background: {c.border_light};
             }}
-        """)
+        """))
 
     # ------------------------------------------------------------------
     # System / year handling

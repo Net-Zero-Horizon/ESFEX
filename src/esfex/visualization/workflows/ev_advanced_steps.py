@@ -51,6 +51,7 @@ from evrex import (
     fit_adoption_to_ev_config,
     generate_all_scenarios,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -880,7 +881,7 @@ class EVIntegrationStep(QWidget):
         self._preview = QTextEdit()
         self._preview.setReadOnly(True)
         self._preview.setMinimumHeight(300)
-        self._preview.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self._preview.setStyleSheet(scale_qss_fonts("font-family: monospace; font-size: 11px;"))
         pg.addWidget(self._preview)
         layout.addWidget(preview_grp)
 

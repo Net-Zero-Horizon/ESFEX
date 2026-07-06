@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from esfex.visualization.workflows.otec_studio import uq
 from esfex.visualization.workflows.otec_studio.project import StudioConfig
 from esfex.visualization.workflows.otec_studio.workers import UQWorker
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class UncertaintyPanel(QWidget):
             0, QHeaderView.ResizeMode.Stretch)
         pl.addWidget(self._table)
         hint = QLabel("P1/P2 = (mean, std) for normal · (low, high) for uniform")
-        hint.setStyleSheet("color: #888; font-size: 10px;")
+        hint.setStyleSheet(scale_qss_fonts("color: #888; font-size: 10px;"))
         pl.addWidget(hint)
         splitter.addWidget(pgrp)
 

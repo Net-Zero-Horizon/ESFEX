@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 _ICONS_DIR = Path(__file__).resolve().parents[1] / "icons"
 
@@ -111,8 +112,8 @@ class SplashScreen(QWidget):
                 border-radius: 8px;
             }}
         """)
-        self._version_label.setStyleSheet(f"color: {text_sec}; font-size: 11px;")
-        self._status_label.setStyleSheet(f"color: {text}; font-size: 12px;")
+        self._version_label.setStyleSheet(scale_qss_fonts(f"color: {text_sec}; font-size: 11px;"))
+        self._status_label.setStyleSheet(scale_qss_fonts(f"color: {text}; font-size: 12px;"))
         self._progress.setStyleSheet(f"""
             QProgressBar {{
                 background: {surface_sec};

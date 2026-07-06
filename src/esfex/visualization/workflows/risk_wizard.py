@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 if TYPE_CHECKING:
     from esfex.visualization.data.gui_model import GuiModel
@@ -360,7 +361,7 @@ class RiskWorkbench(QDialog):
         top_bar = QHBoxLayout()
         self._lbl_step = QLabel("")
         self._lbl_step.setStyleSheet(
-            f"font-weight: bold; font-size: 13px; color: {c.text_primary};"
+            scale_qss_fonts(f"font-weight: bold; font-size: 13px; color: {c.text_primary};")
         )
         top_bar.addWidget(self._lbl_step)
         top_bar.addStretch()

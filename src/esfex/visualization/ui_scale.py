@@ -42,6 +42,27 @@ def scaled(px: float) -> int:
     return int(round(px * ui_scale()))
 
 
+import re as _re
+
+_QSS_FONT_RE = _re.compile(r"(font-size:\s*)(\d+)(px|pt)")
+
+
+def scaled_px(base: float) -> int:
+    """Scale a base font size (px/pt) by :func:`font_scale`, floored at 1."""
+    return max(1, int(round(base * font_scale())))
+
+
+def scale_qss_fonts(qss: str) -> str:
+    """Return *qss* with every literal ``font-size: N(px|pt)`` scaled by
+    :func:`font_scale`, so hard-coded widget stylesheets follow the screen like
+    the base font. Templated sizes (``font-size: {...}``) contain no digits here
+    and are left untouched. No-op at 1.0 (1080p)."""
+    if font_scale() == 1.0:
+        return qss
+    return _QSS_FONT_RE.sub(
+        lambda m: f"{m.group(1)}{scaled_px(int(m.group(2)))}{m.group(3)}", qss)
+
+
 def font_scale() -> float:
     """Gentler factor for the base font: it grows more conservatively than
     chrome (up to 20 %) and shrinks modestly on small laptops (down to 0.85)

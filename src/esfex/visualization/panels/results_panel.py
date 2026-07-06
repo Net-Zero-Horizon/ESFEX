@@ -198,6 +198,7 @@ def _color_interp(
 # ── Screenshot helpers ───────────────────────────────────────────
 
 import math
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 def _nice_ticks(lo: float, hi: float, target_count: int = 5) -> list[float]:
@@ -351,7 +352,7 @@ class ResultsPanel(QWidget):
         title_row = QHBoxLayout()
         title_row.setSpacing(4)
         self._title_label = QLabel(tr("results_panel.title"))
-        self._title_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self._title_label.setStyleSheet(scale_qss_fonts("font-weight: bold; font-size: 12px;"))
         title_row.addWidget(self._title_label)
         title_row.addStretch()
 

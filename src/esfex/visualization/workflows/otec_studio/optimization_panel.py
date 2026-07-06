@@ -40,6 +40,7 @@ from esfex.visualization.workflows.otec_studio.workers import (
     OptimizeWorker,
     SurfaceWorker,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ class OptimizationPanel(QWidget):
             "cost/size sweet spot."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 10px;")
+        hint.setStyleSheet(scale_qss_fonts("color: #888; font-size: 10px;"))
         cf.addRow(hint)
         left_lay.addWidget(con_grp)
 

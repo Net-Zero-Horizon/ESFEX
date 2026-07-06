@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from esfex.visualization.i18n import tr
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +255,7 @@ class GridMappingSourceFetchStep(QWidget):
         # ── Fetch Button ──
         self._btn_fetch = QPushButton("Fetch Data")
         self._btn_fetch.setStyleSheet(
-            "font-size: 11px; font-weight: bold; padding: 4px 8px;"
+            scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 8px;")
         )
         self._btn_fetch.setEnabled(False)
         self._btn_fetch.clicked.connect(self._do_fetch)
@@ -981,7 +982,7 @@ class GridMappingBuildStep(QWidget):
         self._chk_criteria["infrastructure"].setChecked(True)
         self._lbl_criterion_info.setWordWrap(True)
         self._lbl_criterion_info.setStyleSheet(
-            "color: #888; font-size: 11px; padding: 4px 0;"
+            scale_qss_fonts("color: #888; font-size: 11px; padding: 4px 0;")
         )
         node_right.addWidget(self._lbl_criterion_info)
         node_right.addStretch()
@@ -1164,7 +1165,7 @@ class GridMappingBuildStep(QWidget):
 
         self._btn_build = QPushButton("Build Network")
         self._btn_build.setStyleSheet(
-            "font-size: 11px; font-weight: bold; padding: 4px 8px;"
+            scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 8px;")
         )
         self._btn_build.clicked.connect(self._do_build)
         build_lay.addWidget(self._btn_build)
@@ -1799,7 +1800,7 @@ class GridMappingConnectStep(QWidget):
         simplify_lay.addLayout(infra_form)
 
         self._btn_infra_analyze = QPushButton("Analyze")
-        self._btn_infra_analyze.setStyleSheet("font-size: 11px; padding: 4px 8px;")
+        self._btn_infra_analyze.setStyleSheet(scale_qss_fonts("font-size: 11px; padding: 4px 8px;"))
         self._btn_infra_analyze.setEnabled(False)
         self._btn_infra_analyze.clicked.connect(self._do_analyze_infrastructure)
         simplify_lay.addWidget(self._btn_infra_analyze)
@@ -1826,7 +1827,7 @@ class GridMappingConnectStep(QWidget):
         self._btn_infra_select_all.clicked.connect(self._infra_select_all)
         infra_btn_row.addWidget(self._btn_infra_select_all)
         self._btn_infra_apply = QPushButton("Apply Selected")
-        self._btn_infra_apply.setStyleSheet("font-size: 11px; padding: 4px 8px;")
+        self._btn_infra_apply.setStyleSheet(scale_qss_fonts("font-size: 11px; padding: 4px 8px;"))
         self._btn_infra_apply.setEnabled(False)
         self._btn_infra_apply.clicked.connect(self._do_apply_infrastructure)
         infra_btn_row.addWidget(self._btn_infra_apply)
@@ -4323,14 +4324,14 @@ class GridMappingDemandStep(QWidget):
         btn_row = QHBoxLayout()
         self._btn_fetch_data = QPushButton("Fetch WB + ERA5")
         self._btn_fetch_data.setStyleSheet(
-            "font-size: 11px; padding: 4px 8px;"
+            scale_qss_fonts("font-size: 11px; padding: 4px 8px;")
         )
         self._btn_fetch_data.clicked.connect(self._fetch_wb_era5)
         btn_row.addWidget(self._btn_fetch_data)
 
         self._btn_forecast = QPushButton("\u26a1 Forecast Demand")
         self._btn_forecast.setStyleSheet(
-            "font-size: 11px; font-weight: bold; padding: 4px 12px;"
+            scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 12px;")
         )
         self._btn_forecast.setEnabled(False)
         self._btn_forecast.clicked.connect(self._run_forecast)
@@ -4435,7 +4436,7 @@ class GridMappingDemandStep(QWidget):
 
         self._lbl_validation_status = QLabel("")
         self._lbl_validation_status.setWordWrap(True)
-        self._lbl_validation_status.setStyleSheet("color: #888; font-size: 11px;")
+        self._lbl_validation_status.setStyleSheet(scale_qss_fonts("color: #888; font-size: 11px;"))
         vg.addWidget(self._lbl_validation_status)
 
         layout.addWidget(val_group)
@@ -4506,7 +4507,7 @@ class GridMappingDemandStep(QWidget):
         dist_btn_row = QHBoxLayout()
         self._btn_fetch_bld = QPushButton("Fetch & Distribute")
         self._btn_fetch_bld.setStyleSheet(
-            "font-size: 11px; font-weight: bold; padding: 4px 8px;"
+            scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 8px;")
         )
         self._btn_fetch_bld.setEnabled(False)
         self._btn_fetch_bld.clicked.connect(self._fetch_buildings)
@@ -4521,7 +4522,7 @@ class GridMappingDemandStep(QWidget):
             "footprints. Requires the density-engine forecast to be run first."
         )
         self._btn_spatial_dist.setStyleSheet(
-            "font-size: 11px; font-weight: bold; padding: 4px 8px;"
+            scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 8px;")
         )
         self._btn_spatial_dist.clicked.connect(self._distribute_by_spatial_demand)
         dist_btn_row.addWidget(self._btn_spatial_dist)
@@ -4550,7 +4551,7 @@ class GridMappingDemandStep(QWidget):
         apply_row = QHBoxLayout()
         self._btn_apply = QPushButton("Apply Demand & Fractions")
         self._btn_apply.setStyleSheet(
-            "font-weight: bold; font-size: 11px; padding: 4px 16px;"
+            scale_qss_fonts("font-weight: bold; font-size: 11px; padding: 4px 16px;")
         )
         self._btn_apply.setEnabled(False)
         self._btn_apply.clicked.connect(self._apply_all)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.auto_complete import ConnectionPlan
 from esfex.visualization.i18n import tr
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 class AutoCompleteDialog(QDialog):
@@ -50,7 +51,7 @@ class AutoCompleteDialog(QDialog):
             "{n}", str(total_equip),
         ).replace("{g}", str(n))
         lbl = QLabel(summary)
-        lbl.setStyleSheet("font-size: 13px; margin: 6px 0;")
+        lbl.setStyleSheet(scale_qss_fonts("font-size: 13px; margin: 6px 0;"))
         layout.addWidget(lbl)
 
         # Table
@@ -97,7 +98,7 @@ class AutoCompleteDialog(QDialog):
 
         # Info label
         info = QLabel(tr("auto_complete.info"))
-        info.setStyleSheet("color: #888; font-size: 11px; margin: 4px 0;")
+        info.setStyleSheet(scale_qss_fonts("color: #888; font-size: 11px; margin: 4px 0;"))
         info.setWordWrap(True)
         layout.addWidget(info)
 

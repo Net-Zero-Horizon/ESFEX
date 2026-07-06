@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -180,7 +181,7 @@ class _ToastWidget(QFrame):
         icon_label = QLabel(icons.get(level, "i"))
         icon_label.setFixedWidth(18)
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_label.setStyleSheet("font-weight: bold; font-size: 14px; background: transparent;")
+        icon_label.setStyleSheet(scale_qss_fonts("font-weight: bold; font-size: 14px; background: transparent;"))
         layout.addWidget(icon_label)
 
         # Message

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from esfex.visualization.i18n import tr
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -496,8 +497,8 @@ class WindFinancialStep(QWidget):
         # Results display
         self._results_label = QLabel("")
         self._results_label.setStyleSheet(
-            "background-color: #f8f8f8; border: 1px solid #ddd; "
-            "border-radius: 4px; padding: 10px; color: black; font-size: 13px;"
+            scale_qss_fonts("background-color: #f8f8f8; border: 1px solid #ddd; "
+            "border-radius: 4px; padding: 10px; color: black; font-size: 13px;")
         )
         self._results_label.setWordWrap(True)
         layout.addWidget(self._results_label)
@@ -733,8 +734,8 @@ class WindWakeLayoutStep(QWidget):
         # Results display
         self._results_label = QLabel("")
         self._results_label.setStyleSheet(
-            "background-color: #f8f8f8; border: 1px solid #ddd; "
-            "border-radius: 4px; padding: 10px; color: black; font-size: 13px;"
+            scale_qss_fonts("background-color: #f8f8f8; border: 1px solid #ddd; "
+            "border-radius: 4px; padding: 10px; color: black; font-size: 13px;")
         )
         self._results_label.setWordWrap(True)
         layout.addWidget(self._results_label)

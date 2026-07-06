@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 class AnalysisPanel(QWidget):
@@ -65,7 +66,7 @@ class AnalysisPanel(QWidget):
 
         # Title
         self._title_label = QLabel(tr("analysis_panel.title"))
-        self._title_label.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self._title_label.setStyleSheet(scale_qss_fonts("font-weight: bold; font-size: 12px;"))
         layout.addWidget(self._title_label)
 
         # ── Analysis mode selector ──
@@ -212,7 +213,7 @@ class AnalysisPanel(QWidget):
         # N-1 summary results area
         self._nk_summary_label = QLabel()
         self._nk_summary_label.setWordWrap(True)
-        self._nk_summary_label.setStyleSheet("font-size: 10px; padding: 2px;")
+        self._nk_summary_label.setStyleSheet(scale_qss_fonts("font-size: 10px; padding: 2px;"))
         nk_layout.addWidget(self._nk_summary_label)
 
         layout.addWidget(self._grp_nk, 0)  # no stretch — stays compact
@@ -424,7 +425,7 @@ class AnalysisPanel(QWidget):
 
         self._pf_status_label.setText(text)
         self._pf_status_label.setStyleSheet(
-            f"color: {color}; font-weight: bold; font-size: 11px; padding: 2px;"
+            scale_qss_fonts(f"color: {color}; font-weight: bold; font-size: 11px; padding: 2px;")
         )
         self._pf_status_label.setVisible(True)
 

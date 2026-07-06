@@ -68,6 +68,7 @@ from esfex.visualization.workflows.financial_charts import (
     WaterfallChart,
     PriceDurationCurve,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +167,11 @@ def _metric_card(label: str, value: str, color: str = "#2980b9") -> QGroupBox:
     lay = QVBoxLayout(box)
     lay.setContentsMargins(8, 8, 8, 8)
     val_lbl = QLabel(value)
-    val_lbl.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color};")
+    val_lbl.setStyleSheet(scale_qss_fonts(f"font-size: 18px; font-weight: bold; color: {color};"))
     val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lay.addWidget(val_lbl)
     name_lbl = QLabel(label)
-    name_lbl.setStyleSheet("font-size: 10px; color: #888;")
+    name_lbl.setStyleSheet(scale_qss_fonts("font-size: 10px; color: #888;"))
     name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lay.addWidget(name_lbl)
     return box
@@ -904,7 +905,7 @@ class ReportStep(QWidget):
 
         self._report = QTextEdit()
         self._report.setReadOnly(True)
-        self._report.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self._report.setStyleSheet(scale_qss_fonts("font-family: monospace; font-size: 11px;"))
         layout.addWidget(self._report, 1)
 
         # Export buttons

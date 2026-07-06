@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from esfex.visualization.i18n import tr
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -259,9 +260,9 @@ class EVWizardDialog(QDialog):
     def _style_label(lbl: QLabel, bg: str, fg: str, bold: bool = False):
         weight = "bold" if bold else "normal"
         lbl.setStyleSheet(
-            f"background-color: {bg}; color: {fg};"
+            scale_qss_fonts(f"background-color: {bg}; color: {fg};"
             f"font-weight: {weight}; padding: 4px 8px;"
-            f"border-radius: 4px; font-size: 11px;"
+            f"border-radius: 4px; font-size: 11px;")
         )
 
     def _update_buttons(self):

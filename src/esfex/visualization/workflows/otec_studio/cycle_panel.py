@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.workflows.otec_studio import cycles as cyc
 from esfex.visualization.workflows.otec_studio.project import StudioConfig
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class CyclePanel(QWidget):
 
         self._lbl_info = QLabel("")
         self._lbl_info.setWordWrap(True)
-        self._lbl_info.setStyleSheet("color: #888; font-size: 10px;")
+        self._lbl_info.setStyleSheet(scale_qss_fonts("color: #888; font-size: 10px;"))
         form.addRow(self._lbl_info)
 
         root.addWidget(ctrl)

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from esfex.visualization.workflows.otec_studio.project import OtexProject
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +75,8 @@ def _stub_panel(title: str, purpose: str, milestone: str) -> QWidget:
     lay.addWidget(desc)
     badge = QLabel(f"Planned in milestone {milestone}")
     badge.setStyleSheet(
-        "background-color: #34495e; color: #ecf0f1; border-radius: 4px; "
-        "padding: 4px 8px; font-size: 11px;"
+        scale_qss_fonts("background-color: #34495e; color: #ecf0f1; border-radius: 4px; "
+        "padding: 4px 8px; font-size: 11px;")
     )
     badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
     badge.setMaximumWidth(220)

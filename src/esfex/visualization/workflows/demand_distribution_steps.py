@@ -45,6 +45,7 @@ from esfex.visualization.workflows.demand_analysis import (
     classify_buildings,
     compute_classification_summary,
 )
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 def _load_buses_of_node(state, node_index: int):
@@ -725,7 +726,7 @@ class ReviewApplyStep(QWidget):
         btn_row = QHBoxLayout()
         self._btn_apply = QPushButton(tr("wizard_demand.apply"))
         self._btn_apply.setStyleSheet(
-            "font-weight: bold; padding: 8px 24px; font-size: 14px;"
+            scale_qss_fonts("font-weight: bold; padding: 8px 24px; font-size: 14px;")
         )
         self._btn_apply.clicked.connect(self._apply)
         btn_row.addWidget(self._btn_apply)

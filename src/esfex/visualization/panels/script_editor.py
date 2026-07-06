@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.i18n import tr
 from esfex.visualization.theme import current_theme
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 # ======================================================================
@@ -304,7 +305,7 @@ class ScriptEditor(QWidget):
         self._btn_run.setToolTip(tr("script_editor.run_tip"))
         self._btn_run.setFixedHeight(24)
         self._btn_run.setStyleSheet(
-            "QPushButton { padding: 2px 10px; font-size: 11px; }"
+            scale_qss_fonts("QPushButton { padding: 2px 10px; font-size: 11px; }")
         )
         self._btn_run.clicked.connect(self._on_run)
         tb.addWidget(self._btn_run)

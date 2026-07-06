@@ -81,6 +81,7 @@ from esfex.visualization.panels.results_panel import ResultsPanel
 
 from esfex.visualization.theme import current_theme, get_zone_colors
 from esfex.visualization.i18n import tr, language_changed, set_language
+from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ class _BusyOverlay(QWidget):
 
         self._label = QLabel("Processing...")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet("color: #2C3E50; font-size: 13px; background: transparent;")
+        self._label.setStyleSheet(scale_qss_fonts("color: #2C3E50; font-size: 13px; background: transparent;"))
         vbox.addWidget(self._label)
 
         self._progress = QProgressBar()
@@ -186,7 +187,7 @@ class _BusyOverlay(QWidget):
                 f"background: {c.surface_primary}; border-radius: 8px;"
             )
             self._label.setStyleSheet(
-                f"color: {c.text_primary}; font-size: 13px; background: transparent;"
+                scale_qss_fonts(f"color: {c.text_primary}; font-size: 13px; background: transparent;")
             )
             self._progress.setStyleSheet(f"""
                 QProgressBar {{
@@ -359,7 +360,7 @@ class MainWindow(QMainWindow):
         # Compact size that fits within the (now 30px) tab bar.
         self._stop_btn.setFixedHeight(24)
         self._stop_btn.setStyleSheet(
-            "QPushButton { padding: 2px 10px; font-size: 11px; }"
+            scale_qss_fonts("QPushButton { padding: 2px 10px; font-size: 11px; }")
         )
         self._stop_btn.clicked.connect(self._on_stop_run)
         _sb_layout.addWidget(self._stop_btn)
@@ -649,7 +650,7 @@ class MainWindow(QMainWindow):
         self._view_tab_bar.addTab(tr("view.geographic"))
         self._view_tab_bar.addTab(tr("view.sld"))
         self._view_tab_bar.setStyleSheet(
-            "QTabBar::tab { padding: 4px 12px; font-size: 11px; }"
+            scale_qss_fonts("QTabBar::tab { padding: 4px 12px; font-size: 11px; }")
         )
         self._view_tab_bar.currentChanged.connect(self._on_view_tab_changed)
         tab_row.addWidget(self._view_tab_bar)
@@ -1559,7 +1560,7 @@ class MainWindow(QMainWindow):
         bar = bar or getattr(self, "_sld_ops_bar_widget", None)
         if bar is None:
             return
-        bar.setStyleSheet(f"""
+        bar.setStyleSheet(scale_qss_fonts(f"""
             #sldOpsBar {{
                 background: {c.surface_secondary};
                 border-top: 1px solid {c.border_light};
@@ -1630,22 +1631,22 @@ class MainWindow(QMainWindow):
                 background: {c.accent_primary};
                 border-radius: 2px;
             }}
-        """)
+        """))
 
     def _apply_breadcrumb_theme(self):
         """Apply current theme colors to the breadcrumb label."""
         c = current_theme().colors
         self._breadcrumb_label.setStyleSheet(
-            f"QLabel {{ color: {c.text_secondary}; font-size: 11px;"
-            f" padding: 2px 4px; }}"
+            scale_qss_fonts(f"QLabel {{ color: {c.text_secondary}; font-size: 11px;"
+            f" padding: 2px 4px; }}")
         )
 
     def _apply_system_summary_theme(self):
         """Apply current theme colors to the system summary label."""
         c = current_theme().colors
         self._system_summary_label.setStyleSheet(
-            f"QLabel {{ color: {c.text_secondary}; font-size: 11px;"
-            f" padding: 0 12px; }}"
+            scale_qss_fonts(f"QLabel {{ color: {c.text_secondary}; font-size: 11px;"
+            f" padding: 0 12px; }}")
         )
 
     # ------------------------------------------------------------------
