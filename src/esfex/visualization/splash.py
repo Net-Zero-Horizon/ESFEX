@@ -50,15 +50,16 @@ class SplashScreen(QWidget):
         # (status + progress) comes from the explicit `addStretch()` below.
         layout.setSpacing(2)
 
-        # Logo: PNG scaled to fit a 440×200 box while preserving aspect ratio.
-        # Source is 1123×794 (ratio 1.414); QPixmap.scaled with KeepAspectRatio
-        # picks the tighter constraint, so the logo lands at ~283×200 px.
+        # Logo: PNG scaled to fit inside a 400×168 box while preserving aspect
+        # ratio, leaving vertical breathing room so the tiled mark (which bleeds
+        # to the image edges, unlike the old wordmark) is never clipped by the
+        # label's height in the fixed-size splash.
         self._logo_label = QLabel()
         self._logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_path = _ICONS_DIR / "esfex.png"
         if logo_path.exists():
             pixmap = QPixmap(str(logo_path)).scaled(
-                440, 200,
+                400, 168,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )

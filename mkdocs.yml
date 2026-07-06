@@ -10,7 +10,6 @@ copyright: Copyright &copy; 2025-2026 Manuel. Apache License 2.0.
 
 theme:
   name: material
-  logo: assets/esfex.png
   favicon: assets/favicon.png
   palette:
     - media: "(prefers-color-scheme: light)"
