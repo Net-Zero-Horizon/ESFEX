@@ -2522,7 +2522,7 @@ class MainWindow(QMainWindow):
         if logo_path.exists():
             logo_label = QLabel()
             pixmap = QPixmap(str(logo_path)).scaledToWidth(
-                360, Qt.TransformationMode.SmoothTransformation,
+                280, Qt.TransformationMode.SmoothTransformation,
             )
             logo_label.setPixmap(pixmap)
             logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
