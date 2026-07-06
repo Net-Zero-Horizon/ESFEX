@@ -260,7 +260,7 @@ class MainWindow(QMainWindow):
         # per-window one.
         from pathlib import Path
         from PySide6.QtGui import QIcon
-        _icon_path = Path(__file__).resolve().parents[1] / "icons" / "icon.svg"
+        _icon_path = Path(__file__).resolve().parents[1] / "icons" / "icon.png"
         if _icon_path.exists():
             self.setWindowIcon(QIcon(str(_icon_path)))
 

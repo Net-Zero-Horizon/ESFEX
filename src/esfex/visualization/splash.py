@@ -39,7 +39,7 @@ class SplashScreen(QWidget):
         self.setFixedSize(540, 312)
         # Match the app-wide window icon (some Linux compositors don't
         # propagate QApplication.windowIcon to splash windows).
-        _icon_path = _ICONS_DIR / "icon.svg"
+        _icon_path = _ICONS_DIR / "icon.png"
         if _icon_path.exists():
             self.setWindowIcon(QIcon(str(_icon_path)))
 

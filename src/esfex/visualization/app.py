@@ -25,7 +25,7 @@ def _get_or_create_app() -> QApplication:
         # Required for QWebEngineView — must be set before QApplication creation
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
         app = QApplication(sys.argv)
-    icon_path = _ICONS_DIR / "icon.svg"
+    icon_path = _ICONS_DIR / "icon.png"
     if icon_path.exists() and app.windowIcon().isNull():
         app.setWindowIcon(QIcon(str(icon_path)))
     return app
