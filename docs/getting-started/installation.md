@@ -300,7 +300,15 @@ python -c "import platform; print(platform.machine())"
 
 ### Windows
 
-ESFEX is fully supported on Windows 10 and Windows 11. Use either the standard Python installer from python.org or Anaconda/Miniconda.
+ESFEX is fully supported on Windows 10 and Windows 11. Use either the standard Python installer from [python.org](https://www.python.org/downloads/windows/) or Anaconda/Miniconda.
+
+!!! warning "Do not use the Microsoft Store Python"
+    Install Python from python.org or conda — **not** from the Microsoft Store.
+    The Store build runs in an app sandbox with a redirected filesystem and
+    restricted DLL search, which breaks native extension loading and manifests
+    as `ImportError: DLL load failed while importing QtWidgets` when launching
+    the Studio. If you already installed it that way, uninstall the Store Python
+    and reinstall from python.org, then recreate your environment.
 
 **UTF-8 encoding**: ESFEX automatically configures UTF-8 output on Windows. If you still encounter encoding errors in your terminal, set the environment variable before running:
 

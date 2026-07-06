@@ -49,12 +49,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Net-Zero-Horizon/ESFEX/releases/latest">
-    <img src="https://img.shields.io/badge/Download-ESFEX%20Studio%20for%20Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download ESFEX Studio for Windows">
-  </a>
-</p>
-
-<p align="center">
   <a href="#overview">Overview</a> •
   <a href="#key-features">Features</a> •
   <a href="#installation">Installation</a> •
@@ -160,13 +154,7 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 ESFEX is a hybrid Python/Julia package. Python ≥ 3.10 and a working Julia ≥ 1.9 installation are required; the Julia dependencies are managed automatically through `juliacall` on first run.
 
-### Windows installer (no Python/Julia required)
-
-For Windows users who don't want to manage a Python/Julia toolchain, a native
-`.exe` installer bundles everything (Python, Qt, Julia, the GDAL stack) and adds
-an **"ESFEX Studio"** Start Menu shortcut — no `pip`, no `PATH` setup. Download
-it from the [latest release](https://github.com/Net-Zero-Horizon/ESFEX/releases/latest)
-(`ESFEX-<version>-Windows-x86_64.exe`). Build details: [`installer/`](installer/).
+> **Windows note:** install Python from [python.org](https://www.python.org/downloads/windows/) or Anaconda/Miniconda — **not** from the Microsoft Store. The Store build runs in a sandbox with a redirected filesystem that breaks native DLL loading (PySide6/Qt) and per-user `pip` paths.
 
 ### From PyPI
 

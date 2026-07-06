@@ -37,8 +37,8 @@ def _ensure_qt_runtime_on_path() -> None:
        dirs at all, so they can never shadow it.
     2. **WebEngine child can't find its DLLs.** On a conda-forge layout the Qt
        DLLs live in ``<prefix>/Library/bin`` and ``QtWebEngineProcess.exe`` in
-       ``<prefix>/Library/lib/qt6``; launched outside an activated env (the
-       installer shortcut) those aren't on PATH and the helper dies with
+       ``<prefix>/Library/lib/qt6``; launched outside an activated env those
+       aren't on PATH and the helper dies with
        STATUS_DLL_NOT_FOUND, crash-looping the map. Child processes inherit
        ``os.environ['PATH']``, so we add them (only when Qt is conda-provided).
     """
@@ -111,8 +111,9 @@ def _raise_qt_import_error(exc: ImportError) -> None:
             "  • Wrong environment — 'esfex' is resolving to a different env "
             "than the active one. Check with 'where esfex'; it must live under "
             "the *active* environment, not base Anaconda.\n"
-            "  • Or use the standalone ESFEX Studio Windows installer, which "
-            "bundles its own isolated Qt."
+            "  • Microsoft Store Python — its sandboxed, redirected filesystem "
+            "breaks native DLL loading. Uninstall it and reinstall Python from "
+            "python.org or conda, then recreate the environment."
         ) from exc
 
     raise ImportError(
@@ -147,7 +148,7 @@ def launch_studio(
     """
     # Must run before QtWebEngine spawns its render helper, or the map
     # crash-loops with STATUS_DLL_NOT_FOUND when launched outside an
-    # activated conda env (e.g. the installer shortcut).
+    # activated conda env.
     _ensure_qt_runtime_on_path()
 
     try:
