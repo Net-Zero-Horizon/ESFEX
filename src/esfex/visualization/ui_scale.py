@@ -14,7 +14,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import QApplication
 
 _BASELINE_H = 1080.0      # logical-pixel height the base sizes are tuned for
-_MIN, _MAX = 0.9, 1.4     # clamp so chrome never gets tiny or huge
+_MIN, _MAX = 0.8, 1.4     # clamp so chrome never gets tiny or huge (shrinks to
+                          # 0.8 on small laptops so the chrome actually fits)
 
 _cached: float | None = None
 
@@ -42,9 +43,10 @@ def scaled(px: float) -> int:
 
 
 def font_scale() -> float:
-    """Gentler factor for the base font (text scales more conservatively than
-    chrome: it may grow up to 20 % but never shrinks below the tuned size)."""
-    return max(1.0, min(1.2, ui_scale()))
+    """Gentler factor for the base font: it grows more conservatively than
+    chrome (up to 20 %) and shrinks modestly on small laptops (down to 0.85)
+    so fixed-point text no longer overflows a 720/768-line screen."""
+    return max(0.85, min(1.2, ui_scale()))
 
 
 def reset_cache() -> None:

@@ -245,7 +245,15 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr("app.title"))
-        self.resize(1400, 850)
+        # Default size, clamped so it never exceeds the screen on a small
+        # laptop (a fixed 1400×850 overflows a 1366-wide panel).
+        _screen = QApplication.primaryScreen()
+        if _screen is not None:
+            _av = _screen.availableGeometry()
+            self.resize(min(1400, _av.width() - 40),
+                        min(850, _av.height() - 60))
+        else:
+            self.resize(1400, 850)
         # Window icon — redundant with QApplication.windowIcon() but some
         # Linux compositors ignore the app-level icon and only honour the
         # per-window one.
@@ -403,6 +411,10 @@ class MainWindow(QMainWindow):
         self._main_splitter.setStretchFactor(0, 2)
         self._main_splitter.setStretchFactor(1, 5)
         self._main_splitter.setStretchFactor(2, 3)
+        # Explicit initial widths are applied on the first show (see showEvent),
+        # once the splitter has a real width — so the properties panel starts
+        # compact (~24%) instead of claiming ~half from its form sizeHints.
+        self._applied_initial_split = False
 
         # Collapse buttons on splitter handles (parented to MainWindow to avoid clipping)
         add_collapse_button(self, self._main_splitter, 1, 0, "left")    # left panel
@@ -1186,6 +1198,18 @@ class MainWindow(QMainWindow):
 
             # Restore properties panel
             self._restore_properties_panel()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # On the first real show the splitter finally has its laid-out width,
+        # so we can set the default 18/58/24 split. Doing this at construction
+        # (width still 0) is ignored by Qt.
+        if not getattr(self, "_applied_initial_split", True):
+            self._applied_initial_split = True
+            w = self._main_splitter.width() or self.width()
+            if w > 200:
+                self._main_splitter.setSizes(
+                    [int(w * 0.18), int(w * 0.58), int(w * 0.24)])
 
     def _collapse_properties_panel(self) -> None:
         """Collapse the right properties panel to free space for analysis."""

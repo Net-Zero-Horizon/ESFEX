@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.i18n import tr
 from esfex.visualization.modern_widgets import CollapsibleSection
+from esfex.visualization.ui_scale import scaled
 
 
 def _collapsify_groups(widget: QWidget) -> None:
@@ -51,7 +52,10 @@ class PropertiesPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumWidth(400)
+        # Screen-aware minimum: the panel can be narrowed on small laptops
+        # (down to a compact, scaled floor) instead of only being fully
+        # collapsed. Forms live in a scroll area, so a small floor is safe.
+        self.setMinimumWidth(scaled(220))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)

@@ -420,7 +420,8 @@ class ResultsDialog(QDialog):
             dash_header = QListWidgetItem("  DASHBOARD")
             dash_header.setFlags(Qt.ItemFlag.NoItemFlags)
             fnt = dash_header.font(); fnt.setBold(True)
-            fnt.setPointSize(fnt.pointSize() - 1)
+            if fnt.pointSize() > 1:  # -1 when the base font is pixel-defined
+                fnt.setPointSize(fnt.pointSize() - 1)
             dash_header.setFont(fnt)
             dash_header.setSizeHint(QSize(0, 24))
             self._chart_list.addItem(dash_header)
@@ -472,7 +473,8 @@ class ResultsDialog(QDialog):
                 )
                 font = header.font()
                 font.setBold(True)
-                font.setPointSize(font.pointSize() - 1)
+                if font.pointSize() > 1:  # -1 when base font is pixel-defined
+                    font.setPointSize(font.pointSize() - 1)
                 header.setFont(font)
                 header.setSizeHint(QSize(0, 24))
                 self._chart_list.addItem(header)
