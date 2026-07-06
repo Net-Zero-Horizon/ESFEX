@@ -7,6 +7,28 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.2] — 2026-07-06
+
+### Fixed
+
+- **Studio usable on small laptop screens** — the properties panel no longer
+  takes ~half the width and can only be hidden: its minimum width is now
+  screen-scaled and the main splitter defaults to an 18/58/24 split, so the
+  panel starts compact and can be dragged narrow. The default window size is
+  clamped to the available screen. Fonts also fit: the base font now shrinks on
+  small screens (it never did before), the ~46 hard-coded widget `font-size`
+  stylesheets scale with it, and a "QFont: Point size <= 0" warning is guarded.
+
+### Removed
+
+- **Bundled Windows `.exe` installer** and its release build workflow. It
+  masked rather than fixed the real Windows launch failure, which comes from
+  installing Python via the **Microsoft Store** (a sandboxed, redirected
+  filesystem that breaks native PySide6/Qt DLL loading). The README, the
+  installation docs and the Studio's DLL-load error message now document the
+  cause and fix (install Python from python.org or conda). The console-less
+  `esfex-studio` launcher is unaffected.
+
 ## [0.2.1] — 2026-06-19
 
 ### Fixed
