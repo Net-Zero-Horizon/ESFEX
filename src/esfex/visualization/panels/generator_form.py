@@ -26,6 +26,26 @@ from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
+# The model stores English literals ("Renewable" / "Non-renewable"); the combo
+# shows a translated label. Older projects edited while the combo was
+# label-driven may hold a localized string — normalize any shipped-language
+# label back to the English literal so nothing stays mis-typed.
+_GEN_TYPE_CANON: dict[str, str] = {
+    v.lower(): canon
+    for canon, labels in {
+        "Renewable": ["Renewable", "Renovable", "Renouvelable",
+                      "Renovável", "再生可能"],
+        "Non-renewable": ["Non-renewable", "No renovable",
+                          "Non renouvelable", "Não renovável", "非再生可能"],
+    }.items()
+    for v in labels
+}
+
+
+def _canon_gen_type(value: str) -> str:
+    """Map any known (localized) generator-type label to its English literal."""
+    return _GEN_TYPE_CANON.get((value or "").strip().lower(), value or "Renewable")
+
 
 class GeneratorForm(QWidget):
     """Vertical form for editing a :class:`GuiGeneratorInstance`."""
@@ -54,7 +74,12 @@ class GeneratorForm(QWidget):
         fl_id.addRow(tr("generator_form.name"), self._name)
 
         self._gen_type = QComboBox()
-        self._gen_type.addItems([tr("generator_form.type_renewable"), tr("generator_form.type_nonrenewable")])
+        # English literal as itemData; the label is translated. Select/read by
+        # data so the stored value stays language-neutral (a label-only combo
+        # went "sticky" in non-English UIs → every generator got the last type).
+        self._gen_type.addItem(tr("generator_form.type_renewable"), "Renewable")
+        self._gen_type.addItem(tr("generator_form.type_nonrenewable"),
+                               "Non-renewable")
         self._gen_type.currentIndexChanged.connect(self._on_changed)
         fl_id.addRow(tr("generator_form.type"), self._gen_type)
 
@@ -352,7 +377,8 @@ class GeneratorForm(QWidget):
         self._node_combo.blockSignals(False)
 
         self._name.setText(inst.name)
-        self._gen_type.setCurrentText(inst.gen_type)
+        self._gen_type.setCurrentIndex(
+            max(0, self._gen_type.findData(_canon_gen_type(inst.gen_type))))
 
         # Populate fuel combo from system fuels
         self._fuel.blockSignals(True)
@@ -459,7 +485,9 @@ class GeneratorForm(QWidget):
 
     def load_elements(self, element_ids: list[str]):
         """Load multiple generators for batch editing."""
-        from esfex.visualization.panels.multi_edit import collect_attr, set_widget_value
+        from esfex.visualization.panels.multi_edit import (
+            collect_attr, is_mixed, set_widget_value,
+        )
 
         instances = [self._model.state.generators[eid] for eid in element_ids
                      if eid in self._model.state.generators]
@@ -478,6 +506,14 @@ class GeneratorForm(QWidget):
         self._node_combo.blockSignals(False)
         set_widget_value(self._node_combo, collect_attr(instances, "node"))
 
+        # gen_type uses itemData (not label): resolve by data, honouring mixed.
+        gt = collect_attr(instances, "gen_type")
+        if is_mixed(gt):
+            set_widget_value(self._gen_type, gt)
+        else:
+            self._gen_type.setCurrentIndex(
+                max(0, self._gen_type.findData(_canon_gen_type(gt))))
+
         for attr, w in self._field_map():
             set_widget_value(w, collect_attr(instances, attr))
 
@@ -487,7 +523,7 @@ class GeneratorForm(QWidget):
         """Return (model_attr, widget) pairs for simple fields."""
         return [
             ("name", self._name),
-            ("gen_type", self._gen_type),
+            # gen_type handled separately (itemData, not label) — see _on_changed.
             ("fuel", self._fuel),
             ("availability_file", self._availability),
             ("rated_power", self._rated_power),
@@ -558,6 +594,12 @@ class GeneratorForm(QWidget):
                 val = w.value()
             for inst in instances:
                 setattr(inst, attr, val)
+
+        if not widget_is_mixed(self._gen_type):
+            gt = self._gen_type.currentData()
+            if gt:
+                for inst in instances:
+                    inst.gen_type = gt
 
         if not widget_is_mixed(self._node_combo):
             nd = self._node_combo.currentData()

@@ -552,6 +552,22 @@ class GeneratorConfig(BaseModel):
     technology: Optional[str] = None
     reservable: bool = True
 
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_type(cls, v):
+        # Projects saved from a non-English Studio (before the type combo was
+        # fixed) may hold a localized label; map it back to the English literal
+        # so those configs still load.
+        if isinstance(v, str):
+            return {
+                "renovable": "Renewable", "renouvelable": "Renewable",
+                "renovável": "Renewable", "再生可能": "Renewable",
+                "no renovable": "Non-renewable",
+                "non renouvelable": "Non-renewable",
+                "não renovável": "Non-renewable", "非再生可能": "Non-renewable",
+            }.get(v.strip().lower(), v)
+        return v
+
     # Per-node arrays (length = num_nodes)
     life_time: list[int] = Field(description="Lifetime per node (years)")
     initial_age: list[int] = Field(description="Initial age per node (years)")
