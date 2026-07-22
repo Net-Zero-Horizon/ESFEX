@@ -27,6 +27,11 @@ Per-release notes are also published on the
   generator take the last-shown type and saved a localized string that broke the
   schema. The combo now keeps the English literal internally; legacy localized
   values in already-saved projects are normalized on load.
+- **OTEC cycle diagrams under NumPy 2.x** — fluid saturation/entropy/enthalpy
+  properties can come back as single-element arrays on some NumPy/CoolProp
+  combinations, and `float()` on such an array is a hard error under NumPy 2.x,
+  crashing the cycle-state and T-s / P-h diagram computations. These values are
+  now coerced version-robustly.
 
 ### Changed
 
