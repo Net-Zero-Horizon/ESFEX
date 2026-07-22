@@ -79,8 +79,11 @@ def compute_states(
     ``mass_flow`` is a float (single-fluid cycles) or dict (mixture cycles).
     """
     cycle, fluid = build_cycle(config)
-    p_evap = float(fluid.saturation_pressure(t_evap))
-    p_cond = float(fluid.saturation_pressure(t_cond))
+    # _to_scalar (not float()): the fluid property may return a single-element
+    # array on some NumPy/CoolProp versions, and float() on a non-0-d array is
+    # a hard error under NumPy 2.x.
+    p_evap = _to_scalar(fluid.saturation_pressure(t_evap))
+    p_cond = _to_scalar(fluid.saturation_pressure(t_cond))
     inputs = build_inputs_template(config)
     states = cycle.calculate_cycle_states(t_evap, t_cond, p_evap, p_cond, inputs)
     # Normalise scalar state values to plain floats (see _to_scalar): keeps the
@@ -111,11 +114,11 @@ def saturation_dome(
     temps = np.linspace(t_min, t_max, n)
     s_liq, s_vap, h_liq, h_vap, pres = [], [], [], [], []
     for t in temps:
-        s_liq.append(float(fluid.entropy_liquid(t)))
-        s_vap.append(float(fluid.entropy_vapor(t)))
-        h_liq.append(float(fluid.enthalpy_liquid(t)))
-        h_vap.append(float(fluid.enthalpy_vapor(t)))
-        pres.append(float(fluid.saturation_pressure(t)))
+        s_liq.append(_to_scalar(fluid.entropy_liquid(t)))
+        s_vap.append(_to_scalar(fluid.entropy_vapor(t)))
+        h_liq.append(_to_scalar(fluid.enthalpy_liquid(t)))
+        h_vap.append(_to_scalar(fluid.enthalpy_vapor(t)))
+        pres.append(_to_scalar(fluid.saturation_pressure(t)))
     return {
         "T": temps,
         "s_liq": np.array(s_liq), "s_vap": np.array(s_vap),
@@ -135,7 +138,7 @@ def closed_loop_ts(
     s1, s2 = _to_scalar(states["s_1"]), _to_scalar(states["s_2"])
     s3, s4 = _to_scalar(states["s_3"]), _to_scalar(states["s_4"])
     heat_T = np.linspace(t_cond, t_evap, n_heat)
-    heat_s = [float(fluid.entropy_liquid(t)) for t in heat_T]
+    heat_s = [_to_scalar(fluid.entropy_liquid(t)) for t in heat_T]
     s_pts = [s1, s2, *heat_s, s3, s4, s1]
     T_pts = [t_cond, t_cond, *heat_T.tolist(), t_evap, t_cond, t_cond]
     return np.array(s_pts), np.array(T_pts)
