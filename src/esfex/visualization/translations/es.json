@@ -215,7 +215,8 @@
     "copy_attributes": "Copiar Atributos",
     "paste_attributes": "Pegar Atributos",
     "delete": "Eliminar",
-    "delete_n_items": "Eliminar {n} elementos"
+    "delete_n_items": "Eliminar {n} elementos",
+    "view_on_map": "Ver en el mapa"
   },
   "properties": {
     "title": "Propiedades",
@@ -230,7 +231,6 @@
     "centroid": "Centroide (referencia geográfica)",
     "centroid_lat": "Latitud:",
     "centroid_lng": "Longitud:",
-    "pick_on_map": "Seleccionar en el mapa",
     "reserve_static": "Reserva Estática (MW):",
     "reserve_dynamic": "Reserva Dinámica (MW):",
     "reserve_duration": "Duración Reserva (h):",
@@ -268,7 +268,10 @@
     "load_demand_title": "Cargar CSV de Demanda Eléctrica",
     "node_combo_fmt": "Nodo {idx} - {name}",
     "view_demand": "Ver Demanda…",
-    "view_demand_disabled": "Este nodo aún no tiene demanda pronosticada/cargada"
+    "view_demand_disabled": "Este nodo aún no tiene demanda pronosticada/cargada",
+    "place_on_map": "Colocar",
+    "view_on_map": "Ver",
+    "view_on_map_tooltip": "Centrar el mapa en el centroide del nodo"
   },
   "generator_form": {
     "group_id": "Identificación",
@@ -1476,7 +1479,8 @@
     "validating": "Validando configuración del sistema...",
     "running_sim": "Ejecutando simulación...",
     "no_year_data": "No hay resultados detallados para el año {year}.",
-    "no_gen_data": "No hay datos de generación."
+    "no_gen_data": "No hay datos de generación.",
+    "node_no_centroid": "Este nodo no tiene centroide definido. Usa 'Colocar' para fijarlo en el mapa primero."
   },
   "wizard_solar": {
     "title": "Análisis Solar de Tejados",

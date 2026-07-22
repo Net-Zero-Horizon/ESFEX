@@ -46,6 +46,7 @@ class NodeForm(QWidget):
 
     nodeChanged = Signal(int)
     centroidPickRequested = Signal(int)  # node index
+    centroidViewRequested = Signal(int)  # node index
 
     def __init__(self, model: GuiModel, parent=None):
         super().__init__(parent)
@@ -97,9 +98,16 @@ class NodeForm(QWidget):
         self._centroid_lng.editingFinished.connect(self._on_changed)
         centroid_layout.addRow(tr("node_form.centroid_lng"), self._centroid_lng)
 
-        self._pick_on_map_btn = QPushButton(tr("node_form.pick_on_map"))
+        self._pick_on_map_btn = QPushButton(tr("node_form.place_on_map"))
         self._pick_on_map_btn.clicked.connect(self._on_pick_on_map)
-        centroid_layout.addRow(self._pick_on_map_btn)
+        self._view_on_map_btn = QPushButton(tr("node_form.view_on_map"))
+        self._view_on_map_btn.setToolTip(tr("node_form.view_on_map_tooltip"))
+        self._view_on_map_btn.clicked.connect(self._on_view_on_map)
+        centroid_btns = QHBoxLayout()
+        centroid_btns.setContentsMargins(0, 0, 0, 0)
+        centroid_btns.addWidget(self._pick_on_map_btn)
+        centroid_btns.addWidget(self._view_on_map_btn)
+        centroid_layout.addRow(centroid_btns)
 
         form.addRow(centroid_group)
 
@@ -673,6 +681,10 @@ class NodeForm(QWidget):
     def _on_pick_on_map(self):
         if self._current_node is not None:
             self.centroidPickRequested.emit(self._current_node)
+
+    def _on_view_on_map(self):
+        if self._current_node is not None:
+            self.centroidViewRequested.emit(self._current_node)
 
     def set_centroid(self, lat: float, lng: float):
         """Called externally after the user picks a point on the map."""

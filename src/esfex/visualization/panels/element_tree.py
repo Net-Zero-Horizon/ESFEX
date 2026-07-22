@@ -102,6 +102,7 @@ class ElementTreePanel(QWidget):
     addInvestmentRequested = Signal(str, str)  # system_name, technology_type
     multiElementSelected = Signal(str, list)  # element_type, [element_ids]
     deleteSystemRequested = Signal(str)  # system_name
+    viewNodeRequested = Signal(str)  # node id — focus map on centroid
 
     # Element types that support deletion from the tree
     _DELETABLE_TYPES = {
@@ -949,6 +950,12 @@ class ElementTreePanel(QWidget):
                 )
             return
 
+        # Node — view its centroid on the map (temporary marker)
+        view_node_action = None
+        if etype == "node":
+            view_node_action = menu.addAction(tr("tree_ctx.view_on_map"))
+            menu.addSeparator()
+
         # Geo asset specific actions
         if etype == "geo_asset":
             parse_action = menu.addAction(tr("tree_ctx.parse_to_elements"))
@@ -982,7 +989,9 @@ class ElementTreePanel(QWidget):
         action = menu.exec(event.globalPos())
         if action is None:
             return
-        if action == parse_action:
+        if action == view_node_action:
+            self.viewNodeRequested.emit(eid)
+        elif action == parse_action:
             self.parseGeoAssetRequested.emit(eid)
         elif action == duplicate_action:
             self.duplicateRequested.emit(etype, eid)

@@ -215,7 +215,8 @@
     "copy_attributes": "Copiar atributos",
     "paste_attributes": "Colar atributos",
     "delete": "Excluir",
-    "delete_n_items": "Excluir {n} itens"
+    "delete_n_items": "Excluir {n} itens",
+    "view_on_map": "Ver no mapa"
   },
   "properties": {
     "title": "Propriedades",
@@ -230,7 +231,6 @@
     "centroid": "Centroide (referência geográfica)",
     "centroid_lat": "Latitude:",
     "centroid_lng": "Longitude:",
-    "pick_on_map": "Selecionar no mapa",
     "reserve_static": "Reserva estática (MW):",
     "reserve_dynamic": "Reserva dinâmica (MW):",
     "reserve_duration": "Duração da reserva (h):",
@@ -268,7 +268,10 @@
     "load_demand_title": "Carregar CSV de demanda elétrica",
     "node_combo_fmt": "Nó {idx} - {name}",
     "view_demand": "Ver demanda…",
-    "view_demand_disabled": "Este nó ainda não tem demanda prevista/carregada"
+    "view_demand_disabled": "Este nó ainda não tem demanda prevista/carregada",
+    "place_on_map": "Colocar",
+    "view_on_map": "Ver",
+    "view_on_map_tooltip": "Centralizar o mapa no centroide do nó"
   },
   "generator_form": {
     "group_id": "Identificação",
@@ -1476,7 +1479,8 @@
     "validating": "A validar a configuração do sistema...",
     "running_sim": "A executar a simulação...",
     "no_year_data": "Sem resultados detalhados para o ano {year}.",
-    "no_gen_data": "Sem dados de geração."
+    "no_gen_data": "Sem dados de geração.",
+    "node_no_centroid": "Este nó não tem centroide definido. Use 'Colocar' para defini-lo no mapa primeiro."
   },
   "wizard_solar": {
     "title": "Análise de solar em telhado",

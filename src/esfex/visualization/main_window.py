@@ -450,6 +450,7 @@ class MainWindow(QMainWindow):
         def _wire_node(f):
             self._node_form = f
             f.centroidPickRequested.connect(self._on_centroid_pick_requested)
+            f.centroidViewRequested.connect(self._on_centroid_view_requested)
 
         def _wire_gen(f):
             self._gen_form = f
@@ -1955,6 +1956,7 @@ class MainWindow(QMainWindow):
         self.element_tree.addInvestmentRequested.connect(self._on_add_investment_to_system)
         self.element_tree.multiElementSelected.connect(self._on_multi_element_selected)
         self.element_tree.deleteSystemRequested.connect(self._on_delete_system)
+        self.element_tree.viewNodeRequested.connect(self._on_view_node_requested)
 
     def _connect_model(self):
         m = self.model
@@ -3533,9 +3535,38 @@ class MainWindow(QMainWindow):
     }
 
     def _on_centroid_pick_requested(self, node_index: int):
-        """User clicked 'Pick on map' in the node form."""
+        """User clicked 'Place' in the node form."""
         self._pick_centroid_node = node_index
         self.map_widget.set_mode("pick_centroid")
+
+    def _on_view_node_requested(self, node_id: str):
+        """Right-click 'View on map' on a node in the element tree."""
+        node_id = self._resolve_cross_system_id(node_id)
+        try:
+            node_index = int(node_id)
+        except (TypeError, ValueError):
+            return
+        self._on_centroid_view_requested(node_index)
+
+    def _on_centroid_view_requested(self, node_index: int):
+        """User asked to view a node centroid on the map ('View' button or
+        right-click on the node in the element tree). Focus the map on the
+        centroid and drop a temporary marker."""
+        node = self.model.get_node(node_index)
+        if node is None:
+            return
+        lat, lng = node.centroid_lat, node.centroid_lng
+        if lat == 0.0 and lng == 0.0:
+            QMessageBox.information(
+                self,
+                tr("common.info"),
+                tr("messages.node_no_centroid"),
+            )
+            return
+        # Ensure the geographic view is active (index 0 = map, 1 = SLD).
+        if self._view_stack.currentIndex() != 0:
+            self._view_tab_bar.setCurrentIndex(0)
+        self.map_widget.flash_node_centroid(lat, lng, 12)
 
     def _on_element_placed(self, mode: str, lat: float, lng: float):
         """Unified handler for placing generators, batteries, transformers, fuel storages.

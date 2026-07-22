@@ -215,7 +215,8 @@
     "copy_attributes": "Copier les attributs",
     "paste_attributes": "Coller les attributs",
     "delete": "Supprimer",
-    "delete_n_items": "Supprimer {n} éléments"
+    "delete_n_items": "Supprimer {n} éléments",
+    "view_on_map": "Voir sur la carte"
   },
   "properties": {
     "title": "Propriétés",
@@ -230,7 +231,6 @@
     "centroid": "Centroïde (référence géographique)",
     "centroid_lat": "Latitude :",
     "centroid_lng": "Longitude :",
-    "pick_on_map": "Sélectionner sur la carte",
     "reserve_static": "Réserve statique (MW) :",
     "reserve_dynamic": "Réserve dynamique (MW) :",
     "reserve_duration": "Durée de réserve (h) :",
@@ -268,7 +268,10 @@
     "load_demand_title": "Charger le CSV de demande électrique",
     "node_combo_fmt": "Nœud {idx} - {name}",
     "view_demand": "Afficher la demande…",
-    "view_demand_disabled": "Ce nœud n'a pas encore de demande prévue/chargée"
+    "view_demand_disabled": "Ce nœud n'a pas encore de demande prévue/chargée",
+    "place_on_map": "Placer",
+    "view_on_map": "Voir",
+    "view_on_map_tooltip": "Centrer la carte sur le centroïde du nœud"
   },
   "generator_form": {
     "group_id": "Identification",
@@ -1476,7 +1479,8 @@
     "validating": "Validation de la configuration du système...",
     "running_sim": "Exécution de la simulation...",
     "no_year_data": "Aucun résultat détaillé pour l'année {year}.",
-    "no_gen_data": "Aucune donnée de production."
+    "no_gen_data": "Aucune donnée de production.",
+    "node_no_centroid": "Ce nœud n'a pas de centroïde défini. Utilisez « Placer » pour le définir sur la carte d'abord."
   },
   "wizard_solar": {
     "title": "Analyse du solaire en toiture",

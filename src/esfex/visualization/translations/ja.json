@@ -215,7 +215,8 @@
     "copy_attributes": "属性をコピー",
     "paste_attributes": "属性を貼り付け",
     "delete": "削除",
-    "delete_n_items": "{n} 項目を削除"
+    "delete_n_items": "{n} 項目を削除",
+    "view_on_map": "マップで表示"
   },
   "properties": {
     "title": "プロパティ",
@@ -230,7 +231,6 @@
     "centroid": "重心（地理的参照点）",
     "centroid_lat": "緯度:",
     "centroid_lng": "経度:",
-    "pick_on_map": "マップ上で選択",
     "reserve_static": "静的予備力 (MW):",
     "reserve_dynamic": "動的予備力 (MW):",
     "reserve_duration": "予備力持続時間 (h):",
@@ -268,7 +268,10 @@
     "load_demand_title": "電力需要CSVを読み込み",
     "node_combo_fmt": "ノード {idx} - {name}",
     "view_demand": "需要を表示…",
-    "view_demand_disabled": "このノードにはまだ予測/読込済みの需要がありません"
+    "view_demand_disabled": "このノードにはまだ予測/読込済みの需要がありません",
+    "place_on_map": "配置",
+    "view_on_map": "表示",
+    "view_on_map_tooltip": "ノードの重心にマップを合わせる"
   },
   "generator_form": {
     "group_id": "識別",
@@ -1488,7 +1491,8 @@
     "validating": "システム設定を検証中...",
     "running_sim": "シミュレーション実行中...",
     "no_year_data": "{year} 年の詳細結果がありません。",
-    "no_gen_data": "発電データがありません。"
+    "no_gen_data": "発電データがありません。",
+    "node_no_centroid": "このノードには重心が設定されていません。まず「配置」でマップ上に設定してください。"
   },
   "wizard_solar": {
     "title": "太陽光屋根上分析",

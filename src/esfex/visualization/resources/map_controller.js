@@ -2745,6 +2745,30 @@ function showResultsLayer() {
 function setMapView(lat, lng, zoom) { map.setView([lat, lng], zoom); }
 function fitBounds(south, west, north, east) { map.fitBounds([[south, west], [north, east]]); }
 
+// Temporary node-centroid marker: fly to the location and drop a pulsing
+// marker that removes itself after a few seconds. Nodes are abstract, so we
+// never keep a permanent marker (it would overlap the electrical / primary
+// energy elements) — this is a transient "here is the centroid" cue.
+var _tempCentroidMarker = null;
+var _tempCentroidTimer = null;
+function flashNodeCentroid(lat, lng, zoom) {
+    if (_tempCentroidTimer) { clearTimeout(_tempCentroidTimer); _tempCentroidTimer = null; }
+    if (_tempCentroidMarker) { map.removeLayer(_tempCentroidMarker); _tempCentroidMarker = null; }
+    var icon = L.divIcon({
+        className: '',
+        html: '<div class="node-centroid-flash"></div>',
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+    });
+    _tempCentroidMarker = L.marker([lat, lng],
+        { icon: icon, interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(map);
+    map.flyTo([lat, lng], zoom, { duration: 0.6 });
+    _tempCentroidTimer = setTimeout(function () {
+        if (_tempCentroidMarker) { map.removeLayer(_tempCentroidMarker); _tempCentroidMarker = null; }
+        _tempCentroidTimer = null;
+    }, 4500);
+}
+
 // Re-key an index-based marker registry after a deletion.
 // Rebuilds the registry so keys become sequential 0,1,2,...
 // Also updates the magnetic element registry entries.

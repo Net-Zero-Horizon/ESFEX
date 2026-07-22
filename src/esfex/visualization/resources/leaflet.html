@@ -66,6 +66,35 @@
         background: #fdecea;
         color: #c0392b;
     }
+
+    /* Temporary node-centroid marker (transient "View" cue) */
+    @keyframes node-centroid-pulse {
+        0%   { transform: translate(-50%, -50%) scale(0.5); opacity: 0.85; }
+        70%  { transform: translate(-50%, -50%) scale(2.6); opacity: 0.0; }
+        100% { transform: translate(-50%, -50%) scale(2.6); opacity: 0.0; }
+    }
+    .node-centroid-flash {
+        position: relative;
+        width: 14px;
+        height: 14px;
+        margin: 7px;
+        border-radius: 50%;
+        background: #1a73e8;
+        border: 2px solid #ffffff;
+        box-shadow: 0 0 6px rgba(0,0,0,0.45);
+    }
+    .node-centroid-flash::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 2px solid #1a73e8;
+        transform: translate(-50%, -50%);
+        animation: node-centroid-pulse 1.5s ease-out infinite;
+    }
 </style>
 </head>
 <body>

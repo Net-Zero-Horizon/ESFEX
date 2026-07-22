@@ -189,6 +189,14 @@ class MapWidget(QWebEngineView):
     def set_map_view(self, lat: float, lng: float, zoom: int):
         self._run_js(f"setMapView({lat}, {lng}, {zoom})")
 
+    def flash_node_centroid(self, lat: float, lng: float, zoom: int = 12):
+        """Fly to a node centroid and drop a temporary, self-removing marker.
+
+        Nodes are abstract (no permanent map marker); this shows a transient
+        pulsing cue at the centroid without cluttering the map.
+        """
+        self._run_js(f"flashNodeCentroid({lat}, {lng}, {zoom})")
+
     def get_visible_center(self) -> tuple[float, float] | None:
         """Return the current map center as (lat, lng), or None if unavailable."""
         # Use synchronous JS evaluation via a blocking event loop

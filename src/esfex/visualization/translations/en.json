@@ -215,7 +215,8 @@
     "copy_attributes": "Copy Attributes",
     "paste_attributes": "Paste Attributes",
     "delete": "Delete",
-    "delete_n_items": "Delete {n} items"
+    "delete_n_items": "Delete {n} items",
+    "view_on_map": "View on map"
   },
   "properties": {
     "title": "Properties",
@@ -230,7 +231,6 @@
     "centroid": "Centroid (geographic reference)",
     "centroid_lat": "Latitude:",
     "centroid_lng": "Longitude:",
-    "pick_on_map": "Pick on map",
     "reserve_static": "Static Reserve (MW):",
     "reserve_dynamic": "Dynamic Reserve (MW):",
     "reserve_duration": "Reserve Duration (h):",
@@ -268,7 +268,10 @@
     "load_demand_title": "Load Electric Demand CSV",
     "node_combo_fmt": "Node {idx} - {name}",
     "view_demand": "View Demand…",
-    "view_demand_disabled": "This node has no forecasted/loaded demand yet"
+    "view_demand_disabled": "This node has no forecasted/loaded demand yet",
+    "place_on_map": "Place",
+    "view_on_map": "View",
+    "view_on_map_tooltip": "Focus the map on the node centroid"
   },
   "generator_form": {
     "group_id": "Identification",
@@ -1476,7 +1479,8 @@
     "validating": "Validating system configuration...",
     "running_sim": "Running simulation...",
     "no_year_data": "No detailed results for year {year}.",
-    "no_gen_data": "No generation data."
+    "no_gen_data": "No generation data.",
+    "node_no_centroid": "This node has no centroid set. Use 'Place' to set it on the map first."
   },
   "wizard_solar": {
     "title": "Solar Rooftop Analysis",
