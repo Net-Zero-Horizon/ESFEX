@@ -7,6 +7,40 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.3] — 2026-07-22
+
+### Added
+
+- **View a node's centroid on the map** — nodes are abstract and carry no
+  permanent map marker (one would overlap the electrical and primary-energy
+  elements), so a transient cue was added: the map flies to the centroid and
+  drops a pulsing marker that removes itself after a few seconds. Reachable from
+  a new **View** button next to the node form's centroid button (the former
+  *Pick on map* is shortened to **Place**) and from **right-click → View on map**
+  on a node in the element tree.
+
+### Fixed
+
+- **Generator type not preserved in non-English UIs** — the resource-type combo
+  (Renewable / Non-renewable) showed translated labels while the model stores
+  English literals, so editing generators in a non-English UI made every
+  generator take the last-shown type and saved a localized string that broke the
+  schema. The combo now keeps the English literal internally; legacy localized
+  values in already-saved projects are normalized on load.
+
+### Changed
+
+- **Grid Builder UI is now translated** — its labels, group boxes, checkboxes,
+  radio buttons, buttons and tooltips were hard-coded English and never followed
+  the selected language. All user-facing strings now use the translation system
+  (en/es/fr/pt/ja), matching the Solar/Wind/Demand wizards.
+- **New ESFEX logo** across the wordmark, window icon and documentation, with
+  the splash logo no longer clipped and a smaller About-dialog logo.
+- **Python support capped to `>=3.10,<3.14`** so installs on a too-new Python
+  (which has no prebuilt wheels for the scientific stack and fails to build from
+  source) get a clear resolver error instead of an obscure compiler failure;
+  Python 3.13 is now an official supported/classified version.
+
 ## [0.2.2] — 2026-07-06
 
 ### Fixed
