@@ -604,6 +604,38 @@ def gdp_density_point(lat: float, lon: float, year: int, ssp: str = "ssp2") -> O
 
 _CMIP6_MODEL = "CMCC_CM2_VHR4"
 
+# The Open-Meteo climate API rate-limits aggressively (heavy CMIP6 queries); a
+# bare request loses a node's future climate on the first HTTP 429, degrading
+# its SSP demand forecast. Retry transient failures (429 / 5xx / timeout /
+# connection) with exponential backoff + jitter.
+_CMIP6_RETRIES = 4
+_CMIP6_BACKOFF_S = 3.0
+
+
+def _cmip6_get_with_retry(url: str):
+    """GET *url* with retry/backoff on transient (429 / 5xx / network) errors."""
+    import random
+    import time
+
+    import requests
+
+    last_exc = None
+    for attempt in range(_CMIP6_RETRIES):
+        try:
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            return resp
+        except requests.HTTPError as exc:
+            code = getattr(exc.response, "status_code", None)
+            last_exc = exc
+            if code != 429 and not (code and 500 <= code < 600):
+                raise  # non-transient (e.g. 400) — don't retry
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+        if attempt < _CMIP6_RETRIES - 1:
+            time.sleep(_CMIP6_BACKOFF_S * (2 ** attempt) * (0.5 + random.random()))
+    raise last_exc
+
 
 def _cmip6_point_hourly(
     lat: float, lon: float, start_year: int, end_year: int,
@@ -621,7 +653,6 @@ def _cmip6_point_hourly(
         except Exception:
             pass
 
-    import requests
     from esfex.models.demand_projection import _daily_to_hourly_temperature
     url = (
         f"https://climate-api.open-meteo.com/v1/climate?"
@@ -629,8 +660,7 @@ def _cmip6_point_hourly(
         f"&start_date={start_year}-01-01&end_date={end_year}-12-31"
         f"&models={model}&daily=temperature_2m_max,temperature_2m_min"
     )
-    resp = requests.get(url, timeout=120)
-    resp.raise_for_status()
+    resp = _cmip6_get_with_retry(url)
     daily = resp.json().get("daily", {})
     times = daily.get("time", [])
     tmax = daily.get("temperature_2m_max", [])
