@@ -4411,19 +4411,36 @@ class GridMappingDemandStep(QWidget):
         _dist_intro.setWordWrap(True)
         dg.addWidget(_dist_intro)
 
-        # Building source
-        src_row = QHBoxLayout()
-        src_row.addWidget(QLabel(tr("grid_builder.building_source")))
+        # ── Distribution method (one combo → one button) ──
+        # 'Spatial demand' (recommended: the forecast's own per-cell demand) or a
+        # 'Building footprint proxy' (pick which footprint database to download).
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel(tr("grid_builder.distribution_method")))
         self._combo_bld_source = QComboBox()
-        # Microsoft ML first (default): spatially partitioned by tile, so it
-        # downloads only the relevant tiles. Overture is queried over the whole
-        # global buildings dataset and scans every file, which hangs for minutes
-        # even on a small area — kept as an option, not the default.
+        self._combo_bld_source.addItem(tr("grid_builder.method_spatial_demand"), "spatial")
+        self._combo_bld_source.insertSeparator(self._combo_bld_source.count())
+        # A non-selectable group header, then the footprint-proxy databases.
+        self._combo_bld_source.addItem(tr("grid_builder.method_footprint_proxy"), None)
+        _hdr_item = self._combo_bld_source.model().item(
+            self._combo_bld_source.count() - 1)
+        if _hdr_item is not None:
+            _hdr_item.setEnabled(False)
+        # Microsoft ML is spatially tiled (fast); Overture scans the whole global
+        # dataset (slow) — kept as an option.
         self._combo_bld_source.addItem("Microsoft ML", "microsoft")
         self._combo_bld_source.addItem("Overture Maps", "overture")
         self._combo_bld_source.addItem("Google Open Buildings", "google")
-        src_row.addWidget(self._combo_bld_source, 1)
-        dg.addLayout(src_row)
+        self._combo_bld_source.setCurrentIndex(0)  # Spatial demand (default)
+        self._combo_bld_source.currentIndexChanged.connect(
+            self._on_dist_method_changed)
+        method_row.addWidget(self._combo_bld_source, 1)
+        dg.addLayout(method_row)
+
+        # Footprint-proxy options (classification rules + fallback), shown only
+        # when a footprint database is the chosen method.
+        self._footprint_opts = QWidget()
+        _fo = QVBoxLayout(self._footprint_opts)
+        _fo.setContentsMargins(0, 0, 0, 0)
 
         # Classification rules table
         self._rules_table = QTableWidget(0, 4)
@@ -4433,7 +4450,7 @@ class GridMappingDemandStep(QWidget):
         ])
         self._rules_table.horizontalHeader().setStretchLastSection(True)
         self._rules_table.setMinimumHeight(100)
-        dg.addWidget(self._rules_table)
+        _fo.addWidget(self._rules_table)
 
         rules_btn_row = QHBoxLayout()
         self._btn_add_rule = QPushButton(tr("grid_builder.add_rule"))
@@ -4443,7 +4460,7 @@ class GridMappingDemandStep(QWidget):
         self._btn_remove_rule.clicked.connect(self._remove_selected_rule)
         rules_btn_row.addWidget(self._btn_remove_rule)
         rules_btn_row.addStretch()
-        dg.addLayout(rules_btn_row)
+        _fo.addLayout(rules_btn_row)
 
         # Fallback weight
         fallback_row = QHBoxLayout()
@@ -4455,28 +4472,21 @@ class GridMappingDemandStep(QWidget):
         self._spin_fallback.setValue(0.03)
         fallback_row.addWidget(self._spin_fallback)
         fallback_row.addStretch()
-        dg.addLayout(fallback_row)
+        _fo.addLayout(fallback_row)
 
-        # Fetch & Distribute button
+        self._footprint_opts.setVisible(False)  # spatial is the default method
+        dg.addWidget(self._footprint_opts)
+
+        # A single button runs whichever method the combo selects.
         dist_btn_row = QHBoxLayout()
-        self._btn_fetch_bld = QPushButton(tr("grid_builder.fetch_distribute"))
+        self._btn_fetch_bld = QPushButton(
+            tr("grid_builder.distribute_by_spatial_demand"))
         self._btn_fetch_bld.setStyleSheet(
             scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 8px;")
         )
         self._btn_fetch_bld.setEnabled(False)
-        self._btn_fetch_bld.clicked.connect(self._fetch_buildings)
+        self._btn_fetch_bld.clicked.connect(self._on_distribute)
         dist_btn_row.addWidget(self._btn_fetch_bld)
-        # Alternative: distribute by the density model's own per-cell demand
-        # (the actual forecast demand, not a building-footprint proxy).
-        self._btn_spatial_dist = QPushButton(tr("grid_builder.distribute_by_spatial_demand"))
-        self._btn_spatial_dist.setToolTip(
-            tr("grid_builder.assign_each_0_25_demand_density")
-        )
-        self._btn_spatial_dist.setStyleSheet(
-            scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 8px;")
-        )
-        self._btn_spatial_dist.clicked.connect(self._distribute_by_spatial_demand)
-        dist_btn_row.addWidget(self._btn_spatial_dist)
         self._bld_progress = QProgressBar()
         self._bld_progress.setRange(0, 100)
         dist_btn_row.addWidget(self._bld_progress, 1)
@@ -5018,9 +5028,10 @@ class GridMappingDemandStep(QWidget):
         self._chk_apply_correction.blockSignals(False)
         self._refresh_validation()
 
-        # Enable bus distribution
+        # Enable bus distribution (each method checks its own preconditions:
+        # spatial needs a forecast result, the footprint proxy needs bounds).
         has_eligible = len(self._targets) > 0
-        self._btn_fetch_bld.setEnabled(has_eligible and self._bounds is not None)
+        self._btn_fetch_bld.setEnabled(has_eligible)
         self._btn_apply.setEnabled(True)
 
     def _on_view_demand(self):
@@ -5289,6 +5300,23 @@ class GridMappingDemandStep(QWidget):
     # ==================================================================
     # Section 3: Bus Distribution (preserved from original)
     # ==================================================================
+
+    def _on_dist_method_changed(self, *_):
+        """Show the footprint-proxy options only for a footprint database; snap
+        off the non-selectable group header."""
+        data = self._combo_bld_source.currentData()
+        if data is None:  # landed on the disabled 'Building footprint proxy' header
+            self._combo_bld_source.setCurrentIndex(0)  # back to Spatial demand
+            return
+        self._footprint_opts.setVisible(data != "spatial")
+
+    def _on_distribute(self):
+        """Run the distribution method selected in the combo."""
+        method = self._combo_bld_source.currentData()
+        if method == "spatial":
+            self._distribute_by_spatial_demand()
+        elif method in ("microsoft", "overture", "google"):
+            self._fetch_buildings()  # reads the source from the same combo
 
     def _fetch_buildings(self):
         if self._bounds is None:
