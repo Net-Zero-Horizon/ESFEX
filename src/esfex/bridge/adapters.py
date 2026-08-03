@@ -1631,6 +1631,17 @@ class PowerSystemAdapter:
                 jl.seval("setindex!")(
                     jl_line_masks, py_to_julia_vector(fac), str(lid))
             jl.seval("setindex!")(jl_outage_masks, jl_line_masks, "line")
+        # Converters (AC/DC, frequency) and transformers: id-addressed by name.
+        for _cat in ("acdc_converter", "freq_converter", "transformer"):
+            _m = build_outage_mask_by_id(
+                outage_by_type.get(_cat, {}),
+                self.start_hour, self.hours, resolution_hours,
+            )
+            if _m is not None:
+                _jl_m = jl.seval("Dict{String, Vector{Float64}}()")
+                for _id, _fac in _m.items():
+                    jl.seval("setindex!")(_jl_m, py_to_julia_vector(_fac), str(_id))
+                jl.seval("setindex!")(jl_outage_masks, _jl_m, _cat)
 
         # Create input struct using keyword constructor
         jl_input = ESFEX.PowerSystemInput(

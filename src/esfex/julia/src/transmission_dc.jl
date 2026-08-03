@@ -118,7 +118,10 @@ function TransmissionDC(network::NetworkConfig)
                 push!(line_ids, "")
             end
         else
-            push!(line_ids, "")
+            # Transformer branch: use the transformer name so its outage mask
+            # (keyed under "transformer") can be looked up on this same flow.
+            ti = trafo_indices[idx - n_transmission]
+            push!(line_ids, network.transformers[ti].name)
         end
     end
 
@@ -681,15 +684,19 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
     pf_by_line = vars.power_flow_by_line
 
     # Deterministic scheduled outages: id → hourly capacity factor (1.0 = none).
+    # transmission.line_ids holds a line_id (transmission lines) or a transformer
+    # name (transformer branches share this same flow constraint).
     line_masks = get(input.outage_masks, "line", nothing)
+    trafo_masks = get(input.outage_masks, "transformer", nothing)
     outage_for(ℓ, t) = begin
-        if line_masks === nothing
-            1.0
-        else
-            lid = transmission.line_ids[ℓ]
-            lm = isempty(lid) ? nothing : get(line_masks, lid, nothing)
-            lm === nothing ? 1.0 : lm[t]
+        id = transmission.line_ids[ℓ]
+        isempty(id) && return 1.0
+        if line_masks !== nothing && haskey(line_masks, id)
+            return line_masks[id][t]
+        elseif trafo_masks !== nothing && haskey(trafo_masks, id)
+            return trafo_masks[id][t]
         end
+        1.0
     end
 
     for (ℓ, (i, j)) in enumerate(transmission.lines)
@@ -759,6 +766,12 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
     hours = input.temporal.hours
     network = input.network
 
+    # Deterministic scheduled outages: converters are id-addressed by name
+    # (name → hourly capacity factor in [0,1]; 1.0 = none).
+    acdc_masks = get(input.outage_masks, "acdc_converter", nothing)
+    freq_masks = get(input.outage_masks, "freq_converter", nothing)
+    conv_om(masks, nm, t) = (masks === nothing || !haskey(masks, nm)) ? 1.0 : masks[nm][t]
+
     # --- AC/DC Converters ---
     n_acdc = length(network.acdc_converters)
     if n_acdc > 0
@@ -771,9 +784,10 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
 
         for (c, conv) in enumerate(network.acdc_converters)
             for t in 1:hours
-                # Mutual capacity: total through-power ≤ rated
+                # Mutual capacity: total through-power ≤ rated (× outage factor)
                 @constraint(model,
-                    acdc_rect[c, t] + acdc_inv[c, t] <= conv.rated_power_mva)
+                    acdc_rect[c, t] + acdc_inv[c, t] <=
+                        conv.rated_power_mva * conv_om(acdc_masks, conv.name, t))
                 # Minimum power (if applicable)
                 if conv.min_power_mva > 0
                     # Only enforce when active — skip for now (would need binary)
@@ -795,7 +809,8 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
         for (c, conv) in enumerate(network.freq_converters)
             for t in 1:hours
                 @constraint(model,
-                    freq_ab[c, t] + freq_ba[c, t] <= conv.rated_power_mva)
+                    freq_ab[c, t] + freq_ba[c, t] <=
+                        conv.rated_power_mva * conv_om(freq_masks, conv.name, t))
             end
         end
     end
