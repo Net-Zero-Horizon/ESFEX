@@ -4415,8 +4415,12 @@ class GridMappingDemandStep(QWidget):
         src_row = QHBoxLayout()
         src_row.addWidget(QLabel(tr("grid_builder.building_source")))
         self._combo_bld_source = QComboBox()
-        self._combo_bld_source.addItem("Overture Maps", "overture")
+        # Microsoft ML first (default): spatially partitioned by tile, so it
+        # downloads only the relevant tiles. Overture is queried over the whole
+        # global buildings dataset and scans every file, which hangs for minutes
+        # even on a small area — kept as an option, not the default.
         self._combo_bld_source.addItem("Microsoft ML", "microsoft")
+        self._combo_bld_source.addItem("Overture Maps", "overture")
         self._combo_bld_source.addItem("Google Open Buildings", "google")
         src_row.addWidget(self._combo_bld_source, 1)
         dg.addLayout(src_row)

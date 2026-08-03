@@ -201,22 +201,33 @@ class BuildingFetcher(QThread):
 
     @staticmethod
     def _quadkey_to_bbox(quadkey: str):
-        """Convert a QuadKey to a (west, south, east, north) bounding box."""
-        n = len(quadkey)
-        west, south, east, north = -180.0, -90.0, 180.0, 90.0
-        for i in range(n):
-            mid_lon = (west + east) / 2
-            mid_lat = (south + north) / 2
-            digit = int(quadkey[i])
-            if digit in (0, 2):
-                east = mid_lon
-            else:
-                west = mid_lon
-            if digit in (0, 1):
-                south = mid_lat
-            else:
-                north = mid_lat
-        return west, south, east, north
+        """Convert a Bing QuadKey to a (west, south, east, north) bounding box.
+
+        Bing tiles use the Web Mercator projection, so tile rows map to
+        latitude non-linearly — bisecting latitude directly (as a naive
+        implementation does) yields the wrong box everywhere except the
+        equator, so relevant tiles never intersect the domain. Decode the
+        quadkey to (tile_x, tile_y, zoom) and invert the Web Mercator tile
+        formula for correct bounds.
+        """
+        import math
+
+        z = len(quadkey)
+        tile_x = tile_y = 0
+        for ch in quadkey:
+            d = int(ch)
+            tile_x = (tile_x << 1) | (1 if d in (1, 3) else 0)
+            tile_y = (tile_y << 1) | (1 if d in (2, 3) else 0)
+        n = 2 ** z
+
+        def _lon(x):
+            return x / n * 360.0 - 180.0
+
+        def _lat(y):
+            return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+
+        # tile_y increases southward → north edge is tile_y, south is tile_y+1.
+        return _lon(tile_x), _lat(tile_y + 1), _lon(tile_x + 1), _lat(tile_y)
 
     def _fetch_microsoft(self):
         import gzip
@@ -225,8 +236,7 @@ class BuildingFetcher(QThread):
         import geopandas as gpd
         import pandas as pd
         import requests
-        from shapely import wkt
-        from shapely.geometry import box
+        from shapely.geometry import box, shape
 
         self.progress.emit(10, "Downloading Microsoft footprint index...")
 
@@ -234,7 +244,10 @@ class BuildingFetcher(QThread):
             "https://minedbuildings.z5.web.core.windows.net/"
             "global-buildings/dataset-links.csv"
         )
-        links_df = pd.read_csv(index_url)
+        # QuadKey MUST stay a string — read as an int, pandas strips leading
+        # zeros, which silently corrupts every tile in the western/northern
+        # hemisphere (e.g. all of the Americas) so none intersect the domain.
+        links_df = pd.read_csv(index_url, dtype={"QuadKey": str})
 
         self.progress.emit(20, "Finding relevant tiles...")
 
@@ -276,7 +289,10 @@ class BuildingFetcher(QThread):
                 )
                 if tile_df.empty:
                     continue
-                tile_df["geometry"] = tile_df["geometry"].apply(wkt.loads)
+                # Microsoft tiles are GeoJSON-Lines: geometry is a GeoJSON dict,
+                # not WKT — parse with shape(), not wkt.loads() (which errored on
+                # every row, so all tiles were dropped and 0 buildings loaded).
+                tile_df["geometry"] = tile_df["geometry"].apply(shape)
                 tile_gdf = gpd.GeoDataFrame(
                     tile_df, geometry="geometry", crs="EPSG:4326"
                 )
