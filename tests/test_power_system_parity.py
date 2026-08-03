@@ -443,7 +443,10 @@ def test_julia_renewable_dispatch():
 
     model, vars = ESFEX.create_power_system(ps_input)
     jl._model = model
-    jl.seval("optimize!(_model)")
+    # `using JuMP` brings optimize! into Main's scope; without it the call is
+    # UndefVarError unless another test happened to import JuMP first (fragile
+    # run-order dependency). Mirror the idiom used in test_julia_power_system_solves.
+    jl.seval("using JuMP; optimize!(_model)")
 
     result = ESFEX.extract_solution(model, vars, ps_input)
 
