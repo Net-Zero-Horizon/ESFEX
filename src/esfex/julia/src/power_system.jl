@@ -1707,7 +1707,10 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
     has_override = capacity_override_power !== nothing
 
     # Deterministic scheduled outages: [n_bat × hours] capacity mask (1.0 = none).
-    bat_outage = get(input.outage_masks, "battery", nothing)
+    # Lightweight NamedTuple inputs (master-problem representative days) omit the
+    # field entirely — no outages there, so fall back to nothing.
+    bat_outage = hasproperty(input, :outage_masks) ?
+        get(input.outage_masks, "battery", nothing) : nothing
 
     for bi in 1:n_bat
         bat = input.batteries[bi]

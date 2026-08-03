@@ -686,8 +686,10 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
     # Deterministic scheduled outages: id → hourly capacity factor (1.0 = none).
     # transmission.line_ids holds a line_id (transmission lines) or a transformer
     # name (transformer branches share this same flow constraint).
-    line_masks = get(input.outage_masks, "line", nothing)
-    trafo_masks = get(input.outage_masks, "transformer", nothing)
+    # Lightweight NamedTuple inputs (master problem) omit outage_masks → no outages.
+    _om = hasproperty(input, :outage_masks) ? input.outage_masks : Dict{String, Any}()
+    line_masks = get(_om, "line", nothing)
+    trafo_masks = get(_om, "transformer", nothing)
     outage_for(ℓ, t) = begin
         id = transmission.line_ids[ℓ]
         isempty(id) && return 1.0
@@ -768,8 +770,9 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
 
     # Deterministic scheduled outages: converters are id-addressed by name
     # (name → hourly capacity factor in [0,1]; 1.0 = none).
-    acdc_masks = get(input.outage_masks, "acdc_converter", nothing)
-    freq_masks = get(input.outage_masks, "freq_converter", nothing)
+    _om = hasproperty(input, :outage_masks) ? input.outage_masks : Dict{String, Any}()
+    acdc_masks = get(_om, "acdc_converter", nothing)
+    freq_masks = get(_om, "freq_converter", nothing)
     conv_om(masks, nm, t) = (masks === nothing || !haskey(masks, nm)) ? 1.0 : masks[nm][t]
 
     # --- AC/DC Converters ---
