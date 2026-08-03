@@ -153,10 +153,15 @@ def build_density_features(
     ranges = train_ranges or {}
 
     temp = (
-        np.asarray(temperature_hourly[:hpy], dtype=np.float64)
+        np.asarray(temperature_hourly[:hpy], dtype=np.float64).copy()
         if len(temperature_hourly) >= hpy
         else np.full(hpy, 20.0, dtype=np.float64)
     )
+    # NaN/inf temperature (e.g. a degraded ERA5 fallback after a CMIP6 fetch
+    # failure) would propagate through HDD/CDD into the feature matrix; scrub it.
+    _bad = ~np.isfinite(temp)
+    if _bad.any():
+        temp[_bad] = float(temp[~_bad].mean()) if (~_bad).any() else 20.0
     hdd = np.maximum(hdd_base - temp, 0.0)
     cdd = np.maximum(temp - cdd_base, 0.0)
 
@@ -321,8 +326,16 @@ def predict_region_cell_demand(
     feature_order = model.feature_names
 
     # ── Shared hourly block (identical for every cell) ──────────────────
-    temp = (np.asarray(temperature_hourly[:hpy], dtype=np.float64)
+    temp = (np.asarray(temperature_hourly[:hpy], dtype=np.float64).copy()
             if len(temperature_hourly) >= hpy else np.full(hpy, 20.0))
+    # When the CMIP6 fetch fails (rate-limited) the caller falls back to the
+    # ERA5 year, which can be short or carry NaN; a full-length NaN array passes
+    # the length guard above and would flow through HDD/CDD into the model,
+    # silently NaN-ing out this cell's demand and later breaking the bus
+    # distribution. Replace non-finite hours with the finite mean (or 20°C).
+    _bad = ~np.isfinite(temp)
+    if _bad.any():
+        temp[_bad] = float(temp[~_bad].mean()) if (~_bad).any() else 20.0
     hdd = np.maximum(hdd_base - temp, 0.0)
     cdd = np.maximum(temp - cdd_base, 0.0)
     hours = np.arange(hpy)
@@ -731,7 +744,12 @@ def allocate_demand_capacitated(
     one is full — i.e. a bus no longer carries only its immediate cell.
 
     Returns the per-bus served demand (same units as ``cell_demand``)."""
-    cell_demand = np.asarray(cell_demand, dtype=np.float64)
+    # A single non-finite cell demand makes linprog reject the whole problem
+    # (b_eq must not contain NaN) and the gravity fallback propagate NaN into
+    # every bus, which then poisons the bus demand fractions. Treat bad/negative
+    # cell demand as zero so allocation always degrades gracefully.
+    cell_demand = np.asarray(cell_demand, dtype=np.float64).copy()
+    cell_demand[~np.isfinite(cell_demand) | (cell_demand < 0)] = 0.0
     nb = len(bus_cap)
     nc = len(cell_demand)
     if nb == 0:

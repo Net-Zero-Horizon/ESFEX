@@ -5536,6 +5536,10 @@ class GridMappingDemandStep(QWidget):
         clat = np.asarray(res.cell_lats, dtype=float)
         clon = np.asarray(res.cell_lons, dtype=float)
         cann = np.asarray(res.cell_annual_mwh, dtype=float)
+        # A degraded forecast (e.g. CMIP6 rate-limited during the run) can leave
+        # NaN/negative per-cell demand; scrub it so the transport solve and the
+        # resulting bus fractions stay finite instead of failing the split.
+        cann[~np.isfinite(cann) | (cann < 0)] = 0.0
 
         # Assign each cell to its nearest node (projected) — preserves the
         # density model's validated per-node totals; the transport only splits

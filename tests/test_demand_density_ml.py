@@ -99,6 +99,31 @@ class TestCapacitatedAllocation:
             [], [], [], [0.0, 1.0], [0.0, 1.0], [10.0, 10.0])
         assert served.tolist() == [0.0, 0.0]
 
+    def test_nan_cell_demand_scrubbed(self):
+        # A degraded forecast (e.g. CMIP6 rate-limited) can produce NaN per-cell
+        # demand. It must not poison the solve / fractions — bad cells count as 0.
+        served = allocate_demand_capacitated(
+            cell_lats=[0.0, 0.1], cell_lons=[0.0, 0.1],
+            cell_demand=[np.nan, 5.0],
+            bus_lats=[0.0, 0.2], bus_lons=[0.0, 0.2], bus_cap=[100.0, 100.0])
+        assert np.isfinite(served).all()
+        assert served.sum() == pytest.approx(5.0)
+
+    def test_inf_and_negative_cell_demand_scrubbed(self):
+        served = allocate_demand_capacitated(
+            cell_lats=[0.0, 0.1, 0.2], cell_lons=[0.0, 0.1, 0.2],
+            cell_demand=[np.inf, -3.0, 7.0],
+            bus_lats=[0.0, 0.2], bus_lons=[0.0, 0.2], bus_cap=[100.0, 100.0])
+        assert np.isfinite(served).all()
+        assert served.sum() == pytest.approx(7.0)
+
+    def test_all_nan_cell_demand_yields_zeros(self):
+        served = allocate_demand_capacitated(
+            [0.0, 0.1], [0.0, 0.1], [np.nan, np.nan],
+            [0.0, 0.2], [0.0, 0.2], [100.0, 100.0])
+        assert np.isfinite(served).all()
+        assert served.sum() == pytest.approx(0.0)
+
 
 class TestNodeAreas:
     def test_single_node_gets_whole_region(self):
@@ -190,6 +215,29 @@ class TestDensityFeatures:
             train_ranges={"log_pop_density": [0.3, 3.85]},
         )
         assert X[:, 0].max() <= 3.85 + 1e-9
+
+    def test_partial_nan_temperature_scrubbed(self):
+        # A full-length temperature array carrying NaN (e.g. the ERA5 fallback
+        # after a CMIP6 fetch failure) passes the length guard but must not leak
+        # NaN into HDD/CDD and the feature matrix.
+        temp = np.full(8760, 28.0)
+        temp[100:5000] = np.nan
+        X = build_density_features(
+            latitude=21.0, longitude=-80.0, log_pop_density=1.8,
+            log_gdp_density=6.0, log_gdp_per_cap=4.0,
+            temperature_hourly=temp, base_year=2025,
+            feature_order=_FEATURE_ORDER, country_iso="CU")
+        assert not np.isnan(X).any()
+
+    def test_all_nan_temperature_falls_back(self):
+        temp = np.full(8760, np.nan)
+        X = build_density_features(
+            latitude=21.0, longitude=-80.0, log_pop_density=1.8,
+            log_gdp_density=6.0, log_gdp_per_cap=4.0,
+            temperature_hourly=temp, base_year=2025,
+            feature_order=_FEATURE_ORDER, country_iso="CU")
+        assert not np.isnan(X).any()
+        assert np.allclose(X[:, 3], 20.0)   # temperature column → 20 °C fallback
 
 
 @pytest.mark.skipif(
