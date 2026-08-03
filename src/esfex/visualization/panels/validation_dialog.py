@@ -290,18 +290,9 @@ class ValidationDialog(QDialog):
         self._select_all_btn.clicked.connect(self._on_select_all_infra)
         btn_layout.addWidget(self._select_all_btn)
 
-        self._auto_fix_btn = QPushButton("Auto-fix errors")
-        self._auto_fix_btn.setEnabled(False)
-        self._auto_fix_btn.setToolTip(
-            "Apply targeted fixes to flagged errors only:\n"
-            "  • drop self-loop lines / transformers / converters\n"
-            "  • drop elements pointing to deleted buses\n"
-            "  • re-anchor stale endpoint refs\n"
-            "  • rebuild visual transformer/equipment wire-lines\n"
-            "Topology of the rest of the network is preserved."
-        )
-        self._auto_fix_btn.clicked.connect(self._on_auto_fix)
-        btn_layout.addWidget(self._auto_fix_btn)
+        # 'Auto-fix errors' removed: the blanket repair caused more problems
+        # than it solved. The library helper (validation.auto_fix_errors) is
+        # kept for programmatic use; only the UI entry point is gone.
 
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.setEnabled(False)
@@ -354,7 +345,6 @@ class ValidationDialog(QDialog):
         # Reset UI
         self._run_btn.setEnabled(False)
         self._apply_btn.setEnabled(False)
-        self._auto_fix_btn.setEnabled(False)
         self._select_all_btn.setEnabled(False)
         self._results_tree.clear()
         self._issues = []
@@ -392,8 +382,6 @@ class ValidationDialog(QDialog):
         #     infrastructure-reduction suggestions to apply.
         #   • Select All: only if there are items to select.
         has_simplifications = len(actions) > 0 or len(infra) > 0
-        has_issues = len(issues) > 0
-        self._auto_fix_btn.setEnabled(has_issues)
         self._apply_btn.setEnabled(has_simplifications)
         self._select_all_btn.setEnabled(has_simplifications)
         self._populate_results()
@@ -659,72 +647,6 @@ class ValidationDialog(QDialog):
         for i in range(self._results_tree.topLevelItemCount()):
             item = self._results_tree.topLevelItem(i)
             _check_all(item)
-
-    def _on_auto_fix(self):
-        """Apply targeted error fixes (self-loops, dangling refs) to all systems.
-
-        Lightweight alternative to ``_on_apply_all``: does NOT reduce
-        topology, only removes strictly-broken elements and rebuilds
-        visual wiring. Safe to run repeatedly.
-        """
-        from esfex.visualization.data.validation import auto_fix_errors
-
-        if self._all_states:
-            states_to_fix = dict(self._all_states)
-        else:
-            active_name = getattr(self._model.state, "name", "System")
-            states_to_fix = {active_name: self._model.state}
-
-        original_state = self._model.state
-        per_system: list[tuple[str, dict]] = []
-        try:
-            for sys_name, sys_state in states_to_fix.items():
-                self._model.state = sys_state
-                counts = auto_fix_errors(sys_state)
-                per_system.append((sys_name, counts))
-        finally:
-            self._model.state = original_state
-
-        # Force a full GUI rebuild on the active system.
-        self._model.stateLoaded.emit()
-
-        # Build summary
-        lines = []
-        grand_total = 0
-        for sys_name, c in per_system:
-            sys_total = sum(v for k, v in c.items() if k != "wire_lines_rebuilt")
-            grand_total += sys_total
-            if sys_total or c.get("wire_lines_rebuilt"):
-                lines.append(
-                    f"{sys_name}: "
-                    f"{c['self_loop_lines']}+{c['self_loop_transformers']}+"
-                    f"{c['self_loop_converters']} self-loops, "
-                    f"{c['dangling_lines']}+{c['dangling_transformers']}+"
-                    f"{c['dangling_converters']} dangling edges, "
-                    f"{c['dangling_generators']}+{c['dangling_batteries']}+"
-                    f"{c['dangling_electrolyzers']} orphan equipment, "
-                    f"{c['wire_lines_rebuilt']} wire-lines rebuilt"
-                )
-        if not lines:
-            QMessageBox.information(
-                self, "Auto-fix",
-                "No structurally-broken elements found.",
-            )
-        else:
-            QMessageBox.information(
-                self, "Auto-fix complete",
-                f"Removed/repaired {grand_total} element(s) across "
-                f"{len(per_system)} system(s):\n\n" + "\n".join(lines)
-                + "\n\nRe-run validation to confirm the remaining issues."
-            )
-
-        # Clear stale results — counts no longer match state
-        self._results_tree.clear()
-        self._summary_label.setVisible(False)
-        self._issues = []
-        self._auto_fix_btn.setEnabled(False)
-        self._apply_btn.setEnabled(False)
-        self._select_all_btn.setEnabled(False)
 
     def _on_apply_all(self):
         """Apply fixpoint simplification at the selected level to ALL systems."""
