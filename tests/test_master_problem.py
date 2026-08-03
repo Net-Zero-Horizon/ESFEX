@@ -686,7 +686,7 @@ class TestMasterProblemSolve:
 
         jl.seval("global _test_mp_model2")
         jl._test_mp_model2 = model
-        jl.seval("optimize!(_test_mp_model2)")
+        jl.seval("using JuMP; optimize!(_test_mp_model2)")
 
         result = ESFEX.extract_master_solution(model, vars, jl_input)
 

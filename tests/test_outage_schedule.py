@@ -207,7 +207,7 @@ class TestInterruptionsDialog:
 # ---------------------------------------------------------------------------
 class TestGuiRoundTrip:
     def test_outage_schedule_survives_round_trip(self):
-        from tests.test_serializer import _make_esfex_config, _make_system_config
+        from test_serializer import _make_esfex_config, _make_system_config
         from esfex.visualization.data.serializer import (
             _apply_gui_state_to_dict,
             config_to_gui_states,
