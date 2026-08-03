@@ -44,7 +44,8 @@
     "edit": "&Édition",
     "undo": "Annuler",
     "redo": "Rétablir",
-    "custom_constraints": "Contraintes personnalisées…"
+    "custom_constraints": "Contraintes personnalisées…",
+    "interruptions": "Interruptions…"
   },
   "shortcuts_dialog": {
     "title": "Raccourcis clavier",
@@ -2437,5 +2438,21 @@
     "run_the_demand_forecast_auto_xgboost": "Exécutez d'abord la prévision de la demande (moteur Auto/XGBoost) — aucune cellule de demande spatiale disponible.",
     "no_nodes_in_the_active_system": "Aucun nœud dans le système actif.",
     "network_is_already_clean_no_changes": "Le réseau est déjà propre — aucune modification nécessaire."
+  },
+  "interruptions": {
+    "title": "Interruptions de service",
+    "cat_generators": "Générateurs",
+    "cat_batteries": "Batteries",
+    "cat_lines": "Lignes de transport",
+    "cat_transformers": "Transformateurs",
+    "cat_acdc": "Convertisseurs AC/DC",
+    "cat_freq": "Convertisseurs de fréquence",
+    "add": "Ajouter",
+    "delete": "Supprimer",
+    "availability": "Disponibilité",
+    "label_field": "Note",
+    "start": "Début",
+    "end": "Fin",
+    "empty_hint": "Glissez sur une ligne pour ajouter une interruption ; cliquez pour modifier."
   }
 }

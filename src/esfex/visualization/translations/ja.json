@@ -44,7 +44,8 @@
     "edit": "&編集",
     "undo": "元に戻す",
     "redo": "やり直し",
-    "custom_constraints": "カスタム制約…"
+    "custom_constraints": "カスタム制約…",
+    "interruptions": "停止スケジュール…"
   },
   "shortcuts_dialog": {
     "title": "キーボードショートカット",
@@ -2449,5 +2450,21 @@
     "run_the_demand_forecast_auto_xgboost": "先に需要予測（Auto/XGBoost エンジン）を実行してください — 空間需要セルが利用できません。",
     "no_nodes_in_the_active_system": "アクティブなシステムにノードがありません。",
     "network_is_already_clean_no_changes": "ネットワークはすでにクリーンです — 変更は不要です。"
+  },
+  "interruptions": {
+    "title": "サービス停止",
+    "cat_generators": "発電機",
+    "cat_batteries": "蓄電池",
+    "cat_lines": "送電線",
+    "cat_transformers": "変圧器",
+    "cat_acdc": "AC/DC変換器",
+    "cat_freq": "周波数変換器",
+    "add": "追加",
+    "delete": "削除",
+    "availability": "稼働率",
+    "label_field": "メモ",
+    "start": "開始",
+    "end": "終了",
+    "empty_hint": "行をドラッグして停止を追加、クリックで編集。"
   }
 }

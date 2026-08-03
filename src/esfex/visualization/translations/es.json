@@ -44,7 +44,8 @@
     "edit": "&Editar",
     "undo": "Deshacer",
     "redo": "Rehacer",
-    "custom_constraints": "Restricciones Personalizadas…"
+    "custom_constraints": "Restricciones Personalizadas…",
+    "interruptions": "Interrupciones…"
   },
   "shortcuts_dialog": {
     "title": "Atajos de Teclado",
@@ -2437,5 +2438,21 @@
     "run_the_demand_forecast_auto_xgboost": "Ejecute primero el pronóstico de demanda (motor Auto/XGBoost): no hay celdas de demanda espacial disponibles.",
     "no_nodes_in_the_active_system": "No hay nodos en el sistema activo.",
     "network_is_already_clean_no_changes": "La red ya está limpia: no se necesitan cambios."
+  },
+  "interruptions": {
+    "title": "Interrupciones de servicio",
+    "cat_generators": "Generadores",
+    "cat_batteries": "Baterías",
+    "cat_lines": "Líneas de transmisión",
+    "cat_transformers": "Transformadores",
+    "cat_acdc": "Convertidores AC/DC",
+    "cat_freq": "Convertidores de frecuencia",
+    "add": "Añadir",
+    "delete": "Eliminar",
+    "availability": "Disponibilidad",
+    "label_field": "Nota",
+    "start": "Inicio",
+    "end": "Fin",
+    "empty_hint": "Arrastra sobre una fila para añadir una interrupción; haz clic para editar."
   }
 }

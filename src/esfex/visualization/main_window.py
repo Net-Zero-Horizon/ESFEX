@@ -1745,6 +1745,10 @@ class MainWindow(QMainWindow):
             self._on_custom_constraints)
         edit_menu.addAction(self._act_custom_constraints)
 
+        self._act_interruptions = QAction(tr("menu.interruptions"), self)
+        self._act_interruptions.triggered.connect(self._on_interruptions)
+        edit_menu.addAction(self._act_interruptions)
+
         # ── Workflows menu ──
         self._workflows_menu = menu_bar.addMenu(tr("menu.workflows"))
         workflows_menu = self._workflows_menu
@@ -2350,6 +2354,16 @@ class MainWindow(QMainWindow):
         dlg = CustomConstraintsDialog(state.custom_constraints, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             state.custom_constraints = dlg.result_constraints()
+            self.model.dataMutated.emit()
+
+    def _on_interruptions(self):
+        """Open the deterministic-interruptions calendar for the current system."""
+        from PySide6.QtWidgets import QDialog
+        from esfex.visualization.panels.interruptions_dialog import (
+            InterruptionsDialog,
+        )
+        dlg = InterruptionsDialog(self.model, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             self.model.dataMutated.emit()
 
     def _on_undo_changed(self):

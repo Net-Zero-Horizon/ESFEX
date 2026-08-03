@@ -44,7 +44,8 @@
     "edit": "&Edit",
     "undo": "Undo",
     "redo": "Redo",
-    "custom_constraints": "Custom Constraints…"
+    "custom_constraints": "Custom Constraints…",
+    "interruptions": "Interruptions…"
   },
   "shortcuts_dialog": {
     "title": "Keyboard Shortcuts",
@@ -2437,5 +2438,21 @@
     "run_the_demand_forecast_auto_xgboost": "Run the demand forecast (Auto/XGBoost engine) first — no spatial-demand cells available.",
     "no_nodes_in_the_active_system": "No nodes in the active system.",
     "network_is_already_clean_no_changes": "Network is already clean — no changes needed."
+  },
+  "interruptions": {
+    "title": "Service Interruptions",
+    "cat_generators": "Generators",
+    "cat_batteries": "Batteries",
+    "cat_lines": "Transmission lines",
+    "cat_transformers": "Transformers",
+    "cat_acdc": "AC/DC converters",
+    "cat_freq": "Frequency converters",
+    "add": "Add",
+    "delete": "Delete",
+    "availability": "Availability",
+    "label_field": "Note",
+    "start": "Start",
+    "end": "End",
+    "empty_hint": "Drag on a row to add an interruption; click one to edit."
   }
 }

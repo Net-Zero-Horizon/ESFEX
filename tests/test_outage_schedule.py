@@ -156,6 +156,53 @@ class TestBuildOutageMaskMatrix:
 
 
 # ---------------------------------------------------------------------------
+# Interruptions dialog (element collection + apply-to-model logic)
+# ---------------------------------------------------------------------------
+class TestInterruptionsDialog:
+    def _dialog(self):
+        import json
+        pytest.importorskip("PySide6.QtWebEngineWidgets")
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        from esfex.visualization.i18n import init_i18n
+        init_i18n()
+        from esfex.visualization.data.gui_model import (
+            GuiGeneratorInstance, GuiModel, GuiOutageWindow, GuiTransmissionLine,
+        )
+        m = GuiModel()
+        m.state.generators["g1"] = GuiGeneratorInstance(
+            instance_id="g1", unit_key="g1", name="CCGT-1",
+            gen_type="Non-renewable", fuel="Gas")
+        m.state.transmission_lines.append(GuiTransmissionLine(line_id="line_3"))
+        m.state.outage_schedule = [GuiOutageWindow(
+            element_type="generator", element_id="g1",
+            start_hour=100, end_hour=340, availability=0.0)]
+        from esfex.visualization.panels.interruptions_dialog import InterruptionsDialog
+        return InterruptionsDialog(m), m, json
+
+    def test_payload_lists_elements_by_group(self):
+        dlg, _m, json = self._dialog()
+        payload = json.loads(dlg._build_payload())
+        cats = {g["category"] for g in payload["groups"]}
+        assert {"generator", "line"} <= cats
+        assert payload["horizon_hours"] == 8760
+        assert len(payload["schedule"]) == 1
+
+    def test_apply_writes_and_drops_invalid(self):
+        dlg, m, _json = self._dialog()
+        dlg._schedule = [
+            {"element_type": "line", "element_id": "line_3",
+             "start_hour": 0, "end_hour": 48, "availability": 0.5, "label": "maint"},
+            {"element_type": "generator", "element_id": "g1",
+             "start_hour": 10, "end_hour": 10},  # invalid window → dropped
+        ]
+        dlg._apply_to_model()
+        got = m.state.outage_schedule
+        assert len(got) == 1
+        assert got[0].element_id == "line_3" and got[0].availability == 0.5
+
+
+# ---------------------------------------------------------------------------
 # GUI round-trip (SystemConfig ↔ GuiSystemState ↔ config dict)
 # ---------------------------------------------------------------------------
 class TestGuiRoundTrip:

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden;
+        font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #222; }
+    #app { display: flex; flex-direction: column; height: 100%; }
+    #toolbar { flex: 0 0 auto; padding: 8px 12px; border-bottom: 1px solid #e0e0e0;
+        display: flex; align-items: center; gap: 12px; background: #fafafa; }
+    #toolbar .hint { color: #777; font-size: 12px; }
+    #main { flex: 1 1 auto; display: flex; min-height: 0; }
+    #timeline-wrap { flex: 1 1 auto; overflow: auto; position: relative; }
+    #timeline { display: block; }
+    #side { flex: 0 0 260px; border-left: 1px solid #e0e0e0; padding: 12px;
+        overflow: auto; background: #fcfcfc; }
+    #side h3 { font-size: 13px; margin-bottom: 10px; color: #1a73e8; }
+    #side.empty .form { display: none; }
+    #side.empty .placeholder { display: block; }
+    #side .placeholder { display: none; color: #999; font-size: 12px; }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; font-size: 11px; color: #666; margin-bottom: 3px; }
+    .field input, .field select { width: 100%; padding: 5px 6px; border: 1px solid #ccc;
+        border-radius: 3px; font-size: 12px; }
+    #avail-val { color: #1a73e8; font-weight: 600; }
+    button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px;
+        background: #fff; cursor: pointer; font-size: 12px; }
+    button:hover { background: #f0f4ff; border-color: #1a73e8; color: #1a73e8; }
+    button.danger:hover { background: #fdecea; border-color: #c0392b; color: #c0392b; }
+
+    /* Timeline SVG elements */
+    .group-label { font-size: 11px; font-weight: 600; fill: #444; }
+    .row-label { font-size: 12px; fill: #333; }
+    .row-bg:nth-child(even) { fill: #f7f7f7; }
+    .grid-line { stroke: #eaeaea; stroke-width: 1; }
+    .grid-line.month { stroke: #d8d8d8; }
+    .axis-label { font-size: 10px; fill: #888; }
+    .group-sep { stroke: #d0d0d0; stroke-width: 1; }
+    .outage { fill: rgba(26,115,232,0.65); stroke: #1a73e8; stroke-width: 1;
+        rx: 2; cursor: move; }
+    .outage.derate { fill: rgba(230,145,30,0.6); stroke: #e6911e; }
+    .outage.selected { stroke: #c0392b; stroke-width: 2; }
+    .outage-label { font-size: 9px; fill: #fff; pointer-events: none; }
+    .handle { fill: rgba(0,0,0,0.001); cursor: ew-resize; }
+    .row-hit { fill: rgba(0,0,0,0.0); cursor: crosshair; }
+</style>
+</head>
+<body>
+<div id="app">
+    <div id="toolbar">
+        <strong id="tb-title">Interruptions</strong>
+        <span class="hint" id="tb-hint"></span>
+    </div>
+    <div id="main">
+        <div id="timeline-wrap"><svg id="timeline"></svg></div>
+        <div id="side" class="empty">
+            <div class="placeholder" id="side-placeholder"></div>
+            <div class="form" id="side-form">
+                <h3 id="sel-element"></h3>
+                <div class="field">
+                    <label id="lbl-start"></label>
+                    <input type="datetime-local" id="in-start">
+                </div>
+                <div class="field">
+                    <label id="lbl-end"></label>
+                    <input type="datetime-local" id="in-end">
+                </div>
+                <div class="field">
+                    <label><span id="lbl-avail"></span>: <span id="avail-val">0%</span></label>
+                    <input type="range" id="in-avail" min="0" max="100" step="5" value="0">
+                </div>
+                <div class="field">
+                    <label id="lbl-label"></label>
+                    <input type="text" id="in-label" maxlength="60">
+                </div>
+                <button class="danger" id="btn-delete"></button>
+            </div>
+        </div>
+    </div>
+</div>
+<script src="d3.v7.min.js"></script>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="interruptions.js"></script>
+</body>
+</html>
