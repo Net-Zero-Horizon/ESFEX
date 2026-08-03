@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.ui_scale import scaled
 
 
 class SystemForm(QWidget):
@@ -40,12 +42,18 @@ class SystemForm(QWidget):
         self._header_label.setObjectName("headerLabel")
         outer.addWidget(self._header_label)
 
-        # Editable system name
+        # Editable system name — a modest field sitting right after the label,
+        # not stretched to the panel's right edge (the trailing stretch keeps it
+        # left-anchored next to "Name:").
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel(tr("system_form.name_label")))
         self._name_edit = QLineEdit()
+        self._name_edit.setMinimumWidth(scaled(160))
+        self._name_edit.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self._name_edit.editingFinished.connect(self._on_name_changed)
         name_row.addWidget(self._name_edit)
+        name_row.addStretch(1)
         outer.addLayout(name_row)
 
         # Use outer layout directly (parent already provides scrolling)
