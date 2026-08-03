@@ -5243,11 +5243,30 @@ class GridMappingDemandStep(QWidget):
     # Section 2: Eligible nodes detection (for bus distribution)
     # ==================================================================
 
-    def _detect_eligible_nodes(self):
-        """Find all nodes with >= 2 demand-carrying buses across all systems.
+    @staticmethod
+    def _distribution_buses(state, node_index):
+        """Busbars eligible to receive a demand split for one node.
 
-        Connection buses (role='connection') are excluded — they don't carry
-        demand and cannot receive a demand_fraction allocation.
+        Normally the node's ``load``/``mixed`` buses. But a faithful HV import
+        leaves every busbar as ``connection``, and ``repair_bus_roles_and_demand``
+        then promotes just ONE bus per node to ``load`` — which makes a genuinely
+        multi-busbar node look single-bus and silently blocks distribution
+        (``0 multi-bus nodes``). So when there are fewer than two load/mixed
+        buses, fall back to ALL of the node's busbars; the split then promotes
+        whichever receive demand to ``load`` on apply (see ``_apply_all``).
+        """
+        lm = [b for b in state.buses.values()
+              if b.parent_node == node_index and b.role in ("load", "mixed")]
+        if len(lm) >= 2:
+            return lm
+        allb = [b for b in state.buses.values() if b.parent_node == node_index]
+        return allb if len(allb) >= 2 else lm
+
+    def _detect_eligible_nodes(self):
+        """Find all nodes with >= 2 busbars to split demand across.
+
+        Prefers load/mixed buses; for HV-only nodes (all ``connection`` after
+        role-repair) falls back to every busbar so distribution still works.
         """
         self._targets.clear()
         self._all_eligible: list[dict] = []
@@ -5257,10 +5276,7 @@ class GridMappingDemandStep(QWidget):
             return
 
         for node in self._nodes_in_scope():
-            buses = [
-                b for b in state.buses.values()
-                if b.parent_node == node.index and b.role in ("load", "mixed")
-            ]
+            buses = self._distribution_buses(state, node.index)
             if len(buses) >= 2:
                 self._all_eligible.append({
                     "node_index": node.index,
@@ -5531,10 +5547,9 @@ class GridMappingDemandStep(QWidget):
         self._assignments = []
         n_nodes = 0
         for ni, nd in enumerate(nodes):
-            bs = [b for b in state.buses.values()
-                  if b.parent_node == nd.index and b.role in ("load", "mixed")]
+            bs = self._distribution_buses(state, nd.index)
             if len(bs) < 2:
-                continue          # single-bus nodes need no split
+                continue          # single-busbar nodes need no split
             n_nodes += 1
             sel = np.where(cell_node == ni)[0]
             if sel.size:
@@ -5592,9 +5607,16 @@ class GridMappingDemandStep(QWidget):
             new_frac = a["new_fraction"]
             target_bus = state.buses.get(bus_id)
             if target_bus is not None and target_bus.role == "connection":
-                # Defensive: never write demand to a connection bus
-                skipped_connection += 1
-                continue
+                if new_frac and new_frac > 0:
+                    # The user deliberately distributed demand to this busbar
+                    # (spatial/footprint split across an HV node's busbars, which
+                    # role-repair leaves as 'connection'). Promote it to 'load'
+                    # so the model honours the demand rather than dropping it.
+                    target_bus.role = "load"
+                else:
+                    # Zero-share busbar: keep it demand-free.
+                    skipped_connection += 1
+                    continue
             try:
                 self._model.update_bus(bus_id, demand_fraction=new_frac)
                 applied_fracs += 1
