@@ -1010,6 +1010,29 @@ def build_outage_mask_matrix(
     return mask
 
 
+def build_outage_mask_by_id(
+    windows_by_id: dict,
+    start_hour: int,
+    hours: int,
+    resolution_hours: int = 1,
+) -> "dict | None":
+    """Id-addressed masks for multi-stage-filtered elements (lines, converters…).
+
+    Returns ``{element_id: factor_array}`` (length-``hours`` factor per id that
+    has an outage), or ``None`` when nothing is scheduled. Unlike
+    :func:`build_outage_mask_matrix`, this keys by stable element id rather than
+    position, so it is safe when the Julia model filters/reorders elements — the
+    constraint looks each element up by the id it carries.
+    """
+    if not windows_by_id:
+        return None
+    out = {
+        eid: compile_outage_factor(w, start_hour, hours, resolution_hours)
+        for eid, w in windows_by_id.items() if w
+    }
+    return out or None
+
+
 def convert_generator_config(
     gen: GeneratorConfig,
     availability: Optional[np.ndarray] = None,

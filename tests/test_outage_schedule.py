@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from esfex.bridge.converters import (
+    build_outage_mask_by_id,
     build_outage_mask_matrix,
     compile_outage_factor,
     fuel_source_outage_windows,
@@ -152,6 +153,33 @@ class TestBuildOutageMaskMatrix:
         )
         np.testing.assert_array_equal(m[0, 6:10], np.zeros(4))
         assert m[0, 5] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Id-addressed masks (branch elements: lines, converters, routes)
+# ---------------------------------------------------------------------------
+class TestBuildOutageMaskById:
+    def test_none_when_empty(self):
+        assert build_outage_mask_by_id({}, start_hour=0, hours=24) is None
+
+    def test_keyed_by_id_not_position(self):
+        m = build_outage_mask_by_id(
+            {"L3": [(6, 12, 0.0)], "L7": [(0, 4, 0.5)]}, start_hour=0, hours=24,
+        )
+        assert set(m) == {"L3", "L7"}
+        np.testing.assert_array_equal(m["L3"][6:12], np.zeros(6))
+        assert m["L3"][5] == 1.0
+        np.testing.assert_allclose(m["L7"][0:4], 0.5)
+
+    def test_ids_without_windows_excluded(self):
+        # Only ids that actually have windows appear (filtering-safe lookup).
+        m = build_outage_mask_by_id({"L1": [], "L2": [(0, 3, 0.0)]}, start_hour=0, hours=12)
+        assert set(m) == {"L2"}
+
+    def test_rolling_horizon_offset(self):
+        m = build_outage_mask_by_id({"L1": [(30, 34, 0.0)]}, start_hour=24, hours=24)
+        np.testing.assert_array_equal(m["L1"][6:10], np.zeros(4))
+        assert m["L1"][5] == 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -166,7 +166,8 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
                     transmission.num_buses, transmission.lines,
                     transmission.line_reactances, transmission.line_capacities,
                     transmission.incidence_matrix, transmission.max_angle_diff_rad,
-                    transmission.slack_bus, transmission.line_losses, pwl
+                    transmission.slack_bus, transmission.line_losses, pwl,
+                    transmission.line_ids
                 )
             elseif input.pwl_loss_segments == 0
                 # Lossless mode: zero out line losses
@@ -174,7 +175,8 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
                     transmission.num_buses, transmission.lines,
                     transmission.line_reactances, transmission.line_capacities,
                     transmission.incidence_matrix, transmission.max_angle_diff_rad,
-                    transmission.slack_bus, zeros(length(transmission.lines)), nothing
+                    transmission.slack_bus, zeros(length(transmission.lines)), nothing,
+                    transmission.line_ids
                 )
             end
             t_transmission_build = time() - t_tb

@@ -28,6 +28,7 @@ from esfex.bridge.converters import (
     COST_UNSCALE,
     build_bat_cost_curves_dict,
     build_gen_cost_curves_dict,
+    build_outage_mask_by_id,
     build_outage_mask_matrix,
     compile_outage_factor,
     fuel_source_outage_windows,
@@ -1609,7 +1610,8 @@ class PowerSystemAdapter:
         # Centralised deterministic-outage masks for non-generator elements,
         # each aligned to that element's Julia push order (generators fold their
         # outage into `availability` instead). Empty dict ⇒ no masking.
-        jl_outage_masks = jl.seval("Dict{String, Matrix{Float64}}()")
+        jl_outage_masks = jl.seval("Dict{String, Any}()")
+        # Batteries: position-indexed matrix (unfiltered push order).
         bat_mask = build_outage_mask_matrix(
             outage_by_type.get("battery", {}),
             [k for k, _ in bat_order],
@@ -1618,6 +1620,17 @@ class PowerSystemAdapter:
         if bat_mask is not None:
             jl.seval("setindex!")(
                 jl_outage_masks, py_to_julia_matrix(bat_mask), "battery")
+        # Lines: id-addressed (multi-stage filtered) → Dict{line_id → factor}.
+        line_masks = build_outage_mask_by_id(
+            outage_by_type.get("line", {}),
+            self.start_hour, self.hours, resolution_hours,
+        )
+        if line_masks is not None:
+            jl_line_masks = jl.seval("Dict{String, Vector{Float64}}()")
+            for lid, fac in line_masks.items():
+                jl.seval("setindex!")(
+                    jl_line_masks, py_to_julia_vector(fac), str(lid))
+            jl.seval("setindex!")(jl_outage_masks, jl_line_masks, "line")
 
         # Create input struct using keyword constructor
         jl_input = ESFEX.PowerSystemInput(

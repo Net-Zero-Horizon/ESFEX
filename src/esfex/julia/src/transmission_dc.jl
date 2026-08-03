@@ -30,6 +30,7 @@ struct TransmissionDC
     slack_bus::Int
     line_losses::Vector{Float64}        # Per-line loss factor (0-1), legacy linear model
     pwl_losses::Union{PWLLossSegments, Nothing}  # PWL loss model (nothing = use linear)
+    line_ids::Vector{String}            # line_id per entry in `lines` ("" = transformer/adjacency); id-addresses outage masks
 end
 
 """
@@ -104,6 +105,23 @@ function TransmissionDC(network::NetworkConfig)
         end
     end
 
+    # line_id per entry in `lines`, aligned to the same (filtered) order, so
+    # deterministic-outage masks can be looked up by id (filtering-safe).
+    # Transformer branches and adjacency-derived lines carry no line_id ("").
+    line_ids = String[]
+    for idx in 1:length(lines)
+        if idx <= n_transmission
+            src = transmission_src_indices[idx]
+            if !isempty(network.transmission_lines) && src >= 1 && src <= length(network.transmission_lines)
+                push!(line_ids, network.transmission_lines[src].line_id)
+            else
+                push!(line_ids, "")
+            end
+        else
+            push!(line_ids, "")
+        end
+    end
+
     return TransmissionDC(
         network.num_buses,
         lines,
@@ -113,7 +131,8 @@ function TransmissionDC(network::NetworkConfig)
         network.max_angle_diff_rad,
         network.slack_bus,
         losses,
-        nothing  # pwl_losses: computed by compute_pwl_loss_segments() after construction
+        nothing,  # pwl_losses: computed by compute_pwl_loss_segments() after construction
+        line_ids
     )
 end
 
@@ -661,6 +680,18 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
     is_dev = hasproperty(input, :mode) ? input.mode == "development" : false
     pf_by_line = vars.power_flow_by_line
 
+    # Deterministic scheduled outages: id → hourly capacity factor (1.0 = none).
+    line_masks = get(input.outage_masks, "line", nothing)
+    outage_for(ℓ, t) = begin
+        if line_masks === nothing
+            1.0
+        else
+            lid = transmission.line_ids[ℓ]
+            lm = isempty(lid) ? nothing : get(line_masks, lid, nothing)
+            lm === nothing ? 1.0 : lm[t]
+        end
+    end
+
     for (ℓ, (i, j)) in enumerate(transmission.lines)
         base_capacity = transmission.line_capacities[ℓ]
 
@@ -668,8 +699,9 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
             # Master: use investment-augmented line capacity (AffExpr)
             total_cap = capacity_override[ℓ]
             for t in 1:hours
-                @constraint(model, pf_by_line[ℓ][t] <= total_cap)
-                @constraint(model, pf_by_line[ℓ][t] >= -total_cap)
+                om = outage_for(ℓ, t)
+                @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
+                @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
             end
         else
             # Standard operational dispatch path
@@ -697,9 +729,10 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
                     total_cap = base_capacity
                 end
 
-                # Bidirectional flow limits per physical line
-                @constraint(model, pf_by_line[ℓ][t] <= total_cap)
-                @constraint(model, pf_by_line[ℓ][t] >= -total_cap)
+                # Bidirectional flow limits per physical line (× outage factor)
+                om = outage_for(ℓ, t)
+                @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
+                @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
             end
         end
     end

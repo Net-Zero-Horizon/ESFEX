@@ -1110,12 +1110,13 @@ struct PowerSystemInput
     gen_q_limits::Dict{Int, Vector{Float64}}      # Q_max per gen
     gen_q_limits_min::Dict{Int, Vector{Float64}}   # Q_min per gen
 
-    # Deterministic scheduled interruptions (Capa 1). Per element category
-    # ("line", "battery", "acdc_converter", "freq_converter", "electrolyzer")
-    # a [n_elements × hours] capacity mask in [0,1]; 1.0 = no outage. Empty or
-    # missing category ⇒ no masking (identical model). Generators fold their
-    # outage into `availability` instead, so they are not keyed here.
-    outage_masks::Dict{String, Matrix{Float64}}
+    # Deterministic scheduled interruptions (Capa 1). Keyed by element category:
+    #  - position-indexed elements (e.g. "battery") ⇒ [n_elements × hours] Matrix
+    #  - id-addressed elements (e.g. "line", multi-stage filtered) ⇒
+    #    Dict{String, Vector{Float64}} (element_id → hourly factor)
+    # Values are in [0,1] (1.0 = no outage). Empty/missing ⇒ no masking (identical
+    # model). Generators fold their outage into `availability` instead.
+    outage_masks::Dict{String, Any}
 end
 
 # Constructor with sensible defaults
@@ -1230,7 +1231,7 @@ function PowerSystemInput(;
     acopf_q_min_ratio::Float64 = 0.5,
     gen_q_limits::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
     gen_q_limits_min::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
-    outage_masks::Dict{String, Matrix{Float64}} = Dict{String, Matrix{Float64}}()
+    outage_masks::Dict{String, Any} = Dict{String, Any}()
 )
     return PowerSystemInput(
         name, year, base_year,
