@@ -11,7 +11,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from esfex.bridge.converters import build_outage_mask_matrix, compile_outage_factor
+from esfex.bridge.converters import (
+    build_outage_mask_matrix,
+    compile_outage_factor,
+    fuel_source_outage_windows,
+)
 from esfex.config.schema import NodeConfig, OutageWindow, SystemConfig
 
 
@@ -148,6 +152,33 @@ class TestBuildOutageMaskMatrix:
         )
         np.testing.assert_array_equal(m[0, 6:10], np.zeros(4))
         assert m[0, 5] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Fuel-source outages (reuse FuelConfig's disruption window)
+# ---------------------------------------------------------------------------
+class TestFuelSourceOutageWindows:
+    def test_selects_matching_fuel(self):
+        sched = [
+            OutageWindow(element_type="fuel_source", element_id="Gas", start_hour=0, end_hour=48, availability=0.0),
+            OutageWindow(element_type="fuel_source", element_id="Coal", start_hour=10, end_hour=20),
+            OutageWindow(element_type="generator", element_id="Gas", start_hour=0, end_hour=5),
+        ]
+        w = fuel_source_outage_windows(sched, "Gas")
+        assert w == [(0, 48, 0.0)]
+
+    def test_multiple_windows_returned_in_order(self):
+        sched = [
+            OutageWindow(element_type="fuel_source", element_id="Gas", start_hour=0, end_hour=48),
+            OutageWindow(element_type="fuel_source", element_id="Gas", start_hour=100, end_hour=148, availability=0.5),
+        ]
+        w = fuel_source_outage_windows(sched, "Gas")
+        assert w == [(0, 48, 0.0), (100, 148, 0.5)]
+
+    def test_no_match_empty(self):
+        assert fuel_source_outage_windows([], "Gas") == []
+        sched = [OutageWindow(element_type="fuel_source", element_id="Coal", start_hour=0, end_hour=1)]
+        assert fuel_source_outage_windows(sched, "Gas") == []
 
 
 # ---------------------------------------------------------------------------

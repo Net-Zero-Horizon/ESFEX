@@ -969,6 +969,20 @@ def compile_outage_factor(
     return factor
 
 
+def fuel_source_outage_windows(outage_schedule, fuel_name: str) -> list:
+    """Scheduled outage windows for a fuel source, as ``(start, end, avail)``.
+
+    Fuel-source outages reuse ``FuelConfig``'s built-in single-window disruption
+    in the primary-energy model (no Julia change), so the caller applies the
+    first window and warns if more than one is scheduled.
+    """
+    return [
+        (ow.start_hour, ow.end_hour, ow.availability)
+        for ow in (outage_schedule or [])
+        if ow.element_type == "fuel_source" and ow.element_id == fuel_name
+    ]
+
+
 def build_outage_mask_matrix(
     windows_by_id: dict,
     id_order: list,

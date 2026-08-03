@@ -30,6 +30,7 @@ from esfex.bridge.converters import (
     build_gen_cost_curves_dict,
     build_outage_mask_matrix,
     compile_outage_factor,
+    fuel_source_outage_windows,
     convert_battery_config,
     convert_battery_technology_config,
     convert_generator_config,
@@ -3538,6 +3539,7 @@ class PrimaryEnergyAdapter:
         investment_from_master: bool = False,
         h2_production_hourly: Optional[np.ndarray] = None,
         transport_routes: Optional[List[Dict]] = None,
+        outage_schedule: Optional[list] = None,
     ):
         """
         Initialize the PrimaryEnergy adapter.
@@ -3573,6 +3575,7 @@ class PrimaryEnergyAdapter:
         self.infrastructure_config = infrastructure_config
         self.transport_distances = transport_distances
         self.transport_routes = transport_routes or []
+        self.outage_schedule = outage_schedule or []
         self.generators = generators
         self.fuels_definition = fuels_definition
         self.penalties_config = penalties_config
@@ -3653,6 +3656,22 @@ class PrimaryEnergyAdapter:
         for fuel_name, fuel_cfg in self.fuels_config.items():
             fuel_def = self.fuels_definition.get(fuel_name, {})
 
+            # Scheduled fuel-source outages reuse FuelConfig's built-in
+            # disruption window (start/end/availability). Applies the first
+            # scheduled window; the PE model supports one window per source.
+            d_start = int(fuel_cfg.get('disruption_start_hour', 0))
+            d_end = int(fuel_cfg.get('disruption_end_hour', 0))
+            d_avail = float(fuel_cfg.get('disruption_availability', 1.0))
+            _fw = fuel_source_outage_windows(self.outage_schedule, fuel_name)
+            if _fw:
+                d_start, d_end, d_avail = int(_fw[0][0]), int(_fw[0][1]), float(_fw[0][2])
+                if len(_fw) > 1:
+                    logger.warning(
+                        "Fuel source %r has %d scheduled outages; the primary-"
+                        "energy model applies one window per source — using the "
+                        "first (%d–%d h).", fuel_name, len(_fw), _fw[0][0], _fw[0][1],
+                    )
+
             # Cost fields go through scale_cost to match the M$ convention of
             # the PowerSystem objective the PE terms get summed into.
             jl_fuel = ESFEX.FuelConfig(
@@ -3669,9 +3688,9 @@ class PrimaryEnergyAdapter:
                 scale_cost(float(fuel_cfg.get('transport_cost', 0.0))),
                 float(fuel_cfg.get('transport_losses', 0.0)),
                 float(fuel_cfg.get('transport_transit_days_per_100km', 0.0)),
-                int(fuel_cfg.get('disruption_start_hour', 0)),
-                int(fuel_cfg.get('disruption_end_hour', 0)),
-                float(fuel_cfg.get('disruption_availability', 1.0)),
+                d_start,
+                d_end,
+                d_avail,
             )
             jl.seval("push!")(jl_fuels, jl_fuel)
 

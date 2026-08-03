@@ -5030,6 +5030,7 @@ class Orchestrator:
                         initial_storage_levels=pe_init_storage,
                         investment_from_master=(self.config.simulation_mode == "development"),
                         transport_routes=system_config.fuel_transport_routes,
+                        outage_schedule=getattr(system_config, "outage_schedule", None),
                     )
 
                     # Create PE variables in the same JuMP model
