@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from esfex.bridge.converters import compile_outage_factor
+from esfex.bridge.converters import build_outage_mask_matrix, compile_outage_factor
 from esfex.config.schema import NodeConfig, OutageWindow, SystemConfig
 
 
@@ -108,6 +108,46 @@ class TestCompileOutageFactor:
         # Two 0.5 derates over the same hour compound to 0.25.
         f = compile_outage_factor([(6, 12, 0.5), (6, 12, 0.5)], start_hour=0, hours=24)
         np.testing.assert_allclose(f[6:12], 0.25)
+
+
+# ---------------------------------------------------------------------------
+# Centralised mask matrix (branch/injection element types)
+# ---------------------------------------------------------------------------
+class TestBuildOutageMaskMatrix:
+    def test_none_when_no_matching_outage(self):
+        # Windows exist but for an id not in the order -> nothing to mask.
+        m = build_outage_mask_matrix(
+            {"OTHER": [(6, 12, 0.0)]}, ["B1", "B2"], start_hour=0, hours=24,
+        )
+        assert m is None
+
+    def test_none_when_empty(self):
+        assert build_outage_mask_matrix({}, ["B1"], start_hour=0, hours=24) is None
+
+    def test_row_alignment(self):
+        # Only B2 has an outage -> its row (index 1) is masked, others stay 1.
+        m = build_outage_mask_matrix(
+            {"B2": [(6, 12, 0.0)]}, ["B1", "B2", "B3"], start_hour=0, hours=24,
+        )
+        assert m.shape == (3, 24)
+        np.testing.assert_array_equal(m[0], np.ones(24))       # B1 untouched
+        np.testing.assert_array_equal(m[1, 6:12], np.zeros(6))  # B2 out
+        assert m[1, 5] == 1.0
+        np.testing.assert_array_equal(m[2], np.ones(24))       # B3 untouched
+
+    def test_partial_derate_row(self):
+        m = build_outage_mask_matrix(
+            {"E1": [(0, 6, 0.25)]}, ["E1"], start_hour=0, hours=12,
+        )
+        np.testing.assert_allclose(m[0, 0:6], 0.25)
+        np.testing.assert_allclose(m[0, 6:], 1.0)
+
+    def test_respects_rolling_horizon_offset(self):
+        m = build_outage_mask_matrix(
+            {"B1": [(30, 34, 0.0)]}, ["B1"], start_hour=24, hours=24,
+        )
+        np.testing.assert_array_equal(m[0, 6:10], np.zeros(4))
+        assert m[0, 5] == 1.0
 
 
 # ---------------------------------------------------------------------------

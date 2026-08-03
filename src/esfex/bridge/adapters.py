@@ -28,6 +28,7 @@ from esfex.bridge.converters import (
     COST_UNSCALE,
     build_bat_cost_curves_dict,
     build_gen_cost_curves_dict,
+    build_outage_mask_matrix,
     compile_outage_factor,
     convert_battery_config,
     convert_battery_technology_config,
@@ -1087,14 +1088,16 @@ class PowerSystemAdapter:
                 f"{sum(len(v) for v in bat_bus_per_node.values())} entries"
             )
 
-        # Scheduled interruptions (deterministic outages): index the generator
-        # windows once so each unit's availability can be masked in the loop.
-        outage_by_gen: dict[str, list] = {}
+        # Scheduled interruptions (deterministic outages): index every element's
+        # windows once, keyed by type then id. Generators fold their windows into
+        # the availability matrix in the loop below; other element categories are
+        # compiled into the centralised outage_masks dict passed to Julia.
+        outage_by_type: dict[str, dict[str, list]] = {}
         for _ow in getattr(sys, "outage_schedule", None) or []:
-            if _ow.element_type == "generator":
-                outage_by_gen.setdefault(_ow.element_id, []).append(
-                    (_ow.start_hour, _ow.end_hour, _ow.availability)
-                )
+            outage_by_type.setdefault(_ow.element_type, {}).setdefault(
+                _ow.element_id, []
+            ).append((_ow.start_hour, _ow.end_hour, _ow.availability))
+        outage_by_gen = outage_by_type.get("generator", {})
 
         # Convert generators with availability profiles
         # Track order for cost curve mapping (key, python_config) in Julia push order
@@ -1602,6 +1605,19 @@ class PowerSystemAdapter:
         jl_reservoir_level = _np2d_to_jl_gen_bus_dict(
             self.boundary_conditions.get('reservoir_level'))
 
+        # Centralised deterministic-outage masks for non-generator elements,
+        # each aligned to that element's Julia push order (generators fold their
+        # outage into `availability` instead). Empty dict ⇒ no masking.
+        jl_outage_masks = jl.seval("Dict{String, Matrix{Float64}}()")
+        bat_mask = build_outage_mask_matrix(
+            outage_by_type.get("battery", {}),
+            [k for k, _ in bat_order],
+            self.start_hour, self.hours, resolution_hours,
+        )
+        if bat_mask is not None:
+            jl.seval("setindex!")(
+                jl_outage_masks, py_to_julia_matrix(bat_mask), "battery")
+
         # Create input struct using keyword constructor
         jl_input = ESFEX.PowerSystemInput(
             name=sys.name,
@@ -1628,6 +1644,7 @@ class PowerSystemAdapter:
             gap=solver.gap,
             verbose=solver.verbose,
             solver_options=_solver_options_to_julia(solver.options, solver.name),
+            outage_masks=jl_outage_masks,
             fuel_co2=jl_fuel_co2,
             ev_config=jl_ev_config,
             electrolyzer_config=jl_electrolyzer,

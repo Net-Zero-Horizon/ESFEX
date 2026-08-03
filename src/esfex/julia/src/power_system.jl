@@ -1704,6 +1704,9 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
     is_dev = vars.bat_investment_power !== nothing
     has_override = capacity_override_power !== nothing
 
+    # Deterministic scheduled outages: [n_bat × hours] capacity mask (1.0 = none).
+    bat_outage = get(input.outage_masks, "battery", nothing)
+
     for bi in 1:n_bat
         bat = input.batteries[bi]
 
@@ -1860,14 +1863,15 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                 )
 
                 for t in 1:hours
+                    omask = bat_outage === nothing ? 1.0 : bat_outage[bi, t]
                     if is_dev && bat.invest_max_power[b] > 0
                         @constraint(model, vars.bat_charge[bi, b, t] <=
-                            max_charge + vars.bat_investment_power[bi, b])
+                            (max_charge + vars.bat_investment_power[bi, b]) * omask)
                         @constraint(model, vars.bat_discharge[bi, b, t] <=
-                            max_discharge + vars.bat_investment_power[bi, b])
+                            (max_discharge + vars.bat_investment_power[bi, b]) * omask)
                     else
-                        @constraint(model, vars.bat_charge[bi, b, t] <= max_charge)
-                        @constraint(model, vars.bat_discharge[bi, b, t] <= max_discharge)
+                        @constraint(model, vars.bat_charge[bi, b, t] <= max_charge * omask)
+                        @constraint(model, vars.bat_discharge[bi, b, t] <= max_discharge * omask)
                     end
 
                     # Mutex constraint (Big-M: 2× max possible power)

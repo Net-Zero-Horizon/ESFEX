@@ -969,6 +969,33 @@ def compile_outage_factor(
     return factor
 
 
+def build_outage_mask_matrix(
+    windows_by_id: dict,
+    id_order: list,
+    start_hour: int,
+    hours: int,
+    resolution_hours: int = 1,
+) -> "np.ndarray | None":
+    """Dense ``[len(id_order) × hours]`` capacity mask for a set of elements.
+
+    Row ``i`` is the per-timestep availability factor for element ``id_order[i]``
+    (see :func:`compile_outage_factor`), defaulting to all-ones for elements with
+    no scheduled outage. ``windows_by_id`` maps an element id to its list of
+    ``(start_hour, end_hour, availability)`` windows.
+
+    Returns ``None`` when no element in ``id_order`` has an outage, so callers
+    can skip populating the mask entirely (keeping the model identical).
+    """
+    if not windows_by_id or not any(eid in windows_by_id for eid in id_order):
+        return None
+    mask = np.ones((len(id_order), hours), dtype=float)
+    for i, eid in enumerate(id_order):
+        w = windows_by_id.get(eid)
+        if w:
+            mask[i, :] = compile_outage_factor(w, start_hour, hours, resolution_hours)
+    return mask
+
+
 def convert_generator_config(
     gen: GeneratorConfig,
     availability: Optional[np.ndarray] = None,

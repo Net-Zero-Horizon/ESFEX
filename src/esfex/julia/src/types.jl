@@ -1109,6 +1109,13 @@ struct PowerSystemInput
     # Reactive power limits: gen_idx → Vector{Float64} per node (MVAr)
     gen_q_limits::Dict{Int, Vector{Float64}}      # Q_max per gen
     gen_q_limits_min::Dict{Int, Vector{Float64}}   # Q_min per gen
+
+    # Deterministic scheduled interruptions (Capa 1). Per element category
+    # ("line", "battery", "acdc_converter", "freq_converter", "electrolyzer")
+    # a [n_elements × hours] capacity mask in [0,1]; 1.0 = no outage. Empty or
+    # missing category ⇒ no masking (identical model). Generators fold their
+    # outage into `availability` instead, so they are not keyed here.
+    outage_masks::Dict{String, Matrix{Float64}}
 end
 
 # Constructor with sensible defaults
@@ -1222,7 +1229,8 @@ function PowerSystemInput(;
     acopf_tap_ratio_max::Float64 = 2.0,
     acopf_q_min_ratio::Float64 = 0.5,
     gen_q_limits::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
-    gen_q_limits_min::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}()
+    gen_q_limits_min::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
+    outage_masks::Dict{String, Matrix{Float64}} = Dict{String, Matrix{Float64}}()
 )
     return PowerSystemInput(
         name, year, base_year,
@@ -1304,7 +1312,8 @@ function PowerSystemInput(;
         acopf_tap_ratio_max,
         acopf_q_min_ratio,
         gen_q_limits,
-        gen_q_limits_min
+        gen_q_limits_min,
+        outage_masks
     )
 end
 
