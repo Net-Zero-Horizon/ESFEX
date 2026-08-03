@@ -1,5 +1,5 @@
 """
-ESFEX: Energy System FlEXibility — Power System Optimization
+ESFEX: Energy System Flexibility — Power System Optimization
 
 A hybrid Python/Julia optimization framework for power system planning and operation.
 """

@@ -194,7 +194,7 @@ If you use ESFEX in academic work, please cite:
 
 ```bibtex
 @software{esfex2026,
-  title   = {ESFEX: Energy System FlEXibility — Power System Optimization},
+  title   = {ESFEX: Energy System Flexibility — Power System Optimization},
   author  = {Soto Calvo, Manuel & Han Soo, Lee},
   year    = {2026},
   url     = {https://github.com/Net-Zero-Horizon/ESFEX},

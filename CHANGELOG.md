@@ -7,6 +7,56 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.4] — 2026-08-03
+
+### Added
+
+- **Deterministic scheduled interruptions (maintenance / forced outages)** — a
+  new interruptions calendar lets you take any electrical or primary-energy
+  element out of service — fully or as a derate — over explicit time windows,
+  and the optimizer respects them. Supported for generators, batteries, fuel
+  sources, transmission lines, AC/DC and frequency converters, and transformers.
+  Windows are edited in a D3 Gantt-timeline dialog (reachable from the toolbar
+  and from **right-click → Schedule interruption** on an element in the tree),
+  persist with the project, and compile into per-element, per-timestep capacity
+  masks for the model — with no change to the operational formulation itself.
+
+### Changed
+
+- **Grid Builder — Bus Distribution unified** — the two-button flow (separate
+  *Fetch demand* and *Distribute*) is replaced by a single method dropdown
+  (spatial demand + building-footprint proxies) and one **Distribute demand**
+  button; footprint options appear only for footprint methods. The step-3 demand
+  and distribution labels were also tidied.
+- **Validation dialog** — the *Auto-fix errors* button was removed (the
+  underlying validation library function is unchanged).
+- **System attributes** — the system name field now sits directly after its
+  *Name:* label instead of being right-justified.
+- **Interruptions calendar** follows the Studio's visual theme.
+
+### Fixed
+
+- **Large config and project save/load froze — or crashed — the GUI** — parsing,
+  serialising and `.esfexp` bundling ran on the GUI thread, so a large
+  multi-system file painted the progress dialog only partway and could crash Qt.
+  Config load/save and project export/import now run on background workers while
+  the window and its progress dialog stay responsive.
+- **Grid Builder: demand distribution broke when CMIP6 was rate-limited** — a
+  429 during the forecast fell back to a climate year that could carry NaN,
+  which propagated into per-cell demand and then failed the whole bus
+  distribution. Non-finite temperature and cell demand are now scrubbed, so
+  demand and distribution compute from the fallback climate instead of breaking.
+- **Grid Builder: CMIP6 climate fetch now retries** transient 429 / 5xx /
+  network errors with exponential backoff instead of losing a node's future
+  climate on the first throttle.
+- **Grid Builder: availability profiles came back all-zeros** when the weather
+  API rate-limited the concurrent requests; concurrency is capped and all-zero
+  responses now trigger a retry.
+- **Grid Builder: building footprints never downloaded** during bus
+  distribution (Microsoft quadkey, Web-Mercator and GeoJSON parsing bugs).
+- **Grid Builder: demand distribution reported "0 multi-bus nodes"** on all-HV
+  grids where no bus was pre-tagged as load; it now falls back to all busbars.
+
 ## [0.2.3] — 2026-07-22
 
 ### Added
@@ -345,7 +395,7 @@ Per-release notes are also published on the
 
 ## [0.1.0] — 2026-06-02
 
-First PyPI release of **ESFEX — Energy System FlEXibility**.
+First PyPI release of **ESFEX — Energy System Flexibility**.
 
 Hybrid Python/Julia framework for power-system capacity expansion and
 operational dispatch under high renewable penetration: two-stage decomposition,

@@ -16,7 +16,7 @@ from rich.table import Table
 
 app = typer.Typer(
     name="esfex",
-    help="ESFEX: Energy System FlEXibility — Power System Optimization",
+    help="ESFEX: Energy System Flexibility — Power System Optimization",
     add_completion=False,
 )
 # Force UTF-8 output to avoid cp1252 UnicodeEncodeError on Windows.
