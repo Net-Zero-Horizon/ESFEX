@@ -28,6 +28,7 @@ from esfex.bridge.converters import (
     COST_UNSCALE,
     build_bat_cost_curves_dict,
     build_gen_cost_curves_dict,
+    compile_outage_factor,
     convert_battery_config,
     convert_battery_technology_config,
     convert_generator_config,
@@ -1086,6 +1087,15 @@ class PowerSystemAdapter:
                 f"{sum(len(v) for v in bat_bus_per_node.values())} entries"
             )
 
+        # Scheduled interruptions (deterministic outages): index the generator
+        # windows once so each unit's availability can be masked in the loop.
+        outage_by_gen: dict[str, list] = {}
+        for _ow in getattr(sys, "outage_schedule", None) or []:
+            if _ow.element_type == "generator":
+                outage_by_gen.setdefault(_ow.element_id, []).append(
+                    (_ow.start_hour, _ow.end_hour, _ow.availability)
+                )
+
         # Convert generators with availability profiles
         # Track order for cost curve mapping (key, python_config) in Julia push order
         gen_order = []
@@ -1209,6 +1219,21 @@ class PowerSystemAdapter:
                                 cached_inflow[wrapped_start:],
                                 cached_inflow[:wrapped_end - len(cached_inflow)]
                             ])
+
+            # Apply scheduled interruptions as an availability mask. Materialise
+            # a ones matrix for dispatchable units (no CF profile) so the outage
+            # still bites — Julia now caps every generator by availability.
+            gen_windows = outage_by_gen.get(key)
+            if gen_windows:
+                factor = compile_outage_factor(
+                    gen_windows, self.start_hour, self.hours, resolution_hours
+                )
+                if availability is None:
+                    availability = np.ones((self.hours, num_nodes), dtype=float)
+                if availability.ndim == 1:
+                    availability = availability * factor
+                else:
+                    availability = availability * factor[:, None]
 
             gen_bus_map = gen_bus_per_node.get(key)
             jl_gen = convert_generator_config(gen_to_convert, availability, inflow,

@@ -1650,6 +1650,63 @@ class CustomConstraintConfig(BaseModel):
         return self
 
 
+# Infrastructure element categories that can be scheduled out of service.
+# Every type reduces to one of two model primitives at bridge time:
+#   - injection/conversion cap  (generator, battery, electrolyzer,
+#                                fuel_source, fuel_storage)
+#   - branch/transport cap      (line, transformer, acdc_converter,
+#                                freq_converter, fuel_route)
+OutageElementType = Literal[
+    "generator",
+    "line",
+    "battery",
+    "transformer",
+    "acdc_converter",
+    "freq_converter",
+    "electrolyzer",
+    "fuel_source",
+    "fuel_storage",
+    "fuel_route",
+]
+
+
+class OutageWindow(BaseModel):
+    """A deterministic, scheduled interruption of one infrastructure element.
+
+    Applies the capacity/availability multiplier ``availability`` to the target
+    element over the absolute hour window ``[start_hour, end_hour)`` of the
+    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00). A value of
+    ``0.0`` is a full outage; ``0.5`` a 50 % derate. This is the single record
+    the interruptions calendar reads and writes; the bridge compiles the whole
+    schedule into per-element, per-timestep capacity masks for the Julia model.
+    """
+
+    element_type: OutageElementType
+    element_id: str = Field(
+        description="Target element key (dict-keyed types: generators, "
+                    "batteries, electrolyzers, fuel sources) or list index as a "
+                    "string (lines, transformers, converters, fuel routes)."
+    )
+    start_hour: int = Field(ge=0, description="Absolute horizon hour, inclusive")
+    end_hour: int = Field(gt=0, description="Absolute horizon hour, exclusive")
+    availability: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Capacity fraction available during the window "
+                    "(0 = full cut, 1 = no effect).",
+    )
+    label: str = Field(default="", description="Optional note shown on the calendar")
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "OutageWindow":
+        if self.end_hour <= self.start_hour:
+            raise ValueError(
+                f"outage window end_hour ({self.end_hour}) must be greater than "
+                f"start_hour ({self.start_hour}) for {self.element_type} "
+                f"{self.element_id!r}"
+            )
+        return self
+
+
 class SystemConfig(BaseModel):
     """Complete configuration for a single power system."""
 
@@ -1790,6 +1847,14 @@ class SystemConfig(BaseModel):
     )
     fuel_entry_points: list[FuelEntryPointConfig] = Field(
         default_factory=list, description="Fuel import entry points"
+    )
+
+    # Deterministic scheduled interruptions (maintenance / forced outages) for
+    # any electrical or primary-energy element. Edited via the interruptions
+    # calendar; compiled into per-element capacity masks by the bridge.
+    outage_schedule: list[OutageWindow] = Field(
+        default_factory=list,
+        description="Deterministic service interruptions per element/time window",
     )
 
     # GUI-only: equipment layout offsets for spatial round-trip fidelity

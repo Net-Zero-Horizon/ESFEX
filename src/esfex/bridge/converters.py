@@ -933,6 +933,42 @@ def convert_network_config(
     )
 
 
+def compile_outage_factor(
+    windows: list,
+    start_hour: int,
+    hours: int,
+    resolution_hours: int = 1,
+) -> np.ndarray:
+    """Per-timestep availability factor in [0, 1] from scheduled outage windows.
+
+    ``windows`` is a list of ``(start_hour, end_hour, availability)`` triples in
+    absolute hour-of-horizon coordinates (``[start, end)``). The result has
+    length ``hours`` — the current rolling-horizon window at
+    ``resolution_hours`` resolution — where local period ``i`` covers absolute
+    hours ``[(start_hour // res + i) * res, ...)``.
+
+    A period fully inside a window takes that window's ``availability``; partial
+    overlap is weighted exactly like the fuel-supply disruption model
+    (``primary_energy.jl``): ``factor = (1 - frac) + frac * availability``.
+    Multiple overlapping windows compound multiplicatively.
+    """
+    factor = np.ones(hours, dtype=float)
+    if not windows:
+        return factor
+    res = max(1, int(resolution_hours))
+    base_period = start_hour // res
+    for i in range(hours):
+        p_start = (base_period + i) * res
+        p_end = p_start + res
+        for w0, w1, wav in windows:
+            lo = max(p_start, w0)
+            hi = min(p_end, w1)
+            if hi > lo:
+                frac = (hi - lo) / res
+                factor[i] *= (1.0 - frac) + frac * float(wav)
+    return factor
+
+
 def convert_generator_config(
     gen: GeneratorConfig,
     availability: Optional[np.ndarray] = None,

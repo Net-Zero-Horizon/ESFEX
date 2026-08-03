@@ -1575,24 +1575,23 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                 seg_vars = vars.gen_seg_output[(g, b)]
                 for k in 1:length(segs), t in 1:hours
                     seg_cap = segs[k].fraction * total_capacity
-                    if is_renewable && !has_reservoir
-                        avail = gen.availability[t, b]
-                        @constraint(model, seg_vars[k, t] <= seg_cap * avail)
-                    else
-                        @constraint(model, seg_vars[k, t] <= seg_cap)
-                    end
+                    # availability caps every generator: 1.0 by default, the
+                    # capacity factor for renewables, and <1 during a scheduled
+                    # outage (deterministic interruptions). No-op when 1.0, so
+                    # dispatchable units are unaffected unless an outage applies.
+                    avail = gen.availability[t, b]
+                    @constraint(model, seg_vars[k, t] <= seg_cap * avail)
                 end
             end
 
             for t in 1:hours
-                if is_renewable && !has_reservoir
-                    avail = gen.availability[t, b]
-                    @constraint(model,
-                        vars.gen_output[g, b, t] <= total_capacity * avail)
-                else
-                    @constraint(model,
-                        vars.gen_output[g, b, t] <= total_capacity)
+                # availability caps every generator (see segment note above):
+                # default 1.0, CF for renewables, <1 under a scheduled outage.
+                avail = gen.availability[t, b]
+                @constraint(model,
+                    vars.gen_output[g, b, t] <= total_capacity * avail)
 
+                if !(is_renewable && !has_reservoir)
                     # gen_status big-M only when NOT using capacity_override AND in UC mode.
                     # In economic dispatch, gen_status is fixed to 1, so the big-M constraint
                     # is redundant with `gen_output <= total_capacity` and only pollutes the
