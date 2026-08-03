@@ -103,6 +103,7 @@ class ElementTreePanel(QWidget):
     multiElementSelected = Signal(str, list)  # element_type, [element_ids]
     deleteSystemRequested = Signal(str)  # system_name
     viewNodeRequested = Signal(str)  # node id — focus map on centroid
+    scheduleOutageRequested = Signal(str, str)  # element_type, element_id
 
     # Element types that support deletion from the tree
     _DELETABLE_TYPES = {
@@ -126,6 +127,12 @@ class ElementTreePanel(QWidget):
         "bus", "fuel_entry", "fuel_storage", "fuel",
         "electrolyzer", "acdc_converter", "freq_converter",
         "technology", "investment_entry",
+    }
+
+    # Element types that can be scheduled out of service (interruptions calendar)
+    _SCHEDULABLE_TYPES = {
+        "generator", "battery", "line", "transformer",
+        "acdc_converter", "freq_converter",
     }
 
     def __init__(self, parent=None):
@@ -963,6 +970,12 @@ class ElementTreePanel(QWidget):
         else:
             parse_action = None
 
+        # Schedule interruption (outage calendar) for supported element types
+        schedule_action = None
+        if etype in self._SCHEDULABLE_TYPES:
+            schedule_action = menu.addAction(tr("tree_ctx.schedule_outage"))
+            menu.addSeparator()
+
         # Duplicate action
         duplicate_action = None
         if etype in self._DUPLICABLE_TYPES:
@@ -991,6 +1004,8 @@ class ElementTreePanel(QWidget):
             return
         if action == view_node_action:
             self.viewNodeRequested.emit(eid)
+        elif action == schedule_action:
+            self.scheduleOutageRequested.emit(etype, eid)
         elif action == parse_action:
             self.parseGeoAssetRequested.emit(eid)
         elif action == duplicate_action:

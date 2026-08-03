@@ -1961,6 +1961,8 @@ class MainWindow(QMainWindow):
         self.element_tree.multiElementSelected.connect(self._on_multi_element_selected)
         self.element_tree.deleteSystemRequested.connect(self._on_delete_system)
         self.element_tree.viewNodeRequested.connect(self._on_view_node_requested)
+        self.element_tree.scheduleOutageRequested.connect(
+            self._on_schedule_outage_requested)
 
     def _connect_model(self):
         m = self.model
@@ -2363,6 +2365,30 @@ class MainWindow(QMainWindow):
             InterruptionsDialog,
         )
         dlg = InterruptionsDialog(self.model, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.model.dataMutated.emit()
+
+    def _on_schedule_outage_requested(self, element_type: str, element_id: str):
+        """Right-click 'Schedule interruption…' on a tree element → open the
+        interruptions calendar with that element preselected."""
+        from PySide6.QtWidgets import QDialog
+        from esfex.visualization.panels.interruptions_dialog import (
+            InterruptionsDialog,
+        )
+        element_id = self._resolve_cross_system_id(element_id)
+        s = self.model.state
+        # Transformers/converters are addressed by index in the tree but by name
+        # in the outage schedule — resolve to the name the calendar uses.
+        try:
+            if element_type == "transformer":
+                element_id = s.transformers[int(element_id)].name
+            elif element_type == "acdc_converter":
+                element_id = s.acdc_converters[int(element_id)].name
+            elif element_type == "freq_converter":
+                element_id = s.freq_converters[int(element_id)].name
+        except (ValueError, IndexError, AttributeError):
+            pass
+        dlg = InterruptionsDialog(self.model, self, focus=(element_type, element_id))
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.model.dataMutated.emit()
 

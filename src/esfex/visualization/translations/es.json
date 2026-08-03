@@ -217,7 +217,8 @@
     "paste_attributes": "Pegar Atributos",
     "delete": "Eliminar",
     "delete_n_items": "Eliminar {n} elementos",
-    "view_on_map": "Ver en el mapa"
+    "view_on_map": "Ver en el mapa",
+    "schedule_outage": "Programar interrupción…"
   },
   "properties": {
     "title": "Propiedades",

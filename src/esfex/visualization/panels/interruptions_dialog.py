@@ -56,10 +56,11 @@ class _Bridge(QObject):
 class InterruptionsDialog(QDialog):
     """Graphical calendar for scheduling deterministic service interruptions."""
 
-    def __init__(self, model: GuiModel, parent=None):
+    def __init__(self, model: GuiModel, parent=None, focus: "tuple | None" = None):
         super().__init__(parent)
         self.model = model
         self._schedule: list[dict] = []
+        self._focus = focus  # (element_type, element_id) to preselect, or None
 
         self.setWindowTitle(tr("interruptions.title"))
         self.resize(scaled(1040), scaled(620))
@@ -130,11 +131,15 @@ class InterruptionsDialog(QDialog):
             }
             for ow in getattr(s, "outage_schedule", [])
         ]
+        focus = None
+        if self._focus:
+            focus = {"element_type": self._focus[0], "element_id": self._focus[1]}
         return json.dumps({
             "base_year": int(getattr(s, "base_year", 2025)),
             "horizon_hours": 8760,
             "groups": self._collect_groups(),
             "schedule": schedule,
+            "focus": focus,
             "i18n": {
                 "add": tr("interruptions.add"),
                 "delete": tr("interruptions.delete"),

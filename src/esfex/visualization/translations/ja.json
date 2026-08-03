@@ -217,7 +217,8 @@
     "paste_attributes": "属性を貼り付け",
     "delete": "削除",
     "delete_n_items": "{n} 項目を削除",
-    "view_on_map": "マップで表示"
+    "view_on_map": "マップで表示",
+    "schedule_outage": "停止をスケジュール…"
   },
   "properties": {
     "title": "プロパティ",

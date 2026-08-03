@@ -217,7 +217,8 @@
     "paste_attributes": "Paste Attributes",
     "delete": "Delete",
     "delete_n_items": "Delete {n} items",
-    "view_on_map": "View on map"
+    "view_on_map": "View on map",
+    "schedule_outage": "Schedule interruption…"
   },
   "properties": {
     "title": "Properties",
