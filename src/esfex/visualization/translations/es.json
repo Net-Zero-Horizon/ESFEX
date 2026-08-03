@@ -1426,6 +1426,8 @@
     "export_project_missing": "Algunos archivos referenciados no se encontraron y quedaron fuera del paquete:\n{files}",
     "export_project_error": "Falló la exportación del proyecto:\n{e}",
     "import_project_dest": "Elige una carpeta donde extraer el proyecto",
+    "importing_project_title": "Importando proyecto",
+    "importing_project_msg": "Extrayendo {path}…",
     "import_project_done": "Proyecto importado en {path}",
     "import_project_error": "Falló la importación del proyecto:\n{e}",
     "error": "Error",
@@ -2438,7 +2440,10 @@
     "no_buildings_loaded": "No hay edificaciones cargadas.",
     "run_the_demand_forecast_auto_xgboost": "Ejecute primero el pronóstico de demanda (motor Auto/XGBoost): no hay celdas de demanda espacial disponibles.",
     "no_nodes_in_the_active_system": "No hay nodos en el sistema activo.",
-    "network_is_already_clean_no_changes": "La red ya está limpia: no se necesitan cambios."
+    "network_is_already_clean_no_changes": "La red ya está limpia: no se necesitan cambios.",
+    "distribution_method": "Método",
+    "method_spatial_demand": "Demanda espacial",
+    "method_footprint_proxy": "Proxy por huella de edificios"
   },
   "interruptions": {
     "title": "Interrupciones de servicio",

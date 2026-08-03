@@ -1426,6 +1426,8 @@
     "export_project_missing": "Certains fichiers référencés sont introuvables et ont été exclus du paquet :\n{files}",
     "export_project_error": "Échec de l'exportation du projet :\n{e}",
     "import_project_dest": "Choisissez un dossier dans lequel extraire le projet",
+    "importing_project_title": "Importation du projet",
+    "importing_project_msg": "Extraction de {path}…",
     "import_project_done": "Projet importé vers {path}",
     "import_project_error": "Échec de l'importation du projet :\n{e}",
     "error": "Erreur",
@@ -2438,7 +2440,10 @@
     "no_buildings_loaded": "Aucun bâtiment chargé.",
     "run_the_demand_forecast_auto_xgboost": "Exécutez d'abord la prévision de la demande (moteur Auto/XGBoost) — aucune cellule de demande spatiale disponible.",
     "no_nodes_in_the_active_system": "Aucun nœud dans le système actif.",
-    "network_is_already_clean_no_changes": "Le réseau est déjà propre — aucune modification nécessaire."
+    "network_is_already_clean_no_changes": "Le réseau est déjà propre — aucune modification nécessaire.",
+    "distribution_method": "Méthode",
+    "method_spatial_demand": "Demande spatiale",
+    "method_footprint_proxy": "Proxy d'emprise du bâti"
   },
   "interruptions": {
     "title": "Interruptions de service",

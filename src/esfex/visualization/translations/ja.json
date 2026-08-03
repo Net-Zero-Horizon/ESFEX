@@ -1438,6 +1438,8 @@
     "export_project_missing": "一部の参照ファイルが見つからず、パッケージに含まれませんでした:\n{files}",
     "export_project_error": "プロジェクトのエクスポートに失敗しました:\n{e}",
     "import_project_dest": "プロジェクトを展開するフォルダを選択",
+    "importing_project_title": "プロジェクトをインポート中",
+    "importing_project_msg": "{path} を展開中…",
     "import_project_done": "プロジェクトを {path} にインポートしました",
     "import_project_error": "プロジェクトのインポートに失敗しました:\n{e}",
     "error": "エラー",
@@ -2450,7 +2452,10 @@
     "no_buildings_loaded": "建物が読み込まれていません。",
     "run_the_demand_forecast_auto_xgboost": "先に需要予測（Auto/XGBoost エンジン）を実行してください — 空間需要セルが利用できません。",
     "no_nodes_in_the_active_system": "アクティブなシステムにノードがありません。",
-    "network_is_already_clean_no_changes": "ネットワークはすでにクリーンです — 変更は不要です。"
+    "network_is_already_clean_no_changes": "ネットワークはすでにクリーンです — 変更は不要です。",
+    "distribution_method": "方法",
+    "method_spatial_demand": "空間需要",
+    "method_footprint_proxy": "建物フットプリント代理"
   },
   "interruptions": {
     "title": "サービス停止",

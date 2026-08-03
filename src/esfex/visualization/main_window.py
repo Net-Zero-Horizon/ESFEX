@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -238,6 +238,125 @@ def _resize_dialog(dialog, *, width_factor: float = 1.0,
     h = int(round(hint.height() * max(height_factor, 1.0)))
     dialog.resize(w, h)
     dialog.setMinimumSize(w, h)
+
+
+class _ConfigParseWorker(QThread):
+    """Parse a config YAML off the GUI thread.
+
+    Reading + schema-parsing + building the GUI states for a large config
+    (e.g. a 7 MB multi-system file) takes seconds; doing it on the GUI thread
+    froze the window — the progress dialog painted only partway and huge files
+    could crash Qt. This runs the GUI-free heavy work (raw YAML read,
+    ``load_config``, ``config_to_gui_states``) in a worker; the caller drives a
+    ``QEventLoop`` so the window stays responsive, then applies the results on
+    the GUI thread.
+    """
+
+    done = Signal(object, object, object)  # config, raw_dict, states
+    failed = Signal(str)
+
+    def __init__(self, path: str, base_dir: str, parent=None):
+        super().__init__(parent)
+        self._path = path
+        self._base_dir = base_dir
+
+    def run(self):
+        try:
+            import yaml as _yaml
+            from esfex.config.loader import load_config
+
+            with open(self._path, "r", encoding="utf-8") as fh:
+                raw_dict = _yaml.safe_load(fh) or {}
+            config = load_config(self._path)
+            states = config_to_gui_states(config, base_dir=self._base_dir)
+            self.done.emit(config, raw_dict, states)
+        except Exception as exc:  # surfaced to the caller for a message box
+            self.failed.emit(str(exc))
+
+
+class _ConfigSaveWorker(QThread):
+    """Serialise the GUI states to YAML off the GUI thread.
+
+    ``gui_state_to_yaml`` builds the config dict from the (dataclass) states,
+    dumps YAML and writes the file — GUI-free but slow for a large multi-system
+    project. The inputs are snapshotted on the GUI thread (the save dialog is
+    modal, so nothing mutates them meanwhile); the worker only reads them and
+    writes the file.
+    """
+
+    done = Signal()
+    failed = Signal(str)
+
+    def __init__(self, states, base_config, path, links, global_settings,
+                 scenarios, geo_assets, parent=None):
+        super().__init__(parent)
+        self._args = (states, base_config, path, links, global_settings,
+                      scenarios, geo_assets)
+
+    def run(self):
+        try:
+            from esfex.visualization.data.serializer import gui_state_to_yaml
+            states, base, path, links, gs, scen, geo = self._args
+            gui_state_to_yaml(
+                states, base, path, inter_system_links=links,
+                global_settings=gs, stochastic_scenarios=scen, geo_assets=geo)
+            self.done.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class _ProjectExportWorker(QThread):
+    """Bundle a project ``.esfexp`` off the GUI thread.
+
+    ``export_project`` serialises the config and zips every referenced data file
+    (demand CSVs, availability profiles …) — GUI-free but slow for a large
+    multi-system project. Running it on the GUI thread froze the window and could
+    crash Qt on big bundles, the same failure the config save had. Inputs are
+    snapshotted on the GUI thread (the file dialog is modal, so nothing mutates
+    them meanwhile); the worker only reads them and writes the bundle.
+    """
+
+    done = Signal(object)  # export report
+    failed = Signal(str)
+
+    def __init__(self, states, base_config, path, kwargs, parent=None):
+        super().__init__(parent)
+        self._args = (states, base_config, path)
+        self._kwargs = kwargs
+
+    def run(self):
+        try:
+            from esfex.visualization.data.project_bundle import export_project
+            states, base, path = self._args
+            report = export_project(states, base, path, **self._kwargs)
+            self.done.emit(report)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class _ProjectImportWorker(QThread):
+    """Extract a ``.esfexp`` bundle to a project folder off the GUI thread.
+
+    ``import_project`` unzips the bundle and writes every data file — slow for a
+    large project, and it froze the window when run on the GUI thread. The caller
+    then loads the extracted config via the (already threaded) load path.
+    """
+
+    done = Signal(str)  # extracted config path
+    failed = Signal(str)
+
+    def __init__(self, path, dest_dir, parent=None):
+        super().__init__(parent)
+        self._path = path
+        self._dest_dir = dest_dir
+
+    def run(self):
+        try:
+            from esfex.visualization.data.project_bundle import import_project
+            cfg_path = import_project(self._path, self._dest_dir)
+            self.done.emit(str(cfg_path))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -1204,14 +1323,16 @@ class MainWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         # On the first real show the splitter finally has its laid-out width,
-        # so we can set the default 18/58/24 split. Doing this at construction
-        # (width still 0) is ignored by Qt.
+        # so we can set the default split. The side panels (tree, properties)
+        # default to 60% of their former 18/24 widths — 10.8/74.8/14.4 — giving
+        # the center view more room. Doing this at construction (width still 0)
+        # is ignored by Qt.
         if not getattr(self, "_applied_initial_split", True):
             self._applied_initial_split = True
             w = self._main_splitter.width() or self.width()
             if w > 200:
                 self._main_splitter.setSizes(
-                    [int(w * 0.18), int(w * 0.58), int(w * 0.24)])
+                    [int(w * 0.108), int(w * 0.748), int(w * 0.144)])
 
     def _collapse_properties_panel(self) -> None:
         """Collapse the right properties panel to free space for analysis."""
@@ -3118,10 +3239,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog
 
         from esfex import __version__ as _ver
-        from esfex.visualization.data.project_bundle import (
-            PROJECT_SUFFIX,
-            export_project,
-        )
+        # export_project runs on a worker thread (_ProjectExportWorker).
+        from esfex.visualization.data.project_bundle import PROJECT_SUFFIX
 
         # Persist current editing state, like _save_config_file does.
         self._ensure_system_exists()
@@ -3148,25 +3267,42 @@ class MainWindow(QMainWindow):
         progress = self._make_progress_dialog(
             tr("messages.export_project_title"),
             tr("messages.exporting_project_msg", path=Path(path).name))
+        # Bundle off the GUI thread; the event loop keeps the window and the
+        # modal dialog responsive/painted during a large export (same fix as
+        # the config save — a big project froze/crashed the GUI otherwise).
+        from PySide6.QtCore import QEventLoop
+        result: dict = {}
         try:
-            report = export_project(
+            worker = _ProjectExportWorker(
                 self._all_states, self._loaded_config, path,
-                inter_system_links=self.model.inter_system_links,
-                global_settings=self.model.global_settings,
-                stochastic_scenarios=self.model.stochastic_scenarios,
-                app_version=_ver,
-                created_at=_dt.datetime.now().isoformat(timespec="seconds"),
-                project_name=Path(path).stem,
-                src_base=src_base,
-                geo_assets=self._geo_assets,
-            )
-        except Exception as e:
+                dict(
+                    inter_system_links=self.model.inter_system_links,
+                    global_settings=self.model.global_settings,
+                    stochastic_scenarios=self.model.stochastic_scenarios,
+                    app_version=_ver,
+                    created_at=_dt.datetime.now().isoformat(timespec="seconds"),
+                    project_name=Path(path).stem,
+                    src_base=src_base,
+                    geo_assets=self._geo_assets,
+                ), self)
+            worker.done.connect(lambda r: result.update(report=r))
+            worker.failed.connect(lambda m: result.update(error=m))
+            loop = QEventLoop()
+            worker.done.connect(loop.quit)
+            worker.failed.connect(loop.quit)
+            worker.start()
+            loop.exec()
+            worker.wait()
+        finally:
             progress.close()
+
+        if "report" not in result:
             QMessageBox.critical(
                 self, tr("common.error"),
-                tr("messages.export_project_error", e=e))
+                tr("messages.export_project_error",
+                   e=result.get("error", "export failed")))
             return
-        progress.close()
+        report = result["report"]
 
         msg = tr("messages.export_project_done", n=len(report.bundled), path=path)
         if report.missing:
@@ -3180,10 +3316,8 @@ class MainWindow(QMainWindow):
         """Import a ``.esfexp`` bundle: extract to a project folder and load it."""
         from PySide6.QtWidgets import QFileDialog
 
-        from esfex.visualization.data.project_bundle import (
-            PROJECT_SUFFIX,
-            import_project,
-        )
+        # import_project runs on a worker thread (_ProjectImportWorker).
+        from esfex.visualization.data.project_bundle import PROJECT_SUFFIX
 
         path, _ = QFileDialog.getOpenFileName(
             self, tr("menu.import_project"), "",
@@ -3196,14 +3330,33 @@ class MainWindow(QMainWindow):
         if not dest:
             return
         dest_dir = Path(dest) / Path(path).stem
+        # Extract off the GUI thread (a large bundle unzips slowly and froze the
+        # window); the subsequent config load is already threaded.
+        from PySide6.QtCore import QEventLoop
+        progress = self._make_progress_dialog(
+            tr("messages.importing_project_title"),
+            tr("messages.importing_project_msg", path=Path(path).name))
+        result: dict = {}
         try:
-            cfg_path = import_project(path, dest_dir)
-        except Exception as e:
+            worker = _ProjectImportWorker(path, dest_dir, self)
+            worker.done.connect(lambda p: result.update(cfg=p))
+            worker.failed.connect(lambda m: result.update(error=m))
+            loop = QEventLoop()
+            worker.done.connect(loop.quit)
+            worker.failed.connect(loop.quit)
+            worker.start()
+            loop.exec()
+            worker.wait()
+        finally:
+            progress.close()
+
+        if "cfg" not in result:
             QMessageBox.critical(
                 self, tr("common.error"),
-                tr("messages.import_project_error", e=e))
+                tr("messages.import_project_error",
+                   e=result.get("error", "import failed")))
             return
-        self._load_config_file(str(cfg_path))
+        self._load_config_file(result["cfg"])
         self.statusBar().showMessage(
             tr("messages.import_project_done", path=str(dest_dir)))
 
@@ -6884,11 +7037,14 @@ class MainWindow(QMainWindow):
         self._update_map_actions_state()
 
     def _populate_from_config(self, config, *, raw_dict: dict | None = None,
-                              base_dir: "str | None" = None):
+                              base_dir: "str | None" = None, states=None):
         """Load a ESFEXConfig and populate GUI.
 
         ``base_dir`` is the directory the config was loaded from; relative
         demand paths resolve under it (portable projects), then the CWD.
+        ``states`` may be a pre-built ``{name: GuiSystemState}`` mapping (built
+        off the GUI thread by :class:`_ConfigParseWorker` so a large file does
+        not freeze the window); when ``None`` it is built here.
         """
         from esfex.config.schema import ESFEXConfig
 
@@ -6905,7 +7061,8 @@ class MainWindow(QMainWindow):
         self._vs_ranges = None
         self.model.stochastic_scenarios = config_to_stochastic_scenarios(config)
 
-        states = config_to_gui_states(config, base_dir=base_dir)
+        if states is None:
+            states = config_to_gui_states(config, base_dir=base_dir)
         self._all_states = states
         system_names = list(states.keys())
         first_name = system_names[0]
@@ -7086,56 +7243,72 @@ class MainWindow(QMainWindow):
         dlg.setMinimumSize(int(sz.width() * 1.2), int(sz.height() * 1.2))
         dlg.resize(int(sz.width() * 1.2), int(sz.height() * 1.2))
         QApplication.processEvents()
+        # Force a full synchronous paint at final size so the dialog is drawn
+        # correctly *before* the caller starts a long (possibly GUI-thread)
+        # operation — otherwise save/export show it half-painted until the next
+        # event pump. (Load stays responsive via its background parse.)
+        dlg.repaint()
         return dlg
 
     def _load_config_file(self, path: str):
         """Load a YAML config and populate the GUI.
 
-        Large configs (cuba.yaml ≈ 18 s) would freeze the window with
-        no visible feedback, so we drive a QProgressDialog whose label
-        names the current stage. Range (0, 0) gives an indeterminate
-        animation — sufficient to prove the app is alive when we have
-        no good ETA. The dialog is window-modal and non-cancelable
-        (cancelling mid-load isn't atomic for the model rebuild path).
+        The heavy, GUI-free work (raw YAML read, schema parse, building the GUI
+        states) runs on a background thread (:class:`_ConfigParseWorker`) while a
+        ``QEventLoop`` keeps the window — and the modal progress dialog — alive
+        and correctly painted. Doing it synchronously on the GUI thread froze
+        the window (the dialog painted only partway, ~mid-load) and could crash
+        Qt on large files. The parse finishes before this method returns, so
+        callers keep their synchronous contract; only the model application
+        touches the GUI thread.
         """
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QEventLoop
 
         progress = self._make_progress_dialog(
             "Loading", f"Loading {Path(path).name}…")
-
-        def _phase(text: str):
-            progress.setLabelText(text)
-            QApplication.processEvents()
+        base_dir = str(Path(path).parent)
 
         try:
+            # ── Parse off the GUI thread; the event loop keeps the UI alive ──
+            worker = _ConfigParseWorker(path, base_dir, self)
+            result: dict = {}
+            worker.done.connect(
+                lambda c, r, s: result.update(config=c, raw=r, states=s))
+            worker.failed.connect(lambda m: result.update(error=m))
+            loop = QEventLoop()
+            worker.done.connect(loop.quit)
+            worker.failed.connect(loop.quit)
+            worker.start()
+            loop.exec()
+            worker.wait()
+
+            if "config" not in result:
+                QMessageBox.critical(
+                    self, tr("messages.load_error_title"),
+                    tr("messages.load_error_msg",
+                       e=result.get("error", "parse failed")))
+                return
+
+            config = result["config"]
+            raw_dict = result["raw"]
+            states = result["states"]
+
+            # ── Apply on the GUI thread (fast relative to the parse) ──
             try:
-                _phase("Reading YAML…")
-                import yaml as _yaml
-                from esfex.config.loader import load_config
-
-                # Read raw YAML dict to preserve GUI-only keys (e.g. visual_scaling)
-                with open(path, "r", encoding="utf-8") as fh:
-                    raw_dict = _yaml.safe_load(fh) or {}
-
-                _phase("Parsing config schema…")
-                config = load_config(path)
+                progress.setLabelText("Building GUI model…")
                 self._loaded_config = config
                 self._raw_config_dict = raw_dict
                 self._config_path = path
                 # Mirror the CLI's default (``output or Path("./results")``,
                 # cli.py:218) so the panel looks where the runner actually
-                # writes. Deriving from ``config.parent`` produced
-                # ``configs/results`` while the runner wrote to ``./results``
-                # — the panel then opened a non-existent path.
+                # writes.
                 self._last_output_dir = "results"
                 # A new config implies a new run pool — drop any cached
                 # Results dialog tied to the previous config.
                 self._invalidate_results_dialog_cache()
 
-                _phase("Building GUI model…")
                 self._populate_from_config(
-                    config, raw_dict=raw_dict,
-                    base_dir=str(Path(path).parent),
+                    config, raw_dict=raw_dict, base_dir=base_dir, states=states,
                 )
                 self.model.clear_undo()
                 self.console.update_namespace(config=config, state=self.model.state)
@@ -7157,9 +7330,6 @@ class MainWindow(QMainWindow):
                 return
 
             # Post-load auto-validation (non-blocking informational).
-            # Inside the same progress dialog so the user gets one
-            # continuous "Loading…" experience instead of two flashes.
-            _phase("Validating…")
             try:
                 errors, warnings = self._auto_validate_states(self._all_states)
             except Exception:
@@ -7223,13 +7393,23 @@ class MainWindow(QMainWindow):
                 tr("messages.saving_title"),
                 tr("messages.saving_msg", path=Path(path).name))
             try:
-                gui_state_to_yaml(
+                # Serialise off the GUI thread; the event loop keeps the window
+                # and the modal dialog responsive/painted during a large save.
+                from PySide6.QtCore import QEventLoop
+                worker = _ConfigSaveWorker(
                     self._all_states, self._loaded_config, path,
-                    inter_system_links=self.model.inter_system_links,
-                    global_settings=self.model.global_settings,
-                    stochastic_scenarios=self.model.stochastic_scenarios,
-                    geo_assets=self._geo_assets,
-                )
+                    self.model.inter_system_links, self.model.global_settings,
+                    self.model.stochastic_scenarios, self._geo_assets, self)
+                err: dict = {}
+                worker.failed.connect(lambda m: err.update(msg=m))
+                loop = QEventLoop()
+                worker.done.connect(loop.quit)
+                worker.failed.connect(loop.quit)
+                worker.start()
+                loop.exec()
+                worker.wait()
+                if "msg" in err:
+                    raise RuntimeError(err["msg"])
             finally:
                 progress.close()
             self._config_path = path

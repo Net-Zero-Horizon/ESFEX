@@ -1426,6 +1426,8 @@
     "export_project_missing": "Some referenced files were not found and were left out of the bundle:\n{files}",
     "export_project_error": "Failed to export project:\n{e}",
     "import_project_dest": "Choose a folder to extract the project into",
+    "importing_project_title": "Importing Project",
+    "importing_project_msg": "Extracting {path}…",
     "import_project_done": "Project imported to {path}",
     "import_project_error": "Failed to import project:\n{e}",
     "error": "Error",
@@ -2438,7 +2440,10 @@
     "no_buildings_loaded": "No buildings loaded.",
     "run_the_demand_forecast_auto_xgboost": "Run the demand forecast (Auto/XGBoost engine) first — no spatial-demand cells available.",
     "no_nodes_in_the_active_system": "No nodes in the active system.",
-    "network_is_already_clean_no_changes": "Network is already clean — no changes needed."
+    "network_is_already_clean_no_changes": "Network is already clean — no changes needed.",
+    "distribution_method": "Method",
+    "method_spatial_demand": "Spatial demand",
+    "method_footprint_proxy": "Building footprint proxy"
   },
   "interruptions": {
     "title": "Service Interruptions",
