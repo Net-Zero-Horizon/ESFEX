@@ -3,44 +3,54 @@
 <head>
 <meta charset="utf-8">
 <style>
+    /* Defaults are the light palette; interruptions.js overrides these from the
+       active Studio theme (light/dark) via document.documentElement style. */
+    :root {
+        --bg: #FFFFFF; --bg2: #F5F7FA; --elevated: #FFFFFF;
+        --text: #2C3E50; --text2: #7F8C8D; --border: #DEE2E6;
+        --accent: #2980B9; --danger: #C0392B; --warn: #F39C12;
+        --sel-bg: #D6EAF8; --row-alt: #F5F7FA;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden;
-        font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #222; }
+        font-family: "Segoe UI", Arial, sans-serif; font-size: 13px;
+        color: var(--text); background: var(--bg); }
     #app { display: flex; flex-direction: column; height: 100%; }
-    #toolbar { flex: 0 0 auto; padding: 8px 12px; border-bottom: 1px solid #e0e0e0;
-        display: flex; align-items: center; gap: 12px; background: #fafafa; }
-    #toolbar .hint { color: #777; font-size: 12px; }
+    #toolbar { flex: 0 0 auto; padding: 8px 12px; border-bottom: 1px solid var(--border);
+        display: flex; align-items: center; gap: 12px; background: var(--bg2); }
+    #toolbar .hint { color: var(--text2); font-size: 12px; }
     #main { flex: 1 1 auto; display: flex; min-height: 0; }
     #timeline-wrap { flex: 1 1 auto; overflow: auto; position: relative; }
     #timeline { display: block; }
-    #side { flex: 0 0 260px; border-left: 1px solid #e0e0e0; padding: 12px;
-        overflow: auto; background: #fcfcfc; }
-    #side h3 { font-size: 13px; margin-bottom: 10px; color: #1a73e8; }
+    #side { flex: 0 0 260px; border-left: 1px solid var(--border); padding: 12px;
+        overflow: auto; background: var(--bg2); }
+    #side h3 { font-size: 13px; margin-bottom: 10px; color: var(--accent); }
     #side.empty .form { display: none; }
     #side.empty .placeholder { display: block; }
-    #side .placeholder { display: none; color: #999; font-size: 12px; }
+    #side .placeholder { display: none; color: var(--text2); font-size: 12px; }
     .field { margin-bottom: 10px; }
-    .field label { display: block; font-size: 11px; color: #666; margin-bottom: 3px; }
-    .field input, .field select { width: 100%; padding: 5px 6px; border: 1px solid #ccc;
-        border-radius: 3px; font-size: 12px; }
-    #avail-val { color: #1a73e8; font-weight: 600; }
-    button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px;
-        background: #fff; cursor: pointer; font-size: 12px; }
-    button:hover { background: #f0f4ff; border-color: #1a73e8; color: #1a73e8; }
-    button.danger:hover { background: #fdecea; border-color: #c0392b; color: #c0392b; }
+    .field label { display: block; font-size: 11px; color: var(--text2); margin-bottom: 3px; }
+    .field input, .field select { width: 100%; padding: 5px 6px; border: 1px solid var(--border);
+        border-radius: 3px; font-size: 12px; background: var(--elevated); color: var(--text); }
+    #avail-val { color: var(--accent); font-weight: 600; }
+    button { padding: 6px 12px; border: 1px solid var(--border); border-radius: 4px;
+        background: var(--elevated); color: var(--text); cursor: pointer; font-size: 12px; }
+    button:hover { background: var(--sel-bg); border-color: var(--accent); color: var(--accent); }
+    button.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 
     /* Timeline SVG elements */
-    .group-label { font-size: 11px; font-weight: 600; fill: #444; }
-    .row-label { font-size: 12px; fill: #333; }
-    .row-bg:nth-child(even) { fill: #f7f7f7; }
-    .grid-line { stroke: #eaeaea; stroke-width: 1; }
-    .grid-line.month { stroke: #d8d8d8; }
-    .axis-label { font-size: 10px; fill: #888; }
-    .group-sep { stroke: #d0d0d0; stroke-width: 1; }
-    .outage { fill: rgba(26,115,232,0.65); stroke: #1a73e8; stroke-width: 1;
-        rx: 2; cursor: move; }
-    .outage.derate { fill: rgba(230,145,30,0.6); stroke: #e6911e; }
-    .outage.selected { stroke: #c0392b; stroke-width: 2; }
+    .group-label { font-size: 11px; font-weight: 600; fill: var(--text); }
+    .row-label { font-size: 12px; fill: var(--text); }
+    .row-bg { fill: var(--bg); }
+    .row-bg.alt { fill: var(--row-alt); }
+    .grid-line { stroke: var(--border); stroke-width: 1; }
+    .grid-line.month { stroke: var(--border); stroke-width: 1; }
+    .axis-label { font-size: 10px; fill: var(--text2); }
+    .group-sep { stroke: var(--border); stroke-width: 1; }
+    .outage { fill: var(--accent); fill-opacity: 0.65; stroke: var(--accent);
+        stroke-width: 1; rx: 2; cursor: move; }
+    .outage.derate { fill: var(--warn); stroke: var(--warn); }
+    .outage.selected { stroke: var(--danger); stroke-width: 2; }
     .outage-label { font-size: 9px; fill: #fff; pointer-events: none; }
     .handle { fill: rgba(0,0,0,0.001); cursor: ew-resize; }
     .row-hit { fill: rgba(0,0,0,0.0); cursor: crosshair; }

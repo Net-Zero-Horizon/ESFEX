@@ -140,6 +140,7 @@ class InterruptionsDialog(QDialog):
             "groups": self._collect_groups(),
             "schedule": schedule,
             "focus": focus,
+            "theme": self._theme_colors(),
             "i18n": {
                 "add": tr("interruptions.add"),
                 "delete": tr("interruptions.delete"),
@@ -150,6 +151,24 @@ class InterruptionsDialog(QDialog):
                 "empty": tr("interruptions.empty_hint"),
             },
         })
+
+    def _theme_colors(self) -> dict:
+        """Active GUI palette, so the embedded timeline matches the Studio theme
+        (light/dark) instead of a hard-coded light look."""
+        from esfex.visualization.theme import current_theme
+        c = current_theme().colors
+        return {
+            "bg": c.surface_primary,
+            "bg2": c.surface_secondary,
+            "elevated": c.surface_elevated,
+            "text": c.text_primary,
+            "text2": c.text_secondary,
+            "border": c.border_light,
+            "accent": c.accent_primary,
+            "danger": c.danger,
+            "warn": c.status_warning,
+            "selBg": c.selection_bg,
+        }
 
     def _on_committed(self, schedule_json: str) -> None:
         try:

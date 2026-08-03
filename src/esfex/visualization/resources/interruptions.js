@@ -35,10 +35,24 @@ window.addEventListener("DOMContentLoaded", function () {
     });
 });
 
+function applyTheme(t) {
+    // Mirror the active Studio palette onto the CSS variables the stylesheet
+    // reads, so the timeline matches light/dark themes.
+    var root = document.documentElement.style;
+    var map = {
+        bg: "--bg", bg2: "--bg2", elevated: "--elevated", text: "--text",
+        text2: "--text2", border: "--border", accent: "--accent",
+        danger: "--danger", warn: "--warn", selBg: "--sel-bg",
+    };
+    for (var k in map) if (t[k]) root.setProperty(map[k], t[k]);
+    if (t.bg2) root.setProperty("--row-alt", t.bg2);
+}
+
 function boot(data) {
     baseMs = Date.UTC(data.base_year, 0, 1);
     horizon = data.horizon_hours || 8760;
     I = data.i18n || {};
+    if (data.theme) applyTheme(data.theme);
     // Flatten groups → rows (a header row per category, then element rows).
     rows = [];
     (data.groups || []).forEach(function (g) {
@@ -73,7 +87,7 @@ function focusRow(cat, id) {
     wrap.scrollTop = Math.max(0, r._y - wrap.clientHeight / 2);
     // Brief highlight so the user sees which row to schedule.
     svg.append("rect").attr("x", 0).attr("y", r._y).attr("width", LEFT + plotW)
-        .attr("height", ROW_H).attr("fill", "rgba(26,115,232,0.20)")
+        .attr("height", ROW_H).style("fill", "var(--sel-bg)")
         .attr("pointer-events", "none")
         .transition().duration(1800).style("opacity", 0).remove();
     // Preselect an existing outage on that element, if any.
@@ -111,7 +125,7 @@ function render() {
     }
 
     // Rows (backgrounds, labels, create-hit areas)
-    var y = TOP;
+    var y = TOP, elIdx = 0;
     var gRows = svg.append("g");
     rows.forEach(function (r) {
         if (r.kind === "header") {
@@ -121,9 +135,9 @@ function render() {
                 .attr("x", 8).attr("y", y + 13).text(r.label);
             r._y = y; y += HDR_H;
         } else {
-            gRows.append("rect").attr("class", "row-bg")
-                .attr("x", 0).attr("y", y).attr("width", LEFT + plotW).attr("height", ROW_H)
-                .attr("fill", ((r._i = (r._i || 0)), y % (2 * ROW_H) === TOP % (2 * ROW_H)) ? "#fafafa" : "#fff");
+            gRows.append("rect")
+                .attr("class", "row-bg" + ((elIdx++ % 2) ? " alt" : ""))
+                .attr("x", 0).attr("y", y).attr("width", LEFT + plotW).attr("height", ROW_H);
             gRows.append("text").attr("class", "row-label")
                 .attr("x", 10).attr("y", y + ROW_H / 2 + 4)
                 .text(r.label.length > 24 ? r.label.slice(0, 23) + "…" : r.label);
