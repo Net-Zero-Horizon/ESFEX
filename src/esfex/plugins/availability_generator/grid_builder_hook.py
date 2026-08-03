@@ -51,17 +51,20 @@ _WIND_HINTS = frozenset({"wind", "eolic", "eolica", "eolico"})
 # wind farm) into a handful of unique fetches.
 _WEATHER_CELL_DEG = 0.1
 
-# Bounded concurrency for the remaining unique fetches. Each call is network-
-# bound (~30 s server-side; the GIL is released during I/O). Open-Meteo's free
-# budget is ~600 req/min, so the rate limit is not the binding constraint here;
-# we follow the same default the rest of the app uses for its worker pools —
-# ``cpu_count - 2`` (leaving two cores for the UI/main thread). We still cap
-# because the backend does no retry/throttling — over-bursting earns HTTP 429s,
-# which (now that we no longer fabricate flat profiles) become silently missing
-# generators. Pair the cap with retry-on-failure (see ``_fetch_one_weather_cf``).
+# Bounded concurrency for the remaining unique fetches. These are network- and
+# rate-limited, NOT CPU-bound, so the worker count is tuned to the API, not the
+# core count. Open-Meteo's free tier throttles by *concurrent* requests, not
+# just req/min: measured, ~4 concurrent stream cleanly while 8+ already draw
+# HTTP 429s (which, since we no longer fabricate flat profiles, become
+# all-zero/skipped generators). A CPU-based ``cpu_count - 2`` (e.g. 38 on a
+# 40-core box) 429s ~90 % of requests. Keep the default low and rate-limit-safe;
+# the retry-on-failure in ``_fetch_one_weather_cf`` mops up the occasional blip.
 # Override with the ESFEX_AVAILABILITY_WORKERS environment variable.
+_WEATHER_SAFE_WORKERS = 4
+
+
 def _default_max_workers() -> int:
-    return max(1, (os.cpu_count() or 4) - 2)
+    return _WEATHER_SAFE_WORKERS
 
 # Retry transient weather-fetch failures (429 / 5xx / timeouts) with exponential
 # backoff + jitter, since the backends issue a bare ``requests.get`` with no
@@ -348,7 +351,17 @@ def _fetch_one_weather_cf(
     last_exc: Optional[Exception] = None
     for attempt in range(_WEATHER_RETRIES):
         try:
-            return query()
+            res = query()
+            # The backends swallow a failed fetch (HTTP 429/5xx/timeout) and
+            # return an all-zero series rather than raising, so a bare
+            # ``return query()`` would treat a rate-limited miss as success and
+            # never retry. A real yearly CF series is never identically zero, so
+            # treat all-zeros (or empty/None) as a transient failure and retry.
+            if res is None or getattr(res, "size", 0) == 0 or not np.any(res):
+                raise RuntimeError(
+                    "weather backend returned an all-zero series "
+                    "(rate-limited or no data)")
+            return res
         except Exception as exc:  # transient network / rate-limit errors
             last_exc = exc
             if attempt < _WEATHER_RETRIES - 1:
