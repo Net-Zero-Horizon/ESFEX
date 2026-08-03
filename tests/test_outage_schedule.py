@@ -156,6 +156,46 @@ class TestBuildOutageMaskMatrix:
 
 
 # ---------------------------------------------------------------------------
+# GUI round-trip (SystemConfig ↔ GuiSystemState ↔ config dict)
+# ---------------------------------------------------------------------------
+class TestGuiRoundTrip:
+    def test_outage_schedule_survives_round_trip(self):
+        from tests.test_serializer import _make_esfex_config, _make_system_config
+        from esfex.visualization.data.serializer import (
+            _apply_gui_state_to_dict,
+            config_to_gui_states,
+        )
+
+        sc = _make_system_config()
+        sc.outage_schedule = [
+            OutageWindow(element_type="generator", element_id="gas_turbine",
+                         start_hour=100, end_hour=340, availability=0.0, label="overhaul"),
+            OutageWindow(element_type="line", element_id="L1",
+                         start_hour=0, end_hour=48, availability=0.5),
+        ]
+        states = config_to_gui_states(_make_esfex_config(sc))
+        state = states["TestSystem"]
+        assert [o.element_id for o in state.outage_schedule] == ["gas_turbine", "L1"]
+        assert state.outage_schedule[1].availability == 0.5
+
+        sys_dict: dict = {}
+        _apply_gui_state_to_dict(state, sys_dict)
+        got = sys_dict["outage_schedule"]
+        assert len(got) == 2
+        assert got[0]["element_type"] == "generator" and got[0]["end_hour"] == 340
+        assert got[1]["element_id"] == "L1" and got[1]["availability"] == 0.5
+        # Re-validates against the schema.
+        assert [OutageWindow(**d).start_hour for d in got] == [100, 0]
+
+    def test_empty_schedule_omitted(self):
+        from esfex.visualization.data.gui_model import GuiSystemState
+        from esfex.visualization.data.serializer import _apply_gui_state_to_dict
+        sys_dict: dict = {}
+        _apply_gui_state_to_dict(GuiSystemState(name="S"), sys_dict)
+        assert "outage_schedule" not in sys_dict
+
+
+# ---------------------------------------------------------------------------
 # Id-addressed masks (branch elements: lines, converters, routes)
 # ---------------------------------------------------------------------------
 class TestBuildOutageMaskById:

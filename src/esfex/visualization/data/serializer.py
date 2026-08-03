@@ -28,6 +28,7 @@ from esfex.visualization.data.gui_model import (
     GuiDemandSector,
     GuiCustomConstraint,
     GuiCustomConstraintTerm,
+    GuiOutageWindow,
     GuiDevelopmentZone,
     GuiElectrolyzerInstance,
     GuiEVCategory,
@@ -1908,6 +1909,15 @@ def _system_to_gui_state(sys: SystemConfig,
         for cc in (sys.custom_constraints or [])
     ]
 
+    outage_schedule = [
+        GuiOutageWindow(
+            element_type=ow.element_type, element_id=ow.element_id,
+            start_hour=ow.start_hour, end_hour=ow.end_hour,
+            availability=ow.availability, label=ow.label,
+        )
+        for ow in (getattr(sys, "outage_schedule", None) or [])
+    ]
+
     state = GuiSystemState(
         name=sys.name,
         map_center=map_center,
@@ -1915,6 +1925,7 @@ def _system_to_gui_state(sys: SystemConfig,
         nodes=nodes,
         buses=buses,
         custom_constraints=custom_constraints,
+        outage_schedule=outage_schedule,
         _next_bus_id=next_bus_id,
         generators=generators,
         batteries=batteries,
@@ -3070,6 +3081,20 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             if cc.params:
                 cd["params"] = dict(cc.params)
             sys_dict["custom_constraints"].append(cd)
+
+    # Deterministic scheduled interruptions (outage calendar)
+    if getattr(state, "outage_schedule", None):
+        sys_dict["outage_schedule"] = [
+            {
+                "element_type": ow.element_type,
+                "element_id": ow.element_id,
+                "start_hour": int(ow.start_hour),
+                "end_hour": int(ow.end_hour),
+                "availability": float(ow.availability),
+                "label": ow.label,
+            }
+            for ow in state.outage_schedule
+        ]
 
     # Development zones
     if state.development_zones:

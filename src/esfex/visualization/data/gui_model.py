@@ -379,6 +379,23 @@ class GuiCustomConstraint:
 
 
 @dataclass
+class GuiOutageWindow:
+    """A deterministic scheduled interruption of one element (see OutageWindow).
+
+    Edited via the interruptions calendar. ``element_id`` is the element's key
+    or id (generators/batteries: unit key; lines: line_id; converters/
+    transformers: name; fuel sources: fuel name). ``availability`` is the
+    capacity fraction during ``[start_hour, end_hour)`` (0 = full cut).
+    """
+    element_type: str = "generator"
+    element_id: str = ""
+    start_hour: int = 0
+    end_hour: int = 1
+    availability: float = 0.0
+    label: str = ""
+
+
+@dataclass
 class GuiDevelopmentZone:
     name: str
     technology: str
@@ -1026,6 +1043,7 @@ class GuiSystemState:
     freq_converters: list[GuiFrequencyConverter] = field(default_factory=list)
     development_zones: list[GuiDevelopmentZone] = field(default_factory=list)
     custom_constraints: list[GuiCustomConstraint] = field(default_factory=list)
+    outage_schedule: list[GuiOutageWindow] = field(default_factory=list)
     fuel_entry_points: list[GuiFuelEntryPoint] = field(default_factory=list)
     fuel_storages: dict[str, GuiFuelStorage] = field(default_factory=dict)
     fuel_transport_routes: list[GuiFuelTransportRoute] = field(default_factory=list)
