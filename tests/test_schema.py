@@ -160,9 +160,13 @@ class TestFuelConfig:
         with pytest.raises(ValidationError):
             FuelConfig(name="Bad", emission_factor=-0.1, price_base=0)
 
-    def test_price_base_negative_raises(self):
-        with pytest.raises(ValidationError):
-            FuelConfig(name="Bad", emission_factor=0, price_base=-1)
+    def test_price_base_negative_allowed(self):
+        # Waste-to-energy fuels carry a tipping fee (negative price): the plant
+        # is paid to consume them. The Grid Builder assigns -20 to "Waste", and
+        # a ge=0 floor used to reject such configs on load/import.
+        f = FuelConfig(name="Waste", unit="kTon", emission_factor=0.33,
+                       energy_content=3.0, price_base=-20.0)
+        assert f.price_base == -20.0
 
     def test_energy_content_negative_raises(self):
         with pytest.raises(ValidationError):

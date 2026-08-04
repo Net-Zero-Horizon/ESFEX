@@ -30,7 +30,11 @@ class FuelConfig(BaseModel):
     unit: Optional[str] = None  # None for renewable sources
     emission_factor: float = Field(ge=0, description="CO2 emissions (ton/MWh)")
     energy_content: Optional[float] = Field(None, ge=0, description="MWh per unit")
-    price_base: float = Field(ge=0, description="Base price (USD/unit)")
+    # May be negative: waste-to-energy fuels carry a tipping fee (the plant is
+    # paid to consume them), so the Grid Builder assigns e.g. -20 to "Waste".
+    # A ge=0 floor here rejected such configs on load/import.
+    price_base: float = Field(description="Base price (USD/unit; may be negative, "
+                              "e.g. waste-to-energy tipping fees)")
     price_growth_rate: float = Field(default=0, description="Annual price growth rate")
 
 
