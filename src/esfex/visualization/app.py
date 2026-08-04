@@ -28,6 +28,14 @@ def _get_or_create_app() -> QApplication:
     icon_path = _ICONS_DIR / "icon.png"
     if icon_path.exists() and app.windowIcon().isNull():
         app.setWindowIcon(QIcon(str(icon_path)))
+    # Word-wrap all plain-text tooltips to a logical width (Qt otherwise draws
+    # them as a single screen-wide line). Stash the filter on the app so it
+    # outlives this function and isn't garbage-collected.
+    if not getattr(app, "_esfex_tooltip_filter", None):
+        from esfex.visualization.tooltip_wrap import ToolTipWrapFilter
+
+        app._esfex_tooltip_filter = ToolTipWrapFilter(app)
+        app.installEventFilter(app._esfex_tooltip_filter)
     return app
 
 
