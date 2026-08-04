@@ -116,6 +116,7 @@ nav:
     - Solver Guide: user-guide/solver-guide.md
     - Development Zones: user-guide/development-zones.md
     - Custom Constraints: user-guide/custom-constraints.md
+    - Scheduled Interruptions: user-guide/scheduled-interruptions.md
   - GUI Editor:
     - Overview: gui/overview.md
     - Map Editor: gui/map-editor.md
