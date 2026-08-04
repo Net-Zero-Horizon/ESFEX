@@ -4617,6 +4617,10 @@ class GridMappingDemandStep(QWidget):
 
         # Auto-detect eligible nodes for bus distribution
         self._detect_eligible_nodes()
+        # Reflect the selected method's precondition on the Distribute button
+        # (spatial stays disabled until a forecast; a footprint proxy is
+        # runnable once bounds exist).
+        self._update_distribute_enabled()
 
         # Auto-detect country from polygon centroid
         if bounds is not None:
@@ -5028,10 +5032,9 @@ class GridMappingDemandStep(QWidget):
         self._chk_apply_correction.blockSignals(False)
         self._refresh_validation()
 
-        # Enable bus distribution (each method checks its own preconditions:
-        # spatial needs a forecast result, the footprint proxy needs bounds).
-        has_eligible = len(self._targets) > 0
-        self._btn_fetch_bld.setEnabled(has_eligible)
+        # Enable bus distribution for the selected method now that a forecast
+        # exists (spatial becomes runnable; a footprint proxy already was).
+        self._update_distribute_enabled()
         self._btn_apply.setEnabled(True)
 
     def _on_view_demand(self):
@@ -5301,6 +5304,27 @@ class GridMappingDemandStep(QWidget):
     # Section 3: Bus Distribution (preserved from original)
     # ==================================================================
 
+    def _update_distribute_enabled(self):
+        """Enable the single Distribute button when the *selected* method can run.
+
+        The methods have different preconditions — spatial demand needs a
+        completed forecast (it splits the forecast's per-cell demand), a
+        footprint proxy only needs the domain bounds (it can run before a
+        forecast). The unified button must reflect whichever method the combo
+        currently selects, so this is re-evaluated on method change, on forecast
+        completion and on reset. (Before the two buttons were merged, the spatial
+        button was always enabled and the footprint button gated on bounds; the
+        merge collapsed both onto a single ``has_eligible`` gate, which left the
+        button dead for spatial when no footprint targets were detected.)"""
+        method = self._combo_bld_source.currentData()
+        if method == "spatial":
+            ok = self._forecast_result is not None
+        elif method in ("microsoft", "overture", "google"):
+            ok = self._bounds is not None
+        else:  # the disabled 'Building footprint proxy' header
+            ok = False
+        self._btn_fetch_bld.setEnabled(ok)
+
     def _on_dist_method_changed(self, *_):
         """Show the footprint-proxy options only for a footprint database; snap
         off the non-selectable group header."""
@@ -5309,6 +5333,7 @@ class GridMappingDemandStep(QWidget):
             self._combo_bld_source.setCurrentIndex(0)  # back to Spatial demand
             return
         self._footprint_opts.setVisible(data != "spatial")
+        self._update_distribute_enabled()
 
     def _on_distribute(self):
         """Run the distribution method selected in the combo."""
