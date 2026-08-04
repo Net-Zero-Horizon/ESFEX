@@ -50,6 +50,32 @@ from esfex.visualization.ui_scale import scale_qss_fonts
 logger = logging.getLogger(__name__)
 
 
+# MW of generator capacity to require per kV of the network's minimum voltage.
+# Generation interconnects at a voltage matched to its size — sub-MW rooftop PV
+# on LV feeders, tens of MW at 66–132 kV sub-transmission, hundreds of MW at
+# 220–500 kV. Modelling a distribution-scale plant (e.g. a 1.7 MW solar farm)
+# as a node on a ≥110 kV transmission grid it never physically touches just
+# creates a stranded island, so the capacity floor tracks the voltage floor.
+# 0.3 MW/kV anchors 110 kV → ~33 MW / 220 kV → ~66 MW, deliberately on the low
+# side so real transmission plants are never excluded.
+_MIN_CAPACITY_MW_PER_KV = 0.3
+
+
+def suggested_min_capacity_mw(min_voltage_kv: float) -> float:
+    """Generator capacity floor proportional to the network's minimum voltage.
+
+    See :data:`_MIN_CAPACITY_MW_PER_KV`. Returns a tidy rounded value (whole MW
+    below 10 MW, nearest 5 MW above) so the spin box shows an intentional
+    number rather than e.g. 19.8 MW.
+    """
+    if min_voltage_kv <= 0:
+        return 1.0
+    raw = _MIN_CAPACITY_MW_PER_KV * float(min_voltage_kv)
+    if raw < 10:
+        return max(1.0, round(raw))
+    return round(raw / 5.0) * 5.0
+
+
 # =====================================================================
 # Step 1: Region & Fetch (combined domain + sources + fetch)
 # =====================================================================
@@ -132,9 +158,18 @@ class GridMappingSourceFetchStep(QWidget):
         )
         src_lay.addWidget(self._chk_gem)
 
-        # GridFinder (predicted line routes) is intentionally not offered:
-        # it carries only ML-predicted geometry — no voltage, no capacity —
-        # so mixing it with the real OSM topology adds more noise than signal.
+        # GridFinder — ML-predicted transmission/distribution line routes. It
+        # carries geometry only (no voltage/capacity); the builder derives those
+        # from the buses each line connects and the route length, exactly as for
+        # voltage-less OSM lines. Off by default (predicted, lower fidelity); it
+        # fills the gaps where OSM lacks lines, reconnecting generators that plant
+        # databases (WRI/GEM) place with no interconnection in OSM.
+        self._chk_gridfinder = QCheckBox(tr("grid_builder.gridfinder_predicted_lines"))
+        self._chk_gridfinder.setChecked(False)
+        self._chk_gridfinder.setToolTip(
+            tr("grid_builder.gridfinder_tooltip")
+        )
+        src_lay.addWidget(self._chk_gridfinder)
 
         layout.addWidget(src_group)
 
@@ -166,13 +201,25 @@ class GridMappingSourceFetchStep(QWidget):
 
         self._spin_min_capacity = QDoubleSpinBox()
         self._spin_min_capacity.setRange(0.0, 10000.0)
-        self._spin_min_capacity.setValue(1.0)
+        # Default scales with the minimum voltage: a distribution-scale plant on
+        # a transmission grid it never touches only produces a stranded island.
+        self._spin_min_capacity.setValue(
+            suggested_min_capacity_mw(self._spin_min_voltage.value())
+        )
         self._spin_min_capacity.setDecimals(1)
         self._spin_min_capacity.setSuffix(" MW")
         self._spin_min_capacity.setToolTip(
             tr("grid_builder.minimum_generator_capacity_set_to_0")
         )
         filter_form.addRow("Min gen capacity:", self._spin_min_capacity)
+
+        # Keep the capacity floor proportional to the voltage floor until the
+        # user overrides it by hand: raising Min voltage (a more transmission-
+        # focused grid) auto-raises the suggested Min gen capacity, but a manual
+        # edit pins the value and stops the auto-tracking.
+        self._min_cap_user_edited = False
+        self._spin_min_capacity.valueChanged.connect(self._on_min_cap_edited)
+        self._spin_min_voltage.valueChanged.connect(self._on_min_voltage_changed)
         settings_grid.addWidget(filter_widget, 1, 0)
 
         # Columns 2–3 — Element Types (4+4 split)
@@ -284,6 +331,15 @@ class GridMappingSourceFetchStep(QWidget):
         self._progress_layout.addWidget(self._bar_gem)
         self._progress_layout.addWidget(self._status_gem)
 
+        # GridFinder
+        self._lbl_gridfinder = QLabel(tr("grid_builder.gridfinder"))
+        self._bar_gridfinder = QProgressBar()
+        self._bar_gridfinder.setRange(0, 100)
+        self._status_gridfinder = QLabel("")
+        self._progress_layout.addWidget(self._lbl_gridfinder)
+        self._progress_layout.addWidget(self._bar_gridfinder)
+        self._progress_layout.addWidget(self._status_gridfinder)
+
         layout.addWidget(self._progress_group)
 
         # ── Summary ──
@@ -312,6 +368,22 @@ class GridMappingSourceFetchStep(QWidget):
         self._polygon = self._domain.get_polygon()
         self._bounds = self._domain.get_bounds()
         self._btn_fetch.setEnabled(self._bounds is not None)
+
+    def _on_min_cap_edited(self, _value):
+        """User changed the capacity floor by hand → stop auto-tracking voltage.
+
+        Only fires for real user edits: the programmatic updates in
+        :meth:`_on_min_voltage_changed` block signals, so they don't trip this.
+        """
+        self._min_cap_user_edited = True
+
+    def _on_min_voltage_changed(self, kv: int):
+        """Track the capacity floor to the voltage floor unless pinned."""
+        if self._min_cap_user_edited:
+            return
+        blocked = self._spin_min_capacity.blockSignals(True)
+        self._spin_min_capacity.setValue(suggested_min_capacity_mw(kv))
+        self._spin_min_capacity.blockSignals(blocked)
 
     # ------------------------------------------------------------------
     # Public API (called by wizard)
@@ -347,6 +419,7 @@ class GridMappingSourceFetchStep(QWidget):
                 "osm": self._chk_osm.isChecked(),
                 "wri": self._chk_wri.isChecked(),
                 "gem": self._chk_gem.isChecked(),
+                "gridfinder": self._chk_gridfinder.isChecked(),
             },
             "min_voltage_kv": self._spin_min_voltage.value(),
             "min_capacity_mw": self._spin_min_capacity.value(),
@@ -412,6 +485,7 @@ class GridMappingSourceFetchStep(QWidget):
     def _start_fetch(self, bounds, config, polygon):
         from esfex.visualization.workflows.grid_mapping_fetchers import (
             GEMGridFetcher,
+            GridFinderFetcher,
             OSMGridFetcher,
             WRIGridFetcher,
         )
@@ -431,6 +505,7 @@ class GridMappingSourceFetchStep(QWidget):
         osm_on = sources.get("osm", False)
         wri_on = sources.get("wri", False)
         gem_on = sources.get("gem", False)
+        gf_on = sources.get("gridfinder", False)
 
         self._lbl_osm.setVisible(osm_on)
         self._bar_osm.setVisible(osm_on)
@@ -443,6 +518,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._lbl_gem.setVisible(gem_on)
         self._bar_gem.setVisible(gem_on)
         self._status_gem.setVisible(gem_on)
+
+        self._lbl_gridfinder.setVisible(gf_on)
+        self._bar_gridfinder.setVisible(gf_on)
+        self._status_gridfinder.setVisible(gf_on)
 
         if osm_on:
             self._pending += 1
@@ -496,6 +575,21 @@ class GridMappingSourceFetchStep(QWidget):
             self._fetchers.append(fetcher)
             fetcher.start()
 
+        if gf_on:
+            self._pending += 1
+            fetcher = GridFinderFetcher(bounds)
+            fetcher.progress.connect(
+                lambda pct, msg: self._on_progress("gridfinder", pct, msg)
+            )
+            fetcher.finished.connect(
+                lambda feats: self._on_finished("gridfinder", feats)
+            )
+            fetcher.error.connect(
+                lambda err: self._on_error("gridfinder", err)
+            )
+            self._fetchers.append(fetcher)
+            fetcher.start()
+
         if self._pending == 0:
             self._summary_label.setText(tr("grid_builder.no_sources_selected"))
             self.fetchFinished.emit()
@@ -531,6 +625,8 @@ class GridMappingSourceFetchStep(QWidget):
             return self._bar_wri, self._status_wri
         if source == "gem":
             return self._bar_gem, self._status_gem
+        if source == "gridfinder":
+            return self._bar_gridfinder, self._status_gridfinder
         return None, None
 
     def _finalize(self):

@@ -713,6 +713,14 @@ def _overpass_error_snippet(text: str) -> str:
 # =====================================================================
 
 
+class _OverpassTileTooDense(RuntimeError):
+    """A tile persistently hit the server-side [timeout], meaning the query
+    covers too large or dense an area to finish in one shot. The caller
+    subdivides the tile into quadrants and retries each — a smaller query
+    completes under the limit. Distinct from a transient dispatcher/mirror
+    error (which is retried at the same size)."""
+
+
 class OSMGridFetcher(QThread):
     """Fetch power infrastructure from OpenStreetMap via the Overpass API.
 
@@ -741,6 +749,11 @@ class OSMGridFetcher(QThread):
             "storage", "converter",
         }
         self._cancelled = False
+        # Set by _fetch: how many Overpass tiles failed / were queried. Lets
+        # the caller warn on partial coverage instead of treating an
+        # incomplete fetch as a clean success.
+        self.failed_tile_count = 0
+        self.total_tile_count = 0
 
     def cancel(self):
         self._cancelled = True
@@ -788,36 +801,81 @@ class OSMGridFetcher(QThread):
         seen_ids: set[str] = set()
         failed_tiles = 0
         last_tile_error: Exception | None = None
-        for ti, (ts, tw, tn, te) in enumerate(tiles):
+
+        # Adaptive tile queue. Tiles start at _MAX_TILE_DEG; any tile that
+        # persistently times out server-side is split into four quadrants and
+        # re-queued (down to _MIN_TILE_DEG), so dense metros subdivide
+        # themselves instead of silently returning a fraction of the grid.
+        # ``total_est`` grows as tiles subdivide so the progress bar keeps a
+        # sensible denominator.
+        queue: list[tuple[float, float, float, float]] = list(tiles)
+        total_est = n_tiles
+        done = 0
+        subdivided = 0
+        first = True
+        while queue:
             if self._cancelled:
                 return []
+            ts, tw, tn, te = queue.pop(0)
             query = self._build_query(f"{ts},{tw},{tn},{te}")
-            base = 15 + int(70 * ti / n_tiles)
+            base = 15 + int(70 * done / max(total_est, 1))
             label = (
-                f"Querying Overpass tile {ti + 1}/{n_tiles}..."
-                if n_tiles > 1
+                f"Querying Overpass tile {done + 1}/{total_est}..."
+                if total_est > 1
                 else "Querying Overpass API (this may take a while)..."
             )
-            self.progress.emit(base, label)
+            self.progress.emit(min(base, 85), label)
             # Be a polite API citizen between tiles: a short pause avoids
             # bursting the server, which is what triggers the dispatcher
             # timeouts in the first place.
-            if ti > 0:
+            if not first:
                 time.sleep(1.0)
+            first = False
             try:
                 result = self._post_query(api, headers, query, time, requests)
-            except RuntimeError as exc:
-                # One tile failing (e.g. a road-dense tile that times out on
-                # every mirror) must not abort the whole region — skip it and
-                # keep the rest. A fully-failed fetch is raised below.
+            except _OverpassTileTooDense as exc:
+                # Too much data for one query. Split into quadrants and retry
+                # each, unless we are already at the resolution floor — then a
+                # tile that still times out is a genuinely pathological area
+                # and gets skipped (and surfaced) rather than looping forever.
+                span = max(tn - ts, te - tw)
+                if span > self._MIN_TILE_DEG * 1.5:
+                    mlat = 0.5 * (ts + tn)
+                    mlon = 0.5 * (tw + te)
+                    queue.extend([
+                        (ts, tw, mlat, mlon), (ts, mlon, mlat, te),
+                        (mlat, tw, tn, mlon), (mlat, mlon, tn, te),
+                    ])
+                    total_est += 4
+                    subdivided += 1
+                    logger.info(
+                        "OSM tile %.2f,%.2f,%.2f,%.2f too dense; subdividing "
+                        "into 4 (%s)", ts, tw, tn, te, exc,
+                    )
+                    continue
                 failed_tiles += 1
                 last_tile_error = exc
+                done += 1
                 logger.warning(
-                    "OSM tile %d/%d failed, skipping: %s", ti + 1, n_tiles, exc
+                    "OSM tile %.2f,%.2f,%.2f,%.2f still times out at the "
+                    "resolution floor; skipping: %s", ts, tw, tn, te, exc,
+                )
+                continue
+            except RuntimeError as exc:
+                # A transient failure (dispatcher/mirror) that survived all
+                # retries: skip this tile, keep the rest. A fully-failed fetch
+                # is raised below.
+                failed_tiles += 1
+                last_tile_error = exc
+                done += 1
+                logger.warning(
+                    "OSM tile %.2f,%.2f,%.2f,%.2f failed, skipping: %s",
+                    ts, tw, tn, te, exc,
                 )
                 continue
             if result is None or self._cancelled:
                 return []
+            done += 1
 
             # --- Merge this tile's elements, de-duplicating across tiles. ---
             # A way straddling a tile boundary is returned in full by every
@@ -843,23 +901,41 @@ class OSMGridFetcher(QThread):
                     seen_ids.add(feat.osm_id)
                     features.append(feat)
 
+        # Record incompleteness so the caller/UI can warn the user: partial OSM
+        # coverage is the difference between a functional network and hundreds
+        # of stranded generators, so it must never pass as a clean success.
+        self.failed_tile_count = failed_tiles
+        self.total_tile_count = done
+
         # If every tile failed, surface the error; partial coverage is OK.
-        if failed_tiles >= n_tiles:
+        if failed_tiles >= done:
             raise RuntimeError(
-                f"All {n_tiles} Overpass tile(s) failed; last error: "
+                f"All {done} Overpass tile(s) failed; last error: "
                 f"{last_tile_error}"
             )
         if failed_tiles:
             logger.warning(
-                "%d of %d OSM tiles failed; returning partial results",
-                failed_tiles, n_tiles,
+                "%d of %d OSM tiles failed; returning INCOMPLETE results "
+                "(missing infrastructure may leave generators stranded)",
+                failed_tiles, done,
+            )
+        if subdivided:
+            logger.info(
+                "%d dense OSM tile(s) were subdivided to fit the Overpass "
+                "timeout", subdivided,
             )
 
         self.progress.emit(90, f"Filtering (voltage >= {self.min_voltage_kv} kV)...")
         features = self._apply_filters(features)
 
-        skipped = (f" ({failed_tiles} tile(s) skipped)" if failed_tiles else "")
-        self.progress.emit(100, f"OSM: {len(features)} features found{skipped}")
+        if failed_tiles:
+            self.progress.emit(
+                100,
+                f"OSM: {len(features)} features — WARNING: {failed_tiles} of "
+                f"{done} tiles failed, data is INCOMPLETE",
+            )
+        else:
+            self.progress.emit(100, f"OSM: {len(features)} features found")
         return features
 
     # ── Tiling + query helpers ───────────────────────────────────
@@ -870,7 +946,15 @@ class OSMGridFetcher(QThread):
     # body and a "runtime error ... timed out" remark, which previously parsed
     # as a silent empty success. Splitting the bbox into tiles keeps each
     # query well under that limit.
-    _MAX_TILE_DEG = 5.0
+    #
+    # 1.0deg (~110km) is the starting grid: verified to return the full line
+    # set on dense regions (e.g. Kyushu, 1218 power lines) where the old 5deg
+    # tile timed out and returned ~2% of the data. Any tile that STILL times
+    # out (dense metros like Kanto) is subdivided into quadrants down to
+    # _MIN_TILE_DEG, so density is handled adaptively rather than by dropping
+    # data silently.
+    _MAX_TILE_DEG = 1.0
+    _MIN_TILE_DEG = 0.25
 
     # Overpass mirrors, tried in rotation across retries. The main instance
     # returns HTTP 400 dispatcher timeouts under heavy load; rotating to a
@@ -984,12 +1068,16 @@ class OSMGridFetcher(QThread):
         off between attempts.
 
         Returns the parsed overpy ``Result``, or ``None`` if cancelled. Raises
-        ``RuntimeError`` once retries are exhausted. Two Overpass quirks are
-        handled explicitly:
+        ``RuntimeError`` once retries are exhausted, or ``_OverpassTileTooDense``
+        when a tile persistently hits the server-side timeout (so the caller
+        can subdivide it). Three Overpass quirks are handled explicitly:
 
-        * A server-side timeout/overload comes back as HTTP 200 with an empty
-          body and a ``"runtime error ... timed out"`` remark — treat as a
-          retryable failure, not a silently empty success.
+        * A server-side timeout/overload comes back as HTTP 200 with a
+          ``"runtime error ... timed out"`` remark — treat as a retryable
+          failure, not a silently empty success. Two hits ⇒ subdivide.
+        * A zero-element HTTP 200 with NO remark is usually a genuinely empty
+          tile, but an overloaded dispatcher sheds load the same way. Re-query
+          once on a different mirror before trusting the zero.
         * HTTP 400 covers BOTH genuine QL syntax errors (fatal) and transient
           dispatcher/load timeouts under heavy traffic (retryable). Only a
           body that names a ``parse error``/``static error`` is fatal.
@@ -997,6 +1085,8 @@ class OSMGridFetcher(QThread):
         endpoints = self._OVERPASS_ENDPOINTS
         max_retries = 4
         last_error: Exception | None = None
+        timeout_hits = 0
+        empty_hits = 0
         for attempt in range(max_retries + 1):
             if self._cancelled:
                 return None
@@ -1011,12 +1101,46 @@ class OSMGridFetcher(QThread):
                 if resp.status_code == 200:
                     sniff = resp.content[:2048] + resp.content[-2048:]
                     if b"runtime error" in sniff or b"timed out" in sniff:
+                        # A server-side [timeout] means this tile covers too
+                        # much data to finish in one query — retrying at the
+                        # same size just burns another 300s timeout on each
+                        # mirror. After a second confirmation, bail out with a
+                        # distinct error so the caller subdivides the tile
+                        # instead of dropping it.
+                        timeout_hits += 1
+                        if timeout_hits >= 2:
+                            raise _OverpassTileTooDense(
+                                "Overpass server-side timeout on every mirror "
+                                "(tile too large or dense)"
+                            )
                         last_error = RuntimeError(
                             "Overpass server-side timeout (region tile too "
                             "large or dense)"
                         )
                     else:
-                        return api.parse_json(resp.content)
+                        result = api.parse_json(resp.content)
+                        n_elem = (
+                            len(result.nodes) + len(result.ways)
+                            + len(getattr(result, "relations", []) or [])
+                        )
+                        # A 200 with zero elements is usually a genuinely empty
+                        # tile (ocean/rural), but an overloaded dispatcher also
+                        # sheds load by returning an empty 200 with NO remark —
+                        # which the timeout sniff above cannot catch. Trusting
+                        # that zero silently deletes real grid over a populated
+                        # tile (observed: the same box returned 0 then 1176
+                        # features seconds apart). Re-query once on a different
+                        # mirror; only accept the zero if a second server
+                        # confirms it.
+                        if n_elem == 0 and empty_hits < 1 and attempt < max_retries:
+                            empty_hits += 1
+                            last_error = RuntimeError(
+                                "Overpass returned 0 elements (possible "
+                                "load-shed empty)"
+                            )
+                            time.sleep(3.0)
+                            continue
+                        return result
                 elif resp.status_code == 400:
                     msg = _overpass_error_snippet(resp.text)
                     low = resp.text.lower()
@@ -1514,13 +1638,14 @@ def _http_get_with_retry(
     max_retries: int = 3,
     backoff_base: float = 2.0,
     headers: dict | None = None,
+    params: dict | None = None,
     cancelled_cb=None,
 ):
     """GET *url* with exponential backoff on transient errors.
 
     Retries on connection resets, SSL handshake failures, timeouts and
     5xx responses. Returns the final ``requests.Response`` (status 200)
-    or raises the last exception.
+    or raises the last exception. ``params`` are passed as the query string.
     """
     import time
     import requests
@@ -1539,7 +1664,7 @@ def _http_get_with_retry(
         if cancelled_cb is not None and cancelled_cb():
             raise RuntimeError("cancelled")
         try:
-            resp = requests.get(url, timeout=timeout, headers=hdrs)
+            resp = requests.get(url, timeout=timeout, headers=hdrs, params=params)
             if resp.status_code == 200:
                 return resp
             if 500 <= resp.status_code < 600:
@@ -1936,8 +2061,18 @@ class GridFinderFetcher(QThread):
     finished = Signal(object)      # list[GridFeature]
     error = Signal(str)
 
-    # GridFinder Zenodo dataset — the API provides a redirect to the actual file
-    _ZENODO_API = "https://zenodo.org/api/records/3369106"
+    # GridFinder as an ArcGIS Feature Service (ESMAP / energydata.info) — lets us
+    # query by bounding box instead of downloading the 724 MB global grid.gpkg.
+    # The layer has only `source` metadata (openstreetmap | gridfinder); we keep
+    # only the ML-predicted ("gridfinder") lines, since OSM lines already come
+    # from our own Overpass fetch. Voltage/capacity are derived downstream by the
+    # builder's Phase-4 metadata inference (voltage from the buses each line
+    # connects, capacity + impedance from that voltage and the route length).
+    _FEATURE_SERVER = (
+        "https://services.arcgis.com/iQ1dY19aHwbSDYIF/arcgis/rest/services/"
+        "grid_data/FeatureServer/0/query"
+    )
+    _PAGE = 2000
 
     def __init__(
         self,
@@ -1962,75 +2097,51 @@ class GridFinderFetcher(QThread):
             self.error.emit(str(exc))
 
     def _fetch(self) -> list[GridFeature]:
-        import json
+        """Query the GridFinder Feature Service for the ML-predicted lines that
+        intersect the bounding box (paginated), returning them as line
+        ``GridFeature``s with geometry only — the builder derives their
+        electrical metadata from the network they connect."""
+        self.progress.emit(5, "Querying GridFinder (predicted lines) by region...")
 
-        self.progress.emit(5, "Resolving GridFinder download URL...")
-
-        # Get file list from Zenodo API
-        resp = _http_get_with_retry(
-            self._ZENODO_API, timeout=30,
-            cancelled_cb=lambda: self._cancelled,
-        )
-        record = resp.json()
-
-        if self._cancelled:
-            return []
-
-        # Find the GeoJSON or GPKG file
-        download_url = None
-        for f in record.get("files", []):
-            fname = f.get("key", "").lower()
-            if fname.endswith(".geojson") or fname.endswith(".json"):
-                download_url = f.get("links", {}).get("self")
+        base = {
+            "where": "source='gridfinder'",   # predicted only; OSM copies dropped
+            "geometry": f"{self.west},{self.south},{self.east},{self.north}",
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326", "outSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "source", "returnGeometry": "true",
+            "f": "geojson", "resultRecordCount": self._PAGE,
+        }
+        features: list[GridFeature] = []
+        offset = 0
+        while True:
+            if self._cancelled:
+                return []
+            resp = _http_get_with_retry(
+                self._FEATURE_SERVER, timeout=90,
+                params={**base, "resultOffset": offset},
+                cancelled_cb=lambda: self._cancelled,
+            )
+            try:
+                gj = resp.json()
+            except ValueError:
+                logger.warning("GridFinder: non-JSON response from Feature Service")
+                break
+            page = gj.get("features", [])
+            if not page:
+                break
+            features.extend(self._parse_geojson(gj))
+            offset += len(page)
+            self.progress.emit(
+                min(90, 10 + offset // 100),
+                f"GridFinder: {len(features)} predicted line(s)...")
+            # Last page: fewer than a full page AND server didn't flag more.
+            if (len(page) < self._PAGE
+                    and not gj.get("properties", {}).get("exceededTransferLimit")):
                 break
 
-        if not download_url:
-            # Try looking for a compressed file
-            for f in record.get("files", []):
-                fname = f.get("key", "").lower()
-                if "grid" in fname and (fname.endswith(".gpkg")
-                                         or fname.endswith(".zip")):
-                    download_url = f.get("links", {}).get("self")
-                    break
-
-        if not download_url:
-            self.progress.emit(100, "GridFinder: no compatible file found")
-            logger.warning(
-                "GridFinder Zenodo record has no GeoJSON file. "
-                "Available files: %s",
-                [f.get("key") for f in record.get("files", [])],
-            )
-            return []
-
-        self.progress.emit(20, "Downloading GridFinder data...")
-        data_resp = _http_get_with_retry(
-            download_url, timeout=120,
-            cancelled_cb=lambda: self._cancelled,
-        )
-
-        if self._cancelled:
-            return []
-
-        self.progress.emit(60, "Parsing GridFinder geometries...")
-
-        # Handle different formats
-        content_type = data_resp.headers.get("Content-Type", "")
-        raw = data_resp.content
-
-        features: list[GridFeature] = []
-
-        if download_url.endswith(".gpkg") or b"SQLite" in raw[:20]:
-            features = self._parse_gpkg(raw)
-        else:
-            # Assume GeoJSON
-            try:
-                geojson = json.loads(raw)
-                features = self._parse_geojson(geojson)
-            except json.JSONDecodeError:
-                logger.warning("GridFinder: could not parse downloaded file")
-                return []
-
-        self.progress.emit(100, f"GridFinder: {len(features)} line segments found")
+        self.progress.emit(
+            100, f"GridFinder: {len(features)} predicted line segment(s)")
         return features
 
     def _parse_geojson(self, geojson: dict) -> list[GridFeature]:

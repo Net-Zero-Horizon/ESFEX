@@ -176,6 +176,14 @@ _LINE_ENDPOINT_SNAP_CAP_KM = 0.5
 # Everything else becomes its own bus and is merged later by clustering.
 _FAITHFUL_JUNCTION_SNAP_KM = 0.05
 
+# GridFinder (ML-predicted) lines are only KEPT where OSM has no line (the
+# source dedup drops overlaps), so they exist purely to bridge gaps OSM left.
+# Unlike OSM lines — which must snap tightly to stay geometrically faithful —
+# a predicted bridge is only useful if it actually attaches to the real buses
+# near its endpoints, so it gets a deliberately generous endpoint snap. This
+# never loosens OSM snapping; it applies only to `source == "gridfinder"` lines.
+_GRIDFINDER_SNAP_KM = 2.0
+
 # Faithful mode: buses within this distance and at the same voltage are the
 # same physical station and are clustered into one. A "same station" radius,
 # not a reach distance — exposed in the GUI with this sensible default so the
@@ -698,6 +706,24 @@ def build_grid_from_features(
         except Exception as exc:
             result.warnings.append(f"Bus clustering: {exc}")
 
+        # Tie co-located voltage levels with a transformer. This is NOT the
+        # star-coupling fabrication (which reaches across a whole node): it only
+        # connects buses of DIFFERENT voltage that sit at the SAME station
+        # (within station_radius_km) — i.e. the transformer that physically
+        # exists there. Without it a substation's 66/220 kV buses stay
+        # electrically separate, fragmenting the real OSM grid by voltage level.
+        try:
+            vt = _connect_colocated_voltage_levels(
+                model.state, result, station_radius_km,
+            )
+            if vt:
+                result.warnings.append(
+                    f"Voltage consistency: inserted {vt} auto-transformer(s) "
+                    f"between co-located voltage levels at substations"
+                )
+        except Exception as exc:
+            result.warnings.append(f"Co-located voltage coupling: {exc}")
+
     return result
 
 
@@ -937,6 +963,7 @@ def _create_generator(
         gen_type=gen.gen_type or "Non-renewable",
         fuel=mapped_fuel,
         technology_id=mapped_tech,
+        source=getattr(gen, "source", "") or "",
         bus=bus_id,
         node=node_idx,
         rated_power=rp,
@@ -1030,16 +1057,25 @@ def _create_line(
     # transformer) — and snap BOTH ends to it. This applies the same-voltage
     # rule to voltage-less lines too, instead of letting them span e.g. 110 kV
     # to 220 kV (which used to attach a line straight across both levels). (#18)
+    # A GridFinder bridge only helps if its endpoints reach the real buses near
+    # them, so it uses a generous dedicated snap; OSM lines keep the tight snap.
+    endpoint_snap = (_GRIDFINDER_SNAP_KM
+                     if getattr(line, "source", "") == "gridfinder"
+                     else snap_km)
+
     v_line = float(line.voltage_kv) if (line.voltage_kv and line.voltage_kv > 0) else 0.0
     if v_line <= 0:
         from esfex.visualization.data.geo_asset_parser import _find_nearest_bus
         ends: list[float] = []
         for la, lo in ((lat1, lng1), (lat2, lng2)):
-            nb, nd = _find_nearest_bus(la, lo, state, _snap_km=snap_km, voltage_kv=0.0)
-            if nb is not None and nd < snap_km and (state.buses[nb].voltage_kv or 0) > 0:
+            nb, nd = _find_nearest_bus(la, lo, state, _snap_km=endpoint_snap, voltage_kv=0.0)
+            if nb is not None and nd < endpoint_snap and (state.buses[nb].voltage_kv or 0) > 0:
                 ends.append(float(state.buses[nb].voltage_kv))
         if ends:
-            v_line = max(ends)
+            # A predicted bridge operates at the LOWER connected level (the step
+            # up/down is a transformer, not the line); take the min so it doesn't
+            # inherit an inflated transmission rating from a higher-voltage end.
+            v_line = min(ends) if getattr(line, "source", "") == "gridfinder" else max(ends)
 
     line_props: dict = {
         "frequency_hz": line.frequency_hz,
@@ -1049,12 +1085,12 @@ def _create_line(
         line_props["voltage_kv"] = v_line
     from_idx, from_bus = _ensure_bus_at(
         state, lat1, lng1, f"{line.name} Start",
-        snap_km, result, props=line_props,
+        endpoint_snap, result, props=line_props,
         centroids=centroids, force_node=force_node,
     )
     to_idx, to_bus = _ensure_bus_at(
         state, lat2, lng2, f"{line.name} End",
-        snap_km, result, props=line_props,
+        endpoint_snap, result, props=line_props,
         centroids=centroids, force_node=force_node,
     )
 
@@ -1137,7 +1173,13 @@ def _connect_colocated_voltage_levels(
     cluster of buses that sit at the same place (same node, within
     ``radius_km``), connect *adjacent* voltage levels (sorted high→low) with a
     transformer, unless one already bridges those two levels. This avoids both
-    a full mesh and duplicates. Non-faithful mode only.
+    a full mesh and duplicates.
+
+    Runs in both faithful and non-faithful mode: an auto-transformer between
+    two voltage buses that share a substation is a real, physically-present
+    asset (not the star-coupling fabrication faithful mode omits), and without
+    it a substation's e.g. 66/220 kV buses stay electrically separate,
+    fragmenting the real OSM grid by voltage level.
     """
     if not state.buses:
         return 0

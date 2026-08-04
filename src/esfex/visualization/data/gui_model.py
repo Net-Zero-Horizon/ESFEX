@@ -146,6 +146,11 @@ class GuiGeneratorInstance:
     reservable: bool = True
     technology_id: Optional[str] = None  # references GuiTechnology.tech_id
     availability_file: Optional[str] = None
+    # Provenance of the source feature: "osm" | "wri" | "gem" | "gridfinder"
+    # (post source-merge). Empty for hand-added units. Lets us tell a real
+    # Grid-Builder connectivity bug from a plant-DB unit that simply has no
+    # transmission interconnection in the OSM data.
+    source: str = ""
     # Scalar parameters (previously per-node arrays)
     rated_power: float = 0.0
     min_power: float = 0.0
