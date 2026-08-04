@@ -134,8 +134,11 @@ class GridMappingSourceFetchStep(QWidget):
         layout.addWidget(region_group)
 
         # ── Data Sources ──
+        # Laid out in a single row: all four are enabled by default because
+        # combining them (authoritative OSM topology + plant databases +
+        # GridFinder gap-filling) gives the most complete network in general.
         src_group = QGroupBox(tr("grid_builder.data_sources"))
-        src_lay = QVBoxLayout(src_group)
+        src_lay = QHBoxLayout(src_group)
 
         self._chk_osm = QCheckBox(tr("grid_builder.openstreetmap_overpass_api"))
         self._chk_osm.setChecked(True)
@@ -145,7 +148,7 @@ class GridMappingSourceFetchStep(QWidget):
         src_lay.addWidget(self._chk_osm)
 
         self._chk_wri = QCheckBox(tr("grid_builder.wri_global_power_plant_database"))
-        self._chk_wri.setChecked(False)
+        self._chk_wri.setChecked(True)
         self._chk_wri.setToolTip(
             tr("grid_builder.30_000_power_plants_worldwide_with")
         )
@@ -161,11 +164,11 @@ class GridMappingSourceFetchStep(QWidget):
         # GridFinder — ML-predicted transmission/distribution line routes. It
         # carries geometry only (no voltage/capacity); the builder derives those
         # from the buses each line connects and the route length, exactly as for
-        # voltage-less OSM lines. Off by default (predicted, lower fidelity); it
-        # fills the gaps where OSM lacks lines, reconnecting generators that plant
-        # databases (WRI/GEM) place with no interconnection in OSM.
+        # voltage-less OSM lines. It fills the gaps where OSM lacks lines,
+        # reconnecting generators that plant databases (WRI/GEM) place with no
+        # interconnection in OSM.
         self._chk_gridfinder = QCheckBox(tr("grid_builder.gridfinder_predicted_lines"))
-        self._chk_gridfinder.setChecked(False)
+        self._chk_gridfinder.setChecked(True)
         self._chk_gridfinder.setToolTip(
             tr("grid_builder.gridfinder_tooltip")
         )
