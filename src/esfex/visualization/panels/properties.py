@@ -55,7 +55,9 @@ class PropertiesPanel(QWidget):
         # Screen-aware minimum: the panel can be narrowed on small laptops
         # (down to a compact, scaled floor) instead of only being fully
         # collapsed. Forms live in a scroll area, so a small floor is safe.
-        self.setMinimumWidth(scaled(220))
+        # Kept low so the compact default split actually applies instead of
+        # being clamped up (the panel starts narrow; drag it wider as needed).
+        self.setMinimumWidth(scaled(130))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)

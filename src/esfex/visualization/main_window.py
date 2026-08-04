@@ -222,24 +222,6 @@ class _BusyOverlay(QWidget):
         c.move(x, y)
 
 
-def _resize_dialog(dialog, *, width_factor: float = 1.0,
-                   height_factor: float = 1.0) -> None:
-    """Scale a dialog's natural size by per-axis factors (never shrinking).
-
-    Sizes are derived from the dialog's own ``sizeHint`` so they adapt to
-    translated label/title lengths. The window frame wraps the widget, so a
-    wider widget gives the title bar more room — this is the right lever for a
-    clipped window title. ``QInputDialog`` honours a wider width via ``resize``
-    but pins its height unless a minimum is set, so we set both.
-    """
-    dialog.adjustSize()
-    hint = dialog.sizeHint()
-    w = int(round(hint.width() * max(width_factor, 1.0)))
-    h = int(round(hint.height() * max(height_factor, 1.0)))
-    dialog.resize(w, h)
-    dialog.setMinimumSize(w, h)
-
-
 class _ConfigParseWorker(QThread):
     """Parse a config YAML off the GUI thread.
 
@@ -1324,15 +1306,17 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         # On the first real show the splitter finally has its laid-out width,
         # so we can set the default split. The side panels (tree, properties)
-        # default to 60% of their former 18/24 widths — 10.8/74.8/14.4 — giving
-        # the center view more room. Doing this at construction (width still 0)
-        # is ignored by Qt.
+        # default narrow — ~7.87/83.9/8.23 — giving the center view the most
+        # room. Their panel minimums are kept low (element_tree / properties) so
+        # these compact widths actually apply instead of being clamped up on
+        # wide screens. The user can drag either panel wider. Doing this at
+        # construction (width still 0) is ignored by Qt.
         if not getattr(self, "_applied_initial_split", True):
             self._applied_initial_split = True
             w = self._main_splitter.width() or self.width()
             if w > 200:
                 self._main_splitter.setSizes(
-                    [int(w * 0.108), int(w * 0.748), int(w * 0.144)])
+                    [int(w * 0.07865), int(w * 0.83907), int(w * 0.08228)])
 
     def _collapse_properties_panel(self) -> None:
         """Collapse the right properties panel to free space for analysis."""
@@ -2344,19 +2328,56 @@ class MainWindow(QMainWindow):
 
     def _on_add_system_requested(self):
         """Show dialog to create a new empty system."""
-        from PySide6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QDialog, QLineEdit
 
-        # Use an explicit dialog (not the static getText) so we can enlarge it.
-        dialog = QInputDialog(self)
-        dialog.setInputMode(QInputDialog.TextInput)
+        from esfex.visualization.ui_scale import scaled
+
+        # A custom QDialog (not QInputDialog) so we control two things
+        # QInputDialog does not expose: a compact width where the "New System"
+        # window title still fits, and a LEFT-aligned button row.
+        dialog = QDialog(self)
         dialog.setWindowTitle(tr("messages.new_system_title"))
-        dialog.setLabelText(tr("messages.new_system_prompt"))
-        # Widen the dialog so the window title isn't clipped: +20% width on top
-        # of the prior growth (≈1.44× the natural width), keeping the +20% height.
-        _resize_dialog(dialog, width_factor=1.44, height_factor=1.2)
+        # Compact floor — enough for the short title and a usable field, roughly
+        # half the previous (over-wide) size. Compact buttons keep the row from
+        # forcing the dialog wider.
+        dialog.setMinimumWidth(scaled(176))
+        _lay = QVBoxLayout(dialog)
+        _prompt = QLabel(tr("messages.new_system_prompt"))
+        _prompt.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        _lay.addWidget(_prompt)
+
+        # Centered name field: a fixed width flanked by stretches so it sits in
+        # the middle instead of spanning the full (compact) width.
+        _edit = QLineEdit(dialog)
+        _edit.setFixedWidth(scaled(120))
+        _edit_row = QHBoxLayout()
+        _edit_row.addStretch(1)
+        _edit_row.addWidget(_edit)
+        _edit_row.addStretch(1)
+        _lay.addLayout(_edit_row)
+
+        _ok = QPushButton(tr("common.ok"), dialog)
+        _ok.setDefault(True)
+        _ok.setFixedWidth(scaled(56))
+        _ok.clicked.connect(dialog.accept)
+        _cancel = QPushButton(tr("common.cancel"), dialog)
+        _cancel.setFixedWidth(scaled(56))
+        _cancel.clicked.connect(dialog.reject)
+        _edit.returnPressed.connect(dialog.accept)
+        # Centered buttons: stretches on both sides.
+        _btn_row = QHBoxLayout()
+        _btn_row.addStretch(1)
+        _btn_row.addWidget(_ok)
+        _btn_row.addWidget(_cancel)
+        _btn_row.addStretch(1)
+        _lay.addLayout(_btn_row)
+        # Open at the compact width; without this the line edit's preferred
+        # width would reopen it much wider.
+        dialog.resize(scaled(176), dialog.sizeHint().height())
+
         if not dialog.exec():
             return
-        name = dialog.textValue()
+        name = _edit.text()
         if not name.strip():
             return
         name = name.strip()

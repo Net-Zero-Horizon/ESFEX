@@ -138,7 +138,10 @@ class ElementTreePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         from esfex.visualization.ui_scale import scaled
-        self.setMinimumWidth(scaled(200))
+        # Narrow floor so the default split can render the tree compactly; the
+        # user can still drag it wider. (Was 200; lowered so the reduced default
+        # width actually applies instead of being clamped up on wide screens.)
+        self.setMinimumWidth(scaled(120))
         self._clipboard_type: str = ""  # element type in clipboard (for paste enable)
         self._batch_mode: bool = False  # suppress _update_count during bulk loading
 
