@@ -3774,6 +3774,32 @@ def _validate_topology_audit(
                 element_type="generator", element_id=gid,
             ))
 
+    # ── Deficit components (demand but no generation) ───────────
+    # An isolated load island: it carries demand but no generator can reach
+    # it, so the solver can only shed it (VOLL) or turns infeasible. Error —
+    # the demand there is unservable by construction.
+    for cid in rep.deficit_components:
+        comp = rep.components.get(cid, set())
+        if not comp:
+            continue
+        demand_buses = [
+            b for b in comp
+            if (state.buses[b].demand_fraction or 0.0) > 0.0
+            and state.buses[b].role in ("load", "mixed")
+        ]
+        any_bus = demand_buses[0] if demand_buses else next(iter(comp))
+        issues.append(ValidationIssue(
+            severity="error", category="Topology Audit",
+            message=(
+                f"Isolated load island of {len(comp)} bus(es) around "
+                f"'{any_bus}' ({len(demand_buses)} demand bus(es)): carries "
+                "demand but has no generation and no path to any generator. "
+                "The solver can only shed this demand. Connect it to the grid "
+                "or remove the demand."
+            ),
+            element_type="bus", element_id=any_bus,
+        ))
+
     # ── Inert components (no gen, no demand) — informational ────
     for cid in rep.inert_components:
         comp = rep.components.get(cid, set())

@@ -57,6 +57,9 @@ class TopologyAuditReport:
     # Components that contain generation but no demand → free energy
     # in the model unless capacity bridges to demand.
     surplus_components: list[int] = field(default_factory=list)
+    # Components that contain demand but no generation and no path to any
+    # generator → an isolated load island the solver can only shed (VOLL).
+    deficit_components: list[int] = field(default_factory=list)
 
     def is_clean(self) -> bool:
         return not (
@@ -65,6 +68,7 @@ class TopologyAuditReport:
             or self.lines_dropped_unresolved
             or self.lines_dropped_out_of_range
             or self.inert_components or self.surplus_components
+            or self.deficit_components
         )
 
     def summary(self) -> str:
@@ -82,6 +86,8 @@ class TopologyAuditReport:
             f"{len(self.inert_components)}",
             f"Surplus components (gen but no demand): "
             f"{len(self.surplus_components)}",
+            f"Deficit components (demand but no gen): "
+            f"{len(self.deficit_components)}",
         ]
         return "\n".join(lines)
 
@@ -196,6 +202,11 @@ def audit_gui_state(state: "GuiSystemState") -> TopologyAuditReport:
             rep.inert_components.append(cid)
         elif has_gen and not has_demand:
             rep.surplus_components.append(cid)
+        elif has_demand and not has_gen:
+            # Demand with no local generation and no path to any generator —
+            # an isolated load island. The solver can only shed it (VOLL) or
+            # goes infeasible; it can never be served.
+            rep.deficit_components.append(cid)
 
     # ── Orphan buses: singleton components with neither equipment
     # nor demand — pure floating dots on the map that contribute
