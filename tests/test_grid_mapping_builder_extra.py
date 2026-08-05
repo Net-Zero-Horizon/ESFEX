@@ -1136,11 +1136,19 @@ class TestOSMFetcherTiling:
 
     def test_post_query_clean_body_parses(self):
         f = self._fetcher((0.0, 0.0, 1.0, 1.0))
-        sentinel = object()
+
+        # A non-empty clean 200 body must parse and return immediately (not be
+        # mistaken for a timeout, nor re-queried by the zero-element guard).
+        class _Result:
+            nodes = []
+            ways = [object()]
+            relations = []
+
+        sentinel = _Result()
 
         class _Resp:
             status_code = 200
-            content = b'{"elements": []}'
+            content = b'{"elements": [{"type": "way", "id": 1}]}'
             text = ""
 
         class _FakeRequests:
@@ -1347,7 +1355,10 @@ class TestOSMFetcherResilience:
         nodes: list = []
         ways: list = []
 
-    def test_one_failed_tile_is_skipped(self, monkeypatch):
+    def test_one_failed_tile_is_retried_and_recovers(self, monkeypatch):
+        # A tile that fails only on the first attempt (transient load spike) is
+        # re-queried in the retry pass — subdivided — and recovers, so the
+        # fetch reports zero permanently-failed tiles.
         import time as _t
         monkeypatch.setattr(_t, "sleep", lambda *a, **k: None)
         f = self._fetcher()
@@ -1363,7 +1374,8 @@ class TestOSMFetcherResilience:
 
         monkeypatch.setattr(f, "_post_query", fake_post)
         out = f._fetch()
-        assert calls["i"] == n          # every tile attempted despite tile-0 fail
+        assert calls["i"] > n           # the failed tile was retried, not skipped
+        assert f.failed_tile_count == 0  # and recovered on the retry pass
         assert out == []                # empty fakes, but no exception raised
 
     def test_all_tiles_failed_raises(self, monkeypatch):

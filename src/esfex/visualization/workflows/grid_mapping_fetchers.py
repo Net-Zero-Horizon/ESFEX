@@ -799,125 +799,158 @@ class OSMGridFetcher(QThread):
 
         features: list[GridFeature] = []
         seen_ids: set[str] = set()
-        failed_tiles = 0
         last_tile_error: Exception | None = None
+        total_est = n_tiles
+        done = 0
+        subdivided = 0
+
+        def _quadrants(ts, tw, tn, te):
+            mlat = 0.5 * (ts + tn)
+            mlon = 0.5 * (tw + te)
+            return [
+                (ts, tw, mlat, mlon), (ts, mlon, mlat, te),
+                (mlat, tw, tn, mlon), (mlat, mlon, tn, te),
+            ]
 
         # Adaptive tile queue. Tiles start at _MAX_TILE_DEG; any tile that
         # persistently times out server-side is split into four quadrants and
         # re-queued (down to _MIN_TILE_DEG), so dense metros subdivide
         # themselves instead of silently returning a fraction of the grid.
         # ``total_est`` grows as tiles subdivide so the progress bar keeps a
-        # sensible denominator.
-        queue: list[tuple[float, float, float, float]] = list(tiles)
-        total_est = n_tiles
-        done = 0
-        subdivided = 0
-        first = True
-        while queue:
-            if self._cancelled:
-                return []
-            ts, tw, tn, te = queue.pop(0)
-            query = self._build_query(f"{ts},{tw},{tn},{te}")
-            base = 15 + int(70 * done / max(total_est, 1))
-            label = (
-                f"Querying Overpass tile {done + 1}/{total_est}..."
-                if total_est > 1
-                else "Querying Overpass API (this may take a while)..."
-            )
-            self.progress.emit(min(base, 85), label)
-            # Be a polite API citizen between tiles: a short pause avoids
-            # bursting the server, which is what triggers the dispatcher
-            # timeouts in the first place.
-            if not first:
-                time.sleep(1.0)
-            first = False
-            try:
-                result = self._post_query(api, headers, query, time, requests)
-            except _OverpassTileTooDense as exc:
-                # Too much data for one query. Split into quadrants and retry
-                # each, unless we are already at the resolution floor — then a
-                # tile that still times out is a genuinely pathological area
-                # and gets skipped (and surfaced) rather than looping forever.
-                span = max(tn - ts, te - tw)
-                if span > self._MIN_TILE_DEG * 1.5:
-                    mlat = 0.5 * (ts + tn)
-                    mlon = 0.5 * (tw + te)
-                    queue.extend([
-                        (ts, tw, mlat, mlon), (ts, mlon, mlat, te),
-                        (mlat, tw, tn, mlon), (mlat, mlon, tn, te),
-                    ])
-                    total_est += 4
-                    subdivided += 1
-                    logger.info(
-                        "OSM tile %.2f,%.2f,%.2f,%.2f too dense; subdividing "
-                        "into 4 (%s)", ts, tw, tn, te, exc,
+        # sensible denominator. Returns the tiles that failed this pass, or
+        # None if the fetch was cancelled.
+        def _run_queue(queue):
+            nonlocal done, subdivided, last_tile_error, total_est
+            pass_failed: list[tuple[float, float, float, float]] = []
+            first = not features  # only skip the very first pause of the fetch
+            while queue:
+                if self._cancelled:
+                    return None
+                ts, tw, tn, te = queue.pop(0)
+                query = self._build_query(f"{ts},{tw},{tn},{te}")
+                base = 15 + int(70 * done / max(total_est, 1))
+                label = (
+                    f"Querying Overpass tile {done + 1}/{total_est}..."
+                    if total_est > 1
+                    else "Querying Overpass API (this may take a while)..."
+                )
+                self.progress.emit(min(base, 85), label)
+                # Be a polite API citizen between tiles: a short pause avoids
+                # bursting the server, which is what triggers the dispatcher
+                # timeouts in the first place.
+                if not first:
+                    time.sleep(1.0)
+                first = False
+                try:
+                    result = self._post_query(
+                        api, headers, query, time, requests)
+                except _OverpassTileTooDense as exc:
+                    # Too much data for one query. Split into quadrants and
+                    # retry each, unless already at the resolution floor — then
+                    # it is genuinely pathological and gets deferred to the
+                    # retry pass rather than looping forever.
+                    if max(tn - ts, te - tw) > self._MIN_TILE_DEG * 1.5:
+                        queue.extend(_quadrants(ts, tw, tn, te))
+                        total_est += 4
+                        subdivided += 1
+                        logger.info(
+                            "OSM tile %.2f,%.2f,%.2f,%.2f too dense; "
+                            "subdividing into 4 (%s)", ts, tw, tn, te, exc,
+                        )
+                        continue
+                    pass_failed.append((ts, tw, tn, te))
+                    last_tile_error = exc
+                    done += 1
+                    logger.warning(
+                        "OSM tile %.2f,%.2f,%.2f,%.2f still times out at the "
+                        "resolution floor: %s", ts, tw, tn, te, exc,
                     )
                     continue
-                failed_tiles += 1
-                last_tile_error = exc
+                except RuntimeError as exc:
+                    # A transient failure (dispatcher/mirror) that survived all
+                    # retries: defer to the retry pass, keep the rest.
+                    pass_failed.append((ts, tw, tn, te))
+                    last_tile_error = exc
+                    done += 1
+                    logger.warning(
+                        "OSM tile %.2f,%.2f,%.2f,%.2f failed: %s",
+                        ts, tw, tn, te, exc,
+                    )
+                    continue
+                if result is None or self._cancelled:
+                    return None
                 done += 1
-                logger.warning(
-                    "OSM tile %.2f,%.2f,%.2f,%.2f still times out at the "
-                    "resolution floor; skipping: %s", ts, tw, tn, te, exc,
-                )
-                continue
-            except RuntimeError as exc:
-                # A transient failure (dispatcher/mirror) that survived all
-                # retries: skip this tile, keep the rest. A fully-failed fetch
-                # is raised below.
-                failed_tiles += 1
-                last_tile_error = exc
-                done += 1
-                logger.warning(
-                    "OSM tile %.2f,%.2f,%.2f,%.2f failed, skipping: %s",
-                    ts, tw, tn, te, exc,
-                )
-                continue
-            if result is None or self._cancelled:
+
+                # --- Merge this tile's elements, de-duplicating across tiles.
+                # A way straddling a boundary is returned in full by every tile
+                # holding one of its nodes; keep the first copy by osm_id.
+                for node in result.nodes:
+                    if self._cancelled:
+                        return None
+                    feat = self._process_element(
+                        tags=node.tags,
+                        lat=float(node.lat),
+                        lng=float(node.lon),
+                        osm_id=f"node/{node.id}",
+                    )
+                    if feat and feat.osm_id not in seen_ids:
+                        seen_ids.add(feat.osm_id)
+                        features.append(feat)
+                for way in result.ways:
+                    if self._cancelled:
+                        return None
+                    feat = self._process_way(way)
+                    if feat and feat.osm_id not in seen_ids:
+                        seen_ids.add(feat.osm_id)
+                        features.append(feat)
+            return pass_failed
+
+        failed = _run_queue(list(tiles))
+        if failed is None:
+            return []
+
+        # Retry pass: a single tile usually fails to a transient Overpass load
+        # spike, not a real gap. Pause to let the server recover, then re-query
+        # each failed tile SUBDIVIDED (a smaller query is far more likely to get
+        # through under load). Only tiles that fail this second pass are
+        # reported as genuinely missing.
+        if failed and not self._cancelled:
+            self.progress.emit(
+                86, f"Retrying {len(failed)} failed tile(s) after a pause...")
+            logger.warning(
+                "Retrying %d failed OSM tile(s) after a %ds recovery pause...",
+                len(failed), self._RETRY_PAUSE_S,
+            )
+            time.sleep(self._RETRY_PAUSE_S)
+            retry_queue: list[tuple[float, float, float, float]] = []
+            for (ts, tw, tn, te) in failed:
+                if max(tn - ts, te - tw) > self._MIN_TILE_DEG * 1.5:
+                    retry_queue.extend(_quadrants(ts, tw, tn, te))
+                    total_est += 4
+                else:
+                    retry_queue.append((ts, tw, tn, te))
+            retried = _run_queue(retry_queue)
+            if retried is None:
                 return []
-            done += 1
-
-            # --- Merge this tile's elements, de-duplicating across tiles. ---
-            # A way straddling a tile boundary is returned in full by every
-            # tile holding one of its nodes; keep the first copy by osm_id.
-            for node in result.nodes:
-                if self._cancelled:
-                    return []
-                feat = self._process_element(
-                    tags=node.tags,
-                    lat=float(node.lat),
-                    lng=float(node.lon),
-                    osm_id=f"node/{node.id}",
-                )
-                if feat and feat.osm_id not in seen_ids:
-                    seen_ids.add(feat.osm_id)
-                    features.append(feat)
-
-            for way in result.ways:
-                if self._cancelled:
-                    return []
-                feat = self._process_way(way)
-                if feat and feat.osm_id not in seen_ids:
-                    seen_ids.add(feat.osm_id)
-                    features.append(feat)
+            failed = retried
 
         # Record incompleteness so the caller/UI can warn the user: partial OSM
         # coverage is the difference between a functional network and hundreds
         # of stranded generators, so it must never pass as a clean success.
+        failed_tiles = len(failed)
         self.failed_tile_count = failed_tiles
         self.total_tile_count = done
 
-        # If every tile failed, surface the error; partial coverage is OK.
-        if failed_tiles >= done:
+        # If nothing came back at all, surface the error; partial coverage is OK.
+        if failed_tiles and not features:
             raise RuntimeError(
-                f"All {done} Overpass tile(s) failed; last error: "
-                f"{last_tile_error}"
+                f"All Overpass tile(s) failed; last error: {last_tile_error}"
             )
         if failed_tiles:
             logger.warning(
-                "%d of %d OSM tiles failed; returning INCOMPLETE results "
-                "(missing infrastructure may leave generators stranded)",
-                failed_tiles, done,
+                "%d OSM tile(s) still failed after retry; returning INCOMPLETE "
+                "results (missing infrastructure may leave generators stranded)",
+                failed_tiles,
             )
         if subdivided:
             logger.info(
@@ -931,8 +964,8 @@ class OSMGridFetcher(QThread):
         if failed_tiles:
             self.progress.emit(
                 100,
-                f"OSM: {len(features)} features — WARNING: {failed_tiles} of "
-                f"{done} tiles failed, data is INCOMPLETE",
+                f"OSM: {len(features)} features — WARNING: {failed_tiles} "
+                f"tile(s) failed after retry, data is INCOMPLETE",
             )
         else:
             self.progress.emit(100, f"OSM: {len(features)} features found")
@@ -955,6 +988,10 @@ class OSMGridFetcher(QThread):
     # data silently.
     _MAX_TILE_DEG = 1.0
     _MIN_TILE_DEG = 0.25
+
+    # Seconds to wait before the retry pass, so a transient Overpass load spike
+    # (the usual cause of a lone failed tile) has time to clear.
+    _RETRY_PAUSE_S = 20
 
     # Overpass mirrors, tried in rotation across retries. The main instance
     # returns HTTP 400 dispatcher timeouts under heavy load; rotating to a
