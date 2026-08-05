@@ -25,6 +25,7 @@ from esfex.config.schema import (
 )
 from esfex.visualization.data.gui_model import (
     EndpointRef,
+    GuiACDCConverter,
     GuiBus,
     GuiGeneratorInstance,
     GuiSystemState,
@@ -128,3 +129,42 @@ def test_roundtrip_is_idempotent(tmp_path):
         cur = config_to_gui_states(cfg, base_dir=str(tmp_path))[name]
         seen.append(next(iter(cur.generators.values())).bus)
     assert seen == ["bus_3", "bus_3", "bus_3"], seen
+
+
+def test_converter_endpoints_survive_roundtrip(tmp_path):
+    """An AC/DC converter bridging two buses must not collapse to a self-loop.
+
+    Converters persist their endpoints as bus indices, but the reader used to
+    set only from_node/to_node, leaving from_bus == to_bus == 'bus_0' → the
+    nearest-bus fallback snapped both ends to the same bus. On a bus-level
+    network (all buses share node 0) that turned the converter into a self-loop,
+    detaching whatever it bridged to the main grid.
+    """
+    name = "ConvNet"
+    state = GuiSystemState(
+        name=name,
+        buses={
+            "bus_0": _bus("bus_0", 0.0, 0.0),
+            "bus_1": _bus("bus_1", 0.0, 1.0),
+        },
+        transmission_lines=[],
+        acdc_converters=[
+            GuiACDCConverter(
+                name="Conv", from_bus="bus_0", to_bus="bus_1",
+                from_voltage_kv=220.0, dc_voltage_kv=320.0,
+                rated_power_mva=200.0,
+            ),
+        ],
+    )
+    out = tmp_path / "c.yaml"
+    gui_state_to_yaml({name: state}, base_config=_default_config(name),
+                      output_path=out)
+    from esfex.config.loader import load_config
+    reloaded = config_to_gui_states(load_config(out), base_dir=str(tmp_path))[name]
+
+    assert len(reloaded.acdc_converters) == 1
+    conv = reloaded.acdc_converters[0]
+    assert conv.from_bus != conv.to_bus, (
+        f"converter collapsed to a self-loop: {conv.from_bus} == {conv.to_bus}"
+    )
+    assert {conv.from_bus, conv.to_bus} == {"bus_0", "bus_1"}

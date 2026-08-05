@@ -756,6 +756,14 @@ def _system_to_gui_state(sys: SystemConfig,
     # Build integer-index → bus_id mapping so transformers can reference buses
     _bus_id_by_index: list[str] = list(buses.keys())
 
+    def _bus_from_index(idx, node_fallback) -> str:
+        """Resolve a persisted 0-based bus INDEX to a bus_id, falling back to
+        the node's first bus. Used by transformers and converters, which store
+        their endpoints as bus indices (preferred over the legacy node index)."""
+        if idx is not None and 0 <= idx < len(_bus_id_by_index):
+            return _bus_id_by_index[idx]
+        return _node_to_bus.get(node_fallback, "bus_0")
+
     # Helper: pick a sibling bus on a given node whose voltage matches
     # the requested kV (within 10 %). Used to repair legacy YAMLs where
     # multi-voltage transformers were saved with from_bus == to_bus.
@@ -856,6 +864,12 @@ def _system_to_gui_state(sys: SystemConfig,
                 converter_type=getattr(conv, 'converter_type', 'VSC'),
                 from_node=conv.from_node,
                 to_node=conv.to_node,
+                # Resolve the persisted bus indices; without this the endpoints
+                # default to bus_0 == bus_0 and collapse to a self-loop on load.
+                from_bus=_bus_from_index(
+                    getattr(conv, 'from_bus', None), conv.from_node),
+                to_bus=_bus_from_index(
+                    getattr(conv, 'to_bus', None), conv.to_node),
                 from_voltage_kv=_normalize_voltage_kv(getattr(conv, 'from_voltage_kv', 220.0)),
                 dc_voltage_kv=_normalize_voltage_kv(getattr(conv, 'dc_voltage_kv', 320.0)),
                 rated_power_mva=getattr(conv, 'rated_power_mva', 100.0),
@@ -883,6 +897,10 @@ def _system_to_gui_state(sys: SystemConfig,
                 name=conv.name,
                 from_node=conv.from_node,
                 to_node=conv.to_node,
+                from_bus=_bus_from_index(
+                    getattr(conv, 'from_bus', None), conv.from_node),
+                to_bus=_bus_from_index(
+                    getattr(conv, 'to_bus', None), conv.to_node),
                 from_frequency_hz=getattr(conv, 'from_frequency_hz', 50.0),
                 to_frequency_hz=getattr(conv, 'to_frequency_hz', 60.0),
                 rated_power_mva=getattr(conv, 'rated_power_mva', 100.0),
