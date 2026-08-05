@@ -741,10 +741,27 @@ def build_grid_from_features(
                         f"Connectivity: reconnected isolated components within "
                         f"{reconnect_max_km:.0f} km — tapped {rc['tapped']} onto "
                         f"nearby lines, linked {rc['linked']} to the nearest "
-                        f"same-voltage bus (remote islands left isolated)."
+                        f"same-voltage bus."
                     )
             except Exception as exc:
                 result.warnings.append(f"Bounded reconnection: {exc}")
+
+            # Absorb whatever remains dysfunctional (gen XOR demand) into the
+            # connected grid: move its gen/demand to the nearest kept bus and
+            # delete the dead island. Functional islands (gen+demand) are kept.
+            try:
+                ab = _absorb_dysfunctional_islands(model.state, result)
+                if ab.get("islands_absorbed"):
+                    result.warnings.append(
+                        f"Connectivity: absorbed {ab['islands_absorbed']} "
+                        f"dysfunctional island(s) — moved {ab['gens_moved']} "
+                        f"generator(s) and {ab['demand_moved']} demand bus(es) "
+                        f"to the nearest connected bus, removed "
+                        f"{ab['buses_removed']} dead bus(es). Functional "
+                        f"(gen+demand) islands kept."
+                    )
+            except Exception as exc:
+                result.warnings.append(f"Island absorption: {exc}")
 
     return result
 
@@ -1338,6 +1355,124 @@ def _reconnect_isolated_bounded(
         if made == 0:
             break
 
+    return counts
+
+
+def _absorb_dysfunctional_islands(
+    state: GuiSystemState, result: ParseResult,
+) -> dict[str, int]:
+    """Absorb dysfunctional isolated islands into the connected grid (PyPSA-style).
+
+    After bounded reconnection, the components that remain isolated split into:
+
+    * **functional** — contain BOTH generation and demand: a self-sufficient
+      subsystem (e.g. an isolated island grid). Kept as-is.
+    * **dysfunctional** — contain generation XOR demand (or neither): a data
+      artefact (remote OSM fragment). Its generation can never dispatch and its
+      demand can never be served, yet both are real quantities — a ≥20 MW plant
+      and the summed demand of many such fragments move the regional balance.
+
+    So, rather than drop them, this **moves** each dysfunctional island's
+    generators / batteries / electrolyzers and its demand_fraction to the
+    nearest bus of a KEPT component (main + functional islands), then deletes the
+    island's now-empty buses and lines. Energy and capacity are preserved; the
+    dead topology is removed. Mirrors PyPSA's assign-to-nearest-retained-bus.
+    """
+    from esfex.visualization.workflows.grid_mapping_steps import (
+        _BusNN, _build_bus_adjacency, _find_connected_components,
+    )
+
+    counts = {"gens_moved": 0, "demand_moved": 0,
+              "buses_removed": 0, "islands_absorbed": 0}
+    adj = _build_bus_adjacency(state)
+    comps = _find_connected_components(adj)
+    if len(comps) <= 1:
+        return counts
+    main = max(comps, key=len)
+
+    def _has_gen(comp):
+        return any(g.bus in comp for g in state.generators.values())
+
+    def _has_demand(comp):
+        return any(
+            (state.buses[b].demand_fraction or 0.0) > 0.0
+            and state.buses[b].role in ("load", "mixed")
+            for b in comp
+        )
+
+    kept: set[str] = set()
+    dysfunctional: list[set] = []
+    for comp in comps:
+        if comp is main or (_has_gen(comp) and _has_demand(comp)):
+            kept |= comp
+        else:
+            dysfunctional.append(comp)
+    if not dysfunctional or not kept:
+        return counts
+
+    nn = _BusNN(state, kept)
+
+    def _nearest_kept(bid):
+        b = state.buses.get(bid)
+        if not b or (b.latitude == 0.0 and b.longitude == 0.0):
+            return None
+        tid, _ = nn.nearest(b.latitude, b.longitude)
+        return tid
+
+    remove: set[str] = set()
+    for comp in dysfunctional:
+        remove |= comp
+        counts["islands_absorbed"] += 1
+        # Move supply equipment to the nearest kept bus.
+        for g in state.generators.values():
+            if g.bus in comp:
+                tgt = _nearest_kept(g.bus)
+                if tgt:
+                    g.bus = tgt
+                    counts["gens_moved"] += 1
+        for bat in state.batteries.values():
+            if bat.bus in comp:
+                tgt = _nearest_kept(bat.bus)
+                if tgt:
+                    bat.bus = tgt
+        for el in state.electrolyzers.values():
+            if getattr(el, "bus", None) in comp:
+                tgt = _nearest_kept(el.bus)
+                if tgt:
+                    el.bus = tgt
+        # Move demand to the nearest kept bus (make it a load bus if needed).
+        for bid in comp:
+            bus = state.buses.get(bid)
+            if bus and (bus.demand_fraction or 0.0) > 0.0:
+                tgt = _nearest_kept(bid)
+                if tgt:
+                    tb = state.buses[tgt]
+                    if tb.role not in ("load", "mixed"):
+                        tb.role = "load"
+                    tb.demand_fraction = (tb.demand_fraction or 0.0) + bus.demand_fraction
+                    counts["demand_moved"] += 1
+
+    # Delete the absorbed islands' buses and any element referencing them.
+    state.transmission_lines[:] = [
+        ln for ln in state.transmission_lines
+        if ln.from_bus not in remove and ln.to_bus not in remove
+    ]
+    state.transformers[:] = [
+        t for t in state.transformers
+        if t.from_bus not in remove and t.to_bus not in remove
+    ]
+    state.acdc_converters[:] = [
+        c for c in state.acdc_converters
+        if c.from_bus not in remove and c.to_bus not in remove
+    ]
+    if hasattr(state, "freq_converters"):
+        state.freq_converters[:] = [
+            c for c in state.freq_converters
+            if c.from_bus not in remove and c.to_bus not in remove
+        ]
+    for bid in remove:
+        state.buses.pop(bid, None)
+    counts["buses_removed"] = len(remove)
     return counts
 
 

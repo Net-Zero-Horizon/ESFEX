@@ -69,3 +69,63 @@ def test_near_island_reconnects_remote_stays():
     main = max(after.components.values(), key=len)
     assert "bus_3" in main and "bus_4" in main   # near island reconnected
     assert "bus_5" not in main and "bus_6" not in main  # remote left isolated
+
+
+def test_absorb_dysfunctional_keeps_functional():
+    """Dysfunctional islands (gen XOR demand) are absorbed into the nearest kept
+    bus with their gen/demand preserved; functional islands (gen+demand) stay."""
+    from esfex.visualization.data.gui_model import GuiGeneratorInstance
+    from esfex.visualization.workflows.grid_mapping_builder import (
+        _absorb_dysfunctional_islands,
+    )
+
+    def load_bus(bid, lat, lng, dem):
+        b = _bus(bid, lat, lng)
+        b.role = "load"
+        b.demand_fraction = dem
+        return b
+
+    d5 = _km_to_deg(5.0)
+    state = GuiSystemState(
+        name="A",
+        buses={
+            # main (has gen + demand)
+            "bus_0": load_bus("bus_0", 0.0, 0.0, 0.5),
+            "bus_1": _bus("bus_1", 0.0, 0.2),
+            # deficit island (demand, no gen) — must be absorbed, demand moved
+            "bus_2": load_bus("bus_2", d5, 0.1, 0.3),
+            "bus_3": load_bus("bus_3", d5, 0.15, 0.1),
+            # functional island (gen + demand) — must be kept
+            "bus_4": load_bus("bus_4", _km_to_deg(80), 0.1, 0.1),
+            "bus_5": _bus("bus_5", _km_to_deg(80), 0.15),
+        },
+        generators={
+            "g_main": GuiGeneratorInstance(
+                instance_id="g_main", unit_key="m", name="M", fuel="Gas",
+                gen_type="Non-renewable", node=0, rated_power=100.0, bus="bus_1",
+                latitude=0.0, longitude=0.2),
+            "g_isl": GuiGeneratorInstance(
+                instance_id="g_isl", unit_key="i", name="I", fuel="Wind",
+                gen_type="Renewable", node=0, rated_power=50.0, bus="bus_5",
+                latitude=_km_to_deg(80), longitude=0.15),
+        },
+        transmission_lines=[
+            _line("l0", "bus_0", "bus_1"),
+            _line("l2", "bus_2", "bus_3"),   # deficit island
+            _line("l4", "bus_4", "bus_5"),   # functional island
+        ],
+    )
+    demand_before = sum(b.demand_fraction for b in state.buses.values())
+
+    counts = _absorb_dysfunctional_islands(state, ParseResult())
+
+    assert counts["islands_absorbed"] == 1          # only the deficit island
+    assert counts["demand_moved"] >= 1
+    # deficit island buses removed
+    assert "bus_2" not in state.buses and "bus_3" not in state.buses
+    # functional island kept intact
+    assert "bus_4" in state.buses and "bus_5" in state.buses
+    assert state.generators["g_isl"].bus == "bus_5"
+    # total demand preserved (moved, not dropped)
+    demand_after = sum(b.demand_fraction for b in state.buses.values())
+    assert abs(demand_after - demand_before) < 1e-9
