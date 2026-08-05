@@ -1,5 +1,6 @@
 """QApplication lifecycle management for the ESFEX Studio."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,29 @@ from esfex.visualization.theme import apply_theme
 _ICONS_DIR = Path(__file__).resolve().parents[1] / "icons"
 
 
+def _configure_webengine_flags() -> None:
+    """Raise the QtWebEngine (Chromium) raster-tile memory budget before it
+    starts, so the map compositor stops logging ``tile_manager.cc ... tile
+    memory limits exceeded`` and dropping tiles.
+
+    On a headless / GPU-less host QtWebEngine falls back to software rendering,
+    where the default tile budget is small — a large network (thousands of map
+    markers and lines, e.g. Hokkaido) blows past it and parts of the map fail to
+    draw. ``--force-gpu-mem-available-mb`` tells Chromium to size its tile budget
+    for 2 GB (a ceiling assumption, not an allocation). Must run before the
+    QApplication / first QWebEngineView; appends to any existing flags.
+    """
+    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    additions = [
+        f for f in ("--force-gpu-mem-available-mb=2048",)
+        if f.split("=")[0] not in flags
+    ]
+    if additions:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+            f"{flags} {' '.join(additions)}".strip()
+        )
+
+
 def _get_or_create_app() -> QApplication:
     """Return the existing QApplication or create one.
 
@@ -22,6 +46,8 @@ def _get_or_create_app() -> QApplication:
     """
     app = QApplication.instance()
     if app is None:
+        # Both must be set before QApplication creation / QtWebEngine start.
+        _configure_webengine_flags()
         # Required for QWebEngineView — must be set before QApplication creation
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
         app = QApplication(sys.argv)
