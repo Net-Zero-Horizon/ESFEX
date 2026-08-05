@@ -2,21 +2,21 @@
 
 Qt only word-wraps a tooltip when its text is *rich text* (``Qt::mightBeRichText``
 returns true); a plain-text tooltip is drawn on a single line, so a long
-sentence stretches all the way across the screen. Rather than hand-wrap the
-hundreds of ``setToolTip`` calls in the GUI, a single application event filter
-intercepts every tooltip request and re-shows the text wrapped to a logical
-width.
+sentence stretches all the way across the screen.
 
-Install once, on the ``QApplication``::
+An app-global ``QApplication.installEventFilter`` is NOT usable here: routing
+every event through Python is incompatible with the embedded QtWebEngine map
+(it hangs / segfaults). Instead we wrap at *assignment* time by patching
+``QWidget.setToolTip`` once, so every plain-text tooltip is stored as rich text
+pre-wrapped to a logical width. This never touches the event loop.
 
-    app.installEventFilter(ToolTipWrapFilter(app))
+Call :func:`install_tooltip_wrapping` once, after the ``QApplication`` exists.
 """
 
 from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QToolTip, QWidget
 
@@ -54,31 +54,45 @@ def _wrap_to_width(text: str, fm: QFontMetrics, max_px: int) -> str:
     return "<br>".join(html.escape(line) for line in lines)
 
 
-class ToolTipWrapFilter(QObject):
-    """Event filter that wraps every plain-text tooltip to a logical width."""
+def wrap_tooltip(text: str) -> str | None:
+    """Return a rich-text, width-wrapped version of ``text``, or None to leave
+    it untouched (already rich text, empty, or short enough to fit one line)."""
+    if not text:
+        return None
+    if text.lstrip().startswith("<"):
+        # Author-supplied rich text already controls its own wrapping. (Plain
+        # text with a stray '<' does not start with one, and is HTML-escaped
+        # below, so it is never mistaken for markup.)
+        return None
+    fm = QFontMetrics(QToolTip.font())
+    max_px = max(220, fm.averageCharWidth() * _TARGET_CHARS)
+    if fm.horizontalAdvance(text) <= max_px and "\n" not in text:
+        return None
+    return f"<qt>{_wrap_to_width(text, fm, max_px)}</qt>"
 
-    def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
-        if event.type() != QEvent.Type.ToolTip:
-            return False
-        if not isinstance(obj, QWidget):
-            return False
-        text = obj.toolTip()
-        if not text:
-            # No widget tooltip (e.g. an item-view cell tooltip resolved from
-            # the model) — let Qt's default handling run.
-            return False
-        if text.lstrip().startswith("<"):
-            # Author-supplied rich text already controls its own wrapping.
-            # (Plain text containing a stray '<' is handled below and HTML-
-            # escaped, so it is never mistaken for markup here.)
-            return False
 
-        fm = QFontMetrics(QToolTip.font())
-        max_px = max(220, fm.averageCharWidth() * _TARGET_CHARS)
-        # Nothing to gain if it already fits on one line.
-        if fm.horizontalAdvance(text) <= max_px and "\n" not in text:
-            return False
+_installed = False
 
-        wrapped = _wrap_to_width(text, fm, max_px)
-        QToolTip.showText(event.globalPos(), f"<qt>{wrapped}</qt>", obj)
-        return True
+
+def install_tooltip_wrapping() -> None:
+    """Patch ``QWidget.setToolTip`` so every long plain-text tooltip is stored
+    pre-wrapped to a logical width. Idempotent."""
+    global _installed
+    if _installed:
+        return
+    _installed = True
+
+    _orig_set_tooltip = QWidget.setToolTip
+
+    def _set_tooltip(self, text):
+        try:
+            if text:
+                wrapped = wrap_tooltip(text)
+                if wrapped is not None:
+                    text = wrapped
+        except Exception:
+            # Never let tooltip formatting break setting a tooltip.
+            pass
+        _orig_set_tooltip(self, text)
+
+    QWidget.setToolTip = _set_tooltip
