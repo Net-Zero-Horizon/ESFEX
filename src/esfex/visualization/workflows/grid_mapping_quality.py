@@ -870,6 +870,24 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
     SUM_TOL = 0.01  # accept node distributions summing to 1 ± 1 %
 
     for node_idx, bs in buses_by_node.items():
+        # If a valid demand distribution already exists (sum of ALL buses ≈
+        # 1.0), it came from the demand-distribution step or the Grid Builder
+        # and must be preserved verbatim. Redistributing it here is actively
+        # harmful when every bus shares parent_node 0 (Grid Builder networks):
+        # the per-node split is then GLOBAL, so it drains demand out of
+        # electrically-isolated micro-grids (a wind/hydro island with its own
+        # local load) onto the main grid, turning that island into a
+        # gen-with-no-demand "surplus" component on every save/load. Only
+        # ensure demand-bearing buses keep a demand-eligible role so the solver
+        # and the topology audit still count them.
+        total_df = sum(b.demand_fraction for b in bs)
+        if total_df > 0 and abs(total_df - 1.0) <= SUM_TOL:
+            for b in bs:
+                if b.demand_fraction > 0 and b.role not in ("load", "mixed"):
+                    b.role = "mixed" if b.bus_id in supply_buses else "load"
+                    counts["buses_role_changed"] += 1
+            continue
+
         # Demand only goes to true load buses (feeders / distribution
         # terminals). "mixed" buses host equipment too but their primary
         # role in the planning model is supply, so we exclude them from

@@ -168,3 +168,62 @@ def test_converter_endpoints_survive_roundtrip(tmp_path):
         f"converter collapsed to a self-loop: {conv.from_bus} == {conv.to_bus}"
     )
     assert {conv.from_bus, conv.to_bus} == {"bus_0", "bus_1"}
+
+
+def test_island_local_demand_survives_roundtrip(tmp_path):
+    """A disconnected micro-grid (its own generation + local demand) must not
+    lose its demand on save/load. The export re-runs repair_bus_roles_and_demand,
+    whose per-node demand redistribution is GLOBAL when every bus shares node 0
+    (Grid Builder networks) — it used to drain the island's demand onto the main
+    grid, turning the island into a gen-with-no-demand 'surplus' component.
+    """
+    from esfex.bridge.topology_audit import audit_gui_state
+    from esfex.visualization.data.gui_model import GuiGeneratorInstance
+
+    name = "Islands"
+
+    def load_bus(bid, lng, dem):
+        b = _bus(bid, 0.0, lng)
+        b.role = "load"
+        b.demand_fraction = dem
+        return b
+
+    # Main component (bus_0-bus_1) carries 0.7; a disconnected island
+    # (bus_2 has the generator, bus_3 is its local load) carries 0.3. Sum = 1.0.
+    state = GuiSystemState(
+        name=name,
+        buses={
+            "bus_0": load_bus("bus_0", 0.0, 0.7),
+            "bus_1": _bus("bus_1", 0.0, 1.0),
+            "bus_2": _bus("bus_2", 0.0, 2.0),
+            "bus_3": load_bus("bus_3", 3.0, 0.3),
+        },
+        generators={
+            "wind_n0": GuiGeneratorInstance(
+                instance_id="wind_n0", unit_key="wind", name="Island Wind",
+                gen_type="Renewable", fuel="Wind", node=0, rated_power=30.0,
+                bus="bus_2", latitude=0.0, longitude=2.0),
+        },
+        transmission_lines=[
+            GuiTransmissionLine(line_id="l0", from_bus="bus_0", to_bus="bus_1",
+                                capacity_mw=100.0,
+                                from_endpoint=EndpointRef("bus", "bus_0"),
+                                to_endpoint=EndpointRef("bus", "bus_1")),
+            GuiTransmissionLine(line_id="l1", from_bus="bus_2", to_bus="bus_3",
+                                capacity_mw=100.0,
+                                from_endpoint=EndpointRef("bus", "bus_2"),
+                                to_endpoint=EndpointRef("bus", "bus_3")),
+        ],
+    )
+    assert len(audit_gui_state(state).surplus_components) == 0
+
+    out = tmp_path / "isl.yaml"
+    gui_state_to_yaml({name: state}, base_config=_default_config(name),
+                      output_path=out)
+    from esfex.config.loader import load_config
+    reloaded = config_to_gui_states(load_config(out), base_dir=str(tmp_path))[name]
+
+    surplus = audit_gui_state(reloaded).surplus_components
+    assert len(surplus) == 0, (
+        "island lost its local demand on save/load and became surplus"
+    )
