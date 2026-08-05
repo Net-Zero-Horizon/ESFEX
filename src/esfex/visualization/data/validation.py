@@ -3750,11 +3750,12 @@ def _validate_topology_audit(
         issues.append(ValidationIssue(
             severity=sev, category="Topology Audit",
             message=(
-                f"Isolated electrical island around bus '{any_bus}' "
-                f"({len(comp)} bus(es), {total_mw:.1f} MW gen): "
-                f"{gen_names}. No transformer, line or converter "
-                "connects this island to any demand. Add a connection "
-                "or remove the generator(s)."
+                f"Electrical island of {len(comp)} bus(es) "
+                f"({total_mw:.1f} MW gen): {gen_names}. These buses are "
+                "interconnected but the whole group has no line, transformer "
+                "or converter reaching any demand bus — often a real network "
+                "gap where the link to the main grid was not mapped. Connect "
+                "the island to the grid or remove the generator(s)."
             ),
             element_type="bus", element_id=any_bus,
         ))
@@ -3765,8 +3766,10 @@ def _validate_topology_audit(
                 severity=sev, category="Topology Audit",
                 message=(
                     f"Generator '{g.name or gid}' ({g.rated_power:.1f} "
-                    f"MW, {g.fuel}) is on an isolated bus '{g.bus}' "
-                    "with no path to any demand bus."
+                    f"MW, {g.fuel}) on bus '{g.bus}' is part of a "
+                    f"{len(comp)}-bus electrical island with no path to any "
+                    "demand bus. The bus itself is connected locally, but the "
+                    "island as a whole does not reach the main grid."
                 ),
                 element_type="generator", element_id=gid,
             ))
