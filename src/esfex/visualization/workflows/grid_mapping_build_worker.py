@@ -40,6 +40,7 @@ class BuildParams:
     gen_availability: bool
     use_weather: bool
     cfg_path: str | None = None
+    reconnect_max_km: float = 0.0
 
 
 class GridBuildWorker(QThread):
@@ -123,6 +124,7 @@ class GridBuildWorker(QThread):
                 faithful=True,
                 station_radius_km=p.station_radius_km,
                 min_capacity_mw=p.config.get("min_capacity_mw", 0.0),
+                reconnect_max_km=p.reconnect_max_km,
             ))
             out["build_summary"] = result.summary()
             if self._cancelled:

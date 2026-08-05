@@ -393,6 +393,7 @@ def build_grid_from_features(
     faithful: bool = False,
     station_radius_km: float = _FAITHFUL_STATION_CLUSTER_KM,
     min_capacity_mw: float = 0.0,
+    reconnect_max_km: float = 0.0,
 ) -> ParseResult:
     """Create GUI elements from fetched grid features.
 
@@ -723,6 +724,27 @@ def build_grid_from_features(
                 )
         except Exception as exc:
             result.warnings.append(f"Co-located voltage coupling: {exc}")
+
+        # Bounded reconnection of isolated components (opt-in). A substation
+        # within reconnect_max_km of the backbone is physically tied to it — the
+        # OSM data just lacks the final span — so connect it instead of leaving
+        # the demand behind it unservable. Remote components stay isolated.
+        if reconnect_max_km and reconnect_max_km > 0:
+            try:
+                rc = _reconnect_isolated_bounded(
+                    model.state, result,
+                    max_km=reconnect_max_km,
+                    snap_km=station_radius_km,
+                )
+                if rc.get("tapped") or rc.get("linked"):
+                    result.warnings.append(
+                        f"Connectivity: reconnected isolated components within "
+                        f"{reconnect_max_km:.0f} km — tapped {rc['tapped']} onto "
+                        f"nearby lines, linked {rc['linked']} to the nearest "
+                        f"same-voltage bus (remote islands left isolated)."
+                    )
+            except Exception as exc:
+                result.warnings.append(f"Bounded reconnection: {exc}")
 
     return result
 
@@ -1161,6 +1183,162 @@ def _create_line(
         susceptance_pu=b_pu,
     ))
     result.lines_added += 1
+
+
+def _reconnect_isolated_bounded(
+    state: GuiSystemState, result: ParseResult,
+    max_km: float, snap_km: float,
+) -> dict[str, int]:
+    """Bounded reconnection of electrically isolated components (faithful mode).
+
+    A substation within ``max_km`` of the backbone is physically tied to it —
+    OSM merely lacks the final span — so this connects it rather than leaving
+    the demand behind it unservable. Two strategies per isolated component,
+    tightest connection first:
+
+    * **tap (C)** — a same-voltage main LINE passes within ``snap_km`` of an
+      island bus: split that line at the projection point and connect there.
+      The substation genuinely sits on the line; the build just failed to split
+      it. No fabricated geometry.
+    * **link (B)** — otherwise connect the island's nearest bus to the nearest
+      same-voltage main bus with a real-length line (length/impedance/capacity
+      derived from the geometry and voltage).
+
+    Components whose closest connection exceeds ``max_km`` are left isolated —
+    genuine islands / real OSM gaps — and remain flagged by the topology audit.
+    Iterates so a component that reconnects can carry others into the backbone.
+    Returns counts of tapped / linked connections.
+    """
+    from collections import defaultdict
+
+    from esfex.visualization.data.gui_model import (
+        EndpointRef, GuiTransmissionLine,
+    )
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_capacity_mw, estimate_line_pu_params,
+    )
+    from esfex.visualization.workflows.grid_mapping_steps import (
+        _BusNN, _build_bus_adjacency, _find_connected_components, _haversine_km,
+    )
+
+    counts = {"tapped": 0, "linked": 0}
+    _V_TOL = 0.10  # buses within 10 % kV are the "same" voltage level
+
+    def _new_id(prefix: str, existing: set) -> str:
+        n = 0
+        while f"{prefix}{n}" in existing:
+            n += 1
+        return f"{prefix}{n}"
+
+    def _seg_proj(plat, plng, alat, alng, blat, blng):
+        """Great-circle-ish projection of P onto segment A-B in local metres;
+        returns (dist_m, qlat, qlng)."""
+        kx = 111_000.0 * math.cos(math.radians(plat))
+        ax, ay = (alng - plng) * kx, (alat - plat) * 111_000.0
+        bx, by = (blng - plng) * kx, (blat - plat) * 111_000.0
+        dx, dy = bx - ax, by - ay
+        denom = dx * dx + dy * dy
+        t = 0.0 if denom < 1e-9 else max(0.0, min(1.0, -(ax * dx + ay * dy) / denom))
+        qx, qy = ax + t * dx, ay + t * dy
+        dist = math.hypot(qx, qy)
+        return dist, plat + qy / 111_000.0, plng + qx / kx
+
+    def _add_line(from_bus, to_bus, v, length_km, existing_ids, tag):
+        r_pu, x_pu, b_pu = estimate_line_pu_params(v, length_km)
+        fb, tb = state.buses[from_bus], state.buses[to_bus]
+        lid = _new_id("reconnect_", existing_ids)
+        existing_ids.add(lid)
+        state.transmission_lines.append(GuiTransmissionLine(
+            line_id=lid, from_bus=from_bus, to_bus=to_bus,
+            capacity_mw=estimate_line_capacity_mw(v),
+            voltage_kv=v, length_km=length_km,
+            reactance_pu=x_pu, resistance_pu=r_pu, susceptance_pu=b_pu,
+            waypoints=[GeoPoint(fb.latitude, fb.longitude),
+                       GeoPoint(tb.latitude, tb.longitude)],
+            from_endpoint=EndpointRef("bus", from_bus),
+            to_endpoint=EndpointRef("bus", to_bus),
+        ))
+
+    for _round in range(30):
+        adj = _build_bus_adjacency(state)
+        comps = _find_connected_components(adj)
+        if len(comps) <= 1:
+            break
+        main = max(comps, key=len)
+        line_ids = {ln.line_id for ln in state.transmission_lines}
+        bus_ids = set(state.buses)
+
+        # Per-voltage nearest-bus index over the current main component.
+        by_v: dict[int, list[str]] = defaultdict(list)
+        for b in main:
+            bb = state.buses.get(b)
+            if bb and (bb.latitude or bb.longitude):
+                by_v[round(bb.voltage_kv)].append(b)
+        nn_by_v = {v: _BusNN(state, ids) for v, ids in by_v.items()}
+        # Main-component line segments per voltage, for tapping.
+        segs_by_v: dict[int, list] = defaultdict(list)
+        for ln in state.transmission_lines:
+            if ln.from_bus in main and ln.to_bus in main and ln.from_bus != ln.to_bus:
+                a, b = state.buses.get(ln.from_bus), state.buses.get(ln.to_bus)
+                if a and b and (a.latitude or a.longitude) and (b.latitude or b.longitude):
+                    segs_by_v[round((ln.voltage_kv or a.voltage_kv) or 0)].append((ln, a, b))
+
+        made = 0
+        for comp in comps:
+            if comp is main:
+                continue
+            # Best link (B) and best tap (C) for this component.
+            best_link = None   # (dist_km, pid, tid, v)
+            best_tap = None    # (dist_m, pid, ln, qlat, qlng, v)
+            for pid in comp:
+                p = state.buses.get(pid)
+                if not p or (p.latitude == 0.0 and p.longitude == 0.0):
+                    continue
+                pv = round(p.voltage_kv)
+                nn = nn_by_v.get(pv)
+                if nn is not None:
+                    tid, dkm = nn.nearest(p.latitude, p.longitude)
+                    if tid and dkm <= max_km and (best_link is None or dkm < best_link[0]):
+                        best_link = (dkm, pid, tid, p.voltage_kv)
+                for ln, a, b in segs_by_v.get(pv, ()):  # tap candidates
+                    dist_m, qlat, qlng = _seg_proj(
+                        p.latitude, p.longitude,
+                        a.latitude, a.longitude, b.latitude, b.longitude)
+                    if dist_m <= snap_km * 1000 and (best_tap is None or dist_m < best_tap[0]):
+                        best_tap = (dist_m, pid, ln, qlat, qlng, p.voltage_kv)
+
+            # Prefer a tap when a line is closer than the best bus link.
+            if best_tap is not None and (
+                best_link is None or best_tap[0] / 1000.0 <= best_link[0]):
+                dist_m, pid, ln, qlat, qlng, v = best_tap
+                # Split ``ln`` at the projection Q: new junction bus J,
+                # ln → (from..J), new line (J..to), and pid → J.
+                jid = _new_id("junction_", bus_ids)
+                bus_ids.add(jid)
+                state.buses[jid] = GuiBus(
+                    bus_id=jid, name=jid.replace("_", " ").title(),
+                    parent_node=state.buses[ln.from_bus].parent_node,
+                    voltage_kv=v, latitude=qlat, longitude=qlng, role="connection")
+                orig_to = ln.to_bus
+                half = (ln.length_km or _haversine_km(
+                    state.buses[ln.from_bus].latitude, state.buses[ln.from_bus].longitude,
+                    state.buses[orig_to].latitude, state.buses[orig_to].longitude)) / 2.0
+                ln.to_bus = jid
+                ln.to_endpoint = EndpointRef("bus", jid)
+                _add_line(jid, orig_to, v, half, line_ids, "tap-half")
+                _add_line(pid, jid, v, max(dist_m / 1000.0, 0.02), line_ids, "tap-stub")
+                counts["tapped"] += 1
+                made += 1
+            elif best_link is not None:
+                dkm, pid, tid, v = best_link
+                _add_line(pid, tid, v, max(dkm, 0.02), line_ids, "link")
+                counts["linked"] += 1
+                made += 1
+
+        if made == 0:
+            break
+
+    return counts
 
 
 def _connect_colocated_voltage_levels(
