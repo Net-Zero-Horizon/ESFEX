@@ -1879,6 +1879,18 @@ class SystemConfig(BaseModel):
         description="Technology definitions for the Studio"
     )
 
+    # GUI-only: explicit equipment→bus assignment, keyed by the canonical
+    # element id ("{unit_key}_n{node}"). Generators/batteries/electrolyzers are
+    # otherwise serialized node-indexed with no bus reference, so on reload
+    # their bus is re-guessed by nearest coordinate — which scrambles the
+    # topology of a bus-level network (e.g. from the Grid Builder, where every
+    # bus shares node 0). Persisting the exact bus keeps the assignment stable
+    # across save/load. Julia ignores this field.
+    gui_equipment_buses: Optional[dict[str, dict[str, str]]] = Field(
+        default=None, alias="_equipment_buses",
+        description="Explicit equipment→bus_id assignment for the Studio"
+    )
+
     model_config = {"populate_by_name": True}
 
     @property

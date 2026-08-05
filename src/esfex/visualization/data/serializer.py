@@ -1842,6 +1842,24 @@ def _system_to_gui_state(sys: SystemConfig,
         elif inst.node in _node_to_bus:
             inst.bus = _nearest_bus_for(inst.node, inst.latitude, inst.longitude)
 
+    # Explicit equipment→bus assignment persisted by the writer takes priority
+    # over the node/nearest-coordinate guesses above: on a bus-level network
+    # every unit shares node 0, so the guess would scramble assignments on each
+    # save/load. Only apply ids that still resolve to an existing bus.
+    _eq_buses = getattr(sys, "gui_equipment_buses", None) or {}
+    for _kind, _insts in (
+        ("generators", generators),
+        ("batteries", batteries),
+        ("electrolyzers", electrolyzers),
+    ):
+        _map = _eq_buses.get(_kind) or {}
+        if not _map:
+            continue
+        for inst_id, inst in _insts.items():
+            bid = _map.get(inst_id)
+            if bid and bid in buses:
+                inst.bus = bid
+
     # The wire-line-based bus inference and the proximity fallback
     # below must NEVER clobber explicit bus indices that the YAML
     # already carried (``transformer.from_bus`` / ``to_bus`` int
@@ -3524,6 +3542,28 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             layout.setdefault("fuel_entries", {})[str(i)] = [fe.coordinate.lat, fe.coordinate.lng]
     if layout:
         sys_dict["_gui_layout"] = layout
+
+    # Explicit equipment→bus assignment. Generators/batteries/electrolyzers are
+    # serialized node-indexed with no bus reference; on a bus-level network
+    # (e.g. from the Grid Builder, where every bus shares node 0) the reload
+    # would otherwise re-guess each unit's bus by nearest coordinate, scrambling
+    # the topology and stranding generators a little more on every save/load.
+    # Persist the exact bus_id keyed by the canonical id the reader rebuilds.
+    eq_buses: dict[str, dict[str, str]] = {}
+    for gid, inst in state.generators.items():
+        if getattr(inst, "bus", None):
+            cid = _id_remap.get(("generator", gid), gid)
+            eq_buses.setdefault("generators", {})[cid] = inst.bus
+    for bid, inst in state.batteries.items():
+        if getattr(inst, "bus", None):
+            cid = _id_remap.get(("battery", bid), bid)
+            eq_buses.setdefault("batteries", {})[cid] = inst.bus
+    for eid, inst in state.electrolyzers.items():
+        if getattr(inst, "bus", None):
+            cid = _id_remap.get(("electrolyzer", eid), eid)
+            eq_buses.setdefault("electrolyzers", {})[cid] = inst.bus
+    if eq_buses:
+        sys_dict["_equipment_buses"] = eq_buses
 
     # Per-element visual styles (color/size/shape/opacity/width). Stored
     # under ``_gui_styles`` so map customization survives a GUI round-trip.
