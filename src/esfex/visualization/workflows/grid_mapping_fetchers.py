@@ -547,7 +547,7 @@ def _neighbors(f, items, buckets, cl, co, radius_km):
     return out
 
 
-def _drop_plant_aggregates(gens, cluster_km=0.6, tol=0.15):
+def _drop_plant_aggregates(gens, cluster_km=1.0, tol=0.15):
     """Remove the double count between an OSM plant polygon and its unit nodes.
 
     OSM maps a station as BOTH a ``power=plant`` polygon (carrying the plant
@@ -587,12 +587,19 @@ def _drop_plant_aggregates(gens, cluster_km=0.6, tol=0.15):
             us = units_by_plant.get(pi, [])
             if not us:
                 continue
-            usum = sum(u.capacity_mw or 0.0 for u in us)
-            if usum > (p.capacity_mw or 0.0):
-                drop_ids.add(id(p))          # units total more → keep units
-            else:
-                for u in us:                 # plant total ≥ units → keep plant
+            if (p.capacity_mw or 0.0) > 0:
+                # The plant polygon's ``plant:output:electricity`` is the
+                # authoritative CURRENT output — it reflects what the mapper
+                # considers the plant to produce, so it excludes units that are
+                # under construction or decommissioning (e.g. Shimane: the
+                # polygon is 820 MW = the one operating unit, while the unit
+                # nodes list 460+820+1373 MW incl. the retiring #1 and the
+                # under-construction #3). Keep the polygon, drop the units.
+                for u in us:
                     drop_ids.add(id(u))
+            else:
+                # Bare polygon (no capacity tag) — the units carry the data.
+                drop_ids.add(id(p))
 
     # Fallback: within a source, drop a feature whose capacity ≈ the sum of its
     # co-located siblings (a plain aggregate not tagged power=plant).
