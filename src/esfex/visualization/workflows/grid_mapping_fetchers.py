@@ -548,33 +548,72 @@ def _neighbors(f, items, buckets, cl, co, radius_km):
 
 
 def _drop_plant_aggregates(gens, cluster_km=0.6, tol=0.15):
-    """Within a single source, drop a plant-level AGGREGATE feature — one whose
-    capacity ≈ the sum of the individual co-located units of the same plant
-    (e.g. an OSM plant polygon tagged 1650 MW sitting on its 350+700+600 MW unit
-    nodes). Genuine multi-unit plants are untouched: a unit is only dropped if
-    it is the largest AND equals the sum of the others, which an aggregate is
-    and a real unit is not."""
-    import math as _m
+    """Remove the double count between an OSM plant polygon and its unit nodes.
+
+    OSM maps a station as BOTH a ``power=plant`` polygon (carrying the plant
+    total in ``plant:output:electricity``) AND the individual ``power=generator``
+    unit nodes inside it — counting both doubles the capacity (e.g. Shin-Oita:
+    a 2825 MW plant polygon on its 1215+690+920 MW units). Each plant polygon
+    and its enclosed units are the SAME plant, so keep only the larger total and
+    drop the other; genuine multi-unit plants (units with no overlapping
+    polygon) are untouched. Only OSM carries these tags, so it runs per source
+    on OSM. Falls back to a sum-based check for sources without power tags."""
     from collections import defaultdict
+
+    def _power(g):
+        return (g.raw_tags or {}).get("power", "")
+
+    osm = [g for g in gens if g.source == "osm"]
+    plants = [g for g in osm if _power(g) == "plant"]
+    units = [g for g in osm if _power(g) == "generator"]
+    drop_ids: set = set()
+
+    if plants:
+        pbuckets, pcl, pco = _bucket_index(plants, cluster_km)
+        units_by_plant: dict = defaultdict(list)
+        for u in units:
+            ci, cj = int(u.latitude // pcl), int(u.longitude // pco)
+            best, bd = None, cluster_km
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    for j in pbuckets.get((ci + di, cj + dj), ()):
+                        d = _haversine_km(u.latitude, u.longitude,
+                                          plants[j].latitude, plants[j].longitude)
+                        if d <= bd:
+                            best, bd = j, d
+            if best is not None:
+                units_by_plant[best].append(u)
+        for pi, p in enumerate(plants):
+            us = units_by_plant.get(pi, [])
+            if not us:
+                continue
+            usum = sum(u.capacity_mw or 0.0 for u in us)
+            if usum > (p.capacity_mw or 0.0):
+                drop_ids.add(id(p))          # units total more → keep units
+            else:
+                for u in us:                 # plant total ≥ units → keep plant
+                    drop_ids.add(id(u))
+
+    # Fallback: within a source, drop a feature whose capacity ≈ the sum of its
+    # co-located siblings (a plain aggregate not tagged power=plant).
+    tagged = {id(g) for g in plants} | {id(g) for g in units}
     by_src = defaultdict(list)
     for g in gens:
-        by_src[g.source].append(g)
-    drop_ids = set()
+        if id(g) not in drop_ids and id(g) not in tagged:
+            by_src[g.source].append(g)
     for items in by_src.values():
         buckets, cl, co = _bucket_index(items, cluster_km)
         for a in items:
             ac = a.capacity_mw or 0.0
-            if ac <= 0:
+            if ac <= 0 or id(a) in drop_ids:
                 continue
-            neigh = [
-                g for g in _neighbors(a, items, buckets, cl, co, cluster_km)
-                if id(g) not in drop_ids
-            ]
+            neigh = [g for g in _neighbors(a, items, buckets, cl, co, cluster_km)
+                     if id(g) not in drop_ids]
             if len(neigh) < 2:
                 continue
             s = sum(g.capacity_mw or 0.0 for g in neigh)
-            biggest = ac >= max((g.capacity_mw or 0.0) for g in neigh)
-            if biggest and s > 0 and abs(ac - s) / max(ac, s) <= tol:
+            if ac >= max((g.capacity_mw or 0.0) for g in neigh) and s > 0 \
+                    and abs(ac - s) / max(ac, s) <= tol:
                 drop_ids.add(id(a))
     return [g for g in gens if id(g) not in drop_ids]
 

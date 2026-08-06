@@ -1374,6 +1374,46 @@ class TestOSMFeatureReduction:
         gens = [x for x in out if x.feature_type == "generator"]
         assert len(gens) == 1 and gens[0].source == "osm"
 
+    def test_dedup_plant_polygon_vs_units(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            deduplicate_features,
+        )
+        # OSM plant polygon (2825 MW) on its 1215+690+920 MW unit nodes:
+        # keep only one representation (they are the same plant), not both.
+        units = [
+            self._gf(feature_type="generator", name="Shin-Oita", fuel="Natural Gas",
+                     capacity_mw=c, source="osm",
+                     latitude=33.24 + i * 0.0003, longitude=131.5,
+                     raw_tags={"power": "generator"})
+            for i, c in enumerate([1215.0, 690.0, 920.0])
+        ]
+        plant = self._gf(feature_type="generator", name="Shin-Oita", fuel="Natural Gas",
+                         capacity_mw=2825.0, source="osm",
+                         latitude=33.2405, longitude=131.5,
+                         raw_tags={"power": "plant"})
+        out = deduplicate_features(units + [plant])
+        gens = [x for x in out if x.feature_type == "generator"]
+        assert sum(g.rated_power if hasattr(g, "rated_power") else g.capacity_mw
+                   for g in gens) == pytest.approx(2825.0)  # not 5650
+
+    def test_dedup_plant_polygon_kept_when_units_incomplete(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            deduplicate_features,
+        )
+        # Plant polygon 1700 MW with only one 700 MW unit node mapped inside:
+        # the polygon total is authoritative → keep 1700, drop the 700 unit.
+        unit = self._gf(feature_type="generator", name="Matsuura", fuel="Coal",
+                        capacity_mw=700.0, source="osm",
+                        latitude=33.35, longitude=129.684,
+                        raw_tags={"power": "generator"})
+        plant = self._gf(feature_type="generator", name="Matsuura", fuel="Coal",
+                         capacity_mw=1700.0, source="osm",
+                         latitude=33.3502, longitude=129.684,
+                         raw_tags={"power": "plant"})
+        out = deduplicate_features([unit, plant])
+        caps = [x.capacity_mw for x in out if x.feature_type == "generator"]
+        assert caps == [1700.0]
+
     def test_dedup_large_dense_is_fast(self):
         import time
         from esfex.visualization.workflows.grid_mapping_fetchers import (
