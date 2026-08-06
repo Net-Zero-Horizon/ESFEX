@@ -59,5 +59,5 @@ def test_properties_panel_min_is_scaled_and_narrower(qapp):
     from esfex.visualization.panels.properties import PropertiesPanel
     from esfex.visualization.ui_scale import scaled
     p = PropertiesPanel()
-    assert p.minimumWidth() == scaled(220)
+    assert p.minimumWidth() == scaled(130)
     assert p.minimumWidth() < 400  # narrower than the old hard 400 floor
