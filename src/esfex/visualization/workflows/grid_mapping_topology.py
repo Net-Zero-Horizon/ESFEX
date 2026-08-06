@@ -105,9 +105,20 @@ def merge_contiguous_line_segments(
                 if seg is not None:
                     votes[seg] += 1
             rep = group[votes.most_common(1)[0][0]] if votes else group[0]
+            # A physical line's true circuit count / rating is the MAX its
+            # segments report: OSM tags a double-circuit trunk inconsistently
+            # (some segments cables=6 → 2 circuits, others cables=3 → 1), and
+            # inheriting only the representative segment silently halved the
+            # backbone capacity. Take the max over the segments that compose
+            # this merged part.
+            segs = [group[i] for i in votes] if votes else [rep]
+            max_circuits = max((getattr(s, "num_circuits", 1) or 1) for s in segs)
+            max_cap = max((getattr(s, "capacity_mw", 0.0) or 0.0) for s in segs)
             out.append(dataclasses.replace(
                 rep, line_coords=coords_ll,
-                latitude=coords_ll[0][0], longitude=coords_ll[0][1]))
+                latitude=coords_ll[0][0], longitude=coords_ll[0][1],
+                num_circuits=max_circuits,
+                capacity_mw=max_cap if max_cap > 0 else rep.capacity_mw))
             n_out += 1
 
     if n_out < n_in:
