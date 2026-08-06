@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use ESFEX in academic work, please cite it as below."
-title: "ESFEX: Energy System FlEXibility — Power System Optimization"
+title: "ESFEX: Energy System Flexibility — Power System Optimization"
 abstract: >-
-  ESFEX (Energy System FlEXibility) is an open-source hybrid Python/Julia
+  ESFEX (Energy System Flexibility) is an open-source hybrid Python/Julia
   framework for power system capacity expansion and operational dispatch
   under high renewable penetration. It couples a strategic capacity
   expansion planner with a detailed operational dispatch engine through a
@@ -18,8 +18,8 @@ authors:
     given-names: "Han Soo"
     affiliation: "Hiroshima University"
     orcid: "https://orcid.org/0000-0001-7749-0317"
-version: "0.1.3"
-date-released: "2026-06-05"
+version: "0.2.5"
+date-released: "2026-08-06"
 doi: "10.5281/zenodo.20504838"
 license: Apache-2.0
 repository-code: "https://github.com/Net-Zero-Horizon/ESFEX"
