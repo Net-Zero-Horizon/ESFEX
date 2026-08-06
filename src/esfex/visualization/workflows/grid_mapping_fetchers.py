@@ -586,7 +586,14 @@ def _generator_gap_fill(gens, gap_km, same_fuel=True):
     ONLY where OSM is silent — no OSM generator (of the same fuel, if
     ``same_fuel``) within ``gap_km``. This drops the cross-source duplicates
     (the same plant listed by OSM and GEM/WRI) while keeping the plants OSM
-    genuinely lacks (typically new renewables)."""
+    genuinely lacks (typically new renewables).
+
+    An OSM generator only *covers* (blocks) another source's generator if it
+    carries a comparable REAL capacity (≥ half the other's). OSM frequently
+    maps a plant as a bare location marker with no capacity tag (e.g. Genkai
+    nuclear at 1 MW while GEM has its true 2×1180 MW); such a marker is
+    authoritative on location but not on size, so the capacitated GEM/WRI entry
+    is kept instead of being dropped and then filtered out for having no MW."""
     osm = [g for g in gens if g.source == "osm"]
     if not osm:
         return list(gens)
@@ -595,6 +602,13 @@ def _generator_gap_fill(gens, gap_km, same_fuel=True):
     for g in gens:
         if g.source == "osm":
             continue
+        # An OSM generator must carry a real (non-marker) capacity to be
+        # authoritative on this plant's size. OSM tags untagged plants as 0/1 MW
+        # (a bare location marker); below this floor it does not cover a
+        # capacitated GEM/WRI entry, so the true capacity is kept. Using an
+        # ABSOLUTE floor (not a fraction of the other's MW) avoids double-
+        # counting when OSM merely under-tags a plant's capacity.
+        cap_floor = 2.0
         covered = False
         ci, cj = int(g.latitude // cl), int(g.longitude // co)
         for di in (-1, 0, 1):
@@ -602,6 +616,8 @@ def _generator_gap_fill(gens, gap_km, same_fuel=True):
                 for j in buckets.get((ci + di, cj + dj), ()):
                     o = osm[j]
                     if same_fuel and _norm_fuel(o.fuel) != _norm_fuel(g.fuel):
+                        continue
+                    if (o.capacity_mw or 0.0) < cap_floor:
                         continue
                     if _haversine_km(g.latitude, g.longitude, o.latitude, o.longitude) <= gap_km:
                         covered = True

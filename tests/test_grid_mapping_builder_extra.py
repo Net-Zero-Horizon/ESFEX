@@ -1334,6 +1334,46 @@ class TestOSMFeatureReduction:
         names = {x.name for x in out if x.feature_type == "generator"}
         assert names == {"uA", "uB", "uC"}  # aggregate dropped, units kept
 
+    def test_dedup_bare_osm_marker_keeps_gem_capacity(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            deduplicate_features,
+        )
+        # OSM maps Genkai as a bare 1 MW location marker (no capacity tag);
+        # GEM has its true 2x1180 MW. The marker must NOT drop the GEM units.
+        osm_marker = [
+            self._gf(feature_type="generator", name="Genkai", fuel="Nuclear",
+                     capacity_mw=1.0, source="osm",
+                     latitude=33.515 + i * 0.0005, longitude=129.836)
+            for i in range(2)
+        ]
+        gem_units = [
+            self._gf(feature_type="generator", name="Genkai nuclear", fuel="Nuclear",
+                     capacity_mw=1180.0, source="gem",
+                     latitude=33.515, longitude=129.836),
+            self._gf(feature_type="generator", name="Genkai nuclear", fuel="Nuclear",
+                     capacity_mw=1180.0, source="gem",
+                     latitude=33.5155, longitude=129.836),
+        ]
+        out = deduplicate_features(osm_marker + gem_units, gen_gap_km=2.0)
+        gens = [x for x in out if x.feature_type == "generator"]
+        total = sum(g.capacity_mw or 0 for g in gens if (g.capacity_mw or 0) >= 10)
+        assert total >= 2360   # both GEM 1180 units survive (real capacity kept)
+
+    def test_dedup_real_osm_still_covers_gem(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            deduplicate_features,
+        )
+        # OSM has Sendai with real capacity → the near GEM copy is dropped.
+        osm = self._gf(feature_type="generator", name="Sendai", fuel="Nuclear",
+                       capacity_mw=846.0, source="osm",
+                       latitude=31.834, longitude=130.19)
+        gem = self._gf(feature_type="generator", name="Sendai nuclear", fuel="Nuclear",
+                       capacity_mw=890.0, source="gem",
+                       latitude=31.834, longitude=130.189)
+        out = deduplicate_features([osm, gem], gen_gap_km=2.0)
+        gens = [x for x in out if x.feature_type == "generator"]
+        assert len(gens) == 1 and gens[0].source == "osm"
+
     def test_dedup_large_dense_is_fast(self):
         import time
         from esfex.visualization.workflows.grid_mapping_fetchers import (
