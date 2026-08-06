@@ -7,6 +7,64 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.5] — 2026-08-06
+
+### Added
+
+- **Grid Builder — bounded reconnection & island cleanup** — a *Reconnect
+  isolated ≤ N km* control connects each substation within N km of the backbone
+  (tapping a nearby same-voltage line, or linking to the nearest same-voltage
+  bus with a real-length line), then absorbs any component that remains
+  dysfunctional — generation XOR demand — into the connected grid PyPSA-style:
+  its generation/demand is moved to the nearest bus and the dead topology
+  removed, while self-sufficient islands (generation **and** demand) are kept.
+  Default 8 km; set to 0 to keep the network exactly as mapped.
+- **Isolated load-island detection** — validation now reports a component that
+  carries demand but has no generation and no path to any generator (unservable
+  load the solver can only shed); this previously passed clean.
+
+### Changed
+
+- **Grid Builder data sources** — OSM, WRI, GEM and GridFinder are laid out in a
+  single row and all enabled by default; combining them yields the most
+  complete network.
+- **Minimum generator capacity floor scales with the minimum voltage** — the
+  wizard default tracks the voltage floor (~0.3 MW/kV; e.g. 110 kV → 35 MW) so
+  distribution-scale plants don't clutter a transmission model as stranded
+  islands. Edit by hand to pin a value; set to 0 to include every generator.
+- Narrower element-tree and properties panels; compact *New System* dialog.
+
+### Fixed
+
+- **OSM fetch no longer silently returns partial data** — the Overpass fetch
+  tiles the region at 1° (was 5°, which blew past the server timeout on dense
+  regions and returned a fraction as a clean success), subdivides a tile that
+  still times out down to 0.25°, re-queries a zero-element response once to rule
+  out a dispatcher load-shed empty, retries transiently-failed tiles once, and
+  warns loudly when coverage is incomplete.
+- **Project save/load is faithful** — three data-loss bugs fixed: the
+  generator→bus assignment (previously re-guessed by nearest coordinate and
+  scrambled on every export/import), AC/DC & frequency converters collapsing to
+  a self-loop, and a valid demand distribution being drained out of
+  disconnected micro-grids. A Grid Builder network now round-trips with
+  identical connectivity, stable across repeated export/import.
+- **Generation deduplication** — OSM is authoritative and never merges its own
+  units, so real multi-unit plants survive; a GEM/WRI plant is kept only where
+  OSM is silent; a bare OSM location marker (no capacity tag) no longer drops
+  the capacitated GEM entry; an OSM `power=plant` polygon is reconciled against
+  its unit nodes (no double count; the polygon output excludes under-
+  construction / decommissioning units); and only operating GEM plants are kept.
+- **Transmission line ratings** — line circuit count is derived correctly from
+  the OSM `cables` tag (3 cables = 1 three-phase circuit, not 3) and preserved
+  as the maximum across merged segments, so a double-circuit backbone keeps its
+  real thermal capacity.
+- **Tooltips wrap to a logical width** instead of a single screen-wide line —
+  implemented without a global event filter (which segfaulted alongside the
+  embedded QtWebEngine map).
+- Project export/import runs off the GUI thread; negative fuel `price_base` is
+  accepted (waste-to-energy tipping fees); the QtWebEngine raster-tile memory
+  budget is raised so large maps stop dropping tiles.
+
 ## [0.2.4] — 2026-08-03
 
 ### Added
