@@ -1990,6 +1990,15 @@ class WRIGridFetcher(QThread):
 # GEM Global Power Plant Fetcher
 # =====================================================================
 
+# GEM "Status" values to keep: only the fleet that physically exists and
+# operates today. announced / pre-construction / construction plants are not
+# built yet; cancelled / shelved never will be; retired / mothballed are not
+# generating. Excluding them stops phantom capacity (e.g. the 1 GW Ishikari
+# offshore wind still under construction) inflating the built network. A blank
+# / unknown status is kept, to avoid over-filtering sparse rows.
+_GEM_KEEP_STATUS: frozenset = frozenset({"operating"})
+
+
 _GEM_TYPE_TO_FUEL: dict[str, tuple[str, str]] = {
     # (ESFEX fuel, gen_type)  —  keyed by GEM "Type" column (lowercase)
     "coal": ("Coal", "Non-renewable"),
@@ -2102,9 +2111,17 @@ class GEMGridFetcher(QThread):
             df = df[df["Capacity (MW)"] >= self.min_capacity_mw]
 
         features: list[GridFeature] = []
+        skipped_status = 0
         for _, row in df.iterrows():
             if self._cancelled:
                 return []
+
+            # Keep only the operating fleet (see _GEM_KEEP_STATUS). A blank
+            # status is kept; anything else that isn't "operating" is skipped.
+            _st = str(row.get("Status", "")).strip().lower()
+            if _st and _st not in _GEM_KEEP_STATUS:
+                skipped_status += 1
+                continue
 
             gem_type = str(row.get("Type", "")).lower().strip()
             fuel, gen_type = _GEM_TYPE_TO_FUEL.get(
@@ -2194,7 +2211,10 @@ class GEMGridFetcher(QThread):
                 raw_tags=raw_tags,
             ))
 
-        self.progress.emit(100, f"GEM: {len(features)} power plants found")
+        skip_note = (f" ({skipped_status} non-operating skipped)"
+                     if skipped_status else "")
+        self.progress.emit(
+            100, f"GEM: {len(features)} operating power plants found{skip_note}")
         return features
 
 
