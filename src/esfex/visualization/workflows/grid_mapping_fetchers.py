@@ -1447,13 +1447,27 @@ class OSMGridFetcher(QThread):
         if power in ("line", "cable"):
             voltages = _parse_voltage_tag(tags.get("voltage", ""))
             v = voltages[0] if voltages else 0.0
-            circuits_raw = tags.get("circuits", tags.get("cables", "1"))
-            try:
-                num_circuits = max(1, int(circuits_raw.split(";")[0].strip()))
-            except ValueError:
-                num_circuits = 1
             freq = _parse_frequency(tags.get("frequency", ""), lat, lng)
             current_type = "DC" if "dc" in tags.get("line", "").lower() else "AC"
+            # Number of circuits. Prefer OSM's explicit ``circuits`` tag.
+            # Otherwise derive it from ``cables`` (physical conductors): a
+            # 3-phase AC circuit uses 3 cables, a DC bipole 2 — so cables=3→1
+            # circuit, 6→2, etc. Reading ``cables`` directly as the circuit
+            # count tripled the thermal capacity of every single-circuit line.
+            num_circuits = 1
+            circ_tag = tags.get("circuits", "")
+            if circ_tag:
+                try:
+                    num_circuits = max(1, int(circ_tag.split(";")[0].strip()))
+                except ValueError:
+                    num_circuits = 1
+            elif tags.get("cables", ""):
+                try:
+                    cables = int(tags["cables"].split(";")[0].strip())
+                    per_circuit = 2 if current_type == "DC" else 3
+                    num_circuits = max(1, round(cables / per_circuit))
+                except ValueError:
+                    num_circuits = 1
             # Try to extract explicit capacity from OSM tags
             cap_mw = 0.0
             for cap_tag in ("capacity", "rating"):
