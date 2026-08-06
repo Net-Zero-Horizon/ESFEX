@@ -504,11 +504,123 @@ def _line_endpoints_match(
     return fwd or rev
 
 
+def _norm_fuel(fuel: str) -> str:
+    """Normalise a fuel label for cross-source comparison."""
+    s = (fuel or "").strip().lower().replace("_", " ")
+    if "gas" in s:
+        return "gas"
+    if s in ("sun", "solar", "pv", "photovoltaic"):
+        return "solar"
+    if s in ("water", "hydro", "hydroelectric"):
+        return "hydro"
+    if "oil" in s or "diesel" in s:
+        return "oil"
+    return s
+
+
+def _bucket_index(items, cell_km):
+    """Grid-bucket point features so neighbour queries scan a 3×3 cell block
+    (~O(n)) instead of every pair. Returns (buckets, cell_lat, cell_lon)."""
+    from collections import defaultdict
+    if not items:
+        return {}, 1.0, 1.0
+    mean_lat = sum(f.latitude for f in items) / len(items)
+    cl = max(cell_km / 111.0, 1e-9)
+    co = max(cell_km / (111.0 * max(math.cos(math.radians(mean_lat)), 0.01)), 1e-9)
+    buckets: dict = defaultdict(list)
+    for i, f in enumerate(items):
+        buckets[(int(f.latitude // cl), int(f.longitude // co))].append(i)
+    return buckets, cl, co
+
+
+def _neighbors(f, items, buckets, cl, co, radius_km):
+    ci, cj = int(f.latitude // cl), int(f.longitude // co)
+    out = []
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            for j in buckets.get((ci + di, cj + dj), ()):
+                g = items[j]
+                if g is f:
+                    continue
+                if _haversine_km(f.latitude, f.longitude, g.latitude, g.longitude) <= radius_km:
+                    out.append(g)
+    return out
+
+
+def _drop_plant_aggregates(gens, cluster_km=0.6, tol=0.15):
+    """Within a single source, drop a plant-level AGGREGATE feature — one whose
+    capacity ≈ the sum of the individual co-located units of the same plant
+    (e.g. an OSM plant polygon tagged 1650 MW sitting on its 350+700+600 MW unit
+    nodes). Genuine multi-unit plants are untouched: a unit is only dropped if
+    it is the largest AND equals the sum of the others, which an aggregate is
+    and a real unit is not."""
+    import math as _m
+    from collections import defaultdict
+    by_src = defaultdict(list)
+    for g in gens:
+        by_src[g.source].append(g)
+    drop_ids = set()
+    for items in by_src.values():
+        buckets, cl, co = _bucket_index(items, cluster_km)
+        for a in items:
+            ac = a.capacity_mw or 0.0
+            if ac <= 0:
+                continue
+            neigh = [
+                g for g in _neighbors(a, items, buckets, cl, co, cluster_km)
+                if id(g) not in drop_ids
+            ]
+            if len(neigh) < 2:
+                continue
+            s = sum(g.capacity_mw or 0.0 for g in neigh)
+            biggest = ac >= max((g.capacity_mw or 0.0) for g in neigh)
+            if biggest and s > 0 and abs(ac - s) / max(ac, s) <= tol:
+                drop_ids.add(id(a))
+    return [g for g in gens if id(g) not in drop_ids]
+
+
+def _generator_gap_fill(gens, gap_km, same_fuel=True):
+    """OSM-authoritative generator merge. OSM generators are the source of
+    truth and are ALL kept (never merged among themselves, so a real 5×100 MW
+    multi-unit plant survives intact). A generator from another source is kept
+    ONLY where OSM is silent — no OSM generator (of the same fuel, if
+    ``same_fuel``) within ``gap_km``. This drops the cross-source duplicates
+    (the same plant listed by OSM and GEM/WRI) while keeping the plants OSM
+    genuinely lacks (typically new renewables)."""
+    osm = [g for g in gens if g.source == "osm"]
+    if not osm:
+        return list(gens)
+    buckets, cl, co = _bucket_index(osm, gap_km)
+    kept = list(osm)
+    for g in gens:
+        if g.source == "osm":
+            continue
+        covered = False
+        ci, cj = int(g.latitude // cl), int(g.longitude // co)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for j in buckets.get((ci + di, cj + dj), ()):
+                    o = osm[j]
+                    if same_fuel and _norm_fuel(o.fuel) != _norm_fuel(g.fuel):
+                        continue
+                    if _haversine_km(g.latitude, g.longitude, o.latitude, o.longitude) <= gap_km:
+                        covered = True
+                        break
+                if covered:
+                    break
+            if covered:
+                break
+        if not covered:
+            kept.append(g)
+    return kept
+
+
 def deduplicate_features(
     features: list[GridFeature],
     proximity_km: float = 1.0,
     capacity_tolerance: float = 0.20,
     progress: "Callable[[str], None] | None" = None,
+    gen_gap_km: float = 2.0,
 ) -> list[GridFeature]:
     """Remove duplicate features across sources, merging metadata.
 
@@ -607,8 +719,11 @@ def deduplicate_features(
             progress(msg)
 
     _emit(generators, f"Merging {len(generators)} generators…")
-    kept_gens = _proximity_dedup(
-        generators, proximity_km, capacity_check=True,
+    # OSM-authoritative: drop within-source plant aggregates, then keep every
+    # OSM generator and add another source's generator only where OSM has none
+    # nearby. Never merges co-located units, so real multi-unit plants survive.
+    kept_gens = _generator_gap_fill(
+        _drop_plant_aggregates(generators), gen_gap_km,
     )
     _emit(batteries, f"Merging {len(batteries)} batteries…")
     kept_bats = _proximity_dedup(

@@ -37,13 +37,17 @@ def _run(worker):
     return out
 
 
-def test_dedup_collapses_colocated_and_counts(qapp):
-    feats = [_gen(35.0, 139.0, name=f"g{i}") for i in range(5)]
+def test_dedup_keeps_osm_units_drops_cross_source(qapp):
+    # Five OSM units of a multi-unit plant (~100 m apart) are genuine and all
+    # kept; a GEM copy of the plant next to them is dropped (OSM authoritative).
+    feats = [_gen(35.0 + i * 0.001, 139.0, name=f"g{i}") for i in range(5)]
+    feats.append(GridFeature(source="gem", feature_type="generator",
+                             name="gem_dup", latitude=35.0, longitude=139.0005,
+                             capacity_mw=500.0))
     feats.append(GridFeature(source="osm", feature_type="substation",
                              name="S", latitude=40.0, longitude=141.0))
     out = _run(FetchFinalizeWorker(feats, []))
-    # Five co-located generators merge to one; substation untouched.
-    assert out["counts"].get("generator") == 1
+    assert out["counts"].get("generator") == 5   # units kept, GEM copy dropped
     assert out["counts"].get("substation") == 1
     assert "deduplicate" in out["timings"]
     assert "polygon_filter" not in out["timings"]  # no polygon → skipped

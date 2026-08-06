@@ -1289,21 +1289,50 @@ class TestOSMFeatureReduction:
         assert len(gens) == 40
         assert min(g.capacity_mw for g in gens) == 160.0  # 200-40
 
-    def test_dedup_merges_near_and_keeps_far(self):
+    def test_dedup_osm_authoritative_gapfill(self):
         from esfex.visualization.workflows.grid_mapping_fetchers import (
             deduplicate_features,
         )
-        # three generators within 0.2km -> 1; one 10km away -> separate
-        cluster = [
-            self._gf(feature_type="generator", name=f"c{i}", capacity_mw=5.0,
+        # 3 co-located OSM units of a real multi-unit plant → ALL kept (a naive
+        # proximity merge would wrongly collapse them, losing real capacity).
+        units = [
+            self._gf(feature_type="generator", name=f"u{i}", fuel="Coal",
+                     capacity_mw=100.0, source="osm",
                      latitude=35.0 + i * 0.001, longitude=139.0)
             for i in range(3)
         ]
-        far = self._gf(feature_type="generator", name="far", capacity_mw=5.0,
-                       latitude=35.1, longitude=139.0)
-        out = deduplicate_features(cluster + [far], proximity_km=1.0)
-        gens = [x for x in out if x.feature_type == "generator"]
-        assert len(gens) == 2  # one merged cluster + the far one
+        # A GEM copy of the same plant (same fuel, next to OSM) → dropped.
+        gem_dup = self._gf(feature_type="generator", name="Plant", fuel="Coal",
+                           capacity_mw=300.0, source="gem",
+                           latitude=35.0, longitude=139.0005)
+        # A GEM plant OSM lacks (far, different fuel) → kept.
+        gem_new = self._gf(feature_type="generator", name="New Wind", fuel="Wind",
+                           capacity_mw=50.0, source="gem",
+                           latitude=35.2, longitude=139.0)
+        out = deduplicate_features(units + [gem_dup, gem_new], gen_gap_km=2.0)
+        names = {x.name for x in out if x.feature_type == "generator"}
+        assert names == {"u0", "u1", "u2", "New Wind"}
+        assert "Plant" not in names  # cross-source duplicate dropped
+
+    def test_dedup_drops_plant_aggregate(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            deduplicate_features,
+        )
+        # OSM plant polygon (1650 MW) sitting on its 350+700+600 MW unit nodes:
+        # the aggregate is dropped, the three genuine units survive.
+        units = [
+            self._gf(feature_type="generator", name=n, fuel="Coal",
+                     capacity_mw=c, source="osm",
+                     latitude=35.0 + i * 0.0005, longitude=139.0)
+            for i, (n, c) in enumerate(
+                [("uA", 350.0), ("uB", 700.0), ("uC", 600.0)])
+        ]
+        agg = self._gf(feature_type="generator", name="Plant total", fuel="Coal",
+                       capacity_mw=1650.0, source="osm",
+                       latitude=35.0005, longitude=139.0)
+        out = deduplicate_features(units + [agg])
+        names = {x.name for x in out if x.feature_type == "generator"}
+        assert names == {"uA", "uB", "uC"}  # aggregate dropped, units kept
 
     def test_dedup_large_dense_is_fast(self):
         import time
