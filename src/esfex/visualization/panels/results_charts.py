@@ -1406,6 +1406,39 @@ def _resolve_gen_tech(name: str, gen_tech_map: dict[str, dict]) -> dict | None:
     return None
 
 
+_RENEWABLE_FUEL_LABELS = frozenset(
+    {"Solar", "Wind", "Hydro", "Geothermal", "Biomass", "OTEC"}
+)
+
+
+def _fuel_tech_info(cfg: dict) -> dict:
+    """Derive a ``{label, color, category, tech_key}`` entry from a generator's
+    own ``fuel``/``type`` fields.
+
+    Used when a generator has no resolvable ``TechnologyConfig`` — e.g. Grid
+    Builder systems declare generators directly by fuel with no technology
+    catalog. Without this, every such generator falls through to the name-based
+    heuristic (which can't read Japanese/non-English names or the fuel) and
+    collapses into a single ``thermal``/``Other`` bucket. Mirrors the fuel
+    buckets of :func:`_tech_bucket_for_gen` so colours/labels stay consistent
+    with the UC dispatch charts.
+    """
+    gtype = str(cfg.get("type", "")).strip().lower()
+    category = _TECH_TYPE_TO_CATEGORY.get(gtype)
+    if category == "storage_discharge":
+        label = "Storage"
+    else:
+        label = _tech_bucket_for_gen(cfg, str(cfg.get("name", "")))
+        if category is None:
+            category = "renewable" if label in _RENEWABLE_FUEL_LABELS else "thermal"
+    return {
+        "label": label,
+        "color": _color_for(label),
+        "category": category,
+        "tech_key": "",
+    }
+
+
 def _build_gen_tech_map(
     gen_configs: list[dict],
     tech_configs: list[dict],
@@ -1489,9 +1522,16 @@ def _build_gen_tech_map(
             if isinstance(tech_id, bytes):
                 tech_id = tech_id.decode()
             tech_id = str(tech_id).strip()
-            if not (tech_id and tech_id in techs):
-                continue  # leave unmapped — caller falls back honestly.
-            info = techs[tech_id]
+            if tech_id and tech_id in techs:
+                info = techs[tech_id]
+            elif default_cat is None and (cfg.get("fuel") or cfg.get("type")):
+                # No TechnologyConfig entry, but the generator carries a fuel/
+                # type (Grid Builder systems). Group by fuel instead of leaving
+                # it unmapped — otherwise it collapses to a single thermal/Other
+                # bucket in the technology charts.
+                info = _fuel_tech_info(cfg)
+            else:
+                continue  # legacy file, no fuel — caller falls back honestly.
             if default_cat is not None:
                 # Battery: keep category fixed regardless of the
                 # tech entry's nominal type.
