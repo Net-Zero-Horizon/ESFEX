@@ -345,11 +345,18 @@ class ResultsDialog(QDialog):
                         if "Global" not in self._h5_files:
                             self._h5_files["Global"] = p
                             self._base_prefix["Global"] = ""
+                        # The system selector must reflect the CURRENT run only.
+                        # Older HDF5 files in the results dir are previous runs
+                        # (often other regions, e.g. Japan / Isla_Juventud) — with
+                        # files sorted newest-first, stop after the latest run so
+                        # its systems don't get polluted by stale ones.
+                        break
                     else:
                         name = p.stem.replace("results_", "").replace("_results", "")
                         if name not in self._h5_files:
                             self._h5_files[name] = p
                             self._base_prefix[name] = ""
+                        break
             except Exception:
                 pass
 
