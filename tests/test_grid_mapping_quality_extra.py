@@ -784,3 +784,35 @@ def test_repair_node_coupling_already_linked_skipped():
     # within MAX_HOPS (direct neighbour) → not coupled again
     assert counts["buses_coupled"] == 0
     assert counts["lines_added"] == 0
+
+
+class TestEstimateTransformerMva:
+    """Auto-transformer bank ratings must scale with the HV level — a flat
+    100 MVA default throttles inter-voltage-level transfer and starves load
+    in a transmission-only (>=110 kV) network (the binding max-flow
+    constraint we measured: 79% -> 95% deliverable once sized realistically)."""
+
+    def test_scales_with_voltage(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_transformer_mva,
+        )
+        assert estimate_transformer_mva(500) == 1000.0
+        assert estimate_transformer_mva(275) == 600.0
+        assert estimate_transformer_mva(220) == 400.0
+        assert estimate_transformer_mva(187) == 300.0
+        assert estimate_transformer_mva(110) == 200.0
+
+    def test_low_voltage_keeps_100(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_transformer_mva,
+        )
+        assert estimate_transformer_mva(66) == 100.0
+        assert estimate_transformer_mva(0) == 100.0
+
+    def test_monotonic_nondecreasing(self):
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_transformer_mva,
+        )
+        vs = [0, 66, 110, 154, 187, 220, 275, 500]
+        mvas = [estimate_transformer_mva(v) for v in vs]
+        assert mvas == sorted(mvas)

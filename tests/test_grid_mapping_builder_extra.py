@@ -1951,3 +1951,81 @@ class TestVoltageConsistency:
         # a 220/110 step-down transformer ties the 110 kV substation in
         assert any({t.from_voltage_kv, t.to_voltage_kv} == {220.0, 110.0}
                    for t in state.transformers)
+
+
+# ---------------------------------------------------------------------------
+# _enforce_min_voltage — collapse the sub-floor distribution layer
+# ---------------------------------------------------------------------------
+
+class TestEnforceMinVoltage:
+    """The voltage floor must be honoured on the *built* network, not only at
+    fetch time: unknown-voltage features that were assigned a low voltage
+    during the build (6.6 / 22 / 33 kV under a 66 kV floor) must be collapsed,
+    with their generation relocated to the nearest transmission bus."""
+
+    def _state(self):
+        from esfex.visualization.data.gui_model import (
+            GuiBatteryInstance, GuiTransmissionLine,
+        )
+        buses = {
+            "hv": GuiBus(bus_id="hv", parent_node=0, voltage_kv=220.0,
+                         latitude=21.0, longitude=-82.0),
+            "mv": GuiBus(bus_id="mv", parent_node=0, voltage_kv=66.0,
+                         latitude=21.1, longitude=-82.0),
+            "lv": GuiBus(bus_id="lv", parent_node=0, voltage_kv=6.6,
+                         latitude=21.11, longitude=-82.0, role="load",
+                         demand_fraction=0.5),
+        }
+        gen = GuiGeneratorInstance(
+            instance_id="g1", unit_key="u1", name="G1", gen_type="Thermal",
+            fuel="Coal", bus="lv", node=0, latitude=21.11, longitude=-82.0,
+            rated_power=[500.0],
+        )
+        bat = GuiBatteryInstance(
+            instance_id="b1", unit_key="bu1", name="B1", fuel="Battery",
+            bus="lv", node=0, latitude=21.11, longitude=-82.0,
+        )
+        lines = [
+            GuiTransmissionLine(line_id="l_hv_mv", from_bus="hv", to_bus="mv"),
+            GuiTransmissionLine(line_id="l_mv_lv", from_bus="mv", to_bus="lv"),
+        ]
+        trafos = [GuiTransformer(name="t1", from_bus="mv", to_bus="lv")]
+        return _make_state(buses=buses, generators={"g1": gen},
+                           batteries={"b1": bat},
+                           transmission_lines=lines, transformers=trafos)
+
+    def test_collapses_sub_floor_and_relocates_generation(self):
+        state = self._state()
+        result = ParseResult()
+        stats = gmb._enforce_min_voltage(state, 66.0, result)
+        # The 6.6 kV bus is gone; 220 and 66 kV survive.
+        assert "lv" not in state.buses
+        assert set(state.buses) == {"hv", "mv"}
+        # Generation relocated to the nearest surviving bus (66 kV mv).
+        assert state.generators["g1"].bus == "mv"
+        assert state.batteries["b1"].bus == "mv"
+        # Distribution lines/transformers incident to lv are removed.
+        assert [ln.line_id for ln in state.transmission_lines] == ["l_hv_mv"]
+        assert state.transformers == []
+        assert stats["buses_removed"] == 1
+        assert stats["generators_moved"] == 1
+
+    def test_noop_when_floor_zero_or_all_above(self):
+        state = self._state()
+        result = ParseResult()
+        assert gmb._enforce_min_voltage(state, 0.0, result) == {}
+        assert "lv" in state.buses  # untouched
+        # Floor below everything present: nothing collapses.
+        assert gmb._enforce_min_voltage(state, 1.0, result) == {}
+        assert "lv" in state.buses
+
+    def test_skips_when_no_bus_at_floor(self):
+        # Only sub-floor buses: don't empty the grid, warn instead.
+        buses = {"lv": GuiBus(bus_id="lv", parent_node=0, voltage_kv=6.6,
+                              latitude=21.0, longitude=-82.0)}
+        state = _make_state(buses=buses)
+        result = ParseResult()
+        stats = gmb._enforce_min_voltage(state, 66.0, result)
+        assert stats == {}
+        assert "lv" in state.buses
+        assert any("no bus at or above" in w for w in result.warnings)

@@ -182,6 +182,29 @@ def estimate_line_pu_params(
     return (r_pu, x_pu, b_pu)
 
 
+def estimate_transformer_mva(v_high_kv: float) -> float:
+    """Typical substation transformer / autotransformer bank rating by the
+    high-side voltage.
+
+    A flat 100 MVA default throttles inter-voltage-level power transfer in a
+    transmission-only model: every step-down/interconnection caps at 100 MVA,
+    so bulk power injected on the HV backbone cannot reach load at other
+    levels (the binding constraint in a >=110 kV network). These are
+    order-of-magnitude bank ratings for a substation at each level.
+    """
+    if v_high_kv >= 500:
+        return 1000.0
+    if v_high_kv >= 275:
+        return 600.0
+    if v_high_kv >= 220:
+        return 400.0
+    if v_high_kv >= 154:
+        return 300.0
+    if v_high_kv >= 110:
+        return 200.0
+    return 100.0
+
+
 def estimate_transformer_impedance_pu(
     rated_mva: float,
     ratio: float = 2.0,

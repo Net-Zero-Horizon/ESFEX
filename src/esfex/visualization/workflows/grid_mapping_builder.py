@@ -51,6 +51,7 @@ from esfex.visualization.workflows.grid_mapping_quality import (
     estimate_line_pu_params,
     estimate_transformer_impedance_pu,
     estimate_transformer_losses_fraction,
+    estimate_transformer_mva,
 )
 
 logger = logging.getLogger(__name__)
@@ -384,6 +385,89 @@ def _create_fuels_and_technologies(
 # ── Public entry point ───────────────────────────────────────────────
 
 
+def _enforce_min_voltage(state, min_voltage_kv: float, result) -> dict:
+    """Collapse the sub-``min_voltage_kv`` (distribution) layer into the
+    transmission network so the built model only contains buses at or above
+    the voltage floor.
+
+    The fetch-time voltage filter only drops features whose voltage is *known*
+    and below the floor; features that arrive with unknown voltage (very
+    common for OSM ways / GridFinder segments) pass through and are then
+    assigned a low voltage during the build, so distribution buses (e.g.
+    6.6 / 22 / 33 kV) leak in below a 66 kV floor. Left in place, demand and
+    generation sit on those distribution buses and bulk power is forced
+    through sparse, OSM-under-represented distribution traces — mixing two
+    fundamentally different network models and producing phantom congestion.
+
+    For every bus below the floor this:
+
+    * relocates its generators / batteries to the nearest bus at or above the
+      floor (their real point of connection to the transmission network), and
+    * drops the bus and every line / transformer incident to it.
+
+    Nothing is discarded — generation is preserved (relocated); only the
+    distribution *topology* is removed. Demand is (re)distributed onto the
+    surviving buses by the later role/demand phase.
+    """
+    if not min_voltage_kv or min_voltage_kv <= 0:
+        return {}
+    low = {bid for bid, b in state.buses.items()
+           if 0 < (b.voltage_kv or 0) < min_voltage_kv}
+    if not low:
+        return {}
+    hv = [(b.latitude, b.longitude, bid, b.parent_node)
+          for bid, b in state.buses.items()
+          if (b.voltage_kv or 0) >= min_voltage_kv]
+    if not hv:
+        result.warnings.append(
+            f"Min voltage {min_voltage_kv:.0f} kV: no bus at or above the "
+            f"floor — skipped distribution collapse to avoid emptying the grid."
+        )
+        return {}
+
+    def _nearest_hv(lat, lng):
+        best_id, best_node, best_d = None, 0, float("inf")
+        for blat, blng, bid, bnode in hv:
+            d = _haversine_km(lat, lng, blat, blng)
+            if d < best_d:
+                best_id, best_node, best_d = bid, bnode, d
+        return best_id, best_node
+
+    moved_gen = moved_bat = 0
+    for g in state.generators.values():
+        if getattr(g, "bus", None) in low:
+            tid, tnode = _nearest_hv(g.latitude, g.longitude)
+            if tid is not None:
+                g.bus, g.node = tid, tnode
+                moved_gen += 1
+    for bt in state.batteries.values():
+        if getattr(bt, "bus", None) in low:
+            tid, tnode = _nearest_hv(bt.latitude, bt.longitude)
+            if tid is not None:
+                bt.bus, bt.node = tid, tnode
+                moved_bat += 1
+
+    n_lines0, n_tr0 = len(state.transmission_lines), len(state.transformers)
+    state.transmission_lines = [
+        ln for ln in state.transmission_lines
+        if ln.from_bus not in low and ln.to_bus not in low
+    ]
+    state.transformers = [
+        tr for tr in state.transformers
+        if tr.from_bus not in low and tr.to_bus not in low
+    ]
+    for bid in low:
+        state.buses.pop(bid, None)
+
+    return {
+        "buses_removed": len(low),
+        "generators_moved": moved_gen,
+        "batteries_moved": moved_bat,
+        "lines_removed": n_lines0 - len(state.transmission_lines),
+        "transformers_removed": n_tr0 - len(state.transformers),
+    }
+
+
 def build_grid_from_features(
     model: GuiModel,
     features: list[GridFeature],
@@ -393,6 +477,7 @@ def build_grid_from_features(
     faithful: bool = False,
     station_radius_km: float = _FAITHFUL_STATION_CLUSTER_KM,
     min_capacity_mw: float = 0.0,
+    min_voltage_kv: float = 0.0,
     reconnect_max_km: float = 0.0,
 ) -> ParseResult:
     """Create GUI elements from fetched grid features.
@@ -600,6 +685,25 @@ def build_grid_from_features(
             )
         except Exception as exc:
             result.warnings.append(f"Fuel Storage '{fs.name}': {exc}")
+
+    # ── Phase 8.5: Enforce the voltage floor (transmission-only model) ──
+    # Drop the distribution layer that leaked in below ``min_voltage_kv``
+    # (unknown-voltage features that were assigned a low voltage during the
+    # build), relocating any generation on it to the nearest bus at/above the
+    # floor. Runs before role/demand so load is distributed only on the
+    # surviving transmission buses. Applies in faithful mode too — it honours
+    # the fetch scope, it does not fabricate connectivity.
+    if min_voltage_kv and min_voltage_kv > 0:
+        mv = _enforce_min_voltage(model.state, min_voltage_kv, result)
+        if mv.get("buses_removed"):
+            result.warnings.append(
+                f"Voltage floor {min_voltage_kv:.0f} kV: collapsed "
+                f"{mv['buses_removed']} sub-floor distribution bus(es) "
+                f"(moved {mv['generators_moved']} gen / {mv['batteries_moved']} "
+                f"battery to the nearest transmission bus; removed "
+                f"{mv['lines_removed']} line(s), {mv['transformers_removed']} "
+                f"transformer(s))"
+            )
 
     # ── Phase 9: Fuel/tech catalog + supply consistency ───────────
     # Backstop: even if a generator was created with a fuel that didn't
@@ -820,8 +924,10 @@ def _create_buses_from_substation(
             # don't create a transformer to itself.
             return bus_ids
 
-        # Auto-create transformer between the two buses
-        auto_mva = 100.0
+        # Auto-create transformer between the two buses. Size to a realistic
+        # bank rating for the HV level — a flat 100 MVA throttles inter-level
+        # transfer and starves load in a transmission-only (>=110 kV) model.
+        auto_mva = estimate_transformer_mva(v_high)
         ratio = (v_high / v_low) if v_low > 0 else 2.0
         state.transformers.append(GuiTransformer(
             name=f"{sub.name} TR {v_high:.0f}/{v_low:.0f}kV",
@@ -1548,7 +1654,7 @@ def _connect_colocated_voltage_levels(
                 if frozenset((v_hi, v_lo)) in bridged:
                     continue
                 bus_hi, bus_lo = by_v[v_hi], by_v[v_lo]
-                auto_mva = 100.0
+                auto_mva = estimate_transformer_mva(v_hi)
                 ratio = v_hi / v_lo if v_lo > 0 else 2.0
                 bh = state.buses[bus_hi]
                 state.transformers.append(GuiTransformer(
