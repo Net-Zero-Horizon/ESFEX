@@ -7,6 +7,55 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.2.6] — 2026-08-08
+
+### Added
+
+- **`esfex add-solver` / `remove-solver` / `list-solvers`** — install optional,
+  commercial solvers (Gurobi, CPLEX, CBC, SCIP, Xpress) on demand into a
+  dedicated Julia environment that is stacked on the load path, so it survives
+  ESFEX upgrades and always targets the Julia the app actually uses. The install
+  verifies the solver loads, so a licence/build problem is reported up front
+  rather than mid-solve.
+
+### Fixed
+
+- **Solver availability** is now read from ESFEX's Julia environment (the shipped
+  Project.toml plus the optional-solvers env), not from unrelated Python
+  companion packages — the GUI no longer offers a solver the backend cannot
+  load. A project that names a solver unavailable on this machine is coerced to a
+  usable one on load instead of failing mid-solve with an empty result.
+- **Method-specific solver options** (e.g. HiGHS `pdlp_scaling`) are no longer
+  forwarded while the LP method is on *choose*; forwarding them aborted the whole
+  model build on some solver builds.
+- **Runner** now fails loudly when no operational window solves, instead of
+  logging `completed: objective=$0` and exporting an empty result.
+- **Grid Builder — transmission-only model.** The minimum-voltage floor is now
+  enforced on the *built* network: the sub-floor distribution layer that leaked
+  in (unknown-voltage features assigned a low voltage during the build) is
+  collapsed, relocating its generation to the nearest transmission bus. Auto-
+  transformers between voltage levels are sized by level (275→600, 220→400 MVA…)
+  instead of a flat 100 MVA. Together these remove phantom transmission
+  congestion — measured load shedding on a Hokkaido UC run fell from ~37 % to
+  ~5 %.
+- **Grid Builder — step 3 data fetching.** World Bank macro indicators get a
+  30 s budget with retries (was a single 15 s attempt), and Google Open Buildings
+  (unavailable over source.coop's HTTPS glob) transparently falls back to
+  Overture instead of failing the demand step.
+- **Results charts** group generators by fuel when a system has no
+  `TechnologyConfig` catalog (Grid Builder imports), instead of collapsing the
+  whole fleet into a single *Other* bucket.
+- **Map Results** system selector shows only the current run's systems; previous
+  runs in the results directory (often other regions) no longer leak in.
+
+### Changed
+
+- **OSM fetching is faster.** Tiles are fetched concurrently across the Overpass
+  mirrors, dense tiles subdivide on the first server-side timeout, and the query
+  requests only what the builder consumes — `out center` (centroid) for
+  point-like elements and `out geom` (full trace) for lines, dropping the blanket
+  recursion that pulled every substation polygon vertex.
+
 ## [0.2.5] — 2026-08-06
 
 ### Added

@@ -18,8 +18,8 @@ authors:
     given-names: "Han Soo"
     affiliation: "Hiroshima University"
     orcid: "https://orcid.org/0000-0001-7749-0317"
-version: "0.2.5"
-date-released: "2026-08-06"
+version: "0.2.6"
+date-released: "2026-08-08"
 doi: "10.5281/zenodo.20504838"
 license: Apache-2.0
 repository-code: "https://github.com/Net-Zero-Horizon/ESFEX"
