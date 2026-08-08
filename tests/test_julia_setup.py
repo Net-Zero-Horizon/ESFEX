@@ -620,3 +620,58 @@ class TestPrecompileEsfex:
         )
         result = precompile_esfex(force=True)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Optional / commercial solver management (dedicated env stacked on LOAD_PATH)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalSolverEnv:
+    def test_solvers_env_path_in_depot_and_versionless(self):
+        from esfex.bridge.julia_setup import get_solvers_env_path
+        p = get_solvers_env_path()
+        # Lives under a Julia depot's environments/, outside the package, and
+        # is NOT tied to a Julia version (no v1.11 footgun).
+        assert p.name == "esfex_solvers"
+        assert p.parent.name == "environments"
+        assert "site-packages" not in str(p)
+
+    def test_solvers_env_path_respects_julia_depot_path(self, monkeypatch, tmp_path):
+        from esfex.bridge.julia_setup import get_solvers_env_path
+        monkeypatch.setenv("JULIA_DEPOT_PATH", str(tmp_path))
+        p = get_solvers_env_path()
+        assert p == tmp_path / "environments" / "esfex_solvers"
+
+    def test_add_solver_rejects_unknown(self):
+        from esfex.bridge.julia_setup import add_solver
+        with pytest.raises(ValueError, match="Unknown optional solver"):
+            add_solver("nonexistent_solver")
+
+    def test_remove_solver_rejects_unknown(self):
+        from esfex.bridge.julia_setup import remove_solver
+        with pytest.raises(ValueError, match="Unknown optional solver"):
+            remove_solver("nonexistent_solver")
+
+    def test_optional_solver_packages_map(self):
+        from esfex.bridge.julia_setup import OPTIONAL_SOLVER_PACKAGES
+        # Only the non-bundled solvers; must map to their Julia package names.
+        assert OPTIONAL_SOLVER_PACKAGES["gurobi"] == "Gurobi"
+        assert "highs" not in OPTIONAL_SOLVER_PACKAGES  # bundled, not optional
+
+    def test_list_installed_reads_env_project_toml(self, monkeypatch, tmp_path):
+        from esfex.bridge import julia_setup as js
+        env = tmp_path / "environments" / "esfex_solvers"
+        env.mkdir(parents=True)
+        (env / "Project.toml").write_text(
+            '[deps]\nGurobi = "2e9cd046-0924-5485-92f1-d5272153d98b"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(js, "get_solvers_env_path", lambda: env)
+        assert js.list_installed_optional_solvers() == ["gurobi"]
+
+    def test_list_installed_empty_when_no_env(self, monkeypatch, tmp_path):
+        from esfex.bridge import julia_setup as js
+        monkeypatch.setattr(
+            js, "get_solvers_env_path", lambda: tmp_path / "nope")
+        assert js.list_installed_optional_solvers() == []

@@ -26,6 +26,28 @@ def get_julia_path() -> Path:
     return Path(__file__).parent.parent / "julia"
 
 
+def get_solvers_env_path() -> Path:
+    """Path to ESFEX's dedicated Julia environment for optional/commercial
+    solvers (Gurobi, CPLEX, …).
+
+    Commercial solvers are not bundled (they need a per-user license and a
+    large build), so they live in this separate environment instead of the
+    shipped ``src/esfex/julia/Project.toml``. The environment is:
+
+    * **Outside the package** — under the Julia depot — so it survives ESFEX
+      upgrades (a ``pip install --upgrade`` never touches it).
+    * **Stacked on ``LOAD_PATH``** at Julia init, so anything installed here
+      is ``import``-able on demand from ESFEX's activated project.
+    * **In the depot's ``environments/``** so it shares the global package
+      cache (no duplicate downloads).
+
+    Managed via ``esfex add-solver`` / ``remove-solver``.
+    """
+    depot = os.environ.get("JULIA_DEPOT_PATH", "")
+    depot_root = depot.split(os.pathsep)[0] if depot else os.path.expanduser("~/.julia")
+    return Path(depot_root) / "environments" / "esfex_solvers"
+
+
 # ── Sysimage utilities ────────────────────────────────────────────
 
 
@@ -134,6 +156,14 @@ def initialize_julia(
         jl_src = str(src_path / "ESFEX.jl").replace("\\", "/")
         jl.seval(f'using Pkg; Pkg.activate("{jl_project}")')
 
+        # Stack ESFEX's optional-solvers environment on LOAD_PATH so any
+        # commercial solver the user installed via `esfex add-solver` (Gurobi,
+        # CPLEX, …) is import-able on demand — without bundling it into the
+        # shipped project. Pushing a non-existent path is harmless (it simply
+        # resolves nothing until a solver is added).
+        solvers_env = str(get_solvers_env_path()).replace("\\", "/")
+        jl.seval(f'("{solvers_env}" in LOAD_PATH) || push!(LOAD_PATH, "{solvers_env}")')
+
         # Try to load the ESFEX module directly first
         # Only run instantiate if dependencies are missing
         logger.info("Loading ESFEX Julia module...")
@@ -200,6 +230,117 @@ def get_julia() -> Any:
     if _julia_instance is None:
         return initialize_julia()
     return _julia_instance
+
+
+# ── Optional / commercial solver management ───────────────────────
+#
+# Optional solvers are NOT bundled (commit "do not bundle commercial solvers"):
+# they need a per-user license and a heavy build. They live in the dedicated
+# environment at get_solvers_env_path(), which is stacked on LOAD_PATH at Julia
+# init so an installed solver loads on demand. These helpers install/remove/list
+# solvers in that environment using juliacall's own Julia (so the correct Julia
+# version and depot are always used — no "installed into the wrong env" footgun).
+
+# ESFEX solver key → Julia package name, for the solvers users may add.
+OPTIONAL_SOLVER_PACKAGES: dict[str, str] = {
+    "gurobi": "Gurobi",
+    "cplex": "CPLEX",
+    "cbc": "Cbc",
+    "scip": "SCIP",
+    "xpress": "Xpress",
+}
+
+
+def _juliacall_main() -> Any:
+    """Return juliacall's ``Main`` without loading the full ESFEX module.
+
+    Solver management only needs ``Pkg`` in the correct (juliacall) Julia, so
+    we avoid the cost of ``include(ESFEX.jl)``.
+    """
+    try:
+        from juliacall import Main as jl
+    except ImportError as e:  # pragma: no cover - env-specific
+        raise RuntimeError(
+            "juliacall is required to manage Julia solvers. "
+            "Install with: pip install juliacall"
+        ) from e
+    return jl
+
+
+def add_solver(name: str) -> str:
+    """Install an optional solver into ESFEX's dedicated solvers environment.
+
+    Adds the backing Julia package to :func:`get_solvers_env_path` and then
+    ``import``s it to surface any build/license error immediately (e.g. Gurobi
+    needs ``GUROBI_HOME`` + a licence). Returns the Julia package name.
+
+    Raises ``ValueError`` for an unknown solver and ``RuntimeError`` if the
+    package cannot be added or loaded.
+    """
+    key = name.lower()
+    pkg = OPTIONAL_SOLVER_PACKAGES.get(key)
+    if pkg is None:
+        raise ValueError(
+            f"Unknown optional solver {name!r}. Installable solvers: "
+            f"{', '.join(sorted(OPTIONAL_SOLVER_PACKAGES))}."
+        )
+    env = str(get_solvers_env_path()).replace("\\", "/")
+    jl = _juliacall_main()
+    try:
+        jl.seval("using Pkg")
+        jl.seval(f'Pkg.activate("{env}")')
+        jl.seval(f'Pkg.add("{pkg}")')
+        # Verify it actually loads in this Julia — build/license problems throw
+        # here rather than silently at the next solve.
+        jl.seval(f"import {pkg}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to install solver {key!r} ({pkg}.jl): {e}") from e
+    return pkg
+
+
+def remove_solver(name: str) -> str:
+    """Remove an optional solver from ESFEX's dedicated solvers environment."""
+    key = name.lower()
+    pkg = OPTIONAL_SOLVER_PACKAGES.get(key)
+    if pkg is None:
+        raise ValueError(
+            f"Unknown optional solver {name!r}. Installable solvers: "
+            f"{', '.join(sorted(OPTIONAL_SOLVER_PACKAGES))}."
+        )
+    env = str(get_solvers_env_path()).replace("\\", "/")
+    jl = _juliacall_main()
+    try:
+        jl.seval("using Pkg")
+        jl.seval(f'Pkg.activate("{env}")')
+        jl.seval(f'Pkg.rm("{pkg}")')
+    except Exception as e:
+        raise RuntimeError(f"Failed to remove solver {key!r} ({pkg}.jl): {e}") from e
+    return pkg
+
+
+def list_installed_optional_solvers() -> list[str]:
+    """ESFEX solver keys currently installed in the dedicated solvers env.
+
+    Reads the env's ``Project.toml`` directly (no Julia startup).
+    """
+    project_toml = get_solvers_env_path() / "Project.toml"
+    installed: list[str] = []
+    try:
+        in_deps = False
+        present: set[str] = set()
+        for raw in project_toml.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("["):
+                in_deps = line == "[deps]"
+                continue
+            if in_deps and "=" in line:
+                present.add(line.split("=", 1)[0].strip())
+        installed = [k for k, pkg in OPTIONAL_SOLVER_PACKAGES.items() if pkg in present]
+    except Exception:
+        pass
+    return installed
 
 
 _included_overlays: set[str] = set()

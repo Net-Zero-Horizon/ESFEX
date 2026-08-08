@@ -792,6 +792,111 @@ def build_demand_dataset(
             raise typer.Exit(code=1)
 
 
+@app.command("add-solver")
+def add_solver(
+    name: str = typer.Argument(
+        ..., help="Solver to install: gurobi, cplex, cbc, scip, xpress",
+    ),
+):
+    """Install an optional/commercial solver into ESFEX's Julia environment.
+
+    Open solvers (HiGHS, GLPK, Ipopt, SCS, Clarabel) ship with ESFEX. Commercial
+    solvers need a per-user licence and a large build, so they are installed on
+    demand into a dedicated environment that is stacked on Julia's load path —
+    surviving ESFEX upgrades and used automatically once installed.
+
+    Gurobi/CPLEX also require the vendor toolkit + licence to be discoverable at
+    build time (e.g. GUROBI_HOME). The install verifies the solver loads, so any
+    licence/build problem is reported here rather than mid-solve.
+    """
+    from esfex.bridge.julia_setup import OPTIONAL_SOLVER_PACKAGES
+    from esfex.bridge.julia_setup import add_solver as _add
+
+    if name.lower() not in OPTIONAL_SOLVER_PACKAGES:
+        console.print(
+            f"[red]Unknown optional solver '{name}'. Installable solvers: "
+            f"{', '.join(sorted(OPTIONAL_SOLVER_PACKAGES))}.[/red]"
+        )
+        raise typer.Exit(code=2)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task(
+            f"Installing {name} into ESFEX's Julia environment "
+            "(may take a few minutes)...", total=None,
+        )
+        try:
+            pkg = _add(name)
+        except Exception as exc:
+            console.print(f"\n[red]Could not install {name}:[/red] {exc}")
+            raise typer.Exit(code=1)
+
+    console.print(
+        f"\n[green]{pkg}.jl installed and verified.[/green] "
+        f"Select '{name.lower()}' as the solver in Studio or your config."
+    )
+
+
+@app.command("remove-solver")
+def remove_solver(
+    name: str = typer.Argument(..., help="Solver to remove: gurobi, cplex, cbc, scip, xpress"),
+):
+    """Remove an optional solver previously added with ``esfex add-solver``."""
+    from esfex.bridge.julia_setup import OPTIONAL_SOLVER_PACKAGES
+    from esfex.bridge.julia_setup import remove_solver as _remove
+
+    if name.lower() not in OPTIONAL_SOLVER_PACKAGES:
+        console.print(
+            f"[red]Unknown optional solver '{name}'. Installable solvers: "
+            f"{', '.join(sorted(OPTIONAL_SOLVER_PACKAGES))}.[/red]"
+        )
+        raise typer.Exit(code=2)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task(f"Removing {name}...", total=None)
+        try:
+            pkg = _remove(name)
+        except Exception as exc:
+            console.print(f"\n[red]Could not remove {name}:[/red] {exc}")
+            raise typer.Exit(code=1)
+
+    console.print(f"\n[green]{pkg}.jl removed.[/green]")
+
+
+@app.command("list-solvers")
+def list_solvers():
+    """Show which optimization solvers are available to ESFEX."""
+    from esfex.bridge.julia_setup import OPTIONAL_SOLVER_PACKAGES
+    from esfex.config.solver import detect_available_solvers
+
+    avail = detect_available_solvers()
+    table = Table(title="ESFEX solvers")
+    table.add_column("Solver")
+    table.add_column("Available")
+    table.add_column("Type")
+    bundled = {"highs", "glpk", "ipopt", "scs", "clarabel"}
+    for key in sorted(avail):
+        kind = ("bundled" if key in bundled
+                else "optional" if key in OPTIONAL_SOLVER_PACKAGES
+                else "conic/nlp")
+        mark = "[green]yes[/green]" if avail[key] else "[dim]no[/dim]"
+        table.add_row(key, mark, kind)
+    console.print(table)
+    missing = [k for k in OPTIONAL_SOLVER_PACKAGES if not avail.get(k)]
+    if missing:
+        console.print(
+            "\nInstall a commercial solver with: "
+            f"[cyan]esfex add-solver {missing[0]}[/cyan]"
+        )
+
+
 def _entrypoint() -> None:
     """CLI entrypoint (registered in pyproject)."""
     app()

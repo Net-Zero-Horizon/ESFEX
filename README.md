@@ -236,17 +236,27 @@ esfex precompile
 ESFEX supports ten solver backends, selectable per run (`--solver`) or in the config: **HiGHS** (default), CBC, GLPK, Gurobi, CPLEX, SCIP, and Xpress for LP/MIP problems; Clarabel and SCS for conic relaxations; and Ipopt for the nonlinear ACOPF formulations.
 
 Only the **open-source** solvers are bundled (HiGHS, GLPK, Clarabel, SCS,
-Ipopt). The **commercial** solvers (Gurobi, CPLEX, Xpress) are *not* installed by
-default — they require a license that is the user's responsibility. They remain
-selectable: install the corresponding Julia package into the ESFEX Julia
-environment and ESFEX loads it on demand, e.g.
+Ipopt). The **commercial / optional** solvers (Gurobi, CPLEX, Xpress, CBC, SCIP)
+are *not* installed by default — they require a license and/or a large build that
+are the user's responsibility. This keeps the default install smaller and free of
+license-locked binaries.
 
-```julia
-# with a valid license/GRB_LICENSE_FILE already configured
-using Pkg; Pkg.activate(joinpath(dirname(pathof(ESFEX)))); Pkg.add("Gurobi")
+They remain fully selectable — install one on demand:
+
+```bash
+# with a valid license already configured (e.g. GUROBI_HOME / GRB_LICENSE_FILE)
+esfex add-solver gurobi        # cbc and scip are free / no license
+esfex list-solvers             # show what's available
+esfex remove-solver gurobi
 ```
 
-This keeps the default install smaller and free of license-locked binaries.
+`add-solver` installs the backing Julia package into a dedicated ESFEX solver
+environment that is **stacked on Julia's load path** — so it loads automatically
+on the next run, **survives ESFEX upgrades**, and always targets the Julia that
+ESFEX actually uses (no "installed into the wrong Julia" pitfalls). The install
+verifies the solver loads, so any license/build problem is reported immediately
+rather than mid-solve. Once installed, the solver appears in the Studio solver
+list and is usable via `--solver <name>`.
 
 ---
 
