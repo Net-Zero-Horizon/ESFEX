@@ -53,6 +53,73 @@ from esfex.io.demand import load_availability_profile
 logger = logging.getLogger(__name__)
 
 
+# Values of a controlling combo (HiGHS "solver_method", Gurobi "method") that
+# mean "let the solver decide" — no specific algorithm is pinned, so no
+# algorithm-specific option should be forced.
+_METHOD_AUTO_SENTINELS = frozenset({"choose", "auto"})
+
+
+def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
+    """Identifiers of solver options to drop because they are method-specific
+    but the controlling combo is on auto/'choose' (or a different method).
+
+    Some options (e.g. HiGHS ``pdlp_scaling``) only apply when an LP-method
+    combo (``solver_method``) is set to a specific algorithm. The GUI collects
+    them under ``solver_method='choose'`` too (their ``enabled_when`` lists
+    ``choose``), so a saved config carries them even when no method is pinned.
+    Forwarding such an option makes the solver reject an inapplicable
+    parameter — on some HiGHS builds ``pdlp_scaling`` raises
+    ``UnsupportedAttribute`` and aborts the *entire* model build. Only forward
+    a method-gated option when its controller is explicitly set to a matching,
+    non-auto method.
+
+    Pure (no Julia) so it can be unit-tested directly.
+    """
+    active = solver_name.lower()
+    drops: set[str] = set()
+    try:
+        from esfex.config.solver import SOLVER_OPTIONS
+    except Exception:
+        return drops
+
+    catalog = SOLVER_OPTIONS.get(active, [])
+    # key ↔ attr map and each controlling combo's default, for this solver.
+    key_to_attr: dict[str, str] = {}
+    ctrl_default: dict[str, str] = {}
+    for opt in catalog:
+        key, attr = opt.get("key"), opt.get("attr", opt.get("key"))
+        if key and attr and key != attr:
+            key_to_attr[key] = attr
+        if key:
+            ctrl_default[key] = str(opt.get("default", "choose"))
+
+    def _active_ctrl(ctrl_key: str) -> str:
+        ctrl_attr = key_to_attr.get(ctrl_key, ctrl_key)
+        for kk in (ctrl_key, ctrl_attr):
+            if kk in options and options[kk] is not None:
+                return str(options[kk])
+        return ctrl_default.get(ctrl_key, "choose")
+
+    for opt in catalog:
+        gate = opt.get("enabled_when")
+        if not gate:
+            continue
+        applies = True
+        for ctrl_key, allowed in gate.items():
+            allowed_set = {str(a) for a in allowed}
+            active_val = _active_ctrl(ctrl_key)
+            if active_val in _METHOD_AUTO_SENTINELS or active_val not in allowed_set:
+                applies = False
+                break
+        if not applies:
+            idents = [i for i in (opt.get("attr"), opt.get("key")) if i]
+            # Only mark for dropping if the option is actually present in the
+            # supplied config, so the result is exactly "what to strip here".
+            if any(i in options for i in idents):
+                drops.update(idents)
+    return drops
+
+
 def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
     """Convert Python solver options dict to Julia Dict{String, Any}.
 
@@ -106,11 +173,24 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
     except Exception:
         pass
 
+    # Method-specific options whose controlling combo is on auto/'choose' (or a
+    # different method) must not be forwarded — see _method_gated_drops.
+    method_drops = _method_gated_drops(options, active)
+
     jl_dict = jl.seval("Dict{String, Any}()")
     for k, v in options.items():
         key_str = str(k)
         # Remap legacy GUI key → real solver attribute
         attr_str = key_to_attr.get(key_str, key_str)
+        # Drop method-inapplicable options (e.g. PDLP flags while LP method is
+        # left on "choose") before they reach — and are rejected by — the solver.
+        if key_str in method_drops or attr_str in method_drops:
+            logger.warning(
+                "Dropping solver option %r: it only applies to a specific "
+                "LP/QP method that is not currently selected.",
+                key_str,
+            )
+            continue
         # Drop options whose attr belongs exclusively to a different solver.
         # Unknown attrs (not in any solver catalog) pass through — they may be
         # valid solver parameters that simply aren't surfaced in the GUI.

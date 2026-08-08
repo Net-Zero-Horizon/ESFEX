@@ -900,3 +900,58 @@ class TestComputeGeographicFuelAdjustments:
         )
         result = _compute_geographic_fuel_adjustments(cfg)
         assert result["gen0"][0] == pytest.approx(expected, rel=1e-6)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _method_gated_drops — method-specific solver options must not be sent
+# while the controlling LP/QP method is on auto/"choose"
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestMethodGatedDrops:
+    """A HiGHS config that carries PDLP options while the LP method is left on
+    'choose' must not forward them — some HiGHS builds reject `pdlp_scaling`
+    with UnsupportedAttribute and abort the entire model build (the real
+    Hokkaido failure)."""
+
+    def test_choose_drops_all_method_specific(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        opts = {"solver_method": "choose", "pdlp_scaling": True,
+                "simplex_strategy": 1, "presolve": "on"}
+        drops = _method_gated_drops(opts, "highs")
+        assert "pdlp_scaling" in drops
+        assert "simplex_strategy" in drops
+        assert "presolve" not in drops  # ungated option is kept
+
+    def test_pdlp_method_keeps_pdlp_options(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        opts = {"solver_method": "pdlp", "pdlp_scaling": True,
+                "simplex_strategy": 1}
+        drops = _method_gated_drops(opts, "highs")
+        assert "pdlp_scaling" not in drops
+        assert "simplex_strategy" in drops  # simplex-only, wrong method
+
+    def test_simplex_method_keeps_simplex_options(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        opts = {"solver_method": "simplex", "pdlp_scaling": True,
+                "simplex_strategy": 1}
+        drops = _method_gated_drops(opts, "highs")
+        assert "pdlp_scaling" in drops
+        assert "simplex_strategy" not in drops
+
+    def test_missing_method_defaults_to_choose(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        drops = _method_gated_drops({"pdlp_scaling": True}, "highs")
+        assert "pdlp_scaling" in drops
+
+    def test_controller_under_solver_attr(self):
+        # Controller may be stored under its solver attr ("solver") rather than
+        # the GUI key ("solver_method").
+        from esfex.bridge.adapters import _method_gated_drops
+        drops = _method_gated_drops({"solver": "pdlp", "pdlp_scaling": True},
+                                    "highs")
+        assert "pdlp_scaling" not in drops
+
+    def test_empty_options_no_drops(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        assert _method_gated_drops({}, "highs") == set()
