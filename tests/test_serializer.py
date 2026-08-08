@@ -1071,6 +1071,33 @@ class TestConfigToGlobalSettings:
         assert gs.solver_name == "highs"
         assert gs.solver_gap == pytest.approx(0.01)
 
+    # Deterministic availability regardless of the ambient (cached) solver
+    # detection or this machine's Julia env — solver detection is memoised in a
+    # module global, so other tests can leave it populated.
+    _AVAIL = {"highs": True, "glpk": True, "ipopt": True, "scs": True,
+              "clarabel": True, "gurobi": False, "cplex": False, "cbc": False,
+              "scip": False, "xpress": False}
+
+    @patch("esfex.config.solver.detect_available_solvers")
+    def test_unavailable_solver_coerced_to_bundled(self, mock_avail):
+        """A config naming a solver absent from this Julia environment (e.g. a
+        project saved elsewhere with Gurobi) is coerced to a usable one on
+        load, so the run does not fail mid-solve with '…is not installed'."""
+        mock_avail.return_value = dict(self._AVAIL)
+        config = _make_esfex_config()
+        config.solver.name = "gurobi"  # not available in this Julia env
+        gs = config_to_global_settings(config)
+        assert gs.solver_name == "highs"
+
+    @patch("esfex.config.solver.detect_available_solvers")
+    def test_available_solver_preserved(self, mock_avail):
+        """A bundled solver (e.g. Ipopt) is kept as-is — no spurious coercion."""
+        mock_avail.return_value = dict(self._AVAIL)
+        config = _make_esfex_config()
+        config.solver.name = "ipopt"
+        gs = config_to_global_settings(config)
+        assert gs.solver_name == "ipopt"
+
     def test_temporal_defaults(self):
         config = _make_esfex_config()
         gs = config_to_global_settings(config)

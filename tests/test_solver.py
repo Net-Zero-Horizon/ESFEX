@@ -233,25 +233,48 @@ class TestDetectAvailableSolvers:
         result = detect_available_solvers()
         assert result["glpk"] is True
 
-    @patch("esfex.config.solver._can_import", return_value=True)
-    def test_all_available_when_imports_succeed(self, mock_import):
-        """When all imports succeed, all solvers are available."""
+    @patch("esfex.config.solver._solvers_env_deps", return_value=set())
+    @patch("esfex.config.solver._julia_project_deps")
+    def test_all_available_when_in_julia_deps(self, mock_deps, _mock_env):
+        """A solver is available iff its Julia package is a Project.toml dep."""
+        from esfex.config.solver import _SOLVER_JULIA_PKG
+        mock_deps.return_value = set(_SOLVER_JULIA_PKG.values())
         result = detect_available_solvers()
         for solver, avail in result.items():
             assert avail is True, f"{solver} should be available"
 
-    @patch("esfex.config.solver._can_import", return_value=False)
-    def test_only_bundled_when_imports_fail(self, mock_import):
-        """When all imports fail, only HiGHS and GLPK are available."""
+    @patch("esfex.config.solver._solvers_env_deps", return_value=set())
+    @patch("esfex.config.solver._julia_project_deps")
+    def test_only_bundled_when_project_unreadable(self, mock_deps, _mock_env):
+        """When Project.toml can't be read, only the bundled solvers show."""
+        mock_deps.return_value = set()
         result = detect_available_solvers()
-        assert result["highs"] is True
-        assert result["glpk"] is True
-        assert result["gurobi"] is False
+        for s in ("highs", "glpk", "ipopt", "scs", "clarabel"):
+            assert result[s] is True, f"{s} should be bundled-available"
+        for s in ("gurobi", "cplex", "scip", "xpress", "cbc"):
+            assert result[s] is False, f"{s} should be unavailable"
+
+    @patch("esfex.config.solver._solvers_env_deps", return_value=set())
+    def test_commercial_solvers_unavailable_by_default(self, _mock_env):
+        """Gurobi/CPLEX/CBC/SCIP/Xpress are not in ESFEX's Julia deps and no
+        optional-solvers env is present, so the real environment must not offer
+        them — checking the Python companion package (gurobipy, …) is unrelated
+        to the Julia solver that runs."""
+        result = detect_available_solvers()
+        for s in ("gurobi", "cplex", "cbc", "scip", "xpress"):
+            assert result[s] is False, f"{s} must not be offered by default"
+        for s in ("highs", "glpk", "ipopt", "scs", "clarabel"):
+            assert result[s] is True, f"{s} is bundled and must be available"
+
+    @patch("esfex.config.solver._solvers_env_deps", return_value={"Gurobi"})
+    def test_optional_solver_env_makes_it_available(self, _mock_env):
+        """A commercial solver installed into ESFEX's optional-solvers env
+        (stacked on LOAD_PATH) is reported available even though it is not in
+        the shipped Project.toml — this is the `esfex add-solver` path."""
+        result = detect_available_solvers()
+        assert result["gurobi"] is True
+        # Others still reflect only what's actually present.
         assert result["cplex"] is False
-        assert result["scip"] is False
-        assert result["xpress"] is False
-        # cbc depends on cylp OR coinor, both fail
-        assert result["cbc"] is False
 
     def test_caching_returns_same_result(self):
         """Second call returns cached result without re-importing."""

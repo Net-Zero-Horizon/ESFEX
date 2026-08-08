@@ -405,45 +405,112 @@ FORMULATION_SOLVERS: dict[str, set[str]] = {
 _solver_cache: dict[str, bool] | None = None
 
 
+# Map each ESFEX solver key to the Julia package that backs it. A solver is
+# usable iff that package is a dependency of ESFEX's Julia environment — i.e.
+# it appears in ``src/esfex/julia/Project.toml`` ``[deps]``. That is exactly
+# what ``@eval import <Pkg>`` resolves against at solve time, so it is the
+# correct source of truth for availability.
+_SOLVER_JULIA_PKG: dict[str, str] = {
+    "highs": "HiGHS",
+    "glpk": "GLPK",
+    "gurobi": "Gurobi",
+    "cplex": "CPLEX",
+    "cbc": "Cbc",
+    "scip": "SCIP",
+    "xpress": "Xpress",
+    "ipopt": "Ipopt",
+    "clarabel": "Clarabel",
+    "scs": "SCS",
+}
+
+# Solvers guaranteed to ship in ESFEX's Julia Project.toml. Used only as a
+# defensive fallback when the Project.toml cannot be read.
+_BUNDLED_SOLVERS = ("highs", "glpk", "ipopt", "scs", "clarabel")
+
+
+def _parse_project_deps(project_toml) -> set[str]:
+    """Package names in a Julia ``Project.toml`` ``[deps]`` table.
+
+    Parsed by hand (no ``tomllib``) so it works on Python 3.10 without an
+    extra dependency. Returns an empty set if the file cannot be read.
+    """
+    try:
+        deps: set[str] = set()
+        in_deps = False
+        for raw in project_toml.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("["):
+                in_deps = line == "[deps]"
+                continue
+            if in_deps and "=" in line:
+                deps.add(line.split("=", 1)[0].strip())
+        return deps
+    except Exception:
+        return set()
+
+
+def _julia_project_deps() -> set[str]:
+    """Package names in ESFEX's shipped Julia ``Project.toml`` ``[deps]``."""
+    try:
+        from esfex.bridge.julia_setup import get_julia_path
+
+        return _parse_project_deps(get_julia_path() / "Project.toml")
+    except Exception:
+        return set()
+
+
+def _solvers_env_deps() -> set[str]:
+    """Package names in ESFEX's dedicated optional-solvers environment.
+
+    This environment is stacked on ``LOAD_PATH`` at Julia init, so anything a
+    user installs there via ``esfex add-solver`` (Gurobi, CPLEX, …) is
+    import-able — and therefore genuinely available — even though it is not in
+    the shipped project. Empty set when the environment does not exist yet.
+    """
+    try:
+        from esfex.bridge.julia_setup import get_solvers_env_path
+
+        return _parse_project_deps(get_solvers_env_path() / "Project.toml")
+    except Exception:
+        return set()
+
+
 def detect_available_solvers() -> dict[str, bool]:
     """Return ``{solver_name: is_available}`` for all known solvers.
 
-    Uses lightweight Python-side checks (importability of companion
-    packages) so the GUI can populate the combo without starting Julia.
-    HiGHS and GLPK are always available (bundled with Julia).
-    Results are cached for the session.
+    Availability reflects ESFEX's *Julia* environment — the backend that
+    actually runs the solve. A solver is available iff the Julia package
+    backing it is import-able, i.e. declared either in the shipped
+    ``src/esfex/julia/Project.toml`` (bundled open solvers) or in ESFEX's
+    dedicated optional-solvers environment (commercial solvers a user added
+    via ``esfex add-solver``, stacked on ``LOAD_PATH``). No Julia process is
+    started (the Project.toml files are parsed directly), so this stays cheap
+    enough to call while populating the GUI solver combo. Results are cached
+    for the session.
+
+    Note: this deliberately does *not* probe Python companion packages
+    (``gurobipy``, ``cplex``, …). Those are unrelated to the Julia solver
+    ESFEX loads, and checking them made the GUI offer commercial solvers
+    that the backend cannot import — a mid-run ``…is not installed`` failure.
     """
     global _solver_cache
     if _solver_cache is not None:
         return dict(_solver_cache)
 
-    result: dict[str, bool] = {
-        "highs": True,   # HiGHS.jl always present in Project.toml
-        "glpk": True,    # GLPK.jl always present
-    }
-
-    # Gurobi – check for Python gurobipy (almost always installed alongside)
-    result["gurobi"] = _can_import("gurobipy")
-
-    # CPLEX – check for Python cplex
-    result["cplex"] = _can_import("cplex")
-
-    # CBC – check for Python cylp or coinor
-    result["cbc"] = _can_import("cylp") or _can_import("coinor")
-
-    # SCIP – check for Python pyscipopt
-    result["scip"] = _can_import("pyscipopt")
-
-    # Xpress – check for Python xpress
-    result["xpress"] = _can_import("xpress")
-
-    # Ipopt / SCS / Clarabel — bundled Julia packages (declared in the Julia
-    # Project.toml), so always available like HiGHS/GLPK. Required for the
-    # AC-OPF formulations: Ipopt for the exact NLP modes (acopf_polar/rect),
-    # SCS & Clarabel for the SDP relaxation (acopf_sdp) and conic SOCP/QC.
-    result["ipopt"] = True
-    result["scs"] = True
-    result["clarabel"] = True
+    project_deps = _julia_project_deps()
+    env_deps = _solvers_env_deps()
+    all_deps = project_deps | env_deps
+    if project_deps:
+        result = {key: (pkg in all_deps) for key, pkg in _SOLVER_JULIA_PKG.items()}
+    else:
+        # Shipped Project.toml unreadable: assume the always-bundled set, plus
+        # whatever the user installed into the optional-solvers environment.
+        result = {
+            key: (key in _BUNDLED_SOLVERS or pkg in env_deps)
+            for key, pkg in _SOLVER_JULIA_PKG.items()
+        }
 
     _solver_cache = result
     return dict(result)

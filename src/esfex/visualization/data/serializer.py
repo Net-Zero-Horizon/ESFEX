@@ -2115,6 +2115,27 @@ def config_to_global_settings(
     if hasattr(config, 'solver') and config.solver:
         sv = config.solver
         g.solver_name = getattr(sv, 'name', 'highs')
+        # A project may name a solver that is not installed in *this* machine's
+        # Julia environment (e.g. a config saved elsewhere with Gurobi). Left
+        # as-is, the run would fail mid-solve with "…is not installed" and
+        # export an empty result. Coerce to a usable solver so the project
+        # opens and runs; the user can re-pick if they add the solver later.
+        try:
+            import logging
+
+            from esfex.config.solver import detect_available_solvers
+            _avail = detect_available_solvers()
+            if not _avail.get(g.solver_name.lower(), False):
+                _fallback = "highs" if _avail.get("highs") else next(
+                    (k for k, ok in _avail.items() if ok), "highs")
+                logging.getLogger(__name__).warning(
+                    "Configured solver %r is not available in this Julia "
+                    "environment; falling back to %r.",
+                    g.solver_name, _fallback,
+                )
+                g.solver_name = _fallback
+        except Exception:
+            pass
         g.solver_threads = getattr(sv, 'threads', 4)
         g.solver_time_limit = getattr(sv, 'time_limit', 10800)
         g.solver_gap = getattr(sv, 'gap', 0.01)
