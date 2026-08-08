@@ -49,3 +49,39 @@ class TestQuadKeyToBbox:
         pw, ps, pe, pn = parent
         cw, cs, ce, cn = child
         assert (ce - cw) < (pe - pw) and (cn - cs) < (pn - ps)
+
+
+class TestGoogleFallback:
+    """Google Open Buildings (source.coop over plain HTTPS) cannot be globbed by
+    DuckDB and is frequently unavailable. Selecting it must transparently fall
+    back to Overture rather than failing the whole demand-distribution step."""
+
+    def test_google_failure_falls_back_to_overture(self):
+        from unittest.mock import patch
+
+        f = BuildingFetcher("google", (43.0, 141.0, 43.5, 141.5))
+        out = {}
+        f.finished.connect(lambda g: out.setdefault("gdf", g))
+        f.error.connect(lambda m: out.setdefault("err", m))
+        with patch.object(f, "_fetch_google",
+                          side_effect=RuntimeError("source.coop 404")), \
+                patch.object(f, "_fetch_overture",
+                             return_value="OVERTURE") as mock_ov:
+            f.run()
+        assert mock_ov.called
+        assert out.get("gdf") == "OVERTURE"
+        assert "err" not in out
+
+    def test_overture_source_does_not_fall_back(self):
+        # A non-google source that fails surfaces its error (no silent switch).
+        from unittest.mock import patch
+
+        f = BuildingFetcher("overture", (43.0, 141.0, 43.5, 141.5))
+        out = {}
+        f.finished.connect(lambda g: out.setdefault("gdf", g))
+        f.error.connect(lambda m: out.setdefault("err", m))
+        with patch.object(f, "_fetch_overture",
+                          side_effect=RuntimeError("boom")):
+            f.run()
+        assert "gdf" not in out
+        assert "boom" in out.get("err", "")

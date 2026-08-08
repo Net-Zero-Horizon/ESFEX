@@ -4860,6 +4860,8 @@ class GridMappingDemandStep(QWidget):
                     "electricity_access": "EG.ELC.ACCS.ZS",
                     "electric_consumption_kwh_capita": "EG.USE.ELEC.KH.PC",
                 }
+                import time as _time
+
                 headers = {"User-Agent": "ESFEX-Grid/1.0"}
                 wb = {}
                 for key, code in wb_indicators.items():
@@ -4868,22 +4870,32 @@ class GridMappingDemandStep(QWidget):
                         f"/indicator/{code}"
                         f"?format=json&per_page=10&date=2015:2025"
                     )
-                    try:
-                        resp = requests.get(url, headers=headers, timeout=15)
-                        payload = resp.json()
-                        if isinstance(payload, list) and len(payload) >= 2 and payload[1]:
-                            for entry in payload[1]:
-                                if entry.get("value") is not None:
-                                    wb[key] = entry["value"]
-                                    break
-                    except Exception as exc:
-                        # Don't swallow silently: the UI later reads wb.get(k, 0)
-                        # and would render "GDP=$0" as if it were real data.
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "WorldBank fetch failed for %s (indicator %s): %s",
-                            key, code, exc,
-                        )
+                    # The World Bank API is often slow to respond; a single 15 s
+                    # attempt timed out routinely. Give it a longer budget and a
+                    # couple of retries with backoff before giving up.
+                    for attempt in range(3):
+                        try:
+                            resp = requests.get(url, headers=headers, timeout=30)
+                            payload = resp.json()
+                            if (isinstance(payload, list) and len(payload) >= 2
+                                    and payload[1]):
+                                for entry in payload[1]:
+                                    if entry.get("value") is not None:
+                                        wb[key] = entry["value"]
+                                        break
+                            break  # got a valid (possibly empty) response
+                        except Exception as exc:
+                            if attempt < 2:
+                                _time.sleep(2 * (attempt + 1))
+                                continue
+                            # Don't swallow silently: the UI later reads
+                            # wb.get(k, 0) and would render "GDP=$0" as if it
+                            # were real data.
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                "WorldBank fetch failed for %s (indicator %s) "
+                                "after 3 attempts: %s", key, code, exc,
+                            )
 
                 self._wb_data = wb
                 self._ui_call.emit(lambda wb=wb: (

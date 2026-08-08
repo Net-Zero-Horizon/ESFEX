@@ -57,7 +57,23 @@ class BuildingFetcher(QThread):
             elif self.source == "microsoft":
                 gdf = self._fetch_microsoft()
             elif self.source == "google":
-                gdf = self._fetch_google()
+                try:
+                    gdf = self._fetch_google()
+                except Exception as exc:
+                    # Google Open Buildings is served on source.coop over plain
+                    # HTTPS, whose partitioned layout DuckDB cannot glob, so it
+                    # is frequently unavailable. Rather than fail the whole step,
+                    # fall back to Overture (hosted on S3, reliably globbable),
+                    # which carries the same Google/Microsoft footprints.
+                    if self._cancelled:
+                        return
+                    logger.warning(
+                        "Google Open Buildings unavailable (%s); "
+                        "falling back to Overture Maps", exc,
+                    )
+                    self.progress.emit(
+                        15, "Google unavailable — falling back to Overture Maps…")
+                    gdf = self._fetch_overture()
             else:
                 self.error.emit(f"Unknown source: {self.source}")
                 return
