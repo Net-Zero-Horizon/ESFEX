@@ -1104,10 +1104,15 @@ class TestOSMFetcherTiling:
         f = self._fetcher((0.0, 0.0, 1.0, 1.0))
         f.element_types = {"line", "substation"}
         q = f._build_query("0,0,1,1")
-        assert "[out:json][timeout:180]" in q
+        assert "[out:json][timeout:" in q
         assert '"power"="line"' in q
         assert '"power"="substation"' in q
         assert "(0,0,1,1)" in q
+        # Point features use out center (centroid only); lines use out geom
+        # (full trace). The blanket >; recursion is gone.
+        assert "out center" in q
+        assert "out geom" in q
+        assert ">;" not in q
 
     def test_post_query_runtime_error_is_not_silent_success(self):
         f = self._fetcher((0.0, 0.0, 1.0, 1.0))
@@ -1167,6 +1172,47 @@ class TestOSMFetcherTiling:
 
         out = f._post_query(_FakeApi(), {}, "q", _FakeTime(), _FakeRequests())
         assert out is sentinel
+
+
+class TestOSMFetcherOutputParsing:
+    """The query trades the blanket ``>;`` recursion for ``out center`` on
+    point features and ``out geom`` on lines, so _process_way must read
+    coordinates from center/geometry rather than resolved way.nodes."""
+
+    def _fetcher(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            OSMGridFetcher,
+        )
+        f = OSMGridFetcher((0.0, 0.0, 1.0, 1.0))
+        f.min_voltage_kv = 0.0
+        f.min_capacity_mw = 0.0
+        return f
+
+    def test_point_way_uses_centroid_from_out_center(self):
+        overpy = pytest.importorskip("overpy")
+        f = self._fetcher()
+        r = overpy.Overpass().parse_json(
+            '{"version":0.6,"elements":[{"type":"way","id":1,'
+            '"center":{"lat":43.1,"lon":141.2},'
+            '"tags":{"power":"substation","voltage":"220000"}}]}')
+        feat = f._process_way(r.ways[0])
+        assert feat is not None
+        assert feat.feature_type == "substation"
+        assert (feat.latitude, feat.longitude) == (43.1, 141.2)
+        assert not feat.line_coords  # a point, no trace
+
+    def test_line_way_uses_full_geometry_from_out_geom(self):
+        overpy = pytest.importorskip("overpy")
+        f = self._fetcher()
+        r = overpy.Overpass().parse_json(
+            '{"version":0.6,"elements":[{"type":"way","id":2,'
+            '"geometry":[{"lat":43.0,"lon":141.0},{"lat":43.5,"lon":141.5},'
+            '{"lat":44.0,"lon":142.0}],'
+            '"tags":{"power":"line","voltage":"275000"}}]}')
+        feat = f._process_way(r.ways[0])
+        assert feat is not None
+        assert feat.feature_type == "line"
+        assert feat.line_coords == [(43.0, 141.0), (43.5, 141.5), (44.0, 142.0)]
 
 
 class TestOSMFetcher400Handling:
@@ -1463,20 +1509,24 @@ class TestOSMFetcherResilience:
     class _EmptyResult:
         nodes: list = []
         ways: list = []
+        relations: list = []
 
     def test_one_failed_tile_is_retried_and_recovers(self, monkeypatch):
         # A tile that fails only on the first attempt (transient load spike) is
         # re-queried in the retry pass — subdivided — and recovers, so the
         # fetch reports zero permanently-failed tiles.
+        import threading
         import time as _t
         monkeypatch.setattr(_t, "sleep", lambda *a, **k: None)
         f = self._fetcher()
         n = len(f._tile_bboxes())
         calls = {"i": 0}
+        lock = threading.Lock()  # tiles are now fetched concurrently
 
-        def fake_post(api, headers, query, time, requests):
-            i = calls["i"]
-            calls["i"] += 1
+        def fake_post(api, headers, query, time, requests, mirror_offset=0):
+            with lock:
+                i = calls["i"]
+                calls["i"] += 1
             if i == 0:
                 raise RuntimeError("Overpass busy (504)")
             return self._EmptyResult()

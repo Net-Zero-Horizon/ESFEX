@@ -996,90 +996,122 @@ class OSMGridFetcher(QThread):
         # ``total_est`` grows as tiles subdivide so the progress bar keeps a
         # sensible denominator. Returns the tiles that failed this pass, or
         # None if the fetch was cancelled.
-        def _run_queue(queue):
-            nonlocal done, subdivided, last_tile_error, total_est
-            pass_failed: list[tuple[float, float, float, float]] = []
-            first = not features  # only skip the very first pause of the fetch
-            while queue:
-                if self._cancelled:
-                    return None
-                ts, tw, tn, te = queue.pop(0)
-                query = self._build_query(f"{ts},{tw},{tn},{te}")
-                base = 15 + int(70 * done / max(total_est, 1))
-                label = (
-                    f"Querying Overpass tile {done + 1}/{total_est}..."
-                    if total_est > 1
-                    else "Querying Overpass API (this may take a while)..."
+        def _merge_result(result):
+            """Merge one tile's parsed elements into ``features``, de-duped by
+            osm_id. Called only from the main thread — no lock needed. A way
+            straddling a tile boundary comes back from every tile holding it;
+            the first copy wins."""
+            for node in result.nodes:
+                feat = self._process_element(
+                    tags=node.tags,
+                    lat=float(node.lat), lng=float(node.lon),
+                    osm_id=f"node/{node.id}",
                 )
-                self.progress.emit(min(base, 85), label)
-                # Be a polite API citizen between tiles: a short pause avoids
-                # bursting the server, which is what triggers the dispatcher
-                # timeouts in the first place.
-                if not first:
-                    time.sleep(1.0)
-                first = False
-                try:
-                    result = self._post_query(
-                        api, headers, query, time, requests)
-                except _OverpassTileTooDense as exc:
-                    # Too much data for one query. Split into quadrants and
-                    # retry each, unless already at the resolution floor — then
-                    # it is genuinely pathological and gets deferred to the
-                    # retry pass rather than looping forever.
-                    if max(tn - ts, te - tw) > self._MIN_TILE_DEG * 1.5:
-                        queue.extend(_quadrants(ts, tw, tn, te))
-                        total_est += 4
-                        subdivided += 1
-                        logger.info(
-                            "OSM tile %.2f,%.2f,%.2f,%.2f too dense; "
-                            "subdividing into 4 (%s)", ts, tw, tn, te, exc,
-                        )
-                        continue
-                    pass_failed.append((ts, tw, tn, te))
-                    last_tile_error = exc
-                    done += 1
-                    logger.warning(
-                        "OSM tile %.2f,%.2f,%.2f,%.2f still times out at the "
-                        "resolution floor: %s", ts, tw, tn, te, exc,
-                    )
+                if feat and feat.osm_id not in seen_ids:
+                    seen_ids.add(feat.osm_id)
+                    features.append(feat)
+            for way in result.ways:
+                feat = self._process_way(way)
+                if feat and feat.osm_id not in seen_ids:
+                    seen_ids.add(feat.osm_id)
+                    features.append(feat)
+            # Multipolygon substations / plants come back as relations with a
+            # centroid (``out center``); process them as point features.
+            for rel in getattr(result, "relations", []) or []:
+                clat = getattr(rel, "center_lat", None)
+                clon = getattr(rel, "center_lon", None)
+                if clat is None or clon is None:
                     continue
-                except RuntimeError as exc:
-                    # A transient failure (dispatcher/mirror) that survived all
-                    # retries: defer to the retry pass, keep the rest.
-                    pass_failed.append((ts, tw, tn, te))
-                    last_tile_error = exc
-                    done += 1
-                    logger.warning(
-                        "OSM tile %.2f,%.2f,%.2f,%.2f failed: %s",
-                        ts, tw, tn, te, exc,
-                    )
-                    continue
-                if result is None or self._cancelled:
-                    return None
-                done += 1
+                feat = self._process_element(
+                    tags=rel.tags,
+                    lat=float(clat), lng=float(clon),
+                    osm_id=f"relation/{rel.id}",
+                )
+                if feat and feat.osm_id not in seen_ids:
+                    seen_ids.add(feat.osm_id)
+                    features.append(feat)
 
-                # --- Merge this tile's elements, de-duplicating across tiles.
-                # A way straddling a boundary is returned in full by every tile
-                # holding one of its nodes; keep the first copy by osm_id.
-                for node in result.nodes:
-                    if self._cancelled:
-                        return None
-                    feat = self._process_element(
-                        tags=node.tags,
-                        lat=float(node.lat),
-                        lng=float(node.lon),
-                        osm_id=f"node/{node.id}",
-                    )
-                    if feat and feat.osm_id not in seen_ids:
-                        seen_ids.add(feat.osm_id)
-                        features.append(feat)
-                for way in result.ways:
-                    if self._cancelled:
-                        return None
-                    feat = self._process_way(way)
-                    if feat and feat.osm_id not in seen_ids:
-                        seen_ids.add(feat.osm_id)
-                        features.append(feat)
+        def _fetch_one(tile, mirror_offset):
+            """Worker: query one tile on a chosen mirror. Never raises — returns
+            ``(kind, payload)`` where kind is ok/dense/failed/cancelled."""
+            ts, tw, tn, te = tile
+            query = self._build_query(f"{ts},{tw},{tn},{te}")
+            try:
+                result = self._post_query(
+                    api, headers, query, time, requests, mirror_offset)
+            except _OverpassTileTooDense as exc:
+                return ("dense", exc)
+            except RuntimeError as exc:
+                return ("failed", exc)
+            if result is None:
+                return ("cancelled", None)
+            return ("ok", result)
+
+        def _run_queue(queue):
+            # Fetch tiles concurrently, spreading them across the Overpass
+            # mirrors (one worker per endpoint) so a whole region isn't fetched
+            # one blocking request at a time. Density subdivisions collected in
+            # a wave are processed in the next wave. Merging stays on this
+            # thread, so ``features``/``seen_ids`` need no lock.
+            nonlocal done, subdivided, last_tile_error, total_est
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            n_workers = min(len(self._OVERPASS_ENDPOINTS), 4)
+            pass_failed: list[tuple[float, float, float, float]] = []
+            while queue and not self._cancelled:
+                wave, queue = queue, []
+                with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                    futs = {
+                        ex.submit(_fetch_one, tile, i % n_workers): tile
+                        for i, tile in enumerate(wave)
+                    }
+                    for fut in as_completed(futs):
+                        if self._cancelled:
+                            break
+                        tile = futs[fut]
+                        ts, tw, tn, te = tile
+                        kind, payload = fut.result()
+                        done += 1
+                        base = 15 + int(70 * done / max(total_est, 1))
+                        self.progress.emit(
+                            min(base, 85),
+                            f"Querying Overpass tile {done}/{total_est}..."
+                            if total_est > 1
+                            else "Querying Overpass API (this may take a while)...",
+                        )
+                        if kind == "ok":
+                            _merge_result(payload)
+                        elif kind == "dense":
+                            # Too much data for one query: split into quadrants
+                            # for the next wave, unless already at the floor.
+                            if max(tn - ts, te - tw) > self._MIN_TILE_DEG * 1.5:
+                                queue.extend(_quadrants(ts, tw, tn, te))
+                                total_est += 4
+                                subdivided += 1
+                                logger.info(
+                                    "OSM tile %.2f,%.2f,%.2f,%.2f too dense; "
+                                    "subdividing into 4 (%s)",
+                                    ts, tw, tn, te, payload,
+                                )
+                            else:
+                                pass_failed.append(tile)
+                                last_tile_error = payload
+                                logger.warning(
+                                    "OSM tile %.2f,%.2f,%.2f,%.2f still times "
+                                    "out at the resolution floor: %s",
+                                    ts, tw, tn, te, payload,
+                                )
+                        elif kind == "failed":
+                            pass_failed.append(tile)
+                            last_tile_error = payload
+                            logger.warning(
+                                "OSM tile %.2f,%.2f,%.2f,%.2f failed: %s",
+                                ts, tw, tn, te, payload,
+                            )
+                        elif kind == "cancelled":
+                            self._cancelled = True
+                            break
+            if self._cancelled:
+                return None
             return pass_failed
 
         failed = _run_queue(list(tiles))
@@ -1204,91 +1236,105 @@ class OSMGridFetcher(QThread):
         return tiles
 
     def _build_query(self, bbox: str) -> str:
-        """Assemble the Overpass QL query for one bbox tile."""
-        parts: list[str] = []
+        """Assemble the Overpass QL query for one bbox tile.
+
+        Only what the builder actually consumes is requested. Point-like
+        elements (substations, generators, transformers, …) are used by their
+        centroid alone, so they are emitted with ``out center`` — no member
+        nodes are fetched. Only power lines/cables (and, for fuel routing,
+        major roads) need their full vertex geometry, emitted with
+        ``out geom``. This drops the blanket ``>; out skel qt;`` recursion,
+        which used to pull every polygon vertex of every substation just to
+        average it back into a point — the dominant per-tile cost.
+        """
+        # Point-like features: centroid is all the builder uses.
+        pt: list[str] = []
+        # Linear features: full geometry is needed (line traces / road routing).
+        ln: list[str] = []
+
         if "substation" in self.element_types:
-            parts += [
+            pt += [
                 f'node["power"="substation"]({bbox});',
                 f'way["power"="substation"]({bbox});',
                 f'relation["power"="substation"]({bbox});',
             ]
         if "generator" in self.element_types:
-            parts += [
+            pt += [
                 f'node["power"="generator"]({bbox});',
                 f'way["power"="generator"]({bbox});',
                 f'node["power"="plant"]({bbox});',
                 f'way["power"="plant"]({bbox});',
+                f'relation["power"="plant"]({bbox});',
             ]
         if "line" in self.element_types:
-            parts += [
+            ln += [
                 f'way["power"="line"]({bbox});',
                 f'way["power"="cable"]({bbox});',
             ]
         if "transformer" in self.element_types:
-            parts += [
+            pt += [
                 f'node["power"="transformer"]({bbox});',
                 f'way["power"="transformer"]({bbox});',
             ]
         if "converter" in self.element_types:
-            parts += [
+            pt += [
                 f'node["power"="converter"]({bbox});',
                 f'way["power"="converter"]({bbox});',
             ]
         if "storage" in self.element_types:
-            parts += [
+            pt += [
                 f'node["power"="storage"]({bbox});',
                 f'way["power"="storage"]({bbox});',
             ]
         if "fuel_entry" in self.element_types:
-            parts += [
-                f'way["industrial"="refinery"]({bbox});',
-                f'node["industrial"="refinery"]({bbox});',
-                f'way["industrial"="fuel_depot"]({bbox});',
-                f'node["industrial"="fuel_depot"]({bbox});',
-                f'way["industrial"="petroleum_terminal"]({bbox});',
-                f'node["industrial"="petroleum_terminal"]({bbox});',
-                f'way["industrial"="oil"]({bbox});',
-                f'node["industrial"="oil"]({bbox});',
-                f'way["man_made"="oil_terminal"]({bbox});',
-                f'node["man_made"="oil_terminal"]({bbox});',
-                f'way["landuse"="port"]["cargo"~"oil|fuel|lpg|lng|liquid_bulk|petroleum"]({bbox});',
-                f'node["landuse"="port"]["cargo"~"oil|fuel|lpg|lng|liquid_bulk|petroleum"]({bbox});',
-                f'way["harbour"="yes"]["cargo"~"oil|fuel|lpg|lng|liquid_bulk|petroleum"]({bbox});',
-                f'node["harbour"="yes"]["cargo"~"oil|fuel|lpg|lng|liquid_bulk|petroleum"]({bbox});',
+            pt += [
+                f'nwr["industrial"="refinery"]({bbox});',
+                f'nwr["industrial"="fuel_depot"]({bbox});',
+                f'nwr["industrial"="petroleum_terminal"]({bbox});',
+                f'nwr["industrial"="oil"]({bbox});',
+                f'nwr["man_made"="oil_terminal"]({bbox});',
+                f'nwr["landuse"="port"]["cargo"~"oil|fuel|lpg|lng|liquid_bulk|petroleum"]({bbox});',
+                f'nwr["harbour"="yes"]["cargo"~"oil|fuel|lpg|lng|liquid_bulk|petroleum"]({bbox});',
             ]
         if "fuel_storage" in self.element_types:
-            parts += [
-                f'node["man_made"="storage_tank"]["content"~"fuel|oil|gas|diesel|lpg|petroleum"]({bbox});',
-                f'way["man_made"="storage_tank"]["content"~"fuel|oil|gas|diesel|lpg|petroleum"]({bbox});',
-                f'way["industrial"="tank_farm"]({bbox});',
-                f'node["industrial"="tank_farm"]({bbox});',
+            pt += [
+                f'nwr["man_made"="storage_tank"]["content"~"fuel|oil|gas|diesel|lpg|petroleum"]({bbox});',
+                f'nwr["industrial"="tank_farm"]({bbox});',
             ]
         if {"fuel_entry", "fuel_storage"} & self.element_types:
             # Only the major arteries used for fuel trucking. Including
             # "secondary" pulls an order of magnitude more road geometry and
             # reliably times out the Overpass dispatcher in dense regions.
-            parts += [
+            ln += [
                 f'way["highway"~"motorway|trunk|primary"]({bbox});',
             ]
 
-        return (
-            "[out:json][timeout:180];\n(\n"
-            + "\n".join(f"  {p}" for p in parts)
-            + "\n);\nout body;\n>;\nout skel qt;"
-        )
+        blocks = ["[out:json][timeout:90];"]
+        if pt:
+            blocks.append("(\n" + "\n".join(f"  {p}" for p in pt) + "\n)->.pt;")
+        if ln:
+            blocks.append("(\n" + "\n".join(f"  {p}" for p in ln) + "\n)->.ln;")
+        if pt:
+            blocks.append(".pt out center;")
+        if ln:
+            blocks.append(".ln out geom;")
+        return "\n".join(blocks)
 
-    def _post_query(self, api, headers, query, time, requests):
+    def _post_query(self, api, headers, query, time, requests, mirror_offset=0):
         """POST one Overpass query with retries, rotating mirrors and backing
         off between attempts.
 
+        ``mirror_offset`` picks the starting mirror so that concurrently-fetched
+        tiles spread across the Overpass endpoints instead of hammering one.
+
         Returns the parsed overpy ``Result``, or ``None`` if cancelled. Raises
         ``RuntimeError`` once retries are exhausted, or ``_OverpassTileTooDense``
-        when a tile persistently hits the server-side timeout (so the caller
-        can subdivide it). Three Overpass quirks are handled explicitly:
+        when a tile hits the server-side timeout (so the caller can subdivide
+        it). Three Overpass quirks are handled explicitly:
 
-        * A server-side timeout/overload comes back as HTTP 200 with a
-          ``"runtime error ... timed out"`` remark — treat as a retryable
-          failure, not a silently empty success. Two hits ⇒ subdivide.
+        * A server-side timeout comes back as HTTP 200 with a
+          ``"runtime error ... timed out"`` remark — a density signal; bail out
+          immediately so the tile is subdivided rather than re-run at size.
         * A zero-element HTTP 200 with NO remark is usually a genuinely empty
           tile, but an overloaded dispatcher sheds load the same way. Re-query
           once on a different mirror before trusting the zero.
@@ -1299,12 +1345,11 @@ class OSMGridFetcher(QThread):
         endpoints = self._OVERPASS_ENDPOINTS
         max_retries = 4
         last_error: Exception | None = None
-        timeout_hits = 0
         empty_hits = 0
         for attempt in range(max_retries + 1):
             if self._cancelled:
                 return None
-            url = endpoints[attempt % len(endpoints)]
+            url = endpoints[(attempt + mirror_offset) % len(endpoints)]
             try:
                 resp = requests.post(
                     url,
@@ -1316,20 +1361,16 @@ class OSMGridFetcher(QThread):
                     sniff = resp.content[:2048] + resp.content[-2048:]
                     if b"runtime error" in sniff or b"timed out" in sniff:
                         # A server-side [timeout] means this tile covers too
-                        # much data to finish in one query — retrying at the
-                        # same size just burns another 300s timeout on each
-                        # mirror. After a second confirmation, bail out with a
-                        # distinct error so the caller subdivides the tile
-                        # instead of dropping it.
-                        timeout_hits += 1
-                        if timeout_hits >= 2:
-                            raise _OverpassTileTooDense(
-                                "Overpass server-side timeout on every mirror "
-                                "(tile too large or dense)"
-                            )
-                        last_error = RuntimeError(
-                            "Overpass server-side timeout (region tile too "
-                            "large or dense)"
+                        # much data to finish in the server-side [timeout] — a
+                        # genuine density signal, not a transient blip (those
+                        # come back as 429/504/connection errors, handled
+                        # separately). Retrying the same-size query on another
+                        # mirror just burns another full timeout, so bail out
+                        # immediately with a distinct error and let the caller
+                        # subdivide the tile.
+                        raise _OverpassTileTooDense(
+                            "Overpass server-side timeout "
+                            "(tile too large or dense)"
                         )
                     else:
                         result = api.parse_json(resp.content)
@@ -1660,13 +1701,26 @@ class OSMGridFetcher(QThread):
         if not has_relevant_tag:
             return None
 
-        # Resolve node coordinates
+        # Resolve coordinates from whichever output form Overpass returned:
+        #   out geom   -> attributes['geometry'] (full vertex list; power lines)
+        #   out center -> center_lat/lon (single centroid; point features)
+        #   >; (legacy) -> resolved way.nodes
         coords: list[tuple[float, float]] = []
-        for node in way.nodes:
+        geom = (getattr(way, "attributes", None) or {}).get("geometry")
+        if geom:
+            for g in geom:
+                try:
+                    coords.append((float(g["lat"]), float(g["lon"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        elif getattr(way, "center_lat", None) is not None:
+            coords.append((float(way.center_lat), float(way.center_lon)))
+        else:
             try:
-                coords.append((float(node.lat), float(node.lon)))
-            except (TypeError, AttributeError):
-                continue
+                for node in way.get_nodes(resolve_missing=False):
+                    coords.append((float(node.lat), float(node.lon)))
+            except Exception:
+                pass
 
         if not coords:
             return None
