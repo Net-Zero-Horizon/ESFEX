@@ -650,3 +650,36 @@ class TestGatherUnits:
         orch = Orchestrator(cfg, output_dir=tmp_path)
         units = orch._gather_units()
         assert units == {}
+
+
+# ---------------------------------------------------------------------------
+# Tests: operational dispatch surfaces total-failure instead of faking success
+# ---------------------------------------------------------------------------
+
+class TestOperationalDispatchAllWindowsFail:
+    """When every rolling-horizon window fails to solve, the year must raise
+    (the outer loop re-raises) rather than exporting an empty result and
+    logging 'completed: objective=$0'. Regression guard for a single-/few-
+    window run (e.g. UC mode, one 24h window) whose only window failed because
+    the requested solver could not be loaded — the old in-loop guard only
+    fired at window >= 2 and let the single-window case through silently."""
+
+    def _prime_state(self, orch):
+        orch.state = SimulationState(year=2025, base_year=2025, units_config={})
+        orch._sectoral_demand = {}
+        orch._total_hours = 24
+        orch._rooftop_generation = None
+        orch._ev_charging_profiles = None
+        orch._progress = None
+
+    def test_zero_windows_solved_raises(self, tmp_path):
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        self._prime_state(orch)
+        num_nodes = 2
+        demand = np.ones((num_nodes, 24), dtype=float) * 10.0
+        with patch.object(orch, "_solve_window", return_value=None):
+            with pytest.raises(RuntimeError, match="failed to solve"):
+                orch._run_operational_dispatch(
+                    year=2025, year_idx=0, num_years=1,
+                    demand=demand, hours=24, num_nodes=num_nodes,
+                )

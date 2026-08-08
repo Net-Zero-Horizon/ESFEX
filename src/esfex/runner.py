@@ -4186,6 +4186,20 @@ class Orchestrator:
                 all_n1_trans_duals.append(window_result["n1_trans_reserve_duals"])
             total_n1_security_cost += window_result.get("n1_security_cost", 0.0)
 
+        # No window solved: the whole year produced no dispatch. Surface the
+        # underlying solver/model error instead of exporting an empty result
+        # and reporting "Simulation completed" with objective=$0. This covers
+        # the single-/few-window case the in-loop early-abort guard (which only
+        # fires at window >= 2) cannot reach — e.g. UC mode with one 24h window
+        # whose solve failed because the requested solver is unavailable.
+        if num_solved == 0:
+            raise RuntimeError(
+                f"Year {year}: all {num_windows} operational window(s) failed "
+                f"to solve — no dispatch was produced. See the 'Window N failed' "
+                f"error above for the root cause (commonly: the requested solver "
+                f"is not installed/licensed, or the model is infeasible)."
+            )
+
         # Update state boundary conditions for next year
         self.state.boundary_conditions = boundary_conditions
 
