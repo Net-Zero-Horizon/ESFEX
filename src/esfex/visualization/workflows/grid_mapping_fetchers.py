@@ -518,6 +518,39 @@ def _norm_fuel(fuel: str) -> str:
     return s
 
 
+# Plausibility ceiling for a SINGLE generator/plant record, in MW, keyed by the
+# normalised fuel (_norm_fuel). Seeded from the largest operating plant of each
+# type in the GEM Global Integrated Power database (Feb 2025) with a ~20% margin
+# so a record at the current world record is never clipped (e.g. hydropower's
+# Three Gorges, 22.5 GW). Used as the fallback when no GEM entry is available to
+# cross-check an OSM capacity against (see _generator_gap_fill): a record above
+# its fuel's ceiling is a data error, such as an OSM plant polygon tagged
+# 24.9 GW for a ~5 GW gas station. User-overridable via ``max_plant_mw``.
+_MAX_PLANT_MW_BY_FUEL: dict[str, float] = {
+    "hydro":      27000.0,   # GEM max 22500 (Three Gorges)
+    "nuclear":     8300.0,   # GEM max 6944
+    "gas":         8200.0,   # GEM max 6803 (oil/gas)
+    "oil":         8200.0,
+    "coal":        7700.0,   # GEM max 6446
+    "solar":       4800.0,   # GEM max 4000
+    "wind":        3600.0,   # GEM max 3000
+    "biomass":     3100.0,   # GEM max 2580 (bioenergy)
+    "biogas":      3100.0,
+    "waste":       3100.0,
+    "geothermal":   500.0,   # GEM max 362
+}
+# Unknown fuel: use the global maximum so an unrecognised type is never clipped.
+_MAX_PLANT_MW_DEFAULT = 27000.0
+
+
+def _max_plant_mw(fuel: str, overrides: dict | None = None) -> float:
+    """Plausibility ceiling (MW) for a single plant of *fuel*."""
+    key = _norm_fuel(fuel)
+    if overrides and key in overrides:
+        return float(overrides[key])
+    return _MAX_PLANT_MW_BY_FUEL.get(key, _MAX_PLANT_MW_DEFAULT)
+
+
 def _bucket_index(items, cell_km):
     """Grid-bucket point features so neighbour queries scan a 3×3 cell block
     (~O(n)) instead of every pair. Returns (buckets, cell_lat, cell_lon)."""
@@ -674,7 +707,39 @@ def _generator_gap_fill(gens, gap_km, same_fuel=True):
                 break
         if not covered:
             kept.append(g)
+    # NOTE: a cross-source capacity "correction" (overwriting an OSM plant total
+    # with the covering GEM/WRI value) was tried and REMOVED: GEM/WRI are
+    # unit/phase-level and often incomplete, so a single covering row (e.g. one
+    # 167 MW block of the 5040 MW Futtsu station) is NOT a plant total — using
+    # it collapsed correct OSM plant capacities. Gross OSM tag errors are caught
+    # instead by the plausibility ceiling in _cap_implausible_capacity, which
+    # never touches an already-plausible value.
     return kept
+
+
+def _cap_implausible_capacity(gens, overrides=None):
+    """Fallback plausibility guard for generator capacity.
+
+    Caps any generator whose capacity exceeds the world-record ceiling for its
+    fuel (:data:`_MAX_PLANT_MW_BY_FUEL`). This catches residual over-counts that
+    no GEM/WRI entry was available to cross-check (see :func:`_generator_gap_fill`)
+    — e.g. an OSM-only build, or a plant GEM lacks. Runs after the OSM↔GEM
+    reconciliation, so any record already corrected against GEM is within bounds
+    and untouched. ``overrides`` lets the caller replace a per-fuel ceiling."""
+    for g in gens:
+        cap = g.capacity_mw or 0.0
+        if cap <= 0:
+            continue
+        ceil = _max_plant_mw(g.fuel, overrides)
+        if cap > ceil:
+            logger.warning(
+                "Generator '%s' (%s): capacity %.0f MW exceeds the plausible "
+                "maximum %.0f MW for its fuel — capping (no GEM entry to "
+                "cross-check against).",
+                g.name or g.osm_id, g.fuel, cap, ceil,
+            )
+            g.capacity_mw = ceil
+    return gens
 
 
 def deduplicate_features(
@@ -784,8 +849,10 @@ def deduplicate_features(
     # OSM-authoritative: drop within-source plant aggregates, then keep every
     # OSM generator and add another source's generator only where OSM has none
     # nearby. Never merges co-located units, so real multi-unit plants survive.
-    kept_gens = _generator_gap_fill(
-        _drop_plant_aggregates(generators), gen_gap_km,
+    kept_gens = _cap_implausible_capacity(
+        _generator_gap_fill(
+            _drop_plant_aggregates(generators), gen_gap_km,
+        )
     )
     _emit(batteries, f"Merging {len(batteries)} batteries…")
     kept_bats = _proximity_dedup(

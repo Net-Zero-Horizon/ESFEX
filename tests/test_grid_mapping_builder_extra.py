@@ -2079,3 +2079,46 @@ class TestEnforceMinVoltage:
         assert stats == {}
         assert "lv" in state.buses
         assert any("no bus at or above" in w for w in result.warnings)
+
+
+class TestGeneratorCapacityGuard:
+    """A gross OSM capacity tag error (e.g. a polygon tagged 24.9 GW for a
+    ~5 GW gas station) is capped at a per-fuel world-record ceiling, while a
+    real megaproject (Three Gorges, 22.5 GW) and any already-plausible value
+    are left untouched. (A cross-source "correction" against GEM/WRI was tried
+    and removed — they are unit-level and often incomplete, so a single
+    covering row is not a plant total.)"""
+
+    def _gf(self, **kw):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            GridFeature,
+        )
+        base = dict(feature_type="generator", name="Plant", fuel="Natural_gas",
+                    latitude=35.3, longitude=139.8, source="osm",
+                    osm_id="osm/Plant")
+        base.update(kw)
+        return GridFeature(**base)
+
+    def test_fallback_cap_when_no_gem(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            _cap_implausible_capacity,
+        )
+        osm = self._gf(capacity_mw=24905.0)   # no GEM to cross-check
+        out = _cap_implausible_capacity([osm])
+        assert abs(out[0].capacity_mw - 8200.0) < 1e-6   # gas ceiling
+
+    def test_fallback_does_not_clip_real_large_hydro(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            _cap_implausible_capacity,
+        )
+        # Three-Gorges-scale hydro (22.5 GW) is real and must survive.
+        h = self._gf(capacity_mw=22500.0, fuel="Water", name="BigHydro")
+        out = _cap_implausible_capacity([h])
+        assert abs(out[0].capacity_mw - 22500.0) < 1e-6
+
+    def test_max_plant_mw_overrides(self):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            _max_plant_mw,
+        )
+        assert _max_plant_mw("Coal") == 7700.0
+        assert _max_plant_mw("Coal", {"coal": 5000.0}) == 5000.0  # user override
