@@ -683,3 +683,60 @@ class TestOperationalDispatchAllWindowsFail:
                     year=2025, year_idx=0, num_years=1,
                     demand=demand, hours=24, num_nodes=num_nodes,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Multi-system merge: bus_id namespacing (Grid Builder subsystems collide)
+# ---------------------------------------------------------------------------
+
+class TestMergeBusIdNamespacing:
+    """Subsystems built independently by the Grid Builder share a bus_id
+    namespace (both may have 'bus_5'). Merging them into one SystemConfig
+    requires globally unique bus_ids — otherwise pydantic rejects the merged
+    config with 'Duplicate bus_id'. bus_id string references (generator
+    bus_id_per_node) must be namespaced consistently so they still resolve."""
+
+    def _system_with_buses(self, name):
+        from esfex.config.schema import BusConfig
+        gen = _make_generator("Coal", "Non-renewable", "Coal", [200.0, 0.0])
+        # Colliding ids across systems: both use 'bus_5' / 'bus_6'.
+        gen = gen.model_copy(update={"bus_id_per_node": {0: "bus_5"}})
+        sys = _make_system_config(num_nodes=2, generators={"coal": gen}, name=name)
+        buses = [
+            BusConfig(bus_id="bus_5", parent_node=0, voltage_kv=220.0),
+            BusConfig(bus_id="bus_6", parent_node=1, voltage_kv=220.0),
+        ]
+        return sys.model_copy(update={"buses": buses})
+
+    def test_colliding_bus_ids_are_namespaced_on_merge(self):
+        from esfex.config.schema import ESFEXConfig, MetaNetworkConfig
+        sa = self._system_with_buses("Alpha")
+        sb = self._system_with_buses("Beta")
+        cfg = ESFEXConfig(
+            meta_network=MetaNetworkConfig(systems=["Alpha", "Beta"]),
+            systems={"Alpha": sa, "Beta": sb},
+        )
+        # Before the fix this raised pydantic "Duplicate bus_id 'bus_5'".
+        _, operational, _ = Orchestrator._merge_systems(cfg)
+
+        ids = [b.bus_id for b in operational.buses]
+        assert len(ids) == len(set(ids)), f"duplicate bus_ids: {ids}"
+        assert "Alpha__bus_5" in ids and "Beta__bus_5" in ids
+
+        # Generator bus_id_per_node references still resolve to a real bus.
+        bus_set = set(ids)
+        for g in operational.generators.values():
+            for bid in (getattr(g, "bus_id_per_node", None) or {}).values():
+                assert bid in bus_set, f"orphaned bus ref {bid}"
+
+    def test_single_system_keeps_original_bus_ids(self):
+        # No collision possible with one system → don't rename.
+        from esfex.config.schema import ESFEXConfig, MetaNetworkConfig
+        sa = self._system_with_buses("Solo")
+        cfg = ESFEXConfig(
+            meta_network=MetaNetworkConfig(systems=["Solo"]),
+            systems={"Solo": sa},
+        )
+        _, operational, _ = Orchestrator._merge_systems(cfg)
+        ids = [b.bus_id for b in operational.buses]
+        assert "bus_5" in ids and "Solo__bus_5" not in ids

@@ -423,6 +423,19 @@ class Orchestrator:
         def _pad_int(arr: list, sys_idx: int, default=0) -> list:
             return [int(v) for v in _pad(arr, sys_idx, default)]
 
+        # Each subsystem was built independently by the Grid Builder, so their
+        # bus_id namespaces overlap (e.g. Hokkaido and Tohoku both have
+        # 'bus_2190'). Merging them into one SystemConfig requires globally
+        # unique bus_ids, so namespace each subsystem's bus_id by its system
+        # name. Applied only for a genuine multi-system merge so single-system
+        # runs keep their original bus_ids. EVERY string reference to a bus_id
+        # (generator/battery bus_id_per_node, gui_layout bus positions, and the
+        # buses list itself) gets this same transform.
+        multi_sys = len(systems) > 1
+
+        def _uniq_bus_id(sname: str, bid):
+            return f"{sname}__{bid}" if (multi_sys and bid is not None) else bid
+
         # --- 5. Merge generators ----------------------------------------
         merged_gens: dict[str, GeneratorConfig] = {}
         for si, (sname, sys) in enumerate(zip(sys_names, systems)):
@@ -440,10 +453,14 @@ class Orchestrator:
                         else:
                             d[alias if alias in d else field_name] = _pad(val, si)
                 # Shift bus_id_per_node keys by system offset so the per-node
-                # bus mapping points at the merged-system indices.
+                # bus mapping points at the merged-system indices, and namespace
+                # its bus_id values to match the renamed buses.
                 bipn = d.get("bus_id_per_node")
-                if isinstance(bipn, dict) and sys_off:
-                    d["bus_id_per_node"] = {int(k) + sys_off: v for k, v in bipn.items()}
+                if isinstance(bipn, dict):
+                    d["bus_id_per_node"] = {
+                        int(k) + sys_off: _uniq_bus_id(sname, v)
+                        for k, v in bipn.items()
+                    }
                 d["name"] = f"{sname}/{gen.name}"
                 merged_gens[new_key] = GeneratorConfig(**d)
 
@@ -463,8 +480,11 @@ class Orchestrator:
                         else:
                             d[alias if alias in d else field_name] = _pad(val, si)
                 bipn = d.get("bus_id_per_node")
-                if isinstance(bipn, dict) and sys_off:
-                    d["bus_id_per_node"] = {int(k) + sys_off: v for k, v in bipn.items()}
+                if isinstance(bipn, dict):
+                    d["bus_id_per_node"] = {
+                        int(k) + sys_off: _uniq_bus_id(sname, v)
+                        for k, v in bipn.items()
+                    }
                 d["name"] = f"{sname}/{bat.name}"
                 merged_bats[new_key] = BatteryConfig(**d)
 
@@ -633,6 +653,7 @@ class Orchestrator:
             for bus in sys_buses:
                 merged_buses.append(bus.model_copy(update={
                     'parent_node': bus.parent_node + node_off,
+                    'bus_id': _uniq_bus_id(sname, bus.bus_id),
                 }))
             bus_cum += len(sys_buses)
 
@@ -705,8 +726,8 @@ class Orchestrator:
         # per-instance lat/lon, re-keyed to the merged unit-key/node-index
         # scheme: gen keys "{unit}_n{local}" → "{sname}__{unit}_n{local+off}"
         # to match merged_gens keys ("{sname}__{unit}") and the padded
-        # per-node rated_power index (local + node offset).  Bus positions
-        # stay keyed by bus_id (unique, preserved through merge).
+        # per-node rated_power index (local + node offset).  Bus positions are
+        # re-keyed with the same per-system bus_id namespacing as the buses.
         import re as _re_gl
         merged_gui_layout: dict = {
             "generators": {}, "batteries": {}, "buses": {}, "transformers": {},
@@ -715,7 +736,7 @@ class Orchestrator:
             node_off = offsets[sname]
             gl = sys.gui_layout or {}
             for bid, pos in (gl.get("buses") or {}).items():
-                merged_gui_layout["buses"][bid] = pos
+                merged_gui_layout["buses"][_uniq_bus_id(sname, bid)] = pos
             for grp in ("generators", "batteries"):
                 for ekey, pos in (gl.get(grp) or {}).items():
                     m = _re_gl.match(r"^(.*)_n(\d+)$", str(ekey))
