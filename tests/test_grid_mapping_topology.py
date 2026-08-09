@@ -253,7 +253,7 @@ def test_faithful_build_clusters_line_endpoints_to_substations():
         _feat("line", name="L", lat=21.0008, lng=-82.0, voltage_kv=220.0,
               line_coords=[(21.0008, -82.0), (21.0008, -81.0)]),
     ]
-    _gmb.build_grid_from_features(model, feats, faithful=True)
+    _gmb.build_grid_from_features(model, feats)
     s = model.state
     # the line's two endpoints clustered onto the two substation buses → both
     # substations are joined by the line (a connected 2-bus network)

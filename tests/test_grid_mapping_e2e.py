@@ -5,7 +5,7 @@ These tests prove that a network produced by the new faithful import scheme
 (real OSM topology, no fabricated connectivity) is not just drawable but
 actually *solvable* and yields correct dispatch:
 
-  features → build_grid_from_features(faithful=True) → infer params
+  features → build_grid_from_features → infer params
           → serialize to YAML → load_config → SystemConfig
           → PowerSystemAdapter → solve → assert dispatch is correct
 
@@ -58,7 +58,7 @@ def _build_faithful_system():
     ]
     model = MockGuiModel(_make_state(buses={}))
     model.state.name = SYS_NAME
-    gmb.build_grid_from_features(model, feats, faithful=True)
+    gmb.build_grid_from_features(model, feats)
     # The GUI runs parameter inference right after the build; do the same so
     # lines/transformers get electrical parameters instead of staying at 0.
     infer_electrical_params(model.state)

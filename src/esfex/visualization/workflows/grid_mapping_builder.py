@@ -474,7 +474,6 @@ def build_grid_from_features(
     bus_strategy: str = "per_voltage",
     snap_threshold_km: float = 5.0,
     target_node: int | None = None,
-    faithful: bool = False,
     station_radius_km: float = _FAITHFUL_STATION_CLUSTER_KM,
     min_capacity_mw: float = 0.0,
     min_voltage_kv: float = 0.0,
@@ -624,15 +623,12 @@ def build_grid_from_features(
     # The previous 5 km snap collapsed any line spanning <5 km near a single
     # bus onto that bus (from_bus == to_bus → dropped), silently deleting real
     # lines. (#16)
-    # Faithful mode: a tiny snap so each line endpoint becomes its own bus
-    # (only EXACTLY-coincident OSM junction nodes share); a later clustering
-    # pass merges the ones that are the same physical station. This removes the
+    # A tiny snap so each line endpoint becomes its own bus (only
+    # EXACTLY-coincident OSM junction nodes share); a later clustering pass
+    # merges the ones that are the same physical station. This removes the
     # magic "reach" distance entirely — connectivity comes from coincidence,
     # not from how far a line is allowed to reach for a bus.
-    line_snap_km = (
-        _FAITHFUL_JUNCTION_SNAP_KM if faithful
-        else min(snap_threshold_km, _LINE_ENDPOINT_SNAP_CAP_KM)
-    )
+    line_snap_km = _FAITHFUL_JUNCTION_SNAP_KM
     for line in lines:
         try:
             _create_line(
@@ -691,8 +687,8 @@ def build_grid_from_features(
     # (unknown-voltage features that were assigned a low voltage during the
     # build), relocating any generation on it to the nearest bus at/above the
     # floor. Runs before role/demand so load is distributed only on the
-    # surviving transmission buses. Applies in faithful mode too — it honours
-    # the fetch scope, it does not fabricate connectivity.
+    # surviving transmission buses. Honours the fetch scope — it does not
+    # fabricate connectivity.
     if min_voltage_kv and min_voltage_kv > 0:
         mv = _enforce_min_voltage(model.state, min_voltage_kv, result)
         if mv.get("buses_removed"):
@@ -709,163 +705,95 @@ def build_grid_from_features(
     # Backstop: even if a generator was created with a fuel that didn't
     # go through _create_fuels_and_technologies (e.g. a manual edit),
     # ensure every gen.fuel exists in the catalog and is supplied.
+    #
+    # NOTE: the built network is exactly the OSM topology (substations + real
+    # line traces). We do NOT fabricate connectivity — no per-node star-coupling
+    # "hub", no synthetic reserves. Turning the faithful grid into a solvable
+    # model is a separate, explicit step performed later.
     try:
         from esfex.visualization.workflows.grid_mapping_quality import (
-            repair_bus_roles_and_demand,
             repair_fuel_consistency,
-            repair_node_internal_coupling,
         )
         fc = repair_fuel_consistency(model.state)
         result.fuels_created += fc.get("fuels_added", 0)
         result.technologies_created += fc.get("techs_added", 0)
-
-        # Faithful mode (#16): STOP here. The following passes fabricate
-        # connectivity to make the network electrically solvable — they
-        # re-route buses, tie buses to a per-node "hub" (a star-coupling that
-        # can span the whole node, i.e. hundreds of km, ignoring any distance
-        # limit), and add reserves. That is the opposite of representing the
-        # real OSM grid. In faithful mode the built network is exactly the OSM
-        # topology (substations + real line traces); turning it into a solvable
-        # model is a separate, explicit step the user opts into later.
-        if not faithful:
-            # Phase 9b: Tie co-located voltage levels with an auto-transformer.
-            # Voltage-aware line endpoints (#18) can leave a substation with a
-            # separate bus per voltage level; connect adjacent levels so a bus
-            # never sits next to a different voltage without a transformer.
-            vt = _connect_colocated_voltage_levels(
-                model.state, result, snap_threshold_km,
-            )
-            if vt:
-                result.warnings.append(
-                    f"Voltage consistency: inserted {vt} auto-transformer(s) "
-                    f"between co-located voltage levels at substations"
-                )
-
-            # Phase 10: Infer bus roles + redistribute demand_fraction.
-            # Without this, every bus is "load" with full demand fraction,
-            # producing physically nonsensical bus-balance constraints in
-            # the operational LP (HV junctions forced to serve load they
-            # have no path to).
-            br = repair_bus_roles_and_demand(model.state)
-            if br.get("buses_role_changed"):
-                result.warnings.append(
-                    f"Bus roles inferred: {br['buses_role_changed']} buses "
-                    f"re-assigned (load → connection / mixed) across "
-                    f"{br.get('nodes_redistributed', 0)} nodes"
-                )
-
-            # Phase 11: Guarantee short electrical coupling demand → supply
-            # inside each node.  OSM imports leave some demand buses 10+
-            # zig-zag hops from generation (no direct step-up), which makes
-            # the DC-OPF keep angles at 0 and shed at VOLL despite ample
-            # in-node generation.  Insert a direct transformer/line where the
-            # path is too long.  Runs AFTER role/demand repair so supply and
-            # demand buses are correctly identified.
-            nc = repair_node_internal_coupling(model.state)
-            if nc.get("buses_coupled"):
-                result.transformers_added += nc.get("transformers_added", 0)
-                result.warnings.append(
-                    f"Node star-coupling: {nc['buses_coupled']} bus(es) tied to "
-                    f"their node hub across {nc.get('nodes_restructured',0)} "
-                    f"node(s) (+{nc.get('transformers_added',0)} TR, "
-                    f"+{nc.get('lines_added',0)} line) — were >2 hops from hub"
-                )
     except Exception as exc:
         result.warnings.append(f"Fuel/bus consistency repair: {exc}")
 
-    # ── Phase 12: Node operating defaults (reserves + losses) ─────
-    # Fill the operational fields the build leaves at 0 so the produced
-    # network is complete and behaves with a security margin. Skipped in
-    # faithful mode (that is a solvability concern, not real OSM topology).
-    if not faithful:
-        try:
-            from esfex.visualization.workflows.grid_mapping_quality import (
-                apply_node_operational_defaults,
-            )
-            nd = apply_node_operational_defaults(model.state)
-            if nd.get("reserves") or nd.get("losses"):
-                result.warnings.append(
-                    f"Node defaults: reserves set on {nd.get('reserves', 0)} "
-                    f"node(s), losses on {nd.get('losses', 0)} node(s)"
-                )
-        except Exception as exc:
-            result.warnings.append(f"Node operational defaults: {exc}")
-
-    # ── Faithful topology finalize: cluster same-station buses ────────────
+    # ── Topology finalize: cluster same-station buses ─────────────────────
     # Merge buses that are the same physical node (coincident junctions, a line
     # endpoint sitting on a substation, duplicate substation buses) so the real
     # topology is connected — without ever snapping a line to a far bus.
-    if faithful:
-        try:
-            from esfex.visualization.workflows.grid_mapping_topology import (
-                cluster_nearby_buses,
+    try:
+        from esfex.visualization.workflows.grid_mapping_topology import (
+            cluster_nearby_buses,
+        )
+        cl = cluster_nearby_buses(
+            model.state, tol_m=station_radius_km * 1000.0)
+        if cl.get("merged"):
+            result.warnings.append(
+                f"Topology: clustered {cl['merged']} bus(es) into their "
+                f"station, removed {cl.get('selfloops_dropped', 0)} "
+                f"internal self-loop line(s)."
             )
-            cl = cluster_nearby_buses(
-                model.state, tol_m=station_radius_km * 1000.0)
-            if cl.get("merged"):
+    except Exception as exc:
+        result.warnings.append(f"Bus clustering: {exc}")
+
+    # Tie co-located voltage levels with a transformer. This is NOT the
+    # star-coupling fabrication (which reaches across a whole node): it only
+    # connects buses of DIFFERENT voltage that sit at the SAME station
+    # (within station_radius_km) — i.e. the transformer that physically
+    # exists there. Without it a substation's 66/220 kV buses stay
+    # electrically separate, fragmenting the real OSM grid by voltage level.
+    try:
+        vt = _connect_colocated_voltage_levels(
+            model.state, result, station_radius_km,
+        )
+        if vt:
+            result.warnings.append(
+                f"Voltage consistency: inserted {vt} auto-transformer(s) "
+                f"between co-located voltage levels at substations"
+            )
+    except Exception as exc:
+        result.warnings.append(f"Co-located voltage coupling: {exc}")
+
+    # Bounded reconnection of isolated components (opt-in). A substation
+    # within reconnect_max_km of the backbone is physically tied to it — the
+    # OSM data just lacks the final span — so connect it instead of leaving
+    # the demand behind it unservable. Remote components stay isolated.
+    if reconnect_max_km and reconnect_max_km > 0:
+        try:
+            rc = _reconnect_isolated_bounded(
+                model.state, result,
+                max_km=reconnect_max_km,
+                snap_km=station_radius_km,
+            )
+            if rc.get("tapped") or rc.get("linked"):
                 result.warnings.append(
-                    f"Topology: clustered {cl['merged']} bus(es) into their "
-                    f"station, removed {cl.get('selfloops_dropped', 0)} "
-                    f"internal self-loop line(s)."
+                    f"Connectivity: reconnected isolated components within "
+                    f"{reconnect_max_km:.0f} km — tapped {rc['tapped']} onto "
+                    f"nearby lines, linked {rc['linked']} to the nearest "
+                    f"same-voltage bus."
                 )
         except Exception as exc:
-            result.warnings.append(f"Bus clustering: {exc}")
+            result.warnings.append(f"Bounded reconnection: {exc}")
 
-        # Tie co-located voltage levels with a transformer. This is NOT the
-        # star-coupling fabrication (which reaches across a whole node): it only
-        # connects buses of DIFFERENT voltage that sit at the SAME station
-        # (within station_radius_km) — i.e. the transformer that physically
-        # exists there. Without it a substation's 66/220 kV buses stay
-        # electrically separate, fragmenting the real OSM grid by voltage level.
+        # Absorb whatever remains dysfunctional (gen XOR demand) into the
+        # connected grid: move its gen/demand to the nearest kept bus and
+        # delete the dead island. Functional islands (gen+demand) are kept.
         try:
-            vt = _connect_colocated_voltage_levels(
-                model.state, result, station_radius_km,
-            )
-            if vt:
+            ab = _absorb_dysfunctional_islands(model.state, result)
+            if ab.get("islands_absorbed"):
                 result.warnings.append(
-                    f"Voltage consistency: inserted {vt} auto-transformer(s) "
-                    f"between co-located voltage levels at substations"
+                    f"Connectivity: absorbed {ab['islands_absorbed']} "
+                    f"dysfunctional island(s) — moved {ab['gens_moved']} "
+                    f"generator(s) and {ab['demand_moved']} demand bus(es) "
+                    f"to the nearest connected bus, removed "
+                    f"{ab['buses_removed']} dead bus(es). Functional "
+                    f"(gen+demand) islands kept."
                 )
         except Exception as exc:
-            result.warnings.append(f"Co-located voltage coupling: {exc}")
-
-        # Bounded reconnection of isolated components (opt-in). A substation
-        # within reconnect_max_km of the backbone is physically tied to it — the
-        # OSM data just lacks the final span — so connect it instead of leaving
-        # the demand behind it unservable. Remote components stay isolated.
-        if reconnect_max_km and reconnect_max_km > 0:
-            try:
-                rc = _reconnect_isolated_bounded(
-                    model.state, result,
-                    max_km=reconnect_max_km,
-                    snap_km=station_radius_km,
-                )
-                if rc.get("tapped") or rc.get("linked"):
-                    result.warnings.append(
-                        f"Connectivity: reconnected isolated components within "
-                        f"{reconnect_max_km:.0f} km — tapped {rc['tapped']} onto "
-                        f"nearby lines, linked {rc['linked']} to the nearest "
-                        f"same-voltage bus."
-                    )
-            except Exception as exc:
-                result.warnings.append(f"Bounded reconnection: {exc}")
-
-            # Absorb whatever remains dysfunctional (gen XOR demand) into the
-            # connected grid: move its gen/demand to the nearest kept bus and
-            # delete the dead island. Functional islands (gen+demand) are kept.
-            try:
-                ab = _absorb_dysfunctional_islands(model.state, result)
-                if ab.get("islands_absorbed"):
-                    result.warnings.append(
-                        f"Connectivity: absorbed {ab['islands_absorbed']} "
-                        f"dysfunctional island(s) — moved {ab['gens_moved']} "
-                        f"generator(s) and {ab['demand_moved']} demand bus(es) "
-                        f"to the nearest connected bus, removed "
-                        f"{ab['buses_removed']} dead bus(es). Functional "
-                        f"(gen+demand) islands kept."
-                    )
-            except Exception as exc:
-                result.warnings.append(f"Island absorption: {exc}")
+            result.warnings.append(f"Island absorption: {exc}")
 
     return result
 
@@ -1312,7 +1240,7 @@ def _reconnect_isolated_bounded(
     state: GuiSystemState, result: ParseResult,
     max_km: float, snap_km: float,
 ) -> dict[str, int]:
-    """Bounded reconnection of electrically isolated components (faithful mode).
+    """Bounded reconnection of electrically isolated components.
 
     A substation within ``max_km`` of the backbone is physically tied to it —
     OSM merely lacks the final span — so this connects it rather than leaving
@@ -1594,9 +1522,8 @@ def _connect_colocated_voltage_levels(
     transformer, unless one already bridges those two levels. This avoids both
     a full mesh and duplicates.
 
-    Runs in both faithful and non-faithful mode: an auto-transformer between
-    two voltage buses that share a substation is a real, physically-present
-    asset (not the star-coupling fabrication faithful mode omits), and without
+    An auto-transformer between two voltage buses that share a substation is a
+    real, physically-present asset (not fabricated connectivity), and without
     it a substation's e.g. 66/220 kV buses stay electrically separate,
     fragmenting the real OSM grid by voltage level.
     """

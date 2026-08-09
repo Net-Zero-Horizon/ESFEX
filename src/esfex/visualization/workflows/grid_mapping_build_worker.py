@@ -121,7 +121,6 @@ class GridBuildWorker(QThread):
                 bus_strategy=p.config.get("bus_strategy", "per_voltage"),
                 snap_threshold_km=p.config.get("snap_threshold_km", 5.0),
                 target_node=None,
-                faithful=True,
                 station_radius_km=p.station_radius_km,
                 min_capacity_mw=p.config.get("min_capacity_mw", 0.0),
                 min_voltage_kv=p.config.get("min_voltage_kv", 0.0),
