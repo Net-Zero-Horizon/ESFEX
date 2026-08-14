@@ -86,3 +86,34 @@ def test_fuel_tech_info_helper():
     assert info["label"] == "Coal"
     assert info["category"] == "thermal"
     assert info["color"]  # a colour was assigned
+
+
+def test_orient_to_node_hours_handles_transposed_demand():
+    """``demand`` is stored (hours, nodes) while per-node result arrays are
+    (nodes, hours). The orientation helper must normalise both to
+    (nodes, hours) so a run with more nodes than hours (all of Japan: 72
+    nodes > 24 h) reports the true load-shed share (69%) and not 184%.
+    """
+    import numpy as np
+
+    n_hours = 24
+    # Japan-scale: 72 nodes, 24 hours — the case that broke.
+    demand = np.arange(n_hours * 72, dtype=float).reshape(n_hours, 72)  # (24,72)
+    loss = np.arange(72 * n_hours, dtype=float).reshape(72, n_hours)    # (72,24)
+
+    od = rc.orient_to_node_hours(demand, n_hours)
+    ol = rc.orient_to_node_hours(loss, n_hours)
+    assert od.shape == (72, n_hours)   # transposed
+    assert ol.shape == (72, n_hours)   # already (nodes, hours) — unchanged
+    # Per-hour sum is length n_hours (not truncated to the first 24 nodes).
+    assert od.sum(axis=0).shape == (n_hours,)
+    assert od.sum() == demand.sum()    # total invariant under transpose
+
+    # Tokyo-scale: 5 nodes < 24 hours — both layouts already correct.
+    d5 = np.zeros((n_hours, 5))
+    assert rc.orient_to_node_hours(d5, n_hours).shape == (5, n_hours)
+    l5 = np.zeros((5, n_hours))
+    assert rc.orient_to_node_hours(l5, n_hours).shape == (5, n_hours)
+
+    # No hour count known → passthrough (no guessing).
+    assert rc.orient_to_node_hours(demand, None).shape == (n_hours, 72)

@@ -407,6 +407,10 @@ class DashboardLoader:
         LMP, hourly demand / RE / thermal / battery / curtailment /
         load-shed. Returns the trajectory + mix payloads JS expects."""
         import numpy as _np
+
+        from esfex.visualization.panels.results_charts import (
+            orient_to_node_hours,
+        )
         rng = None
         try:
             from esfex.visualization.panels.results_charts import (
@@ -429,6 +433,12 @@ class DashboardLoader:
             arr = sc[key][:]
             if arr.ndim < 2:
                 return arr.astype(float)
+            # Normalise to (nodes, hours) — ``demand`` is stored (hours, nodes)
+            # while per-node result arrays are (nodes, hours) — so the node
+            # slice and per-hour sum below act on the right axes. Without it,
+            # nodes > hours (all of Japan: 72 nodes > 24 h) mis-reads demand and
+            # inflates the shed share (184% instead of the true 69%).
+            arr = orient_to_node_hours(arr, n_hours)
             if rng is not None:
                 lo, hi = rng
                 arr = arr[lo:hi]

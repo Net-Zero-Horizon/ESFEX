@@ -393,6 +393,25 @@ _TECH_GROUPS = frozenset({
 _ROOFTOP_KEY = "rooftop_generation"
 
 
+def orient_to_node_hours(arr: "np.ndarray", n_hours: Optional[int]) -> "np.ndarray":
+    """Orient a 2-D result array to ``(nodes, hours)``.
+
+    ``demand`` is persisted ``(hours, nodes)`` while per-node result arrays
+    (``loss_load``, ``curtailment``, …) are ``(nodes, hours)``. When
+    ``n_hours`` is known, transpose an array whose hour axis is axis 0 so that
+    downstream node-axis slices and per-hour sums act on the right axis.
+
+    The naive "assume (nodes, hours)" layout only breaks when a run has more
+    nodes than hours (e.g. all of Japan: 72 nodes > 24 h): demand then gets
+    summed over hours and truncated to the first ``n_hours`` nodes, which
+    inflated the load-shed share to 184 % instead of the true 69 %.
+    """
+    if (n_hours and getattr(arr, "ndim", 0) >= 2
+            and arr.shape[1] != n_hours and arr.shape[0] == n_hours):
+        return arr.T
+    return arr
+
+
 def _system_node_range(
     h5f: h5py.File, base_prefix: str
 ) -> Optional[tuple[int, int]]:
@@ -9461,13 +9480,37 @@ class UCLoadShedCurtailmentChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             rng = _system_node_range(h5f, bp)
 
+            # ``rng`` is a NODE index range (used to isolate one system in a
+            # multi-system file). It applies only to per-NODE arrays such as
+            # ``demand``. Per-BUS arrays (``loss_load``, ``curtailment`` —
+            # first dim = bus count, which for a bus-level / reduced network
+            # is far larger than the node count) must NOT be sliced with it,
+            # or the total is truncated to the first few buses (which read the
+            # shed as a tiny fraction of demand). Detect the node dimension
+            # from the demand array and slice only matching arrays.
+            #
+            # ``demand`` is stored (hours, nodes) while the per-node result
+            # arrays are (nodes, hours); orient everything to (nodes, hours)
+            # first (via the hour axis) so the node count and node-range slice
+            # act on the right axis. Without this, a run with more nodes than
+            # hours (all of Japan: 72 nodes > 24 h) mis-reads demand.
+            _nh = (int(sc["electricity_prices"].shape[0])
+                   if "electricity_prices" in sc
+                   and sc["electricity_prices"].ndim == 1 else None)
+
+            _n_nodes = None
+            if "demand" in sc and sc["demand"].ndim >= 2:
+                _n_nodes = orient_to_node_hours(sc["demand"][:], _nh).shape[0]
+
             def _hourly_total(key: str) -> np.ndarray:
                 if key not in sc:
                     return np.zeros(0)
                 arr = sc[key][:]
                 if arr.ndim < 2:
                     return arr.astype(float)
-                if rng is not None:
+                arr = orient_to_node_hours(arr, _nh)
+                if (rng is not None and _n_nodes is not None
+                        and arr.shape[0] == _n_nodes):
                     lo, hi = rng
                     arr = arr[lo:hi]
                 return arr.sum(axis=0).astype(float)
