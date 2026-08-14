@@ -481,9 +481,14 @@ def _ensure_bus_at(
         bus_id=bus_id,
         name=bus_name,
         parent_node=node_idx,
+        # 0 = unknown: OSM tags voltage on only ~half of Kanto lines and many
+        # substations lack it entirely. Defaulting the rest to a mid value
+        # (220 kV — which TEPCO does not even use) floods the model with
+        # spurious buses whose capacity/impedance are wrong. Leave unknown and
+        # let _propagate_voltage infer it from the voltage-bearing neighbours.
         voltage_kv=_normalize_voltage_kv(
             _prop_float(p, "voltage_kv", "voltage", "Voltage",
-                        "kV", "kv", default=220.0)),
+                        "kV", "kv", default=0.0)),
         frequency_hz=src_freq,
         current_type=_prop_str(p, "current_type", default="AC"),
         latitude=lat,

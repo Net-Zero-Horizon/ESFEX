@@ -131,15 +131,16 @@ def test_reason_fuel_entry_and_unknown():
 
 @pytest.mark.parametrize("v,expected", [
     # Nearest standard type; b = omega(50Hz) * C(nF) -> microsiemens/km.
-    (500.0, (0.020, 0.270, 4.084)),
-    (600.0, (0.020, 0.270, 4.084)),   # nearest 500
-    (345.0, (0.030, 0.246, 4.335)),   # nearest 380
-    (220.0, (0.060, 0.301, 3.927)),
-    (110.0, (0.095, 0.380, 2.890)),
-    (66.0,  (0.150, 0.400, 2.765)),
-    (33.0,  (0.250, 0.400, 2.670)),
-    (10.0,  (0.250, 0.400, 2.670)),   # nearest 33
-    (0.0,   (0.095, 0.380, 2.890)),   # <=0 -> 110 default type
+    # Large bundled-conductor EHV types (see _STD_LINE_TYPES).
+    (500.0, (0.016, 0.268, 4.147)),
+    (600.0, (0.016, 0.268, 4.147)),   # nearest 500
+    (345.0, (0.022, 0.245, 4.398)),   # nearest 380
+    (220.0, (0.045, 0.300, 4.021)),
+    (110.0, (0.075, 0.375, 2.922)),
+    (66.0,  (0.120, 0.390, 2.796)),
+    (33.0,  (0.200, 0.390, 2.702)),
+    (10.0,  (0.200, 0.390, 2.702)),   # nearest 33
+    (0.0,   (0.075, 0.375, 2.922)),   # <=0 -> 110 default type
 ])
 def test_estimate_line_rxb_per_km(v, expected):
     assert Q.estimate_line_rxb_per_km(v) == pytest.approx(expected, rel=1e-3)
@@ -148,7 +149,7 @@ def test_estimate_line_rxb_per_km(v, expected):
 def test_estimate_line_rxb_negative_fallback():
     # Non-positive voltage falls back to the 110 kV default standard type.
     assert Q.estimate_line_rxb_per_km(-5.0) == pytest.approx(
-        (0.095, 0.380, 2.890), rel=1e-3)
+        (0.075, 0.375, 2.922), rel=1e-3)
 
 
 # ── estimate_line_pu_params ──────────────────────────────────────────
@@ -241,10 +242,10 @@ def test_generator_defaults_known_and_unknown():
     (37.0, 127.0, 60.0),     # South Korea
     (14.0, 121.0, 60.0),     # Philippines
     (23.5, 121.0, 60.0),     # Taiwan
-    (35.0, 140.0, 60.0),     # East Japan
+    (35.0, 140.0, 50.0),     # East Japan (Tokyo/Kanto) → 50 Hz
     (6.0, -9.0, 60.0),       # Liberia
     (48.0, 2.0, 50.0),       # Paris → 50 Hz
-    (35.0, 134.0, 50.0),     # West Japan → 50 Hz
+    (35.0, 134.0, 60.0),     # West Japan (Chugoku) → 60 Hz
     (-33.0, 151.0, 50.0),    # Sydney → 50 Hz
 ])
 def test_infer_frequency(lat, lng, expected):
@@ -667,18 +668,18 @@ class TestEstimateTransformerMva:
         from esfex.visualization.workflows.grid_mapping_quality import (
             estimate_transformer_mva,
         )
-        assert estimate_transformer_mva(500) == 1000.0
-        assert estimate_transformer_mva(275) == 600.0
-        assert estimate_transformer_mva(220) == 400.0
-        assert estimate_transformer_mva(187) == 300.0
-        assert estimate_transformer_mva(110) == 200.0
+        assert estimate_transformer_mva(500) == 2000.0
+        assert estimate_transformer_mva(275) == 1200.0
+        assert estimate_transformer_mva(220) == 800.0
+        assert estimate_transformer_mva(187) == 500.0
+        assert estimate_transformer_mva(110) == 300.0
 
-    def test_low_voltage_keeps_100(self):
+    def test_low_voltage_keeps_default(self):
         from esfex.visualization.workflows.grid_mapping_quality import (
             estimate_transformer_mva,
         )
-        assert estimate_transformer_mva(66) == 100.0
-        assert estimate_transformer_mva(0) == 100.0
+        assert estimate_transformer_mva(66) == 150.0
+        assert estimate_transformer_mva(0) == 150.0
 
     def test_monotonic_nondecreasing(self):
         from esfex.visualization.workflows.grid_mapping_quality import (

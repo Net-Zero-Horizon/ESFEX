@@ -358,11 +358,11 @@ class TestCreateFuelsAndTechnologies:
 
 class TestStandardLineTypeCapacity:
     @pytest.mark.parametrize("kv,expected_mw", [
-        # sqrt(3) * V * I_nom(nearest type) * 0.7  (per circuit)
-        (110, 98.7),
-        (220, 344.1),
-        (380, 1188.7),
-        (500, 1819.1),
+        # sqrt(3) * V * I_nom(nearest type) * 0.9  (per circuit, bundled EHV)
+        (110, 171.4),
+        (220, 686.0),
+        (380, 2132.5),
+        (500, 3351.5),
     ])
     def test_thermal_capacity(self, kv, expected_mw):
         from esfex.visualization.workflows.grid_mapping_quality import (
@@ -398,7 +398,7 @@ class TestStandardLineTypeCapacity:
             estimate_line_rxb_per_km,
         )
         r, x, b = estimate_line_rxb_per_km(380)
-        assert r == pytest.approx(0.030) and x == pytest.approx(0.246)
+        assert r == pytest.approx(0.022) and x == pytest.approx(0.245)
         assert b > 0  # susceptance derived from the type capacitance
 
 
@@ -443,14 +443,18 @@ class TestCreateBusesFromSubstation:
         assert len(bus_ids) == 1
         assert result.transformers_added == 0
 
-    def test_single_bus_default_voltage_when_missing(self):
+    def test_single_bus_unknown_voltage_when_missing(self):
+        # An untagged substation must be left at 0 (unknown) so that
+        # _propagate_voltage can later infer its real level from neighbours.
+        # Defaulting to 220 kV floods the model with a voltage the grid does
+        # not use and corrupts the derived capacity/impedance.
         state = _make_state(buses={})
         result = ParseResult()
         sub = _feat("substation", name="", voltage_kv=0.0)
         bus_ids = gmb._create_buses_from_substation(
             state, sub, "per_substation", 5.0, result, {}, None)
         bus = state.buses[bus_ids[0]]
-        assert bus.voltage_kv == 220.0
+        assert bus.voltage_kv == 0.0
 
 
 # ======================================================================
@@ -721,8 +725,8 @@ class TestCreateLine:
         gmb._create_line(state, line, 5.0, result, {}, None)
         gl = state.transmission_lines[-1]
         # Thermal rating of the nearest (500 kV) standard type:
-        # sqrt(3) * 500 * 3.0 kA * 0.7 ~= 1819 MW.
-        assert gl.capacity_mw == pytest.approx(1819.1, rel=0.01)
+        # sqrt(3) * 500 * 4.3 kA * 0.9 ~= 3352 MW.
+        assert gl.capacity_mw == pytest.approx(3351.5, rel=0.01)
 
 
 # ======================================================================
@@ -2032,3 +2036,95 @@ class TestGeneratorCapacityGuard:
         )
         assert _max_plant_mw("Coal") == 7700.0
         assert _max_plant_mw("Coal", {"coal": 5000.0}) == 5000.0  # user override
+
+
+class TestFrequencyConsistency:
+    """Every bus gets a valid mains frequency, uniform per AC-connected area,
+    and equipment is aligned to its bus. Regression for the Japan 50/60 Hz
+    fragmentation that stranded generation from demand (~76% spurious shed)."""
+
+    def test_unifies_backfills_and_isolates_by_component(self):
+        from esfex.visualization.data.gui_model import GuiTransmissionLine
+        st = GuiSystemState(name="S")
+        st.nodes = [GuiNode(index=0, name="N0")]
+        st.buses = {
+            # A-B-C are AC-linked (Kanto): 50, 60 (boundary noise), None.
+            "A": GuiBus(bus_id="A", parent_node=0, frequency_hz=50.0,
+                        latitude=35.7, longitude=139.7),
+            "B": GuiBus(bus_id="B", parent_node=0, frequency_hz=60.0,
+                        latitude=35.7, longitude=139.8),
+            "C": GuiBus(bus_id="C", parent_node=0, frequency_hz=None,
+                        latitude=35.7, longitude=139.9),
+            # D is a separate component in west Japan → must stay 60 Hz.
+            "D": GuiBus(bus_id="D", parent_node=0, frequency_hz=60.0,
+                        latitude=34.7, longitude=135.5),
+        }
+        st.transmission_lines = [
+            GuiTransmissionLine(line_id="L1", from_bus="A", to_bus="B"),
+            GuiTransmissionLine(line_id="L2", from_bus="B", to_bus="C"),
+        ]
+        st.transformers = []
+        st.generators = {
+            "g": GuiGeneratorInstance(
+                instance_id="g", unit_key="u", name="g", gen_type="Thermal",
+                fuel="Gas", bus="B", node=0, frequency_hz=60.0),
+        }
+        st.batteries = {}
+
+        gmb._repair_frequency_consistency(st)
+
+        # A-B-C component: majority 50 (A=50, C backfilled→50, B=60) → all 50.
+        assert st.buses["A"].frequency_hz == 50.0
+        assert st.buses["B"].frequency_hz == 50.0
+        assert st.buses["C"].frequency_hz == 50.0
+        # D stands alone in west Japan → keeps 60 Hz (converters bridge, not us).
+        assert st.buses["D"].frequency_hz == 60.0
+        # Generator runs at the frequency of the bus it connects to.
+        assert st.generators["g"].frequency_hz == 50.0
+
+
+class TestVoltagePropagation:
+    """Untagged buses/lines inherit their real voltage from tagged neighbours
+    before the voltage floor runs. Regression for the OSM 220 kV default that
+    flooded Kanto with a voltage TEPCO does not use and corrupted the derived
+    line capacity/impedance (~76% spurious shed)."""
+
+    def test_propagates_and_recomputes_capacity(self):
+        from esfex.visualization.data.gui_model import GuiTransmissionLine
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_capacity_mw,
+        )
+        st = GuiSystemState(name="S")
+        st.nodes = [GuiNode(index=0, name="N0")]
+        st.buses = {
+            "A": GuiBus(bus_id="A", parent_node=0, voltage_kv=275.0),  # tagged
+            "B": GuiBus(bus_id="B", parent_node=0, voltage_kv=0.0),    # untagged
+            "C": GuiBus(bus_id="C", parent_node=0, voltage_kv=0.0),    # untagged
+            "X": GuiBus(bus_id="X", parent_node=0, voltage_kv=0.0),    # isolated
+        }
+        st.transmission_lines = [
+            GuiTransmissionLine(line_id="AB", from_bus="A", to_bus="B",
+                                voltage_kv=0.0, num_circuits=2, length_km=10),
+            GuiTransmissionLine(line_id="BC", from_bus="B", to_bus="C",
+                                voltage_kv=0.0, num_circuits=2, length_km=10),
+        ]
+        st.transformers = []
+        st.generators = {}
+        st.batteries = {}
+
+        changed = gmb._propagate_voltage(st)
+        assert changed >= 4
+
+        # Voltage flows A → B → C along the untagged chain.
+        assert st.buses["B"].voltage_kv == 275.0
+        assert st.buses["C"].voltage_kv == 275.0
+        # An isolated untagged bus falls back to the 220 kV default.
+        assert st.buses["X"].voltage_kv == 220.0
+
+        # Untagged lines take the endpoint voltage and their capacity/impedance
+        # are recomputed from it (not left at the spurious default).
+        exp = estimate_line_capacity_mw(275.0, 2)
+        for ln in st.transmission_lines:
+            assert ln.voltage_kv == 275.0
+            assert abs(ln.capacity_mw - exp) < 1.0
+            assert ln.reactance_pu > 0.0

@@ -97,27 +97,37 @@ def reason_incomplete(f: "GridFeature") -> str:
 # voltage class. Values are order-of-magnitude figures from utility
 # planning handbooks; calibrated for ACSR conductors and standard
 # tower geometry. (R, X) in ohm/km, B in microsiemens/km.
-# Canonical overhead AC standard line types per nominal voltage level,
-# derived from the PyPSA standard line-type library (MIT-licensed). Each row is
-# the representative bundled conductor for that level. A feature's line is
-# mapped to the type with the *closest* nominal voltage (PyPSA-Earth's
-# approach), and both the per-km impedance AND the thermal current rating come
-# from the same row, so capacity and impedance stay mutually consistent.
+# Canonical overhead AC standard line types per nominal voltage level. A
+# feature's line is mapped to the type with the *closest* nominal voltage
+# (PyPSA-Earth's approach); the per-km impedance AND the thermal current rating
+# come from the same row so capacity and impedance stay mutually consistent.
+#
+# The EHV rows model the LARGE bundled conductors real transmission lines use
+# (e.g. 490–810 mm² Al/St, 2–4 sub-conductors per phase), NOT the modest
+# Al/St 240/40 the earlier table assumed. A single 240 mm² 2-bundle rates a
+# 500 kV circuit at ~1.8 GW, roughly half of what an actual 500 kV circuit
+# carries (~3–3.5 GW); on a load-heavy grid (e.g. Tokyo, ~35 GW into a mesh
+# whose min-cut was thereby ~2× under-rated) this alone forced massive spurious
+# load shed, while low-load grids (Cuba) never noticed. i_nom is the per-circuit
+# thermal ampacity; capacity scales with num_circuits.
 #   (V_nom_kV, r_ohm/km, x_ohm/km, c_nF/km, i_nom_kA per circuit)
 _STD_LINE_TYPES: list[tuple[float, float, float, float, float]] = [
-    (33.0,  0.250, 0.400, 8.5,  0.40),
-    (66.0,  0.150, 0.400, 8.8,  0.50),
-    (110.0, 0.095, 0.380, 9.2,  0.74),   # 305-AL1/39-ST1A 110
-    (132.0, 0.090, 0.370, 9.3,  0.74),
-    (220.0, 0.060, 0.301, 12.5, 1.29),   # Al/St 240/40 2-bundle 220
-    (300.0, 0.040, 0.265, 13.2, 1.935),  # Al/St 240/40 3-bundle 300
-    (380.0, 0.030, 0.246, 13.8, 2.58),   # Al/St 240/40 4-bundle 380
-    (500.0, 0.020, 0.270, 13.0, 3.00),
-    (750.0, 0.013, 0.276, 13.1, 4.16),   # Al/St 560/50 4-bundle 750
+    (33.0,  0.200, 0.390, 8.6,  0.45),
+    (66.0,  0.120, 0.390, 8.9,  0.65),
+    (110.0, 0.075, 0.375, 9.3,  1.00),
+    (132.0, 0.070, 0.365, 9.4,  1.05),
+    (220.0, 0.045, 0.300, 12.8, 2.00),   # 2-bundle 490/65 220
+    (300.0, 0.030, 0.263, 13.4, 2.80),   # 3-bundle 490/65 300
+    (380.0, 0.022, 0.245, 14.0, 3.60),   # 4-bundle 490/65 380
+    (500.0, 0.016, 0.268, 13.2, 4.30),   # 4-bundle 810/70 500
+    (750.0, 0.011, 0.274, 13.3, 5.80),   # 6-bundle 810/70 750
 ]
 
-# N-1 security derate applied to the thermal rating (PyPSA-Earth s_max_pu).
-_LINE_SECURITY_FACTOR = 0.7
+# Thermal-rating margin applied to the ampacity. This is NOT an N-1 derate —
+# N-1 security is a separate, optional constraint (see N1SecurityConfig); baking
+# a 30 % contingency derate into every line's base rating double-counts it and
+# starves the plain UC. 0.9 keeps only a modest thermal headroom.
+_LINE_SECURITY_FACTOR = 0.9
 _OMEGA_50HZ = 2.0 * 3.141592653589793 * 50.0  # rad/s, for shunt susceptance
 
 
@@ -190,19 +200,22 @@ def estimate_transformer_mva(v_high_kv: float) -> float:
     transmission-only model: every step-down/interconnection caps at 100 MVA,
     so bulk power injected on the HV backbone cannot reach load at other
     levels (the binding constraint in a >=110 kV network). These are
-    order-of-magnitude bank ratings for a substation at each level.
+    order-of-magnitude ratings for the whole transformer BANK at a substation
+    (a major node runs several units in parallel), sized so the step-down
+    capacity is consistent with the line capacity feeding it — otherwise the
+    transformers, not the lines, silently become the delivery bottleneck.
     """
     if v_high_kv >= 500:
-        return 1000.0
+        return 2000.0
     if v_high_kv >= 275:
-        return 600.0
+        return 1200.0
     if v_high_kv >= 220:
-        return 400.0
+        return 800.0
     if v_high_kv >= 154:
-        return 300.0
+        return 500.0
     if v_high_kv >= 110:
-        return 200.0
-    return 100.0
+        return 300.0
+    return 150.0
 
 
 def estimate_transformer_impedance_pu(
@@ -430,8 +443,10 @@ _60HZ_REGIONS: list[tuple[float, float, float, float]] = [
     (4.5, 21.5, 116.0, 127.0),
     # Taiwan
     (21.5, 25.5, 119.5, 122.5),
-    # Japan east of ~136 °E (60 Hz half)
-    (24.0, 46.0, 136.0, 146.0),
+    # Japan WEST of ~138 °E (60 Hz half): Kyushu, Shikoku, Chugoku, Kansai,
+    # up to the Fossa Magna (~138 °E). East of it — Kanto (Tokyo), Tohoku,
+    # Hokkaido — is 50 Hz (the world default, so no box needed).
+    (24.0, 46.0, 128.0, 138.0),
     # Liberia
     (4.0, 9.0, -12.0, -7.0),
 ]
@@ -442,8 +457,10 @@ def infer_frequency_hz(lat: float, lng: float) -> float:
 
     Uses rough country bounding boxes for the (relatively few) 60 Hz
     regions; everywhere else defaults to 50 Hz, the world standard.
-    Japan straddles both: east of ≈ 136 °E is 60 Hz, west is 50 Hz —
-    captured by the box for that country.
+    Japan straddles both: WEST of the Fossa Magna (~138 °E) is 60 Hz
+    (Osaka, Kyushu), EAST is 50 Hz (Tokyo/Kanto, Tohoku, Hokkaido) —
+    captured by the box for that country. Verified against OSM: Kanto
+    power infrastructure carries ``frequency=50``.
     """
     for la_min, la_max, lo_min, lo_max in _60HZ_REGIONS:
         if la_min <= lat <= la_max and lo_min <= lng <= lo_max:

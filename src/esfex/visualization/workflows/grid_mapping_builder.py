@@ -682,6 +682,21 @@ def build_grid_from_features(
         except Exception as exc:
             result.warnings.append(f"Fuel Storage '{fs.name}': {exc}")
 
+    # ── Phase 8.4: Propagate voltage to untagged buses/lines ──────────────
+    # Must run BEFORE the voltage floor: an untagged bus that inherits its real
+    # (e.g. 66 kV) level from its neighbours is then correctly dropped by the
+    # floor, whereas the old 220 kV default survived it and corrupted the
+    # network's capacity/impedance.
+    try:
+        vc = _propagate_voltage(model.state)
+        if vc:
+            result.warnings.append(
+                f"Voltage inference: resolved {vc} untagged bus/line "
+                f"voltage(s) from tagged neighbours (was defaulting to 220 kV)."
+            )
+    except Exception as exc:
+        result.warnings.append(f"Voltage inference: {exc}")
+
     # ── Phase 8.5: Enforce the voltage floor (transmission-only model) ──
     # Drop the distribution layer that leaked in below ``min_voltage_kv``
     # (unknown-voltage features that were assigned a low voltage during the
@@ -795,7 +810,198 @@ def build_grid_from_features(
         except Exception as exc:
             result.warnings.append(f"Island absorption: {exc}")
 
+    # ── Frequency consistency ─────────────────────────────────────────────
+    # Every bus must carry a valid mains frequency. OSM tags it on only a
+    # fraction of elements (~23% in Japan), and line-endpoint / junction buses
+    # are created without one, so much of the network relies on the geographic
+    # 50/60 Hz inference. A stray None/0 Hz bus — or a bus left on the wrong
+    # frequency — forms its own synchronous island the DC-OPF cannot feed
+    # across, stranding generation from demand (the root cause of Japan's ~76 %
+    # spurious load shed: Kanto is 50 Hz but untagged buses were inferred at
+    # 60 Hz). Backfill from location, then align each generator/battery to the
+    # bus it physically connects to.
+    try:
+        n_freq = _repair_frequency_consistency(model.state)
+        if n_freq:
+            result.warnings.append(
+                f"Frequency consistency: unified the mains frequency of "
+                f"{n_freq} bus(es) with their AC-connected area (backfilled "
+                f"missing values and cleared 50/60 Hz boundary noise); "
+                f"aligned equipment to its bus."
+            )
+    except Exception as exc:
+        result.warnings.append(f"Frequency consistency: {exc}")
+
     return result
+
+
+def _repair_frequency_consistency(state) -> int:
+    """Give every bus a valid mains frequency, uniform per AC-connected area.
+
+    A synchronous (AC-connected) area runs at a single frequency; the 50 Hz
+    and 60 Hz halves of a country are joined only through frequency/HVDC
+    converters. OSM tags ``frequency`` on a minority of elements and
+    line-endpoint buses are created without one, so raw values are a patchwork
+    of OSM tags, geographic inference, and ``None``. Left alone, a stray bus on
+    the wrong frequency is its own island the DC-OPF cannot feed across.
+
+    This backfills missing values from location, then sets every bus in an
+    AC-connected component (lines + transformers, NOT converters — those
+    legitimately bridge frequencies) to that component's majority frequency,
+    and aligns each generator/battery to its bus. Returns the number of buses
+    whose frequency was changed.
+    """
+    from collections import Counter, defaultdict
+
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        infer_frequency_hz,
+    )
+
+    buses = state.buses
+    # 1. Backfill missing/invalid frequencies from geography.
+    for bus in buses.values():
+        if not bus.frequency_hz or bus.frequency_hz <= 0:
+            bus.frequency_hz = infer_frequency_hz(bus.latitude, bus.longitude)
+
+    # 2. AC adjacency (lines + transformers; converters intentionally excluded).
+    adj: dict[str, set[str]] = defaultdict(set)
+    for ln in state.transmission_lines:
+        if getattr(ln, "decorative", False):
+            continue
+        a, b = ln.from_bus, ln.to_bus
+        if a in buses and b in buses and a != b:
+            adj[a].add(b)
+            adj[b].add(a)
+    for tr in state.transformers:
+        a, b = tr.from_bus, tr.to_bus
+        if a in buses and b in buses and a != b:
+            adj[a].add(b)
+            adj[b].add(a)
+
+    # 3. Per AC-connected component, unify to the majority frequency.
+    seen: set[str] = set()
+    changed = 0
+    for seed in buses:
+        if seed in seen:
+            continue
+        comp = []
+        stack = [seed]
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            comp.append(x)
+            stack.extend(n for n in adj[x] if n not in seen)
+        freq = Counter(buses[b].frequency_hz for b in comp).most_common(1)[0][0]
+        for b in comp:
+            if buses[b].frequency_hz != freq:
+                buses[b].frequency_hz = freq
+                changed += 1
+
+    # 4. Equipment runs at the frequency of the bus it connects to.
+    for gen in state.generators.values():
+        b = buses.get(gen.bus)
+        if b is not None and b.frequency_hz:
+            gen.frequency_hz = b.frequency_hz
+    for bat in state.batteries.values():
+        b = buses.get(bat.bus)
+        if b is not None and b.frequency_hz:
+            bat.frequency_hz = b.frequency_hz
+    return changed
+
+
+def _propagate_voltage(state) -> int:
+    """Infer voltage for buses/lines OSM left untagged, from their tagged
+    neighbours — instead of defaulting every unknown to 220 kV.
+
+    OSM carries a ``voltage`` tag on only ~half of the lines in a dense region
+    (54 % of the Tokyo fetch had none) and on a minority of substation
+    polygons. Defaulting the rest to a mid value floods the transmission model
+    with spurious 220 kV buses — a level TEPCO does not even use — whose
+    capacity AND impedance (both derived from voltage) are wrong, so the
+    network can carry only a fraction of its load. A line runs at a single
+    voltage and terminates on same-voltage buses, so an untagged bus takes the
+    voltage of the lines on it; the value then flows along untagged lines to
+    the next bus (a fixed-point relaxation). Every line whose voltage is
+    resolved has its rating and impedance recomputed to match. A bus reaching
+    no tagged neighbour keeps a conservative fallback.
+
+    Returns the number of buses + lines whose voltage was assigned.
+    """
+    from collections import defaultdict
+
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_capacity_mw,
+        estimate_line_pu_params,
+    )
+
+    buses = state.buses
+    inc: dict[str, list] = defaultdict(list)
+    for ln in state.transmission_lines:
+        if getattr(ln, "decorative", False):
+            continue
+        if ln.from_bus in buses:
+            inc[ln.from_bus].append(ln)
+        if ln.to_bus in buses:
+            inc[ln.to_bus].append(ln)
+
+    # Fixed-point relaxation: an untagged bus takes the highest voltage among
+    # the elements it touches (line's own voltage, else the neighbour bus).
+    changed = 0
+    for _ in range(len(buses) + 1):
+        progressed = False
+        for bid, b in buses.items():
+            if (b.voltage_kv or 0) > 0:
+                continue
+            nv = []
+            for ln in inc.get(bid, ()):
+                other = ln.to_bus if ln.from_bus == bid else ln.from_bus
+                v = (ln.voltage_kv or 0) or (
+                    buses[other].voltage_kv if other in buses else 0)
+                if v and v > 0:
+                    nv.append(v)
+            if nv:
+                b.voltage_kv = max(nv)
+                changed += 1
+                progressed = True
+        if not progressed:
+            break
+
+    # Resolve untagged line voltages from their endpoints and recompute the
+    # rating + impedance from the now-known level.
+    for ln in state.transmission_lines:
+        if getattr(ln, "decorative", False) or (ln.voltage_kv or 0) > 0:
+            continue
+        ev = [buses[e].voltage_kv for e in (ln.from_bus, ln.to_bus)
+              if e in buses and (buses[e].voltage_kv or 0) > 0]
+        if not ev:
+            continue
+        v = max(ev)
+        ln.voltage_kv = v
+        ln.capacity_mw = estimate_line_capacity_mw(
+            v, getattr(ln, "num_circuits", 1) or 1)
+        if getattr(ln, "length_km", None):
+            r, x, bsus = estimate_line_pu_params(v, ln.length_km)
+            ln.resistance_pu, ln.reactance_pu, ln.susceptance_pu = r, x, bsus
+        changed += 1
+
+    # Conservative fallback for anything still unknown (an all-untagged pocket
+    # with no tagged neighbour anywhere): keep the legacy default so it is not
+    # left at 0 kV, but this now applies to a handful of isolated buses rather
+    # than the whole network.
+    for b in buses.values():
+        if (b.voltage_kv or 0) <= 0:
+            b.voltage_kv = 220.0
+            changed += 1
+    for ln in state.transmission_lines:
+        if getattr(ln, "decorative", False) or (ln.voltage_kv or 0) > 0:
+            continue
+        ln.voltage_kv = 220.0
+        ln.capacity_mw = estimate_line_capacity_mw(
+            220.0, getattr(ln, "num_circuits", 1) or 1)
+        changed += 1
+    return changed
 
 
 # ── Phase 1: Substation → Buses ──────────────────────────────────────
@@ -874,8 +1080,10 @@ def _create_buses_from_substation(
         result.transformers_added += 1
 
     else:
-        # Single bus (per_substation or single-voltage)
-        v = sub.voltage_kv if sub.voltage_kv > 0 else 220.0
+        # Single bus (per_substation or single-voltage). 0 = unknown voltage
+        # (OSM often omits it on substation polygons); _propagate_voltage
+        # infers it from the connected lines instead of defaulting to 220 kV.
+        v = sub.voltage_kv if sub.voltage_kv > 0 else 0.0
         props = {
             "voltage_kv": v,
             "frequency_hz": sub.frequency_hz,
