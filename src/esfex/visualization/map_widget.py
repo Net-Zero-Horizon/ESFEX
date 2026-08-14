@@ -675,7 +675,16 @@ class MapWidget(QWebEngineView):
 
     def show_domain_polygon(self, coords: list[tuple[float, float]]):
         import json
-        self._run_js(f"showDomainPolygon({json.dumps(coords)})")
+
+        from esfex.visualization.workflows.geo_domain import as_rings
+
+        # A multi-ring (archipelago) domain must reach Leaflet as separate
+        # polygons — each ring wrapped in its own list — else L.polygon reads
+        # the extra rings as holes in the first island. A single ring is passed
+        # through unchanged (Leaflet's simple-polygon form).
+        rings = as_rings(coords)
+        payload = coords if len(rings) <= 1 else [[r] for r in rings]
+        self._run_js(f"showDomainPolygon({json.dumps(payload)})")
 
     def clear_domain_polygon(self):
         self._run_js("clearDomainPolygon()")

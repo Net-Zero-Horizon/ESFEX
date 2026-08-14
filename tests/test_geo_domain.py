@@ -43,12 +43,14 @@ def test_overlapping_polygons_union_to_one():
     assert _area(poly) == pytest.approx(175.0)
 
 
-def test_disjoint_polygons_take_largest_part():
+def test_disjoint_polygons_keep_every_part():
     small = _poly_feature([[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]])      # area 4
     big = _poly_feature([[20, 20], [30, 20], [30, 30], [20, 30], [20, 20]])  # area 100
     poly = geoasset_to_domain_polygon(_fc(small, big))
-    # Documented v1 limitation: largest part only.
-    assert _area(poly) == pytest.approx(100.0)
+    # Every disjoint part is preserved (archipelago domains like Japan) — the
+    # earlier "largest part only" collapse dropped whole islands.
+    assert len(poly) == 2  # multi-ring: one ring per island
+    assert _area(poly) == pytest.approx(104.0)  # both parts, not just the big one
 
 
 def test_polygon_with_hole_keeps_exterior_only():
@@ -72,7 +74,9 @@ def test_multipolygon_geometry_supported():
         ],
     }}
     poly = geoasset_to_domain_polygon(_fc(geom))
-    assert _area(poly) == pytest.approx(16.0)
+    # Both parts of the MultiPolygon are kept (16 + 4).
+    assert len(poly) == 2  # multi-ring
+    assert _area(poly) == pytest.approx(20.0)
 
 
 def test_no_polygons_returns_empty():
@@ -100,3 +104,49 @@ def test_domain_shapely_roundtrip():
     poly = geoasset_to_domain_polygon(_fc(_poly_feature(SQUARE)))
     shp = domain_shapely(poly)
     assert shp.area == pytest.approx(100.0)
+
+
+# ── Multi-ring (archipelago) domains ─────────────────────────────────
+
+def test_as_rings_single_and_multi():
+    from esfex.visualization.workflows.geo_domain import as_rings
+    single = [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+    assert as_rings(single) == [single]                 # bare ring wrapped
+    multi = [single, [(5.0, 5.0), (5.0, 6.0), (6.0, 6.0)]]
+    assert as_rings(multi) == multi                     # already multi-ring
+    assert as_rings([]) == []
+    assert as_rings([(0.0, 0.0), (0.0, 1.0)]) == []     # < 3 vertices dropped
+
+
+def test_domain_bounds_spans_all_rings():
+    # Two disjoint islands: bounds must be the union bbox, not one island's.
+    multi = [
+        [(0.0, 0.0), (0.0, 2.0), (2.0, 2.0), (2.0, 0.0)],
+        [(20.0, 30.0), (20.0, 32.0), (22.0, 32.0), (22.0, 30.0)],
+    ]
+    assert domain_bounds(multi) == (0.0, 0.0, 22.0, 32.0)
+
+
+def test_multiring_domain_keeps_disjoint_island_features():
+    # The Japan bug: a feature on a second island must survive the polygon
+    # clip when the domain is multi-ring (was dropped when only the largest
+    # ring was kept).
+    from esfex.visualization.workflows.grid_mapping_fetchers import (
+        GridFeature,
+        filter_features_by_polygon,
+    )
+    honshu = [(0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0)]
+    hokkaido = [(40.0, 140.0), (40.0, 142.0), (42.0, 142.0), (42.0, 140.0)]
+    domain = [honshu, hokkaido]
+
+    def _sub(lat, lng):
+        return GridFeature(source="osm", feature_type="substation",
+                           name="s", latitude=lat, longitude=lng)
+    on_honshu = _sub(5.0, 5.0)
+    on_hokkaido = _sub(41.0, 141.0)
+    offshore = _sub(60.0, 60.0)
+
+    kept = filter_features_by_polygon([on_honshu, on_hokkaido, offshore], domain)
+    assert on_honshu in kept
+    assert on_hokkaido in kept      # would be dropped before the fix
+    assert offshore not in kept

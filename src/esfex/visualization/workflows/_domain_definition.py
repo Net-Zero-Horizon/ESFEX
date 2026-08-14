@@ -32,7 +32,7 @@ from esfex.visualization.i18n import tr
 from esfex.visualization.workflows._domain_geoasset_control import (
     GeoAssetDomainControl,
 )
-from esfex.visualization.workflows.geo_domain import domain_bounds
+from esfex.visualization.workflows.geo_domain import as_rings, domain_bounds
 
 
 class DomainDefinitionWidget(QWidget):
@@ -164,7 +164,9 @@ class DomainDefinitionWidget(QWidget):
     # Shared domain application (the single funnel → mutual exclusivity)
     # ------------------------------------------------------------------
     def _set_domain(self, poly, source):
-        if not poly or len(poly) < 3:
+        # ``poly`` may be a single ring or a multi-ring (archipelago) domain.
+        rings = as_rings(poly)
+        if not rings:
             return
         self._polygon = list(poly)
         self._bounds = domain_bounds(self._polygon)
@@ -174,7 +176,7 @@ class DomainDefinitionWidget(QWidget):
             if hasattr(self._map_widget, "fit_bounds"):
                 s, w, n, e = self._bounds
                 self._map_widget.fit_bounds(s, w, n, e)
-        n = len(self._polygon)
+        n = sum(len(r) for r in rings)  # total vertices across all rings
         area = self._area_km2()
         if source:
             self._status.setText(

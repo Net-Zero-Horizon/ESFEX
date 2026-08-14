@@ -412,23 +412,30 @@ def _line_intersects_polygon(
 
 def filter_features_by_polygon(
     features: list[GridFeature],
-    polygon: list[tuple[float, float]],
+    polygon,
 ) -> list[GridFeature]:
     """Keep only features whose location falls inside *polygon*.
 
-    For point features (substations, generators, etc.) the centroid must lie
-    inside the polygon.  For line features, at least one vertex must be inside.
+    *polygon* is a single ring ``[(lat, lng), ...]`` or a multi-ring
+    ``[[(lat, lng), ...], ...]`` (an archipelago such as Japan). A feature is
+    kept when it falls inside **any** ring — otherwise disjoint islands would be
+    clipped away. For point features (substations, generators, etc.) the
+    centroid must lie inside; for line features, at least one vertex must.
     """
-    if not polygon or len(polygon) < 3:
+    from esfex.visualization.workflows.geo_domain import as_rings
+
+    rings = as_rings(polygon)
+    if not rings:
         return features  # no polygon → keep all
 
     filtered: list[GridFeature] = []
     for f in features:
         if f.feature_type in ("line", "road") and f.line_coords:
-            if _line_intersects_polygon(f.line_coords, polygon):
+            if any(_line_intersects_polygon(f.line_coords, r) for r in rings):
                 filtered.append(f)
         else:
-            if _point_in_polygon(f.latitude, f.longitude, polygon):
+            if any(_point_in_polygon(f.latitude, f.longitude, r)
+                   for r in rings):
                 filtered.append(f)
     return filtered
 

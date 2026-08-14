@@ -58,19 +58,44 @@ def has_polygon(geojson: dict) -> bool:
     return any(g.get("type") in ("Polygon", "MultiPolygon") for g in geoms)
 
 
-def geoasset_to_domain_polygon(geojson: dict) -> list[LatLng]:
-    """Dissolve all polygons of a GeoAsset into one domain ring ``[(lat, lng)]``.
+def as_rings(polygon) -> list[list[LatLng]]:
+    """Normalize a domain to a list of rings.
+
+    A domain is either a single ring ``[(lat, lng), ...]`` or a multi-ring
+    ``[[(lat, lng), ...], ...]`` (an archipelago / disjoint region). Returns
+    the list of rings with < 3 vertices dropped. Backward-compatible: a bare
+    ring is wrapped into a one-element list.
+
+    Detection is by nesting depth of the first element: for a single ring the
+    first element is a point ``(lat, lng)`` whose ``[0]`` is a number; for a
+    multi-ring it is itself a ring whose ``[0]`` is a point (a sequence).
+    """
+    if not polygon:
+        return []
+    first = polygon[0]
+    is_multi = (
+        isinstance(first, (list, tuple))
+        and len(first) > 0
+        and isinstance(first[0], (list, tuple))
+    )
+    rings = polygon if is_multi else [polygon]
+    return [list(r) for r in rings if r and len(r) >= 3]
+
+
+def geoasset_to_domain_polygon(geojson: dict):
+    """Dissolve a GeoAsset's polygons into a domain ring — or multi-ring.
 
     All Polygon/MultiPolygon geometries are unioned (``shapely.unary_union``).
-    Returns the exterior ring of the result, in ``(lat, lng)`` order (GeoJSON
-    stores ``(lng, lat)``; every ESFEX consumer expects ``(lat, lng)``).
+    Coordinates are returned in ``(lat, lng)`` order (GeoJSON stores
+    ``(lng, lat)``; every ESFEX consumer expects ``(lat, lng)``).
+
+    Returns a single ring ``[(lat, lng), ...]`` when the union is one polygon
+    (the common case), or a multi-ring ``[[(lat, lng), ...], ...]`` when it is
+    disjoint (an archipelago such as Japan — Honshu, Hokkaido, Kyushu, …). This
+    preserves every island: the earlier "keep only the largest ring" collapse
+    silently dropped whole islands from both the fetch bbox and the clip.
 
     Returns ``[]`` when the asset has no polygon features.
-
-    Limitation (v1): a multi-part dissolved domain (e.g. an archipelago)
-    collapses to its single largest exterior ring — holes and disjoint parts
-    are dropped, because every downstream consumer's domain contract is a single
-    ``list[(lat, lng)]`` ring.
     """
     from shapely import unary_union
     from shapely.geometry import MultiPolygon, Polygon
@@ -81,25 +106,45 @@ def geoasset_to_domain_polygon(geojson: dict) -> list[LatLng]:
 
     dissolved = unary_union(geoms)
     if isinstance(dissolved, MultiPolygon):
-        dissolved = max(dissolved.geoms, key=lambda g: g.area, default=None)
-    if not isinstance(dissolved, Polygon) or dissolved.is_empty:
+        parts = list(dissolved.geoms)
+    elif isinstance(dissolved, Polygon):
+        parts = [dissolved]
+    else:
+        parts = []
+
+    rings: list[list[LatLng]] = []
+    for part in parts:
+        if not isinstance(part, Polygon) or part.is_empty:
+            continue
+        coords = list(part.exterior.coords)
+        if len(coords) > 1 and coords[0] == coords[-1]:
+            coords = coords[:-1]  # drop the closing duplicate
+        rings.append([(lat, lng) for lng, lat in coords])
+
+    if not rings:
         return []
-
-    coords = list(dissolved.exterior.coords)
-    if len(coords) > 1 and coords[0] == coords[-1]:
-        coords = coords[:-1]  # drop the closing duplicate
-    return [(lat, lng) for lng, lat in coords]
+    return rings[0] if len(rings) == 1 else rings
 
 
-def domain_bounds(polygon: list[LatLng]) -> tuple[float, float, float, float]:
-    """Bounding box ``(south, west, north, east)`` of a ``(lat, lng)`` ring."""
-    lats = [p[0] for p in polygon]
-    lngs = [p[1] for p in polygon]
+def domain_bounds(polygon) -> tuple[float, float, float, float]:
+    """Bounding box ``(south, west, north, east)`` over every ring of a domain
+    (single ring or multi-ring)."""
+    pts = [p for ring in as_rings(polygon) for p in ring]
+    lats = [p[0] for p in pts]
+    lngs = [p[1] for p in pts]
     return (min(lats), min(lngs), max(lats), max(lngs))
 
 
-def domain_shapely(polygon: list[LatLng]):
-    """A shapely ``Polygon`` in ``(lng, lat)`` for GeoDataFrame clipping."""
-    from shapely.geometry import Polygon
+def domain_shapely(polygon):
+    """A shapely geometry in ``(lng, lat)`` for GeoDataFrame clipping — a
+    ``Polygon`` for a single-ring domain, a ``MultiPolygon`` for a multi-ring
+    (archipelago) domain."""
+    from shapely.geometry import MultiPolygon, Polygon
 
-    return Polygon([(lng, lat) for lat, lng in polygon])
+    polys = [
+        Polygon([(lng, lat) for lat, lng in ring])
+        for ring in as_rings(polygon)
+    ]
+    if not polys:
+        return Polygon()
+    return polys[0] if len(polys) == 1 else MultiPolygon(polys)
