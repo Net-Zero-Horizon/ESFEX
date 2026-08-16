@@ -187,6 +187,47 @@ class TestCellGrid:
         assert 0 < len(latp) < len(latb)
 
 
+class TestMultiRingDomainClip:
+    """Cells and node areas clip to a multi-ring (archipelago) domain, so an
+    island nation's border nodes don't absorb a neighbouring country's cells.
+    Regression for the Japan demand: western nodes swallowed ~45 M of South
+    Korea + ~24 M of China, inflating their load ~10x (Kitakyushu 42 GW)."""
+
+    # Two disjoint 1°-boxes ~10° apart (e.g. two islands), plus the wide gap
+    # of open water/foreign land between them.
+    ISLAND_A = [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]
+    ISLAND_B = [(0.0, 10.0), (0.0, 11.0), (1.0, 11.0), (1.0, 10.0)]
+
+    def test_region_cells_clip_to_all_islands_excluding_gap(self):
+        from esfex.models.demand_density_ml import region_cells_025
+        multi = [self.ISLAND_A, self.ISLAND_B]
+        lats, lons, _ = region_cells_025(polygon_latlon=multi)
+        assert len(lats) > 0
+        # Every kept cell lies inside one island box — none in the 1°<lon<10°
+        # gap (the "foreign" water/land that the bbox would otherwise include).
+        in_a = (lats >= 0) & (lats <= 1) & (lons >= 0) & (lons <= 1)
+        in_b = (lats >= 0) & (lats <= 1) & (lons >= 10) & (lons <= 11)
+        assert np.all(in_a | in_b)
+        assert in_a.any() and in_b.any()   # both islands kept
+        # Strictly fewer than the full bounding box (which spans the gap).
+        latb, _, _ = region_cells_025(bounds=(0.0, 0.0, 1.0, 11.0))
+        assert len(lats) < len(latb)
+
+    def test_node_area_partition_respects_multiring(self):
+        from esfex.models.demand_density_ml import compute_node_areas_km2
+        multi = [self.ISLAND_A, self.ISLAND_B]
+        # One node on each island: each gets ~half the (two-island) land area,
+        # not a bbox-inflated share spanning the gap.
+        areas = compute_node_areas_km2(
+            [0.5, 0.5], [0.5, 10.5], polygon_latlon=multi, grid=120)
+        assert len(areas) == 2
+        assert areas[0] > 0 and areas[1] > 0
+        # Total land ≈ two 1°×1° boxes, far less than the 1°×11° bbox.
+        bbox_area = compute_node_areas_km2(
+            [0.5], [5.5], bounds=(0.0, 0.0, 1.0, 11.0))[0]
+        assert sum(areas) < 0.5 * bbox_area
+
+
 class TestDensityFeatures:
     def test_shape_and_order(self):
         temp = np.full(8760, 28.0)
@@ -270,7 +311,7 @@ class TestRasterSampling:
         pa = sample_node_pop_and_area(lats, lons, 2025, bounds=self._CUBA, grid=120)
         assert len(pa) == 2
         pop_area_total = sum(a for _d, a in pa)
-        ring, _ml, region_area = _region_ring(lats, lons, None, self._CUBA)
+        _clip, _bbox, _ml, region_area = _region_ring(lats, lons, None, self._CUBA)
         # Inhabited land is a small slice of the ocean-heavy bbox.
         assert 0 < pop_area_total < 0.5 * region_area
         # Each node has a positive population density.

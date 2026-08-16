@@ -181,6 +181,7 @@ class GridMappingWizard(QDialog):
             bounds = self._step_source_fetch.get_bounds()
             self._step_demand.set_inputs(
                 bounds, self._model, self._all_states,
+                polygon=self._step_source_fetch.get_polygon(),
             )
 
         if self._current_step < len(self._steps) - 1:

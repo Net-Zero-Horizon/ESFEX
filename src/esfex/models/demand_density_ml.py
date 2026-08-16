@@ -272,8 +272,9 @@ def region_cells_025(
         s, n = min(node_lats), max(node_lats)
         w, e = min(node_lons), max(node_lons)
         s -= _CELL_DEG; n += _CELL_DEG; w -= _CELL_DEG; e += _CELL_DEG
-    elif polygon_latlon:
-        las = [p[0] for p in polygon_latlon]; los = [p[1] for p in polygon_latlon]
+    elif _as_rings(polygon_latlon):
+        pts = [p for r in _as_rings(polygon_latlon) for p in r]
+        las = [p[0] for p in pts]; los = [p[1] for p in pts]
         s, n, w, e = min(las), max(las), min(los), max(los)
     else:
         return np.array([]), np.array([]), np.array([])
@@ -288,7 +289,12 @@ def region_cells_025(
     LA, LO = np.meshgrid(lat_c, lon_c, indexing="ij")
     lats = LA.ravel(); lons = LO.ravel()
 
-    poly = _make_poly(list(polygon_latlon)) if (polygon_latlon and len(polygon_latlon) >= 3) else None
+    # Clip cells to the study domain (single ring or multi-ring/archipelago).
+    # Without this the cell grid spans the whole bounding box — for an island
+    # nation the box reaches neighbouring countries, whose populated cells then
+    # get assigned to the nearest border node and inflate its demand (Japan's
+    # western nodes absorbed ~45 M of South Korea + ~24 M of China).
+    poly = _make_poly(polygon_latlon) if _as_rings(polygon_latlon) else None
     if poly is not None:
         from shapely.geometry import Point
         keep = np.array([poly.contains(Point(lo, la)) for la, lo in zip(lats, lons)])
@@ -424,51 +430,95 @@ def _region_ring(
     node_lons: list[float],
     polygon_latlon: Optional[list[tuple[float, float]]],
     bounds: Optional[tuple[float, float, float, float]],
-) -> tuple[list[tuple[float, float]], float, float]:
-    """Resolve the study region to a ring; return (ring, mean_lat, area_km2).
+):
+    """Resolve the study region; return ``(clip, bbox_ring, mean_lat, area)``.
 
-    Prefers the drawn polygon, then the bounding box, then a padded node
-    bounding box (so a single/colinear node set still has area)."""
-    if polygon_latlon and len(polygon_latlon) >= 3:
-        ring = list(polygon_latlon)
+    ``clip`` is the domain to test cell containment against — a single ring or
+    a multi-ring (archipelago) polygon, or ``None`` when only a bounding box /
+    padded node box is available. ``bbox_ring`` is the 4-corner extent to
+    enumerate the grid over. Prefers the drawn polygon, then the bounding box,
+    then a padded node box (so a single/colinear node set still has area)."""
+    rings = _as_rings(polygon_latlon)
+    clip = polygon_latlon if rings else None
+    if rings:
+        pts = [p for r in rings for p in r]
+        lat_min = min(p[0] for p in pts); lat_max = max(p[0] for p in pts)
+        lon_min = min(p[1] for p in pts); lon_max = max(p[1] for p in pts)
     elif bounds:
         s, w, no, e = bounds
-        ring = [(s, w), (s, e), (no, e), (no, w)]
+        lat_min, lat_max, lon_min, lon_max = s, no, w, e
     else:
         lat_min, lat_max = min(node_lats), max(node_lats)
         lon_min, lon_max = min(node_lons), max(node_lons)
         pad_lat = max((lat_max - lat_min) * 0.5, 0.25)
         pad_lon = max((lon_max - lon_min) * 0.5, 0.25)
-        ring = [
-            (lat_min - pad_lat, lon_min - pad_lon),
-            (lat_min - pad_lat, lon_max + pad_lon),
-            (lat_max + pad_lat, lon_max + pad_lon),
-            (lat_max + pad_lat, lon_min - pad_lon),
-        ]
-    mean_lat = sum(lat for lat, _ in ring) / len(ring)
-    return ring, mean_lat, _polygon_area_km2(ring, mean_lat)
+        lat_min -= pad_lat; lat_max += pad_lat
+        lon_min -= pad_lon; lon_max += pad_lon
+    bbox_ring = [
+        (lat_min, lon_min), (lat_min, lon_max),
+        (lat_max, lon_max), (lat_max, lon_min),
+    ]
+    mean_lat = (lat_min + lat_max) / 2.0
+    # Area of the actual domain (sum of island rings), not the ocean-filled
+    # bounding box — so a node's Voronoi share reflects real land area.
+    if rings:
+        total_area = sum(_polygon_area_km2(r, mean_lat) for r in rings)
+    else:
+        total_area = _polygon_area_km2(bbox_ring, mean_lat)
+    return clip, bbox_ring, mean_lat, total_area
 
 
-def _make_poly(ring: list[tuple[float, float]]):
+def _as_rings(polygon) -> list[list[tuple[float, float]]]:
+    """Normalise a domain to a list of ``(lat, lng)`` rings.
+
+    Accepts a single ring ``[(lat, lng), …]`` or a multi-ring (archipelago)
+    ``[[(lat, lng), …], …]``. Detection is by nesting depth of the first
+    element. Rings with < 3 vertices are dropped. This is the same contract as
+    the fetcher's domain clip, so a country like Japan (Honshu, Hokkaido,
+    Kyushu, …) clips every island and excludes neighbouring countries' cells."""
+    if not polygon:
+        return []
+    first = polygon[0]
+    is_multi = (
+        isinstance(first, (list, tuple))
+        and len(first) > 0
+        and isinstance(first[0], (list, tuple))
+    )
+    rings = polygon if is_multi else [polygon]
+    return [list(r) for r in rings if r and len(r) >= 3]
+
+
+def _make_poly(polygon):
+    """Shapely geometry (lng, lat) for a single-ring or multi-ring domain — a
+    ``Polygon`` for one ring, a ``MultiPolygon`` for several. ``None`` if
+    shapely is unavailable or the domain has no valid ring."""
     try:
-        from shapely.geometry import Polygon
-        return Polygon([(lng, lat) for (lat, lng) in ring])
+        from shapely.geometry import MultiPolygon, Polygon
     except Exception:
         return None
+    rings = _as_rings(polygon)
+    if not rings:
+        return None
+    polys = [Polygon([(lng, lat) for (lat, lng) in r]) for r in rings]
+    return polys[0] if len(polys) == 1 else MultiPolygon(polys)
 
 
-def _nearest_node_cells(ring, node_lats, node_lons, mean_lat, grid):
-    """Yield (node_index, lat, lon) for each interior grid point of *ring*,
-    assigning the point to its nearest node (the Voronoi partition)."""
-    poly = _make_poly(ring)
+def _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
+    """Yield (node_index, lat, lon) for each interior grid point of the study
+    region, assigning the point to its nearest node (the Voronoi partition).
+
+    Points are enumerated over ``bbox_ring`` and kept only when inside the
+    ``clip`` domain (single ring or multi-ring/archipelago); a ``None`` clip
+    keeps the whole box."""
+    poly = _make_poly(clip) if _as_rings(clip) else None
     point_cls = None
     if poly is not None:
         from shapely.geometry import Point as point_cls  # noqa: N813
 
-    lat_min = min(lat for lat, _ in ring)
-    lat_max = max(lat for lat, _ in ring)
-    lon_min = min(lng for _, lng in ring)
-    lon_max = max(lng for _, lng in ring)
+    lat_min = min(lat for lat, _ in bbox_ring)
+    lat_max = max(lat for lat, _ in bbox_ring)
+    lon_min = min(lng for _, lng in bbox_ring)
+    lon_max = max(lng for _, lng in bbox_ring)
 
     mlng = _M_PER_DEG_LNG_EQ * math.cos(math.radians(mean_lat))
     nx = np.asarray(node_lons, dtype=np.float64) * mlng
@@ -499,7 +549,7 @@ def compute_node_areas_km2(
     n = len(node_lats)
     if n == 0:
         return []
-    ring, mean_lat, total_area = _region_ring(
+    clip, bbox_ring, mean_lat, total_area = _region_ring(
         node_lats, node_lons, polygon_latlon, bounds)
     if total_area <= 0:
         return [0.0] * n
@@ -508,7 +558,7 @@ def compute_node_areas_km2(
 
     counts = np.zeros(n, dtype=np.int64)
     for ni, _la, _lo in _nearest_node_cells(
-            ring, node_lats, node_lons, mean_lat, grid):
+            clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
         counts[ni] += 1
 
     if counts.sum() == 0:
@@ -537,13 +587,13 @@ def _sample_node_raster(
     n = len(node_lats)
     if n == 0:
         return []
-    ring, mean_lat, total_area = _region_ring(
+    clip, bbox_ring, mean_lat, total_area = _region_ring(
         node_lats, node_lons, polygon_latlon, bounds)
     if total_area <= 0:
         return [None] * n
     acc = np.zeros(n, dtype=np.float64)
     cnt = np.zeros(n, dtype=np.int64)
-    for ni, la, lo in _nearest_node_cells(ring, node_lats, node_lons, mean_lat, grid):
+    for ni, la, lo in _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
         v = sample_fn(la, lo)
         if v is None or v <= 0:
             continue
@@ -906,7 +956,7 @@ def sample_node_pop_and_area(
     except Exception:
         return [(None, 0.0)] * n
 
-    ring, mean_lat, total_area = _region_ring(
+    clip, bbox_ring, mean_lat, total_area = _region_ring(
         node_lats, node_lons, polygon_latlon, bounds)
     if total_area <= 0:
         return [(None, 0.0)] * n
@@ -914,7 +964,7 @@ def sample_node_pop_and_area(
     sum_pop = np.zeros(n, dtype=np.float64)
     cnt_pop = np.zeros(n, dtype=np.int64)
     total_inside = 0
-    for ni, la, lo in _nearest_node_cells(ring, node_lats, node_lons, mean_lat, grid):
+    for ni, la, lo in _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
         total_inside += 1
         pd = sample_pop_density(la, lo, year)
         if pd is not None and pd > 0:

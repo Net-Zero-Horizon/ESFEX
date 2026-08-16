@@ -4702,11 +4702,15 @@ class GridMappingDemandStep(QWidget):
         self._dist_group.setVisible(len(load_buses) >= 2)
         self.set_inputs(bounds, model, self._all_states)
 
-    def set_inputs(self, bounds, model, all_states):
+    def set_inputs(self, bounds, model, all_states, polygon=None):
         """Called by wizard when navigating to this step."""
         self._model = model
         self._all_states = all_states
         self._bounds = bounds
+        # The study-domain ring(s) — clips the demand-density cell grid to the
+        # country so neighbouring nations' population doesn't leak into border
+        # nodes. May be a single ring or a multi-ring (archipelago) domain.
+        self._polygon = polygon or []
         self._buildings_gdf = None
         self._classified_gdf = None
         self._assignments.clear()
@@ -5030,6 +5034,7 @@ class GridMappingDemandStep(QWidget):
             node_lons=[n.centroid_lng for n in nodes],
             node_names=[n.name for n in nodes],
             bounds=self._bounds,
+            area_polygon=getattr(self, "_polygon", None) or [],
         )
 
         # Build macro data from WB fetch
