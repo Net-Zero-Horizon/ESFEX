@@ -9494,12 +9494,14 @@ class UCLoadShedCurtailmentChart(QWidget):
             # first (via the hour axis) so the node count and node-range slice
             # act on the right axis. Without this, a run with more nodes than
             # hours (all of Japan: 72 nodes > 24 h) mis-reads demand.
+            # NB: sc[key] is a lazy ``_ArrayShim`` — it exposes ``.shape`` but
+            # not ``.ndim``; derive the rank from the shape length.
             _nh = (int(sc["electricity_prices"].shape[0])
                    if "electricity_prices" in sc
-                   and sc["electricity_prices"].ndim == 1 else None)
+                   and len(sc["electricity_prices"].shape) == 1 else None)
 
             _n_nodes = None
-            if "demand" in sc and sc["demand"].ndim >= 2:
+            if "demand" in sc and len(sc["demand"].shape) >= 2:
                 _n_nodes = orient_to_node_hours(sc["demand"][:], _nh).shape[0]
 
             def _hourly_total(key: str) -> np.ndarray:
