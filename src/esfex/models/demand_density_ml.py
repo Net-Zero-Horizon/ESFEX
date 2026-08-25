@@ -670,13 +670,43 @@ _CMIP6_MODEL = "CMCC_CM2_VHR4"
 # The Open-Meteo climate API rate-limits aggressively (heavy CMIP6 queries); a
 # bare request loses a node's future climate on the first HTTP 429, degrading
 # its SSP demand forecast. Retry transient failures (429 / 5xx / timeout /
-# connection) with exponential backoff + jitter.
-_CMIP6_RETRIES = 4
+# connection) with exponential backoff + jitter, honouring a ``Retry-After``
+# header when the server sends one.
+_CMIP6_RETRIES = 6
 _CMIP6_BACKOFF_S = 3.0
+_CMIP6_BACKOFF_CAP_S = 90.0
+# CMCC_CM2_VHR4 is a ~0.25° (~25 km) model, so nodes within a cell get
+# physically identical climate. Snap node coordinates to this grid and fetch
+# each unique cell once — collapses the hundreds of near-duplicate country-scale
+# requests that trip the 429 limit down to a few dozen.
+_CMIP6_GRID_DEG = 0.25
+# Minimum spacing between *network* fetches (cache hits are free), to stay under
+# the Open-Meteo per-minute rate limit instead of bursting into 429s.
+_CMIP6_THROTTLE_S = 1.2
+
+
+class _Cmip6DailyLimit(Exception):
+    """Open-Meteo's *daily* request quota is exhausted (``"Daily API request
+    limit exceeded. Please try again tomorrow."``). Unlike a per-minute/hour
+    burst, this will not clear within the run, so we stop immediately and
+    degrade instead of retrying every cell for hours against a dead quota."""
+
+
+def _is_daily_limit(resp) -> bool:
+    """True if a 429 response is the hard *daily* quota (not a burst limit)."""
+    try:
+        reason = (resp.json() or {}).get("reason", "")
+    except Exception:
+        reason = getattr(resp, "text", "") or ""
+    reason = reason.lower()
+    return "daily" in reason or "try again tomorrow" in reason
 
 
 def _cmip6_get_with_retry(url: str):
-    """GET *url* with retry/backoff on transient (429 / 5xx / network) errors."""
+    """GET *url* with retry/backoff on transient (429 / 5xx / network) errors.
+
+    A *daily* quota 429 raises :class:`_Cmip6DailyLimit` immediately — retrying
+    it would only stall the run (every subsequent cell fails the same way)."""
     import random
     import time
 
@@ -684,6 +714,7 @@ def _cmip6_get_with_retry(url: str):
 
     last_exc = None
     for attempt in range(_CMIP6_RETRIES):
+        retry_after = None
         try:
             resp = requests.get(url, timeout=120)
             resp.raise_for_status()
@@ -693,11 +724,34 @@ def _cmip6_get_with_retry(url: str):
             last_exc = exc
             if code != 429 and not (code and 500 <= code < 600):
                 raise  # non-transient (e.g. 400) — don't retry
+            if code == 429 and exc.response is not None:
+                # Hard daily quota → abort now (don't burn retries on a limit
+                # that only resets tomorrow).
+                if _is_daily_limit(exc.response):
+                    raise _Cmip6DailyLimit(
+                        "Open-Meteo daily API quota exhausted") from exc
+                # Burst (per-minute/hour) 429 → honour Retry-After if present.
+                ra = getattr(exc.response, "headers", {}).get("Retry-After")
+                if ra:
+                    try:
+                        retry_after = float(ra)
+                    except ValueError:
+                        retry_after = None
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_exc = exc
         if attempt < _CMIP6_RETRIES - 1:
-            time.sleep(_CMIP6_BACKOFF_S * (2 ** attempt) * (0.5 + random.random()))
+            backoff = _CMIP6_BACKOFF_S * (2 ** attempt) * (0.5 + random.random())
+            wait = retry_after if retry_after is not None else backoff
+            time.sleep(min(wait, _CMIP6_BACKOFF_CAP_S))
     raise last_exc
+
+
+def _cmip6_cache_path(lat, lon, start_year, end_year, model=_CMIP6_MODEL):
+    """On-disk cache path for one point's CMIP6 timeseries. Keyed at 0.01°, so
+    grid-snapped coordinates (see :data:`_CMIP6_GRID_DEG`) reuse the same file
+    across every node that falls in the cell."""
+    from esfex.paths import CMIP6_DIR
+    return CMIP6_DIR / f"cmip6_{model}_{lat:.2f}_{lon:.2f}_{start_year}_{end_year}.npz"
 
 
 def _cmip6_point_hourly(
@@ -708,7 +762,7 @@ def _cmip6_point_hourly(
     climate API, reconstructed from daily Tmax/Tmin. Cached to CMIP6_DIR.
     Returns {year: ndarray(8760)} (possibly empty on failure)."""
     from esfex.paths import CMIP6_DIR
-    cache = CMIP6_DIR / f"cmip6_{model}_{lat:.2f}_{lon:.2f}_{start_year}_{end_year}.npz"
+    cache = _cmip6_cache_path(lat, lon, start_year, end_year, model)
     if cache.exists():
         try:
             d = np.load(cache)
@@ -717,12 +771,21 @@ def _cmip6_point_hourly(
             pass
 
     from esfex.models.demand_projection import _daily_to_hourly_temperature
+    # An OPEN_METEO_API_KEY (paid/non-commercial subscription) routes to the
+    # customer endpoint, which has far higher rate limits than the shared free
+    # tier — the escape hatch when the free daily quota is a bottleneck.
+    import os
+    api_key = os.environ.get("OPEN_METEO_API_KEY", "").strip()
+    host = ("customer-climate-api.open-meteo.com" if api_key
+            else "climate-api.open-meteo.com")
     url = (
-        f"https://climate-api.open-meteo.com/v1/climate?"
+        f"https://{host}/v1/climate?"
         f"latitude={lat:.4f}&longitude={lon:.4f}"
         f"&start_date={start_year}-01-01&end_date={end_year}-12-31"
         f"&models={model}&daily=temperature_2m_max,temperature_2m_min"
     )
+    if api_key:
+        url += f"&apikey={api_key}"
     resp = _cmip6_get_with_retry(url)
     daily = resp.json().get("daily", {})
     times = daily.get("time", [])
@@ -765,18 +828,71 @@ def fetch_cmip6_node_temps(
     base_year: int, years: int, model: str = _CMIP6_MODEL,
 ) -> list[Optional[dict]]:
     """Per-node CMIP6 per-year hourly temperature for the simulation horizon.
-    Returns a list (one per node) of {year: ndarray(8760)} or None on failure."""
+    Returns a list (one per node) of {year: ndarray(8760)} or None on failure.
+
+    Country-scale grids have hundreds of nodes but the CMIP6 model is only
+    ~0.25°; fetching per node hammered Open-Meteo into 429s. Nodes are snapped
+    to the model grid, each unique cell is fetched exactly once (cache hits are
+    free; only real network calls are throttled), and the result is shared back
+    to every node in the cell."""
+    import time
+
     start = base_year
     end = base_year + max(years - 1, 0)
-    out: list[Optional[dict]] = []
+    grid = _CMIP6_GRID_DEG
+
+    # Map each node to its coarse model-grid cell.
+    node_cells: list[tuple] = []
+    unique_cells: dict[tuple, tuple[float, float]] = {}
     for la, lo in zip(node_lats, node_lons):
+        clat = round(round(float(la) / grid) * grid, 4)
+        clon = round(round(float(lo) / grid) * grid, 4)
+        key = (clat, clon)
+        node_cells.append(key)
+        unique_cells.setdefault(key, (clat, clon))
+
+    logger.info(
+        "CMIP6: %d node(s) → %d unique %.2f° cell(s) to fetch",
+        len(node_cells), len(unique_cells), grid,
+    )
+
+    by_cell: dict[tuple, Optional[dict]] = {}
+    daily_exhausted = False
+    for key, (clat, clon) in unique_cells.items():
+        if daily_exhausted:
+            by_cell[key] = None  # quota is dead for the day — don't hammer it
+            continue
+        cached = _cmip6_cache_path(clat, clon, start, end, model).exists()
         try:
-            d = _cmip6_point_hourly(float(la), float(lo), start, end, model)
-            out.append(d or None)
+            d = _cmip6_point_hourly(clat, clon, start, end, model)
+            by_cell[key] = d or None
+        except _Cmip6DailyLimit:
+            # Stop immediately: every remaining cell would fail identically.
+            # The forecast degrades to shared climate for the uncached cells;
+            # the quota resets tomorrow (or set OPEN_METEO_API_KEY for a keyed
+            # endpoint with higher limits).
+            daily_exhausted = True
+            by_cell[key] = None
+            n_left = len(unique_cells) - len(by_cell)
+            logger.warning(
+                "CMIP6: Open-Meteo DAILY quota exhausted — stopping fetch; "
+                "%d remaining cell(s) will use degraded (shared) climate. "
+                "Retry tomorrow, or set OPEN_METEO_API_KEY. Already-cached "
+                "cells are unaffected.", n_left,
+            )
+            continue
         except Exception as exc:
-            logger.warning("CMIP6 climate fetch failed @(%.2f,%.2f): %s", la, lo, exc)
-            out.append(None)
-    return out
+            logger.warning(
+                "CMIP6 climate fetch failed @cell(%.2f,%.2f): %s",
+                clat, clon, exc,
+            )
+            by_cell[key] = None
+        # Throttle only genuine network fetches so a country-scale run stays
+        # under the per-minute rate limit; cached cells cost nothing.
+        if not cached and by_cell[key] is not None:
+            time.sleep(_CMIP6_THROTTLE_S)
+
+    return [by_cell.get(k) for k in node_cells]
 
 
 def allocate_demand_capacitated(
