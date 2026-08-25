@@ -990,21 +990,37 @@ class OSMGridFetcher(QThread):
         min_capacity_mw: float = 1.0,
         element_types: set[str] | None = None,
         parent=None,
+        polygon=None,
     ):
         super().__init__(parent)
         self.south, self.west, self.north, self.east = bounds
+        # Domain ring(s). Used to skip tiles that fall entirely outside the
+        # study region: for an archipelago the bounding box spans huge tracts
+        # of open ocean between islands (Japan: 24-45°N × 123-154°E), and
+        # querying those empty tiles multiplied the fetch time ~6× and hammered
+        # the Overpass servers into 500/502 errors. May be a single ring or a
+        # multi-ring (archipelago) domain; ``None`` keeps every tile.
+        self._polygon = polygon
         self.min_voltage_kv = min_voltage_kv
         self.min_capacity_mw = min_capacity_mw
         self.element_types = element_types or {
             "substation", "generator", "line", "transformer",
             "storage", "converter",
         }
+        # Major roads (for fuel routing) are fetched in a separate best-effort
+        # pass, never bundled with the electrical query — see _build_query.
+        self._wants_roads = bool(
+            {"fuel_entry", "fuel_storage"} & self.element_types
+        )
         self._cancelled = False
         # Set by _fetch: how many Overpass tiles failed / were queried. Lets
         # the caller warn on partial coverage instead of treating an
         # incomplete fetch as a clean success.
         self.failed_tile_count = 0
         self.total_tile_count = 0
+        # Best-effort road pass: how many road sub-queries failed. Reported
+        # separately — missing roads degrade fuel routing but never the grid.
+        self.road_query_failures = 0
 
     def cancel(self):
         self._cancelled = True
@@ -1107,11 +1123,22 @@ class OSMGridFetcher(QThread):
 
         def _fetch_one(tile, mirror_offset):
             """Worker: query one tile on a chosen mirror. Never raises — returns
-            ``(kind, payload)`` where kind is ok/dense/failed/cancelled."""
+            ``(kind, payload)`` where kind is ok/dense/failed/cancelled.
+
+            Successful (non-empty) tiles are cached to disk so a re-run — the
+            common case when a country-scale fetch is partially rate-limited —
+            only re-queries the tiles that actually failed, instead of hammering
+            the whole region again."""
             ts, tw, tn, te = tile
+            cpath = self._tile_cache_path(tile)
+            if cpath is not None and cpath.exists():
+                try:
+                    return ("ok", api.parse_json(cpath.read_bytes()))
+                except Exception:
+                    pass  # corrupt/partial cache → re-fetch
             query = self._build_query(f"{ts},{tw},{tn},{te}")
             try:
-                result = self._post_query(
+                result, raw = self._post_query(
                     api, headers, query, time, requests, mirror_offset)
             except _OverpassTileTooDense as exc:
                 return ("dense", exc)
@@ -1119,6 +1146,16 @@ class OSMGridFetcher(QThread):
                 return ("failed", exc)
             if result is None:
                 return ("cancelled", None)
+            # Cache only non-empty results: an empty tile might be a genuine
+            # ocean gap OR a load-shed empty, so don't pin it permanently.
+            n_elem = (len(result.nodes) + len(result.ways)
+                      + len(getattr(result, "relations", []) or []))
+            if cpath is not None and raw and n_elem > 0:
+                try:
+                    cpath.parent.mkdir(parents=True, exist_ok=True)
+                    cpath.write_bytes(raw)
+                except Exception:
+                    pass
             return ("ok", result)
 
         def _run_queue(queue):
@@ -1129,7 +1166,10 @@ class OSMGridFetcher(QThread):
             # thread, so ``features``/``seen_ids`` need no lock.
             nonlocal done, subdivided, last_tile_error, total_est
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            n_workers = min(len(self._OVERPASS_ENDPOINTS), 4)
+            # Keep concurrency low: 2 in-flight requests spread across mirrors
+            # is gentle enough that a country-scale fetch doesn't trip the
+            # Overpass per-IP rate limiter into 429/500/502 storms.
+            n_workers = min(len(self._OVERPASS_ENDPOINTS), 2)
             pass_failed: list[tuple[float, float, float, float]] = []
             while queue and not self._cancelled:
                 wave, queue = queue, []
@@ -1244,6 +1284,17 @@ class OSMGridFetcher(QThread):
         self.progress.emit(90, f"Filtering (voltage >= {self.min_voltage_kv} kV)...")
         features = self._apply_filters(features)
 
+        # Best-effort fuel-routing roads: a SEPARATE, bounded pass that runs
+        # only AFTER the electrical grid is complete, and only over the tiles
+        # that actually contain fuel infrastructure. Each is a single
+        # short-timeout shot (no retry, no subdivision) under a hard wall-clock
+        # budget, so heavy road geometry can never block or dominate the build
+        # the way an inline per-tile road query did. Missing roads only degrade
+        # fuel routing — never the grid.
+        if self._wants_roads and not self._cancelled:
+            features = features + self._fetch_fuel_roads(
+                tiles, features, api, headers, time, requests)
+
         if failed_tiles:
             self.progress.emit(
                 100,
@@ -1307,9 +1358,186 @@ class OSMGridFetcher(QThread):
                         w + (j + 1) * d_lon,
                     )
                 )
+
+        # Drop tiles that don't touch the study domain — for an archipelago the
+        # bounding box is mostly open ocean, and querying those empty tiles is
+        # what turned a ~2 h fetch into 12 h of Overpass 500/502 errors.
+        tiles = self._tiles_in_domain(tiles)
         return tiles
 
-    def _build_query(self, bbox: str) -> str:
+    def _tiles_in_domain(self, tiles):
+        """Keep only tiles that intersect the domain polygon (single- or
+        multi-ring). Falls back to all tiles if shapely / the polygon is
+        unavailable, so a drawn-bbox domain is unaffected."""
+        if not self._polygon:
+            return tiles
+        try:
+            from shapely.geometry import MultiPolygon, Polygon, box
+
+            from esfex.visualization.workflows.geo_domain import as_rings
+            rings = as_rings(self._polygon)
+            if not rings:
+                return tiles
+            polys = [Polygon([(lng, lat) for (lat, lng) in r]) for r in rings]
+            dom = polys[0] if len(polys) == 1 else MultiPolygon(polys)
+            if not dom.is_valid:
+                dom = dom.buffer(0)
+            # tile = (s, w, n, e); shapely box takes (minx, miny, maxx, maxy)
+            # in (lng, lat) order.
+            kept = [t for t in tiles
+                    if box(t[1], t[0], t[3], t[2]).intersects(dom)]
+            if kept:
+                dropped = len(tiles) - len(kept)
+                if dropped:
+                    logger.info(
+                        "OSM tiling: skipped %d/%d ocean tile(s) outside the "
+                        "domain (archipelago bounding box).", dropped, len(tiles))
+                return kept
+        except Exception as exc:  # never fail the fetch over the optimisation
+            logger.debug("tile-in-domain filter skipped: %s", exc)
+        return tiles
+
+    def _tile_cache_path(self, tile, roads: bool = False):
+        """Disk path for a tile's cached Overpass JSON, keyed by its bbox and
+        the requested element types (the query depends on both). ``None`` if a
+        cache location can't be resolved. A stale entry (> 30 days) is ignored
+        so infrastructure edits eventually flow through. ``roads=True`` keys the
+        separate major-road query so it never collides with the power tile."""
+        try:
+            import hashlib
+            import time as _time
+
+            from esfex.paths import OSM_TILE_CACHE_DIR
+            ts, tw, tn, te = tile
+            et = "roads" if roads else ",".join(sorted(self.element_types))
+            h = hashlib.md5(
+                f"{ts:.4f}_{tw:.4f}_{tn:.4f}_{te:.4f}|{et}".encode()
+            ).hexdigest()[:16]
+            prefix = "road" if roads else "tile"
+            path = OSM_TILE_CACHE_DIR / f"{prefix}_{ts:.3f}_{tw:.3f}_{h}.json"
+            if path.exists() and (_time.time() - path.stat().st_mtime) > 30 * 86400:
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+            return path
+        except Exception:
+            return None
+
+    # Wall-clock ceiling for the whole best-effort road pass. Roads are
+    # auxiliary (fuel routing only); they must never dominate a build, so once
+    # this budget is spent the pass stops and returns whatever it gathered.
+    _ROAD_PASS_BUDGET_S = 240.0
+    # Per-request client timeout for a single road tile. Paired with the low
+    # server-side [timeout] in the roads_only query, a dense tile fails fast
+    # and is skipped instead of blocking.
+    _ROAD_REQ_TIMEOUT_S = 45
+
+    def _roads_from_result(self, result) -> list:
+        """Extract road GridFeatures from one parsed road query result."""
+        feats: list = []
+        for way in getattr(result, "ways", []) or []:
+            try:
+                f = self._process_way(way)
+            except Exception:
+                continue
+            if f is not None and f.feature_type == "road":
+                feats.append(f)
+        return feats
+
+    def _road_fetch_tile(self, tile, api, headers, requests) -> list:
+        """One best-effort major-road query for a single tile.
+
+        Returns a list of road GridFeatures (possibly empty). Never raises,
+        never retries, never subdivides: a dense/failed road tile is simply
+        skipped (counted in ``road_query_failures``). Serves and populates the
+        separate ``roads=True`` tile cache so re-runs don't refetch."""
+        ts, tw, tn, te = tile
+        cpath = self._tile_cache_path(tile, roads=True)
+        if cpath is not None and cpath.exists():
+            try:
+                return self._roads_from_result(
+                    api.parse_json(cpath.read_bytes()))
+            except Exception:
+                pass  # corrupt cache → refetch
+        query = self._build_query(f"{ts},{tw},{tn},{te}", roads_only=True)
+        try:
+            resp = requests.post(
+                self._OVERPASS_ENDPOINTS[0],
+                data=query.encode("utf-8"),
+                headers=headers,
+                timeout=self._ROAD_REQ_TIMEOUT_S,
+            )
+        except Exception:
+            self.road_query_failures += 1
+            return []
+        sniff = resp.content[:2048] + resp.content[-2048:]
+        if (resp.status_code != 200
+                or b"runtime error" in sniff or b"timed out" in sniff):
+            # Non-200, or a server-side [timeout] on a too-dense road tile —
+            # skip it (best-effort), don't burn time subdividing or retrying.
+            self.road_query_failures += 1
+            return []
+        try:
+            result = api.parse_json(resp.content)
+        except Exception:
+            self.road_query_failures += 1
+            return []
+        if cpath is not None and resp.content:
+            try:
+                cpath.parent.mkdir(parents=True, exist_ok=True)
+                cpath.write_bytes(resp.content)
+            except Exception:
+                pass
+        return self._roads_from_result(result)
+
+    def _fetch_fuel_roads(self, tiles, features, api, headers, time,
+                          requests) -> list:
+        """Best-effort road pass for fuel routing, run after the grid is built.
+
+        Queries roads ONLY over the tiles that actually contain fuel
+        infrastructure (fuel entries/storages) — typically a handful of coastal
+        industrial tiles, not the whole country — each as a single short shot,
+        under ``_ROAD_PASS_BUDGET_S``. Returns the merged road GridFeatures."""
+        fuel = [f for f in features
+                if f.feature_type in ("fuel_entry", "fuel_storage")]
+        if not fuel:
+            return []
+        # Tiles containing at least one fuel feature.
+        road_tiles: list = []
+        for tile in tiles:
+            ts, tw, tn, te = tile
+            if any(ts <= f.latitude <= tn and tw <= f.longitude <= te
+                   for f in fuel):
+                road_tiles.append(tile)
+        if not road_tiles:
+            return []
+
+        self.progress.emit(
+            92,
+            f"Fetching fuel-routing roads over {len(road_tiles)} tile(s) "
+            "(best-effort)...",
+        )
+        out: list = []
+        seen: set = set()
+        t0 = time.time()
+        for k, tile in enumerate(road_tiles):
+            if self._cancelled or (time.time() - t0) > self._ROAD_PASS_BUDGET_S:
+                logger.info(
+                    "Road pass stopped early (%d/%d tiles) — budget/cancel; "
+                    "fuel routing may be partial.", k, len(road_tiles))
+                break
+            for rf in self._road_fetch_tile(tile, api, headers, requests):
+                if rf.osm_id not in seen:
+                    seen.add(rf.osm_id)
+                    out.append(rf)
+            self.progress.emit(
+                min(92 + int(6 * (k + 1) / len(road_tiles)), 98),
+                f"Fuel-routing roads: tile {k + 1}/{len(road_tiles)}...",
+            )
+        return out
+
+    def _build_query(self, bbox: str, roads_only: bool = False) -> str:
         """Assemble the Overpass QL query for one bbox tile.
 
         Only what the builder actually consumes is requested. Point-like
@@ -1320,7 +1548,27 @@ class OSMGridFetcher(QThread):
         ``out geom``. This drops the blanket ``>; out skel qt;`` recursion,
         which used to pull every polygon vertex of every substation just to
         average it back into a point — the dominant per-tile cost.
+
+        The major-road query (``roads_only=True``) is fetched in a SEPARATE
+        request from the electrical grid. Over a 1° tile it pulls a huge amount
+        of road geometry and reliably trips the Overpass dispatcher into HTTP
+        500/502; bundling it with the power query would drop substations and
+        lines whenever the roads failed, leaving an incomplete grid. Roads are
+        auxiliary (fuel-routing only), so they are fetched best-effort and their
+        failure never poisons the electrical fetch.
         """
+        if roads_only:
+            # Only the major arteries used for fuel trucking. Including
+            # "secondary" pulls an order of magnitude more road geometry and
+            # reliably times out the Overpass dispatcher in dense regions. A low
+            # server-side [timeout] makes a too-dense road tile fail fast so the
+            # best-effort pass skips it instead of blocking (roads are auxiliary).
+            return (
+                "[out:json][timeout:25];\n"
+                f'(\n  way["highway"~"motorway|trunk|primary"]({bbox});\n)->.ln;\n'
+                ".ln out geom;"
+            )
+
         # Point-like features: centroid is all the builder uses.
         pt: list[str] = []
         # Linear features: full geometry is needed (line traces / road routing).
@@ -1333,10 +1581,18 @@ class OSMGridFetcher(QThread):
                 f'relation["power"="substation"]({bbox});',
             ]
         if "generator" in self.element_types:
+            # Utility-scale supply only. Rooftop PV is mapped as vast numbers
+            # of power=generator nodes and is discarded downstream anyway
+            # (_is_rooftop_solar), so exclude roof-mounted units at the source
+            # instead of fetching and dropping them — the single biggest source
+            # of unnecessary Overpass volume in densely-mapped regions. The
+            # ``!=`` filters still pass any generator lacking the tag, so no
+            # real plant or wind turbine is lost. ``power=plant`` is only ever
+            # an area (way/relation), so the node variant is dropped.
+            _no_roof = '["generator:place"!="roof"]["location"!="roof"]'
             pt += [
-                f'node["power"="generator"]({bbox});',
-                f'way["power"="generator"]({bbox});',
-                f'node["power"="plant"]({bbox});',
+                f'node["power"="generator"]{_no_roof}({bbox});',
+                f'way["power"="generator"]{_no_roof}({bbox});',
                 f'way["power"="plant"]({bbox});',
                 f'relation["power"="plant"]({bbox});',
             ]
@@ -1346,9 +1602,17 @@ class OSMGridFetcher(QThread):
                 f'way["power"="cable"]({bbox});',
             ]
         if "transformer" in self.element_types:
+            # Only voltage-tagged (transmission) transformers. Distribution and
+            # pole transformers are mapped as a flood of voltage-less
+            # power=transformer nodes; without a voltage they default to a
+            # spurious 220/110 unit and inject fake buses at random pole
+            # locations (see _create_transformer). Requiring [voltage] both cuts
+            # the volume and stops them from corrupting the transmission model —
+            # transformers between voltage levels are synthesised at substations
+            # regardless, so nothing meaningful is lost.
             pt += [
-                f'node["power"="transformer"]({bbox});',
-                f'way["power"="transformer"]({bbox});',
+                f'node["power"="transformer"]["voltage"]({bbox});',
+                f'way["power"="transformer"]["voltage"]({bbox});',
             ]
         if "converter" in self.element_types:
             pt += [
@@ -1375,13 +1639,9 @@ class OSMGridFetcher(QThread):
                 f'nwr["man_made"="storage_tank"]["content"~"fuel|oil|gas|diesel|lpg|petroleum"]({bbox});',
                 f'nwr["industrial"="tank_farm"]({bbox});',
             ]
-        if {"fuel_entry", "fuel_storage"} & self.element_types:
-            # Only the major arteries used for fuel trucking. Including
-            # "secondary" pulls an order of magnitude more road geometry and
-            # reliably times out the Overpass dispatcher in dense regions.
-            ln += [
-                f'way["highway"~"motorway|trunk|primary"]({bbox});',
-            ]
+        # NOTE: major roads for fuel routing are intentionally NOT queried here.
+        # They are fetched in a separate best-effort pass (roads_only=True) so a
+        # heavy-road HTTP 500 can never drop the electrical grid for this tile.
 
         blocks = ["[out:json][timeout:90];"]
         if pt:
@@ -1422,7 +1682,7 @@ class OSMGridFetcher(QThread):
         empty_hits = 0
         for attempt in range(max_retries + 1):
             if self._cancelled:
-                return None
+                return None, None
             url = endpoints[(attempt + mirror_offset) % len(endpoints)]
             try:
                 resp = requests.post(
@@ -1469,7 +1729,7 @@ class OSMGridFetcher(QThread):
                             )
                             time.sleep(3.0)
                             continue
-                        return result
+                        return result, resp.content
                 elif resp.status_code == 400:
                     msg = _overpass_error_snippet(resp.text)
                     low = resp.text.lower()
@@ -1799,7 +2059,24 @@ class OSMGridFetcher(QThread):
         if not coords:
             return None
 
-        # Centroid
+        return self._build_feature(tags, coords, f"way/{way.id}")
+
+    def _build_feature(
+        self,
+        tags: dict[str, str],
+        coords: list[tuple[float, float]],
+        osm_id: str,
+    ) -> GridFeature | None:
+        """Build a GridFeature from resolved tags + geometry vertices.
+
+        ``coords`` is the ordered list of ``(lat, lng)`` vertices (a single
+        pair for a point/centroid, the full trace for a line). Shared by the
+        Overpass way path (:meth:`_process_way`) and the Geofabrik/PBF path so
+        both go through identical classification and geometry handling."""
+        if not coords:
+            return None
+        power = tags.get("power", "")
+        highway = tags.get("highway", "")
         lat = sum(c[0] for c in coords) / len(coords)
         lng = sum(c[1] for c in coords) / len(coords)
 
@@ -1811,21 +2088,19 @@ class OSMGridFetcher(QThread):
                 latitude=lat, longitude=lng,
                 line_coords=coords,
                 include=False,  # Not shown in review or built
-                raw_tags=dict(tags), osm_id=f"way/{way.id}",
+                raw_tags=dict(tags), osm_id=osm_id,
             )
 
         line_coords = coords if power in ("line", "cable") else None
 
         if power:
             return self._process_element(
-                tags=tags,
-                lat=lat, lng=lng,
-                osm_id=f"way/{way.id}",
-                line_coords=line_coords,
+                tags=tags, lat=lat, lng=lng,
+                osm_id=osm_id, line_coords=line_coords,
             )
 
-        # Non-power way (fuel infrastructure)
-        return self._process_fuel_element(tags, lat, lng, f"way/{way.id}")
+        # Non-power geometry (fuel infrastructure area)
+        return self._process_fuel_element(tags, lat, lng, osm_id)
 
     def _process_fuel_element(
         self,

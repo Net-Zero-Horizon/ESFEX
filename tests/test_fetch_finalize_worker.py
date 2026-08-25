@@ -92,3 +92,29 @@ def test_progress_announces_polygon_clip(qapp):
     w.progress.connect(lambda m: msgs.append(m))
     w.run()
     assert any("Clipping" in m and "region" in m for m in msgs)
+
+
+# ── OSMGridFetcher tile-in-domain filter ────────────────────────────────
+# An archipelago's bounding box is mostly open ocean; querying those empty
+# tiles turned Japan's ~2 h fetch into 12 h of Overpass 500/502 errors. The
+# tiler must skip tiles that don't intersect the domain polygon.
+
+def test_osm_tiling_skips_ocean_tiles(qapp):
+    from esfex.visualization.workflows.grid_mapping_fetchers import OSMGridFetcher
+    # Two 1°-boxes ~10° apart (two islands), so the box between them is "ocean".
+    island_a = [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]
+    island_b = [(0.0, 10.0), (0.0, 11.0), (1.0, 11.0), (1.0, 10.0)]
+    bounds = (0.0, 0.0, 1.0, 11.0)  # spans both islands + the gap
+
+    no_poly = OSMGridFetcher(bounds, polygon=None)._tile_bboxes()
+    with_poly = OSMGridFetcher(bounds, polygon=[island_a, island_b])._tile_bboxes()
+
+    assert len(with_poly) < len(no_poly)          # ocean tiles dropped
+    # Every kept tile intersects one of the islands (lon in [0,1] or [10,11]).
+    for (s, w, n, e) in with_poly:
+        assert (w <= 1.0 and e >= 0.0) or (w <= 11.0 and e >= 10.0)
+    # A single-ring (drawn bbox) domain is unaffected — no rings dropped
+    # spuriously when the domain IS the whole box.
+    full = OSMGridFetcher(bounds, polygon=[
+        (0.0, 0.0), (0.0, 11.0), (1.0, 11.0), (1.0, 0.0)])._tile_bboxes()
+    assert len(full) == len(no_poly)

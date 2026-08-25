@@ -38,6 +38,11 @@ GRIDDED_NIGHTLIGHTS_DIR = GRIDDED_DIR / "nightlights"
 
 MODELS_DIR = PROJECT_DATA / "models"
 CMIP6_DIR = PROJECT_DATA / "cmip6"
+OSM_TILE_CACHE_DIR = PROJECT_DATA / "osm_tile_cache"
+# Geofabrik regional .osm.pbf extracts + the region index, cached for reuse.
+# Country-scale grid builds read these locally instead of the (rate-limited,
+# frequently-degraded) live Overpass API. See grid_mapping_geofabrik.py.
+GEOFABRIK_DIR = PROJECT_DATA / "geofabrik"
 ERA5_DIR = PROJECT_DATA / "era5"
 NEW_SOURCES_DIR = PROJECT_DATA / "new_sources"
 OWID_DIR = PROJECT_DATA / "owid"

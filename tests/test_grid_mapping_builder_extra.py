@@ -1099,6 +1099,100 @@ class TestOSMFetcherTiling:
         assert "out geom" in q
         assert ">;" not in q
 
+    def test_build_query_generator_excludes_rooftop_pv(self):
+        # Rooftop PV is discarded downstream (_is_rooftop_solar); don't fetch
+        # the flood in the first place. power=plant is an area, not a node.
+        f = self._fetcher((0.0, 0.0, 1.0, 1.0))
+        f.element_types = {"generator"}
+        q = f._build_query("0,0,1,1")
+        assert '"generator:place"!="roof"' in q
+        assert '"location"!="roof"' in q
+        assert 'node["power"="plant"]' not in q
+        assert 'way["power"="plant"]' in q      # areas still fetched
+        assert 'relation["power"="plant"]' in q
+
+    def test_build_query_transformer_requires_voltage(self):
+        # Voltage-less pole/distribution transformers are a flood and inject
+        # spurious 220/110 units — require a voltage tag to keep only the
+        # transmission-relevant ones.
+        f = self._fetcher((0.0, 0.0, 1.0, 1.0))
+        f.element_types = {"transformer"}
+        q = f._build_query("0,0,1,1")
+        assert '"power"="transformer"]["voltage"]' in q
+
+    def test_build_query_excludes_roads_from_power_query(self):
+        # Major roads must NEVER ride along in the electrical query: a heavy
+        # road tile 500s and would otherwise drop substations/lines with it.
+        f = self._fetcher((0.0, 0.0, 1.0, 1.0))
+        f.element_types = {"substation", "line", "fuel_entry", "fuel_storage"}
+        q = f._build_query("0,0,1,1")
+        assert "highway" not in q
+        assert '"power"="substation"' in q
+
+    def test_build_query_roads_only_is_highway_only(self):
+        f = self._fetcher((0.0, 0.0, 1.0, 1.0))
+        q = f._build_query("0,0,1,1", roads_only=True)
+        assert "highway" in q
+        assert "motorway|trunk|primary" in q
+        assert "out geom" in q
+        # No electrical elements leak into the road query.
+        assert '"power"=' not in q
+
+    def test_wants_roads_flag_tracks_fuel_element_types(self):
+        assert self._fetcher((0.0, 0.0, 1.0, 1.0))._wants_roads is False
+        f = self._fetcher((0.0, 0.0, 1.0, 1.0))
+        f2 = type(f)(
+            (0.0, 0.0, 1.0, 1.0),
+            element_types={"substation", "fuel_entry"},
+        )
+        assert f2._wants_roads is True
+
+    def test_road_fetch_failure_never_drops_the_grid(self, monkeypatch):
+        # A road tile that 500s must be swallowed: single shot, no retry, no
+        # subdivision — return nothing, count the failure, never raise.
+        f = self._fetcher((0.0, 0.0, 1.0, 1.0))
+
+        class _Resp500:
+            status_code = 500
+            content = b"Internal Server Error"
+
+        class _FakeRequests:
+            RequestException = _ReqExc
+
+            def post(self, *a, **k):
+                return _Resp500()
+
+        monkeypatch.setattr(f, "_tile_cache_path", lambda tile, roads=False: None)
+        out = f._road_fetch_tile(
+            (0.4, 0.4, 0.5, 0.5), object(), {}, _FakeRequests())
+        assert out == []
+        assert f.road_query_failures >= 1
+
+    def test_fuel_roads_pass_only_queries_fuel_tiles(self, monkeypatch):
+        # The road pass must query ONLY tiles holding fuel infrastructure, not
+        # the whole country, and must never touch a fuel-free build.
+        f = self._fetcher((0.0, 0.0, 3.0, 3.0))
+        tiles = f._tile_bboxes()
+        queried = []
+        monkeypatch.setattr(
+            f, "_road_fetch_tile",
+            lambda tile, *a, **k: queried.append(tile) or [])
+
+        class _Feat:
+            def __init__(self, ft, lat, lng):
+                self.feature_type, self.latitude, self.longitude = ft, lat, lng
+
+        import time as _t
+        # No fuel features → no road tiles queried at all.
+        assert f._fetch_fuel_roads(tiles, [], object(), {}, _t, object()) == []
+        assert queried == []
+        # One fuel entry at (0.5, 0.5) → only its containing tile is queried.
+        feats = [_Feat("fuel_entry", 0.5, 0.5)]
+        f._fetch_fuel_roads(tiles, feats, object(), {}, _t, object())
+        assert len(queried) == 1
+        (ts, tw, tn, te) = queried[0]
+        assert ts <= 0.5 <= tn and tw <= 0.5 <= te
+
     def test_post_query_runtime_error_is_not_silent_success(self):
         f = self._fetcher((0.0, 0.0, 1.0, 1.0))
 
@@ -1155,8 +1249,11 @@ class TestOSMFetcherTiling:
             def sleep(self, *_):
                 pass
 
-        out = f._post_query(_FakeApi(), {}, "q", _FakeTime(), _FakeRequests())
+        # _post_query returns (parsed_result, raw_bytes) — the raw body is
+        # carried out so the caller can cache the tile.
+        out, raw = f._post_query(_FakeApi(), {}, "q", _FakeTime(), _FakeRequests())
         assert out is sentinel
+        assert raw == _Resp.content
 
 
 class TestOSMFetcherOutputParsing:
@@ -1514,9 +1611,11 @@ class TestOSMFetcherResilience:
                 calls["i"] += 1
             if i == 0:
                 raise RuntimeError("Overpass busy (504)")
-            return self._EmptyResult()
+            return self._EmptyResult(), b""   # (result, raw) — empty → uncached
 
         monkeypatch.setattr(f, "_post_query", fake_post)
+        # Never read a stale on-disk tile cache during the test.
+        monkeypatch.setattr(f, "_tile_cache_path", lambda tile: None)
         out = f._fetch()
         assert calls["i"] > n           # the failed tile was retried, not skipped
         assert f.failed_tile_count == 0  # and recovered on the retry pass
