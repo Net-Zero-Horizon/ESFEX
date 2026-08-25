@@ -489,7 +489,6 @@ class GridMappingSourceFetchStep(QWidget):
         from esfex.visualization.workflows.grid_mapping_fetchers import (
             GEMGridFetcher,
             GridFinderFetcher,
-            OSMGridFetcher,
             WRIGridFetcher,
         )
 
@@ -528,9 +527,14 @@ class GridMappingSourceFetchStep(QWidget):
 
         if osm_on:
             self._pending += 1
-            fetcher = OSMGridFetcher(
+            from esfex.visualization.workflows.grid_mapping_geofabrik import (
+                make_osm_fetcher,
+            )
+            # Country-scale domains use a local Geofabrik extract (reliable,
+            # reproducible, no Overpass rate-limits); small bboxes use Overpass.
+            fetcher = make_osm_fetcher(
                 bounds, min_voltage_kv=min_v, min_capacity_mw=min_cap,
-                element_types=etypes,
+                element_types=etypes, polygon=polygon,
             )
             fetcher.progress.connect(
                 lambda pct, msg: self._on_progress("osm", pct, msg)
@@ -5731,13 +5735,30 @@ class GridMappingDemandStep(QWidget):
             return m if m > 0 else max(float(b.voltage_kv), 1.0) * sc
 
         self._assignments = []
-        n_nodes = 0
+        n_nodes = 0       # multi-bus nodes split by capacitated transport
+        n_single = 0      # single-bus nodes (all demand on the sole load bus)
         for ni, nd in enumerate(nodes):
             bs = self._distribution_buses(state, nd.index)
-            if len(bs) < 2:
-                continue          # single-busbar nodes need no split
-            n_nodes += 1
+            if not bs:
+                continue
             sel = np.where(cell_node == ni)[0]
+            if len(bs) < 2:
+                # Single-busbar node — the norm after the PyPSA-style node-mesh
+                # reduction (one bus per node). There is nothing to split, but we
+                # STILL emit a 1.0 assignment: skipping it left ``_assignments``
+                # empty on a fully-reduced grid, which disabled the Apply button
+                # and thereby dropped ALL per-node forecast demand (the node
+                # demand CSVs are only written from ``_apply_all``).
+                b = bs[0]
+                node_mwh = float(np.sum(cann[sel])) if sel.size else 0.0
+                self._assignments.append({
+                    "node_name": nd.name, "bus_id": b.bus_id, "bus_name": b.name,
+                    "building_count": int(round(node_mwh)),
+                    "old_fraction": b.demand_fraction, "new_fraction": 1.0,
+                })
+                n_single += 1
+                continue
+            n_nodes += 1
             if sel.size:
                 served = allocate_demand_capacitated(
                     clat[sel], clon[sel], cann[sel],
@@ -5758,10 +5779,13 @@ class GridMappingDemandStep(QWidget):
 
         self._render_assignments_table()
         self._progress.setValue(100)
-        self._btn_apply.setEnabled(len(self._assignments) > 0)
+        # Apply must also be enabled when only single-bus nodes exist (a fully
+        # reduced grid) or a forecast is present, so per-node demand still writes.
+        self._btn_apply.setEnabled(
+            len(self._assignments) > 0 or self._forecast_result is not None)
         self._lbl_bld_status.setText(
-            f"Capacitated-transport distribution: {len(self._assignments)} bus "
-            f"fraction(s) across {n_nodes} multi-bus node(s) from "
+            f"Demand distribution: {len(self._assignments)} bus fraction(s) "
+            f"across {n_nodes} multi-bus + {n_single} single-bus node(s) from "
             f"{len(res.cell_lats)} demand cells.")
 
     def _apply_all(self):

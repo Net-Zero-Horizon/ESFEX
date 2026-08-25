@@ -1423,3 +1423,70 @@ def test_inter_system_links_endpoint_and_zero_capacity_and_dup():
 
 def test_inter_system_links_none_input():
     assert V.validate_inter_system_links(None, {}) == []
+
+
+# ── reduce_to_node_mesh (PyPSA-style equivalent-network reduction) ──────
+# Replaces the ad-hoc L2+ pruning that stranded generation on weak sub-buses.
+# Each node → one bus with aggregated gen+demand; inter-node branches are the
+# parallel combination of the original cross-boundary lines (a real mesh,
+# inherited from the topology — not a hub-and-spoke star).
+
+def test_reduce_to_node_mesh_collapses_and_combines():
+    # Node 0: two buses (a gen bus with a THIN line + a strong bus). Node 1:
+    # one bus. Two parallel inter-node lines between node 0 and node 1.
+    st = _state(
+        nodes=[_node(0, name="A"), _node(1, name="B")],
+        buses={
+            "a_gen": _bus("a_gen", node=0, voltage=500),
+            "a_hub": _bus("a_hub", node=0, voltage=500),
+            "b_hub": _bus("b_hub", node=1, voltage=500),
+        },
+        transmission_lines=[
+            # intra-node (absorbed): gen bus → hub, thin
+            _line("intra", "a_gen", "a_hub", cap=120.0, reactance_pu=0.02),
+            # two parallel inter-node lines → combined into one equiv branch
+            _line("x1", "a_hub", "b_hub", cap=1000.0, reactance_pu=0.04),
+            _line("x2", "a_hub", "b_hub", cap=1000.0, reactance_pu=0.04),
+        ],
+        transformers=[],
+        generators={"g": _gen("g", bus="a_gen", node=0, rated=5000.0)},
+        batteries={},
+    )
+    n = V.reduce_to_node_mesh(st)
+    assert n == 2
+    # Two node buses, all demand on them.
+    assert set(st.buses) == {"node_0", "node_1"}
+    assert all(b.demand_fraction == 1.0 for b in st.buses.values())
+    # One equivalent inter-node branch (the two parallels combined); intra-node
+    # line absorbed.
+    real = [l for l in st.transmission_lines if not getattr(l, "decorative", False)]
+    assert len(real) == 1
+    eq = real[0]
+    assert {eq.from_bus, eq.to_bus} == {"node_0", "node_1"}
+    assert eq.capacity_mw == pytest.approx(2000.0)          # 1000 + 1000
+    assert eq.reactance_pu == pytest.approx(0.02)           # 0.04 ∥ 0.04
+    # The 5 GW generator now sits on its node bus (co-located with demand — no
+    # longer stranded behind the 120 MW intra-node line).
+    assert st.generators["g"].bus == "node_0"
+    assert st.transformers == []
+
+
+def test_reduce_to_node_mesh_is_mesh_not_star():
+    # 4 nodes in a ring (0-1-2-3-0): every node keeps degree 2 → a mesh, never
+    # a star (which would give one hub of degree 3 and three leaves).
+    buses = {f"b{i}": _bus(f"b{i}", node=i, voltage=220) for i in range(4)}
+    ring = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    lines = [_line(f"l{i}", f"b{a}", f"b{b}", cap=500.0, reactance_pu=0.05)
+             for i, (a, b) in enumerate(ring)]
+    st = _state(nodes=[_node(i) for i in range(4)], buses=buses,
+                transmission_lines=lines, transformers=[],
+                generators={}, batteries={})
+    V.reduce_to_node_mesh(st)
+    real = [l for l in st.transmission_lines if not getattr(l, "decorative", False)]
+    from collections import defaultdict
+    deg = defaultdict(int)
+    for l in real:
+        deg[l.from_bus] += 1
+        deg[l.to_bus] += 1
+    assert len(real) == 4                    # the 4 ring branches survive
+    assert all(d == 2 for d in deg.values())  # every node degree 2 → mesh

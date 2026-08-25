@@ -824,6 +824,15 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
         if ln.to_bus:
             transmission_endpoints.add(ln.to_bus)
 
+    # Buses per node — a node with a single bus MUST host its demand on that
+    # bus (it is the node's only possible demand sink), so it can never be a
+    # pure HV "connection". This is exactly the case after the L2+
+    # equivalent-network reduction (one node bus carrying all gen+demand):
+    # without this guard those HV node buses are demoted to "connection" and
+    # the node's demand is silently dropped.
+    from collections import Counter as _Counter
+    _buses_per_node = _Counter(b.parent_node for b in state.buses.values())
+
     # ── Phase 1: assign role per bus ──
     new_roles: dict[str, str] = {}
     for bid, bus in state.buses.items():
@@ -835,6 +844,10 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
         if has_supply:
             # Bus hosts generation / storage — mixed (also serves load).
             role = "mixed"
+        elif _buses_per_node.get(bus.parent_node, 0) <= 1:
+            # Sole bus of its node — the only demand sink, so it must carry
+            # load regardless of voltage or transformer topology.
+            role = "load"
         elif is_xfm_to and v <= HV_THRESHOLD_KV:
             # Down-stream side of a step-down transformer, LV side.
             # Feeders attach here → load.

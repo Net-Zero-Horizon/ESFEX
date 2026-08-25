@@ -546,6 +546,22 @@ def test_repair_bus_roles_lv_becomes_load_and_redistributes():
     assert counts["nodes_redistributed"] == 1
 
 
+def test_repair_bus_roles_sole_hv_node_bus_carries_demand():
+    # After the L2+ equivalent-network reduction each node has ONE bus at HV
+    # with no transformer. The old HV heuristic demoted it to "connection" and
+    # the node's demand was silently dropped. A node's sole bus must be a load
+    # sink regardless of voltage.
+    n0 = bus("node_0", parent_node=0, voltage_kv=500.0, role="connection",
+             demand_fraction=0.0)
+    n1 = bus("node_1", parent_node=1, voltage_kv=500.0, role="connection",
+             demand_fraction=0.0)
+    state = make_state(buses={"node_0": n0, "node_1": n1})
+    Q.repair_bus_roles_and_demand(state)
+    assert n0.role == "load" and n1.role == "load"          # not "connection"
+    assert n0.demand_fraction == pytest.approx(1.0)          # whole-node demand
+    assert n1.demand_fraction == pytest.approx(1.0)
+
+
 def test_repair_bus_roles_preserves_valid_distribution():
     b0 = bus("bus_0", parent_node=0, voltage_kv=33.0, role="load",
              demand_fraction=0.7)

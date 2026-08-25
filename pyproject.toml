@@ -73,6 +73,9 @@ dependencies = [
     "shapely>=2.0.0",
     "requests>=2.28.0",
     "overpy>=0.7",
+    # Country-scale OSM via local Geofabrik .osm.pbf extracts (pyosmium) —
+    # reliable/reproducible where the live Overpass API is rate-limited.
+    "osmium>=4.0",
     "otex>=0.1.0",
     "scikit-learn>=1.3.0",
     "atlite>=0.2.11",

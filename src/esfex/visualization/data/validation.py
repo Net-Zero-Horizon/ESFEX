@@ -5014,6 +5014,154 @@ def _cleanup_fuel_infrastructure(
     return simplify_network(model, fuel_actions)
 
 
+def reduce_to_node_mesh(state: GuiSystemState) -> int:
+    """Collapse the bus-level network to a node-level equivalent mesh.
+
+    This is the canonical PyPSA / Ward-style spatial reduction used for the
+    reduced (L2+) representation, replacing the ad-hoc radial/series/collapse
+    pruning that stranded generation on weak sub-buses (Japan: 37 GW of gas
+    behind a 504 MW line, so the DC-OPF could only deliver ~48 GW of ~250 GW
+    available). Podar ≠ reducir: pruning removes buses without recomputing the
+    equivalent impedances, so the retained network no longer represents the
+    original's power transfer. A proper reduction computes those equivalents.
+
+    Each node (the Grid Builder cluster carried by ``bus.parent_node``) becomes
+    a single bus carrying that node's aggregated generation and demand. Nodes
+    are wired to their neighbours by ONE equivalent branch per node-pair,
+    combining every original cross-boundary line/transformer in parallel
+    (thermal capacity summed; series admittance ``1/x_eq = Σ 1/x_i``). Because
+    the inter-node adjacency is inherited from the real lines' node-pairs, the
+    result is a genuine mesh (not a hub-and-spoke star) and preserves the
+    network's transfer capability by construction.
+
+    Mutates ``state`` in place; returns the node-bus count.
+    """
+    from collections import defaultdict
+
+    from esfex.visualization.data.gui_model import (
+        EndpointRef, GeoPoint, GuiBus, GuiTransmissionLine,
+    )
+
+    B = state.buses
+    nodes = state.nodes
+    NN = len(nodes)
+    if NN == 0 or not B:
+        return 0
+
+    node_of = {bid: b.parent_node for bid, b in B.items()}
+
+    # Representative voltage / frequency per node (buses within a node share
+    # the node bus, so pick the dominant level).
+    buses_of_node: dict[int, list] = defaultdict(list)
+    for b in B.values():
+        buses_of_node[b.parent_node].append(b)
+    node_v: dict[int, float] = {}
+    node_freq: dict[int, float] = {}
+    for i in range(NN):
+        nb = buses_of_node.get(i, [])
+        node_v[i] = max((b.voltage_kv for b in nb), default=500.0) if nb else 500.0
+        freqs = [getattr(b, "frequency_hz", 50.0) or 50.0 for b in nb]
+        node_freq[i] = max(set(freqs), key=freqs.count) if freqs else 50.0
+
+    # Equivalent inter-node branches: combine original cross-boundary
+    # lines + transformers per node-pair (parallel).
+    pair: dict[tuple[int, int], dict] = defaultdict(
+        lambda: {"cap": 0.0, "invx": 0.0, "invr": 0.0, "b": 0.0})
+
+    def _accumulate(ni, nj, cap, x, r, b):
+        if ni is None or nj is None or ni == nj:
+            return
+        p = pair[(min(ni, nj), max(ni, nj))]
+        p["cap"] += max(cap, 0.0)
+        if x > 0:
+            p["invx"] += 1.0 / x
+        if r > 0:
+            p["invr"] += 1.0 / r
+        p["b"] += b
+
+    for ln in state.transmission_lines:
+        if getattr(ln, "decorative", False):
+            continue
+        _accumulate(
+            node_of.get(ln.from_bus), node_of.get(ln.to_bus),
+            float(ln.capacity_mw or 0.0),
+            float(getattr(ln, "reactance_pu", 0.0) or 0.0),
+            float(getattr(ln, "resistance_pu", 0.0) or 0.0),
+            float(getattr(ln, "susceptance_pu", 0.0) or 0.0))
+    for tr in state.transformers:
+        _accumulate(
+            node_of.get(tr.from_bus), node_of.get(tr.to_bus),
+            float(getattr(tr, "rated_power_mva", 0.0) or 0.0),
+            float(getattr(tr, "impedance_pu", 0.0) or 0.05), 0.0, 0.0)
+
+    # One node bus per node, carrying all of the node's demand.
+    node_bus_id = {i: f"node_{i}" for i in range(NN)}
+    new_buses: dict[str, GuiBus] = {}
+    for i in range(NN):
+        nd = nodes[i]
+        new_buses[node_bus_id[i]] = GuiBus(
+            bus_id=node_bus_id[i], name=nd.name or node_bus_id[i],
+            parent_node=i, voltage_kv=node_v[i], frequency_hz=node_freq[i],
+            role="load", demand_fraction=1.0,
+            latitude=nd.centroid_lat, longitude=nd.centroid_lng)
+
+    # Equivalent branches as transmission lines.
+    try:
+        from esfex.visualization.workflows.grid_mapping_steps import _haversine_km
+    except Exception:
+        def _haversine_km(*_a, **_k):
+            return 0.0
+    new_lines: list = []
+    for (i, j), p in sorted(pair.items()):
+        xeq = (1.0 / p["invx"]) if p["invx"] > 0 else 0.01
+        req = (1.0 / p["invr"]) if p["invr"] > 0 else 0.0
+        length = _haversine_km(nodes[i].centroid_lat, nodes[i].centroid_lng,
+                               nodes[j].centroid_lat, nodes[j].centroid_lng)
+        new_lines.append(GuiTransmissionLine(
+            line_id=f"eq_{i}_{j}", from_bus=node_bus_id[i], to_bus=node_bus_id[j],
+            from_node=i, to_node=j,
+            capacity_mw=p["cap"], voltage_kv=max(node_v[i], node_v[j]),
+            reactance_pu=xeq, resistance_pu=req, susceptance_pu=p["b"],
+            length_km=length,
+            from_endpoint=EndpointRef("bus", node_bus_id[i]),
+            to_endpoint=EndpointRef("bus", node_bus_id[j]),
+            waypoints=[GeoPoint(nodes[i].centroid_lat, nodes[i].centroid_lng),
+                       GeoPoint(nodes[j].centroid_lat, nodes[j].centroid_lng)]))
+
+    # Move generation / storage onto their node bus (co-located with demand →
+    # no stranding).
+    for g in state.generators.values():
+        n = node_of.get(getattr(g, "bus", None))
+        if n is not None:
+            g.bus = node_bus_id[n]
+    for bt in state.batteries.values():
+        n = node_of.get(getattr(bt, "bus", None))
+        if n is not None:
+            bt.bus = node_bus_id[n]
+
+    # Converters: remap endpoints to node buses; drop intra-node self-loops.
+    def _remap_convs(convs):
+        out = []
+        for c in convs:
+            ni = node_of.get(getattr(c, "from_bus", None))
+            nj = node_of.get(getattr(c, "to_bus", None))
+            if ni is None or nj is None or ni == nj:
+                continue
+            c.from_bus = node_bus_id[ni]
+            c.to_bus = node_bus_id[nj]
+            out.append(c)
+        return out
+    state.acdc_converters = _remap_convs(state.acdc_converters)
+    if hasattr(state, "freq_converters"):
+        state.freq_converters = _remap_convs(state.freq_converters)
+
+    # Swap in the reduced network (transformers are absorbed into the branches).
+    state.buses = new_buses
+    state.transmission_lines = new_lines
+    state.transformers = []
+    return NN
+
+
 def apply_simplification_level(
     model: "GuiModel",
     level: int,
@@ -5041,6 +5189,13 @@ def apply_simplification_level(
 
     state = model.state
     all_log: list[str] = []
+
+    # L2+ uses the canonical PyPSA/Ward equivalent-network reduction (one node
+    # bus with aggregated gen+demand, meshed by equivalent branches) instead of
+    # the ad-hoc radial/series/collapse pruning below, which stranded
+    # generation on weak sub-buses. L0/L1 stay faithful (lossless); the
+    # reduction runs once after the L0/L1 fixpoint converges.
+    _reduce = level >= 2
 
     all_log.append(
         f"── Initial: {len(state.buses)} buses, "
@@ -5082,22 +5237,23 @@ def apply_simplification_level(
                 round_log.append(f"Aggregated {n} equipment group(s)")
                 changes += n
 
-        # Step 3: Radial bus pruning (L2+)
-        if level >= 2:
+        # Step 3: Radial bus pruning (legacy L2+ pruning — superseded by the
+        # equivalent-network reduction that runs after this loop).
+        if level >= 2 and not _reduce:
             n = _prune_radial_buses(state)
             if n:
                 round_log.append(f"Pruned {n} radial bus(es)")
                 changes += n
 
-        # Step 4: Series bus elimination (L2+)
-        if level >= 2:
+        # Step 4: Series bus elimination (legacy L2+ pruning).
+        if level >= 2 and not _reduce:
             n = _eliminate_series_buses(state)
             if n:
                 round_log.append(f"Eliminated {n} series bus(es)")
                 changes += n
 
-        # Step 5: Intra-node voltage collapse (L3+)
-        if level >= 3:
+        # Step 5: Intra-node voltage collapse (legacy L3+ pruning).
+        if level >= 3 and not _reduce:
             suggestions = _find_voltage_collapse(state, config)
             for s in suggestions:
                 apply_topology_suggestion(model, s)
@@ -5107,8 +5263,8 @@ def apply_simplification_level(
                     f"Collapsed {len(suggestions)} voltage level(s)"
                 )
 
-        # Step 6: Full node collapse (L4+)
-        if level >= 4:
+        # Step 6: Full node collapse (legacy L4+ pruning).
+        if level >= 4 and not _reduce:
             suggestions = _find_full_node_collapse(state, config)
             for s in suggestions:
                 apply_topology_suggestion(model, s)
@@ -5159,6 +5315,23 @@ def apply_simplification_level(
             break
     else:
         all_log.append(f"Reached max iterations ({max_iterations})")
+
+    # L2+: canonical equivalent-network reduction. After the L0/L1 faithful
+    # fixpoint, collapse to a node-level mesh so generation is co-located with
+    # demand and inter-node transfer is carried by real equivalent branches —
+    # the reduced network is deliverable by construction (no stranding).
+    if _reduce:
+        try:
+            nb_before = len(state.buses)
+            n_nodes = reduce_to_node_mesh(state)
+            repair_network(state)
+            all_log.append(
+                f"Equivalent-network reduction (PyPSA-style): {nb_before} "
+                f"buses → {n_nodes}-node mesh with {len(state.transmission_lines)} "
+                f"equivalent branch(es); generation + demand co-located per node."
+            )
+        except Exception as exc:
+            all_log.append(f"Equivalent-network reduction failed: {exc}")
 
     # Rebuild visual wire-lines so transformers / equipment render
     # connected to their buses on the map. Simplification frequently
