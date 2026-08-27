@@ -1,0 +1,21 @@
+# ---- Core (required) ----
+esfex                # ESFEX solver (installs Julia bridge via juliacall)
+numpy
+scipy
+matplotlib
+h5py
+pandas
+psutil
+pyyaml
+pytest
+
+# ---- Test-case data ----
+matpower             # provides case1354pegase ... case13659pegase files
+
+# ---- Open-source baseline solvers (optional; skipped automatically if missing) ----
+pypsa
+pandapower
+pypower
+# GridCalEngine      # or VeraGridEngine — AC/DC OPF baseline
+# gridx-egret        # Egret (Pyomo-based) baseline; needs a Pyomo-compatible LP/NLP solver (e.g. ipopt)
+# oct2py             # MATPOWER-via-Octave baseline; needs GNU Octave installed
