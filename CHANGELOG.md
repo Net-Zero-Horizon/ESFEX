@@ -7,6 +7,50 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [0.3.0] — 2026-08-27
+
+### Added
+
+- **Country-scale OSM via Geofabrik** — a local `.osm.pbf` extract backend
+  (pyosmium) that downloads the relevant regional extract once and filters it
+  offline, replacing the rate-limited / frequently-degraded live Overpass API
+  for large study areas. Region is auto-selected by domain span; overridable
+  with `ESFEX_OSM_BACKEND`.
+- **PyPSA-style equivalent-network reduction (L2+)** — collapses each bus
+  cluster to one node substation with aggregated generation/load, meshed by the
+  parallel equivalent of the original crossing lines (capacity summed,
+  `1/x_eq = Σ 1/x_i`).
+- **CMIP6 climate from the public Google Cloud (Pangeo) Zarr store** — driven by
+  the SSP selected in Grid Builder step 3 (so the temperature-driven demand
+  responds to the chosen pathway), cached offline; the Open-Meteo fallback gains
+  spatial dedup to the model grid and a daily-limit fail-fast.
+- **Offline admin-1 node naming** (Natural Earth) — names every node instantly
+  with no Nominatim rate limit.
+- **IEEE benchmark reproduction** (`esfex_benchmark_repro/`) — DC/AC-OPF
+  validation harness and reference results against scipy / PyPSA / pandapower /
+  PYPOWER / PowerModels / Sienna on the IEEE 9–300 and PEGASE cases.
+
+### Changed
+
+- Default minimum-voltage filter lowered from 110 to **66 kV** so regional
+  subtransmission (which holds many grids together) is kept; node-count ceilings
+  raised to 5000 for country-scale builds.
+- OSM query decoupled (roads fetched separately, best-effort), wasteful fields
+  trimmed, and per-tile results cached. Data-source labels are backend-neutral
+  ("OpenStreetMap").
+
+### Fixed
+
+- **Per-generator big-M** in unit commitment so aggregated units are no longer
+  clamped below their rated power (which stranded surplus and shed load at VoLL).
+- Demand distribution now handles single-bus (node-mesh) nodes; density cells
+  are clipped to the study domain; demand is oriented (nodes, hours) so the
+  shed share isn't inflated.
+- Multi-island study domains are kept intact; OSM-untagged voltages are inferred
+  instead of defaulting to 220 kV; implausible generator capacities are capped
+  per fuel; `bus_id` is namespaced per subsystem when merging.
+- Benign Qt (signal disconnect) and JuMP (`model.ext` copy) warnings silenced.
+
 ## [0.2.6] — 2026-08-08
 
 ### Added
