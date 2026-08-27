@@ -80,6 +80,11 @@ dependencies = [
     "scikit-learn>=1.3.0",
     "atlite>=0.2.11",
     "rasterio>=1.3.0",
+    # Country-scale CMIP6 climate from the public Google Cloud (Pangeo) Zarr
+    # store — scenario-consistent and not rate-limited (vs the Open-Meteo API).
+    "xarray>=2023.1.0",
+    "gcsfs>=2023.1.0",
+    "zarr>=2.14.0",
     # Demand estimation — classical ML (former [ml]):
     "xgboost>=2.0.0",
     # Demand estimation — deep learning (former [dl]; heavy: torch):

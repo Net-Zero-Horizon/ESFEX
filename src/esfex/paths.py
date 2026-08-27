@@ -38,6 +38,10 @@ GRIDDED_NIGHTLIGHTS_DIR = GRIDDED_DIR / "nightlights"
 
 MODELS_DIR = PROJECT_DATA / "models"
 CMIP6_DIR = PROJECT_DATA / "cmip6"
+# Regional subsets of the public Google Cloud (Pangeo) CMIP6 Zarr store, cached
+# as NetCDF so country-scale climate reads are offline after the first fetch and
+# honour the user-selected SSP. See models/cmip6_zarr.py.
+CMIP6_ZARR_DIR = PROJECT_DATA / "cmip6_zarr"
 OSM_TILE_CACHE_DIR = PROJECT_DATA / "osm_tile_cache"
 # Geofabrik regional .osm.pbf extracts + the region index, cached for reuse.
 # Country-scale grid builds read these locally instead of the (rate-limited,

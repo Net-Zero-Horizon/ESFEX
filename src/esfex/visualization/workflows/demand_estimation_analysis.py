@@ -966,8 +966,12 @@ class DemandProfileBuilder:
 
         # ── Per-node CMIP6 multi-year climate (hourly profile shape) ──
         emit(28, "Fetching CMIP6 climate per node…")
+        # Pass the SSP the user selected (step 3) so the climate is scenario-
+        # consistent with the GDP/population pathway (local Zarr backend); the
+        # Open-Meteo fallback ignores it.
         cmip6 = fetch_cmip6_node_temps(
-            list(proxy.node_lats), list(proxy.node_lons), base_year, years)
+            list(proxy.node_lats), list(proxy.node_lons), base_year, years,
+            ssp=getattr(self._cfg, "ssp_scenario", None))
         n_cmip6 = sum(1 for c in cmip6 if c)
         cells_by_node = [np.where(a_node == nd)[0] for nd in range(num_nodes)]
 

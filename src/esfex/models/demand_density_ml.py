@@ -826,20 +826,43 @@ def _cmip6_point_hourly(
 def fetch_cmip6_node_temps(
     node_lats: list[float], node_lons: list[float],
     base_year: int, years: int, model: str = _CMIP6_MODEL,
+    ssp=None,
 ) -> list[Optional[dict]]:
     """Per-node CMIP6 per-year hourly temperature for the simulation horizon.
     Returns a list (one per node) of {year: ndarray(8760)} or None on failure.
 
-    Country-scale grids have hundreds of nodes but the CMIP6 model is only
-    ~0.25°; fetching per node hammered Open-Meteo into 429s. Nodes are snapped
-    to the model grid, each unique cell is fetched exactly once (cache hits are
-    free; only real network calls are throttled), and the result is shared back
-    to every node in the cell."""
+    When ``ssp`` is given (the pathway the user selected in Grid Builder step 3),
+    the local Google Cloud Zarr backend is tried first: it is scenario-consistent
+    (the climate matches the chosen SSP, not Open-Meteo's fixed implicit one) and
+    isn't rate-limited. Open-Meteo is the fallback.
+
+    Open-Meteo path: country-scale grids have hundreds of nodes but the CMIP6
+    model is only ~0.25°; fetching per node hammered Open-Meteo into 429s. Nodes
+    are snapped to the model grid, each unique cell is fetched exactly once (cache
+    hits are free; only real network calls are throttled), and the result is
+    shared back to every node in the cell."""
     import time
 
     start = base_year
     end = base_year + max(years - 1, 0)
     grid = _CMIP6_GRID_DEG
+
+    # Scenario-consistent local backend first (honours the selected SSP).
+    if ssp is not None:
+        try:
+            from esfex.models.cmip6_zarr import fetch_cmip6_zarr_node_temps
+            zarr_out = fetch_cmip6_zarr_node_temps(
+                node_lats, node_lons, base_year, years, ssp)
+            if zarr_out is not None:
+                got = sum(1 for c in zarr_out if c)
+                logger.info(
+                    "CMIP6: served %d/%d node(s) from the local Zarr store "
+                    "(SSP-consistent, no Open-Meteo).", got, len(zarr_out))
+                return zarr_out
+        except Exception as exc:
+            logger.warning(
+                "CMIP6 Zarr backend unavailable (%s); falling back to "
+                "Open-Meteo (single implicit scenario).", exc)
 
     # Map each node to its coarse model-grid cell.
     node_cells: list[tuple] = []
