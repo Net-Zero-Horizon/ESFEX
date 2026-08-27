@@ -2315,7 +2315,7 @@
     "view_demand": "View Demand…",
     "region": "Region",
     "data_sources": "Data Sources",
-    "openstreetmap_overpass_api": "OpenStreetMap (Overpass API)",
+    "openstreetmap_overpass_api": "OpenStreetMap",
     "substations_generators_transmission_lines_transf": "Substations, generators, transmission lines, transformers, converters, and storage from OSM.",
     "wri_global_power_plant_database": "WRI Global Power Plant Database",
     "30_000_power_plants_worldwide_with": "~30,000 power plants worldwide with capacity, fuel type, and location.",

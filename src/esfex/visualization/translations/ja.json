@@ -2327,7 +2327,7 @@
     "view_demand": "需要を表示…",
     "region": "地域",
     "data_sources": "データソース",
-    "openstreetmap_overpass_api": "OpenStreetMap (Overpass API)",
+    "openstreetmap_overpass_api": "OpenStreetMap",
     "substations_generators_transmission_lines_transf": "OSM の変電所、発電機、送電線、変圧器、変換器、蓄電設備。",
     "wri_global_power_plant_database": "WRI Global Power Plant Database",
     "30_000_power_plants_worldwide_with": "容量、燃料種別、位置情報を含む世界約30,000か所の発電所。",

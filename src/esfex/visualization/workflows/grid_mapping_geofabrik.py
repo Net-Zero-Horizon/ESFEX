@@ -120,11 +120,7 @@ class GeofabrikGridFetcher(OSMGridFetcher):
         self.progress.emit(
             92, f"Filtering (voltage >= {self.min_voltage_kv} kV)...")
         feats = self._apply_filters(feats)
-        self.progress.emit(
-            100,
-            f"Geofabrik '{region_id}': {len(feats)} features "
-            "(local extract, no Overpass)",
-        )
+        self.progress.emit(100, f"OSM: {len(feats)} features found")
         return feats
 
     # ── Domain polygon ───────────────────────────────────────────────

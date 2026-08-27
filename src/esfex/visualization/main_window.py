@@ -7631,10 +7631,17 @@ class MainWindow(QMainWindow):
             # toolbar / results panel updates the same way they did
             # under the old QProcess path. Disconnect first to avoid
             # stacked connections after repeated runs.
-            try:
-                self.run_output.finished.disconnect(self._on_subprocess_finished)
-            except (TypeError, RuntimeError):
-                pass
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                # First run: the signal was never connected, so PySide6 both
+                # raises (caught below) AND prints a RuntimeWarning — suppress
+                # the noise, it's the expected no-op.
+                _warnings.simplefilter("ignore", RuntimeWarning)
+                try:
+                    self.run_output.finished.disconnect(
+                        self._on_subprocess_finished)
+                except (TypeError, RuntimeError):
+                    pass
             self.run_output.finished.connect(self._on_subprocess_finished)
         except PtyUnavailable:
             # Fall back to the previous QProcess console.
