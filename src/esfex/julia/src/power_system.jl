@@ -1515,8 +1515,15 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
     # UC mode is identified by gen_startup being present (gen_status always exists)
     is_uc = vars.gen_startup !== nothing
     is_dev = vars.gen_investment !== nothing
-    # Big-M for on/off constraints: use max demand × 1.1 to handle generators > 1 GW
-    M = max(maximum(input.demand) * 1.1, 1e4)
+    # Big-M for on/off constraints. It only needs to force gen_output→0 when the
+    # unit is off (status=0); when on it must be ≥ the unit's own capacity so it
+    # never caps output below the (already-present) `gen_output ≤ capacity`
+    # bound. max-demand is NOT a valid ceiling: aggregated generators routinely
+    # exceed the biggest node's demand (e.g. all of a node's gas collapsed onto
+    # one bus → 46 GW while peak nodal demand is ~12 GW), and a max-demand big-M
+    # then clamps them, stranding the surplus and shedding load at VoLL. Use a
+    # per-generator big-M sized to each unit's capacity.
+    _demand_M = max(maximum(input.demand) * 1.1, 1e4)
 
     for g in 1:n_gen
         gen = input.generators[g]
@@ -1586,6 +1593,15 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                 end
             end
 
+            # Per-generator big-M: ≥ this unit's own capacity (existing +
+            # investable) so the on/off constraint below only zeroes output when
+            # off — never clamps a large aggregated unit below its rated power.
+            _gen_cap_ub = gen.rated_power[b]
+            if is_dev && length(gen.invest_max) >= b && gen.invest_max[b] > 0
+                _gen_cap_ub += gen.invest_max[b]
+            end
+            M_gb = max(_demand_M, _gen_cap_ub * 1.1)
+
             for t in 1:hours
                 # availability caps every generator (see segment note above):
                 # default 1.0, CF for renewables, <1 under a scheduled outage.
@@ -1600,7 +1616,7 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                     # LP matrix with a coefficient of M (~1e4), worsening conditioning.
                     if capacity_override === nothing && vars.gen_status !== nothing && is_uc
                         @constraint(model,
-                            vars.gen_output[g, b, t] <= M * vars.gen_status[g, b, t]
+                            vars.gen_output[g, b, t] <= M_gb * vars.gen_status[g, b, t]
                         )
                     end
                 end
@@ -3545,12 +3561,21 @@ function recover_uc_duals_via_copy(
     # use to translate the original variable / constraint handles into
     # their copies — both ``gen_status`` (for fix) and
     # ``balance_constraints`` (for dual lookup) live on the original.
+    # ``copy_model`` warns (harmlessly) that it cannot copy the entries we stash
+    # in ``model.ext`` (cost_expressions, temporal_resolution_hours,
+    # n1_penalty_cost). The dual-recovery copy never reads them — they are used
+    # on the ORIGINAL model for the cost breakdown — so empty ``ext`` across the
+    # copy to keep the solver log clean, then restore it on the original.
+    saved_ext = copy(model.ext)
+    empty!(model.ext)
     new_model, reference_map = try
         copy_model(model)
     catch e
+        merge!(model.ext, saved_ext)
         @warn "UC dual recovery (copy): copy_model failed" exception=e
         return nothing
     end
+    merge!(model.ext, saved_ext)
 
     optimizer = try
         create_optimizer(
