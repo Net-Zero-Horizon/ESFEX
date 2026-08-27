@@ -50,6 +50,49 @@ def reverse_geocode_place(lat: float, lng: float, *, timeout: float = 5.0) -> st
         return None
 
 
+# Cached (STRtree, geometries, names) for the bundled admin-1 polygons.
+_ADMIN1_INDEX = None
+
+
+def reverse_geocode_admin1_offline(lat: float, lng: float) -> str | None:
+    """Admin-1 region (state / province / prefecture) containing the point, from
+    the bundled Natural Earth shapefile — offline and instant.
+
+    Nominatim's ~1 request/second policy does not scale to a country-scale grid
+    (hundreds of nodes), so most nodes would otherwise keep a generic "Node i"
+    name. A point-in-polygon lookup against the admin-1 boundaries gives every
+    node a real region name with no network and no rate limit. Returns ``None``
+    for points outside all admin polygons (e.g. open ocean)."""
+    global _ADMIN1_INDEX
+    try:
+        if _ADMIN1_INDEX is None:
+            import geopandas as gpd
+            from shapely.strtree import STRtree
+
+            from esfex.paths import ADMIN1_SHP
+            gdf = gpd.read_file(ADMIN1_SHP)
+            namecol = next(
+                (c for c in ("name", "name_en", "gn_name", "woe_name",
+                             "NAME", "name_local")
+                 if c in gdf.columns),
+                gdf.columns[0],
+            )
+            geoms = list(gdf.geometry.values)
+            names = [str(v) if v is not None else None
+                     for v in gdf[namecol].values]
+            _ADMIN1_INDEX = (STRtree(geoms), geoms, names)
+        tree, geoms, names = _ADMIN1_INDEX
+        from shapely.geometry import Point
+        pt = Point(lng, lat)
+        for k in tree.query(pt):            # bbox candidates (shapely 2.x → idx)
+            k = int(k)
+            if geoms[k].contains(pt):
+                return names[k] or None
+        return None
+    except Exception:
+        return None
+
+
 def name_positions_by_region(
     positions: list[tuple[float, float, str]],
     *,
@@ -101,6 +144,11 @@ def name_positions_by_region(
             except Exception:
                 name = None
             geocoded += 1
+        if not name:
+            # Offline admin-1 fallback (instant, no rate limit) so every node
+            # gets a real region name instead of a generic "Node i" once the
+            # Nominatim budget is spent — the country-scale case.
+            name = reverse_geocode_admin1_offline(lat, lng)
         if not name:
             name = f"{fallback_prefix} {i}"
         else:
