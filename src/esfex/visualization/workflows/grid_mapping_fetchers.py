@@ -986,7 +986,7 @@ class OSMGridFetcher(QThread):
     def __init__(
         self,
         bounds: tuple[float, float, float, float],
-        min_voltage_kv: float = 110.0,
+        min_voltage_kv: float = 66.0,
         min_capacity_mw: float = 1.0,
         element_types: set[str] | None = None,
         parent=None,

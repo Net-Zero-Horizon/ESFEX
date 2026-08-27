@@ -195,7 +195,11 @@ class GridMappingSourceFetchStep(QWidget):
 
         self._spin_min_voltage = QSpinBox()
         self._spin_min_voltage.setRange(10, 750)
-        self._spin_min_voltage.setValue(110)
+        # 66 kV keeps the subtransmission that holds regional grids together.
+        # Higher levels drop it: e.g. Japan's Hokkaido cohesion lives at 66 kV,
+        # so a >100 kV filter shatters it into disconnected islands. Users who
+        # deliberately raise this accept that reduced connectivity.
+        self._spin_min_voltage.setValue(66)
         self._spin_min_voltage.setSuffix(" kV")
         self._spin_min_voltage.setToolTip(
             tr("grid_builder.minimum_voltage_for_substations_and_lines")
@@ -1038,14 +1042,19 @@ class GridMappingBuildStep(QWidget):
 
         node_form = QFormLayout()
         node_form.setContentsMargins(0, 0, 0, 0)
+        # Ceilings are generous for country-scale builds (a national transmission
+        # model can warrant hundreds–thousands of nodes; PyPSA-Eur clusters up to
+        # ~1000+ buses per country). The clustering is bounded by the actual
+        # feature count anyway (max_k = min(max_k, n-1)), so a high ceiling never
+        # invents nodes — it just removes the arbitrary 100/200 UI limit.
         self._spin_min_nodes = QSpinBox()
-        self._spin_min_nodes.setRange(1, 100)
+        self._spin_min_nodes.setRange(1, 5000)
         self._spin_min_nodes.setValue(2)
         self._spin_min_nodes.setToolTip(tr("grid_builder.minimum_number_of_nodes_to_create"))
         node_form.addRow("Minimum nodes:", self._spin_min_nodes)
 
         self._spin_max_nodes = QSpinBox()
-        self._spin_max_nodes.setRange(1, 200)
+        self._spin_max_nodes.setRange(1, 5000)
         self._spin_max_nodes.setValue(20)
         self._spin_max_nodes.setToolTip(tr("grid_builder.maximum_number_of_nodes_to_create"))
         node_form.addRow("Maximum nodes:", self._spin_max_nodes)
@@ -5835,8 +5844,12 @@ class GridMappingDemandStep(QWidget):
                     state.buses[bus_id].demand_fraction = new_frac
                     applied_fracs += 1
         if skipped_connection:
-            logging.getLogger(__name__).warning(
-                "Skipped %d connection bus(es) during demand allocation",
+            # Expected, not an error: HV connection busbars (grid junctions) get
+            # a zero demand share, so they stay demand-free. Node demand is fully
+            # conserved on the load busbars + the per-node demand CSVs.
+            logging.getLogger(__name__).info(
+                "Demand allocation: %d HV connection busbar(s) left demand-free "
+                "(as expected — junctions carry no load).",
                 skipped_connection,
             )
 
