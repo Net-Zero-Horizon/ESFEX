@@ -340,7 +340,9 @@ class TestEnsureBusAt:
         assert node_idx == 0
         assert bus_id in s.buses
         assert r.buses_added == 1
-        assert s.buses[bus_id].voltage_kv == 220.0
+        # A voltage-less bus is left at 0 kV so the real level is inferred later
+        # (no magic 220 kV default any more — see the OSM voltage-inference fix).
+        assert s.buses[bus_id].voltage_kv == 0.0
 
     def test_snaps_to_existing_bus(self):
         s = _state_with_node(0, lat=23.0, lng=-82.0)
