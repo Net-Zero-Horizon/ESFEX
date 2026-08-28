@@ -1192,18 +1192,6 @@ class GridMappingBuildStep(QWidget):
             tr("grid_builder.faithful_import_only_buses_of_the")
         )
         radius_row.addWidget(self._spin_station_radius)
-
-        radius_row.addWidget(QLabel(tr("grid_builder.reconnect_isolated")))
-        self._spin_reconnect = QDoubleSpinBox()
-        self._spin_reconnect.setRange(0.0, 50.0)
-        self._spin_reconnect.setValue(8.0)
-        self._spin_reconnect.setSingleStep(1.0)
-        self._spin_reconnect.setDecimals(0)
-        self._spin_reconnect.setSuffix(" km")
-        self._spin_reconnect.setToolTip(
-            tr("grid_builder.reconnect_isolated_tooltip")
-        )
-        radius_row.addWidget(self._spin_reconnect)
         radius_row.addStretch(1)
         build_right.addLayout(radius_row)
 
@@ -1722,7 +1710,12 @@ class GridMappingBuildStep(QWidget):
             gen_availability=self._chk_gen_availability.isChecked(),
             use_weather=True,  # weather-based CF is now the default behaviour
             cfg_path=getattr(main_window, "_config_path", None),
-            reconnect_max_km=self._spin_reconnect.value(),
+            # Faithful topology: no bounded reconnection from the GUI. The pass
+            # fabricated bridging spans (up to the old 8 km "reach") and, before
+            # demand exists, deleted real islanded subsystems (Hokkaido/Shikoku/
+            # Okinawa), stranding their load. Kept in the build API (config/tests
+            # can still opt in) but off by default and no longer user-exposed.
+            reconnect_max_km=0.0,
         )
 
         # Block per-element signals so the thousands of created elements don't

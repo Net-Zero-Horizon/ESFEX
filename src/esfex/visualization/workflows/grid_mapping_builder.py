@@ -1626,6 +1626,25 @@ def _absorb_dysfunctional_islands(
 
     counts = {"gens_moved": 0, "demand_moved": 0,
               "buses_removed": 0, "islands_absorbed": 0}
+
+    # Demand is assigned in a LATER Grid Builder step (demand distribution),
+    # not during the build. Before that, every bus reads demand_fraction == 0,
+    # so the "gen XOR demand" test below would condemn EVERY real islanded
+    # subsystem — Hokkaido, Shikoku, Okinawa (each a genuine synchronous area
+    # tied to Honshu only by HVDC, which is excluded from AC adjacency) — as a
+    # dead OSM fragment and delete it, relocating its generation to the mainland.
+    # The next step then assigns demand to those now-empty island nodes, which
+    # can neither import nor self-generate → they shed at VOLL (Japan's ~25 %
+    # spurious load shed). Absorption is only meaningful once demand exists, so
+    # skip it entirely while the model is still demand-less: keep the faithful
+    # topology; the islands stay as isolated subsystems that balance locally.
+    has_demand = any(
+        (b.demand_fraction or 0.0) > 0.0 and b.role in ("load", "mixed")
+        for b in state.buses.values()
+    )
+    if not has_demand:
+        return counts
+
     adj = _build_bus_adjacency(state)
     comps = _find_connected_components(adj)
     if len(comps) <= 1:
