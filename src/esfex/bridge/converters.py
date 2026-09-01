@@ -370,6 +370,34 @@ def convert_index_julia_to_py(idx: int) -> int:
     return idx - 1
 
 
+def node_bus_mapping_required(buses, num_nodes: int) -> bool:
+    """Whether per-node arrays must be mapped onto the bus network.
+
+    Per-node arrays (``rated_power``, availability, reserves, …) are indexed by
+    node; the operational model is indexed by bus. The two coincide *only* when
+    the bus list is the identity mapping — one bus per node, in node order.
+
+    The historical test was ``num_buses > num_nodes``, which assumed the bus
+    network is always a refinement of the node network. A reduced network
+    breaks that assumption: ``reduce_to_node_mesh`` followed by
+    ``drop_isolated_components`` leaves FEWER buses than nodes (every node whose
+    buses were dropped). Under the old test the mapping was skipped and
+    node-indexed arrays were consumed *positionally* as bus-indexed ones, so
+    each node past the first bus-less node had its capacity silently relocated
+    onto another node's bus — Japan: 70 % of 330 GW landed on the wrong bus, so
+    34 % of load shed at VOLL while that capacity sat idle (and renewables were
+    curtailed at the same hour). The same skip left bus-level results
+    un-aggregated, exported as if node-level.
+    """
+    if not buses:
+        return False
+    if len(buses) != num_nodes:
+        return True
+    return any(
+        int(getattr(b, "parent_node", i) or 0) != i for i, b in enumerate(buses)
+    )
+
+
 def expand_node_to_bus_array(
     node_array: list,
     bus_to_node: list,

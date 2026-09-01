@@ -1050,9 +1050,15 @@ class Orchestrator:
         self._inflow_cache = self._preload_inflow_profiles(num_nodes)
         self._num_nodes = num_nodes
 
-        # Build bus-to-node mapping for aggregating bus-level results to node-level
+        # Build bus-to-node mapping for aggregating bus-level results to
+        # node-level. Needed whenever the bus list is not the identity mapping
+        # over nodes — including the FEWER-buses-than-nodes case a reduced
+        # network produces, which the old ``len(buses) > num_nodes`` test
+        # missed, leaving bus-indexed results exported as if node-indexed
+        # (the Result Viewer then read 289 buses as 289 hours ≈ 13 days).
+        from esfex.bridge.converters import node_bus_mapping_required
         sys_cfg = self.primary_system
-        if sys_cfg.buses and len(sys_cfg.buses) > num_nodes:
+        if sys_cfg.buses and node_bus_mapping_required(sys_cfg.buses, num_nodes):
             self._bus_to_node = [bus.parent_node for bus in sys_cfg.buses]
             self._num_buses = len(sys_cfg.buses)
         else:
@@ -2093,14 +2099,14 @@ class Orchestrator:
             if not avail_file:
                 continue
 
-            # Resolve path under config_dir, refusing escapes (e.g.
-            # `../../etc/passwd` in a yaml authored elsewhere). The
-            # old code happily passed `..` straight to Path then
-            # `.resolve()`, letting hostile configs read arbitrary
-            # files. See utils/paths.safe_resolve_under.
-            from esfex.utils.paths import safe_resolve_under
+            # Resolve consistently with demand paths: an absolute path (the
+            # GUI writes availability profiles at absolute locations, and runs
+            # from a temp config in /tmp) is trusted as-is; a relative path is
+            # resolved under config_dir, still refusing `../` traversal from a
+            # yaml authored elsewhere. See utils/paths.resolve_project_data_file.
+            from esfex.utils.paths import resolve_project_data_file
             try:
-                avail_path = safe_resolve_under(config_dir, avail_file)
+                avail_path = resolve_project_data_file(config_dir, avail_file)
             except ValueError:
                 logger.warning(
                     "Skipping generator %r: availability_file %r resolves "
@@ -4304,7 +4310,10 @@ class Orchestrator:
         # Average RE penetration
         avg_re = total_re_penetration / num_solved if num_solved > 0 else 0.0
 
-        # Aggregate bus-level results to node-level (when num_buses > num_nodes)
+        # Aggregate bus-level results back to node-level whenever the bus
+        # network is not the identity mapping over nodes (see
+        # node_bus_mapping_required) — otherwise bus-indexed arrays are
+        # exported as if node-indexed and every viewer misreads them.
         if self._bus_to_node is not None:
             # Quantity variables: SUM across buses in same node
             gen_output = self._aggregate_buses_to_nodes(gen_output, "sum")
@@ -5673,12 +5682,14 @@ class Orchestrator:
         """
         updated = deepcopy(base_units_config)
 
-        # Build bus_to_node mapping
+        # Build bus_to_node mapping (needed whenever the bus list is not the
+        # identity mapping over nodes, including fewer-buses-than-nodes).
+        from esfex.bridge.converters import node_bus_mapping_required
         sys = self.primary_system
         num_nodes = sys.nodes.num_nodes or 1
         buses = sys.buses or []
         num_buses = len(buses) if buses else num_nodes
-        if len(buses) > num_nodes:
+        if node_bus_mapping_required(buses, num_nodes):
             bus_to_node = [b.parent_node for b in buses]
         else:
             bus_to_node = None
@@ -5706,7 +5717,7 @@ class Orchestrator:
         gen_caps = year_caps.get('gen', {})
         # Detect master granularity (same logic as for tech_caps below).
         gen_master_per_node = (
-            num_buses > num_nodes
+            bus_to_node is not None
             and gen_caps
             and len(next(iter(gen_caps.values()))) == num_nodes
         )
@@ -5756,13 +5767,13 @@ class Orchestrator:
         # organically and the DC-OPF routes it; if a single-bus injection is
         # infeasible that indicates a real model issue to fix, not to mask.)
         master_per_node = (
-            num_buses > num_nodes
+            bus_to_node is not None
             and tech_caps
             and len(next(iter(tech_caps.values()))) == num_nodes
         )
         first_bus_of_node: dict[int, int] | None = None
         node_buses_map: dict[int, list[int]] | None = None
-        if master_per_node or num_buses > num_nodes:
+        if master_per_node or bus_to_node is not None:
             first_bus_of_node = {}
             node_buses_map = {}
             for b_idx, b in enumerate(buses):
@@ -5883,7 +5894,7 @@ class Orchestrator:
         bat_tech_cap_caps = year_caps.get('bat_tech_capacity', {})
         bat_tech_keys = list(self.primary_system.battery_technologies.keys())
         bat_master_per_node = (
-            num_buses > num_nodes
+            bus_to_node is not None
             and bat_tech_pow_caps
             and len(next(iter(bat_tech_pow_caps.values()))) == num_nodes
         )

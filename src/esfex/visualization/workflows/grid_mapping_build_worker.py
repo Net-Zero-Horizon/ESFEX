@@ -150,6 +150,13 @@ class GridBuildWorker(QThread):
 
             # ── Drop isolated debris components ──
             self.progress.emit("Dropping isolated components…")
+            # Which nodes have an electrical presence BEFORE the drop. Only
+            # nodes the drop *empties* may be pruned below; a node that never
+            # had a bus is user scaffolding (e.g. a build with no features)
+            # and must survive.
+            nodes_with_bus_before = {
+                b.parent_node for b in model.state.buses.values()
+            }
             counts = self._timed("Drop isolated components",
                                   lambda: drop_isolated_components(
                                       model.state, min_buses=p.min_component,
@@ -171,6 +178,41 @@ class GridBuildWorker(QThread):
                     f"{counts['converters']} converter(s), "
                     f"{counts['generators']} generator(s), "
                     f"{counts['batteries']} battery(ies)")
+
+            # ── Restore the "every node has a bus" invariant ──
+            # A node is a geographic aggregation; a bus is its electrical
+            # presence. Buses are therefore always >= nodes, and the whole
+            # bridge relies on it: per-node arrays (rated_power, availability,
+            # reserves, demand) are mapped onto the bus network, and results
+            # are aggregated back bus→node. drop_isolated_components removes
+            # buses but never nodes, so a node whose only bus sat in a dropped
+            # fragment is left with NO electrical presence — it cannot connect
+            # to the grid, its demand can never be served, and it breaks the
+            # invariant (Japan: 296 nodes vs 289 buses, which silently shifted
+            # 70 % of generation capacity onto the wrong bus and shed 34 % of
+            # the load). Prune those nodes so the two stay consistent.
+            #
+            # Only nodes the drop EMPTIED are pruned. A node that never had a
+            # bus is not debris — it is the user's own scaffolding (nodes are
+            # created before any equipment is placed on them), and deleting it
+            # would silently undo their work.
+            nodes_with_bus_after = {
+                b.parent_node for b in model.state.buses.values()
+            }
+            orphans = [
+                n.index for n in model.state.nodes
+                if n.index in nodes_with_bus_before
+                and n.index not in nodes_with_bus_after
+            ]
+            if orphans:
+                self.progress.emit(
+                    f"Pruning {len(orphans)} node(s) left without a bus…")
+                for idx in sorted(orphans, reverse=True):
+                    model.remove_node(idx)
+                island_lines.append(
+                    f"→ Pruned {len(orphans)} node(s) left with no bus by the "
+                    f"component drop (a node without a bus has no electrical "
+                    f"presence); {len(model.state.nodes)} node(s) remain.")
 
             # ── Hard sweep: drop dangling references ──
             self.progress.emit("Removing dangling references…")

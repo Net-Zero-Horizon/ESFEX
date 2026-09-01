@@ -412,6 +412,44 @@ def orient_to_node_hours(arr: "np.ndarray", n_hours: Optional[int]) -> "np.ndarr
     return arr
 
 
+def _scenario_hours(sc) -> Optional[int]:
+    """Number of time-steps in a scenario, read from an unambiguous series.
+
+    Needed to orient ``demand`` — persisted ``(hours, nodes)`` while every
+    per-node result array is ``(nodes, hours)``. A 1-D price series gives the
+    hour count with no axis ambiguity; a per-node 2-D result array is the
+    fallback (its last axis is always time).
+    """
+    for key in ("electricity_prices", "electricity_prices_energy"):
+        try:
+            d = sc.get(key)
+            if d is not None and getattr(d, "ndim", 0) == 1 and d.shape[0] > 0:
+                return int(d.shape[0])
+        except Exception:
+            continue
+    for key in ("loss_load", "curtailment", "CO2_emissions", "voltage_angle"):
+        try:
+            d = sc.get(key)
+            if d is not None and getattr(d, "ndim", 0) == 2 and d.shape[1] > 0:
+                return int(d.shape[1])
+        except Exception:
+            continue
+    return None
+
+
+def _demand_node_hours(sc):
+    """Read a scenario's ``demand`` oriented to ``(nodes, hours)``.
+
+    Always use this instead of ``sc["demand"][:]``: the dataset is persisted
+    ``(hours, nodes)`` while every other per-node array is ``(nodes, hours)``,
+    so a raw read makes node-axis sums and slices operate on the hour axis.
+    Returns ``None`` when the scenario has no demand.
+    """
+    if "demand" not in sc:
+        return None
+    return orient_to_node_hours(sc["demand"][:], _scenario_hours(sc))
+
+
 def _system_node_range(
     h5f: h5py.File, base_prefix: str
 ) -> Optional[tuple[int, int]]:
@@ -2289,7 +2327,7 @@ class GenerationMixChart(QWidget):
                         all_gen.setdefault(rlabel, []).extend(rm.tolist())
 
                 if "demand" in sc:
-                    dem = sc["demand"][:]
+                    dem = _demand_node_hours(sc)
                     dt = _sum_nodes(dem) if dem.ndim >= 2 else dem
                     dm = _aggregate(dt, "monthly", tres)
                     demand_all.extend(dm.tolist())
@@ -3376,7 +3414,11 @@ class NetLoadHeatmapChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             if "demand" not in sc:
                 return {"error": "No demand data"}
-            dem = sc["demand"][:]
+            # ``demand`` is stored (hours, nodes); orient it before summing the
+            # node axis, otherwise the "hourly" series is really one value per
+            # NODE and the UC day×hour reshape below invents days (296 nodes →
+            # 13 "days" for a 24 h run).
+            dem = orient_to_node_hours(sc["demand"][:], _scenario_hours(sc))
             demand = _sum_nodes(dem) if dem.ndim >= 2 else dem
             # In UC keep the full operational horizon (often < 1 year);
             # in planning, cap to 1 year to match the month×hour layout.
@@ -6319,7 +6361,7 @@ class SankeyEnergyFlowChart(QWidget):
 
             # Per-node demand
             if "demand" in sc:
-                dem = sc["demand"][:]
+                dem = _demand_node_hours(sc)
                 for ni in range(dem.shape[0]):
                     nname = node_names[ni] if ni < len(node_names) else f"Node {ni}"
                     gwh = float(np.sum(dem[ni, :])) * tres / 1000.0
@@ -6334,7 +6376,7 @@ class SankeyEnergyFlowChart(QWidget):
 
             # Transmission losses from node loss factors
             if node_losses and "demand" in sc:
-                dem = sc["demand"][:]
+                dem = _demand_node_hours(sc)
                 for ni in range(dem.shape[0]):
                     if ni < len(node_losses) and node_losses[ni] > 0:
                         node_dem = float(np.sum(dem[ni, :])) * tres / 1000.0
@@ -7091,7 +7133,7 @@ class CarbonPenaltyChart(QWidget):
 
                 # Demand for intensity normalisation.
                 if "demand" in sc:
-                    d = sc["demand"][:]
+                    d = _demand_node_hours(sc)
                     df = _sum_nodes(d) if d.ndim >= 2 else d
                     demand_mwh.append(float(np.sum(df)) * tres)
                 else:
@@ -8087,7 +8129,7 @@ class FlexReliabilityChart(QWidget):
         """demand − (wind + solar utility generation), one-year [steps]."""
         if "demand" not in sc:
             return None
-        dem = sc["demand"][:]
+        dem = _demand_node_hours(sc)
         demand = _sum_nodes(dem) if dem.ndim >= 2 else np.asarray(dem).reshape(-1)
         demand = demand[:yh]
         re = np.zeros(len(demand))
@@ -8195,7 +8237,7 @@ class FlexReliabilityChart(QWidget):
             # rather than capping at one year — UC windows are short.
             if "demand" not in sc:
                 return {"error": "demand missing"}
-            dem = sc["demand"][:]
+            dem = _demand_node_hours(sc)
             demand = _sum_nodes(dem) if dem.ndim >= 2 else np.asarray(dem).reshape(-1)
             n_hours = int(demand.size)
             re = np.zeros(n_hours)
@@ -8307,7 +8349,7 @@ def _custom_extract(sc: h5py.Group, vid: str, yh: int) -> Optional[np.ndarray]:
     if vid == "__net_load__":
         if "demand" not in sc:
             return None
-        dem = sc["demand"][:]
+        dem = _demand_node_hours(sc)
         demand = _sum_nodes(dem) if dem.ndim >= 2 else np.asarray(dem).reshape(-1)
         demand = demand[:yh]
         re = np.zeros(len(demand))
@@ -9314,6 +9356,12 @@ class UCDispatchStackChart(QWidget):
                 arr = sc[key][:]
                 if arr.ndim < 2:
                     return arr[:n_hours] if arr.size else np.zeros(n_hours)
+                # ``demand`` is stored (hours, nodes) unlike every other
+                # per-node array — without this the sum below collapses the
+                # HOUR axis and the demand line becomes the 24 h total of the
+                # first n_hours nodes (a curve matching neither the forecast
+                # nor the dispatch).
+                arr = orient_to_node_hours(arr, n_hours)
                 if rng is not None:
                     lo, hi = rng
                     arr = arr[lo:hi]
@@ -10092,7 +10140,7 @@ class UCNetLoadDurationChart(QWidget):
             if "demand" not in sc:
                 return {"error": "demand missing"}
             rng = _system_node_range(h5f, bp)
-            dem_arr = sc["demand"][:]
+            dem_arr = _demand_node_hours(sc)
             if dem_arr.ndim >= 2:
                 if rng is not None:
                     lo, hi = rng

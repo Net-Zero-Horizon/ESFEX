@@ -1145,17 +1145,32 @@ class PowerSystemAdapter:
         fuel_adjustments = _compute_geographic_fuel_adjustments(sys)
 
         # Build bus_to_node mapping for per-node → per-bus expansion.
-        # When num_buses > num_nodes, converter functions expand per-node arrays
-        # to per-bus arrays (capacity at first bus, properties replicated).
+        # Converter functions expand per-node arrays to per-bus arrays
+        # (capacity at the unit's bus, properties replicated) whenever the bus
+        # list is not the identity mapping over nodes — see
+        # ``node_bus_mapping_required``. A reduced network can have FEWER buses
+        # than nodes, which the old ``num_buses > num_nodes`` test missed.
         from esfex.config.schema import BusConfig
+        from esfex.bridge.converters import node_bus_mapping_required
         buses = sys.buses or [
             BusConfig(bus_id=f"bus_{i}", parent_node=i, demand_fraction=1.0)
             for i in range(num_nodes)
         ]
         bus_to_node_0idx = [b.parent_node for b in buses]
         num_buses = len(buses)
-        need_expansion = num_buses > num_nodes
+        need_expansion = node_bus_mapping_required(buses, num_nodes)
         b2n_arg = bus_to_node_0idx if need_expansion else None
+        if need_expansion and num_buses < num_nodes:
+            _orphan = sorted(set(range(num_nodes)) - set(bus_to_node_0idx))
+            if _orphan:
+                logger.warning(
+                    "%d node(s) have no operational bus (%s%s): any demand or "
+                    "capacity there cannot be served and is dropped from the "
+                    "dispatch. This usually means the network reduction left "
+                    "those nodes empty.",
+                    len(_orphan), _orphan[:10],
+                    "…" if len(_orphan) > 10 else "",
+                )
 
         # Resolve generator/battery → bus mapping from transmission_lines_geo
         gen_bus_per_node, bat_bus_per_node = _resolve_element_bus_mapping(sys)
@@ -1220,14 +1235,16 @@ class PowerSystemAdapter:
                                 cached[:wrapped_end - len(cached)]
                             ])
             elif hasattr(gen, 'availability_file') and gen.availability_file:
-                # Fallback: load from file if not cached. Resolve safely
-                # under config_dir to refuse `../../...` traversal from
-                # untrusted yaml files (see utils/paths.safe_resolve_under).
+                # Fallback: load from file if not cached. Resolve like demand
+                # paths: absolute paths (GUI-written, run from a /tmp config)
+                # are trusted as-is; relative paths resolve under config_dir,
+                # refusing `../../...` traversal from untrusted yaml files
+                # (see utils/paths.resolve_project_data_file).
                 from pathlib import Path
-                from esfex.utils.paths import safe_resolve_under
+                from esfex.utils.paths import resolve_project_data_file
                 config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
                 try:
-                    avail_path = safe_resolve_under(config_dir, gen.availability_file)
+                    avail_path = resolve_project_data_file(config_dir, gen.availability_file)
                 except ValueError:
                     import logging
                     logging.getLogger(__name__).warning(
@@ -1928,9 +1945,15 @@ class PowerSystemAdapter:
     def _map_termination_status(self, jl) -> int:
         """Map JuMP termination status to PuLP-compatible code.
 
-        Strict mapping: only ``OPTIMAL`` / ``LOCALLY_SOLVED`` returns success.
-        Anything else (including ``OTHER_ERROR`` with a "feasible point"
-        primal status) is reported as a failure so the caller can stop.
+        ``OPTIMAL`` / ``LOCALLY_SOLVED`` return success. A solver that stops at
+        a resource LIMIT (time / nodes / iterations) but holds a FEASIBLE primal
+        point is also accepted: an operational dispatch that meets demand is a
+        valid result, and discarding it turns a slow-but-solved window into a
+        total run failure (Japan's 72 h UC would grind the last ~2 % of the MIP
+        gap for the whole time limit, then fail — throwing away a usable
+        dispatch). The optimality gap is logged loudly so the result is not
+        mistaken for a proven optimum; loosen ``solver.gap`` or raise
+        ``solver.time_limit`` to close it. INFEASIBLE / UNBOUNDED stay failures.
         """
         status = jl.seval("termination_status(_ps_model)")
         status_str = str(status)
@@ -1943,9 +1966,38 @@ class PowerSystemAdapter:
         elif "INFEASIBLE" in status_str:
             self._dump_iis_if_requested(jl, "_ps_model")
             return -1
-        # Diagnose anything else as a failure (no fallback, no acceptance)
+
+        # Accept a feasible incumbent found before a resource limit was hit.
+        _LIMITS = ("TIME_LIMIT", "NODE_LIMIT", "ITERATION_LIMIT",
+                   "SOLUTION_LIMIT", "OBJECTIVE_LIMIT", "OTHER_LIMIT")
         try:
             primal_status = str(jl.seval("primal_status(_ps_model)"))
+        except Exception:
+            primal_status = "NO_SOLUTION"
+        if "FEASIBLE_POINT" in primal_status and any(
+            lim in status_str for lim in _LIMITS
+        ):
+            try:
+                obj = float(jl.seval("objective_value(_ps_model)"))
+                bound = float(jl.seval("objective_bound(_ps_model)"))
+                gap = abs(obj - bound) / (abs(obj) + 1e-9)
+                logger.warning(
+                    "Solver stopped at %s with a FEASIBLE incumbent — accepting "
+                    "it (objective=%.6g, bound=%.6g, gap=%.2f%%). This dispatch "
+                    "is valid but not proven optimal; loosen solver.gap or raise "
+                    "solver.time_limit to close the gap.",
+                    status_str, obj, bound, gap * 100.0,
+                )
+            except Exception:
+                logger.warning(
+                    "Solver stopped at %s with a FEASIBLE incumbent — accepting "
+                    "it (optimality gap unknown). Loosen solver.gap or raise "
+                    "solver.time_limit to close it.", status_str,
+                )
+            return 1
+
+        # Diagnose anything else as a failure (no fallback, no acceptance)
+        try:
             dual_status = str(jl.seval("dual_status(_ps_model)"))
             logger.error(
                 f"Solver failed with non-optimal termination: {status_str}, "
@@ -2373,13 +2425,14 @@ class MasterProblemAdapter:
 
         # Build bus_to_node mapping for per-node → per-bus expansion
         from esfex.config.schema import BusConfig
+        from esfex.bridge.converters import node_bus_mapping_required
         buses = sys.buses or [
             BusConfig(bus_id=f"bus_{i}", parent_node=i, demand_fraction=1.0)
             for i in range(num_nodes)
         ]
         bus_to_node_0idx = [b.parent_node for b in buses]
         num_buses = len(buses)
-        need_expansion = num_buses > num_nodes
+        need_expansion = node_bus_mapping_required(buses, num_nodes)
         b2n_arg = bus_to_node_0idx if need_expansion else None
 
         # Resolve per-(unit, node) physical bus mapping (endpoint /
