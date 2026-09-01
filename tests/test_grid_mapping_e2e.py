@@ -174,3 +174,116 @@ def test_faithful_network_solves_and_serves_demand():
     # allow a small tolerance for any curtailment/loss terms.
     assert gen_total == pytest.approx(demand_total, rel=0.02)
     assert sol["objective"] > 0
+
+
+@pytest.mark.julia
+def test_load_shed_is_bounded_by_bus_demand():
+    """Every bus carries an explicit upper bound on ``load_shed``.
+
+    ``load_shed`` enters the power balance on the SUPPLY side, so without a
+    per-bus bound the solver can use it as a virtual generator: "shed" more
+    than a bus consumes and export the surplus over the network. That is not
+    hypothetical — with criticality-weighted VOLL it is *profitable* to shed
+    at a cheap bus to serve expensive ones, and Japan showed 1 504 MW shed at
+    a 33 MW bus with 66 % of the reported shedding being this artefact.
+
+    The DC-OPF path (the default for every UC run) bounded only the buses with
+    NO demand, leaving every load-carrying bus unbounded; the AC-OPF path
+    allowed twice the node's demand. Both now bound each bus by its own
+    demand, so the bound must exist for load-carrying buses too.
+    """
+    from esfex.bridge.adapters import PowerSystemAdapter
+    from esfex.bridge.julia_setup import get_julia
+
+    state = _build_faithful_system()
+    sysc = _to_system_config(state)
+    num_nodes = sysc.nodes.num_nodes
+    hours = 3
+    # Every node carries demand — pre-fix this produced ZERO bounds.
+    demand = np.full((hours, num_nodes), PEAK_MW)
+
+    ps = PowerSystemAdapter(
+        config=sysc, demand=demand, hours=hours, num_nodes=num_nodes,
+        year=2025, base_year=2025, mode="unit_commitment",
+    )
+    ps.build_model()
+
+    jl = get_julia()
+    jl.seval("global _shedcap_model")
+    jl._shedcap_model = ps._jl_model
+    jl.seval("import JuMP")
+    n_bounds = int(jl.seval(
+        '''length([c for (F, S) in JuMP.list_of_constraint_types(_shedcap_model)
+                    for c in JuMP.all_constraints(_shedcap_model, F, S)
+                    if occursin("max_load_shed", JuMP.name(c))])'''
+    ))
+
+    n_buses = len(sysc.buses or []) or num_nodes
+    assert n_bounds >= n_buses * hours, (
+        f"only {n_bounds} load_shed bounds for {n_buses} demand-carrying "
+        f"bus(es) x {hours} h — load-carrying buses are unbounded, so "
+        f"load_shed can act as virtual generation"
+    )
+
+
+@pytest.mark.julia
+def test_load_shed_never_exceeds_bus_demand():
+    """Load shedding is UNSERVED DEMAND, so it can never exceed the demand
+    sitting on the bus.
+
+    ``load_shed`` enters the power balance on the SUPPLY side, so without a
+    per-bus upper bound the solver uses it as a virtual generator: it "sheds"
+    more than a bus consumes and exports the surplus over the network. The
+    DC-OPF path — the default for every UC run — had no such bound at all and
+    the AC-OPF path allowed twice the node's demand (Japan: 1 504 MW shed at a
+    33 MW bus, with 66 % of the reported load shedding being this artefact
+    rather than real unserved load).
+    """
+    from esfex.bridge.adapters import PowerSystemAdapter
+
+    state = _build_faithful_system()
+    sysc = _to_system_config(state)
+    num_nodes = sysc.nodes.num_nodes
+    hours = 6
+
+    # Force scarcity with a very uneven split: node 0 carries almost no load
+    # while the rest are far beyond what the system can generate. That is
+    # precisely the shape that rewards "shedding" at the near-empty bus and
+    # routing the surplus elsewhere.
+    total_cap = sum(max(g.rated_power) for g in sysc.generators.values())
+    demand = np.zeros((hours, num_nodes))
+    demand[:, 0] = 1.0
+    if num_nodes > 1:
+        demand[:, 1:] = 3.0 * total_cap
+
+    # Operational mode: no investment escape hatch, so scarcity must show up
+    # as shedding rather than as new capacity.
+    ps = PowerSystemAdapter(
+        config=sysc, demand=demand, hours=hours, num_nodes=num_nodes,
+        year=2025, base_year=2025, mode="unit_commitment",
+    )
+    ps.build_model()
+    ps.solve()
+    sol = ps.get_solution_values()
+
+    shed = np.asarray(sol["load_shed"], dtype=float)
+    assert shed.size, "solver returned no per-bus load_shed"
+    buses = sysc.buses or []
+    if shed.ndim == 2 and shed.shape[0] == hours and shed.shape[1] == len(buses):
+        shed = shed.T  # normalise to (buses, hours)
+
+    assert shed.sum() > 0, "scenario did not force any shedding — weak test"
+
+    for b, bus in enumerate(buses):
+        if b >= shed.shape[0]:
+            break
+        ni = int(bus.parent_node)
+        df = (bus.demand_fraction
+              if getattr(bus, "role", "load") in ("load", "mixed") else 0.0)
+        for t in range(min(hours, shed.shape[1])):
+            bus_demand = demand[t, ni] * df
+            assert shed[b, t] <= bus_demand + 1e-6, (
+                f"bus {b} (node {ni}) shed {shed[b, t]:,.3f} MW but carries "
+                f"only {bus_demand:,.3f} MW of demand — load_shed is acting "
+                f"as virtual generation"
+            )

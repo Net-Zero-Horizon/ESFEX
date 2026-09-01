@@ -514,6 +514,22 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             # Connection buses (bus_df = 0) contribute zero to the demand term.
             bus_demand = input.demand[t, input.network.bus_to_node[i]] * bus_df
 
+            # Cap load shedding at the demand actually sitting on this bus.
+            # ``load_shed`` enters the KCL below on the SUPPLY side, so with
+            # only its ``>= 0`` declaration it is unbounded above and the
+            # solver can use it as a virtual generator: shed far more than a
+            # bus consumes and export the surplus over the network. Japan:
+            # 1 504 MW "shed" at a 33 MW bus, and 66 % of the reported load
+            # shedding was this artefact rather than real unserved load, which
+            # also displaced real dispatch. The single-bus balance
+            # (``add_demand_constraints!``) and the AC-OPF path both bound it;
+            # the DC-OPF path — the default for every UC run — did not.
+            # Connection buses (bus_df = 0) get the bound at 0, which is the
+            # same rule: nothing to leave unserved where there is no load.
+            @constraint(model,
+                vars.load_shed[i, t] <= max(bus_demand, 0.0),
+                base_name = "max_load_shed_dc_b$(i)_t$(t)")
+
             # NOTE: flex_curt is NOT in the KCL.  Flexible demand curtailment
             # participates only in the objective (benefit) and in sectoral
             # constraints.  Including it in the KCL allowed the model to
@@ -614,23 +630,10 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 
         end
 
-        # Per-bus: load_shed = 0 at non-demand buses.  load_shed represents
-        # UNSERVED demand; a bus with no local demand has nothing to leave
-        # unserved, so allowing it would turn load_shed into virtual
-        # generation.  (Physical constraint — not an outcome cap; the
-        # economic upper bound on shedding is the VOLL penalty itself.)
-        for b in 1:n_bus
-            ni = input.network.bus_to_node[b]
-            bus_role = input.network.buses[b].role
-            is_load_bus = bus_role == "load" || bus_role == "mixed"
-            bus_df = is_load_bus ? input.network.buses[b].demand_fraction : 0.0
-            bus_demand_t = input.demand[t, ni] * bus_df
-            if bus_demand_t <= 0.0
-                @constraint(model,
-                    vars.load_shed[b, t] <= 0.0,
-                    base_name = "max_load_shed_dc_b$(b)_t$(t)")
-            end
-        end
+        # NOTE: the per-bus load_shed bound lives in the KCL loop above
+        # (``max_load_shed_dc_b*``), where it caps every bus at its OWN
+        # demand. The zero-demand case this block used to handle separately
+        # is that same bound evaluated at 0, so it is no longer repeated here.
 
         # 3. Flow-angle coupling (standard DCOPF: pf_MW = S_base/x_pu × Δθ)
         # This replaces the cycle-based KVL formulation and correctly handles

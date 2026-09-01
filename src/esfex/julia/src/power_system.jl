@@ -1477,22 +1477,27 @@ function add_demand_constraints!(model, vars::PowerSystemVariables, input;
             end
         end
 
-        # Per-bus: load_shed = 0 at non-demand buses (load_shed is UNSERVED
-        # demand; a bus with no local demand has nothing to leave unserved,
-        # so allowing it would make load_shed virtual generation). The
-        # economic upper bound on shedding is the VOLL penalty itself — no
-        # artificial per-node cap.
+        # Per-bus cap: load_shed is UNSERVED DEMAND, so it can never exceed
+        # the demand actually sitting at that bus.
+        #
+        # It enters the power balance above on the SUPPLY side, so leaving it
+        # unbounded turns it into virtual generation: the solver "sheds" far
+        # more than a bus consumes and exports the surplus over the network.
+        # Japan: 1 504 MW shed at a 33 MW bus, and 66 % of the reported
+        # load shedding was this artefact rather than real unserved load.
+        # Relaxing the VOLL penalty is not a substitute for the bound — an
+        # expensive virtual generator is still a virtual generator, and it
+        # both inflates the shed metric and displaces real dispatch.
+        # The zero-demand case (a bus with no load) is this same bound at 0.
         for b in 1:n_bus
             ni = input.network.bus_to_node[b]
             bus_role = input.network.buses[b].role
             is_load_bus = bus_role == "load" || bus_role == "mixed"
             bus_df = is_load_bus ? input.network.buses[b].demand_fraction : 0.0
             bus_demand_t = input.demand[t, ni] * bus_df
-            if bus_demand_t <= 0.0
-                @constraint(model,
-                    vars.load_shed[b, t] <= 0.0,
-                    base_name = "max_load_shed_b$(b)_t$(t)")
-            end
+            @constraint(model,
+                vars.load_shed[b, t] <= max(bus_demand_t, 0.0),
+                base_name = "max_load_shed_b$(b)_t$(t)")
         end
     end
 end

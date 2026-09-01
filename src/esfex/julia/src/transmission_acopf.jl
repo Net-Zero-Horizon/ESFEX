@@ -1009,29 +1009,30 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
 
         end
 
-        # load_shed caps (per-bus zero for non-demand, per-node total).
+        # load_shed cap: unserved demand can never exceed the demand actually
+        # sitting on this bus.
+        #
+        # load_shed enters the KCL above on the SUPPLY side, so any bound
+        # looser than the bus's own demand lets the solver use it as a virtual
+        # generator: shed more than the bus consumes and export the surplus
+        # over the network, inflating the shed metric and displacing real
+        # dispatch. The previous per-node ``<= 2.0 * node_demand`` permitted
+        # exactly that, up to one extra times the node's demand; the DC path
+        # (transmission_dc.jl) had no bound at all — Japan: 1 504 MW "shed" at
+        # a 33 MW bus, and 66 % of the reported load shedding was artefact.
+        # Bounding each bus by its own demand is the definition of unserved
+        # demand, is tighter than the per-node sum it replaces, and subsumes
+        # the zero-demand case (connection buses get the bound at 0).
         n_bus_ac = input.network.num_buses
-        buses_per_node_lc = Dict{Int, Vector{Int}}()
         for b in 1:n_bus_ac
             ni = input.network.bus_to_node[b]
             bus_role = input.network.buses[b].role
             is_load_bus = bus_role == "load" || bus_role == "mixed"
             bus_df = is_load_bus ? input.network.buses[b].demand_fraction : 0.0
             bus_demand_t = input.demand[t, ni] * bus_df
-            if bus_demand_t <= 0.0
-                @constraint(model,
-                    vars.load_shed[b, t] <= 0.0,
-                    base_name = "max_load_shed_acopf_b$(b)_t$(t)")
-            end
-            push!(get!(buses_per_node_lc, ni, Int[]), b)
-        end
-        for (ni, bs) in buses_per_node_lc
-            node_demand_t = input.demand[t, ni]
-            if length(bs) > 0 && node_demand_t > 0
-                @constraint(model,
-                    sum(vars.load_shed[b, t] for b in bs) <= 2.0 * node_demand_t,
-                    base_name = "max_load_shed_acopf_node$(ni)_t$(t)")
-            end
+            @constraint(model,
+                vars.load_shed[b, t] <= max(bus_demand_t, 0.0),
+                base_name = "max_load_shed_acopf_b$(b)_t$(t)")
         end
     end
 end
