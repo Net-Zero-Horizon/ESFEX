@@ -186,9 +186,8 @@ function render(data) {
     // window.
     const lim = (R[R.length - 1] || 1.8) + 0.2;
     const layout = {
-        margin: { l: 8, r: 8, t: 96, b: 24 },
-        title: { text: "<b>Annotated Circular Dendrogram</b><br>" +
-                       "<span style='font-size:11px;color:#7f8c8d'>tree = average-linkage clustering · rings = composition · peak RE · cost premium</span>",
+        margin: { l: 8, r: 8, t: 50, b: 24 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>tree = average-linkage clustering · rings = composition · peak RE · cost premium</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         xaxis: {

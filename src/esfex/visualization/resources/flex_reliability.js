@@ -257,14 +257,10 @@ function renderUC(data) {
         : `<span style="color:#1E8449"><b>Adequate</b> — no operational stress events</span>`;
 
     const layout = {
-        margin: { t: 110, r: 70, b: 60, l: 80 },
+        margin: { t: 80, r: 70, b: 60, l: 80 },
         grid: { rows: 3, columns: 1, pattern: "independent", roworder: "top to bottom" },
         showlegend: true,
         annotations: [
-            { text: `<b>Flexibility &amp; Reliability — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",

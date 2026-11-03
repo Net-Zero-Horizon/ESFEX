@@ -88,20 +88,13 @@ function renderProfile(data) {
         hovertemplate: "Hour %{x}: %{y:,.2f} USD/MWh<extra></extra>",
     });
 
-    const title = `Hourly Electricity Price — Year ${data.year}`;
     const layout = {
-        margin: { t: 90, r: 30, b: 60, l: 70 },
+        margin: { t: 60, r: 30, b: 60, l: 70 },
         showlegend: true,
-        annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.14, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         legend: {
             orientation: "h",
             x: 0.5, xanchor: "center",
-            y: 1.06, yanchor: "bottom",
+            y: 1.02, yanchor: "bottom",
             font: { size: 10 },
             bgcolor: "rgba(255,255,255,0.85)",
             bordercolor: "rgba(0,0,0,0.1)",

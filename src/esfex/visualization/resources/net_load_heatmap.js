@@ -127,17 +127,10 @@ function renderHeatmap(data) {
     // Y axis label switches with mode: UC packs rows by day-of-horizon,
     // planning packs rows by month-of-year.
     const yTitle = (data.mode === "uc") ? "<b>Day</b>" : "<b>Month</b>";
-    const title = (data.mode === "uc")
-        ? "Net Load Heatmap — UC Horizon (Year " + data.year + ")"
-        : "Net Load Heatmap — Year " + data.year;
     const layout = {
-        margin: { t: 80, r: 30, b: 70, l: 70 },
+        margin: { t: 50, r: 30, b: 70, l: 70 },
         showlegend: false,
         annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.12, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 16 } },
             { text: "<b>a) Avg Net Load (MW)</b>",
               x: 0.20, xref: "paper", xanchor: "center",
               y: 1.02, yref: "paper", yanchor: "bottom",

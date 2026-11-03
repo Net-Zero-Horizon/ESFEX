@@ -91,9 +91,8 @@ function render(data) {
         });
     });
     const layout = {
-        margin: { l: 8, r: 8, t: 96, b: 28 },
-        title: { text: "<b>Composition of Investment per Alternative</b><br>" +
-                       "<span style='font-size:11px;color:#7f8c8d'>tile area = MW added · grouped by category then technology</span>",
+        margin: { l: 8, r: 8, t: 50, b: 28 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>tile area = MW added · grouped by category then technology</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         annotations: annotations,

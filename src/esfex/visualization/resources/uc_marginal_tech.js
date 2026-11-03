@@ -75,6 +75,7 @@ function hideStatus() {
 }
 
 function renderMarginal(data) {
+    resetLabelFits();
     const x = data.hours;
     const N = data.tech_labels.length;
     // Build a discrete colorscale from the per-tech palette. Plotly's
@@ -125,15 +126,10 @@ function renderMarginal(data) {
         showlegend: false,
     };
 
-    const title = `Marginal Technology — Year ${data.year}`;
     const layout = {
-        margin: { t: 110, r: 30, b: 80, l: 110 },
+        margin: { t: 80, r: 30, b: 20, l: 80 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
         annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: "Which technology sets the system price each hour",
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
@@ -141,8 +137,10 @@ function renderMarginal(data) {
         ],
         xaxis:  { domain: [0, 1], anchor: "y", title: "<b>Hour</b>" },
         yaxis:  { domain: [0.65, 0.95], showticklabels: false },
-        xaxis2: { domain: [0, 1], anchor: "y2",
-                  title: "<b>Technology</b>", tickangle: -25 },
+        xaxis2: Object.assign({ domain: [0, 1], anchor: "y2",
+                  title: "<b>Technology</b>" },
+            labelAxis({ axis: "xaxis2", labels: barX, fontSize: 11,
+                        fraction: 0.25, maxChars: 24, angle: -25 })),
         yaxis2: { domain: [0.0, 0.55], title: "<b>Hours marginal</b>",
                   rangemode: "tozero" },
     };
@@ -151,7 +149,7 @@ function renderMarginal(data) {
         responsive: true,
         displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 window.addEventListener("resize", () => {

@@ -47,8 +47,8 @@ function render(data) {
         tickfont:  { size: 10 }
     };
     const layout = {
-        margin: { l: 60, r: 40, t: 96, b: 40 },
-        title: { text: "<b>Trade-off Parallel Coordinates</b><br><span style='font-size:11px;color:#7f8c8d'>each line = one alternative · red = optimal · drag axes to brush</span>",
+        margin: { l: 60, r: 40, t: 70, b: 40 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>each line = one alternative · red = optimal · drag axes to brush</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top", font: { size: 13 } }
     };
     Plotly.purge("plot");

@@ -63,23 +63,24 @@ function hideStatus() {
     document.getElementById("status").style.display = "none";
 }
 
-const RE_LIKE = new Set(["Solar", "Wind", "Hydro", "Biomass", "Geothermal", "OTEC", "Nuclear", "Hydrogen"]);
-function _sortKey(name) {
-    // Renewables first (cheaper marginal cost → bottom of stack
-    // visually), thermal in the middle, batteries last on top.
-    if (RE_LIKE.has(name)) return 0;
-    if (name === "Battery") return 2;
-    return 1;
+function _mean(values) {
+    let sum = 0, n = 0;
+    for (const v of values || []) {
+        if (v != null && isFinite(v)) { sum += v; n++; }
+    }
+    return n ? sum / n : 0;
 }
 
 function renderDispatch(data) {
     const x = data.hours;
     const traces = [];
 
-    // Generation by tech, stacked. Sort so renewables sit at the
-    // bottom of the stack.
-    const techs = Object.keys(data.gen_by_tech || {}).sort(
-        (a, b) => _sortKey(a) - _sortKey(b) || a.localeCompare(b)
+    // Generation by tech, stacked by mean output, largest first so the
+    // biggest contributors sit at the bottom: the same order as the
+    // Overview's hourly dispatch (dashboard_loader._read_uc_hourly).
+    const gen = data.gen_by_tech || {};
+    const techs = Object.keys(gen).sort(
+        (a, b) => _mean(gen[b]) - _mean(gen[a]) || a.localeCompare(b)
     );
     for (const tech of techs) {
         const series = data.gen_by_tech[tech];
@@ -98,16 +99,16 @@ function renderDispatch(data) {
         traces.push({
             x: x, y: data.bat_discharge,
             type: "scatter", mode: "none",
-            stackgroup: "pos", name: "Battery discharge",
-            fillcolor: "rgba(155, 89, 182, 0.8)",
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Battery discharge</extra>",
+            stackgroup: "pos", name: "Battery (discharge)",
+            fillcolor: "rgba(155, 89, 182, 0.85)",
+            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Battery (discharge)</extra>",
         });
     }
     if (data.load_shed && data.load_shed.some(v => v > 0)) {
         traces.push({
             x: x, y: data.load_shed,
             type: "scatter", mode: "none",
-            stackgroup: "pos", name: "Load shedding",
+            stackgroup: "pos", name: "Load shed",
             fillcolor: "rgba(231, 76, 60, 0.85)",
             hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Load shed</extra>",
         });
@@ -118,10 +119,10 @@ function renderDispatch(data) {
         traces.push({
             x: x, y: data.bat_charge.map(v => -Math.abs(v || 0)),
             type: "scatter", mode: "none",
-            stackgroup: "neg", name: "Battery charge",
+            stackgroup: "neg", name: "Battery (charge)",
             fillcolor: "rgba(155, 89, 182, 0.45)",
             customdata: data.bat_charge,
-            hovertemplate: "Hour %{x}: %{customdata:,.1f} MW<extra>Battery charge</extra>",
+            hovertemplate: "Hour %{x}: %{customdata:,.1f} MW<extra>Battery (charge)</extra>",
         });
     }
     if (data.curtailment && data.curtailment.some(v => v > 0)) {
@@ -146,20 +147,13 @@ function renderDispatch(data) {
         });
     }
 
-    const title = `Hourly Dispatch — Year ${data.year}`;
     const layout = {
-        margin: { t: 90, r: 30, b: 60, l: 70 },
+        margin: { t: 60, r: 30, b: 60, l: 70 },
         showlegend: true,
-        annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.14, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         legend: {
             orientation: "h",
             x: 0.5, xanchor: "center",
-            y: 1.06, yanchor: "bottom",
+            y: 1.02, yanchor: "bottom",
             font: { size: 10 },
             tracegroupgap: 8,
             bgcolor: "rgba(255,255,255,0.85)",

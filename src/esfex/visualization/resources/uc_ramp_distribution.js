@@ -43,19 +43,22 @@ function showStatus(t, e) { const s = document.getElementById("status"); s.textC
 function hideStatus() { document.getElementById("status").style.display = "none"; }
 
 function renderRamps(data) {
+    resetLabelFits();
     const traces = [];
-    for (const tech of data.techs) {
+    const boxTechs = data.techs.filter(t => data.ramps[t] && data.ramps[t].length);
+    const boxNames = legendNames({ traces: boxTechs.map((_, i) => i), labels: boxTechs,
+                                   fraction: 0.18, fontSize: 10, reservePx: 50 });
+    boxTechs.forEach((tech, i) => {
         const ramps = data.ramps[tech];
-        if (!ramps || !ramps.length) continue;
         traces.push({
             y: ramps, x: ramps.map(() => tech),
-            type: "box", name: tech,
+            type: "box", name: boxNames[i],
             marker: { color: (data.tech_colors || {})[tech] || "#95A5A6" },
             boxpoints: "outliers",
             jitter: 0.3, pointpos: 0,
             hovertemplate: "%{y:,.1f} MW<extra>" + tech + "</extra>",
         });
-    }
+    });
 
     // P95 markers overlaid as a scatter trace — quick visual ranking.
     const p95Techs = data.techs.filter(t => data.p95[t] != null);
@@ -72,20 +75,18 @@ function renderRamps(data) {
     }
 
     const layout = {
-        margin: { t: 100, r: 30, b: 70, l: 70 },
+        margin: { t: 70, r: 30, b: 20, l: 70 },
         showlegend: true,
         annotations: [
-            { text: `<b>Ramp Distribution by Technology — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.10, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: "Hour-to-hour |ΔP|, MW &nbsp;|&nbsp; red diamond = P95",
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.04, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
         ],
         legend: { font: { size: 10 } },
-        xaxis: { title: "<b>Technology</b>", tickangle: -25 },
+        xaxis: Object.assign({ title: "<b>Technology</b>" },
+            labelAxis({ axis: "xaxis", labels: data.techs, fontSize: 11,
+                        fraction: 0.25, maxChars: 24, angle: -25 })),
         yaxis: { title: "<b>|ΔP| per hour (MW)</b>", rangemode: "tozero" },
         boxmode: "group",
     };
@@ -93,7 +94,7 @@ function renderRamps(data) {
     Plotly.newPlot("plot", traces, layout, {
         responsive: true, displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 window.addEventListener("resize", () => {

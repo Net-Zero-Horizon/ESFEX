@@ -198,12 +198,8 @@ function render(data, cmap, granularity) {
         ? "technology × node placement"
         : "technology (aggregated across nodes)";
     const layout = {
-        margin: { l: 20, r: 30, t: 96, b: bottomMargin },
-        title: { text: "<b>Decision Factors — Alternatives × " +
-                       (granularity === "tech_node" ? "Tech × Node"
-                                                    : "Technologies") +
-                       "</b><br>" +
-                       "<span style='font-size:11px;color:#7f8c8d'>rows clustered by Euclidean distance · columns clustered by co-investment correlation · cell colour = MW invested · " +
+        margin: { l: 20, r: 30, t: 50, b: bottomMargin },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>rows clustered by Euclidean distance · columns clustered by co-investment correlation · cell colour = MW invested · " +
                        granLabel + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },

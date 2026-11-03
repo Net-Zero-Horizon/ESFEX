@@ -168,9 +168,8 @@ function render(data, method) {
     const methodLabel = isP ? "Principal Component Analysis"
                             : "t-distributed Stochastic Neighbour Embedding";
     const layout = {
-        margin: { l: 70, r: 30, t: 96, b: 80 },
-        title: { text: `<b>2D Projection of the decision space</b><br>` +
-                       `<span style='font-size:11px;color:#7f8c8d'>${methodLabel} — each alternative as a point in technology × node investment space</span>`,
+        margin: { l: 70, r: 30, t: 50, b: 80 },
+        title: { text: `<span style='font-size:11px;color:#7f8c8d'>${methodLabel} — each alternative as a point in technology × node investment space</span>`,
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         xaxis: { title: xTitle, gridcolor: "rgba(0,0,0,0.08)",

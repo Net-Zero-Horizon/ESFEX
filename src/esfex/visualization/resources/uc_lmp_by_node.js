@@ -46,12 +46,13 @@ function showStatus(t, e) { const s = document.getElementById("status"); s.textC
 function hideStatus() { document.getElementById("status").style.display = "none"; }
 
 function renderLMP(data) {
+    resetLabelFits();
     const heatmap = {
         z: data.z, x: data.hours, y: data.nodes,
         type: "heatmap", colorscale: "Plasma",
         colorbar: {
             title: { text: "USD/MWh", side: "right" },
-            len: 0.55, y: 0.72, yanchor: "middle", thickness: 12,
+            len: 0.42, y: 0.79, yanchor: "middle", thickness: 12,
         },
         hovertemplate: "Node %{y}<br>Hour %{x}<br>LMP: %{z:,.1f} USD/MWh<extra></extra>",
         xaxis: "x", yaxis: "y",
@@ -82,30 +83,39 @@ function renderLMP(data) {
         (spread > 1 ? " — transmission constraints active" : " — uniform pricing");
 
     const layout = {
-        margin: { t: 110, r: 70, b: 60, l: 100 },
+        margin: { t: 80, r: 70, b: 60, l: 10 },
         grid: { rows: 3, columns: 1, pattern: "independent", roworder: "top to bottom" },
         annotations: [
-            { text: `<b>Locational Marginal Prices — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.13, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.07, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
         ],
         xaxis:  { domain: [0, 1], anchor: "y", showticklabels: false },
-        yaxis:  { domain: [0.55, 1.0], title: "<b>Node</b>", autorange: "reversed" },
-        xaxis2: { domain: [0, 1], anchor: "y2", tickangle: -25 },
-        yaxis2: { domain: [0.28, 0.48], title: "<b>Mean LMP</b>", rangemode: "tozero" },
+        // Node names: shortened tick text, margin sized to fit (the
+        // "Node" title is pushed out past the labels), and thinned when
+        // there are more nodes than readable rows.
+        yaxis:  Object.assign({ domain: [0.58, 1.0], autorange: "reversed",
+                                title: { text: "<b>Node</b>", standoff: 8 } },
+            labelAxis({ axis: "yaxis", labels: data.nodes, fontSize: 11,
+                        fraction: 0.2, domain: [0.58, 1.0] })),
+        // Names under the bar panel are rotated −45° and must fit the
+        // gap above the system-average panel (18 % of the plot height):
+        // the character cap follows that gap and ticks are thinned so
+        // neighbouring labels never overlap.
+        xaxis2: Object.assign({ domain: [0, 1], anchor: "y2" },
+            labelAxis({ axis: "xaxis2", labels: rankedNodes, fontSize: 11,
+                        fraction: 0.2, maxChars: 24, angle: -45,
+                        depth: sz => 0.18 * sz.h - 6 })),
+        yaxis2: { domain: [0.34, 0.50], title: "<b>Mean LMP</b>", rangemode: "tozero" },
         xaxis3: { domain: [0, 1], anchor: "y3", title: "<b>Hour</b>" },
-        yaxis3: { domain: [0.0, 0.20], title: "<b>System avg</b>", rangemode: "tozero" },
+        yaxis3: { domain: [0.0, 0.16], title: "<b>System avg</b>", rangemode: "tozero" },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", [heatmap, bar, sysavg], layout, {
         responsive: true, displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 window.addEventListener("resize", () => {

@@ -76,14 +76,10 @@ function renderSOC(data) {
     }).join(" &nbsp;|&nbsp; ");
 
     const layout = {
-        margin: { t: 110, r: 30, b: 60, l: 70 },
+        margin: { t: 80, r: 30, b: 60, l: 70 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
         showlegend: true,
         annotations: [
-            { text: `<b>Storage SOC &amp; Cycles — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: parts,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
