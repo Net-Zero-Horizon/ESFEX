@@ -111,7 +111,6 @@ function renderTimeline(data) {
         hovertemplate: "Hour %{x}: %{y:,.0f} MWh<extra>Cumulative</extra>",
     });
 
-    const title = `Load Shedding &amp; Curtailment — Year ${data.year}`;
     const sharePct = (data.demand_total_mwh > 0)
         ? (100 * data.load_shed_total_mwh / data.demand_total_mwh).toFixed(1)
         : "0";
@@ -122,14 +121,10 @@ function renderTimeline(data) {
         `peak ${data.curtailment_max_mw.toFixed(1)} MW`;
 
     const layout = {
-        margin: { t: 110, r: 70, b: 60, l: 70 },
+        margin: { t: 80, r: 70, b: 60, l: 70 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
         showlegend: true,
         annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",

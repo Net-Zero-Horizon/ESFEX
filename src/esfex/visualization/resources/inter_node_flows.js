@@ -56,24 +56,24 @@ function refresh() {
 }
 
 function renderFlowsUC(data) {
+    resetLabelFits();
     // Hourly net flow per node: positive = importing, negative =
     // exporting. One line per node.
-    const traces = data.nodes.map(node => ({
+    const names = legendNames({ traces: data.nodes.map((_, i) => i),
+                                labels: data.nodes.map(n => n.label),
+                                fraction: 0.2, fontSize: 10, reservePx: 50 });
+    const traces = data.nodes.map((node, i) => ({
         x: data.hours, y: node.net_mw,
         type: "scatter", mode: "lines",
-        name: node.label,
+        name: names[i],
         line: { color: node.color, width: 2 },
         hovertemplate:
             "Hour %{x}: %{y:,.1f} MW<extra>" + node.label + "</extra>",
     }));
     const layout = {
-        margin: { t: 100, r: 30, b: 60, l: 80 },
+        margin: { t: 70, r: 30, b: 60, l: 80 },
         showlegend: true,
         annotations: [
-            { text: "<b>Inter-Node Net Flow — Year " + data.year + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.10, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: "Positive = net importing &nbsp;|&nbsp; Negative = net exporting",
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.04, yref: "paper", yanchor: "bottom",
@@ -92,7 +92,7 @@ function renderFlowsUC(data) {
     Plotly.newPlot("plot", traces, layout, {
         responsive: true, displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 function showStatus(text, isError) {
@@ -108,15 +108,22 @@ function hideStatus() {
 }
 
 function renderFlows(data) {
+    resetLabelFits();
     const traces = [];
     const years = data.years;
+    // The legend sits in the 12 % strip right of the plot (x ≥ 0.88);
+    // names are shortened to fit it. Only the import trace of each
+    // node (even index) shows in the legend.
+    const names = legendNames({ traces: data.nodes.map((_, i) => 2 * i),
+                                labels: data.nodes.map(n => n.label),
+                                fraction: 0.12, fontSize: 10, reservePx: 50 });
 
-    for (const node of data.nodes) {
+    data.nodes.forEach((node, i) => {
         // Imports — positive bars
         traces.push({
             type: "bar",
             x: years, y: node.imports_gwh,
-            name: node.label,
+            name: names[i],
             legendgroup: node.label,
             marker: { color: node.color, opacity: 0.85 },
             offsetgroup: "flows",
@@ -137,20 +144,14 @@ function renderFlows(data) {
             hovertemplate:
                 "%{x}: %{customdata:,.1f} GWh<extra>" + node.label + " · exports</extra>",
         });
-    }
+    });
 
     const layout = {
         // Tight right margin so the legend hugs the figure edge
         // (≈20% of the previous 30 px gutter).
-        margin: { t: 60, r: 6, b: 70, l: 80 },
+        margin: { t: 30, r: 6, b: 70, l: 80 },
         barmode: "relative",
         showlegend: true,
-        annotations: [
-            { text: "<b>Inter-Node Power Flows (Imports ↑ / Exports ↓)</b>",
-              x: 0.435, xref: "paper", xanchor: "center",
-              y: 1.02, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         shapes: [
             // Zero baseline across the plot
             { type: "line", xref: "x domain", yref: "y",
@@ -188,7 +189,7 @@ function renderFlows(data) {
         responsive: true,
         displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 window.addEventListener("resize", () => {

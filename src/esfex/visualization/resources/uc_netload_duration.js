@@ -71,13 +71,9 @@ function renderDuration(data) {
         `Min net ${data.min_netload_mw.toFixed(0)} MW &nbsp;|&nbsp; ` + negFrac;
 
     const layout = {
-        margin: { t: 110, r: 30, b: 60, l: 70 },
+        margin: { t: 80, r: 30, b: 60, l: 70 },
         showlegend: true,
         annotations: [
-            { text: `<b>Net Load Duration Curve — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",

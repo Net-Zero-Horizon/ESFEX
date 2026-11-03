@@ -101,29 +101,22 @@ function renderOperation(data) {
     }
 
     const resCap = data.resolution.charAt(0).toUpperCase() + data.resolution.slice(1);
-    const title = `Battery Operation — Year ${data.year} (${data.resolution})`;
 
     const layout = {
-        // Wider top margin to host title + horizontal legend stack.
-        margin: { t: 90, r: 30, b: 60, l: 70 },
+        // Top margin hosts the horizontal legend above the plot.
+        margin: { t: 60, r: 30, b: 60, l: 70 },
         barmode: "relative",
         showlegend: true,
-        annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.14, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         shapes: [
             { type: "line", xref: "x domain", yref: "y",
               x0: 0, x1: 1, y0: 0, y1: 0,
               line: { color: "#000000", width: 1 } },
         ],
-        // Horizontal legend just below the title, above the plot.
+        // Horizontal legend above the plot.
         legend: {
             orientation: "h",
             x: 0.5, xanchor: "center",
-            y: 1.06, yanchor: "bottom",
+            y: 1.02, yanchor: "bottom",
             font: { size: 10 },
             tracegroupgap: 12,
             bgcolor: "rgba(255,255,255,0.85)",

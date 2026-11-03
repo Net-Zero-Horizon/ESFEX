@@ -59,6 +59,7 @@ const NAMED_COLORSCALES = {
 function resolveColorscale(name) { return NAMED_COLORSCALES[name] || name; }
 
 function render(data) {
+    resetLabelFits();
     const sp = data.spatial;
     if (!sp || !sp.tech_labels || sp.tech_labels.length === 0) {
         showStatus("No spatial divergence data.", false); return;
@@ -75,14 +76,16 @@ function render(data) {
         customdata: sp.mean_mw
     };
     const layout = {
-        margin: { l: 220, r: 30, t: 96, b: 120 },
-        title: { text: "<b>Spatial Divergence</b><br><span style='font-size:11px;color:#7f8c8d'>σ across alternatives per (technology × node) · hotter = more contested</span>",
+        margin: { l: 10, r: 30, t: 50, b: 10 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>σ across alternatives per (technology × node) · hotter = more contested</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top", font: { size: 13 } },
-        xaxis: { tickangle: -40, automargin: true },
-        yaxis: { automargin: true }
+        xaxis: labelAxis({ axis: "xaxis", labels: sp.node_labels, fontSize: 11,
+                           fraction: 0.25, maxChars: 24, angle: -40 }),
+        yaxis: labelAxis({ axis: "yaxis", labels: sp.tech_labels, fontSize: 11,
+                           fraction: 0.25 })
     };
     Plotly.purge("plot");
-    Plotly.newPlot("plot", [trace], layout, { responsive: true, displaylogo: false });
+    Plotly.newPlot("plot", [trace], layout, { responsive: true, displaylogo: false }).then(refitLabels);
 }
 
 // Python params widget calls this when the colormap combo changes.

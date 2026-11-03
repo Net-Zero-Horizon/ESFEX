@@ -172,14 +172,9 @@ function renderMetrics(data) {
         // Right margin reserves space for the rotated category labels
         // (which double as the band-colour legend) and the year
         // colorbar that lives further right.
-        margin: { t: 50, r: 260, b: 60, l: 280 },
+        margin: { t: 30, r: 260, b: 60, l: 280 },
         annotations: annotations,
         shapes: shapes,
-        title: {
-            text: "<b>Temporal Evolution of Power System Metrics</b>",
-            x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
-            font: { size: 16 },
-        },
         xaxis: {
             range: [-20, 130],
             tickvals: [0, 25, 50, 75, 100],

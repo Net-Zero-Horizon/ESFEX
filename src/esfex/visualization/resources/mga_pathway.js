@@ -42,8 +42,8 @@ function render(data) {
     const cellH = (1 - topPad - yGap*(rows-1)) / rows;
     const traces = [];
     const layout = {
-        margin: { l: 40, r: 10, t: 96, b: 80 },
-        title: { text: "<b>Pathway Divergence — cumulative installed MW per alternative</b><br><span style='font-size:11px;color:#7f8c8d'>stacked by category</span>",
+        margin: { l: 40, r: 10, t: 50, b: 80 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>cumulative installed MW per alternative · stacked by category</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top", font: { size: 13 } },
         showlegend: true,
         legend: { orientation: "h", y: -0.10, x: 0.5, xanchor: "center",

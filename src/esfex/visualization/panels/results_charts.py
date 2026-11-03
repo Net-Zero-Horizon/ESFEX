@@ -6530,9 +6530,10 @@ class SankeyEnergyFlowChart(QWidget):
             ),
         ))
 
-        title_text = (
-            f"Energy Flow — {sel_year}"
-            f"  |  Generation: {total_generation:,.0f} GWh"
+        # No chart-level heading (the Results Viewer window already
+        # names the chart); keep only the key totals as a caption.
+        caption_text = (
+            f"Generation: {total_generation:,.0f} GWh"
             f"  |  Demand: {total_demand:,.0f} GWh"
             f"  |  RE: {re_pct:.1f}%"
         )
@@ -6548,11 +6549,11 @@ class SankeyEnergyFlowChart(QWidget):
             _bg, _fg = "white", "black"
 
         pfig.update_layout(
-            title=dict(text=title_text,
-                       font=dict(size=14, family="Arial, sans-serif",
+            title=dict(text=caption_text,
+                       font=dict(size=11, family="Arial, sans-serif",
                                  color=_fg)),
             font=dict(size=11, family="Arial, sans-serif", color=_fg),
-            margin=dict(l=10, r=10, t=50, b=10),
+            margin=dict(l=10, r=10, t=36, b=10),
             paper_bgcolor=_bg,
             plot_bgcolor=_bg,
         )

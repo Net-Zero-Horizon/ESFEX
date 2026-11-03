@@ -178,9 +178,8 @@ function render(data, cmap) {
     // Stack the two panels vertically with shared x.
     // y  (heatmap) takes the lower 65%, y2 (dendro) the top ~22%.
     const layout = {
-        margin: { l: 90, r: 30, t: 96, b: 90 },
-        title: { text: "<b>Clustered Heatmap — Alternative Similarity</b><br>" +
-                       "<span style='font-size:11px;color:#7f8c8d'>Euclidean distance in decision space · rows / columns reordered by the dendrogram above</span>",
+        margin: { l: 90, r: 30, t: 50, b: 90 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>Euclidean distance in decision space · rows / columns reordered by the dendrogram above</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         xaxis:  { domain: [0.0, 1.0],

@@ -17,6 +17,13 @@ function _ucClearPlot() {
     try { Plotly.purge("plot"); } catch (e) {}
 }
 let bridge = null;
+let _lastUnits = null;
+
+const MIN_ROW_PX = 16;       // smallest row height that fits a label line
+const MARGIN_T = 40;
+const MARGIN_B = 60;
+const LABEL_FONT = 11;
+const LABEL_FRACTION = 0.3;  // labels take at most 30 % of the width
 
 document.addEventListener("DOMContentLoaded", () => {
     new QWebChannel(qt.webChannelTransport, channel => {
@@ -76,36 +83,45 @@ function renderHeatmap(data) {
         xgap: 1, ygap: 1,
     };
 
-    const title = `Commitment Schedule — Year ${data.year}`;
-    // Dynamic height: rows × ~22 px so even large fleets stay readable.
-    const rowH = Math.max(18, Math.min(28, 600 / data.units.length));
     const plot = document.getElementById("plot");
-    plot.style.height = Math.max(400, data.units.length * rowH + 160) + "px";
+    _lastUnits = data.units;
+    resetLabelFits();
+    plot.style.height = _plotHeight(data.units.length) + "px";
 
     const layout = {
-        margin: { t: 90, r: 30, b: 60, l: 220 },
+        margin: { t: MARGIN_T, r: 30, b: MARGIN_B, l: 10 },
         annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.07, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: "<span style='color:#27AE60'>■</span> On  &nbsp; <span style='color:#ECEFF1'>■</span> Off",
               x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.03, yref: "paper", yanchor: "bottom",
+              y: 1, yref: "paper", yanchor: "bottom", yshift: 6,
               showarrow: false, font: { size: 11 } },
         ],
         xaxis: { title: "<b>Hour</b>", side: "bottom" },
-        yaxis: { autorange: "reversed" },  // first unit at top
+        // Full unit names stay as the category values (hover shows
+        // them); the tick text is shortened and the left margin grows
+        // to fit it instead of clipping long names.
+        yaxis: Object.assign({ autorange: "reversed" },  // first unit at top
+            labelAxis({ axis: "yaxis", labels: data.units,
+                        fraction: LABEL_FRACTION, fontSize: LABEL_FONT })),
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", [trace], layout, {
         responsive: true,
         displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
+}
+
+// Fill the window; grow past it (page scrolls) only when the fleet is
+// too large to give every unit a readable row.
+function _plotHeight(nUnits) {
+    const needed = nUnits * MIN_ROW_PX + MARGIN_T + MARGIN_B;
+    return Math.max(window.innerHeight, needed);
 }
 
 window.addEventListener("resize", () => {
     const plot = document.getElementById("plot");
-    if (plot && plot.data) Plotly.Plots.resize(plot);
+    if (!plot || !plot.data || !_lastUnits) return;
+    plot.style.height = _plotHeight(_lastUnits.length) + "px";
+    Plotly.Plots.resize(plot);
 });
