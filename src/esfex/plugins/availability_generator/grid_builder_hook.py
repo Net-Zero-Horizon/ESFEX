@@ -20,6 +20,7 @@ import concurrent.futures
 import logging
 import os
 import random
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
@@ -120,9 +121,11 @@ def generate_for_grid_build(
     use_weather_data
         When True, wind and solar generators query the weather backend
         for their (lat, lng) — realistic, but network-bound. Queries are
-        de-duplicated per ~11 km grid cell and run concurrently, so the
-        cost scales with the number of *distinct* locations, not the
-        generator count. If a query fails (or the backend is unavailable),
+        de-duplicated per ~11 km grid cell, so the cost scales with the
+        number of *distinct* locations, not the generator count. With
+        ``open_meteo`` one request per cell serves solar and wind, requests
+        are paced to the free tier's per-minute quota, and downloaded cells
+        are cached on disk (see :mod:`open_meteo_weather`). If a query fails (or the backend is unavailable),
         that wind/solar unit is left **without** an availability profile —
         no flat or synthetic value is fabricated — and the omission is
         reported. When False (fast builds) wind/solar use a flat
@@ -192,7 +195,7 @@ def generate_for_grid_build(
                 # file and report it, so the gap is visible rather than faked.
                 logger.warning(
                     "No weather data for %s (%s) — leaving it without an "
-                    "availability profile (no synthetic fallback).", gid, kind)
+                    "availability profile.", gid, kind)
                 skipped.append(gid)
                 continue
         else:
@@ -237,18 +240,16 @@ def _weather_cache_key(
     weather_year: int,
     weather_source: str,
 ) -> tuple:
-    """A dedup key for one weather query.
+    """A dedup key for one weather query: ``(kind, lat, lng, year, source)``.
 
     Coordinates are bucketed to a ~11 km grid cell (see ``_WEATHER_CELL_DEG``).
-    Wind capacity factors also depend on the rated power (turbine power-curve
-    scaling), so the rounded rating joins the key; solar does not.
+    The unit's rating is not part of the key: ``windrex`` is called without a
+    power curve, so every wind unit uses its default turbine and the capacity
+    factor of a cell does not depend on the unit's rated power.
     """
     lat = round(gen.latitude / _WEATHER_CELL_DEG) * _WEATHER_CELL_DEG
     lng = round(gen.longitude / _WEATHER_CELL_DEG) * _WEATHER_CELL_DEG
-    cell = (round(lat, 3), round(lng, 3), weather_year, weather_source)
-    if kind == "wind":
-        return ("wind", *cell, round(max(gen.rated_power, 1.0)))
-    return ("solar", *cell)
+    return (kind, round(lat, 3), round(lng, 3), weather_year, weather_source)
 
 
 def _prefetch_weather_cfs(
@@ -278,6 +279,9 @@ def _prefetch_weather_cfs(
     total = len(keys)
     if not total:
         return cache
+
+    if weather_source == "open_meteo":
+        return _prefetch_open_meteo(keys, weather_year, progress_callback)
 
     if progress_callback:
         progress_callback(0, f"Fetching weather for {total} location(s)…")
@@ -309,6 +313,86 @@ def _prefetch_weather_cfs(
         "Weather availability: %d unique location(s) fetched for the build.",
         len(cache),
     )
+    return cache
+
+
+def _prefetch_open_meteo(
+    keys: list[tuple],
+    weather_year: int,
+    progress_callback: Optional[Callable[[int, str], None]],
+) -> dict[tuple, np.ndarray]:
+    """Open-Meteo path: one quota-paced request per grid cell serves both the
+    solar and the wind units in it, with a disk cache across builds."""
+    from esfex.plugins.availability_generator import open_meteo_weather as om
+
+    try:  # the CF models live in solarex / windrex
+        import solarex  # noqa: F401
+        import windrex  # noqa: F401
+    except ImportError:
+        logger.debug("solarex / windrex unavailable — no weather profiles")
+        return {}
+
+    cells: dict[tuple, list[tuple]] = {}
+    for key in keys:
+        cells.setdefault((key[1], key[2]), []).append(key)
+
+    cache_dir = om.default_cache_dir()
+    to_download = [c for c in cells
+                   if not om._cache_path(cache_dir, *c, weather_year).exists()]
+    n_cells = len(cells)
+    if progress_callback:
+        msg = f"Weather for {n_cells} location(s)"
+        if to_download:
+            per_min = om.CALLS_PER_MINUTE_BUDGET / om.year_request_cost(weather_year)
+            minutes = len(to_download) / per_min
+            msg += (f" — {len(to_download)} to download from Open-Meteo "
+                    f"(~{max(1, round(minutes))} min at its free rate limit)")
+        progress_callback(0, msg + "…")
+
+    limiter = om.MinuteRateLimiter()
+    stop = threading.Event()
+    quota_reason: list[str] = []
+
+    def _work(cell):
+        weather = om.fetch_cell_weather(cell[0], cell[1], weather_year,
+                                        limiter, cache_dir, stop)
+        if weather is None:
+            return cell, {}
+        out = {}
+        for key in cells[cell]:
+            cf = om.solar_cf(weather) if key[0] == "solar" else om.wind_cf(weather)
+            if np.any(cf):
+                out[key] = cf
+        return cell, out
+
+    cache: dict[tuple, np.ndarray] = {}
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_resolve_max_workers(n_cells)
+    ) as ex:
+        futures = [ex.submit(_work, c) for c in cells]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                _cell, cfs = fut.result()
+                cache.update(cfs)
+            except om.OpenMeteoQuotaExhausted as exc:
+                if not stop.is_set():
+                    quota_reason.append(str(exc))
+                    stop.set()  # the rest would only draw more 429s
+            except Exception as exc:
+                logger.warning("Weather fetch failed: %s", exc)
+            done += 1
+            if progress_callback:
+                progress_callback(int(100 * done / n_cells),
+                                  f"Weather {done}/{n_cells} location(s)…")
+
+    if quota_reason:
+        logger.warning(
+            "Open-Meteo quota exhausted (%s). Locations downloaded so far are "
+            "cached in %s; re-run the build later to fetch the rest.",
+            quota_reason[0], cache_dir)
+    logger.info("Weather availability: %d of %d location(s) available.",
+                len({(k[1], k[2]) for k in cache}), n_cells)
     return cache
 
 

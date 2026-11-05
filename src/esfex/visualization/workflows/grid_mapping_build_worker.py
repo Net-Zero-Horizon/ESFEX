@@ -243,10 +243,16 @@ class GridBuildWorker(QThread):
                 )
                 out_dir = (Path(p.cfg_path).parent / "availability"
                            if p.cfg_path else Path.cwd() / "availability")
+                # Weather downloads are paced to Open-Meteo's rate limit and
+                # can take minutes on large systems: surface their progress.
+                def _avail_progress(_pct, msg):
+                    if msg.startswith("Weather"):
+                        self.progress.emit(msg)
                 written = self._timed("Availability profiles",
                                       lambda: generate_for_grid_build(
                                           model.state, out_dir,
-                                          use_weather_data=p.use_weather))
+                                          use_weather_data=p.use_weather,
+                                          progress_callback=_avail_progress))
                 if written:
                     island_lines.append(
                         f"Generated {len(written)} availability profile(s) "
@@ -258,7 +264,9 @@ class GridBuildWorker(QThread):
                     island_lines.append(
                         f"{n_skipped} wind/solar generator(s) had no weather "
                         f"data available — left without an availability "
-                        f"profile (no synthetic fallback).")
+                        f"profile. Downloaded weather is cached, so "
+                        f"rebuilding later only fetches the missing "
+                        f"locations.")
 
         out["island_summary"] = "\n".join(island_lines)
         out["simplify_level"] = p.simplify_level

@@ -500,7 +500,28 @@ class TestTranslations:
 
 class TestGridBuilderHookDedup:
     """The Grid Builder availability hook must query the weather backend once
-    per distinct location, not once per generator (the Japan-scale bottleneck)."""
+    per distinct location, not once per generator (the Japan-scale bottleneck).
+
+    With the default ``open_meteo`` source the per-cell download goes through
+    :mod:`open_meteo_weather` (quota-paced, disk-cached), so these tests stub
+    ``fetch_cell_weather`` / ``requests.get`` there and point the cache at a
+    temporary directory — they must never reach the network."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_weather_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ESFEX_WEATHER_CACHE", str(tmp_path / "weather"))
+
+    @staticmethod
+    def _weather(wind_100m=9.0):
+        n = 8760
+        hours = np.arange(n)
+        ghi = np.clip(900 * np.sin(np.pi * ((hours % 24) - 6) / 12), 0, None)
+        return {
+            "shortwave_radiation": ghi.astype(np.float32),
+            "temperature_2m": np.full(n, 25.0, dtype=np.float32),
+            "wind_speed_10m": np.full(n, 6.0, dtype=np.float32),
+            "wind_speed_100m": np.full(n, wind_100m, dtype=np.float32),
+        }
 
     @staticmethod
     def _gen(lat, lng, fuel="Wind", rated=10.0):
@@ -523,14 +544,16 @@ class TestGridBuilderHookDedup:
         }
         state = SimpleNamespace(generators=gens)
 
+        from esfex.plugins.availability_generator import open_meteo_weather as om
+        pytest.importorskip("windrex")
         calls = {"n": 0}
 
-        def fake_wind(lat, lng, year, source, rated_power_mw=1.0):
+        def fake_fetch(lat, lng, year, limiter, cache_dir, stop):
             calls["n"] += 1
-            return np.full(8760, 0.4)
+            return self._weather()
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("windrex.compute_wind_hourly_cf", fake_wind, create=True):
+                patch.object(om, "fetch_cell_weather", fake_fetch):
             written = gbh.generate_for_grid_build(
                 state, Path(tmp), use_weather_data=True)
 
@@ -548,11 +571,14 @@ class TestGridBuilderHookDedup:
         gens = {"w0": self._gen(35.0, 139.0)}
         state = SimpleNamespace(generators=gens)
 
+        from esfex.plugins.availability_generator import open_meteo_weather as om
+        pytest.importorskip("windrex")
+
         def boom(*a, **k):
             raise RuntimeError("network down")
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("windrex.compute_wind_hourly_cf", boom, create=True):
+                patch.object(om, "fetch_cell_weather", boom):
             written = gbh.generate_for_grid_build(
                 state, Path(tmp), use_weather_data=True)
 
@@ -568,17 +594,29 @@ class TestGridBuilderHookDedup:
         gens = {"w0": self._gen(35.0, 139.0)}
         state = SimpleNamespace(generators=gens)
 
+        import requests
+        from esfex.plugins.availability_generator import open_meteo_weather as om
+        pytest.importorskip("windrex")
+        weather = self._weather(wind_100m=9.0)
         calls = {"n": 0}
 
-        def flaky(lat, lng, year, source, rated_power_mw=1.0):
+        class _Resp:
+            def __init__(self, status):
+                self.status_code = status
+                self.headers = {}
+
+            def json(self):
+                if self.status_code != 200:
+                    return {"error": True, "reason": "Internal error"}
+                return {"hourly": {k: v.tolist() for k, v in weather.items()}}
+
+        def flaky(*a, **k):
             calls["n"] += 1
-            if calls["n"] < 3:          # fail the first two attempts
-                raise RuntimeError("HTTP 429 Too Many Requests")
-            return np.full(8760, 0.45)
+            return _Resp(503 if calls["n"] < 3 else 200)  # two transient 5xx
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("windrex.compute_wind_hourly_cf", flaky, create=True), \
-                patch.object(gbh.time, "sleep", lambda *_: None):  # no real wait
+                patch.object(requests, "get", flaky), \
+                patch.object(om.time, "sleep", lambda *_: None):  # no real wait
             written = gbh.generate_for_grid_build(
                 state, Path(tmp), use_weather_data=True)
 
@@ -586,7 +624,7 @@ class TestGridBuilderHookDedup:
             assert calls["n"] == 3
             assert "w0" in written
             data = np.loadtxt(written["w0"], delimiter=",")
-            assert np.allclose(data, 0.45)
+            assert np.allclose(data, om.wind_cf(weather), atol=1e-6)
 
     def test_env_override_caps_workers(self, monkeypatch):
         from esfex.plugins.availability_generator import grid_builder_hook as gbh
