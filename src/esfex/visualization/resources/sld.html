@@ -67,6 +67,24 @@
     }
     #sld-tooltip .tt-label { font-weight: 600; }
     #sld-tooltip .tt-sub { font-size: 11px; opacity: 0.85; margin-top: 2px; }
+
+    /* Level of detail: sld_controller.js sets lod-far / lod-mid on the svg
+       from the zoom scale. Far: frames, bars and lines only, at a constant
+       on-screen width. Mid: plus equipment symbols. Text appears only when
+       it is large enough to read; until then the substation names are
+       drawn at a fixed size in .sld-names. */
+    svg.lod-far .sld-root text, svg.lod-mid .sld-root text,
+    svg.lod-far .sld-root .lod-label, svg.lod-mid .sld-root .lod-label { display: none; }
+    svg.lod-far .layer-stubs, svg.lod-far .layer-equip,
+    svg.lod-far .layer-ops, svg.lod-mid .layer-ops > :not(polygon) { display: none; }
+    svg.lod-far .layer-edges circle, svg.lod-far .bus-bar circle,
+    svg.lod-far .bus-bar-border { display: none; }
+    svg.lod-far .edge-path { vector-effect: non-scaling-stroke; stroke-width: 1px; }
+    svg.lod-far .bus-bar-line { vector-effect: non-scaling-stroke; stroke-width: 2.5px; }
+    svg.lod-far .node-group-bg {
+        vector-effect: non-scaling-stroke; stroke-width: 1px; stroke-dasharray: none;
+        fill: #8A96A3; fill-opacity: 0.08;
+    }
 </style>
 </head>
 <body>
