@@ -479,6 +479,8 @@ _JUNCTION_LABEL = 22
 _TERM_EDGE_PAD = 16      # keep line terminals this far from the bar ends
 _TERM_CLEAR = 12         # ... and this far from other stubs on the same face
 _EQ_PITCH_JS = 72.0      # equipment pitch used by the JS renderer
+_EQ_CLEAR = 30           # lines leaving downwards keep this far from equipment
+_FACE_ROOM = 14          # bar length needed per line terminal on one face
 
 
 def _bus_positions_for_layout(state, group_meta, edge_records):
@@ -542,16 +544,14 @@ def _translate(children, edges, dx, dy):
                 p["y"] += dy
 
 
-def _spread_terminals(lo, hi, occupied, k):
-    """``k`` increasing X positions on [lo, hi] spread over the stretches
-    that stay clear of the ``occupied`` X positions."""
-    if k <= 0:
-        return []
+def _free_stretches(lo, hi, occupied, blocked=()):
+    """Stretches of [lo, hi] clear of the ``occupied`` X positions (by
+    ``_TERM_CLEAR``) and of the ``blocked`` (a, b) intervals."""
     if hi <= lo:
-        return [(lo + hi) / 2.0] * k
+        return []
     free = [(lo, hi)]
-    for x in sorted(occupied):
-        a, b = x - _TERM_CLEAR, x + _TERM_CLEAR
+    cuts = sorted([(x - _TERM_CLEAR, x + _TERM_CLEAR) for x in occupied] + list(blocked))
+    for a, b in cuts:
         nxt = []
         for f0, f1 in free:
             if b <= f0 or a >= f1:
@@ -562,6 +562,51 @@ def _spread_terminals(lo, hi, occupied, k):
             if b < f1:
                 nxt.append((b, f1))
         free = nxt
+    return free
+
+
+def _face_obstacles(c, kids, intra_edges, bus_equipment, up):
+    """What a line leaving bar ``c`` on its top (``up``) or bottom face must
+    avoid: (X positions of the stubs already on that face, X spans it must
+    not cross). The spans are the block's other bars on that side (a line
+    through them would read as a connection) and, below the bar, its own
+    equipment."""
+    face_y = c["y"] if up else c["y"] + _BUS_H
+    occ: list[float] = []
+    for e in intra_edges:
+        for sec in e.get("sections", []):
+            for p in (sec["startPoint"], sec["endPoint"]):
+                if (c["x"] - 1 <= p["x"] <= c["x"] + c["width"] + 1
+                        and abs(p["y"] - face_y) < 0.5):
+                    occ.append(p["x"])
+    blocked: list[tuple[float, float]] = []
+    for o in kids:
+        if o is c:
+            continue
+        if (o["y"] < c["y"] - 0.5) if up else (o["y"] > c["y"] + 0.5):
+            blocked.append((o["x"] - _TERM_CLEAR, o["x"] + o["width"] + _TERM_CLEAR))
+    if not up:
+        eq_xs = _equip_stub_xs(c, len(bus_equipment.get(c["id"], [])))
+        occ.extend(eq_xs)
+        if eq_xs:
+            blocked.append((min(eq_xs) - _EQ_CLEAR, max(eq_xs) + _EQ_CLEAR))
+    return occ, blocked
+
+
+def _face_room(c, occ, blocked) -> float:
+    free = _free_stretches(c["x"] + _TERM_EDGE_PAD, c["x"] + c["width"] - _TERM_EDGE_PAD,
+                           occ, blocked)
+    return sum(f1 - f0 for f0, f1 in free)
+
+
+def _spread_terminals(lo, hi, occupied, k, blocked=()):
+    """``k`` increasing X positions on [lo, hi] spread over the stretches
+    that stay clear of the ``occupied`` X positions and ``blocked`` spans."""
+    if k <= 0:
+        return []
+    if hi <= lo:
+        return [(lo + hi) / 2.0] * k
+    free = _free_stretches(lo, hi, occupied, blocked)
     total = sum(f1 - f0 for f0, f1 in free)
     if total < 1.0:
         step = (hi - lo) / (k + 1)
@@ -626,8 +671,25 @@ def _apply_site_layout(
             c["width"] = float(max(80, _BUS_PER_EDGE * n + 2 * _TERM_EDGE_PAD))
             c["properties"]["junction"] = True
         sub_eq = {g: bus_equipment.get(g, []) for g in s.bus_gids}
-        _apply_grid_layout(kids, intra[s.sid], SimpleNamespace(nodes=[]), sub_eq,
-                           row_spacing=_SITE_ROW_SPACING_Y)
+        # A bar whose lines to other blocks find no room on either face
+        # (the bars above and below cover it) is lengthened and the block
+        # laid out again: the tree layout centres a bar over its children,
+        # so the extra length sticks out past them.
+        for _attempt in range(3):
+            _apply_grid_layout(kids, intra[s.sid], SimpleNamespace(nodes=[]), sub_eq,
+                               row_spacing=_SITE_ROW_SPACING_Y)
+            grown = False
+            for c in kids:
+                n = inter_count.get(c["id"], 0)
+                if not n or len(kids) < 2:
+                    continue
+                need = _FACE_ROOM * n
+                if max(_face_room(c, *_face_obstacles(c, kids, intra[s.sid], bus_equipment, up))
+                       for up in (True, False)) < need:
+                    c["width"] += 2 * (need + _TERM_EDGE_PAD + _TERM_CLEAR)
+                    grown = True
+            if not grown:
+                break
         bb = _block_bbox(kids, intra[s.sid], bus_equipment, s.kind != "junction")
         bbox[s.sid] = bb
         blocks.append(Block(s.sid, bb[2] - bb[0], bb[3] - bb[1], s.lat, s.lon))
@@ -644,12 +706,13 @@ def _apply_site_layout(
         kids = [by_id[g] for g in s.bus_gids if g in by_id]
         _translate(kids, intra[s.sid], bx - x0, by - y0)
 
-    # 3. Terminals for the lines between blocks. A bar in the block's top
-    #    row connects upwards and any other bar downwards; a bar alone in
-    #    its block with nothing hanging below it (a junction, a bare bus)
-    #    connects on whichever side faces the far end. Terminals are spread
-    #    over the face, clear of the stubs already on it, ordered by the
-    #    direction of the far end so lines leaving left start on the left.
+    # 3. Terminals for the lines between blocks. A line leaves its bar on
+    #    the face (top or bottom) that points to the far block, when that
+    #    face has room: away from the block's other bars on that side (the
+    #    line would cut through them) and, below the bar, beside its own
+    #    equipment. Otherwise it takes the other face; a bar with no room on
+    #    either keeps the default (top row up, others down). Terminals are
+    #    spread over the face, clear of the stubs already on it.
     site_top: dict[str, float] = {}
     site_bottom: dict[str, float] = {}
     for s in sites:
@@ -660,7 +723,7 @@ def _apply_site_layout(
     block_cy = {s.sid: placement.xy[s.sid][1] + (bbox[s.sid][3] - bbox[s.sid][1]) / 2.0
                 for s in sites}
 
-    def face_up(gid, other_gid):
+    def default_up(gid, other_gid):
         c = by_id[gid]
         sid = site_of[gid]
         top = abs(c["y"] - site_top[sid]) < 0.5
@@ -670,21 +733,34 @@ def _apply_site_layout(
         return top
 
     occupied: dict[tuple[str, bool], list[float]] = {}
+    blocked: dict[tuple[str, bool], list[tuple[float, float]]] = {}
     for s in sites:
-        for e in intra[s.sid]:
-            for sec in e.get("sections", []):
-                for p in (sec["startPoint"], sec["endPoint"]):
-                    for g in s.bus_gids:
-                        c = by_id[g]
-                        if not (c["x"] - 1 <= p["x"] <= c["x"] + c["width"] + 1):
-                            continue
-                        if abs(p["y"] - c["y"]) < 0.5:
-                            occupied.setdefault((g, True), []).append(p["x"])
-                        elif abs(p["y"] - (c["y"] + _BUS_H)) < 0.5:
-                            occupied.setdefault((g, False), []).append(p["x"])
-    for g, c in by_id.items():
-        occupied.setdefault((g, False), []).extend(
-            _equip_stub_xs(c, len(bus_equipment.get(g, []))))
+        kids = [by_id[g] for g in s.bus_gids if g in by_id]
+        for c in kids:
+            for up in (True, False):
+                occupied[(c["id"], up)], blocked[(c["id"], up)] = _face_obstacles(
+                    c, kids, intra[s.sid], bus_equipment, up)
+
+    def room(g, up):
+        return _face_room(by_id[g], occupied[(g, up)], blocked[(g, up)])
+
+    face_load: dict[tuple[str, bool], int] = {}
+
+    def face_up(gid, other_gid):
+        """Face of ``gid`` for a line to ``other_gid``."""
+        c0, r0, _sc, sr = placement.cells[site_of[gid]]
+        _d0, q0, _dc, qr = placement.cells[site_of[other_gid]]
+        default = default_up(gid, other_gid)
+        if q0 + qr <= r0:
+            order = (True, False)            # far block entirely above
+        elif q0 >= r0 + sr:
+            order = (False, True)            # entirely below
+        else:
+            order = (default, not default)
+        for up in order:
+            if room(gid, up) >= _FACE_ROOM * (face_load.get((gid, up), 0) + 1):
+                return up
+        return default
 
     ends_on: dict[tuple[str, bool], list[tuple[float, str, str]]] = {}
     for e in inter:
@@ -692,16 +768,17 @@ def _apply_site_layout(
         if s0 not in by_id or t0 not in by_id:
             continue
         cs, ct = by_id[s0], by_id[t0]
-        ends_on.setdefault((s0, face_up(s0, t0)), []).append(
-            (ct["x"] + ct["width"] / 2.0, e["id"], "s"))
-        ends_on.setdefault((t0, face_up(t0, s0)), []).append(
-            (cs["x"] + cs["width"] / 2.0, e["id"], "t"))
+        for g, other, far, end in ((s0, t0, ct, "s"), (t0, s0, cs, "t")):
+            up = face_up(g, other)
+            face_load[(g, up)] = face_load.get((g, up), 0) + 1
+            ends_on.setdefault((g, up), []).append(
+                (far["x"] + far["width"] / 2.0, e["id"], end))
     term: dict[tuple[str, str], tuple[float, float, bool]] = {}
     for (g, up), lst in ends_on.items():
         c = by_id[g]
         lst.sort()
         xs = _spread_terminals(c["x"] + _TERM_EDGE_PAD, c["x"] + c["width"] - _TERM_EDGE_PAD,
-                               occupied.get((g, up), []), len(lst))
+                               occupied.get((g, up), []), len(lst), blocked.get((g, up), []))
         y = c["y"] if up else c["y"] + _BUS_H
         for (_ox, eid, end), x in zip(lst, xs):
             term[(eid, end)] = (x, y, up)
@@ -713,11 +790,19 @@ def _apply_site_layout(
             continue
         sx, sy, sup = term[(e["id"], "s")]
         tx, ty, tup = term[(e["id"], "t")]
-        specs.append(LineSpec(e["id"], site_of[e["sources"][0]], site_of[e["targets"][0]],
-                              sx, sy, sup, tx, ty, tup))
-    routes = route_lines(placement, specs)
+        s0, t0 = e["sources"][0], e["targets"][0]
+        specs.append(LineSpec(e["id"], site_of[s0], site_of[t0],
+                              sx, sy, sup, tx, ty, tup,
+                              s_face=f"{s0}|{'u' if sup else 'd'}",
+                              t_face=f"{t0}|{'u' if tup else 'd'}"))
+    routing = route_lines(placement, specs)
+    # Widened channels moved the blocks: move their contents with them.
+    for s in sites:
+        dx, dy = routing.shift.get(s.sid, (0.0, 0.0))
+        if dx or dy:
+            _translate([by_id[g] for g in s.bus_gids if g in by_id], intra[s.sid], dx, dy)
     for e in inter:
-        pts = routes.get(e["id"])
+        pts = routing.routes.get(e["id"])
         if not pts:
             continue
         e["properties"]["precomputedRoute"] = True
@@ -763,8 +848,6 @@ def _apply_grid_layout(
     Edges get simple orthogonal routing with two bend points; the JS side
     then spreads incoming connections along each bar in Phase 2.
     """
-    import math
-
     # ── 1. Transformer-tree depth → row. A bus that is the LV side of a
     #      transformer sits one row BELOW its HV parent; roots (buses that are
     #      no transformer's LV side) sit at the top. So every transformer

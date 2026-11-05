@@ -1111,6 +1111,50 @@ function _longestHSeg(sections) {
 }
 
 /**
+ * Spot for an inline symbol of half-size (hw, hh), measured along the line,
+ * on a routed polyline. Inner segments only (the end stubs run into bars),
+ * vertical ones first, longest first; on each, the midpoint and then
+ * positions sliding along the segment, until one clears every obstacle
+ * placed so far (parallel circuits would otherwise stack their symbols on
+ * the same spot). Returns {x, y, vertical} or null.
+ */
+function _placeOnRoute(sections, hw, hh, ignoreOwner) {
+    var pts = [];
+    sections.forEach(function(sec) {
+        pts.push(sec.startPoint);
+        if (sec.bendPoints) sec.bendPoints.forEach(function(bp) { pts.push(bp); });
+        pts.push(sec.endPoint);
+    });
+    var segs = [];
+    for (var i = 2; i < pts.length - 1; i++) {
+        var a = pts[i - 1], b = pts[i];
+        var vertical = Math.abs(a.x - b.x) < 0.5;
+        var len = vertical ? Math.abs(a.y - b.y) : Math.abs(a.x - b.x);
+        if (len >= 2 * hh + 8) segs.push({ a: a, b: b, vertical: vertical, len: len });
+    }
+    segs.sort(function(p, q) {
+        if (p.vertical !== q.vertical) return p.vertical ? -1 : 1;
+        return q.len - p.len;
+    });
+    for (var k = 0; k < segs.length; k++) {
+        var sg = segs[k];
+        var mx = (sg.a.x + sg.b.x) / 2, my = (sg.a.y + sg.b.y) / 2;
+        var room = sg.len / 2 - hh - 4;
+        var offs = [0];
+        for (var d = 2 * hh + 6; d <= room; d += 2 * hh + 6) { offs.push(d); offs.push(-d); }
+        for (var j = 0; j < offs.length; j++) {
+            var x = sg.vertical ? mx : mx + offs[j];
+            var y = sg.vertical ? my + offs[j] : my;
+            var bx = sg.vertical ? hw : hh, by = sg.vertical ? hh : hw;
+            if (!_overlapsAny(x - bx, y - by, x + bx, y + by, 2, ignoreOwner)) {
+                return { x: x, y: y, vertical: sg.vertical };
+            }
+        }
+    }
+    return null;
+}
+
+/**
  * Place a label inline ON a horizontal line segment, centred and breaking the
  * line. Tries the segment midpoint first, then slides left/right ALONG the
  * line to dodge other elements (never perpendicular, so it stays on the line).
@@ -1285,15 +1329,20 @@ function _drawEdge(layer, edge, busH) {
         _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2, edgeOwner);
         mid = { x: txx, y: tmid };   // label sits beside the symbol
     } else if (edgeType === 'transformer') {
-        // Non-adjacent transformer routed in a side channel: place the two
-        // coupled windings on the channel's vertical run (the polyline is
-        // already drawn) so the symbol sits on the line, never on a bar.
+        // Transformer routed along channels (between two blocks, or around
+        // other bars): the two coupled windings sit on the polyline, along
+        // its direction, on a free spot of an inner segment.
         var r2 = 11, off2 = 8;
-        g.append('circle').attr('cx', mid.x).attr('cy', mid.y - off2).attr('r', r2)
+        var spot = _placeOnRoute(sections, r2 + 2, off2 + r2 + 2, edgeOwner);
+        var vert = spot ? spot.vertical : true;
+        if (spot) mid = { x: spot.x, y: spot.y };
+        var ox = vert ? 0 : off2, oy = vert ? off2 : 0;
+        g.append('circle').attr('cx', mid.x - ox).attr('cy', mid.y - oy).attr('r', r2)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        g.append('circle').attr('cx', mid.x).attr('cy', mid.y + off2).attr('r', r2)
+        g.append('circle').attr('cx', mid.x + ox).attr('cy', mid.y + oy).attr('r', r2)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        _addObstacle(mid.x - r2 - 2, mid.y - off2 - r2 - 2, mid.x + r2 + 2, mid.y + off2 + r2 + 2, edgeOwner);
+        var hx = r2 + 2 + ox, hy = r2 + 2 + oy;
+        _addObstacle(mid.x - hx, mid.y - hy, mid.x + hx, mid.y + hy, edgeOwner);
     }
 
     // Converter IEC symbol (square with ~/= or ~/Hz)
