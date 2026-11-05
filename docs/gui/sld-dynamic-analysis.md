@@ -12,6 +12,17 @@ Three levels of dynamic analysis overlaid on the Single-Line Diagram (SLD) topol
 3. Click **Load Results** and select an HDF5 results file from a completed simulation
 4. The operational toolbar becomes active with year/hour controls, playback, and contingency selection
 
+### How the Diagram Is Laid Out
+
+When the buses have map coordinates, the diagram follows the geography of the system:
+
+- **Substations.** Buses on the same site are drawn together inside one dashed frame. A site is a set of buses joined by a transformer whose two ends are less than 5 km apart, or lying within 300 m of each other. Inside the frame, higher-voltage bars sit above lower-voltage ones and each transformer is drawn vertically between its two bars, with the equipment hanging below each bar.
+- **Junctions.** A bus with no equipment and no transformer (a tee or tap point on a line) is drawn as a short bar without a frame. Its name appears in the tooltip.
+- **Placement.** Each frame is placed as close as possible to its map position, on a grid that keeps a clear channel between frames. Long empty stretches, such as sea, are shortened.
+- **Lines** between sites leave their bar vertically and follow the channels between frames, so they never cross another substation. A transformer whose two ends are more than 5 km apart links two frames, and its symbol is drawn on the connecting line.
+
+The layout is the same every time the same system is opened. If no bus has coordinates, the diagram falls back to one column per node, with voltage levels in rows.
+
 
 ---
 

@@ -107,7 +107,7 @@ function initSld() {
             var ch = svg.node().clientHeight;
             if (!cw || !ch || cw < 10 || ch < 10) return;  // container not visible yet
             var sc = Math.min(cw / diagramBounds.w, ch / diagramBounds.h);
-            zoomBehavior.scaleExtent([Math.max(0.05, sc), 5]);
+            zoomBehavior.scaleExtent([Math.max(0.001, sc), 5]);
             // Reposition legend to new upper-right corner
             if (currentData) _drawLegend(currentData);
             // Reposition the navigation minimap to the new bottom-left corner
@@ -259,6 +259,7 @@ function render(data, layouted) {
                 color: props.color || T.edgeLine,
                 voltageKv: props.voltageKv || 0,
                 label: props.label || bid,
+                junction: !!props.junction,
                 parentNode: props.parentNode,
                 equips: equips,
                 orientation: pyOrient,
@@ -904,8 +905,9 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
                     .attr('fill', bl.color)
                     .text(bl.voltageKv + ' kV');
             }
-            // Bus name — ABOVE, right-aligned
-            busG.append('text').attr('class', 'data-label')
+            // Bus name — ABOVE, right-aligned. A line junction's bar is
+            // too short for both labels: its name stays in the tooltip.
+            if (!bl.junction) busG.append('text').attr('class', 'data-label')
                 .attr('x', barLen - 4).attr('y', -5)
                 .attr('text-anchor', 'end').attr('dominant-baseline', 'auto')
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
@@ -1789,7 +1791,7 @@ function fitView(animate) {
     var sc = Math.min(cw / db.w, ch / db.h);
 
     // Clamp zoom-out to this fit scale (diagram always fills panel)
-    zoomBehavior.scaleExtent([Math.max(0.05, sc), 5]);
+    zoomBehavior.scaleExtent([Math.max(0.001, sc), 5]);
 
     var tx = (cw - db.w * sc) / 2 - db.x * sc;
     var ty = (ch - db.h * sc) / 2 - db.y * sc;
