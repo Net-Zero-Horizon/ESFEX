@@ -4277,6 +4277,7 @@ class GridMappingDemandStep(QWidget):
         self._fetcher = None
         self._wb_data: dict = {}
         self._era5_data: dict = {}
+        self._fetched_key = None  # inputs the cached WB/ERA5 data belong to
         self._forecast_result = None
         self._forecast_result_raw = None   # uncorrected demand_multi_year copy
         self._forecast_nodes: list = []
@@ -4397,22 +4398,14 @@ class GridMappingDemandStep(QWidget):
         growth_row.addStretch()
         fg.addLayout(growth_row)
 
-        # Fetch + Run buttons
+        # One button: fetch World Bank + ERA5 inputs, then run the forecast.
         btn_row = QHBoxLayout()
-        self._btn_fetch_data = QPushButton(tr("grid_builder.fetch_wb_era5"))
-        self._btn_fetch_data.setStyleSheet(
-            scale_qss_fonts("font-size: 11px; padding: 4px 8px;")
-        )
-        self._btn_fetch_data.clicked.connect(self._fetch_wb_era5)
-        btn_row.addWidget(self._btn_fetch_data)
-
-        self._btn_forecast = QPushButton(tr("grid_builder.forecast_demand"))
-        self._btn_forecast.setStyleSheet(
+        self._btn_fetch_forecast = QPushButton(tr("grid_builder.fetch_and_forecast"))
+        self._btn_fetch_forecast.setStyleSheet(
             scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 12px;")
         )
-        self._btn_forecast.setEnabled(False)
-        self._btn_forecast.clicked.connect(self._run_forecast)
-        btn_row.addWidget(self._btn_forecast)
+        self._btn_fetch_forecast.clicked.connect(self._fetch_and_forecast)
+        btn_row.addWidget(self._btn_fetch_forecast)
 
         self._forecast_progress = QProgressBar()
         self._forecast_progress.setRange(0, 100)
@@ -4723,6 +4716,7 @@ class GridMappingDemandStep(QWidget):
         self._forecast_result = None
         self._wb_data.clear()
         self._era5_data.clear()
+        self._fetched_key = None
 
         # Reset UI
         self._forecast_progress.setValue(0)
@@ -4733,7 +4727,7 @@ class GridMappingDemandStep(QWidget):
         self._lbl_bld_status.setText("")
         self._lbl_apply_status.setText("")
         self._results_table.setRowCount(0)
-        self._btn_forecast.setEnabled(False)
+        self._btn_fetch_forecast.setEnabled(True)
         self._btn_fetch_bld.setEnabled(False)
         self._btn_apply.setEnabled(False)
 
@@ -4839,8 +4833,35 @@ class GridMappingDemandStep(QWidget):
 
         threading.Thread(target=_do_detect, daemon=True).start()
 
-    def _fetch_wb_era5(self):
-        """Fetch World Bank indicators + ERA5 temperature in background."""
+    def _fetch_inputs_key(self):
+        """Identify the inputs a fetch depends on (country, domain centre,
+        weather year), or None when no country / bounds are set."""
+        country_data = self._combo_country.currentData()
+        if not country_data or not self._bounds:
+            return None
+        south, west, north, east = self._bounds
+        weather_year = min(self._spin_base_year.value() - 1, 2025)
+        return (country_data.get("iso2", ""),
+                round((south + north) / 2.0, 4), round((west + east) / 2.0, 4),
+                weather_year)
+
+    def _fetch_and_forecast(self):
+        """Fetch the World Bank + ERA5 inputs, then run the forecast.
+
+        The fetch is skipped when the data already on hand was fetched for
+        the same country, domain and weather year, so re-running the forecast
+        after tweaking its parameters doesn't hit the network again.
+        """
+        key = self._fetch_inputs_key()
+        if key is not None and key == self._fetched_key \
+                and self._wb_data and self._era5_data:
+            self._run_forecast()
+            return
+        self._fetch_wb_era5(on_done=self._run_forecast)
+
+    def _fetch_wb_era5(self, on_done=None):
+        """Fetch World Bank indicators + ERA5 temperature in background,
+        then call ``on_done`` on the GUI thread if the fetch succeeded."""
         country_data = self._combo_country.currentData()
         if not country_data:
             self._lbl_forecast_status.setText(
@@ -4850,8 +4871,9 @@ class GridMappingDemandStep(QWidget):
 
         iso2 = country_data.get("iso2", "")
         iso3 = country_data.get("iso3", iso2)
+        fetch_key = self._fetch_inputs_key()
 
-        self._btn_fetch_data.setEnabled(False)
+        self._btn_fetch_forecast.setEnabled(False)
         self._forecast_progress.setValue(5)
         self._lbl_forecast_status.setText(tr("grid_builder.fetching_world_bank_data"))
 
@@ -4942,26 +4964,27 @@ class GridMappingDemandStep(QWidget):
                     "lon": lon,
                     "year": weather_year,
                 }
-                self._ui_call.emit(
-                    lambda wb=wb, temp=temp, weather_year=weather_year: (
-                        self._forecast_progress.setValue(60),
-                        self._lbl_forecast_status.setText(
-                            f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                            f"Pop={wb.get('population', 0):,.0f}, "
-                            "kWh/cap="
-                            f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}. "
-                            f"ERA5: {len(temp)} hours ({weather_year}). "
-                            f"Ready to forecast."
-                        ),
-                        self._btn_forecast.setEnabled(True),
-                        self._btn_fetch_data.setEnabled(True),
+                self._fetched_key = fetch_key
+
+                def _fetched(wb=wb, temp=temp, weather_year=weather_year):
+                    self._forecast_progress.setValue(60)
+                    self._lbl_forecast_status.setText(
+                        f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
+                        f"Pop={wb.get('population', 0):,.0f}, "
+                        "kWh/cap="
+                        f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}. "
+                        f"ERA5: {len(temp)} hours ({weather_year})."
                     )
-                )
+                    if on_done is not None:
+                        on_done()  # keeps the button busy until it finishes
+                    else:
+                        self._btn_fetch_forecast.setEnabled(True)
+                self._ui_call.emit(_fetched)
 
             except Exception as exc:
                 self._ui_call.emit(lambda e=exc: (
                     self._lbl_forecast_status.setText(f"Fetch error: {e}"),
-                    self._btn_fetch_data.setEnabled(True),
+                    self._btn_fetch_forecast.setEnabled(True),
                     self._forecast_progress.setValue(0),
                 ))
 
@@ -4990,21 +5013,21 @@ class GridMappingDemandStep(QWidget):
             ProxyData,
         )
 
-        self._btn_forecast.setEnabled(False)
+        self._btn_fetch_forecast.setEnabled(False)
         self._forecast_progress.setValue(65)
         self._lbl_forecast_status.setText(tr("grid_builder.running_demand_forecast"))
 
         state = self._model.state if self._model else None
         if state is None:
             self._lbl_forecast_status.setText(tr("grid_builder.no_active_system"))
-            self._btn_forecast.setEnabled(True)
+            self._btn_fetch_forecast.setEnabled(True)
             return
 
         nodes = self._nodes_in_scope()
         num_nodes = len(nodes)
         if num_nodes == 0:
             self._lbl_forecast_status.setText(tr("grid_builder.no_nodes_in_system"))
-            self._btn_forecast.setEnabled(True)
+            self._btn_fetch_forecast.setEnabled(True)
             return
 
         country_data = self._combo_country.currentData() or {}
@@ -5116,7 +5139,7 @@ class GridMappingDemandStep(QWidget):
                     self._lbl_forecast_status.setText(f"Forecast error: {e}"),
                     self._forecast_progress.setValue(0),
                 ))
-            self._ui_call.emit(lambda: self._btn_forecast.setEnabled(True))
+            self._ui_call.emit(lambda: self._btn_fetch_forecast.setEnabled(True))
 
         threading.Thread(target=_do_forecast, daemon=True).start()
 
