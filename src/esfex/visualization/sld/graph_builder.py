@@ -1,26 +1,36 @@
 """Convert a GuiSystemState into an SLD layout descriptor.
 
-Instead of a deep ELK compound hierarchy (which produces poor results for
-power-system single-line diagrams), this module uses a **two-pass** strategy:
+Every ``GuiBus`` is a horizontal bar and every transmission line /
+transformer / converter is an edge between two bars. Equipment hangs below
+its bar and is arranged by the JavaScript renderer. Positions and edge
+routes are computed here; the renderer draws them as given.
 
-1. Build a **flat** ELK graph where each *bus* is a node and each
-   *transmission line / transformer / converter* is an edge.  ELK's layered
-   algorithm then positions the buses cleanly.
+Two layouts:
 
-2. Attach **equipment lists** to each bus as metadata.  The JavaScript
-   renderer manually arranges equipment in an evenly-spaced row below each
-   bus bar and draws vertical stubs — giving the classic PowerFactory look.
+* **Site layout** (buses have map coordinates): buses are grouped into
+  sites — substations and line junctions (:mod:`.substations`). Each site is
+  laid out as a compact block with the transformer-tree grid below (HV bars
+  above LV bars, transformers as verticals). The blocks are placed on a cell
+  grid following the geography (:mod:`.placement`) and the lines between
+  them are routed along the clear channels of that grid
+  (:mod:`.channel_router`).
+* **Node grid** (no usable coordinates): one column per node, rows by
+  transformer depth (:func:`_apply_grid_layout`).
 
-The output is a single JSON dict with two top-level keys:
+The output is a single JSON dict:
 
-- ``"elkGraph"`` — the flat ELK graph (buses + inter-bus edges)
+- ``"elkGraph"`` — buses (``children``, with x/y) and edges (with sections)
 - ``"busEquipment"`` — ``{ bus_id: [ {equipment metadata}, ... ] }``
-- ``"nodeGroups"`` — ``[ { nodeId, name, busIds: [...] }, ... ]``
+- ``"nodeGroups"`` — frames drawn around buses: ``[ { nodeId, name,
+  busIds, siteId? }, ... ]`` (one per substation in the site layout, one
+  per node in the node grid)
+- ``"constants"`` — sizes shared with the renderer
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from esfex.visualization.data.gui_model import GuiSystemState
@@ -121,6 +131,8 @@ def build_elk_graph(
             "name": label,
             "color": get_voltage_color(bus.voltage_kv),
             "n_buses": 1,
+            "lat": float(bus.latitude or 0.0),
+            "lon": float(bus.longitude or 0.0),
         }
 
     # ── Collect equipment per merged bar (group_id) ──
@@ -401,12 +413,20 @@ def build_elk_graph(
                 "busIds": bus_ids,
             })
 
-    # ── PowerFactory-style deterministic layout ──
-    # Replace the generic ELK layered algorithm (NP-hard, slow at >300
-    # nodes) with an O(n) grid: rows = voltage levels (HV at top, LV at
-    # bottom), columns = geographic nodes (left-to-right by node index).
-    # Each bus sits at the (voltage row, node column) intersection.
-    _apply_grid_layout(elk_children, elk_edges, state, bus_equipment)
+    # ── Layout ──
+    # With bus coordinates, the diagram is laid out by SITE: buses are
+    # grouped into substations / junctions, each drawn as a compact block
+    # (the transformer-tree layout below, per block), and the blocks are
+    # placed on a grid following the system's geography. Without usable
+    # coordinates, fall back to the single voltage-row × node-column grid.
+    positions = _bus_positions_for_layout(state, group_meta, edge_records)
+    if positions is not None and elk_children:
+        groups = _apply_site_layout(
+            elk_children, elk_edges, bus_equipment, group_meta, positions,
+            {n.index: (n.name or f"Node {n.index}") for n in state.nodes},
+        )
+    else:
+        _apply_grid_layout(elk_children, elk_edges, state, bus_equipment)
     elk_graph: dict[str, Any] = {
         "id": "root",
         "children": elk_children,
@@ -424,7 +444,7 @@ def build_elk_graph(
     )
     for edge in elk_edges:
         p = edge.get("properties", {})
-        log.info(
+        log.debug(
             "  edge %s: %s → %s  [%s, %s]",
             edge["id"], edge["sources"][0], edge["targets"][0],
             p.get("edgeType", "?"), p.get("label", ""),
@@ -443,11 +463,296 @@ def build_elk_graph(
     }
 
 
+# ── Site (substation) layout ────────────────────────────────────────
+
+# Inside a substation block the voltage rows sit closer than in the legacy
+# whole-system grid: only the transformer symbol and its label live there.
+_SITE_ROW_SPACING_Y = 150
+# Frame drawn around a substation by the JS renderer (_drawNodeGroup):
+# 18 px bar label + 30 px padding + 28 px title above, 30 px on the sides
+# and below. The block footprint must include it.
+_FRAME_TOP = 76
+_FRAME_SIDE = 30
+_FRAME_BOTTOM = 30
+_JUNCTION_PAD = 12
+_JUNCTION_LABEL = 22
+_TERM_EDGE_PAD = 16      # keep line terminals this far from the bar ends
+_TERM_CLEAR = 12         # ... and this far from other stubs on the same face
+_EQ_PITCH_JS = 72.0      # equipment pitch used by the JS renderer
+
+
+def _bus_positions_for_layout(state, group_meta, edge_records):
+    """``{gid: (lat, lon)}`` for every bar, or None (no usable geography)."""
+    from esfex.visualization.sld.substations import bus_positions
+
+    if not group_meta:
+        return None
+    coords = {g: (m.get("lat", 0.0), m.get("lon", 0.0)) for g, m in group_meta.items()}
+    node_of = {g: m["parent_node"] for g, m in group_meta.items()}
+    centroids = {n.index: (float(n.centroid_lat or 0.0), float(n.centroid_lng or 0.0))
+                 for n in state.nodes}
+    nbrs: dict[str, set[str]] = {}
+    for r in edge_records:
+        nbrs.setdefault(r["src"], set()).add(r["tgt"])
+        nbrs.setdefault(r["tgt"], set()).add(r["src"])
+    return bus_positions(coords, node_of, centroids, nbrs)
+
+
+def _equip_stub_xs(child: dict, n_eq: int) -> list[float]:
+    """X of each equipment stub below a horizontal bar (as the JS draws)."""
+    if n_eq <= 0:
+        return []
+    start = child["x"] + (child["width"] - n_eq * _EQ_PITCH_JS) / 2.0 + _EQ_PITCH_JS / 2.0
+    return [start + i * _EQ_PITCH_JS for i in range(n_eq)]
+
+
+def _block_bbox(children, edges, bus_equipment, framed: bool):
+    """Footprint (x0, y0, x1, y1) of a laid-out block, frame included."""
+    x0 = y0 = math.inf
+    x1 = y1 = -math.inf
+    for c in children:
+        n_eq = len(bus_equipment.get(c["id"], []))
+        below = (_BUS_H + _STUB_LEN + _EQUIP_SIZE + 20) if n_eq else (_BUS_H + 10)
+        x0 = min(x0, c["x"])
+        x1 = max(x1, c["x"] + c["width"])
+        y0 = min(y0, c["y"] - 18)
+        y1 = max(y1, c["y"] + below)
+    for e in edges:
+        for sec in e.get("sections", []):
+            for p in [sec["startPoint"], sec["endPoint"]] + sec.get("bendPoints", []):
+                x0 = min(x0, p["x"] - 10)
+                x1 = max(x1, p["x"] + 10)
+                y0 = min(y0, p["y"] - 10)
+                y1 = max(y1, p["y"] + 10)
+    if framed:
+        return (x0 - _FRAME_SIDE, y0 - (_FRAME_TOP - 18),
+                x1 + _FRAME_SIDE, y1 + _FRAME_BOTTOM)
+    return (x0 - _JUNCTION_PAD, y0 - (_JUNCTION_LABEL - 18),
+            x1 + _JUNCTION_PAD, y1 + _JUNCTION_PAD)
+
+
+def _translate(children, edges, dx, dy):
+    for c in children:
+        c["x"] = c["x"] + dx
+        c["y"] = c["y"] + dy
+    for e in edges:
+        for sec in e.get("sections", []):
+            for p in [sec["startPoint"], sec["endPoint"]] + sec.get("bendPoints", []):
+                p["x"] += dx
+                p["y"] += dy
+
+
+def _spread_terminals(lo, hi, occupied, k):
+    """``k`` increasing X positions on [lo, hi] spread over the stretches
+    that stay clear of the ``occupied`` X positions."""
+    if k <= 0:
+        return []
+    if hi <= lo:
+        return [(lo + hi) / 2.0] * k
+    free = [(lo, hi)]
+    for x in sorted(occupied):
+        a, b = x - _TERM_CLEAR, x + _TERM_CLEAR
+        nxt = []
+        for f0, f1 in free:
+            if b <= f0 or a >= f1:
+                nxt.append((f0, f1))
+                continue
+            if a > f0:
+                nxt.append((f0, a))
+            if b < f1:
+                nxt.append((b, f1))
+        free = nxt
+    total = sum(f1 - f0 for f0, f1 in free)
+    if total < 1.0:
+        step = (hi - lo) / (k + 1)
+        return [lo + step * (i + 1) for i in range(k)]
+    out = []
+    for i in range(k):
+        d = total * (i + 1) / (k + 1)
+        for f0, f1 in free:
+            if d <= f1 - f0:
+                out.append(f0 + d)
+                break
+            d -= f1 - f0
+        else:
+            out.append(free[-1][1])
+    return out
+
+
+def _apply_site_layout(
+    elk_children: list[dict],
+    elk_edges: list[dict],
+    bus_equipment: dict[str, list[dict]],
+    group_meta: dict[str, dict],
+    positions: dict[str, tuple[float, float]],
+    node_names: dict[int, str],
+) -> list[dict]:
+    """In-place site layout; returns the substation frames (``nodeGroups``)."""
+    from types import SimpleNamespace
+
+    from esfex.visualization.sld.channel_router import LineSpec, route_lines
+    from esfex.visualization.sld.placement import Block, place_blocks
+    from esfex.visualization.sld.substations import detect_sites
+
+    edge_ends = [(e["sources"][0], e["targets"][0],
+                  e["properties"].get("edgeType", "transmission")) for e in elk_edges]
+    equipped = {g for g, eq in bus_equipment.items() if eq}
+    sites = detect_sites(group_meta, edge_ends, positions, equipped, node_names)
+    site_of = {g: s.sid for s in sites for g in s.bus_gids}
+    by_id = {c["id"]: c for c in elk_children}
+
+    intra: dict[str, list[dict]] = {s.sid: [] for s in sites}
+    inter: list[dict] = []
+    for e in elk_edges:
+        a, b = site_of.get(e["sources"][0]), site_of.get(e["targets"][0])
+        if a is not None and a == b:
+            intra[a].append(e)
+        else:
+            inter.append(e)
+
+    inter_count: dict[str, int] = {}
+    for e in inter:
+        for g in (e["sources"][0], e["targets"][0]):
+            inter_count[g] = inter_count.get(g, 0) + 1
+
+    # 1. Lay out each block on its own, at the origin.
+    blocks: list[Block] = []
+    bbox: dict[str, tuple[float, float, float, float]] = {}
+    for s in sites:
+        kids = [by_id[g] for g in s.bus_gids if g in by_id]
+        if s.kind == "junction":
+            c = kids[0]
+            n = inter_count.get(c["id"], 0)
+            c["width"] = float(max(80, _BUS_PER_EDGE * n + 2 * _TERM_EDGE_PAD))
+            c["properties"]["junction"] = True
+        sub_eq = {g: bus_equipment.get(g, []) for g in s.bus_gids}
+        _apply_grid_layout(kids, intra[s.sid], SimpleNamespace(nodes=[]), sub_eq,
+                           row_spacing=_SITE_ROW_SPACING_Y)
+        bb = _block_bbox(kids, intra[s.sid], bus_equipment, s.kind != "junction")
+        bbox[s.sid] = bb
+        blocks.append(Block(s.sid, bb[2] - bb[0], bb[3] - bb[1], s.lat, s.lon))
+
+    links = sorted({tuple(sorted((site_of[e["sources"][0]], site_of[e["targets"][0]])))
+                    for e in inter
+                    if e["sources"][0] in site_of and e["targets"][0] in site_of})
+    placement = place_blocks(blocks, links)
+
+    # 2. Move every block to its place.
+    for s in sites:
+        bx, by = placement.xy[s.sid]
+        x0, y0, _x1, _y1 = bbox[s.sid]
+        kids = [by_id[g] for g in s.bus_gids if g in by_id]
+        _translate(kids, intra[s.sid], bx - x0, by - y0)
+
+    # 3. Terminals for the lines between blocks. A bar in the block's top
+    #    row connects upwards and any other bar downwards; a bar alone in
+    #    its block with nothing hanging below it (a junction, a bare bus)
+    #    connects on whichever side faces the far end. Terminals are spread
+    #    over the face, clear of the stubs already on it, ordered by the
+    #    direction of the far end so lines leaving left start on the left.
+    site_top: dict[str, float] = {}
+    site_bottom: dict[str, float] = {}
+    for s in sites:
+        ys = [by_id[g]["y"] for g in s.bus_gids if g in by_id]
+        site_top[s.sid] = min(ys)
+        site_bottom[s.sid] = max(ys)
+
+    block_cy = {s.sid: placement.xy[s.sid][1] + (bbox[s.sid][3] - bbox[s.sid][1]) / 2.0
+                for s in sites}
+
+    def face_up(gid, other_gid):
+        c = by_id[gid]
+        sid = site_of[gid]
+        top = abs(c["y"] - site_top[sid]) < 0.5
+        bottom = abs(c["y"] - site_bottom[sid]) < 0.5
+        if top and bottom and not bus_equipment.get(gid):
+            return block_cy[site_of[other_gid]] < c["y"]
+        return top
+
+    occupied: dict[tuple[str, bool], list[float]] = {}
+    for s in sites:
+        for e in intra[s.sid]:
+            for sec in e.get("sections", []):
+                for p in (sec["startPoint"], sec["endPoint"]):
+                    for g in s.bus_gids:
+                        c = by_id[g]
+                        if not (c["x"] - 1 <= p["x"] <= c["x"] + c["width"] + 1):
+                            continue
+                        if abs(p["y"] - c["y"]) < 0.5:
+                            occupied.setdefault((g, True), []).append(p["x"])
+                        elif abs(p["y"] - (c["y"] + _BUS_H)) < 0.5:
+                            occupied.setdefault((g, False), []).append(p["x"])
+    for g, c in by_id.items():
+        occupied.setdefault((g, False), []).extend(
+            _equip_stub_xs(c, len(bus_equipment.get(g, []))))
+
+    ends_on: dict[tuple[str, bool], list[tuple[float, str, str]]] = {}
+    for e in inter:
+        s0, t0 = e["sources"][0], e["targets"][0]
+        if s0 not in by_id or t0 not in by_id:
+            continue
+        cs, ct = by_id[s0], by_id[t0]
+        ends_on.setdefault((s0, face_up(s0, t0)), []).append(
+            (ct["x"] + ct["width"] / 2.0, e["id"], "s"))
+        ends_on.setdefault((t0, face_up(t0, s0)), []).append(
+            (cs["x"] + cs["width"] / 2.0, e["id"], "t"))
+    term: dict[tuple[str, str], tuple[float, float, bool]] = {}
+    for (g, up), lst in ends_on.items():
+        c = by_id[g]
+        lst.sort()
+        xs = _spread_terminals(c["x"] + _TERM_EDGE_PAD, c["x"] + c["width"] - _TERM_EDGE_PAD,
+                               occupied.get((g, up), []), len(lst))
+        y = c["y"] if up else c["y"] + _BUS_H
+        for (_ox, eid, end), x in zip(lst, xs):
+            term[(eid, end)] = (x, y, up)
+
+    # 4. Route the lines along the channels between blocks.
+    specs = []
+    for e in inter:
+        if (e["id"], "s") not in term or (e["id"], "t") not in term:
+            continue
+        sx, sy, sup = term[(e["id"], "s")]
+        tx, ty, tup = term[(e["id"], "t")]
+        specs.append(LineSpec(e["id"], site_of[e["sources"][0]], site_of[e["targets"][0]],
+                              sx, sy, sup, tx, ty, tup))
+    routes = route_lines(placement, specs)
+    for e in inter:
+        pts = routes.get(e["id"])
+        if not pts:
+            continue
+        e["properties"]["precomputedRoute"] = True
+        e["sections"] = [{
+            "startPoint": {"x": pts[0][0], "y": pts[0][1]},
+            "endPoint": {"x": pts[-1][0], "y": pts[-1][1]},
+            "bendPoints": [{"x": p[0], "y": p[1]} for p in pts[1:-1]],
+        }]
+
+    for c in elk_children:
+        c["x"] = float(c["x"])
+        c["y"] = float(c["y"])
+
+    groups = []
+    for s in sites:
+        if s.kind != "substation":
+            continue
+        groups.append({
+            "nodeId": s.node,
+            "siteId": s.sid,
+            "name": s.name,
+            "busIds": list(s.bus_gids),
+        })
+    log.info("SLD site layout: %d sites (%d junctions) on a %d×%d grid",
+             len(sites), sum(1 for s in sites if s.kind == "junction"),
+             placement.n_cols, placement.n_rows)
+    return groups
+
+
 def _apply_grid_layout(
     elk_children: list[dict],
     elk_edges: list[dict],
     state: GuiSystemState,
     bus_equipment: dict[str, list[dict]] | None = None,
+    row_spacing: float = _ROW_SPACING_Y,
 ) -> None:
     """In-place: assign x/y/sections using a voltage-row × node-column grid.
 
@@ -549,7 +854,10 @@ def _apply_grid_layout(
     node_col_w: dict[int, float] = {}
     cursor_x = 0.0
     for node_idx in state_node_order:
-        nset = {g for g, nd in node_of.items() if nd == node_idx}
+        # Ordered list (children order) next to the set, so roots are placed
+        # in the same order on every run (set order follows str hashing).
+        nlist = [g for g, nd in node_of.items() if nd == node_idx]
+        nset = set(nlist)
         leaf_cursor = [cursor_x]
         placed: set[str] = set()
 
@@ -573,12 +881,12 @@ def _apply_grid_layout(
             bus_wide[gid] = w
             return xl, xl + w
 
-        roots = [g for g in nset
+        roots = [g for g in nlist
                  if g not in parent_of or parent_of[g] not in nset]
         for r in roots:
             if r not in placed:
                 _place(r)
-        for g in nset:                       # leftover (cycles / orphans)
+        for g in nlist:                      # leftover (cycles / orphans)
             if g not in placed:
                 _place(g)
 
@@ -598,7 +906,7 @@ def _apply_grid_layout(
     for i, r in enumerate(sorted_v_list):
         row_y[r] = cursor_y
         cursor_y += row_h.get(r, 0.0) + (
-            _ROW_SPACING_Y if i < len(sorted_v_list) - 1 else 0.0)
+            row_spacing if i < len(sorted_v_list) - 1 else 0.0)
 
     # ── 5. Apply x / width / y to every bus. ──
     for c in elk_children:
@@ -709,7 +1017,7 @@ def _apply_grid_layout(
         ridx = v_to_row[v]
         row_y[ridx] = cursor_y
         if i < n_rows - 1:
-            gap_h = max(_ROW_SPACING_Y,
+            gap_h = max(row_spacing,
                         gap_need[ridx] * _LANE_STEP_Y + 2 * _LANE_MARGIN_Y)
             cursor_y += row_h[ridx] + gap_h
         else:
