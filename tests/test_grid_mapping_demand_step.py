@@ -85,3 +85,98 @@ def test_switching_method_reevaluates_button(step):
     assert step._btn_fetch_bld.isEnabled()
     _select(step, "spatial")           # currentIndexChanged → _on_dist_method_changed
     assert not step._btn_fetch_bld.isEnabled()
+
+
+# ── Unified 'Fetch and Forecast' button ─────────────────────────────────
+# The former 'Fetch WB + ERA5' and 'Forecast Demand' buttons were merged:
+# one click fetches the inputs and, once they arrive, runs the forecast.
+
+class _SyncThread:
+    """Runs the worker inline so the fetch → forecast chain is testable
+    without an event loop (``_ui_call`` then delivers directly)."""
+
+    def __init__(self, target, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _fake_get(url, **kw):
+    if "worldbank" in url:
+        return _Resp([{}, [{"value": 1234.0}]])
+    return _Resp({"hourly": {"temperature_2m": [25.0] * 8760}})
+
+
+@pytest.fixture
+def ready_step(step):
+    step._combo_country.addItem("Cuba", {"iso2": "CU", "iso3": "CUB", "name": "Cuba"})
+    step._combo_country.setCurrentIndex(step._combo_country.count() - 1)
+    step._bounds = (20.0, -85.0, 23.0, -74.0)
+    return step
+
+
+def test_single_fetch_and_forecast_button(step):
+    assert step._btn_fetch_forecast.text() == "Fetch and Forecast"
+    assert step._btn_fetch_forecast.isEnabled()
+    assert not hasattr(step, "_btn_fetch_data")
+    assert not hasattr(step, "_btn_forecast")
+
+
+def test_fetch_then_forecast(ready_step, monkeypatch):
+    import threading
+    import requests
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(requests, "get", _fake_get)
+    calls = []
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: calls.append("forecast"))
+
+    ready_step._fetch_and_forecast()
+
+    assert calls == ["forecast"]
+    assert ready_step._wb_data["population"] == 1234.0
+    assert len(ready_step._era5_data["temperature_hourly"]) == 8760
+
+
+def test_rerun_skips_fetch_when_inputs_unchanged(ready_step, monkeypatch):
+    import threading
+    import requests
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(requests, "get", _fake_get)
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: None)
+    ready_step._fetch_and_forecast()
+
+    fetches, forecasts = [], []
+    monkeypatch.setattr(ready_step, "_fetch_wb_era5",
+                        lambda on_done=None: fetches.append(1))
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: forecasts.append(1))
+    ready_step._fetch_and_forecast()
+    assert fetches == [] and forecasts == [1]
+
+    # A new base year changes the ERA5 weather year → fetch again.
+    ready_step._spin_base_year.setValue(ready_step._spin_base_year.value() - 1)
+    ready_step._fetch_and_forecast()
+    assert fetches == [1]
+
+
+def test_fetch_error_does_not_forecast(ready_step, monkeypatch):
+    import threading
+    import requests
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(requests, "get", _fake_get)
+    # Bounds missing → the ERA5 part fails inside the worker.
+    ready_step._bounds = None
+    calls = []
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: calls.append(1))
+    ready_step._fetch_and_forecast()
+    assert calls == []
+    assert ready_step._btn_fetch_forecast.isEnabled()
+    assert "Fetch error" in ready_step._lbl_forecast_status.text()
