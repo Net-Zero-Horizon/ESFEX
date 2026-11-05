@@ -85,7 +85,9 @@ function initSld() {
         .on('zoom', function(event) {
             rootGroup.attr('transform', event.transform);
             _updateMinimapViewport();
-        });
+            _scheduleViewUpdate(false);
+        })
+        .on('end', function() { _scheduleViewUpdate(true); });
     svg.call(zoomBehavior);
 
     svg.on('click', function(event) {
@@ -214,6 +216,11 @@ function _ensureFitView(callback, attempt) {
 // ══════════════════════════════════════════════════════════════════
 
 function render(data, layouted) {
+    // Draw and measure with every element shown; the view state (level of
+    // detail, culling, name overlay) is re-applied at the end.
+    _resetViewState();
+    _frames = [];
+    _cullLayers = {};
     rootGroup.selectAll('*').remove();
     elementRegistry = {};
     busLayout = {};
@@ -314,6 +321,11 @@ function render(data, layouted) {
 
     // ── Navigation minimap (bottom-left, fixed) for large systems ──
     _drawMinimap();
+
+    // ── Level of detail, culling index, substation names ──
+    _frames.sort(function(a, b) { return b.prio - a.prio; });
+    _buildCullIndex();
+    _scheduleViewUpdate(true);
 }
 
 
@@ -718,6 +730,19 @@ function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
         .attr('stroke-width', 1.2)
         .attr('stroke-dasharray', '6,3');
 
+    // Overview name (drawn at a fixed screen size while titles are hidden).
+    var maxKv = 0;
+    busIds.forEach(function(bid) {
+        var bl = busLayout[bid];
+        if (bl && bl.voltageKv > maxKv) maxKv = bl.voltageKv;
+    });
+    // Names that are only an imported identifier ("Substation way/424481948")
+    // yield to real names.
+    var idOnly = /\d{5,}/.test(ng.name || '');
+    _frames.push({ name: ng.name || '', x: gx, y: gy, w: gw, h: gh,
+                   prio: (idOnly ? 0 : 1e12) + maxKv * 1e6 + busIds.length * 1e3
+                         + Math.min(999, gw * gh / 1e4) });
+
     // Title label
     var titleText = ng.name;
     layer.append('text')
@@ -1074,12 +1099,13 @@ function _drawPendingLabel(e) {
         labelY = placed.y;
     }
 
-    e.g.append('rect')
+    var lg = e.g.append('g').attr('class', 'lod-label');
+    lg.append('rect')
         .attr('x', labelX - labelW / 2).attr('y', labelY - 9)
         .attr('width', labelW).attr('height', labelH).attr('rx', 4)
         .attr('fill', T.edgeLabelBg).attr('stroke', e.color)
         .attr('stroke-width', 0.8).attr('opacity', inline ? 1 : 0.95);
-    e.g.append('text')
+    lg.append('text')
         .attr('x', labelX).attr('y', labelY + 1)
         .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
@@ -1857,6 +1883,211 @@ function fitView(animate) {
 
 
 // ══════════════════════════════════════════════════════════════════
+// Level of detail, viewport culling and overview names
+// ══════════════════════════════════════════════════════════════════
+//
+// A large system has tens of thousands of SVG elements: drawing them all
+// at every zoom makes the overview an unreadable smear and panning slow.
+//   * Level of detail — a class on the <svg> (CSS rules in sld.html):
+//       lod-far  (scale < LOD_FAR):  frames, bars and lines only;
+//       lod-mid  (scale < LOD_NEAR): plus equipment symbols, no text;
+//       none:                        everything.
+//   * Substation names — while the diagram's own text is hidden, the
+//     frame names are drawn at a fixed screen size, most important first
+//     (highest voltage, then size), skipping any that would overlap.
+//   * Culling — elements well outside the viewport get display:none, so
+//     the browser neither styles nor paints them.
+
+var LOD_FAR = 0.12;
+var LOD_NEAR = 0.55;
+var CULL_MARGIN = 0.6;          // of the viewport size, on each side
+var _CULL_LAYERS = ['layer-groups', 'layer-edges', 'layer-buses', 'layer-stubs',
+                    'layer-equip', 'layer-ops', 'layer-contingency'];
+var _lodLevel = '';
+var _cullLayers = {};           // layer class -> [{ el, x0, y0, x1, y1, hidden }]
+var _cullRegion = null;         // diagram-space box the current culling covers
+var _frames = [];               // substation frames: { name, x, y, w, h, prio }
+var _namesAt = null;            // transform the name overlay was laid out for
+var _viewFrame = null;
+var _viewFinal = false;
+
+function _lodFor(k) {
+    return k < LOD_FAR ? 'lod-far' : (k < LOD_NEAR ? 'lod-mid' : '');
+}
+
+/** Everything shown, no overlay — for drawing, measuring and export. */
+function _resetViewState() {
+    if (!svg) return;
+    svg.classed('lod-far', false).classed('lod-mid', false);
+    _lodLevel = '';
+    Object.keys(_cullLayers).forEach(function(name) {
+        _cullLayers[name].forEach(function(it) {
+            if (it.hidden) { it.el.style.display = ''; it.hidden = false; }
+        });
+    });
+    _cullRegion = null;
+    svg.selectAll('.sld-names').remove();
+    _namesAt = null;
+}
+
+function _scheduleViewUpdate(final) {
+    if (final) _viewFinal = true;
+    if (_viewFrame !== null) return;
+    _viewFrame = requestAnimationFrame(function() {
+        _viewFrame = null;
+        var fin = _viewFinal;
+        _viewFinal = false;
+        _updateView(fin);
+    });
+}
+
+function _updateView(final) {
+    if (!svg || !diagramBounds) return;
+    var t = d3.zoomTransform(svg.node());
+    if (!t.k) return;
+    var lod = _lodFor(t.k);
+    if (lod !== _lodLevel) {
+        svg.classed('lod-far', lod === 'lod-far').classed('lod-mid', lod === 'lod-mid');
+        _lodLevel = lod;
+    }
+    _updateCulling(t, final);
+    _updateNames(t, final);
+}
+
+function _bboxIn(el) {
+    var b;
+    try { b = el.getBBox(); } catch (e) { return null; }
+    if (!b || (b.width === 0 && b.height === 0)) return null;
+    var x0 = b.x, y0 = b.y, x1 = b.x + b.width, y1 = b.y + b.height;
+    var tl = el.transform && el.transform.baseVal;
+    if (tl && tl.numberOfItems) {
+        var m = tl.consolidate().matrix;
+        var xs = [m.a * x0 + m.c * y0 + m.e, m.a * x1 + m.c * y0 + m.e,
+                  m.a * x0 + m.c * y1 + m.e, m.a * x1 + m.c * y1 + m.e];
+        var ys = [m.b * x0 + m.d * y0 + m.f, m.b * x1 + m.d * y0 + m.f,
+                  m.b * x0 + m.d * y1 + m.f, m.b * x1 + m.d * y1 + m.f];
+        x0 = Math.min.apply(null, xs); x1 = Math.max.apply(null, xs);
+        y0 = Math.min.apply(null, ys); y1 = Math.max.apply(null, ys);
+    }
+    return { x0: x0, y0: y0, x1: x1, y1: y1 };
+}
+
+/** Bounding boxes of a layer's top-level elements (measured fully shown). */
+function _indexCullLayer(name) {
+    if (!rootGroup) return;
+    var old = _cullLayers[name] || [];
+    old.forEach(function(it) { if (it.hidden) it.el.style.display = ''; });
+    var lodWas = _lodLevel;
+    if (lodWas) svg.classed(lodWas, false);     // CSS-hidden elements measure as empty
+    var items = [];
+    rootGroup.selectAll('.' + name).each(function() {
+        var kids = this.children;
+        for (var i = 0; i < kids.length; i++) {
+            var b = _bboxIn(kids[i]);
+            if (b) { b.el = kids[i]; b.hidden = false; items.push(b); }
+        }
+    });
+    if (lodWas) svg.classed(lodWas, true);
+    _cullLayers[name] = items;
+    _cullRegion = null;                          // force a re-cull
+}
+
+function _buildCullIndex() {
+    _cullLayers = {};
+    _CULL_LAYERS.forEach(_indexCullLayer);
+}
+
+function _updateCulling(t, final) {
+    var cw = svg.node().clientWidth, ch = svg.node().clientHeight;
+    if (!cw || !ch) return;
+    var vx0 = -t.x / t.k, vy0 = -t.y / t.k;
+    var vw = cw / t.k, vh = ch / t.k;
+    // Still inside the region culled last time (with half the margin to
+    // spare) and at a similar scale: nothing to do.
+    var r = _cullRegion;
+    if (r && !final && Math.abs(r.k - t.k) / r.k < 0.25
+            && vx0 >= r.x0 + r.mx / 2 && vy0 >= r.y0 + r.my / 2
+            && vx0 + vw <= r.x1 - r.mx / 2 && vy0 + vh <= r.y1 - r.my / 2) {
+        return;
+    }
+    var mx = vw * CULL_MARGIN, my = vh * CULL_MARGIN;
+    var x0 = vx0 - mx, y0 = vy0 - my, x1 = vx0 + vw + mx, y1 = vy0 + vh + my;
+    _cullRegion = { x0: x0, y0: y0, x1: x1, y1: y1, mx: mx, my: my, k: t.k };
+    Object.keys(_cullLayers).forEach(function(name) {
+        var items = _cullLayers[name];
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            var out = it.x1 < x0 || it.x0 > x1 || it.y1 < y0 || it.y0 > y1;
+            if (out !== it.hidden) {
+                it.el.style.display = out ? 'none' : '';
+                it.hidden = out;
+            }
+        }
+    });
+}
+
+/** Substation names at a fixed screen size while the diagram text is hidden. */
+function _updateNames(t, final) {
+    var g = svg.select('.sld-names');
+    if (t.k >= LOD_NEAR || !_frames.length) {
+        g.remove();
+        _namesAt = null;
+        return;
+    }
+    if (g.empty()) {
+        var before = svg.select('.sld-legend').node() ? '.sld-legend'
+                   : (svg.select('.sld-minimap').node() ? '.sld-minimap' : null);
+        g = before ? svg.insert('g', before) : svg.append('g');
+        g.attr('class', 'sld-names').attr('pointer-events', 'none');
+    }
+    // Panning at the same scale: move the laid-out names along; lay them
+    // out again once the gesture ends (new frames may have come in view).
+    if (_namesAt && _namesAt.k === t.k && !final) {
+        g.attr('transform', 'translate(' + (t.x - _namesAt.x) + ',' + (t.y - _namesAt.y) + ')');
+        return;
+    }
+    _namesAt = { k: t.k, x: t.x, y: t.y };
+    g.attr('transform', null);
+    var cw = svg.node().clientWidth, ch = svg.node().clientHeight;
+    var fs = 11, lh = 14, placed = [], out = [];
+    for (var i = 0; i < _frames.length; i++) {
+        var f = _frames[i];
+        if (!f.name) continue;
+        var sx = f.x * t.k + t.x, sy = f.y * t.k + t.y;
+        var sw = f.w * t.k, sh = f.h * t.k;
+        if (sx > cw || sy > ch || sx + sw < 0 || sy + sh < 0) continue;
+        var tw = f.name.length * fs * 0.58 + 4;
+        // Inside the frame's top-left corner when it is big enough on
+        // screen, else just above it.
+        var inside = sw > tw + 8 && sh > lh * 2;
+        var x = sx + (inside ? 6 : 0), y = inside ? sy + lh : sy - 3;
+        var bx0 = x - 6, by0 = y - lh, bx1 = x + tw + 6, by1 = y + 6;
+        if (bx1 < 0 || bx0 > cw || by1 < 0 || by0 > ch) continue;
+        var clash = false;
+        for (var j = 0; j < placed.length; j++) {
+            var p = placed[j];
+            if (bx0 < p[2] && p[0] < bx1 && by0 < p[3] && p[1] < by1) { clash = true; break; }
+        }
+        if (clash) continue;
+        placed.push([bx0, by0, bx1, by1]);
+        out.push({ key: f.name + '|' + i, x: x, y: y, name: f.name });
+    }
+    g.selectAll('text').data(out, function(d) { return d.key; })
+        .join(function(enter) {
+            return enter.append('text')
+                .attr('font-family', 'Segoe UI, Roboto, sans-serif')
+                .attr('font-size', fs + 'px').attr('font-weight', '700')
+                .attr('fill', T.groupTitle)
+                .attr('stroke', T.bg).attr('stroke-width', 3)
+                .attr('stroke-linejoin', 'round').attr('paint-order', 'stroke')
+                .text(function(d) { return d.name; });
+        })
+        .attr('x', function(d) { return d.x; })
+        .attr('y', function(d) { return d.y; });
+}
+
+
+// ══════════════════════════════════════════════════════════════════
 // Navigation minimap — fixed overview (bottom-left) so the user does not
 // get lost when zoomed into a large system. Shows a scaled-down diagram
 // (busbars + lines) with a draggable viewport rectangle.
@@ -1881,8 +2112,8 @@ function _drawMinimap() {
     // viewport (and overlaps the SLD): the height is a fraction of the window
     // height, capped to keep a consistent size on large screens; the width
     // varies with the diagram aspect, also a capped fraction of the window.
-    var FIXED_H = Math.max(60, Math.min(140, ch * 0.16));
-    var maxW = Math.min(720, cw * 0.55);
+    var FIXED_H = Math.max(50, Math.min(110, ch * 0.13));
+    var maxW = Math.min(260, cw * 0.28);
     var ms = Math.min(maxW / db.w, FIXED_H / db.h);
     var contentW = db.w * ms, contentH = db.h * ms;
     var mmW = contentW;                   // panel width varies with the diagram
@@ -1914,6 +2145,9 @@ function _drawMinimap() {
     // vertically inside the fixed-height panel.
     var content = mm.append('g')
         .attr('transform', 'translate(0,' + contentYoff + ')');
+    // One path per colour (lines, then bars): a large system has thousands
+    // of lines, and the minimap only needs their shape.
+    var edgeD = {}, barD = {};
     var edges = (currentLayouted && currentLayouted.edges) || [];
     edges.forEach(function(e) {
         var col = (e.properties && e.properties.color) || T.edgeLine;
@@ -1926,8 +2160,7 @@ function _drawMinimap() {
                 d += (i ? 'L' : 'M') + ((p.x - db.x) * ms).toFixed(1) + ',' +
                      ((p.y - db.y) * ms).toFixed(1);
             });
-            content.append('path').attr('d', d).attr('fill', 'none')
-                .attr('stroke', col).attr('stroke-width', 0.5).attr('opacity', 0.45);
+            edgeD[col] = (edgeD[col] || '') + d;
         });
     });
     Object.keys(busLayout).forEach(function(bid) {
@@ -1936,8 +2169,16 @@ function _drawMinimap() {
         var x = (bl.x - db.x) * ms, y = (bl.y - db.y) * ms;
         var w = isVert ? 1.5 : Math.max(1, bl.barLen * ms);
         var h = isVert ? Math.max(1, bl.barLen * ms) : 1.5;
-        content.append('rect').attr('x', x).attr('y', y)
-            .attr('width', w).attr('height', h).attr('fill', bl.color || '#333');
+        var col = bl.color || '#333';
+        barD[col] = (barD[col] || '') + 'M' + x.toFixed(1) + ',' + y.toFixed(1) +
+            'h' + w.toFixed(1) + 'v' + h.toFixed(1) + 'h' + (-w).toFixed(1) + 'Z';
+    });
+    Object.keys(edgeD).forEach(function(col) {
+        content.append('path').attr('d', edgeD[col]).attr('fill', 'none')
+            .attr('stroke', col).attr('stroke-width', 0.5).attr('opacity', 0.45);
+    });
+    Object.keys(barD).forEach(function(col) {
+        content.append('path').attr('d', barD[col]).attr('fill', col);
     });
 
     // Viewport rectangle (updated on every zoom/pan).
@@ -2287,6 +2528,9 @@ function updateOperationalData(jsonStr) {
 
     // ── System info bar (fixed, outside rootGroup) ──
     _drawSystemInfoBar(ops);
+
+    _indexCullLayer('layer-ops');
+    _scheduleViewUpdate(true);
 }
 
 /** Remove operational overlay. */
@@ -2816,6 +3060,7 @@ function updateContingencyData(jsonStr) {
     svg.selectAll('.contingency-badge').remove();
 
     var gCtg = rootGroup.append('g').attr('class', 'layer-contingency');
+    setTimeout(function() { _indexCullLayer('layer-contingency'); _scheduleViewUpdate(true); }, 0);
 
     // ── Mark the tripped element ──
     var tripKey = null;
@@ -3329,9 +3574,12 @@ function _drawSystemInfoBar(ops) {
 /** Serialize current SVG and send to Python bridge for export. */
 function exportSvg() {
     if (!svg) return;
+    // Export the whole diagram at full detail, not the current view.
+    _resetViewState();
     var svgNode = svg.node();
     var serializer = new XMLSerializer();
     var markup = serializer.serializeToString(svgNode);
+    _scheduleViewUpdate(true);
     if (sldBridge) sldBridge.on_svg_exported(markup);
 }
 

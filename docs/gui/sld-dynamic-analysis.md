@@ -25,6 +25,22 @@ When the buses have map coordinates, the diagram follows the geography of the sy
 
 The layout is the same every time the same system is opened. If no bus has coordinates, the diagram falls back to one column per node, with voltage levels in rows.
 
+### Zoom and Detail
+
+What the diagram shows depends on the zoom, so it stays readable from the whole system down to a single bay:
+
+| Zoom | Shown |
+|------|-------|
+| Whole system (far) | Substation frames (lightly shaded), busbars and lines, at a constant on-screen width |
+| Region (middle) | Adds generators, loads and the other equipment symbols |
+| Close (scale 0.55 and above) | Everything: voltages, bus and equipment names, line labels, results overlays |
+
+While the diagram's own text is too small to read, the substation names are drawn at a fixed size instead. Higher-voltage and larger substations come first, and a name that would overlap another is left out until you zoom in. Names that are only an imported identifier, such as `Substation way/424481948`, give way to real names.
+
+Parts of the diagram far outside the view are not drawn, so panning stays smooth on systems with thousands of buses. The minimap in the bottom-left corner shows where the view is; click or drag on it to move.
+
+**Export SVG** always saves the whole diagram at full detail, whatever the current zoom.
+
 
 ---
 
