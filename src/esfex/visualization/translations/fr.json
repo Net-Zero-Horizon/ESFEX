@@ -1378,7 +1378,8 @@
     "error": "Erreur",
     "warning": "Avertissement",
     "info": "Info",
-    "enable": "Activer"
+    "enable": "Activer",
+    "no_effect": "Sans effet dans le modèle actuel ; conservé pour que les fichiers existants se chargent."
   },
   "custom_constraints": {
     "title": "Contraintes personnalisées",

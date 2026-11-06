@@ -21,6 +21,7 @@ import numpy as np
 from esfex.analysis.frequency import (
     FrequencyAnalyzer,
     GeneratorFreqParams,
+    analyzer_settings,
     build_gen_freq_params_from_hdf5,
 )
 from esfex.io.exporter import demand_is_step_major
@@ -57,9 +58,12 @@ class SldResultsLoader:
     """
 
     def __init__(self, h5_path: str | Path, state: GuiSystemState,
-                 base_prefix: str = "") -> None:
+                 base_prefix: str = "", system_config=None) -> None:
         self._path = Path(h5_path)
         self._state = state
+        # SystemConfig whose frequency keys (frequency_nominal, rocof_limit,
+        # ...) set the frequency gauge's limits; None uses the defaults.
+        self._system_config = system_config
         self._base_prefix = base_prefix
         self._freq_analyzer = None  # Set up after loading mappings
 
@@ -384,6 +388,7 @@ class SldResultsLoader:
                         "d_total_mw_per_hz": round(freq_resp.d_total_mw_per_hz, 2),
                         "is_stable": freq_resp.is_stable,
                         "rocof_ok": freq_resp.rocof_ok,
+                        "f_nom_hz": self._freq_analyzer.f_nom,
                     }
 
         return result
@@ -398,7 +403,8 @@ class SldResultsLoader:
             )
             if not gen_params:
                 return None
-            return FrequencyAnalyzer(gen_params)
+            return FrequencyAnalyzer(
+                gen_params, **analyzer_settings(self._system_config, self._state))
         except Exception:
             log.debug("Could not build frequency analyzer", exc_info=True)
             return None

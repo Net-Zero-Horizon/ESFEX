@@ -129,7 +129,7 @@ The frequency analysis uses parameters from the system configuration:
 | `rocof_limit` | `SystemConfig` | 2.0 Hz/s | Maximum allowable ROCOF |
 | `frequency_nadir_limit` | `SystemConfig` | 49.0 Hz | Minimum allowable frequency |
 
-Droop and governor time constant are per-node arrays (like other generator parameters), allowing different settings for each generator at each node.
+Droop and governor time constant are per-node arrays (like other generator parameters), allowing different settings for each generator at each node. The SLD frequency gauge uses the four `SystemConfig` keys; a `frequency_nominal` left at 50 Hz follows the buses' frequency, and a `frequency_nadir_limit` left at 49 Hz becomes 1 Hz below nominal (see [SLD Dynamic Analysis](../gui/sld-dynamic-analysis.md)).
 
 ## N-1 Frequency Screening
 

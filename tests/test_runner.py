@@ -273,6 +273,14 @@ class TestOrchestratorInit:
         orch = Orchestrator(cfg, output_dir=tmp_path, config_path=cp)
         assert orch.config_path == cp
 
+    def test_config_path_as_str(self, tmp_path):
+        """A str config_path works like a Path (it used to raise
+        AttributeError on ``config_path.parent``)."""
+        cfg = _make_esfex_config()
+        cp = tmp_path / "my_config.yaml"
+        orch = Orchestrator(cfg, output_dir=str(tmp_path), config_path=str(cp))
+        assert orch.config_path == cp
+
     def test_simulation_mode_logged(self, tmp_path, caplog):
         cfg = _make_esfex_config()
         with caplog.at_level(logging.DEBUG, logger="esfex.runner"):

@@ -4,10 +4,10 @@ An ESFEX run is described by one YAML file. `esfex.config.loader.load_config()` 
 
 The configuration drives a two-stage decomposition [**[25]**](../reference/bibliography.md#ref25): capacity expansion in the master problem [**[24]**](../reference/bibliography.md#ref24), then operational dispatch over a rolling horizon.
 
-!!! warning "Unknown keys are silently ignored"
-    **Unknown keys are not errors.** The models accept and drop keys they do not define, so a typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` loads without complaint and has no effect.
+!!! warning "Unknown keys are ignored, with a warning"
+    **Unknown keys are not errors.** A typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` has no effect. The loader logs a warning for each one with its full path (for example `Unknown configuration key systems.island.generators.diesel.min_up_time is ignored`), `esfex validate -c <file>` lists them, and so does the Studio's validation (category *Configuration*).
 
-    Check spelling against the reference. `esfex validate -c <file>` catches type errors and missing required keys, but not ignored keys.
+    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling` and `_geo_assets`, and the free-form `plugins` and `solver.options`. Stochastic scenario multipliers report their own unknown keys.
 
 ---
 
@@ -104,7 +104,7 @@ solver:
     ipm_optimality_tolerance: 1.0e-8
 ```
 
-The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them (`acopf_sdp`, `acopf_polar`, `acopf_rect`). `scale_constraints` is accepted but not used in 0.3.0. See the [Solver Guide](solver-guide.md) for tuning.
+The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them: `acopf_soc`, `acopf_qc` and `acopf_sdp` need a conic solver (HiGHS has no second-order cones), `acopf_polar` and `acopf_rect` need Ipopt. `scale_constraints` has no effect: it loads, but neither the model nor the solvers read it. See the [Solver Guide](solver-guide.md) for tuning.
 
 ---
 
@@ -292,7 +292,7 @@ Existing units go under `generators`, keyed by a unit id. Every list has one ent
 1. If `fuel_cost` is missing or all zero, it is computed per node as `price_base / energy_content / eff_at_rated` (the linked technology's `eff_at_rated` is used where the unit's is 0). Nodes with zero efficiency get 0.
 2. For fuels named exactly `Gas`, `Diesel` (60 $/MWh), `Oil`, `Fuel_oil` (55 $/MWh) or `Biomass` (20 $/MWh), a fixed non-fuel cost is **added to `maintenance_cost`** at every node with a positive fuel cost. It is skipped when the unit's largest `maintenance_cost` is already at least half the adder.
 
-In the example above, with `Diesel: {energy_content: 10.0, price_base: 800.0}`, node 1 gets `fuel_cost` ≈ 228.6 $/MWh and `maintenance_cost` 5 + 60 = 65 $/MWh. To keep your own O&M figure, set `maintenance_cost` to at least half the adder (30 $/MWh for diesel). A non-renewable unit whose fuel is missing from `fuels` and whose fuel cost is zero is reported in a warning, because it would be dispatched for free with zero emissions.
+In the example above, with `Diesel: {energy_content: 10.0, price_base: 800.0}`, node 1 gets `fuel_cost` ≈ 228.6 $/MWh and `maintenance_cost` 5 + 60 = 65 $/MWh. To keep your own O&M figure, set `maintenance_cost` to at least half the adder (30 $/MWh for diesel). Each unit that receives the adder is named in the run log (INFO level, so in the log file and in the `verbose` console). A non-renewable unit whose fuel is missing from `fuels` and whose fuel cost is zero is reported in a warning, because it would be dispatched for free with zero emissions.
 
 **Optional fields.** Other generator schema fields, such as `fuel_cost_curve`, `droop`, `governor_time_const`, `q_max_mvar`, `q_min_mvar`, `power_factor` and `risk_coefficient`, are read when present and take their schema defaults otherwise.
 
@@ -465,14 +465,12 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
       ev_loss: 10000000.0               # $/MWh EV driving not supplied (omit: = loss_of_load)
       rooftop_curtailment: 5.0          # $/MWh
       loss_of_fuel_supply: 100.0
-      transport_congestion: 100.0
-      storage_violation: 100.0
-      non_electric_demand_loss: 100.0
+      non_electric_demand_loss: 100.0   # $/unit non-electric fuel demand not served
 ```
 
 The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the monolithic master problem and a soft one (priced with `curtailment_excess_penalty`) under Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`soc_violation`, `delay_retirement_per_mw` and `coupling_slack_penalty` can also be set here (`coupling_slack_penalty` has no effect: the primary-energy model has no coupling slack). A `curtailment` key is accepted but has no effect.
+`soc_violation` and `delay_retirement_per_mw` can also be set here. `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation` load without a warning (the Studio writes them) but have no effect: the model has no such slacks, and curtailed RE is priced by `curtailment_cost`.
 
 `loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
 
@@ -626,7 +624,7 @@ A system file contains the system mapping itself (`name`, `nodes`, `generators`,
 
 It does **not** check:
 
-- unknown or misspelled keys (dropped without a message);
+- unknown or misspelled keys: these are listed (as warnings), not rejected;
 - the length of per-node arrays against the node count;
 - that demand, availability or inflow files exist (they are opened when the run starts).
 

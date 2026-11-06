@@ -9,7 +9,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 - **Default**: `required` means loading fails without it. "required by loader" means the schema has a default but the loader indexes the key directly, so a missing key fails with `Failed to load configuration: '<key>'`.
 
 !!! warning "Unknown keys are ignored"
-    The models do not forbid extra keys. A misspelled or obsolete key (for example `min_up_time` instead of `min_up`) is dropped without an error or warning, and the default is used.
+    The models do not forbid extra keys. A misspelled or obsolete key (for example `min_up_time` instead of `min_up`) is dropped and the default is used. The loader logs a warning with the key's full path, and `esfex validate` and the Studio's validation list it.
 
 ---
 
@@ -58,7 +58,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 | `time_limit` | int (≥ 0) | `10800` | Time limit per solve (seconds, `0` = unlimited) |
 | `gap` | float (0–1) | `0.01` | Relative MIP gap |
 | `verbose` | bool | `false` | Print solver output |
-| `scale_constraints` | bool | `true` | Not used by the model in 0.3.0 |
+| `scale_constraints` | bool | `true` | No effect: read by neither the model nor the solvers |
 | `options` | dict[str, any] | `{}` | Solver-specific options passed to JuMP. See [Solver Guide](../user-guide/solver-guide.md) |
 
 HiGHS options that apply to one LP method only (for example `primal_feasibility_tolerance` or `simplex_scale_strategy` for simplex, `ipm_optimality_tolerance` for IPM) are dropped with a warning unless `options.solver_method` is set explicitly to a matching method. See the [Solver Guide](../user-guide/solver-guide.md).
@@ -902,7 +902,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 
 ## PenaltiesConfig
 
-Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). A `curtailment` key is accepted for backward compatibility but has no effect; use `curtailment_cost`.
+Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes them and shows them disabled.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -911,6 +911,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_reserve_dynamic` | float | `100` | $/MW dynamic reserve deficit |
 | `loss_of_inertia` | float | `200` | $/MW-s inertia deficit |
 | `transfer_margin` | float | `100` | Transfer-margin violation ($/MW). YAML also accepts `TransferMargin` |
+| `curtailment` | float | `100` | No effect (the Studio writes it as `Curtailment`): curtailed RE is priced by `curtailment_cost` and `curtailment_excess_penalty`. |
 | `max_curtailment_ratio` | float (0–1) | `0.05` | Cap on RE curtailment as a fraction of RE generation. Hard constraint per representative day in the monolithic master, soft (with `curtailment_excess_penalty`) under Benders; not enforced in operational dispatch |
 | `curtailment_cost` | float (≥ 0) | `20` | Cost of curtailed RE in operational dispatch ($/MWh) |
 | `curtailment_excess_penalty` | float (≥ 0) | `500` | Benders master: penalty on curtailment above `max_curtailment_ratio` ($/MWh) |
@@ -922,9 +923,9 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
 | `coupling_slack_penalty` | float | `1` | No effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack (kept so existing files load). |
-| `transport_congestion` | float | `100` | $/MW congestion |
-| `storage_violation` | float | `100` | $/MW storage violation |
-| `non_electric_demand_loss` | float | `100` | $/unit fuel demand unmet |
+| `transport_congestion` | float | `100` | No effect: fuel transport has no congestion slack (kept so existing files load). |
+| `storage_violation` | float | `100` | No effect: fuel storage has no violation slack (kept so existing files load). |
+| `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
 | `soc_violation` | float | `1000000` | $/MWh SOC limit violation. |
 | `delay_retirement_per_mw` | float | `50000` | $/MW delay retirement penalty. |
 
@@ -1133,9 +1134,11 @@ Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` 
 
 Nested under the top-level `risk` key. See [Risk and Resilience](../formulation/risk-resilience.md).
 
+The block holds the settings of the Studio's Risk & Resilience Workbench (analysis and post-processing). Neither the master problem nor the dispatch reads it, `enabled` included; the only risk input to the optimization is the per-element `risk_coefficient` of generators, batteries and technologies.
+
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | `false` | Enable the risk module |
+| `enabled` | bool | `false` | Set by the Workbench's Apply; the optimization does not read it |
 | `risk_measure` | `expected` \| `cvar` \| `minimax_regret` | `"expected"` | `expected`, `cvar` or `minimax_regret` |
 | `cvar_alpha` | float (> 0, < 1) | `0.95` | CVaR confidence level (0.95 → worst 5 % of scenarios) |
 | `cvar_lambda` | float (0–1) | `0.5` | Risk-aversion weight (0 = risk-neutral, 1 = pure CVaR) |
