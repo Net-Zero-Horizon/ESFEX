@@ -195,14 +195,32 @@ The `esfex` object wraps the runner, result loading and the standalone workflow 
 | `esfex.run(config, output_dir="results", years=None, start_year=None)` | Full simulation (master problem + dispatch) in the Studio process. `config` is an `ESFEXConfig` or a YAML path. `start_year` defaults to the year of `date_start`. Returns a list of `YearResults` (`year`, `objective`, `re_penetration`, ...). The GUI is blocked until it finishes. |
 | `esfex.sensitivity(config_path, parameters=None, n_samples=64, output_dir="sensitivity_output", years=None)` | Sobol sensitivity analysis (config mode). `parameters` is a list of `{"name", "lower", "upper"}` dicts, `name` being a config parameter key such as `"fuel_cost"` (default bounds from the predefined set); `None` uses all predefined config parameters. `years` per run defaults to 25. |
 | `esfex.export_results(h5_path, output_dir, fmt="csv")` | Export an HDF5 results file to `"csv"`, `"excel"` or `"json"` |
-| `esfex.load_results(path)` | Read an HDF5 results file into a dict of numpy arrays keyed by year (see limitation below) |
+| `esfex.load_results(path, years=None)` | Read an HDF5 results file into a dict of numpy arrays keyed by year (see [Loading Results](#loading-results)) |
 | `esfex.plot.generation_mix(results, year)`, `.prices(results, year)`, `.investments(results)`, `.load_duration(results, year)` | Matplotlib charts from a `load_results()` dict |
-| `esfex.solve_master(config, solver="highs")`, `esfex.solve_dispatch(config, solver="highs")` | Master-only and dispatch-only solves (see limitation below) |
+| `esfex.solve_master(config, solver=None, years=None, start_year=2025, output_dir="results")` | Master problem only (capacity expansion), prepared exactly like `esfex.run()`. Returns a dict with `investments`, `retirements`, `cumulative_capacities` and `re_targets`, each keyed by year (investment keys as in the HDF5 `investment_*` attributes, for example `tech_investment_power_0_3`). The config runs in `development` mode whatever its `simulation_mode`. Raises `RuntimeError` if the master problem fails. |
+| `esfex.solve_dispatch(config, solver=None, year=2025, output_dir="results")` | Dispatch of one year with the units in the config, no master problem (investment candidates are not built). A `development` config is dispatched in `economic_dispatch` mode; `unit_commitment` and `economic_dispatch` configs keep their mode. Returns the year's `YearResults` and writes an HDF5 file to `output_dir`. |
 | `esfex.workflows.*` | Standalone models: `wind_weibull`, `wind_financials`, `solar_financials`, `solar_peak_sun_hours`, `system_financials`, `financial_monte_carlo`, `hazard_screening`, `risk_assessment`, `ev_profiles`, `estimate_demand`, `climate_demand_adjustment`, `otec_capacity_factors`, `tsam_cluster`. `esfex.workflows.help()` lists their arguments. |
 
-!!! warning "Limitations in the current version"
-    - `esfex.load_results()` reads `demand` (as `[node, step]`, also from older files that stored it `[step, node]`), `power_flow` and `curtailment` correctly. It does not match the current HDF5 layout for the other keys: `generation` holds dataset names instead of arrays, and `summary`, `investments`, `prices`, `storage`, `generator_names` and `battery_names` come back empty. As a result `esfex.plot.generation_mix`, `prices` and `investments` do not produce charts; `load_duration` works. To read other datasets, open the file with `h5py` (layout in [Results Export](../user-guide/results-export.md)), or use the **Results** dialog.
-    - `esfex.solve_master()` and `esfex.solve_dispatch()` raise `TypeError`: they build the adapters without the demand and horizon arguments the adapters require. Use `esfex.run()`.
+`solver` overrides the config's `solver.name` (default: keep it). Like `esfex.run()`, both solvers run in the Studio process and block the GUI until they finish.
+
+### Loading Results
+
+`esfex.load_results(path, years=None)` reads a runner HDF5 file (layout in [HDF5 Output Schema](../reference/hdf5-output-schema.md)). `years` limits it to some years; for large runs, reading every year needs a lot of memory.
+
+| Key | Content |
+|-----|---------|
+| `years` | Years found in `detailed_results`, sorted |
+| `generation[year]` | `[generator, step]` MW, summed over nodes; rows follow `generator_names` (zeros for a unit absent that year) |
+| `storage[year]` | `[battery, step]` state of charge (MWh), summed over nodes; rows follow `battery_names`. Absent when there are no batteries |
+| `demand[year]` | `[node, step]` MW (also read correctly from older files that stored `[step, node]`) |
+| `prices[year]` | `[node, step]` nodal prices ($/MWh); `[1, step]` mean price if the file has no nodal prices |
+| `power_flow[year]` | `[node, node, step]` MW |
+| `curtailment[year]` | `[node, step]` MW |
+| `investments[year]` | `{technology name: MW}`: new generation and battery power capacity built that year, summed over nodes |
+| `summary[year]` | Scalars of the year: `total_cost`, `renewable_penetration`, `co2_emissions`, `loss_of_load`, `load_shed`, `total_generation`, `total_demand`, `solve_time`, `master_re_target`, `feasible`, `n1_security_cost` |
+| `generator_names`, `battery_names` | Dataset names of the units in `generation/` and `battery_soc/` |
+
+For node-level generation or any other dataset, open the file with `h5py`, or use the **Results** dialog.
 
 
 ---

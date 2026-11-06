@@ -539,6 +539,7 @@ A plugin that would be skipped by the trusted list shows `untrusted` after its s
 | `--git` | | String | Git URL to clone (`https://` or `git://`) |
 | `--zip` | | Path | ZIP file to extract |
 | `--name` | `-n` | String | Target directory name (git installs) |
+| `--trust-host` | | Flag | Allow a git host outside the default list (see below) |
 
 ```bash
 # Install from GitHub
@@ -547,11 +548,14 @@ esfex plugin install --git https://github.com/user/esfex-weather
 # Install from GitHub with a custom directory name
 esfex plugin install --git https://github.com/user/esfex-weather --name weather_plugin
 
+# Install from another git host you trust
+esfex plugin install --git https://git.example.org/team/esfex-weather.git --trust-host
+
 # Install from a ZIP file
 esfex plugin install --zip weather_plugin.zip
 ```
 
-From the CLI, git installs work only for the hosts github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht; other hosts are refused.
+Git installs from github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht work as they are. Any other host is refused unless you add `--trust-host`, the command-line equivalent of the confirmation the Studio asks for. The plugin's code runs with your permissions, so use it only for a source you trust.
 
 Output on success:
 
@@ -583,8 +587,9 @@ Disabled plugin: weather_forecast
 Enabled plugin: weather_forecast
 ```
 
-!!! note
-    The plugin API has a `get_cli_commands()` hook, but the `esfex` CLI does not currently register plugin sub-commands.
+### Plugin commands
+
+Plugins can add their own commands, run as `esfex <plugin name> <command> ...` (for example `esfex carbon_tracker report results.h5`); `esfex --help` lists them. To provide them, `esfex` loads the enabled, trusted plugins when it starts with a command that is not built in, or with `--help`. Built-in commands do not load plugins at startup. A plugin that fails to load, or whose name is already an `esfex` command, is skipped with a message and the other commands keep working.
 
 
 ---

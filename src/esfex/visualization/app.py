@@ -158,15 +158,18 @@ def run_studio(config=None, system: str | None = None,
     splash.set_progress(85, tr("splash.loading_plugins"))
 
     # Load and register plugins in GUI mode
+    import logging
     try:
         from esfex.plugins import get_plugin_manager
 
         pm = get_plugin_manager()
         loaded_config = getattr(window, "_loaded_config", None)
         pm.load_all(loaded_config, gui_mode=True)
+        if loaded_config is not None:
+            for err in pm.apply_config(loaded_config):
+                logging.getLogger(__name__).warning("Invalid plugin configuration: %s", err)
         pm.register_gui_extensions(window)
     except Exception:
-        import logging
         logging.getLogger(__name__).exception("Plugin loading failed in GUI mode")
 
     splash.set_progress(100, tr("splash.ready"))
