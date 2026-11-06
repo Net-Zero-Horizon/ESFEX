@@ -72,11 +72,11 @@ There are no investment fields on the generator form: new capacity is configured
 
 #### Reservoir Mode (Hydro Generators)
 
-The **Reservoir** section is hidden by default. It appears only for a generator whose reservoir capacity is above 0, for example one imported from a configuration file that defines a reservoir. It does not depend on the fuel, and a generator created in the Studio cannot enable it from the form. With a reservoir, hydro is dispatched against a water-energy budget rather than as firm capacity.
+The **Reservoir** section appears for a generator whose fuel is `Water`, and for any generator whose reservoir capacity is above 0. To give a new hydro unit a reservoir, set its fuel to `Water` and enter a Reservoir Capacity. With a reservoir, hydro is dispatched against a water-energy budget rather than as firm capacity.
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| Reservoir Capacity | MWh | Maximum energy storage of the reservoir. Setting it to 0 hides the section. |
+| Reservoir Capacity | MWh | Maximum energy storage of the reservoir. 0 = no reservoir (run-of-river); on a non-`Water` generator, 0 also hides the section. |
 | Initial Level | frac | Starting level as a fraction of reservoir capacity |
 | Min Level / Max Level | frac | Allowed level band |
 | Inflow File | path | CSV with hourly inflow in MW-equivalent |

@@ -251,7 +251,7 @@ File menu shortcuts and toolbar actions can be reassigned under **File > Prefere
 
 Click **Validate** in the toolbar to check the configuration before running a simulation. The validation dialog:
 
-- Has one checkbox per check category: Structural, Electrical, Demand, Generation, Fuel Network, Connectivity, and Topology Audit (GUI vs solver agreement). Topology Audit reports electrical islands, including islands with demand but no reachable generation (an error).
+- Has one checkbox per check category: Structural, Electrical, Demand, Generation, Fuel Network, Connectivity, Realism, and Topology Audit (GUI vs solver agreement). Topology Audit reports electrical islands, including islands with demand but no reachable generation (an error). Realism looks for probable duplicate plants (same name, or same fuel within 15 km; info), installed capacity more than twice the peak demand (info), and a transmission bottleneck: a max-flow from generator buses to demand buses through the line, transformer and converter ratings that cannot carry the peak demand (warning).
 - Has a **Network Simplification** checkbox that finds dead-end buses, stub lines, and unused fuel elements, and an **Apply Simplification** button to remove them.
 - Has an optional **Network reduction (levels)** check with levels L1 (equipment aggregation and parallel lines) to L4 (full node collapse), which suggests merges you can apply selectively.
 - Groups results by severity: errors, warnings, and info.

@@ -234,7 +234,7 @@ class TestCategoryOrder:
         expected = {
             "structural", "electrical", "demand",
             "generation", "fuel_network", "connectivity",
-            "topology_audit",
+            "realism", "topology_audit",
         }
         assert set(CATEGORY_ORDER) == expected
 
@@ -1813,8 +1813,9 @@ class TestCountValidators:
     def test_all_categories(self):
         n = count_validators()
         # structural(3) + electrical(5) + demand(1) + generation(1)
-        # + fuel_network(3) + connectivity(1) + topology_audit(1) = 15
-        assert n == 15
+        # + fuel_network(3) + connectivity(1) + realism(1)
+        # + topology_audit(1) = 16
+        assert n == 16
 
     def test_single_category_structural(self):
         n = count_validators({"structural"})
