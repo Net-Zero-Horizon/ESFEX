@@ -127,8 +127,8 @@ Adds security constraints for the loss of a single element to the dispatch. See 
 | Reserve Type | Largest Unit | `Largest Unit`: the headroom of the other units and batteries must cover the output of the largest unit. `Percentage`: the headroom of all units and batteries must cover Reserve Percentage × the system demand of each step. |
 | Reserve Percentage (frac) | 0.15 | Used when Reserve Type is `Percentage` |
 | Use Iterative SCOPF | Off | Replace preventive N-1 reserves with post-contingency (LODF) line limits for every pair of lines, added in one solve (not iterative) |
-| SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); saved but not used (the SCOPF constraints are built in one pass) |
-| SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on; saved but not used |
+| SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); saved but not used (the SCOPF constraints are built in one pass). A value other than 5 logs a warning when the run loads the configuration |
+| SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on; saved but not used. A value other than 0.01 logs a warning when the run loads the configuration |
 | Allow Corrective Actions | Off | Allow post-contingency battery and generator re-dispatch instead of preventive reserve |
 | *SLD contingency analysis* | | The fields below do not change the optimisation: they set up **Run All N-1** and **Run Screening** in the SLD Analysis panel |
 | Critical Line Threshold (frac) | 0.0 | Only lines and transformers loaded at or above this fraction of their capacity are tripped; 0 trips them all |
@@ -239,7 +239,6 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | FRE Penetration Loss | 100 | $/MWh | Shortfall from the RE target |
 | EV Loss | 50,000 | $/MWh | EV driving energy not supplied. Same as Loss of Load by default; a lower value makes leaving EVs uncharged cheaper than generating. |
 | Loss of Fuel Supply | 100 | $/unit | Fuel supply deficit |
-| PE Coupling Slack | 1 | $/unit | No effect (disabled): the fuel model has no periodic–hourly coupling slack |
 | Transport Congestion | 100 | $/MW | No effect (disabled): fuel transport has no congestion slack |
 | Storage Violation | 100 | $/MW | No effect (disabled): fuel storage has no violation slack |
 | Non-Electric Demand Loss | 100 | $/unit | Non-electric (sectoral) fuel demand left unmet |

@@ -799,7 +799,6 @@
     "penalty_fre": "RE普及率不足:",
     "penalty_ev": "EV損失:",
     "penalty_fuel_supply": "燃料供給不足:",
-    "penalty_coupling_slack": "一次エネルギー連成スラック:",
     "penalty_transport": "輸送混雑:",
     "penalty_storage": "貯蔵違反:",
     "penalty_non_elec": "非電力需要不足:",
@@ -827,7 +826,7 @@
     "ac_q_min_ratio": "Q最小比率 (×Q_max):"
   },
   "global_form": {
-    "n1_scopf_unused_tip": "設定には保存されますが使用されません: SCOPF制約は1回で構築されます。",
+    "n1_scopf_unused_tip": "設定には保存されますが使用されません: SCOPF制約は1回で構築されます。既定値以外の値を設定すると、設定の読み込み時に警告が出ます。",
     "n1_crit_line_tip": "全N-1とスクリーニングは、容量に対する負荷率がこの割合以上の線路と変圧器のみを遮断します。0 = すべて。",
     "n1_sld_header_tip": "以下の設定はSLD解析パネル (全N-1を実行・スクリーニング実行) の既定値です。最適化には影響しません。",
     "n1_sld_header": "SLD事故解析 (全N-1 / スクリーニング):",

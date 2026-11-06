@@ -97,8 +97,8 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. |
 | `generation_reserve_percentage` | float (0–1) | `0.15` | Reserve fraction when `generation_reserve_type: percentage` |
 | `scopf_enabled` | bool | `false` | Use SCOPF instead of preventive N-1 reserves: post-contingency (LODF) flow limits for every pair of lines, in one solve, with priced overloads. |
-| `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative) |
-| `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used |
+| `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative); another value logs a warning |
+| `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used; another value logs a warning |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
 | `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
 | `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | Studio SLD analysis only: how generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
@@ -903,7 +903,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 
 ## PenaltiesConfig
 
-Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes them and shows them disabled.
+Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes the last three and shows them disabled; `coupling_slack_penalty` is deprecated, no longer written by the Studio, and logs a warning when present.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -923,7 +923,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `fre_penetration_loss` | float | `100` | $/MWh RE shortfall |
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
-| `coupling_slack_penalty` | float | `1` | No effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack (kept so existing files load). |
+| `coupling_slack_penalty` | float | `1` | Deprecated, no effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack. Existing files still load, with a warning. |
 | `transport_congestion` | float | `100` | No effect: fuel transport has no congestion slack (kept so existing files load). |
 | `storage_violation` | float | `100` | No effect: fuel storage has no violation slack (kept so existing files load). |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |

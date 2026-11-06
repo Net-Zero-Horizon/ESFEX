@@ -229,7 +229,7 @@ Fuel that arrives in a step can be used in that step: the tank level after the s
 | `link_supply_storage_in_*` | \(\sum_{t \in p} s^{in}_{f,n,t} = S_{f,n,p}\) (PE-4a) |
 | `link_ne_*` | \(\sum_{t \in p} W^{ne,hr}_{f,s,n,t} = W^{ne}_{f,s,n,p}\) |
 
-Shipments are linked through the arrivals and departures of PE-3b. There are no periodic storage levels and no linking slacks; `penalties.coupling_slack_penalty` has no effect.
+Shipments are linked through the arrivals and departures of PE-3b. There are no periodic storage levels and no linking slacks; `penalties.coupling_slack_penalty` is deprecated and has no effect (loading it logs a warning).
 
 ## Non-Electric Fuel Demand
 
