@@ -142,7 +142,7 @@ The depth, redistribution and threshold values preset the SLD Analysis panel eac
 
 ### Risk & Resilience
 
-Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there. The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
+Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there, and stores its climate and hazard scenarios, which are saved as `risk.climate_scenarios` and `risk.hazard_scenarios` (climate probabilities are rescaled to sum to 1 on save, as the schema requires; a scenario the schema rejects is not saved and a warning is logged). The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -152,8 +152,8 @@ Settings stored in the `risk:` block of the YAML. The fields are greyed out unti
 | Risk Aversion (λ) | 0.5 | Weight of the CVaR term |
 | Hazard Combination | Independent | `Independent`, `Copula` or `MCDA` |
 | Value of Lost Load: Residential / Commercial / Industrial / Critical | 5,000 / 25,000 / 15,000 / 100,000 $/MWh | Sector VOLL used by the risk analysis (not the dispatch VOLL, which is the system Loss of Load penalty) |
-| Base Temperature | 18.0 °C | Reference temperature for degree days |
-| Heating Coeff. (MW/HDD) / Cooling Coeff. (MW/CDD) | 0 / 0 | Temperature sensitivity of demand |
+| Base Temperature | 24.0 °C | Reference temperature for degree days (24 °C suits tropical islands; use about 18 °C for temperate regions) |
+| Heating Coeff. (%/°C) / Cooling Coeff. (%/°C) | 0.5 / 2.5 | Demand change per °C below / above the base temperature |
 | Insurance Premium Rate | 0 | Fraction of asset value |
 | Monte Carlo Samples | 1000 | 100 to 100,000 |
 | Monte Carlo Seed | 42 | Random seed |
@@ -267,7 +267,7 @@ Scenarios for the stochastic master problem. Click **Scenarios** in the Element 
 
 ### Scenario Table
 
-Type a name and click **Add**; **Remove Selected** deletes the selected scenarios after a confirmation. Each row has:
+Type a name and click **Add**; **Remove Selected** deletes the selected scenarios after a confirmation. Removing every scenario also persists on save (the primary system's `stochastic_scenarios` is written as an empty list). Each row has:
 
 | Column | Description |
 |--------|-------------|
