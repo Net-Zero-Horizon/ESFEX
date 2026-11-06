@@ -1451,6 +1451,41 @@ import Ipopt
             @test sum(res.ev_loss) ≈ 2.5 atol = 1e-6
             @test res.ev_soc[1, 1] ≈ 15.0 atol = 1e-6   # start of each step
             @test res.ev_soc[1, 2] ≈ 0.0 atol = 1e-6
+
+            # Result totals are energy (MWh) and mass (t) over the window:
+            # step rates × 2 h. They used to be summed in MW (and t/h), so
+            # with 24 h steps the yearly totals came out 24× too small.
+            coal = mkgen("Coal", "Non-renewable", "Coal", [40.0], [1.0e-5],
+                         ones(H, 1); nb = 1, H = H)
+            input = PowerSystemInput(
+                name = "tot2h", year = 2025, network = net, generators = [coal],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = temporal, fuel_co2 = Dict("Coal" => 0.5),   # 1 t/MWh_e
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test res.total_demand ≈ 200.0 atol = 1e-6       # 50 MW × 2 steps × 2 h
+            @test res.total_generation ≈ 160.0 atol = 1e-6
+            @test res.load_shed_total ≈ 40.0 atol = 1e-6
+            @test res.total_co2 ≈ 160.0 rtol = 1e-6
+            # The node array stays a rate (t/h), like the MW arrays.
+            @test sum(res.co2_emissions) * 2.0 ≈ res.total_co2 rtol = 1e-6
+
+            solar = mkgen("Solar", "Renewable", "Solar", [100.0], [0.0],
+                          ones(H, 1); nb = 1, H = H)
+            input = PowerSystemInput(
+                name = "curt2h", year = 2025, network = net, generators = [solar],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = temporal,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test res.total_curtailment ≈ 200.0 atol = 1e-6  # 50 MW spilled × 2 × 2 h
+            @test res.re_penetration ≈ 1.0 atol = 1e-6
         end
 
         @testset "one CO2 budget per system" begin

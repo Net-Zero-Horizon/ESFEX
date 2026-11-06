@@ -74,11 +74,6 @@ rooftop_solar_config:
   base_year: 2025
   target_year: 2050
   degradation_rate: 0.005
-  systems_per_node: [5000, 3000]      # required by the schema, not used
-  avg_system_size: [5.0, 5.0]         # required by the schema, not used
-  initial_adoption: [0.05, 0.03]      # required by the schema, not used
-  max_adoption: {low: 0.30, medium: 0.50, high: 0.70}   # required, not used
-  adoption_rates: {low: 0.05, medium: 0.08, high: 0.12} # required, not used
 ```
 
 | Parameter | Default | Used | Description |
@@ -90,8 +85,8 @@ rooftop_solar_config:
 | `simulation_seed` | `42` | Yes | Random seed |
 | `base_year`, `target_year` | 2025, 2050 | Yes | Span of the S-curve (ROOF-2) |
 | `degradation_rate` | `0.005` | Yes | Annual degradation (ROOF-1) |
-| `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption`, `adoption_rates` | -- | No | Required by the schema; not passed to rooftex |
-| `performance_ratio`, `cost_per_kw`, `cost_reduction_rate`, `o_and_m_cost` | -- | No | Validated, not used |
+| `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption`, `adoption_rates` | `null` | No | Optional; not passed to rooftex |
+| `performance_ratio`, `cost_per_kw`, `cost_reduction_rate`, `o_and_m_cost` | 0.75, 1200, 0.08, 20 | No | Validated, not used |
 
 ## Output
 

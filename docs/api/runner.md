@@ -200,7 +200,7 @@ class SimulationState:
 
 Complete results for one simulation year, including all optimization variables, derived metrics, and scalar summaries.
 
-Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities; max for `gen_status`, `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), except for `power_flow` and `transfer_margin`, whose window arrays are concatenated with their overlap hours.
+Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities; max for `gen_status`, `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), also for the `power_flow`, `transfer_margin` and N-1 dual series; a key missing from a window (no binding dual there) is zero-filled for that window's steps.
 
 ```python
 @dataclass
@@ -248,7 +248,7 @@ class YearResults:
 | `loss_of_reserve_static` | `Optional[np.ndarray]` | `(node, hour)` | Static reserve deficit (MW) |
 | `loss_of_reserve_dynamic` | `Optional[np.ndarray]` | `(node, hour)` | Dynamic reserve deficit (MW) |
 | `load_shed_array` | `Optional[np.ndarray]` | `(node, hour)` | Load shedding (MW) |
-| `co2_emissions` | `Optional[np.ndarray]` | `(node, hour)` | CO2 emissions (tonnes) |
+| `co2_emissions` | `Optional[np.ndarray]` | `(node, hour)` | CO2 emission rate (tCO2/h); × `resolution_hours` for tonnes per step |
 | `loss_of_inertia` | `Optional[np.ndarray]` | `(hour,)` | System inertia deficit (labelled GW*s in the HDF5 file) |
 
 ### Network and Prices
@@ -260,7 +260,7 @@ class YearResults:
 | `voltage_magnitude` | `Optional[np.ndarray]` | `(bus, hour)` | Voltage magnitude (p.u.), ACOPF modes only |
 | `reactive_generation` | `Optional[np.ndarray]` | `(gen, bus, hour)` | Reactive power (MVAr), ACOPF modes only |
 | `transfer_investment` | `Optional[dict]` | `{(from,to): float}` | Transmission investment (MW) |
-| `transfer_margin` | `Optional[dict]` | `{(from,to): array}` | Transfer margin slack (MW) |
+| `transfer_margin` | `Optional[dict]` | `{(from_bus, to_bus): array}` | Transfer margin slack (MW), keyed by operational bus pair like `power_flow` |
 | `prices` | `Optional[np.ndarray]` | `(node, hour)` | Nodal prices ($/MWh, dual of power balance) |
 | `price_energy_component` | `Optional[np.ndarray]` | `(hour,)` | Mean of `prices` over nodes ($/MWh) |
 | `price_congestion_component` | `Optional[np.ndarray]` | `(node, hour)` | `prices` minus the energy component ($/MWh) |
@@ -297,7 +297,7 @@ class YearResults:
 | `bat_lcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery LCOE ($/MWh) |
 | `bat_vallcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery value-adjusted LCOE ($/MWh) |
 | `fuel_for_power` | `Optional[dict]` | `{gen_idx: array}` | Declared but never filled by the runner (always `None`) |
-| `technology_selling_prices` | `Optional[dict]` | `{gen_name: dict}` | Selling-price data per generator name (`prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type`) |
+| `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed `_2`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
 
 Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#derived-metrics).
 
@@ -315,7 +315,7 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `emissions` | `float` | `0.0` | Total CO2 emissions (tonnes) |
+| `emissions` | `float` | `0.0` | Total CO2 emissions (tonnes; step rates × `resolution_hours`) |
 | `re_penetration` | `float` | `0.0` | Renewable energy penetration fraction |
 | `load_shed` | `float` | `0.0` | Total unserved energy (MWh) |
 | `total_generation` | `float` | `0.0` | Total energy generated (MWh) |

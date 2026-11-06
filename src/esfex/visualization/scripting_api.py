@@ -713,7 +713,13 @@ class ESFEXAPI:
                                         ("power_flow", "power_flow"),
                                         ("curtailment", "curtailment"),
                                     ]:
-                                        if ds_name in grp:
+                                        if ds_name == "demand" and ds_name in grp:
+                                            # [node, step]; old files may hold [step, node]
+                                            from esfex.io.exporter import demand_node_hours
+                                            ep = grp.get("electricity_prices")
+                                            out[out_key][yr] = demand_node_hours(
+                                                grp[ds_name], ep.shape[0] if ep is not None else None)
+                                        elif ds_name in grp:
                                             out[out_key][yr] = np.array(grp[ds_name])
                                 except (ValueError, IndexError):
                                     pass
