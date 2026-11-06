@@ -106,7 +106,7 @@ Constraint `res_head_limit_g{g}_b{b}_t{t}`. Evaluated at the start-of-step level
 
 ## 4. Master-Problem Integration
 
-In the capacity-expansion master problem the same balance (RES-1–RES-6) is enforced inside every representative-day subproblem, so investment decisions see hydro as an energy-limited resource rather than firm MW.
+In the capacity-expansion master problem the same balance (RES-1–RES-6) is enforced inside every representative-day subproblem, so investment decisions see hydro as an energy-limited resource rather than firm MW. Each representative day (TSAM period, Benders subproblem) uses the inflow \(W_t\) of its own hours, like the availability profiles.
 
 **Seasonal storage.** When `tsam_inter_period_linking` is enabled (TSAM time aggregation), the master builds a chronological chain of reservoir-level boundary variables — one per reservoir node, year-cyclic — mirroring the battery state-of-charge chain. Each representative period starts at the previous boundary level and ends at the next, so a reservoir can be filled in a wet period and drawn down in a later dry one. This captures genuinely seasonal hydro storage that a per-period cyclic model cannot represent.
 

@@ -916,46 +916,7 @@ function create_benders_subproblem(
         demand_slice[t, n] = demand[t, n] * growth_factor
     end
 
-    day_generators = map(input.generators) do gen
-        full_avail = gen.availability
-        avail_rows = size(full_avail, 1)
-        if avail_rows > 0
-            sliced = Matrix{Float64}(undef, hours, size(full_avail, 2))
-            for t in 1:hours
-                actual_hour = start_hour + t - 1
-                h = mod1(actual_hour, avail_rows)
-                for b in 1:size(full_avail, 2)
-                    sliced[t, b] = full_avail[h, b]
-                end
-            end
-            GeneratorConfig(
-                gen.name, gen.type, gen.fuel,
-                gen.rated_power, gen.min_power,
-                gen.efficiency_rated, gen.efficiency_min,
-                gen.ramp_up, gen.ramp_down,
-                gen.min_up_time, gen.min_down_time,
-                gen.start_up_cost, gen.fuel_cost,
-                gen.fixed_cost, gen.maintenance_cost,
-                gen.inertia, gen.invest_cost, gen.invest_max,
-                sliced, gen.reservable,
-                gen.life_time, gen.initial_age,
-                gen.degradation_rate, gen.decommissioning_cost,
-                gen.frequency_hz, gen.current_type,
-                gen.reservoir_capacity, gen.reservoir_initial_level,
-                gen.reservoir_min_level, gen.reservoir_max_level,
-                gen.reservoir_inflow, gen.reservoir_turbine_efficiency,
-                gen.reservoir_evaporation_rate, gen.reservoir_pump_capacity,
-                gen.reservoir_pump_efficiency, gen.reservoir_spillage_allowed,
-                gen.reservoir_invest_cost, gen.reservoir_invest_max,
-                gen.risk_coefficient,
-                gen.reservoir_min_release,
-                gen.cascade_downstream, gen.cascade_delay_hours,
-                gen.reservoir_head_min_factor
-            )
-        else
-            gen
-        end
-    end
+    day_generators = generators_for_day(input.generators, start_hour, hours)
 
     day_input = (
         generators = day_generators,

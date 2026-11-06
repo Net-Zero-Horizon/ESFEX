@@ -534,6 +534,49 @@ import Ipopt
             @test calculate_target_ratios(mk(Dict((1, 1) => 0.42)))[(1, 1)] ≈ 0.42
         end
 
+        @testset "master: each representative day reads its own inflow" begin
+            # An empty reservoir is the only source; day 2 is the peak (the
+            # representative) day and the only day with inflow. The day model
+            # read inflow row t of the whole profile, so the representative
+            # day saw day 1's zero inflow and shed all its load.
+            H = 48
+            inflow = zeros(H, 1)
+            inflow[25:48, 1] .= 30.0
+            hydro = GeneratorConfig(
+                "Hydro", "Renewable", "Water", [100.0], [0.0],
+                [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
+                [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
+                [500.0], [0.0], [0.0], [1.0], inflow,
+                [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [1.0],
+            )
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            demand = fill(10.0, H, 1)
+            demand[25:48, 1] .= 20.0
+            inp = MasterProblemInput(
+                years = [2025], network = net, generators = [hydro],
+                batteries = BatteryConfig[], base_demand = demand,
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 10.0, verbose = false)
+            model, _, _ = create_master_problem(inp; use_representative_days = true)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            shed = sum(value(v) for v in all_variables(model)
+                       if startswith(name(v), "op_y1_d1_ll["))
+            @test shed ≈ 0.0 atol = 1e-6
+
+            # The cut wraps around a shorter profile, and units without
+            # profiles pass through.
+            day = ESFEX.generators_for_day([hydro], 40, 12)[1]
+            @test day.reservoir_inflow[:, 1] == [fill(30.0, 9); zeros(3)]
+            @test size(day.availability) == (12, 1)
+        end
+
         @testset "custom constraints (linear cap binds)" begin
             H = 2
             gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
