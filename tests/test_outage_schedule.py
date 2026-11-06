@@ -208,7 +208,9 @@ class TestInterruptionsDialog:
         payload = json.loads(dlg._build_payload())
         cats = {g["category"] for g in payload["groups"]}
         assert {"generator", "line"} <= cats
-        assert payload["horizon_hours"] == 8760
+        # The whole horizon a Studio run simulates, not one year.
+        from esfex.visualization.panels.interruptions_dialog import STUDIO_RUN_YEARS
+        assert payload["horizon_hours"] == STUDIO_RUN_YEARS * 8760
         assert len(payload["schedule"]) == 1
 
     def test_apply_writes_and_drops_invalid(self):
