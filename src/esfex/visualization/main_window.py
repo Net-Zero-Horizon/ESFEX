@@ -86,6 +86,10 @@ from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 logger = logging.getLogger(__name__)
+# The SLD analysis handlers log through ``log``; it was never defined, so
+# every one of their fallbacks (no AC bridge, analyzer build failure, N-k
+# error) raised NameError instead of logging.
+log = logger
 
 _SUPPORTED_GEO_EXTENSIONS = {".geojson", ".json", ".shp", ".kml", ".kmz", ".gpkg"}
 
