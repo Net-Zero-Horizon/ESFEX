@@ -219,11 +219,9 @@ results/csv/
     └── year_2025_base_demand.csv
 ```
 
-Limitations of the CSV export:
+`[node, step]` datasets keep their layout (one row per node, one column per step). The 3-D `power_flow.csv` and `transfer_margin.csv` of multi-node runs have one row per node pair: `from_node`, `to_node`, then one column per step. Nested groups (`technology_selling_prices/<gen>/`, `primary_energy/`, `n1_security/trans_reserve_duals/`) become nested folders.
 
-- Only one group level below a scenario is exported: `technology_selling_prices/`, `primary_energy/` and `n1_security/trans_reserve_duals/` come out empty or missing.
-- Attributes are not exported, so `cost_breakdown/`, `global/`, `inter_system/`, `mga/` and `system_configuration/` are left out.
-- 3-D datasets cannot be written: on a results file with `power_flow` or `transfer_margin` (multi-node runs), the export stops with `ValueError: Must pass 2-d input` partway through the first scenario. Read these files with h5py instead (see [Python API](#python-api)).
+Attributes are not exported, so `cost_breakdown/`, `global/`, `inter_system/`, `mga/` and `system_configuration/` are left out.
 
 ### Excel Export
 

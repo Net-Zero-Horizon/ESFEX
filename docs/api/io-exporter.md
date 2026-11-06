@@ -58,11 +58,15 @@ output_dir/
         ...
 ```
 
+How datasets are laid out:
+
+- 1-D and 2-D datasets keep their layout (for `[node, step]` datasets: one row per node, one column per step). A scalar dataset becomes a one-cell file.
+- 3-D datasets (`power_flow` and `transfer_margin` of multi-node runs, `[from_node, to_node, step]`) get one row per node pair: the first two columns are `from_node` and `to_node`, then one column per step. Other datasets with more than two axes are written the same way, with index columns named `dim_0`, `dim_1`, ...
+- Nested groups become nested folders (`technology_selling_prices/<gen>/prices_weights.csv`, `n1_security/trans_reserve_duals/*.csv`, `primary_energy/<section>/<fuel>.csv`).
+
 Limitations:
 
-- Only one group level below a scenario is exported. Datasets nested deeper (`technology_selling_prices/<gen>/prices_weights`, `primary_energy/<section>/<fuel>`, `n1_security/trans_reserve_duals/*`) are skipped, so their folders are empty or missing.
 - Attributes are not exported, so groups that hold only attributes (`cost_breakdown/`, `global/cost_breakdown/`) and all `mga/`, `global/`, `inter_system/` and `system_configuration/` content are left out.
-- Each dataset is written with `pandas.DataFrame`, which accepts only 1-D or 2-D arrays. A file that contains a 3-D dataset (`power_flow` or `transfer_margin`, written for multi-node runs) makes `to_csv()` raise `ValueError: Must pass 2-d input` partway through the scenario folder.
 
 #### to_excel
 
