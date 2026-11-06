@@ -146,6 +146,18 @@ def test_screening_button_reports_counts(monkeypatch):
     assert "Error" not in summaries[-1]
 
 
+def test_failed_run_is_reported_not_raised(monkeypatch):
+    """A failing analyzer ends in an "Error:" summary. ``log`` was undefined in
+    main_window, so the except branch itself raised NameError."""
+    class _Broken:
+        def get_contingency_list(self, snapshot):
+            raise RuntimeError("boom")
+
+    fake, summaries = _fake_window(_Broken(), monkeypatch)
+    fake.run_all("n1", "pro_rata", 0.0)
+    assert summaries == ["Error: boom"]
+
+
 def test_analysis_panel_nk_defaults():
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
