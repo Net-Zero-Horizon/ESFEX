@@ -2,13 +2,13 @@
 
 ## Overview
 
-The primary energy module models the fuel supply chain from import/production to consumption [**[49]**](../reference/bibliography.md#ref49). It is part of the operational dispatch: fuel logistics (supply, transport, storage) are solved in primary-energy periods (daily by default) inside the same model as the hourly power dispatch.
+The primary energy module models the fuel supply chain from import/production to consumption [**[49]**](../reference/bibliography.md#ref49). It is part of the operational dispatch, inside the same model as the hourly power dispatch: supply limits and shipments are set per primary-energy period (daily by default), and each node's fuel tank is balanced every hour.
 
 The module captures:
 
 - **Fuel supply** at import/production nodes with cost and annual availability limits
 - **Fuel transport** between nodes along routes with capacity, losses and cost
-- **Fuel storage** per node with minimum and initial levels
+- **Fuel storage**: one tank per fuel and node, with minimum and initial levels, from which generators and non-electric users draw every hour
 - **Non-electric fuel demand** (transport, industry, households) that competes with power generation for the same fuel
 
 ---
@@ -111,8 +111,8 @@ Each source is keyed by the fuel it supplies. All per-node values are lists with
 | `storage_investment_cost`, `max_storage_investment_per_node` | $/unit, units | Cost and cap of new fuel storage in the master problem (required) |
 | `transport_cost`, `max_transport_investment_per_arc` | $/unit/km, units | Cost per km and cap of new route capacity in the master problem (required) |
 | `transport_losses` | fraction per 100 km | Required by the loader; the dispatch uses the per-route losses below |
-| `transport_transit_days_per_100km` | days | Optional delivery lead time along routes (default 0, instantaneous) |
-| `disruption_start_hour`, `disruption_end_hour`, `disruption_availability` | hour, hour, fraction | Optional supply cut: availability is scaled to `disruption_availability` inside the window |
+| `transport_transit_days_per_100km` | days | Optional delivery lead time along routes (default 0, instantaneous): a shipment reaches the destination tank that many days per 100 km after it leaves |
+| `disruption_start_hour`, `disruption_end_hour`, `disruption_availability` | hour, hour, fraction | Optional supply cut: availability is scaled to `disruption_availability` inside the window. Hours count from 1 January of the base year (8760 per year), like [scheduled interruptions](../user-guide/scheduled-interruptions.md) |
 
 The master problem does not build fuel storage or transport capacity in practice (its fuel-infrastructure variables only carry cost), so the existing `storage_capacity` and route capacities are what the dispatch works with in `development` mode.
 
@@ -223,8 +223,7 @@ Non-electric demand captures fuel consumption outside the electricity sector: tr
 
 The demand grows by `non_electric_demand_growth[<fuel>]` per year from the first simulated year (no growth if not given) and is spread over the months by `seasonal_factors[<fuel>][<sector>]` (12 relative values; even if not given). Unmet demand costs `penalties.non_electric_demand_loss` per unit, per sector. The schema also accepts `criticality`, `is_flexible`, `flexibility_ratio`, `delay_tolerance` and `price_sensitivity` on these entries, but the primary-energy model does not use them.
 
-!!! warning "Known limitation"
-    Fuel shipped to a node enters its periodic balance but not its hourly tank (the hourly tank is filled only by local supply). Hourly use at a node supplied only by transport is therefore covered by the hourly shortfall slack and priced at `loss_of_fuel_supply`.
+Fuel shipped to a node goes into its tank: a period's shipment leaves the origin evenly over the period's hours and arrives after the route's transit time, less transport losses. Generators and non-electric users at the destination draw from that tank like from locally supplied fuel. Use that the tank cannot cover is a fuel shortfall, priced at `penalties.loss_of_fuel_supply`.
 
 ---
 
@@ -437,7 +436,7 @@ systems:
 esfex run -c fuel_system.yaml --years 10 -v
 ```
 
-With primary energy active, every dispatch window gets variables for fuel supply, transport and storage in each primary-energy period, coupled to the generators' hourly fuel burn. `primary_energy_resolution: 24` optimizes fuel logistics daily while power dispatch stays hourly. Storage levels are carried from one window to the next.
+With primary energy active, every dispatch window gets supply and shipment variables for each primary-energy period and an hourly tank balance per fuel and node, coupled to the generators' hourly fuel burn. `primary_energy_resolution: 24` sets the supply limits and shipments daily while the tanks and the power dispatch stay hourly. Tank levels are carried from one window to the next.
 
 ---
 
@@ -501,7 +500,7 @@ with h5py.File(path, "r") as f:
 
 5. **Emission factors**: `emission_factor` is per MWh of fuel energy (IPCC-style values such as 0.202 for natural gas); the dispatch divides generator output by its `eff_at_rated`.
 
-6. **Temporal resolution**: `primary_energy_resolution` sets the period length for fuel logistics. Values of 24 (daily) or 168 (weekly) are typical. Shorter periods are more detailed but slower.
+6. **Temporal resolution**: `primary_energy_resolution` sets the period length for supply limits and shipments. Values of 24 (daily) or 168 (weekly) are typical. Shorter periods are more detailed but slower.
 
 7. **Fuel names**: The same name must appear in `fuels`, as the `primary_energy_sources` key, in each route's `fuel_params`, and as the generators' `fuel`.
 

@@ -601,10 +601,12 @@ class OutageWindow(BaseModel):
                           "freq_converter", "electrolyzer", "fuel_source",
                           "fuel_storage", "fuel_route"]
     element_id: str
-    start_hour: int                     # inclusive, >= 0
+    node: Optional[int] = None          # generators / batteries: only this node
+    start_hour: int                     # inclusive, >= 0; horizon hour (0 = Jan 1 of base_year)
     end_hour: int                       # exclusive; validator: end_hour > start_hour
     availability: float = 0.0           # 0 = full outage
     label: str = ""
+    recurring: bool = False             # repeat every year (start_hour modulo 8760)
 ```
 
 ### CustomConstraintConfig

@@ -6,18 +6,19 @@ and integration with the electrical system, considering non-electric demands.
 
 Temporal Scales:
 - Investment: Capacity decisions (typically annual)
-- Primary Period: Fuel supply/transport planning (configurable)
-- Hourly: Operational fuel dispatch for power generation
+- Primary Period: supply limits and fuel shipments (configurable, 24 h default)
+- Hourly (time step): the fuel tanks and every use of fuel
 
-Key Components:
-- Fuel supply and import
-- Fuel transport between nodes
-- Fuel storage dynamics
+Each node has one tank, balanced per time step:
+    level[t+1] = level[t] + (local supply_t + arrivals_t) * efficiency
+                 - drawn_t - departures_t
+    drawn_t + shortfall_t >= fuel for power_t + non-electric consumption_t
+A period's route shipment leaves its origin evenly over the period's steps
+and arrives at the destination after the route's transit delay, net of
+transport losses. Local supply per step is free within the period's limit.
 
 Constants:
 - MW_TO_KW: MW → kW conversion for H2 production equation
-- Non-electric demand satisfaction
-- Coupling with power system generators
 """
 
 using JuMP: @variable, @constraint, @expression, @objective, Model, AffExpr
@@ -144,6 +145,26 @@ function _cumulative_capacity(input::PrimaryEnergyInput, kind::String, fuel::Str
 end
 
 """
+    _window_start_hour(input) -> Int
+
+Absolute horizon hour at which the window starts: hour 0 is Jan 1 of
+`base_year` and every modelled year is 8760 h long.
+"""
+_window_start_hour(input::PrimaryEnergyInput) =
+    (input.year - input.base_year) * HOURS_STD_YEAR + input.year_hour_offset
+
+"""
+    _transit_steps(fuel, route, step_hours) -> Int
+
+Transit delay of `route` for `fuel`, in time steps of `step_hours` hours
+(`transport_transit_days_per_100km` × distance / 100, rounded).
+"""
+function _transit_steps(fuel::FuelConfig, route::TransportRoute, step_hours::Int)
+    days = fuel.transport_transit_days_per_100km * route.distance_km / 100.0
+    return max(0, round(Int, days * 24.0 / max(step_hours, 1)))
+end
+
+"""
     prepare_fuel_data(input, temporal)
 
 Prepare fuel supply limits and demand requirements per period.
@@ -166,6 +187,10 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
     # Using window duration (total_operational_hours) would allow each window to access
     # 100% of annual availability, leading to over-consumption across multiple windows.
     scaling_base_hours = Float64(hours_in_year(input.year))  # Full year hours (8760 or 8784 for leap)
+    # Absolute horizon hour at which the window's first step starts (hour 0 =
+    # Jan 1 of base_year); disruption windows are given in these hours.
+    window_hour0 = _window_start_hour(input)
+    step_h = max(input.step_hours, 1)
     max_supply_periodic = Dict{String, Dict{Int, Dict{Int, Float64}}}()
     for fuel in input.fuels
         max_supply_periodic[fuel.name] = Dict{Int, Dict{Int, Float64}}()
@@ -180,12 +205,16 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
                 fraction = hours_in_p / scaling_base_hours
                 # Source disruption: scale availability by the fraction of this
                 # period's hours that fall inside the disruption window (reduced
-                # to disruption_availability there).
+                # to disruption_availability there). Step s covers the absolute
+                # hours [window_hour0 + (s-1)*step_h, window_hour0 + s*step_h).
                 disruption_mult = 1.0
                 if fuel.disruption_end_hour > fuel.disruption_start_hour && hours_in_p > 0
-                    n_cut = count(h -> fuel.disruption_start_hour <= h <
-                                       fuel.disruption_end_hour, hrs)
-                    frac_cut = n_cut / hours_in_p
+                    n_cut = sum(hrs) do s
+                        h0 = window_hour0 + (s - 1) * step_h
+                        max(0, min(h0 + step_h, fuel.disruption_end_hour) -
+                               max(h0, fuel.disruption_start_hour))
+                    end
+                    frac_cut = n_cut / (hours_in_p * step_h)
                     disruption_mult = (1.0 - frac_cut) +
                         frac_cut * fuel.disruption_availability
                 end
@@ -305,11 +334,7 @@ function build_primary_energy_variables!(
     fuel_transport_pp = Dict{String, Matrix{VariableRef}}()
     ne_consumption_pp = Dict{Tuple{String, String}, Matrix{VariableRef}}()
     ne_short_pp = Dict{Tuple{String, String}, Matrix{VariableRef}}()
-    storage_start_pp = Dict{String, Matrix{VariableRef}}()
-    storage_end_pp = Dict{String, Matrix{VariableRef}}()
-    loss_supply_pp = Dict{String, Matrix{VariableRef}}()
     excess_supply_pp = Dict{String, Matrix{VariableRef}}()
-    net_storage_change_pp = Dict{String, Matrix{VariableRef}}()
 
     for fuel_name in fuel_names
         # Fuel supply [node, period]
@@ -328,26 +353,6 @@ function build_primary_energy_variables!(
             )
         end
 
-        # Storage levels [node, period]
-        storage_start_pp[fuel_name] = @variable(model,
-            [n=1:n_nodes, p=1:n_primary],
-            lower_bound = 0,
-            base_name = "pp_storage_start_$(fuel_name)"
-        )
-
-        storage_end_pp[fuel_name] = @variable(model,
-            [n=1:n_nodes, p=1:n_primary],
-            lower_bound = 0,
-            base_name = "pp_storage_end_$(fuel_name)"
-        )
-
-        # Loss of supply [node, period]
-        loss_supply_pp[fuel_name] = @variable(model,
-            [n=1:n_nodes, p=1:n_primary],
-            lower_bound = 0,
-            base_name = "pp_loss_supply_$(fuel_name)"
-        )
-
         # Excess supply [node, period] - Enabled to match Python legacy
         # Slack variable to allow exceeding max_supply_periodic if needed for feasibility
         # This allows importing more fuel than the periodic limit when necessary (with high cost penalty)
@@ -355,12 +360,6 @@ function build_primary_energy_variables!(
             [n=1:n_nodes, p=1:n_primary],
             lower_bound = 0,
             base_name = "pp_excess_supply_$(fuel_name)"
-        )
-
-        # Net hourly storage change [node, period]
-        net_storage_change_pp[fuel_name] = @variable(model,
-            [n=1:n_nodes, p=1:n_primary],
-            base_name = "pp_net_storage_change_$(fuel_name)"
         )
 
         # Non-electric consumption per sector
@@ -390,8 +389,6 @@ function build_primary_energy_variables!(
     ne_consumption_hr = Dict{Tuple{String, String}, Matrix{VariableRef}}()
     loss_supply_hr = Dict{String, Matrix{VariableRef}}()
     emissions_hr = Dict{String, Matrix{VariableRef}}()
-    coupling_slack_start = Dict{String, Matrix{VariableRef}}()
-    coupling_slack_end = Dict{String, Matrix{VariableRef}}()
 
     for fuel_name in fuel_names
         # Storage level (includes hour T+1 for final state)
@@ -401,7 +398,7 @@ function build_primary_energy_variables!(
             base_name = "hr_storage_$(fuel_name)"
         )
 
-        # Storage in/out [node, hour]
+        # Local supply into the tank / fuel drawn for consumption [node, hour]
         storage_in_hr[fuel_name] = @variable(model,
             [n=1:n_nodes, t=1:n_hours],
             lower_bound = 0,
@@ -414,7 +411,7 @@ function build_primary_energy_variables!(
             base_name = "hr_storage_out_$(fuel_name)"
         )
 
-        # Loss of supply hourly
+        # Consumption the tank cannot cover (fuel shortfall) [node, hour]
         loss_supply_hr[fuel_name] = @variable(model,
             [n=1:n_nodes, t=1:n_hours],
             lower_bound = 0,
@@ -426,21 +423,6 @@ function build_primary_energy_variables!(
             [n=1:n_nodes, t=1:n_hours],
             lower_bound = 0,
             base_name = "hr_emissions_$(fuel_name)"
-        )
-
-        # Coupling slack variables - Enabled to match Python legacy
-        # These allow small violations in the coupling between periodic and hourly storage levels
-        # when it's structurally impossible to satisfy them (e.g., long windows with insufficient initial storage)
-        coupling_slack_start[fuel_name] = @variable(model,
-            [n=1:n_nodes, p=1:n_primary],
-            lower_bound = 0,
-            base_name = "slack_start_$(fuel_name)"
-        )
-
-        coupling_slack_end[fuel_name] = @variable(model,
-            [n=1:n_nodes, p=1:n_primary],
-            lower_bound = 0,
-            base_name = "slack_end_$(fuel_name)"
         )
 
         # Hourly NE consumption per sector
@@ -510,11 +492,7 @@ function build_primary_energy_variables!(
         fuel_supply_pp,
         fuel_transport_pp,
         ne_consumption_pp,
-        storage_start_pp,
-        storage_end_pp,
-        loss_supply_pp,
         excess_supply_pp,
-        net_storage_change_pp,
         storage_level_hr,
         storage_in_hr,
         storage_out_hr,
@@ -523,8 +501,6 @@ function build_primary_energy_variables!(
         loss_supply_hr,
         emissions_hr,
         total_emissions_hr,
-        coupling_slack_start,
-        coupling_slack_end,
         elec_power,
         h2_prod,
         elec_invest,
@@ -606,72 +582,15 @@ function add_primary_energy_constraints!(
     end
 
     # =========================================================================
-    # II. Primary Period Constraints
+    # II. Primary Period Constraints (supply limits, NE demand, shipments)
     # =========================================================================
 
     for p in temporal.primary_period_indices
         inv_p = get(temporal.primary_to_investment_period, p, 1)
+        days_in_p = length(temporal.hours_in_primary_period[p]) * input.step_hours / 24.0
 
         for fuel_name in fuel_names
-            fuel = fuel_by_name[fuel_name]
-
             for n in 1:n_nodes
-                # Periodic supply + transport in = transport out + NE consumption + storage change + loss
-                transport_in = AffExpr(0.0)
-                transport_out = AffExpr(0.0)
-
-                days_in_p = length(temporal.hours_in_primary_period[p]) / 24.0
-                for (r, route) in enumerate(input.transport_routes)
-                    if !haskey(route.fuel_params, fuel_name)
-                        continue
-                    end
-                    fparams = route.fuel_params[fuel_name]
-
-                    if route.to_node == n  # inflow to this node, after the transit delay
-                        loss_factor = 1.0 - (fparams.transport_losses * route.distance_km / 100.0)
-                        # Replenishment lead time (source -> plant tank): fuel
-                        # dispatched at period p_src = p - transit_periods arrives
-                        # now. Derived from the fuel's days-per-100km and the
-                        # route distance. Shipments dispatched before the window
-                        # (p_src < 1) fall outside it and are not counted here —
-                        # a small boundary effect; storage buffers it.
-                        transit_days = fuel.transport_transit_days_per_100km *
-                            route.distance_km / 100.0
-                        transit_periods = days_in_p > 0 ?
-                            round(Int, transit_days / days_in_p) : 0
-                        p_src = p - transit_periods
-                        if p_src >= 1
-                            add_to_expression!(transport_in,
-                                vars.fuel_transport_periodic[fuel_name][r, p_src],
-                                loss_factor)
-                        end
-                    end
-                    if route.from_node == n  # outflow from this node (dispatched now)
-                        add_to_expression!(transport_out,
-                            vars.fuel_transport_periodic[fuel_name][r, p])
-                    end
-                end
-
-                ne_consumption_total = AffExpr(0.0)
-                for sector in sectors
-                    key = (fuel_name, sector)
-                    if haskey(vars.non_electric_consumption_periodic, key)
-                        add_to_expression!(ne_consumption_total,
-                            vars.non_electric_consumption_periodic[key][n, p])
-                    end
-                end
-
-                # Balance constraint
-                @constraint(model,
-                    vars.storage_level_start[fuel_name][n, p] +
-                    vars.fuel_supply_periodic[fuel_name][n, p] + transport_in ==
-                    vars.storage_level_end[fuel_name][n, p] +
-                    ne_consumption_total + transport_out +
-                    vars.fuel_loss_of_supply_periodic[fuel_name][n, p] +
-                    vars.net_hourly_storage_change[fuel_name][n, p],
-                    base_name = "pp_balance_$(fuel_name)_$(n)_$(p)"
-                )
-
                 # Supply limit (with excess slack)
                 max_sup = get(get(max_supply[fuel_name], n, Dict()), p, Inf)
                 @constraint(model,
@@ -701,58 +620,9 @@ function add_primary_energy_constraints!(
                         end
                     end
                 end
-
-                # Storage continuity
-                if p > 1
-                    @constraint(model,
-                        vars.storage_level_start[fuel_name][n, p] ==
-                        vars.storage_level_end[fuel_name][n, p-1],
-                        base_name = "pp_storage_continuity_$(fuel_name)_$(n)_$(p)"
-                    )
-                else
-                    # Initial storage level (p == 1)
-                    initial_level = if input.initial_storage_levels !== nothing &&
-                                       haskey(input.initial_storage_levels, fuel_name) &&
-                                       n <= length(input.initial_storage_levels[fuel_name])
-                        input.initial_storage_levels[fuel_name][n]
-                    else
-                        fuel.initial_storage_level[n] * fuel.storage_capacity[n]
-                    end
-
-                    @constraint(model,
-                        vars.storage_level_start[fuel_name][n, 1] == initial_level,
-                        base_name = "pp_storage_initial_$(fuel_name)_$(n)"
-                    )
-
-                    # Fix hourly storage at t=1 too
-                    @constraint(model,
-                        vars.fuel_storage_level_hourly[fuel_name][n, 1] == initial_level,
-                        base_name = "hr_storage_initial_$(fuel_name)_$(n)"
-                    )
-                end
-
-                # Storage capacity constraints
-                base_cap = fuel.storage_capacity[n]
-                cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
-                inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
-                    vars.storage_capacity_investment[fuel_name][inv_p, n]
-                else
-                    0.0
-                end
-                total_cap = base_cap + cumul_cap + inv_cap
-
-                @constraint(model,
-                    vars.storage_level_end[fuel_name][n, p] <= total_cap,
-                    base_name = "pp_storage_max_end_$(fuel_name)_$(n)_$(p)"
-                )
-
-                @constraint(model,
-                    vars.storage_level_start[fuel_name][n, p] <= total_cap,
-                    base_name = "pp_storage_max_start_$(fuel_name)_$(n)_$(p)"
-                )
             end
 
-            # Transport capacity constraints (route-based)
+            # Transport capacity constraints (route-based, units/day)
             for (r, route) in enumerate(input.transport_routes)
                 if !haskey(route.fuel_params, fuel_name)
                     continue
@@ -769,8 +639,6 @@ function add_primary_energy_constraints!(
                 end
 
                 total_daily_cap = base_daily_cap + cumul_cap + inv_cap
-                hours_in_p = length(temporal.hours_in_primary_period[p])
-                days_in_p = hours_in_p / 24.0
 
                 @constraint(model,
                     vars.fuel_transport_periodic[fuel_name][r, p] <=
@@ -782,11 +650,83 @@ function add_primary_energy_constraints!(
     end
 
     # =========================================================================
-    # III. Hourly Operational Constraints
+    # III. Shipments per time step
     # =========================================================================
+    # A period's route flow leaves its origin evenly over the period's steps
+    # and reaches the destination tank transit-delay steps later, net of the
+    # transport losses. Fuel still in transit at the window's end does not
+    # reach this window (nor the next one).
+
+    steps_in_period = Dict(p => length(temporal.hours_in_primary_period[p])
+                           for p in temporal.primary_period_indices)
+    arrivals = Dict{String, Matrix{AffExpr}}()
+    departures = Dict{String, Matrix{AffExpr}}()
+    for fuel_name in fuel_names
+        fuel = fuel_by_name[fuel_name]
+        arr = [AffExpr(0.0) for _ in 1:n_nodes, _ in 1:n_hours]
+        dep = [AffExpr(0.0) for _ in 1:n_nodes, _ in 1:n_hours]
+        if haskey(vars.fuel_transport_periodic, fuel_name)
+            flow = vars.fuel_transport_periodic[fuel_name]
+            for (r, route) in enumerate(input.transport_routes)
+                haskey(route.fuel_params, fuel_name) || continue
+                fparams = route.fuel_params[fuel_name]
+                delivered = max(0.0, 1.0 - fparams.transport_losses * route.distance_km / 100.0)
+                delay = _transit_steps(fuel, route, input.step_hours)
+                from_ok = 1 <= route.from_node <= n_nodes
+                to_ok = 1 <= route.to_node <= n_nodes
+                for t in 1:n_hours
+                    p = temporal.hour_to_primary_period[t]
+                    from_ok && add_to_expression!(dep[route.from_node, t],
+                        flow[r, p], 1.0 / steps_in_period[p])
+                    s = t - delay
+                    if to_ok && s >= 1
+                        ps = temporal.hour_to_primary_period[s]
+                        add_to_expression!(arr[route.to_node, t],
+                            flow[r, ps], delivered / steps_in_period[ps])
+                    end
+                end
+            end
+        end
+        arrivals[fuel_name] = arr
+        departures[fuel_name] = dep
+    end
+
+    # =========================================================================
+    # IV. Hourly Operational Constraints (the tanks)
+    # =========================================================================
+
+    # (configured, built earlier, total) tank capacity at node n in investment period inv_p
+    function tank_capacity(fuel, fuel_name, n, inv_p)
+        base_cap = fuel.storage_capacity[n]
+        cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
+        inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
+            vars.storage_capacity_investment[fuel_name][inv_p, n]
+        else
+            0.0
+        end
+        return base_cap, cumul_cap, base_cap + cumul_cap + inv_cap
+    end
+
+    for fuel_name in fuel_names
+        fuel = fuel_by_name[fuel_name]
+        for n in 1:n_nodes
+            initial_level = if input.initial_storage_levels !== nothing &&
+                               haskey(input.initial_storage_levels, fuel_name) &&
+                               n <= length(input.initial_storage_levels[fuel_name])
+                input.initial_storage_levels[fuel_name][n]
+            else
+                fuel.initial_storage_level[n] * fuel.storage_capacity[n]
+            end
+            @constraint(model,
+                vars.fuel_storage_level_hourly[fuel_name][n, 1] == initial_level,
+                base_name = "hr_storage_initial_$(fuel_name)_$(n)"
+            )
+        end
+    end
 
     for t in 1:n_hours
         p = temporal.hour_to_primary_period[t]
+        inv_p = get(temporal.primary_to_investment_period, p, 1)
 
         for fuel_name in fuel_names
             fuel = fuel_by_name[fuel_name]
@@ -803,63 +743,35 @@ function add_primary_energy_constraints!(
             end
 
             for n in 1:n_nodes
-                # Hourly storage balance
-                # Matches Python legacy (primary_energy.py lines 711-716):
-                #   level[t+1] = level[t] + (storage_in + h2_production) * efficiency - storage_out
-                # For Hydrogen, also add production from electrolyzers
-                # E1: Use optimization variable when electrolyzer_config is provided,
-                # otherwise fall back to fixed h2_production_hourly data
+                # Tank balance:
+                #   level[t+1] = level[t] + (local supply + arrivals [+ H2]) * eff
+                #                - drawn - departures
+                # Hydrogen also receives electrolyzer production: a variable
+                # when electrolyzer_config is provided, else the fixed
+                # h2_production_hourly data.
+                inflow = AffExpr(0.0)
+                add_to_expression!(inflow, vars.fuel_storage_in_hourly[fuel_name][n, t])
+                add_to_expression!(inflow, arrivals[fuel_name][n, t])
                 if fuel_name == "Hydrogen" && vars.h2_production !== nothing
-                    # Joint optimization: H2 production is a variable (units/hr)
-                    h2_var = vars.h2_production[n, t] / MW_TO_KW  # Convert to storage units
-                    @constraint(model,
-                        vars.fuel_storage_level_hourly[fuel_name][n, t+1] ==
-                        vars.fuel_storage_level_hourly[fuel_name][n, t] +
-                        (vars.fuel_storage_in_hourly[fuel_name][n, t] + h2_var) * storage_eff -
-                        vars.fuel_storage_out_hourly[fuel_name][n, t],
-                        base_name = "hr_storage_balance_$(fuel_name)_$(n)_$(t)"
-                    )
+                    add_to_expression!(inflow, vars.h2_production[n, t], 1.0 / MW_TO_KW)
                 elseif fuel_name == "Hydrogen" && input.h2_production_hourly !== nothing
-                    # Fixed data fallback (legacy behavior)
-                    h2_fixed = input.h2_production_hourly[t, n] / MW_TO_KW
-                    @constraint(model,
-                        vars.fuel_storage_level_hourly[fuel_name][n, t+1] ==
-                        vars.fuel_storage_level_hourly[fuel_name][n, t] +
-                        (vars.fuel_storage_in_hourly[fuel_name][n, t] + h2_fixed) * storage_eff -
-                        vars.fuel_storage_out_hourly[fuel_name][n, t],
-                        base_name = "hr_storage_balance_$(fuel_name)_$(n)_$(t)"
-                    )
-                else
-                    @constraint(model,
-                        vars.fuel_storage_level_hourly[fuel_name][n, t+1] ==
-                        vars.fuel_storage_level_hourly[fuel_name][n, t] +
-                        vars.fuel_storage_in_hourly[fuel_name][n, t] * storage_eff -
-                        vars.fuel_storage_out_hourly[fuel_name][n, t],
-                        base_name = "hr_storage_balance_$(fuel_name)_$(n)_$(t)"
-                    )
+                    add_to_expression!(inflow, input.h2_production_hourly[t, n] / MW_TO_KW)
                 end
-
-                # Cannot dispatch more than available
                 @constraint(model,
-                    vars.fuel_storage_out_hourly[fuel_name][n, t] <=
-                    vars.fuel_storage_level_hourly[fuel_name][n, t],
-                    base_name = "hr_storage_max_out_$(fuel_name)_$(n)_$(t)"
+                    vars.fuel_storage_level_hourly[fuel_name][n, t+1] ==
+                    vars.fuel_storage_level_hourly[fuel_name][n, t] +
+                    storage_eff * inflow -
+                    vars.fuel_storage_out_hourly[fuel_name][n, t] -
+                    departures[fuel_name][n, t],
+                    base_name = "hr_storage_balance_$(fuel_name)_$(n)_$(t)"
                 )
 
+                base_cap, cumul_cap, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
+
                 # Max hourly dispatch rate (fraction of total storage capacity)
-                # Matches Python legacy (primary_energy.py lines 724-731)
                 if haskey(input.infrastructure, fuel_name)
                     infra = input.infrastructure[fuel_name]
                     if infra.max_hourly_dispatch_rate >= 0
-                        base_cap = fuel.storage_capacity[n]
-                        cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
-                        inv_p = get(temporal.primary_to_investment_period, p, 1)
-                        inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
-                            vars.storage_capacity_investment[fuel_name][inv_p, n]
-                        else
-                            0.0
-                        end
-                        total_cap = base_cap + cumul_cap + inv_cap
                         @constraint(model,
                             vars.fuel_storage_out_hourly[fuel_name][n, t] <=
                             infra.max_hourly_dispatch_rate * total_cap,
@@ -868,37 +780,25 @@ function add_primary_energy_constraints!(
                     end
                 end
 
-                # Minimum storage level
-                if fuel.min_storage_level > 0
-                    base_cap = fuel.storage_capacity[n]
-                    if base_cap > 0
-                        @constraint(model,
-                            vars.fuel_storage_level_hourly[fuel_name][n, t] >=
-                            fuel.min_storage_level * base_cap,
-                            base_name = "hr_storage_min_$(fuel_name)_$(n)_$(t)"
-                        )
-                    end
+                # Minimum storage level (after each step; the initial level is given)
+                if fuel.min_storage_level > 0 && base_cap > 0
+                    @constraint(model,
+                        vars.fuel_storage_level_hourly[fuel_name][n, t+1] >=
+                        fuel.min_storage_level * base_cap,
+                        base_name = "hr_storage_min_$(fuel_name)_$(n)_$(t)"
+                    )
                 end
 
-                # Maximum storage level
-                base_cap = fuel.storage_capacity[n]
-                cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
+                # Maximum storage level. A node without any tank capacity has
+                # no bound: its tank only buffers fuel within the window.
                 if base_cap > 0 || cumul_cap > 0
-                    inv_p = get(temporal.primary_to_investment_period, p, 1)
-                    inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
-                        vars.storage_capacity_investment[fuel_name][inv_p, n]
-                    else
-                        0.0
-                    end
-                    total_cap = base_cap + cumul_cap + inv_cap
-
                     @constraint(model,
-                        vars.fuel_storage_level_hourly[fuel_name][n, t] <= total_cap,
+                        vars.fuel_storage_level_hourly[fuel_name][n, t+1] <= total_cap,
                         base_name = "hr_storage_max_$(fuel_name)_$(n)_$(t)"
                     )
                 end
 
-                # Fuel needed for power + NE demand <= storage out + loss
+                # Fuel needed for power + NE consumption <= drawn + shortfall
                 fuel_for_power = AffExpr(0.0)
                 for (gen_idx, fuel_info) in input.generator_fuel_map
                     gen_fuel_name, _, _, _ = fuel_info
@@ -917,11 +817,9 @@ function add_primary_energy_constraints!(
                     end
                 end
 
-                # Hourly NE demand limit per sector
-                # Matches Python legacy (primary_energy.py lines 773-789):
-                # Each hour's NE consumption cannot exceed periodic_demand / hours_in_period
-                hours_in_p = temporal.hours_in_primary_period[p]
-                n_hours_in_p = length(hours_in_p)
+                # Hourly NE demand limit per sector: each hour's NE consumption
+                # cannot exceed periodic_demand / hours_in_period
+                n_hours_in_p = steps_in_period[p]
                 for sector in sectors
                     key = (fuel_name, sector)
                     if haskey(vars.non_electric_consumption_hourly, key) && haskey(ne_demand, key)
@@ -979,7 +877,7 @@ function add_primary_energy_constraints!(
     end
 
     # =========================================================================
-    # IV. Coupling Constraints (Temporal Scale Linking)
+    # V. Period ↔ step links
     # =========================================================================
 
     for p in temporal.primary_period_indices
@@ -987,50 +885,13 @@ function add_primary_energy_constraints!(
         if isempty(hours_in_p)
             continue
         end
-        first_hour = hours_in_p[1]
         last_hour = hours_in_p[end]
+        inv_p = get(temporal.primary_to_investment_period, p, 1)
 
         for fuel_name in fuel_names
-            # Storage efficiency for coupling constraint consistency
-            storage_eff = if haskey(input.infrastructure, fuel_name)
-                input.infrastructure[fuel_name].storage_efficiency
-            else
-                0.8
-            end
-
+            fuel = fuel_by_name[fuel_name]
             for n in 1:n_nodes
-                # Link hourly to periodic at period start
-                @constraint(model,
-                    vars.fuel_storage_level_hourly[fuel_name][n, first_hour] +
-                    vars.coupling_slack_start[fuel_name][n, p] >=
-                    vars.storage_level_start[fuel_name][n, p],
-                    base_name = "link_storage_start_$(fuel_name)_$(n)_$(p)"
-                )
-
-                # Link hourly to periodic at period end
-                @constraint(model,
-                    vars.fuel_storage_level_hourly[fuel_name][n, last_hour+1] +
-                    vars.coupling_slack_end[fuel_name][n, p] >=
-                    vars.storage_level_end[fuel_name][n, p],
-                    base_name = "link_storage_end_$(fuel_name)_$(n)_$(p)"
-                )
-
-                # Link net hourly storage ops to period
-                # Must match hourly dynamics: level[t+1] = level[t] + in*eff - out
-                # So net change (withdrawal) = out - in*eff
-                storage_net_change = AffExpr(0.0)
-                for t in hours_in_p
-                    add_to_expression!(storage_net_change,
-                        vars.fuel_storage_out_hourly[fuel_name][n, t])
-                    add_to_expression!(storage_net_change,
-                        vars.fuel_storage_in_hourly[fuel_name][n, t], -storage_eff)
-                end
-                @constraint(model,
-                    vars.net_hourly_storage_change[fuel_name][n, p] == storage_net_change,
-                    base_name = "link_net_storage_$(fuel_name)_$(n)_$(p)"
-                )
-
-                # Link periodic supply to hourly storage_in
+                # The period's local supply is delivered over its steps
                 storage_in_sum = AffExpr(0.0)
                 for t in hours_in_p
                     add_to_expression!(storage_in_sum,
@@ -1040,11 +901,21 @@ function add_primary_energy_constraints!(
                     storage_in_sum == vars.fuel_supply_periodic[fuel_name][n, p],
                     base_name = "link_supply_storage_in_$(fuel_name)_$(n)_$(p)"
                 )
-            end
-        end
 
-        # Link hourly NE consumption to periodic
-        for fuel_name in fuel_names
+                # Minimum storage level at the period's end (on the total capacity)
+                if fuel.min_storage_level > 0
+                    base_cap, cumul_cap, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
+                    if base_cap > 0 || cumul_cap > 0
+                        @constraint(model,
+                            vars.fuel_storage_level_hourly[fuel_name][n, last_hour + 1] >=
+                            fuel.min_storage_level * total_cap,
+                            base_name = "hr_storage_min_final_$(fuel_name)_$(n)_$(p)"
+                        )
+                    end
+                end
+            end
+
+            # Hourly NE consumption adds up to the period's
             for sector in sectors
                 key = (fuel_name, sector)
                 if haskey(vars.non_electric_consumption_hourly, key) &&
@@ -1064,67 +935,21 @@ function add_primary_energy_constraints!(
             end
         end
 
-        # Minimum storage level at period boundaries
-        # Matches Python legacy (primary_energy.py lines 877-893):
-        # At end of each period, enforce min storage on both hourly and periodic levels
-        for fuel_name in fuel_names
-            fuel = fuel_by_name[fuel_name]
-            if fuel.min_storage_level > 0
-                for n in 1:n_nodes
-                    base_cap = fuel.storage_capacity[n]
-                    cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
-                    inv_p = get(temporal.primary_to_investment_period, p, 1)
-                    inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
-                        vars.storage_capacity_investment[fuel_name][inv_p, n]
-                    else
-                        0.0
-                    end
-                    total_cap = base_cap + cumul_cap + inv_cap
-                    min_storage_abs = fuel.min_storage_level * total_cap
-
-                    if base_cap > 0 || (isa(cumul_cap, Number) && cumul_cap > 0)
-                        # Hourly level at end of period
-                        @constraint(model,
-                            vars.fuel_storage_level_hourly[fuel_name][n, last_hour + 1] >= min_storage_abs,
-                            base_name = "hr_storage_min_final_$(fuel_name)_$(n)_$(p)"
-                        )
-                        # Periodic end level
-                        @constraint(model,
-                            vars.storage_level_end[fuel_name][n, p] >= min_storage_abs,
-                            base_name = "pp_storage_min_end_$(fuel_name)_$(n)_$(p)"
-                        )
-                    end
-                end
-            end
-        end
-
-        # Last-period minimum storage in development mode
-        # Matches Python legacy (primary_energy.py lines 656-661):
-        # Enforce min fill percentage on last period end for sustainability
+        # Development mode: the window ends with every tank at least 10 % full
+        # (no cyclic storage condition).
         if p == temporal.primary_period_indices[end] && input.mode == "development"
             for fuel_name in fuel_names
-                if haskey(input.infrastructure, fuel_name)
-                    infra = input.infrastructure[fuel_name]
-                    fuel = fuel_by_name[fuel_name]
-                    for n in 1:n_nodes
-                        base_cap = fuel.storage_capacity[n]
-                        if base_cap > 0
-                            cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
-                            inv_p = get(temporal.primary_to_investment_period, p, 1)
-                            inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
-                                vars.storage_capacity_investment[fuel_name][inv_p, n]
-                            else
-                                0.0
-                            end
-                            total_cap = base_cap + cumul_cap + inv_cap
-                            # Use storage_expansion_limit as proxy for min_level_percentage
-                            # (Python uses fuel_infrastructure.storage_facilities.min_level_percentage, default 0.1)
-                            min_fill = 0.1
-                            @constraint(model,
-                                vars.storage_level_end[fuel_name][n, p] >= min_fill * total_cap,
-                                base_name = "pp_storage_min_last_$(fuel_name)_$(n)_$(p)"
-                            )
-                        end
+                haskey(input.infrastructure, fuel_name) || continue
+                fuel = fuel_by_name[fuel_name]
+                for n in 1:n_nodes
+                    base_cap, _, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
+                    if base_cap > 0
+                        min_fill = 0.1
+                        @constraint(model,
+                            vars.fuel_storage_level_hourly[fuel_name][n, last_hour + 1] >=
+                            min_fill * total_cap,
+                            base_name = "hr_storage_min_last_$(fuel_name)_$(n)"
+                        )
                     end
                 end
             end
@@ -1202,10 +1027,9 @@ the dict's values into the PowerSystem objective AND merges the dict into
 Buckets:
   :pe_investment_cost     — transport + storage infrastructure annualised CAPEX
   :pe_supply_cost         — base_price + import_cost × periodic supply, plus the tank drawdown (start − end level) at base_price
-  :pe_loss_cost           — loss-of-supply penalty (periodic + hourly)
+  :pe_loss_cost           — fuel shortfall (hourly) and unmet non-electric demand penalties
   :pe_excess_cost         — excess-supply penalty
   :pe_transport_cost      — route transport cost × periodic flow
-  :pe_coupling_slack_cost — periodic↔hourly storage-level linking slack
   :pe_electrolyzer_cost   — PE-side electrolyzer CAPEX/OPEX (distinct from
                             the PowerSystem-side electrolyzer in `cost_expressions`).
 """
@@ -1220,7 +1044,6 @@ function get_primary_energy_objective_terms(
     pe_loss_cost           = AffExpr(0.0)
     pe_excess_cost         = AffExpr(0.0)
     pe_transport_cost      = AffExpr(0.0)
-    pe_coupling_slack_cost = AffExpr(0.0)
     pe_electrolyzer_cost   = AffExpr(0.0)
 
     fuel_names = [f.name for f in input.fuels]
@@ -1298,11 +1121,6 @@ function get_primary_energy_objective_terms(
                     vars.fuel_supply_periodic[fuel_name][n, p],
                     base_price + import_cost)
 
-                # Loss of supply penalty
-                add_to_expression!(pe_loss_cost,
-                    vars.fuel_loss_of_supply_periodic[fuel_name][n, p],
-                    loss_penalty)
-
                 # Excess supply penalty
                 add_to_expression!(pe_excess_cost,
                     vars.fuel_excess_supply_periodic[fuel_name][n, p],
@@ -1356,25 +1174,6 @@ function get_primary_energy_objective_terms(
     end
 
     # =========================================================================
-    # Coupling Slack Penalties (periodic-hourly storage level linking)
-    # =========================================================================
-
-    coupling_slack_pen = input.coupling_slack_penalty
-
-    for fuel_name in fuel_names
-        for n in 1:n_nodes
-            for p in temporal.primary_period_indices
-                add_to_expression!(pe_coupling_slack_cost,
-                    vars.coupling_slack_start[fuel_name][n, p],
-                    coupling_slack_pen)
-                add_to_expression!(pe_coupling_slack_cost,
-                    vars.coupling_slack_end[fuel_name][n, p],
-                    coupling_slack_pen)
-            end
-        end
-    end
-
-    # =========================================================================
     # Electrolyzer Costs (E1: joint H2 production optimization)
     # Matches Python legacy electrolizer_model.py get_objective_terms()
     # =========================================================================
@@ -1408,7 +1207,6 @@ function get_primary_energy_objective_terms(
         :pe_loss_cost           => pe_loss_cost,
         :pe_excess_cost         => pe_excess_cost,
         :pe_transport_cost      => pe_transport_cost,
-        :pe_coupling_slack_cost => pe_coupling_slack_cost,
         :pe_electrolyzer_cost   => pe_electrolyzer_cost,
     )
 end
@@ -1582,10 +1380,8 @@ function extract_primary_energy_solution(
             for n in 1:n_nodes
                 total_supply[fuel_name][p] +=
                     value(vars.fuel_supply_periodic[fuel_name][n, p])
-                total_loss[fuel_name][p] +=
-                    value(vars.fuel_loss_of_supply_periodic[fuel_name][n, p])
             end
-            # Add hourly loss aggregated into primary periods
+            # Hourly fuel shortfall aggregated into primary periods
             if haskey(vars.fuel_loss_of_supply_hourly, fuel_name)
                 hours_in_p = temporal.hours_in_primary_period[p]
                 for t in hours_in_p, n in 1:n_nodes
@@ -1608,16 +1404,11 @@ function extract_primary_energy_solution(
         end
     end
 
-    # Final storage levels for carry-over
+    # Final tank levels for carry-over
     final_storage = Dict{String, Vector{Float64}}()
-    last_p = temporal.primary_period_indices[end]
-
     for fuel_name in fuel_names
-        final_storage[fuel_name] = zeros(n_nodes)
-        for n in 1:n_nodes
-            final_storage[fuel_name][n] =
-                value(vars.storage_level_end[fuel_name][n, last_p])
-        end
+        level = vars.fuel_storage_level_hourly[fuel_name]
+        final_storage[fuel_name] = [value(level[n, end]) for n in 1:n_nodes]
     end
 
     # Per-route transport flows
@@ -1663,15 +1454,7 @@ function extract_primary_energy_solution(
             end
         end
 
-        # Loss of supply penalty (periodic)
-        if haskey(vars.fuel_loss_of_supply_periodic, fuel_name)
-            for p in 1:n_primary, n in 1:n_nodes
-                total_loss_penalty += value(vars.fuel_loss_of_supply_periodic[fuel_name][n, p]) *
-                    input.loss_of_fuel_supply_penalty
-            end
-        end
-
-        # Loss of supply penalty (hourly)
+        # Fuel shortfall penalty (hourly)
         if haskey(vars.fuel_loss_of_supply_hourly, fuel_name)
             for t in 1:input.hours, n in 1:n_nodes
                 total_loss_penalty += value(vars.fuel_loss_of_supply_hourly[fuel_name][n, t]) *

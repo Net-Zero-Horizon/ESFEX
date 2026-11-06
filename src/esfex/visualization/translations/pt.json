@@ -2455,6 +2455,7 @@
     "delete": "Excluir",
     "availability": "Disponibilidade",
     "label_field": "Nota",
+    "recurring": "Repetir todos os anos",
     "start": "Início",
     "end": "Fim",
     "empty_hint": "Arraste numa linha para adicionar uma interrupção; clique para editar."

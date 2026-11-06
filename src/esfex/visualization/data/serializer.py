@@ -1973,6 +1973,7 @@ def _system_to_gui_state(sys: SystemConfig,
                 element_type=ow.element_type, element_id=iid,
                 start_hour=ow.start_hour, end_hour=ow.end_hour,
                 availability=ow.availability, label=ow.label,
+                recurring=bool(getattr(ow, "recurring", False)),
             )
             for iid in ids
         )
@@ -3207,6 +3208,8 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "availability": float(ow.availability),
                 "label": ow.label,
             }
+            if getattr(ow, "recurring", False):
+                od["recurring"] = True
             # Calendar ids are instance ids; the config uses unit key + node.
             inst = (_instances.get(ow.element_type) or {}).get(ow.element_id)
             if inst is not None:

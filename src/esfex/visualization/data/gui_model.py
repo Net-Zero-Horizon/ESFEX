@@ -390,7 +390,9 @@ class GuiOutageWindow:
     Edited via the interruptions calendar. ``element_id`` is the element's key
     or id (generators/batteries: unit key; lines: line_id; converters/
     transformers: name; fuel sources: fuel name). ``availability`` is the
-    capacity fraction during ``[start_hour, end_hour)`` (0 = full cut).
+    capacity fraction during ``[start_hour, end_hour)`` (0 = full cut). Hours
+    are absolute horizon hours (0 = Jan 1 of base_year); ``recurring`` repeats
+    the window every year.
     """
     element_type: str = "generator"
     element_id: str = ""
@@ -398,6 +400,7 @@ class GuiOutageWindow:
     end_hour: int = 1
     availability: float = 0.0
     label: str = ""
+    recurring: bool = False
 
 
 @dataclass
