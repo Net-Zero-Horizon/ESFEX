@@ -171,7 +171,7 @@ export PrimaryEnergyInput, PrimaryEnergyVariables, PrimaryEnergyResult
 export create_primary_energy_model, create_temporal_mapping
 export build_primary_energy_variables!, add_primary_energy_constraints!
 export get_primary_energy_objective_terms, extract_primary_energy_solution
-export couple_primary_energy_to_power_system!
+export couple_primary_energy_to_power_system!, in_transit_arrivals
 
 # Master Problem types and functions
 export SystemNodeRange
@@ -203,11 +203,6 @@ export add_inter_system_constraints!, build_multi_system_objective!
 export ScenarioMultipliers, Scenario, StochasticMasterInput
 export create_stochastic_master_problem
 export scenario_master_input, build_stochastic_objective!
-
-# Primary Energy Investment in Master Problem
-export PrimaryEnergyInvestmentConfig
-export add_primary_energy_investment_variables!
-export add_primary_energy_investment_costs!
 
 # NPV Iteration and Retirement
 export UnitNPV, NPVIterationResult

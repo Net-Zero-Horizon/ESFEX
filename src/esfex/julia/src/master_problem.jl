@@ -408,39 +408,8 @@ function build_master_variables!(
         end
     end
 
-    # Primary energy investment variables (M10)
-    fuel_storage_investment = Dict{String, Dict{Int, Vector{VariableRef}}}()
-    fuel_transport_investment = Dict{String, Dict{Int, Dict{Int, VariableRef}}}()
-
-    if !isempty(input.pe_configs)
-        for pe_config in input.pe_configs
-            fuel_id = pe_config.fuel_id
-            fuel_storage_investment[fuel_id] = Dict{Int, Vector{VariableRef}}()
-            fuel_transport_investment[fuel_id] = Dict{Int, Dict{Int, VariableRef}}()
-
-            for y_idx in 1:num_years
-                # Storage investment per node per year
-                fuel_storage_investment[fuel_id][y_idx] = @variable(model,
-                    [n=1:n_buses],
-                    lower_bound = 0,
-                    upper_bound = pe_config.storage_invest_max[n],
-                    base_name = "fuel_stor_inv_$(fuel_id)_y$(y_idx)"
-                )
-
-                # Transport investment per route per year
-                fuel_transport_investment[fuel_id][y_idx] = Dict{Int, VariableRef}()
-                for (r, route) in enumerate(input.transport_routes)
-                    if haskey(route.fuel_params, fuel_id)
-                        fuel_transport_investment[fuel_id][y_idx][r] = @variable(model,
-                            lower_bound = 0,
-                            upper_bound = pe_config.transport_invest_max,
-                            base_name = "fuel_trans_inv_$(fuel_id)_y$(y_idx)_r$(r)"
-                        )
-                    end
-                end
-            end
-        end
-    end
+    # The master has no fuel model: fuel storage and transport are built by
+    # the dispatch's primary-energy model (fuel_infrastructure).
 
     # Reservoir capacity investment variables
     reservoir_investment = Dict{Int, Dict{Int, Vector{VariableRef}}}()
@@ -472,8 +441,6 @@ function build_master_variables!(
         slack_re_target,
         slack_capacity,
         slack_budget,
-        fuel_storage_investment,
-        fuel_transport_investment,
         Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}(),  # inter_period_soc (TSAM)
         Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}(),  # inter_period_reservoir (TSAM seasonal hydro)
         reservoir_investment,
@@ -1340,27 +1307,6 @@ function build_investment_cost_expression(
             add_to_expression!(investment_cost, var, trans_cost * m_tx)
         end
 
-        # Primary energy infrastructure investment (M10)
-        for pe_config in input.pe_configs
-            fuel_id = pe_config.fuel_id
-            if haskey(vars.fuel_storage_investment, fuel_id) &&
-               haskey(vars.fuel_storage_investment[fuel_id], y_idx)
-                for n in 1:n_buses
-                    add_to_expression!(investment_cost,
-                        vars.fuel_storage_investment[fuel_id][y_idx][n],
-                        pe_config.storage_invest_cost[n])
-                end
-            end
-            if haskey(vars.fuel_transport_investment, fuel_id) &&
-               haskey(vars.fuel_transport_investment[fuel_id], y_idx)
-                for (r, var) in vars.fuel_transport_investment[fuel_id][y_idx]
-                    route = input.transport_routes[r]
-                    transport_cost = pe_config.transport_invest_cost * route.distance_km
-                    add_to_expression!(investment_cost, var, transport_cost)
-                end
-            end
-        end
-
         # Reservoir capacity investment
         for g in 1:n_gen
             gen = input.generators[g]
@@ -1754,6 +1700,12 @@ end
 Add operational constraints for a representative day by delegating to power_system.jl
 and transmission_dc.jl functions. Only master-specific logic (capacity precomputation,
 technology dispatch, RE enforcement, sectoral LoL) remains here.
+
+Returns `(tech_output, tech_day_cost)`: the candidate technologies' dispatch
+and their operating cost that `day_operational_cost` does not see (the
+curtailment penalty of candidate renewables and the battery technologies'
+maintenance and throughput degradation), unscaled like `day_operational_cost`;
+the callers scale both to the year the same way.
 
 CRITICAL: This links investment decisions to operational feasibility.
 """
@@ -2251,7 +2203,7 @@ function add_day_operational_constraints!(
     # objective so the LP trades tech overbuild against storage capex on an
     # explicit economic basis (the max_curtailment_ratio constraint alone
     # empirically does not bind for the full-year operational LP).
-    tech_curt_cost = AffExpr(0.0)
+    tech_day_cost = AffExpr(0.0)
 
     if input.max_curtailment_ratio < 1.0
         # Build as AffExpr explicitly: when the sum collapses to a single
@@ -2315,9 +2267,9 @@ function add_day_operational_constraints!(
                             add_to_expression!(total_curtailment, -1.0, tech_output[tc, b, ts])
                             # Penalise the same expression in the objective
                             if input.curtailment_cost > 0
-                                add_to_expression!(tech_curt_cost,
+                                add_to_expression!(tech_day_cost,
                                     cumul_cap * (avail * input.curtailment_cost))
-                                add_to_expression!(tech_curt_cost,
+                                add_to_expression!(tech_day_cost,
                                     -input.curtailment_cost, tech_output[tc, b, ts])
                             end
                         end
@@ -2333,9 +2285,35 @@ function add_day_operational_constraints!(
         end
     end
 
-    # Return tech_output AND the tech curtailment cost (the caller adds the
-    # latter to the master objective alongside calculate_day_operational_cost).
-    return tech_output, tech_curt_cost
+    add_to_expression!(tech_day_cost,
+        battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
+
+    # The caller scales tech_day_cost with the day cost (calculate_day_operational_cost)
+    return tech_output, tech_day_cost
+end
+
+"""
+    battery_tech_operating_cost(input, charge, discharge, hours) -> AffExpr
+
+Unscaled operating cost of the candidate battery technologies over `hours`
+steps, as the dispatch charges the batteries they become: `maintenance_cost`
+on charge and discharge, `throughput_degradation_cost` on discharge.
+`charge`/`discharge` are indexed [technology, bus, step]; `nothing` when the
+system has no battery technology.
+"""
+function battery_tech_operating_cost(input::MasterProblemInput, charge, discharge, hours::Int)
+    cost = AffExpr(0.0)
+    (charge === nothing || discharge === nothing) && return cost
+    for (bt, btech) in enumerate(input.battery_technologies), b in 1:input.network.num_buses
+        mc = btech.maintenance_cost[b]
+        dc = btech.throughput_degradation_cost[b]
+        (mc != 0 || dc != 0) || continue
+        for ts in 1:hours
+            add_to_expression!(cost, mc, charge[bt, b, ts])
+            add_to_expression!(cost, mc + dc, discharge[bt, b, ts])
+        end
+    end
+    return cost
 end
 
 """
@@ -2398,8 +2376,9 @@ co2_cost_per_mwh(input::MasterProblemInput, unit, b::Int) =
     day_operational_cost(ps_vars, input, hours; tech_output=nothing)
 
 Unscaled operating cost of one representative day or TSAM period: fuel, O&M
-and CO2, load shedding, curtailment, battery throughput and the reserve and
-inertia shortfalls. The callers scale it to a year.
+and CO2, load shedding, curtailment, battery maintenance (on charge and
+discharge) and throughput, and the reserve and inertia shortfalls. The callers
+scale it to a year.
 """
 function day_operational_cost(
     ps_vars::PowerSystemVariables,
@@ -2494,6 +2473,12 @@ function day_operational_cost(
         for b in 1:n_bat
             bat = input.batteries[b]
             for n in ps_vars.buses_of_bat[b]
+                # Maintenance per MWh charged and discharged, as in the dispatch
+                mc = bat.maintenance_cost[n]
+                if mc != 0
+                    add_to_expression!(cost, mc, ps_vars.bat_charge[b, n, t])
+                    add_to_expression!(cost, mc, ps_vars.bat_discharge[b, n, t])
+                end
                 if haskey(ps_vars.bat_seg_discharge, (b, n))
                     segs = input.bat_cost_curves[b][n]
                     seg_vars = ps_vars.bat_seg_discharge[(b, n)]
@@ -2528,22 +2513,27 @@ function day_operational_cost(
 end
 
 """
-    calculate_day_operational_cost(ps_vars, input, year_idx, hours)
+    calculate_day_operational_cost(ps_vars, input, year_idx, hours;
+                                   tech_output=nothing, tech_day_cost=nothing)
 
 Calculate operational cost for a representative day, scaled to the year.
+`tech_day_cost` (from `add_day_operational_constraints!`) is scaled with it.
 """
 function calculate_day_operational_cost(
     ps_vars::PowerSystemVariables,
     input::MasterProblemInput,
     year_idx::Int,
     hours::Int;
-    tech_output::Union{Nothing, Any} = nothing
+    tech_output::Union{Nothing, Any} = nothing,
+    tech_day_cost::Union{Nothing, AffExpr} = nothing
 )::AffExpr
     tres = max(1.0, input.temporal_resolution_hours)
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
     scaling_factor = tres * days_in_year / input.representative_days_per_year
 
-    return day_operational_cost(ps_vars, input, hours; tech_output) * scaling_factor
+    cost = day_operational_cost(ps_vars, input, hours; tech_output)
+    tech_day_cost === nothing || add_to_expression!(cost, tech_day_cost)
+    return cost * scaling_factor
 end
 
 """
@@ -2602,13 +2592,13 @@ function add_representative_days_validation!(
             ps_vars = create_day_ps_vars!(model, input, y_idx, day_idx + day_offset, hours)
 
             # Add operational constraints via delegation to power_system.jl
-            tech_output, tech_curt_cost = add_day_operational_constraints!(
+            tech_output, tech_day_cost = add_day_operational_constraints!(
                 model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour
             )
 
-            # Calculate and store operational cost (including tech curtailment penalty)
+            # Operational cost scaled to the year (candidate technologies' too)
             day_cost = calculate_day_operational_cost(ps_vars, input, y_idx, hours;
-                tech_output=tech_output) + tech_curt_cost
+                tech_output=tech_output, tech_day_cost=tech_day_cost)
             push!(vars.operational_costs[y_idx], day_cost)
         end
     end
@@ -2619,10 +2609,12 @@ end
 # =============================================================================
 
 """
-    calculate_day_operational_cost_tsam(day_vars, input, year_idx, hours, weight)
+    calculate_day_operational_cost_tsam(day_vars, input, year_idx, hours, weight;
+                                        tech_output=nothing, tech_day_cost=nothing)
 
 Calculate operational cost for a TSAM representative period with period weight.
-Uses weight-based scaling instead of 365/N uniform scaling.
+Uses weight-based scaling instead of 365/N uniform scaling; `tech_day_cost`
+is scaled with it.
 """
 function calculate_day_operational_cost_tsam(
     ps_vars::PowerSystemVariables,
@@ -2630,10 +2622,13 @@ function calculate_day_operational_cost_tsam(
     year_idx::Int,
     hours::Int,
     weight::Float64;
-    tech_output::Union{Nothing, Any} = nothing
+    tech_output::Union{Nothing, Any} = nothing,
+    tech_day_cost::Union{Nothing, AffExpr} = nothing
 )::AffExpr
     tres = max(1.0, input.temporal_resolution_hours)
-    return day_operational_cost(ps_vars, input, hours; tech_output) * tres * weight
+    cost = day_operational_cost(ps_vars, input, hours; tech_output)
+    tech_day_cost === nothing || add_to_expression!(cost, tech_day_cost)
+    return cost * tres * weight
 end
 
 """
@@ -2770,7 +2765,6 @@ function add_tsam_periods_validation!(
             # Batteries chain SOC, reservoirs chain water level; both attach the
             # period start to the previous boundary and its end to the next.
             tech_output = nothing
-            tech_curt_cost = AffExpr(0.0)
 
             soc_initial = nothing
             soc_final = nothing
@@ -2800,7 +2794,7 @@ function add_tsam_periods_validation!(
                 end
             end
 
-            tech_output, tech_curt_cost = add_day_operational_constraints!(
+            tech_output, tech_day_cost = add_day_operational_constraints!(
                 model, ps_vars, vars, input, y_idx, chrono_idx + day_offset,
                 day_demand, start_hour;
                 initial_soc_overrides=soc_initial,
@@ -2809,11 +2803,11 @@ function add_tsam_periods_validation!(
                 final_reservoir_targets=res_final
             )
 
-            # Calculate weighted operational cost (with tech curtailment penalty)
+            # Weighted operational cost (candidate technologies' too)
             day_cost = calculate_day_operational_cost_tsam(
                 ps_vars, input, y_idx, hours, weight;
-                tech_output=tech_output
-            ) + weight * tech_curt_cost
+                tech_output=tech_output, tech_day_cost=tech_day_cost
+            )
             push!(vars.operational_costs[y_idx], day_cost)
         end
     end
@@ -3217,8 +3211,6 @@ function create_multi_system_master_problem(input::MultiSystemMasterInput)
     ext_vars = ExtendedMasterVariables(
         system_vars,
         inter_system_investment,
-        Dict{String, Dict{Int, Vector{VariableRef}}}(),
-        Dict{String, Dict{Int, Dict{Int, VariableRef}}}(),
         Dict{String, Dict{Int, Vector{AffExpr}}}(),
         Dict{String, Dict{Int, AffExpr}}(),
         Dict{String, Dict{Int, Float64}}(),
@@ -3398,7 +3390,7 @@ function create_multi_system_master_problem(input::MultiSystemMasterInput)
 
                 # Pass inter-system flow contributions at border buses
                 inj = external_inj_per_system[sys.name]
-                tech_output, tech_curt_cost = add_day_operational_constraints!(
+                tech_output, tech_day_cost = add_day_operational_constraints!(
                     model, ps_vars, vars_sys, sys_input,
                     y_idx, day_idx, day_demand, start_hour;
                     external_injections = isempty(inj) ? nothing : inj
@@ -3406,7 +3398,7 @@ function create_multi_system_master_problem(input::MultiSystemMasterInput)
 
                 day_cost = calculate_day_operational_cost(
                     ps_vars, sys_input, y_idx, actual_hours;
-                    tech_output=tech_output) + tech_curt_cost
+                    tech_output=tech_output, tech_day_cost=tech_day_cost)
                 push!(vars_sys.operational_costs[y_idx], day_cost)
                 ext_vars.system_day_vars[sys.name][(y_idx, day_idx)] = ps_vars
             end
@@ -3755,93 +3747,6 @@ function build_stochastic_objective!(
     @objective(model, Min, total_cost)
 
     return total_cost  # Return for MGA near-optimal constraint
-end
-
-# =============================================================================
-# Primary Energy Infrastructure Investment
-# =============================================================================
-
-"""
-    add_primary_energy_investment_variables!(model, ext_vars, input, pe_configs)
-
-Add primary energy infrastructure investment variables to the model.
-"""
-function add_primary_energy_investment_variables!(
-    model::Model,
-    ext_vars::ExtendedMasterVariables,
-    input::MasterProblemInput,
-    pe_configs::Vector{PrimaryEnergyInvestmentConfig}
-)
-    num_years = length(input.years)
-    n_buses = input.network.num_buses
-
-    for pe_config in pe_configs
-        fuel_id = pe_config.fuel_id
-
-        # Storage investment per node per year
-        ext_vars.fuel_storage_investment[fuel_id] = Dict{Int, Vector{VariableRef}}()
-        for y_idx in 1:num_years
-            ext_vars.fuel_storage_investment[fuel_id][y_idx] = @variable(model,
-                [n=1:n_buses],
-                lower_bound = 0,
-                upper_bound = pe_config.storage_invest_max[n],
-                base_name = "fuel_stor_inv_$(fuel_id)_y$(y_idx)"
-            )
-        end
-
-        # Transport investment per route per year
-        ext_vars.fuel_transport_investment[fuel_id] = Dict{Int, Dict{Int, VariableRef}}()
-        for y_idx in 1:num_years
-            ext_vars.fuel_transport_investment[fuel_id][y_idx] = Dict{Int, VariableRef}()
-            for (r, route) in enumerate(input.transport_routes)
-                if haskey(route.fuel_params, fuel_id)
-                    ext_vars.fuel_transport_investment[fuel_id][y_idx][r] = @variable(model,
-                        lower_bound = 0,
-                        upper_bound = pe_config.transport_invest_max,
-                        base_name = "fuel_trans_inv_$(fuel_id)_y$(y_idx)_r$(r)"
-                    )
-                end
-            end
-        end
-    end
-end
-
-"""
-    add_primary_energy_investment_costs!(total_cost, ext_vars, input, pe_configs, discount_factor, y_idx)
-
-Add primary energy investment costs to objective function.
-"""
-function add_primary_energy_investment_costs!(
-    total_cost::AffExpr,
-    ext_vars::ExtendedMasterVariables,
-    input::MasterProblemInput,
-    pe_configs::Vector{PrimaryEnergyInvestmentConfig},
-    discount_factor::Float64,
-    y_idx::Int
-)
-    n_buses = input.network.num_buses
-
-    for pe_config in pe_configs
-        fuel_id = pe_config.fuel_id
-
-        # Storage investment cost
-        if haskey(ext_vars.fuel_storage_investment, fuel_id)
-            for n in 1:n_buses
-                add_to_expression!(total_cost,
-                    ext_vars.fuel_storage_investment[fuel_id][y_idx][n],
-                    pe_config.storage_invest_cost[n] * discount_factor)
-            end
-        end
-
-        # Transport investment cost (route-based, includes distance factor)
-        if haskey(ext_vars.fuel_transport_investment, fuel_id)
-            for (r, var) in ext_vars.fuel_transport_investment[fuel_id][y_idx]
-                route = input.transport_routes[r]
-                transport_cost = pe_config.transport_invest_cost * route.distance_km
-                add_to_expression!(total_cost, var, transport_cost * discount_factor)
-            end
-        end
-    end
 end
 
 # =============================================================================

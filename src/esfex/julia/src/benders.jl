@@ -1241,8 +1241,11 @@ function create_benders_subproblem(
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
     scaling_factor = tres * days_in_year / input.representative_days_per_year
 
+    # Battery technologies' maintenance and throughput, as in the monolithic master
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
-        tech_output=tech_output)
+        tech_output=tech_output,
+        tech_day_cost=battery_tech_operating_cost(input, bat_tech_charge,
+                                                  bat_tech_discharge, hours))
 
     # Cap load-shedding penalties for Benders numerical stability.
     # calculate_day_operational_cost already includes scaling_factor internally,
