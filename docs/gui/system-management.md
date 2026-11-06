@@ -103,7 +103,9 @@ All system names are shown in bold; the tree does not mark the active system.
 2. Edit the **Name** field.
 3. Press Enter or move to another field to confirm.
 
-The rename updates the Element Tree and the system's entry in the project. It does not update inter-system links that reference the old name, nor the Global Settings > Systems to Simulate list, which Validate, Save, and Run use. A renamed system can therefore be left out of validation and runs, and its links point to a name that no longer exists. Choose final system names before validating or adding inter-system links.
+The rename updates every place that refers to the system by name: the Element Tree, the inter-system links that end at it, the Global Settings > Systems to Simulate list (the system keeps its tick and its position), and the saved project (`systems` and `meta_network`). Settings that the Studio does not edit stay with the renamed system. A rename marks the project as not validated, so run Validate again before Run.
+
+A name that another system already uses is rejected with a message, and the field goes back to the old name.
 
 
 ---

@@ -47,6 +47,7 @@ from esfex.visualization.data.serializer import (
     config_to_stochastic_scenarios,
     gui_state_to_yaml,
     inter_system_links_to_config_dict,
+    rename_system_in_config,
 )
 from esfex.visualization.map_widget import MapWidget
 from esfex.visualization.sld_widget import SldWidget
@@ -2286,23 +2287,43 @@ class MainWindow(QMainWindow):
         return element_id
 
     def _on_system_renamed(self, old_name: str, new_name: str):
-        """Handle system name change from the system settings form."""
+        """Handle system name change from the system settings form.
+
+        The name is a key in several places: ``_all_states``, the element
+        tree, inter-system links, ``systems_to_simulate`` and the loaded
+        base config (``systems`` and ``meta_network``). All of them follow
+        the rename, so the system keeps its links and stays in Validate/Run.
+        """
+        state = self._all_states.get(old_name)
         if new_name in self._all_states and new_name != old_name:
             QMessageBox.warning(
                 self, tr("messages.duplicate_name_title"),
                 tr("messages.duplicate_name", name=new_name),
             )
-            # Revert
-            self._model.state.name = old_name
+            # Revert the name the form already wrote into the state.
+            if state is not None:
+                state.name = old_name
+            self.model.state.name = old_name
+            form = getattr(self, "_system_form", None)
+            if form is not None:
+                form.load_element()
             return
-        # Update _all_states dict
-        state = self._all_states.pop(old_name, None)
-        if state is not None:
-            self._all_states[new_name] = state
+        # Rebuild _all_states in place of the old key (order matters: the
+        # first system is the primary one for new projects).
+        self._all_states = {
+            (new_name if name == old_name else name): st
+            for name, st in self._all_states.items()
+        }
         if self._current_system_name == old_name:
             self._current_system_name = new_name
+        self.model.rename_system_references(old_name, new_name)
+        rename_system_in_config(self._loaded_config, old_name, new_name)
         # Update element tree
         self.element_tree.rename_system(old_name, new_name)
+        self._sync_systems_to_form()
+        self._invalidate_validation()
+        # Map ids of the other systems carry a "<system>/" prefix; re-render.
+        self.model.stateLoaded.emit()
 
     def _update_map_actions_state(self):
         """Enable/disable map-element toolbar actions based on system count."""
@@ -2979,24 +3000,7 @@ class MainWindow(QMainWindow):
                 for lk in config_to_inter_system_links(config):
                     # Only add links whose both systems exist in the studio
                     if lk.from_system in self._all_states and lk.to_system in self._all_states:
-                        self.model.add_inter_system_link(
-                            link_id=lk.link_id,
-                            link_type=lk.link_type,
-                            fuel=lk.fuel,
-                            from_system=lk.from_system,
-                            to_system=lk.to_system,
-                            from_node=lk.from_node,
-                            to_node=lk.to_node,
-                            capacity_mw=lk.capacity_mw,
-                            investment_cost=lk.investment_cost,
-                            max_investment_mw=lk.max_investment_mw,
-                            loss_factor=lk.loss_factor,
-                            distance_km=lk.distance_km,
-                            cost_per_mw_km=lk.cost_per_mw_km,
-                            waypoints=lk.waypoints,
-                            from_endpoint=lk.from_endpoint,
-                            to_endpoint=lk.to_endpoint,
-                        )
+                        self.model.restore_inter_system_link(lk, keep_id=False)
 
                 QMessageBox.information(
                     self, tr("common.info"),
@@ -7110,38 +7114,9 @@ class MainWindow(QMainWindow):
         self.model.clear_inter_system_links()
         self.element_tree.clear_inter_system_links()
         for lk in config_to_inter_system_links(config):
-            self.model.add_inter_system_link(
-                link_id=lk.link_id,
-                link_type=lk.link_type,
-                fuel=lk.fuel,
-                from_system=lk.from_system,
-                to_system=lk.to_system,
-                from_node=lk.from_node,
-                to_node=lk.to_node,
-                capacity_mw=lk.capacity_mw,
-                investment_cost=lk.investment_cost,
-                max_investment_mw=lk.max_investment_mw,
-                loss_factor=lk.loss_factor,
-                distance_km=lk.distance_km,
-                cost_per_mw_km=lk.cost_per_mw_km,
-                # Restore GUI geometry + LineForm-parity electrical
-                # metadata, all saved in SystemLinkConfig.* so the
-                # polyline and the properties form round-trip cleanly.
-                waypoints=lk.waypoints,
-                from_endpoint=lk.from_endpoint,
-                to_endpoint=lk.to_endpoint,
-                voltage_kv=lk.voltage_kv,
-                line_type=lk.line_type,
-                length_km=lk.length_km,
-                base_impedance=lk.base_impedance,
-                reactance_per_km=lk.reactance_per_km,
-                susceptance_pu=lk.susceptance_pu,
-                num_circuits=lk.num_circuits,
-                frequency_hz=lk.frequency_hz,
-                current_type=lk.current_type,
-                decorative=lk.decorative,
-                style=lk.style,
-            )
+            # Every parsed field (geometry, impedance, LineForm-parity
+            # metadata, style) is restored.
+            self.model.restore_inter_system_link(lk)
 
         self._update_map_actions_state()
         self._restore_geo_assets(raw_dict)
