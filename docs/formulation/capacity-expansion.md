@@ -372,7 +372,7 @@ RE targets are set per system \(\sigma\) (one global system when the configurati
 \rho^{target}_{\sigma,1} = \rho^{init}_\sigma, \qquad \rho^{target}_{\sigma,y} = \rho^{init}_\sigma + \frac{y - 1}{Y - 1} \left( \rho^{target} - \rho^{init}_\sigma \right) \quad (y \geq 2) \tag{RE-1}
 \]
 
-with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\).
+with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\). In myopic planning each one-year master takes its year's \(\rho^{target}_{\sigma,y}\) from this trajectory over the whole horizon (`re_target_override`), while RE-3 starts from the share reached the year before.
 
 **RE-2: RE target** (soft, `re_target_s{σ}_y{y}`):
 

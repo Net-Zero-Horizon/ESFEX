@@ -2362,6 +2362,10 @@ struct MasterProblemInput
     # Loss-of-load penalty cap ($/MW per timestep) applied inside Benders
     # subproblems for numerical stability. Ignored by the monolithic solver.
     benders_lol_penalty_cap::Float64
+    # RE targets (system, year) that replace the RE-1 trajectory: a myopic
+    # run solves one year at a time, so its year's target comes from the
+    # whole horizon's trajectory. Empty = RE-1.
+    re_target_override::Dict{Tuple{Int,Int}, Float64}
 end
 
 # Constructor with defaults
@@ -2436,7 +2440,8 @@ function MasterProblemInput(;
     gen_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     tech_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     bat_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
-    benders_lol_penalty_cap::Float64 = 1000.0
+    benders_lol_penalty_cap::Float64 = 1000.0,
+    re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}()
 )
     return MasterProblemInput(
         years, base_year,
@@ -2469,7 +2474,8 @@ function MasterProblemInput(;
         transmission_resistances, transmission_loss_segments,
         solver_name, threads, time_limit, gap, verbose, solver_options,
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
-        benders_lol_penalty_cap
+        benders_lol_penalty_cap,
+        re_target_override
     )
 end
 

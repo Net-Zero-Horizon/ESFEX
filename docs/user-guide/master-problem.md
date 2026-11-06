@@ -233,7 +233,7 @@ The path enters the model in three ways:
 
 With several systems, each system has its own RE share and starting value.
 
-In `myopic` mode, each year is a one-year model. Its target is the RE share reached the year before, and the increment bounds require this year's share to rise by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT` (shortfalls are paid through `FRE_penetration_loss`). `TARGET_RE_PENETRATION` does not enter the myopic master.
+In `myopic` mode, each year is a one-year model whose target is that year's \(\tau_y\) on the same path, computed over the whole horizon from \(\rho^{init}\) to `TARGET_RE_PENETRATION` with the same clamped steps. The increment bounds start from the RE share reached the year before: this year's share must rise by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT` (shortfalls are paid through `FRE_penetration_loss`).
 
 ```yaml
 systems:
