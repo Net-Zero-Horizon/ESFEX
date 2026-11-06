@@ -3538,12 +3538,17 @@ class MainWindow(QMainWindow):
 
     def _on_map_ready(self):
         """Map initialised -- load config if one was provided, or rebuild after crash."""
-        if self._loaded_config is not None:
+        crashed = getattr(self.map_widget, '_crash_recovered', False)
+        if crashed:
+            self.map_widget._crash_recovered = False
+        if self._loaded_config is not None and (not crashed or self._project_load_pending):
+            # First load (also when the map crashed before it was populated).
             self.statusBar().showMessage("Loading configuration...")
             QTimer.singleShot(0, self._deferred_populate)
-        elif getattr(self.map_widget, '_crash_recovered', False):
-            # Map was reloaded after WebEngine render process crash — rebuild
-            self.map_widget._crash_recovered = False
+        elif crashed:
+            # Map was reloaded after a WebEngine render process crash: redraw
+            # the project as it is in memory. Repopulating from
+            # _loaded_config would drop every edit made since loading.
             self.statusBar().showMessage("Map recovered from crash. Rebuilding...")
             QTimer.singleShot(50, self._on_state_loaded)
         else:

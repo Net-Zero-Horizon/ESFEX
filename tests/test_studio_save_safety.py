@@ -280,3 +280,56 @@ def test_unknown_keys_kept_by_autosave_cleared_by_save(home, tmp_path, no_dialog
         assert "dorop" not in cfg.read_text()
     finally:
         _close(w)
+
+
+def _spy_map_ready(w, monkeypatch):
+    """Record whether the next map-ready repopulates from the loaded config
+    or redraws the in-memory project."""
+    calls: list[str] = []
+    monkeypatch.setattr(w, "_deferred_populate", lambda: calls.append("populate"))
+    monkeypatch.setattr(w, "_on_state_loaded", lambda: calls.append("redraw"))
+    return calls
+
+
+def _wait_for(app, calls, timeout=60.0):
+    t0 = time.time()
+    while not calls and time.time() - t0 < timeout:
+        app.processEvents()
+        time.sleep(0.02)
+    assert calls, "map-ready never handled"
+
+
+def test_map_crash_keeps_in_memory_edits(home, tmp_path, no_dialogs, monkeypatch):
+    """#133: after a WebEngine renderer crash the map is rebuilt from the
+    project in memory, not repopulated from the file loaded at startup."""
+    cfg = _project(tmp_path / "proj")
+    app, w = _start(cfg)
+    try:
+        _wait_loaded(app, w)
+        state = w.model.state
+        gen = next(iter(state.generators.values()))
+        gen.name = "edited in memory"
+        calls = _spy_map_ready(w, monkeypatch)
+        w.map_widget._on_render_crash(None, 1)       # reloads the page
+        _wait_for(app, calls)
+        assert calls == ["redraw"]
+        assert w.model.state is state
+        assert gen.name == "edited in memory"
+        assert not w.map_widget._crash_recovered
+    finally:
+        _close(w)
+
+
+def test_map_crash_before_first_populate_loads_the_project(home, tmp_path, no_dialogs,
+                                                           monkeypatch):
+    cfg = _project(tmp_path / "proj")
+    app, w = _start(cfg)
+    try:
+        assert w._project_load_pending
+        calls = _spy_map_ready(w, monkeypatch)
+        w.map_widget._crash_recovered = True
+        w._on_map_ready()
+        _wait_for(app, calls)
+        assert calls[0] == "populate"
+    finally:
+        _close(w)
