@@ -2305,9 +2305,19 @@ class PowerSystemAdapter:
         except Exception as e:
             logger.error(f"Failed to dump IIS: {e}")
 
-    def get_solution_values(self) -> Dict[str, Any]:
+    def get_solution_values(self, keep_steps: Optional[int] = None,
+                            primary_energy: Optional["PrimaryEnergyAdapter"] = None,
+                            ) -> Dict[str, Any]:
         """
         Extract solution values from the solved model.
+
+        Args:
+            keep_steps: Steps of a rolling-horizon window that are committed
+                (the next window solves the rest again). The objective, the
+                scalar totals and ``cost_breakdown`` then cover only those
+                steps; the arrays still span the window. Default: all steps.
+            primary_energy: The primary-energy block solved in the same
+                model, so its costs are split by step too.
 
         Returns:
             Dictionary with solution values
@@ -2318,9 +2328,19 @@ class PowerSystemAdapter:
         if self._jl_model is None:
             raise RuntimeError("Model not built. Call build_model() first.")
 
+        committed = None
+        n_steps = int(self._jl_input.temporal.hours)
+        if keep_steps is not None and 0 < int(keep_steps) < n_steps:
+            pe_vars = getattr(primary_energy, "_jl_vars", None)
+            pe_temporal = getattr(primary_energy, "_jl_temporal", None)
+            committed = ESFEX.committed_steps(
+                self._jl_vars, n_steps, int(keep_steps),
+                pe_vars=pe_vars, pe_temporal=pe_temporal)
+
         # Extract solution using Julia function
         t0 = _time.perf_counter()
-        jl_result = ESFEX.extract_solution(self._jl_model, self._jl_vars, self._jl_input)
+        jl_result = ESFEX.extract_solution(self._jl_model, self._jl_vars, self._jl_input,
+                                           committed=committed)
         t_extract = _time.perf_counter() - t0
 
         # Convert to Python dictionary
@@ -4497,25 +4517,35 @@ class PrimaryEnergyAdapter:
 
         logger.debug("PrimaryEnergy integrated with PowerSystem")
 
-    def get_results(self) -> Dict[str, Any]:
+    def get_results(self, keep_steps: Optional[int] = None) -> Dict[str, Any]:
         """
         Get primary energy results after solving.
 
+        Args:
+            keep_steps: Committed steps of a rolling-horizon window; the cost
+                totals cover only those (a period counts for the share of
+                its steps among them). Default: all steps.
+
         Returns:
             Dictionary with solution values (``total_fuel_cost``,
-            ``total_transport_cost``, ``total_loss_penalty`` in $)
+            ``total_transport_cost``, ``total_loss_penalty`` in $;
+            ``fuel_for_power``: ``{generator index (0-based): [node x step]}``,
+            the fuel each coupled unit burns per step)
         """
         ESFEX = get_esfex_module()
 
         if self._jl_model is None:
             raise RuntimeError("Model not built.")
 
+        keep = self.hours if keep_steps is None else max(1, min(int(keep_steps), self.hours))
         jl_result = ESFEX.extract_primary_energy_solution(
             self._jl_model,
             self._jl_vars,
             self._jl_input,
             self._jl_temporal,
+            keep=keep,
         )
+        hourly = ESFEX.extract_hourly_results(self._jl_vars, self._jl_input, self._jl_temporal)
 
         # Convert to Python types
         return {
@@ -4530,6 +4560,10 @@ class PrimaryEnergyAdapter:
             'total_fuel_cost': float(jl_result.total_fuel_cost) * COST_UNSCALE,
             'total_transport_cost': float(jl_result.total_transport_cost) * COST_UNSCALE,
             'total_loss_penalty': float(jl_result.total_loss_penalty) * COST_UNSCALE,
+            'fuel_for_power': {
+                int(g) - 1: np.array(m, dtype=float)
+                for g, m in hourly["fuel_for_power_hourly"].items()
+            },
         }
 
     def get_debug_info(self) -> Dict[str, Any]:

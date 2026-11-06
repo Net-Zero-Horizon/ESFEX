@@ -453,7 +453,7 @@ Results are written to `results/<config_stem>_<ddmmyyyy>_<HHMM>.h5` (or the `--o
 | `transport_flows/<fuel>` | Flow per route `[routes x periods]`, same periods |
 | attrs `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | Yearly totals, in $ |
 
-With a rolling horizon each window reports its own periods; the year keeps only each window's committed steps (not the overlap with the next window), like the dispatch arrays, and the window costs count in proportion to those steps.
+With a rolling horizon each window reports its own periods; the year keeps only each window's committed steps (not the overlap with the next window), like the dispatch arrays, and the costs add up those steps (a period's supply counts for the share of its steps that the window keeps).
 
 ### Fuel Supply and Storage
 

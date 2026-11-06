@@ -1332,16 +1332,21 @@ end
 # =============================================================================
 
 """
-    extract_primary_energy_solution(model, vars, input, temporal)
+    extract_primary_energy_solution(model, vars, input, temporal; adjusted_prices, keep)
 
 Extract solution values from the primary energy model.
+
+The cost totals cover the first `keep` steps (default: all): a rolling-horizon
+window keeps only those, and a period's quantities count for the share of its
+steps among them (see `period_committed_share`).
 """
 function extract_primary_energy_solution(
     model::Model,
     vars::PrimaryEnergyVariables,
     input::PrimaryEnergyInput,
     temporal::TemporalMapping;
-    adjusted_prices::Dict{String, Float64} = Dict{String, Float64}()
+    adjusted_prices::Dict{String, Float64} = Dict{String, Float64}(),
+    keep::Int = input.hours
 )::PrimaryEnergyResult
     fuel_names = [f.name for f in input.fuels]
     n_nodes = input.num_nodes
@@ -1443,7 +1448,8 @@ function extract_primary_energy_solution(
         # Fuel supply cost
         if haskey(vars.fuel_supply_periodic, fuel_name)
             for p in 1:n_primary, n in 1:n_nodes
-                total_fuel_cost += value(vars.fuel_supply_periodic[fuel_name][n, p]) * price
+                total_fuel_cost += value(vars.fuel_supply_periodic[fuel_name][n, p]) * price *
+                    period_committed_share(temporal, p, keep)
             end
         end
 
@@ -1457,7 +1463,8 @@ function extract_primary_energy_solution(
                     flow_val = value(vars.fuel_transport_periodic[fuel_name][r, p])
                     if flow_val > 1e-6
                         fparams = route.fuel_params[fuel_name]
-                        total_transport_cost += flow_val * fparams.transport_cost * route.distance_km
+                        total_transport_cost += flow_val * fparams.transport_cost * route.distance_km *
+                            period_committed_share(temporal, p, keep)
                     end
                 end
             end
@@ -1465,7 +1472,7 @@ function extract_primary_energy_solution(
 
         # Fuel shortfall penalty (hourly)
         if haskey(vars.fuel_loss_of_supply_hourly, fuel_name)
-            for t in 1:input.hours, n in 1:n_nodes
+            for t in 1:min(keep, input.hours), n in 1:n_nodes
                 total_loss_penalty += value(vars.fuel_loss_of_supply_hourly[fuel_name][n, t]) *
                     input.loss_of_fuel_supply_penalty
             end
