@@ -90,3 +90,21 @@ def test_each_system_pays_its_own_co2_penalty(tmp_path):
     assert a_t == pytest.approx(LOAD * 8760, rel=1e-3)
     # B: coal + 500 $/t loses to gas, so B stops at its own budget
     assert b_t == pytest.approx(BUDGET, rel=1e-3)
+
+
+def test_zone_nodes_join_the_budget_of_their_system():
+    """Zone nodes are appended after every system's nodes, so they fell
+    outside every system's node range and their emissions escaped the
+    budgets. Each now joins the system of the bus it connects to."""
+    from test_zones import _make_zone
+
+    from esfex.zones import expand_config_with_zones
+
+    _, op, _ = Orchestrator._merge_systems(_config())
+    op = op.model_copy(update={"development_zones": [
+        _make_zone("ZB", target_bus=1), _make_zone("ZA", target_bus=0),
+        _make_zone("ZB2", target_bus=1)]})
+    expanded, mappings = expand_config_with_zones(op)
+    assert [m.virtual_node_idx for m in mappings] == [2, 3, 4]
+    extra = {b.system: b.extra_nodes for b in expanded.co2_budget_by_system}
+    assert extra == {"A": [3], "B": [2, 4]}

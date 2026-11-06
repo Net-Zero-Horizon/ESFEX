@@ -39,7 +39,7 @@ esfex run -c CONFIG [OPTIONS]
 | `--solver` | `-s` | String | value in config | Overrides `solver.name`: `highs`, `cbc`, `glpk`, `gurobi`, `cplex`, `scip`, `xpress`, `clarabel`, `scs`, `ipopt`. The schema default is `highs`. |
 | `--output` | `-o` | Path | `./results` | Output directory (created if missing) |
 | `--years` | `-y` | Integer | `25` | Number of years to simulate. `unit_commitment` mode always runs a single year. |
-| `--start-year` | | Integer | year of `date_start` | Label of the first simulated year. The date labels then start on `date_start`'s day and time in this year. Demand is still read from the first row |
+| `--start-year` | | Integer | year of `date_start` | Label of the first simulated year. The date labels then start on `date_start`'s day and time in this year. Demand is still read from the first row, and the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar |
 | `--verbose` | `-v` | Flag | off | Debug-level console logging, solver output on, and the configuration summary table |
 | `--dry-run` | | Flag | off | Load and validate the configuration, then exit without starting Julia |
 

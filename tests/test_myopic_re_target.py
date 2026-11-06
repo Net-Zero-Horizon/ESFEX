@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, "tests")
-from test_runner import _create_orchestrator, _make_esfex_config, _make_system_config  # noqa: E402
+from test_runner import (  # noqa: E402
+    _create_orchestrator, _make_esfex_config, _make_generator, _make_system_config)
 
 from esfex.config.schema import MasterProblemConfig  # noqa: E402
 from esfex.runner import re_target_trajectory  # noqa: E402
@@ -46,7 +47,9 @@ def test_trajectory_matches_the_julia_master():
 
 
 def test_each_myopic_year_gets_its_trajectory_target(tmp_path):
-    sysc = _make_system_config().model_copy(update={
+    # Gas only: a renewable without a profile would count at full capacity
+    gas = _make_generator("Gas", "Non-renewable", "Gas", [100.0, 50.0])
+    sysc = _make_system_config(generators={"gas": gas}).model_copy(update={
         "target_re_penetration": 0.6, "min_annual_increment": 0.0,
         "max_annual_increment": 1.0})
     cfg = _make_esfex_config(sysc, master_problem=MasterProblemConfig(
@@ -73,3 +76,6 @@ def test_each_myopic_year_gets_its_trajectory_target(tmp_path):
     # No renewables: initial share 0, linear to 0.6 over four years
     assert [c["re_target_override"] for c in captured] == [
         {(1, 1): pytest.approx(v)} for v in (0.0, 0.2, 0.4, 0.6)]
+    # Each one-year master reads its own year's block of multi-year profiles
+    assert [c["profile_start_hour"] for c in captured] == [
+        k * HOURS_STD_YEAR for k in range(4)]
