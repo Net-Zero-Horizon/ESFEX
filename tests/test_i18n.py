@@ -30,13 +30,16 @@ def _restore_language_notifier():
         changed = Signal()
 
     n = _Notifier()
-    saved = _i18n_mod.language_changed
+    # Keep the original notifier alive too: dropping the module's only
+    # reference deleted it, and with it the source of the signal restored
+    # below (later tests then failed on "Signal source has been deleted").
+    saved = _i18n_mod._notifier, _i18n_mod.language_changed
     _i18n_mod._notifier = n
     _i18n_mod.language_changed = n.changed
     try:
         yield
     finally:
-        _i18n_mod.language_changed = saved
+        _i18n_mod._notifier, _i18n_mod.language_changed = saved
 
 # Path to real translation files shipped with the package.
 _TRANSLATIONS_DIR = (

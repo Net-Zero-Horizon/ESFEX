@@ -304,6 +304,7 @@ class TestOrchestratorInit:
         cfg = _make_esfex_config()
         with patch("esfex.plugins.get_plugin_manager") as mock_get_pm:
             mock_pm = MagicMock()
+            mock_pm.apply_config.return_value = []  # no invalid plugin sections
             mock_get_pm.return_value = mock_pm
             _ = Orchestrator(cfg, output_dir=tmp_path)
             mock_pm.load_all.assert_called_once()
@@ -315,6 +316,7 @@ class TestOrchestratorInit:
         cfg = _make_esfex_config()
         with patch("esfex.plugins.get_plugin_manager") as mock_get_pm:
             mock_pm = MagicMock()
+            mock_pm.apply_config.return_value = []  # no invalid plugin sections
             mock_get_pm.return_value = mock_pm
             _ = Orchestrator(cfg, output_dir=tmp_path)
             mock_pm.register_julia_modules.assert_called_once()
