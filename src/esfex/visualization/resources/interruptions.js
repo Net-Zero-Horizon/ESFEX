@@ -5,21 +5,35 @@
 "use strict";
 
 var LEFT = 172, ROW_H = 22, HDR_H = 18, TOP = 26, PAD_R = 16;
-var baseMs = Date.UTC(2025, 0, 1), horizon = 8760, plotW = 900, contentH = 0;
+var baseYear = 2025, horizon = 8760, plotW = 900, contentH = 0;
 var rows = [], rowOf = {}, schedule = [], selected = null, uidSeq = 1;
 var x, svg, gBars, I = {};
 
-function hourToDate(h) { return new Date(baseMs + h * 3600000); }
+// Model calendar: every modelled year has 8760 h and no Feb 29 (the data are
+// 8760-h blocks; see esfex.utils.temporal). Hour h is in year
+// baseYear + floor(h / 8760); within it, dates follow a non-leap calendar.
+var H_YEAR = 8760, NOLEAP = Date.UTC(2025, 0, 1);   // 2025 is not a leap year
+function hourToParts(h) {
+    var y = Math.floor(h / H_YEAR);
+    var d = new Date(NOLEAP + (h - y * H_YEAR) * 3600000);
+    return { year: baseYear + y, month: d.getUTCMonth(), day: d.getUTCDate(),
+             hour: d.getUTCHours(), minute: d.getUTCMinutes() };
+}
+function partsToHour(year, month, day, hour, minute) {
+    if (month === 1 && day === 29) day = 28;   // Feb 29 is not modelled
+    var r = (Date.UTC(2025, month, day, hour, minute) - NOLEAP) / 3600000;
+    return (year - baseYear) * H_YEAR + Math.round(r);
+}
 function pad(n) { return String(n).padStart(2, "0"); }
 function hourToInput(h) {
-    var d = hourToDate(h);
-    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) +
-           "T" + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes());
+    var p = hourToParts(h);
+    return p.year + "-" + pad(p.month + 1) + "-" + pad(p.day) +
+           "T" + pad(p.hour) + ":" + pad(p.minute);
 }
 function inputToHour(s) {
     var m = /(\d+)-(\d+)-(\d+)T(\d+):(\d+)/.exec(s || "");
     if (!m) return null;
-    return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - baseMs) / 3600000);
+    return partsToHour(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
 }
 function clampH(h) { return Math.max(0, Math.min(horizon, Math.round(h))); }
 function keyOf(d) { return d.element_type + " " + d.element_id; }
@@ -49,7 +63,7 @@ function applyTheme(t) {
 }
 
 function boot(data) {
-    baseMs = Date.UTC(data.base_year, 0, 1);
+    baseYear = data.base_year || 2025;
     horizon = data.horizon_hours || 8760;
     I = data.i18n || {};
     if (data.theme) applyTheme(data.theme);
@@ -113,15 +127,15 @@ function render() {
     // Month grid + axis labels
     var gGrid = svg.append("g");
     for (var mo = 0; mo <= 12; mo++) {
-        var h = Math.round((Date.UTC(new Date(baseMs).getUTCFullYear(), mo, 1) - baseMs) / 3600000);
+        var h = partsToHour(baseYear, mo, 1, 0, 0);
         if (h < 0 || h > horizon) continue;
         gGrid.append("line").attr("class", "grid-line month")
             .attr("x1", x(h)).attr("x2", x(h)).attr("y1", TOP).attr("y2", contentH - 8);
         if (mo < 12) {
-            var mid = hourToDate(h);
             gGrid.append("text").attr("class", "axis-label")
                 .attr("x", x(h) + 4).attr("y", 16)
-                .text(mid.toLocaleString("default", { month: "short", timeZone: "UTC" }));
+                .text(new Date(Date.UTC(2025, mo, 1))
+                      .toLocaleString("default", { month: "short", timeZone: "UTC" }));
         }
     }
 
