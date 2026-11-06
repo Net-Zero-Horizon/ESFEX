@@ -7,7 +7,7 @@ delegating to Julia implementations.
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -24,6 +24,9 @@ from esfex.config.schema import (
     SystemConfig,
     TemporalConfig,
 )
+
+if TYPE_CHECKING:
+    from esfex.topology import ResultExpander
 from esfex.bridge.converters import (
     COST_SCALE,
     COST_UNSCALE,
