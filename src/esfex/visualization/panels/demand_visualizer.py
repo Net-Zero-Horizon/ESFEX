@@ -90,10 +90,13 @@ def _series_of(demand) -> np.ndarray:
 
 
 def _date_index(n: int, start_year: int):
-    """Hourly pandas DatetimeIndex of length ``n`` anchored at ``start_year``."""
-    import pandas as pd
+    """Hourly DatetimeIndex of length ``n`` from 1 Jan ``start_year``.
 
-    return pd.date_range(f"{start_year}-01-01", periods=n, freq="h")
+    Model years are 8760 h, so Feb 29 is skipped.
+    """
+    from esfex.utils.temporal import model_time_index
+
+    return model_time_index(f"{start_year}-01-01", n)
 
 
 def demand_stats(series: np.ndarray) -> dict:

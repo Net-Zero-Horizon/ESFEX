@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.utils.temporal import HOURS_STD_YEAR, model_time_index
 from esfex.visualization.i18n import tr
 
 # Reuse ALL data loading helpers from the matplotlib module
@@ -1029,9 +1029,8 @@ class NetLoadHeatmapChart(PlotlyChart):
                                x=0.5, y=0.5, showarrow=False)
             return fig
 
-        freq = f"{tres}h"
         start_yr = min(yr_list) if yr_list else 2025
-        idx = pd.date_range(start=f"{start_yr}-01-01", periods=len(net_load_all), freq=freq)
+        idx = model_time_index(f"{start_yr}-01-01", len(net_load_all), tres)
         df = pd.DataFrame({"NL": net_load_all}, index=idx)
         df["ramp"] = df["NL"].diff()
 

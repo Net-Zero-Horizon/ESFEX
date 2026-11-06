@@ -13,7 +13,7 @@ from typing import Optional
 import h5py
 import numpy as np
 
-from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.utils.temporal import HOURS_STD_YEAR, model_time_index
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
@@ -3458,8 +3458,7 @@ class NetLoadHeatmapChart(QWidget):
             if len(net_load) < yh:
                 net_load = np.pad(net_load, (0, yh - len(net_load)), mode="constant")
                 ramp = np.pad(ramp, (0, yh - len(ramp)), mode="constant")
-            freq = f"{tres}h"
-            idx = pd.date_range(start=f"{year}-01-01", periods=yh, freq=freq)
+            idx = model_time_index(f"{year}-01-01", yh, tres)
             df = pd.DataFrame({"NL": net_load[:yh], "ramp": ramp[:yh]}, index=idx)
             df["tod"] = (df.index.hour // tres)
             avg_nl = df.groupby([df.index.month, "tod"])["NL"].mean().unstack()
