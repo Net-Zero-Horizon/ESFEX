@@ -93,3 +93,19 @@ def test_master_no_longer_extends_a_zero_cost_unit_for_free(tmp_path):
         master_problem=MasterProblemConfig())
     inv = Orchestrator(cfg, output_dir=tmp_path / "out").run(years=1)[0].investments
     assert inv.get("tech_investment_power_0_0", 0.0) > 50.0
+
+
+def test_master_uses_the_configured_life_extension_cost_factor():
+    """The runner never passed life_extension_cost_factor: the adapter's
+    hard-coded 0.3 applied whatever the configuration said."""
+    from esfex.bridge.adapters import MasterProblemAdapter
+
+    sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)]).model_copy(
+        update={"life_extension_cost_factor": 0.5})
+    master = MasterProblemAdapter(config=sysc, years=[2025], base_year=2025,
+                                  demand=np.ones((24, 1)))
+    assert master.life_extension_cost_factor == 0.5
+    master = MasterProblemAdapter(config=sysc, years=[2025], base_year=2025,
+                                  demand=np.ones((24, 1)),
+                                  life_extension_cost_factor=0.1)
+    assert master.life_extension_cost_factor == 0.1

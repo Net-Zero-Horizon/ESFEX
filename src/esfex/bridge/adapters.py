@@ -2278,7 +2278,7 @@ class MasterProblemAdapter:
         min_re_increment: float = 0.0,
         max_re_increment: float = 1.0,
         slack_penalty: float = 1e6,
-        life_extension_cost_factor: float = 0.3,
+        life_extension_cost_factor: Optional[float] = None,
         decommissioning_cost_factor: float = 0.1,
         temporal_resolution_hours: int = 24,
         representative_days_per_year: int = 12,
@@ -2330,6 +2330,7 @@ class MasterProblemAdapter:
                 1-based, that replace the RE-1 trajectory (myopic mode)
             slack_penalty: Penalty for violating soft constraints
             life_extension_cost_factor: Cost factor for life extension
+                (default: the system's life_extension_cost_factor)
             decommissioning_cost_factor: Cost factor for decommissioning
             temporal_resolution_hours: Hours per timestep
             investment_resolution_hours: Hours per investment period (8760=annual)
@@ -2399,6 +2400,13 @@ class MasterProblemAdapter:
         self.inertia_limit = float(getattr(
             self.system_config, 'INERTIA_LIMIT',
             getattr(self.system_config, 'inertia_limit', 0.0)))
+
+        # Life extension: the system's life_extension_cost_factor unless the
+        # caller overrides it (the runner never passed it, so the config key
+        # had no effect and a hard-coded 0.3 applied).
+        if self.life_extension_cost_factor is None:
+            self.life_extension_cost_factor = float(getattr(
+                self.system_config, 'life_extension_cost_factor', 0.20))
 
         # CO2: same sources as the dispatch (fuels' emission factors and
         # penalties.co2_cost), so the plan sees the carbon cost it will pay.
