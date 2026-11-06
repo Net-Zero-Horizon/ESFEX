@@ -1453,6 +1453,8 @@
     "saved_msg": "Configuration saved to:\n{path}",
     "save_error_title": "Save Error",
     "save_error_msg": "Failed to save config:\n{e}",
+    "save_blocked_loading": "The project is still loading; it cannot be saved yet.",
+    "save_refused_empty_project": "Not saved: the project is empty, and saving it would overwrite the systems defined in\n{path}",
     "no_data_title": "No Data",
     "no_data_msg": "No {key} data found.",
     "no_coords_title": "No Coordinates",
