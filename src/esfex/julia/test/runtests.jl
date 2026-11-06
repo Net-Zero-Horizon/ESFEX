@@ -1835,6 +1835,76 @@ import Ipopt
             end
         end
 
+        @testset "master prices candidate technologies with their offer curve" begin
+            # 100 MW of load, 100 MW of diesel at 5e-5 and up to 100 MW of a
+            # cheap-to-build gas technology. Its flat fuel_cost is 1e-5, but
+            # its offer curve prices the upper half at 1e-4, above diesel, so
+            # the dispatch runs only the lower half. The master built the
+            # curve and then charged the flat 1e-5 on every MWh.
+            H = 24
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [5.0e-5],
+                           ones(H, 1); nb = 1, H = H)
+            o = [0.0]
+            gas = TechnologyConfig("GasNew", "Non-renewable", "Gas", [1.0e-9], [100.0],
+                                   ones(H, 1), [1.0], [1.0], [1.0], [1.0], o, o, o,
+                                   [1.0e-5], o, o, o, o, [25.0], o, o, 50.0, "AC",
+                                   false, [1.0])
+            curve = Dict(1 => Dict(1 => [CostSegment(0.5, 1.0e-5),
+                                         CostSegment(0.5, 1.0e-4)]))
+            mkinput(curves) = MasterProblemInput(
+                years = [2025], network = net, generators = [diesel],
+                batteries = BatteryConfig[], technologies = [gas],
+                base_demand = fill(100.0, H, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                max_curtailment_ratio = 1.0, tech_cost_curves = curves,
+                verbose = false)
+            function tech_energy(inp)
+                model, _, _ = create_master_problem(inp; use_representative_days = true)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return sum(value(v) for v in all_variables(model)
+                           if startswith(name(v), "tech_out_y1_d1["))
+            end
+            @test tech_energy(mkinput(Dict{Int, Dict{Int, Vector{CostSegment}}}())) ≈
+                  24 * 100.0 rtol = 1e-6
+            @test tech_energy(mkinput(curve)) ≈ 24 * 50.0 rtol = 1e-6
+
+            # Benders: the subproblem prices the segments too, and the cut
+            # gradient includes the segment caps (fraction × capacity), so it
+            # matches the cost change of one more MW of gas. At 60 MW the two
+            # 30 MW segments (1e-5 and 3e-5) both run and displace diesel.
+            curve2 = Dict(1 => Dict(1 => [CostSegment(0.5, 1.0e-5),
+                                          CostSegment(0.5, 3.0e-5)]))
+            inp = mkinput(curve2)
+            _, bvars, _, _, _ = ESFEX.create_benders_master(inp)
+            empty_caps() = Dict{Tuple{Int,Int}, Float64}()
+            function sp_solve(cap)
+                caps = ESFEX.FixedCapacities(Dict((1, 1) => 100.0), empty_caps(),
+                    empty_caps(), Dict((1, 1) => cap), empty_caps(), empty_caps(),
+                    Dict{Int, Float64}(), [0.0])
+                sp = ESFEX.create_benders_subproblem(inp, 1, 1, fill(100.0, H, 1), 1,
+                                                     caps, bvars)
+                optimize!(sp.model)
+                @test string(termination_status(sp.model)) == "OPTIMAL"
+                td, _, _ = ESFEX.extract_subproblem_duals(sp, inp)
+                return objective_value(sp.model), get(td, (1, 1), 0.0), sp.scaling_factor
+            end
+            q60, grad60, sf = sp_solve(60.0)
+            q61, _, _ = sp_solve(61.0)
+            @test grad60 ≈ q61 - q60 rtol = 1e-6
+            # Each MW of gas runs half at 1e-5 and half at 3e-5 and displaces
+            # diesel at 5e-5: 3e-5 saved per MWh (the flat 1e-5 would save 4e-5)
+            @test grad60 ≈ -24 * sf * 3.0e-5 rtol = 1e-6
+            q20, _, _ = sp_solve(20.0)
+            @test q20 - q60 ≈ 40 * 24 * sf * 3.0e-5 rtol = 1e-6
+        end
+
         @testset "CO2 factor is per MWh of fuel" begin
             # 0.2 t per MWh of fuel at 50 % rated efficiency is 0.4 t per MWh
             # of electricity; the factor used to be applied per MWh_e.

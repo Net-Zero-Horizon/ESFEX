@@ -288,6 +288,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `tech_cap_t{t}_b{b}_ts{ts}_y{y}_d{d}` | OP-1 | Technology output <= cumulative capacity (× availability for renewables) |
+| `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}_y{y}_d{d}` | OP-1b | Technology with a `fuel_cost_curve`: segment `k` <= `fraction_k` × cumulative capacity (× availability); the segments sum to the output and are charged their marginal costs instead of `fuel_cost` |
 | `bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*` | OP-2a | Battery-technology power and energy limits |
 | `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*` | OP-2b | Battery-technology SOC: initial, dynamics (`× Δt`), cyclic |
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
@@ -323,6 +324,7 @@ In the stochastic master these names carry a scenario tag.
 | `benders_cut_y{y}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}` |
 | `re_min_day_s*_y*_d*` | BEN-REDAY | Subproblem: RE share at least the master's RE ratio |
 | `max_curt_y{y}_d{d}` | BEN-CURT | Subproblem: soft curtailment cap with slack `curt_excess_y{y}_d{d}` |
+| `tech_cap_t{t}_b{b}_ts{ts}`, `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}` | BEN-CAP | Subproblem: technology output and offer-curve segments at the fixed capacity; their duals form the cut's technology gradient |
 
 The Benders master also contains TECH, BUD, RET-2, CAP, TXN and RE-2/RE-3.
 

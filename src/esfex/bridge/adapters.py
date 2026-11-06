@@ -2771,11 +2771,12 @@ class MasterProblemAdapter:
             bus_to_node=bus_to_node_0idx if need_expansion else None,
             bat_bus_per_node=bat_bus_per_node,
         )
-        # Technologies use same fuel_cost_curve attribute
+        # Technologies use the same fuel_cost_curve attribute; the master may
+        # build them at any bus of a node, so each bus gets the node's curve
         jl_tech_cost_curves = build_gen_cost_curves_dict(
             tech_order, [], num_buses,
             bus_to_node=bus_to_node_0idx if need_expansion else None,
-            gen_bus_per_node={},
+            all_buses_of_node=True,
         )
 
         # Convert network (pass per-line data + transformers + buses)
