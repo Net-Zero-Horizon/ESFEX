@@ -83,14 +83,27 @@ def test_fuel_link_becomes_fuel_routes_not_a_line():
     assert op.nodes.nodes_connections[2 * n + 1] == 0.0
     # Two one-way routes between A's node 1 and B's node 0 (global node 2)
     routes = {r["route_id"]: r for r in op.fuel_transport_routes}
-    assert set(routes) == {"link_A_B_0_fwd", "link_A_B_0_rev"}
-    fwd, rev = routes["link_A_B_0_fwd"], routes["link_A_B_0_rev"]
+    assert set(routes) == {"link0_A_B_Diesel_0_fwd", "link0_A_B_Diesel_0_rev"}
+    fwd, rev = routes["link0_A_B_Diesel_0_fwd"], routes["link0_A_B_Diesel_0_rev"]
     assert (fwd["from_node"], fwd["to_node"]) == (1, 2)
     assert (rev["from_node"], rev["to_node"]) == (2, 1)
     assert fwd["distance_km"] == 90.0
     assert fwd["fuel_params"] == {"Diesel": {"capacity": 300.0, "transport_cost": 0.05,
                                              "losses_fraction": 0.002}}
     assert master.fuel_transport_routes == op.fuel_transport_routes
+
+
+def test_fuel_links_between_the_same_systems_get_distinct_route_ids():
+    # Two fuels on the same pair, and a second Diesel link on the same
+    # connection: the ids were link_A_B_0_fwd/rev for all three.
+    links = [_fuel_link(), _fuel_link(link_type="transmission", fuel=None),
+             _fuel_link(fuel="LNG"), _fuel_link()]
+    _, op, _ = Orchestrator._merge_systems(_config(*links))
+    ids = [r["route_id"] for r in op.fuel_transport_routes]
+    assert ids == ["link0_A_B_Diesel_0_fwd", "link0_A_B_Diesel_0_rev",
+                   "link2_A_B_LNG_0_fwd", "link2_A_B_LNG_0_rev",
+                   "link3_A_B_Diesel_0_fwd", "link3_A_B_Diesel_0_rev"]
+    assert len(set(ids)) == len(ids)
 
 
 def test_transmission_link_is_still_a_line():
@@ -134,4 +147,4 @@ def test_fuel_link_routes_reach_the_primary_energy_block():
     got = jl.seval('[(r.route_id, r.from_node, r.to_node, r.fuel_params["Diesel"].capacity)'
                    " for r in _pe_in.transport_routes]")
     assert [(str(i), int(f), int(t), float(c)) for i, f, t, c in got] == [
-        ("link_A_B_0_fwd", 2, 3, 300.0), ("link_A_B_0_rev", 3, 2, 300.0)]
+        ("link0_A_B_Diesel_0_fwd", 2, 3, 300.0), ("link0_A_B_Diesel_0_rev", 3, 2, 300.0)]

@@ -96,12 +96,16 @@ def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
     ``losses_fraction`` = ``loss_factor`` (per 100 km). Capacity investment
     on the route follows the fuel's ``fuel_infrastructure``, so the link's
     ``max_investment_MW`` / ``investment_cost_per_MW`` are not used.
+
+    Route ids are ``link{k}_{A}_{B}_{fuel}_{i}_fwd|rev``, with ``k`` the
+    link's position in ``systems_links`` and ``i`` the connection, so two
+    fuel links between the same systems (e.g. Diesel and LNG) keep apart.
     """
     def _at(seq, idx, default=0.0):
         return float(seq[idx]) if idx < len(seq) and seq[idx] is not None else default
 
     routes: list[dict] = []
-    for link in links:
+    for pos, link in enumerate(links):
         if link.link_type != "fuel_route" or len(link.systems) < 2:
             continue
         sa, sb = link.systems[0], link.systems[1]
@@ -124,7 +128,7 @@ def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
             dist = _at(link.distance_km, idx)
             for suffix, frm, to in (("fwd", ga, gb), ("rev", gb, ga)):
                 routes.append({
-                    "route_id": f"link_{sa}_{sb}_{idx}_{suffix}",
+                    "route_id": f"link{pos}_{sa}_{sb}_{link.fuel}_{idx}_{suffix}",
                     "from_node": frm,
                     "to_node": to,
                     "distance_km": dist,

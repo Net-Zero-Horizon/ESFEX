@@ -82,7 +82,7 @@ Buttons at the bottom: **Delete Line** and **Edit Trace**.
 
 When the systems are merged for the simulation, each transmission link becomes a transmission line between the first bus of each endpoint node, with the link's capacity, length, and per-unit reactance and resistance. The investment cost and maximum are applied as transfer-investment parameters at both endpoint nodes (the larger value wins if several links meet at a node). Voltage, type, circuits, frequency, and current type are kept for display and do not change the solver. Multiple links between the same pair of systems are allowed and act as separate lines.
 
-Each fuel route link becomes two one-way fuel transport routes (`link_<A>_<B>_<i>_fwd` and `_rev`) between its two nodes, added to the merged `fuel_transport_routes`. It is not part of the electrical network. The link fields map as follows:
+Each fuel route link becomes two one-way fuel transport routes (`link<k>_<A>_<B>_<fuel>_<i>_fwd` and `_rev`, where `k` is the link's position in `systems_links` and `i` its connection, so several fuel links between the same systems keep distinct ids) between its two nodes, added to the merged `fuel_transport_routes`. It is not part of the electrical network. The link fields map as follows:
 
 | Link field | Route parameter |
 |------------|-----------------|
