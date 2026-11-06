@@ -775,7 +775,6 @@
     "target_re": "目標RE普及率 (frac):",
     "min_increment": "最小年間増加率 (frac):",
     "max_increment": "最大年間増加率 (frac):",
-    "loss_demand_thr": "需要損失閾値 (frac):",
     "inertia_limit_thr": "慣性制限閾値 (frac):",
     "sim_rooftop": "屋上太陽光シミュレーション:",
     "co2_annual": "CO2年間予算 (トン/年):",

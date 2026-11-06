@@ -1829,7 +1829,6 @@ class PowerSystemAdapter:
             co2_budget_violation_penalty=scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
             delay_retirement_penalty_per_mw=scale_cost(float(getattr(sys.penalties, 'delay_retirement_per_mw', 50000.0))),
             # Demand constraints — load shedding bounded to fraction of demand
-            loss_demand_threshold=float(sys.loss_demand_threshold),
             max_annual_system_cost=scale_cost(float(getattr(sys, 'max_annual_system_cost', float('inf')))),
             # Electricity price for time-varying V2G compensation and flex demand benefit
             electricity_price=py_to_julia_vector(

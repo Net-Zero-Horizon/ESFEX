@@ -1796,6 +1796,8 @@ class SystemConfig(BaseModel):
     demand_scale: float = Field(default=1.0, gt=0)
 
     # System parameters
+    # Deprecated and ignored: no model constraint ever used it. Still accepted
+    # so existing case files (Studio wrote LOSS_DEMAND_TRHESHOLD) load.
     loss_demand_threshold: float = Field(default=0.05, ge=0, le=1, alias="LOSS_DEMAND_TRHESHOLD")
     life_extension_cost_factor: float = Field(default=0.20, ge=0)
     sim_rooftop: bool = Field(default=False, alias="SIM_ROOFTOP")

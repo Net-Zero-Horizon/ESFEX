@@ -1053,7 +1053,6 @@ struct PowerSystemInput
     reserve_dynamic_requirement::Dict{Int, Float64}
 
     # Demand constraints
-    loss_demand_threshold::Float64
     max_annual_system_cost::Float64
     max_node_investment::Vector{Float64}
 
@@ -1198,7 +1197,6 @@ function PowerSystemInput(;
     reserve_static_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     reserve_dynamic_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     # Demand constraints
-    loss_demand_threshold::Float64 = 1.0,
     max_annual_system_cost::Float64 = Inf,
     max_node_investment::Vector{Float64} = Float64[],
     # NPV/lifecycle tracking (P2)
@@ -1290,7 +1288,6 @@ function PowerSystemInput(;
         delay_retirement_penalty_per_mw,
         reserve_static_requirement,
         reserve_dynamic_requirement,
-        loss_demand_threshold,
         max_annual_system_cost,
         max_node_investment,
         unit_npv,
