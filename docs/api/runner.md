@@ -35,10 +35,11 @@ class Orchestrator:
 | `system_name` | `str` | The system names joined with `_` (for example `IslaJuventud_Cuba`) |
 | `state` | `Optional[SimulationState]` | Current simulation state (set during `run()`) |
 | `results` | `list[YearResults]` | Accumulated results across years |
+| `master_solution` | `Optional[dict]` | Master problem decisions after `run(master_only=True)` (`investments`, `retirements`, `cumulative_capacities`, `re_targets`, each keyed by year); `None` otherwise or if the master problem failed |
 
 When development zones are configured, `run()` replaces `primary_system` and `master_system` with the zone-expanded systems.
 
-The constructor also loads plugins (`PluginManager.load_all()`) and registers their Julia modules.
+The constructor also loads plugins (`PluginManager.load_all()`), gives them the config (`PluginManager.apply_config()`: validates each plugin's `plugins.<name>` section and calls `on_config_loaded`; an invalid section raises `ValueError`) and registers their Julia modules.
 
 **Example:**
 
@@ -61,6 +62,7 @@ def run(
     self,
     years: Optional[int] = None,
     start_year: Optional[int] = None,
+    master_only: bool = False,
 ) -> list[YearResults]
 ```
 
@@ -73,6 +75,7 @@ Execute the full simulation: Master Problem (capacity expansion) followed by yea
 |-----------|------|---------|-------------|
 | `years` | `Optional[int]` | `25` | Number of years to simulate |
 | `start_year` | `Optional[int]` | year of `date_start` | Label of the first simulated year. When given, the date labels start on `date_start`'s day and time in this year. It does not select demand rows |
+| `master_only` | `bool` | `False` | Stop after the Master Problem (step 10 below): the decisions are left in `master_solution`, the HDF5 file (system configuration only) is finalized, plugins are torn down and an empty list is returned. Needs `simulation_mode: development` (`ValueError` otherwise) |
 
 **Returns:** `list[YearResults]` -- One result object per simulated year.
 

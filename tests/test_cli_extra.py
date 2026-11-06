@@ -564,6 +564,8 @@ class TestRegisterPluginCli:
 
 class TestEntrypoint:
     def test_entrypoint_invokes_app(self):
-        with patch.object(cli, "app") as fake_app:
+        with patch.object(cli, "app") as fake_app, \
+                patch.object(cli, "_register_plugin_cli") as register:
             cli._entrypoint()
+        register.assert_called_once()
         fake_app.assert_called_once()

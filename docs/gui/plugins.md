@@ -19,7 +19,7 @@ Open **Plugins > Manage Plugins...**. The dialog shows all discovered plugins wi
 
 A plugin installed through the dialog (or `esfex plugin install`) is recorded as trusted; see [Trusted Plugins](#trusted-plugins).
 
-No restart required. The plugin manager hot-loads new plugins and registers their GUI extensions (menu items, result variables, translations; see [GUI Extension Hooks](#gui-extension-hooks) for the hooks that are not wired yet).
+No restart required. The plugin manager hot-loads new plugins and registers their GUI extensions (see [GUI Extension Hooks](#gui-extension-hooks)).
 
 ### Installing Manually
 
@@ -83,7 +83,7 @@ If no plugins are discovered, the table shows "No plugins found."
 
 Toggle the checkbox next to any plugin, then click **OK**.
 
-- **Enabling**: Hot-loaded immediately. Its menu items, result variables and translations appear without restart.
+- **Enabling**: Hot-loaded immediately. Its GUI extensions appear without restart.
 - **Disabling**: Marked as disabled in the state file. Because loaded Python modules cannot be fully unloaded at runtime, a restart is required. The dialog displays a notification.
 
 State persisted in `~/.esfex/plugins.json`:
@@ -236,8 +236,9 @@ def create_plugin(context: PluginContext) -> WeatherForecastPlugin:
 
 The top-level `plugins:` section of the YAML configuration is kept as a free-form dictionary (`config.plugins`). A plugin reads its own entry from the config it receives in its hooks or from `self.context.config`.
 
-!!! note
-    The protocol also defines `get_config_schema()` and `on_config_loaded()`, but the current version never calls them: the `plugins.{name}` section is not validated against the schema, and `on_config_loaded()` does not run. Validate the section yourself, for example in `pre_simulation()`:
+To have the section checked, return a Pydantic model from `get_config_schema()`. When a simulation starts, the `plugins.{name}` section (if present) is validated against it, and an invalid section stops the run with an error naming it. The Studio checks it too when it starts with a config file, and logs a warning instead. The section stays a dict in `config.plugins`.
+
+`on_config_loaded(config)` is then called with the validated configuration, once per run (before `pre_simulation()`) and when the Studio starts with a config file; `self.context.config` is set to the same config just before. It is not called for a plugin whose section is invalid.
 
 ```python
 from pydantic import BaseModel
@@ -248,9 +249,11 @@ class WeatherConfig(BaseModel):
     source: str = "era5"
 
 class WeatherForecastPlugin(ESFEXPlugin):
-    def pre_simulation(self, *, config, output_dir):
-        plugin_cfg = config.plugins.get("weather_forecast", {})
-        self.settings = WeatherConfig(**plugin_cfg)
+    def get_config_schema(self):
+        return WeatherConfig
+
+    def on_config_loaded(self, config):
+        self.settings = WeatherConfig(**config.plugins.get("weather_forecast", {}))
 ```
 
 In the YAML configuration file:
@@ -278,6 +281,7 @@ Override only needed hooks -- all have no-op defaults.
 | Hook | When Called | Purpose |
 |------|------------|---------|
 | `setup()` | After instantiation | One-time initialization |
+| `on_config_loaded()` | A run starts, or the Studio starts with a config file | `config`; see [Plugin Configuration](#plugin-configuration) |
 | `teardown()` | End of a simulation run (`Orchestrator.run`) | Release resources, close connections |
 
 ### Simulation Hooks
@@ -296,19 +300,18 @@ Override only needed hooks -- all have no-op defaults.
 
 | Hook | Returns | Purpose |
 |------|---------|---------|
-| `get_tree_categories()` | `list[dict]` | Add categories to the element tree panel |
-| `get_forms(model)` | `list[tuple[str, QWidget]]` | Register property forms for custom element types |
-| `get_toolbar_actions(toolbar, window)` | `list[QAction]` | Add buttons to the main toolbar |
+| `get_tree_categories()` | `list[dict]` | Add categories (`{"key", "label", "element_type"}`) to every system in the element tree |
+| `get_forms(model)` | `list[tuple[str, QWidget]]` | Register property forms for custom element types (`model` is the Studio's data model) |
+| `get_toolbar_actions(toolbar, window)` | `list[QAction]` | Add buttons to the main toolbar (returned actions are added if the plugin did not add them) |
 | `get_menu_items(menu_bar, window)` | `None` | Add items to the menu bar (`window._plugins_menu` is the **Plugins** menu) |
 | `get_result_variables()` | `list[tuple[str, str, str, str]]` | Register result variables: `(display_name, hdf5_key, aggregation, viz_type)` |
 | `get_map_layers(map_widget)` | `None` | Add custom overlay layers to the Leaflet map |
 | `get_translations()` | `dict[str, dict]` | Provide `{lang: {key: value}}` translation strings |
 | `get_julia_modules()` | `list[Path]` | Return `.jl` files to `include()` at runtime as overlays |
-| `get_cli_commands()` | `list[typer.Typer]` | Register CLI sub-commands under `esfex {name} ...` |
-| `get_config_schema()` | `type[BaseModel]` | Pydantic model for plugin configuration validation |
+| `get_cli_commands()` | `list[typer.Typer]` | Register CLI sub-commands under `esfex {name} ...` (see [Plugin Commands](#plugin-commands)) |
+| `get_config_schema()` | `type[BaseModel]` | Pydantic model validating the `plugins.{name}` section (see [Plugin Configuration](#plugin-configuration)) |
 
-!!! warning "Hooks not called in the current version"
-    The Studio calls `get_menu_items()`, `get_result_variables()` and `get_translations()`. It does not call `get_tree_categories()`, `get_forms()`, `get_toolbar_actions()` or `get_map_layers()`, so those extensions do not appear. `get_cli_commands()` is not registered either (the CLI discovers plugins but does not load them), and `get_config_schema()` is never called.
+A plugin tree category starts empty: ESFEX does not store elements of plugin types. Add them with `window.element_tree.add_plugin_element(key, element_id, label)` (current system); selecting one shows the form registered for the category's `element_type` and calls its `load_element(element_id)`. They are not saved with the project. `map_widget` may still be loading when `get_map_layers()` runs; run your JavaScript (the Leaflet map is the global `map`) from its `loadFinished` signal, which also fires when the map reloads.
 
 A common use of `get_julia_modules()` is registering a custom optimization
 constraint type via `ESFEX.register_constraint_hook!` — see
@@ -337,7 +340,17 @@ esfex plugin uninstall weather_forecast
 
 Mirrors the dialog functionality. Useful for headless servers, CI pipelines, or scripted deployments. `--name/-n` sets the target directory name for a Git install.
 
-There is no option to confirm an untrusted Git host, so `--git` only works with the hosts listed under [Installing from the GUI](#installing-from-the-gui); use the dialog for other hosts. There is no `--force` either: to reinstall, uninstall first.
+`--git` accepts the hosts listed under [Installing from the GUI](#installing-from-the-gui). For any other host, add `--trust-host` to confirm that you trust it (the dialog asks the same question):
+
+```bash
+esfex plugin install --git https://git.example.org/team/esfex-weather.git --trust-host
+```
+
+There is no `--force`: to reinstall, uninstall first.
+
+### Plugin Commands
+
+Plugins can add their own commands (`get_cli_commands()`), run as `esfex <plugin name> <command> ...`; `esfex --help` lists them. When `esfex` starts with a command that is not built in (or with `--help`), it loads the enabled, trusted plugins (see [Trusted Plugins](#trusted-plugins)) and mounts their commands. Built-in commands such as `esfex run` do not load plugins at that point. A plugin that fails to load, returns something that is not a Typer app, or is named like a built-in command is skipped with a message on the console; the other commands keep working.
 
 
 ---
@@ -366,7 +379,7 @@ If the log says the plugin's hash "does not match the trusted hash on record", i
 
 - Confirm the plugin is enabled (checkbox checked, or not in `disabled` list).
 - Check that `gui_mode` is `True` in the plugin context (set automatically in GUI mode).
-- Tree categories, forms, toolbar actions and map layers are not registered in the current version (see [GUI Extension Hooks](#gui-extension-hooks)).
+- A plugin tree category is empty until the plugin adds elements to it (see [GUI Extension Hooks](#gui-extension-hooks)).
 - Verify hook methods return correct types (e.g., `get_forms()` must return `list[(str, QWidget)]`).
 
 ### Disabling a Plugin Does Not Take Effect
@@ -395,7 +408,7 @@ rm ~/.esfex/plugins.json
 - **Name sanitization**: Plugin directory names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$`. Names containing path separators, dots, or other special characters are rejected.
 - **Git hook prevention**: When cloning a plugin from Git, hooks are disabled by pointing `core.hooksPath` to an empty temporary directory. This prevents malicious pre-checkout or post-checkout hooks from executing arbitrary code.
 - **URL scheme restriction**: Only `https://` and `git://` Git URLs are accepted. Local file paths, `ssh://`, and other schemes are blocked to prevent unintended local file access.
-- **Host confirmation**: Git hosts outside github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht need an explicit confirmation in the dialog.
+- **Host confirmation**: Git hosts outside github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht need an explicit confirmation in the dialog, or `--trust-host` on the command line.
 - **No project-local plugins**: `<project>/.esfex/plugins/` is not scanned, so opening someone else's project does not run its code.
 - **Trusted hashes**: once a plugin has been installed through the dialog or CLI, only plugins whose SHA-256 hash is on record are loaded (see [Trusted Plugins](#trusted-plugins)).
 - **Overwrite confirmation**: Installing a plugin over an existing one requires explicit confirmation (a dialog in the GUI, or the `force` parameter in the API).
