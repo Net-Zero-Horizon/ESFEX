@@ -5050,21 +5050,91 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
 
     node_of = {bid: b.parent_node for bid, b in B.items()}
 
-    # Representative voltage / frequency per node (buses within a node share
-    # the node bus, so pick the dominant level).
     buses_of_node: dict[int, list] = defaultdict(list)
     for b in B.values():
         buses_of_node[b.parent_node].append(b)
-    node_v: dict[int, float] = {}
-    node_freq: dict[int, float] = {}
+
+    # ── What the reduction collapses together ─────────────────────────
+    # One bus per node is the rule, EXCEPT where a converter sits *inside* a
+    # node. A back-to-back converter (frequency or AC/DC) is co-located by
+    # construction — ``_create_converter`` places its two ends ~33 m apart —
+    # so both ends always fall in the same cluster. Collapsing the node to a
+    # single bus therefore turned every such converter into a self-loop and
+    # deleted it, taking with it the electrical boundary it represents:
+    # Japan's 50/60 Hz split silently became one synchronous area, and the
+    # DC-OPF could move unlimited power across an interface that in reality
+    # is a handful of back-to-back stations.
+    #
+    # A node is a geographic aggregation and may hold several buses (buses >=
+    # nodes); only the *electrical* connection is bus-to-bus. So a node that
+    # contains a converter is split into the AC-connected groups the converter
+    # separates, and the converter survives to link the resulting buses.
+    def _all_converters():
+        yield from (getattr(state, "acdc_converters", None) or [])
+        yield from (getattr(state, "freq_converters", None) or [])
+
+    split_nodes = {
+        node_of[c.from_bus]
+        for c in _all_converters()
+        if getattr(c, "from_bus", None) in node_of
+        and getattr(c, "to_bus", None) in node_of
+        and node_of[c.from_bus] == node_of[c.to_bus]
+    }
+
+    group_of: dict[str, int] = {}      # bus_id -> reduced-bus index
+    group_members: list[list] = []     # reduced-bus index -> [GuiBus]
+    group_node: list[int] = []         # reduced-bus index -> parent node
     for i in range(NN):
         nb = buses_of_node.get(i, [])
-        node_v[i] = max((b.voltage_kv for b in nb), default=500.0) if nb else 500.0
-        freqs = [getattr(b, "frequency_hz", 50.0) or 50.0 for b in nb]
-        node_freq[i] = max(set(freqs), key=freqs.count) if freqs else 50.0
+        if not nb:
+            continue
+        if i not in split_nodes:
+            g = len(group_members)
+            group_members.append(list(nb))
+            group_node.append(i)
+            for b in nb:
+                group_of[b.bus_id] = g
+            continue
+        # AC adjacency *inside* this node. Converters are deliberately not
+        # edges here — they are the separators being preserved.
+        ids = {b.bus_id for b in nb}
+        adj_in: dict[str, set] = {bid: set() for bid in ids}
+        for br in list(state.transmission_lines) + list(state.transformers):
+            if getattr(br, "decorative", False):
+                continue
+            u, v = getattr(br, "from_bus", None), getattr(br, "to_bus", None)
+            if u in ids and v in ids and u != v:
+                adj_in[u].add(v)
+                adj_in[v].add(u)
+        seen: set = set()
+        for b in nb:
+            if b.bus_id in seen:
+                continue
+            comp, stack = [], [b.bus_id]
+            while stack:
+                x = stack.pop()
+                if x in seen:
+                    continue
+                seen.add(x)
+                comp.append(x)
+                stack.extend(adj_in[x] - seen)
+            g = len(group_members)
+            group_members.append([B[bid] for bid in comp])
+            group_node.append(i)
+            for bid in comp:
+                group_of[bid] = g
+    NG = len(group_members)
 
-    # Equivalent inter-node branches: combine original cross-boundary
-    # lines + transformers per node-pair (parallel).
+    # Representative voltage / frequency per reduced bus.
+    grp_v: list[float] = []
+    grp_freq: list[float] = []
+    for members in group_members:
+        grp_v.append(max((b.voltage_kv for b in members), default=500.0))
+        freqs = [getattr(b, "frequency_hz", 50.0) or 50.0 for b in members]
+        grp_freq.append(max(set(freqs), key=freqs.count) if freqs else 50.0)
+
+    # Equivalent branches: combine original cross-boundary lines +
+    # transformers per reduced-bus pair (parallel).
     pair: dict[tuple[int, int], dict] = defaultdict(
         lambda: {"cap": 0.0, "invx": 0.0, "invr": 0.0, "b": 0.0})
 
@@ -5083,27 +5153,54 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
         if getattr(ln, "decorative", False):
             continue
         _accumulate(
-            node_of.get(ln.from_bus), node_of.get(ln.to_bus),
+            group_of.get(ln.from_bus), group_of.get(ln.to_bus),
             float(ln.capacity_mw or 0.0),
             float(getattr(ln, "reactance_pu", 0.0) or 0.0),
             float(getattr(ln, "resistance_pu", 0.0) or 0.0),
             float(getattr(ln, "susceptance_pu", 0.0) or 0.0))
     for tr in state.transformers:
         _accumulate(
-            node_of.get(tr.from_bus), node_of.get(tr.to_bus),
+            group_of.get(tr.from_bus), group_of.get(tr.to_bus),
             float(getattr(tr, "rated_power_mva", 0.0) or 0.0),
             float(getattr(tr, "impedance_pu", 0.0) or 0.05), 0.0, 0.0)
 
-    # One node bus per node, carrying all of the node's demand.
-    node_bus_id = {i: f"node_{i}" for i in range(NN)}
+    # One reduced bus per group. The node's demand is shared between its
+    # groups in proportion to the demand its member buses already carried, so
+    # a split node does not duplicate or lose load.
+    groups_of_node: dict[int, list[int]] = defaultdict(list)
+    for g, i in enumerate(group_node):
+        groups_of_node[i].append(g)
+    grp_bus_id: list[str] = [""] * NG
+    for i, gs in groups_of_node.items():
+        for k, g in enumerate(gs):
+            grp_bus_id[g] = f"node_{i}" if k == 0 else f"node_{i}_b{k}"
+
     new_buses: dict[str, GuiBus] = {}
-    for i in range(NN):
+    for i, gs in groups_of_node.items():
         nd = nodes[i]
-        new_buses[node_bus_id[i]] = GuiBus(
-            bus_id=node_bus_id[i], name=nd.name or node_bus_id[i],
-            parent_node=i, voltage_kv=node_v[i], frequency_hz=node_freq[i],
-            role="load", demand_fraction=1.0,
-            latitude=nd.centroid_lat, longitude=nd.centroid_lng)
+        weights = [
+            sum(float(getattr(b, "demand_fraction", 0.0) or 0.0)
+                for b in group_members[g]) for g in gs
+        ]
+        total_w = sum(weights)
+        if total_w <= 0:                       # no load anywhere → largest group
+            weights = [0.0] * len(gs)
+            weights[max(range(len(gs)), key=lambda k: len(group_members[gs[k]]))] = 1.0
+            total_w = 1.0
+        for k, g in enumerate(gs):
+            members = group_members[g]
+            lats = [b.latitude for b in members if b.latitude or b.longitude]
+            lngs = [b.longitude for b in members if b.latitude or b.longitude]
+            share = weights[k] / total_w
+            new_buses[grp_bus_id[g]] = GuiBus(
+                bus_id=grp_bus_id[g],
+                name=(nd.name or grp_bus_id[g]) if k == 0
+                else f"{nd.name or f'node_{i}'} ({grp_freq[g]:.0f} Hz)",
+                parent_node=i, voltage_kv=grp_v[g], frequency_hz=grp_freq[g],
+                role="load" if share > 0 else "connection",
+                demand_fraction=share,
+                latitude=(sum(lats) / len(lats)) if lats else nd.centroid_lat,
+                longitude=(sum(lngs) / len(lngs)) if lngs else nd.centroid_lng)
 
     # Equivalent branches as transmission lines.
     try:
@@ -5112,43 +5209,56 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
         def _haversine_km(*_a, **_k):
             return 0.0
     new_lines: list = []
-    for (i, j), p in sorted(pair.items()):
+    for (gi, gj), p in sorted(pair.items()):
         xeq = (1.0 / p["invx"]) if p["invx"] > 0 else 0.01
         req = (1.0 / p["invr"]) if p["invr"] > 0 else 0.0
-        length = _haversine_km(nodes[i].centroid_lat, nodes[i].centroid_lng,
-                               nodes[j].centroid_lat, nodes[j].centroid_lng)
+        bi, bj = new_buses[grp_bus_id[gi]], new_buses[grp_bus_id[gj]]
+        length = _haversine_km(bi.latitude, bi.longitude,
+                               bj.latitude, bj.longitude)
         new_lines.append(GuiTransmissionLine(
-            line_id=f"eq_{i}_{j}", from_bus=node_bus_id[i], to_bus=node_bus_id[j],
-            from_node=i, to_node=j,
-            capacity_mw=p["cap"], voltage_kv=max(node_v[i], node_v[j]),
+            # Keeps the historical ``eq_<i>_<j>`` shape for the usual
+            # one-bus-per-node case; a split node contributes its suffix.
+            line_id=(f"eq_{grp_bus_id[gi].removeprefix('node_')}"
+                     f"_{grp_bus_id[gj].removeprefix('node_')}"),
+            from_bus=grp_bus_id[gi], to_bus=grp_bus_id[gj],
+            from_node=group_node[gi], to_node=group_node[gj],
+            capacity_mw=p["cap"], voltage_kv=max(grp_v[gi], grp_v[gj]),
             reactance_pu=xeq, resistance_pu=req, susceptance_pu=p["b"],
             length_km=length,
-            from_endpoint=EndpointRef("bus", node_bus_id[i]),
-            to_endpoint=EndpointRef("bus", node_bus_id[j]),
-            waypoints=[GeoPoint(nodes[i].centroid_lat, nodes[i].centroid_lng),
-                       GeoPoint(nodes[j].centroid_lat, nodes[j].centroid_lng)]))
+            from_endpoint=EndpointRef("bus", grp_bus_id[gi]),
+            to_endpoint=EndpointRef("bus", grp_bus_id[gj]),
+            waypoints=[GeoPoint(bi.latitude, bi.longitude),
+                       GeoPoint(bj.latitude, bj.longitude)]))
 
-    # Move generation / storage onto their node bus (co-located with demand →
-    # no stranding).
+    # Move generation / storage onto the reduced bus of the group they sat in
+    # (co-located with that group's demand → no stranding, and a unit behind a
+    # converter stays on its own side of the boundary).
     for g in state.generators.values():
-        n = node_of.get(getattr(g, "bus", None))
-        if n is not None:
-            g.bus = node_bus_id[n]
+        gi = group_of.get(getattr(g, "bus", None))
+        if gi is not None:
+            g.bus = grp_bus_id[gi]
     for bt in state.batteries.values():
-        n = node_of.get(getattr(bt, "bus", None))
-        if n is not None:
-            bt.bus = node_bus_id[n]
+        gi = group_of.get(getattr(bt, "bus", None))
+        if gi is not None:
+            bt.bus = grp_bus_id[gi]
+    for el in getattr(state, "electrolyzers", {}).values():
+        gi = group_of.get(getattr(el, "bus", None))
+        if gi is not None:
+            el.bus = grp_bus_id[gi]
 
-    # Converters: remap endpoints to node buses; drop intra-node self-loops.
+    # Converters: remap endpoints to the reduced buses. A converter whose two
+    # ends now land on the SAME reduced bus is genuinely internal (nothing it
+    # separates survived) and is dropped; a back-to-back converter inside a
+    # node no longer falls in that case, because its node was split above.
     def _remap_convs(convs):
         out = []
         for c in convs:
-            ni = node_of.get(getattr(c, "from_bus", None))
-            nj = node_of.get(getattr(c, "to_bus", None))
-            if ni is None or nj is None or ni == nj:
+            gi = group_of.get(getattr(c, "from_bus", None))
+            gj = group_of.get(getattr(c, "to_bus", None))
+            if gi is None or gj is None or gi == gj:
                 continue
-            c.from_bus = node_bus_id[ni]
-            c.to_bus = node_bus_id[nj]
+            c.from_bus = grp_bus_id[gi]
+            c.to_bus = grp_bus_id[gj]
             out.append(c)
         return out
     state.acdc_converters = _remap_convs(state.acdc_converters)
@@ -5159,7 +5269,7 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     state.buses = new_buses
     state.transmission_lines = new_lines
     state.transformers = []
-    return NN
+    return len(new_buses)
 
 
 def apply_simplification_level(

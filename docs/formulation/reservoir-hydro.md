@@ -49,7 +49,7 @@ $$
 L_{g,b,t+1} = L_{g,b,t}\,(1-\rho) + W_{g,b,t} + \Phi_{g,b,t} - \frac{P_{g,b,t}}{\eta} + \eta_p\,U_{g,b,t} - S_{g,b,t}
 $$
 
-where \(\Phi_{g,b,t}\) is the cascade inflow (RES-5, zero for a unit with no upstream feeders).
+where \(\Phi_{g,b,t}\) is the cascade inflow (RES-5, zero for a unit with no upstream feeders). Constraint `res_dynamics_g{g}_b{b}_t{t}`.
 
 ### RES-2: Level band
 
@@ -57,17 +57,19 @@ $$
 \ell^{\min} C \le L_{g,b,t+1} \le \ell^{\max} C
 $$
 
-Pumping is bounded by the pump capacity, and spillage is forced to zero when `reservoir_spillage_allowed` is false.
+Pumping is bounded by the pump capacity, and spillage is forced to zero when `reservoir_spillage_allowed` is false. Constraints `res_min_level_*`, `res_max_level_*`, `res_pump_limit_*` / `res_no_pump_*`, `res_no_spill_*`. In the dispatch's `development` mode the capacity \(C\) in the level band includes a reservoir investment variable bounded by `reservoir_invest_max` (`res_invest_limit_*`).
 
 ### RES-3: Boundary condition
 
-The starting level is fixed to the configured fraction, and the period is **cyclic** (the end level returns to the start, within `soc_end_tolerance`):
+The starting level is fixed, and each period is **cyclic**: the end level returns to the start, within `soc_end_tolerance` \(\epsilon\):
 
 $$
-L_{g,b,1} = \ell^0 C, \qquad L_{g,b,H+1} \approx L_{g,b,1}
+L_{g,b,1} = L^{0}_{g,b}, \qquad (1-\epsilon)\,L^{0}_{g,b} \le L_{g,b,H+1} \le (1+\epsilon)\,L^{0}_{g,b}
 $$
 
-With **seasonal storage** enabled (see §4), the cyclic closure is replaced by a chronological chain: the level starts at the previous period's boundary and ends pinned to the next, so water is carried across periods rather than reset each one.
+\(L^0_{g,b} = \ell^0 C\) in the first window of a year and in the master problem. In rolling-horizon dispatch, later windows start from the level at the end of the previous window's last kept hour, and the end condition is relative to that level, so over a year the level can drift by up to \(\epsilon\) per window. Constraints `res_initial_*`, `res_end_lower_*`, `res_end_upper_*`.
+
+With **seasonal storage** enabled (see §4), the cyclic closure is replaced by a chronological chain: the level starts at the previous period's boundary and ends pinned to the next (`res_end_seasonal_*`), so water is carried across periods rather than reset each one.
 
 ### RES-4: Minimum environmental flow
 
@@ -76,6 +78,8 @@ When `reservoir_min_release` \(R^{\min} > 0\), the water leaving the reservoir (
 $$
 \frac{P_{g,b,t}}{\eta} + S_{g,b,t} \ge R^{\min}
 $$
+
+Constraint `res_min_release_g{g}_b{b}_t{t}`.
 
 ### RES-5: Hydraulic cascade
 
@@ -95,7 +99,7 @@ $$
 P_{g,b,t} \le \bar P\left( \phi + (1-\phi)\,\frac{L_{g,b,t} - \ell^{\min} C}{(\ell^{\max} - \ell^{\min})\,C} \right)
 $$
 
-Evaluated at the start-of-step level \(L_{g,b,t}\), this bound is linear in the level variable — the tractable piecewise-linear treatment of head dependence. Reservoir investment is not folded into the fill fraction, keeping the constraint linear.
+Constraint `res_head_limit_g{g}_b{b}_t{t}`. Evaluated at the start-of-step level \(L_{g,b,t}\), this bound is linear in the level variable — the tractable piecewise-linear treatment of head dependence. Reservoir investment is not folded into the fill fraction, keeping the constraint linear.
 
 ---
 

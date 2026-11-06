@@ -12,6 +12,14 @@ When a generator trips, the power imbalance causes the system frequency to devia
 
 The COI model aggregates all synchronous machines into a single equivalent machine, enabling closed-form analytical solutions for each metric.
 
+This module is a post-processing analysis (`analysis/frequency.py`) run on dispatch results, in the Studio or from Python; it adds nothing to the optimization. The dispatch has its own linear inertia requirement, `inertia_{t}` (INE-1 in [Operational Dispatch](operational-dispatch.md)):
+
+\[
+\sum_{g,b} H_{g,b}\, p_{g,b,t} + \sum_{k,b} H^{bat}_{k,b} \left( p^{ch}_{k,b,t} + p^{dis}_{k,b,t} \right) + \lambda^{H}_t \geq H^{min}_t
+\]
+
+where \(H^{min}_t\) is the inertia threshold in MW·s (hourly profile or `INERTIA_LIMIT_THRESHOLD`, default 0.1; an absolute value, although the Studio labels the field as a fraction) and the shortfall \(\lambda^H_t\) is penalized at `penalties.loss_of_inertia`. Like FS-1, it weights each unit's inertia constant by its output, not its rating.
+
 ## Mathematical Model
 
 ### System Inertia

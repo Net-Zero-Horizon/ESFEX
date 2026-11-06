@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from esfex.config.schema import canonical_unit_type
 from esfex.visualization.data.gui_model import (
     EndpointRef,
     FuelEntryParams,
@@ -642,6 +643,7 @@ def apply_assignments(
                 _valid_gen_types = {"Renewable", "Non-renewable", "Storage", "Electrolyzer"}
                 raw_type = _prop_str(p, "gen_type", "type", "Type",
                                      default="Non-renewable")
+                raw_type = canonical_unit_type(raw_type)
                 gen_type = raw_type if raw_type in _valid_gen_types else "Non-renewable"
                 fuel = _prop_str(p, "fuel", "Fuel", default="Natural Gas")
                 inst_id = _make_instance_id("gen", unit_key, node_idx, state.generators)

@@ -1,6 +1,11 @@
 # Rooftop Solar Model
 Module: `esfex.models.solar_rooftop`
 
+!!! note "Two implementations"
+    The simulation runner does not use this module. It generates rooftop profiles with the external `rooftex` package (`rooftex.generate_profiles(RooftopConfig(...))`, which returns a `RooftopResult` with `.availability`, `.adoption_factors` and `.max_potential_mw`); see [Integration with the simulation](#integration-with-the-simulation).
+
+    The package-level names `esfex.models.generate_rooftop_solar_profiles` and `esfex.models.calculate_rooftop_potential` are aliases of `rooftex.generate_profiles` and `rooftex.calculate_potential`. `rooftex.generate_profiles` takes a single `RooftopConfig` argument, so it rejects the keyword arguments shown below. Import from `esfex.models.solar_rooftop` to get the functions documented on this page.
+
 ## Overview
 
 Rooftop solar differs from utility-scale solar in several ways [**[54]**](../reference/bibliography.md#ref54):
@@ -114,7 +119,7 @@ Otherwise, estimated from a Gamma distribution scaled by urbanization.
 |-----|------|---------|-------------|
 | `performance_ratio` | `float` | `0.75` | System performance ratio. |
 | `adoption_rates` | `dict` | `{"low": 0.05, "medium": 0.08, "high": 0.12}` | Growth rates by scenario. |
-| `initial_adoption` | `list[float]` | `[0.05] * num_nodes` | Initial adoption fraction per node. |
+| `initial_adoption` | `list[float]` | `[0.05] * num_nodes` | Read but not used in any calculation. |
 | `max_adoption` | `dict` | `{"low": 0.30, "medium": 0.50, "high": 0.70}` | Max adoption by scenario. |
 | `systems_per_node` | `list[int]` | Auto-estimated | Number of potential rooftop systems per node. |
 | `avg_system_size` | `list[float]` | Auto-estimated | Average system size in kW per node. |
@@ -158,7 +163,7 @@ def integrate_rooftop_solar(
 ) -> Optional[dict]
 ```
 
-Integrate rooftop solar as a virtual generator in the optimization model. Modifies `units_config` in place, adding a `"Rooftop_Solar"` unit.
+Build a rooftop solar unit as a virtual generator and add it to `units_config` in place, under the next free `unit_{N}` key with `"name": "Rooftop_Solar"`. This is a standalone helper; the runner does not call it.
 
 **Parameters:**
 
@@ -171,9 +176,10 @@ Integrate rooftop solar as a virtual generator in the optimization model. Modifi
 | `availability_matrix` | `np.ndarray` | required | From `generate_rooftop_solar_profiles()`. |
 | `adoption_factors` | `np.ndarray` | required | From `generate_rooftop_solar_profiles()`. |
 | `max_potential` | `list[float]` | required | From `generate_rooftop_solar_profiles()`. |
-| `co2_reduction` | `float` | `0.7` | CO2 reduction factor vs conventional mix. |
+| `co2_reduction` | `float` | `0.7` | Accepted but not used. |
 | `cost_reduction_rate` | `float` | `0.08` | Annual learning curve cost reduction (8%/year). |
 | `min_capacity_threshold` | `float` | `1.0` | Minimum total capacity (MW) to add the unit. |
+| `config` | `dict` or `None` | `None` | Optional keys: `o_and_m_cost` (20), `performance_ratio` (0.75), `degradation_rate` (0.005), `target_year` (2050), `cost_per_kw` (1200). |
 
 **Returns:** The rooftop solar unit configuration dict, or `None` if below threshold.
 
@@ -188,6 +194,7 @@ s_curve_factor = 1 / (1 + exp(-10 * (progress_factor - 0.5)))
 current_adoption = adoption_factors * s_curve_factor
 
 # Installed capacity per node
+degradation_factor = 1 - degradation_rate * years_diff / 2
 installed_capacity = max_potential * current_adoption * degradation_factor
 ```
 
@@ -247,33 +254,43 @@ potential = calculate_rooftop_potential(populations)
 
 ---
 
-## Integration with Capacity Expansion
+## Integration with the Simulation
 
-Rooftop solar integration in the main simulation loop:
+When a system sets `SIM_ROOFTOP: true` and has a `rooftop_solar_config` block, the runner (`Orchestrator._generate_rooftop_solar`):
 
-1. At simulation start, `generate_rooftop_solar_profiles()` creates availability and adoption data.
-2. Each year, `integrate_rooftop_solar()` computes the installed capacity and adds a virtual generator to `units_config`.
-3. The `PowerSystemAdapter` receives the rooftop generation profile via `kwargs['rooftop_generation']` and passes it to the Julia model.
-4. In the Julia model, rooftop generation is treated as must-take renewable generation (subject to curtailment limits).
+1. Calls `rooftex.generate_profiles` once with `num_nodes`, one year of hours, the simulation start year as base year, the last simulated year as target year, `adoption_scenario`, `weather_variability` and `simulation_seed`. No other `rooftop_solar_config` field is passed to rooftex.
+2. Takes the per-node maximum potential from the system's `rooftop_max_potential` if set, otherwise from the rooftex result.
+3. For each simulated year, computes installed capacity with the S-curve and degradation formulas shown under `integrate_rooftop_solar` (using `base_year`, `target_year` and `degradation_rate` from `rooftop_solar_config`) and multiplies it by the availability profile. If peak rooftop output stays below 1 MW, rooftop solar is dropped.
+4. Treats rooftop output as behind-the-meter: in each operational window it is subtracted from demand before the Julia call, `max(demand - rooftop, 0)`, so output above demand is self-curtailed. Sectoral demands are scaled by the same ratio. The adapter receives `rooftop_generation=None`, so no rooftop variables are created in the dispatch model.
+5. Stores the yearly series in `YearResults.rooftop_generation` and writes it to the HDF5 scenario group as `rooftop_generation` (hours × nodes).
+
+`systems_per_node`, `avg_system_size`, `performance_ratio`, `initial_adoption`, `max_adoption`, `adoption_rates`, `cost_per_kw`, `cost_reduction_rate` and `o_and_m_cost` are validated by the schema but not used by the runner.
 
 ---
 
 ## YAML Configuration
 
+`rooftop_solar_config` is validated by `RooftopSolarConfig`. `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption` and `adoption_rates` have no default and must be present.
+
 ```yaml
 systems:
   island:
-    rooftop_solar:
-      enabled: true
-      adoption_scenario: "medium"
-      weather_variability: "normal"
+    SIM_ROOFTOP: true
+    rooftop_max_potential: [25.0, 15.0, 10.0, 5.0]   # MW per node (optional)
+    rooftop_solar_config:
+      adoption_scenario: "medium"     # low | medium | high
+      weather_variability: "normal"   # low | normal | high
+      simulation_seed: 42
+      base_year: 2025
+      target_year: 2050
+      degradation_rate: 0.005
       performance_ratio: 0.75
       cost_per_kw: 1200
       cost_reduction_rate: 0.08
-      degradation_rate: 0.005
       o_and_m_cost: 20
-      target_year: 2050
       systems_per_node: [5000, 3000, 2000, 1000]
       avg_system_size: [5.0, 5.0, 5.0, 5.0]  # kW
       initial_adoption: [0.05, 0.03, 0.02, 0.01]
+      max_adoption: {low: 0.30, medium: 0.50, high: 0.70}
+      adoption_rates: {low: 0.05, medium: 0.08, high: 0.12}
 ```

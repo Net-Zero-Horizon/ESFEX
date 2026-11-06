@@ -886,15 +886,17 @@ class TestExtractKpis:
         kpis = extract_kpis(LPModel(), 0.0, sol)
         assert kpis["inv_bat_total"] == pytest.approx(10.0)
 
-    def test_bat_tech_cap_investment(self):
+    def test_bat_tech_cap_investment_not_counted(self):
+        """inv_bat_total is power (MW); energy (MWh) used to be added to it."""
         sol = {"bat_tech_cap_inv_y1_bt0_n0": 20.0}
         kpis = extract_kpis(LPModel(), 0.0, sol)
-        assert kpis["inv_bat_total"] == pytest.approx(20.0)
+        assert kpis["inv_bat_total"] == 0.0
+        assert kpis["curtailment"] == 0.0
 
     def test_bat_tech_pow_and_cap_combined(self):
         sol = {"bat_tech_pow_inv_y1_bt0_n0": 10.0, "bat_tech_cap_inv_y1_bt0_n0": 20.0}
         kpis = extract_kpis(LPModel(), 0.0, sol)
-        assert kpis["inv_bat_total"] == pytest.approx(30.0)
+        assert kpis["inv_bat_total"] == pytest.approx(10.0)
 
     def test_curtailment_by_name(self):
         sol = {"op_curtailment_y1_n0_t1": 5.0, "op_curtailment_y1_n0_t2": 3.0}

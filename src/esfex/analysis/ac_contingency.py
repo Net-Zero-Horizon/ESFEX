@@ -98,14 +98,17 @@ class ACContingencyAnalyzer:
             self._bridge.set_element_in_service(gen_type, gen_element_id, False)
 
         # Redistribute lost generation to remaining dispatchable gens
-        self._redistribute_generation(net, gen_element_id, lost_output, gens_data)
+        shifts = self._redistribute_generation(gen_element_id, lost_output, gens_data)
 
         # Rerun AC power flow
         pf_result = self._bridge.rerun_power_flow()
 
-        # Restore generator
+        # Restore generator and the pre-contingency dispatch, so the next
+        # contingency does not start from this one's redistribution
         if gen_type:
             self._bridge.set_element_in_service(gen_type, gen_element_id, True)
+        for gen_id, delta in shifts.items():
+            self._bridge.shift_gen_output(gen_id, -delta)
 
         if not pf_result.converged:
             log.info("AC PF diverged for gen loss %s, falling back to DC", gen_element_id)
@@ -279,18 +282,18 @@ class ACContingencyAnalyzer:
         return None
 
     def _redistribute_generation(
-        self, net: Any, tripped_id: str, lost_mw: float,
-        gens_data: dict[str, Any],
-    ) -> None:
-        """Redistribute lost generation to remaining dispatchable gens."""
-        import pandapower as pp  # noqa: F401
+        self, tripped_id: str, lost_mw: float, gens_data: dict[str, Any],
+    ) -> dict[str, float]:
+        """Redistribute lost generation to remaining dispatchable gens.
 
+        Returns the MW added to each generator, for the caller to undo.
+        """
         # Find dispatchable gens with headroom
         headroom: dict[str, float] = {}
-        for gen_id, pp_idx in self._bridge._gen_id_to_pp.items():
+        for gen_id in self._bridge._gen_id_to_pp:
             if gen_id == tripped_id:
                 continue
-            if not net.gen.at[pp_idx, "in_service"]:
+            if not self._bridge.gen_in_service(gen_id):
                 continue
             current = gens_data.get(gen_id, {}).get("output_mw", 0.0)
             rated = gens_data.get(gen_id, {}).get("capacity_mw", 0.0)
@@ -300,14 +303,15 @@ class ACContingencyAnalyzer:
 
         total_headroom = sum(headroom.values())
         if total_headroom <= 0:
-            return
+            return {}
 
         # Pro-rata increase
+        shifts: dict[str, float] = {}
         for gen_id, room in headroom.items():
             increase = min(lost_mw, total_headroom) * (room / total_headroom)
-            pp_idx = self._bridge._gen_id_to_pp[gen_id]
-            current_p = float(net.gen.at[pp_idx, "p_mw"])
-            net.gen.at[pp_idx, "p_mw"] = current_p + increase
+            self._bridge.shift_gen_output(gen_id, increase)
+            shifts[gen_id] = increase
+        return shifts
 
     def _dc_fallback_gen(
         self, snapshot: dict, gen_id: str,

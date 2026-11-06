@@ -1,13 +1,15 @@
 # EV & V2G Assessment
 
-Electric vehicle fleet adoption modeling and vehicle-to-grid integration analysis. Access via **Workflows > EV & V2G Assessment**.
+Electric vehicle fleet adoption modeling and vehicle-to-grid integration analysis. Access via **Workflows > EV & V2G Assessment...**.
 
 The wizard evaluates the electrification trajectory of a vehicle fleet and its consequences for the power system. Starting from a geographic domain and baseline fleet composition, it projects EV adoption under multiple scenarios, generates hourly charging demand profiles, quantifies V2G flexibility potential, and produces calibrated EV parameters for the ESFEX optimizer. The analysis builds on established frameworks for V2G economics [**[51]**](../reference/bibliography.md#ref51), power system integration of electric vehicles [**[52]**](../reference/bibliography.md#ref52), and technology diffusion modeling [**[53]**](../reference/bibliography.md#ref53).
 
-The wizard is organized in two phases:
+The wizard has four steps. Each step stacks several panels:
 
-- **Phase A (Steps 1-5)**: Fleet Assessment. Define the transport context, configure macroeconomic and policy inputs, run four adoption models, review fleet evolution, and select a baseline scenario.
-- **Phase B (Steps 6-9)**: Grid Integration. Generate charging demand profiles under three management strategies, assess V2G technical potential and battery degradation, evaluate grid impact, and export the results to the ESFEX model.
+1. **Domain & Macro**: transport context (study area and baseline fleet), then macroeconomic and policy inputs.
+2. **Adoption & Results**: four adoption models, fleet evolution results, and selection of a baseline scenario.
+3. **Charging & V2G**: charging demand profiles under three management strategies, then V2G technical potential and battery degradation.
+4. **Grid & Integration**: grid impact, then export of the results to the ESFEX model.
 
 All computations use the `evrex` library, which can also be used independently for scripting and batch analysis — see [Scripting](#scripting).
 
@@ -15,19 +17,16 @@ All computations use the `evrex` library, which can also be used independently f
 ---
 
 
-## Phase A — Fleet Assessment
+## Step 1: Domain & Macro
 
 
-### Step 1: Transport Context
+### Transport Context
 
 Define the geographic study area and enter the baseline vehicle fleet composition.
 
 **Domain definition:**
 
-Draw a rectangle on the interactive map or enter bounding box coordinates manually (south latitude, north latitude, west longitude, east longitude). The domain defines the geographic scope for infrastructure auto-detection and country identification.
-
-- **Draw on Map**: Click the button, then draw a rectangle on the map. The wizard minimizes during drawing and restores when the rectangle is complete.
-- **Manual coordinates**: Enter the four bounding-box values directly and click **Apply Coordinates**.
+Define the study area with the shared domain selector: **Draw domain** on the map, or **Use imported area as domain** with an imported GeoAsset (see [Study area selector](index.md#study-area-selector)). The domain defines the geographic scope for infrastructure auto-detection and country identification. The infrastructure indicators below are computed for the domain's bounding box.
 
 **Auto-detect infrastructure:**
 
@@ -60,7 +59,7 @@ Default values are shown above. Adjust them to reflect the actual fleet composit
 - Fleet data for many countries is available from national transport statistics or OICA (International Organization of Motor Vehicle Manufacturers).
 
 
-### Step 2: Macro & Policy Data
+### Macro & Policy Data
 
 Configure macroeconomic indicators, EV-specific cost parameters, and policy instruments that drive the adoption models.
 
@@ -74,7 +73,7 @@ Configure macroeconomic indicators, EV-specific cost parameters, and policy inst
 | Inflation rate | 3 | %/year | Annual consumer price inflation. Affects real fuel price projections. |
 | GDP growth rate | 3 | %/year | Annual real GDP growth. Drives future purchasing power evolution. |
 
-**Auto-fetch**: Click **Fetch Macro Data** to retrieve GDP per capita, urbanization, and population from the World Bank API, and GDP growth and inflation from the IMF DataMapper API. The country is auto-detected from the domain bounding box defined in Step 1 (reverse geocoding). If country detection fails, enter data manually.
+**Auto-fetch**: Click **Fetch Macro Data** to retrieve GDP per capita, urbanization, and population from the World Bank API, and GDP growth and inflation from the IMF DataMapper API. The country is auto-detected from the domain bounding box (reverse geocoding). If country detection fails, enter data manually.
 
 **EV economics table:**
 
@@ -116,7 +115,10 @@ Additional cost parameters:
 - For small island developing states (SIDS), fuel prices are often 30-50% higher than global averages due to transport costs, which accelerates the TCO crossover.
 
 
-### Step 3: Adoption Models
+## Step 2: Adoption & Results
+
+
+### Adoption Models
 
 Run up to four EV adoption projection methods simultaneously and validate against historical data.
 
@@ -150,10 +152,10 @@ A dropdown offers three parameter packages that simultaneously configure all per
 
 Two sources of historical EV stock data for model calibration:
 
-- **Fetch IEA Data**: Loads bundled data from the IEA Global EV Data Explorer (2010-2024 EV stock by country). Available when country detection succeeded in Step 2.
+- **Fetch IEA Data**: Loads bundled data from the IEA Global EV Data Explorer (2010-2024 EV stock by country). Available when country detection succeeded in the macro panel.
 - **Import CSV**: Load a user-provided CSV file with columns `year` and `ev_stock` (or `stock`).
 
-When validation data is available, the fleet results in Step 4 overlay the historical trajectory on the projection curves, and the MAPE (Mean Absolute Percentage Error) metric is computed for each model.
+When validation data is available, the fleet results panel overlays the historical trajectory on the projection curves, and the MAPE (Mean Absolute Percentage Error) metric is computed for each model.
 
 **Run Models**: Executes all selected methods in a background thread. A progress bar and log panel show real-time status. Each method reports its final penetration percentage upon completion.
 
@@ -164,9 +166,9 @@ When validation data is available, the fleet results in Step 4 overlay the histo
 - For countries with announced ICE bans (e.g., Norway 2025, UK 2035, EU 2035), the policy-driven model produces the most realistic near-term trajectory.
 
 
-### Step 4: Fleet Results
+### Fleet Results
 
-Visualization of the fleet evolution projections from all models computed in Step 3.
+Visualization of the fleet evolution projections from all models computed by the adoption models panel.
 
 **Charts (side-by-side):**
 
@@ -187,9 +189,9 @@ A tabular view showing penetration percentages at every 5th year (2025, 2030, 20
 | **CSV** | Full time series with columns: year, method, penetration, total_ev, energy_gwh, peak_mw. |
 
 
-### Step 5: Scenario Selection
+### Scenario Selection
 
-Compare all adoption models and select one as the baseline for Phase B grid integration analysis.
+Compare all adoption models and select one as the baseline for the charging, V2G and grid analysis (Steps 3 and 4).
 
 **Selection interface:**
 
@@ -210,7 +212,7 @@ Radio buttons are generated for each computed model, labeled with the method nam
 | Energy (GWh) | Annual EV energy demand at target year |
 | Peak (MW) | Peak charging demand at target year |
 
-Select the scenario that best represents the expected adoption trajectory for the study area. This curve becomes the basis for all Phase B computations — charging demand profiles, V2G potential, and grid impact are all derived from the fleet numbers in the selected scenario.
+Select the scenario that best represents the expected adoption trajectory for the study area. This curve becomes the basis for all later computations — charging demand profiles, V2G potential, and grid impact are all derived from the fleet numbers in the selected scenario.
 
 **Tips:**
 
@@ -219,13 +221,10 @@ Select the scenario that best represents the expected adoption trajectory for th
 - For conservative grid planning, the model with the highest peak demand provides a stress-test scenario.
 
 
----
+## Step 3: Charging & V2G
 
 
-## Phase B — Grid Integration
-
-
-### Step 6: Charging Demand
+### Charging Demand
 
 Generate and compare 24-hour charging demand profiles under three charging management strategies.
 
@@ -239,7 +238,7 @@ Upload a CSV file containing a 24-hour base electricity demand profile (MW) for 
 
 **Analysis year:**
 
-A year selector (default: midpoint of the projection horizon) determines which year's fleet size is used for profile generation. The fleet count per category at the selected year is extracted from the adoption curve chosen in Step 5.
+A year selector (default: midpoint of the projection horizon) determines which year's fleet size is used for profile generation. The fleet count per category at the selected year is extracted from the adoption curve chosen in the scenario selection panel.
 
 **Charging parameters by category:**
 
@@ -272,7 +271,7 @@ The following technical parameters are used internally for each vehicle category
 - The daily energy (MWh) is identical across all three scenarios — only the temporal distribution changes.
 
 
-### Step 7: V2G Potential
+### V2G Potential
 
 Assess vehicle-to-grid discharge capacity and quantify battery degradation costs.
 
@@ -330,7 +329,10 @@ A text panel below the charts reports:
 - The connected-time profile has the largest influence on V2G power availability. Workplace charging infrastructure (increasing midday connection) can substantially increase daytime V2G capacity for solar peak shaving.
 
 
-### Step 8: Grid Impact
+## Step 4: Grid & Integration
+
+
+### Grid Impact
 
 Comprehensive assessment of how EV charging and V2G affect the power system.
 
@@ -341,7 +343,7 @@ Comprehensive assessment of how EV charging and V2G affect the power system.
 | Charging scenario | Uncontrolled, Time-of-Use Shifted, Optimized | Which charging profile to use for the impact assessment. Default: Optimized. |
 | V2G compensation | $0-500/MWh (default: $50) | Payment rate for V2G services. Used to compute economic metrics. |
 
-**Run Grid Analysis**: Executes `evrex.assess_grid_impact()` using the selected charging scenario, V2G potential from Step 7, and the base demand profile from Step 6 (or a synthetic profile if none was loaded).
+**Run Grid Analysis**: Executes `evrex.assess_grid_impact()` using the selected charging scenario, V2G potential, and the base demand profile from the charging demand panel (or a synthetic profile if none was loaded).
 
 **Charts (side-by-side):**
 
@@ -390,7 +392,7 @@ Three key financial metrics displayed below the flexibility table:
 - The economic metrics are indicative estimates. For detailed financial analysis, export the results and use the [Financial Analysis Wizard](financial-analysis.md).
 
 
-### Step 9: Integration
+### Integration
 
 Compile all wizard results and apply them to the ESFEX optimization model.
 
@@ -405,6 +407,8 @@ The selected adoption curve is fitted to a logistic function using least-squares
 | `mid_point_fraction` | Fraction of the planning horizon at which adoption reaches 50% |
 
 These parameters, together with per-category technical specifications, form the complete EV configuration for ESFEX.
+
+In the simulation, the S-curve parameters scale each category's fleet and charging profile, while the dispatch model represents the categories as one aggregate fleet per node: battery capacity, charging power and V2G power are fleet-size-weighted means across categories, and the efficiencies and minimum SOC are weighted by battery energy.
 
 **Configuration preview:**
 
@@ -636,7 +640,7 @@ from evrex import (
     fit_adoption_to_ev_config,
 )
 
-# Step 1: Define transport context
+# Transport context
 transport = TransportContext(
     fleet_by_category={"light": 1000, "medium": 200, "heavy": 50, "buses": 30},
     avg_daily_km={"light": 40, "medium": 80, "heavy": 150, "buses": 200},
@@ -645,7 +649,7 @@ transport = TransportContext(
     road_density_km2=3.2,
 )
 
-# Step 2: Define macro data
+# Macro data
 macro = EVMacroData(
     country_iso="CUB",
     gdp_per_capita=5000,
@@ -667,7 +671,7 @@ macro = EVMacroData(
     emission_target_pct=0,
 )
 
-# Step 3: Run adoption models
+# Adoption models
 bass = run_ev_bass_diffusion(transport, 2025, 2050, p=0.02, q=0.40)
 logistic = run_ev_logistic_adoption(macro, transport, 2025, 2050)
 tco = run_ev_tco_parity(macro, transport, 2025, 2050, price_sensitivity=8.0)
@@ -676,10 +680,10 @@ policy = run_ev_policy_driven(macro, transport, 2025, 2050)
 print(f"Bass: {bass.penetration[-1]*100:.1f}% by {bass.years[-1]}")
 print(f"TCO:  {tco.penetration[-1]*100:.1f}% by {tco.years[-1]}")
 
-# Step 5: Select preferred scenario
+# Select the preferred scenario
 selected = bass
 
-# Step 6: Generate charging profiles
+# Charging profiles
 ev_params = {
     "light":  {"charging_power": 7,  "battery_capacity": 50},
     "medium": {"charging_power": 11, "battery_capacity": 75},
@@ -696,7 +700,7 @@ scenarios = generate_all_scenarios(
 for name, s in scenarios.items():
     print(f"  {name}: peak={s.peak_demand_mw:.1f} MW, daily={s.daily_energy_mwh:.1f} MWh")
 
-# Step 7: V2G potential
+# V2G potential
 v2g = compute_v2g_potential(
     fleet_by_category=fleet_2035,
     ev_categories=ev_params,
@@ -713,7 +717,7 @@ print(f"V2G: {v2g.annual_v2g_potential_gwh:.2f} GWh/year")
 print(f"Degradation: {deg.total_degradation_pct_per_year:.2f}%/year")
 print(f"Break-even: ${deg.breakeven_compensation:.1f}/MWh")
 
-# Step 8: Grid impact
+# Grid impact
 impact = assess_grid_impact(
     base_demand_24h=[200 + 80*i/24 for i in range(24)],  # simplified
     ev_charging_24h=scenarios["optimized"].aggregate_hourly_mw,
@@ -723,7 +727,7 @@ impact = assess_grid_impact(
 print(f"Peak shaving: {impact.peak_shaving_mw:.1f} MW")
 print(f"Net V2G value: ${impact.net_v2g_value:,.0f}")
 
-# Step 9: Generate ESFEX configuration
+# ESFEX configuration
 ev_config = fit_adoption_to_ev_config(
     curve=selected,
     transport=transport,

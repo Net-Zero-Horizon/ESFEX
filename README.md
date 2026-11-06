@@ -64,7 +64,7 @@
 
 **ESFEX** (Energy System Flexibility) is an open-source power system planning framework that co-optimizes generation, storage, and transmission investment over multi-decade horizons while explicitly capturing the operational flexibility constraints that arise in systems with high shares of variable renewable energy.
 
-It couples a strategic **capacity expansion planner** (Master Problem) with a detailed **operational dispatch engine** through a two-stage decomposition — bridging the gap between long-term investment planning tools and short-term production cost models. Investment decisions are validated operationally (ramp rates, minimum stable generation, storage cycling, demand response, sector coupling) *before* being accepted, so the plan that ESFEX produces is one the system can actually operate.
+It couples a strategic **capacity expansion planner** (Master Problem) with a detailed **operational dispatch engine** through a two-stage decomposition — bridging the gap between long-term investment planning tools and short-term production cost models. The master problem already includes operational constraints (ramp rates, minimum stable generation, storage cycling, demand response, sector coupling) on representative days, and every year of the resulting plan is then dispatched hour by hour, so operating problems such as unserved demand or excess curtailment show up in the results.
 
 ESFEX is implemented as a hybrid system: **Python** handles configuration, data management, orchestration, the GIS Studio, and post-processing; **Julia** (via [JuMP](https://jump.dev/)) handles the mathematical optimization, leveraging its compiled performance for large-scale LP and MIP problems. The two communicate through [`juliacall`](https://github.com/JuliaPy/PythonCall.jl). The architecture is modular: seven interlinked optimization models can be selectively enabled depending on the study scope.
 
@@ -83,15 +83,15 @@ ESFEX is implemented as a hybrid system: **Python** handles configuration, data 
 
 ### Optimization Architecture
 
-- **Two-stage decomposition** — Master Problem (all years simultaneously, representative days/periods) + Operational Dispatch (year-by-year, full chronological year). Investments are operationally validated before acceptance.
+- **Two-stage decomposition** — Master Problem (all years simultaneously, representative days/periods, optional Benders decomposition) + Operational Dispatch (year-by-year, full chronological year).
 - **Rolling horizon dispatch** — Configurable overlapping time windows with boundary-condition propagation (battery SOC, generator status) and automatic result stitching.
-- **Three simulation modes** — `development` (LP, continuous commitment + investment), `economic_dispatch` (LP, fixed fleet), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
+- **Three simulation modes** — `development` (LP master problem + LP dispatch, optionally with unit commitment), `economic_dispatch` (fixed fleet; LP, or conic/NLP with AC-OPF), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
 - **Unit decommissioning planning** — Age-based retirement plus NPV-based retirement for flexible phase-out / retention of the unit inventory.
 
 ### Power System Modeling
 
-- **DC power flow** — KCL/KVL constraints with a cycle-based formulation for meshed networks, voltage angle variables, piecewise-linear losses, and transmission investment.
-- **AC optimal power flow** — Four selectable ACOPF formulations: SOC relaxation (convex W-space), QC relaxation (McCormick envelopes), Polar NLP (exact V-θ), and Rectangular NLP (exact e-f), solved with Ipopt. Models voltage magnitudes, reactive balance, apparent-power limits (`P² + Q² ≤ S²`).
+- **DC power flow** — Bus-level KCL with angle-based line flows (`P = (S_base/x)·Δθ`, one angle reference per connected component), piecewise-linear losses, and transmission investment.
+- **AC optimal power flow** — Five selectable ACOPF formulations: SOC relaxation (convex W-space), QC relaxation (McCormick envelopes), SDP relaxation, Polar NLP (exact V-θ) and Rectangular NLP (exact e-f). The relaxations use conic solvers (Clarabel, SCS, or a commercial solver for SOC/QC); the exact NLP formulations use Ipopt. Models voltage magnitudes, reactive balance, apparent-power limits (`P² + Q² ≤ S²`).
 - **AC power flow verification** — Post-DC Newton-Raphson AC power flow (native Julia solver + pandapower bridge for IEC 60909 short-circuit analysis) to validate voltage profiles and detect violations the DC approximation misses.
 - **N-1 security** — Automatic critical-contingency identification with post-contingency flow redistribution for generation and transmission, in both DC and AC.
 - **Frequency stability** — Post-contingency ROCOF, frequency nadir, and steady-state frequency via a center-of-inertia (COI) model, with N-1 screening of online generators.
@@ -119,8 +119,8 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 - **GIS-based Studio** — A PySide6 + Leaflet.js map for visually building power systems: place nodes, generators, batteries, and transmission lines with polyline routing. Includes resource-assessment wizards for rooftop solar, utility-scale PV ([solarex](https://github.com/Net-Zero-Horizon/solarex)), wind ([windrex](https://github.com/Net-Zero-Horizon/windrex)), and OTEC ([OTEX](https://github.com/Net-Zero-Horizon/OTEX)) availability profiles.
 - **Plugin system** — Directory-based plugins with simulation lifecycle hooks, GUI integration, and Julia overlay modules for custom constraints.
-- **CLI** — `run`, `validate`, `export`, `studio`, `precompile`, `info` and `plugin` commands (plus `train-demand-model` / `build-demand-dataset` demand-data utilities) with Rich formatting and progress tracking.
-- **HDF5 output** — Structured results with derived metrics (LCOE, VALCOE, capacity factor) exportable to CSV, Excel, and JSON.
+- **CLI** — `run`, `validate`, `export`, `studio`, `precompile`, `info`, `add-solver` / `remove-solver` / `list-solvers` and `plugin` commands (plus `train-demand-model` / `build-demand-dataset` demand-data utilities) with Rich formatting and progress tracking.
+- **HDF5 output** — Structured results with derived metrics (LCOE, VALLCOE, capacity factor) exportable to CSV, Excel, and JSON.
 
 ---
 
@@ -152,7 +152,7 @@ ESFEX treats sector coupling as a first-class architectural principle. Any energ
 
 ## Installation
 
-ESFEX is a hybrid Python/Julia package. Python ≥ 3.10 and a working Julia ≥ 1.9 installation are required; the Julia dependencies are managed automatically through `juliacall` on first run.
+ESFEX is a hybrid Python/Julia package. It needs Python 3.10–3.13. Julia (≥ 1.9) is managed through `juliacall`: a suitable Julia on your `PATH` is used, otherwise one is downloaded on first use, and ESFEX's Julia dependencies are installed automatically.
 
 > **Windows note:** install Python from [python.org](https://www.python.org/downloads/windows/) or Anaconda/Miniconda — **not** from the Microsoft Store. The Store build runs in a sandbox with a redirected filesystem that breaks native DLL loading (PySide6/Qt) and per-user `pip` paths.
 
@@ -172,6 +172,8 @@ conda env create -f environment.yml   # or: mamba env create -f environment.yml
 conda activate esfex
 esfex info
 ```
+
+`environment.yml` currently pins Python below 3.13; use pip for Python 3.13.
 
 ### From source (development mode)
 
@@ -225,11 +227,13 @@ pip install -e ".[dev]"          # pytest, pytest-cov, ruff, black, mypy
 
 ### Julia backend
 
-The Julia optimization models live in [`src/esfex/julia/`](src/esfex/julia/) with their own `Project.toml`. On the first `esfex run`, `juliacall` instantiates the Julia environment automatically. To build a sysimage for faster startup:
+The Julia optimization models live in [`src/esfex/julia/`](src/esfex/julia/) with their own `Project.toml`. The first time Julia is needed (`esfex run`, or `esfex info` to do it up front), the Julia packages are installed and compiled automatically. To build a sysimage for faster startup:
 
 ```bash
 esfex precompile
 ```
+
+`precompile` runs `julia` as a separate process, so it needs a `julia` executable on `PATH`.
 
 ### Solvers
 
@@ -272,8 +276,8 @@ esfex run -c my_system.yaml --years 25 --verbose
 # Run in unit-commitment (MIP) mode with a specific solver
 esfex run -c my_system.yaml --mode unit_commitment --solver gurobi
 
-# Export results to CSV
-esfex export -r results/output.h5 -f csv
+# Export results to CSV (the run writes results/<config>_<ddmmyyyy>_<HHMM>.h5)
+esfex export -r results/my_system_29102026_1430.h5 -f csv
 
 # Show version and system information
 esfex info
@@ -282,11 +286,15 @@ esfex info
 ### Python API
 
 ```python
+from pathlib import Path
+
 from esfex import load_config
 from esfex.runner import Orchestrator
 
-config = load_config("my_system.yaml")
-orchestrator = Orchestrator(config, output_dir="./results")
+config_file = Path("my_system.yaml")
+config = load_config(config_file)
+orchestrator = Orchestrator(config, output_dir="./results",
+                            config_path=config_file)
 results = orchestrator.run(years=25)
 
 for year in results:
@@ -312,23 +320,34 @@ esfex studio -c my_system.yaml   # open an existing configuration
 > On Windows, if `esfex` is "not recognized", launch it as a module instead:
 > `python -m esfex studio`. See [Installation → Windows](#windows-if-esfex-is-not-recognized).
 
-Place nodes, generators, batteries, and transmission lines directly on a Leaflet map with geographic routing, edit element parameters through validated forms, and run resource-assessment wizards (rooftop solar, utility PV via [solarex](https://github.com/Net-Zero-Horizon/solarex), wind via [windrex](https://github.com/Net-Zero-Horizon/windrex), OTEC via [OTEX](https://github.com/Net-Zero-Horizon/OTEX)) to generate availability profiles. The Studio writes standard ESFEX YAML that the CLI and Python API consume unchanged.
+Place nodes, generators, batteries, and transmission lines directly on a Leaflet map with geographic routing, edit element parameters through validated forms, and run resource-assessment wizards (rooftop solar, utility PV via [solarex](https://github.com/Net-Zero-Horizon/solarex), wind via [windrex](https://github.com/Net-Zero-Horizon/windrex), OTEC via [OTEX](https://github.com/Net-Zero-Horizon/OTEX)) to generate availability profiles. The Studio writes standard ESFEX YAML that `esfex run` and the Python API load directly.
 
 ---
 
 ## Configuration
 
-ESFEX is driven by a single YAML configuration describing the system topology, technologies, temporal settings, and solver options. Key sections:
+ESFEX is driven by a single YAML configuration describing the system topology, technologies, temporal settings, and solver options. Key top-level sections:
 
 | Section | Purpose |
 |---------|---------|
 | `simulation_mode` | `development`, `economic_dispatch`, or `unit_commitment` |
 | `temporal` | Resolution, rolling-horizon window/overlap, investment resolution |
-| `solver` | Solver name, threads, gap, time limit, numerical options |
+| `solver` | Solver name, threads, gap, time limit, solver-specific options |
+| `master_problem` | Representative days, planning mode, Benders, MGA/SPORES |
+| `meta_network` | Systems to include and the links between them |
+| `systems` | One entry per power system (keys below) |
+
+Main keys of each `systems.<name>` entry:
+
+| Key | Purpose |
+|-----|---------|
+| `demand_path` / `demand_paths` | Hourly demand file(s) |
 | `nodes` / `buses` | Network topology and demand assignment |
-| `generators` | Thermal, renewable, and conversion technologies |
-| `batteries` | Storage with degradation and duration bounds |
-| `transmission` | Lines, transformers, converters; DC/AC power flow settings |
+| `generators` / `batteries` | Existing units (per-node lists) |
+| `technologies` / `battery_technologies` | Investment candidates |
+| `transmission_lines_geo`, `transformers`, `acdc_converters`, `freq_converters` | Network elements |
+| `power_flow_mode`, `dc_power_flow`, `ac_power_flow` | Power-flow formulation and parameters |
+| `penalties`, `co2_budget` | Soft-constraint costs and emissions budget |
 | `development_zones` | Candidate sites for new generation investment |
 
 See the [Configuration Reference](docs/reference/config-reference.md) and the [User Guide](docs/user-guide/configuration.md) for the full schema.
@@ -387,7 +406,7 @@ mkdocs serve
 
 ## Requirements
 
-- **Python** ≥ 3.10 (3.10, 3.11, 3.12 supported)
+- **Python** 3.10, 3.11, 3.12 or 3.13
 - **Julia** ≥ 1.9 (managed via `juliacall`)
 - Core Python: NumPy, Pandas, SciPy, h5py, Pydantic, NetworkX, Typer, Rich, PySide6
 - A supported solver: HiGHS (default, open-source), or Gurobi / CPLEX / CBC / GLPK / SCIP / Xpress / Clarabel / SCS / Ipopt
@@ -404,7 +423,8 @@ If you use ESFEX in academic work, please cite:
   author  = {Soto Calvo, Manuel and Lee, Han Soo},
   year    = {2026},
   url     = {https://github.com/Net-Zero-Horizon/ESFEX},
-  version = {0.1.3},
+  doi     = {10.5281/zenodo.20504838},
+  version = {0.3.0},
   license = {Apache-2.0}
 }
 ```

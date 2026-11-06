@@ -48,6 +48,7 @@ from esfex.config.schema import (
     TemporalConfig,
     TransformerConfig,
     TransmissionLineGeo,
+    canonical_unit_type,
 )
 
 
@@ -130,6 +131,19 @@ def _convert_fuels(fuels_data: dict[str, dict]) -> dict[str, FuelConfig]:
     return result
 
 
+def _pass_through(model: type, data: dict[str, Any], kwargs: dict[str, Any]) -> None:
+    """Copy into *kwargs* every *model* field present in *data* (by name or
+    alias) that the caller did not map explicitly, so fields the Studio
+    writes are not silently dropped."""
+    for name, field in model.model_fields.items():
+        if name in kwargs:
+            continue
+        if name in data:
+            kwargs[name] = data[name]
+        elif field.alias and field.alias in data:
+            kwargs[name] = data[field.alias]
+
+
 def _convert_generator(unit_key: str, data: dict[str, Any]) -> GeneratorConfig:
     """Convert a generator unit definition to GeneratorConfig."""
     kwargs: dict[str, Any] = dict(
@@ -157,41 +171,21 @@ def _convert_generator(unit_key: str, data: dict[str, Any]) -> GeneratorConfig:
         maintenance_cost=data["maintenance_cost"],
         invest_cost=data["invest_cost"],
         invest_max_power=data["invest_max_power"],
-        availability_file=data.get("Availability"),
+        availability_file=data.get("Availability", data.get("availability_file")),
         frequency_hz=data.get("frequency_hz", 50.0),
         current_type=data.get("current_type", "AC"),
     )
-    # Pass through reservoir fields if present
-    _reservoir_fields = [
-        "reservoir_capacity", "reservoir_initial_level", "reservoir_min_level",
-        "reservoir_max_level", "reservoir_turbine_efficiency",
-        "reservoir_evaporation_rate", "reservoir_pump_capacity",
-        "reservoir_pump_efficiency", "reservoir_spillage_allowed",
-        "reservoir_invest_cost", "reservoir_invest_max", "reservoir_inflow_file",
-    ]
-    for field in _reservoir_fields:
-        if field in data:
-            kwargs[field] = data[field]
-    # Authoritative per-node bus assignment from the GUI / serializer.
-    # Without this the bridge adapter falls back to coarser heuristics
-    # (transmission_line endpoints, default bus per node, etc.) which
-    # silently leaves multi-bus-per-node thermal plants un-anchored —
-    # observed empirically as 70% load shed in cuba_link.yaml UC runs.
-    if "bus_id_per_node" in data:
-        kwargs["bus_id_per_node"] = data["bus_id_per_node"]
-    if "bus_index" in data:
-        kwargs["bus_index"] = data["bus_index"]
+    # Everything else the schema knows (reservoir and cascade fields,
+    # droop, risk_coefficient, cost curves, Q limits, and the authoritative
+    # per-node bus assignment bus_id_per_node / bus_index — without which
+    # multi-bus-per-node plants are left un-anchored).
+    _pass_through(GeneratorConfig, data, kwargs)
     return GeneratorConfig(**kwargs)
 
 
 def _convert_battery(unit_key: str, data: dict[str, Any]) -> BatteryConfig:
     """Convert a storage unit definition to BatteryConfig."""
-    extra: dict[str, Any] = {}
-    if "bus_id_per_node" in data:
-        extra["bus_id_per_node"] = data["bus_id_per_node"]
-    if "bus_index" in data:
-        extra["bus_index"] = data["bus_index"]
-    return BatteryConfig(
+    kwargs: dict[str, Any] = dict(
         name=data.get("name", unit_key),
         type="Storage",
         fuel=data.get("fuel", "None"),
@@ -227,15 +221,16 @@ def _convert_battery(unit_key: str, data: dict[str, Any]) -> BatteryConfig:
         capacity=data["capacity"],
         MaxChargePower=data["MaxChargePower"],
         MaxDischargePower=data["MaxDischargePower"],
-        availability_file=data.get("Availability"),
+        availability_file=data.get("Availability", data.get("availability_file")),
         current_type=data.get("current_type", "DC"),
-        **extra,
     )
+    _pass_through(BatteryConfig, data, kwargs)
+    return BatteryConfig(**kwargs)
 
 
 def _convert_primary_energy_source(name: str, data: dict[str, Any]) -> PrimaryEnergySourceConfig:
     """Convert primary energy source definition."""
-    return PrimaryEnergySourceConfig(
+    kwargs: dict[str, Any] = dict(
         name=data.get("name", name),
         unit=data["unit"],
         max_availability=data["max_availability"],
@@ -249,6 +244,27 @@ def _convert_primary_energy_source(name: str, data: dict[str, Any]) -> PrimaryEn
         max_storage_investment_per_node=data["max_storage_investment_per_node"],
         max_transport_investment_per_arc=data["max_transport_investment_per_arc"],
     )
+    _pass_through(PrimaryEnergySourceConfig, data, kwargs)
+    return PrimaryEnergySourceConfig(**kwargs)
+
+
+def _warn_zero_ramps(generators: dict[str, GeneratorConfig]) -> None:
+    """Point out installed units whose ramp limit is 0. The dispatch treats
+    it as "no ramp limit"; projects saved by older Studio versions hold 0
+    because that was the default for new generators."""
+    zero = sorted(
+        key for key, gen in generators.items()
+        if any(p > 0 and (gen.ramp_up[i] <= 0 or gen.ramp_down[i] <= 0)
+               for i, p in enumerate(gen.rated_power)
+               if i < len(gen.ramp_up) and i < len(gen.ramp_down))
+    )
+    if zero:
+        shown = ", ".join(zero[:10]) + (f" (+{len(zero) - 10} more)" if len(zero) > 10 else "")
+        log.warning(
+            "%d generator(s) have ramp_up/ramp_down = 0 where they have capacity: %s. "
+            "0 means no ramp limit; set a fraction of capacity per hour to limit ramping.",
+            len(zero), shown,
+        )
 
 
 def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
@@ -261,7 +277,8 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
     _valid_gen_types = {"Renewable", "Non-renewable", "Electrolyzer"}
     for key, value in list(system_data.items()):
         if (key.startswith("unit_") or key.startswith("bat_")) and isinstance(value, dict):
-            unit_type = value.get("type", "Unknown")
+            unit_type = canonical_unit_type(value.get("type", "Unknown"))
+            value["type"] = unit_type
             if unit_type == "Storage":
                 batteries[key] = _convert_battery(key, value)
             elif unit_type in _valid_gen_types:
@@ -279,7 +296,8 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
         for key, value in system_data["generators"].items():
             if isinstance(value, dict):
                 # Sanitize unknown generator types
-                gt = value.get("type", "Non-renewable")
+                gt = canonical_unit_type(value.get("type", "Non-renewable"))
+                value["type"] = gt
                 if gt not in ("Renewable", "Non-renewable", "Storage", "Electrolyzer"):
                     log.warning("Generator %s has unknown type '%s', treating as Non-renewable", key, gt)
                     value["type"] = "Non-renewable"
@@ -291,6 +309,8 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             if isinstance(value, dict):
                 batteries[key] = _convert_battery(key, value)
         del system_data["batteries"]
+
+    _warn_zero_ramps(generators)
 
     # Convert fuels
     if "fuels" in system_data and isinstance(system_data["fuels"], dict):
@@ -331,11 +351,13 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             co2_cost=pen_data.get("co2_cost", 10),
             co2_budget_violation=pen_data.get("co2_budget_violation", 500),
             fre_penetration_loss=pen_data.get("fre_penetration_loss", 100),
-            ev_loss=pen_data.get("ev_loss", 10),
+            ev_loss=pen_data.get("ev_loss"),
             loss_of_fuel_supply=pen_data.get("loss_of_fuel_supply", 100),
             transport_congestion=pen_data.get("transport_congestion", 100),
             storage_violation=pen_data.get("storage_violation", 100),
             non_electric_demand_loss=pen_data.get("non_electric_demand_loss", 100),
+            **{k: pen_data[k] for k in ("soc_violation", "delay_retirement_per_mw",
+                                        "coupling_slack_penalty") if k in pen_data},
         )
 
     # Convert CO2 budget
@@ -538,12 +560,33 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
                 ),
             )
 
-    return SystemConfig(
+    system = SystemConfig(
         generators=generators,
         batteries=batteries,
         electrolyzers=electrolyzers,
         **system_data,
     )
+    _warn_demandless_nodes(system)
+    return system
+
+
+def _warn_demandless_nodes(system: SystemConfig) -> None:
+    """Point out nodes whose buses all have demand_fraction 0: the models
+    place a node's demand only on its buses, so that demand is not served
+    (nor counted as shed)."""
+    if not system.buses:
+        return
+    totals: dict[int, float] = {}
+    for b in system.buses:
+        totals[b.parent_node] = totals.get(b.parent_node, 0.0) + b.demand_fraction
+    zero = sorted(n for n, t in totals.items() if t <= 0)
+    if zero:
+        log.warning(
+            "System %r: node(s) %s have buses but all with demand_fraction 0 "
+            "(e.g. role 'connection'); their demand is dropped. Give one of "
+            "their buses role 'load' or 'mixed' and a demand_fraction.",
+            system.name, zero,
+        )
 
 
 def load_config(path: Union[str, Path]) -> ESFEXConfig:

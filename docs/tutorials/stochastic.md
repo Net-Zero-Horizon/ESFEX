@@ -50,66 +50,63 @@ Probabilities must sum to 1.0.
 ```yaml
 master_problem:
   stochastic: true
-  representative_days_per_year: 5
+  solver_method: monolithic   # Benders ignores the scenarios
+  representative_days: 5
   min_day_separation: 7
 ```
 
-When `stochastic: true`, the master problem creates separate operational variables for each scenario while sharing investment variables across all scenarios.
+With `stochastic: true` the master problem shares one set of investment variables across all scenarios and builds a separate set of representative-day operational variables for each scenario.
 
 ### Step 2: Define Scenarios
 
-Scenarios use multipliers that modify base-case parameters:
+`stochastic_scenarios` is a list. Each scenario has a `name`, a `probability` (they must sum to 1) and optional `multipliers`; a multiplier left out is 1.0:
 
 ```yaml
 systems:
   island:
-    # ... standard system config (nodes, generators, batteries, etc.) ...
+    # ... standard system config (nodes, generators, technologies, ...) ...
 
     stochastic_scenarios:
-      high_demand:
+      - name: high_demand
         probability: 0.3
         multipliers:
-          demand_multiplier: 1.2            # 20% higher demand
-          demand_growth_multiplier: 1.5     # 50% faster growth
-          fuel_cost_multiplier: 1.1         # 10% more expensive fuel
+          demand_growth: 1.03        # demand +3 %/year relative to the base case
+          fuel_cost: 1.1             # 10 % more expensive fuel
 
-      base_case:
+      - name: base_case
         probability: 0.4
-        multipliers:
-          demand_multiplier: 1.0
-          fuel_cost_multiplier: 1.0
 
-      green_transition:
+      - name: green_transition
         probability: 0.2
         multipliers:
-          investment_cost_multiplier: 0.8   # 20% cheaper RE investment
-          battery_cost_multiplier: 0.7      # 30% cheaper batteries
-          renewable_availability_multiplier: 1.1  # 10% better RE resources
+          invest_cost_renewables: 0.8   # 20 % cheaper RE investment
+          invest_cost_storage: 0.7      # 30 % cheaper batteries
 
-      stagnation:
+      - name: stagnation
         probability: 0.1
         multipliers:
-          demand_multiplier: 0.9            # 10% lower demand
-          demand_growth_multiplier: 0.6     # Much slower growth
-          fuel_cost_multiplier: 0.8         # Cheaper fuel
+          demand_growth: 0.98        # demand −2 %/year
+          fuel_cost: 0.8
 ```
 
 ### Available Multipliers
 
-Each multiplier scales the corresponding base-case parameter (1.0 = no change).
+Each multiplier scales the corresponding base-case parameter (1.0 = no change). Any other key is ignored.
 
 | Multiplier | Default | What It Scales |
 |-----------|---------|----------------|
-| `demand_multiplier` | 1.0 | All electrical demand values (D_n,t) |
-| `demand_growth_multiplier` | 1.0 | Annual demand growth rate (compounds over years) |
-| `fuel_cost_multiplier` | 1.0 | All generator fuel costs ($/MWh) |
-| `renewable_availability_multiplier` | 1.0 | RE capacity factors (solar irradiance, wind speed) |
-| `investment_cost_multiplier` | 1.0 | Generator investment costs ($/MW) |
-| `battery_cost_multiplier` | 1.0 | Battery investment costs ($/MW and $/MWh) |
-| `co2_cost_multiplier` | 1.0 | CO2 emission penalty ($/tCO2) |
-| `discount_rate_multiplier` | 1.0 | Discount rate for NPV calculation |
-| `ev_adoption_multiplier` | 1.0 | EV fleet growth rate |
-| `technology_improvement_multiplier` | 1.0 | Generator efficiency improvements |
+| `demand_growth` | 1.0 | Demand, as an annual factor: base demand × `demand_growth`^(year − 1) |
+| `fuel_cost` | 1.0 | Fuel cost of generators and candidate technologies |
+| `fuel_price_growth` | 1.0 | Extra annual fuel price escalation: fuel cost × `fuel_price_growth`^(year − 1) |
+| `maintenance_cost` | 1.0 | Maintenance cost of generators, batteries and technologies |
+| `invest_cost_renewables` | 1.0 | Investment cost of renewable technologies ($/MW) |
+| `invest_cost_conventional` | 1.0 | Investment cost of non-renewable technologies ($/MW) |
+| `invest_cost_storage` | 1.0 | Battery technology investment cost ($/MW and $/MWh) |
+| `invest_cost_transmission` | 1.0 | Transmission investment cost ($/MW) |
+| `discount_rate` | 1.0 | Discount rate used for the scenario's costs |
+| `carbon_price` | 1.0 | CO2 cost (`co2_cost`) in the scenario's operation |
+
+There is no multiplier for renewable availability or EV adoption.
 
 ### How Multipliers Work
 
@@ -117,9 +114,9 @@ Each multiplier scales the corresponding base-case parameter (1.0 = no change).
 parameter_s = parameter_base * multiplier_s
 ```
 
-For example, if the base fuel cost is $85/MWh and `fuel_cost_multiplier = 1.3`, the effective fuel cost in that scenario is $85 * 1.3 = $110.5/MWh.
+For example, with a base fuel cost of $85/MWh and `fuel_cost: 1.3`, the fuel cost in that scenario's operation is $85 × 1.3 = $110.5/MWh.
 
-`demand_growth_multiplier` compounds: base growth 2%/year with multiplier 1.5 yields 3%/year effective. Over 10 years, ~34% total increase vs. ~22% at base growth.
+`demand_growth` is a factor per year, compounding from the first year: with 1.03, the scenario's demand is 3 % above the base case in year 2, 6.1 % in year 3 and 30.5 % in year 10. Each scenario's operation has to serve its own demand with the common plan (or shed it at the `loss_of_load` cost), so a high-demand scenario pushes the plan to build more.
 
 ---
 
@@ -130,20 +127,20 @@ simulation_mode: development
 date_start: "01/01/2025 00:00"
 
 temporal:
-  resolution_hours: 1
   use_rolling_horizon: true
   rolling_horizon_hours: 48
-  overlap_hours: 6
+  overlap_hours: 24
 
 solver:
   name: highs
   threads: 4
-  time_limit: 7200            # Allow more time for stochastic solve
+  time_limit: 7200            # allow more time for the stochastic solve
   gap: 0.01
 
 master_problem:
   stochastic: true
-  representative_days_per_year: 5
+  solver_method: monolithic
+  representative_days: 5
   min_day_separation: 7
 
 meta_network:
@@ -152,102 +149,79 @@ meta_network:
 systems:
   island:
     name: island
-    demand_path: demand.xlsx
-    demand_scale: 1.0
-    demand_growth: 0.02
-    discount_rate: 0.05
-    target_re_penetration: 0.80
-    max_curtailment_ratio: 0.05
-    MAX_ANNUAL_SYSTEM_COST: 500000000.0
+    demand_path: demand.csv
+    TARGET_RE_PENETRATION: 0.8
 
     nodes:
-      adjacency_matrix:
-        - [0, 100]
-        - [100, 0]
-      coordinates:
-        - [-82.38, 23.13]
-        - [-81.95, 22.40]
-      names: ["Node_A", "Node_B"]
+      nodes_connections: [0.0]
+      node_names: [Main]
 
     generators:
       diesel:
         name: Diesel
         type: Non-renewable
         fuel: Diesel
-        rated_power: [50.0, 30.0]
-        min_power: [0.3, 0.3]
-        invest_cost: [0, 0]
-        invest_max_power: [0, 0]
-        fuel_cost: [85.0, 85.0]
-        fixed_cost: [5.0, 5.0]
-        maintenance_cost: [3.0, 3.0]
-        eff_at_rated: [0.38, 0.38]
-        eff_at_min: [0.30, 0.30]
-        life_time: [30, 30]
-        initial_age: [10, 10]
+        rated_power: [60.0]
+        life_time: [30]
+        initial_age: [10]
+        degradation_rate: [0.0]
+        decommissioning_cost: [0.0]
+        min_power: [0.0]
+        min_up: [0]
+        min_down: [0]
+        ramp_up: [1.0]
+        ramp_down: [1.0]
+        eff_at_rated: [0.35]
+        eff_at_min: [0.25]
+        inertia: [2.0]
+        start_up_cost: [0.0]
+        fuel_cost: [85.0]
+        fixed_cost: [0.0]
+        maintenance_cost: [10.0]
+        invest_cost: [1000000.0]
+        invest_max_power: [0.0]
 
     technologies:
       solar_pv:
         name: Solar PV
         type: Renewable
-        fuel: Solar
-        invest_cost: [700000, 700000]
-        invest_max_power: [200, 100]
-        Availability: solar_profile.csv
-        eff_at_rated: [1.0, 1.0]
-        degradation_rate: [0.005, 0.005]
+        fuel: Sun
+        Availability: solar.csv
+        invest_cost: [700000.0]
+        invest_max_power: [200.0]
+        eff_at_rated: [1.0]
+        degradation_rate: [0.005]
         lifetime: 25
-
-      wind:
-        name: Wind Onshore
-        type: Renewable
-        fuel: Wind
-        invest_cost: [1200000, 1200000]
-        invest_max_power: [100, 50]
-        Availability: wind_profile.csv
-        eff_at_rated: [1.0, 1.0]
-        degradation_rate: [0.002, 0.002]
-        lifetime: 20
 
     battery_technologies:
       li_ion:
         name: Li-Ion
-        invest_cost_power: [180000, 180000]
-        invest_cost_energy: [120000, 120000]
-        invest_max_power: [100, 50]
-        invest_max_capacity: [400, 200]
-        min_duration_hours: 2.0
-        max_duration_hours: 8.0
-        efficiency_charge: [0.95, 0.95]
-        efficiency_discharge: [0.95, 0.95]
+        invest_cost_power: [180000.0]
+        invest_cost_energy: [120000.0]
+        invest_max_power: [100.0]
+        invest_max_capacity: [400.0]
+        efficiency_charge: [0.95]
+        efficiency_discharge: [0.95]
+        degradation_rate: [0.0]
         lifetime: 15
 
     penalties:
-      loss_of_load: 10000000.0
-      curtailment: 100.0
+      loss_of_load: 10000.0
       max_curtailment_ratio: 0.05
-      fre_penetration_loss: 100.0
 
     stochastic_scenarios:
-      high_demand:
+      - name: high_demand
         probability: 0.3
         multipliers:
-          demand_multiplier: 1.2
-          demand_growth_multiplier: 1.5
-          fuel_cost_multiplier: 1.1
-
-      base_case:
+          demand_growth: 1.03
+          fuel_cost: 1.1
+      - name: base_case
         probability: 0.5
-        multipliers:
-          demand_multiplier: 1.0
-          fuel_cost_multiplier: 1.0
-
-      green_transition:
+      - name: green_transition
         probability: 0.2
         multipliers:
-          investment_cost_multiplier: 0.8
-          battery_cost_multiplier: 0.7
-          renewable_availability_multiplier: 1.1
+          invest_cost_renewables: 0.8
+          invest_cost_storage: 0.7
 ```
 
 ---
@@ -258,35 +232,15 @@ systems:
 esfex run -c stochastic_config.yaml --years 10 -v
 ```
 
-Expected log:
+The log confirms the scenarios before the master problem is solved:
 
 ```
-ESFEX - Power System Optimization
-Configuration: stochastic_config.yaml
-Mode: development
-Solver: highs
-
-Configuration Summary
-+-------------------+------------------+
-| Setting           | Value            |
-+-------------------+------------------+
-| Simulation Mode   | development      |
-| Solver            | highs            |
-| Systems           | island           |
-| Stochastic        | 3 scenarios      |
-+-------------------+------------------+
-
-Solving stochastic master problem...
-  Scenario 'high_demand' (prob=0.30): building operational constraints...
-  Scenario 'base_case' (prob=0.50): building operational constraints...
-  Scenario 'green_transition' (prob=0.20): building operational constraints...
-  Total variables: 245,000  Total constraints: 312,000
-  Solver: HiGHS (4 threads, gap=1%)
-  Optimal objective: $142,500,000 (expected cost)
-  Solve time: 145.3 seconds
+  Stochastic mode: 3 scenarios — high_demand (p=0.30), base_case (p=0.50), green_transition (p=0.20)
+Stochastic MasterProblem built with 3 scenarios
+MasterProblem termination: OPTIMAL, primal: FEASIBLE_POINT
 ```
 
-The stochastic master problem creates separate operational variables per scenario while sharing investment variables, increasing solve time.
+The master problem has one block of representative-day operation per scenario, so it grows roughly in proportion to the number of scenarios. The yearly dispatch that follows the master problem runs on the base case.
 
 ---
 
@@ -294,49 +248,26 @@ The stochastic master problem creates separate operational variables per scenari
 
 ### Robust Investment Decisions
 
-A single set of investment decisions applies across all scenarios:
+A single set of investment decisions applies across all scenarios. The run writes `results/stochastic_config_<ddmmyyyy>_<HHMM>.h5`; each year's investments are attributes of its group (`investment_tech_investment_power_<t>_<n>`, `investment_bat_tech_investment_power_<b>_<n>`, `investment_bat_tech_investment_capacity_<b>_<n>`, with `<t>`/`<b>` the 0-based position in `technologies`/`battery_technologies` and `<n>` the node):
 
 ```python
+from pathlib import Path
+
 import h5py
-import numpy as np
 
-with h5py.File("results/results_island.h5", "r") as f:
-    summary = f["summary_results"]
+h5_path = max(Path("results").glob("stochastic_config_*.h5"), key=lambda p: p.stat().st_mtime)
 
-    # Investment decisions (same for all scenarios)
-    if "gen_investment_power" in summary:
-        gen_inv = summary["gen_investment_power"][:]
-        print("Generator investments (MW) by year:")
-        for y, inv in enumerate(gen_inv):
-            if inv.sum() > 0:
-                print(f"  Year {y+1}: {inv}")
-
-    if "bat_investment_power" in summary:
-        bat_inv = summary["bat_investment_power"][:]
-        print("\nBattery investments (MW) by year:")
-        for y, inv in enumerate(bat_inv):
-            if inv.sum() > 0:
-                print(f"  Year {y+1}: {inv}")
+with h5py.File(h5_path, "r") as f:
+    for name, grp in f["detailed_results"].items():
+        inv = {k.removeprefix("investment_"): round(float(v), 1)
+               for k, v in grp.attrs.items() if k.startswith("investment_")}
+        if inv:
+            print(name, inv)
 ```
 
 ### Per-Scenario Operational Outcomes
 
-Operational outcomes (dispatch, costs, emissions) differ by scenario:
-
-```python
-with h5py.File("results/results_island.h5", "r") as f:
-    # Expected (probability-weighted) total cost
-    total_cost = f["summary_results/total_cost"][:]
-    print(f"Expected total cost (NPV): ${total_cost.sum():,.0f}")
-
-    # Per-scenario costs (if available)
-    if "stochastic_results" in f:
-        stoch = f["stochastic_results"]
-        for scenario_name in stoch.keys():
-            scenario_cost = stoch[scenario_name]["total_cost"][:]
-            prob = stoch[scenario_name].attrs.get("probability", "?")
-            print(f"  {scenario_name} (prob={prob}): ${scenario_cost.sum():,.0f}")
-```
+The results file holds the common investment plan and the base-case dispatch. Per-scenario operational results are not exported, and there is no option to re-run a scenario with a fixed plan. To see how the plan performs in a given scenario, add the built capacity as existing `generators`/`batteries` in a copy of the scenario's configuration and run it with `simulation_mode: economic_dispatch`, or compare against the deterministic runs used for EVPI below.
 
 ### EVPI: Expected Value of Perfect Information
 
@@ -349,40 +280,51 @@ EVPI = E[cost_stochastic] - E[cost_with_perfect_info]
 Compute EVPI by running the deterministic optimization per scenario, weighted by probabilities:
 
 ```bash
-# Run deterministic for each scenario (modify YAML manually or via script)
+# Stochastic run, then a deterministic run per scenario
+# (scenario files: stochastic: false, base parameters scaled by hand)
+esfex run -c stochastic_config.yaml -o results/stochastic/
 esfex run -c scenario_high_demand.yaml -o results/det_high/
 esfex run -c scenario_base_case.yaml -o results/det_base/
 esfex run -c scenario_green.yaml -o results/det_green/
 ```
 
 ```python
+from pathlib import Path
+
 import h5py
+
+def newest(folder):
+    return max(Path(folder).glob("*.h5"), key=lambda p: p.stat().st_mtime)
+
+def total_cost(path):
+    with h5py.File(path, "r") as f:
+        return f["summary_results/total_cost"][:].sum()
 
 # Deterministic costs under perfect information
 det_costs = {
-    "high_demand": ("results/det_high/results_island.h5", 0.3),
-    "base_case": ("results/det_base/results_island.h5", 0.5),
-    "green_transition": ("results/det_green/results_island.h5", 0.2),
+    "high_demand": (newest("results/det_high"), 0.3),
+    "base_case": (newest("results/det_base"), 0.5),
+    "green_transition": (newest("results/det_green"), 0.2),
 }
 
 expected_perfect = 0.0
 for name, (path, prob) in det_costs.items():
-    with h5py.File(path, "r") as f:
-        cost = f["summary_results/total_cost"][:].sum()
-        expected_perfect += prob * cost
-        print(f"  {name}: ${cost:,.0f}")
+    cost = total_cost(path)
+    expected_perfect += prob * cost
+    print(f"  {name}: ${cost:,.0f}")
 
 print(f"\nExpected cost with perfect info: ${expected_perfect:,.0f}")
 
-# Stochastic cost
-with h5py.File("results/results_island.h5", "r") as f:
-    stoch_cost = f["summary_results/total_cost"][:].sum()
+# Cost of the stochastic plan (see the note below)
+stoch_cost = total_cost(newest("results/stochastic"))
 
 evpi = stoch_cost - expected_perfect
-print(f"Stochastic expected cost:        ${stoch_cost:,.0f}")
+print(f"Stochastic plan cost:            ${stoch_cost:,.0f}")
 print(f"EVPI:                            ${evpi:,.0f}")
 print(f"EVPI as % of stochastic cost:    {evpi/stoch_cost:.1%}")
 ```
+
+`summary_results/total_cost` holds the yearly operational dispatch cost; investment cost is not included, and the stochastic run's dispatch covers the base case only. For a strict EVPI, add each run's investment cost and evaluate the stochastic plan in every scenario (as described above), then take the probability-weighted cost. The snippet above gives a first approximation.
 
 Small EVPI (< 2-3%): deterministic solution is nearly as good. Large EVPI (> 5-10%): uncertainty significantly affects optimal investment and stochastic programming provides real value.
 
@@ -417,6 +359,8 @@ The stochastic solution typically exhibits hedging behavior:
 - **Moderate RE targets**: Rather than aggressive RE deployment (optimal under green transition) or minimal RE (optimal under stagnation), the stochastic solution takes a middle path.
 
 ### Example Comparison Table
+
+Illustrative numbers:
 
 | Metric | Deterministic (Base) | Stochastic | Difference |
 |--------|---------------------|------------|------------|
@@ -493,4 +437,4 @@ Problem size grows linearly with scenarios (operational variables replicated, in
 6. **Scenario design**: Focus scenarios on the most impactful uncertainties (identified via sensitivity analysis). Scenario probabilities encode the planner's beliefs about the future.
 
 !!! warning "Validation Advisory"
-    The stochastic framework is structurally complete but should be validated carefully for production studies. Start with 2-3 scenarios and verify that per-scenario operational results are consistent with expectations before scaling up.
+    The stochastic framework is structurally complete but should be validated carefully for production studies. Start with 2-3 scenarios and compare the plan with the deterministic run of each scenario before scaling up.

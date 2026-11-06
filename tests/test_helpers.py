@@ -650,6 +650,13 @@ class TestCalculateCo2Emissions:
         expected = 100 * 24 * 0.9 + 50 * 24 * 0.4
         assert emissions == pytest.approx(expected)
 
+    def test_factor_is_per_mwh_of_fuel(self):
+        """Output is divided by the unit's rated efficiency at each node."""
+        gen_output = np.ones((1, 2, 10)) * 100
+        generators = [{"type": "Thermal", "fuel": "Gas", "eff_at_rated": [0.5, 0.4]}]
+        emissions = calculate_co2_emissions(gen_output, generators, {"Gas": 0.2})
+        assert emissions == pytest.approx(1000 * 0.2 / 0.5 + 1000 * 0.2 / 0.4)
+
     def test_renewable_generators_zero_emissions(self):
         """Renewable generators contribute zero emissions."""
         gen_output = np.ones((2, 1, 24)) * 100

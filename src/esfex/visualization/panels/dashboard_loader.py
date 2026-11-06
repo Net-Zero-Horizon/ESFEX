@@ -883,7 +883,6 @@ class DashboardLoader:
         ("npv_penalty_cost",         "NPV penalty"),
         ("delay_retirement_cost",    "Delayed retirement"),
         ("demand_shift_cost",        "Demand shift"),
-        ("v2g_compensation",         "V2G compensation"),
     ]
 
     def _read_cost_breakdown(self, f: h5py.File, bp: str,

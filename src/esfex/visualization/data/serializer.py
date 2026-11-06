@@ -1945,14 +1945,28 @@ def _system_to_gui_state(sys: SystemConfig,
         for cc in (sys.custom_constraints or [])
     ]
 
-    outage_schedule = [
-        GuiOutageWindow(
-            element_type=ow.element_type, element_id=ow.element_id,
-            start_hour=ow.start_hour, end_hour=ow.end_hour,
-            availability=ow.availability, label=ow.label,
+    # The calendar addresses generator / battery instances (one per node of a
+    # unit); the config addresses the unit key plus an optional node. A
+    # window on the whole unit becomes one window per instance.
+    _instances = {"generator": generators, "battery": batteries}
+    outage_schedule = []
+    for ow in (getattr(sys, "outage_schedule", None) or []):
+        ids = [ow.element_id]
+        insts = _instances.get(ow.element_type)
+        if insts is not None:
+            node = getattr(ow, "node", None)
+            matched = [iid for iid, inst in insts.items()
+                       if inst.unit_key == ow.element_id
+                       and (node is None or inst.node == node)]
+            ids = matched or ids
+        outage_schedule.extend(
+            GuiOutageWindow(
+                element_type=ow.element_type, element_id=iid,
+                start_hour=ow.start_hour, end_hour=ow.end_hour,
+                availability=ow.availability, label=ow.label,
+            )
+            for iid in ids
         )
-        for ow in (getattr(sys, "outage_schedule", None) or [])
-    ]
 
     state = GuiSystemState(
         name=sys.name,
@@ -2107,7 +2121,7 @@ def config_to_global_settings(
         t = config.temporal
         g.resolution_hours = getattr(t, 'resolution_hours', 1)
         g.rolling_horizon_hours = getattr(t, 'rolling_horizon_hours', 48)
-        g.overlap_hours = getattr(t, 'overlap_hours', 6)
+        g.overlap_hours = getattr(t, 'overlap_hours', 24)
         g.investment_resolution = getattr(t, 'investment_resolution', HOURS_STD_YEAR)
         g.primary_energy_resolution = getattr(t, 'primary_energy_resolution', 24)
         g.use_rolling_horizon = getattr(t, 'use_rolling_horizon', True)
@@ -2704,12 +2718,19 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         if any(c["latitude"] != 0.0 or c["longitude"] != 0.0 for c in coords):
             sys_dict["nodes"]["node_coordinates"] = coords
 
-    # Rebuild adjacency matrix (SUM parallel lines between same node pair)
+    # Rebuild adjacency matrix (SUM parallel lines between same node pair).
+    # Derive each end's node from its BUS (bus.parent_node is the authoritative
+    # mapping and is kept in sync when nodes are removed); the line's own
+    # from_node/to_node are deprecated mirrors that go stale on any index shift
+    # and would wire the matrix between the wrong node pairs entirely.
+    _bus_parent = {bid: int(b.parent_node) for bid, b in state.buses.items()}
     connections = [0.0] * (n * n)
     for line in state.transmission_lines:
-        if line.from_node < n and line.to_node < n:
-            connections[line.from_node * n + line.to_node] += line.capacity_mw
-            connections[line.to_node * n + line.from_node] += line.capacity_mw
+        fn = _bus_parent.get(line.from_bus, line.from_node)
+        tn = _bus_parent.get(line.to_bus, line.to_node)
+        if 0 <= fn < n and 0 <= tn < n:
+            connections[fn * n + tn] += line.capacity_mw
+            connections[tn * n + fn] += line.capacity_mw
     sys_dict.setdefault("nodes", {})
     sys_dict["nodes"]["nodes_connections"] = connections
     sys_dict["nodes"]["num_nodes"] = n
@@ -2952,6 +2973,19 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         zero_capacity = (getattr(ln, "capacity_mw", 0) or 0) <= 0
         return has_eq_endpoint and zero_capacity
 
+    def _line_node(ln, end: str) -> int:
+        """Node index of one end of *ln*, from its bus (the authoritative map).
+
+        ``from_node``/``to_node`` on the line are deprecated mirrors that go
+        stale whenever node indices shift; ``bus.parent_node`` is maintained.
+        Falls back to the stored value only when the bus is unknown.
+        """
+        bus_id = ln.from_bus if end == "from" else ln.to_bus
+        bus = state.buses.get(bus_id) if bus_id else None
+        if bus is not None:
+            return int(bus.parent_node)
+        return int(ln.from_node if end == "from" else ln.to_node)
+
     real_lines = [
         ln for ln in state.transmission_lines if not _is_wire_line(ln)
     ]
@@ -2961,8 +2995,16 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 k: v
                 for k, v in {
                     "line_id": ln.line_id,
-                    "from_node": ln.from_node,
-                    "to_node": ln.to_node,
+                    # from_node/to_node are DEPRECATED mirrors of the line's
+                    # buses (see GuiTransmissionLine): derive them from
+                    # ``bus.parent_node``, the authoritative mapping, instead
+                    # of trusting the stored ints. Node indices shift whenever
+                    # a node is removed, and the stored copies do not follow —
+                    # 614 of 673 Japan lines pointed at the wrong node pair
+                    # after the build pruned 7 bus-less nodes, scrambling the
+                    # node adjacency the whole model is built on.
+                    "from_node": _line_node(ln, "from"),
+                    "to_node": _line_node(ln, "to"),
                     "from_bus": _bus_id_to_idx.get(ln.from_bus) if ln.from_bus else None,
                     "to_bus": _bus_id_to_idx.get(ln.to_bus) if ln.to_bus else None,
                     "capacity_mw": ln.capacity_mw,
@@ -3141,8 +3183,10 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
 
     # Deterministic scheduled interruptions (outage calendar)
     if getattr(state, "outage_schedule", None):
-        sys_dict["outage_schedule"] = [
-            {
+        _instances = {"generator": state.generators, "battery": state.batteries}
+        sys_dict["outage_schedule"] = []
+        for ow in state.outage_schedule:
+            od = {
                 "element_type": ow.element_type,
                 "element_id": ow.element_id,
                 "start_hour": int(ow.start_hour),
@@ -3150,8 +3194,12 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "availability": float(ow.availability),
                 "label": ow.label,
             }
-            for ow in state.outage_schedule
-        ]
+            # Calendar ids are instance ids; the config uses unit key + node.
+            inst = (_instances.get(ow.element_type) or {}).get(ow.element_id)
+            if inst is not None:
+                od["element_id"] = inst.unit_key
+                od["node"] = int(inst.node)
+            sys_dict["outage_schedule"].append(od)
 
     # Development zones
     if state.development_zones:

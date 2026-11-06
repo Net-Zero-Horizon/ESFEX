@@ -621,3 +621,62 @@ class TestNativeACBridgePowerFlow:
         result = analyzer.analyze_generator_loss(snapshot, "gen_1")
         assert isinstance(result, ACContingencyResult)
         assert result.contingency_type == "generator"
+
+
+# ── Generator-loss redistribution, on both bridges ──
+
+_BRIDGES = [
+    pytest.param("native", marks=[
+        pytest.mark.julia,
+        pytest.mark.skipif(not HAS_NATIVE, reason="Julia/NativeACBridge not available")]),
+    pytest.param("pandapower", marks=pytest.mark.skipif(
+        not HAS_PANDAPOWER, reason="pandapower not installed")),
+]
+
+
+def _make_bridge(kind, state):
+    from esfex.analysis.native_ac_bridge import NativeACBridge
+    return NativeACBridge(state) if kind == "native" else PandapowerBridge(state)
+
+
+@pytest.mark.parametrize("kind", _BRIDGES)
+def test_generator_loss_leaves_the_dispatch_unchanged(kind):
+    # The lost output used to be added to the other units for good: each
+    # generator contingency started from the previous one's redistribution.
+    from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
+
+    state = _make_state(num_gens=4)
+    for gid in ("gen_2", "gen_3"):   # two dispatchable units on bus_1
+        state.generators[gid].gen_type = "Non-renewable"
+        state.generators[gid].fuel = "Diesel"
+    scenario = _make_scenario(
+        gen_outputs={"gen_0": 30.0, "gen_1": 20.0, "gen_2": 40.0, "gen_3": 40.0},
+        gen_status={f"gen_{i}": True for i in range(4)})
+    bridge = _make_bridge(kind, state)
+    before = bridge.run_power_flow(scenario)
+    assert before.converged
+    snapshot = build_snapshot_from_scenario(state, scenario)
+    analyzer = ACContingencyAnalyzer(bridge)
+
+    first = analyzer.analyze_generator_loss(snapshot, "gen_2")
+    second = analyzer.analyze_generator_loss(snapshot, "gen_2")
+
+    assert first.ac_converged
+    assert first.post_gen_mw["gen_3"] > 40.0 + 1.0   # picked up part of the lost 40 MW
+    assert second.post_gen_mw == first.post_gen_mw
+    after = bridge.rerun_power_flow()
+    assert after.bus_p_mw == pytest.approx(before.bus_p_mw, abs=0.01)
+
+
+@pytest.mark.julia
+@pytest.mark.skipif(not (HAS_NATIVE and HAS_PANDAPOWER), reason="needs both AC bridges")
+def test_native_and_pandapower_agree_bus_by_bus():
+    # Results were read one element off (Julia-style indexing on a 0-based
+    # juliacall vector), so the last bus raised and the solve was discarded.
+    state = _make_state(num_nodes=3, num_lines=2)
+    scenario = _make_scenario(node_demands={0: 30.0, 1: 50.0, 2: 40.0})
+    native = _make_bridge("native", state).run_power_flow(scenario)
+    pandapower = _make_bridge("pandapower", state).run_power_flow(scenario)
+    assert native.converged and pandapower.converged
+    for bus_id in state.buses:
+        assert native.bus_va_deg[bus_id] == pytest.approx(pandapower.bus_va_deg[bus_id], abs=0.1)

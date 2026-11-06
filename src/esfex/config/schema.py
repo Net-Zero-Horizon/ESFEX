@@ -54,7 +54,10 @@ class PenaltiesConfig(BaseModel):
     co2_cost: float = Field(default=10, description="$/tCO2")
     co2_budget_violation: float = Field(default=500, description="$/tCO2 over budget")
     fre_penetration_loss: float = Field(default=100, description="$/MWh RE shortfall")
-    ev_loss: float = Field(default=10, description="$/MWh EV demand not met")
+    ev_loss: Optional[float] = Field(
+        default=None,
+        description="$/MWh EV driving energy not supplied (default: loss_of_load)",
+    )
     loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
     coupling_slack_penalty: float = Field(default=1.0, description="$/unit PE periodic-hourly coupling slack")
     transport_congestion: float = Field(default=100, description="$/MW congestion")
@@ -62,6 +65,14 @@ class PenaltiesConfig(BaseModel):
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
     delay_retirement_per_mw: float = Field(default=50000, description="$/MW delay retirement penalty")
+
+    @model_validator(mode="after")
+    def _default_ev_loss(self) -> "PenaltiesConfig":
+        # Driving energy the fleet cannot supply is unserved demand; a cheap
+        # default makes leaving EVs uncharged cheaper than generating.
+        if self.ev_loss is None:
+            self.ev_loss = self.loss_of_load
+        return self
 
 
 class CO2BudgetConfig(BaseModel):
@@ -328,7 +339,7 @@ class NodeConfig(BaseModel):
     reserve_dynamic: list[float] = Field(default_factory=list, description="Dynamic reserve requirement per node (MW)")
     reserve_duration: list[int] = Field(default_factory=list, description="Reserve duration per node (hours)")
     losses: list[float] = Field(default_factory=list, description="Transmission losses per node (fraction)")
-    transference_invest_cost: list[float] = Field(default_factory=list, description="Transmission investment cost ($/MW)")
+    transference_invest_cost: list[float] = Field(default_factory=list, description="Transmission investment cost per node ($/MW); a corridor costs the higher of its two ends")
     transference_invest_max: list[float] = Field(default_factory=list, description="Max transmission investment (MW)")
 
     # GIS metadata (optional, backward-compatible)
@@ -367,9 +378,16 @@ class NodeConfig(BaseModel):
 class DCPowerFlowConfig(BaseModel):
     """DC power flow model parameters."""
 
-    base_impedance: float = Field(default=100.0, description="Base impedance (Ohm)")
+    base_impedance: float = Field(
+        default=100.0,
+        description="Deprecated and ignored: per-unit values use S_base = "
+                    "ac_power_flow.base_mva and Z_base = V²/S_base per line",
+    )
     reactance_per_km: float = Field(default=0.4, description="Line reactance (Ohm/km)")
-    voltage_level_kv: float = Field(default=220.0, description="Nominal voltage (kV)")
+    voltage_level_kv: float = Field(
+        default=220.0,
+        description="Nominal voltage (kV), used for lines without voltage_kv",
+    )
     # NOTE: DC angle-difference limits were removed — in this DC formulation
     # they impose a non-physical pf ≤ b_line·max_angle throttle.  DC flows are
     # bounded by the explicit thermal pf ≤ line_capacity constraints.
@@ -391,6 +409,18 @@ class DCPowerFlowConfig(BaseModel):
         default=2, ge=1, le=5,
         description="Number of PWL segments for master problem (fewer for performance)",
     )
+
+    @model_validator(mode="after")
+    def _warn_base_impedance(self) -> "DCPowerFlowConfig":
+        # It served as both Z_base (Ω) and S_base (MVA); both now follow
+        # ac_power_flow.base_mva and each line's voltage.
+        if self.base_impedance != 100.0:
+            import logging
+            logging.getLogger(__name__).warning(
+                "dc_power_flow.base_impedance=%s is ignored: per-unit values use "
+                "ac_power_flow.base_mva as S_base and V²/S_base per line as Z_base",
+                self.base_impedance)
+        return self
 
 
 class ACPowerFlowConfig(BaseModel):
@@ -545,6 +575,29 @@ def normalize_cost_curve(
 # =============================================================================
 
 
+# Accepted spellings of the unit type, lower-cased. Projects saved from a
+# non-English Studio (before the type combo was fixed) may hold a localized
+# label; hand-written configs often use lower case.
+_UNIT_TYPE_ALIASES = {
+    "renewable": "Renewable", "renovable": "Renewable",
+    "renouvelable": "Renewable", "renovável": "Renewable", "再生可能": "Renewable",
+    "non-renewable": "Non-renewable", "non renewable": "Non-renewable",
+    "nonrenewable": "Non-renewable", "no renovable": "Non-renewable",
+    "non renouvelable": "Non-renewable", "não renovável": "Non-renewable",
+    "非再生可能": "Non-renewable",
+    "storage": "Storage", "electrolyzer": "Electrolyzer",
+}
+
+
+def canonical_unit_type(value):
+    """Map a unit type label to its English literal ("Renewable",
+    "Non-renewable", "Storage", "Electrolyzer"); unknown values are
+    returned unchanged."""
+    if isinstance(value, str):
+        return _UNIT_TYPE_ALIASES.get(value.strip().lower(), value)
+    return value
+
+
 class GeneratorConfig(BaseModel):
     """Generator unit configuration."""
 
@@ -559,18 +612,7 @@ class GeneratorConfig(BaseModel):
     @field_validator("type", mode="before")
     @classmethod
     def _normalize_type(cls, v):
-        # Projects saved from a non-English Studio (before the type combo was
-        # fixed) may hold a localized label; map it back to the English literal
-        # so those configs still load.
-        if isinstance(v, str):
-            return {
-                "renovable": "Renewable", "renouvelable": "Renewable",
-                "renovável": "Renewable", "再生可能": "Renewable",
-                "no renovable": "Non-renewable",
-                "non renouvelable": "Non-renewable",
-                "não renovável": "Non-renewable", "非再生可能": "Non-renewable",
-            }.get(v.strip().lower(), v)
-        return v
+        return canonical_unit_type(v)
 
     # Per-node arrays (length = num_nodes)
     life_time: list[int] = Field(description="Lifetime per node (years)")
@@ -581,8 +623,8 @@ class GeneratorConfig(BaseModel):
     min_power: list[float] = Field(description="Minimum output fraction per node")
     min_up: list[int] = Field(description="Minimum up time per node (hours)")
     min_down: list[int] = Field(description="Minimum down time per node (hours)")
-    ramp_up: list[float] = Field(description="Ramp up rate per node (pu/min)")
-    ramp_down: list[float] = Field(description="Ramp down rate per node (pu/min)")
+    ramp_up: list[float] = Field(description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
+    ramp_down: list[float] = Field(description="Ramp down limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
     eff_at_rated: list[float] = Field(description="Efficiency at rated power per node")
     eff_at_min: list[float] = Field(description="Efficiency at minimum power per node")
     inertia: list[float] = Field(description="Inertia constant H per node (s)")
@@ -668,6 +710,8 @@ class GeneratorConfig(BaseModel):
 class BatteryConfig(BaseModel):
     """Battery/storage unit configuration."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     type: Literal["Storage"] = "Storage"
     fuel: str = "None"
@@ -751,6 +795,12 @@ class TechnologyConfig(BaseModel):
     name: str
     type: Literal["Renewable", "Non-renewable"]
     fuel: str
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_type(cls, v):
+        return canonical_unit_type(v)
+
     invest_cost: list[float] = Field(description="Investment cost per node ($/MW)")
     invest_max_power: list[float] = Field(description="Max investment per node (MW)")
     availability_file: Optional[str] = Field(None, alias="Availability")
@@ -758,8 +808,8 @@ class TechnologyConfig(BaseModel):
     degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
     lifetime: int = Field(description="Economic lifetime (years)")
     min_output: list[float] = Field(default_factory=lambda: [0.0], description="Min output fraction per node")
-    ramp_up: list[float] = Field(default_factory=lambda: [1.0], description="Ramp up rate per node (pu/min)")
-    ramp_down: list[float] = Field(default_factory=lambda: [1.0], description="Ramp down rate per node (pu/min)")
+    ramp_up: list[float] = Field(default_factory=lambda: [1.0], description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
+    ramp_down: list[float] = Field(default_factory=lambda: [1.0], description="Ramp down limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
     fuel_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fuel cost per node ($/MWh)")
     fuel_cost_curve: Optional[list[CostCurveConfig]] = Field(
         default=None,
@@ -1300,10 +1350,27 @@ class TemporalConfig(BaseModel):
 
     resolution_hours: int = Field(default=1, ge=1, description="Hourly resolution")
     rolling_horizon_hours: int = Field(default=48, ge=1)
-    overlap_hours: int = Field(default=6, ge=0)
+    overlap_hours: int = Field(
+        default=24, ge=0,
+        description="Look-ahead hours solved but not kept in each window; must be "
+                    "< rolling_horizon_hours. Storage needs >= 24 h to see the next "
+                    "daily peak.",
+    )
     investment_resolution: int = Field(default=HOURS_STD_YEAR, description="Hours per investment period")
     primary_energy_resolution: int = Field(default=24, description="Hours")
     use_rolling_horizon: bool = True
+
+    @model_validator(mode="after")
+    def _check_overlap(self):
+        if self.use_rolling_horizon and self.overlap_hours >= self.rolling_horizon_hours:
+            if "overlap_hours" in self.model_fields_set:
+                raise ValueError(
+                    f"overlap_hours ({self.overlap_hours}) must be less than "
+                    f"rolling_horizon_hours ({self.rolling_horizon_hours})"
+                )
+            # Default overlap with a short window: keep half the window as look-ahead.
+            self.overlap_hours = self.rolling_horizon_hours // 2
+        return self
 
 
 class NetworkReductionConfig(BaseModel):
@@ -1691,6 +1758,11 @@ class OutageWindow(BaseModel):
                     "batteries, electrolyzers, fuel sources) or list index as a "
                     "string (lines, transformers, converters, fuel routes)."
     )
+    node: Optional[int] = Field(
+        default=None, ge=0,
+        description="Generators / batteries: only the unit's capacity at this "
+                    "node is cut (None = every node of the unit).",
+    )
     start_hour: int = Field(ge=0, description="Absolute horizon hour, inclusive")
     end_hour: int = Field(gt=0, description="Absolute horizon hour, exclusive")
     availability: float = Field(
@@ -1745,7 +1817,7 @@ class SystemConfig(BaseModel):
     frequency_nadir_limit: float = Field(default=49.0, gt=0, description="Minimum allowable frequency before UFLS (Hz)")
 
     # Configurable optimization parameters (previously hardcoded in Julia)
-    soc_end_tolerance: float = Field(default=0.05, ge=0, le=0.5, description="Battery end-of-horizon SOC tolerance (±fraction)")
+    soc_end_tolerance: float = Field(default=0.05, ge=0, le=0.5, description="End-level tolerance (fraction): reservoir band per window; battery year-end floor below the year-start SOC")
     min_cycling_ratio: float = Field(default=0.8, ge=0, le=1, description="Min battery cycling as fraction of capacity")
     min_cycling_period_days: float = Field(default=7.0, gt=0, description="Period for min cycling calculation (days)")
     reserve_static_default_ratio: float = Field(default=0.15, ge=0, le=1, description="Default static reserve as fraction of demand")
@@ -1916,6 +1988,66 @@ class SystemConfig(BaseModel):
                 )
                 for i in range(n)
             ]
+        return self
+
+    @model_validator(mode='after')
+    def _normalize_demand_fractions(self) -> 'SystemConfig':
+        """Each node's demand is split over its buses: fractions must sum to 1.
+
+        The models multiply the node demand by every bus's fraction, so two
+        load buses left at the default 1.0 would serve the node's demand
+        twice. Rescale nodes whose fractions sum to anything else (the
+        Studio already writes normalized fractions).
+        """
+        if not self.buses:
+            return self
+        totals: dict[int, float] = {}
+        for b in self.buses:
+            totals[b.parent_node] = totals.get(b.parent_node, 0.0) + b.demand_fraction
+        rescaled = {n: t for n, t in totals.items() if t > 0 and abs(t - 1.0) > 1e-6}
+        if not rescaled:
+            return self
+        for b in self.buses:
+            if b.parent_node in rescaled:
+                b.demand_fraction = b.demand_fraction / rescaled[b.parent_node]
+        import logging
+        logging.getLogger(__name__).warning(
+            "System %r: bus demand_fraction values of node(s) %s summed to %s; "
+            "rescaled to 1 so each node's demand is served once.",
+            self.name, sorted(rescaled),
+            ", ".join(f"{rescaled[n]:g}" for n in sorted(rescaled)),
+        )
+        return self
+
+    @model_validator(mode='after')
+    def _resolve_outage_unit_ids(self) -> 'SystemConfig':
+        """Point generator / battery outage windows at the unit key.
+
+        The Studio names per-node pieces of a unit ``<unit_key>_n<node>``;
+        projects saved before the calendar wrote unit keys hold those ids,
+        which no unit matches. Rewrite them to (unit key, node) and warn
+        about windows whose element does not exist.
+        """
+        if not self.outage_schedule:
+            return self
+        import logging
+        import re
+        keys = {"generator": set(self.generators), "battery": set(self.batteries)}
+        unknown = []
+        for i, ow in enumerate(self.outage_schedule):
+            units = keys.get(ow.element_type)
+            if units is None or ow.element_id in units:
+                continue
+            m = re.fullmatch(r"(.+)_n(\d+)", ow.element_id)
+            if m and m.group(1) in units:
+                self.outage_schedule[i] = ow.model_copy(update={
+                    "element_id": m.group(1), "node": int(m.group(2))})
+            else:
+                unknown.append(f"{ow.element_type} {ow.element_id!r}")
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "System %r: outage window(s) for unknown element(s) %s are ignored.",
+                self.name, ", ".join(unknown))
         return self
 
     @model_validator(mode='after')

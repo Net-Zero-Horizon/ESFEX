@@ -300,8 +300,9 @@ class TestGuiGeneratorInstance:
         assert g.eff_at_min == 0.25
         assert g.min_up == 0
         assert g.min_down == 0
-        assert g.ramp_up == 0.0
-        assert g.ramp_down == 0.0
+        # 0 used to freeze the unit's output; 1.0 = full capacity per hour
+        assert g.ramp_up == 1.0
+        assert g.ramp_down == 1.0
         assert g.inertia == 0.0
         assert g.start_up_cost == 0.0
         assert g.decommissioning_cost == 0.0
@@ -753,7 +754,7 @@ class TestGuiPenalties:
         assert p.co2_cost == 10.0
         assert p.co2_budget_violation == 500.0
         assert p.fre_penetration_loss == 100.0
-        assert p.ev_loss == 10.0
+        assert p.ev_loss == p.loss_of_load
         assert p.loss_of_fuel_supply == 100.0
         assert p.transport_congestion == 100.0
         assert p.storage_violation == 100.0
@@ -1050,7 +1051,10 @@ class TestNormalizePx:
 
 
 class TestGuiGlobalSettings:
-    def test_defaults(self):
+    def test_defaults(self, monkeypatch):
+        # Shipped defaults, not whatever the developer's own preferences file holds.
+        import esfex.visualization.preferences as prefs
+        monkeypatch.setattr(prefs, "load_preferences", lambda: {})
         gs = GuiGlobalSettings()
         assert gs.simulation_mode == "development"
         assert gs.unit_commitment_hours == 24
@@ -1059,7 +1063,7 @@ class TestGuiGlobalSettings:
         # Temporal
         assert gs.resolution_hours == 6
         assert gs.rolling_horizon_hours == 48
-        assert gs.overlap_hours == 0
+        assert gs.overlap_hours == 24
         assert gs.investment_resolution == 8760  # HOURS_STD_YEAR
         assert gs.primary_energy_resolution == 24
         assert gs.use_rolling_horizon is True

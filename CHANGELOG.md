@@ -7,6 +7,205 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Per-release notes are also published on the
 [GitHub Releases page](https://github.com/Net-Zero-Horizon/ESFEX/releases).
 
+## [Unreleased]
+
+### Changed
+
+- **CO2 of generation is per MWh of fuel.** `fuels.*.emission_factor`
+  (IPCC-style values such as 0.202 t/MWh for gas, as the Grid Builder
+  writes them and the primary-energy block applies them) was applied per
+  MWh of electricity by the dispatch, the master and Benders: emissions,
+  the CO2 cost and the CO2 budget were short by the unit's efficiency
+  (about 2.5× at 40 %). Output is now divided by the unit's `eff_at_rated`
+  at its node; a unit without an efficiency uses the factor as is.
+- **Per-unit bases of the DC network.** `dc_power_flow.base_impedance` was
+  used both as Z_base (Ω), to turn a line's length into reactance, and as
+  S_base (MVA), for the DC flow and losses. S_base is now
+  `ac_power_flow.base_mva` (default 100, so flows and losses are unchanged
+  by default) and a line without `reactance_pu` gets
+  length × `reactance_per_km` / (V²/S_base) with its own voltage, the
+  convention of the Grid Builder's per-unit values; it used a fixed
+  100 Ω at every voltage. `base_impedance` is ignored (with a warning when
+  set). The master's node links carry the parallel reactance of the lines
+  they stand for; they used the fuel transport distance (or 0.01 p.u.).
+- **Reserves are headroom, not energy.** Static and dynamic reserves no longer
+  enter the power balance as demand; they are kept as spare capacity on the
+  committed units. Runs with reserves dispatch less generation, fuel and CO2
+  than before.
+- **Stochastic master problem is a real two-stage model.** Each scenario now
+  has its own representative-day operation with the common investment plan,
+  and the scenario multipliers (demand, fuel, maintenance, CO2 price,
+  investment costs) change the plan. `demand_growth` acts as an annual factor
+  (demand × `demand_growth`^(year − 1)). A warning is logged if Benders is
+  selected, which ignores the scenarios.
+- **CO2 cost now affects planning.** The master problem charges `co2_cost` ×
+  fuel emission factor (`fuels.*.emission_factor`) in its operating cost, on
+  representative days and with TSAM, so a CO2 price can change what is built.
+- **Transmission corridor cost is charged once**, at the higher of the two end
+  nodes' `transference_invest_cost`, instead of once per direction. The master
+  problem builds more transmission than before.
+- **Ramp limits are a fraction of capacity per hour.** With `resolution_hours`
+  > 1 the limit per step is `ramp × resolution_hours` (at most the full
+  capacity). A ramp of 0 now means no limit, new Studio generators default to
+  1.0, and the Studio labels say pu/h instead of pu/min.
+- **Minimum up/down times are in hours** and are converted to time steps
+  (`ceil(hours / resolution_hours)`).
+- **Unserved demand is bounded by the demand on its bus** in every
+  formulation, so load shedding can no longer act as a virtual generator.
+  Reported shedding can be higher than before where it used to hide a real
+  shortfall.
+- **Rolling horizon:** default `overlap_hours` raised from 6 to 24; an overlap
+  must be shorter than the window; the last window of each year has a soft
+  end-of-year battery SOC floor.
+- The perfect-foresight master problem no longer applies a hidden 2 %/year
+  demand growth; demand comes from the demand file only.
+- The master problem's per-node capacity adequacy counts imports up to the
+  transfer capacity of the node's lines.
+- With TSAM, the master problem charges reserve and inertia shortfalls like
+  the representative-day master.
+- **Preventive N-1 now takes effect.** Its shortfall was never added to the
+  objective, so `n1_security` did not change the dispatch. It is now charged
+  at `loss_of_reserve_static`, and generation N-1 is a headroom test: the
+  other units (online ones in unit commitment) and batteries must be able to
+  replace the largest unit's output. Runs with N-1 enabled commit more
+  capacity than before.
+- **Transmission losses in planning, and a sound linear model.** The master
+  problem and Benders now apply `loss_model` (with `pwl_loss_segments_master`
+  segments for `pwl`); their node links had no resistance and the network
+  ignored the setting, so planning was lossless. Each link now carries the
+  equivalent resistance of the bus-level lines between its nodes, so
+  multi-node plans favour local supply more than before. `loss_model: linear`
+  loses a fraction `resistance_pu` of the flow in either direction; it used
+  to create energy on flows leaving a line's lower-index end. Line resistance
+  is divided by `num_circuits`, like the reactance, so multi-circuit lines
+  have lower losses than before.
+- **Development-mode transmission investment in the dispatch is bounded and
+  charged.** `tf_inv_*` (used when the dispatch itself runs in `development`
+  mode, e.g. `PowerSystemAdapter` without `mode`, or `esfex.solve_dispatch`)
+  had no upper bound and no cost, so any line could be built for free. It is
+  now limited by `transference_invest_max` and charged
+  `transference_invest_cost`, as in the master problem.
+- **Energy balances use the step length.** With `resolution_hours > 1` the
+  CO2 budget counted emissions in MW instead of tonnes, the EV fleet SOC and
+  the SOC of new batteries in the master (and Benders) moved by MW instead of
+  MWh, and the EV profiles were read hour by hour as if they were steps. All
+  now scale by the step length and the EV profiles are averaged to it; the
+  CO2 budget excess is charged once per tonne. Hourly runs are unchanged.
+- **Flexible demand is shifted in the dispatch.** Sectors with `is_flexible`,
+  `flexibility_ratio > 0` and `delay_tolerance > 0` can move up to
+  `flexibility_ratio` of their demand per step by up to `delay_tolerance`
+  hours, and the shift now enters the power balance (it used to change
+  nothing). The flexible-curtailment "benefit", which lowered the objective
+  without serving any less demand, is removed; `flexible_demand_benefit_ratio`
+  is no longer used and `flexible_demand_benefit` in the cost breakdown is 0.
+  `demand_shift_cost_rate` is charged per MWh and per hour moved.
+- **Benders matches the monolithic master on renewables, and runs from the
+  runner.** Its subproblems also capped each day's renewable output at the
+  master's RE ratio, so with a low target renewables could not be used
+  (with 0 % none was built); they now have a floor only. The runner's debug
+  LP export no longer aborts Benders runs, and a one-node, one-step day no
+  longer breaks the subproblem.
+- **N-1 and SCOPF are soft and per physical line.** SCOPF generation N-1
+  used the old form (others' output >= demand), which forced the largest
+  unit to 0; it now uses the headroom test of preventive N-1. Corrective N-1
+  lets every non-renewable unit re-dispatch within one step of its ramp, plus
+  batteries. SCOPF line and generation constraints were hard (infeasible
+  dispatch when unmet); their overloads and shortfalls are now priced at
+  `loss_of_reserve_static`. Transmission N-1 and SCOPF read the flow of each
+  physical line (they used the first circuit of a bus pair, with SCOPF also
+  ignoring the line's direction). ACOPF line limits now apply scheduled
+  outages and development-mode transmission investment.
+- **Primary energy and EV inputs reach the model.** Non-electric fuel demand
+  was about 1/12 of the configured annual demand; it now follows
+  `non_electric_demand_growth` and `seasonal_factors` (it used 1 %/year and
+  an even split), uses the month of the year (not of the window) and the step
+  length. Non-electric CO2 used to be 0 (the fuel's `emission_factor` was not
+  read). Unmet non-electric demand is priced per sector at
+  `non_electric_demand_loss`. Coupled generators no longer pay `fuel_cost` on
+  top of the fuel the supply chain buys, and fuel drawn from the tanks is
+  charged at the fuel price (stored fuel is not free within a window). Fuel
+  storage and transport are built
+  by the dispatch's primary-energy block in development mode too, at the
+  window's share of the annuity, and built capacity carries over to later
+  windows (it was never kept, and the master never built any). A route
+  without `route_id` gets `route_<index>` instead of disabling the block.
+  The master plans with the EV charging load, and `EV_initial_soc` sets each
+  window's starting fleet SOC (it was always 80 %).
+- `ev_loss` defaults to the `loss_of_load` penalty (a warning is logged if it
+  is set lower).
+- Per-node `demand_fraction` values are rescaled to sum to 1 (with a warning).
+- Grid Builder: the "Reconnect isolated" option is removed; island
+  subsystems are kept as built from OpenStreetMap.
+
+### Fixed
+
+- The dataset root (`ESFEX_DATA_ROOT`) defaults to `~/.esfex/data`. It
+  defaulted to a maintainer-local volume, so the Grid Builder's Geofabrik
+  and OSM tile caches and the CMIP6 cache failed for other users.
+- Config-mode sensitivity parameters now all change the run:
+  `invest_cost_transmission` (node corridor, development-zone and
+  inter-system link costs), `maintenance_cost`, `carbon_price`
+  (`co2_cost`) and `demand_growth` (now the demand level, `demand_scale`)
+  had no effect and got zero indices. `fuel_price_growth` is no longer
+  offered (a run has no fuel price escalation to vary), and a parameter
+  key without a config field raises an error.
+- Sensitivity analysis: config mode now reports the investment KPIs
+  (`inv_gen_total`, `inv_bat_total`; they were always NaN and so got
+  zero indices), reads only the newest results file of a run directory
+  (a reused directory summed earlier runs in), and runs the number of
+  years set in the new **Years per run** option or `years` argument (it
+  always ran 25). A KPI with failed evaluations gets no indices (NaN, with
+  the count in `n_failed`) instead of indices computed with 10 × the
+  largest value standing in. LP mode's `inv_bat_total` no longer adds MWh
+  to MW. `esfex.sensitivity()` in the scripting console works (it raised
+  a TypeError with `parameters` and analysed nothing without).
+- Trusted plugins load on every start. Their hash included the
+  `__pycache__/` Python writes on first import, so every installed plugin
+  was skipped from the second start on. Bytecode and `.git/` are no longer
+  hashed, and plugins are imported from source only. Untrusted plugins can
+  be approved with the new **Trust** button in the Plugin Manager or
+  `esfex plugin trust NAME`; both show which plugins are untrusted.
+- In a merged multi-system run, a system without `transmission_lines_geo`
+  keeps its `nodes_connections` in the dispatch (they become lines). Its
+  internal links used to vanish from the dispatch as soon as the merged
+  network had any line, such as an inter-system link, islanding its nodes
+  while the master still planned with them.
+- Life-extended capacity is derated by `risk_coefficient` in the master's
+  capacity adequacy constraint (it counted at full rating once a unit passed
+  its lifetime).
+- Generator, battery, primary-energy source and penalty fields written by the
+  Studio (droop, risk coefficients, reservoir and cascade fields, cost curves,
+  `throughput_degradation_cost`, `soc_violation`, ...) are no longer dropped
+  when a configuration is loaded.
+- Generator types are normalised (case, translated Studio labels) before
+  validation instead of being rewritten to `Non-renewable`.
+- A battery's `Availability` file is kept when loading.
+- Development zones work in multi-node and multi-system configurations; zones,
+  custom constraints and outage schedules survive the merge of systems.
+- Scheduled outages created in the Studio apply to the right unit and node.
+- EV: driving consumption is no longer divided by 1000 twice; all categories
+  contribute (weighted) to the fleet parameters; the V2G availability profile
+  and the fleet size follow the S-curve growth; profiles are reproducible
+  (seeded); driving energy is taken from the fleet SOC; V2G compensation is no
+  longer subtracted from the objective a second time.
+- Rolling horizon: storage, unit status, ramp and reservoir state are carried
+  over from the end of the kept part of each window, at the right bus (also
+  with network reduction), and inherited battery energy is passed in MWh.
+- Network reduction keeps buses that host equipment and remaps bus indices.
+- The electrolyzer is limited to its rated power in the dispatch.
+- The native AC bridge works (it previously always fell back to DC), and AC
+  contingency analysis restores generator output after each case.
+- Topology: every node keeps at least one bus, and per-node arrays are mapped
+  onto the bus network instead of being read positionally.
+- Grid Builder no longer deletes islanded subsystems (for example ones linked
+  only by HVDC) before demand is assigned.
+- Studio projects resolve availability files like demand files, so runs from
+  the GUI keep their availability profiles.
+- Results Viewer: demand is read with the right orientation (fixes the Net
+  Load Heatmap, demand line and Commitment Heatmap); chart titles removed, long
+  labels shortened to fit, and Hourly Dispatch uses the Overview's names and
+  colours.
+
 ## [0.3.0] — 2026-08-27
 
 ### Added
@@ -553,6 +752,8 @@ operational dispatch under high renewable penetration: two-stage decomposition,
 DC/AC optimal power flow, N-1 security, frequency stability, battery storage,
 sector coupling (electrolyzer, primary energy, EV/V2G, rooftop solar),
 MGA/SPORES, stochastic programming, Sobol sensitivity, and a GIS-based Studio.
+Includes a directory-based plugin system with a GUI **Plugins** menu
+(`PluginsDialog`: list, install from ZIP or Git, enable/disable, uninstall).
 Includes the unit-commitment load-shed fix, the test/coverage expansion, and
 full packaging (CI, Apache-2.0, REUSE-compliant).
 

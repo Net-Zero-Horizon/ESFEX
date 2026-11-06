@@ -1,6 +1,6 @@
 # Inter-System Links
 
-Connections between two independent power systems for power transfer or fuel transport: submarine cables, HVDC interconnectors, international pipelines, and cross-border fuel shipping routes. Links appear under the **Inter-system Links** node in the Element Tree at the project level.
+Connections between two power systems of the same project: submarine cables, HVDC interconnectors, cross-border lines. Links appear under the **Inter-system Links** item in the Element Tree, in the **Transmission Lines** and **Fuel Routes** sub-categories.
 
 
 ---
@@ -8,16 +8,11 @@ Connections between two independent power systems for power transfer or fuel tra
 
 ## Concepts
 
-In multi-system projects, each system is solved independently unless inter-system links exist. Links enable:
-
-- **Resource sharing** -- A system with surplus renewable generation can export to a neighboring system experiencing peak demand.
-- **Reliability improvement** -- Interconnection provides backup capacity and reduces the need for local reserve margins.
-- **Economic optimization** -- The optimizer can trade power between systems to minimize total cost.
-- **Fuel supply chains** -- Cross-border pipelines or LNG shipping routes connect fuel producers with consumers.
+All systems selected in Global Settings > Systems to Simulate are solved together in one optimization. Without links, the systems do not exchange anything. A transmission link lets power flow between a node of one system and a node of another, so the optimizer can share generation and reserves across systems.
 
 ### Link Ownership
 
-Jointly owned by both connected systems. Links appear once in the **Inter-system Links** section, not duplicated in each system's element list. Deleting either connected system automatically removes associated links.
+A link belongs to the project, not to either system. It appears once under **Inter-system Links**. Deleting either connected system removes its links.
 
 
 ---
@@ -27,24 +22,11 @@ Jointly owned by both connected systems. Links appear once in the **Inter-system
 
 ### Transmission Links
 
-**Bidirectional** electrical power exchange between systems. Typical physical realizations:
-
-- Submarine HVDC cables between islands.
-- Overhead AC/DC transmission lines between mainland grids.
-- Back-to-back converter stations at frequency boundaries.
-
-Displayed as **solid purple polylines** with arrow markers indicating the defined direction. Actual power flow may be in either direction.
+Electrical connection between two systems. Power can flow in either direction.
 
 ### Fuel Route Links
 
-**Directional** fuel transport between systems. Typical physical realizations:
-
-- Natural gas pipelines.
-- LNG shipping routes.
-- Hydrogen pipeline corridors.
-- Ammonia tanker routes.
-
-Displayed as **dashed purple polylines**, visually distinguished from electrical transmission links.
+A fuel route traced between fuel facilities of two different systems is stored as a link of type *fuel route*. These links are not supported end to end yet: the link form has no fuel selector, and when the project is saved they are written as electrical links (`meta_network.systems_links`), so after reloading they appear as transmission links. Model cross-system fuel transport with care, or avoid these links for now.
 
 
 ---
@@ -52,81 +34,53 @@ Displayed as **dashed purple polylines**, visually distinguished from electrical
 
 ## Creating Links
 
-### From the Element Tree
+All systems are drawn on the map at once, so you create a link by tracing across systems with the normal tools:
 
-1. Expand the **Inter-system Links** node in the tree.
-2. Right-click **Transmission Links** (or **Fuel Routes**).
-3. Select **Add New**.
-4. In the Properties Panel form that opens:
-   - Select the **From System** and **From Node** using the dropdown menus.
-   - Select the **To System** and **To Node**.
-   - Set the capacity, costs, loss parameters, and (for fuel routes) the fuel type.
-5. The link appears on the map as a straight line between the two endpoints.
+1. Make sure both systems have the elements you want to connect (buses or equipment for a transmission link; fuel sources or fuel storages for a fuel route).
+2. Select **Line** (or **Fuel Route**) in the toolbar.
+3. Click the start element in the first system.
+4. For a transmission link, click on the map to add waypoints that route the cable.
+5. Click the end element in the other system.
 
-### From the Toolbar (Visual Drawing)
-
-For links requiring geographic routing (curved paths around islands, along coastlines):
-
-1. Ensure at least two systems exist in the project.
-2. Select the **Inter-system Line** drawing mode from the toolbar (or the equivalent for fuel routes).
-3. Click on a node in the current (active) system. It highlights to confirm selection.
-4. Click on the map to add intermediate waypoints for geographic routing.
-5. Switch to the target system by clicking its name in the Element Tree.
-6. Click on the destination node in the target system to complete the link.
-7. The Properties Panel opens the link form for parameter configuration.
+When the two endpoints belong to different systems, an inter-system link is created instead of a normal line. The status bar confirms it. A new transmission link starts with 100 MW capacity, and its length is computed from the endpoints and waypoints; a new fuel route link starts with 0 capacity.
 
 **Tips:**
-- Add as many waypoints as needed to accurately represent a submarine cable route or pipeline path.
-- Press `Escape` at any point during the trace to cancel.
-- Waypoints can be edited later using the **Edit Trace** toggle.
+- Press `Escape` during the trace to cancel.
+- Waypoints can be edited later with **Edit Trace** in the link form.
+- There is no "Add" entry in the tree for links; the Inter-system Links item has no context menu.
 
 
 ---
 
 
-## Transmission Link Properties
+## Link Properties
+
+The link form mirrors the transmission line form. A read-only header shows the two systems and nodes.
 
 | Section | Field | Unit | Description |
 |---------|-------|------|-------------|
-| **Endpoints** | From System | -- | Source system name (dropdown) |
-| | From Node | -- | Node index in the source system (dropdown, filtered by selected system) |
-| | To System | -- | Destination system name (dropdown) |
-| | To Node | -- | Node index in the destination system (dropdown) |
-| **Capacity** | Existing Capacity | MW | Current transfer capacity of the interconnection. Set to 0 if no interconnection currently exists and the link represents a potential investment. |
-| | Investment Cost | $/MW | Cost per MW for building new transfer capacity. Used by the master problem optimizer. |
-| | Max Investment | MW | Maximum new capacity the optimizer may build. Set to 0 to represent a fixed link with no expansion. |
-| **Losses** | Loss Factor | fraction | Fraction of power lost during transfer (0.0 to 1.0). A value of 0.03 means 3% of power is lost in transit. Accounts for converter losses, cable resistance, and other transmission losses. |
-| **Distance** | Distance | km | Physical length of the interconnection. Auto-calculated from the polyline coordinates if waypoints are present. Can be overridden manually for routes where the cable/pipeline length differs significantly from the straight-line distance. |
-| | Cost per MW-km | $/MW/km | Distance-dependent cost component. Total investment cost = Investment Cost x MW + Cost per MW-km x MW x km. This captures the fact that longer links are more expensive per MW. |
-| **Actions** | Edit Trace | toggle | Enable polyline vertex editing for the link route |
+| **Bus endpoints** | From bus / To bus | -- | Buses at each end of the link |
+| **Properties** | Capacity | MW | Existing transfer capacity. Set to 0 if the link only represents a possible investment. |
+| | Voltage | kV | Nominal voltage |
+| | Type | -- | overhead, underground, or submarine |
+| | Length | km | Physical length. Computed from the trace; editable. |
+| | Base Impedance | ohm | Base impedance for per-unit conversion |
+| | Reactance per km | ohm/km | Series reactance per km |
+| | Reactance / Resistance / Susceptance | pu | Per-unit line parameters |
+| | Circuits | -- | Number of circuits (1–10) |
+| | Frequency | Hz | Nominal frequency |
+| | Current Type | -- | AC or DC |
+| **Economic** | Investment cost | $/MW | Cost per MW of new transfer capacity |
+| | Max investment | MW | Maximum new capacity the optimizer may build. 0 means no expansion. |
+| | Operational cost | $/MW·km | Stored in the configuration; not used by the current solver |
+| | Loss factor | fraction | Must be between 0 and 1. Stored in the configuration; not used by the current solver |
+| **Appearance** | Color, width, opacity | -- | Map style |
 
-### Net Transfer Capacity (NTC)
+Buttons at the bottom: **Delete Line** and **Edit Trace**.
 
-Effective transfer capacity = sum of all parallel link capacities minus losses. The optimizer respects NTC limits in both directions:
+### How Links Enter the Model
 
-- **Forward NTC** = Sum of (capacity x (1 - loss_factor)) for all links from System A to System B.
-- **Reverse NTC** = Same sum applied in the reverse direction (same links, same losses).
-
-Multiple parallel links between the same system pair are additive, enabling phased interconnection expansion.
-
-
----
-
-
-## Fuel Route Link Properties
-
-| Section | Field | Unit | Description |
-|---------|-------|------|-------------|
-| **Endpoints** | From System | -- | Source system name |
-| | From Node | -- | Node index in the source system |
-| | To System | -- | Destination system name |
-| | To Node | -- | Node index in the destination system |
-| **Fuel** | Fuel Type | -- | The fuel being transported (dropdown: Natural Gas, Hydrogen, Ammonia, Diesel, Fuel Oil, etc.) |
-| **Capacity** | Capacity | MW | Maximum transport rate in energy-equivalent terms |
-| **Losses** | Loss Factor | fraction/100km | Fraction of fuel lost per 100 km of transport distance. Models pipeline leakage, boil-off (LNG), or evaporation. |
-| **Costs** | Cost per MW-km | $/MWh/km | Transport cost per unit of energy per km of distance |
-| **Distance** | Distance | km | Route length (auto-calculated from polyline or entered manually) |
-| **Actions** | Edit Trace | toggle | Enable polyline vertex editing |
+When the systems are merged for the simulation, each link becomes a transmission line between the first bus of each endpoint node, with the link's capacity, length, and per-unit reactance and resistance. The investment cost and maximum are applied as transfer-investment parameters at both endpoint nodes (the larger value wins if several links meet at a node). Voltage, type, circuits, frequency, and current type are kept for display and do not change the solver. Multiple links between the same pair of systems are allowed and act as separate lines.
 
 
 ---
@@ -136,87 +90,46 @@ Multiple parallel links between the same system pair are additive, enabling phas
 
 ### Selecting and Editing
 
-- Click a link in the Element Tree to select it. Its form appears in the Properties Panel and the link highlights on the map.
-- Edit any field in the form. Changes are reflected immediately on the map (e.g., capacity changes update the line width).
+- Click a link in the Element Tree or on the map. Its form appears in the Properties Panel.
+- Tree items are labelled `<system>:<node> -> <system>:<node>`, with the capacity (or fuel) in the info column.
 
 ### Editing Link Routes
 
 1. Select the link.
 2. Click **Edit Trace** in the Properties Panel.
-3. Waypoint vertices become visible as draggable handles.
-4. Drag handles to reshape the route.
-5. Click **Edit Trace** again to confirm.
+3. Drag the vertex handles to reshape the route.
+4. Click **Edit Trace** again to finish.
 
 ### Deleting Links
 
-- Select a link and press `Delete`.
-- Right-click a link in the tree and select **Delete**.
-- Links are automatically removed when either connected system is deleted.
-
-### Viewing All Links
-
-Expand the **Inter-system Links** node in the tree to see all links organized by type:
-
-```
-Inter-system Links
-  Transmission Links (3)
-    Link: Cuba -> Jamaica (500 MW)
-    Link: Cuba -> Cayman (200 MW)
-    Link: Jamaica -> Haiti (300 MW)
-  Fuel Routes (1)
-    Route: Trinidad -> Jamaica (Natural Gas, 1000 MW)
-```
+- Right-click the link in the tree and select **Delete**, or use the **Delete** button below the tree or **Delete Line** in the form.
+- Links are removed automatically when either connected system is deleted.
+- Renaming a system does not update its links; see [System Management](system-management.md#renaming-a-system).
 
 
 ---
 
 
-## DC-OPF Across Systems
+## Validation
 
-When multiple systems are interconnected via transmission links with DC power flow enabled, the optimizer solves a coupled optimal power flow respecting:
+The Validate dialog does not check inter-system links. They are checked by the automatic validation that runs before every save and after loading a configuration. The rules are:
 
-1. **Capacity constraints** -- Power flow on each link is bounded by its NTC.
-2. **Loss modeling** -- Transfer losses reduce the power received by the importing system.
-3. **Angle constraints** (if enabled) -- Voltage angle differences between the connected nodes are bounded by the maximum angle difference setting.
-4. **Investment decisions** -- The master problem can invest in new link capacity up to the Max Investment limit, weighing interconnection costs against generation investment alternatives.
-
-The coupled solution minimizes total system cost across all interconnected systems, accounting for transfer costs, losses, and interconnection investment.
-
-
----
-
-
-## Constraints and Validation
-
-| Rule | Description |
-|------|-------------|
-| **No self-links** | A system cannot link to itself. Use intra-system transmission lines instead. |
-| **Valid endpoints** | Both endpoint systems must exist in the project. |
-| **Valid nodes** | Node indices must be valid within their respective systems. |
-| **Positive capacity** | Existing capacity plus max investment must be greater than zero (otherwise the link serves no purpose). |
-| **Non-negative losses** | Loss factor must be between 0.0 and 1.0. |
-| **Parallel links allowed** | Multiple links between the same pair of systems are permitted and their capacities are additive. |
-| **Fuel type required** | Fuel route links must have a fuel type assigned. |
-
-The validation dialog checks all links against these rules and reports violations.
+| Rule | Severity |
+|------|----------|
+| Both systems are loaded in the project | Error |
+| A link does not connect a system to itself | Error |
+| Node indices are within range in their systems | Error |
+| Capacity, costs, and distance are not negative | Error |
+| Loss factor is between 0 and 1 | Error |
+| Endpoint buses exist in their systems | Warning (the line may not be drawn) |
 
 
 ---
 
 
-## Map Display and Visual Style
+## Map Display
 
-| Link Type | Line Style | Color | Markers |
-|-----------|-----------|-------|---------|
-| Transmission | Solid | Purple | Arrow markers at midpoint and endpoint |
-| Fuel Route | Dashed | Purple | Arrow markers at midpoint |
-
-Both link types support complex geographic paths with intermediate waypoints, preserved through save/load cycles and exported as coordinate arrays in YAML.
-
-Line width scales with capacity:
-- Links under 100 MW: thin line (2px).
-- Links 100-500 MW: medium line (3px).
-- Links over 500 MW: thick line (4px).
+Links are drawn as purple (`#8e44ad`) lines, 3 px wide by default, following their waypoints. Change color, width, and opacity in the form's Appearance group. Waypoints are saved in the YAML configuration.
 
 
 ---
@@ -224,14 +137,10 @@ Line width scales with capacity:
 
 ## Workflow Example: Connecting Two Island Systems
 
-1. Create two systems: "Cuba" and "Jamaica".
-2. Add nodes to each system representing their respective substations.
-3. In the Element Tree, right-click **Inter-system Links > Transmission Links > Add New**.
-4. Set From System = "Cuba", From Node = 3 (a coastal substation).
-5. Set To System = "Jamaica", To Node = 0 (the nearest Jamaican substation).
-6. Set Existing Capacity = 0 MW (no current interconnection).
-7. Set Investment Cost = 2000 $/MW, Max Investment = 500 MW.
-8. Set Loss Factor = 0.04 (4% for a ~200 km submarine cable).
-9. Set Distance = 200 km, Cost per MW-km = 5 $/MW/km.
-10. Click **Edit Trace** and add waypoints to route the cable around the Cayman Trench.
-11. Validate the project. The optimizer will now consider building this interconnection.
+1. Create two systems, "Cuba" and "Jamaica", and add their buses (see [Map Editor](map-editor.md)).
+2. Select **Line** in the toolbar.
+3. Click a coastal bus in Cuba, click waypoints along the cable route, then click a bus in Jamaica.
+4. In the link form, set Capacity = 0 MW (no existing interconnection).
+5. Set Investment cost = 2,000,000 $/MW and Max investment = 500 MW.
+6. Check the computed Length and the per-unit reactance.
+7. Validate and run. The optimizer can now invest in the interconnection.

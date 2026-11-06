@@ -100,6 +100,15 @@ class SobolChart(FigureCanvasQTAgg):
         self.ax.legend(loc="lower right", fontsize=9)
         self.ax.set_xlim(left=-0.05)
         self.ax.axvline(x=0, color="gray", linewidth=0.5)
+        n_failed = result.n_failed.get(kpi_name, 0)
+        if n_failed:
+            self.ax.text(
+                0.5, 0.5,
+                tr("sensitivity.no_indices").replace("{n}", str(n_failed))
+                .replace("{total}", str(result.n_evaluations)),
+                transform=self.ax.transAxes, ha="center", va="center",
+                color=c.text_primary, fontsize=10,
+            )
 
         self.fig.tight_layout(pad=1.5)
         self.draw()
@@ -188,6 +197,13 @@ class SensitivityDialog(QDialog):
         samples_lay.addWidget(self._n_samples_spin)
         self._eval_label = QLabel()
         samples_lay.addWidget(self._eval_label)
+        # Config mode runs a full simulation per evaluation; 25 = `esfex run` default
+        self._years_label = QLabel(tr("sensitivity.years_per_run"))
+        samples_lay.addWidget(self._years_label)
+        self._years_spin = QSpinBox()
+        self._years_spin.setRange(1, 50)
+        self._years_spin.setValue(25)
+        samples_lay.addWidget(self._years_spin)
         left_layout.addWidget(samples_group)
 
         # Parameters table
@@ -285,6 +301,8 @@ class SensitivityDialog(QDialog):
     def _on_mode_changed(self):
         is_lp = self._mode_combo.currentIndex() == 0
         self._lp_browse_btn.setEnabled(is_lp)
+        self._years_label.setEnabled(not is_lp)
+        self._years_spin.setEnabled(not is_lp)
 
         if is_lp:
             if self._lp_path:
@@ -399,6 +417,7 @@ class SensitivityDialog(QDialog):
             parameters=params,
             kpi_names=kpis,
             n_base_samples=self._n_samples_spin.value(),
+            years=None if is_lp else self._years_spin.value(),
         )
 
         self._worker = SensitivityWorker(
@@ -438,10 +457,12 @@ class SensitivityDialog(QDialog):
         self._cancel_btn.setEnabled(False)
         self._export_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
-        self._progress_label.setText(
-            f"Done. {result.n_evaluations} evaluations, "
-            f"{len(result.parameters)} parameters."
-        )
+        text = (f"Done. {result.n_evaluations} evaluations, "
+                f"{len(result.parameters)} parameters.")
+        failed = [_KPI_DISPLAY.get(k, k) for k, n in result.n_failed.items() if n]
+        if failed:
+            text += "\n" + tr("sensitivity.failed_summary").replace("{kpis}", ", ".join(failed))
+        self._progress_label.setText(text)
         self._update_chart()
 
     def _on_error(self, msg: str):

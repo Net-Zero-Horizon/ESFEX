@@ -1,6 +1,6 @@
 # Electrolyzer Model
 
-The electrolyzer model implements power-to-hydrogen (P2H2) conversion [**[49]**](../reference/bibliography.md#ref49), coupling the electrical power system with hydrogen production for sector coupling applications [**[50]**](../reference/bibliography.md#ref50). It is implemented in `electrolyzer.jl`.
+Electrolyzers convert power to hydrogen (P2H2) [**[49]**](../reference/bibliography.md#ref49) and are a common sector-coupling technology [**[50]**](../reference/bibliography.md#ref50). In ESFEX the electrolyzer is a bounded, controllable electrical load in the operational dispatch (`power_system.jl`); its hydrogen output is not modelled.
 
 ---
 
@@ -13,13 +13,12 @@ Electrolyzers consume electricity to produce hydrogen via water electrolysis (sp
 1. **Flexible load**: Electrolyzers can modulate their power consumption to absorb surplus renewable generation, providing demand-side flexibility.
 2. **Sector coupling**: Hydrogen output can satisfy non-electric energy demands (industrial feedstock, transport fuel, heating) or be stored for later reconversion to electricity via fuel cells.
 
-The model supports:
+What ESFEX models today:
 
-- Capacity investment decisions for new electrolyzer installations
-- Variable efficiency modeling based on operating load
-- Ramp rate constraints reflecting physical limitations
-- Coupling with both the power system (electricity consumption) and the primary energy module (hydrogen output)
-- Water consumption tracking
+- The electrolyzer's power consumption in the operational dispatch, bounded by its rated power and ramp rates, as a load in the power balance
+- Its variable and fixed costs
+
+What it does not model: hydrogen output, hydrogen demand or storage coupling, investment in new electrolyzers, minimum operating point, and the electrolyzer in the master problem. Because the dispatch gives the hydrogen no value, it plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`. The sector-coupling role (2) is not implemented.
 
 ---
 
@@ -56,102 +55,55 @@ The model parameter `energy_per_kg_h2` captures the total system-level energy co
 ---
 
 
-## 3. Decision Variables
+## 3. Decision Variable
 
 
 | Variable | Domain | Units | Description | Julia Name |
 |----------|--------|-------|-------------|------------|
-| \(I^{elz}_n\) | \(\mathbb{R}_+\) | MW | Electrolyzer capacity investment at node \(n\) | `elz_investment[n]` |
-| \(P^{elz}_{n,t}\) | \(\mathbb{R}_+\) | MW | Power consumption at node \(n\), hour \(t\) | `electrolyzer_power[n,t]` |
-| \(H_{n,t}\) | \(\mathbb{R}_+\) | kg/h | Hydrogen production at node \(n\), hour \(t\) | `hydrogen_production[n,t]` |
+| \(P^{elz}_{b,t}\) | \(\mathbb{R}_+\) | MW | Power consumption at bus \(b\), time step \(t\) | `electrolyzer_power[b,t]` |
 
-Built by `build_electrolyzer_variables!()`.
+The variable is created in `build_variables!()` (`power_system.jl`) when the system has at least one electrolyzer. It is indexed by bus: the per-node configuration lists are mapped onto buses like generators, with the rated power at the node's first bus and the other parameters copied to every bus of the node.
+
+!!! warning "One electrolyzer per system"
+    Only the first entry under `electrolyzers` is used; further entries are ignored. To model several sites, put them in one entry with per-node lists.
 
 ---
 
 
 ## 4. Constraints
 
-### ELZ-1: Power Capacity Limit
+Implemented in `add_electrolyzer_dispatch_constraints!()` (`power_system.jl`).
 
-Electrolyzer power consumption is bounded by the sum of existing rated capacity and new investment:
+### ELZ-1: Rated Power
 
 \[
-P^{elz}_{n,t} \leq \bar{P}^{elz}_n + I^{elz}_n \quad \forall n, t
+P^{elz}_{b,t} \leq \bar{P}^{elz}_b \quad \forall b, t
 \tag{ELZ-1}
 \]
 
-where:
+where \(\bar{P}^{elz}_b\) is `rated_power` mapped to bus \(b\). A bus without rated power gets no electrolyzer load: there is no investment variable. Constraint `electrolyzer_max_b{b}_t{t}`.
 
-- \(\bar{P}^{elz}_n\) is the existing rated electrolyzer capacity at node \(n\) (MW)
-- \(I^{elz}_n\) is the investment variable (MW), bounded by `invest_max_power[n]`
-
-This constraint ensures that power consumption never exceeds total installed capacity. The investment variable is bounded by:
+### ELZ-2: Ramp Rates
 
 \[
-0 \leq I^{elz}_n \leq \bar{I}^{elz}_n \qquad \forall n
-\]
-
-where \(\bar{I}^{elz}_n\) is the maximum allowable investment at node \(n\).
-
-### ELZ-2: Hydrogen Production
-
-Hydrogen production is proportional to power consumption via an average efficiency:
-
-\[
-H_{n,t} = P^{elz}_{n,t} \times \frac{1000 \cdot \bar{\eta}^{elz}}{E_{H_2}} \quad \forall n, t
-\tag{ELZ-2}
-\]
-
-where:
-
-- \(\bar{\eta}^{elz} = (\eta^{rated} + \eta^{min}) / 2\) is the average efficiency over the operating range
-- \(E_{H_2}\) is the energy per kilogram of hydrogen (kWh/kg), from `energy_per_kg_h2`
-- The factor 1000 converts MW to kW for unit consistency
-
-**Derivation of the average efficiency.** Electrolyzer efficiency varies with load: it is typically highest at partial load and decreases at rated power due to increased overpotentials. The true efficiency curve \(\eta(P)\) is nonlinear. Rather than introducing a piecewise-linear approximation (which would add complexity), the model uses the arithmetic mean of the efficiencies at rated power and minimum operating point:
-
-\[
-\bar{\eta}^{elz} = \frac{\eta^{rated} + \eta^{min}}{2}
-\]
-
-For example, with \(\eta^{rated} = 0.70\) and \(\eta^{min} = 0.65\), the average efficiency is 0.675.
-
-!!! note "Efficiency Approximation"
-    The model uses a constant average efficiency rather than a piecewise-linear efficiency curve. This linearization avoids additional variables and constraints while providing a reasonable approximation for capacity planning studies. For detailed operational studies where load-dependent efficiency significantly impacts results, a PWL efficiency curve could be implemented using the same segment decomposition approach used for generator fuel cost curves (see [Operational Dispatch -- PWL](operational-dispatch.md#311-piecewise-linear-pwl-fuel-cost-decomposition)).
-
-### ELZ-3: Ramp Rate Constraints
-
-Power consumption changes between consecutive time steps are limited by ramp rates, reflecting the physical inertia of the electrolysis process (thermal management, gas handling, membrane conditioning):
-
-\[
-P^{elz}_{n,t} - P^{elz}_{n,t-1} \leq (\bar{P}^{elz}_n + I^{elz}_n) \cdot r^{up}_{n} \quad \forall n, t > 1
-\tag{ELZ-3a}
+P^{elz}_{b,t} - P^{elz}_{b,t-1} \leq \bar{P}^{elz}_b \cdot \min\left(1, r^{up}_b \Delta t\right) \quad \forall b, t \geq 2
+\tag{ELZ-2a}
 \]
 
 \[
-P^{elz}_{n,t-1} - P^{elz}_{n,t} \leq (\bar{P}^{elz}_n + I^{elz}_n) \cdot r^{down}_{n} \quad \forall n, t > 1
-\tag{ELZ-3b}
+P^{elz}_{b,t-1} - P^{elz}_{b,t} \leq \bar{P}^{elz}_b \cdot \min\left(1, r^{down}_b \Delta t\right) \quad \forall b, t \geq 2
+\tag{ELZ-2b}
 \]
 
-where:
+where \(r^{up}_b\), \(r^{down}_b\) are `ramp_up` and `ramp_down` in fractions of rated power per hour and \(\Delta t\) is the time step (`resolution_hours`). A rate of 0 or less means no limit, and the constraint is omitted. The limits apply inside a window only, not across rolling-horizon window boundaries. Constraints `electrolyzer_ramp_up_b{b}_t{t}` and `electrolyzer_ramp_down_b{b}_t{t}`.
 
-- \(r^{up}_n \in [0,1]\) is the maximum ramp-up rate (fraction of total capacity per hour)
-- \(r^{down}_n \in [0,1]\) is the maximum ramp-down rate (fraction of total capacity per hour)
+### Not implemented
 
-Typical ramp rates range from 0.1 (solid oxide, slow thermal response) to 1.0 (PEM, can ramp from zero to full power in under a minute, effectively unconstrained at hourly resolution).
+- **Hydrogen production.** `eff_at_rated`, `eff_at_min` and `energy_per_kg_h2` are read but no hydrogen output is computed in the dispatch, and no hydrogen demand or storage is linked to the electrolyzer.
+- **Minimum operating point.** `min_power` is not used; the electrolyzer can run at any level between 0 and its rated power.
+- **Investment.** `invest_cost`, `invest_max_power` and `life_time` are not used by the dispatch, and the master problem has no electrolyzer.
 
-Implemented in `add_electrolyzer_constraints!()`.
-
-### ELZ-4: Minimum Operating Point (Optional)
-
-When configured, the electrolyzer has a minimum stable operating point below which it must shut down:
-
-\[
-P^{elz}_{n,t} \geq \underline{P}^{elz}_n \cdot u^{elz}_{n,t} \quad \forall n, t
-\]
-
-where \(\underline{P}^{elz}_n\) is the minimum power fraction and \(u^{elz}_{n,t}\) is a binary on/off status. In the LP formulation, this constraint is relaxed or omitted to maintain linearity.
+The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electrolyzer_constraints!`, ...) and the electrolyzer block of `primary_energy.jl` (investment, `h2_production`, `electrolyzer_max_power_*`) model investment and hydrogen output, but no run calls them: the primary-energy adapter passes no electrolyzer configuration.
 
 ---
 
@@ -159,71 +111,21 @@ where \(\underline{P}^{elz}_n\) is the minimum power fraction and \(u^{elz}_{n,t
 ## 5. Objective Terms
 
 
-The electrolyzer contributes the following cost terms to the objective function, implemented in `get_electrolyzer_objective_terms()`:
+Built in `build_objective!()` (`power_system.jl`) as `electrolyzer_cost`, part of the energy costs that are multiplied by the time step \(\Delta t\):
 
 \[
-C^{elz} = \sum_n \left[ C^{elz,inv}_n + C^{elz,fix}_n + C^{elz,var}_n + C^{elz,water}_n \right]
+C^{elz} = \Delta t \left[ \sum_{b,t} c^{var}_b \, P^{elz}_{b,t} + \sum_b \bar{P}^{elz}_b \, c^{fix}_b \, T \right]
 \tag{ELZ-OBJ}
 \]
 
-### 5.1 Annualized Investment Cost
+where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) is the window length in hours.
 
+| Term | Units | Description |
+|------|-------|-------------|
+| \(c^{var}_b\) (`variable_cost`) | \$/MWh | Variable cost of the electricity consumed |
+| \(c^{fix}_b\) (`fixed_cost`) | \$/MW per hour | Fixed cost on rated power. It is applied per hour of the window, so a yearly figure in \$/MW/year must be divided by 8760. It is a constant and does not affect the dispatch |
 
-Investment cost is annualized over the electrolyzer lifetime and prorated to the optimization window:
-
-\[
-C^{elz,inv}_n = \frac{c^{inv,elz}_n}{\tau^{elz}_n \cdot 8760} \cdot I^{elz}_n \cdot T
-\]
-
-where:
-
-- \(c^{inv,elz}_n\) is the total investment cost (\$/MW)
-- \(\tau^{elz}_n\) is the lifetime (years)
-- \(T\) is the number of time steps in the optimization window
-- The factor \(8760\) converts annual cost to hourly
-
-### 5.2 Fixed O&M Cost
-
-
-Fixed operations and maintenance cost, proportional to total installed capacity:
-
-\[
-C^{elz,fix}_n = c^{fix,elz}_n \cdot (\bar{P}^{elz}_n + I^{elz}_n) \cdot T
-\]
-
-where \(c^{fix,elz}_n\) is the fixed O&M cost rate (\$/MW/hour).
-
-### 5.3 Variable O&M Cost
-
-
-Variable cost proportional to electricity consumed:
-
-\[
-C^{elz,var}_n = \sum_t c^{var,elz}_n \cdot P^{elz}_{n,t}
-\]
-
-where \(c^{var,elz}_n\) is the variable O&M cost (\$/MWh).
-
-### 5.4 Water Cost
-
-
-Water consumption cost proportional to hydrogen produced:
-
-\[
-C^{elz,water}_n = \sum_t c^{water} \cdot H_{n,t}
-\]
-
-where \(c^{water}\) is the water cost per kilogram of hydrogen (\$/kg H2). Water consumption for electrolysis is approximately 9 liters per kg H2.
-
-### 5.5 Cost Summary Table
-
-
-| Term | Formula | Units | Description |
-|------|---------|-------|-------------|
-| Annualized investment | \(\frac{c^{inv}}{\tau \cdot 8760} \cdot I \cdot T\) | \$ | Capital cost spread over lifetime |
-| Fixed O&M | \(c^{fix} \cdot (\bar{P} + I) \cdot T\) | \$ | Capacity-proportional maintenance |
-| Variable O&M | \(\sum_t c^{var} \cdot P_t\) | \$ | Energy-proportional operating cost |
-| Water | \(\sum_t c^{water} \cdot H_t\) | \$ | Feedstock cost |
+`water_cost` is not used.
 
 ---
 
@@ -231,118 +133,71 @@ where \(c^{water}\) is the water cost per kilogram of hydrogen (\$/kg H2). Water
 ## 6. Power System Coupling
 
 
-The electrolyzer is coupled to the power system as an additional electrical load. Electrolyzer power consumption appears on the demand side of the power balance equation:
-
-**Single-bus (PB-1):**
+\(P^{elz}_{b,t}\) is a load on the demand side of the bus power balance, in the single-bus balance (PB-1), the DC network balance (DC-1) and the ACOPF balance:
 
 \[
-\sum_g P_{g,n,t} + \ldots = D_{n,t} + P^{elz}_{n,t} + \sum_b P^{ch}_{b,n,t} + \ldots
+\sum_g P_{g,b,t} + \ldots = D_{b,t} + P^{elz}_{b,t} + \sum_k P^{ch}_{k,b,t} + \ldots
 \]
-
-**Multi-bus (DC-1):**
-
-\[
-\text{net\_inj}_{n,t} = \sum_g P_{g,n,t} - D_{n,t} - P^{elz}_{n,t} - \ldots = \sum_\ell K_{n,\ell} f_{\ell,t}
-\]
-
-This coupling is handled by `couple_electrolyzer_to_power_system!()`. The electrolyzer power variable \(P^{elz}_{n,t}\) is added to the demand-side expressions at the node where the electrolyzer is located.
 
 ---
 
 
-## 7. Hydrogen Demand Coupling
+## 7. Configuration
 
 
-When the primary energy module is active, hydrogen produced by the electrolyzer can satisfy hydrogen demand requirements:
-
-\[
-\sum_t H_{n,t} \cdot \Delta t \geq D^{H_2}_{n} \quad \forall n
-\]
-
-where \(D^{H_2}_n\) is the hydrogen demand at node \(n\) over the optimization window (kg). This constraint links the electrolyzer to the broader energy system, ensuring that hydrogen production meets industrial, transport, or other non-electric hydrogen demands.
-
-If hydrogen storage is available, the temporal profile of production can differ from the demand profile, allowing the electrolyzer to operate flexibly:
-
-\[
-V^{H_2}_{n,t+1} = V^{H_2}_{n,t} + H_{n,t} \cdot \Delta t - W^{H_2}_{n,t}
-\]
-
-where \(V^{H_2}_{n,t}\) is the hydrogen inventory and \(W^{H_2}_{n,t}\) is the hydrogen withdrawal for end-use.
-
----
-
-
-## 8. Operational Strategies
-
-
-The optimizer naturally selects the electrolyzer operating strategy that minimizes total system cost:
-
-| Strategy | Condition | Behavior |
-|----------|-----------|----------|
-| **Load following RE** | High RE penetration | Electrolyzer absorbs surplus RE, reducing curtailment |
-| **Baseload** | Low electricity prices | Continuous operation at high capacity factor |
-| **Peak shaving** | High peak demand | Electrolyzer reduces consumption during peaks |
-| **Idle** | High electricity prices | Electrolyzer shuts down, hydrogen demand unmet (penalized) |
-
-The flexibility of the electrolyzer is bounded by ramp rate constraints (ELZ-3) and minimum operating point (if configured). Faster-ramping technologies (PEM) can better follow variable renewable generation.
-
----
-
-
-## 9. Configuration
-
-
-Electrolyzer parameters are specified per node in the system configuration:
+Electrolyzers are a system key. Lists are per node:
 
 ```yaml
 electrolyzers:
-  alkaline:
-    name: Alkaline Electrolyzer
+  pem:
+    name: PEM Electrolyzer
+    technology: PEM
     rated_power: [10.0]           # MW per node
-    eff_at_rated: [0.70]          # Efficiency at rated power
-    eff_at_min: [0.65]            # Efficiency at minimum power
-    energy_per_kg_h2: 55.0        # kWh per kg H2 (system-level)
-    ramp_up: [0.5]                # Fraction of capacity per hour
+    min_power: [0.1]              # not used by the dispatch
+    ramp_up: [0.5]                # fraction of rated power per hour (0 = no limit)
     ramp_down: [0.5]
-    invest_cost: [1500000.0]      # $/MW total investment
-    invest_max_power: [50.0]      # MW maximum investment per node
-    fixed_cost: [30000.0]         # $/MW/year fixed O&M
-    variable_cost: [2.0]          # $/MWh variable O&M
-    water_cost: 0.05              # $/kg H2
-    life_time: [20]               # years
+    eff_at_rated: [0.70]          # read, not used (no H2 output)
+    eff_at_min: [0.65]
+    energy_per_kg_h2: 55.0        # kWh per kg H2, not used
+    fixed_cost: [3.4]             # $/MW per hour (about 30000 $/MW/year)
+    variable_cost: [2.0]          # $/MWh
+    water_cost: 0.05              # not used
+    invest_cost: [1500000.0]      # not used
+    invest_max_power: [0.0]       # not used
+    life_time: [20]
+    initial_age: [0]
+    degradation_rate: [0.0]
 ```
 
-### 9.1 Parameter Reference
+### 7.1 Parameter Reference
 
 
-| Parameter | Symbol | Units | Description |
-|-----------|--------|-------|-------------|
-| `rated_power` | \(\bar{P}^{elz}_n\) | MW | Existing installed capacity per node |
-| `eff_at_rated` | \(\eta^{rated}\) | -- | Efficiency at rated power |
-| `eff_at_min` | \(\eta^{min}\) | -- | Efficiency at minimum operating point |
-| `energy_per_kg_h2` | \(E_{H_2}\) | kWh/kg | System energy consumption per kg H2 |
-| `ramp_up` | \(r^{up}\) | 1/h | Maximum ramp-up rate (fraction of capacity) |
-| `ramp_down` | \(r^{down}\) | 1/h | Maximum ramp-down rate (fraction of capacity) |
-| `invest_cost` | \(c^{inv,elz}\) | \$/MW | Total investment cost |
-| `invest_max_power` | \(\bar{I}^{elz}\) | MW | Maximum investment per node |
-| `fixed_cost` | \(c^{fix,elz}\) | \$/MW/yr | Annual fixed O&M cost |
-| `variable_cost` | \(c^{var,elz}\) | \$/MWh | Variable O&M cost |
-| `water_cost` | \(c^{water}\) | \$/kg H2 | Water feedstock cost |
-| `life_time` | \(\tau^{elz}\) | years | Equipment lifetime |
+| Parameter | Symbol | Units | Used | Description |
+|-----------|--------|-------|------|-------------|
+| `rated_power` | \(\bar{P}^{elz}\) | MW | Yes | Installed capacity per node (ELZ-1) |
+| `ramp_up` / `ramp_down` | \(r^{up}\), \(r^{down}\) | 1/h | Yes | Ramp rates as fraction of rated power per hour (ELZ-2) |
+| `variable_cost` | \(c^{var}\) | \$/MWh | Yes | Variable cost |
+| `fixed_cost` | \(c^{fix}\) | \$/MW/h | Yes (constant) | Fixed cost per hour |
+| `min_power` | -- | fraction | No | Minimum operating point |
+| `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | -- | -- | No | Hydrogen conversion |
+| `water_cost` | -- | \$/kg H2 | No | Water cost |
+| `invest_cost`, `invest_max_power`, `life_time` | -- | -- | No | Investment |
+
+Electrolyzer results are not written to the HDF5 output.
 
 ---
 
 
-## 10. Implementation Reference
+## 8. Implementation Reference
 
 
-| Julia Function | Purpose | File |
-|----------------|---------|------|
-| `build_electrolyzer_variables!()` | Create investment, power, and production variables | `electrolyzer.jl` |
-| `add_electrolyzer_constraints!()` | Add ELZ-1 through ELZ-3 constraints | `electrolyzer.jl` |
-| `get_electrolyzer_objective_terms()` | Compute objective cost contributions | `electrolyzer.jl` |
-| `couple_electrolyzer_to_power_system!()` | Add electrolyzer power to demand side of balance | `electrolyzer.jl` |
-| `extract_electrolyzer_solution()` | Extract power, production, and investment results | `electrolyzer.jl` |
+| Function | Purpose | File |
+|----------|---------|------|
+| `build_variables!()` | Creates `electrolyzer_power` (bus × time) | `power_system.jl` |
+| `add_electrolyzer_dispatch_constraints!()` | ELZ-1 and ELZ-2 | `power_system.jl` |
+| `build_objective!()` | `electrolyzer_cost` (ELZ-OBJ) | `power_system.jl` |
+| `add_demand_constraints!()`, `add_dc_constraints!()`, `add_acopf_power_balance!()` | Load term in the power balance | `power_system.jl`, `transmission_dc.jl`, `transmission_acopf.jl` |
+| `PowerSystemAdapter` | Builds `ElectrolyzerConfig` from the first `electrolyzers` entry | `bridge/adapters.py` |
 
 ---
 

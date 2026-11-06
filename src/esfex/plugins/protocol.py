@@ -172,9 +172,8 @@ class ESFEXPlugin:
     def get_julia_modules(self) -> list[Path]:
         """Return ``.jl`` files to ``include()`` after ``ESFEX.jl``.
 
-        These modules can define functions invoked by Julia-side callbacks
-        during model construction — e.g.
-        ``add_hydrogen_constraints!(model, vars, input)``.
+        An overlay can, for example, register a custom constraint type with
+        ``ESFEX.register_constraint_hook!(type, fn)``.
 
         The native ESFEX Julia code is never modified on disk.
         """

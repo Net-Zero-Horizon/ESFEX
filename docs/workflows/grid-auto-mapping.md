@@ -1,81 +1,57 @@
-# Grid Auto-Mapping
+# Grid Builder
 
-Automated power grid construction from open geospatial databases. Access via **Workflows > Grid Auto-Mapping**.
+Automated power grid construction from open geospatial databases. Access via **Workflows > Grid Builder...**.
 
-The wizard builds a complete power system network — buses, generators, batteries, transmission lines, transformers, converters, and fuel infrastructure — by querying publicly available geographic databases and applying spatial clustering, deduplication, and connectivity algorithms. Starting from a user-drawn polygon on the map, it fetches real-world infrastructure data, normalizes it into a unified intermediate format, creates network elements with automatic node placement, and validates the resulting topology.
+The Grid Builder creates a power system network (buses, generators, batteries, transmission lines, transformers, converters and, optionally, fuel infrastructure) from publicly available geographic databases. Starting from a study area drawn on the map or taken from an imported GeoAsset, it fetches real-world infrastructure, normalizes it into a common intermediate format, removes cross-source duplicates, places nodes, and builds the network from the real substation and line topology. A final step forecasts hourly demand per node and splits it among the buses.
 
-The wizard is organized in a single phase of five steps:
+The wizard has three steps:
 
-1. **Region Definition** — draw the study area polygon on the map.
-2. **Sources & Fetch** — select databases, set filters, and download infrastructure data.
-3. **Review** — inspect, filter, and toggle fetched features before import.
-4. **Build Network** — create nodes via spatial clustering and map features to network elements.
-5. **Connect & Simplify** — auto-connect isolated components, route fuel, and clean up topology.
+1. **Region & Fetch**: define the study area, select data sources and filters, and download infrastructure data.
+2. **Build & Connect**: choose the target system, create nodes (spatial clustering or manual), and build and simplify the network.
+3. **Demand**: forecast hourly demand per node and distribute it among each node's buses.
 
-All spatial computations use the `esfex.visualization.workflows.grid_mapping_clustering`, `grid_mapping_fetchers`, and `grid_mapping_builder` modules, which can also be called from scripts — see [Scripting](#scripting).
+The build always imports the real topology ("faithful import"). It does not fabricate connectivity: there is no automatic bridging of isolated components, no node star-coupling and no generator step-up chains, so island subsystems are kept as islands.
+
+The spatial computations live in the `esfex.visualization.workflows.grid_mapping_fetchers`, `grid_mapping_clustering` and `grid_mapping_builder` modules, which can also be called from scripts. See [Scripting](#scripting).
 
 
 ---
 
 
-### Step 1: Region Definition
+### Step 1: Region & Fetch
 
-Define the geographic study area by drawing a polygon on the interactive map.
+Define the study area, configure the data sources and filters, then click **Fetch Data**.
 
-**Drawing the polygon:**
+**Region:**
 
-Click on the map to place vertices. Close the polygon by clicking on or near the first vertex. The wizard minimizes automatically while drawing so the full map is visible, and restores itself when the polygon is complete.
+The study area is set with the shared domain selector (see [Study area selector](index.md#study-area-selector)): either **Draw domain** (click vertices on the map and close the polygon) or **Use imported area as domain** > **Apply as domain** with an imported GeoAsset. Multi-ring domains (for example an archipelago) are kept. The status line shows the vertex count and an approximate area computed from the polygon's bounding box (see [GM-4](#gm-4-bounding-box-area)).
 
-Once drawn, the wizard displays:
-
-- **Vertex list** — coordinates of each vertex (up to 10 shown, remainder summarized).
-- **Bounding box** — the rectangular envelope `(south, west)` to `(north, east)` used for API queries.
-- **Approximate area** — computed via the Shoelace formula on latitude/longitude coordinates projected to kilometers (see [GM-4](#gm-4-shoelace-polygon-area)).
-
-The polygon can be redrawn at any time by clicking "Draw Polygon on Map" again.
-
-**How it works:**
-
-APIs require rectangular bounding boxes, so the wizard extracts the polygon's envelope for queries. After download, a point-in-polygon filter (ray-casting algorithm) clips results to the actual polygon boundary. This means irregular shapes — island coastlines, administrative borders, river basins — all work correctly.
-
-**Tips:**
-
-- Use a polygon that follows natural or administrative boundaries rather than a simple rectangle. The polygon clip removes features outside the boundary even if they fall within the bounding box.
-- Larger regions produce more features and longer download times. For country-scale studies, consider splitting into sub-regions.
-- The area estimate uses a cosine-latitude projection (approximate). For precise areas near the poles, verify independently.
-
-
-### Step 2: Sources & Fetch
-
-Select which geospatial databases to query, configure filters, and download infrastructure data.
-
-This step combines source configuration and data fetching into a single interface. Configure all settings first, then click **Fetch Data** to launch parallel downloads.
+The fetchers query by bounding box. After download, a point-in-polygon test (ray casting) clips the results to the actual domain: point features must lie inside a ring, and lines must have at least one vertex inside. Irregular shapes such as coastlines or administrative borders therefore work as expected.
 
 **Data sources:**
 
+All four sources are enabled by default. Combining them (OSM topology, plant databases, and GridFinder gap-filling) gives the most complete network.
+
 | Source | Default | Description |
 |--------|---------|-------------|
-| **OpenStreetMap (Overpass API)** | Enabled | Crowd-sourced geographic data. Provides substations, generators, transmission lines, transformers, AC/DC converters, energy storage, fuel entry points, and fuel storage. The most comprehensive source for network topology. |
-| **GEM Global Power Plants (2025)** | Enabled | Global Energy Monitor database (February 2025 update). Power plants with capacity, fuel type, commissioning year, owner, and technology sub-type. More recent than WRI. |
-| **WRI Global Power Plant Database** | Disabled | World Resources Institute database (~30,000 plants worldwide). Power plants with capacity and fuel type. Useful as a cross-reference when GEM coverage is incomplete. |
-| **GridFinder (Predicted Grid Routes)** | Disabled | ML-predicted transmission line routes derived from nighttime satellite imagery (Zenodo dataset). Useful for regions with sparse OSM mapping. Supports GeoJSON and GeoPackage formats. |
+| **OpenStreetMap** | Enabled | Crowd-sourced geographic data. Provides substations, generators, transmission lines, transformers, AC/DC converters, energy storage, fuel entry points and fuel storage. The authoritative source for network topology. Fetched from the Overpass API or from a local Geofabrik extract (see [Country-scale OSM (Geofabrik)](#country-scale-osm-geofabrik)). |
+| **WRI Global Power Plant Database** | Enabled | World Resources Institute database (~30,000 plants worldwide) with capacity and fuel type. |
+| **GEM Global Power Plants (2025)** | Enabled | Global Energy Monitor database (February 2025 update): capacity, fuel, commissioning year, owner and technology sub-type. Only units with status "operating" are kept. |
+| **GridFinder (predicted lines)** | Enabled | ML-predicted line routes from satellite night-lights (Zenodo dataset). Geometry only: voltage and capacity are derived from the buses each line connects. GridFinder lines are kept only where OSM has no line, and their endpoints snap to buses within 2 km, so they fill gaps in OSM coverage. |
 
 **Filters:**
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
-| Minimum voltage | 10 -- 750 kV | 110 kV | Substations and lines below this voltage are excluded. Set to 110 kV for transmission-only studies, or 33 kV to include sub-transmission. |
-| Minimum generator capacity | 0 -- 10,000 MW | 1 MW | Generators with known capacity below this threshold are excluded. Generators with unknown capacity (0 MW in the database) are always included. |
-| Bus snap threshold | 0.1 -- 100 km | 5 km | Distance threshold for snapping new elements to existing buses during network construction (Step 4). Elements closer than this distance to an existing bus share that bus rather than creating a new one. |
+| Min voltage | 10 -- 750 kV | 66 kV | Substations and lines with a known voltage below this value are excluded at fetch time. After the build, buses that ended up below the floor are collapsed into the nearest bus at or above it (see [Build pipeline](#build-pipeline)). The 66 kV default keeps the sub-transmission layer that holds regional grids together; a higher floor can split a regional grid into disconnected islands. |
+| Min gen capacity | 0 -- 10,000 MW | 0.3 MW per kV of Min voltage (20 MW at 66 kV) | Generator capacity floor. The default follows Min voltage (0.3 MW/kV, rounded) until you edit the value by hand, which pins it. When the value is above 0, the build drops every generator below it, **including generators with unknown capacity** (0 MW in the source). Set it to 0 to include every generator. |
 
 **Element types to import:**
-
-Eight independently selectable element categories:
 
 | Element Type | Default | OSM Tags |
 |--------------|---------|----------|
 | Substations / Buses | Enabled | `power=substation` |
-| Generators / Power Plants | Enabled | `power=generator`, `power=plant` |
+| Generators | Enabled | `power=generator`, `power=plant` |
 | Transmission Lines | Enabled | `power=line`, `power=cable` |
 | Transformers | Enabled | `power=transformer` |
 | Energy Storage | Enabled | `power=storage` |
@@ -87,185 +63,152 @@ Eight independently selectable element categories:
 
 | Strategy | Description |
 |----------|-------------|
-| **One bus per voltage level** (recommended) | Multi-voltage substations produce one bus per voltage level, connected by auto-created transformers. Yields a more realistic network topology. |
-| **One bus per substation** | Each substation becomes a single bus at its highest voltage. Simpler model with fewer elements. |
+| **One bus per voltage level** (recommended, default) | Multi-voltage substations produce one bus per voltage level, connected by auto-created transformers. |
+| **One bus per substation** | Each substation becomes a single bus at its highest voltage. |
 
 **Fetching:**
 
-Click **Fetch Data** to launch parallel download threads for all enabled sources. Each source displays its own progress bar and status message. Failed downloads are reported but do not block other sources. The button changes to **Re-fetch Data** after completion, allowing re-runs with different settings.
+Click **Fetch Data** to start one download thread per enabled source. Each source shows its own progress bar and status message. A failed source is reported in the error log but does not block the others. After completion the button changes to **Re-fetch Data**.
 
-After all sources complete, the wizard automatically:
+When all sources finish, a background worker:
 
-1. **Clips to polygon** — removes features outside the drawn polygon (APIs use the bounding box, which is larger).
-2. **Deduplicates** — merges duplicate features across sources (see [Deduplication Algorithm](#deduplication-algorithm)).
-3. **Summarizes** — displays counts by feature type.
+1. **Clips to the domain** (the APIs return the larger bounding box).
+2. **Removes cross-source duplicates** (see [Deduplication Algorithm](#deduplication-algorithm)).
+3. **Summarizes** the feature counts by type.
 
-**Tips:**
-
-- Enable both OSM and GEM for the most complete picture. OSM provides network topology (substations, lines), while GEM provides accurate generator capacities and fuel types.
-- Enable GridFinder only for regions with known gaps in OSM transmission line coverage (parts of sub-Saharan Africa, Southeast Asia).
-- Enable fuel entry and fuel storage only if you plan to model fuel supply chains. These elements require the road network, which increases download size.
-- The Overpass API has rate limits. For very large regions, the query may time out — try reducing the region size or increasing the minimum voltage filter.
-
-
-### Step 3: Review
-
-Inspect all fetched features in a sortable table and selectively include or exclude individual items before building the network.
-
-**Feature table columns:**
-
-| Column | Description |
-|--------|-------------|
-| Include | Checkbox to include or exclude each feature from network construction |
-| Source | Database that provided this feature (OSM, GEM, WRI, GridFinder) |
-| Type | Feature type: substation, generator, battery, line, transformer, converter, fuel\_entry, fuel\_storage |
-| Name | Feature name from the source database |
-| Voltage (kV) | Operating voltage. Multi-voltage substations show both levels (e.g., "220 / 110") |
-| Capacity (MW) | Rated capacity in MW (generators, batteries) or MVA (transformers, converters) |
-| Fuel | Fuel type for generators (Solar, Wind, Natural Gas, etc.) |
-
-**Filtering:**
-
-A dropdown filter restricts the table to a single feature type (Substations, Generators, Batteries, Lines, Transformers, Converters, Fuel Entries, or Fuel Storage). Select "All Types" to show everything.
-
-**Bulk actions:**
-
-- **Select All** — checks all visible (non-hidden) features.
-- **Deselect All** — unchecks all visible features.
-
-A summary label shows the count of selected features out of the total.
+There is no manual review table: the fetched features go straight to Step 2.
 
 **Tips:**
 
-- Uncheck features that appear to be data errors (e.g., a generator with implausible capacity or location).
-- Use the type filter to review one category at a time. For example, filter to "Generators" and verify fuel types before building.
-- Road features (used internally for fuel routing) are hidden from the table and cannot be toggled.
+- Keep OSM and GEM enabled. OSM provides the network topology (substations, lines); GEM adds capacities and plants missing from OSM.
+- Enable fuel entry and fuel storage only if you plan to model fuel supply chains. The OSM fetch then also downloads major roads near the fuel features.
+- For large domains, install `osmium` so the OSM data comes from a local Geofabrik extract instead of the rate-limited Overpass API.
 
 
-### Step 4: Build Network
+#### Country-scale OSM (Geofabrik)
 
-Create nodes via spatial clustering and map the reviewed features into the active system as buses, generators, batteries, transmission lines, transformers, converters, and fuel infrastructure.
+The OSM backend is chosen automatically:
+
+- **Geofabrik**: used when the domain spans 2 degrees or more (latitude or longitude) and is a polygon. The smallest Geofabrik regional `.osm.pbf` extract covering the domain is downloaded once, cached under the ESFEX data directory (`data/geofabrik`), and filtered locally with `pyosmium`. A cached extract younger than 30 days is reused. The extracted elements go through the same conversion and filters as the Overpass path, so the resulting features are the same.
+- **Overpass API**: used for smaller domains.
+
+Set the environment variable `ESFEX_OSM_BACKEND` to `geofabrik`, `overpass` or `auto` (default) to override the choice. The Geofabrik backend needs the `osmium` Python package (`pip install osmium`); if it is not importable, the fetch falls back to Overpass and logs a warning.
+
+
+### Step 2: Build & Connect
+
+Choose the target system, create nodes, and build the network. The build runs on a background thread; while it runs, the **Build Network** button becomes **Cancel**. A cancelled build keeps the partial network.
 
 **Target system:**
 
-Select an existing system from the dropdown, or click **New System** to create a new one. The wizard switches the editor to the selected system before building.
+Select an existing system from the dropdown, or click **New System...** to create one. The wizard switches the editor to the selected system before building. Building again after going back restores the system to its state before the first build, so elements are not duplicated.
 
-**Automatic node placement (optional):**
+**Node placement:**
 
-When enabled (default), the wizard determines optimal node locations via K-means clustering before placing any elements.
+With **Automatically create nodes from spatial clustering** checked (default), node locations come from K-means clustering of the fetched features. The Grid Builder replaces any existing nodes of the target system (for example the default "Node 0").
 
 | Setting | Range | Default | Description |
 |---------|-------|---------|-------------|
-| Minimum nodes | 1 -- 100 | 2 | Lower bound on the number of nodes to create |
-| Maximum nodes | 1 -- 200 | 20 | Upper bound on the number of nodes to create |
+| Minimum nodes | 1 -- 5000 | 2 | Lower bound on the number of nodes |
+| Maximum nodes | 1 -- 5000 | 20 | Upper bound on the number of nodes (also capped by the number of features) |
 
-**Clustering criteria:**
+**Clustering criteria (select one or more):**
 
-One or more criteria can be selected. When multiple criteria are active, each runs independently and the candidate positions are merged via a consensus K-means pass (pool all candidate centroids, re-cluster to the mean of the individual k values).
+When several criteria are checked, each runs independently and the candidate positions are merged by a consensus K-means pass (pool all candidate centroids, re-cluster to the mean of the individual k values).
 
 | Criterion | Method | Description |
 |-----------|--------|-------------|
-| **Infrastructure Density** | K-means on infrastructure positions | Clusters the positions of substations, generators, batteries, transformers, converters, and fuel entries. Places nodes where physical infrastructure is concentrated. Default criterion. |
-| **Demand Proxy (Building Footprints)** | Fetch + cluster building centroids | Downloads building footprints from Overture Maps, Microsoft ML Buildings, or Google Open Buildings (tried in that order). Clusters by building density to approximate demand hotspots. Requires an additional download. Falls back to Infrastructure Density if building data is unavailable. |
-| **Regional Balance (Uniform Coverage)** | Grid-seeded K-means | Seeds initial cluster centroids on a regular spatial grid covering the study area, then runs K-means. Ensures even geographic coverage regardless of infrastructure density. Good for planning studies that require uniform spatial resolution. |
+| **Infrastructure Density** | K-means on infrastructure positions | Clusters the positions of substations, generators, batteries, transformers, converters and fuel entries. Places nodes where physical infrastructure is concentrated. Default criterion. |
+| **Demand Proxy (Building Footprints)** | Fetch + cluster building centroids | Downloads building footprints from Overture Maps, Microsoft ML Buildings or Google Open Buildings (tried in that order). Clusters by building density to approximate demand hotspots. Requires an additional download. Falls back to Infrastructure Density if building data is unavailable. |
+| **Regional Balance (Uniform Coverage)** | Grid-seeded K-means | Seeds the initial centroids on a regular grid over the study area, then runs K-means. Gives even geographic coverage regardless of infrastructure density. |
 
-The optimal number of clusters is determined automatically via the elbow method (see [GM-3](#gm-3-elbow-method-knee-detection)). All clustering operates on coordinates projected to approximate kilometers using a cosine-latitude correction (see [GM-5](#gm-5-utm-approximation-for-metric-distances)).
+The number of clusters is chosen with the elbow method (see [GM-3](#gm-3-elbow-method-knee-detection)). Clustering works on coordinates projected to approximate kilometers (see [GM-5](#gm-5-utm-approximation-for-metric-distances)).
 
-When automatic node placement is disabled, fetched elements are assigned to the nearest existing node in the target system. At least one node must already exist.
+**Node naming:** clustered nodes are named after the place they fall in:
 
-**Network building pipeline:**
+1. Nominatim (OpenStreetMap) reverse geocoding, at about one request per 1.1 s and stopping after 80 calls or 30 s.
+2. For the remaining nodes, an offline point-in-polygon lookup in the bundled Natural Earth admin-1 boundaries (state, province, prefecture).
+3. Otherwise "Node i".
 
-After nodes are created (or if using existing nodes), the wizard executes an eight-phase build pipeline:
+Repeated names get a numeric suffix ("Springfield", "Springfield 2").
 
-| Phase | Input Features | Created Elements |
-|-------|---------------|-----------------|
-| 1. Substations | `substation` | Buses (one per voltage level or per substation, depending on strategy). Auto-creates transformers between voltage levels in per-voltage mode. |
-| 1.5. Fuels & Technologies | All generator fuels | `GuiFuel` and `GuiTechnology` objects with sensible defaults (see [Fuel & Technology Mapping](#fuel--technology-mapping)). |
-| 2. Generators | `generator` | `GuiGeneratorInstance` with mapped fuel, technology, capacity, and initial age (from commissioning year). |
-| 3. Batteries | `battery` | `GuiBatteryInstance` with power rating and energy capacity (explicit or 4-hour default duration). |
-| 4. Lines | `line` | `GuiTransmissionLine` with waypoint geometry. Endpoints snapped to nearest buses. Capacity from explicit tags or SIL estimate. Self-loop lines (both endpoints snap to same bus) are skipped. |
-| 5. Transformers | `transformer` | `GuiTransformer` with HV and LV bus creation. |
-| 6. Converters | `converter` | `GuiACDCConverter` with AC-side and DC-side bus creation. |
-| 7. Fuel Entries | `fuel_entry` | Fuel entry points with mapped fuel type. |
-| 8. Fuel Storage | `fuel_storage` | Fuel storage facilities with mapped fuel type. |
+**Manual nodes:**
 
-Each element is snapped to the nearest existing bus within the snap threshold. If no bus exists within range, a new bus is created at the element's geographic location.
+With auto-creation unchecked, a node editor appears: a table (Name, Lat, Lng) with **Add node (click map)**, **Add node (row)** and **Delete selected**. Each node's Voronoi territory, clipped to the domain, is drawn live on the map. Buses are assigned to the nearest node centroid, so the territories show where elements will land. At least one node must exist before building.
+
+**Build options:**
+
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| Generate availability profiles | on/off | on | After the build, write one availability CSV per generator (see [Availability profiles](#availability-profiles)). |
+| Station merge radius | 0.05 -- 5 km | 1.0 km | Buses of the same voltage within this radius are treated as one physical station and merged. This is what connects line endpoints to their substation. It is a "same station" tolerance, not a reach distance: lines are never snapped to a distant bus. Increase it if large substations split into separate components; decrease it if two distinct stations merge. |
+| Simplification level | 0 -- 4 | 0 | Simplification applied after the build, before the network is drawn (see below). |
+| Drop isolated < N bus(es) | 1 -- 50 | 2 | Connected components with fewer buses than N are removed. The largest component is always kept. Set to 1 to keep everything. |
+
+**Simplification levels:**
+
+| Level | Effect |
+|-------|--------|
+| 0 -- Cleanup only | Repairs broken references and self-loops, removes orphaned fuel infrastructure and buses with nothing attached. |
+| 1 -- Aggregate equipment & parallel lines | Level 0, plus merging of parallel lines and aggregation of equivalent generators and batteries in place. |
+| 2 -- 4 | Level 1, plus an equivalent-network reduction (PyPSA-style): each node becomes one bus carrying its aggregated generation and demand, and nodes are joined by one equivalent branch per connected node pair (capacities summed, \(1/x_{eq} = \sum 1/x_i\)). A node containing an AC/DC or frequency converter keeps one bus per side of the converter. |
+
+Levels 2, 3 and 4 currently run the same reduction. The combo labels for these levels ("Radial / series bus elimination", "Intra-node voltage collapse", "Full node collapse") describe an older pruning scheme.
+
+#### Build pipeline
+
+`build_grid_from_features` creates the elements in this order:
+
+| Phase | Input | Result |
+|-------|-------|--------|
+| 1. Substations | `substation` | Buses (one per voltage level or per substation, depending on the strategy). In per-voltage mode, transformers between the levels. |
+| 1.5. Fuels & technologies | Generator fuels | `GuiFuel` and `GuiTechnology` objects (see [Fuel & Technology Mapping](#fuel-technology-mapping)). |
+| 2. Generators | `generator` | Generators with mapped fuel, technology, capacity and initial age (from the commissioning year). Generators below Min gen capacity are dropped first. |
+| 3. Batteries | `battery` | Batteries with power rating and energy capacity (explicit, or a 4-hour default duration). |
+| 4. Lines | `line` | OSM segments are merged into contiguous lines and split where a substation sits on them. Endpoints share a bus only when they coincide (0.05 km); GridFinder endpoints snap within 2 km. Capacity from tags or the standard-line-type estimate (see [Line Capacity Estimation](#line-capacity-estimation)). Self-loops are skipped. |
+| 5. Transformers | `transformer` | Transformers with HV and LV buses. |
+| 6. Converters | `converter` | AC/DC converters with AC-side and DC-side buses. |
+| 7. Fuel entries | `fuel_entry` | Fuel entry points with mapped fuel type. |
+| 8. Fuel storage | `fuel_storage` | Fuel storage facilities with mapped fuel type. |
+| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance are recomputed. Anything still unresolved (an all-untagged pocket) falls back to 220 kV. |
+| 8.5. Voltage floor | Buses below Min voltage | Generators and batteries on sub-floor buses move to the nearest bus at or above the floor; the sub-floor buses and their lines and transformers are removed. |
+| 9. Fuel consistency | All generators | Every generator fuel exists in the catalog and is supplied. |
+| Station clustering | All buses | Same-voltage buses within the station merge radius are merged; internal self-loops are dropped. |
+| Co-located voltage levels | Buses of different voltage at one station | A transformer is inserted between voltage levels that sit within the station merge radius. |
+| Frequency consistency | All buses | Missing frequencies are filled from the location (50/60 Hz), each AC-connected area gets one frequency, and equipment is aligned with its bus. |
+
+The build worker then runs:
+
+1. **Parameter inference** (`infer_electrical_params`): fills missing line and transformer ratings and raises (never lowers) a rating below the worst-case flow across the branch.
+2. **Simplification** at the selected level.
+3. **Isolated-component cleanup** (`drop_isolated_components`, keeping the largest component).
+4. **Node pruning**: nodes whose only buses were removed in the cleanup are deleted, so every node keeps at least one bus. Nodes that never had a bus are kept.
+5. **Dangling-reference sweep** (`drop_dangling_refs`).
+6. **Availability profiles**, if enabled.
+
+The result panel shows the build summary, the simplification log, the isolated-component cleanup, and the time spent in each phase.
+
+#### Availability profiles
+
+With **Generate availability profiles** checked, the build writes `<instance_id>_availability.csv` for each generator into `<config_dir>/availability/` (or `./availability/` when no configuration file is loaded) and assigns it to the generator. Thermal, hydro, geothermal and biomass profiles are synthetic. Wind and solar use weather-based capacity factors (Open-Meteo, via `windrex`/`solarex`), which adds time per unique location. A wind or solar generator with no weather data gets no profile; there is no flat fallback.
 
 **Tips:**
 
 - Start with the default Infrastructure Density criterion. Add Demand Proxy or Regional Balance only if the default placement is unsatisfactory.
-- For island systems, set minimum nodes to 1. For large interconnected grids, increase maximum nodes to 30--50.
-- Review the build log in the result panel. Warnings indicate features that could not be placed (e.g., lines with no geometry).
+- For island systems, set minimum nodes to 1. National models can need hundreds of nodes; raise the maximum accordingly.
+- Check the build log. Warnings list features that could not be placed (for example lines with no geometry) and the effect of each pipeline phase.
 
 
-### Step 5: Connect & Simplify
+### Step 3: Demand
 
-Three optional post-processing actions to refine the auto-generated network. Each action is independent and can be run in any order, though the recommended sequence is: Auto-Connect first, then Simplify, then Auto-Route Fuel (if fuel infrastructure was fetched).
+Forecast hourly demand for each node and split it among the node's buses. The same panel is available for a single node from the node attributes panel (**Forecast** button). It has four parts:
 
-#### 1. Auto-Connect
+1. **Demand Forecast**: country (with **Auto-detect**), base year, horizon, ML engine, national demand, GDP scenario (SSP1--SSP5), elasticity and efficiency, then **Fetch and Forecast**.
+2. **Forecast Results**: Node, Peak (MW), Annual (GWh) and Load Factor per node.
+3. **Validate against observed demand** (optional): import an observed hourly CSV per node, compare, and optionally apply a month-hour correction.
+4. **Bus Distribution**: split each node's demand among its buses (spatial demand by default, or a building-footprint proxy), then **Apply Demand & Fractions**, which writes `demand_<node>.csv` files under `<config_dir>/demand/`.
 
-Iterative connectivity analysis with electrical validation. The algorithm runs multiple passes, each building a fresh bus adjacency graph and checking every element for a complete connection chain.
-
-**Per-iteration phases:**
-
-| Phase | Check | Fix |
-|-------|-------|-----|
-| 1--2 | Voltage mismatches between connected buses | Replace direct lines with transformer chains |
-| 3--4 | Disconnected network components (BFS on bus adjacency graph) | Bridge isolated components to the main network via new transmission lines |
-| 5--6 | Transformers missing connection lines to their buses | Create missing connection lines |
-| 7--8 | AC/DC and frequency converters missing connection lines | Create missing connection lines |
-| 9--10 | Equipment (generators, batteries, electrolyzers) without complete chains | Create LV bus, transformer, and connection lines |
-| 11 | Transformer voltages inconsistent with their bus voltages | Synchronize |
-
-The loop converges when an iteration produces zero new elements, or when the maximum iteration count is reached. After convergence, a final verification re-audits all elements and reports any remaining failures.
-
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| Max iterations | 1 -- 100 | 20 | Maximum number of check-and-fix passes. The loop stops early when no issues remain. |
-| Voltage mismatch ratio | 1.1 -- 10.0 | 1.5 | Bus-to-bus lines whose endpoint voltage ratio exceeds this threshold are replaced with a transformer chain. |
-| Max interconnection distance | 10 -- 10,000 km | 100 km | Maximum distance for bridging isolated components. Components farther than this from the main network are left as independent local networks (e.g., offshore platforms, remote islands). |
-| LV bus voltage | 0.1 -- 33 kV | 0.48 kV | Voltage level assigned to auto-created low-voltage buses in equipment connection chains. |
-
-#### 2. Auto-Route Fuel
-
-Connects fuel entry points to fuel storage facilities via road-network routing.
-
-The algorithm builds a graph from OSM road segments (motorways, trunk roads, primary and secondary roads fetched during Step 2) and uses Dijkstra's shortest-path algorithm to find routes between each fuel storage facility and its nearest fuel entry point of matching fuel type.
-
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| Max route distance | 10 -- 5,000 km | 200 km | Maximum road-network distance for fuel routes. Storage beyond this distance is left unconnected. |
-
-Fuel routing requires that fuel entry points, fuel storage, and road data were all fetched in Step 2. If any of these are missing, no routes are created.
-
-#### 3. Simplify & Aggregate
-
-Two-phase cleanup of the auto-generated network:
-
-**Phase 1 (always runs): Network cleanup**
-
-- Removes empty isolated buses (degree 0 — no connected lines, no equipment).
-- Removes self-loop lines (both endpoints on the same bus).
-- Removes duplicate lines between the same bus pair (merged into one with summed capacity).
-
-**Phase 2 (optional): Infrastructure aggregation**
-
-Merges similar generators and batteries (same fuel and technology) into aggregate units. Four scope levels:
-
-| Scope | Description |
-|-------|-------------|
-| **Clean Up Only** | Phase 1 only — no aggregation |
-| **Aggregate by Bus** | Merge units on the same bus |
-| **Aggregate by Circuit** | Merge units across buses in the same connected component |
-| **Aggregate by Node** | Merge units across all buses within a node |
-
-The wizard first runs an analysis pass that displays merge groups in a tree view (group description, unit count, total MW, and reduction count). Select individual groups via checkboxes before applying.
-
-**Tips:**
-
-- Run Auto-Connect first to establish full connectivity, then Simplify to clean artifacts created during auto-connection.
-- Use "Aggregate by Bus" (default) for a moderate reduction. Use "Aggregate by Node" for maximum simplification.
-- After applying aggregations, click Analyze again to check for further merge opportunities (new groups may emerge after prior merges).
+See [Demand Forecast & Bus Distribution](demand-distribution.md) for the parameters and methods.
 
 
 ---
@@ -276,11 +219,11 @@ The wizard first runs an analysis pass that displays merge groups in a tree view
 
 ### GridFeature Schema
 
-All fetchers normalize raw source data into a unified `GridFeature` dataclass before any processing:
+All fetchers normalize raw source data into a common `GridFeature` dataclass before any processing:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source` | str | Origin database: `"osm"`, `"wri"`, `"gem"`, or `"gridfinder"` |
+| `source` | str | Origin database: `"osm"`, `"wri"`, `"gem"` or `"gridfinder"` |
 | `feature_type` | str | Element category: `"substation"`, `"generator"`, `"line"`, `"transformer"`, `"battery"`, `"converter"`, `"fuel_entry"`, `"fuel_storage"`, `"road"` |
 | `name` | str | Feature name from the source database |
 | `latitude` | float | WGS-84 latitude (decimal degrees) |
@@ -289,23 +232,23 @@ All fetchers normalize raw source data into a unified `GridFeature` dataclass be
 | `voltage_kv_secondary` | float | Secondary voltage for multi-voltage substations (0 = single voltage) |
 | `capacity_mw` | float | Rated capacity in MW or MVA (0 = unknown) |
 | `frequency_hz` | float | System frequency in Hz (default 50) |
-| `current_type` | str | `"AC"`, `"DC"`, or `"AC_DC"` |
+| `current_type` | str | `"AC"`, `"DC"` or `"AC_DC"` |
 | `fuel` | str | Fuel type for generators (e.g., `"Solar"`, `"Natural Gas"`, `"Diesel"`) |
-| `gen_type` | str | `"Renewable"`, `"Non-renewable"`, or `"Storage"` |
+| `gen_type` | str | `"Renewable"`, `"Non-renewable"` or `"Storage"` |
 | `energy_mwh` | float | Energy capacity for batteries in MWh (0 = unknown, builder defaults to 4h duration) |
 | `line_coords` | list | Line geometry as `[(lat, lng), ...]` waypoints |
 | `num_circuits` | int | Number of parallel circuits (lines only, default 1) |
 | `operator` | str | Plant owner or grid operator |
 | `commissioning_year` | int | Year commissioned (0 = unknown) |
 | `technology` | str | Technology sub-type (e.g., `"CCGT"`, `"Onshore"`, `"Offshore"`) |
-| `raw_tags` | dict | Raw source tags for debugging |
+| `raw_tags` | dict | Raw source tags |
 | `osm_id` | str | OpenStreetMap element ID (e.g., `"node/123456"`) |
-| `include` | bool | User toggle from the Review step (default `True`) |
+| `include` | bool | Whether the builder uses the feature (default `True`; the GUI no longer exposes a toggle) |
 
 
 ### Fuel & Technology Mapping
 
-The builder automatically creates fuel and technology objects for each unique fuel type found in the imported generators. A two-level alias system normalizes variant names to canonical keys:
+The builder creates a fuel for each distinct generator fuel, and a technology for each (technology, fuel) pair. Fuel names are normalized to canonical keys with an alias table; a generator with no detected fuel goes to `other`.
 
 **Fuel alias table (selected entries):**
 
@@ -315,29 +258,18 @@ The builder automatically creates fuel and technology objects for each unique fu
 | wind, eolica, eolico | `wind` | Wind |
 | hydro, hydroelectric, hydropower, water | `water` | Water |
 | naturalgas, gas, ng, gasnatural | `naturalgas` | Natural Gas |
-| oil, fueloil, hfo, diesel, gasoil | `diesel` | Diesel |
+| diesel, gasoil, dieselengine | `diesel` | Diesel |
+| oil, fueloil, hfo, heavyfueloil, residualfueloil, petroleum, crude, bunker, mazut, steamoil | `fuel_oil` | Fuel Oil |
 | coal, carbon, petcoke | `coal` | Coal |
 | nuclear, uranium | `nuclear` | Nuclear |
 | biomass, biomasa | `biomass` | Biomass |
 | biogas | `biogas` | Biogas |
 | waste, residuos | `waste` | Waste |
 | geothermal, geotermica | `geothermal` | Geothermal |
+| otec | `otec` | OTEC |
+| other, otro, otros | `other` | Other |
 
-**Default technology parameters:**
-
-| Canonical Key | Technology Name | Category | Efficiency (rated) | Efficiency (min) | Lifetime (years) |
-|--------------|----------------|----------|-------------------|------------------|------------------|
-| `sun` | Solar PV | Renewable | 1.00 | 1.00 | 25 |
-| `wind` | Wind Turbine | Renewable | 1.00 | 1.00 | 25 |
-| `water` | Hydroelectric | Renewable | 0.90 | 0.85 | 50 |
-| `geothermal` | Geothermal | Renewable | 0.90 | 0.85 | 30 |
-| `naturalgas` | Gas Turbine | Non-renewable | 0.45 | 0.30 | 30 |
-| `coal` | Coal Plant | Non-renewable | 0.38 | 0.28 | 40 |
-| `diesel` | Diesel Generator | Non-renewable | 0.40 | 0.25 | 25 |
-| `nuclear` | Nuclear Plant | Non-renewable | 0.33 | 0.33 | 60 |
-| `biomass` | Biomass Plant | Non-renewable | 0.30 | 0.20 | 25 |
-| `biogas` | Biogas Generator | Non-renewable | 0.35 | 0.25 | 20 |
-| `waste` | Waste-to-Energy | Non-renewable | 0.25 | 0.18 | 25 |
+An unrecognized fuel keeps its own name and gets the `other` numeric defaults.
 
 **Default fuel parameters:**
 
@@ -346,50 +278,82 @@ The builder automatically creates fuel and technology objects for each unique fu
 | `naturalgas` | MMBTU | 0.202 | 0.293 | 4.0 |
 | `coal` | kTon | 0.341 | 8.14 | 60.0 |
 | `diesel` | kTon | 0.267 | 11.63 | 600.0 |
+| `fuel_oil` | kTon | 0.279 | 11.30 | 450.0 |
 | `nuclear` | kgU | 0.0 | 45,000.0 | 0.006 |
 | `biomass` | kTon | 0.0 | 4.5 | 40.0 |
 | `biogas` | Nm3 | 0.0 | 0.006 | 0.3 |
 | `waste` | kTon | 0.33 | 3.0 | -20.0 |
+| `other` | MWh | 0.5 | 1.0 | 50.0 |
 
-Renewable fuels (sun, wind, water, geothermal) have no unit, no emission factor, and zero price — they represent always-available resources.
+Renewable fuels (sun, wind, water, geothermal, otec) have no unit, no emission factor and zero price.
 
-If a fuel or technology already exists in the system with a matching canonical key, the existing object is reused rather than creating a duplicate.
+**Technology catalog:**
+
+Each generator is classified into a technology from its canonical fuel, the technology hint of the source (GEM technology column, OSM `generator:method`) and its capacity:
+
+| Technology | Fuel | Efficiency (rated / min) | Lifetime (years) | Assigned when |
+|-----------|------|--------------------------|------------------|---------------|
+| Solar PV | sun | 1.00 / 1.00 | 25 | always for sun |
+| Onshore Wind | wind | 1.00 / 1.00 | 25 | wind, no "offshore" hint |
+| Offshore Wind | wind | 1.00 / 1.00 | 27 | hint contains "offshore" |
+| Run-of-River Hydro | water | 0.90 / 0.85 | 60 | hint contains "run" or "ror" |
+| Reservoir Hydro | water | 0.90 / 0.85 | 60 | other hydro |
+| Pumped-Storage Hydro | water | 0.80 / 0.75 | 60 | hint contains "pump" |
+| Geothermal | geothermal | 0.90 / 0.85 | 30 | always for geothermal |
+| CCGT | naturalgas | 0.58 / 0.45 | 30 | hint "ccgt"/"combined", or no hint and capacity ≥ 100 MW or unknown |
+| OCGT | naturalgas | 0.40 / 0.28 | 25 | hint "ocgt"/"open"/"peak", or no hint and capacity < 100 MW |
+| Coal Steam Turbine | coal | 0.40 / 0.30 | 40 | always for coal |
+| Fuel-Oil Steam Turbine | fuel_oil | 0.35 / 0.28 | 35 | fuel oil, or diesel with a "steam"/"boiler" hint |
+| Diesel Engine | diesel | 0.42 / 0.30 | 25 | other diesel |
+| Nuclear | nuclear | 0.33 / 0.33 | 60 | always for nuclear |
+| Biomass Steam Turbine | biomass | 0.30 / 0.20 | 25 | always for biomass |
+| Biogas Engine | biogas | 0.40 / 0.30 | 20 | always for biogas |
+| Waste-to-Energy | waste | 0.25 / 0.18 | 25 | always for waste |
+| Other Generator | other | 0.35 / 0.25 | 25 | anything else |
+
+If a fuel or technology with a matching key or name already exists in the system, it is reused instead of duplicated.
 
 
 ### Deduplication Algorithm
 
-When multiple sources report the same physical asset, the wizard merges duplicates to avoid double-counting.
+When several sources report the same asset, `deduplicate_features` keeps one record. OSM is treated as authoritative.
 
-**Generator deduplication:**
+**Generators:**
 
-1. Sort generators by source priority: OSM (best geolocation) > GEM (newest data) > WRI (oldest).
-2. For each pair of generators within the proximity threshold (default 1.0 km, computed via Haversine distance — see [GM-1](#gm-1-haversine-distance)):
-   - If the capacity difference is within the tolerance (default 20%): mark the lower-priority record as a duplicate.
-   - Merge metadata: fill missing fields (name, fuel, operator, commissioning year, technology) from the duplicate into the primary record.
-3. The primary record is kept; the duplicate is discarded.
+1. **Plant/unit reconciliation (OSM).** OSM often maps a station both as a `power=plant` polygon and as the `power=generator` units inside it. Units within 1 km of a plant polygon are matched to it. If the polygon carries a capacity, it is kept and its units are dropped; a polygon without capacity is dropped in favour of its units. Within any source, a record whose capacity matches the sum of its co-located neighbours (±15%) is dropped as an aggregate.
+2. **OSM-authoritative gap fill.** Every OSM generator is kept. A GEM or WRI generator is kept only if no OSM generator of the same fuel with a capacity of at least 2 MW lies within 2 km. OSM markers without a real capacity therefore do not hide a GEM/WRI entry with a known capacity.
+3. **Plausibility caps.** A capacity above the largest plausible single plant for its fuel is capped: hydro 27 GW, nuclear 8.3 GW, gas and oil 8.2 GW, coal 7.7 GW, solar 4.8 GW, wind 3.6 GW, biomass/biogas/waste 3.1 GW, geothermal 0.5 GW (unknown fuels 27 GW).
 
-**Line deduplication:**
+The GEM fetcher only returns units with status "operating".
 
-1. OSM lines are always kept.
-2. GridFinder lines are checked against OSM lines: if both endpoints of a GridFinder line are within the proximity threshold of an OSM line's endpoints (in either direction), the GridFinder line is discarded.
+**Other point features:** batteries are merged by proximity (1 km) and capacity (±20%); substations by proximity (1 km); transformers by proximity (0.5 km). The higher-priority source (OSM > GEM > WRI > GridFinder) is kept and its empty fields are filled from the duplicate.
 
-**Other element types** (substations, transformers, converters, storage) are not deduplicated because they are sourced exclusively from OSM.
+**Lines:** OSM lines are always kept. A GridFinder line whose endpoints both match an OSM line's endpoints (within 1 km, either direction) is merged into the OSM line (its attributes fill empty OSM fields); other GridFinder lines are kept.
 
 
 ### Line Capacity Estimation
 
-When a transmission line has no explicit capacity tag in the source data, the builder estimates capacity from the voltage level using typical Surge Impedance Loading (SIL) values:
+A line without a capacity tag gets the thermal rating of the standard overhead line type with the nearest nominal voltage:
 
-| Voltage (kV) | Estimated Capacity (MW per circuit) |
-|--------------|-----------------------------------|
-| >= 500 | 2,000 |
-| >= 345 | 1,000 |
-| >= 220 | 500 |
-| >= 110 | 200 |
-| >= 33 | 50 |
-| < 33 | 10 |
+\[
+P = \sqrt{3}\, V\, I_{nom} \times 0.9 \times n_{circuits}
+\]
 
-The effective capacity is multiplied by the number of circuits (from the `circuits` or `cables` tag, default 1).
+| Nominal voltage (kV) | \(I_{nom}\) per circuit (kA) | Rating per circuit at nominal voltage (MW) |
+|---------------------|------------------------------|-------------------------------------------|
+| 33 | 0.45 | 23 |
+| 66 | 0.65 | 67 |
+| 110 | 1.00 | 171 |
+| 132 | 1.05 | 216 |
+| 220 | 2.00 | 686 |
+| 300 | 2.80 | 1,309 |
+| 380 | 3.60 | 2,133 |
+| 500 | 4.30 | 3,352 |
+| 750 | 5.80 | 6,781 |
+
+\(V\) is the line's own voltage and 0.9 is a thermal margin (not an N-1 derate). The same line type provides the per-km impedance, so rating and impedance stay consistent. The number of circuits comes from the OSM `circuits` tag, or else from `cables` (3 cables per AC circuit); default 1. A tagged capacity is multiplied by the number of circuits.
+
+Parameter inference later raises a line or transformer rating that is below 1.25 times the worst-case flow across it, capped by the system peak demand (×1.25) and by a surge-impedance-loading ceiling per voltage class (500 kV: 2,400 MW; 345 kV: 1,200; 220 kV: 600; 110 kV: 250; 66 kV: 120; 33 kV: 60; 10 kV: 20; below: 10), with a 5 MW floor. It never lowers a rating.
 
 
 ---
@@ -400,7 +364,7 @@ The effective capacity is multiplied by the number of circuits (from the `circui
 
 ### GM-1: Haversine Distance
 
-The great-circle distance between two points on the Earth's surface, used for proximity calculations throughout the wizard (snapping, deduplication, interconnection):
+The great-circle distance between two points on the Earth's surface, used for proximity calculations throughout the wizard (snapping, deduplication, station clustering):
 
 \[
 d = 2R \arctan2\!\left(\sqrt{a},\; \sqrt{1-a}\right) \tag{GM-1}
@@ -420,7 +384,7 @@ a = \sin^2\!\left(\frac{\Delta\varphi}{2}\right) + \cos\varphi_1 \cos\varphi_2 \
 | \(\Delta\varphi\) | \(\varphi_2 - \varphi_1\) |
 | \(\Delta\lambda\) | \(\lambda_2 - \lambda_1\) |
 
-The Haversine formula assumes a spherical Earth. For the distance scales in this wizard (typically 0.1 -- 100 km), the error relative to an ellipsoidal calculation is negligible (< 0.3%).
+The Haversine formula assumes a spherical Earth. For the distance scales in this wizard (typically 0.05 -- 100 km), the error relative to an ellipsoidal calculation is negligible (< 0.3%).
 
 
 ### GM-2: K-Means Clustering Objective
@@ -443,7 +407,7 @@ The algorithm uses k-means++ initialization (10 restarts, random state 42) for t
 
 ### GM-3: Elbow Method (Knee Detection)
 
-The optimal number of clusters \(k^*\) is determined by finding the "knee" in the inertia curve — the point of diminishing returns where adding more clusters yields minimal improvement:
+The number of clusters \(k^*\) is chosen at the "knee" of the inertia curve, the point of diminishing returns where adding clusters yields little improvement:
 
 \[
 k^* = \arg\max_{k \in [k_{\min},\, k_{\max}]} \; d_\perp(k) \tag{GM-3}
@@ -461,30 +425,23 @@ Both axes are normalized to \([0, 1]\) before computing distances so that the nu
 \hat{x}_k = \frac{k - k_{\min}}{k_{\max} - k_{\min}}, \qquad \hat{y}_k = \frac{J(k) - J(k_{\max})}{J(k_{\min}) - J(k_{\max})}
 \]
 
-This method avoids the low-\(k\) bias of the silhouette score and provides a robust, parameter-free selection of the cluster count.
+This avoids the low-\(k\) bias of the silhouette score and needs no extra parameter.
 
 
-### GM-4: Shoelace Polygon Area
+### GM-4: Bounding-Box Area
 
-The approximate area of the user-drawn polygon, used for display purposes in Step 1:
-
-\[
-A = \frac{1}{2} \left|\sum_{i=0}^{n-1} \left(x_i y_{i+1} - x_{i+1} y_i\right)\right| \tag{GM-4}
-\]
-
-where indices are taken modulo \(n\), and the coordinates are projected to approximate kilometers:
+The area shown in the domain status line is an estimate from the domain's bounding box, not the polygon area:
 
 \[
-x_i = \varphi_i \times 111.32 \;\text{km}, \qquad y_i = \lambda_i \times 111.32 \times \cos\bar{\varphi} \;\text{km}
+A \approx (\Delta\varphi \times 111.32) \times (\Delta\lambda \times 111.32 \times \cos\varphi_{\text{mid}}) \tag{GM-4}
 \]
 
 | Symbol | Description |
 |--------|-------------|
-| \(\varphi_i, \lambda_i\) | Latitude and longitude of vertex \(i\) (decimal degrees) |
-| \(\bar{\varphi}\) | Mean latitude of all vertices |
-| \(n\) | Number of polygon vertices |
+| \(\Delta\varphi, \Delta\lambda\) | Latitude and longitude span of the bounding box (degrees) |
+| \(\varphi_{\text{mid}}\) | Mid-latitude of the bounding box |
 
-The factor 111.32 km/degree converts degrees to approximate distances. The cosine correction accounts for the convergence of meridians at higher latitudes.
+For irregular polygons the value overstates the enclosed area. It is used for display only.
 
 
 ### GM-5: UTM Approximation for Metric Distances
@@ -511,26 +468,20 @@ After clustering, centroids are back-projected to geographic coordinates by divi
 
 ## Scripting
 
-The grid mapping modules can be used independently for batch processing and automated workflows:
+The grid mapping modules can be used without the GUI for batch processing:
 
 ```python
 from esfex.visualization.workflows.grid_mapping_fetchers import (
-    GridFeature,
-    OSMGridFetcher,
     GEMGridFetcher,
-    WRIGridFetcher,
     deduplicate_features,
     filter_features_by_polygon,
 )
+from esfex.visualization.workflows.grid_mapping_geofabrik import make_osm_fetcher
 from esfex.visualization.workflows.grid_mapping_clustering import (
-    NodeClusteringWorker,
     _determine_optimal_k,
     _extract_infrastructure_points,
     _project_to_km,
     _run_kmeans,
-)
-from esfex.visualization.workflows.grid_mapping_builder import (
-    build_grid_from_features,
 )
 
 # Define study area (south, west, north, east)
@@ -542,21 +493,24 @@ polygon = [
     (23.3, -79.5), (21.4, -79.5),
 ]
 
-# Fetch features (outside Qt, call _fetch() directly)
-osm = OSMGridFetcher(bounds, min_voltage_kv=110, min_capacity_mw=1.0)
+# Fetch features (outside Qt, call _fetch() directly).
+# make_osm_fetcher picks Geofabrik or Overpass like the GUI does.
+osm = make_osm_fetcher(
+    bounds, min_voltage_kv=66, min_capacity_mw=20.0,
+    element_types=None, polygon=polygon,
+)
 features = osm._fetch()
+features += GEMGridFetcher(bounds, min_capacity_mw=20.0)._fetch()
 
-# Filter and deduplicate
+# Clip and deduplicate
 features = filter_features_by_polygon(features, polygon)
-features = deduplicate_features(features, proximity_km=1.0)
+features = deduplicate_features(features)
 
-# Inspect results
 for f in features:
     print(f"{f.feature_type:15s} {f.name:40s} "
           f"{f.capacity_mw:8.1f} MW  {f.fuel}")
 
-# Determine optimal node count from infrastructure positions
-import numpy as np
+# Determine the node count from infrastructure positions
 pts = _extract_infrastructure_points(features)
 pts_km = _project_to_km(pts)
 k = _determine_optimal_k(pts_km, min_k=2, max_k=20)
@@ -564,36 +518,43 @@ print(f"Optimal k = {k}")
 
 # Run K-means
 labels, centroids = _run_kmeans(pts_km, k)
-print(f"Cluster centroids (km): {centroids}")
 ```
 
 The fetcher classes inherit from `QThread` and emit Qt signals for GUI progress. When used in scripts without a Qt event loop, call the `_fetch()` method directly instead of `start()`.
 
-For building the network, instantiate a `GuiModel` and `GuiSystemState` from `esfex.visualization.data.gui_model`, then call `build_grid_from_features()`:
+To build the network, create a `GuiModel`, load a blank `GuiSystemState` into it, add the nodes and call `build_grid_from_features()`:
 
 ```python
+import math
+
+import numpy as np
+
 from esfex.visualization.data.gui_model import GuiModel, GuiSystemState
+from esfex.visualization.workflows.grid_mapping_builder import (
+    build_grid_from_features,
+)
 
-# Create a model with a blank system
-state = GuiSystemState(name="scripted_grid")
-model = GuiModel(state)
+model = GuiModel()
+model.load_state(GuiSystemState(name="scripted_grid"))
 
-# Add nodes (from clustering results)
+# Add nodes from the clustering result (back-project km to lat/lng)
+cos_lat = math.cos(math.radians(float(np.mean(pts[:, 0]))))
 for i, (cy, cx) in enumerate(centroids):
-    import math
-    mid_lat = float(np.mean(pts[:, 0]))
-    cos_lat = math.cos(math.radians(mid_lat))
-    lat = cy / 111.32
-    lng = cx / (111.32 * cos_lat)
     idx = model.add_node(f"Node {i}")
-    model.update_node(idx, centroid_lat=lat, centroid_lng=lng)
+    model.update_node(idx, centroid_lat=cy / 111.32,
+                      centroid_lng=cx / (111.32 * cos_lat))
 
-# Build network
 result = build_grid_from_features(
     model=model,
     features=features,
     bus_strategy="per_voltage",
-    snap_threshold_km=5.0,
+    station_radius_km=1.0,
+    min_capacity_mw=20.0,
+    min_voltage_kv=66.0,
 )
 print(result.summary())
 ```
+
+`build_grid_from_features` runs the build phases listed in [Build pipeline](#build-pipeline); the GUI worker additionally runs parameter inference, simplification and the isolated-component cleanup (`infer_electrical_params` in `grid_mapping_inference`, `apply_simplification_level` and `drop_isolated_components` in `esfex.visualization.data.validation`).
+
+It also accepts `reconnect_max_km` (default 0). A positive value enables an opt-in bounded reconnection: isolated components within that distance of the main network are tapped onto nearby lines or linked to the nearest same-voltage bus, and remaining islands that have only generation or only demand are absorbed into the connected grid. The GUI always passes 0, and the builder modules also contain an `iterative_auto_connect` and a `fuel_auto_route` function (in `grid_mapping_steps`) that the GUI no longer calls.

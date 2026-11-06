@@ -9,14 +9,6 @@ import pytest
 import numpy as np
 from pathlib import Path
 
-# Import test fixtures
-from conftest import (
-    sample_demand,
-    sample_solar_availability,
-    sample_wind_availability,
-)
-
-
 def _build_simple_network(jl, ESFEX, num_nodes, connections, distances,
                           *, base_impedance=100.0, reactance_per_km=0.4,
                           voltage_kv=220.0, max_angle_diff_rad=0.524,

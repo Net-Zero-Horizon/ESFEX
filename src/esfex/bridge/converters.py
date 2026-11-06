@@ -499,6 +499,7 @@ def convert_transmission_line_data(
     line: TransmissionLineGeo,
     dc_config: DCPowerFlowConfig,
     distances: Optional[np.ndarray] = None,
+    s_base_mva: float = 100.0,
 ) -> Any:
     """
     Convert a Python TransmissionLineGeo to Julia TransmissionLineData struct.
@@ -507,6 +508,7 @@ def convert_transmission_line_data(
         line: Python TransmissionLineGeo
         dc_config: DC power flow defaults (for fallback reactance calculation)
         distances: Optional distance matrix (for fallback length)
+        s_base_mva: System power base (MVA) of the per-unit values
 
     Returns:
         Julia TransmissionLineData struct
@@ -545,10 +547,8 @@ def convert_transmission_line_data(
     # Determine reactance: use per-line value or derive from length + global defaults
     reactance_pu = line.reactance_pu
     if reactance_pu is None or reactance_pu <= 0:
-        if length_km > 0 and dc_config.base_impedance > 0:
-            reactance_pu = (length_km * dc_config.reactance_per_km) / dc_config.base_impedance
-        else:
-            reactance_pu = 0.01  # Minimal default
+        from esfex.utils.per_unit import derived_reactance_pu
+        reactance_pu = derived_reactance_pu(length_km, line.voltage_kv, dc_config, s_base_mva)
 
     resistance_pu = line.resistance_pu if line.resistance_pu is not None else 0.0
     susceptance_pu = line.susceptance_pu if line.susceptance_pu is not None else 0.0
@@ -711,6 +711,7 @@ def convert_network_config(
     acdc_converters: Optional[list] = None,
     freq_converters: Optional[list] = None,
     buses: Optional[List[BusConfig]] = None,
+    s_base_mva: float = 100.0,
 ) -> Any:
     """
     Convert Python NodeConfig to Julia NetworkConfig struct.
@@ -724,6 +725,7 @@ def convert_network_config(
         acdc_converters: AC/DC converter definitions (optional)
         freq_converters: Frequency converter definitions (optional)
         buses: Bus definitions (optional, auto-creates one bus per node if omitted)
+        s_base_mva: System power base (MVA): ``ac_power_flow.base_mva``
 
     Returns:
         Julia NetworkConfig struct with bus support
@@ -897,7 +899,7 @@ def convert_network_config(
                     if tid is not None and str(tid) in trafo_to_bus:
                         line = line.model_copy(update={'to_bus': trafo_to_bus[str(tid)]})
 
-            jl_line = convert_transmission_line_data(line, dc_config, distances)
+            jl_line = convert_transmission_line_data(line, dc_config, distances, s_base_mva)
             if jl_line is None:
                 continue  # unresolved endpoints
             jl.seval("push!")(jl_lines, jl_line)
@@ -946,7 +948,7 @@ def convert_network_config(
         py_to_julia_int_vector(bus_to_node),
         py_to_julia_matrix(connections),
         py_to_julia_matrix(distances),
-        dc_config.base_impedance,
+        float(s_base_mva),
         dc_config.reactance_per_km,
         dc_config.voltage_level_kv,
         np.deg2rad(dc_config.max_angle_diff_deg),
@@ -1946,11 +1948,14 @@ def convert_system_config(
         jl.seval("push!")(jl_batteries, jl_bat)
 
     # Convert network (pass per-line data + transformers + buses)
+    from esfex.utils.per_unit import system_s_base
+
     jl_network = convert_network_config(
         sys_config.nodes, sys_config.dc_power_flow,
         transmission_lines_geo=sys_config.transmission_lines_geo or None,
         transformers=sys_config.transformers or None,
         buses=sys_config.buses or None,
+        s_base_mva=system_s_base(sys_config),
     )
 
     # Get demand matrix

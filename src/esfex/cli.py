@@ -124,7 +124,7 @@ def run(
         None,
         "--years",
         "-y",
-        help="Number of years to simulate (default: from config)",
+        help="Number of years to simulate (default: 25)",
     ),
     verbose: bool = typer.Option(
         False,
@@ -433,7 +433,6 @@ def plugin_list():
         console.print(
             "Plugins are discovered from:\n"
             "  ~/.esfex/plugins/\n"
-            "  <project>/.esfex/plugins/\n"
             "  $ESFEX_PLUGIN_PATH"
         )
         return
@@ -451,6 +450,8 @@ def plugin_list():
             continue
         enabled = pm.is_enabled(name)
         status = "[green]enabled[/green]" if enabled else "[red]disabled[/red]"
+        if not pm.is_trusted(name):
+            status += " [red]untrusted[/red]"
         table.add_row(name, meta.version, meta.category, status, meta.description)
 
     console.print(table)
@@ -500,6 +501,23 @@ def plugin_uninstall(
     pm = get_plugin_manager()
     pm.uninstall(name)
     console.print(f"[green]Uninstalled plugin:[/green] {name}")
+
+
+@plugin_app.command("trust")
+def plugin_trust(
+    name: str = typer.Argument(..., help="Plugin name to trust"),
+):
+    """Trust a plugin's current files so it loads (it runs with full access)."""
+    from esfex.plugins import get_plugin_manager
+
+    pm = get_plugin_manager()
+    pm.discover()
+    try:
+        pm.trust_plugin(name)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Trusted plugin:[/green] {name}")
 
 
 @plugin_app.command("enable")

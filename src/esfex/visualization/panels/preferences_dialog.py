@@ -295,7 +295,7 @@ class _SolverSimulationPage(QWidget):
 
         self.default_overlap = QSpinBox()
         self.default_overlap.setRange(0, 720)
-        self.default_overlap.setValue(sim.get("default_overlap", 0))
+        self.default_overlap.setValue(sim.get("default_overlap", 24))
         self.default_overlap.setSuffix(" h")
         mform.addRow(tr("preferences.sim_default_overlap"), self.default_overlap)
 

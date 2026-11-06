@@ -5,7 +5,7 @@ The cost-optimal plan answers *what should we build?* with a single deterministi
 ESFEX implements both methods. They share the cost-slack envelope \(Z \leq (1+\varepsilon) C^*\) but answer different questions:
 
 - **[MGA](#mga-classical-hop-skip-jump-loop)** (Modeling to Generate Alternatives [**[8]**](../reference/bibliography.md#ref8)) — runs a single diversity objective \(K\) times. Each iteration penalises investment variables seen in earlier alternatives. Good for "surprise me, show me \(K\) different plans."
-- **[SPORES](#sporesper-objective-sweep)** (Spatially-explicit Practically Optimal REsultS [**[7]**](../reference/bibliography.md#ref7)) — solves one alternative per *named objective* (smallest portfolio, technology equity, regional equity, evolutionary distance). Good for "show me the plan that minimises X under the cost cap."
+- **[SPORES](#spores-per-objective-sweep)** (Spatially-explicit Practically Optimal REsultS [**[7]**](../reference/bibliography.md#ref7)) — solves one alternative per *named objective* (smallest portfolio, technology equity, regional equity, evolutionary distance). Good for "show me the plan that minimises X under the cost cap."
 
 A [decision matrix](#when-to-use-which) at the end of this tutorial helps you choose.
 
@@ -42,25 +42,29 @@ master_problem:
 ### Step 2: Run
 
 ```bash
-esfex run my_system.yaml
+esfex run -c my_system.yaml
 ```
 
 A single Master Problem is built, the cost-optimal seed is solved, the cost cap is added, then the HSJ loop runs 10 times — re-using the same JuMP model and only swapping the objective each iteration.
 
 ### Step 3: Read the results
 
-Alternatives land in `results.h5` under `/mga/`:
+Alternatives are written to the run's HDF5 file (`results/my_system_<ddmmyyyy>_<HHMM>.h5`) under `/mga/`, one group `alternative_<k>` per alternative. The attributes are plain strings, so no `.decode()` is needed:
 
 ```python
+from pathlib import Path
+
 import h5py
 
-with h5py.File("results/my_system.h5", "r") as f:
+h5_path = max(Path("results").glob("my_system_*.h5"), key=lambda p: p.stat().st_mtime)
+
+with h5py.File(h5_path, "r") as f:
     mga = f["mga"]
-    print(f"Method: {mga.attrs['method'].decode()}")           # "mga"
+    print(f"Method: {mga.attrs['method']}")                    # "mga"
     print(f"Cost optimal: ${mga.attrs['optimal_cost']/1e9:.2f}B")
-    for k in sorted(mga.keys()):
+    for k in sorted(mga.keys(), key=lambda k: int(k.split("_")[1])):
         alt = mga[k]
-        obj = alt.attrs["objective"].decode()
+        obj = alt.attrs["objective"]
         print(f"  {k}: cost=${alt.attrs['cost']/1e9:.2f}B  objective={obj}")
 ```
 
@@ -118,7 +122,7 @@ When `enabled: false`, the validator is bypassed so YAML drafts can keep both fi
 ### Step 2: Run
 
 ```bash
-esfex run my_system.yaml
+esfex run -c my_system.yaml
 ```
 
 The sweep loop runs once per objective. Each call to `apply_spores_objective!` cleans up the previous objective's auxiliary variables / constraints before installing its own, so the JuMP model never accumulates dead aux across the sweep.
@@ -126,14 +130,14 @@ The sweep loop runs once per objective. Each call to `apply_spores_objective!` c
 ### Step 3: Read the results
 
 ```python
-with h5py.File("results/my_system.h5", "r") as f:
+with h5py.File(h5_path, "r") as f:
     mga = f["mga"]
-    method = mga.attrs["method"].decode()
-    objs = [o.decode() for o in mga.attrs["objectives"]]
+    method = mga.attrs["method"]
+    objs = list(mga.attrs["objectives"])
     print(f"Method: {method}  (objectives: {objs})")
-    for k in sorted(mga.keys()):
+    for k in sorted(mga.keys(), key=lambda k: int(k.split("_")[1])):
         alt = mga[k]
-        obj = alt.attrs["objective"].decode()
+        obj = alt.attrs["objective"]
         cost = alt.attrs["cost"] / 1e9
         cost_pct = 100 * (cost - mga.attrs["optimal_cost"]/1e9) / (mga.attrs["optimal_cost"]/1e9)
         print(f"  {k}: cost=${cost:.2f}B  (+{cost_pct:.2f}% vs opt)  objective={obj}")
@@ -269,7 +273,7 @@ The MGA / SPORES section of the GUI Result Viewer colours every chart by the `ob
 - [Mathematical formulation](../formulation/capacity-expansion.md#15-mgaspores-near-optimal-alternative-exploration) — full LP statement of every objective with tagged equations
 - [SporesObjective enum](../api/config-schema.md#sporesobjective) — the canonical objective list
 - [MGAAdapter API](../api/bridge-adapters.md#mgaadapter) — Python entry point
-- [`run_spores` Julia entry](../api/julia-api.md#sporesphase-2) — Julia entry point + dispatcher
+- [`run_spores` Julia entry](../api/julia-api.md#spores-phase-2) — Julia entry point + dispatcher
 - [HDF5 schema for `/mga/`](../reference/hdf5-output-schema.md#mgaspores-results) — per-alternative attributes and datasets
 - Lombardi F, Pickering B, Colombo E, Pfenninger S. *Policy decision support for renewables deployment through spatially explicit practically optimal alternatives*. **Joule** 2020;4(10):2185–2207. [[bib]](../reference/bibliography.md#ref7)
 - DeCarolis JF. *Using modeling to generate alternatives (MGA) to expand our thinking on energy futures*. **Energy Economics** 2011;33(2):145–152. [[bib]](../reference/bibliography.md#ref8)

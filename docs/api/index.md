@@ -19,6 +19,16 @@
 | [`esfex.utils`](utils.md) | Helpers and temporal utilities | `BoundaryConditions`, `calculate_rolling_horizon_windows()` |
 | [`esfex.sensitivity`](sensitivity.md) | Sobol sensitivity analysis | `SensitivityEngine`, `SensitivityParameter`, `SobolResult` |
 
+These public modules have no API page yet; see their docstrings:
+
+| Module | Description |
+|--------|-------------|
+| `esfex.bridge.converters` | Python/Julia data conversion, node-to-bus array expansion, result conversion |
+| `esfex.analysis` | Contingency and N-1 assessment, frequency response, AC verification bridges (pandapower, native) |
+| `esfex.topology` | Network reduction and expansion of reduced results |
+| `esfex.zones` | Development zone expansion (`expand_config_with_zones()`) |
+| `esfex.plugins` | Plugin manager and the `ESFEXPlugin` hook protocol |
+
 ---
 
 ## Julia Backend
@@ -26,10 +36,13 @@
 | Module | Description | Reference |
 |--------|-------------|-----------|
 | `ESFEX.jl` | Core optimization models | [Julia API](julia-api.md) |
-| `power_system.jl` | Operational dispatch (LP/MIP) | [Julia API - Power System](julia-api.md#power-system) |
-| `master_problem.jl` | Capacity expansion planning | [Julia API - Master Problem](julia-api.md#master-problem) |
+| `power_system.jl` | Operational dispatch (LP/MIP) | [Julia API - Power System](julia-api.md#power-system-operational-dispatch) |
+| `master_problem.jl` | Capacity expansion planning | [Julia API - Master Problem](julia-api.md#master-problem-capacity-expansion) |
 | `transmission_dc.jl` | DC power flow constraints | [Julia API - Transmission DC](julia-api.md#transmission-dc) |
-| `mga.jl` | MGA/SPORES near-optimal alternatives | [Julia API - Utility](julia-api.md#utility) |
+| `mga.jl` | MGA/SPORES near-optimal alternatives | [Julia API - MGA](julia-api.md#mga-classical-hsj-loop), [SPORES](julia-api.md#spores-phase-2) |
+| `benders.jl` | Benders decomposition of the master problem | [Julia API - Benders](julia-api.md#benders-decomposition) |
+| `transmission_acopf.jl` | ACOPF formulations and AC power flow | [Julia API - ACOPF](julia-api.md#acopf-and-ac-power-flow) |
+| `primary_energy.jl` | Fuel supply chain | [Julia API - Primary Energy](julia-api.md#primary-energy) |
 
 ---
 
@@ -56,7 +69,9 @@ Orchestrator
             |
             ├── PrimaryEnergyAdapter ──> primary_energy.jl  (fuel supply chain)
             |
-            └── ResultsExporter ──> HDF5 / CSV / Excel / JSON
+            └── Orchestrator._append_year_to_hdf5() ──> results HDF5 file
+
+esfex export / ResultsExporter ──> CSV / Excel / JSON  (reads a finished HDF5 file)
 ```
 
 ---
@@ -64,6 +79,8 @@ Orchestrator
 ## Quick Start
 
 ```python
+from pathlib import Path
+
 from esfex import load_config
 from esfex.runner import Orchestrator
 
@@ -71,7 +88,7 @@ from esfex.runner import Orchestrator
 config = load_config("isla_juventud.yaml")
 
 # Create orchestrator and run simulation
-orchestrator = Orchestrator(config, output_dir="./results", config_path="isla_juventud.yaml")
+orchestrator = Orchestrator(config, output_dir="./results", config_path=Path("isla_juventud.yaml"))
 results = orchestrator.run(years=25, start_year=2025)
 
 # Access per-year results
@@ -88,7 +105,8 @@ for yr in results:
 ```python
 from esfex.io.exporter import ResultsExporter
 
-exporter = ResultsExporter("results/results_isla_juventud.h5")
+# Result files are named <config_stem>_<ddmmyyyy>_<HHMM>.h5
+exporter = ResultsExporter("results/isla_juventud_15012026_1030.h5")
 exporter.to_csv("results/csv/")
 exporter.to_excel("results/report.xlsx")
 ```
@@ -104,7 +122,7 @@ from esfex.models.financial_analysis import (
 )
 
 assumptions = FinancialAssumptions(discount_rate=0.08, tax_rate=0.25)
-financials = compute_system_financials("results/results_isla_juventud.h5", assumptions)
+financials = compute_system_financials("results/isla_juventud_15012026_1030.h5", assumptions)
 
 print(f"System NPV:  ${financials.npv_total:,.0f}")
 print(f"Project IRR: {financials.project_irr:.1%}")
@@ -112,7 +130,7 @@ print(f"System LCOE: ${financials.lcoe_system:.1f}/MWh")
 print(f"WACC:        {financials.wacc:.1%}")
 
 # Per-technology breakdown
-techs = compute_technology_financials("results/results_isla_juventud.h5", assumptions)
+techs = compute_technology_financials("results/isla_juventud_15012026_1030.h5", assumptions)
 for name, tf in techs.items():
     print(f"  {name}: LCOE=${tf.lcoe:.1f}/MWh, CF={tf.capacity_factor:.1%}")
 ```

@@ -116,6 +116,9 @@ class GlobalSettingsForm(QWidget):
         self._overlap.setRange(0, 720)
         self._overlap.editingFinished.connect(self._on_changed)
         tl.addRow(tr("global_form.overlap"), self._overlap)
+        # The overlap must stay shorter than the window (schema rejects otherwise).
+        self._rolling_horizon.valueChanged.connect(
+            lambda v: self._overlap.setMaximum(min(720, max(0, v - 1))))
 
         self._inv_resolution = QSpinBox()
         self._inv_resolution.setRange(1, 87600)

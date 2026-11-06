@@ -1,6 +1,9 @@
 # Risk & Resilience Analysis
 
-The risk and resilience module extends the [Stochastic Programming](stochastic-programming.md) formulation with explicit risk measures (CVaR, min-max regret), climate-adjusted resource modeling under Shared Socioeconomic Pathways, natural hazard fragility functions, and post-optimization resilience metrics. It enables planners to move beyond expected-cost minimization and quantify the robustness of capacity expansion plans against low-probability, high-consequence events. Notation follows the conventions in the [Formulation Overview](overview.md).
+The risk and resilience module provides risk measures (CVaR, min-max regret), climate-adjusted resource modeling under Shared Socioeconomic Pathways, natural hazard fragility functions, and resilience metrics. It enables planners to move beyond expected-cost minimization and quantify the robustness of capacity expansion plans against low-probability, high-consequence events. Notation follows the conventions in the [Formulation Overview](overview.md).
+
+!!! warning "What reaches the optimization"
+    Only the per-element `risk_coefficient` (Level 1, [Section 6.1](#61-hazard-aware-capacity-constraints)) enters the optimization, as a derating in the master problem's capacity adequacy constraint. The CVaR and min-max regret objectives, hazard scenarios, recovery dynamics, insurance cost and sectoral VOLL described below are computed by the Risk & Resilience Workbench (`models/hazard_assessment.py`) as analysis and post-processing; the `risk` configuration section is not read by the master problem or the dispatch.
 
 The module references the following international standards:
 
@@ -16,11 +19,11 @@ The module references the following international standards:
 
 The module operates in three complementary modes:
 
-1. **Pre-optimization (risk-aware investment).** Hazard maps and fragility functions are translated into discrete damage scenarios with associated probabilities. These scenarios enter the stochastic Master Problem as additional second-stage recourse blocks, and the objective is augmented with a risk measure (CVaR or min-max regret) so that investment decisions hedge against catastrophic outcomes.
+1. **Pre-optimization (risk-aware investment).** Hazard maps and fragility functions give a per-element risk coefficient that derates capacity in the master problem's capacity adequacy constraint (implemented). Turning hazard maps into discrete damage scenarios that enter the stochastic master problem as recourse blocks, with a risk measure in the objective, is **not implemented**.
 
-2. **During-optimization (stochastic with CVaR).** The two-stage stochastic program from [Stochastic Programming](stochastic-programming.md) is extended with auxiliary CVaR variables and constraints. The risk-averse objective balances expected cost against tail risk, producing investment plans that limit worst-case losses at a specified confidence level.
+2. **During-optimization (stochastic with CVaR).** Extending the two-stage stochastic program from [Stochastic Programming](stochastic-programming.md) with CVaR variables and constraints is **not implemented**; the stochastic master minimizes expected cost. The formulation in Section 2 is kept as the design reference.
 
-3. **Post-optimization (robustness evaluation).** Given a fixed investment plan \(I^*\) from the [Capacity Expansion](capacity-expansion.md) Master Problem, the system is re-dispatched under a large ensemble of Monte Carlo hazard scenarios. Resilience metrics — LOLP, EENS, resilience index (Panteli & Mancarella), and system average recovery time — are computed and reported alongside sensitivity analysis that identifies the most impactful uncertainties.
+3. **Post-optimization (robustness evaluation).** The Workbench estimates resilience metrics — LOLP, EENS, resilience index (Panteli & Mancarella), and system average recovery time — from hazard scenarios and the system's aggregate capacity and demand, alongside sensitivity analysis. It does not re-dispatch the optimization model.
 
 An interactive **Risk & Resilience Workbench** (GUI) provides a 3-step wizard: (1) Risk Analysis — auto-fetches hazard data from 7 public APIs, runs composite risk assessment with fragility functions, computes per-element risk coefficients, and displays failure probability heatmaps, EAL, IM exceedance curves, and sensitivity analysis; (2) Scenarios — climate projections (SSP pathways with demand adjustment) and hazard disaster scenarios for stochastic optimization; (3) Results & Export — summary, CSV/JSON/YAML export, and ISO 31000 §6.7 structured HTML reporting. All charts are exportable as PNG/SVG/PDF.
 
@@ -94,7 +97,7 @@ When \(\lambda = 0\), the formulation reduces to expected-cost minimization (RIS
 
 The formulation remains a linear program: \(\eta\) is a free variable, \(z_s\) are non-negative continuous variables, and the constraints (RISK-2) are linear. The number of additional variables is \(1 + S\) and the number of additional constraints is \(S\).
 
-**Julia implementation note.** The function `create_risk_aware_master_problem(input, risk_config)` adds variable `η` (scalar), variables `z[s]` for each scenario, constraints (RISK-2), and modifies the objective to (RISK-3). The `risk_config.cvar_alpha` and `risk_config.cvar_lambda` parameters control \(\alpha\) and \(\lambda\) respectively.
+**Implementation status.** The LP form (RISK-2, RISK-3) is not part of any ESFEX optimization model. `risk.risk_measure`, `risk.cvar_alpha` and `risk.cvar_lambda` are used only by the post-optimization backend below.
 
 **Post-optimization CVaR backend.** The Risk Workbench also computes CVaR for post-optimization risk assessment via Monte Carlo perturbation of hazard intensities. The `CompositeRiskAssessment` class generates \(N\) perturbed hazard maps (each IM multiplied by \(1 + \epsilon\), \(\epsilon \sim \mathcal{N}(0, \sigma^2)\)), computes the deterministic EAL for each sample, sorts the resulting distribution, and returns the risk-adjusted EAL:
 
@@ -195,7 +198,7 @@ Climate scenarios follow the IPCC AR6 framework of Shared Socioeconomic Pathways
 | SSP3-7.0 | 7.0 W/m\(^2\) | Regional rivalry -- high challenges to mitigation | +3.6 C |
 | SSP5-8.5 | 8.5 W/m\(^2\) | Fossil-fueled development -- very high emissions | +4.4 C |
 
-Each SSP translates into modified availability profiles for renewable generators, adjusted demand curves, and altered extreme-event frequencies. In the stochastic formulation, SSPs define scenarios \(\omega_s\) with associated probability weights \(\pi_s\).
+Each SSP translates into modified availability profiles for renewable generators, adjusted demand curves, and altered extreme-event frequencies. The Workbench builds SSP scenarios with probability weights \(\pi_s\) (`risk.climate_scenarios`); they are not passed to the stochastic master, whose scenarios come from `stochastic_scenarios`.
 
 ### 3.2 Climate-Adjusted Availability Profiles
 
@@ -567,12 +570,14 @@ Risk integrates with the Master Problem at two levels:
 \tag{RISK-17b}
 \]
 
-The capacity adequacy expression in the Master Problem (CUM-1 through CUM-4) is modified to:
+In the master problem's capacity adequacy constraint (CAP-1, `add_capacity_adequacy_constraints!`), each unit's capacity counts as
 
 \[
-C^{eff}_{g,n,y} = C^{cumul}_{g,n,y} \cdot \rho_{g,n} \cdot \alpha^{cc}_{g,n} \cdot (1 - \delta_{g,n})^{age}
+C^{eff}_{g,n,y} = C_{g,n,y} \cdot \rho_{g,n} \cdot \alpha^{cc}_{g,n} \cdot (1 - \delta_{g,n})^{age}
 \tag{RISK-18a}
 \]
+
+for existing generators and candidate technologies; batteries and battery technologies count their power capacity times \(\rho\). Capacity kept past its lifetime through life extension counts with \(\alpha^{cc}\) and \(\rho\), like the unit it extends. The coefficient is the `risk_coefficient` list (per node) of each generator, battery, technology and battery technology, default 1.0. It does not affect the dispatch or the investment cost.
 
 | Symbol | Units | Description |
 |--------|-------|-------------|
@@ -581,7 +586,7 @@ C^{eff}_{g,n,y} = C^{cumul}_{g,n,y} \cdot \rho_{g,n} \cdot \alpha^{cc}_{g,n} \cd
 
 This applies identically to existing units and new investment technologies. A coastal solar PV with \(\rho = 0.82\) contributes only 82% of its rated power to system adequacy, incentivizing the optimizer to either invest more at risky locations or prefer safer ones.
 
-**Level 2 — Hazard scenarios (stochastic).** Discrete disaster events with per-element damage fractions enter the stochastic Master Problem as scenarios:
+**Level 2 — Hazard scenarios (stochastic). Not implemented in the optimization.** In the design, discrete disaster events with per-element damage fractions enter the stochastic Master Problem as scenarios:
 
 \[
 C^{avail}_{g,n,y,h} = C^{cumul}_{g,n,y} \cdot \left(1 - \phi^{damage}_{g,n,h}\right)
@@ -594,10 +599,12 @@ C^{avail}_{g,n,y,h} = C^{cumul}_{g,n,y} \cdot \left(1 - \phi^{damage}_{g,n,h}\ri
 | \(\phi^{damage}_{g,n,h}\) | \([0, 1]\) | Damage fraction for generator \(g\) at node \(n\) under hazard scenario \(h\) |
 | \(C^{avail}_{g,n,y,h}\) | MW | Available capacity after damage |
 
-The damage fraction is derived from fragility functions (RISK-12) evaluated at the specific hazard intensity of scenario \(h\). Level 1 captures expected risk (continuous derating); Level 2 captures extreme events (discrete scenarios). Both are complementary.
+The damage fraction is derived from fragility functions (RISK-12) evaluated at the specific hazard intensity of scenario \(h\). Level 1 captures expected risk (continuous derating); Level 2 would capture extreme events (discrete scenarios). `risk.hazard_scenarios` are generated and used by the Workbench only.
 
 ### 6.2 Recovery Dynamics
 
+!!! note "Not implemented"
+    No optimization model applies damage or recovery. RISK-19 is used only in the Workbench's scenario analysis.
 
 Following a disaster event in year \(y_0\), damaged components are progressively restored over a recovery period. The available capacity in subsequent years accounts for both damage and recovery:
 
@@ -617,6 +624,8 @@ At \(k = 0\), the capacity is fully damaged (multiplied by 0); at \(k = \tau^{re
 
 ### 6.3 Insurance Cost Integration
 
+!!! note "Not implemented"
+    No insurance cost is added to any objective; RISK-20 is a design reference.
 
 Risk-exposed components incur additional operational expenditure in the form of insurance premiums or self-insurance reserves. The annual insurance cost is proportional to the replacement cost and the composite risk index:
 
@@ -631,7 +640,7 @@ C^{insur}_{g,n} = \mu^{insur} \cdot C^{repl}_{g,n} \cdot CRI_n
 | \(C^{repl}_{g,n}\) | \$ | Full replacement cost of generator \(g\) at node \(n\) |
 | \(CRI_n\) | -- | Composite risk index at node \(n\) (from RISK-17) |
 
-This cost is added to the annual operational cost in the objective function, providing an incentive for the optimizer to avoid concentrating investments in high-risk locations.
+In the design, this cost would be added to the annual operational cost in the objective, giving the optimizer an incentive to avoid concentrating investments in high-risk locations.
 
 ### 6.4 VOLL-Differentiated Load Shedding
 
@@ -658,7 +667,9 @@ Typical VOLL values:
 | Industrial | 15,000 | Process interruption, material waste |
 | Critical (hospitals, water) | 100,000 | Life safety, public health |
 
-The sectoral VOLL creates a shedding priority: the optimizer will shed residential load before industrial, and industrial before critical, reflecting societal preferences.
+The sectoral VOLL creates a shedding priority: residential load is shed before industrial, and industrial before critical.
+
+The `risk.voll` values are used by the Workbench only. In the operational dispatch, sector-differentiated shedding uses the system's `electric_demand` sectors with their `criticality` and the `criticality_penalties` weights applied to `penalties.loss_of_load` (see [Operational Dispatch](operational-dispatch.md)).
 
 ---
 
@@ -781,6 +792,9 @@ A score of 1.0 means every node can survive the loss of its largest generating u
 
 ### 8.1 Scenario Enumeration
 
+
+!!! note "Not implemented as re-dispatch"
+    ESFEX does not re-run the dispatch under hazard scenarios. The Workbench (`ResilienceAnalyzer`) estimates the metrics of Section 7 from the scenarios and the aggregate installed capacity and demand. The procedure below is the design reference.
 
 Given an optimal investment plan \(I^*\) from the Master Problem, post-optimization stress testing fixes the investment decisions and re-dispatches the system under each hazard scenario:
 
@@ -1046,13 +1060,13 @@ All fetchers produce `HazardIntensityMap` objects with standardized fields: haza
 ## 12. Configuration
 
 
-The risk and resilience module is configured through the `risk` section of the YAML configuration file:
+The `risk` section of the YAML configuration is read by the Risk & Resilience Workbench. Apart from `risk_coefficient` on the elements (set per generator, battery or technology, usually by the Workbench), it does not change the optimization.
 
 ```yaml
 risk:
   enabled: true
   risk_measure: cvar          # Options: expected, cvar, minimax_regret
-  cvar_alpha: 0.05            # CVaR confidence level (worst 5%)
+  cvar_alpha: 0.95            # CVaR confidence level (worst 5%)
   cvar_lambda: 0.5            # Risk-aversion weight (0 = risk-neutral, 1 = pure CVaR)
 
   risk_criteria:              # ALARP thresholds (ISO 31000 §6.5)
@@ -1064,54 +1078,40 @@ risk:
     composite_risk_high: 0.15
 
   climate_scenarios:
-    ssp245:
+    - name: ssp245
       probability: 0.4
-      availability_suffix: ssp245
+      ssp_pathway: SSP2-4.5
+      availability_suffix: _ssp245
       demand_scale: {2030: 1.05, 2040: 1.12, 2050: 1.20}
       temperature_delta: {2030: 0.8, 2040: 1.2, 2050: 1.6}
-    ssp370:
-      probability: 0.35
-      availability_suffix: ssp370
-      demand_scale: {2030: 1.08, 2040: 1.18, 2050: 1.35}
-      temperature_delta: {2030: 1.0, 2040: 1.6, 2050: 2.2}
-    ssp585:
-      probability: 0.25
-      availability_suffix: ssp585
+    - name: ssp585
+      probability: 0.6
+      ssp_pathway: SSP5-8.5
+      availability_suffix: _ssp585
       demand_scale: {2030: 1.10, 2040: 1.25, 2050: 1.50}
       temperature_delta: {2030: 1.2, 2040: 2.0, 2050: 3.0}
 
   hazard_scenarios:
-    nankai_earthquake:
+    - name: nankai_earthquake
       probability: 0.03
+      hazard_type: earthquake
       year_of_occurrence: 5
       affected_nodes: [0, 1]
-      affected_generators: [solar_pv_0, wind_0]
-      damage_fraction: {solar_pv_0: 0.8, wind_0: 0.3}
-      recovery_years: 3
+      damage_fraction: {solar_pv: 0.8, wind: 0.3}
+      recovery_hours: 26280
 
-    typhoon_cat5:
-      probability: 0.01
-      year_of_occurrence: 8
-      affected_nodes: [0, 1, 2]
-      affected_generators: [wind_0, wind_1]
-      damage_fraction: {wind_0: 1.0, wind_1: 0.6}
-      recovery_years: 2
-
-  voll_by_sector:
-    residential: 5000          # $/MWh
+  voll:                       # $/MWh, Workbench only
+    residential: 5000
     commercial: 25000
     industrial: 15000
     critical: 100000
-
-  insurance_rate_hazard: 0.008  # Annual insurance rate (fraction of replacement cost)
 ```
 
 **Entry points:**
 
 | Function / Class | Mode | Description |
 |----------|------|-------------|
-| `create_risk_aware_master_problem(input, risk_config)` | Pre-optimization | Builds the stochastic Master Problem with CVaR variables and hazard-aware capacity constraints |
-| `evaluate_risk_robustness(h5_path, risk_config)` | Post-optimization | Reads a solved HDF5 results file, stress-tests the investment plan against hazard scenarios, and computes resilience metrics |
+| `add_capacity_adequacy_constraints!()` (`master_problem.jl`) | Optimization | Applies `risk_coefficient` (RISK-18a) in CAP-1 |
 | `CompositeRiskAssessment` | Workbench | Multi-hazard risk assessment with CVaR, minimax regret, copula combination, Monte Carlo propagation, and OAT sensitivity |
 | `evaluate_risk_criteria(profiles, criteria)` | Workbench | ALARP classification of nodes against configurable thresholds |
 | `ResilienceAnalyzer` | Workbench | ISO 22372 resilience metrics: LOLP, EENS, resilience index, SART, 4 adaptive capacities |
@@ -1124,17 +1124,12 @@ risk:
 ## 13. Relationship to Other Formulations
 
 
-The risk and resilience module is compatible with all other ESFEX components:
-
-| Feature | Compatibility | Notes |
-|---------|--------------|-------|
-| [Capacity Expansion](capacity-expansion.md) | Full | Hazard-aware capacity constraints (RISK-18) modify cumulative expressions |
-| [Stochastic Programming](stochastic-programming.md) | Extension | CVaR objective (RISK-3) adds variables and constraints to the stochastic formulation |
-| [Operational Dispatch](operational-dispatch.md) | Full | Stress testing re-dispatches with damaged capacities |
-| [DC Power Flow](dc-power-flow.md) | Full | Transmission damage modeled via reduced line ratings |
-| [AC OPF](ac-power-flow.md) | Full | Post-hazard AC feasibility verification |
-| [Primary Energy](primary-energy.md) | Full | Fuel supply disruption modeled as hazard scenario |
-| MGA/SPORES | Sequential | Near-optimal alternatives evaluated under hazard scenarios |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| [Capacity Expansion](capacity-expansion.md) | Implemented | `risk_coefficient` derates capacity in CAP-1 (RISK-18a) |
+| [Stochastic Programming](stochastic-programming.md) | Not implemented | The stochastic master minimizes expected cost; no CVaR (RISK-3) or hazard scenarios |
+| [Operational Dispatch](operational-dispatch.md) | Not implemented | No re-dispatch with damaged capacities |
+| [Primary Energy](primary-energy.md) | Separate feature | A fuel source disruption window (PE-1b) and scheduled outages are configured directly, not from hazard scenarios |
 
 ---
 

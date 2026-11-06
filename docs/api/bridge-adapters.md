@@ -21,7 +21,7 @@ ESFEXConfig / SystemConfig
         --> convert_battery_config() per battery
         --> convert_network_config() for DC power flow topology
         --> ESFEX.PowerSystemInput(...) Julia struct
-    --> ESFEX.create_power_system(input) --> (model, vars)  [JuMP [20]](../reference/bibliography.md#ref20)
+    --> ESFEX.create_power_system(input; custom_constraints) --> (model, vars)  [JuMP [20]](../reference/bibliography.md#ref20)
     --> JuMP.optimize!(model)
     --> ESFEX.extract_solution(model, vars, input) --> PowerSystemResult
     --> convert_power_system_result() --> Python dict
@@ -35,11 +35,14 @@ ESFEXConfig / SystemConfig + years + demand
         --> convert generators, batteries, technologies, battery_technologies
         --> convert_network_config() for transmission
         --> ESFEX.MasterProblemInput(...) Julia struct
-    --> ESFEX.create_master_problem(input) --> (model, vars, targets)
+    --> ESFEX.create_master_problem(input; use_representative_days, custom_constraints) --> (model, vars, targets)
+        (or ESFEX.create_stochastic_master_problem(StochasticMasterInput) when stochastic scenarios are set)
     --> JuMP.optimize!(model)
     --> ESFEX.extract_master_solution(...) --> MasterProblemResult
     --> Python dict with investment/retirement decisions per year
 ```
+
+With `solver_method="benders"`, `build_model()` only creates the input and `solve()` calls `ESFEX.run_benders_decomposition(input; ...)`, which builds its own investment master and per-day subproblems.
 
 ---
 
@@ -84,14 +87,18 @@ class PowerSystemAdapter:
 
 | Key | Type | Description |
 |-----|------|-------------|
+| `system_config` | `SystemConfig` | Overrides the system taken from `config`. The runner passes the merged (multi-system, zone-expanded) system here. |
 | `units_config` | `dict` | Updated unit capacities from MasterProblem investments. Keys are generator/battery config keys, values are dicts with `rated_power`, `capacity`, etc. Virtual generators/batteries created by `_build_config_from_cumulative()` are also included here. |
+| `boundary_conditions` | `dict` | State carried over from the previous rolling window, each a `(unit, bus)` array: `gen_status_init`, `gen_output_prev`, `reservoir_level`, `battery_soc` (MWh). On the year's last window also `battery_soc_end_min` (MWh floor) and `battery_soc_end_cyclic` (bool). |
 | `sectoral_demand` | `dict` | Sectoral demand arrays `{sector_name: np.ndarray(hours, nodes)}`. |
-| `rooftop_generation` | `np.ndarray` | Rooftop solar generation profile `(hours, nodes)` in MW. |
+| `rooftop_generation` | `np.ndarray` | Rooftop solar generation profile `(hours, nodes)` in MW. The runner passes `None`: rooftop output is already subtracted from the demand it sends. |
 | `re_penetration_target` | `float` | Year-specific RE penetration target override (0-1). |
 | `ev_config_data` | `dict` | EV fleet configuration for V2G constraints. |
 | `electricity_price` | `list[float]` | Time-varying electricity prices for V2G compensation. |
-| `unit_npv` | `dict` | NPV values per (generator, bus) for lifecycle-aware dispatch. |
-| `replacement_needed` | `dict` | Boolean flags per (generator, bus) indicating replacement needed. |
+| `unit_npv`, `bat_unit_npv` | `dict` | NPV values per (generator or battery, bus) for lifecycle-aware dispatch. |
+| `replacement_needed`, `bat_replacement_needed` | `dict` | Boolean flags per (unit, bus) indicating replacement needed. |
+| `decommissioning_cost_gen`, `decommissioning_cost_bat` | `dict` | Decommissioning cost per (unit, bus) in $. |
+| `discount_rate` | `float` | Overrides `sys.discount_rate`. |
 
 **Methods:**
 
@@ -141,9 +148,29 @@ Solve the optimization model. Returns a PuLP-compatible status code:
 def get_solution_values(self) -> dict
 ```
 
-Extract all variable values from the solved model. Calls `ESFEX.extract_solution()` on the Julia side and converts to a Python dictionary with NumPy arrays. Returns keys such as `gen_output`, `bat_charge`, `bat_discharge`, `bat_soc`, `curtailment`, `loss_of_load`, `transfer`, `gen_status`, `electricity_prices`, `nodal_electricity_prices`, etc.
+Extract all variable values from the solved model. Calls `ESFEX.extract_solution()` on the Julia side and converts the result with `esfex.bridge.converters.convert_power_system_result()` to a Python dictionary with NumPy arrays, indexed by bus. Costs are converted back from M$ to $. Main keys:
 
-When cost decomposition is available, the result dictionary also includes a `cost_breakdown` key — a dict with 27 cost component fields (fuel, O&M, CO2, investment, etc.) plus `total`. See [HDF5 Output Schema — cost_breakdown](../reference/hdf5-output-schema.md#cost_breakdown) for the full field list.
+| Key | Content |
+|-----|---------|
+| `status`, `objective`, `solve_time` | Termination status, objective ($), solve time (s) |
+| `gen_output` | Generation, `(gen, bus, hour)` MW |
+| `gen_status`, `gen_startup` | Commitment status and start-ups (UC mode only) |
+| `bat_charge`, `bat_discharge`, `bat_soc` | Battery dispatch, `(bat, bus, hour)` |
+| `curtailment`, `load_shed` | `(bus, hour)` MW |
+| `reserve_static`, `reserve_dynamic`, `loss_of_reserve_static`, `loss_of_reserve_dynamic` | Reserves and their shortfalls |
+| `co2_emissions` | `(bus, hour)` tonnes |
+| `voltage_angle` | `(bus, hour)` rad |
+| `voltage_magnitude`, `reactive_generation` | ACOPF modes only, otherwise `None` |
+| `energy_prices` | Balance-constraint duals, `(bus, hour)` USD/MWh (recovered by a fixed-commitment LP re-solve in UC mode) |
+| `power_flow`, `power_flow_by_line` | Flow per bus pair `{(i, j): array}` and per physical line |
+| `gen_investment`, `bat_investment_power`, `bat_investment_capacity`, `transfer_investment` | Development mode only |
+| `bat_spillage`, `ev_*`, `loss_of_inertia`, `transfer_margin`, `reservoir_*` | Present when the feature is active |
+| `n1_gen_reserve_duals`, `n1_trans_reserve_duals`, `n1_binding_contingencies`, `n1_security_cost` | N-1 security outputs |
+| `total_generation`, `total_demand`, `total_losses`, `re_penetration`, `total_co2`, `load_shed_total`, `total_curtailment` | Scalars |
+
+When network reduction is enabled, the arrays are expanded back to the original buses and lines before they are returned.
+
+When cost decomposition is available, the result dictionary also includes a `cost_breakdown` key — a dict with 35 cost component fields (fuel, O&M, CO2, investment, primary energy, N-1 shortfall, etc.) plus `total`. See [HDF5 Output Schema — cost_breakdown](../reference/hdf5-output-schema.md#cost_breakdown) for the field list.
 
 ### get_objective_value
 
@@ -175,7 +202,7 @@ class MasterProblemAdapter:
         years: List[int],
         base_year: int,
         demand: np.ndarray,
-        demand_growth: float = 0.02,
+        demand_growth: float = 0.0,
         discount_rate: float = 0.05,
         max_annual_investment: float = 1e9,
         target_re_penetration: float = 0.5,
@@ -188,6 +215,7 @@ class MasterProblemAdapter:
         temporal_resolution_hours: int = 24,
         representative_days_per_year: int = 12,
         min_day_separation: int = 7,
+        investment_resolution_hours: int = 8760,
         use_tsam: bool = False,
         tsam_period_start_hours: Optional[List[List[int]]] = None,
         tsam_period_weights: Optional[List[List[float]]] = None,
@@ -195,8 +223,13 @@ class MasterProblemAdapter:
         tsam_inter_period_linking: bool = True,
         use_stochastic: bool = False,
         stochastic_scenarios: Optional[List[dict]] = None,
+        system_node_ranges: Optional[List[tuple]] = None,
         config_path: Optional[str] = None,
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
+        solver_method: str = "monolithic",
+        benders_max_iterations: int = 50,
+        benders_tolerance: float = 1e-4,
+        benders_lol_penalty_cap: float = 1000.0,
         **kwargs
     ) -> None
 ```
@@ -207,21 +240,25 @@ class MasterProblemAdapter:
 |-----------|------|-------------|
 | `years` | `list[int]` | Planning horizon years, e.g. `[2025, 2026, ..., 2050]`. |
 | `base_year` | `int` | Base year for NPV discounting. |
-| `demand` | `np.ndarray` | Base demand array `(hours, nodes)`. Applied with `demand_growth` for each year. |
-| `demand_growth` | `float` | Annual demand growth rate (e.g., 0.02 = 2%). |
+| `demand` | `np.ndarray` | Demand array `(hours, nodes)` holding every planning year, one block per year. |
+| `demand_growth` | `float` | Extra annual growth applied on top of each year's block (default `0.0`; the runner always passes 0). |
 | `discount_rate` | `float` | Discount rate for NPV calculations (e.g., 0.05 = 5%). |
 | `max_annual_investment` | `float` | Maximum annual investment budget in $. |
 | `target_re_penetration` | `float` | Target RE penetration ratio by the final year (0-1). |
 | `initial_re_penetration` | `float` | Starting RE penetration ratio (auto-calculated from existing RE capacity). |
 | `temporal_resolution_hours` | `int` | Hours per timestep for representative days (e.g., 24). |
 | `representative_days_per_year` | `int` | Number of representative days per year for operational validation. |
+| `investment_resolution_hours` | `int` | Hours per investment period (8760 = one decision per year). |
 | `use_tsam` | `bool` | Use Time Series Aggregation Method (TSAM) clustering instead of peak-day selection. |
 | `tsam_period_start_hours` | `list[list[int]]` | Per-year start hours for TSAM periods (1-indexed). |
 | `tsam_period_weights` | `list[list[float]]` | Per-year weights for TSAM periods. |
 | `tsam_inter_period_linking` | `bool` | Enable inter-period SOC linking for battery continuity across representative periods. |
-| `use_stochastic` | `bool` | Enable two-stage stochastic programming with scenario trees. |
+| `use_stochastic`, `stochastic_scenarios` | `bool`, `list[dict]` | Build the two-stage stochastic master (`create_stochastic_master_problem`): shared investment, one representative-day operation per scenario. Ignored, with a warning, when `solver_method="benders"`. |
+| `system_node_ranges` | `list[tuple]` | `(name, first_bus, num_buses, initial_re)` per system (1-indexed buses), for per-system RE targets in multi-system runs. |
 | `config_path` | `str` | Path to config file for resolving relative availability file paths. |
 | `availability_cache` | `dict` | Pre-loaded availability profiles for generators and technologies. |
+| `solver_method` | `str` | `"monolithic"` (one JuMP model) or `"benders"` (`run_benders_decomposition`). |
+| `benders_max_iterations`, `benders_tolerance`, `benders_lol_penalty_cap` | `int`, `float`, `float` | Benders settings: iteration cap, relative gap for convergence, cap on the load-shedding penalty in the subproblems. |
 
 **Methods:**
 
@@ -231,7 +268,7 @@ class MasterProblemAdapter:
 def build_model(self, use_representative_days: bool = True) -> None
 ```
 
-Build the JuMP capacity expansion model. If `use_representative_days` is True, includes operational validation constraints using representative days (peak demand days or TSAM clusters).
+Build the JuMP capacity expansion model. If `use_representative_days` is True, includes operational validation constraints using representative days (peak demand days or TSAM clusters). With `solver_method="benders"` it only prepares the Julia input; the models are built during `solve()`.
 
 ### solve
 
@@ -239,7 +276,7 @@ Build the JuMP capacity expansion model. If `use_representative_days` is True, i
 def solve(self) -> int
 ```
 
-Optimize the master problem. Returns PuLP-compatible status code.
+Optimize the master problem (or run Benders decomposition). Returns PuLP-compatible status code.
 
 ### get_solution_values
 
@@ -256,19 +293,34 @@ Extract investment and retirement decisions keyed by year. Returns a dictionary 
 - Retirement decisions
 - Total NPV cost
 
+The top-level keys include `status`, `objective`, `solve_time`, `solution` (per-year dicts of `tech_investment_power_{t}_{n}`, `bat_tech_investment_power_{bt}_{n}`, `bat_tech_investment_capacity_{bt}_{n}` and `transfer_investment_{i}_{j}` values), `tech_investment`, `bat_tech_power_investment`, `bat_tech_capacity_investment`, `cumulative_*` capacities, `total_investment_by_year`, `total_operational_by_year` and `re_penetration_by_year`.
+
+### Other methods
+
+| Method | Description |
+|--------|-------------|
+| `get_investment_decisions()` | Investment decisions by year (technology, battery power and energy, transmission). |
+| `get_retirement_decisions()` | Retirement and life-extension decisions by year. |
+| `get_year_investments(year)` | Investment keys for one calendar year, e.g. `tech_investment_power_0_0`. |
+| `get_cumulative_capacity(year_idx=None, year=None)` | Cumulative `gen` and `bat` capacity per node for one year (`year_idx` is 1-indexed and deprecated). |
+| `get_objective_value()` | NPV of total cost in $. |
+| `get_re_targets()` | RE target per year index. |
+| `export_solution(filepath)` | Write the solution to CSV. |
+| `solution` (property) | Legacy-format solution dictionary. |
+
 ### write_lp
 
 ```python
 def write_lp(self, filepath: str) -> None
 ```
 
-Export the master problem LP file for debugging or sensitivity analysis.
+Export the master problem LP file for debugging or sensitivity analysis. Requires a built JuMP model, so it is not available with `solver_method="benders"`.
 
 ---
 
 ## TransmissionDCAdapter
 
-Wraps DC power flow graph construction using Kirchhoff's voltage law formulation.
+Builds the Julia `TransmissionDC` structure (lines, reactances, incidence matrix) from a node configuration. The DC power flow itself is angle-based: each line's flow is `S_base / x · (θ_i − θ_j)`, with one reference bus per connected component.
 
 ```python
 class TransmissionDCAdapter:
@@ -277,10 +329,9 @@ class TransmissionDCAdapter:
         num_nodes: int,
         nodes_config: NodeConfig,
         fuel_transport_distances: List[List[float]],
-        base_impedance: float = 100.0,
+        s_base_mva: float = 100.0,
         reactance_per_km: float = 0.4,
         voltage_level_kv: float = 220.0,
-        enable_angle_limits: bool = True,
         max_angle_diff_deg: float = 30.0,
         transmission_lines_geo=None,
         transformers=None,
@@ -290,15 +341,15 @@ class TransmissionDCAdapter:
     ) -> None
 ```
 
+`s_base_mva` is the system power base of the per-unit line data (the runner passes `ac_power_flow.base_mva`). A line without `reactance_pu` gets `length_km × reactance_per_km / Z_base`, with `Z_base = V² / S_base` and `V` the line's `voltage_kv` (else `voltage_level_kv`).
+
 **Properties:**
 
 | Property | Type | Description |
 |----------|------|-------------|
 | `lines` | `list[tuple]` | List of `(from_bus, to_bus)` pairs (0-indexed). |
 | `line_reactances` | `dict[tuple, float]` | Per-line reactance keyed by `(from, to)`. |
-| `incidence_matrix` | `np.ndarray` | Bus-line incidence matrix. |
-| `cycle_matrix` | `np.ndarray` | Line-cycle matrix for Kirchhoff's voltage law. |
-| `independent_cycles` | `list[list[tuple]]` | Detected independent network cycles. |
+| `incidence_matrix` | `np.ndarray` | Bus-line incidence matrix (`+1` where a line leaves a bus, `-1` where it enters). |
 
 ---
 
@@ -307,7 +358,7 @@ class TransmissionDCAdapter:
 Wraps near-optimal alternative exploration (`mga.jl`). Two methods share this adapter, dispatched by `MGAConfig.method`:
 
 - **`"mga"`** (default): wraps Julia's `run_mga_spores` — the classical Hop-Skip-Jump loop. Produces `num_alternatives` alternatives, each maximising a diversity objective weighted by the frequency score `1 − 2·freq`.
-- **`"spores"`**: wraps Julia's `run_spores` — the per-objective sweep. Solves one alternative per entry in `MGAConfig.objectives`, with each entry mapped to its matching `Symbol` (see [§ SPORES](julia-api.md#sporesphase-2)).
+- **`"spores"`**: wraps Julia's `run_spores` — the per-objective sweep. Solves one alternative per entry in `MGAConfig.objectives`, with each entry mapped to its matching `Symbol` (see [§ SPORES](julia-api.md#spores-phase-2)).
 
 Both paths return a uniform dictionary; each alternative carries an `objective` tag so downstream consumers (runner export, viewer) render them with one code path.
 
@@ -500,7 +551,37 @@ Computes fuel cost adjustments based on geographic distance between generators a
 ### _resolve_element_bus_mapping
 
 ```python
-def _resolve_element_bus_mapping(sys_config: SystemConfig) -> tuple[dict, dict]
+def _resolve_element_bus_mapping(
+    sys_config: SystemConfig,
+) -> tuple[dict[str, dict[int, int]], dict[str, dict[int, int]]]
 ```
 
-Resolve generator-to-bus and battery-to-bus mappings from `transmission_lines_geo` endpoint data. Returns `(gen_to_bus, bat_to_bus)` dicts mapping config keys to 0-based bus indices.
+Resolve the physical bus of each existing generator and battery, per node. Sources, in priority order:
+
+1. `transmission_lines_geo` entries whose `from_endpoint_type` / `to_endpoint_type` is `generator` or `battery` (one bus for the whole unit).
+2. The unit's `bus_index` field, set by the Grid Builder.
+
+Returns `(gen_bus_per_node, bat_bus_per_node)`, each mapping `unit_key → {node_idx: bus_idx}` (0-based) for every node where the unit's capacity is positive. Nodes without an entry use the node's first bus (see [Node vs bus indexing](#node-vs-bus-indexing)).
+
+---
+
+## Node vs bus indexing
+
+Config arrays (`rated_power`, availability, reserves, …) are indexed by node; the Julia operational model is indexed by bus. The helpers in `esfex.bridge.converters` map between the two.
+
+```python
+def node_bus_mapping_required(buses, num_nodes: int) -> bool
+def expand_node_to_bus_array(node_array, bus_to_node, mode="capacity",
+                             bus_per_node=None,
+                             replicate_to_all_buses_in_node=False) -> list
+def expand_node_to_bus_matrix(node_matrix, bus_to_node,
+                              default_value=1.0) -> np.ndarray
+```
+
+| Function | Description |
+|----------|-------------|
+| `node_bus_mapping_required` | `True` unless the bus list is the identity over nodes (one bus per node, bus `i` in node `i`). It is also `True` when there are fewer buses than nodes, as after network reduction drops isolated buses. |
+| `expand_node_to_bus_array` | Per-node list to per-bus list. `mode="capacity"` puts each node's value on the unit's bus from `bus_per_node`, else on the node's first bus; with `replicate_to_all_buses_in_node=True` it is copied to every bus of the node (virtual investment units). `mode="property"` gives every bus its node's value. |
+| `expand_node_to_bus_matrix` | `(hours, nodes)` to `(hours, buses)`: every bus gets its node's profile; out-of-range nodes get `default_value`. |
+
+Both adapters call `node_bus_mapping_required` and expand per-node data when it returns `True`. On the way back the runner aggregates bus results to nodes: quantities (generation, storage, curtailment, load shedding, CO2, reserves, …) are summed over a node's buses, while commitment status, prices and voltage angles take the maximum.

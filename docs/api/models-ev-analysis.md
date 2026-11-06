@@ -1,7 +1,9 @@
 # EV Analysis
 Module: `esfex.models.ev_analysis`
 
-Provides the computational engine for Phase B of the EV & V2G Assessment Workflow: charging demand characterization, V2G potential assessment, battery degradation modeling, and grid impact analysis.
+This module re-exports the external `evrex` package; the names below are importable from both `esfex.models.ev_analysis` and `evrex`.
+
+Provides the computational engine for steps 3–4 (Charging & V2G, Grid & Integration) of the EV & V2G Assessment Workflow: charging demand characterization, V2G potential assessment, battery degradation modeling, and grid impact analysis.
 
 ---
 
@@ -16,6 +18,7 @@ Provides the computational engine for Phase B of the EV & V2G Assessment Workflo
 | `category` | `str` | Vehicle category (light, medium, heavy, buses) |
 | `scenario` | `str` | `"uncontrolled"`, `"tou_shifted"`, or `"optimized"` |
 | `hourly_mw` | `list[float]` | 24 values — charging demand per hour (MW) |
+| `description` | `str` | Short label, e.g. `"light (uncontrolled): 1000 vehicles x 7 kW"` |
 
 ### ChargingScenarioResult
 
@@ -40,6 +43,8 @@ Hourly V2G capacity and energy availability.
 | `hourly_available_soc_mwh` | `list[float]` | 24 values — available energy in SOC window |
 | `daily_v2g_energy_mwh` | `float` | Total daily V2G energy potential |
 | `annual_v2g_potential_gwh` | `float` | Annualized V2G potential |
+| `degradation_cost_per_kwh` | `float` | Placeholder, left at 0 by `compute_v2g_potential` (see `DegradationResult`) |
+| `breakeven_compensation` | `float` | Placeholder, left at 0 by `compute_v2g_potential` ($/MWh) |
 
 ### DegradationResult
 
@@ -50,6 +55,8 @@ Battery degradation analysis output.
 | `chemistry` | `str` | `"NMC"` or `"LFP"` |
 | `cycles_per_day` | `float` | Average V2G cycles per day |
 | `depth_of_discharge` | `float` | Average DoD for V2G cycling |
+| `cycle_life_remaining_pct` | `float` | `100 - total_degradation_pct_per_year`, floored at 0 |
+| `calendar_aging_pct_per_year` | `float` | Calendar aging component (%/year) |
 | `total_degradation_pct_per_year` | `float` | Total capacity loss (%/year) |
 | `degradation_cost_per_kwh` | `float` | Cost per kWh cycled ($/kWh) |
 | `breakeven_compensation` | `float` | Break-even V2G rate ($/MWh) |
@@ -66,8 +73,17 @@ Grid impact assessment results.
 | `net_load_24h` | `list[float]` | Net = base + EV - V2G |
 | `peak_shaving_mw` | `float` | Peak reduction from V2G |
 | `valley_filling_mw` | `float` | Valley filling increase |
+| `peak_to_valley_before` | `float` | Peak/valley ratio of base demand |
+| `peak_to_valley_after` | `float` | Peak/valley ratio of net load |
+| `re_curtailment_reduction_pct` | `float` | Estimated RE curtailment reduction: V2G energy as % of base energy, capped at 15 % |
+| `frequency_regulation_mw` | `float` | 50 % of mean V2G power (MW) |
 | `arbitrage_revenue_annual` | `float` | Annual arbitrage revenue ($) |
-| `net_v2g_value` | `float` | Total V2G program value ($) |
+| `avoided_reinforcement` | `float` | Avoided grid reinforcement: peak reduction × reinforcement cost per MW ($) |
+| `net_v2g_value` | `float` | Total V2G program value: arbitrage + avoided reinforcement + V2G compensation ($) |
+
+### DEFAULT_CONNECTED_PROFILE
+
+24 hourly values of the fraction of the fleet plugged in (0.85 at midnight, 0.25 at mid-morning), used by `compute_v2g_potential` when no connected profile is passed.
 
 ---
 

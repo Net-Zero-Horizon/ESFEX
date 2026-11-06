@@ -1,7 +1,9 @@
 """Central path registry for esfex datasets.
 
-All data lives under ``ESFEX_DATA_ROOT`` (env var). Default:
-``/media/manuel/New Volume/Demand_forecasting``.
+All data lives under ``ESFEX_DATA_ROOT`` (env var, ``~`` expanded). Default:
+``~/.esfex/data``, so the caches the Studio writes (Geofabrik extracts, OSM
+tiles, CMIP6 subsets) work for every user; point the variable at an existing
+dataset tree to use it.
 
 Scripts, figures and code live in the repo (``.../Net_zero_horizon/esfex``);
 only datasets are under ``DATA_ROOT``.
@@ -13,8 +15,8 @@ from pathlib import Path
 
 DATA_ROOT = Path(os.environ.get(
     "ESFEX_DATA_ROOT",
-    "/media/manuel/New Volume/Demand_forecasting",
-))
+    str(Path.home() / ".esfex" / "data"),
+)).expanduser()
 
 PROJECT_DATA = DATA_ROOT / "data"
 

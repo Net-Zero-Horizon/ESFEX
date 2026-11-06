@@ -7,8 +7,8 @@ directories with ``plugin.json`` + ``__init__.py``.
 
 Scan order:
     1. ``~/.esfex/plugins/``
-    2. ``<project_dir>/.esfex/plugins/``
-    3. Directories in ``$ESFEX_PLUGIN_PATH`` (colon-separated)
+    2. ``<project_dir>/.esfex/plugins/``, only with ``include_project_dir=True``
+    3. Directories in ``$ESFEX_PLUGIN_PATH`` (``os.pathsep``-separated)
 
 Security hardening:
     - ZIP extraction validates every path against Zip Slip (CWE-22)
@@ -16,6 +16,8 @@ Security hardening:
     - ``git clone`` runs with hooks disabled to prevent pre-checkout RCE
     - Git URLs are restricted to ``https://`` and ``git://`` schemes
     - Installing over an existing plugin requires explicit confirmation
+    - Once a plugin has been installed or trusted, only plugins whose content
+      hash is on record are loaded (``trusted_hashes`` in ``plugins.json``)
 """
 
 from __future__ import annotations
@@ -84,12 +86,26 @@ def _validate_zip_paths(zf: zipfile.ZipFile, target_root: Path) -> None:
             )
 
 
+# Written by Python or git after install, not part of the plugin's source
+_UNHASHED_DIRS = frozenset({"__pycache__", ".git"})
+_UNHASHED_SUFFIXES = (".pyc", ".pyo")
+
+
 def _hash_directory(path: Path) -> str:
-    """Compute a SHA-256 digest of all files in *path* for audit logging."""
+    """SHA-256 digest of the plugin's files (trust allowlist and audit log).
+
+    Bytecode caches and git metadata are left out: importing the plugin
+    wrote ``__pycache__/``, which changed the hash on first use and got the
+    plugin skipped from the next start. Since cached bytecode is not hashed,
+    :meth:`PluginManager._load_plugin` never runs it.
+    """
     h = hashlib.sha256()
     for fpath in sorted(path.rglob("*")):
-        if fpath.is_file():
-            h.update(str(fpath.relative_to(path)).encode())
+        rel = fpath.relative_to(path)
+        if _UNHASHED_DIRS.intersection(rel.parts):
+            continue
+        if fpath.is_file() and not fpath.name.endswith(_UNHASHED_SUFFIXES):
+            h.update(str(rel).encode())
             h.update(fpath.read_bytes())
     return h.hexdigest()
 
@@ -366,9 +382,18 @@ class PluginManager:
                 logger.warning("Cannot create module spec for plugin %r", name)
                 return None
 
+            # Bytecode is not covered by the trusted hash: drop any cache and
+            # import from source only, so a planted .pyc cannot run.
+            for cache in plugin_dir.rglob("__pycache__"):
+                shutil.rmtree(cache, ignore_errors=True)
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            write_bytecode = sys.dont_write_bytecode
+            sys.dont_write_bytecode = True
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.dont_write_bytecode = write_bytecode
 
             factory = getattr(module, "create_plugin", None)
             if factory is None:
@@ -651,6 +676,22 @@ class PluginManager:
         trusted = state.setdefault("trusted_hashes", {})
         trusted[name] = plugin_hash
         _write_state(state)
+
+    def is_trusted(self, name: str) -> bool:
+        """Whether :meth:`load_all` would load *name* (allowlist check only).
+
+        True while no hash is on record (legacy mode, see :meth:`load_all`).
+        """
+        trusted = _read_state().get("trusted_hashes", {})
+        if not trusted:
+            return True
+        plugin_dir = self._discovered.get(name)
+        if plugin_dir is None or name not in trusted:
+            return False
+        try:
+            return _hash_directory(plugin_dir) == trusted[name]
+        except OSError:
+            return False
 
     def trust_plugin(self, name: str) -> None:
         """Public API: explicitly mark an already-installed plugin trusted.

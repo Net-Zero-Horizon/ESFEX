@@ -8,84 +8,99 @@ Two levels: **Global Settings** apply to the entire simulation; **System Setting
 
 ## Global Settings
 
-Click **Global Settings** in the Element Tree. These parameters apply uniformly across all systems.
+Click **Global Settings** in the Element Tree. These parameters apply to all systems. The form has these groups, top to bottom: Systems to Simulate, Simulation, Temporal, Power Flow, Master Problem, N-1 Security, Risk & Resilience, Solver Options and Visual Scaling.
+
+**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s, gap 0.001, verbose off, Scale Constraints off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
+
+### Systems to Simulate
+
+One checkbox per system. Only the checked systems are validated and run. If none are stored in the project, all systems are simulated.
 
 ### Simulation
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Simulation Mode | `development` | `development` = LP-based capacity expansion combined with rolling-horizon economic dispatch. Fast and suitable for long-term planning studies. `unit_commitment` = MIP with binary generator on/off decisions. Captures start-up costs, minimum up/down times, and discrete unit scheduling. More detailed but significantly slower. |
-| UC Hours | 24 | Hours per unit commitment window. Only relevant when Simulation Mode is `unit_commitment`. Longer windows capture more operational detail but increase solve time exponentially. |
-| Date Start | 01/01/2025 | Simulation start date. The first year of the planning horizon begins on this date. Demand data and availability profiles are aligned to this date. |
-| Enable Primary Energy | On | Include the fuel supply chain in the optimization. When enabled, the optimizer jointly optimizes electricity and fuel networks, considering fuel transport costs, storage, and supply constraints. When disabled, fuel is assumed to be available at each generator at its specified cost. |
+| Simulation Mode | `development` | `Development`: master problem (capacity expansion) first, then rolling-horizon dispatch of every planning year. `Unit Commitment`: no master problem; a MIP with binary on/off decisions, start-up costs and minimum up/down times for the existing fleet, run over the first UC Hours of the first year only. See [Concepts](../getting-started/concepts.md). |
+| UC Hours (h) | 24 | Shown only in `Unit Commitment` mode. Number of hours dispatched (at most 8,760). It is not a window size. |
+| Enable UC | Off | Shown only in `Development` mode. Runs each dispatch window with binary commitment instead of an LP (`master_problem.use_uc_in_dispatch`). |
+| Start Date | 01/01/2025 00:00 | Simulation start date (`DD/MM/YYYY HH:MM`). The first planning year starts on this date. |
+| Primary Energy | On (YAML), Off (new project) | Include the fuel supply chain (fuel sources, storage, routes, electrolyzers) in the optimization. When off, fuel is available at each generator at its fuel cost. |
+| Console Verbose | Basic | `High` adds `--verbose` to the run command, so the **Run Output** tab shows debug-level log output. |
 
 **Tips:**
-- Start with `development` mode for initial design. Switch to `unit_commitment` only after topology is stable (MIP solves take 10-100x longer).
-- Date Start determines the base year for cost projections, fuel price growth, and degradation.
+- Start with `Development` mode. Unit commitment MIPs take much longer to solve.
+- Start Date sets the base year for cost projections, fuel price growth and degradation.
 
 ### Temporal
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Resolution | 1 h | Operational time step for dispatch optimization. Supports 1 hour (standard), 0.5 hours, and 0.25 hours. Finer resolution captures sub-hourly dynamics but increases problem size proportionally. |
-| Rolling Horizon Hours | 48 | Size of each dispatch window in hours. The operational year (8760 hours) is divided into overlapping windows of this length. Each window is solved independently as an optimization problem. |
-| Overlap Hours | 6 | Overlap between consecutive dispatch windows. The first `overlap_hours` of each window use the final state from the previous window (battery SOC, generator status) as initial conditions. Only results from the non-overlapping portion are kept. |
-| Investment Resolution | 8760 h | Time granularity for the master problem (strategic planning). Use 8760 for annual resolution. Lower values (e.g., 4380 for semi-annual) increase planning detail but double the master problem size. |
-| Primary Energy Resolution | 168 h | Time step for the fuel supply chain optimization. Default is weekly (168 hours). Only active when Enable Primary Energy is on. |
+| Resolution (h) | 1 (YAML), 6 (new project) | Operational time step, an integer from 1 to 24 hours. Coarser steps make the problem smaller; ramp limits and minimum up/down times are scaled to the step. |
+| Rolling Horizon (h) | 48 | Size of each dispatch window in hours. The operational year (8760 hours) is divided into overlapping windows of this length. Each window is solved independently as an optimization problem. |
+| Overlap (h) | 24 | Look-ahead at the end of each window: solved, then discarded and re-solved by the next window. Only the first `rolling_horizon_hours - overlap_hours` of each window are kept, and the state at the end of that part (battery SOC, generator status and output, reservoir levels) starts the next window. Must be shorter than the window; the form caps it at window − 1. |
+| Investment Resolution (h) | 8760 | Hours per investment period of the master problem. Use 8760 for annual periods. |
+| PE Resolution (h) | 24 | Time step of the fuel supply chain model. Only used when Primary Energy is on. |
+| Use Rolling Horizon | On | When off, each year is dispatched in a single window. |
 
-**Rolling horizon:** The operational year is solved as overlapping windows. Example with 48-hour windows and 6-hour overlap:
-- Window 1: hours 1-48 (keep hours 1-42).
-- Window 2: hours 43-90 (initial conditions from hour 42, keep hours 43-84).
-- Window 3: hours 85-132, and so on.
+**Rolling horizon:** The operational year is solved as overlapping windows. Example with 48-hour windows and 24-hour overlap:
+- Window 1: hours 1-48 (keep hours 1-24).
+- Window 2: hours 25-72 (initial conditions from the end of hour 24, keep hours 25-48).
+- Window 3: hours 49-96, and so on.
 
-Overlap ensures smooth SOC continuity and generator on/off transitions between windows.
+Stored energy has no value at the end of a window, so the overlap is what lets a window charge storage for a peak in the next day. With less than 24 h, storage can be empty when a peak falls just after a window boundary; ESFEX logs a warning in that case.
 
-### Solver
+### Power Flow
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| Solver | Auto-detect | Which optimization solver to use. Options: HiGHS (free, default), Gurobi (commercial, requires license), CPLEX (commercial, requires license), CBC (free), GLPK (free). The solver selector auto-detects which solvers are installed on your system and only shows available options. |
-| Threads | 4 | Number of parallel solver threads. Set to the number of physical CPU cores for optimal performance. Hyperthreading cores may not provide additional benefit. |
-| Time Limit | 300 s | Maximum solve time per optimization problem (per window or per master problem). If the solver cannot find an optimal solution within this limit, it returns the best feasible solution found. Increase for large or difficult problems. |
-| Optimality Gap | 0.01 | Relative MIP optimality gap (1% default). The solver stops when it proves the current solution is within this fraction of the true optimum. Only relevant for unit commitment mode (MIP). Set to 0.001 (0.1%) for high-precision studies, or 0.05 (5%) for rapid feasibility checks. |
-| Verbose | Off | When enabled, full solver output (iterations, simplex/barrier progress, branching statistics) is printed to the Python console. Useful for diagnosing infeasibility or slow convergence. |
-
-**Recommendations:**
-- **HiGHS** -- Best free solver. Excellent for LP problems (development mode). Good MIP performance.
-- **Gurobi** -- Premium commercial solver with state-of-the-art MIP performance. Free academic licenses available.
-- **CPLEX** -- IBM's commercial solver. Competitive with Gurobi for large MIPs.
-- **CBC** -- Free MIP solver. Slower than HiGHS for most problems but well-tested.
-- **GLPK** -- Free LP/MIP solver. Suitable only for small problems.
-
-### N-1 Security
-
-Ensures system stability after loss of any single element (one generator or one transmission line).
+The power-flow formulation applies to the whole model: multi-system projects are merged into one network and solved with one formulation.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| N-1 Enabled | Off | Master switch for contingency analysis. When enabled, the optimizer adds constraints ensuring survivability under single-element outages. |
-| Transmission Enabled | On | Test line outages. For each transmission line, verify that the remaining network can serve all demand without violating thermal limits. |
-| Transmission Reserve Factor | 0.70 | Post-contingency line loading limit as a fraction of rated capacity. A value of 0.70 means that after a line outage, no remaining line may be loaded above 70% of its rating. This provides headroom for the redistributed power flows. |
-| Critical Threshold | 0.50 | Minimum utilization to consider a line critical. Lines loaded below this threshold in the base case are not tested as contingencies (they are unlikely to cause issues). Reduces computation time. |
-| Generation Enabled | On | Test generator outages. Ensure that losing the largest (or most critical) generator does not cause load shedding. |
-| Reserve Type | `largest_unit` | How to size the generation reserve requirement: `largest_unit` = reserve >= largest online generator. `percentage` = reserve >= Reserve Percentage x total demand. `fixed` = reserve >= a fixed MW value. |
-| Reserve Percentage | 0.15 | Generation capacity reserve margin (15% default). Only used when Reserve Type is `percentage`. |
+| Power Flow Mode | DC OPF | `DC OPF`: linearized DC power flow. `DC OPF + AC Verify`: DC OPF, then a post-hoc Newton-Raphson AC check of the dispatch (only in `Unit Commitment` mode). `AC OPF — SOC`, `AC OPF — QC`, `AC OPF — SDP`: convex relaxations of the AC OPF. `AC OPF — Polar`, `AC OPF — Rect`: exact nonlinear AC OPF. See [AC Power Flow](../formulation/ac-power-flow.md). |
 
-The optimizer identifies critical elements, simulates their outage, and verifies continued demand service. If infeasible, it adjusts dispatch or invests in additional capacity/transmission.
+The mode restricts the solver list: solvers that cannot handle the formulation are greyed out, and the selection moves to a compatible one.
+
+| Mode | Compatible solvers |
+|------|--------------------|
+| DC OPF, DC OPF + AC Verify | HiGHS, Gurobi, GLPK, CBC, SCIP, CPLEX, Xpress |
+| AC OPF — SOC, AC OPF — QC | HiGHS, Gurobi, CPLEX, Xpress, Clarabel, SCS |
+| AC OPF — SDP | SCS, Clarabel |
+| AC OPF — Polar, AC OPF — Rect | Ipopt |
+
+The AC parameters are shown for every mode except `DC OPF`:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| Base MVA | 100 | System base power for per-unit conversion |
+| Voltage Min (p.u.) / Voltage Max (p.u.) | 0.90 / 1.10 | Bus voltage limits |
+| Gen Default PF | 0.85 | Power factor used to estimate generator reactive limits when none are given |
+| Load Power Factor | 0.9 | Reactive demand: Q = P × tan(acos(pf)) |
+| Q Slack Penalty ($/MVAr) | 100 | Penalty on reactive power imbalance |
+| Min Reactance (p.u.) | 0.01 | Floor applied to the reactance of short lines and bus ties |
+| Tap Ratio Min / Tap Ratio Max | 0.5 / 2.0 | Transformer taps outside this range are reset to 1.0 |
+| Q Min Ratio (×Q_max) | 0.5 | Q_min = −ratio × Q_max when reactive limits are not given |
+
+There is no slack-bus field and no angle limit. The reference bus is the bus whose **Bus Type** is `slack` in the bus form. The DC angle-difference limit is not part of the formulation.
 
 ### Master Problem
 
-Strategic multi-year capacity expansion planning.
+Strategic multi-year capacity expansion planning. See [Master Problem](../user-guide/master-problem.md) for how these settings are used.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Stochastic | Off | Enable multi-scenario stochastic optimization. When enabled, the master problem considers all defined stochastic scenarios simultaneously, weighted by their probabilities. First-stage decisions (investments) are common across scenarios; second-stage decisions (dispatch) vary per scenario. |
-| Representative Days | 3 | Number of peak/representative days per year used for operational validation within the master problem. The master problem uses simplified operational snapshots to verify that investment decisions produce feasible dispatch. |
-| Min Day Separation | 720 h | Minimum hours between representative days. Ensures that selected days are spread across the year (e.g., summer peak, winter peak, shoulder season) rather than clustered. 720 hours = 30 days minimum separation. |
+| Enable Stochastic | Off | Two-stage stochastic master over the scenarios defined under **Scenarios** in the tree (see [Scenarios](#scenarios)). |
+| Representative Days | 5 | Days per year used to estimate operating cost in the master (peak-based selection, 1 to 365). Ignored when TSAM is on. |
+| Min Day Separation | 5 | Minimum distance, in **days**, between selected representative days (0 to 365 in the form; the schema requires at least 1). Ignored when TSAM is on. |
+| Solver Method | Monolithic (full model) | `Monolithic (full model)` or `Benders Decomposition` |
+| Max Iterations | 50 | Benders only |
+| Convergence Tolerance | 0.0001 | Benders only: relative gap for convergence |
+| Enable TSAM Clustering | Off | Replace peak-day selection with time-series clustering |
+| TSAM Periods | 10 | Number of clustered representative days per year (2 to 365) |
+| Clustering Method | `kmedoids` | `kmedoids` or `kmeans` |
+| Inter-Period Storage Linking (Battery + Hydro) | On | Chain storage state of charge across clustered days |
 
 ### MGA / SPORES (Near-Optimal Alternative Exploration)
 
-Generates a set of investment portfolios near the cost-optimal solution. Two methods share the cost-slack envelope but differ in how alternatives are produced (see [Concepts: MGA and SPORES](../getting-started/concepts.md#near-optimal-alternatives-mga-and-spores)):
+Part of the Master Problem group. Generates a set of investment portfolios near the cost-optimal solution. Two methods share the cost-slack envelope but differ in how alternatives are produced (see [Concepts: MGA and SPORES](../getting-started/concepts.md#near-optimal-alternatives-mga-and-spores)):
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -93,10 +108,76 @@ Generates a set of investment portfolios near the cost-optimal solution. Two met
 | Method | `MGA (HSJ loop)` | `MGA (HSJ loop)` runs the classical loop $K$ times; `SPORES (per-objective)` solves one alternative per declared objective |
 | Alternatives | 10 | Number of alternatives $K$ for the HSJ loop. **Hidden when Method = SPORES** (the count equals the number of checked objectives) |
 | SPORES Objectives | (none checked) | Multi-select checklist: `HSJ diversity`, `Min total build`, `Tech equity`, `Regional equity`, `Evolutionary distance`. **Hidden when Method = MGA**. Required when Method = SPORES — saving with the method set but no objectives selected will trigger a validation error at run time |
-| Cost Slack (fraction) | 0.10 | Maximum cost increase allowed (0.10 = alternatives can cost up to 110% of optimal). Shared by both methods |
-| Invest. Threshold (MW) | 0.01 | Minimum investment to count as "selected" by HSJ frequency scoring. Used by `method = mga` and by the SPORES `hsj_diversity` objective; the other SPORES objectives ignore it |
+| Cost Slack (fraction) | 0.05 | Maximum cost increase allowed (0.05 = alternatives can cost up to 105% of optimal), from 0 to 0.5. Shared by both methods |
+| Invest. Threshold (MW) | 0.1 | Minimum investment to count as "selected" by HSJ frequency scoring. Used by `method = mga` and by the SPORES `hsj_diversity` objective; the other SPORES objectives ignore it |
 
-The visible field set updates automatically: choosing `SPORES (per-objective)` hides Alternatives and reveals SPORES Objectives, and vice versa. The objectives box is capped at ~220 px wide so it doesn't dominate the form when active.
+The visible field set updates automatically: choosing `SPORES (per-objective)` hides Alternatives and reveals SPORES Objectives, and vice versa.
+
+### N-1 Security
+
+Adds security constraints for the loss of a single element to the dispatch. See [N-1 Security-Constrained DC Power Flow](../formulation/dc-power-flow.md#n-1-security-constrained-dc-power-flow).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| Enable N-1 Security | Off | Master switch. In a project created in the Studio, N-1 applies only in `Unit Commitment` mode (`apply_to_modes: [unit_commitment]`); there is no field for this. A YAML file without `apply_to_modes` applies it in both modes. |
+| Transmission | On | Line outage constraints |
+| Trans. Reserve Factor (frac) | 0.70 | Usable fraction of line capacity under N-1 |
+| Critical Line Threshold (frac) | 0.0 | Written to the YAML, but not read by the current model |
+| Generation | On | Generator outage constraints |
+| Reserve Type | Largest Unit | `Largest Unit` or `Percentage`. `Fixed MW` is also listed, but the schema rejects it when the YAML is loaded, so do not use it. |
+| Reserve Percentage (frac) | 0.15 | Used when Reserve Type is `Percentage` |
+| Use Iterative SCOPF | Off | Replace preventive N-1 reserves with post-contingency (LODF) line limits for every pair of lines, added in one solve (not iterative) |
+| SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); not used by the model |
+| SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on |
+| Allow Corrective Actions | Off | Allow post-contingency battery and generator re-dispatch instead of preventive reserve |
+| Contingency Depth | N-1 | `N-1` or `N-1-1` |
+| Redistribution Mode | Pro-rata | `Pro-rata (proportional to capacity)` or `Droop-based (governor response)` |
+| PI Screening Threshold | 0.0 | Performance-index threshold for contingency screening; 0 analyzes all |
+| Include Transformer Contingencies | Off | Add transformer outages |
+| Include Battery Contingencies | Off | Add battery outages |
+
+Contingency Depth, Redistribution Mode, PI Screening Threshold and the transformer and battery contingency options are saved in the YAML (`n1_security`) but the optimization does not read them yet. The SLD analysis panel has its own copies of the depth, redistribution and threshold controls (see [Single-Line Diagram](sld-dynamic-analysis.md#n-k-analysis-options)).
+
+### Risk & Resilience
+
+Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there. The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| Enable Risk & Resilience Analysis | Off | Enables the group |
+| Risk Measure | Expected Value | `Expected Value`, `CVaR (Conditional Value-at-Risk)` or `Minimax Regret` |
+| CVaR Confidence (α) | 0.95 | CVaR confidence level |
+| Risk Aversion (λ) | 0.5 | Weight of the CVaR term |
+| Hazard Combination | Independent | `Independent`, `Copula` or `MCDA` |
+| Value of Lost Load: Residential / Commercial / Industrial / Critical | 5,000 / 25,000 / 15,000 / 100,000 $/MWh | Sector VOLL used by the risk analysis (not the dispatch VOLL, which is the system Loss of Load penalty) |
+| Base Temperature | 18.0 °C | Reference temperature for degree days |
+| Heating Coeff. (MW/HDD) / Cooling Coeff. (MW/CDD) | 0 / 0 | Temperature sensitivity of demand |
+| Insurance Premium Rate | 0 | Fraction of asset value |
+| Monte Carlo Samples | 1000 | 100 to 100,000 |
+| Monte Carlo Seed | 42 | Random seed |
+
+### Solver Options
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| Solver | `highs` | Only solvers whose Julia package is installed in ESFEX's Julia environment are listed. Bundled: HiGHS, GLPK, Ipopt, SCS, Clarabel. Gurobi, CPLEX, CBC, SCIP and Xpress appear after `esfex add-solver` (commercial solvers also need their own license). Solvers incompatible with the Power Flow Mode are greyed out. See [Solver Guide](../user-guide/solver-guide.md). |
+| Threads | 4 | Number of parallel solver threads (1 to 128) |
+| Time Limit (s) | 10800 (YAML), 3600 (new project) | Maximum solve time per optimization problem |
+| Gap (frac) | 0.01 (YAML), 0.001 (new project) | Relative MIP optimality gap. Only relevant for MIP problems (unit commitment). |
+| Verbose | Off | Print the full solver log in the Run Output tab |
+| Scale Constraints | On (YAML), Off (new project) | Written to the YAML (`solver.scale_constraints`) but not used by the solver interface |
+
+Below these fields, the group shows the options specific to the selected solver (for example presolve or LP method). They are stored in `solver.options`.
+
+### Visual Scaling
+
+Controls marker and line sizes on the map. Each element class is scaled automatically from its smallest to its largest value onto the pixel range below, so no per-system calibration is needed.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| Marker Min Size (px) / Marker Max Size (px) | 6 / 40 | Size of the smallest and largest marker |
+| Marker Scaling | Area ∝ value (sqrt) | `Area ∝ value (sqrt)`, `Radius ∝ value (linear)` or `Log (heavy-tailed)` |
+| Line Min Width (px) / Line Max Width (px) | 1.5 / 8 | Width of the thinnest and thickest line (linear scaling) |
 
 
 ---
@@ -104,116 +185,107 @@ The visible field set updates automatically: choosing `SPORES (per-objective)` h
 
 ## System Settings
 
-Click a **system name** in the Element Tree. Each system has independent parameters.
+Click a **system name** in the Element Tree. Each system has independent parameters, in three groups: General, Cost Limits and Penalties. The name field at the top renames the system.
 
 ### General
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Name | -- | System name (editable). Must be unique. |
-| Demand Scale | 1.0 | Multiplier applied to all demand in this system. Use values >1.0 to model demand growth or <1.0 for demand reduction scenarios. |
-| Discount Rate | 0.08 | Net Present Value discount rate (8% default). Used to discount future costs to present value for investment comparison. Higher rates favor near-term, lower-cost options. |
-| RE Penetration Target | 0.50 | Final-year renewable energy fraction target (50% default). The optimizer penalizes any shortfall from this target using the RE Penetration Loss penalty. |
-| Min Annual Increment | 0.02 | Minimum yearly increase in RE penetration (2%). Prevents the optimizer from deferring all RE investment to the final year. |
-| Max Annual Increment | 0.10 | Maximum yearly increase in RE penetration (10%). Prevents unrealistically rapid transitions. |
-| Loss Demand Threshold | 0.01 | Acceptable unserved energy ratio (1% default). The optimizer aims to keep loss of load below this fraction of total demand. |
-| Inertia Threshold | 0.0 | Minimum system inertia requirement in seconds. Set >0 to ensure a minimum level of synchronous generation is online at all times. |
-| Simulate Rooftop | Off | Include distributed rooftop PV in the simulation. When enabled, rooftop PV production is subtracted from net demand before dispatch optimization. |
+| Demand Scale (x) | 1.0 | Multiplier applied to all demand in this system |
+| Discount Rate (frac) | 0.05 | Discount rate for net present value |
+| Base LCOE ($/MWh) | 93.0 | Electricity price used to estimate investment revenue in the master problem's NPV calculations |
+| Target RE Penetration (frac) | 1.0 | Final-year renewable energy share target. Shortfalls are penalized with the FRE Penetration Loss penalty. |
+| Min Annual Increment (frac) | 0.01 | Minimum yearly increase in RE share |
+| Max Annual Increment (frac) | 0.10 | Maximum yearly increase in RE share |
+| Loss Demand Threshold (frac) | 0.05 | Acceptable unserved energy ratio |
+| Inertia Limit Threshold (frac) | 0.1 | Minimum system inertia per hour, the sum of output × H over online units. Despite the "frac" label, the value is compared directly with that MW·s sum. |
+| Simulate Rooftop | Off | Include distributed rooftop PV |
+| Enable CO2 Budget | On | Enforce an annual CO2 budget for this system; emissions above it pay the CO2 Budget Violation penalty |
+| CO2 Annual Budget (tonnes/year) | 1,000,000 | Annual CO2 budget |
+
+The master-problem meaning of the RE target, increments, discount rate and cost limits is described in [Master Problem](../user-guide/master-problem.md).
 
 ### Cost Limits
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Max Annual Cost | $1e12 | Annual investment budget cap. The optimizer cannot spend more than this in any single year. Set to a very large value (default) to have no practical limit. |
-| Max NPV Penalty | $1e9 | Penalty coefficient for exceeding the NPV budget. Acts as a soft budget constraint. |
-| Max Decommissioning Cost | $1e9 | Cap on total decommissioning expenditure across the planning horizon. |
-| Life Extension Factor | 1.5 | Cost multiplier for extending a unit's operational life beyond its rated lifetime. A factor of 1.5 means life extension costs 50% more than normal maintenance. |
+| Max Annual System Cost ($) | 20e9 | Cap on annual system cost |
+| Max NPV Penalty ($/MW) | 1e6 | Cap per MW on the NPV penalty |
+| Max Decommission Cost ($/MW) | 5e5 | Cap per MW on decommissioning cost |
+| Force Replacement ($) | −5e5 | NPV threshold below which a unit is replaced |
+| Life Extension Cost Factor (x) | 0.20 | Life extension costs `invest_cost × factor` per MW per year |
 
 ### Penalties
 
-Shadow prices controlling constraint violation costs. Higher penalties push the optimizer toward constraint satisfaction. Setting a penalty to zero effectively removes the constraint.
+Penalty costs on constraint violations. Higher penalties push the optimizer toward constraint satisfaction.
 
 | Penalty | Default | Unit | Description |
 |---------|---------|------|-------------|
-| Loss of Load | 10,000,000 | $/MWh | Value of lost load (VOLL). The cost assigned to each MWh of unserved energy. This is typically the highest penalty, reflecting the severe economic and social impact of blackouts. |
-| Static Reserve | 100 | $/MW | Penalty for spinning reserve shortfall. Applied per MW of reserve deficiency per hour. |
-| Dynamic Reserve | 100 | $/MW | Penalty for frequency response reserve shortfall. |
-| Inertia | 200 | $/s | Penalty for system inertia below the threshold. Applied per second of inertia deficiency. |
-| Curtailment | 100 | $/MWh | Penalty applied to renewable energy curtailment. Higher values discourage curtailment and incentivize storage investment. |
-| Max Curtailment Ratio | 0.05 | fraction | Maximum fraction of renewable generation that may be curtailed (5% default). This is a hard constraint, not a penalty: the optimizer enforces `curtailment <= ratio x total_RE_generation`. |
-| CO2 Cost | 10 | $/tonne | Carbon price. Applied to all CO2 emissions from fossil fuel combustion. |
-| CO2 Budget Violation | 500 | $/tonne | Penalty for exceeding the CO2 budget (if enabled). Acts as a backstop to the carbon price. |
-| RE Penetration Loss | 100 | $/MWh | Penalty for shortfall from the RE target. Applied per MWh of "missing" renewable energy relative to the target. |
-| EV Loss | 10 | $/MWh | Penalty for unmet EV charging demand. Lower than VOLL because EV charging can often be deferred. |
-| Fuel Supply Loss | 100 | $/MWh | Penalty for fuel supply shortfall. Applied when fuel demand exceeds supply. |
-| Non-Electric Demand Loss | 100 | $/MWh | Penalty for unmet non-electric demand (heat, hydrogen, etc.). |
+| Loss of Load | 50,000 | $/MWh | Value of lost load (VOLL) for unserved demand. The schema default for a YAML file without this key is 10,000,000. |
+| Loss Reserve (Static) | 100 | $/MW | Static reserve shortfall, per MW and hour |
+| Loss Reserve (Dynamic) | 100 | $/MW | Dynamic (frequency response) reserve shortfall |
+| Loss of Inertia | 200 | $/MW·s | Inertia shortfall below the Inertia Limit Threshold |
+| Transfer Margin | 100 | $/MW | Transfer margin violation |
+| Curtailment | 100 | -- | Not a schema field: the loader drops it, so it has no effect. Use Curtailment Cost. |
+| Max Curtailment Ratio | 0.05 | fraction | Curtailment allowed as a fraction of RE generation before Curtailment Excess Penalty applies |
+| Curtailment Cost ($/MWh) | 20 | $/MWh | Cost of each curtailed MWh of RE |
+| Curtailment Excess Penalty ($/MWh) | 500 | $/MWh | Curtailment above the Max Curtailment Ratio |
+| RE Excess Penalty ($/MWh) | 100 | $/MWh | RE generation above the target |
+| Rooftop Curtailment | 5 | $/MWh | Curtailed rooftop PV |
+| CO2 Cost | 10 | $/t | Carbon price on all emissions |
+| CO2 Budget Violation | 500 | $/t | Emissions above the CO2 budget |
+| FRE Penetration Loss | 100 | $/MWh | Shortfall from the RE target |
+| EV Loss | 50,000 | $/MWh | EV driving energy not supplied. Same as Loss of Load by default; a lower value makes leaving EVs uncharged cheaper than generating. |
+| Loss of Fuel Supply | 100 | $/unit | Fuel supply deficit |
+| PE Coupling Slack | 1 | $/unit | Slack between the periodic fuel model and hourly dispatch |
+| Transport Congestion | 100 | $/MW | Saved in the YAML; not used by the current model |
+| Storage Violation | 100 | $/MW | Saved in the YAML; not used by the current model |
+| Non-Electric Demand Loss | 100 | $/unit | Saved in the YAML; not used by the current model |
 
-#### Criticality Penalties (Load Shedding Priority)
+#### Criticality (Load Shedding Priority)
 
-Priority order for load shedding. The optimizer sheds lowest-criticality load first.
+The four **Criticality … ($/MWh)** fields are **multipliers on the Loss of Load penalty**, not prices: shedding load of a sector costs VOLL × multiplier. Each demand sector is assigned a criticality level in the node's Demand Sectors table.
 
-| Level | Default | Typical Assignment |
-|-------|---------|-------------------|
-| Critical | 1,000 $/MWh | Hospitals, emergency services, water treatment, data centers |
-| High | 100 $/MWh | Industrial loads, large commercial consumers |
-| Medium | 10 $/MWh | Residential loads, small commercial |
-| Low | 1 $/MWh | Interruptible loads, non-essential services, street lighting |
+| Level | Default multiplier | Cost with default VOLL | Typical assignment |
+|-------|--------------------|------------------------|--------------------|
+| Critical | 3.0 | 150,000 $/MWh | Hospitals, emergency services, water treatment |
+| High | 2.0 | 100,000 $/MWh | Industrial loads, large commercial consumers |
+| Medium | 1.0 | 50,000 $/MWh | Residential loads, small commercial |
+| Low | 0.5 | 25,000 $/MWh | Interruptible loads, non-essential services |
 
-Assign demand sectors to criticality levels in the demand configuration. A hospital (Critical) never loses power before a street light (Low).
-
-### CO2 Budget
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| Enabled | Off | When on, enforce a hard CO2 budget constraint in addition to the carbon price. |
-| Annual Budget | 1e6 tonnes/year | Maximum annual CO2 emissions for this system. If emissions exceed this budget, the CO2 Budget Violation penalty applies. |
-| Budget Trajectory | Linear | How the budget decreases over the planning horizon: `Linear` (constant annual reduction), `Exponential` (faster initial reduction), or `Constant` (same budget every year). |
-
-### DC Power Flow
-
-Linearized DC power flow model for transmission dispatch.
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| Enable Angle Limits | On | Enforce voltage angle difference limits across transmission lines. Prevents unrealistic power flows on lightly loaded lines. |
-| Max Angle Difference | 30 degrees | Maximum voltage angle difference between connected buses. Typical values range from 15-45 degrees depending on system characteristics. |
-| Slack Bus | 0 | Reference bus index for DC power flow angle calculations. The slack bus has angle = 0 by convention. Choose a strong bus (major generation center). |
+The optimizer sheds the cheapest (lowest-multiplier) load first. A YAML file without `criticality_penalties` uses the schema defaults 1000 / 100 / 10 / 1, which are also applied as VOLL multipliers.
 
 
 ---
 
 
-## Stochastic Scenarios
+## Scenarios
 
-Multiple planning scenarios for robust optimization. Click **Stochastic Scenarios** in the Element Tree.
+Scenarios for the stochastic master problem. Click **Scenarios** in the Element Tree.
 
-### Scenario Definition
+### Scenario Table
 
-Each scenario represents an alternative future with different cost assumptions:
+Type a name and click **Add**; **Remove Selected** deletes the selected scenarios after a confirmation. Each row has:
 
-| Field | Description |
-|-------|-------------|
-| Name | Descriptive scenario name (e.g., "High Oil Price", "Low RE Cost", "Climate Extreme") |
-| Probability | Weight assigned to this scenario (0.0 to 1.0). All scenario probabilities must sum to 1.0. |
+| Column | Description |
+|--------|-------------|
+| Name | Scenario name (e.g., "High Oil Price") |
+| Probability | Weight from 0 to 1. The form warns when the probabilities do not sum to 1.0. |
+| Description | Free text |
 
 ### Cost Multipliers
 
-Multipliers adjusting system-level parameters relative to the base case:
+**Add Multiplier** opens a list of about 30 keys, grouped as Investment, Operational, Fuel, Penalty, Demand and Financial (for example `Generator investment cost`, `Fuel base price`, `Loss of load penalty (VOLL)`, `Demand growth factor`, `Discount rate`). Each added key becomes a column with one multiplier per scenario (default 1.0). **Remove Selected Multiplier** removes a column.
 
-| Multiplier | Description | Example |
-|------------|-------------|---------|
-| Fuel Cost | Scales all fuel prices | 1.5 = 50% higher fuel costs |
-| Demand Growth | Scales demand increase over the planning horizon | 0.8 = 20% less demand growth |
-| Investment Cost | Scales capital expenditure for all technologies | 0.7 = 30% cheaper investments (e.g., optimistic technology learning) |
-| RE Availability | Scales renewable resource availability profiles | 1.1 = 10% better solar/wind resource (e.g., favorable climate) |
+Only `Demand growth factor` (`demand_growth`) and `Discount rate` (`discount_rate`) currently reach the model. The other keys are written to the YAML under names that the scenario schema does not know, so the loader ignores them. To vary investment, fuel, maintenance or carbon costs, edit the scenario's `multipliers` block in the YAML with the schema keys listed in [Stochastic Programming](../formulation/stochastic-programming.md).
 
 ### Using Stochastic Optimization
 
 1. Define at least two scenarios with probabilities summing to 1.0.
-2. Enable stochastic mode in **Global Settings > Master Problem > Stochastic**.
+2. Check **Global Settings > Master Problem > Enable Stochastic**.
 3. Run the simulation.
 
-The master problem makes investment decisions performing well across all scenarios (first-stage). Operational dispatch (second-stage) adjusts per-scenario, producing a robust investment plan that hedges against uncertainty.
+Investment decisions are common to all scenarios (first stage); operation is evaluated per scenario (second stage), and the objective is the probability-weighted cost. See [Stochastic Programming](../formulation/stochastic-programming.md).
 
 
 ---
@@ -223,13 +295,12 @@ The master problem makes investment decisions performing well across all scenari
 
 | Level | Scope | Examples |
 |-------|-------|---------|
-| **Global** | All systems | Solver, temporal resolution, N-1 security, simulation mode |
-| **System** | One system | Demand scale, RE targets, penalties, CO2 budgets, discount rate |
-| **Stochastic** | Modifies system-level | Fuel cost multiplier, demand growth multiplier |
+| **Global** | All systems | Solver, temporal resolution, power flow mode, N-1 security, simulation mode |
+| **System** | One system | Demand scale, RE targets, penalties, CO2 budget, discount rate |
+| **Scenarios** | Stored with the first system | Demand growth and discount-rate multipliers |
 
 - Global settings cannot be overridden per system. Different temporal resolutions require separate projects.
-- System settings are fully independent. Connected systems can have different RE targets, penalties, and CO2 budgets.
-- Stochastic multipliers modify system-level parameters across all systems.
+- System settings are independent. Connected systems can have different RE targets, penalties and CO2 budgets.
 
 
 ---
@@ -237,10 +308,10 @@ The master problem makes investment decisions performing well across all scenari
 
 ## Settings Persistence
 
-- Saved as part of the project file (`Ctrl+S`).
-- Exported YAML files (`Ctrl+Shift+S`) include all settings.
-- Defaults used for unconfigured settings (matching the editor's initial values).
-- User-modified settings highlighted with a subtle background color.
+- Global and system settings are part of the project YAML. **Save** (`Ctrl+S`) writes it to the current file, or asks for a path if there is none. **Export As…** (`Ctrl+Shift+S`) writes the same YAML to a new path. Nothing is stripped in either case.
+- Before writing, the Studio validates all systems. If there are errors, it asks "Save anyway?".
+- **File > Export Project…** writes a portable `.esfexp` bundle with the YAML and its data files.
+- Keys missing from an opened YAML take the schema defaults; new projects take the Preferences defaults (see the top of this page).
 
 
 ---
@@ -250,10 +321,10 @@ The master problem makes investment decisions performing well across all scenari
 
 | Study Type | Simulation Mode | Resolution | Rolling Horizon | Solver | N-1 |
 |------------|----------------|------------|-----------------|--------|-----|
-| Screening study | `development` | 1 h | 48 h | HiGHS | Off |
+| Screening study | `development` | 6 h | 48 h | HiGHS | Off |
 | Detailed planning | `development` | 1 h | 48 h | Gurobi | On |
-| Operational study | `unit_commitment` | 0.5 h | 24 h | Gurobi | On |
-| Rapid feasibility | `development` | 1 h | 168 h | HiGHS | Off |
+| Operational study | `unit_commitment` | 1 h | 24 h | Gurobi | On |
+| Rapid feasibility | `development` | 6 h | 168 h | HiGHS | Off |
 | Stochastic planning | `development` | 1 h | 48 h | Gurobi | Off |
 
 
@@ -267,9 +338,10 @@ The master problem makes investment decisions performing well across all scenari
 | Solver reports infeasible | Penalties too low or conflicting constraints | Increase VOLL penalty, relax RE target |
 | Very slow solve | UC mode with many generators, small windows | Use `development` mode, increase window size |
 | Unrealistic curtailment | `max_curtailment_ratio` too high | Reduce to 0.05 (5%) |
-| No battery investment | Curtailment penalty too low | Increase curtailment penalty, reduce `max_curtailment_ratio` |
+| No battery investment | Curtailment cost too low | Increase Curtailment Cost, reduce `max_curtailment_ratio` |
 | Memory issues | Too many years × nodes × generators | Reduce planning horizon, aggregate nodes |
 | Numerical warnings | Poor problem scaling | Enable solver verbose mode, check penalty magnitudes |
+| Solver missing from the list | Julia package not installed, or incompatible with the Power Flow Mode | Run `esfex add-solver`, or change the Power Flow Mode |
 
 
 ---
@@ -279,7 +351,7 @@ The master problem makes investment decisions performing well across all scenari
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+S` | Save all settings to project file |
-| `Ctrl+Shift+S` | Export settings to YAML |
-| `Ctrl+Z` | Undo last change in form |
-| `F5` | Reset form to saved values |
+| `Ctrl+S` | Save the project YAML |
+| `Ctrl+Shift+S` | Export As… (same YAML, new path) |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo (model-wide, not per form) |
+| `Ctrl+,` | Preferences… |

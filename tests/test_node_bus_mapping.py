@@ -236,3 +236,185 @@ def test_pruning_spares_nodes_that_never_had_a_bus():
 
     # n3 (never had a bus) survives; n2 (emptied) is gone.
     assert [n.name for n in st.nodes] == ["n0", "n1", "n3"]
+
+
+def test_pruning_keeps_num_nodes_consistent_with_demand_paths():
+    """Removing a node must reindex equipment node references too.
+
+    The serializer sizes the system with
+    ``num_nodes = max(len(nodes), max(unit.node) + 1)``, so a single generator
+    left pointing at a stale (pre-removal) node index re-inflates num_nodes
+    past the real node count. The config then contradicts its own
+    demand_paths and the run aborts with "demand_paths has N entries but
+    system has M nodes"."""
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.gui_model import (
+        GuiBus, GuiGeneratorInstance, GuiModel, GuiNode,
+    )
+
+    model = GuiModel()
+    st = model.state
+    st.nodes = [GuiNode(index=i, name=f"n{i}", centroid_lat=float(i),
+                        centroid_lng=0.0) for i in range(4)]
+    for i in range(4):
+        st.buses[f"node_{i}"] = GuiBus(
+            bus_id=f"node_{i}", name=f"node_{i}", parent_node=i,
+            voltage_kv=220.0, role="load", demand_fraction=1.0,
+            latitude=float(i), longitude=0.0)
+    # A generator on the LAST node — the one whose index shifts on removal.
+    st.generators["g"] = GuiGeneratorInstance(
+        instance_id="g", unit_key="u", name="G", fuel="Gas",
+        gen_type="Non-renewable", node=3, rated_power=100.0, bus="node_3",
+        latitude=3.0, longitude=0.0)
+
+    model.remove_node(1)          # prune a middle node
+
+    assert len(st.nodes) == 3
+    # The generator followed its node down to index 2 — not left at 3.
+    assert st.generators["g"].node == 2
+    assert st.buses["node_3"].parent_node == 2
+
+    # What the serializer would compute for num_nodes.
+    n = max([len(st.nodes)] + [u.node + 1 for u in st.generators.values()])
+    assert n == len(st.nodes), (
+        f"num_nodes would be {n} for {len(st.nodes)} real nodes — stale "
+        f"equipment node reference re-inflates the system size"
+    )
+
+
+def test_pruning_keeps_branch_node_indices_consistent():
+    """Removing a node must not leave branches wired to the wrong node pair.
+
+    ``from_node``/``to_node`` on a line are deprecated mirrors of its buses.
+    They do not follow an index shift, and the serializer builds the node
+    adjacency matrix — the topology the whole model rests on — from them.
+    After the Grid Builder pruned 7 bus-less nodes, 614 of Japan's 673 lines
+    pointed at the wrong node pair (a 16 km line joining Fukuoka to Hokkaido).
+    """
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.gui_model import (
+        EndpointRef, GuiBus, GuiModel, GuiNode, GuiTransmissionLine,
+    )
+
+    model = GuiModel()
+    st = model.state
+    st.nodes = [GuiNode(index=i, name=f"n{i}", centroid_lat=float(i),
+                        centroid_lng=0.0) for i in range(4)]
+    for i in range(4):
+        st.buses[f"node_{i}"] = GuiBus(
+            bus_id=f"node_{i}", name=f"node_{i}", parent_node=i,
+            voltage_kv=220.0, role="load", demand_fraction=1.0,
+            latitude=float(i), longitude=0.0)
+    # A line between the two HIGHEST nodes — both indices shift on removal.
+    st.transmission_lines = [GuiTransmissionLine(
+        line_id="l", from_bus="node_2", to_bus="node_3",
+        from_node=2, to_node=3, capacity_mw=100.0, voltage_kv=220.0,
+        from_endpoint=EndpointRef("bus", "node_2"),
+        to_endpoint=EndpointRef("bus", "node_3"))]
+
+    model.remove_node(0)
+
+    ln = st.transmission_lines[0]
+    # The buses followed the shift; the line's mirrors must follow them.
+    assert st.buses["node_2"].parent_node == 1
+    assert st.buses["node_3"].parent_node == 2
+    assert (ln.from_node, ln.to_node) == (1, 2), (
+        f"line still points at nodes {(ln.from_node, ln.to_node)} after the "
+        f"shift — the adjacency matrix would wire the wrong node pair"
+    )
+
+
+# ── 5. the reduction must preserve converters (and the boundaries they mark) ──
+
+
+def _reduction_fixture():
+    """One node holding a back-to-back frequency converter: a 50 Hz side and a
+    60 Hz side, ~33 m apart (exactly how ``_create_converter`` builds one),
+    plus a neighbouring node on each side."""
+    from esfex.visualization.data.gui_model import (
+        EndpointRef, GuiBus, GuiFrequencyConverter, GuiModel, GuiNode,
+        GuiTransmissionLine,
+    )
+    m = GuiModel()
+    st = m.state
+    st.nodes = [GuiNode(index=i, name=f"n{i}", centroid_lat=35.0 + i,
+                        centroid_lng=138.0) for i in range(3)]
+
+    def bus(bid, node, lat, lng, hz):
+        st.buses[bid] = GuiBus(bus_id=bid, name=bid, parent_node=node,
+                               voltage_kv=500.0, frequency_hz=hz, role="load",
+                               demand_fraction=1.0, latitude=lat, longitude=lng)
+
+    bus("east", 0, 36.0, 138.5, 50.0)              # neighbour, 50 Hz
+    bus("fc_e", 1, 35.5, 138.0, 50.0)              # converter station, 50 Hz side
+    bus("fc_w", 1, 35.5003, 138.0003, 60.0)        # ...60 Hz side, ~33 m away
+    bus("west", 2, 35.0, 137.5, 60.0)              # neighbour, 60 Hz
+
+    def line(lid, a, b):
+        return GuiTransmissionLine(
+            line_id=lid, from_bus=a, to_bus=b, capacity_mw=1000.0,
+            voltage_kv=500.0, reactance_pu=0.01,
+            from_endpoint=EndpointRef("bus", a),
+            to_endpoint=EndpointRef("bus", b))
+    st.transmission_lines = [line("l_e", "east", "fc_e"),
+                             line("l_w", "fc_w", "west")]
+    st.freq_converters = [GuiFrequencyConverter(
+        name="FC", from_bus="fc_e", to_bus="fc_w", rated_power_mva=300.0,
+        from_frequency_hz=50.0, to_frequency_hz=60.0)]
+    return m, st
+
+
+def test_reduction_preserves_a_back_to_back_converter():
+    """A back-to-back converter has both ends in the same node by
+    construction (~33 m apart). Collapsing the node to one bus turned it into
+    a self-loop and deleted it — with it went Japan's 50/60 Hz boundary, so
+    the DC-OPF could move unlimited power across an interface that is really
+    a few back-to-back stations."""
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.validation import reduce_to_node_mesh
+
+    m, st = _reduction_fixture()
+    assert len(st.freq_converters) == 1
+    reduce_to_node_mesh(st)
+
+    assert len(st.freq_converters) == 1, "the converter was dropped by the reduction"
+    fc = st.freq_converters[0]
+    assert fc.from_bus != fc.to_bus, "converter collapsed into a self-loop"
+    assert fc.from_bus in st.buses and fc.to_bus in st.buses
+
+    # The node that holds it kept BOTH sides — buses may exceed nodes.
+    assert len(st.buses) == 4 and len(st.nodes) == 3
+    freqs = {st.buses[fc.from_bus].frequency_hz, st.buses[fc.to_bus].frequency_hz}
+    assert freqs == {50.0, 60.0}, f"frequency boundary lost: {freqs}"
+
+
+def test_reduction_keeps_one_bus_per_node_without_converters():
+    """Nodes with no internal converter still collapse to a single bus, and
+    each node's demand share still sums to 1."""
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.validation import reduce_to_node_mesh
+
+    m, st = _reduction_fixture()
+    st.freq_converters = []                      # no converter anywhere
+    reduce_to_node_mesh(st)
+
+    assert len(st.buses) == 3, "one bus per node expected without converters"
+    assert all(b.demand_fraction == pytest.approx(1.0) for b in st.buses.values())
+
+
+def test_split_node_shares_its_demand_between_the_two_sides():
+    """A split node must not duplicate or lose load: its groups' demand
+    fractions sum to 1."""
+    pytest.importorskip("PySide6")
+    from collections import defaultdict
+    from esfex.visualization.data.validation import reduce_to_node_mesh
+
+    m, st = _reduction_fixture()
+    reduce_to_node_mesh(st)
+
+    per_node = defaultdict(float)
+    for b in st.buses.values():
+        per_node[b.parent_node] += b.demand_fraction
+    for node, share in per_node.items():
+        assert share == pytest.approx(1.0), (
+            f"node {node} carries {share} of its own demand")
