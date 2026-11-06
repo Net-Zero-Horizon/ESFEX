@@ -107,7 +107,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | Symbol | Units | Description | Julia field |
 |--------|-------|-------------|-------------|
 | \(\bar{P}_{g,n}\) | MW | Rated power of an existing generator | `gen.rated_power[n]` |
-| \(c^{inv}_{g,n}\) | \$/MW | Investment cost of an existing generator (used to price life extension) | `gen.invest_cost[n]` |
+| \(c^{inv}_{g,n}\) | \$/MW | Investment cost of an existing generator (used to price life extension; the candidate technology's when 0, see OBJ-3b) | `gen.invest_cost[n]` |
 | \(c^{inv}_{k,n}\) | \$/MW | Technology investment cost | `tech.invest_cost[n]` |
 | \(\bar{I}_{k,n}\) | MW | Maximum cumulative technology investment | `tech.invest_max[n]` |
 | \(\tau_{g,n}\), \(\tau_{k,n}\) | years | Lifetime | `life_time[n]` |
@@ -187,7 +187,9 @@ where \(d_{r}\) is the length of fuel route \(r\) (km), and \(c^{ft}_f\) is the 
 C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y \tag{OBJ-3b}
 \]
 
-Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\). With an investment cost of 0, life extension is free.
+Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
+
+Where an existing unit's investment cost is 0 at a node (the Studio default), \(c^{inv}\) is taken from the unit's candidate when the master input is built (`life_extension_invest_costs` in `bridge/adapters.py`): for a generator, the technology with the same `fuel` and `type` (the one its `technology` field names if several match, else the first in configuration order); for a battery, the battery technology its `technology` field names, else the first battery technology (`invest_cost_power`). A unit with no candidate keeps \(c^{inv} = 0\), so its extension is free; a warning names it once per run.
 
 ### 5.2 Operational Cost
 
