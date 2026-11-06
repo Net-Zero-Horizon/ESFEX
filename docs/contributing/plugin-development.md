@@ -6,7 +6,7 @@ ESFEX plugins extend the framework without modifying its core source code. A plu
 
 - **Extend the simulation** --- inject custom logic before/after optimization steps, modify demand data, or add post-processing
 - **Extend the GUI** --- add tree categories, property forms, toolbar buttons, menu items, result variables, and map layers
-- **Extend the CLI** --- return Typer sub-apps from `get_cli_commands()` (currently not mounted; see [CLI Hooks](#cli-hooks))
+- **Extend the CLI** --- return Typer sub-apps from `get_cli_commands()`, run as `esfex <plugin name> ...` (see [CLI Hooks](#cli-hooks))
 - **Inject Julia code** --- provide `.jl` overlay modules that are `include()`-d at runtime, adding constraints or variables to the optimization model without altering ESFEX's native Julia files
 
 ### Plugin Discovery Mechanism
@@ -128,7 +128,7 @@ class ESFEXPlugin:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `context.config` | `ESFEXConfig` or `None` | The loaded ESFEX configuration. May be `None` if the plugin is loaded before config parsing. |
+| `context.config` | `ESFEXConfig` or `None` | The loaded ESFEX configuration. May be `None` if the plugin is loaded before a config is (see [Plugin Configuration](#plugin-configuration)); updated before each `on_config_loaded()` call. |
 | `context.plugin_dir` | `Path` | Root directory of the plugin (where `plugin.json` lives). Use this to locate data files bundled with your plugin. |
 | `context.data_dir` | `Path` | Persistent data directory for this plugin: `~/.esfex/plugin_data/{name}/`. Created automatically. Use this for caches, logs, or generated artifacts. |
 | `context.gui_mode` | `bool` | `True` when running inside the Studio. Use this to conditionally import PySide6 modules. |
@@ -154,9 +154,26 @@ plugins:
     report_format: "xlsx"
 ```
 
-`ESFEXConfig.plugins` is a plain `dict[str, Any]`; ESFEX does not validate it. Read your section from the context, for example `(self.context.config.plugins or {}).get(self.meta.name, {})` (the config is `None` in the Studio when no project is loaded at startup).
+`ESFEXConfig.plugins` is a plain `dict[str, Any]`. Read your section from the context, for example `(self.context.config.plugins or {}).get(self.meta.name, {})`. `self.context.config` is `None` when the plugin was loaded for a plugin CLI command, or by a Studio started without a project; it is set before each `on_config_loaded()` call.
 
-The base class also defines `get_config_schema()` and `on_config_loaded(config)`, but ESFEX does not call either of them at present. Validate your section yourself in `setup()` or `pre_simulation()`.
+```python
+def get_config_schema(self) -> Optional[type[BaseModel]]:
+    """Return a Pydantic model validating the plugins.<name> section."""
+    return None
+
+def on_config_loaded(self, config: ESFEXConfig) -> None:
+    """Called with the loaded and validated configuration."""
+```
+
+`PluginManager.apply_config(config)` runs both for every loaded plugin:
+
+1. If the plugin returns a model from `get_config_schema()` and the config has a `plugins.<name>` section, the section is validated with `model.model_validate(section)`. The section itself stays a dict.
+2. If it is valid (or there is nothing to validate), `context.config` is set to `config` and `on_config_loaded(config)` is called.
+
+The runner calls it once per run, when the `Orchestrator` is created (so before `pre_simulation()`); an invalid section raises `ValueError("Invalid plugin configuration: plugins.<name>: ...")` and the run does not start. The Studio calls it at startup when it opens a config file and only logs invalid sections.
+
+!!! note "`setup()` may run without a config"
+    The manager loads plugins only once per process. When `esfex` loaded them for a plugin command, or the Studio started without a project, `setup()` saw `context.config = None`. Read configuration in `on_config_loaded()`, not in `setup()`.
 
 
 ---
@@ -285,8 +302,16 @@ def post_simulation(
 
 Only called when `context.gui_mode is True`. Guard PySide6 imports behind this check.
 
-!!! warning "Only `get_menu_items` is wired at present"
-    The plugin manager looks up the Studio's panels under attribute names the main window does not have (`_tree`, `_props`, `_model`, `_toolbar`; `plugins/manager.py`, `_register_*`), so `get_tree_categories`, `get_forms` and `get_toolbar_actions` are never called. `get_menu_items` (via `menuBar()`), `get_result_variables` (results panel) and `get_translations` work.
+`PluginManager.register_gui_extensions(window)` calls them when the Studio starts, and the Plugin Manager calls them when it hot-loads a plugin. They receive these parts of the main window:
+
+| Hook | Receives / registers on |
+|------|------------------------|
+| `get_tree_categories()` | `window.element_tree` (`ElementTreePanel.register_plugin_category`) |
+| `get_forms(model)` | `model` is `window.model` (the `GuiModel`); forms go to `window.properties_panel` |
+| `get_toolbar_actions(toolbar, window)` | `toolbar` is `window.toolbar` (the main `QToolBar`) |
+| `get_menu_items(menu_bar, window)` | `window.menuBar()` |
+| `get_result_variables()` | `window._results_panel` |
+| `get_map_layers(map_widget)` | `window.map_widget` (Leaflet in a `QWebEngineView`) |
 
 ### extend_element_tree
 
@@ -300,6 +325,14 @@ def get_tree_categories(self) -> list[dict[str, str]]:
     return []
 ```
 
+The category appears in every system, including systems added later; a `tree.<key>` translation, if you register one, replaces `label`. It starts empty: ESFEX does not store elements of plugin types. Add them yourself, to the current system:
+
+```python
+main_window.element_tree.add_plugin_element("co2_sources", "src_1", "Cement plant")
+```
+
+Selecting the item shows the form registered for `element_type` (below). Plugin elements are not saved with the project and disappear when it is reloaded; keep their data in the plugin (for example under `context.data_dir`).
+
 ### extend_element_forms
 
 ```python
@@ -311,6 +344,8 @@ def get_forms(self, model: Any) -> list[tuple[str, Any]]:
     """
     return []
 ```
+
+If the widget has a `load_element(element_id)` method, it is called with the selected element's id each time the form is shown.
 
 ### extend_toolbar
 
@@ -327,6 +362,8 @@ def get_toolbar_actions(self, toolbar: Any, main_window: Any) -> list[Any]:
     """
     return []
 ```
+
+Returned actions that are not on the toolbar yet are added to it, so `toolbar.addAction()` in the hook is optional.
 
 ### extend_menu
 
@@ -369,6 +406,14 @@ def get_map_layers(self, map_widget: Any) -> None:
     """
 ```
 
+The map page may still be loading when the hook runs, and it is reloaded if its render process crashes. Add the layer from the widget's `loadFinished` signal; the Leaflet map is the page's global `map`:
+
+```python
+def get_map_layers(self, map_widget):
+    js = "L.circle([22.0, -80.0], {radius: 20000}).addTo(map);"
+    map_widget.loadFinished.connect(lambda ok: ok and map_widget.page().runJavaScript(js))
+```
+
 ### register_translations
 
 ```python
@@ -396,20 +441,19 @@ def get_translations(self) -> dict[str, dict[str, str]]:
 
 ## CLI Hooks
 
-!!! warning "Not functional at present"
-    Plugin CLI sub-commands are never mounted. At import time the CLI calls `discover()` and then `register_cli_commands(app)`, but `register_cli_commands` iterates only *loaded* plugins, and nothing loads them at that point. `esfex <plugin_name> ...` therefore fails with "No such command". The API below is what a plugin should implement once this is fixed; until then, ship a standalone script or a GUI action instead.
+When `esfex` starts with a command that is not built in (or with `--help`), its entry point loads the enabled, trusted plugins (`load_all(config=None)`, so `context.config` is `None`) and calls `register_cli_commands(app)`. Built-in commands (`run`, `studio`, `plugin`, ...) skip this, so they don't pay for importing plugins, and `run` / `studio` still load them with the project's config.
+
+A plugin is skipped, with an error in the log (printed on the console), when it fails to load, when `get_cli_commands()` raises or returns something other than `typer.Typer` apps, or when its name is already an `esfex` command. The rest of the CLI keeps working.
 
 ### register_commands
 
 ```python
 def get_cli_commands(self) -> list[typer.Typer]:
-    """Return Typer sub-apps to register as 'esfex <name> ...'.
-
-    Each returned Typer app is mounted as a subcommand group named
-    after the plugin.
-    """
+    """Return Typer sub-apps to register as 'esfex <name> ...'."""
     return []
 ```
+
+The commands are mounted as one group named after the plugin (`plugin.json` `name`). With several apps, their commands are merged into that group.
 
 Example registration:
 
@@ -444,7 +488,7 @@ class CarbonTrackerPlugin(ESFEXPlugin):
         return [app]
 ```
 
-Once registration works, this would expose `esfex carbon_tracker report results.h5`.
+This exposes `esfex carbon_tracker report results.h5`, listed by `esfex --help` and `esfex carbon_tracker --help`.
 
 
 ---
@@ -871,7 +915,11 @@ esfex plugin install --git https://github.com/user/esfex-carbon-tracker.git
 
 Only `https://` and `git://` URL schemes are accepted. Git hooks are disabled during clone to prevent pre-checkout remote code execution.
 
-Only these hosts are accepted without confirmation: `github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org` (with or without `www.`) and `git.sr.ht`. Other hosts require `trust_host=True` in `install_from_git(url, target_name=None, *, force=False, trust_host=False)`. The Studio dialog asks before cloning from another host; `esfex plugin install --git` never passes `trust_host`, so installs from other hosts fail on the command line.
+Only these hosts are accepted without confirmation: `github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org` (with or without `www.`) and `git.sr.ht`. Other hosts require `trust_host=True` in `install_from_git(url, target_name=None, *, force=False, trust_host=False)`. The Studio dialog asks before cloning from another host; on the command line, add `--trust-host`:
+
+```bash
+esfex plugin install --git https://git.example.org/team/carbon-tracker.git --trust-host
+```
 
 ### Python Dependencies
 
@@ -899,6 +947,9 @@ esfex plugin install --zip /path/to/plugin.zip
 
 # Install from git
 esfex plugin install --git https://github.com/user/esfex-plugin.git
+
+# Install from a git host outside the default list (explicit confirmation)
+esfex plugin install --git https://git.example.org/team/esfex-plugin.git --trust-host
 
 # Uninstall
 esfex plugin uninstall carbon_tracker
@@ -1093,7 +1144,7 @@ Built-in safety measures:
 
 3. **Zip Slip protection**: Before extracting any ZIP archive, all member paths are validated against the target directory. Archives containing entries that would escape the target (e.g., `../../etc/passwd`) are rejected with a `ValueError`.
 
-4. **Git clone hardening**: Git hooks are disabled during `git clone` by setting `core.hooksPath` to an empty temporary directory. This prevents pre-checkout hooks from executing arbitrary code. Only `https://` and `git://` URL schemes are accepted, and hosts outside the default list need `trust_host=True`.
+4. **Git clone hardening**: Git hooks are disabled during `git clone` by setting `core.hooksPath` to an empty temporary directory. This prevents pre-checkout hooks from executing arbitrary code. Only `https://` and `git://` URL schemes are accepted, and hosts outside the default list need `trust_host=True` (`--trust-host` on the command line).
 
 5. **Audit logging**: The SHA-256 hash of every loaded plugin directory is logged, enabling forensic analysis of which code was executed.
 
@@ -1153,8 +1204,8 @@ from esfex.plugins.manager import get_plugin_manager, reset_plugin_manager
 |--------|----------|---------|-------------|
 | `setup()` | Lifecycle | `None` | One-time initialization after instantiation |
 | `teardown()` | Lifecycle | `None` | Cleanup when shutting down |
-| `get_config_schema()` | Config | `type[BaseModel]` or `None` | Defined but not called by ESFEX at present |
-| `on_config_loaded(config)` | Config | `None` | Defined but not called by ESFEX at present |
+| `get_config_schema()` | Config | `type[BaseModel]` or `None` | Validates the `plugins.<name>` section when a run starts |
+| `on_config_loaded(config)` | Config | `None` | Called with the validated config when a run starts (and when the Studio starts with a config) |
 | `pre_simulation(...)` | Runner | `None` | Before simulation starts |
 | `post_demand_loaded(...)` | Runner | `np.ndarray` or `None` | After demand loading; return modified demand |
 | `pre_master_problem(...)` | Runner | `None` | Before master problem solve |
@@ -1163,7 +1214,7 @@ from esfex.plugins.manager import get_plugin_manager, reset_plugin_manager
 | `post_year(...)` | Runner | `None` | After each year's results |
 | `post_simulation(...)` | Runner | `None` | After all years complete |
 | `get_julia_modules()` | Julia | `list[Path]` | Julia overlay files to include |
-| `get_cli_commands()` | CLI | `list[Typer]` | Typer sub-apps for CLI (not mounted at present) |
+| `get_cli_commands()` | CLI | `list[Typer]` | Typer sub-apps, mounted as `esfex <name> ...` |
 | `get_tree_categories()` | GUI | `list[dict]` | Element tree categories |
 | `get_forms(model)` | GUI | `list[tuple]` | Property panel forms |
 | `get_toolbar_actions(toolbar, window)` | GUI | `list[QAction]` | Toolbar actions |
@@ -1180,12 +1231,13 @@ from esfex.plugins.manager import get_plugin_manager, reset_plugin_manager
 | `load_all(config=None, gui_mode=False, project_dir=None, include_project_dir=False)` | Discover (if not done), load, and setup all enabled, trusted plugins |
 | `load_single(name, config, gui_mode)` | Hot-load a single plugin by name |
 | `call_hook(hook_name, **kwargs)` | Dispatch a hook to all loaded plugins |
+| `apply_config(config)` | Validate each plugin's `plugins.<name>` section and call `on_config_loaded`; returns the error messages of invalid sections |
 | `enable(name)` / `disable(name)` | Persist enable/disable state |
 | `install_from_zip(zip_path, *, force=False)` | Install plugin from ZIP archive and trust its hash |
 | `install_from_git(url, target_name=None, *, force=False, trust_host=False)` | Install plugin from git repository and trust its hash |
 | `trust_plugin(name)` | Record the current hash of a discovered plugin as trusted |
 | `uninstall(name)` | Remove plugin from user plugins directory |
 | `register_julia_modules()` | `include()` the Julia overlays of loaded plugins |
-| `register_cli_commands(app)` | Register CLI subcommands of loaded plugins on a Typer app |
+| `register_cli_commands(app)` | Mount the CLI sub-commands of loaded plugins on a Typer app (skipping broken or clashing ones) |
 | `register_gui_extensions(window)` | Register all GUI extensions on main window |
 | `teardown_all()` | Teardown all plugins in reverse order |

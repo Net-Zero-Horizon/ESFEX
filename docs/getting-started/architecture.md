@@ -352,6 +352,7 @@ Plugins can hook into the simulation lifecycle at these points:
 | Hook | When |
 |------|------|
 | `setup()` | After plugin instantiation |
+| `on_config_loaded()` | When a run starts, after the plugin's `plugins.<name>` section passed `get_config_schema()` |
 | `pre_simulation()` | Before simulation starts |
 | `post_demand_loaded()` | After demand data is loaded (can modify demand) |
 | `pre_master_problem()` | Before capacity expansion solve |
@@ -361,8 +362,7 @@ Plugins can hook into the simulation lifecycle at these points:
 | `post_simulation()` | After all years complete |
 | `teardown()` | After the run, and on shutdown |
 
-!!! note
-    `ESFEXPlugin` also defines `on_config_loaded()`, `get_config_schema()` and `get_cli_commands()`, but ESFEX does not currently call them: they have no effect.
+Plugins can also add `esfex <plugin name> ...` commands (`get_cli_commands()`) and Studio extensions (tree categories, forms, toolbar actions, menus, result variables, map layers); see [Plugin Development](../contributing/plugin-development.md).
 
 ### Julia Extensions
 
