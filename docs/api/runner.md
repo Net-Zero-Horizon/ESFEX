@@ -301,7 +301,7 @@ class YearResults:
 | `bat_capacity_factor` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery capacity factors |
 | `bat_lcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery LCOE ($/MWh) |
 | `bat_vallcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery value-adjusted LCOE ($/MWh) |
-| `fuel_for_power` | `Optional[dict]` | `{gen_idx: array}` | Declared but never filled by the runner (always `None`) |
+| `fuel_for_power` | `Optional[dict]` | `{unit: (node, hour)}` | Fuel burnt by each fuel-coupled unit (fuel units per step), keyed by unit name; `None` without primary energy. Written to `primary_energy/fuel_for_power/` |
 | `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed ` (1)`, ` (2)`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
 
 Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#derived-metrics).
@@ -310,7 +310,7 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows (committed steps only, per period of `primary_energy_resolution` hours from the start of the year): `{section: {fuel: array}}` plus cost totals (committed share of each window) |
+| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows (committed steps only, per period of `primary_energy_resolution` hours from the start of the year): `{section: {fuel: array}}` plus cost totals (summed over each window's committed steps) and `fuel_for_power` |
 | `n1_gen_reserve_duals` | `Optional[np.ndarray]` | `(hour,)` dual of the generation N-1 constraint |
 | `n1_trans_reserve_duals` | `Optional[dict]` | Duals of the transmission N-1 constraints |
 | `n1_binding_contingencies` | `Optional[list]` | Binding contingency IDs |

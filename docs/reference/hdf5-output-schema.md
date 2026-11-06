@@ -163,7 +163,7 @@ Despite the name, this is the same total demand array as `detailed_results/.../d
 
 ## cost_breakdown/
 
-Granular decomposition of the annual system cost into 35 components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, accumulated across rolling horizon windows.
+Granular decomposition of the annual system cost into 35 components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, summed over the rolling-horizon windows. Each window counts only its committed steps (the overlap tail is solved again by the next window); costs with no time step (investment annuities, CO2-budget slack) count for the committed share of the window.
 
 This group is present when the optimizer exports per-component cost data. The [Financial Analysis](../api/models-financial-analysis.md) module reads this group directly; when it is absent, costs are recalculated from generation output and system configuration.
 
@@ -203,7 +203,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
 | `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
-| `pe_coupling_slack_cost` | float | $ | Always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
+| `pe_coupling_slack_cost` | float | $ | Deprecated, always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
 | `pe_electrolyzer_cost` | float | $ | Electrolyzer cost in the primary energy model |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `total` | float | $ | Sum of all cost components |
@@ -577,9 +577,10 @@ Written when the primary energy model is active.
 | `transport_investments/{fuel}` | dataset | Transport capacity investments |
 | `storage_investments/{fuel}` | dataset | Storage capacity investments |
 | `transport_flows/{fuel}` | dataset | Flows per route and period `[routes x periods]` |
+| `fuel_for_power/{unit}` | dataset | Fuel burnt by each fuel-coupled unit `[nodes x steps]`, in fuel units per step (attribute `units`) |
 | `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | attributes | Cost totals ($) |
 
-Rolling-horizon windows contribute only their committed steps (the overlap with the next window is dropped, as for the dispatch arrays); window costs count in proportion to those steps.
+Rolling-horizon windows contribute only their committed steps (the overlap with the next window is dropped, as for the dispatch arrays). The cost totals add up each window's committed steps: a period's supply and flows count for the share of its steps that the window keeps.
 
 #### n1_security/
 

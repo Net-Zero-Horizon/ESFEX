@@ -216,9 +216,11 @@ def _merge_pe_windows(windows, period_steps: int) -> dict:
     overlap tail belongs to the next window), joined along time and summed
     back into periods of ``period_steps`` steps from the start of the year.
     Windows may have different period counts (the last one is shorter).
-    Costs count the committed share of each window (``keep / steps``), like
-    the dispatch objective. Investments and end-of-year tank levels come
-    from the last window.
+    Each window's costs already cover only its committed steps
+    (``PrimaryEnergyAdapter.get_results(keep_steps=...)``) and are summed.
+    ``fuel_for_power`` (``{unit: [node x step]}``) is cut to the committed
+    steps and joined like the dispatch arrays. Investments and end-of-year
+    tank levels come from the last window.
     """
     def _committed_steps(arr, n_steps, keep):
         arr = np.asarray(arr, dtype=float)
@@ -259,9 +261,19 @@ def _merge_pe_windows(windows, period_steps: int) -> dict:
     merged["transport_investments"] = last_pe.get("transport_investments", {})
     merged["storage_investments"] = last_pe.get("storage_investments", {})
     for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
-        merged[cost_key] = sum(
-            float(pe.get(cost_key, 0.0)) * (keep / n_steps if n_steps > 0 else 1.0)
-            for pe, n_steps, keep in windows)
+        merged[cost_key] = sum(float(pe.get(cost_key, 0.0)) for pe, _, _ in windows)
+    units: list = []
+    for pe, _, _ in windows:
+        units.extend(u for u in (pe.get("fuel_for_power") or {}) if u not in units)
+    if units:
+        merged["fuel_for_power"] = {}
+        for unit in units:
+            n_nodes = next(np.asarray(pe["fuel_for_power"][unit]).shape[0] for pe, _, _ in windows
+                           if unit in (pe.get("fuel_for_power") or {}))
+            merged["fuel_for_power"][unit] = np.concatenate([
+                np.asarray(pe["fuel_for_power"][unit], dtype=float)[:, :keep]
+                if unit in (pe.get("fuel_for_power") or {}) else np.zeros((n_nodes, keep))
+                for pe, _, keep in windows], axis=-1)
     return merged
 
 
@@ -351,7 +363,7 @@ class YearResults:
     bat_capacity_factor: Optional[np.ndarray] = None      # [bat x node x hour]
     bat_lcoe: Optional[np.ndarray] = None                 # [bat x node x hour]
     bat_vallcoe: Optional[np.ndarray] = None              # [bat x node x hour]
-    fuel_for_power: Optional[dict] = None                 # {gen_idx: [node x hour]}
+    fuel_for_power: Optional[dict] = None                 # {unit: [node x hour]} fuel units/step
     technology_selling_prices: Optional[dict] = None      # {tech_name: {prices_weights, ...}}
     price_energy_component: Optional[np.ndarray] = None   # [hour]
     price_congestion_component: Optional[np.ndarray] = None  # [node x hour]
@@ -5073,25 +5085,24 @@ class Orchestrator:
                 else:
                     return arr[..., :keep_h]
 
-            # Accumulate scalar results (scale by kept fraction)
+            # Accumulate scalar results. The window's objective, totals and
+            # cost breakdown already cover only its committed steps
+            # (_solve_window extracts them with keep_hours).
             total_solve_time += window_result.get("solve_time", 0.0)
             total_re_penetration += window_result.get("re_penetration", 0.0)
             window_hours_total = end_hour - start_hour
             kept_fraction = keep_hours / window_hours_total if window_hours_total > 0 else 1.0
-            total_objective += window_result.get("objective", 0.0) * kept_fraction
-            total_load_shed += window_result.get("load_shed_total", 0.0) * kept_fraction
-            total_curtailment += window_result.get("total_curtailment", 0.0) * kept_fraction
-            total_emissions += window_result.get("total_co2", 0.0) * kept_fraction
-            total_generation += window_result.get("total_generation", 0.0) * kept_fraction
-            total_demand_val += window_result.get("total_demand", 0.0) * kept_fraction
+            total_objective += window_result.get("objective", 0.0)
+            total_load_shed += window_result.get("load_shed_total", 0.0)
+            total_curtailment += window_result.get("total_curtailment", 0.0)
+            total_emissions += window_result.get("total_co2", 0.0)
+            total_generation += window_result.get("total_generation", 0.0)
+            total_demand_val += window_result.get("total_demand", 0.0)
 
-            # Accumulate cost breakdown (scale energy-based costs by kept_fraction)
             wbd = window_result.get("cost_breakdown")
             if wbd:
                 for k, v in wbd.items():
-                    accumulated_cost_breakdown[k] = (
-                        accumulated_cost_breakdown.get(k, 0.0) + v * kept_fraction
-                    )
+                    accumulated_cost_breakdown[k] = accumulated_cost_breakdown.get(k, 0.0) + v
 
             # Collect array results (trimmed to remove overlap hours)
             if window_result.get("gen_output") is not None:
@@ -5338,6 +5349,7 @@ class Orchestrator:
             electrolyzer_power=electrolyzer_power,
             electrolyzer_h2=electrolyzer_h2,
             primary_energy=pe_merged,
+            fuel_for_power=(pe_merged or {}).get("fuel_for_power") or None,
             load_shed=total_load_shed,
             re_penetration=avg_re,
             emissions=total_emissions,
@@ -6083,23 +6095,34 @@ class Orchestrator:
                     logger.warning(f"Could not export LP: {e}")
                 return None
 
+            # Steps committed from this window (the next window solves the
+            # overlap tail again): the scalar totals and costs cover only
+            # these, and the boundary state is taken where they end.
+            k = min(keep_hours, hours) if keep_hours else hours
+
             # Extract results
-            solution = ps.get_solution_values()
+            solution = ps.get_solution_values(keep_steps=k, primary_energy=pe)
 
             # Extract primary energy results and storage carry-over
             pe_results = None
             if pe is not None:
                 try:
-                    pe_results = pe.get_results()
+                    pe_results = pe.get_results(keep_steps=k)
                 except Exception as e:
                     logger.warning(f"Window {window}: PE result extraction failed: {e}")
                 if pe_results:
                     self._carry_pe_investments(pe_results)
+                    # Fuel burnt per coupled unit, keyed by the unit's name
+                    unit_names = unique_unit_names([g["name"] for g in gen_list])
+                    pe_results["fuel_for_power"] = {
+                        unit_names[g]: arr
+                        for g, arr in (pe_results.get("fuel_for_power") or {}).items()
+                        if 0 <= g < len(unit_names)
+                    }
 
             # Extract boundary conditions for next window, at the end of the
             # committed part: the next window starts there, not at the end of
             # this window's look-ahead (overlap) tail.
-            k = min(keep_hours, hours) if keep_hours else hours
             new_boundary = {}
 
             def _state_at(arr):
@@ -7961,6 +7984,16 @@ class Orchestrator:
                     for fuel_name, arr in pe["transport_flows"].items():
                         tf_grp.create_dataset(
                             fuel_name, data=np.array(arr, dtype=np.float64))
+
+                # Fuel burnt by each coupled unit: {unit: [nodes × steps]}
+                if result.fuel_for_power:
+                    ffp_grp = pe_grp.create_group("fuel_for_power")
+                    ffp_grp.attrs["units"] = "fuel units per step"
+                    for unit, arr in result.fuel_for_power.items():
+                        ffp_grp.create_dataset(
+                            str(unit).replace("/", "_"),
+                            data=np.array(arr, dtype=np.float64),
+                            chunks=True, compression="gzip")
 
             # --- N-1 Security Results ---
             if (result.n1_gen_reserve_duals is not None
