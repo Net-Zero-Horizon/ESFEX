@@ -337,9 +337,10 @@ def inter_system_links_to_config_dict(
     links: list[GuiInterSystemLink],
     config_dict: dict,
 ) -> None:
-    """Write inter-system links back into ``config_dict["meta_network"]``."""
-    if not links:
-        return
+    """Write inter-system links back into ``config_dict["meta_network"]``.
+
+    An empty list writes ``systems_links: []``: the GUI's links replace the
+    loaded file's, so deleting every link in the Studio persists on save."""
     meta = config_dict.get("meta_network")
     if meta is None:
         return
@@ -2254,6 +2255,10 @@ def config_to_global_settings(
         g.risk_insurance_premium_rate = rk.insurance_premium_rate
         g.risk_monte_carlo_samples = rk.monte_carlo_samples
         g.risk_monte_carlo_seed = rk.monte_carlo_seed
+        g.risk_climate_scenarios = [
+            sc.model_dump(mode="python") for sc in rk.climate_scenarios]
+        g.risk_hazard_scenarios = [
+            sc.model_dump(mode="python") for sc in rk.hazard_scenarios]
 
     # visual_scaling is a GUI-only key not in the Pydantic schema,
     # so it must be read from the raw YAML dict.
@@ -2409,6 +2414,47 @@ def global_settings_to_config_dict(
     config_dict["risk"]["insurance_premium_rate"] = g.risk_insurance_premium_rate
     config_dict["risk"]["monte_carlo_samples"] = g.risk_monte_carlo_samples
     config_dict["risk"]["monte_carlo_seed"] = g.risk_monte_carlo_seed
+    config_dict["risk"]["climate_scenarios"] = _risk_scenario_dicts(
+        g.risk_climate_scenarios, "climate")
+    config_dict["risk"]["hazard_scenarios"] = _risk_scenario_dicts(
+        g.risk_hazard_scenarios, "hazard")
+
+
+def _risk_scenario_dicts(scenarios, kind: str) -> list[dict]:
+    """Workbench scenario dicts as the schema stores them: keys the schema
+    does not know (``delta_source`` …) are dropped, a scenario the schema
+    rejects is skipped with a warning, and climate probabilities are rescaled
+    to sum to 1, so the saved file still loads."""
+    import logging
+
+    from pydantic import ValidationError
+
+    from esfex.config.schema import ClimateScenarioConfig, HazardScenarioConfig
+
+    model = ClimateScenarioConfig if kind == "climate" else HazardScenarioConfig
+    out = []
+    for sc in scenarios or []:
+        if not isinstance(sc, dict):
+            sc = getattr(sc, "__dict__", {})
+        try:
+            cfg = model.model_validate(
+                {k: v for k, v in sc.items() if k in model.model_fields})
+        except ValidationError as exc:
+            logging.getLogger(__name__).warning(
+                "Risk %s scenario %r not saved: %s", kind, sc.get("name"), exc)
+            continue
+        out.append(cfg.model_dump(mode="python"))
+    # The schema requires climate probabilities to sum to 1 (they weigh the
+    # futures); after a scenario is removed in the workbench they may not,
+    # and the saved file would no longer load. Rescale them instead.
+    total = sum(sc["probability"] for sc in out)
+    if kind == "climate" and out and total > 0 and abs(total - 1.0) > 0.01:
+        logging.getLogger(__name__).warning(
+            "Risk climate scenario probabilities sum to %.4f; rescaled to 1 "
+            "on save.", total)
+        for sc in out:
+            sc["probability"] = sc["probability"] / total
+    return out
 
 
 def stochastic_scenarios_to_config_dict(
@@ -2421,9 +2467,10 @@ def stochastic_scenarios_to_config_dict(
     scenarios : list of GuiStochasticScenario
     sys_dict : dict
         The system-level dict (not top-level config dict).
+
+    An empty list writes ``stochastic_scenarios: []``, so deleting every
+    scenario in the Studio persists on save.
     """
-    if not scenarios:
-        return
     # Legacy keys are written under their model names; keys with no effect
     # are dropped with a warning.
     sys_dict["stochastic_scenarios"] = [
@@ -2543,13 +2590,15 @@ def gui_state_to_yaml(
         _apply_gui_state_to_dict(state, sys_dict)
         _drop_shadowed_aliases(SystemConfig, sys_dict)
 
-    if inter_system_links:
+    # ``None`` keeps the base config's entries; a list (even empty) replaces
+    # them, so deleting the last link or scenario in the GUI persists.
+    if inter_system_links is not None:
         inter_system_links_to_config_dict(inter_system_links, config_dict)
 
     if global_settings:
         global_settings_to_config_dict(global_settings, config_dict)
 
-    if stochastic_scenarios:
+    if stochastic_scenarios is not None:
         # Write stochastic scenarios to the primary system dict: the first
         # simulated system, which is where config_to_stochastic_scenarios
         # and the runner read them from.

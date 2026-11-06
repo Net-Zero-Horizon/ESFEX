@@ -257,3 +257,26 @@ def test_export_project_uses_load_folder(home, tmp_path, no_dialogs, monkeypatch
         assert "demand/d0.csv" in names and "availability/solar.csv" in names
     finally:
         _close(w)
+
+
+def test_unknown_keys_kept_by_autosave_cleared_by_save(home, tmp_path, no_dialogs):
+    """The autosave cache does not change the user's file, so its unknown
+    keys are still reported; a real save drops them and clears the list."""
+    cfg = _project(tmp_path / "proj")
+    d = yaml.safe_load(cfg.read_text())
+    d["systems"]["island"]["dorop"] = 1
+    cfg.write_text(yaml.safe_dump(d, sort_keys=False))
+    app, w = _start(cfg)
+    try:
+        _wait_loaded(app, w)
+        st = w._all_states["island"]
+        assert st.unknown_config_keys
+        w._mark_modified()
+        w._on_autosave()
+        assert st.unknown_config_keys
+        assert "dorop" in cfg.read_text()
+        w._on_save()
+        assert w._all_states["island"].unknown_config_keys == []
+        assert "dorop" not in cfg.read_text()
+    finally:
+        _close(w)
