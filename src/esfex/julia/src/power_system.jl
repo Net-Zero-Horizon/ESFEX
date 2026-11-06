@@ -837,23 +837,23 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
 
     # Load shedding penalty (VOLL × MWh) — node-level
     #
-    # IMPORTANT: only price load_shed *directly* when there is no
-    # sectoral decomposition.  When sectoral_load_shed_cost is also in
-    # the objective AND sum(sectoral_lol) == load_shed (the linking
-    # equality), pricing load_shed here would double-count every shed
-    # MWh — once via VOLL, and again via VOLL × criticality_multiplier
-    # (cuba.yaml: medium=10, high=100, critical=1000).  The sectoral
-    # expression already represents the criticality-weighted cost.
+    # With a sectoral decomposition, the sectors' shed is priced at
+    # VOLL × criticality below (cuba.yaml: medium=10, high=100,
+    # critical=1000); only the unclassified remainder
+    # (load_shed − Σ sectoral shed, see add_sectoral_demand_constraints!)
+    # is priced here, at VOLL. Pricing all of load_shed here would
+    # double-count every sectoral MWh.
     n_node = input.network.num_nodes
     has_sectoral = vars.loss_of_load_sectoral !== nothing &&
                    !isempty(vars.loss_of_load_sectoral)
-    load_shed_cost = if has_sectoral
-        AffExpr(0.0)  # priced via sectoral_load_shed_cost below
-    else
-        @expression(model,
-            input.loss_of_load_penalty *
-            sum(vars.load_shed[b, t] for b in 1:n_bus, t in 1:hours)
-        )
+    load_shed_cost = @expression(model,
+        input.loss_of_load_penalty *
+        sum(vars.load_shed[b, t] for b in 1:n_bus, t in 1:hours)
+    )
+    if has_sectoral
+        for lol_vars in values(vars.loss_of_load_sectoral), n in 1:n_node, t in 1:hours
+            add_to_expression!(load_shed_cost, -input.loss_of_load_penalty, lol_vars[n, t])
+        end
     end
 
 
@@ -3085,6 +3085,19 @@ function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerS
     _charge_n1_shortfall!(model, n1_cost, input)
 end
 
+"""
+    _sectoral_demand_at(input, sector, t, ni) -> Float64
+
+Demand of `sector` at node `ni` and step `t` (MW, >= 0); 0 when the sector's
+array does not cover that node or step.
+"""
+function _sectoral_demand_at(input, sector, t, ni)
+    arr = get(input.sectoral_demand, sector, nothing)
+    arr === nothing && return 0.0
+    (t <= size(arr, 1) && ni <= size(arr, 2)) || return 0.0
+    return max(0.0, arr[t, ni])
+end
+
 # Export the new constraint functions
 export add_renewable_constraint!, add_co2_constraint!, add_co2_emissions_definition!, add_curtailment_constraints!
 export add_n1_security_constraints!, identify_n1_critical_elements
@@ -3093,12 +3106,17 @@ export add_scopf_constraints!
 """
     add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Add sectoral load shedding constraints:
-1. Sum of sectoral LOL == total LOL (decomposition)
-2. Per-sector LOL cap: lol_sector <= sectoral_demand[sector]
-3. Criticality ordering: higher criticality sectors shed last
+Add sectoral load shedding constraints, per node and step:
+1. Each sector sheds at most its own demand: lol_sector <= sectoral_demand[sector].
+2. The node's shed splits into the sectors' shed plus an unclassified
+   remainder: load_shed - sum(lol_sector) in [0, max(0, demand - sum(sectoral_demand))].
 
-Matches legacy PowerSystem.py lines 1175-1230.
+The remainder covers node demand that no sector accounts for (sectoral data
+missing for a node, or not matching the demand passed in), so the split is
+always feasible. The objective prices each sector's shed at
+VOLL x criticality and the remainder at VOLL (multiplier 1). With the per-sector
+caps, the cheapest sector can no longer absorb all shed: dearer sectors are
+shed only once the cheaper ones are fully shed.
 """
 function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     if vars.loss_of_load_sectoral === nothing || isempty(vars.loss_of_load_sectoral)
@@ -3117,31 +3135,34 @@ function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, inp
     end
 
     for ni in 1:n_node, t in 1:hours
-        # 1. Sum of sectoral LOL == total LOL across this node's buses.
+        # 1. Each sector sheds at most its own demand. Without this cap the
+        # whole shed went to the sector with the lowest criticality, so all
+        # unserved energy was priced at the cheapest multiplier.
         sector_lol_sum = AffExpr(0.0)
+        sector_demand_sum = 0.0
         for sector in sectors
-            add_to_expression!(sector_lol_sum, 1.0, vars.loss_of_load_sectoral[sector][ni, t])
+            lol = vars.loss_of_load_sectoral[sector][ni, t]
+            add_to_expression!(sector_lol_sum, 1.0, lol)
+            sec_dem = _sectoral_demand_at(input, sector, t, ni)
+            sector_demand_sum += sec_dem
+            @constraint(model, lol <= sec_dem,
+                base_name = "sectoral_lol_cap_$(sector)_$(ni)_$(t)")
         end
         node_load_shed = AffExpr(0.0)
         for b in buses_of_node[ni]
             add_to_expression!(node_load_shed, 1.0, vars.load_shed[b, t])
         end
-        @constraint(model, sector_lol_sum == node_load_shed,
+
+        # 2. The node's shed = sectoral shed + an unclassified remainder,
+        # bounded by the demand no sector accounts for. Sectoral data can
+        # miss a node (e.g. the Grid Builder split demand across new buses
+        # without rebuilding the sector shares); the remainder keeps the
+        # split feasible there instead of forcing load_shed = 0.
+        residual_cap = max(0.0, input.demand[t, ni] - sector_demand_sum)
+        @constraint(model, node_load_shed - sector_lol_sum >= 0.0,
             base_name = "sectoral_lol_sum_$(ni)_$(t)")
-
-        # 2. Per-sector LOL cap relaxed.  The original cap
-        # `lol_sector <= sectoral_demand[sector][t, node]` is correct
-        # in principle, but in real configs sectoral_demand isn't
-        # always populated for every (sector, node, t) triple — when
-        # the Grid Builder splits node demand across buses without
-        # rebuilding sectoral aggregates, the cap forces lol_sector=0
-        # and the equality `sum(lol_sector) == load_shed` then forces
-        # load_shed=0, making the LP infeasible whenever the bus-level
-        # demand exceeds what gen + import can serve.  load_shed is
-        # already priced by VOLL × MWh via the sectoral cost term, so
-        # leaving sectoral LOL unbounded does not change the optimal
-        # dispatch; it only avoids spurious infeasibility.
-
+        @constraint(model, node_load_shed - sector_lol_sum <= residual_cap,
+            base_name = "sectoral_lol_residual_$(ni)_$(t)")
     end
 
     # B13: Demand shifting: what leaves a step is at most flexibility_ratio of
