@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from esfex.utils.temporal import HOURS_STD_YEAR
 
@@ -2407,6 +2407,15 @@ class ESFEXConfig(BaseModel):
 
     # Console / file logging verbosity
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    # Set by load_config: dotted paths of the file's keys that nothing reads.
+    _unknown_keys: list[str] = PrivateAttr(default_factory=list)
+
+    @property
+    def unknown_keys(self) -> list[str]:
+        """Keys of the loaded file that ESFEX ignores (misspelt or obsolete),
+        as dotted paths such as ``systems.Cuba.generators.gas_1.dorop``."""
+        return list(self._unknown_keys)
 
     @model_validator(mode="after")
     def validate_systems_exist(self) -> "ESFEXConfig":

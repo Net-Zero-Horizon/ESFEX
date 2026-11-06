@@ -622,6 +622,27 @@ def test_global_settings_roundtrip_console_and_scaling():
     assert g2.visual_scaling.marker_min_px == 7.5
 
 
+def test_system_settings_edits_survive_save_and_reload(tmp_path):
+    """The base config is dumped by alias (TARGET_RE_PENETRATION) and the
+    Studio wrote its edit by name; the stale alias won on reload."""
+    from esfex.config.loader import load_config
+    cfg = _minimal_config()
+    states = S.config_to_gui_states(cfg)
+    st = states["Sys"]
+    st.settings.target_re_penetration = 0.8
+    st.settings.force_replacement = -1234.0
+    st.settings.max_annual_increment = 0.07
+    st.settings.inertia_limit_threshold = 0.3
+    st.settings.sim_rooftop = True
+    out = tmp_path / "p.yaml"
+    S.gui_state_to_yaml(states, cfg, out)
+    s2 = load_config(out).systems["Sys"]
+    assert (s2.target_re_penetration, s2.force_replacement, s2.max_annual_increment,
+            s2.inertia_limit_threshold, s2.sim_rooftop) == (0.8, -1234.0, 0.07, 0.3, True)
+    written = yaml.safe_load(out.read_text())["systems"]["Sys"]
+    assert "TARGET_RE_PENETRATION" not in written
+
+
 def test_risk_settings_survive_load_and_save():
     """The Studio writes the risk block from its global settings; loading
     must read it back, or the next save resets it to the defaults."""

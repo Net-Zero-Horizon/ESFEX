@@ -6,7 +6,7 @@ Pydantic v2 models for the ESFEX configuration. YAML files are normally loaded w
 
 General behaviour:
 
-- **Extra keys are ignored.** No model sets `extra="forbid"`, so unknown keys are dropped without an error.
+- **Extra keys are ignored.** No model sets `extra="forbid"`, so unknown keys are dropped without an error. [`load_config()`](config-loader.md) reports them: it logs each one and keeps the list in `ESFEXConfig.unknown_keys`.
 - **Aliases.** `SystemConfig`, `GeneratorConfig`, `TechnologyConfig` and `SystemLinkConfig` set `populate_by_name=True` and accept both the field name and its alias (for example `target_re_penetration` and `TARGET_RE_PENETRATION`, `availability_file` and `Availability`). `BatteryConfig` does not, so it only accepts the alias `Availability`; passing `availability_file=` drops the value.
 - **Per-node lists.** Fields typed `list[...]` on equipment hold one value per node. Their length is not validated.
 

@@ -251,7 +251,7 @@ File menu shortcuts and toolbar actions can be reassigned under **File > Prefere
 
 Click **Validate** in the toolbar to check the configuration before running a simulation. The validation dialog:
 
-- Has one checkbox per check category: Structural, Electrical, Demand, Generation, Fuel Network, Connectivity, and Topology Audit (GUI vs solver agreement). Topology Audit reports electrical islands, including islands with demand but no reachable generation (an error).
+- Has one checkbox per check category: Structural, Configuration (keys of the opened YAML file that ESFEX ignores; they are not kept when the project is saved), Electrical, Demand, Generation, Fuel Network, Connectivity, and Topology Audit (GUI vs solver agreement). Topology Audit reports electrical islands, including islands with demand but no reachable generation (an error).
 - Has a **Network Simplification** checkbox that finds dead-end buses, stub lines, and unused fuel elements, and an **Apply Simplification** button to remove them.
 - Has an optional **Network reduction (levels)** check with levels L1 (equipment aggregation and parallel lines) to L4 (full node collapse), which suggests merges you can apply selectively.
 - Groups results by severity: errors, warnings, and info.

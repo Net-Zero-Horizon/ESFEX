@@ -7442,6 +7442,10 @@ class MainWindow(QMainWindow):
                 progress.close()
             self._config_path = path
             self._last_saved_path = path
+            # The saved file no longer holds the loaded file's unknown keys.
+            for _st in self._all_states.values():
+                if _st is not None:
+                    _st.unknown_config_keys = []
             # State on disk now matches in-memory state.
             self._clear_modified()
             self._update_window_title()
