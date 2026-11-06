@@ -39,7 +39,17 @@ While the diagram's own text is too small to read, the substation names are draw
 
 Parts of the diagram far outside the view are not drawn, so panning stays smooth on systems with thousands of buses. The minimap in the bottom-left corner shows where the view is; click or drag on it to move.
 
-**Export SVG** always saves the whole diagram at full detail, whatever the current zoom.
+**Export SVG** saves the whole diagram at full detail, whatever the current zoom.
+
+### Open a Substation
+
+Double-click a substation frame to open that substation on its own. Its busbars, equipment and internal transformers are drawn at full detail, however small the substation is on screen. Double-clicking anywhere else zooms in.
+
+Each line to another substation is cut to a short straight stub that leaves its busbar and ends in the far substation's name, for example `→ Bayamo 220 kV`. Click the name to open that substation. A line that reaches a tap point outside any substation names the nearest substations behind the tap, up to two (`→ A / B +1`), and opens the first one. Hover a stub to see the line's own label.
+
+The breadcrumb at the top left shows where you are (**System › Bayamo 220 kV**). Click **System**, or press Esc or Backspace, to go back to the whole system at the zoom you left it at. Selecting an element in the Element Tree that is not in the open substation also goes back.
+
+Selection, the results overlays and the contingency overlay work the same in a substation as in the whole system. **Export SVG** in a substation saves only that substation.
 
 
 ---
