@@ -203,6 +203,16 @@ except ConfigLoadError as e:
     print(e)   # Configuration validation failed: ... / Failed to load configuration: ...
 ```
 
+### SavedConfigInvalidError
+
+```python
+class SavedConfigInvalidError(ConfigLoadError):
+    path: str          # the file the Studio saved
+    error: Exception   # the loader's exception
+```
+
+Raised by `esfex.visualization.launch_studio()` after the Studio window closes, when the user chose "Save anyway" on a configuration with errors: the file is written, but reloading it fails. `esfex studio` reports it and exits with code 1.
+
 ---
 
 ## Path Resolution
