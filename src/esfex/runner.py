@@ -39,6 +39,7 @@ from esfex.io.demand import _read_tabular, create_sectoral_demand, read_hourly_t
 from esfex.utils import aggregate_demand_to_resolution
 from esfex.utils.per_unit import derived_reactance_pu, system_s_base
 from esfex.utils.temporal import (
+    DEFAULT_RUN_YEARS,
     HOURS_STD_YEAR,
     aggregate_to_resolution,
     drop_leap_days,
@@ -1512,7 +1513,7 @@ class Orchestrator:
         2. STEP 2: Run operational subproblems year-by-year using MasterProblem decisions
 
         Args:
-            years: Number of years to simulate (default: 25)
+            years: Number of years to simulate (default: ``DEFAULT_RUN_YEARS`` = 25)
             start_year: Label of the first simulated year. Default: the
                 year of ``date_start``. When given, the date labels start
                 on ``date_start``'s day and time in this year. It only
@@ -1538,7 +1539,7 @@ class Orchestrator:
                 "master_only needs simulation_mode 'development' "
                 f"(got {self.config.simulation_mode!r})")
         self.master_solution = None
-        years = years or 25
+        years = years or DEFAULT_RUN_YEARS
         self._start_date = self._resolve_start_date(start_year)
         start_year = self._start_date.year
         end_year = start_year + years

@@ -111,3 +111,23 @@ def test_payload_spans_the_run_horizon_from_date_start():
     p = _payload("01/01/2025 00:00", [(30 * 8760 + 10, 30 * 8760 + 20)])
     assert p["horizon_hours"] == 31 * 8760
     assert p["schedule"][0]["start_hour"] == 30 * 8760 + 10
+
+
+def test_calendar_and_runner_share_the_default_horizon(tmp_path, monkeypatch):
+    """The calendar spans the years a run simulates without ``--years``:
+    one constant for both, so they cannot drift apart."""
+    import sys
+
+    import esfex.runner as runner_mod
+    from esfex.utils.temporal import DEFAULT_RUN_YEARS
+    from esfex.visualization.panels.interruptions_dialog import STUDIO_RUN_YEARS
+
+    assert STUDIO_RUN_YEARS == DEFAULT_RUN_YEARS
+    sys.path.insert(0, "tests")
+    from test_runner import _make_esfex_config
+
+    monkeypatch.setattr(runner_mod, "DEFAULT_RUN_YEARS", 3)
+    orch = runner_mod.Orchestrator(_make_esfex_config(), output_dir=tmp_path)
+    # Stops right after the horizon is set: it reports the default's span
+    with pytest.raises(ValueError, match="horizon 2025-2027"):
+        orch.run(dispatch_years=[1900])

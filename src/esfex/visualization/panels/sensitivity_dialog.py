@@ -39,6 +39,7 @@ from esfex.sensitivity.engine import (
     get_lp_parameters,
 )
 from esfex.sensitivity.worker import SensitivityWorker
+from esfex.utils.temporal import DEFAULT_RUN_YEARS
 from esfex.visualization.i18n import tr
 from esfex.visualization.panels.word_wrap_header import WordWrapHeaderView
 from esfex.visualization.theme import current_theme
@@ -197,12 +198,12 @@ class SensitivityDialog(QDialog):
         samples_lay.addWidget(self._n_samples_spin)
         self._eval_label = QLabel()
         samples_lay.addWidget(self._eval_label)
-        # Config mode runs a full simulation per evaluation; 25 = `esfex run` default
+        # Config mode runs a full simulation per evaluation; default as `esfex run`
         self._years_label = QLabel(tr("sensitivity.years_per_run"))
         samples_lay.addWidget(self._years_label)
         self._years_spin = QSpinBox()
         self._years_spin.setRange(1, 50)
-        self._years_spin.setValue(25)
+        self._years_spin.setValue(DEFAULT_RUN_YEARS)
         samples_lay.addWidget(self._years_spin)
         left_layout.addWidget(samples_group)
 
