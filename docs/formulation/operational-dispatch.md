@@ -116,7 +116,7 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
-| \(p^{\text{elz}}_{n,t}\) | \(n,t\) | \([0, \bar{P}^{\text{elz}}_n]\) | MW | Electrolyzer power consumption (`electrolyzer_power`), at most the rated power; consecutive steps differ by at most `ramp_up` / `ramp_down` × rated power × \(\Delta t\) (no limit when the ramp is 0) |
+| \(p^{\text{elz}}_{n,t}\) | \(n,t\) | \([0, \bar{P}^{\text{elz}}_n]\) | MW | Electrolyzer power consumption, summed over the system's electrolyzers (`electrolyzer_power[e,n,t]`); each one is at most the rated power; consecutive steps differ by at most `ramp_up` / `ramp_down` × rated power × \(\Delta t\) (no limit when the ramp is 0) |
 | \(\text{RC}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Rooftop solar curtailment (`rooftop_curtailment`) |
 
 ---
@@ -206,7 +206,7 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 ### 3.4 Penalty Costs
 
 \[
-Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{n,t} \text{LS}_{n,t}}_{\text{load shedding (no sectors)}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
+Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \Big(\sum_{n,t} \text{LS}_{n,t} - \sum_{s,i,t} \text{LOL}_{s,i,t}\Big)}_{\text{load shedding not attributed to a sector}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
 \]
 
 \[
@@ -217,7 +217,7 @@ Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{n,t} \text{LS}_{n,t}}_{\text{
 + \underbrace{C^{\text{TM}} \sum_{i,j,t} \mu_{i,j,t}}_{\text{transfer margin}} + \underbrace{C^{\text{CO2,bud}} \, \xi^{\text{CO2}}}_{\text{CO2 budget violation}} + \underbrace{C^{\text{RC}} \sum_{n,t} \text{RC}_{n,t}}_{\text{rooftop curtailment}} \tag{OBJ-4c}
 \]
 
-The load-shedding term \(C^{\text{VOLL}} \sum \text{LS}\) is used only when the system has no sectoral demand. With sectors, shed load is priced only through \(Z^{\text{sec}}\) (OBJ-5), which already carries VOLL times the sector's criticality; charging both would count each shed MWh twice. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
+Without sectoral demand the \(\text{LOL}\) terms are absent and all shed load costs \(C^{\text{VOLL}}\). With sectors, each sector's shed load is priced through \(Z^{\text{sec}}\) (OBJ-5), which carries VOLL times the sector's criticality; only the remainder that no sector accounts for (SEC-2) is priced here, at VOLL, so no shed MWh is counted twice. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
 
 ### 3.5 Sectoral Load Shedding Penalties
 
@@ -792,16 +792,24 @@ The fleet starts each window at its initial SOC (`initial_soc`, or `target_soc` 
 
 Implemented in `add_sectoral_demand_constraints!()`.
 
-#### SEC-1: LOL Decomposition
+#### SEC-1: Per-Sector Cap
 
 \[
-\sum_{s \in \mathcal{S}} \text{LOL}_{s,i,t} = \sum_{n \in i} \text{LS}_{n,t} \quad \forall i, t \tag{SEC-1}
+\text{LOL}_{s,i,t} \leq D^{\text{sec}}_{s,i,t} \quad \forall s, i, t \tag{SEC-1}
 \]
 
-The load shed on a node's buses is decomposed into per-sector contributions (`sectoral_lol_sum_*`). There is no per-sector cap in the dispatch: the sectors are bounded only through this sum and the per-bus bound PB-1b. Since shedding is priced at \(C^{\text{VOLL}} \kappa_s\) (OBJ-5), all of a node's shed load is attributed to its lowest-criticality sector.
+A sector cannot shed more than its own demand \(D^{\text{sec}}_{s,i,t}\) at the node (`sectoral_demand`, `sectoral_lol_cap_*`).
+
+#### SEC-2: LOL Decomposition
+
+\[
+0 \;\leq\; \sum_{n \in i} \text{LS}_{n,t} - \sum_{s \in \mathcal{S}} \text{LOL}_{s,i,t} \;\leq\; \max\Big(0,\; D^{\text{node}}_{t,i} - \sum_{s} D^{\text{sec}}_{s,i,t}\Big) \quad \forall i, t \tag{SEC-2}
+\]
+
+The load shed on a node's buses is split into per-sector contributions plus an unclassified remainder (`sectoral_lol_sum_*`, `sectoral_lol_residual_*`). The remainder is bounded by the node demand that no sector accounts for: it is 0 when the sector shares cover the whole demand, and it keeps the split feasible at a node whose sectoral data is missing (for example after the Grid Builder split a node's demand across new buses). The remainder is priced at \(C^{\text{VOLL}}\) (OBJ-4a).
 
 !!! note "Criticality ordering"
-    Higher-criticality sectors receive a higher load shedding penalty in the objective (\(C^{\text{VOLL}} \cdot \kappa_s\)). No explicit ordering constraint is needed.
+    Higher-criticality sectors receive a higher load shedding penalty in the objective (\(C^{\text{VOLL}} \cdot \kappa_s\)). With the per-sector cap SEC-1, the optimizer sheds the cheapest sector up to its demand before touching a dearer one. No explicit ordering constraint is needed.
 
 ---
 
@@ -1015,7 +1023,7 @@ Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each
 | `add_co2_constraint!()` | CO2-2 | `power_system.jl` |
 | `add_inertia_constraints!()` | INE-1 | `power_system.jl` |
 | `add_ev_constraints!()` | EV-1 to EV-7 | `power_system.jl` |
-| `add_sectoral_demand_constraints!()` | SEC-1, SHIFT-1 | `power_system.jl` |
+| `add_sectoral_demand_constraints!()` | SEC-1, SEC-2, SHIFT-1 | `power_system.jl` |
 | `add_n1_security_constraints!()` | N1-1, N1-2 | `power_system.jl` |
 | `add_scopf_constraints!()` | N1-3, N1-4 | `power_system.jl` |
 | `add_node_investment_limits!()` | INV-1 | `power_system.jl` |

@@ -27,7 +27,7 @@ import pandas as pd
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
-from esfex.config.schema import ESFEXConfig, SystemConfig
+from esfex.config.schema import CostCurveConfig, ESFEXConfig, SystemConfig
 from esfex.bridge.adapters import PowerSystemAdapter, MasterProblemAdapter, PrimaryEnergyAdapter
 from esfex.models.ev import (
     aggregate_ev_profiles,
@@ -229,6 +229,9 @@ class YearResults:
     reservoir_spillage: Optional[np.ndarray] = None
     reservoir_pump: Optional[np.ndarray] = None
     reservoir_invest_capacity: Optional[np.ndarray] = None  # [gen x node]
+    # Electrolyzers [electrolyzer x node x hour], in config order
+    electrolyzer_power: Optional[np.ndarray] = None       # MW drawn
+    electrolyzer_h2: Optional[np.ndarray] = None          # kg/h of hydrogen
     # Derived metrics (computed post-optimization)
     capacity_factor: Optional[np.ndarray] = None          # [gen x node x hour]
     lcoe: Optional[np.ndarray] = None                     # [gen x node x hour]
@@ -257,6 +260,37 @@ class YearResults:
     # Granular cost decomposition (accumulated from operational windows)
     cost_breakdown: Optional[dict] = None
 
+
+
+def re_target_trajectory(initial: float, target: float, num_years: int,
+                         min_inc: float, max_inc: float) -> list[float]:
+    """Yearly RE targets of the planning horizon (RE-1, as the Julia
+    ``calculate_target_ratios``): the initial share in year 1, then a
+    linear path to ``target`` whose yearly step is clamped to
+    ``[min_inc, max_inc]``."""
+    path: list[float] = []
+    for y in range(num_years):
+        if y == 0:
+            path.append(initial)
+            continue
+        tau = initial + y / (num_years - 1) * (target - initial)
+        step = tau - path[-1]
+        if step < min_inc:
+            tau = path[-1] + min_inc
+        elif step > max_inc:
+            tau = path[-1] + max_inc
+        path.append(tau)
+    return path
+
+
+def _warn_flat_renewable(kind: str, key: str) -> None:
+    """Log that a renewable unit without an availability profile is modelled
+    as available in every hour (capacity factor 1.0)."""
+    logger.warning(
+        "%s %r is Renewable but has no availability_file: it is modelled as "
+        "available at full capacity in every hour (capacity factor 1.0). "
+        "Right for dispatchable renewables (biomass, geothermal); set a "
+        "profile for solar, wind and other variable sources.", kind, key)
 
 class Orchestrator:
     """
@@ -1156,7 +1190,6 @@ class Orchestrator:
             name="_".join(sys_names),
             demand_path=None,
             demand_scale=1.0,
-            loss_demand_threshold=max(s.loss_demand_threshold for s in systems),
             life_extension_cost_factor=base.life_extension_cost_factor,
             sim_rooftop=any(s.sim_rooftop for s in systems),
             target_re_penetration=min(s.target_re_penetration for s in systems),
@@ -2587,6 +2620,14 @@ class Orchestrator:
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
+        A configured ``availability_file`` that cannot be resolved or found
+        is an error (a generator used to be dropped from the dispatch, a
+        technology to crash with a KeyError). A renewable unit with no file
+        at all runs at capacity factor 1.0 in every hour, which is right for
+        dispatchable renewables (biomass, geothermal, reservoir hydro) but
+        not for solar or wind: it is logged once per unit
+        (:func:`_warn_flat_renewable`).
+
         Args:
             num_nodes: Number of nodes in the system
 
@@ -2594,6 +2635,7 @@ class Orchestrator:
             Dictionary mapping gen_key -> availability array
         """
         from esfex.io.demand import load_availability_profile
+        from esfex.utils.paths import resolve_project_data_file
         from pathlib import Path
 
         cache = {}
@@ -2603,86 +2645,54 @@ class Orchestrator:
         # Track unique files to avoid loading the same file multiple times
         file_cache = {}
 
-        for gen_key, gen in sys.generators.items():
-            avail_file = getattr(gen, 'availability_file', None)
-            if not avail_file:
-                continue
-
+        def _load(kind: str, key: str, avail_file: str):
             # Resolve consistently with demand paths: an absolute path (the
             # GUI writes availability profiles at absolute locations, and runs
             # from a temp config in /tmp) is trusted as-is; a relative path is
             # resolved under config_dir, still refusing `../` traversal from a
             # yaml authored elsewhere. See utils/paths.resolve_project_data_file.
-            from esfex.utils.paths import resolve_project_data_file
             try:
                 avail_path = resolve_project_data_file(config_dir, avail_file)
-            except ValueError:
-                logger.warning(
-                    "Skipping generator %r: availability_file %r resolves "
-                    "outside config directory %s (refusing path traversal)",
-                    gen_key, avail_file, config_dir,
-                )
-                continue
+            except ValueError as e:
+                raise ValueError(
+                    f"{kind} {key!r}: availability_file {avail_file!r} resolves "
+                    f"outside config directory {config_dir} (refusing path traversal)"
+                ) from e
             if not avail_path.exists():
-                logger.warning(
-                    "Skipping generator %r: availability_file %r not found "
-                    "under %s",
-                    gen_key, avail_file, config_dir,
+                raise FileNotFoundError(
+                    f"{kind} {key!r}: availability_file {avail_file!r} not found "
+                    f"under {config_dir}"
                 )
-                continue
-
-            # Use file path as cache key (same file = same data)
             file_key = str(avail_path)
-
-            if file_key in file_cache:
-                # Reuse already loaded data
-                cache[gen_key] = file_cache[file_key]
-            else:
-                # Load and cache
-                try:
-                    availability = load_availability_profile(
-                        avail_path,
-                        temporal_resolution_hours=1,  # Load at full resolution
-                        num_nodes=num_nodes,
-                        date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
-                    )
-                    file_cache[file_key] = availability
-                    cache[gen_key] = availability
-                except Exception as e:
-                    logger.warning(f"Failed to load availability for {gen.name}: {e}")
-
+            if file_key not in file_cache:
+                file_cache[file_key] = load_availability_profile(
+                    avail_path,
+                    temporal_resolution_hours=1,  # Load at full resolution
+                    num_nodes=num_nodes,
+                    date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
+                )
+            cache[key] = file_cache[file_key]
             # Also index by the original availability_file string so that
             # virtual generators can look up by file path directly.
-            cache[avail_file] = cache[gen_key]
+            cache[avail_file] = cache[key]
+
+        for gen_key, gen in sys.generators.items():
+            avail_file = getattr(gen, 'availability_file', None)
+            if avail_file:
+                _load("Generator", gen_key, avail_file)
+            elif (gen.type == "Renewable"
+                  and not any(c > 0 for c in (gen.reservoir_capacity or []))
+                  and (any(p > 0 for p in gen.rated_power)
+                       or any(p > 0 for p in gen.invest_max_power))):
+                _warn_flat_renewable("Generator", gen_key)
 
         # Also preload technology availability profiles
         for tech_key, tech in sys.technologies.items():
             avail_file = getattr(tech, 'availability_file', None)
-            if not avail_file:
-                continue
-
-            avail_path = config_dir / avail_file
-            if not avail_path.exists():
-                avail_path = Path(avail_file)
-
-            file_key = str(avail_path.resolve())
-
-            if file_key in file_cache:
-                cache[tech_key] = file_cache[file_key]
-            else:
-                try:
-                    availability = load_availability_profile(
-                        avail_path,
-                        temporal_resolution_hours=1,
-                        num_nodes=num_nodes,
-                        date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
-                    )
-                    file_cache[file_key] = availability
-                    cache[tech_key] = availability
-                except Exception as e:
-                    logger.warning(f"Failed to load availability for tech {tech.name}: {e}")
-
-            cache[avail_file] = cache[tech_key]
+            if avail_file:
+                _load("Technology", tech_key, avail_file)
+            elif tech.type == "Renewable" and any(p > 0 for p in tech.invest_max_power):
+                _warn_flat_renewable("Technology", tech_key)
 
         logger.debug(f"Loaded {len(file_cache)} unique availability files for {len(cache)} generators/technologies")
         return cache
@@ -2942,6 +2952,17 @@ class Orchestrator:
             # Per-system current RE tracking
             current_re_per_system: dict[str, float] = dict(per_system_initial_re)
 
+            # Each year's RE target follows the perfect-foresight trajectory
+            # (RE-1: initial -> TARGET_RE_PENETRATION over the horizon, steps
+            # clamped to the annual increments), not last year's outcome.
+            min_inc = getattr(primary, 'min_annual_increment', 0.01)
+            max_inc = getattr(primary, 'max_annual_increment', 0.10)
+            re_paths = [re_target_trajectory(overall_initial_re, target_re, num_years,
+                                             min_inc, max_inc)]
+            if system_node_ranges:
+                re_paths = [re_target_trajectory(init, target_re, num_years, min_inc, max_inc)
+                            for _, _, _, init in system_node_ranges]
+
             # Accumulation state
             investments_by_year: dict[int, dict] = {}
             retirements_by_year: dict[int, dict] = {}
@@ -2953,12 +2974,9 @@ class Orchestrator:
             for y_idx, year in enumerate(years_range):
                 logger.debug(f"\n--- Myopic: Year {year} ({y_idx+1}/{num_years}) ---")
 
-                # 1. Compute interpolated RE target for this year
-                if num_years > 1:
-                    progress = y_idx / (num_years - 1)
-                else:
-                    progress = 1.0
-                year_target_re = overall_initial_re + progress * (target_re - overall_initial_re)
+                # 1. This year's RE target on the horizon trajectory
+                year_targets = {(s + 1, 1): path[y_idx] for s, path in enumerate(re_paths)}
+                year_target_re = re_paths[0][y_idx]
                 logger.debug(f"  RE target: {year_target_re:.2%} (current: {current_re:.2%})")
 
                 # 2. Prepare modified system config with accumulated investments
@@ -3063,9 +3081,10 @@ class Orchestrator:
                     max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
                     target_re_penetration=year_target_re,
                     initial_re_penetration=current_re,
-                    min_re_increment=getattr(primary, 'min_annual_increment', 0.01),
-                    max_re_increment=getattr(primary, 'max_annual_increment', 0.10),
+                    min_re_increment=min_inc,
+                    max_re_increment=max_inc,
                     system_node_ranges=year_sys_ranges,
+                    re_target_override=year_targets,
                     temporal_resolution_hours=resolution_hours,
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
@@ -4437,6 +4456,8 @@ class Orchestrator:
         all_reservoir_level = []
         all_reservoir_spillage = []
         all_reservoir_pump = []
+        all_electrolyzer_power = []
+        all_electrolyzer_h2 = []
         all_pe_results: list[dict] = []
         all_n1_gen_duals = []
         all_n1_binding: list[str] = []
@@ -4740,6 +4761,9 @@ class Orchestrator:
                 all_reservoir_spillage.append(_trim(window_result["reservoir_spillage"], keep_hours))
             if window_result.get("reservoir_pump") is not None:
                 all_reservoir_pump.append(_trim(window_result["reservoir_pump"], keep_hours))
+            if window_result.get("electrolyzer_power") is not None:
+                all_electrolyzer_power.append(_trim(window_result["electrolyzer_power"], keep_hours))
+                all_electrolyzer_h2.append(_trim(window_result["electrolyzer_h2"], keep_hours))
             if window_result.get("reservoir_invest_capacity") is not None:
                 last_reservoir_invest = window_result["reservoir_invest_capacity"]
             # Investment arrays: keep from last window (not time-varying)
@@ -4814,6 +4838,10 @@ class Orchestrator:
         reservoir_level = np.concatenate(all_reservoir_level, axis=-1) if all_reservoir_level else None
         reservoir_spillage = np.concatenate(all_reservoir_spillage, axis=-1) if all_reservoir_spillage else None
         reservoir_pump = np.concatenate(all_reservoir_pump, axis=-1) if all_reservoir_pump else None
+        electrolyzer_power = (np.concatenate(all_electrolyzer_power, axis=-1)
+                              if all_electrolyzer_power else None)
+        electrolyzer_h2 = (np.concatenate(all_electrolyzer_h2, axis=-1)
+                           if all_electrolyzer_h2 else None)
 
         # Combine keyed series across windows (committed steps only)
         combined_power_flow = _concat_window_series(all_power_flow)
@@ -4879,6 +4907,8 @@ class Orchestrator:
             reservoir_level = self._aggregate_buses_to_nodes(reservoir_level, "sum")
             reservoir_spillage = self._aggregate_buses_to_nodes(reservoir_spillage, "sum")
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
+            electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
+            electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
             # Status variables: MAX across buses (1 if active at any bus)
             gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
             # Prices: MAX across buses (highest marginal price)
@@ -4932,6 +4962,8 @@ class Orchestrator:
             reservoir_spillage=reservoir_spillage,
             reservoir_pump=reservoir_pump,
             reservoir_invest_capacity=last_reservoir_invest,
+            electrolyzer_power=electrolyzer_power,
+            electrolyzer_h2=electrolyzer_h2,
             primary_energy=pe_merged,
             load_shed=total_load_shed,
             re_penetration=avg_re,
@@ -5766,6 +5798,9 @@ class Orchestrator:
                 "ev_v2g": solution.get('ev_v2g'),
                 "ev_soc": solution.get('ev_soc'),
                 "ev_loss": solution.get('ev_loss'),
+                # Electrolyzers [electrolyzer x bus x hour]: MW drawn, kg/h H2
+                "electrolyzer_power": solution.get('electrolyzer_power'),
+                "electrolyzer_h2": solution.get('electrolyzer_h2'),
                 # Investment arrays
                 "gen_investment": solution.get('gen_investment'),
                 "bat_investment_power": solution.get('bat_investment_power'),
@@ -6455,6 +6490,21 @@ class Orchestrator:
                         return out
                     return [arr[0]] * n
 
+                def _rep_curve(curves, n=num_buses):
+                    # The technology's per-node bidding curves, per bus. A
+                    # bus whose node has no curve gets a flat one (its
+                    # fuel_cost). None when the technology has no curve.
+                    if not curves:
+                        return None
+                    if len(curves) == 1:
+                        return [curves[0]] * n
+                    out = []
+                    for _b in range(n):
+                        _nidx = bus_to_node[_b] if bus_to_node is not None else _b
+                        out.append(curves[_nidx] if _nidx < len(curves)
+                                   else CostCurveConfig())
+                    return out
+
                 vgen_key = f"inv_{tech_key}"
                 updated[vgen_key] = {
                     "name": f"Investment {tech.name}",
@@ -6469,6 +6519,7 @@ class Orchestrator:
                     "min_up": _rep(tech.min_up),
                     "min_down": _rep(tech.min_down),
                     "fuel_cost": _rep(tech.fuel_cost),
+                    "fuel_cost_curve": _rep_curve(tech.fuel_cost_curve),
                     "fixed_cost": _rep(tech.fixed_cost),
                     "maintenance_cost": _rep(tech.maintenance_cost),
                     "start_up_cost": _rep(tech.start_up_cost),
@@ -7490,6 +7541,28 @@ class Orchestrator:
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW"
+
+            # --- Electrolyzers (per electrolyzer, config order) ---
+            if result.electrolyzer_power is not None:
+                elz_names = [getattr(e, "name", None) or key for key, e in
+                             (self.primary_system.electrolyzers or {}).items()]
+                for group_name, data, units, desc in (
+                    ("electrolyzer_power", result.electrolyzer_power, "MW",
+                     "Electrolyzer power drawn [nodes x hours] per electrolyzer"),
+                    ("electrolyzer_h2", result.electrolyzer_h2, "kg/h",
+                     "Hydrogen produced [nodes x hours] per electrolyzer"),
+                ):
+                    if data is None:
+                        continue
+                    elz_group = scenario.create_group(group_name)
+                    elz_group.attrs["description"] = desc
+                    for e, name in enumerate(elz_names):
+                        if e < data.shape[0]:
+                            ds = elz_group.create_dataset(
+                                self._h5safe(name), data=data[e],
+                                chunks=True, compression="gzip",
+                            )
+                            ds.attrs["units"] = units
 
             # --- Investments (scalar attrs) ---
             if result.investments:

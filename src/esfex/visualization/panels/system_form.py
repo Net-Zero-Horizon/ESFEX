@@ -108,12 +108,6 @@ class SystemForm(QWidget):
         self._max_increment.editingFinished.connect(self._on_changed)
         gl.addRow(tr("system_form.max_increment"), self._max_increment)
 
-        self._loss_demand_thr = QDoubleSpinBox()
-        self._loss_demand_thr.setRange(0, 1)
-        self._loss_demand_thr.setDecimals(4)
-        self._loss_demand_thr.editingFinished.connect(self._on_changed)
-        gl.addRow(tr("system_form.loss_demand_thr"), self._loss_demand_thr)
-
         self._inertia_limit_thr = QDoubleSpinBox()
         self._inertia_limit_thr.setRange(0, 1)
         self._inertia_limit_thr.setDecimals(4)
@@ -248,7 +242,6 @@ class SystemForm(QWidget):
         self._target_re.setValue(s.target_re_penetration)
         self._min_increment.setValue(s.min_annual_increment)
         self._max_increment.setValue(s.max_annual_increment)
-        self._loss_demand_thr.setValue(s.loss_demand_threshold)
         self._inertia_limit_thr.setValue(s.inertia_limit_threshold)
         self._sim_rooftop.setChecked(s.sim_rooftop)
 
@@ -301,7 +294,6 @@ class SystemForm(QWidget):
         s.target_re_penetration = self._target_re.value()
         s.min_annual_increment = self._min_increment.value()
         s.max_annual_increment = self._max_increment.value()
-        s.loss_demand_threshold = self._loss_demand_thr.value()
         s.inertia_limit_threshold = self._inertia_limit_thr.value()
         s.sim_rooftop = self._sim_rooftop.isChecked()
 

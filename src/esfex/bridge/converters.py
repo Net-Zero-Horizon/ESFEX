@@ -177,6 +177,7 @@ def build_gen_cost_curves_dict(
     num_buses: int,
     bus_to_node: Optional[list] = None,
     gen_bus_per_node: Optional[dict] = None,
+    per_bus_keys: Optional[set] = None,
 ) -> Any:
     """Build Julia ``Dict{Int, Dict{Int, Vector{CostSegment}}}`` for generators.
 
@@ -196,6 +197,10 @@ def build_gen_cost_curves_dict(
     gen_bus_per_node:
         Generator key → {node_idx: bus_idx} (0-based) for explicit physical
         placement. Falls back to the first bus of each node when missing.
+    per_bus_keys:
+        Keys of units whose arrays (curves included) are already per bus
+        (virtual generators from master investments): curve ``i`` belongs to
+        bus ``i``, and buses without rated power get no curve.
 
     Returns
     -------
@@ -217,7 +222,13 @@ def build_gen_cost_curves_dict(
         inner = jl.seval("Dict{Int, Vector{CostSegment}}()")
         has_entries = False
 
+        per_bus = per_bus_keys is not None and key in per_bus_keys
         for node_idx, curve in enumerate(curves):
+            if curve is None:
+                continue
+            if per_bus and not (node_idx < len(gen.rated_power)
+                                and gen.rated_power[node_idx] > 0):
+                continue  # no unit at this bus: no output variable to split
             blocks = normalize_cost_curve(curve, fallback_price=gen.fuel_cost[node_idx])
             if len(blocks) <= 1:
                 continue
@@ -225,7 +236,9 @@ def build_gen_cost_curves_dict(
             # Determine bus index (1-based) for this node — use the
             # per-(unit, node) physical placement when available, else
             # role-aware fallback.
-            if bus_to_node is not None:
+            if per_bus:
+                bus_1 = node_idx + 1
+            elif bus_to_node is not None:
                 bus_0 = None
                 if gen_bus_per_node is not None:
                     bus_0 = gen_bus_per_node.get(key, {}).get(node_idx)
@@ -1861,6 +1874,11 @@ def convert_power_system_result(jl_result: Any) -> dict:
         result["reservoir_pump"] = julia_to_py_array(jl_result.reservoir_pump)
     if jl_result.reservoir_invest_capacity is not None:
         result["reservoir_invest_capacity"] = julia_to_py_array(jl_result.reservoir_invest_capacity)
+
+    # Electrolyzers [electrolyzer x bus x hour]: power (MW), hydrogen (kg/h)
+    if jl_result.electrolyzer_power is not None:
+        result["electrolyzer_power"] = julia_to_py_array(jl_result.electrolyzer_power)
+        result["electrolyzer_h2"] = julia_to_py_array(jl_result.electrolyzer_h2)
 
     # N-1 security results
     if jl_result.n1_gen_reserve_duals is not None:

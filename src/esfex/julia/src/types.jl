@@ -833,6 +833,19 @@ struct ElectrolyzerConfig
 end
 
 """
+    electrolyzer_h2_per_mwh(ec::ElectrolyzerConfig, i::Int) -> Float64
+
+Hydrogen produced per MWh drawn at index `i` (kg/MWh):
+1000 × mean(eff_at_rated, eff_at_min) / energy_per_kg_h2. Shared by the
+primary-energy hydrogen balance and the dispatch results.
+"""
+function electrolyzer_h2_per_mwh(ec::ElectrolyzerConfig, i::Int)
+    ec.energy_per_kg_h2 > 0 || return 0.0
+    avg_eff = (ec.eff_at_rated[i] + ec.eff_at_min[i]) / 2.0
+    return 1000.0 * avg_eff / ec.energy_per_kg_h2
+end
+
+"""
     ElectrolyzerVariables
 
 Container for electrolyzer decision variables.
@@ -997,8 +1010,8 @@ struct PowerSystemInput
     # EV configuration (optional)
     ev_config::Union{EVConfig, Nothing}
 
-    # Electrolyzer configuration (optional)
-    electrolyzer_config::Union{ElectrolyzerConfig, Nothing}
+    # Electrolyzers (each one per-bus arrays); empty = none
+    electrolyzers::Vector{ElectrolyzerConfig}
 
     # Sectoral load criticality weights for load shedding penalty
     sectoral_criticality::Dict{String, Float64}
@@ -1072,7 +1085,6 @@ struct PowerSystemInput
     reserve_dynamic_requirement::Dict{Int, Float64}
 
     # Demand constraints
-    loss_demand_threshold::Float64
     max_annual_system_cost::Float64
     max_node_investment::Vector{Float64}
 
@@ -1178,6 +1190,8 @@ function PowerSystemInput(;
     solver_options::Dict{String, Any} = Dict{String, Any}(),
     fuel_co2::Dict{String, Float64} = Dict{String, Float64}(),
     ev_config::Union{EVConfig, Nothing} = nothing,
+    electrolyzers::Vector{ElectrolyzerConfig} = ElectrolyzerConfig[],
+    # Single-electrolyzer form, kept for older callers; appended to `electrolyzers`.
     electrolyzer_config::Union{ElectrolyzerConfig, Nothing} = nothing,
     sectoral_criticality::Dict{String, Float64} = Dict{String, Float64}(),
     sectoral_delay_tolerance::Dict{String, Int} = Dict{String, Int}(),
@@ -1221,7 +1235,6 @@ function PowerSystemInput(;
     reserve_static_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     reserve_dynamic_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     # Demand constraints
-    loss_demand_threshold::Float64 = 1.0,
     max_annual_system_cost::Float64 = Inf,
     max_node_investment::Vector{Float64} = Float64[],
     # NPV/lifecycle tracking (P2)
@@ -1284,7 +1297,7 @@ function PowerSystemInput(;
         solver_name, threads, time_limit, gap, verbose, solver_options,
         fuel_co2,
         ev_config,
-        electrolyzer_config,
+        electrolyzer_config === nothing ? electrolyzers : vcat(electrolyzers, [electrolyzer_config]),
         sectoral_criticality,
         sectoral_delay_tolerance,
         sectoral_flexibility_ratio,
@@ -1314,7 +1327,6 @@ function PowerSystemInput(;
         delay_retirement_penalty_per_mw,
         reserve_static_requirement,
         reserve_dynamic_requirement,
-        loss_demand_threshold,
         max_annual_system_cost,
         max_node_investment,
         unit_npv,
@@ -1432,8 +1444,8 @@ mutable struct PowerSystemVariables
     ev_soc::Union{Array{VariableRef, 2}, Nothing}  # node × (hour+1)
     ev_loss::Union{Array{VariableRef, 2}, Nothing}
 
-    # Electrolyzer variables (node × hour) - optional
-    electrolyzer_power::Union{Array{VariableRef, 2}, Nothing}
+    # Electrolyzer power (electrolyzer × bus × hour) - optional
+    electrolyzer_power::Union{Array{VariableRef, 3}, Nothing}
 
     # Inertia (hour) - optional
     loss_of_inertia::Union{Vector{VariableRef}, Nothing}
@@ -1744,6 +1756,11 @@ struct PowerSystemResult
 
     # Granular cost decomposition (populated after solve)
     cost_breakdown::Union{CostBreakdown, Nothing}
+
+    # Electrolyzers (electrolyzer × bus × hour): power drawn (MW) and
+    # hydrogen produced (kg/h, see electrolyzer_h2_per_mwh)
+    electrolyzer_power::Union{Array{Float64, 3}, Nothing}
+    electrolyzer_h2::Union{Array{Float64, 3}, Nothing}
 end
 
 
@@ -2367,6 +2384,10 @@ struct MasterProblemInput
     # Loss-of-load penalty cap ($/MW per timestep) applied inside Benders
     # subproblems for numerical stability. Ignored by the monolithic solver.
     benders_lol_penalty_cap::Float64
+    # RE targets (system, year) that replace the RE-1 trajectory: a myopic
+    # run solves one year at a time, so its year's target comes from the
+    # whole horizon's trajectory. Empty = RE-1.
+    re_target_override::Dict{Tuple{Int,Int}, Float64}
 end
 
 # Constructor with defaults
@@ -2441,7 +2462,8 @@ function MasterProblemInput(;
     gen_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     tech_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     bat_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
-    benders_lol_penalty_cap::Float64 = 1000.0
+    benders_lol_penalty_cap::Float64 = 1000.0,
+    re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}()
 )
     return MasterProblemInput(
         years, base_year,
@@ -2474,7 +2496,8 @@ function MasterProblemInput(;
         transmission_resistances, transmission_loss_segments,
         solver_name, threads, time_limit, gap, verbose, solver_options,
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
-        benders_lol_penalty_cap
+        benders_lol_penalty_cap,
+        re_target_override
     )
 end
 
