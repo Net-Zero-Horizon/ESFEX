@@ -166,7 +166,7 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `sectoral_lol_cap_{sector}_{ni}_{t}` | SEC-1 | Sectoral LOL <= the sector's demand at the node |
-| `sectoral_lol_sum_{ni}_{t}`, `sectoral_lol_residual_{ni}_{t}` | SEC-2 | Load shed on the node's buses minus the sectoral LOL is in [0, node demand not covered by any sector]; that remainder is priced at VOLL |
+| `sectoral_lol_sum_{ni}_{t}`, `sectoral_lol_residual_{ni}_{t}` | SEC-2 | Load shed on the node's buses minus the sectoral LOL is in [0, node demand not covered by any sector]; that remainder is priced at VOLL × the demand-weighted mean of the node's sector criticalities (1 without sector demand) |
 | `demand_shift_out_cap_{sector}_{ni}_{t}` | SHIFT-1 | Demand shifted out of a step at most `flexibility_ratio` × sector demand (flexible sectors with `delay_tolerance > 0`); the net shift enters the power balance |
 
 ### Investment & Cost Limits
