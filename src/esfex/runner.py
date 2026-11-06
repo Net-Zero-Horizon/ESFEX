@@ -300,6 +300,7 @@ class Orchestrator:
         # Initialize state
         self.state: Optional[SimulationState] = None
         self.results: list[YearResults] = []
+        self.master_solution: Optional[dict] = None  # set by run(master_only=True)
 
         logger.debug(f"Orchestrator initialized for system: {self.system_name}")
         logger.debug(f"Mode: {config.simulation_mode}")
@@ -309,6 +310,10 @@ class Orchestrator:
         from esfex.plugins import get_plugin_manager
         self._pm = get_plugin_manager()
         self._pm.load_all(config, gui_mode=False, project_dir=config_path.parent if config_path else None)
+        plugin_errors = self._pm.apply_config(config)
+        if plugin_errors:
+            raise ValueError(
+                "Invalid plugin configuration:\n  " + "\n  ".join(plugin_errors))
         self._pm.register_julia_modules()
 
         # Progress tracking
@@ -1274,6 +1279,7 @@ class Orchestrator:
         self,
         years: Optional[int] = None,
         start_year: int = 2025,
+        master_only: bool = False,
     ) -> list[YearResults]:
         """
         Run the full simulation.
@@ -1285,10 +1291,18 @@ class Orchestrator:
         Args:
             years: Number of years to simulate (default: 25)
             start_year: First year of simulation
+            master_only: Stop after step 1 (development mode only). The
+                decisions are left in ``self.master_solution`` (None if the
+                master problem failed) and no year results are returned.
 
         Returns:
             List of YearResults for each simulated year
         """
+        if master_only and self.config.simulation_mode != "development":
+            raise ValueError(
+                "master_only needs simulation_mode 'development' "
+                f"(got {self.config.simulation_mode!r})")
+        self.master_solution = None
         years = years or 25
         end_year = start_year + years
         years_range = list(range(start_year, end_year))
@@ -1594,6 +1608,16 @@ class Orchestrator:
                 retirements=master_retirements,
                 config=self.config,
             )
+            if master_only:
+                self.master_solution = {
+                    "investments": master_investments,
+                    "retirements": master_retirements,
+                    "cumulative_capacities": master_cumulative_caps,
+                    "re_targets": master_re_targets,
+                }
+                self._finalize_hdf5(hdf5_path)
+                self._pm.teardown_all()
+                return []
         else:
             logger.info(
                 f"{self.config.simulation_mode} mode: skipping Master Problem")

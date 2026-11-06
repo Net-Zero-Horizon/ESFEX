@@ -110,6 +110,23 @@ def _hash_directory(path: Path) -> str:
     return h.hexdigest()
 
 
+def _typer_command_names(app: Any) -> set[str]:
+    """Names of the commands and groups registered on a Typer *app*."""
+    from typer.main import get_command_name
+
+    names: set[str] = set()
+    for cmd in app.registered_commands:
+        if cmd.name:
+            names.add(cmd.name)
+        elif cmd.callback is not None:
+            names.add(get_command_name(cmd.callback.__name__))
+    for grp in app.registered_groups:
+        name = grp.name or getattr(grp.typer_instance.info, "name", None)
+        if name:
+            names.add(name)
+    return names
+
+
 def _read_state() -> dict[str, Any]:
     """Read the enable/disable state file."""
     if _STATE_FILE.is_file():
@@ -307,8 +324,9 @@ class PluginManager:
                     logger.warning(
                         "Plugin %r at %s has hash %s which does not match "
                         "the trusted hash on record (%s). Skipping. "
-                        "Re-install via the GUI Plugins dialog to approve.",
-                        name, plugin_dir, current_hash, expected,
+                        "Trust it in the Plugin Manager or with "
+                        "'esfex plugin trust %s'.",
+                        name, plugin_dir, current_hash, expected, name,
                     )
                     continue
             plugin = self._load_plugin(name, plugin_dir, config, gui_mode)
@@ -607,8 +625,8 @@ class PluginManager:
         if host not in _TRUSTED_GIT_HOSTS and not trust_host:
             raise ValueError(
                 f"Host {host!r} is not in the default trusted git hosts "
-                f"({sorted(_TRUSTED_GIT_HOSTS)}). Confirm via "
-                "trust_host=True if you know the source."
+                f"({sorted(_TRUSTED_GIT_HOSTS)}). If you trust the source, "
+                "pass trust_host=True (esfex plugin install --trust-host)."
             )
 
         _USER_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
@@ -752,6 +770,44 @@ class PluginManager:
                 )
         return results
 
+    # ── Configuration ─────────────────────────────────────────────────
+
+    def apply_config(self, config: Any) -> list[str]:
+        """Give a loaded configuration to every loaded plugin.
+
+        For each plugin, its ``plugins.<name>`` section (when present) is
+        validated against :meth:`ESFEXPlugin.get_config_schema`; the section
+        itself stays a dict. If it is valid, ``context.config`` is set to
+        *config* and :meth:`ESFEXPlugin.on_config_loaded` is called.
+
+        Returns one message per invalid section (those plugins don't get
+        ``on_config_loaded``); the caller decides whether that is fatal.
+        Exceptions raised by the plugin's own hooks are logged, as for the
+        other hooks.
+        """
+        sections = getattr(config, "plugins", None) or {}
+        errors: list[str] = []
+        for plugin in self._plugins:
+            name = plugin.meta.name
+            try:
+                schema = plugin.get_config_schema()
+            except Exception:
+                logger.exception("Plugin %r get_config_schema() failed", name)
+                schema = None
+            if schema is not None and name in sections:
+                try:
+                    schema.model_validate(sections[name] or {})
+                except Exception as exc:
+                    errors.append(f"plugins.{name}: {exc}")
+                    continue
+            if getattr(plugin, "context", None) is not None:
+                plugin.context.config = config
+            try:
+                plugin.on_config_loaded(config)
+            except Exception:
+                logger.exception("Plugin %r on_config_loaded() failed", name)
+        return errors
+
     # ── Julia registration ────────────────────────────────────────────
 
     def register_julia_modules(self) -> None:
@@ -791,15 +847,48 @@ class PluginManager:
     # ── CLI registration ──────────────────────────────────────────────
 
     def register_cli_commands(self, app: Any) -> None:
-        """Register plugin CLI sub-commands on the Typer *app*."""
+        """Mount each loaded plugin's CLI sub-commands as ``esfex <name> ...``.
+
+        The Typer apps from :meth:`ESFEXPlugin.get_cli_commands` go under one
+        group named after the plugin (several apps are merged into it). A
+        plugin whose name is already a command, or whose apps cannot be
+        built into a command, is skipped with a logged error, so one broken
+        plugin cannot stop the CLI from starting.
+        """
+        import typer
+
         for plugin in self._plugins:
+            name = plugin.meta.name
+            if name in _typer_command_names(app):
+                logger.error(
+                    "Plugin %r: CLI commands not registered, 'esfex %s' "
+                    "already exists", name, name,
+                )
+                continue
+            n_groups = len(app.registered_groups)
             try:
-                sub_apps = plugin.get_cli_commands()
+                sub_apps = list(plugin.get_cli_commands() or [])
+                if not sub_apps:
+                    continue
                 for sub_app in sub_apps:
-                    app.add_typer(sub_app, name=plugin.meta.name)
+                    if not isinstance(sub_app, typer.Typer):
+                        raise TypeError(
+                            f"get_cli_commands() returned {sub_app!r}, "
+                            "not a typer.Typer"
+                        )
+                if len(sub_apps) == 1:
+                    app.add_typer(sub_apps[0], name=name)
+                else:
+                    group = typer.Typer(name=name, help=plugin.meta.description)
+                    for sub_app in sub_apps:
+                        group.add_typer(sub_app)
+                    app.add_typer(group, name=name)
+                # Build now: a broken app would otherwise fail the whole CLI
+                typer.main.get_command(app)
             except Exception:
+                del app.registered_groups[n_groups:]
                 logger.exception(
-                    "Plugin %r get_cli_commands() failed", plugin.meta.name
+                    "Plugin %r: CLI commands could not be registered", name
                 )
 
     # ── GUI registration ──────────────────────────────────────────────
@@ -859,7 +948,7 @@ class PluginManager:
 
     def _register_tree_categories(self, plugin: ESFEXPlugin, window: Any) -> None:
         categories = plugin.get_tree_categories()
-        tree_panel = getattr(window, "_tree", None)
+        tree_panel = getattr(window, "element_tree", None)
         if tree_panel is None or not categories:
             return
         for cat in categories:
@@ -869,20 +958,25 @@ class PluginManager:
                 )
 
     def _register_forms(self, plugin: ESFEXPlugin, window: Any) -> None:
-        props = getattr(window, "_props", None)
+        props = getattr(window, "properties_panel", None)
         if props is None:
             return
-        model = getattr(window, "_model", None)
+        model = getattr(window, "model", None)
         forms = plugin.get_forms(model)
         for element_type, widget in forms:
             if hasattr(props, "register_form"):
                 props.register_form(element_type, widget)
 
     def _register_toolbar(self, plugin: ESFEXPlugin, window: Any) -> None:
-        toolbar = getattr(window, "_toolbar", None)
+        toolbar = getattr(window, "toolbar", None)
         if toolbar is None:
             return
-        plugin.get_toolbar_actions(toolbar, window)
+        actions = plugin.get_toolbar_actions(toolbar, window) or []
+        # The plugin may already have added them itself (documented example)
+        present = list(toolbar.actions()) if hasattr(toolbar, "actions") else []
+        for action in actions:
+            if action not in present:
+                toolbar.addAction(action)
 
     def _register_menu(self, plugin: ESFEXPlugin, window: Any) -> None:
         menu_bar = getattr(window, "menuBar", None)
@@ -901,7 +995,7 @@ class PluginManager:
                 results_panel.register_result_variable(*var_tuple)
 
     def _register_map_layers(self, plugin: ESFEXPlugin, window: Any) -> None:
-        map_widget = getattr(window, "_map", None)
+        map_widget = getattr(window, "map_widget", None)
         if map_widget is None:
             return
         plugin.get_map_layers(map_widget)
