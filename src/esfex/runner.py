@@ -154,6 +154,76 @@ def _concat_window_series(windows) -> dict:
     }
 
 
+def _pe_period_bounds(n_steps: int, period_steps: int) -> list[tuple[int, int]]:
+    """``[start, end)`` steps of each primary-energy period of a window.
+
+    Mirrors ``create_temporal_mapping`` in primary_energy.jl: periods of
+    ``min(period_steps, n_steps)`` steps, the last one possibly shorter.
+    """
+    length = min(period_steps, n_steps) if period_steps > 0 else n_steps
+    length = max(length, 1)
+    return [(s, min(s + length, n_steps)) for s in range(0, n_steps, length)]
+
+
+def _merge_pe_windows(windows, period_steps: int) -> dict:
+    """Join the primary-energy results of the rolling-horizon windows.
+
+    ``windows`` is a list of ``(pe_result, window_steps, keep_steps)``.
+    Per-period series (fuel supply, non-electric demand served, fuel
+    shortfall, transport flows ``[route x period]``) are spread evenly over
+    the steps of their period, cut to the window's committed steps (the
+    overlap tail belongs to the next window), joined along time and summed
+    back into periods of ``period_steps`` steps from the start of the year.
+    Windows may have different period counts (the last one is shorter).
+    Costs count the committed share of each window (``keep / steps``), like
+    the dispatch objective. Investments and end-of-year tank levels come
+    from the last window.
+    """
+    def _committed_steps(arr, n_steps, keep):
+        arr = np.asarray(arr, dtype=float)
+        bounds = _pe_period_bounds(n_steps, period_steps)
+        if arr.shape[-1] != len(bounds):
+            raise ValueError(
+                f"primary-energy series has {arr.shape[-1]} periods, "
+                f"expected {len(bounds)} for {n_steps} steps")
+        per_step = np.concatenate(
+            [np.repeat(arr[..., [p]] / (e - s), e - s, axis=-1)
+             for p, (s, e) in enumerate(bounds)], axis=-1)
+        return per_step[..., :keep]
+
+    def _to_periods(series):
+        total = series.shape[-1]
+        return np.stack(
+            [series[..., s:e].sum(axis=-1) for s, e in _pe_period_bounds(total, period_steps)],
+            axis=-1)
+
+    merged: dict = {}
+    for key in ("total_fuel_supply", "total_ne_demand_satisfied",
+                "total_loss_of_supply", "transport_flows"):
+        fuels: list = []
+        for pe, _, _ in windows:
+            fuels.extend(f for f in (pe.get(key) or {}) if f not in fuels)
+        merged[key] = {}
+        for fuel in fuels:
+            parts = []
+            shape = next(np.asarray(pe[key][fuel]).shape[:-1] for pe, _, _ in windows
+                         if fuel in (pe.get(key) or {}))
+            for pe, n_steps, keep in windows:
+                arr = (pe.get(key) or {}).get(fuel)
+                parts.append(_committed_steps(arr, n_steps, keep) if arr is not None
+                             else np.zeros(shape + (keep,)))
+            merged[key][fuel] = _to_periods(np.concatenate(parts, axis=-1))
+    last_pe = windows[-1][0]
+    merged["final_storage_levels"] = last_pe.get("final_storage_levels", {})
+    merged["transport_investments"] = last_pe.get("transport_investments", {})
+    merged["storage_investments"] = last_pe.get("storage_investments", {})
+    for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
+        merged[cost_key] = sum(
+            float(pe.get(cost_key, 0.0)) * (keep / n_steps if n_steps > 0 else 1.0)
+            for pe, n_steps, keep in windows)
+    return merged
+
+
 @dataclass
 class SimulationState:
     """Tracks state across simulation years."""
@@ -2642,6 +2712,20 @@ class Orchestrator:
 
         return result
 
+    def _aggregate_unit_buses_to_nodes(self, arr):
+        """Sum a ``[unit x bus]`` array (e.g. investments) into ``[unit x node]``."""
+        if arr is None or self._bus_to_node is None:
+            return arr
+        arr = np.asarray(arr)
+        b2n = self._bus_to_node
+        if arr.ndim != 2 or arr.shape[1] != len(b2n):
+            return arr
+        out = np.zeros((arr.shape[0], self._num_nodes), dtype=float)
+        for b, n in enumerate(b2n):
+            if 0 <= n < self._num_nodes:
+                out[:, n] += arr[:, b]
+        return out
+
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
@@ -4801,7 +4885,8 @@ class Orchestrator:
             if window_result.get("transfer_investment") is not None:
                 last_transfer_investment = window_result["transfer_investment"]
             if window_result.get("primary_energy") is not None:
-                all_pe_results.append(window_result["primary_energy"])
+                all_pe_results.append(
+                    (window_result["primary_energy"], end_hour - start_hour, keep_hours))
             # N-1 security results
             # A window without binding N-1 duals returns None: zero-fill it.
             all_n1_gen_duals.append((
@@ -4814,7 +4899,7 @@ class Orchestrator:
                     if bc not in all_n1_binding:
                         all_n1_binding.append(bc)
             all_n1_trans_duals.append((window_result.get("n1_trans_reserve_duals") or {}, keep_hours))
-            total_n1_security_cost += window_result.get("n1_security_cost", 0.0)
+            total_n1_security_cost += (window_result.get("n1_security_cost") or 0.0) * kept_fraction
 
         # No window solved: the whole year produced no dispatch. Surface the
         # underlying solver/model error instead of exporting an empty result
@@ -4874,33 +4959,9 @@ class Orchestrator:
         combined_n1_trans_duals = _concat_window_series(all_n1_trans_duals)
         n1_gen_duals_arr = _concat_window_series(all_n1_gen_duals).get("d")
 
-        # Merge primary energy results across windows
-        pe_merged = None
-        if all_pe_results:
-            pe_merged = {}
-            for key in ("total_fuel_supply", "total_ne_demand_satisfied", "total_loss_of_supply"):
-                pe_merged[key] = {}
-                for pe in all_pe_results:
-                    if key in pe:
-                        for fuel, arr in pe[key].items():
-                            if fuel in pe_merged[key]:
-                                pe_merged[key][fuel] = pe_merged[key][fuel] + arr
-                            else:
-                                pe_merged[key][fuel] = arr.copy()
-            last_pe = all_pe_results[-1]
-            pe_merged["final_storage_levels"] = last_pe.get("final_storage_levels", {})
-            pe_merged["transport_investments"] = last_pe.get("transport_investments", {})
-            pe_merged["storage_investments"] = last_pe.get("storage_investments", {})
-            # Sum transport flows across windows
-            pe_merged["transport_flows"] = {}
-            for pe in all_pe_results:
-                for fuel, arr in pe.get("transport_flows", {}).items():
-                    if fuel in pe_merged["transport_flows"]:
-                        pe_merged["transport_flows"][fuel] = pe_merged["transport_flows"][fuel] + arr
-                    else:
-                        pe_merged["transport_flows"][fuel] = arr.copy()
-            for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
-                pe_merged[cost_key] = sum(pe.get(cost_key, 0.0) for pe in all_pe_results)
+        # Merge primary energy results across windows (committed steps only)
+        pe_merged = (_merge_pe_windows(all_pe_results, self._pe_period_steps())
+                     if all_pe_results else None)
 
         # Average RE penetration
         avg_re = total_re_penetration / num_solved if num_solved > 0 else 0.0
@@ -4934,6 +4995,11 @@ class Orchestrator:
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
             electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
             electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
+            # Investments [unit x bus]: SUM across buses in same node
+            last_gen_investment = self._aggregate_unit_buses_to_nodes(last_gen_investment)
+            last_bat_inv_power = self._aggregate_unit_buses_to_nodes(last_bat_inv_power)
+            last_bat_inv_capacity = self._aggregate_unit_buses_to_nodes(last_bat_inv_capacity)
+            last_reservoir_invest = self._aggregate_unit_buses_to_nodes(last_reservoir_invest)
             # Status variables: MAX across buses (1 if active at any bus)
             gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
             # Prices: MAX across buses (highest marginal price)
@@ -5501,6 +5567,11 @@ class Orchestrator:
                         f"storage_cap={fv['storage_capacity']}")
         return pe_sources
 
+    def _pe_period_steps(self) -> int:
+        """Primary-energy period length in timesteps (``primary_energy_resolution`` hours)."""
+        res_h = getattr(self.config.temporal, 'resolution_hours', 1) or 1
+        return max(1, int(self.config.temporal.primary_energy_resolution) // res_h)
+
     def _solve_window(
         self,
         year: int,
@@ -5653,7 +5724,7 @@ class Orchestrator:
 
                     # Convert PE resolution from real hours to timestep units
                     res_h = getattr(self.config.temporal, 'resolution_hours', 1)
-                    pe_res_timesteps = max(1, self.config.temporal.primary_energy_resolution // res_h)
+                    pe_res_timesteps = self._pe_period_steps()
 
                     # Scale max_availability for temporal resolution: PE model treats
                     # each timestep as 1h, but each is res_h real hours. The PE model
@@ -5826,6 +5897,21 @@ class Orchestrator:
                 # Electrolyzers [electrolyzer x bus x hour]: MW drawn, kg/h H2
                 "electrolyzer_power": solution.get('electrolyzer_power'),
                 "electrolyzer_h2": solution.get('electrolyzer_h2'),
+                # Battery spillage [bat x bus x hour], inertia deficit
+                # [hour], transfer margin {(from_bus, to_bus): [hour]}
+                "bat_spillage": solution.get('bat_spillage'),
+                "loss_of_inertia": solution.get('loss_of_inertia'),
+                "transfer_margin": solution.get('transfer_margin'),
+                # Reservoir hydro [gen x bus x hour] (level: hour+1 columns)
+                "reservoir_level": solution.get('reservoir_level'),
+                "reservoir_spillage": solution.get('reservoir_spillage'),
+                "reservoir_pump": solution.get('reservoir_pump'),
+                "reservoir_invest_capacity": solution.get('reservoir_invest_capacity'),
+                # N-1 security: duals, binding contingencies, security cost
+                "n1_gen_reserve_duals": solution.get('n1_gen_reserve_duals'),
+                "n1_trans_reserve_duals": solution.get('n1_trans_reserve_duals'),
+                "n1_binding_contingencies": solution.get('n1_binding_contingencies'),
+                "n1_security_cost": solution.get('n1_security_cost', 0.0),
                 # Investment arrays
                 "gen_investment": solution.get('gen_investment'),
                 "bat_investment_power": solution.get('bat_investment_power'),
@@ -7536,7 +7622,8 @@ class Orchestrator:
             # --- Reservoir hydro data (per generator) ---
             if result.reservoir_level is not None:
                 res_group = scenario.create_group("reservoir_level")
-                res_group.attrs["description"] = "Reservoir water level [nodes x hours+1] per gen"
+                res_group.attrs["description"] = (
+                    "Reservoir water level at the start of each hour [nodes x hours] per gen")
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_level.shape[0]:
                         ds = res_group.create_dataset(
@@ -7555,6 +7642,16 @@ class Orchestrator:
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW-eq"
+
+            if result.reservoir_invest_capacity is not None:
+                rinv_group = scenario.create_group("reservoir_invest_capacity")
+                rinv_group.attrs["description"] = "Reservoir capacity investment [nodes] per gen"
+                for g, name in enumerate(self._gen_names):
+                    if g < result.reservoir_invest_capacity.shape[0]:
+                        ds = rinv_group.create_dataset(
+                            gen_ds[g], data=result.reservoir_invest_capacity[g],
+                        )
+                        ds.attrs["units"] = "MWh"
 
             if result.reservoir_pump is not None:
                 pump_group = scenario.create_group("reservoir_pump")

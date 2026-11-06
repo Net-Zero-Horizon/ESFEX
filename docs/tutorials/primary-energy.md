@@ -446,12 +446,14 @@ Results are written to `results/<config_stem>_<ddmmyyyy>_<HHMM>.h5` (or the `--o
 
 | Path | Content |
 |------|---------|
-| `total_fuel_supply/<fuel>` | Fuel bought, all nodes (per period of a dispatch window, added over the year's windows; `.sum()` gives the yearly total) |
+| `total_fuel_supply/<fuel>` | Fuel bought, all nodes, per period of `primary_energy_resolution` hours from the start of the year (`.sum()` gives the yearly total) |
 | `total_ne_demand_satisfied/<fuel>` | Non-electric demand served (same layout) |
 | `total_loss_of_supply/<fuel>` | Fuel demand not supplied (same layout) |
 | `final_storage_levels/<fuel>` | Storage level per node at the end of the year |
-| `transport_flows/<fuel>` | Flow per route `[routes x periods]`, added over the year's windows |
+| `transport_flows/<fuel>` | Flow per route `[routes x periods]`, same periods |
 | attrs `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | Yearly totals, in M$ |
+
+With a rolling horizon each window reports its own periods; the year keeps only each window's committed steps (not the overlap with the next window), like the dispatch arrays, and the window costs count in proportion to those steps.
 
 ### Fuel Supply and Storage
 

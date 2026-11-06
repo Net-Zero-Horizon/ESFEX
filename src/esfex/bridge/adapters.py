@@ -518,13 +518,25 @@ def _expand_powersystem_result(
     for key in (
         "gen_output", "curtailment",
         "gen_status", "gen_startup",
-        "bat_charge", "bat_discharge", "bat_soc",
+        "bat_charge", "bat_discharge", "bat_soc", "bat_spillage",
+        "reservoir_level", "reservoir_spillage", "reservoir_pump",
+        "electrolyzer_power", "electrolyzer_h2",
     ):
         arr = result.get(key)
         if arr is None:
             continue
         a = _np.asarray(arr)
         if a.ndim == 3 and a.shape[1] == rm.n_reduced_buses:
+            result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
+
+    # ── Per-unit investments [unit x bus]: bus axis = 1 ──
+    for key in ("gen_investment", "bat_investment_power", "bat_investment_capacity",
+                "reservoir_invest_capacity"):
+        arr = result.get(key)
+        if arr is None:
+            continue
+        a = _np.asarray(arr)
+        if a.ndim == 2 and a.shape[1] == rm.n_reduced_buses:
             result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
 
     # ── Per-bus 2-D arrays: bus axis = 0 ──
