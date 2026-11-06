@@ -130,6 +130,7 @@ Adds security constraints for the loss of a single element to the dispatch. See 
 | SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); saved but not used (the SCOPF constraints are built in one pass). A value other than 5 logs a warning when the run loads the configuration |
 | SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on; saved but not used. A value other than 0.01 logs a warning when the run loads the configuration |
 | Allow Corrective Actions | Off | Allow post-contingency battery and generator re-dispatch instead of preventive reserve |
+| Compute N-1 Security Cost | Off | Re-solve each operational window without the N-1 constraints and report the objective difference as the N-1 security cost (`compute_security_cost`). Roughly doubles the solve time; off, the cost is reported as 0 |
 | *SLD contingency analysis* | | The fields below do not change the optimisation: they set up **Run All N-1** and **Run Screening** in the SLD Analysis panel |
 | Critical Line Threshold (frac) | 0.0 | Only lines and transformers loaded at or above this fraction of their capacity are tripped; 0 trips them all |
 | Contingency Depth | N-1 | `N-1` or `N-1-1`; initial value of the panel's depth selector |

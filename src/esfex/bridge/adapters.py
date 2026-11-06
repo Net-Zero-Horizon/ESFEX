@@ -2165,6 +2165,19 @@ class PowerSystemAdapter:
 
         status_code = self._map_termination_status(jl)
 
+        # Cost of N-1 security (opt-in): re-solve a copy without the N-1
+        # constraints; extract_solution reports the objective difference.
+        if status_code == 1 and self._n1_security_cost_requested():
+            try:
+                t0 = _time.perf_counter()
+                cost = float(jl.seval("compute_n1_security_cost!")(
+                    self._jl_model, self._jl_input))
+                logger.info(
+                    f"⏱ N-1 security cost re-solve: {_time.perf_counter() - t0:.2f}s "
+                    f"(cost={cost:.6g} M$)")
+            except Exception as exc:
+                logger.warning(f"N-1 security cost skipped due to bridge error: {exc}")
+
         # UC dual recovery (Ruta A v2): MIPs have no duals, so a UC solve
         # otherwise produces ``prices = 0`` in the HDF5 export. We clone
         # the model (``recover_uc_duals_via_copy``), fix ``gen_status``
@@ -2200,6 +2213,12 @@ class PowerSystemAdapter:
                 )
 
         return status_code
+
+    def _n1_security_cost_requested(self) -> bool:
+        """``n1_security.compute_security_cost`` is on and N-1 applies to this mode."""
+        n1 = getattr(self.esfex_config, "n1_security", None) if self.esfex_config else None
+        return bool(n1 is not None and n1.enabled and n1.compute_security_cost
+                    and self.mode in n1.apply_to_modes)
 
     def _map_termination_status(self, jl) -> int:
         """Map JuMP termination status to PuLP-compatible code.

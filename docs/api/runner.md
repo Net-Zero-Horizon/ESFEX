@@ -314,7 +314,7 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 | `n1_gen_reserve_duals` | `Optional[np.ndarray]` | `(hour,)` dual of the generation N-1 constraint |
 | `n1_trans_reserve_duals` | `Optional[dict]` | Duals of the transmission N-1 constraints |
 | `n1_binding_contingencies` | `Optional[list]` | Binding contingency IDs |
-| `n1_security_cost` | `float` | Incremental cost of N-1 security ($), default `0.0`; the model does not compute it yet, so it stays `0.0` |
+| `n1_security_cost` | `float` | Cost of N-1 security ($): objective with N-1 minus objective without it, summed over the year's windows; `0.0` unless `n1_security.compute_security_cost` is on |
 
 ### System-Level Scalars
 

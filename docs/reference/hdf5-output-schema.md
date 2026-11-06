@@ -142,7 +142,7 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
 
 Energy and CO2 totals here and in the scenario attributes below are sums of the per-step rates times `temporal_resolution_hours`, so they are MWh and tonnes at any time step.
-| `n1_security_cost` | (num_years,) | float | Incremental cost of N-1 security ($); currently always 0 (not computed — the shortfall penalty is `n1_security_shortfall_cost` in `cost_breakdown/`) |
+| `n1_security_cost` | (num_years,) | float | Cost of N-1 security ($): objective with N-1 minus objective without it, with `n1_security.compute_security_cost: true`; 0 otherwise. The shortfall penalty alone is `n1_security_shortfall_cost` in `cost_breakdown/` |
 
 ---
 
@@ -588,7 +588,7 @@ Written when N-1 security results exist.
 
 | Content | Kind | Description |
 |---------|------|-------------|
-| `security_cost` | attribute | Incremental cost of N-1 security ($); currently always 0 (see `n1_security_cost` above) |
+| `security_cost` | attribute | Cost of N-1 security ($); 0 unless `compute_security_cost` is on (see `n1_security_cost` above) |
 | `gen_reserve_duals` | dataset (hours,) | Dual of the generation N-1 reserve constraint (USD/MW) |
 | `trans_reserve_duals/line_{l}_outage_{k}_dir_{d}` | datasets | Duals of the transmission contingency constraints (USD/MW) |
 | `binding_contingencies` | dataset (bytes) | IDs of binding contingencies |

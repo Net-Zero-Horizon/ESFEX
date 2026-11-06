@@ -1347,6 +1347,40 @@ import Ipopt
             _, _, cost, _ = solve_n1([ngen("A", 60.0, 1.0e-5)], 50.0;
                                      rtype = "percentage", rpct = 0.2)
             @test cost ≈ 0.0 atol = 1e-6
+
+            # n1_security_cost = objective with N-1 − objective without it
+            # (was always 0). Corrective N-1 moves 35 MW from A to the dearer
+            # B in both steps; a short backup only adds the shortfall penalty.
+            function n1_security(gens; kw...)
+                input = PowerSystemInput(;
+                    name = "n1", year = 2025, network = net, generators = gens,
+                    batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0,
+                    n1_security_enabled = true, n1_generation_enabled = true,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    kw...)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                before = extract_solution(model, vars, input).n1_security_cost
+                c = compute_n1_security_cost!(model, input)
+                res = extract_solution(model, vars, input)
+                return before, c, res.n1_security_cost, value(vars.gen_output[1, 1, 1])
+            end
+            before, c, stored, a_out = n1_security(
+                [ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4; ramp = 0.25)];
+                n1_scopf_enabled = true, n1_corrective_enabled = true)
+            @test before == 0.0                       # not computed: stays 0
+            @test c ≈ 35.0 * (1.0e-4 - 1.0e-5) * H rtol = 1e-6
+            @test stored ≈ c
+            @test a_out ≈ 15.0 atol = 1e-6            # original solution untouched
+            _, c, _, _ = n1_security([ngen("A", 100.0, 1.0e-5), ngen("B", 30.0, 1.0e-4)])
+            @test c ≈ 20.0 * H rtol = 1e-6
+            # N-1 off: nothing to compute
+            _, c, stored, _ = n1_security([ngen("A", 100.0, 1.0e-5)];
+                                          n1_security_enabled = false)
+            @test c == 0.0 && stored == 0.0
         end
 
         @testset "ACOPF line limits follow scheduled outages" begin

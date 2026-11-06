@@ -331,6 +331,7 @@ end
 | `committed_steps` | `(ps_vars, hours, keep; pe_vars, pe_temporal) -> CommittedSteps` | Share of each variable in a window's first `keep` steps (1 / 0 per step, period share for primary-energy periods, `keep / hours` for variables without a step). `committed_value(cs, expr)` values a solved expression over those steps. |
 | `recover_uc_duals!` | `(model, vars, input) -> Bool` | UC only: fix the commitment binaries to their rounded values on the model itself and re-solve as an LP so balance duals (prices) exist. Mutates the model. |
 | `recover_uc_duals_via_copy` | `(model, vars, input) -> Union{Matrix, Nothing}` | Same on a copy of the model; returns the `[bus x hour]` price matrix in M$/MWh, or `nothing`. Used by `PowerSystemAdapter`. |
+| `compute_n1_security_cost!` | `(model, input) -> Float64` | Re-solve a copy of the solved model with the N-1 slacks free of charge and store objective(with) − objective(without) in `model.ext[:n1_security_cost]`, which `extract_solution` reports as `n1_security_cost` (solver cost units). Used by `PowerSystemAdapter` when `n1_security.compute_security_cost` is on. |
 
 ### Master Problem (Capacity Expansion)
 

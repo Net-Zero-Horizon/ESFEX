@@ -1615,6 +1615,17 @@ class N1SecurityConfig(BaseModel):
         ),
     )
 
+    # Cost of N-1 security: one extra solve per operational window
+    compute_security_cost: bool = Field(
+        default=False,
+        description=(
+            "Re-solve each operational window without the N-1 constraints and "
+            "store objective(with N-1) - objective(without) as "
+            "n1_security_cost. Roughly doubles the solve time. Off: "
+            "n1_security_cost stays 0."
+        ),
+    )
+
     # N-k depth and analysis options
     contingency_depth: Literal["n1", "n1_1"] = Field(
         default="n1",

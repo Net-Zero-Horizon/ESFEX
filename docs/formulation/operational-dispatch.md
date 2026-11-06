@@ -879,6 +879,7 @@ All SCOPF slacks are priced like the preventive ones.
 - `generation_enabled`, `transmission_enabled` -- enable each part
 - `transmission_reserve_factor` -- fraction \(\omega\) of line capacity usable under N-1 (default 0.70)
 - `scopf_enabled`, `corrective_enabled` -- SCOPF variant and corrective generation N-1
+- `compute_security_cost` -- re-solve each window without N-1 and report the objective difference as `n1_security_cost` (see [Cost of N-1 security](dc-power-flow.md#cost-of-n-1-security))
 
 ---
 
