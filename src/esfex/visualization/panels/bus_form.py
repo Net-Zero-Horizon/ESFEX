@@ -30,6 +30,7 @@ class BusForm(QWidget):
         self._current_id: str | None = None
         self._multi_ids: list[str] | None = None
         self._updating = False
+        self._role_edited = False
 
         layout = QFormLayout(self)
 
@@ -165,6 +166,9 @@ class BusForm(QWidget):
         """Enforce role/demand_fraction invariant: connection buses must have df=0."""
         if self._updating:
             return
+        # A role picked here is the user's: the save-time role repair
+        # (repair_bus_roles_and_demand) must keep it.
+        self._role_edited = True
         new_role = self._role.currentText()
         if new_role == "connection":
             self._updating = True
@@ -232,6 +236,11 @@ class BusForm(QWidget):
                 val = w.value()
             for inst in instances:
                 setattr(inst, attr, val)
+
+        if self._role_edited and not widget_is_mixed(self._role):
+            for inst in instances:
+                inst.role_user_set = True
+        self._role_edited = False
 
         # Parent node is special (uses data, not text)
         if not widget_is_mixed(self._parent_node):

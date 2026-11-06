@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -342,6 +343,16 @@ class GlobalSettingsForm(QWidget):
         self._n1_enabled.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_enabled)
 
+        # Simulation modes the N-1 constraints apply to (apply_to_modes).
+        n1_modes_row = QHBoxLayout()
+        self._n1_apply_dev = QCheckBox(tr("global_form.n1_apply_dev"))
+        self._n1_apply_uc = QCheckBox(tr("global_form.n1_apply_uc"))
+        for cb in (self._n1_apply_dev, self._n1_apply_uc):
+            cb.toggled.connect(self._on_changed)
+            n1_modes_row.addWidget(cb)
+        n1_modes_row.addStretch(1)
+        n1l.addRow(tr("global_form.n1_apply_modes"), n1_modes_row)
+
         self._n1_trans_enabled = QCheckBox(tr("global_form.enable"))
         self._n1_trans_enabled.toggled.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_trans"), self._n1_trans_enabled)
@@ -352,11 +363,6 @@ class GlobalSettingsForm(QWidget):
         self._n1_trans_reserve.editingFinished.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_trans_reserve"), self._n1_trans_reserve)
 
-        self._n1_crit_line = QDoubleSpinBox()
-        self._n1_crit_line.setRange(0, 1)
-        self._n1_crit_line.setDecimals(3)
-        self._n1_crit_line.editingFinished.connect(self._on_changed)
-        n1l.addRow(tr("global_form.n1_crit_line"), self._n1_crit_line)
 
         self._n1_gen_enabled = QCheckBox(tr("global_form.enable"))
         self._n1_gen_enabled.toggled.connect(self._on_changed)
@@ -365,7 +371,6 @@ class GlobalSettingsForm(QWidget):
         self._n1_gen_type = QComboBox()
         self._n1_gen_type.addItem(tr("global_form.reserve_largest"), "largest_unit")
         self._n1_gen_type.addItem(tr("global_form.reserve_percentage"), "percentage")
-        self._n1_gen_type.addItem(tr("global_form.reserve_fixed"), "fixed_mw")
         self._n1_gen_type.currentIndexChanged.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_gen_type"), self._n1_gen_type)
 
@@ -384,6 +389,7 @@ class GlobalSettingsForm(QWidget):
 
         self._n1_scopf_max_iter = QSpinBox()
         self._n1_scopf_max_iter.setRange(1, 20)
+        self._n1_scopf_max_iter.setToolTip(tr("global_form.n1_scopf_unused_tip"))
         self._n1_scopf_max_iter.editingFinished.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_scopf_max_iter"), self._n1_scopf_max_iter)
 
@@ -391,6 +397,7 @@ class GlobalSettingsForm(QWidget):
         self._n1_scopf_tol.setRange(0, 1)
         self._n1_scopf_tol.setDecimals(4)
         self._n1_scopf_tol.setSingleStep(0.001)
+        self._n1_scopf_tol.setToolTip(tr("global_form.n1_scopf_unused_tip"))
         self._n1_scopf_tol.editingFinished.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_scopf_tol"), self._n1_scopf_tol)
 
@@ -400,7 +407,20 @@ class GlobalSettingsForm(QWidget):
         self._n1_corrective.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_corrective)
 
-        # ── N-k Depth & Analysis Options ──
+        # ── SLD contingency analysis (Run All N-1 / Screening) ──
+        # Not part of the optimisation: defaults of the SLD Analysis panel.
+        n1_sld_header = QLabel(tr("global_form.n1_sld_header"))
+        n1_sld_header.setToolTip(tr("global_form.n1_sld_header_tip"))
+        n1_sld_header.setWordWrap(True)
+        n1l.addRow(n1_sld_header)
+
+        self._n1_crit_line = QDoubleSpinBox()
+        self._n1_crit_line.setRange(0, 1)
+        self._n1_crit_line.setDecimals(3)
+        self._n1_crit_line.setToolTip(tr("global_form.n1_crit_line_tip"))
+        self._n1_crit_line.editingFinished.connect(self._on_changed)
+        n1l.addRow(tr("global_form.n1_crit_line"), self._n1_crit_line)
+
         self._n1_depth = QComboBox()
         self._n1_depth.addItem("N-1", "n1")
         self._n1_depth.addItem("N-1-1", "n1_1")
@@ -825,6 +845,8 @@ class GlobalSettingsForm(QWidget):
 
         # N-1
         self._n1_enabled.setChecked(g.n1_enabled)
+        self._n1_apply_dev.setChecked("development" in g.n1_apply_to_modes)
+        self._n1_apply_uc.setChecked("unit_commitment" in g.n1_apply_to_modes)
         self._n1_trans_enabled.setChecked(g.n1_transmission_enabled)
         self._n1_trans_reserve.setValue(g.n1_transmission_reserve_factor)
         self._n1_crit_line.setValue(g.n1_critical_line_threshold)
@@ -1098,6 +1120,14 @@ class GlobalSettingsForm(QWidget):
 
         # N-1
         g.n1_enabled = self._n1_enabled.isChecked()
+        # Keep modes this form does not show (e.g. economic_dispatch).
+        modes = [m for m in g.n1_apply_to_modes
+                 if m not in ("development", "unit_commitment")]
+        if self._n1_apply_dev.isChecked():
+            modes.append("development")
+        if self._n1_apply_uc.isChecked():
+            modes.append("unit_commitment")
+        g.n1_apply_to_modes = modes
         g.n1_transmission_enabled = self._n1_trans_enabled.isChecked()
         g.n1_transmission_reserve_factor = self._n1_trans_reserve.value()
         g.n1_critical_line_threshold = self._n1_crit_line.value()

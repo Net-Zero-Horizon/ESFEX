@@ -100,14 +100,55 @@ class _GeoAssetInfo:
     is_domain: bool = False   # applied as a workflow domain
 
 
+_WGS84_CRS_NAMES = {
+    "urn:ogc:def:crs:ogc:1.3:crs84", "urn:ogc:def:crs:epsg::4326",
+    "epsg:4326", "crs84", "ogc:crs84",
+}
+
+
+def _geojson_needs_reprojection(data: dict) -> bool:
+    """True when a GeoJSON declares a ``crs`` member other than WGS84.
+
+    RFC 7946 GeoJSON is always WGS84 and has no ``crs``; older files
+    (GeoJSON 2008, QGIS exports) may name a projected CRS there.
+    """
+    crs = data.get("crs") if isinstance(data, dict) else None
+    if not isinstance(crs, dict):
+        return False
+    name = str((crs.get("properties") or {}).get("name", "")).strip().lower()
+    return bool(name) and name not in _WGS84_CRS_NAMES
+
+
+def _to_wgs84(gdf):
+    """Reproject a GeoDataFrame to WGS84 (EPSG:4326), the map's coordinates.
+
+    A layer without a CRS is assumed to be WGS84 already (logged).
+    """
+    if gdf.crs is None:
+        logger.warning(
+            "Geo file has no coordinate reference system; assuming WGS84 "
+            "longitude/latitude.")
+        return gdf
+    if gdf.crs.to_epsg() != 4326:
+        logger.info("Reprojecting geo file from %s to WGS84", gdf.crs)
+        return gdf.to_crs(epsg=4326)
+    return gdf
+
+
 def _read_geo_file(path: str) -> tuple[str, dict]:
-    """Read any supported geo file, return (geojson_str, geojson_dict)."""
+    """Read any supported geo file, return (geojson_str, geojson_dict).
+
+    The result is always in WGS84 longitude/latitude (what the map and the
+    model use): files in a projected CRS (e.g. a UTM shapefile) are
+    reprojected.
+    """
     ext = Path(path).suffix.lower()
     if ext in (".geojson", ".json"):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return json.dumps(data), data
-    # All other formats require geopandas
+        if not _geojson_needs_reprojection(data):
+            return json.dumps(data), data
+    # All other formats (and GeoJSON in a projected CRS) require geopandas
     import geopandas as gpd  # noqa: F811
     if ext == ".kmz":
         import zipfile
@@ -119,8 +160,9 @@ def _read_geo_file(path: str) -> tuple[str, dict]:
                 gdf = gpd.read_file(kml_file, driver="KML")
     elif ext == ".kml":
         gdf = gpd.read_file(path, driver="KML")
-    else:  # .shp, .gpkg
+    else:  # .shp, .gpkg, projected GeoJSON
         gdf = gpd.read_file(path)
+    gdf = _to_wgs84(gdf)
     geojson_str = gdf.to_json()
     return geojson_str, json.loads(geojson_str)
 
@@ -1021,13 +1063,22 @@ class MainWindow(QMainWindow):
         self._sld_hour_slider.setMaximum(max_h)
         self._sld_hour_spin.setMaximum(max_h)
 
+        self._enable_sld_results_controls()
+
+    def _enable_sld_results_controls(self):
+        """Put the SLD back in results mode for the loaded HDF5 file.
+
+        Builds the results contingency analyzer, enables the time controls
+        and redraws the overlay. Used after loading results and when the
+        Analysis mode (which disables those controls) is switched off.
+        """
+        loader = getattr(self, "_sld_results_loader", None)
+        if loader is None:
+            return
         # Build contingency analyzer (Level 2)
         self._sld_contingency_analyzer = None
         try:
-            from esfex.analysis.contingency import (
-                ContingencyAnalyzer,
-                build_contingency_from_state,
-            )
+            from esfex.analysis.contingency import build_contingency_from_state
             self._sld_contingency_analyzer = build_contingency_from_state(
                 self.model.state,
                 loader.num_nodes,
@@ -1181,6 +1232,11 @@ class MainWindow(QMainWindow):
 
             # Populate the analysis panel from current editor state
             self._analysis_panel.populate()
+            g = self.model.global_settings
+            self._analysis_panel.set_nk_defaults(
+                g.n1_contingency_depth, g.n1_redistribution_mode,
+                g.n1_pi_screening_threshold,
+            )
 
             # Build analyzers from editor state
             self._analysis_freq_analyzer = None
@@ -1299,6 +1355,11 @@ class MainWindow(QMainWindow):
             self._sld_contingency_combo.blockSignals(False)
             self._sld_btn_export.setEnabled(False)
             self._sld_btn_clear.setEnabled(False)
+            self._sld_contingency_analyzer = None
+
+            # Results loaded before Analysis was switched on: give the time
+            # controls (disabled in analysis mode) and the overlay back.
+            self._enable_sld_results_controls()
 
             # Restore properties panel
             self._restore_properties_panel()
@@ -1591,6 +1652,16 @@ class MainWindow(QMainWindow):
         result_dict = dataclasses.asdict(result)
         self.sld_widget.update_contingency_data(json.dumps(result_dict))
 
+    def _nk_contingency_types(self) -> set[str]:
+        """Element types the N-k runs trip (Global Settings > N-1 Security)."""
+        g = self.model.global_settings
+        types = {"generator", "line"}
+        if g.n1_transformer_contingencies:
+            types.add("transformer")
+        if g.n1_battery_contingencies:
+            types.add("battery")
+        return types
+
     def _on_run_all_n1(self, depth: str, redispatch: str, pi_threshold: float):
         """Run full N-1 or N-1-1 analysis on the current scenario snapshot."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
@@ -1598,33 +1669,25 @@ class MainWindow(QMainWindow):
             self._analysis_panel.update_nk_summary("No contingency analyzer available.")
             return
 
+        from esfex.analysis.contingency import run_all_contingencies
         from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
         scenario = self._analysis_panel.get_scenario()
         snapshot = build_snapshot_from_scenario(self.model.state, scenario)
 
         try:
-            if depth == "n1_1" and hasattr(analyzer, "analyze_n1_1"):
-                results = analyzer.analyze_n1_1(
-                    snapshot, redistribution=redispatch
-                )
-                n_ctg = len(results) if results else 0
-                n_violations = sum(
-                    1 for r in (results or []) if not r.is_secure
-                )
-                self._analysis_panel.update_nk_summary(
-                    f"N-1-1: {n_ctg} pairs analyzed, {n_violations} violations"
-                )
+            results = run_all_contingencies(
+                analyzer, snapshot, depth=depth, redistribution=redispatch,
+                types=self._nk_contingency_types(),
+                min_line_loading=self.model.global_settings.n1_critical_line_threshold,
+            )
+            n_violations = sum(1 for r in results if not r.is_secure)
+            if depth == "n1_1":
+                text = (f"N-1-1: {len(results)} stressed pairs analyzed, "
+                        f"{n_violations} violations")
             else:
-                results = analyzer.analyze_all_contingencies(
-                    snapshot, redistribution=redispatch
-                )
-                n_ctg = len(results) if results else 0
-                n_violations = sum(
-                    1 for r in (results or []) if not r.is_secure
-                )
-                self._analysis_panel.update_nk_summary(
-                    f"N-1: {n_ctg} contingencies, {n_violations} violations"
-                )
+                text = (f"N-1: {len(results)} contingencies, "
+                        f"{n_violations} violations")
+            self._analysis_panel.update_nk_summary(text)
         except Exception as exc:
             log.warning("N-1 analysis failed: %s", exc, exc_info=True)
             self._analysis_panel.update_nk_summary(f"Error: {exc}")
@@ -1636,26 +1699,22 @@ class MainWindow(QMainWindow):
             self._analysis_panel.update_nk_summary("No contingency analyzer available.")
             return
 
+        from esfex.analysis.contingency import screen_all_contingencies
         from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
         scenario = self._analysis_panel.get_scenario()
         snapshot = build_snapshot_from_scenario(self.model.state, scenario)
 
         try:
-            if hasattr(analyzer, "screen_contingencies"):
-                ranked = analyzer.screen_contingencies(
-                    snapshot, pi_threshold=pi_threshold
-                )
-                n_total = len(ranked) if ranked else 0
-                n_critical = sum(
-                    1 for r in (ranked or []) if r.pi > pi_threshold
-                ) if pi_threshold > 0 else n_total
-                self._analysis_panel.update_nk_summary(
-                    f"Screening: {n_critical}/{n_total} critical contingencies"
-                )
-            else:
-                self._analysis_panel.update_nk_summary(
-                    "Screening not available (no PTDF/LODF support)"
-                )
+            ranked, n_total = screen_all_contingencies(
+                analyzer, snapshot, pi_threshold=pi_threshold,
+                redistribution=redispatch, types=self._nk_contingency_types(),
+                min_line_loading=self.model.global_settings.n1_critical_line_threshold,
+            )
+            worst = (f"; worst: {ranked[0]['element_id']} (PI {ranked[0]['pi']:.2f})"
+                     if ranked else "")
+            self._analysis_panel.update_nk_summary(
+                f"Screening: {len(ranked)}/{n_total} critical contingencies{worst}"
+            )
         except Exception as exc:
             log.warning("Screening failed: %s", exc, exc_info=True)
             self._analysis_panel.update_nk_summary(f"Error: {exc}")

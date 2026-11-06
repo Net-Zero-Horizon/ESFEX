@@ -241,7 +241,7 @@ Fuel routes are visible in every layer. Layer filtering only affects the map; th
 1. The file appears on the map and under **Geo Assets** in the Element Tree. Nothing is added to the system yet.
 2. Right-click the asset and select **Parse to System Elements...** to convert its features into buses, lines, generators, and other elements.
 
-The file is not reprojected. Provide data in WGS84 (EPSG:4326); a file in another CRS is drawn in the wrong place.
+Files in another coordinate reference system (for example a UTM shapefile, or a GeoJSON with a projected `crs` member) are reprojected to WGS84 (EPSG:4326) on import. A file without a CRS is taken as WGS84 longitude/latitude, with a warning in the log.
 
 
 ---

@@ -1434,6 +1434,10 @@ def _system_to_gui_state(sys: SystemConfig,
                     base = _node_coords.get(buses[bus_id].parent_node, (0.0, 0.0))
                     buses[bus_id].latitude = base[0] + coords[0]
                     buses[bus_id].longitude = base[1] + coords[1]
+        # Roles the user picked in the bus form (kept by the save-time repair).
+        for bus_id in gui_layout.get("user_set_bus_roles", []) or []:
+            if bus_id in buses:
+                buses[bus_id].role_user_set = True
         # For buses not in gui_layout, inherit parent node coordinates
         for bus_id, bus in buses.items():
             if bus_id not in gui_layout.get("buses", {}):
@@ -2170,7 +2174,7 @@ def config_to_global_settings(
     if hasattr(config, 'n1_security') and config.n1_security:
         n1 = config.n1_security
         g.n1_enabled = getattr(n1, 'enabled', False)
-        g.n1_apply_to_modes = list(getattr(n1, 'apply_to_modes', ['unit_commitment']))
+        g.n1_apply_to_modes = list(getattr(n1, 'apply_to_modes', ['development', 'unit_commitment']))
         g.n1_transmission_enabled = getattr(n1, 'transmission_enabled', True)
         g.n1_transmission_reserve_factor = getattr(n1, 'transmission_reserve_factor', 0.70)
         g.n1_critical_line_threshold = getattr(n1, 'critical_line_threshold', 0.0)
@@ -3677,6 +3681,10 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     for i, fe in enumerate(state.fuel_entry_points):
         if fe.coordinate and (fe.coordinate.lat != 0.0 or fe.coordinate.lng != 0.0):
             layout.setdefault("fuel_entries", {})[str(i)] = [fe.coordinate.lat, fe.coordinate.lng]
+    user_roles = sorted(
+        bid for bid, bus in state.buses.items() if bus.role_user_set)
+    if user_roles:
+        layout["user_set_bus_roles"] = user_roles
     if layout:
         sys_dict["_gui_layout"] = layout
 

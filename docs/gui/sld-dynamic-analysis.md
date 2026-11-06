@@ -343,15 +343,15 @@ Group at the bottom of the panel:
 | Control | Description |
 |---------|-------------|
 | Contingency Depth | `N-1` or `N-1-1` |
-| Redistribution | `Pro-rata` or `Droop-based` |
-| PI Screening Threshold | Performance-index threshold; 0 analyzes all contingencies |
-| **Run All N-1** | Analyze every contingency at the selected depth and show a summary |
-| **Run Screening** | Rank contingencies by performance index, PI = Σ (flow / capacity)² over lines, and show how many are critical (at most 50 are ranked) |
+| Redistribution | `Pro-rata` or `Droop-based` (DC model; the AC model always redistributes pro rata) |
+| PI Screening Threshold | Performance-index threshold for **Run Screening**; 0 keeps every contingency |
+| **Run All N-1** | N-1: trips every contingency in the list and reports how many there are and how many are insecure (overload or load shedding). N-1-1: for each first outage, trips as second outage each line loaded at 80 % or more afterwards, and reports the first 20 such pairs and their violations (DC model, also in AC mode) |
+| **Run Screening** | Trips every contingency with the DC model, computes PI = Σ (flow / capacity)² over lines and transformers, and reports how many have PI at or above the threshold, out of how many, and the worst one |
 
-These buttons do not work in the current version. **Run All N-1** shows an error message in the summary line at both depths. **Run Screening** gives a result only with the threshold at 0 in DC mode; in AC mode it shows "Screening not available". The Redistribution choice is not applied. Use the **Contingency** combo to analyze contingencies one at a time.
+The depth, redistribution and threshold start from **Global Settings > N-1 Security** each time Analysis is switched on. The same section decides which elements are tripped: generators and lines always, transformers and discharging batteries when their options are on, and only lines and transformers loaded at or above the critical line threshold.
 
 ### Switching Between Modes
 
 - Analysis mode and loaded results are independent. Load Results, year, hour and playback controls are disabled while analysis mode is on.
-- Unchecking **Analysis** clears the overlays and restores the properties panel. The year, hour and playback controls stay disabled, so click **Load Results** again to go back to a results file.
+- Unchecking **Analysis** clears the analysis overlays and restores the properties panel. If a results file was loaded, its year, hour and playback controls come back and the diagram shows its current hour again.
 - **Clear** exits analysis mode and also unloads the results.

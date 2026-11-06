@@ -352,7 +352,9 @@ where \(\rho^{post}\) is `transmission_reserve_factor` (default 0.70) and \(f_{l
 
 Both slacks are priced at `penalties.loss_of_reserve_static` per MW and time step and reported as `n1_security_shortfall_cost`, so an insecure fleet or network shows up as a cost instead of an infeasible model.
 
-`critical_line_threshold`, `generation_reserve_type`, `generation_reserve_percentage`, `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint.
+With `generation_reserve_type: percentage` the requirement of N1-1 is `generation_reserve_percentage` × the total demand of the step instead of the largest unit's output, and no unit is excluded from the headroom.
+
+`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` only configure the post-hoc contingency analysis of the Studio's single-line diagram. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint.
 
 ### PTDF Matrix Construction
 
