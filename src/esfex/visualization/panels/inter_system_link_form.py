@@ -110,12 +110,6 @@ class InterSystemLinkForm(QWidget):
         # numeric inputs. No specialValueText (the user can read the
         # current value at a glance and override it) and 6-decimal
         # precision to match electrical units in the YAML.
-        self._base_impedance = QDoubleSpinBox()
-        self._base_impedance.setRange(0, 1e6)
-        self._base_impedance.setDecimals(2)
-        self._base_impedance.editingFinished.connect(self._on_changed)
-        layout.addRow(tr("line_form.base_impedance"), self._base_impedance)
-
         self._reactance_per_km = QDoubleSpinBox()
         self._reactance_per_km.setRange(0, 100)
         self._reactance_per_km.setDecimals(4)
@@ -278,7 +272,6 @@ class InterSystemLinkForm(QWidget):
                 float(link.length_km if link.length_km is not None
                       else (link.distance_km or 0.0))
             )
-            self._base_impedance.setValue(float(link.base_impedance or 0.0))
             self._reactance_per_km.setValue(float(link.reactance_per_km or 0.0))
             self._reactance_pu.setValue(float(link.reactance_pu or 0.0))
             self._resistance_pu.setValue(float(link.resistance_pu or 0.0))
@@ -428,7 +421,6 @@ class InterSystemLinkForm(QWidget):
         link.capacity_mw = float(self._capacity.value())
         link.voltage_kv = float(self._voltage.value())
         link.line_type = self._line_type.currentText() or None
-        link.base_impedance = float(self._base_impedance.value())
         link.reactance_per_km = float(self._reactance_per_km.value())
         link.reactance_pu = float(self._reactance_pu.value())
         link.resistance_pu = float(self._resistance_pu.value())

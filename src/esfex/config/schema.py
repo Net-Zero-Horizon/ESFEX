@@ -188,6 +188,12 @@ class TransmissionLineGeo(BaseModel):
     # Power flow properties (per-line overrides for global DC power flow defaults)
     length_km: Optional[float] = None
     reactance_pu: Optional[float] = None
+    reactance_per_km: Optional[float] = Field(
+        default=None, ge=0,
+        description="Series reactance (ohm/km) used to derive reactance_pu "
+                    "from length_km when reactance_pu is not set; "
+                    "None or 0 = dc_power_flow.reactance_per_km",
+    )
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1

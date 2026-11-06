@@ -274,8 +274,8 @@ class GuiTransmissionLine:
     to_endpoint: Optional[EndpointRef] = None
     # Power flow properties
     length_km: Optional[float] = None          # None = auto-calculate from coords
-    base_impedance: Optional[float] = None     # ohm (None = system default)
-    reactance_per_km: Optional[float] = None   # ohm/km (None = system default)
+    reactance_per_km: Optional[float] = None   # ohm/km (None = system default);
+                                               # derives reactance_pu from length
     reactance_pu: Optional[float] = None       # None = use global default
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None

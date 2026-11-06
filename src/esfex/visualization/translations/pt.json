@@ -413,12 +413,12 @@
     "scale_factor": "Fator de escala:"
   },
   "line_form": {
+    "reactance_per_km_tip": "Reatância série desta linha por km. Com o comprimento, dá a reatância quando Reatância (pu) está vazia (x = comprimento × X/km ÷ (V² / S_base)). Padrão = reatância por km do fluxo DC do sistema.",
     "group_properties": "Propriedades",
     "capacity": "Capacidade (MW):",
     "voltage": "Tensão (kV):",
     "type": "Tipo:",
     "length": "Comprimento (km):",
-    "base_impedance": "Impedância base (ohm):",
     "reactance_per_km": "Reatância por km (ohm/km):",
     "reactance_pu": "Reatância (pu):",
     "resistance_pu": "Resistência (pu):",

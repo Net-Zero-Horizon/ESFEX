@@ -407,6 +407,7 @@ See [Nodes and buses](../user-guide/configuration.md#nodes-and-buses) in the gui
 | `line_type` | `overhead` \| `underground` \| `submarine` \| null | `null` | `overhead`, `underground` or `submarine` |
 | `length_km` | float \| null | `null` | Length (km) |
 | `reactance_pu` | float \| null | `null` | Reactance (p.u. on `ac_power_flow.base_mva`). Missing → length × `reactance_per_km` / Z_base with Z_base = V² / `base_mva` (V = `voltage_kv`, else `voltage_level_kv`); 0.01 without a length |
+| `reactance_per_km` | float (≥ 0) \| null | `null` | This line's reactance (Ω/km) for the derivation above; null or 0 = `dc_power_flow.reactance_per_km` |
 | `resistance_pu` | float \| null | `null` | Resistance (p.u.). Missing → 0 |
 | `susceptance_pu` | float \| null | `null` | Susceptance (p.u.). Missing → 0 |
 | `num_circuits` | int | `1` | Parallel circuits |
