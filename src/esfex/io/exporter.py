@@ -18,6 +18,32 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Names of the leading axes of the 3-D [from, to, step] datasets.
+_PAIR_AXES = ("from_node", "to_node")
+
+
+def _dataset_to_frame(data: np.ndarray, name: str = "") -> pd.DataFrame:
+    """Turn an HDF5 dataset of any rank into a 2-D table for CSV.
+
+    Scalars become one cell and 1-D/2-D arrays keep their layout. Higher
+    ranks (``power_flow``, ``transfer_margin``: from node x to node x step)
+    get one row per leading-index combination, with those indices as the
+    first columns (``from_node``, ``to_node``; ``dim_k`` for other
+    datasets), and one column per step.
+    """
+    data = np.asarray(data)
+    if data.ndim == 0:
+        return pd.DataFrame({name or "value": [data.item()]})
+    if data.ndim <= 2:
+        return pd.DataFrame(data)
+    lead = data.shape[:-1]
+    if data.ndim == 3 and name in ("power_flow", "transfer_margin"):
+        axes = list(_PAIR_AXES)
+    else:
+        axes = [f"dim_{k}" for k in range(len(lead))]
+    index = pd.MultiIndex.from_product([range(n) for n in lead], names=axes)
+    return pd.DataFrame(data.reshape(-1, data.shape[-1]), index=index).reset_index()
+
 
 class ResultsExporter:
     """
@@ -150,8 +176,7 @@ class ResultsExporter:
 
         for key in group:
             if isinstance(group[key], h5py.Dataset):
-                data = group[key][:]
-                df = pd.DataFrame(data)
+                df = _dataset_to_frame(group[key][()], key)
                 df.to_csv(output_dir / f"{key}.csv", index=False)
 
     def _export_scenario_to_csv(self, scenario: h5py.Group, output_dir: Path) -> None:
@@ -166,21 +191,15 @@ class ResultsExporter:
         # Determine data root (incremental vs one-shot format)
         data_root = scenario["hourly_data"] if "hourly_data" in scenario else scenario
 
-        for category in data_root:
-            if isinstance(data_root[category], h5py.Group):
-                cat_dir = output_dir / category
-                cat_dir.mkdir(parents=True, exist_ok=True)
-
-                for name in data_root[category]:
-                    if isinstance(data_root[category][name], h5py.Dataset):
-                        data = data_root[category][name][:]
-                        df = pd.DataFrame(data)
-                        df.to_csv(cat_dir / f"{name}.csv", index=False)
-
-            elif isinstance(data_root[category], h5py.Dataset):
-                data = data_root[category][:]
-                df = pd.DataFrame(data)
-                df.to_csv(output_dir / f"{category}.csv", index=False)
+        for key in data_root:
+            item = data_root[key]
+            if isinstance(item, h5py.Group):
+                # Nested groups (n1_security/trans_reserve_duals,
+                # technology_selling_prices/<unit>/...) become subfolders.
+                self._export_scenario_to_csv(item, output_dir / key)
+            elif isinstance(item, h5py.Dataset):
+                df = _dataset_to_frame(item[()], key)
+                df.to_csv(output_dir / f"{key}.csv", index=False)
 
     def _group_to_dataframe(self, group: h5py.Group) -> Optional[pd.DataFrame]:
         """Convert HDF5 group to DataFrame."""
