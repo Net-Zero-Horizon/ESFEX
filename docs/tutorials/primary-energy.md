@@ -451,7 +451,7 @@ Results are written to `results/<config_stem>_<ddmmyyyy>_<HHMM>.h5` (or the `--o
 | `total_loss_of_supply/<fuel>` | Fuel demand not supplied (same layout) |
 | `final_storage_levels/<fuel>` | Storage level per node at the end of the year |
 | `transport_flows/<fuel>` | Flow per route `[routes x periods]`, same periods |
-| attrs `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | Yearly totals, in M$ |
+| attrs `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | Yearly totals, in $ |
 
 With a rolling horizon each window reports its own periods; the year keeps only each window's committed steps (not the overlap with the next window), like the dispatch arrays, and the window costs count in proportion to those steps.
 
@@ -474,8 +474,8 @@ with h5py.File(path, "r") as f:
             print(f"  {fuel}: {ds[:].sum():,.0f} t supplied")
         for fuel, ds in pe["final_storage_levels"].items():
             print(f"  {fuel} end-of-year storage per node: {ds[:].round(0)}")
-        print(f"  fuel cost: {pe.attrs.get('total_fuel_cost', 0.0):.2f} M$, "
-              f"transport cost: {pe.attrs.get('total_transport_cost', 0.0):.2f} M$")
+        print(f"  fuel cost: {pe.attrs.get('total_fuel_cost', 0.0):,.0f} $, "
+              f"transport cost: {pe.attrs.get('total_transport_cost', 0.0):,.0f} $")
 ```
 
 ### Emissions and Total Cost
