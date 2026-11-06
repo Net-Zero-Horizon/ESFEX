@@ -169,6 +169,26 @@ def compute_classification_summary(gdf) -> pd.DataFrame:
     )
 
 
+def _nearest_index(lats, lngs, ref_lats, ref_lngs) -> "np.ndarray":
+    """Index of the nearest reference point for each point (planar degrees).
+
+    Chunked so the distance matrix stays below ~500 M entries.
+    """
+    n, m = len(lats), len(ref_lats)
+    out = np.empty(n, dtype=np.intp)
+    chunk = max(1, min(100_000, 500_000_000 // max(m, 1)))
+    for start in range(0, n, chunk):
+        end = min(start + chunk, n)
+        d = ((lats[start:end, None] - ref_lats[None, :]) ** 2
+             + (lngs[start:end, None] - ref_lngs[None, :]) ** 2)
+        out[start:end] = np.argmin(d, axis=1)
+    return out
+
+
+def _target_key(target: dict) -> tuple:
+    return (target.get("system_name"), target["node_index"])
+
+
 class ClassifyDistributeWorker(QThread):
     """Classify building footprints and distribute them to buses off the UI thread.
 
@@ -178,6 +198,12 @@ class ClassifyDistributeWorker(QThread):
     buildings). This worker performs the same computation in the background and
     emits the finished assignments + classification summary for the GUI to
     render.
+
+    Each building first goes to the node of its nearest bus among
+    ``reference_buses`` (every bus of the nodes in scope, as
+    ``(latitude, longitude, (system_name, node_index))``; defaults to the
+    targets' buses), then to the nearest bus of that node. A node's split
+    therefore uses only its own buildings, not every building of the domain.
 
     Emits
     -----
@@ -201,12 +227,14 @@ class ClassifyDistributeWorker(QThread):
         fallback_weight_per_m2: float,
         targets: list,
         parent=None,
+        reference_buses: list | None = None,
     ):
         super().__init__(parent)
         self._gdf = buildings_gdf
         self._rules = rules
         self._fallback = fallback_weight_per_m2
         self._targets = targets
+        self._reference = reference_buses
 
     def run(self):
         try:
@@ -223,7 +251,20 @@ class ClassifyDistributeWorker(QThread):
             bld_lats = centroids.y.to_numpy()
             bld_lngs = centroids.x.to_numpy()
             bld_weights = classified["demand_weight"].to_numpy()
-            n_bld = len(bld_lats)
+
+            # Node of each building: the node of its nearest bus overall.
+            ref = self._reference
+            if not ref:
+                ref = [(b.latitude, b.longitude, _target_key(t))
+                       for t in self._targets for b in t["buses"]]
+            keys = sorted({k for _, _, k in ref}, key=repr)
+            key_id = {k: i for i, k in enumerate(keys)}
+            ref_node = np.array([key_id[k] for _, _, k in ref], dtype=np.intp)
+            bld_node = (ref_node[_nearest_index(
+                bld_lats, bld_lngs,
+                np.array([r[0] for r in ref], dtype=float),
+                np.array([r[1] for r in ref], dtype=float))]
+                if len(ref) and len(bld_lats) else np.full(len(bld_lats), -1))
 
             assignments: list[dict] = []
             n_targets = max(1, len(self._targets))
@@ -236,25 +277,13 @@ class ClassifyDistributeWorker(QThread):
                 bus_lats = np.array([b.latitude for b in buses])
                 bus_lngs = np.array([b.longitude for b in buses])
 
-                chunk_size = max(
-                    1, min(100_000, 500_000_000 // max(n_buses, 1)),
-                )
-                bus_weights = np.zeros(n_buses)
-                nearest = np.empty(n_bld, dtype=np.intp)
-
-                for start in range(0, n_bld, chunk_size):
-                    end = min(start + chunk_size, n_bld)
-                    dlat = bld_lats[start:end, None] - bus_lats[None, :]
-                    dlng = bld_lngs[start:end, None] - bus_lngs[None, :]
-                    dists = dlat ** 2 + dlng ** 2
-                    chunk_nearest = np.argmin(dists, axis=1)
-                    nearest[start:end] = chunk_nearest
-                    # bincount accumulates far faster than np.add.at.
-                    bus_weights += np.bincount(
-                        chunk_nearest,
-                        weights=bld_weights[start:end],
-                        minlength=n_buses,
-                    )
+                own = bld_node == key_id.get(_target_key(target), -2)
+                nearest = _nearest_index(
+                    bld_lats[own], bld_lngs[own], bus_lats, bus_lngs)
+                # bincount accumulates far faster than np.add.at.
+                bus_weights = np.bincount(
+                    nearest, weights=bld_weights[own], minlength=n_buses,
+                ).astype(float)
 
                 total = bus_weights.sum()
                 if total > 0:

@@ -1,19 +1,17 @@
 """Solar PV Potential Assessment wizard dialog.
 
-Two-phase multi-step wizard:
+Four steps, each grouping several panels:
 
-Phase A — Solar PV Resource Assessment & MCDA:
-  1. Define domain (rectangle on map or manual coordinates)
-  2. Configure module (CEC database) and assessment parameters
-  3. Configure MCDA criteria and weighting method
-  4. Run analysis (ERA5 + DEM + LULC + MCDA)
-  5. View results and generate development zones
-
-Phase B — Advanced Analysis:
-  6. Solar characterization (GHI patterns, diurnal, seasonal, temperature)
-  7. Financial analysis (LCOE, NPV, IRR, sensitivity)
-  8. Array / shading analysis (GCR, inter-row shading, bifacial gain)
-  9. Availability profile generation (hourly CF for model generators)
+  1. Domain & module — define the domain (rectangle on the map or manual
+     coordinates); configure the module (CEC database) and assessment
+     parameters.
+  2. Criteria & analysis — MCDA criteria and weighting method; run the
+     analysis (ERA5 + DEM + LULC + MCDA).
+  3. Results & financials — results and development zones; financial
+     analysis (LCOE, NPV, IRR, sensitivity).
+  4. Advanced — solar characterization (GHI patterns, diurnal, seasonal,
+     temperature), array / shading analysis (GCR, inter-row shading,
+     bifacial gain) and availability profiles (hourly CF for generators).
 """
 
 from __future__ import annotations

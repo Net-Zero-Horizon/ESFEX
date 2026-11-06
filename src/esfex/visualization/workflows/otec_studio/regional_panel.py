@@ -263,10 +263,15 @@ class RegionalPanel(QWidget):
             return
         from esfex.visualization.workflows.otec_studio import engineering as eng
         s = reg.summarize_regional(self._df)
+        # Every feasible site is eligible: the threshold is the highest LCOE
+        # of the run, on purpose (the scenario's lcoe_threshold has no widget
+        # in the Studio and its 0.15 $/kWh default would drop most OTEC
+        # sites). The buffer follows the scenario (zone_buffer_km).
         thr = (s["lcoe_max"] if s["lcoe_max"] is not None else 1.0)
         try:
             self._zones = eng.zones_from_regional(
-                self._df, lcoe_threshold=thr, buffer_km=10.0)
+                self._df, lcoe_threshold=thr,
+                buffer_km=float(self._config().zone_buffer_km or 10.0))
         except Exception as exc:  # noqa: BLE001
             self._summary.setText(
                 f"<span style='color:#e67e22;'>Zone clustering failed: "
