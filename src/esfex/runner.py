@@ -154,6 +154,28 @@ def _concat_window_series(windows) -> dict:
     }
 
 
+def unique_unit_names(names: list[str]) -> list[str]:
+    """Index-aligned unit names with homonyms made unique.
+
+    The first unit keeps its name; later ones with the same name get
+    `` (1)``, `` (2)``… (skipping a candidate that is already taken). This
+    is the one convention of the results file: the runner's name lists,
+    the HDF5 dataset names and the readers that strip the suffix to find a
+    unit's configuration (``financial_analysis``, the results charts).
+    """
+    used = set()
+    out: list[str] = []
+    for name in names:
+        name = str(name)
+        cand, k = name, 0
+        while cand in used:
+            k += 1
+            cand = f"{name} ({k})"
+        used.add(cand)
+        out.append(cand)
+    return out
+
+
 def _pe_period_bounds(n_steps: int, period_steps: int) -> list[tuple[int, int]]:
     """``[start, end)`` steps of each primary-energy period of a window.
 
@@ -1526,18 +1548,18 @@ class Orchestrator:
         # fuel directly (no name-parsing). The config's ``technology``
         # field is unreliable here (orphan IDs like ``tech_5`` that don't
         # resolve in the ``technologies`` dict), so we rely on fuel only.
-        self._gen_names = [
+        self._gen_names = unique_unit_names([
             gen.name if hasattr(gen, 'name') else key
             for key, gen in self.primary_system.generators.items()
-        ]
+        ])
         self._gen_fuels = [
             (getattr(gen, 'fuel', None) or '') or ''
             for _, gen in self.primary_system.generators.items()
         ]
-        self._bat_names = [
+        self._bat_names = unique_unit_names([
             bat.name if hasattr(bat, 'name') else key
             for key, bat in self.primary_system.batteries.items()
-        ]
+        ])
 
         # Preload all availability profiles ONCE (cache for operational phase)
         self._availability_cache = self._preload_availability_profiles(num_nodes)
@@ -6298,25 +6320,11 @@ class Orchestrator:
                 continue
             bat_names.append(vdata.get("name", key))
 
-        # Deduplicate names (HDF5 datasets require unique names within a group)
-        def _dedup(names: list[str]) -> list[str]:
-            seen: dict[str, int] = {}
-            out: list[str] = []
-            for n in names:
-                if n in seen:
-                    seen[n] += 1
-                    out.append(f"{n} ({seen[n]})")
-                else:
-                    seen[n] = 0
-                    out.append(n)
-            return out
-
-        # _dedup may suffix duplicates with " (N)"; apply to names only,
-        # not fuels — the fuel list stays index-aligned with the pre-dedup
-        # gen_names because _dedup preserves order and length.
-        self._gen_names = _dedup(gen_names)
+        # Homonyms get a " (N)" suffix (HDF5 needs unique dataset names);
+        # order and length are kept, so the fuel list stays index-aligned.
+        self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
-        self._bat_names = _dedup(bat_names)
+        self._bat_names = unique_unit_names(bat_names)
 
     # ------------------------------------------------------------------
     # System-unit mapping (for per-system HDF5 export)
@@ -7038,21 +7046,11 @@ class Orchestrator:
     def _h5_unit_names(cls, names: list[str]) -> list[str]:
         """HDF5 dataset names for a unit list, index-aligned and unique.
 
-        Names are passed through ``_h5safe``; a name already used (two
-        units with the same name, or ``"A/B"`` next to ``"A - B"``) gets
-        a ``_2``, ``_3``… suffix.
+        Names are passed through ``_h5safe`` and made unique with
+        :func:`unique_unit_names` (a homonym, or ``"A/B"`` next to
+        ``"A - B"``, gets a `` (1)``, `` (2)``… suffix).
         """
-        out: list[str] = []
-        used: set[str] = set()
-        for name in names:
-            safe = cls._h5safe(str(name))
-            cand, k = safe, 1
-            while cand in used:
-                k += 1
-                cand = f"{safe}_{k}"
-            used.add(cand)
-            out.append(cand)
-        return out
+        return unique_unit_names([cls._h5safe(str(name)) for name in names])
 
     def _append_year_to_hdf5(self, path: Path, result: YearResults):
         """Append year results to HDF5 file with legacy-compatible structure."""
@@ -7666,8 +7664,9 @@ class Orchestrator:
 
             # --- Electrolyzers (per electrolyzer, config order) ---
             if result.electrolyzer_power is not None:
-                elz_names = [getattr(e, "name", None) or key for key, e in
-                             (self.primary_system.electrolyzers or {}).items()]
+                elz_names = self._h5_unit_names(
+                    [getattr(e, "name", None) or key for key, e in
+                     (self.primary_system.electrolyzers or {}).items()])
                 for group_name, data, units, desc in (
                     ("electrolyzer_power", result.electrolyzer_power, "MW",
                      "Electrolyzer power drawn [nodes x hours] per electrolyzer"),
@@ -7681,7 +7680,7 @@ class Orchestrator:
                     for e, name in enumerate(elz_names):
                         if e < data.shape[0]:
                             ds = elz_group.create_dataset(
-                                self._h5safe(name), data=data[e],
+                                name, data=data[e],
                                 chunks=True, compression="gzip",
                             )
                             ds.attrs["units"] = units

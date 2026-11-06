@@ -300,7 +300,7 @@ class YearResults:
 | `bat_lcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery LCOE ($/MWh) |
 | `bat_vallcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery value-adjusted LCOE ($/MWh) |
 | `fuel_for_power` | `Optional[dict]` | `{gen_idx: array}` | Declared but never filled by the runner (always `None`) |
-| `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed `_2`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
+| `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed ` (1)`, ` (2)`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
 
 Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#derived-metrics).
 
