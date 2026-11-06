@@ -16,7 +16,7 @@
 using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
-             coefficient, objective_function
+             coefficient, objective_function, all_variables, name
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -472,6 +472,48 @@ import Ipopt
             @test lol["critical"] ≈ 10.0 atol = 1e-6
             @test res.cost_breakdown.load_shedding_cost ≈
                   0.01 * (50.0 + 10.0 * 1000.0) rtol = 1e-6
+        end
+
+        @testset "master: sectoral shed is part of load shed" begin
+            # One bus, 100 MW of load, 40 MW of gas and nothing to build:
+            # 60 MW must be shed on each representative day. The sectoral
+            # shed used to be an extra injection next to load_shed, so a day
+            # could shed up to ~2x its demand and the bus's own load_shed (at
+            # plain VOLL) absorbed every MWh: the sector's criticality had no
+            # effect on the plan's cost.
+            H = 48
+            gas = mkgen("Gas", "Non-renewable", "Gas", [40.0],
+                        [1.0], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function master_shed(crit)
+                inp = MasterProblemInput(
+                    years = [2025], network = net, generators = [gas],
+                    batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    loss_of_load_penalty = 10.0,
+                    sectoral_demand = Dict("cheap" => fill(30.0, H, 1),
+                                           "critical" => fill(70.0, H, 1)),
+                    sectoral_criticality = Dict("cheap" => 1.0, "critical" => crit),
+                    verbose = false)
+                model, mvars, _ = create_master_problem(inp; use_representative_days = true)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                byname(pfx) = [v for v in all_variables(model) if startswith(name(v), pfx)]
+                shed = sum(value.(byname("op_y1_d1_ll[")))
+                lol_crit = sum(value.(byname("op_y1_d1_lol_critical[")))
+                return objective_value(model), shed, lol_crit
+            end
+            obj1, shed1, _ = master_shed(1.0)
+            obj2, shed2, crit2 = master_shed(1000.0)
+            @test shed1 ≈ 24 * 60.0 rtol = 1e-6     # exactly the unmet load
+            @test shed2 ≈ 24 * 60.0 rtol = 1e-6
+            @test crit2 ≈ 24 * 30.0 rtol = 1e-6     # cheap sector holds only 30 MW
+            @test obj2 > 100 * obj1                  # criticality is priced
         end
 
         @testset "custom constraints (linear cap binds)" begin

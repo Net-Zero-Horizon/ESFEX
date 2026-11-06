@@ -2081,12 +2081,6 @@ function add_day_operational_constraints!(
                 add_to_expression!(expr, -1.0, bat_tech_charge[btc, bus, t])
             end
         end
-        # Sectoral loss of load contributions
-        if ps_vars.loss_of_load_sectoral !== nothing
-            for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
-                add_to_expression!(expr, lol_vars[bus, t])
-            end
-        end
         # Inter-system external injections
         if external_injections !== nothing && haskey(external_injections, (bus, t))
             add_to_expression!(expr, external_injections[(bus, t)])
@@ -2138,28 +2132,10 @@ function add_day_operational_constraints!(
         capacity_override=total_cap_gen)
 
     # =========================================================================
-    # Sectoral Loss-of-Load Upper Bounds (M2) — master-specific
+    # Sectoral split of the load shed (M2) — master-specific
     # =========================================================================
-    if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral) && !isempty(input.sectoral_demand)
-        for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
-            if haskey(input.sectoral_demand, sector)
-                sec_dem = input.sectoral_demand[sector]
-                for t in 1:hours
-                    actual_hour = start_hour + t - 1
-                    hours_in_data = size(sec_dem, 1)
-                    hour_in_year = hours_in_data > 0 ? mod1(actual_hour, hours_in_data) : 1
-                    for n in 1:n_buses
-                        parent_node = input.network.bus_to_node[n]
-                        bus_fraction = input.network.buses[n].demand_fraction
-                        sec_demand_val = sec_dem[hour_in_year, parent_node] * bus_fraction * growth_factor
-                        @constraint(model,
-                            lol_vars[n, t] <= max(0.0, sec_demand_val),
-                            base_name = "lol_sec_ub_$(sector)_y$(year_idx)_d$(day_idx)_n$(n)_t$(t)")
-                    end
-                end
-            end
-        end
-    end
+    add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
+        start_hour, growth_factor; label = "y$(year_idx)_d$(day_idx)")
 
     # =========================================================================
     # CRITICAL: Per-System Renewable Penetration Constraints — master-specific
@@ -2351,6 +2327,53 @@ function add_day_operational_constraints!(
 end
 
 """
+    add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
+                                       start_hour, growth_factor; label=nothing)
+
+Split each bus's load shed of a representative day into per-sector shed plus
+an unclassified remainder, as the dispatch does (SEC-1, SEC-2):
+
+- each sector sheds at most its own demand at the bus
+  (`sectoral_demand[t, parent node] × demand_fraction × growth`);
+- `load_shed − Σ sector shed` lies in [0, bus demand not covered by any sector].
+
+The sectoral shed is part of `load_shed`, not an extra injection: the bus can
+shed at most its demand (PB-1b). `day_operational_cost` charges `load_shed` at
+VOLL and adds the criticality premium on the sectoral part. `label` names the
+constraints; `nothing` leaves them unnamed (Benders subproblems).
+"""
+function add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
+                                            start_hour::Int, growth_factor::Float64;
+                                            label::Union{Nothing, String} = nothing)
+    lol = ps_vars.loss_of_load_sectoral
+    (lol === nothing || isempty(lol)) && return
+    hours = size(demand_slice, 1)
+    for t in 1:hours, b in 1:input.network.num_buses
+        parent = input.network.bus_to_node[b]
+        frac = input.network.buses[b].demand_fraction
+        sector_shed = AffExpr(0.0)
+        sector_demand = 0.0
+        for (sector, lol_vars) in lol
+            sec_val = 0.0
+            sec_dem = get(input.sectoral_demand, sector, nothing)
+            if sec_dem !== nothing && size(sec_dem, 1) > 0 && parent <= size(sec_dem, 2)
+                hour_in_year = mod1(start_hour + t - 1, size(sec_dem, 1))
+                sec_val = max(0.0, sec_dem[hour_in_year, parent] * frac * growth_factor)
+            end
+            sector_demand += sec_val
+            add_to_expression!(sector_shed, lol_vars[b, t])
+            @constraint(model, lol_vars[b, t] <= sec_val,
+                base_name = label === nothing ? "" : "lol_sec_ub_$(sector)_$(label)_n$(b)_t$(t)")
+        end
+        residual_cap = max(0.0, demand_slice[t, parent] * frac - sector_demand)
+        @constraint(model, ps_vars.load_shed[b, t] - sector_shed >= 0.0,
+            base_name = label === nothing ? "" : "lol_sec_sum_$(label)_n$(b)_t$(t)")
+        @constraint(model, ps_vars.load_shed[b, t] - sector_shed <= residual_cap,
+            base_name = label === nothing ? "" : "lol_sec_residual_$(label)_n$(b)_t$(t)")
+    end
+end
+
+"""
     co2_cost_per_mwh(input, unit, b)
 
 Carbon cost of one MWh produced by `unit` (generator or technology) at bus `b`
@@ -2439,12 +2462,16 @@ function day_operational_cost(
                 input.curtailment_cost)
         end
 
+        # Sectoral shed is part of load_shed (add_day_sectoral_shed_constraints!),
+        # which is already charged VOLL above: add the criticality premium
+        # VOLL × (κ − 1), so a sector's MWh costs VOLL × κ and the unclassified
+        # remainder VOLL.
         if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral)
             for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
                 criticality = get(input.sectoral_criticality, sector, 1.0)
-                sector_penalty = input.loss_of_load_penalty * criticality
+                sector_premium = input.loss_of_load_penalty * (criticality - 1.0)
                 for n in 1:n_buses
-                    add_to_expression!(cost, lol_vars[n, t], sector_penalty)
+                    add_to_expression!(cost, lol_vars[n, t], sector_premium)
                 end
             end
         end

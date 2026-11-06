@@ -1021,11 +1021,6 @@ function create_benders_subproblem(
                 add_to_expression!(expr, -1.0, bat_tech_charge[btc, bus, t])
             end
         end
-        if ps_vars.loss_of_load_sectoral !== nothing
-            for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
-                add_to_expression!(expr, lol_vars[bus, t])
-            end
-        end
         return expr
     end
 
@@ -1074,27 +1069,10 @@ function create_benders_subproblem(
         capacity_override=total_cap_gen)
 
     # =========================================================================
-    # Sectoral Loss-of-Load Upper Bounds
+    # Sectoral split of the load shed (same as the monolithic master)
     # =========================================================================
-    if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral) && !isempty(input.sectoral_demand)
-        for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
-            if haskey(input.sectoral_demand, sector)
-                sec_dem = input.sectoral_demand[sector]
-                for t in 1:hours
-                    actual_hour = start_hour + t - 1
-                    hours_in_data = size(sec_dem, 1)
-                    hour_in_year = hours_in_data > 0 ? mod1(actual_hour, hours_in_data) : 1
-                    for n in 1:n_buses
-                        parent_node = input.network.bus_to_node[n]
-                        bus_fraction = input.network.buses[n].demand_fraction
-                        sec_demand_val = sec_dem[hour_in_year, parent_node] * bus_fraction * growth_factor
-                        @constraint(sp_model,
-                            lol_vars[n, t] <= max(0.0, sec_demand_val))
-                    end
-                end
-            end
-        end
-    end
+    add_day_sectoral_shed_constraints!(sp_model, ps_vars, input, demand_slice,
+        start_hour, growth_factor)
 
     # =========================================================================
     # RE Penetration with FIXED ratio — PER SYSTEM
@@ -1272,18 +1250,18 @@ function create_benders_subproblem(
     lol_penalty_cap = input.benders_lol_penalty_cap
     if lol_penalty_cap > 0 && input.loss_of_load_penalty > lol_penalty_cap
         lol_diff = lol_penalty_cap - input.loss_of_load_penalty  # negative
+        # load_shed is per bus.
         for t in 1:hours
-            for n in 1:n_nodes
+            for n in 1:n_buses
                 add_to_expression!(day_cost, ps_vars.load_shed[n, t], lol_diff * scaling_factor)
             end
         end
-        # Also cap sectoral loss-of-load penalties (which use criticality multipliers)
+        # Also cap the sectoral criticality premium, VOLL × (κ − 1)
+        # (day_operational_cost), so a sector's MWh costs cap × κ.
         if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral)
             for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
                 criticality = get(input.sectoral_criticality, sector, 1.0)
-                orig_penalty = input.loss_of_load_penalty * criticality
-                capped_penalty = lol_penalty_cap * criticality
-                sec_diff = capped_penalty - orig_penalty  # negative
+                sec_diff = lol_diff * (criticality - 1.0)
                 for t in 1:hours
                     for n in 1:n_buses
                         add_to_expression!(day_cost, lol_vars[n, t], sec_diff * scaling_factor)

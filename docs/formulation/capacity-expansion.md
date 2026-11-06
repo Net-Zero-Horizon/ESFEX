@@ -209,10 +209,10 @@ C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}
 \]
 
 \[
-\quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot \kappa_s \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
+\quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot (\kappa_s - 1) \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
 \]
 
-where \(\kappa_s\) is the criticality weight for sector \(s\). Unlike the dispatch, the master charges both \(L^{day}\) and \(L^{sec,day}\). The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well, with the same scaling.
+where \(\kappa_s\) is the criticality weight for sector \(s\). The sectoral shed \(L^{sec,day}\) is part of \(L^{day}\) (SEC-2), which OBJ-5 already charges at VOLL; OBJ-6 adds the criticality premium, so a sector's shed MWh costs \(c^{VOLL} \kappa_s\) and the unclassified remainder \(c^{VOLL}\), as in the dispatch. The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well, with the same scaling.
 
 !!! note "PWL cost curves in the master problem"
     When existing generators have a `fuel_cost_curve` configured, the representative day operational cost (OBJ-5) uses the same piecewise-linear (PWL) fuel cost decomposition as the operational dispatch formulation (see [Operational Dispatch -- PWL Fuel Cost](operational-dispatch.md#311-piecewise-linear-pwl-fuel-cost-decomposition)). The same applies to existing batteries with `discharge_cost_curve`, which then replaces the throughput cost. Candidate technologies are costed at their flat `fuel_cost`; their cost curves are not used by the master.
@@ -438,7 +438,7 @@ The day reuses the operational-dispatch constraint builders of `power_system.jl`
 For each bus and time step (DC-1 with these extra terms, or PB-1 on a single bus):
 
 \[
-\sum_{g} P^{day}_{g,n,t} + \sum_k P^{tech}_{k,n,t} + \sum_{b} P^{dis,day}_{b,n,t} + \sum_k \left( P^{bt,dis}_{k,n,t} - P^{bt,ch}_{k,n,t} \right) + L^{day}_{n,t} + \sum_{s} L^{sec,day}_{s,n,t} = D^{day}_{n,t} + \sum_{b} P^{ch,day}_{b,n,t} + \sum_{\ell} K_{n,\ell} f^{day}_{\ell,t} \tag{PB-1}
+\sum_{g} P^{day}_{g,n,t} + \sum_k P^{tech}_{k,n,t} + \sum_{b} P^{dis,day}_{b,n,t} + \sum_k \left( P^{bt,dis}_{k,n,t} - P^{bt,ch}_{k,n,t} \right) + L^{day}_{n,t} = D^{day}_{n,t} + \sum_{b} P^{ch,day}_{b,n,t} + \sum_{\ell} K_{n,\ell} f^{day}_{\ell,t} \tag{PB-1}
 \]
 
 where the demand at bus \(n\) is the parent node's demand times the bus demand fraction:
@@ -447,7 +447,7 @@ where the demand at bus \(n\) is the parent node's demand times the bus demand f
 D^{day}_{n,t} = D_{t, \text{parent}(n)} \cdot \alpha_n \tag{PB-2}
 \]
 
-\(L^{day}_{n,t} \leq D^{day}_{n,t}\) as in the dispatch (PB-1b). Note that the sectoral loss of load \(L^{sec,day}\) also enters the supply side, bounded only per sector by SEC-1 below and not linked to \(L^{day}\); a day can therefore shed up to about twice its demand at VOLL prices. Curtailment does **not** appear in the power balance.
+\(L^{day}_{n,t} \leq D^{day}_{n,t}\) as in the dispatch (PB-1b). The sectoral loss of load \(L^{sec,day}\) is a split of \(L^{day}\) (SEC-2 below), not a separate injection, so a day sheds at most its demand. Curtailment does **not** appear in the power balance.
 
 #### 8.3.2 Generator Capacity Linked to Investment
 
@@ -525,6 +525,14 @@ Each sector's load shedding cannot exceed the sector's demand at that bus and st
 \[
 L^{sec,day}_{s,n,t} \leq \max\left(0,\, D^{sec}_{s,\text{parent}(n),t} \cdot \alpha_n \right) \qquad \forall\, s,\, n,\, t \tag{SEC-1}
 \]
+
+The bus's load shed splits into the sectors' shed plus a remainder bounded by the bus demand that no sector accounts for (`lol_sec_sum_*`, `lol_sec_residual_*`):
+
+\[
+0 \;\leq\; L^{day}_{n,t} - \sum_{s} L^{sec,day}_{s,n,t} \;\leq\; \max\Big(0,\, D^{day}_{n,t} - \sum_{s} D^{sec}_{s,\text{parent}(n),t} \cdot \alpha_n\Big) \qquad \forall\, n,\, t \tag{SEC-2}
+\]
+
+Sectoral demand is scaled by the year's demand growth like \(D^{day}\). The Benders subproblems use the same constraints.
 
 ### 8.4 Cost Scaling
 
