@@ -166,9 +166,8 @@ Electrical connections between buses or equipment: overhead lines, underground c
 | | Voltage | kV | Operating voltage. |
 | | Type | -- | overhead, underground or submarine (blank = unspecified). |
 | | Length | km | Line length. 0 (shown as "Auto") = a distance is computed when the model is built. |
-| | Base Impedance | ohm | Base impedance used to derive the per-unit reactance from the length. 0 = "Default" (global value). |
-| | Reactance per km | ohm/km | Used with the length when no per-unit reactance is set. 0 = "Default". |
-| | Reactance / Resistance / Susceptance | pu | Per-unit X, R and B. 0 = "Global" (derived from length × reactance per km / base impedance, or global defaults). |
+| | Reactance per km | ohm/km | This line's series reactance per km (saved as `reactance_per_km`). Used with the length when no per-unit reactance is set. 0 = "Default" (the system's DC power flow reactance per km). |
+| | Reactance / Resistance / Susceptance | pu | Per-unit X, R and B on the system base (`ac_power_flow.base_mva`). Reactance 0 = "Global": derived as length × reactance per km / Z_base, with Z_base = V² / S_base from the line voltage; 0.01 pu without a length. |
 | | Circuits | -- | Number of parallel circuits (1 to 10). |
 | | Frequency / Current Type | Hz, -- | Inherited from the connected bus. |
 | **Appearance** | Color, Width | -, px | Line colour and width (0 = auto, uses the global line scaling). |

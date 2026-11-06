@@ -413,12 +413,12 @@
     "scale_factor": "Factor de Escala:"
   },
   "line_form": {
+    "reactance_per_km_tip": "Reactancia serie de esta línea por km. Con la longitud da la reactancia cuando Reactancia (pu) está vacía (x = longitud × X/km ÷ (V² / S_base)). Por defecto = reactancia por km del flujo DC del sistema.",
     "group_properties": "Propiedades",
     "capacity": "Capacidad (MW):",
     "voltage": "Voltaje (kV):",
     "type": "Tipo:",
     "length": "Longitud (km):",
-    "base_impedance": "Impedancia Base (ohm):",
     "reactance_per_km": "Reactancia por km (ohm/km):",
     "reactance_pu": "Reactancia (pu):",
     "resistance_pu": "Resistencia (pu):",

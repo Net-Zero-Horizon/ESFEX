@@ -25,14 +25,19 @@ def derived_reactance_pu(
     voltage_kv: Optional[float],
     dc_config: Any,
     s_base_mva: float,
+    reactance_per_km: Optional[float] = None,
 ) -> float:
     """Reactance (p.u.) of a line given only its length.
 
     ``length × reactance_per_km / Z_base`` with ``Z_base = V² / S_base``; ``V``
     is the line voltage, or ``dc_power_flow.voltage_level_kv`` when unknown.
+    ``reactance_per_km`` is the line's own value (ohm/km); when None or 0,
+    ``dc_power_flow.reactance_per_km`` is used.
     """
     v = voltage_kv or getattr(dc_config, "voltage_level_kv", 0.0)
     if not length_km or length_km <= 0 or not v or v <= 0 or s_base_mva <= 0:
         return DEFAULT_REACTANCE_PU
+    x_km = reactance_per_km if reactance_per_km and reactance_per_km > 0 \
+        else dc_config.reactance_per_km
     z_base = v * v / s_base_mva
-    return length_km * dc_config.reactance_per_km / z_base
+    return length_km * x_km / z_base

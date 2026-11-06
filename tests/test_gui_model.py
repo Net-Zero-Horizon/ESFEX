@@ -406,7 +406,6 @@ class TestGuiTransmissionLine:
         assert tl.from_endpoint is None
         assert tl.to_endpoint is None
         assert tl.length_km is None
-        assert tl.base_impedance is None
         assert tl.reactance_per_km is None
         assert tl.reactance_pu is None
         assert tl.resistance_pu is None

@@ -413,12 +413,12 @@
     "scale_factor": "スケール係数:"
   },
   "line_form": {
+    "reactance_per_km_tip": "この線路のkmあたり直列リアクタンス。リアクタンス (pu) が空のとき、長さと合わせてリアクタンスを算出します (x = 長さ × X/km ÷ (V² / S_base))。既定値 = システムのDC潮流のkmあたりリアクタンス。",
     "group_properties": "プロパティ",
     "capacity": "容量 (MW):",
     "voltage": "電圧 (kV):",
     "type": "種類:",
     "length": "長さ (km):",
-    "base_impedance": "基準インピーダンス (ohm):",
     "reactance_per_km": "km当たりリアクタンス (ohm/km):",
     "reactance_pu": "リアクタンス (pu):",
     "resistance_pu": "抵抗 (pu):",

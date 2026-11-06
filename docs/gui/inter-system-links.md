@@ -65,8 +65,7 @@ The link form mirrors the transmission line form. A read-only header shows the t
 | | Voltage | kV | Nominal voltage |
 | | Type | -- | overhead, underground, or submarine |
 | | Length | km | Physical length. Computed from the trace and the endpoints (read-only; move the endpoints or edit the trace to change it). |
-| | Base Impedance | ohm | Base impedance for per-unit conversion |
-| | Reactance per km | ohm/km | Series reactance per km |
+| | Reactance per km | ohm/km | Series reactance per km; stored with the link, not used by the run (set the per-unit reactance) |
 | | Reactance / Resistance / Susceptance | pu | Per-unit line parameters |
 | | Circuits | -- | Number of circuits (1–10) |
 | | Frequency | Hz | Nominal frequency |
