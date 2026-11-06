@@ -137,7 +137,7 @@ The penalties are set per system under `penalties:` (key names are case-insensit
 | Curtailment | `curtailment_cost`, `curtailment_excess_penalty` | 20, 500 $/MWh | Cost of curtailed renewable energy, and of curtailment above `max_curtailment_ratio` |
 | CO₂ budget violation | `co2_budget_violation` | 500 $/t | Penalty for exceeding the annual emissions budget (`co2_budget`) |
 
-All penalty values are user-configurable. Higher penalties push the optimizer harder to satisfy the constraint; lower values allow more violation when it is cost-effective. Setting penalties too high can cause numerical issues. Do not confuse `loss_of_load` with the system-level `LOSS_DEMAND_TRHESHOLD` (default 0.05), which is a fraction, not a cost. See the [Configuration Reference](../reference/config-reference.md) for all penalty keys.
+All penalty values are user-configurable. Higher penalties push the optimizer harder to satisfy the constraint; lower values allow more violation when it is cost-effective. Setting penalties too high can cause numerical issues. Do not confuse `loss_of_load` with the deprecated system-level `LOSS_DEMAND_TRHESHOLD`, which is ignored. See the [Configuration Reference](../reference/config-reference.md) for all penalty keys.
 
 Any violated constraint in the optimal solution has a clear economic interpretation: satisfying the constraint costs more than the penalty.
 

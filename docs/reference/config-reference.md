@@ -221,7 +221,7 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `demand_scale` | float (> 0) | `1` | Multiplier applied to all demand |
 | `discount_rate` | float (0–1) | `0.05` | Discount rate |
 | `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in NPV calculations ($/MWh) |
-| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Passed to the operational model; no constraint uses it in 0.3.0 |
+| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Deprecated and ignored: accepted so older case files load, but not passed to the model (no constraint ever used it). The Studio no longer shows or writes it |
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target. See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |
@@ -568,7 +568,7 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `fuel_cost` | list[float] | required | Fuel cost per node ($/MWh). Required key; if all zero and `fuel` is in `fuels`, the loader computes it (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `fixed_cost` | list[float] | required | Fixed O&M per node, applied per MWh generated ($/MWh) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
-| `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`) |
+| `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`). Where it is 0, the technology with the same `fuel` and `type` supplies it |
 | `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader (legacy per-unit investment; use `technologies`) |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` \| `AC_DC` | `"AC"` | `AC`, `DC` or `AC_DC` |
@@ -650,7 +650,7 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh) |
 | `throughput_degradation_cost` | list[float] \| null | `null` | Cycling cost per MWh discharged, per node ($/MWh). `null` means 0 |
 | `discharge_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present. |
-| `invest_cost` | list[float] | required by loader | Power investment cost per node ($/MW). Required by the loader; prices life extension |
+| `invest_cost` | list[float] | required by loader | Power investment cost per node ($/MW). Required by the loader; prices life extension. Where it is 0, the battery technology named by `technology` (else the first one) supplies `invest_cost_power` |
 | `invest_cost_energy` | list[float] | `[0.0]` | Energy investment cost per node ($/MWh). Missing → copy of `invest_cost` |
 | `invest_max_power` | list[float] | required by loader | Maximum power investment per node (MW). Required by the loader |
 | `invest_max_capacity` | list[float] | `[0.0]` | Maximum energy investment per node (MWh). Missing → zeros |
