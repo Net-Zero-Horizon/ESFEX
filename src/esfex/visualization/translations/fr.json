@@ -657,7 +657,7 @@
     "group_identity": "Identité",
     "group_per_node": "Investissement par nœud",
     "populate_btn": "Remplir depuis les nœuds",
-    "populate_tip": "Copier les capacités d'investissement existantes et maximales depuis les technologies des nœuds",
+    "populate_tip": "Ajouter une ligne (valeurs par défaut) pour chaque nœud du système qui n'est pas encore dans le tableau",
     "delete_entry": "Supprimer l'entrée",
     "node_col": "Nœud",
     "existing_col": "Existant",

@@ -88,9 +88,9 @@ Transmission lines and fuel routes use a **polyline trace**: click the start ele
 
 ### Fuel Transport Routes
 
-Click **Fuel Route**, click a fuel source or fuel storage, then click another fuel source or fuel storage.
+Click **Fuel Route**, click a fuel source or fuel storage, optionally click empty map space to add waypoints, then click another fuel source or fuel storage. Press `Escape` to cancel.
 
-- Clicking empty map space does not add waypoints in this mode, so a new route is a straight line. Use **Edit Trace** in the route form to reshape it.
+- Waypoints are stored with the route; **Edit Trace** in the route form reshapes it later.
 - Fuel routes are drawn as dashed lines.
 - Configure the fuel, capacity, transport cost, and losses in the Properties Panel.
 

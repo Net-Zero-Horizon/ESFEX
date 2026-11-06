@@ -657,7 +657,7 @@
     "group_identity": "識別",
     "group_per_node": "ノード別投資",
     "populate_btn": "ノードから入力",
-    "populate_tip": "ノード技術から既存容量と最大投資容量をコピー",
+    "populate_tip": "表にまだないシステムの各ノードについて行 (既定値) を追加",
     "delete_entry": "エントリを削除",
     "node_col": "ノード",
     "existing_col": "既存",

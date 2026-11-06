@@ -657,7 +657,7 @@
     "group_identity": "Identity",
     "group_per_node": "Investment per Node",
     "populate_btn": "Populate from Nodes",
-    "populate_tip": "Copy existing & max investment capacities from node technologies",
+    "populate_tip": "Add a row (with default values) for every node of the system that is not in the table yet",
     "delete_entry": "Delete Entry",
     "node_col": "Node",
     "existing_col": "Existing",

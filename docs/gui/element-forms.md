@@ -464,7 +464,7 @@ Each entry defines where and how much new capacity of one technology the optimiz
 | | Type | Generator, Battery / Storage, Electrolyzer, AC/DC Converter, Freq. Converter, Transmission, Fuel Storage or Fuel Transport |
 | | Technology | Optional reference to a Technologies entry |
 | **Investment per Node** | Node / Invest Cost ($/MW) / Invest Max (MW) | One row per node. Batteries add Energy Cost ($/MWh) and Energy Max (MWh). |
-| | Populate from Nodes | Adds a row for every node not yet in the table |
+| | Populate from Nodes | Adds a row, with default values, for every node of the system not yet in the table |
 | | Delete Entry | Deletes the entry after a confirmation |
 
 This is the only place where per-node investment costs and limits are set; the node, generator, battery and line forms have no investment fields.

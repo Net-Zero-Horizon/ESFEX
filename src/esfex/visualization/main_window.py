@@ -740,6 +740,9 @@ class MainWindow(QMainWindow):
 
         self._user_prefs = load_preferences()
         apply_shortcuts(self._action_registry, get_shortcuts(self._user_prefs))
+        # Editor preferences apply from startup, not only after the
+        # Preferences dialog is closed.
+        self.script_editor.apply_preferences(self._user_prefs.get("editor", {}))
 
         # Auto-save timer (controlled by preferences)
         self._auto_save_timer = QTimer(self)

@@ -52,14 +52,15 @@ Bottom-right of the window. Multi-line scripting environment:
 
 - **Multiple tabs** -- Open several scripts at once. Each tab has its own undo history. Closing a tab does not ask to save; closing the last tab clears it.
 - **Syntax highlighting** -- Python keywords, builtins, strings, numbers, comments, and decorators are highlighted using the current theme's colors.
-- **Line numbers** -- Displayed in the left gutter (can be turned off under **File > Preferences... > Studio > Script Editor**, along with font, tab width and word wrap).
+- **Line numbers** -- Displayed in the left gutter (can be turned off under **File > Preferences... > Studio > Script Editor**, along with font, tab width, word wrap and auto-indent). These preferences apply from startup.
 - **Tab key** -- `Tab` inserts 4 spaces; `Shift+Tab` removes 4 leading spaces.
+- **Auto-indent** -- `Enter` starts the new line with the indentation of the current one, plus 4 spaces after a line ending in `:`. Turn it off in the preferences above.
 
 #### Script Editor Actions
 
 | Control | Action |
 |---------|--------|
-| **▶ Run** | Execute the current tab's script. The console switches to the **Python REPL** tab and shows the output. |
+| **▶ Run** (`Ctrl+Enter`) | Execute the current tab's script. The console switches to the **Python REPL** tab and shows the output. |
 | **☰ > New** | Create a blank script tab. |
 | **☰ > Open** | Load a `.py` file into a new tab. |
 | **☰ > Save** | Save the current tab to its file (asks for a path the first time). |
