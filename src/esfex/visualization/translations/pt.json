@@ -657,7 +657,7 @@
     "group_identity": "Identidade",
     "group_per_node": "Investimento por nó",
     "populate_btn": "Preencher a partir dos nós",
-    "populate_tip": "Copiar capacidades de investimento existentes e máximas das tecnologias dos nós",
+    "populate_tip": "Adicionar uma linha (com valores padrão) para cada nó do sistema que ainda não está na tabela",
     "delete_entry": "Eliminar entrada",
     "node_col": "Nó",
     "existing_col": "Existente",

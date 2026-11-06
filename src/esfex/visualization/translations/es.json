@@ -657,7 +657,7 @@
     "group_identity": "Identidad",
     "group_per_node": "Inversión por Nodo",
     "populate_btn": "Completar desde Nodos",
-    "populate_tip": "Copiar capacidades existentes y máximas de inversión de tecnologías del nodo",
+    "populate_tip": "Añadir una fila (con valores por defecto) por cada nodo del sistema que aún no está en la tabla",
     "delete_entry": "Eliminar Entrada",
     "node_col": "Nodo",
     "existing_col": "Existente",
