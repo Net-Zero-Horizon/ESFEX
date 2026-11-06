@@ -55,9 +55,9 @@ This caps the output of generator `Coal` at 500 MWh **per operational window** (
 
 Each term's `index` lists one entry per axis of the variable:
 
-- **Unit axis** (generator or battery): the unit's **config key** (not its display name).
-- **Technology axis**: the technology's config key.
-- **Year axis**: a **year value** of the horizon (for example `2030`). With the default run, years are labelled from 2025.
+- **Unit axis** (generator or battery): the unit's **config key** (not its display name). An integer that is not a key is the unit's 1-based position in the config.
+- **Technology axis**: the technology's config key, or its 1-based position.
+- **Year axis**: a **year value** of the horizon (for example `2030`). Years are labelled from the year of `date_start` (or `esfex run --start-year`).
 - **Bus, node and hour axes**: a 1-based integer.
 - `all`: sum over that axis. For **operational** variables, `all` is accepted only on the **hour** axis; on any other axis the model build fails. For investment variables, `all` works on every axis.
 

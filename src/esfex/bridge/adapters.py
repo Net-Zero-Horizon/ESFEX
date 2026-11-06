@@ -235,6 +235,27 @@ def _investment_axes(tech_idx, year_idx):
     }
 
 
+def _lookup_axis_entry(kind, m, entry):
+    """1-based index of ``entry`` on a named axis, or None if unknown.
+
+    Names match as strings, so a YAML ``1`` finds the key ``"1"`` and
+    ``"2030"`` finds the year 2030. On a unit or technology axis an integer
+    that names no key is a 1-based position, like on the numeric axes.
+    """
+    for key in (entry, str(entry)):
+        if key in m:
+            return m[key]
+    if kind == "year":
+        try:
+            return m.get(int(entry))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(entry, (int, np.integer)) and not isinstance(entry, bool) \
+            and 1 <= int(entry) <= len(m):
+        return int(entry)
+    return None
+
+
 def _resolve_one(cc, name_axes) -> dict:
     """Resolve a single constraint into a plain spec with 1-based Julia indices
     (``"all"`` → -1). Raises ValueError on an unknown name."""
@@ -252,12 +273,13 @@ def _resolve_one(cc, name_axes) -> dict:
                 resolved.append(-1)
             elif pos in axes:
                 kind, m = axes[pos]
-                if entry not in m:
+                idx = _lookup_axis_entry(kind, m, entry)
+                if idx is None:
                     raise ValueError(
                         f"custom constraint '{cc.name}': unknown {kind} "
                         f"'{entry}' for variable '{t.variable}'"
                     )
-                resolved.append(m[entry])
+                resolved.append(idx)
             else:
                 resolved.append(int(entry))
         terms.append({"variable": t.variable, "index": resolved,
@@ -1016,23 +1038,31 @@ class PowerSystemAdapter:
         logger.debug(f"PowerSystemAdapter initialized: {hours}h, {num_nodes} nodes, mode={mode}")
 
     def _slice_availability(self, cached: np.ndarray, resolution_hours: int) -> Optional[np.ndarray]:
-        """Slice a cached availability profile to the current window."""
+        """Slice a cached hourly profile (availability, inflow) to this window.
+
+        ``start_hour`` counts from the start of the model year. The profile is
+        indexed by horizon hour (year index × 8760 + hour), wrapping around
+        when it is shorter, as in the master problem: a multi-year profile
+        gives each year its own block, a one-year profile repeats.
+        """
+        year_idx = max(0, int(self.year) - int(self.base_year))
+        start = (year_idx * HOURS_STD_YEAR + self.start_hour) % max(len(cached), 1)
         if resolution_hours > 1 and len(cached) > self.hours:
             resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
-            start_idx = self.start_hour // resolution_hours
+            start_idx = start // resolution_hours
             end_idx = start_idx + self.hours
             return resampled[start_idx:end_idx]
         else:
-            end_h = self.start_hour + self.hours
+            end_h = start + self.hours
             if end_h <= len(cached):
-                return cached[self.start_hour:end_h]
-            elif self.start_hour < len(cached):
+                return cached[start:end_h]
+            elif start < len(cached):
                 return np.concatenate([
-                    cached[self.start_hour:],
+                    cached[start:],
                     cached[:end_h - len(cached)]
                 ])
             else:
-                wrapped_start = self.start_hour % len(cached)
+                wrapped_start = start % len(cached)
                 wrapped_end = wrapped_start + self.hours
                 if wrapped_end <= len(cached):
                     return cached[wrapped_start:wrapped_end]
@@ -1220,36 +1250,11 @@ class PowerSystemAdapter:
             # Use cached availability if available, otherwise load from file
             availability = None
             if key in self.availability_cache:
-                # Use pre-loaded cache (already at full resolution, slice window)
-                cached = self.availability_cache[key]
-                if resolution_hours > 1 and len(cached) > self.hours:
-                    # Aggregate to temporal resolution using MEAN (correct for capacity factors)
-                    resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
-                    start_idx = self.start_hour // resolution_hours
-                    end_idx = start_idx + self.hours
-                    availability = resampled[start_idx:end_idx]
-                else:
-                    # Slice from correct window offset within the year
-                    end_h = self.start_hour + self.hours
-                    if end_h <= len(cached):
-                        availability = cached[self.start_hour:end_h]
-                    elif self.start_hour < len(cached):
-                        # Window extends beyond available data — wrap around
-                        availability = np.concatenate([
-                            cached[self.start_hour:],
-                            cached[:end_h - len(cached)]
-                        ])
-                    else:
-                        # start_hour beyond data — wrap
-                        wrapped_start = self.start_hour % len(cached)
-                        wrapped_end = wrapped_start + self.hours
-                        if wrapped_end <= len(cached):
-                            availability = cached[wrapped_start:wrapped_end]
-                        else:
-                            availability = np.concatenate([
-                                cached[wrapped_start:],
-                                cached[:wrapped_end - len(cached)]
-                            ])
+                # Pre-loaded cache at full resolution: slice this year's window
+                # (mean aggregation for resolution > 1, correct for capacity factors)
+                availability = self._slice_availability(
+                    self.availability_cache[key], resolution_hours
+                )
             elif hasattr(gen, 'availability_file') and gen.availability_file:
                 # Fallback: load from file if not cached. Resolve like demand
                 # paths: absolute paths (GUI-written, run from a /tmp config)
@@ -1309,34 +1314,10 @@ class PowerSystemAdapter:
             # Reservoir inflow profile
             inflow = None
             if key in self.inflow_cache:
-                cached_inflow = self.inflow_cache[key]
-                if resolution_hours > 1:
-                    # Aggregate inflow using MEAN (m³/s average over period)
-                    resampled_inflow = aggregate_to_resolution(
-                        cached_inflow, target_hours=resolution_hours
-                    )
-                    start_idx = self.start_hour // resolution_hours
-                    end_idx = start_idx + self.hours
-                    inflow = resampled_inflow[start_idx:end_idx]
-                else:
-                    end_h = self.start_hour + self.hours
-                    if end_h <= len(cached_inflow):
-                        inflow = cached_inflow[self.start_hour:end_h]
-                    elif self.start_hour < len(cached_inflow):
-                        inflow = np.concatenate([
-                            cached_inflow[self.start_hour:],
-                            cached_inflow[:end_h - len(cached_inflow)]
-                        ])
-                    else:
-                        wrapped_start = self.start_hour % len(cached_inflow)
-                        wrapped_end = wrapped_start + self.hours
-                        if wrapped_end <= len(cached_inflow):
-                            inflow = cached_inflow[wrapped_start:wrapped_end]
-                        else:
-                            inflow = np.concatenate([
-                                cached_inflow[wrapped_start:],
-                                cached_inflow[:wrapped_end - len(cached_inflow)]
-                            ])
+                # Mean aggregation for resolution > 1 (m³/s average over period)
+                inflow = self._slice_availability(
+                    self.inflow_cache[key], resolution_hours
+                )
 
             # Apply scheduled interruptions as an availability mask. Materialise
             # a ones matrix for dispatchable units (no CF profile) so the outage

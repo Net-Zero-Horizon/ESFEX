@@ -793,7 +793,7 @@ class ESFEXAPI:
         config: Any,
         output_dir: Union[str, Path] = "results",
         years: int | None = None,
-        start_year: int = 2025,
+        start_year: int | None = None,
     ):
         """Run a full ESFEX simulation (master + operational dispatch).
 
@@ -805,8 +805,9 @@ class ESFEXAPI:
             Directory for output HDF5 files.
         years : int, optional
             Number of years to simulate (default: all from config).
-        start_year : int
-            First simulation year.
+        start_year : int, optional
+            Label of the first simulated year (default: the year of
+            ``date_start``).
 
         Returns
         -------

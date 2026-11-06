@@ -20,8 +20,8 @@ Load demand data from an Excel (.xlsx, .xls) or CSV file.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `file_path` | `str` or `Path` | required | Path to the demand data file. |
-| `date_start` | `str` | `"01/01/2025 00:00"` | Simulation start date and time in `"DD/MM/YYYY HH:MM"` format. Used to compute year boundaries and time indices. |
-| `year_to_load` | `int` or `None` | `None` | If specified, loads only data for this calendar year. If `None`, loads all data in the file. |
+| `date_start` | `str` | `"01/01/2025 00:00"` | Timestamp of the first row, `"DD/MM/YYYY HH:MM"`. Gives the first year label, the time index and the calendar used to find Feb 29. |
+| `year_to_load` | `int` or `None` | `None` | If specified, loads only that model year: the 8,760-row block number `year_to_load - year of date_start`. If `None`, loads all data in the file. |
 
 **Returns:** A 5-tuple:
 
@@ -30,21 +30,21 @@ Load demand data from an Excel (.xlsx, .xls) or CSV file.
 | 0 | `np.ndarray` | Demand array with shape `(hours, num_nodes)` in MW. |
 | 1 | `int` | Total number of hours loaded. |
 | 2 | `int` | Number of nodes (columns in the file). |
-| 3 | `list[int]` | List of years present in the data (e.g., `[2025, 2026, ..., 2050]`). |
-| 4 | `list[datetime]` | Time index -- one `datetime` object per hour. |
+| 3 | `list[int]` | Model years in the data, one per started 8,760-row block from the year of `date_start` (e.g., `[2025, 2026, ..., 2049]`). |
+| 4 | `list[datetime]` | Time index -- one `datetime` object per hour, skipping Feb 29. |
 
 **Raises:**
 - `FileNotFoundError` if the demand file does not exist.
+- `ValueError` if `year_to_load` is not one of the model years in the data.
 
 **Behavior:**
 
-- When `year_to_load=None`: reads the entire file. Both CSV and Excel files are read with no header row (`header=None`), so every row is treated as data.
-- When `year_to_load` is specified: calculates the row range for that year based on `date_start`, then reads only those rows. This avoids loading the full multi-year file into memory.
-- Years are determined from the time span: `start_date.year` through `end_date.year`.
+- The file is read like a simulation run reads it: data start in the first row, leading rows with non-numeric cells (headers) are skipped, and Feb 29 rows of leap-year data are dropped (`esfex.utils.temporal.drop_leap_days`), so every year is 8,760 rows.
+- When `year_to_load` is specified, only that year's 8,760-row block is returned, with its time index.
 
 **Demand File Format:**
 
-Hourly power demand values in MW. Each column represents a node. No header row, for CSV and Excel alike.
+Hourly power demand values in MW. Each column represents a node. A header row is optional, for CSV and Excel alike.
 
 | Column 0 | Column 1 | Column 2 | ... |
 |----------|----------|----------|-----|
@@ -61,7 +61,7 @@ Demand growth is NOT applied inside `load_demand_data()`. The function loads raw
 `load_demand_data()` is a standalone helper; the runner does not call it. `Orchestrator._load_demand()` reads each system's demand itself:
 
 - It uses `demand_paths` (one file per node, stacked side by side) if set, otherwise `demand_path` (one column per node).
-- CSV files are read with `header=None`. Excel files are read with `pd.read_excel()` defaults, so the runner treats the first Excel row as a header, unlike `load_demand_data()`.
+- Files are read with `read_hourly_table()`, as in `load_demand_data()`: header rows are skipped and Feb 29 rows are dropped.
 - If the file is shorter than the simulation horizon, the first year is repeated to fill it.
 - The system's `demand_scale` is applied, and the systems of the meta-network are stacked side by side into one `(hours, nodes)` array.
 
@@ -136,6 +136,7 @@ def load_availability_profile(
     file_path: Union[str, Path],
     temporal_resolution_hours: int = 1,
     num_nodes: Optional[int] = None,
+    date_start: Optional[str] = None,
 ) -> np.ndarray
 ```
 
@@ -148,12 +149,14 @@ Load a generator availability profile from an Excel or CSV file.
 | `file_path` | `str` or `Path` | required | Path to the availability data file. |
 | `temporal_resolution_hours` | `int` | `1` | Target temporal resolution. If > 1, the hourly data is aggregated using MEAN (appropriate for capacity factors). |
 | `num_nodes` | `int` or `None` | `None` | Expected number of nodes. If provided, the columns are broadcast, extended or truncated to match (see below). |
+| `date_start` | `str` or `None` | `None` | Timestamp of the first row (`"DD/MM/YYYY HH:MM"`), used to find Feb 29 rows. The run passes the config's `date_start`. |
 
 **Returns:** Array of shape `(hours, nodes)` with values clipped to [0, 1].
 
 **Behavior:**
 
 - If the file does not exist, or reading it fails, logs a warning or error and returns an array of ones with shape `(8760 // temporal_resolution_hours, num_nodes)` (10 columns if `num_nodes` is `None`).
+- Header rows (leading rows with non-numeric cells) are skipped. Feb 29 rows are dropped so every year is 8,760 rows: by the calendar from `date_start` when given, and always for a file of exactly 8,784 rows.
 - A single-column file is copied to every node.
 - If the file has more than one column but fewer than `num_nodes`, the last column is repeated for the missing nodes.
 - If the file has more columns than `num_nodes`, truncates to the expected number.
@@ -218,7 +221,7 @@ class DemandDataManager:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `excel_path` | `str` or `Path` | required | Path to the Excel or CSV demand file. |
-| `date_start` | `str` | `"01/01/2025 00:00"` | Simulation start date. |
+| `date_start` | `str` | `"01/01/2025 00:00"` | Timestamp of the first row; its year is the first year in the index. |
 | `time_step` | `int` | `1` | Time step in hours. |
 
 ### prepare_hdf5_storage
@@ -227,7 +230,7 @@ class DemandDataManager:
 def prepare_hdf5_storage(self) -> Path
 ```
 
-Convert the Excel/CSV file to an HDF5 file with year-indexed access.
+Convert the Excel/CSV file to an HDF5 file with year-indexed access. Rows are read as in `load_demand_data()` (Feb 29 is dropped for hourly data), and each year is a block of `8760 / time_step` rows.
 
 **Returns:** Path to the created HDF5 temporary file.
 

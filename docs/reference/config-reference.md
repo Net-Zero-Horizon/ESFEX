@@ -19,7 +19,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 |---|---|---|---|
 | `simulation_mode` | `development` \| `unit_commitment` \| `economic_dispatch` | `"development"` | `development`: master problem (capacity expansion) then operational dispatch for every year. `economic_dispatch`: dispatch only (LP), no master problem. `unit_commitment`: dispatch only with binary commitment (MIP), first year only |
 | `unit_commitment_hours` | int (≥ 1) | `24` | `unit_commitment` mode only: number of hours of the first year that are dispatched (capped at 8,760) |
-| `date_start` | str | `"01/01/2025 00:00"` | Start timestamp `DD/MM/YYYY HH:MM`. Labels the hourly time index; demand is read from the first row of the file |
+| `date_start` | str | `"01/01/2025 00:00"` | Start timestamp `DD/MM/YYYY HH:MM` of the first data row. Labels the hourly time index (Feb 29 skipped: every model year is 8,760 h) and gives the first year label unless `esfex run --start-year` is set. It does not select rows: demand is read from the first row of the file |
 | `temporal` | [TemporalConfig](#temporalconfig) | see [TemporalConfig](#temporalconfig) | Time resolution and rolling horizon |
 | `solver` | [SolverConfig](#solverconfig) | see [SolverConfig](#solverconfig) | Solver backend and options |
 | `network_reduction` | [NetworkReductionConfig](#networkreductionconfig) | see [NetworkReductionConfig](#networkreductionconfig) | Optional internal reduction of the bus network before solving |

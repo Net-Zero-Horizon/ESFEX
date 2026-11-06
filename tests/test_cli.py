@@ -337,7 +337,7 @@ class TestRunCommand:
                 ],
             )
         assert result.exit_code == 0
-        mock_orch_instance.run.assert_called_once_with(years=5)
+        mock_orch_instance.run.assert_called_once_with(years=5, start_year=None)
 
 
 # ---------------------------------------------------------------------------
