@@ -542,6 +542,12 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             try:
                 _g.maintenance_cost = _new_maint
                 _linked_maint += 1
+                log.info(
+                    "Generator %s (fuel %s): added the non-fuel O&M adder of %g $/MWh "
+                    "to maintenance_cost (now %s). Set maintenance_cost to at least "
+                    "%g $/MWh to keep your own value.",
+                    _gk, _fuel_name, _adder, _new_maint, _adder * 0.5,
+                )
             except Exception as _exc:
                 log.warning("Cannot set maintenance_cost on %s: %s", _g.name, _exc)
 

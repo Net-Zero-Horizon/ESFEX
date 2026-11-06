@@ -166,7 +166,7 @@ After the units are built, and only if the system has a non-empty `fuels` block,
 
     The adder is applied at every node whose fuel cost is positive, and skipped for the whole unit if its largest `maintenance_cost` is already at least half the adder. It applies whether the fuel cost was given or computed in step 1. Other fuel names get no adder.
 
-The loader logs how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
+The loader logs (INFO) each unit that receives the adder, with the resulting `maintenance_cost`, and how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
 
 ---
 

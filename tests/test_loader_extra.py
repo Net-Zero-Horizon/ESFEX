@@ -642,6 +642,20 @@ class TestFuelLinking:
         # Gas adder is 60.0, fuel_cost>0 at both nodes
         assert maint[0] == pytest.approx(60.0)
 
+    def test_non_fuel_adder_logged_per_generator(self, caplog):
+        """Each unit that receives the adder is named in the log."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _thermal_gen(
+            name="GP", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[0.0, 0.0])
+        data["unit_1"] = _thermal_gen(
+            name="GQ", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[40.0, 40.0])
+        with caplog.at_level(logging.INFO, logger="esfex.config.loader"):
+            _convert_system(data)
+        lines = [r.getMessage() for r in caplog.records if "non-fuel O&M adder" in r.getMessage()]
+        assert len(lines) == 1
+        assert "unit_0" in lines[0] and "60" in lines[0]
+
     def test_existing_substantial_maintenance_not_doubled(self):
         """If maintenance already >= adder*0.5, skip the LCOE add."""
         data = _minimal_system()
