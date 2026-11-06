@@ -187,6 +187,33 @@ class TestToCsv:
         exporter.to_csv(nested_dir)
         assert nested_dir.exists()
 
+    def test_multinode_3d_and_nested_datasets(self, tmp_path):
+        """Runner-format multi-node file: [from, to, step] power flow,
+        transfer margin, a scalar dataset and nested groups. The export
+        used to stop with "Must pass 2-d input" on power_flow."""
+        h5_path = tmp_path / "results.h5"
+        flow = np.arange(3 * 3 * 4, dtype=float).reshape(3, 3, 4)
+        with h5py.File(h5_path, "w") as f:
+            sc = f.create_group("detailed_results").create_group("year_2025_threshold_0")
+            sc.create_group("generation").create_dataset("Gas", data=np.ones((3, 4)))
+            sc.create_dataset("power_flow", data=flow)
+            sc.create_dataset("transfer_margin", data=np.zeros((3, 3, 4)))
+            sc.create_dataset("n_units", data=7)
+            tsp = sc.create_group("technology_selling_prices").create_group("Gas")
+            tsp.create_dataset("prices_weights", data=np.ones((5, 3)))
+        csv_dir = tmp_path / "csv"
+        ResultsExporter(h5_path).to_csv(csv_dir)
+
+        sc_dir = csv_dir / "year_2025_threshold_0"
+        pf = pd.read_csv(sc_dir / "power_flow.csv")
+        assert list(pf.columns[:2]) == ["from_node", "to_node"]
+        assert len(pf) == 9 and pf.shape[1] == 2 + 4
+        row = pf[(pf.from_node == 1) & (pf.to_node == 2)].iloc[0, 2:].to_numpy()
+        np.testing.assert_array_equal(row, flow[1, 2])
+        assert (sc_dir / "transfer_margin.csv").exists()
+        assert pd.read_csv(sc_dir / "n_units.csv").iloc[0, 0] == 7
+        assert (sc_dir / "technology_selling_prices" / "Gas" / "prices_weights.csv").exists()
+
     def test_empty_hdf5_no_crash(self, tmp_path):
         """An HDF5 file with no groups should export without errors."""
         h5_path = tmp_path / "empty.h5"

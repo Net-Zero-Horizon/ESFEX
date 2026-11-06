@@ -94,7 +94,8 @@ def initialize_julia(
 
     Args:
         threads: Number of threads for Julia
-        compile: Whether to precompile the ESFEX module
+        compile: Accepted for compatibility; not used (build a sysimage
+            with ``esfex precompile`` instead)
         verbose: Enable verbose output
 
     Returns:

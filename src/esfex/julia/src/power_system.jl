@@ -2620,7 +2620,8 @@ end
 """
     add_co2_emissions_definition!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Define CO2 emissions at each node and hour.
+Define the CO2 emission rate (tCO2/h) at each node and step; the tonnes
+emitted in step t are `CO2_emissions[node, t] × resolution_hours`.
 
   CO2_emissions[node, t] == sum(gen_output[g, b, t] * co2_per_mwh(g, b) for g, b at node)
 """
@@ -3656,6 +3657,11 @@ Extract solution values from solved model.
 
 Returns a PowerSystemResult containing all solution values, metrics, and optional
 dual prices (if the model is LP or has been fixed and resolved as LP).
+
+Time-series arrays are per-step rates: MW for power, tCO2/h for
+`co2_emissions`. The scalar totals (`total_generation`, `total_demand`,
+`total_curtailment`, `load_shed_total` in MWh; `total_co2` in tCO2) are
+energy/mass over the window: the rates summed over steps × `resolution_hours`.
 """
 function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemInput)
     status = termination_status(model)
@@ -3808,17 +3814,20 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         prices = zeros(n_bus, hours)
     end
 
-    # Calculate metrics
-    total_gen = sum(gen_out)
-    total_demand = sum(input.demand)
-    total_curt = sum(curt)
-    total_ls = sum(ls)
+    # Calculate metrics. The arrays are per-step rates (MW, tCO2/h); each
+    # step lasts `tres` hours, so energy and mass totals are sum × tres
+    # (MWh, tCO2), whatever the temporal resolution.
+    tres_tot = Float64(input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1)
+    total_gen = sum(gen_out) * tres_tot
+    total_demand = sum(input.demand) * tres_tot
+    total_curt = sum(curt) * tres_tot
+    total_ls = sum(ls) * tres_tot
 
-    # Renewable energy penetration
+    # Renewable energy penetration (unit-free ratio)
     re_gen = 0.0
     for g in 1:n_gen
         if input.generators[g].type == "Renewable"
-            re_gen += sum(gen_out[g, :, :])
+            re_gen += sum(gen_out[g, :, :]) * tres_tot
         end
     end
     re_pen = total_gen > 0 ? re_gen / total_gen : 0.0
@@ -3828,7 +3837,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
     for g in 1:n_gen, b in 1:size(gen_out, 2)
         co2_factor = co2_per_mwh(input.fuel_co2, input.generators[g], b)
         co2_factor == 0.0 && continue
-        total_co2 += sum(gen_out[g, b, :]) * co2_factor
+        total_co2 += sum(gen_out[g, b, :]) * co2_factor * tres_tot
     end
 
     # Power flow values (legacy node-pair dict)

@@ -23,6 +23,7 @@ from esfex.analysis.frequency import (
     GeneratorFreqParams,
     build_gen_freq_params_from_hdf5,
 )
+from esfex.io.exporter import demand_is_step_major
 from esfex.visualization.data.gui_model import GuiSystemState
 
 log = logging.getLogger(__name__)
@@ -271,11 +272,13 @@ class SldResultsLoader:
                 }
 
             # ── Demand / Load shedding ──
-            demand_ds = grp.get("demand")  # [nodes x hours]
+            demand_ds = grp.get("demand")  # [nodes x hours]; old files may be [hours x nodes]
             shed_ds = grp.get("loss_load")  # [nodes x hours]
+            demand_t = demand_ds is not None and demand_is_step_major(demand_ds, self._hours)
             for node in self._state.nodes:
                 ni = node.index
-                demand_mw = _safe_read_2d(demand_ds, ni, h)
+                demand_mw = (_safe_read_2d(demand_ds, h, ni) if demand_t
+                             else _safe_read_2d(demand_ds, ni, h))
                 shed_mw = _safe_read_2d(shed_ds, ni, h)
                 result["loads"][f"load_node_{ni}"] = {
                     "demand_mw": round(demand_mw, 2),

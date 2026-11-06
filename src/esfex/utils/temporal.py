@@ -137,7 +137,7 @@ def aggregate_demand_to_resolution(
     -------
     np.ndarray or pd.DataFrame
         Aggregated time series with reduced timesteps
-        Each value represents the MAXIMUM demand within that period
+        Each value represents the MEAN demand within that period
 
     Examples
     --------

@@ -544,9 +544,12 @@ def _load_year_data(h5_path: Path | str, scenario_key: str) -> dict:
         if "electricity_prices" in grp:
             data["system_prices"] = grp["electricity_prices"][:]
 
-        # Demand
+        # Demand [node, step] (old files may store it [step, node])
         if "demand" in grp:
-            data["demand"] = grp["demand"][:]
+            from esfex.io.exporter import demand_node_hours
+            n_steps = (grp["electricity_prices"].shape[0]
+                       if "electricity_prices" in grp else None)
+            data["demand"] = demand_node_hours(grp["demand"], n_steps)
 
         # Curtailment & load shed
         if "curtailment" in grp:
