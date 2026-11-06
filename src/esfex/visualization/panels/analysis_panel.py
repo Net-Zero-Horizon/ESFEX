@@ -494,6 +494,17 @@ class AnalysisPanel(QWidget):
         """Update the N-k summary label with results."""
         self._nk_summary_label.setText(text)
 
+    def set_nk_defaults(
+        self, depth: str, redistribution: str, pi_threshold: float,
+    ) -> None:
+        """Preset the N-k options from Global Settings > N-1 Security."""
+        for combo, value in ((self._nk_depth_combo, depth),
+                             (self._nk_redispatch_combo, redistribution)):
+            idx = combo.findData(value)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        self._nk_pi_threshold.setValue(float(pi_threshold or 0.0))
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

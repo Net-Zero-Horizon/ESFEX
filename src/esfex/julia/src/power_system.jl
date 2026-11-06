@@ -2788,7 +2788,10 @@ Preventive N-1 security: the system must survive the loss of its largest
 element without re-dispatch.
 
 1. Generation N-1: the headroom of the other reservable units (online ones in
-   unit commitment) and of the batteries must cover the largest unit's output.
+   unit commitment) and of the batteries must cover the largest unit's output
+   (`n1_generation_reserve_type = "largest_unit"`) or
+   `n1_generation_reserve_percentage` × the system demand of each step
+   (`"percentage"`).
 2. Transmission N-1: each line carries at most `n1_transmission_reserve_factor`
    of its capacity, leaving room for post-contingency redistribution.
 
@@ -2832,6 +2835,10 @@ replace its output. For each step
 
     cover_t + shortfall_t ≥ gen_output[g*, b*, t]      (constraint `\$(cname)_t\$(t)`)
 
+With `n1_generation_reserve_type = "percentage"` the requirement is instead
+`n1_generation_reserve_percentage × Σ_n demand[t, n]` and no unit is excluded
+from the cover.
+
 with cover_t the batteries' headroom (max discharge − discharge + charge) plus,
 per non-renewable unit other than (g*, b*), its headroom
 (available capacity, × status in unit commitment, − output):
@@ -2844,8 +2851,14 @@ The shortfall is priced at `loss_of_reserve_static` through `n1_cost`.
 """
 function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput,
                       n1_cost::AffExpr; corrective::Bool, cname::String)
-    g_star, b_star = _n1_largest_unit(input)
-    (g_star == 0 || !(b_star in vars.buses_of_gen[g_star])) && return
+    pct = input.n1_generation_reserve_type == "percentage"
+    if pct
+        g_star, b_star = 0, 0
+        input.n1_generation_reserve_percentage > 0 || return
+    else
+        g_star, b_star = _n1_largest_unit(input)
+        (g_star == 0 || !(b_star in vars.buses_of_gen[g_star])) && return
+    end
     spinning = vars.gen_status !== nothing && vars.gen_startup !== nothing
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
     for t in 1:input.temporal.hours
@@ -2884,8 +2897,10 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
             end
         end
         short = @variable(model, lower_bound = 0, base_name = "$(cname)_shortfall_t$(t)")
-        @constraint(model, cover + short >= vars.gen_output[g_star, b_star, t],
-            base_name = "$(cname)_t$(t)")
+        need = pct ?
+            input.n1_generation_reserve_percentage * sum(@view input.demand[t, :]) :
+            vars.gen_output[g_star, b_star, t]
+        @constraint(model, cover + short >= need, base_name = "$(cname)_t$(t)")
         add_to_expression!(n1_cost, input.loss_of_reserve_static, short)
     end
 end

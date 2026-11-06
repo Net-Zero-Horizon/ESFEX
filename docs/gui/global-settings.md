@@ -119,24 +119,26 @@ Adds security constraints for the loss of a single element to the dispatch. See 
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Enable N-1 Security | Off | Master switch. In a project created in the Studio, N-1 applies only in `Unit Commitment` mode (`apply_to_modes: [unit_commitment]`); there is no field for this. A YAML file without `apply_to_modes` applies it in both modes. |
+| Enable N-1 Security | Off | Master switch |
+| Apply in | Development, Unit commitment | Simulation modes that get the N-1 constraints (`apply_to_modes`). Other modes listed in the YAML (e.g. `economic_dispatch`) are kept. |
 | Transmission | On | Line outage constraints |
 | Trans. Reserve Factor (frac) | 0.70 | Usable fraction of line capacity under N-1 |
-| Critical Line Threshold (frac) | 0.0 | Written to the YAML, but not read by the current model |
 | Generation | On | Generator outage constraints |
-| Reserve Type | Largest Unit | `Largest Unit` or `Percentage`. `Fixed MW` is also listed, but the schema rejects it when the YAML is loaded, so do not use it. |
+| Reserve Type | Largest Unit | `Largest Unit`: the headroom of the other units and batteries must cover the output of the largest unit. `Percentage`: the headroom of all units and batteries must cover Reserve Percentage × the system demand of each step. |
 | Reserve Percentage (frac) | 0.15 | Used when Reserve Type is `Percentage` |
 | Use Iterative SCOPF | Off | Replace preventive N-1 reserves with post-contingency (LODF) line limits for every pair of lines, added in one solve (not iterative) |
-| SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); not used by the model |
-| SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on |
+| SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); saved but not used (the SCOPF constraints are built in one pass) |
+| SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on; saved but not used |
 | Allow Corrective Actions | Off | Allow post-contingency battery and generator re-dispatch instead of preventive reserve |
-| Contingency Depth | N-1 | `N-1` or `N-1-1` |
-| Redistribution Mode | Pro-rata | `Pro-rata (proportional to capacity)` or `Droop-based (governor response)` |
-| PI Screening Threshold | 0.0 | Performance-index threshold for contingency screening; 0 analyzes all |
-| Include Transformer Contingencies | Off | Add transformer outages |
-| Include Battery Contingencies | Off | Add battery outages |
+| *SLD contingency analysis* | | The fields below do not change the optimisation: they set up **Run All N-1** and **Run Screening** in the SLD Analysis panel |
+| Critical Line Threshold (frac) | 0.0 | Only lines and transformers loaded at or above this fraction of their capacity are tripped; 0 trips them all |
+| Contingency Depth | N-1 | `N-1` or `N-1-1`; initial value of the panel's depth selector |
+| Redistribution Mode | Pro-rata | `Pro-rata (proportional to capacity)` or `Droop-based (governor response)`; initial value of the panel's selector |
+| PI Screening Threshold | 0.0 | Initial value of the panel's threshold; 0 keeps every contingency |
+| Include Transformer Contingencies | Off | Trip transformers too |
+| Include Battery Contingencies | Off | Trip discharging batteries too |
 
-Contingency Depth, Redistribution Mode, PI Screening Threshold and the transformer and battery contingency options are saved in the YAML (`n1_security`) but the optimization does not read them yet. The SLD analysis panel has its own copies of the depth, redistribution and threshold controls (see [Single-Line Diagram](sld-dynamic-analysis.md#n-k-analysis-options)).
+The depth, redistribution and threshold values preset the SLD Analysis panel each time **Analysis** is switched on; you can change them there for a single run (see [Single-Line Diagram](sld-dynamic-analysis.md#n-k-analysis-options)). The transformer and battery options and the critical line threshold are read when the runs start. The optimisation itself only uses the fields above the *SLD contingency analysis* row.
 
 ### Risk & Resilience
 
@@ -198,7 +200,7 @@ Click a **system name** in the Element Tree. Each system has independent paramet
 | Min Annual Increment (frac) | 0.01 | Minimum yearly increase in RE share |
 | Max Annual Increment (frac) | 0.10 | Maximum yearly increase in RE share |
 | Loss Demand Threshold (frac) | 0.05 | Acceptable unserved energy ratio |
-| Inertia Limit Threshold (frac) | 0.1 | Minimum system inertia per hour, the sum of output × H over online units. Despite the "frac" label, the value is compared directly with that MW·s sum. |
+| Min. System Inertia (MW·s) | 0.1 | Minimum system inertia per hour, the sum of output × H over online units (an absolute value; 0.1 is effectively no requirement) |
 | Simulate Rooftop | Off | Include distributed rooftop PV |
 | Enable CO2 Budget | On | Enforce an annual CO2 budget for this system; emissions above it pay the CO2 Budget Violation penalty |
 | CO2 Annual Budget (tonnes/year) | 1,000,000 | Annual CO2 budget |
@@ -224,7 +226,7 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | Loss of Load | 50,000 | $/MWh | Value of lost load (VOLL) for unserved demand. The schema default for a YAML file without this key is 10,000,000. |
 | Loss Reserve (Static) | 100 | $/MW | Static reserve shortfall, per MW and hour |
 | Loss Reserve (Dynamic) | 100 | $/MW | Dynamic (frequency response) reserve shortfall |
-| Loss of Inertia | 200 | $/MW·s | Inertia shortfall below the Inertia Limit Threshold |
+| Loss of Inertia | 200 | $/MW·s | Inertia shortfall below the Min. System Inertia |
 | Transfer Margin | 100 | $/MW | Transfer margin violation |
 | Curtailment | 100 | -- | Not a schema field: the loader drops it, so it has no effect. Use Curtailment Cost. |
 | Max Curtailment Ratio | 0.05 | fraction | Curtailment allowed as a fraction of RE generation before Curtailment Excess Penalty applies |

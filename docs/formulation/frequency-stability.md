@@ -18,7 +18,7 @@ This module is a post-processing analysis (`analysis/frequency.py`) run on dispa
 \sum_{g,b} H_{g,b}\, p_{g,b,t} + \sum_{k,b} H^{bat}_{k,b} \left( p^{ch}_{k,b,t} + p^{dis}_{k,b,t} \right) + \lambda^{H}_t \geq H^{min}_t
 \]
 
-where \(H^{min}_t\) is the inertia threshold in MW·s (hourly profile or `INERTIA_LIMIT_THRESHOLD`, default 0.1; an absolute value, although the Studio labels the field as a fraction) and the shortfall \(\lambda^H_t\) is penalized at `penalties.loss_of_inertia`. Like FS-1, it weights each unit's inertia constant by its output, not its rating.
+where \(H^{min}_t\) is the inertia threshold in MW·s (hourly profile or `INERTIA_LIMIT_THRESHOLD`, default 0.1; an absolute value, the Studio's Min. System Inertia field) and the shortfall \(\lambda^H_t\) is penalized at `penalties.loss_of_inertia`. Like FS-1, it weights each unit's inertia constant by its output, not its rating.
 
 ## Mathematical Model
 

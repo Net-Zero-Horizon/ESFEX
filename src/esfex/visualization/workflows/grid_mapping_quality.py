@@ -18,7 +18,10 @@ values that won't blow up downstream load-flow / dispatch.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from esfex.visualization.workflows.grid_mapping_fetchers import (
@@ -774,6 +777,11 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
     (its rough downstream capacity) or equally if no such transformer
     is found.
 
+    Buses whose role the user picked in the bus form
+    (``role_user_set``) keep that role: they are never re-classified or
+    promoted, a user ``connection`` bus never receives demand, and a user
+    ``mixed`` bus counts as a demand carrier like a ``load`` bus.
+
     Returns counts of buses whose role / demand changed.
     """
     HV_THRESHOLD_KV = 100.0  # Above this, presume transmission-only by default
@@ -782,9 +790,13 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
         "buses_role_changed": 0,
         "buses_demand_changed": 0,
         "nodes_redistributed": 0,
+        "nodes_without_demand_bus": 0,
     }
     if not state.buses:
         return counts
+
+    def _fixed(b) -> bool:
+        return bool(getattr(b, "role_user_set", False))
 
     # Index supply-equipment buses
     supply_buses: set[str] = set()
@@ -836,6 +848,9 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
     # ── Phase 1: assign role per bus ──
     new_roles: dict[str, str] = {}
     for bid, bus in state.buses.items():
+        if _fixed(bus):
+            new_roles[bid] = bus.role
+            continue
         v = float(bus.voltage_kv or 0)
         has_supply = bid in supply_buses
         is_xfm_to = bid in transformer_to_bus_capacity
@@ -871,6 +886,10 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
         if bus.role != new_roles[bid]:
             bus.role = new_roles[bid]
             counts["buses_role_changed"] += 1
+        # A user "connection" bus carries no demand (schema invariant).
+        if _fixed(bus) and bus.role == "connection" and bus.demand_fraction != 0.0:
+            bus.demand_fraction = 0.0
+            counts["buses_demand_changed"] += 1
 
     # ── Phase 3: validate / repair demand_fraction per node ──
     from collections import defaultdict
@@ -894,7 +913,8 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
         total_df = sum(b.demand_fraction for b in bs)
         if total_df > 0 and abs(total_df - 1.0) <= SUM_TOL:
             for b in bs:
-                if b.demand_fraction > 0 and b.role not in ("load", "mixed"):
+                if (b.demand_fraction > 0 and b.role not in ("load", "mixed")
+                        and not _fixed(b)):
                     b.role = "mixed" if b.bus_id in supply_buses else "load"
                     counts["buses_role_changed"] += 1
             continue
@@ -905,15 +925,27 @@ def repair_bus_roles_and_demand(state) -> dict[str, int]:
         # the demand split — otherwise an HV bus where Termoeléctrica
         # connects would soak up most of the node's residential load
         # despite physically being a generation point.
-        loads = [b for b in bs if b.role == "load"]
+        # A "mixed" role the user chose is a deliberate demand carrier.
+        loads = [b for b in bs
+                 if b.role == "load" or (b.role == "mixed" and _fixed(b))]
         if not loads:
             # No load bus → fall back to "mixed" buses.
             loads = [b for b in bs if b.role == "mixed"]
         if not loads:
-            # Still nothing — promote the first reasonable bus to load.
-            fallback = next((b for b in bs if b.voltage_kv > 0), None)
-            if fallback is None and bs:
-                fallback = bs[0]
+            # Still nothing — promote the first reasonable bus to load
+            # (never one whose role the user fixed).
+            free = [b for b in bs if not _fixed(b)]
+            fallback = next((b for b in free if b.voltage_kv > 0), None)
+            if fallback is None and free:
+                fallback = free[0]
+            if fallback is None:
+                counts["nodes_without_demand_bus"] += 1
+                logger.warning(
+                    "Node %s: every bus has a user-set 'connection' role, so "
+                    "its demand has no bus to go to. Set one bus to 'load' "
+                    "or 'mixed'.", node_idx,
+                )
+                continue
             if fallback is not None:
                 # Clear stale fractions on other buses of the node.
                 for b in bs:

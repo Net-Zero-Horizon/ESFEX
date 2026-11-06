@@ -49,7 +49,7 @@ All forms of electricity production: solar PV, wind turbines, diesel engines, ga
 | **Existing Capacity** | Rated Power | MW | Nameplate capacity. |
 | | Life Time | years | Expected operational life. |
 | | Initial Age | years | Age of the unit at the start of the horizon. |
-| | Degradation | %/yr | Annual capacity degradation. Despite the label, the value is a fraction per year: 0.005 means 0.5 %/yr. |
+| | Degradation | fraction/yr | Annual capacity degradation, as a fraction per year: 0.005 means 0.5 %/yr. |
 | | Risk Coefficient | 0-1 | Geographic risk derating factor, normally computed by the Risk workflow. 1.0 = no derating. |
 | **Operating Parameters** | Min Power | pu | Minimum stable output as a fraction of rated power. Applied with unit commitment. |
 | | Min Up / Min Down | h | Minimum on / off time after a start / stop. Unit commitment only. |
@@ -113,7 +113,7 @@ All forms of energy storage: lithium-ion, flow batteries, pumped hydro, compress
 | | SOC Initial | frac | Starting state of charge (0.0 to 1.0) at the start of each year. Rolling windows carry the SOC from one to the next; at the end of the year the battery must be back to at least this level (within `soc_end_tolerance`, soft). |
 | | Max DoD | frac | Maximum depth of discharge. |
 | **Lifetime** | Life Time / Initial Age | years | Expected life and age at the start of the horizon. |
-| | Degradation | %/yr | Annual capacity degradation, entered as a fraction per year (0.01 = 1 %/yr) despite the label. |
+| | Degradation | fraction/yr | Annual capacity degradation, as a fraction per year (0.01 = 1 %/yr). |
 | | Risk Coefficient | 0-1 | Geographic risk derating factor. 1.0 = no derating. |
 | **Operating Parameters** | Min Power | pu | Minimum stable output (unit commitment). |
 | | Min Up / Min Down | h | Minimum on / off time (unit commitment). |
@@ -205,8 +205,8 @@ Electrical connection points at a given voltage. Each bus belongs to a parent no
 | Frequency | Hz | System frequency |
 | Current Type | -- | `AC` or `DC` |
 | Bus Type | -- | `PQ`, `PV` or `slack`. The slack bus is the angle reference for power flow. A network uses a single slack bus; choosing `slack` when another bus already has it shows a warning. |
-| Role | -- | `connection` (pure junction, no demand), `load` (serves demand) or `mixed` (equipment and demand). Default `connection`. On every save, export or run the Studio recomputes the role from the topology (bus with generation or storage: `mixed`; only bus of its node, or low-voltage bus below 100 kV / LV side of a step-down transformer: `load`; otherwise `connection`), so a role set by hand can be overwritten. |
-| Demand Fraction | frac | Share of the parent node's demand served by this bus. Forced to 0 and disabled for `connection` buses. The fractions of a node's buses should sum to 1.0. At save time, a node whose fractions do not sum to 1.0 gets its demand redistributed over its `load` buses; when a configuration is loaded, fractions are rescaled per node to sum to 1.0, with a warning. |
+| Role | -- | `connection` (pure junction, no demand), `load` (serves demand) or `mixed` (equipment and demand). Default `connection`. On every save, export or run the Studio sets the role of the other buses from the topology (bus with generation or storage: `mixed`; only bus of its node, or low-voltage bus below 100 kV / LV side of a step-down transformer: `load`; otherwise `connection`). A role you pick in this field is yours: it is kept on save and reload (the project stores the list of such buses in `_gui_layout.user_set_bus_roles`), a `connection` bus you set never receives demand, and a `mixed` bus you set counts as a demand bus. |
+| Demand Fraction | frac | Share of the parent node's demand served by this bus. Forced to 0 and disabled for `connection` buses. The fractions of a node's buses should sum to 1.0. At save time, a node whose fractions do not sum to 1.0 gets its demand redistributed over its `load` buses (and the `mixed` buses whose role you set); if every bus of a node is a `connection` you set, the node's demand has nowhere to go and a warning is logged; when a configuration is loaded, fractions are rescaled per node to sum to 1.0, with a warning. |
 | Color, Size | -, px | Marker style (Appearance section) |
 
 ### AC/DC Converter
@@ -231,7 +231,7 @@ Interfaces between AC and DC buses for HVDC transmission and DC-coupled storage.
 | **Economics** | Fixed Cost | $/MW/yr | Annual fixed O&M |
 | | Variable Cost | $/MWh | Cost per MWh transferred |
 | **Lifecycle** | Lifetime / Initial Age | years | Expected life and current age |
-| | Degradation Rate | %/yr | Entered as a fraction per year (0 to 0.1; 0.005 = 0.5 %/yr) despite the label |
+| | Degradation Rate | fraction/yr | Fraction per year (0 to 0.1; 0.005 = 0.5 %/yr) |
 
 ### Frequency Converter
 
@@ -344,7 +344,7 @@ Converts electricity to hydrogen, enabling power-to-gas coupling.
 | | Variable Cost | $/MWh | Cost per MWh of electricity consumed |
 | | Water Cost | $/m³ | Cost of water |
 | **Lifecycle** | Lifetime / Initial Age | years | Expected life and current age |
-| | Degradation Rate | %/yr | Entered as a fraction per year (0.01 = 1 %/yr) despite the label |
+| | Degradation Rate | fraction/yr | Fraction per year (0.01 = 1 %/yr) |
 
 Investment in new electrolyzer capacity is configured in the [Investment Portfolio](#investment-portfolio). The **Delete Electrolyzer** button asks for confirmation.
 

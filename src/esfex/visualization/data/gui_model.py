@@ -127,6 +127,10 @@ class GuiBus:
     latitude: float = 0.0               # Absolute map position
     longitude: float = 0.0
     style: VisualStyle = field(default_factory=VisualStyle)
+    # GUI-only: True once the user picks the role in the bus form. The
+    # role repair run on save (repair_bus_roles_and_demand) then keeps it.
+    # Saved as the ``_gui_layout.user_set_bus_roles`` list of bus ids.
+    role_user_set: bool = False
 
 
 @dataclass
@@ -830,7 +834,7 @@ class GuiGlobalSettings:
     # N1 Security
     n1_enabled: bool = False
     n1_apply_to_modes: list[str] = field(
-        default_factory=lambda: ["unit_commitment"]
+        default_factory=lambda: ["development", "unit_commitment"]
     )
     n1_transmission_enabled: bool = True
     n1_transmission_reserve_factor: float = 0.70

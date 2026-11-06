@@ -516,7 +516,7 @@ def test_repair_bus_roles_empty():
     state = make_state()
     assert Q.repair_bus_roles_and_demand(state) == {
         "buses_role_changed": 0, "buses_demand_changed": 0,
-        "nodes_redistributed": 0}
+        "nodes_redistributed": 0, "nodes_without_demand_bus": 0}
 
 
 def test_repair_bus_roles_supply_makes_mixed():
