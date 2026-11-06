@@ -13,6 +13,7 @@ from typing import Optional
 import h5py
 import numpy as np
 
+from esfex.io.exporter import demand_is_step_major, demand_node_hours
 from esfex.utils.temporal import HOURS_STD_YEAR
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -440,14 +441,15 @@ def _scenario_hours(sc) -> Optional[int]:
 def _demand_node_hours(sc):
     """Read a scenario's ``demand`` oriented to ``(nodes, hours)``.
 
-    Always use this instead of ``sc["demand"][:]``: the dataset is persisted
-    ``(hours, nodes)`` while every other per-node array is ``(nodes, hours)``,
-    so a raw read makes node-axis sums and slices operate on the hour axis.
-    Returns ``None`` when the scenario has no demand.
+    Always use this instead of ``sc["demand"][:]``: current files store it
+    ``(nodes, hours)``, but older ones kept ``(hours, nodes)`` when there
+    were no more hours than nodes, so a raw read of those makes node-axis
+    sums and slices operate on the hour axis. Returns ``None`` when the
+    scenario has no demand.
     """
     if "demand" not in sc:
         return None
-    return orient_to_node_hours(sc["demand"][:], _scenario_hours(sc))
+    return demand_node_hours(sc["demand"], _scenario_hours(sc))
 
 
 def _system_node_range(
@@ -661,6 +663,10 @@ class _SlicedScenarioView:
                     )
             # Fall through to raw root dataset when nodal data is absent.
         obj = self._g[key]
+        if (key == "demand" and isinstance(obj, _DATASET_T)
+                and demand_is_step_major(obj, _scenario_hours(self._g))):
+            # Old file with (hours, nodes) demand: the node axis is axis 1.
+            return _ArrayShim(obj[()][:, self._lo:self._hi].T)
         if isinstance(obj, _DATASET_T):
             if key in _SLICE_AXIS0_DATASETS:
                 # Downgrade to no-slicing for legacy 1D layouts where the
@@ -3414,11 +3420,11 @@ class NetLoadHeatmapChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             if "demand" not in sc:
                 return {"error": "No demand data"}
-            # ``demand`` is stored (hours, nodes); orient it before summing the
-            # node axis, otherwise the "hourly" series is really one value per
-            # NODE and the UC day×hour reshape below invents days (296 nodes →
-            # 13 "days" for a 24 h run).
-            dem = orient_to_node_hours(sc["demand"][:], _scenario_hours(sc))
+            # Orient ``demand`` (old files may hold it (hours, nodes)) before
+            # summing the node axis, otherwise the "hourly" series is really
+            # one value per NODE and the UC day×hour reshape below invents
+            # days (296 nodes → 13 "days" for a 24 h run).
+            dem = _demand_node_hours(sc)
             demand = _sum_nodes(dem) if dem.ndim >= 2 else dem
             # In UC keep the full operational horizon (often < 1 year);
             # in planning, cap to 1 year to match the month×hour layout.
@@ -9551,7 +9557,7 @@ class UCLoadShedCurtailmentChart(QWidget):
 
             _n_nodes = None
             if "demand" in sc and len(sc["demand"].shape) >= 2:
-                _n_nodes = orient_to_node_hours(sc["demand"][:], _nh).shape[0]
+                _n_nodes = _demand_node_hours(sc).shape[0]
 
             def _hourly_total(key: str) -> np.ndarray:
                 if key not in sc:
