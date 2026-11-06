@@ -22,6 +22,9 @@ data/
 # not a data dump. The `data/` rule above otherwise catches it.
 !src/esfex/visualization/data/
 !src/esfex/visualization/data/**
+# ...but the re-include above also catches its bytecode caches.
+src/esfex/visualization/data/**/__pycache__/
+src/esfex/visualization/data/**/*.py[cod]
 *.h5
 *.hdf5
 *.nc
