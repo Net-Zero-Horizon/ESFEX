@@ -270,7 +270,7 @@ When a system sets `SIM_ROOFTOP: true` and has a `rooftop_solar_config` block, t
 
 ## YAML Configuration
 
-`rooftop_solar_config` is validated by `RooftopSolarConfig`. `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption` and `adoption_rates` have no default and must be present.
+`rooftop_solar_config` is validated by `RooftopSolarConfig`. `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption` and `adoption_rates` are optional (default `null`); the runner does not use them.
 
 ```yaml
 systems:

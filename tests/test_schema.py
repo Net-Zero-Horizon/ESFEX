@@ -1853,3 +1853,14 @@ class TestUnitTypeSpelling:
 
         assert _make_technology("PV", "Solar", 1, tech_type="renewable").type == "Renewable"
         assert _make_technology("CCGT", "Gas", 1, tech_type="Non renewable").type == "Non-renewable"
+
+
+class TestRooftopSolarConfigOptional:
+    def test_unused_fields_are_optional(self):
+        # systems_per_node, avg_system_size, initial_adoption, max_adoption
+        # and adoption_rates are not used by the runner; they used to be
+        # required, so a config with only the used fields was rejected.
+        from esfex.config.schema import RooftopSolarConfig
+
+        cfg = RooftopSolarConfig(adoption_scenario="high", simulation_seed=1)
+        assert cfg.systems_per_node is None and cfg.max_adoption is None

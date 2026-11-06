@@ -1245,7 +1245,7 @@ def _system_to_gui_state(sys: SystemConfig,
             if hasattr(rc, fld):
                 setattr(rooftop_solar, fld, getattr(rc, fld))
         for arr_fld in ('systems_per_node', 'avg_system_size', 'initial_adoption'):
-            if hasattr(rc, arr_fld):
+            if getattr(rc, arr_fld, None) is not None:
                 setattr(rooftop_solar, arr_fld, list(getattr(rc, arr_fld)))
         if hasattr(rc, 'max_adoption') and rc.max_adoption:
             rooftop_solar.max_adoption = dict(rc.max_adoption)
