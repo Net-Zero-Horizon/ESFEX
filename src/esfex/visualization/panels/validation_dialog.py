@@ -59,6 +59,7 @@ _CATEGORY_LABELS: dict[str, str] = {
     "generation": "Generation (adequacy, availability files)",
     "fuel_network": "Fuel Network (supply chain integrity)",
     "connectivity": "Connectivity (isolated components)",
+    "realism": "Realism (duplicate plants, reserve margin, deliverability)",
     "topology_audit": "Topology Audit (GUI vs solver agreement)",
     "risk": "Risk & Resilience (hazard exposure, fragility curves)",
 }

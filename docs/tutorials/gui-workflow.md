@@ -305,6 +305,7 @@ See [Inter-System Links](../gui/inter-system-links.md) for details and current l
     - **Generation** (adequacy, availability files)
     - **Fuel Network** (supply chain integrity)
     - **Connectivity** (isolated components)
+    - **Realism** (duplicate plants, reserve margin, deliverability of the peak demand through the line ratings)
     - **Topology Audit** (GUI vs solver agreement), which also reports load islands with no reachable generation
 
     There are also a **Network Simplification** check (dead-end buses and unused fuel elements) and an optional **Network reduction (levels)** check, L1 to L4.

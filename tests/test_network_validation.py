@@ -93,3 +93,55 @@ def test_validate_network_flags_over_capacity():
     assert rep.reserve_margin == pytest.approx(4.0)
     assert any("Reserve margin" in f for f in rep.flags)
     assert any("2.4×" in f or "4.2×" in f for f in rep.flags)
+
+
+# ── Wired into the Studio's Validate (#20) ───────────────────────────
+
+
+def test_realism_category_runs_in_validate_state():
+    """The realism checks were only reachable from Python; Validate runs them."""
+    from esfex.visualization.data.gui_model import GuiNode, GuiNodeDemand
+    from esfex.visualization.data.validation import CATEGORY_ORDER, validate_state
+
+    assert "realism" in CATEGORY_ORDER
+    state = GuiSystemState(
+        name="B",
+        nodes=[GuiNode(index=0, name="N0",
+                       demand=GuiNodeDemand(peak_mw=300.0))],
+        buses={
+            "bus_0": _bus("bus_0", 0, 0),
+            "bus_1": _bus("bus_1", 0, 1, "load", 1.0),
+        },
+        generators={
+            "g0": _gen("g0", "Plant A", "Gas", "bus_0", 300),
+            "g1": _gen("g1", "Plant A unit 2", "Gas", "bus_0", 300),
+        },
+        transmission_lines=[_line("l0", "bus_0", "bus_1", 100)],
+    )
+    issues = validate_state(state, categories={"realism"})
+    msgs = [(i.severity, i.message) for i in issues]
+    assert any(s == "warning" and "Transmission bottleneck" in m for s, m in msgs)
+    assert any(s == "info" and "duplicate plant" in m for s, m in msgs)
+    assert all(i.category == "Realism" for i in issues)
+
+
+def test_duplicate_detection_scales():
+    """Bucketed matching: thousands of units stay fast and match like before."""
+    import time
+
+    buses = {f"b{i}": _bus(f"b{i}", (i % 100) * 0.5, (i // 100) * 0.5)
+             for i in range(2000)}
+    gens = {f"g{i}": _gen(f"g{i}", f"Farm {i}x", "Sun", f"b{i}", 10)
+            for i in range(2000)}
+    # Two same-fuel units 1 km apart, different names → one group.
+    buses["x0"] = _bus("x0", 40.0, 40.0)
+    buses["x1"] = _bus("x1", 40.009, 40.0)
+    gens["x0"] = _gen("x0", "Alpha", "Coal", "x0", 100)
+    gens["x1"] = _gen("x1", "Beta", "Coal", "x1", 100)
+    state = GuiSystemState(name="S", buses=buses, generators=gens)
+    t0 = time.perf_counter()
+    dups = detect_duplicate_plants(state)
+    assert time.perf_counter() - t0 < 5.0
+    groups = [sorted(d["members"]) for d in dups]
+    assert ["x0", "x1"] in groups
+    assert len(groups) == 1

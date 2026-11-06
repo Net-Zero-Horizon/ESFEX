@@ -251,6 +251,27 @@ def test_degradation_labels_are_fractions(lang):
         assert "%" not in d[sec][key], (lang, sec, d[sec][key])
 
 
+def test_reservoir_section_shows_for_new_hydro_unit(qapp):
+    """#18: a new Water generator (capacity 0) can reach the Reservoir fields."""
+    from esfex.visualization.data.gui_model import GuiGeneratorInstance
+    from esfex.visualization.panels.generator_form import GeneratorForm
+
+    model = GuiModel()
+    model.state.generators["hydro"] = GuiGeneratorInstance(
+        instance_id="hydro", unit_key="hydro", name="Hydro", gen_type="Renewable",
+        fuel="Water", node=0, rated_power=50.0)
+    model.state.generators["gas"] = GuiGeneratorInstance(
+        instance_id="gas", unit_key="gas", name="Gas", gen_type="Non-renewable",
+        fuel="Gas", node=0, rated_power=50.0)
+    form = GeneratorForm(model)
+    form.load_element("hydro")
+    assert not form._reservoir_group.isHidden()
+    form._reservoir_capacity.setValue(1000.0)
+    assert model.state.generators["hydro"].reservoir_capacity == pytest.approx(1000.0)
+    form.load_element("gas")
+    assert form._reservoir_group.isHidden()
+
+
 def test_inertia_field_takes_mws(qapp):
     from esfex.visualization.panels.system_form import SystemForm
 
