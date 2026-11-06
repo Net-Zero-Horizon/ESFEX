@@ -466,6 +466,13 @@ def plugin_install(
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Target directory name (for git)"
     ),
+    trust_host: bool = typer.Option(
+        False, "--trust-host",
+        help="Allow a git host outside the default list (github.com, "
+             "gitlab.com, bitbucket.org, codeberg.org, git.sr.ht). The "
+             "plugin's code runs with your permissions: use only for a "
+             "source you trust.",
+    ),
 ):
     """Install a plugin from a git repository or ZIP file."""
     from esfex.plugins import get_plugin_manager
@@ -474,7 +481,8 @@ def plugin_install(
 
     if git:
         try:
-            installed = pm.install_from_git(git, target_name=name)
+            installed = pm.install_from_git(
+                git, target_name=name, trust_host=trust_host)
             console.print(f"[green]Installed plugin:[/green] {installed}")
         except Exception as e:
             console.print(f"[red]Install failed:[/red] {e}")
@@ -682,19 +690,27 @@ def _show_config_summary(cfg):
     console.print(table)
 
 
-def _register_plugin_cli() -> None:
-    """Discover plugins and register their CLI sub-commands."""
+def _register_plugin_cli(args: Optional[list[str]] = None) -> None:
+    """Load the enabled, trusted plugins and mount their CLI sub-commands.
+
+    Called by the ``esfex`` entry point with the command line, not on
+    import. Skipped when *args* name a built-in command: those don't need
+    plugin commands, and ``run`` and ``studio`` load the plugins themselves
+    with the project's config (the manager loads plugins only once).
+    """
+    args = sys.argv[1:] if args is None else args
+    command = next((a for a in args if not a.startswith("-")), None)
     try:
         from esfex.plugins import get_plugin_manager
+        from esfex.plugins.manager import _typer_command_names
 
+        if command is not None and command in _typer_command_names(app):
+            return
         pm = get_plugin_manager()
-        pm.discover()
+        pm.load_all(config=None, gui_mode=False)
         pm.register_cli_commands(app)
     except Exception:
-        pass  # Don't crash the CLI if plugin discovery fails
-
-
-_register_plugin_cli()
+        pass  # A plugin problem must not stop the built-in commands
 
 
 @app.command()
@@ -917,6 +933,7 @@ def list_solvers():
 
 def _entrypoint() -> None:
     """CLI entrypoint (registered in pyproject)."""
+    _register_plugin_cli()
     app()
 
 

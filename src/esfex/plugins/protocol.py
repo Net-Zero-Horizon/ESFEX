@@ -58,7 +58,12 @@ class PluginContext:
     """Context injected into the plugin factory ``create_plugin(context)``."""
 
     config: Optional[ESFEXConfig]
-    """The loaded ESFEX configuration, or *None* if not yet available."""
+    """The loaded ESFEX configuration, or *None* if not yet available.
+
+    Updated before each :meth:`ESFEXPlugin.on_config_loaded` call; *None*
+    when the plugin was loaded for a plugin CLI command or by a Studio
+    started without a config file.
+    """
 
     plugin_dir: Path
     """Root directory of the plugin (where ``plugin.json`` lives)."""
@@ -98,11 +103,22 @@ class ESFEXPlugin:
     # ── Configuration ─────────────────────────────────────────────────
 
     def get_config_schema(self) -> Optional[type[BaseModel]]:
-        """Return a Pydantic model validating ``plugins.{name}`` config section."""
+        """Return a Pydantic model validating the ``plugins.{name}`` config section.
+
+        Checked when a run starts (an invalid section stops the run) and
+        when the Studio starts with a config file (logged as a warning).
+        The section stays a dict in ``config.plugins``.
+        """
         return None
 
     def on_config_loaded(self, config: ESFEXConfig) -> None:
-        """Called after the full configuration has been loaded and validated."""
+        """Called with the loaded and validated configuration.
+
+        Runs when a simulation starts (before ``pre_simulation``, once per
+        run) and when the Studio starts with a config file, after
+        ``context.config`` has been set to *config*. Not called when the
+        plugin's ``plugins.{name}`` section fails :meth:`get_config_schema`.
+        """
 
     # ── Runner hooks ──────────────────────────────────────────────────
 
@@ -182,7 +198,13 @@ class ESFEXPlugin:
     # ── CLI ────────────────────────────────────────────────────────────
 
     def get_cli_commands(self) -> list[typer.Typer]:
-        """Return Typer sub-apps to register as ``esfex <name> ...``."""
+        """Return Typer sub-apps to register as ``esfex <name> ...``.
+
+        Their commands are merged into one group named after the plugin.
+        Called when ``esfex`` starts with a command that is not built in (or
+        with ``--help``), after loading the enabled, trusted plugins with
+        ``context.config = None``.
+        """
         return []
 
     # ── GUI (only called when gui_mode=True) ──────────────────────────
@@ -191,15 +213,25 @@ class ESFEXPlugin:
         """Return category descriptors for the element tree.
 
         Each dict should have ``{"key": "...", "label": "...", "element_type": "..."}``.
+        The category appears in every system of the tree; add elements to it
+        with ``main_window.element_tree.add_plugin_element(key, element_id, label)``.
         """
         return []
 
     def get_forms(self, model: Any) -> list[tuple[str, Any]]:
-        """Return ``(element_type, QWidget)`` pairs for the properties panel."""
+        """Return ``(element_type, QWidget)`` pairs for the properties panel.
+
+        *model* is the Studio's ``GuiModel``. The widget is shown when an
+        element of that type is selected; its ``load_element(element_id)``
+        is called if it has one.
+        """
         return []
 
     def get_toolbar_actions(self, toolbar: Any, main_window: Any) -> list[Any]:
-        """Return ``QAction`` instances to add to the toolbar."""
+        """Return ``QAction`` instances to add to the main toolbar.
+
+        Returned actions the plugin has not added to *toolbar* itself are added.
+        """
         return []
 
     def get_menu_items(self, menu_bar: Any, main_window: Any) -> None:
@@ -210,7 +242,12 @@ class ESFEXPlugin:
         return []
 
     def get_map_layers(self, map_widget: Any) -> None:
-        """Add custom layers to the map widget."""
+        """Add custom layers to the map widget.
+
+        *map_widget* is the Studio's Leaflet ``QWebEngineView``; the page may
+        still be loading, so run JavaScript (the Leaflet map is the global
+        ``map``) from its ``loadFinished`` signal.
+        """
 
     def get_translations(self) -> dict[str, dict[str, str]]:
         """Return ``{lang: {key: value}}`` translation mappings."""
