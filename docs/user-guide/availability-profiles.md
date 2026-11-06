@@ -8,7 +8,7 @@ An availability profile is a time series of **capacity factors** (0.0 to 1.0): t
 - **1.0**: the unit can run at full capacity
 - Values in between reflect partial availability (clouds, moderate wind)
 
-A generator without a profile has a constant availability of 1.0. A profile is not limited to renewables: in operational dispatch, the profile caps the output of **any** generator that has one (for example a seasonal derating of a biomass plant).
+A generator or technology without a profile has a constant availability of 1.0. That is right for dispatchable units, but not for solar or wind: a `Renewable` unit without a profile (other than a reservoir hydro unit) is therefore logged once at the start of the run (`... is Renewable but has no availability_file: it is modelled as available at full capacity in every hour (capacity factor 1.0) ...`). A profile is not limited to renewables: in operational dispatch, the profile caps the output of **any** generator that has one (for example a seasonal derating of a biomass plant).
 
 
 ---
@@ -309,8 +309,8 @@ You can also generate profiles externally and save them in the required format:
 1. **Value range**: values are clipped to [0.0, 1.0] without a warning.
 2. **Columns**: see [Column Handling](#column-handling).
 3. **Rows**: see [Profile Length and Multiple Years](#profile-length-and-multiple-years).
-4. **Missing file, generator**: the generator is skipped with a warning (`Skipping generator '<key>': availability_file '<file>' not found under <dir>`). It is then **left out of the operational dispatch model**. It does not fall back to 1.0 there.
-5. **Missing file, technology** (and the master problem's copy of a generator profile): a warning `Availability file not found: <path>, using default 1.0` is logged, and a constant 1.0 profile is used.
+4. **Missing file** (generator or technology): the run stops at startup with `FileNotFoundError: Generator '<key>': availability_file '<file>' not found under <dir>` (or `Technology '<key>': ...`). A path that resolves outside the project directory stops it the same way.
+5. **No file** on a `Renewable` unit: constant 1.0, with the warning described above.
 6. **Unreadable file** (non-numeric cells, including a header row): an error `Error loading availability from <path>: …` is logged, and a constant 1.0 profile is used.
 
 ---
@@ -336,17 +336,17 @@ With [development zones](development-zones.md), each zone adds a node to the net
 ### File Not Found
 
 ```
-WARNING  Skipping generator 'solar_pv': availability_file 'data/profile_sun_1.csv' not found under /path/to/project
+FileNotFoundError: Generator 'solar_pv': availability_file 'data/profile_sun_1.csv' not found under /path/to/project
 ```
 
 **Cause**: the `Availability` path does not resolve to a file.
-**Effect**: the generator is missing from the operational dispatch.
+**Effect**: the run stops before solving.
 **Solution**: check the path relative to the configuration file's directory, or use an absolute path.
 
 ### Path Outside the Project
 
 ```
-WARNING  Skipping generator 'solar_pv': availability_file '../shared/sun.csv' resolves outside config directory /path/to/project (refusing path traversal)
+ValueError: Generator 'solar_pv': availability_file '../shared/sun.csv' resolves outside config directory /path/to/project (refusing path traversal)
 ```
 
 **Solution**: move the file under the project directory, or use an absolute path.
