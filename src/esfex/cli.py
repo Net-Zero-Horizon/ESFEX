@@ -92,6 +92,7 @@ console = Console(force_terminal=True)
 # Values `run --mode/--solver` accept: the schema's (esfex/__init__ already
 # imports it, so this costs nothing at startup).
 from esfex.config.schema import ESFEXConfig as _ESFEXConfig, SolverConfig as _SolverConfig
+from esfex.utils.temporal import DEFAULT_RUN_YEARS
 
 SIMULATION_MODES: tuple[str, ...] = typing.get_args(
     _ESFEXConfig.model_fields["simulation_mode"].annotation)
@@ -153,7 +154,7 @@ def run(
         None,
         "--years",
         "-y",
-        help="Number of years to simulate (default: 25)",
+        help=f"Number of years to simulate (default: {DEFAULT_RUN_YEARS})",
     ),
     start_year: Optional[int] = typer.Option(
         None,
@@ -441,8 +442,19 @@ def studio(
     if config:
         console.print(f"Loading: {config}")
 
-    result = launch_studio(config=str(config) if config else None, blocking=True,
-                           output=str(output) if output else None)
+    from esfex.config.loader import SavedConfigInvalidError
+
+    try:
+        result = launch_studio(config=str(config) if config else None, blocking=True,
+                               output=str(output) if output else None)
+    except SavedConfigInvalidError as e:
+        # "Save anyway" on a configuration with errors: written, but invalid.
+        console.print(f"[yellow]Configuration saved to {e.path}, "
+                      f"but it does not validate:[/yellow]")
+        console.print(str(e.error), markup=False)
+        console.print(f"Fix it in the Studio, or check it with: esfex validate -c {e.path}",
+                      markup=False)
+        raise typer.Exit(code=1)
 
     if result:
         console.print("[green]Configuration saved.[/green]")
@@ -987,9 +999,14 @@ def _studio_entrypoint() -> None:
     ``studio`` command, which would write to a console that doesn't
     exist under pythonw.
     """
+    from esfex.config.loader import SavedConfigInvalidError
     from esfex.visualization import launch_studio
 
-    launch_studio(blocking=True)
+    try:
+        launch_studio(blocking=True)
+    except SavedConfigInvalidError:
+        # No console under pythonw; the Studio warned before "Save anyway".
+        pass
 
 
 if __name__ == "__main__":

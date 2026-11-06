@@ -149,6 +149,12 @@ def launch_studio(
     ESFEXConfig | None
         The configuration as last saved (reloaded from the saved file) if
         the user saved, ``None`` if they closed without saving.
+
+    Raises
+    ------
+    esfex.config.loader.SavedConfigInvalidError
+        The user saved (with "Save anyway") a configuration that does not
+        load. The file is written; the exception names it and the error.
     """
     # Must run before QtWebEngine spawns its render helper, or the map
     # crash-loops with STATUS_DLL_NOT_FOUND when launched outside an
@@ -171,7 +177,10 @@ def launch_studio(
         saved = getattr(window, "_last_saved_path", None)
         if not saved:
             return None
-        from esfex.config.loader import load_config
-        return load_config(saved)
+        from esfex.config.loader import SavedConfigInvalidError, load_config
+        try:
+            return load_config(saved)
+        except Exception as exc:
+            raise SavedConfigInvalidError(saved, exc) from exc
 
     return None

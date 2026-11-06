@@ -17,6 +17,11 @@ import pandas as pd
 # (drop_leap_days) and from result date labels (model_time_index).
 HOURS_STD_YEAR: int = 8760
 
+# Years a run simulates when none is given (``esfex run`` without --years,
+# ``Orchestrator.run(years=None)``, a Studio run). The Studio's interruptions
+# calendar spans the same horizon.
+DEFAULT_RUN_YEARS: int = 25
+
 # Feb 29 in an hourly series that starts on 1 Jan of a leap year.
 _FEB29_START = 59 * 24
 _FEB29_END = _FEB29_START + 24
