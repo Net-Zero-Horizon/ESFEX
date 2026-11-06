@@ -687,16 +687,22 @@ Each scenario \(\omega\) has:
 
 | Multiplier | Description |
 |------------|-------------|
-| `invest_cost_renewables` | Scales RE investment costs |
-| `invest_cost_conventional` | Scales conventional investment costs |
-| `fuel_cost` | Scales fuel costs in the scenario's operation |
-| `maintenance_cost` | Scales maintenance costs in the scenario's operation |
-| `invest_cost_storage` | Scales storage investment costs |
+| `invest_cost_renewables` | Scales RE technology investment costs |
+| `invest_cost_conventional` | Scales conventional technology investment costs |
+| `invest_cost_storage` | Scales battery technology investment costs (power and energy) |
+| `bat_invest_cost_power`, `bat_invest_cost_capacity` | Scale the battery power and energy costs, on top of `invest_cost_storage` |
 | `invest_cost_transmission` | Scales transmission investment costs |
-| `discount_rate` | Scenario-specific discount rate adjustment |
-| `demand_growth` | Annual demand factor of the scenario's operation (demand × factor^(y−1)) |
+| `gen_decommissioning_cost`, `bat_decommissioning_cost` | Scale the decommissioning costs of existing generators and batteries |
+| `fuel_cost` | Scales fuel costs in the scenario's operation |
 | `fuel_price_growth` | Extra annual fuel price escalation in the scenario's operation |
+| `gen_fixed_cost` | Scales the fixed O&M of generators and technologies in the scenario's operation |
+| `maintenance_cost` | Scales maintenance costs in the scenario's operation |
 | `carbon_price` | Scales the CO2 cost in the scenario's operation |
+| `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration` | Scale the loss-of-load (incl. sectoral), reserve-shortfall, curtailment and RE-shortfall penalties in the scenario's operation |
+| `demand_growth` | Annual demand factor of the scenario's operation (demand × factor^(y−1)) |
+| `discount_rate` | Scenario-specific discount rate adjustment |
+
+See [Stochastic Programming](stochastic-programming.md#22-scenario-multipliers) for the legacy keys the loader translates.
 
 ### 11.2 Two-Stage Structure
 
@@ -711,10 +717,10 @@ Each scenario \(\omega\) has:
 **Julia function**: `build_stochastic_objective!(model, vars, input, scenarios, scenario_costs)`
 
 \[
-\min \; Z^{stoch} = \sum_{\omega} \pi_\omega \sum_{y=1}^{Y} \frac{C^{inv}_{y,\omega} + C^{asset}_y + C^{op}_{y,\omega}}{(1+r_\omega)^{y-1}} + C^{slack} \tag{STOCH-1}
+\min \; Z^{stoch} = \sum_{\omega} \pi_\omega \sum_{y=1}^{Y} \frac{C^{inv}_{y,\omega} + C^{asset}_{y,\omega} + C^{op}_{y,\omega}}{(1+r_\omega)^{y-1}} + C^{slack} \tag{STOCH-1}
 \]
 
-where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discount rate, \(C^{inv}_{y,\omega}\) the investment cost with the scenario's multipliers (period-start years only), \(C^{asset}_y\) the life-extension and decommissioning cost, and \(C^{op}_{y,\omega}\) the operational cost of the scenario's own dispatch. See [Stochastic Programming](stochastic-programming.md).
+where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discount rate, \(C^{inv}_{y,\omega}\) the investment cost with the scenario's multipliers (period-start years only), \(C^{asset}_{y,\omega}\) the life-extension and decommissioning cost (decommissioning scaled by the scenario's multipliers), and \(C^{op}_{y,\omega}\) the operational cost of the scenario's own dispatch. See [Stochastic Programming](stochastic-programming.md).
 
 ---
 

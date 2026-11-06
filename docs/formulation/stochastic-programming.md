@@ -40,17 +40,28 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | Multiplier | Applies to | Where |
 |-----------|-----------|-------|
 | `demand_growth` | Demand: \(D_{y,n,t} \cdot m^{dem}_s{}^{\,(y-1)}\). An annual factor: 1.02 = +2 %/year relative to the base case, compounding | Scenario operation |
-| `fuel_cost` | Fuel cost of generators and candidate technologies | Scenario operation |
+| `fuel_cost` | Fuel cost of generators (piecewise fuel-cost curves included) and candidate technologies | Scenario operation |
 | `fuel_price_growth` | Extra annual fuel price escalation: fuel cost × \(m^{fpg}_s{}^{\,(y-1)}\) | Scenario operation |
-| `maintenance_cost` | Maintenance cost of generators, batteries and technologies | Scenario operation |
+| `gen_fixed_cost` | Fixed O&M (\$/MWh) of generators and candidate technologies | Scenario operation |
+| `maintenance_cost` | Maintenance cost of generators and technologies (the master does not charge battery maintenance) | Scenario operation |
 | `carbon_price` | CO2 cost (`co2_cost`) | Scenario operation |
+| `penalty_loss_of_load` | Loss-of-load penalty, and the sectoral penalties derived from it | Scenario operation |
+| `penalty_loss_of_reserve` | Static and dynamic reserve shortfall penalties | Scenario operation |
+| `penalty_curtailment` | Curtailment cost (existing renewables and candidate technologies) | Scenario operation |
+| `penalty_fre_penetration` | RE-penetration shortfall penalty | Scenario operation |
 | `invest_cost_renewables` | Investment cost of renewable technologies | Scenario investment cost |
 | `invest_cost_conventional` | Investment cost of non-renewable technologies | Scenario investment cost |
 | `invest_cost_storage` | Battery technology investment cost (power and energy) | Scenario investment cost |
+| `bat_invest_cost_power` | Battery technology power cost (\$/MW), on top of `invest_cost_storage` | Scenario investment cost |
+| `bat_invest_cost_capacity` | Battery technology energy cost (\$/MWh), on top of `invest_cost_storage` | Scenario investment cost |
 | `invest_cost_transmission` | Transmission investment cost | Scenario investment cost |
+| `gen_decommissioning_cost` | Decommissioning cost of existing generators | Scenario asset cost |
+| `bat_decommissioning_cost` | Decommissioning cost of existing batteries | Scenario asset cost |
 | `discount_rate` | Discount rate: \(r_s = r \cdot m^{disc}_s\) | Scenario discounting |
 
-The operation multipliers are applied by `scenario_master_input()`, which builds a copy of the master input for each scenario and year. A key that is not one of these names is ignored.
+The operation multipliers are applied by `scenario_master_input()`, which builds a copy of the master input for each scenario and year; the investment, asset and discount multipliers act on the scenario's terms of the objective (§4).
+
+The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning. That includes the keys for costs the master does not have: start-up, electrolyzer, converter, fuel import, fuel storage and transport investment, battery maintenance, inter-system cost per MW·km, and the loss-of-fuel-supply and CO2-budget penalties.
 
 ### 2.3 Scenario Construction
 
@@ -121,7 +132,7 @@ P^{day,(\omega_s)}_{g,n,t} \text{ varies by scenario } s \quad \text{(separate v
 The stochastic objective minimizes the expected total cost: each scenario values the common investment with its own cost multipliers and discount rate, adds the existing-asset costs (life extension, decommissioning) and its own operating cost, and is weighted by its probability:
 
 \[
-\min \; Z^{stoch} = \sum_{s=1}^{S} \pi_s \left[ \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_{y,s}}{(1+r_s)^{y-1}} + \sum_{y=1}^{Y} \frac{C^{asset}_y + C^{op}_{y,s}}{(1+r_s)^{y-1}} \right] + C^{slack}
+\min \; Z^{stoch} = \sum_{s=1}^{S} \pi_s \left[ \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_{y,s}}{(1+r_s)^{y-1}} + \sum_{y=1}^{Y} \frac{C^{asset}_{y,s} + C^{op}_{y,s}}{(1+r_s)^{y-1}} \right] + C^{slack}
 \tag{STOCH-OBJ}
 \]
 
@@ -133,10 +144,10 @@ Built by `build_stochastic_objective!()`.
 Investment decisions are common to all scenarios, but their unit cost is uncertain: each scenario values the same investment with its own investment-cost multipliers and discount rate, and the objective takes the probability-weighted sum:
 
 \[
-C^{inv}_{y,s} = \sum_{t,n} m^{tech}_{s} \, c^{inv}_{t,n} \, I^{tech}_{y,t,n} + \sum_{b,n} m^{sto}_s \left( c^{inv,P}_{b,n} I^{bat,P}_{y,b,n} + c^{inv,E}_{b,n} I^{bat,E}_{y,b,n} \right) + \sum_{\text{corridors}} m^{tx}_s \, c^{tr} \, I^{tr}_{y} + C^{PE}_y + C^{res}_y
+C^{inv}_{y,s} = \sum_{t,n} m^{tech}_{s} \, c^{inv}_{t,n} \, I^{tech}_{y,t,n} + \sum_{b,n} m^{sto}_s \left( m^{P}_s \, c^{inv,P}_{b,n} I^{bat,P}_{y,b,n} + m^{E}_s \, c^{inv,E}_{b,n} I^{bat,E}_{y,b,n} \right) + \sum_{\text{corridors}} m^{tx}_s \, c^{tr} \, I^{tr}_{y} + C^{PE}_y + C^{res}_y
 \]
 
-where \(m^{tech}_s\) is `invest_cost_renewables` or `invest_cost_conventional` by technology type. Primary-energy (\(C^{PE}\)) and reservoir (\(C^{res}\)) investment are not scaled. Life extension and decommissioning of existing assets are added every year, discounted at \(r_s\).
+where \(m^{tech}_s\) is `invest_cost_renewables` or `invest_cost_conventional` by technology type, \(m^{sto}_s\) is `invest_cost_storage`, \(m^{P}_s\) and \(m^{E}_s\) are `bat_invest_cost_power` and `bat_invest_cost_capacity`, and \(m^{tx}_s\) is `invest_cost_transmission`. Primary-energy (\(C^{PE}\)) and reservoir (\(C^{res}\)) investment are not scaled. Life extension and decommissioning of existing assets (\(C^{asset}_{y,s}\)) are added every year, discounted at \(r_s\); the decommissioning costs are multiplied by `gen_decommissioning_cost` and `bat_decommissioning_cost`.
 
 ### 4.3 Second-Stage Operational Cost
 
@@ -147,7 +158,7 @@ For each scenario \(s\) the operational cost comes from that scenario's own repr
 C^{op}_{y,s} = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d,s}
 \]
 
-where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)). Penalty coefficients (load shedding, curtailment, reserves) are not scaled.
+where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, fixed O&M, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment, RE-penetration shortfall), as scaled by the multipliers of §2.2 (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
 
 ### 4.4 Scenario-Adjusted Discount Rate
 
