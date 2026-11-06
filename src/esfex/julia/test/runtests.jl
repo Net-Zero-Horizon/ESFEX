@@ -31,9 +31,10 @@ import Ipopt
     @testset "hours_in_year" begin
         @test ESFEX.HOURS_STD_YEAR == 8760
         @test ESFEX.hours_in_year(2025) == 8760  # common year
-        @test ESFEX.hours_in_year(2024) == 8784  # leap year
-        @test ESFEX.hours_in_year(2000) == 8784  # divisible by 400 -> leap
-        @test ESFEX.hours_in_year(1900) == 8760  # divisible by 100 not 400 -> common
+        # Leap years are modelled as 8760 h (data come in 8760-h blocks)
+        @test ESFEX.hours_in_year(2024) == 8760
+        @test ESFEX.hours_in_year(2000) == 8760
+        @test ESFEX.hours_in_year(1900) == 8760
     end
 
     @testset "parse_acopf_formulation" begin

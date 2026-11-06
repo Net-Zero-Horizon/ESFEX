@@ -64,7 +64,7 @@ Each row is one hour; each column is one **node**.
 | Hour 8760 | 0.00 | 0.00 | 0.00 |
 
 - **Values**: 0.0 to 1.0. Values outside this range are clipped.
-- **Rows**: one per hour; 8,760 rows for one year.
+- **Rows**: one per hour; 8,760 rows for one year. A header row is optional and skipped. Leap-year data lose their Feb 29 rows when read (see [Demand Data](demand-data.md#leap-years)), so a year is always 8,760 rows.
 - **Columns**: one per node. A bus uses the column of its parent node.
 
 ### Column Handling
@@ -225,12 +225,10 @@ temporal:
 
 ## Profile Length and Multiple Years
 
-The two stages read a profile differently:
+The master problem and the operational dispatch look up hours by their position **in the whole horizon** (year index × 8,760 + hour of the year), wrapping around when the profile is shorter:
 
-- **Operational dispatch** looks up hours by their position **within the current year**. Every simulated year therefore uses rows 1 to 8,760 of the profile. Rows beyond 8,760 are not used. A profile shorter than a year wraps around.
-- **The master problem** looks up its representative-day hours by their position **in the whole horizon**, wrapping around when the profile is shorter. With a multi-year profile, the master sees years 2, 3, … while dispatch keeps using year 1.
-
-Use **one-year (8,760-row) profiles** so that both stages see the same data.
+- A one-year (8,760-row) profile is repeated every year.
+- A multi-year profile gives each simulated year its own 8,760-row block (rows 8,761 to 17,520 for the second year, and so on). If it has fewer years than the horizon, it starts again from its first row after its last year.
 
 
 ---
@@ -298,7 +296,7 @@ You can also generate profiles externally and save them in the required format:
 - Solar profiles are zero at night.
 - Annual capacity factors are plausible for the technology and site.
 - No long runs of constant values, which may indicate data errors.
-- 8,760 rows, no header, no timestamp column.
+- 8,760 rows per year, no timestamp column.
 
 
 ---
@@ -311,7 +309,7 @@ You can also generate profiles externally and save them in the required format:
 3. **Rows**: see [Profile Length and Multiple Years](#profile-length-and-multiple-years).
 4. **Missing file, generator**: the generator is skipped with a warning (`Skipping generator '<key>': availability_file '<file>' not found under <dir>`). It is then **left out of the operational dispatch model**. It does not fall back to 1.0 there.
 5. **Missing file, technology** (and the master problem's copy of a generator profile): a warning `Availability file not found: <path>, using default 1.0` is logged, and a constant 1.0 profile is used.
-6. **Unreadable file** (non-numeric cells, including a header row): an error `Error loading availability from <path>: …` is logged, and a constant 1.0 profile is used.
+6. **Unreadable file** (non-numeric cells below the header rows): an error `Error loading availability from <path>: …` is logged, and a constant 1.0 profile is used. Leading rows with non-numeric cells are skipped as headers.
 
 ---
 
@@ -354,11 +352,11 @@ WARNING  Skipping generator 'solar_pv': availability_file '../shared/sun.csv' re
 ### Profile Silently Constant at 1.0
 
 ```
-ERROR  Error loading availability from /path/to/profile.xlsx: could not convert string to float: 'Node 0'
+ERROR  Error loading availability from /path/to/profile.xlsx: /path/to/profile.xlsx: non-numeric value in data row 5
 ```
 
-**Cause**: the file has a header row or other non-numeric cells.
-**Solution**: remove the header; the file must contain numbers only.
+**Cause**: the file has non-numeric cells below its header rows.
+**Solution**: below an optional header, the file must contain numbers only.
 
 ### Wrong Profile at Some Nodes
 

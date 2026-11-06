@@ -694,7 +694,7 @@ with \(e_f\) (t per MWh of fuel, from `fuel_co2`) and \(\eta_{g,n}\) as in OBJ-6
 
 In a multi-system run there is one CO2-2 constraint per system \(s\): the sum runs over the generators at that system's nodes, with that system's budget \(B^{\text{CO2}}_s\), slack \(\xi^{\text{CO2}}_s\) and penalty \(C^{\text{CO2,bud}}_s\) (its own `co2_budget` and `penalties.co2_budget_violation`); a system with the budget disabled has no constraint. A single system has one constraint over all nodes.
 
-The annual CO2 budget \(B^{\text{CO2}}\) (`co2_budget`, tonnes/year) is scaled by the window fraction \(T \cdot \Delta t / H_{\text{year}}\), where \(H_{\text{year}}\) is the number of hours in the year (`hours_per_year`). The left-hand side is the window's emissions in tonnes (output × \(\Delta t\) × emission factor). The violation slack \(\xi^{\text{CO2}}\) is penalized by `co2_budget_violation_penalty` per tonne, once: in OBJ-4c its coefficient is \(C^{\text{CO2,bud}} / \Delta t\), so that the \(\Delta t\) of OBJ cancels.
+The annual CO2 budget \(B^{\text{CO2}}\) (`co2_budget`, tonnes/year) is scaled by the window fraction \(T \cdot \Delta t / H_{\text{year}}\), where \(H_{\text{year}}\) is the number of hours in the year (`hours_per_year`, always 8760, leap years included). The left-hand side is the window's emissions in tonnes (output × \(\Delta t\) × emission factor). The violation slack \(\xi^{\text{CO2}}\) is penalized by `co2_budget_violation_penalty` per tonne, once: in OBJ-4c its coefficient is \(C^{\text{CO2,bud}} / \Delta t\), so that the \(\Delta t\) of OBJ cancels.
 
 ---
 

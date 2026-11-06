@@ -128,6 +128,42 @@ def test_resolvers_filter_by_target():
     assert resolve_investment_constraints([_cc()], {"SolarPV": 1}, {2030: 1}) == []
 
 
+# ── Integer and string-typed entries on named axes (#50) ────────────────────
+
+def test_integer_on_unit_axis_is_a_position():
+    from esfex.bridge.adapters import resolve_custom_constraints
+    c = _cc(terms=[ConstraintTerm(variable="gen_output", index=[2, "all"])])
+    specs = resolve_custom_constraints(_sys([c]))
+    assert specs[0]["terms"][0]["index"] == [2, -1]   # 2nd generator (Coal)
+
+
+def test_integer_matches_numeric_key_name_first():
+    from esfex.bridge.adapters import resolve_custom_constraints
+    c = _cc(terms=[ConstraintTerm(variable="gen_output", index=[1, "all"])])
+    sys = SimpleNamespace(generators={"7": object(), "1": object()},
+                          batteries={}, custom_constraints=[c])
+    # The key "1" (2nd generator) wins over position 1
+    assert resolve_custom_constraints(sys)[0]["terms"][0]["index"] == [2, -1]
+
+
+def test_integer_out_of_range_on_unit_axis_raises():
+    from esfex.bridge.adapters import resolve_custom_constraints
+    c = _cc(terms=[ConstraintTerm(variable="gen_output", index=[3, "all"])])
+    with pytest.raises(ValueError, match="unknown generator '3'"):
+        resolve_custom_constraints(_sys([c]))
+
+
+def test_year_given_as_string():
+    from esfex.bridge.adapters import resolve_investment_constraints
+    cc = CustomConstraintConfig(
+        name="y", target="investment", sense="<=", rhs=1.0,
+        terms=[ConstraintTerm(variable="tech_investment",
+                              index=["2030", 1, "all"])],
+    )
+    specs = resolve_investment_constraints([cc], {"SolarPV": 1}, {2025: 1, 2030: 2})
+    assert specs[0]["terms"][0]["index"] == [2, 1, -1]
+
+
 # ── Round-trip through the Pydantic model (YAML/.esfexp safe) ───────────────
 
 def test_model_dump_round_trip():

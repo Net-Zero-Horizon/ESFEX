@@ -87,7 +87,7 @@ class ESFEXConfig(BaseModel):
 | Field | Default | Description |
 |-------|---------|-------------|
 | `simulation_mode` | `"development"` | `development`: master problem then dispatch. `economic_dispatch`: LP dispatch only. `unit_commitment`: MIP dispatch of the first `unit_commitment_hours` hours of the first year |
-| `date_start` | `"01/01/2025 00:00"` | Start timestamp used to label the hourly time index |
+| `date_start` | `"01/01/2025 00:00"` | Timestamp of the first data row. Labels the hourly time index (Feb 29 skipped) and gives the first year label |
 | `enable_primary_energy` | `True` | Include the fuel supply chain |
 
 **Validator:** every name in `meta_network.systems` must be a key of `systems` (`ValueError: System 'x' referenced in meta_network but not defined in systems`).
