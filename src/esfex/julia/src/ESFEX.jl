@@ -113,7 +113,7 @@ include("acopf_benchmark.jl")
 # Configuration types
 export NetworkConfig, GeneratorConfig, BatteryConfig, BusData
 export TechnologyConfig, BatteryTechnologyConfig
-export CostSegment
+export CostSegment, CO2BudgetGroup
 export TransmissionLineData, TransformerData
 export ACDCConverterData, FrequencyConverterData
 export TemporalConfig, PenaltyConfig, TargetConfig, SolverSettings

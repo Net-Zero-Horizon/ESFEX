@@ -1412,6 +1412,63 @@ import Ipopt
             @test res.ev_soc[1, 2] ≈ 0.0 atol = 1e-6
         end
 
+        @testset "one CO2 budget per system" begin
+            # Two systems, one node each, no link. Each has a 40 t share of
+            # its budget for this 2 h window. System A's overrun is nearly
+            # free, so its coal serves all 100 MWh and A pays for 60 t; B's
+            # penalty is high, so B burns 40 MWh of coal and the rest is gas.
+            # A merged run used to apply one budget and one penalty to both.
+            H = 2
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            net2 = NetworkConfig(2, 2, buses, [1, 2], zeros(2, 2), zeros(2, 2),
+                                 100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                 TransmissionLineData[], TransformerData[],
+                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
+            coal = mkgen("Coal", "Non-renewable", "Coal", [100.0, 100.0], [1.0e-5, 1.0e-5],
+                         ones(H, 2); nb = 2, H = H)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 100.0], [1.0e-4, 1.0e-4],
+                        ones(H, 2); nb = 2, H = H)
+            budget = 40.0 * 8760 / 2
+            input = PowerSystemInput(
+                name = "A_B", year = 2025, network = net2, generators = [coal, gas],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 2),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                fuel_co2 = Dict("Coal" => 0.5),   # / η 0.5 = 1 t/MWh_e
+                co2_budget = 2 * budget, co2_budget_violation_penalty = 5e-4,
+                co2_budget_groups = [CO2BudgetGroup("A", [1], budget, 1e-9),
+                                     CO2BudgetGroup("B", [2], budget, 5e-4)],
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test sum(res.gen_output[1, 1, :]) ≈ 100.0 atol = 1e-6
+            @test sum(res.gen_output[1, 2, :]) ≈ 40.0 atol = 1e-6
+            @test value(vars.co2_budget_violation[1]) ≈ 60.0 atol = 1e-6
+            @test value(vars.co2_budget_violation[2]) ≈ 0.0 atol = 1e-6
+            @test res.cost_breakdown.co2_emission_cost ≈ 60.0 * 1e-9 rtol = 1e-6
+            @test constraint_by_name(model, "CO2_budget_constraint[A]") !== nothing
+            @test constraint_by_name(model, "CO2_budget_constraint[B]") !== nothing
+
+            # No budget for B: only A is constrained.
+            input_a = PowerSystemInput(
+                name = "A_B", year = 2025, network = net2, generators = [coal, gas],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 2),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                fuel_co2 = Dict("Coal" => 0.5),
+                co2_budget_groups = [CO2BudgetGroup("A", [1], budget, 5e-4),
+                                     CO2BudgetGroup("B", [2], Inf, 5e-4)],
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input_a)
+            optimize!(model)
+            res = extract_solution(model, vars, input_a)
+            @test sum(res.gen_output[1, 1, :]) ≈ 40.0 atol = 1e-6
+            @test sum(res.gen_output[1, 2, :]) ≈ 100.0 atol = 1e-6
+            @test collect(keys(vars.co2_budget_violation)) == [1]
+            @test constraint_by_name(model, "CO2_budget_constraint[B]") === nothing
+        end
+
         @testset "solve_dcopf benchmark" begin
             # Cheap gen at bus 1 supplies a bus-2 load across one line.
             r = solve_dcopf(num_buses = 2, demand = [0.0, 100.0],

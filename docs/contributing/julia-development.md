@@ -230,9 +230,11 @@ if input.mode == "unit_commitment"
     # Binary commitment variables and min up/down time
 end
 
-# Only if a CO2 budget is set (add_co2_constraint!)
-if !isinf(input.co2_budget) && input.co2_budget > 0
-    # budget scaled to the window: co2_budget * hours * tres / hours_per_year
+# Only for the CO2 budget groups that have a budget (add_co2_constraint!):
+# one per system in a multi-system run, else one from input.co2_budget
+for grp in co2_budget_groups(input)
+    has_co2_budget(grp) || continue
+    # budget scaled to the window: grp.budget * hours * tres / hours_per_year
 end
 
 # Optional variable containers are `nothing` when unused
