@@ -9,7 +9,221 @@ Per-release notes are also published on the
 
 ## [Unreleased]
 
+### Added
+
+- **Every electrolyzer is dispatched, and its results are exported.** Only
+  the first entry under `electrolyzers` reached the dispatch; the others
+  were ignored, and no electrolyzer result was kept. All entries are now
+  modelled (`PowerSystemInput` takes a vector, `electrolyzers`; the single
+  `electrolyzer_config` keyword is still accepted), and each one's power
+  (MW) and hydrogen output (kg/h, the conversion of the primary-energy
+  hydrogen balance) are kept in `YearResults.electrolyzer_power` /
+  `electrolyzer_h2` and written to the HDF5 file as
+  `electrolyzer_power/{name}` and `electrolyzer_h2/{name}`.
+
+- **Unknown configuration keys are reported.** A misspelt or obsolete key
+  (`min_up_time` for `min_up`) used to be dropped without a trace. It is
+  still ignored, but `load_config` now logs a warning for each one with its
+  full path (`systems.Cuba.generators.gas_1.dorop`) and keeps the list in
+  `ESFEXConfig.unknown_keys`; `esfex validate` prints it, and the Studio's
+  validation lists the keys under a new *Configuration* category. Keys the
+  loader translates are not reported: upper-case aliases, flat `dc_*` /
+  `DC_*` keys, penalty keys in any case, legacy `unit_*` / `bat_*` units,
+  the Studio's `_gui_*` / `_technologies` / `_equipment_buses` metadata,
+  `visual_scaling`, `_geo_assets`, `plugins` and `solver.options`.
+
+- **`esfex plugin install --git URL --trust-host`.** Git hosts outside
+  github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht were
+  always refused on the command line, because the CLI had no way to confirm
+  them as the Studio's dialog does. `--trust-host` is that confirmation.
+- **`Orchestrator.run(master_only=True)`** stops after the master problem and
+  leaves its decisions in `Orchestrator.master_solution`.
+
+- **Realism check in Validate.** The Validate dialog has a new **Realism**
+  category that runs the plausibility and operability checks that until now
+  were only reachable from Python: probable duplicate plants (same name, or
+  same fuel within 15 km; info), installed capacity more than twice the peak
+  demand (info), and a max-flow test of whether the line, transformer and
+  converter ratings can deliver the peak demand from the generator buses
+  (warning).
+- **N-1 "Apply in" setting.** Global Settings > N-1 Security has checkboxes
+  for the simulation modes that get the N-1 constraints (`apply_to_modes`).
+  Studio projects used to fix this to unit commitment with no way to change
+  it; new projects now default to both modes, like a YAML file.
+- **Per-line reactance per km.** `transmission_lines_geo` entries accept
+  `reactance_per_km` (Ω/km). When a line has no `reactance_pu`, its reactance
+  is derived from its length with this value instead of
+  `dc_power_flow.reactance_per_km`. The Studio line form's Reactance per km
+  field, which was saved but dropped on load, now has this effect.
+
 ### Changed
+
+- **Each system keeps its own CO2 budget.** When several systems were
+  simulated together, the merged system took the first system's
+  `co2_budget` for all of them and the largest `co2_budget_violation`
+  penalty: in a two-island case every tonne the main island emitted over
+  its budget was priced at the small island's 500 $/t, and the small
+  island's emissions counted against the main island's budget. The
+  dispatch now adds one CO2 budget constraint per system, over that
+  system's nodes, with that system's `annual_budget`, `enabled` flag and
+  `penalties.co2_budget_violation`. Single-system runs are unchanged. The
+  master problem and Benders have no CO2 budget (only the CO2 price), so
+  they are unaffected.
+
+- **Primary energy: one fuel tank per node, balanced every hour.** The fuel
+  model had two storage layers, a periodic balance and an hourly tank, tied
+  together by slack variables. Fuel shipped along a route entered only the
+  periodic balance, so generators and non-electric users at a node fed by
+  transport ran on the penalised shortfall; non-electric use was counted in
+  both layers (50 units in a tank served 25 of non-electric demand); and the
+  periodic shortfall sat on the consumption side, where it acted as a sink.
+  Each fuel now has a single tank per node:
+  level = previous level + (local supply + arriving shipments) × storage
+  efficiency − fuel drawn − departing shipments, and the fuel drawn plus the
+  shortfall must cover the fuel for power and the non-electric use of each
+  hour. Periods keep the supply limits, the non-electric demand per sector
+  and the route shipments; a period's shipment leaves evenly over its hours
+  and arrives after the route's transit time (now counted in time steps,
+  no longer rounded to whole periods), less transport losses. Fuel arriving
+  in an hour can be used in that hour, so a shortfall now means fuel is
+  really missing. The periodic storage levels, their linking slacks and the
+  periodic shortfall are gone: `penalties.coupling_slack_penalty` has no
+  effect, the `pe_coupling_slack_cost` result is always 0, and
+  `total_loss_of_supply` is the hourly shortfall. Route capacity per period
+  now uses the period's real length when `resolution_hours` > 1.
+- **Scheduled interruptions happen once, in absolute horizon hours.**
+  `start_hour`/`end_hour` of an outage window were taken as hours within
+  the year, so a window repeated in every simulated year and a
+  `start_hour` of 8760 or more never applied. They are now horizon hours
+  (hour 0 = 1 January of the base year, 8760 h per year), as documented.
+  The new `recurring: true` repeats a window every year at the same hours
+  of the year (also in the Studio calendar, "Repeat every year"). This
+  applies to generators, batteries, lines, transformers and converters.
+- **Fuel-source disruptions use horizon hours.** `disruption_start_hour` /
+  `disruption_end_hour` (and `fuel_source` interruptions) were compared with
+  the step numbers of each dispatch window, so the cut hit the start of
+  every window and never the hours entered. They are now absolute horizon
+  hours, located with the window's year and start hour; a `fuel_source`
+  interruption is applied in the dispatch windows it overlaps.
+
+- **Life extension of units with `invest_cost` 0 is no longer free.** The
+  master prices a life-extended MW at `invest_cost × life_extension_cost_factor`
+  per year, and existing units default to `invest_cost` 0 in the Studio, so
+  they could be kept forever at no cost. Where the cost is 0 at a node, it
+  is now taken from the candidate technology with the same fuel and type
+  (for batteries, the battery technology named by `technology`, else the
+  first one). A unit with no candidate stays free and is named in a warning.
+- **`life_extension_cost_factor` is applied.** The master always used a
+  hard-coded 0.3; it now uses the system's value (default 0.20).
+- **Myopic planning follows the RE target path.** Each one-year master
+  targeted the RE share reached the year before, so `TARGET_RE_PENETRATION`
+  never entered a myopic run. Each year now targets its point on the
+  perfect-foresight path (initial share → target over the horizon, steps
+  clamped to `MIN_ANNUAL_INCREMENT` / `MAX_ANNUAL_INCREMENT`); the increment
+  bounds still start from last year's share.
+- **Sector priorities in load shedding.** In the dispatch, a sector's shed
+  load was not capped by its demand, so all unserved energy was booked to
+  one sector and priced at the cheapest (or, where sector data was missing,
+  the dearest) multiplier. In the master's representative days, the
+  sectoral shed was an extra injection next to the bus's load shedding, so
+  a day could shed up to about twice its demand and the plain-VOLL load
+  shedding absorbed every MWh, ignoring criticality. Both models now split a
+  bus's shed into per-sector amounts capped by each sector's demand plus an
+  unclassified remainder (demand that no sector covers) priced at VOLL;
+  sectors cost VOLL × criticality, cheapest first.
+- **Missing availability profiles.** A `Renewable` generator or technology
+  without `availability_file` (reservoir hydro excepted) runs at capacity
+  factor 1.0 every hour; this is now logged once per unit at startup. A
+  configured profile that cannot be found now stops the run with the unit
+  and path named: a generator used to be dropped from the dispatch, and a
+  technology crashed with a `KeyError`.
+- **`LOSS_DEMAND_TRHESHOLD` is deprecated.** It was passed to the model but
+  no constraint used it. It is no longer passed, the Studio no longer shows
+  or writes it, and old case files that contain it still load.
+
+- **Every stochastic scenario multiplier in the Studio changes the plan.**
+  The Studio's scenario form offered 32 multiplier keys, but the model knew
+  only 10 names, so the loader dropped the rest: only the demand growth and
+  discount rate multipliers reached the model. `ScenarioMultipliers` now has
+  a multiplier for each cost the stochastic master charges: besides the
+  existing ten, `gen_fixed_cost`, `gen_decommissioning_cost`,
+  `bat_decommissioning_cost`, `bat_invest_cost_power` and
+  `bat_invest_cost_capacity` (both on top of `invest_cost_storage`),
+  `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`
+  and `penalty_fre_penetration`. The Studio offers exactly these. Keys
+  written by earlier Studio versions are translated on load and save
+  (`gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` →
+  `maintenance_cost`, `transmission_invest_cost` →
+  `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`,
+  `penalty_co2_cost` → `carbon_price`, `gen_invest_cost` → both technology
+  investment costs). Keys that act on the same multiplier multiply, with a
+  warning. Keys for costs the master problem does not have are dropped with
+  a warning, and the Studio no longer offers them: start-up, electrolyzer,
+  converter, fuel import, fuel storage and transport investment, battery
+  maintenance, cost per MW·km, and the loss-of-fuel-supply and CO2-budget
+  penalties. A loaded project shows only the multipliers its file sets.
+
+- **The detailed `demand` dataset is always `[node, step]`.** The scenario
+  `demand` in `detailed_results/year_YYYY_threshold_0/` was transposed to
+  `(nodes, hours)` only when the run had more hours than nodes; a
+  unit-commitment run on a large network (for example 24 h on 72 nodes)
+  kept `(hours, nodes)`. It is now always `(nodes, hours)`, like every
+  other per-node dataset, and carries the attribute
+  `dimensions = "nodes x hours"`. The results viewer, the SLD,
+  `esfex.load_results()` and the financial analysis read both new and old
+  files (`esfex.io.exporter.demand_node_hours()`); in old files the number
+  of time steps decides the axis. `/demand/year_YYYY_base_demand` keeps its
+  `(hours, nodes)` layout.
+- **`rooftop_solar_config`: unused fields are optional.**
+  `systems_per_node`, `avg_system_size`, `initial_adoption`,
+  `max_adoption` and `adoption_rates` were required by the schema although
+  the runner never passes them to rooftex. They now default to `null`; the
+  documentation marks them, and `performance_ratio` and the cost fields,
+  as not used by the runner.
+
+- **Every modelled year has 8760 hours, leap years included.** The master
+  problem counted 8784 h in leap years (`hours_per_year`), while demand
+  and profiles are read in 8760-row years. For a leap year the master
+  picked its representative days from rows starting at (y−1)·8784
+  instead of (y−1)·8760, one day late per earlier year and running into
+  the next year, and the annual scaling of operating costs, CO2 budgets
+  and fuel supply limits used 8784 h in leap years. Now `hours_per_year` is
+  always 8760, in Python (`hours_for_year`) and Julia (`hours_in_year`).
+  Feb 29 rows of leap-year input data are dropped when demand,
+  availability and inflow files are read (found from the calendar that
+  starts at `date_start`; a file of exactly 8784 rows is always taken as
+  one leap year), and date labels skip Feb 29, so every year runs from
+  1 January to 31 December in the results viewer.
+- **Year labels follow `date_start`.** A run always labelled its years
+  from 2025, whatever `date_start` said, because the CLI did not pass a
+  start year. Years are now labelled from the year of `date_start`, and
+  the new `esfex run --start-year YYYY` option (and `start_year=` in
+  `Orchestrator.run()` and `esfex.run()`) relabels them; the date labels
+  then start on `date_start`'s day and time in that year. `date_start`
+  still does not select rows: demand is read from the first row.
+
+- **Bus roles you set are kept.** Every save re-derived each bus's role from
+  the topology, so a role picked in the bus form was overwritten. A role you
+  pick is now marked as yours (saved in `_gui_layout.user_set_bus_roles`) and
+  kept on save and reload; the demand-fraction repair never gives demand to a
+  `connection` bus you set and counts a `mixed` bus you set as a demand bus.
+  Buses whose role you have not touched are still repaired from the topology.
+- **Generation N-1 "Percentage" reserve works.** With Reserve Type =
+  Percentage, the generation N-1 constraint requires headroom of
+  `generation_reserve_percentage` × the system demand of each step (no unit
+  excluded). Before, the setting was ignored and the largest-unit rule was
+  always used. The "Fixed MW" choice, which the schema rejects, is removed.
+- **Grid Builder simplification levels 0–2.** Levels 2, 3 and 4 of the build
+  step ran the same equivalent-network reduction under labels that described
+  an older pruning scheme. The build step now offers 0 (cleanup), 1
+  (aggregate equipment and parallel lines) and 2 (equivalent network, one
+  bus per node); scripts passing 3 or 4 get level 2 as before.
+- **Min. System Inertia field.** The system field labelled "Inertia Limit
+  Threshold (frac)" is an absolute MW·s requirement; it is now labelled in
+  MW·s and accepts values above 1.
+- The per-line Base Impedance field is removed from the line and
+  inter-system link forms (unused since Z_base is derived from the line
+  voltage and `ac_power_flow.base_mva`).
 
 - **CO2 of generation is per MWh of fuel.** `fuels.*.emission_factor`
   (IPCC-style values such as 0.202 t/MWh for gas, as the Grid Builder
@@ -138,6 +352,259 @@ Per-release notes are also published on the
   subsystems are kept as built from OpenStreetMap.
 
 ### Fixed
+
+- **Inter-system fuel routes are fuel routes.** A fuel route traced in the
+  Studio between two systems was saved as an electrical link (no type, no
+  fuel), came back as a transmission link after reloading, and the run
+  turned it into a power line. `meta_network.systems_links` entries now
+  have `link_type` (`transmission`, the default, or `fuel_route`) and
+  `fuel`; the Studio saves and reloads both, and the link form has a fuel
+  selector for fuel routes. On merge, each connection of a fuel route link
+  becomes two one-way primary-energy transport routes between the two
+  nodes (capacity = `existing_capacity_MW` in fuel units/day,
+  `transport_cost` = `cost_per_mw_km`, `losses_fraction` = `loss_factor`
+  per 100 km, length = `distance_km`); it adds no electrical line,
+  adjacency or transfer investment. Route investment follows the fuel's
+  `fuel_infrastructure`, so the link's `max_investment_MW` and
+  `investment_cost_per_MW` are not used (a warning is logged when set). A
+  fuel route without a fuel is ignored with a warning, and the Studio
+  validation flags it.
+
+- **Reservoir pumping on multi-bus nodes.** The DC-OPF and AC-OPF bus
+  balances looked up a reservoir's capacity by node index in per-bus
+  arrays, so the pump of a reservoir off its node's first bus was left out
+  of the balance: pumped water was free.
+- **Built technology capacity keeps the technology's bidding curve.** The
+  virtual generators that carry master investments into the dispatch got
+  the flat `fuel_cost` only; they now carry `fuel_cost_curve`. A curve at a
+  bus where a unit has no capacity no longer raises an error in the
+  dispatch.
+- **Development-mode dispatch could buy a 0-MW line but not use it.** The
+  flow on a candidate corridor below 0.1 MW stayed fixed to 0 even after
+  investment (Julia API only; the runner dispatches in economic-dispatch or
+  unit-commitment mode).
+- **Benders load-shedding penalty cap** iterated the per-bus load-shed
+  variables by node count.
+
+- **Fuel-cost multiplier and fuel-cost curves.** In a stochastic scenario,
+  `fuel_cost` and `fuel_price_growth` did not scale generators that use a
+  piecewise fuel-cost curve; they do now.
+
+- **Yearly energy and CO2 totals with steps longer than 1 h.** The
+  dispatch summed MW (and tCO2/h) per step for total generation, demand,
+  curtailment, load shed and CO2, so with `resolution_hours > 1` every
+  yearly total was divided by the step length: a 24-hour-step run reported
+  22,417 t of CO2 for a real 538,000 t. This affected `YearResults`
+  (`emissions`, `total_generation`, `total_demand`, `load_shed`), the HDF5
+  scenario attributes and `summary_results` / `global/summary_results`,
+  and the runner's `gen=… MWh` / `CO2=… t` log lines. The totals are now
+  the step values times the step length. The `CO2_emissions` dataset
+  stays a per-step rate, like the MW datasets; its `units` attribute now
+  says `tCO2/h` (it said `tonnes CO2`) and the readers multiply it by
+  `temporal_resolution_hours`, as before. Hourly runs are unchanged.
+- **CSV export of multi-node results.** `esfex export -f csv` stopped with
+  `ValueError: Must pass 2-d input` on any multi-node run, at the 3-D
+  `power_flow` / `transfer_margin` datasets. These are now written with
+  one row per node pair (`from_node`, `to_node`, then one column per
+  step), scalar datasets as one cell, and nested groups
+  (`technology_selling_prices/<gen>/`, `n1_security/trans_reserve_duals/`,
+  `primary_energy/`) as nested folders instead of being skipped.
+- **Rolling-horizon `power_flow`, `transfer_margin` and N-1 duals.** These
+  series were joined window by window including each window's overlap
+  tail, so they had more steps than the year (`power_flow` of
+  `(3, 3, 10008)` for 8760 h) and drifted out of step with every other
+  array. They now keep only the committed steps. A transmission N-1 dual
+  (or the generation N-1 dual) that binds only in some windows is
+  zero-filled in the others instead of being concatenated short.
+- **Inter-system flows with a bus network.** `inter_system/.../power_flow`
+  read the bus indices of each line as node indices, so when buses differ
+  from nodes the flows between systems were attributed to the wrong
+  systems or lost. Line ends are now mapped bus → node → system. The
+  scenario `transfer_margin` dataset had the same mix-up and is now
+  aggregated to node pairs like `power_flow`.
+- **HDF5 per-unit dataset names.** `technology_selling_prices/` used the
+  raw generator name, so a name with `/` (`Cuba/Gas`) created nested
+  groups, and two generators with the same name overwrote each other. In
+  the battery groups (and in the other per-generator groups outside
+  `generation/`) two units with the same name made the HDF5 write fail.
+  Every per-unit group now uses the same `/`-free, unique name per unit
+  (`Cuba - Gas`, `Cuba - Gas_2`, ...).
+- **`num_years` in unit-commitment runs.** The HDF5 root attribute stored
+  the requested number of years, although unit-commitment mode runs only
+  the first; it now stores the number of years simulated.
+- A missing open solver no longer suggests `] add <Package>`: the message
+  points to `esfex add-solver` for Gurobi, CPLEX and Cbc, and to
+  reinstalling ESFEX's Julia project for the solvers that ship with it.
+  Docstrings: `aggregate_demand_to_resolution` returns the MEAN per period
+  (it said MAX), and the `compile` argument of `initialize_julia()` is
+  documented as unused.
+
+- **Excel demand: the first row is data again.** A run read Excel demand
+  files with the first row as a header, so a file without a header lost
+  its first hour and every later hour moved up by one. The run now reads
+  CSV and Excel the same way, from the first row; leading rows with text
+  (a header such as node names) are skipped, so files with or without a
+  header give the same hours. Availability files follow the same rule (a
+  header row used to make the profile fall back to a constant 1.0). A
+  text cell below the header is reported as
+  `non-numeric value in data row <n>`.
+- **Multi-year availability profiles in the dispatch.** The dispatch
+  looked up availability and reservoir inflow by the hour of the year, so
+  every year used the first 8760 rows of a multi-year profile while the
+  master used each year's own rows. The dispatch now indexes profiles by
+  horizon hour, wrapping around like the master.
+- **`load_demand_data(..., year_to_load=Y)`** returned the file's first row
+  followed by the rows of year Y (off by one), and used calendar years of
+  8784 h. It now returns the 8760-row block of year Y, raises `ValueError`
+  for a year outside the data, and reads the rows a run reads.
+  `DemandDataManager` also indexes 8760-row model years.
+- **Custom constraints: integers on a unit axis.** An integer index on a
+  generator, battery or technology axis was rejected as an unknown name,
+  even when it matched a key such as `"1"`. Names now match as strings
+  (also `"2030"` on a year axis), and an integer that is not a key is the
+  unit's 1-based position.
+
+- **Studio edits of system settings were lost on reload.** The Studio saved
+  settings such as `target_re_penetration`, `min_annual_increment`,
+  `max_annual_increment`, `force_replacement`, `inertia_limit_threshold`,
+  `sim_rooftop` and `ev_initial_soc` twice: the value the file was opened
+  with under the upper-case alias (`TARGET_RE_PENETRATION`) and the edited
+  value under the field name. The alias won on the next load, so the edit
+  was discarded. The Studio now writes each setting once, and the loader
+  uses the field name when a file has both (with a warning if they differ),
+  which recovers edits in files saved earlier.
+- **Risk settings reset on the second save.** The Studio wrote the `risk`
+  block but did not read it back when opening a project, so the next save
+  replaced it with the defaults. It now round-trips. The block is documented
+  as Workbench-only: the optimization reads neither it nor `risk.enabled`.
+- **SLD frequency gauge ignored the system's frequency keys.** It used fixed
+  values (load damping 0.01 pu, ROCOF limit 2 Hz/s, 50 Hz and 49 Hz with
+  results loaded). It now uses `load_damping`, `rocof_limit`,
+  `frequency_nominal` and `frequency_nadir_limit` of the edited system; a
+  nominal frequency left at 50 Hz follows the buses' frequency and a nadir
+  limit left at 49 Hz becomes 1 Hz below nominal.
+- **HiGHS offered for the SOC and QC AC-OPF formulations.** HiGHS rejects
+  second-order cone constraints, so these runs failed at the first solve.
+  The Studio no longer offers it for `acopf_soc` / `acopf_qc`.
+- **`esfex run --mode/--solver` accepted any value.** An unknown mode or
+  solver was written into the configuration unchecked. Both are now checked
+  against the values the configuration accepts (the solver name is
+  case-insensitive), the help lists all of them, and the verbose header
+  prints `Mode: (from config)` instead of `Mode: None`.
+- **`esfex studio -o` had no effect.** File → Save now writes to the `-o`
+  file, or to the `-c` file when `-o` is not given (it used to ask for a
+  path), and relative data paths resolve against the `-c` file's folder.
+  `launch_studio()` returned `None` even after a save; it now returns the
+  saved configuration.
+- **`Orchestrator(config_path="x.yaml")` with a string** raised
+  `AttributeError`; a `str` path now works like a `Path`.
+- **`environment.yml` pinned Python below 3.13** although ESFEX supports
+  3.13; it now allows the same versions as pip (3.10–3.13).
+- **No-effect settings are marked as such.** The `Curtailment` penalty the
+  Studio writes was dropped on load; it now loads, like
+  `coupling_slack_penalty`, `transport_congestion` and `storage_violation`,
+  and all four are documented as having no effect and shown disabled in the
+  Studio. `solver.scale_constraints` is read by nothing; it is documented as
+  such and shown disabled.
+- The loader names each generator that receives the non-fuel O&M adder in
+  the log (INFO), with the resulting `maintenance_cost`.
+
+- **Plugin commands work.** `esfex <plugin name> ...` failed with "No such
+  command": the CLI only discovered plugins and never loaded them, so
+  `get_cli_commands()` was never called. When `esfex` starts with a command
+  that is not built in (or with `--help`), it now loads the enabled, trusted
+  plugins and mounts their commands; `esfex --help` lists them. Built-in
+  commands such as `esfex run` do not load plugins at startup. A plugin that
+  fails to load, returns something other than a Typer app or is named like a
+  built-in command is skipped with a message, and the other commands keep
+  working.
+- **Plugin configuration hooks are called.** `get_config_schema()` and
+  `on_config_loaded()` were defined but never called. When a run starts, each
+  plugin's `plugins.<name>` section is validated against its schema (an
+  invalid section stops the run with an error naming it) and
+  `on_config_loaded(config)` is called; the Studio does the same when it
+  starts with a config file and logs invalid sections as warnings.
+  `context.config` is updated before the call.
+- **Plugin tree categories, forms, toolbar actions and map layers appear in
+  the Studio.** The plugin manager looked for the main window's panels under
+  names it does not have, so these four hooks were never called. A plugin
+  category now appears in every system of the element tree (also in systems
+  added later, with its label), and `element_tree.add_plugin_element()` adds
+  elements to it whose selection shows the plugin's form. Returned toolbar
+  actions are added to the toolbar.
+- **`esfex.solve_master()` and `esfex.solve_dispatch()` in the Python console
+  run.** Both raised `TypeError` (the adapters were built without their
+  demand and horizon arguments). They now go through the runner:
+  `solve_master()` returns the master problem's investments, retirements,
+  cumulative capacities and RE targets per year; `solve_dispatch()` dispatches
+  one year with the configured units and returns its `YearResults`. Both take
+  `solver=None` (keep the config's solver) and an `output_dir`.
+- **`esfex.load_results()` reads current results files.** Only `demand`,
+  `power_flow` and `curtailment` matched the HDF5 layout; generation held
+  dataset names and prices, storage, investments, summary and the unit names
+  came back empty, so `esfex.plot.generation_mix`, `prices` and `investments`
+  drew nothing. Generation and battery state of charge are now
+  `[unit, step]` arrays summed over nodes, prices are the nodal prices,
+  investments are MW per technology name and year, and summary holds each
+  year's scalars. A new `years=` argument limits what is read.
+
+- **Renaming a system.** The rename did not reach the inter-system links,
+  Global Settings > Systems to Simulate or the saved `meta_network.systems`,
+  so the renamed system dropped out of Validate and Run, its links pointed to
+  a missing system and the saved file no longer loaded. Settings the Studio
+  does not edit were also lost. All these references now follow the rename,
+  the system keeps its position, and renaming onto an existing name shows a
+  message instead of raising an error. Save drops names that are not
+  systems of the project from `meta_network.systems`, and stochastic
+  scenarios are written to the first simulated system, where they are read.
+- **Inter-system links keep their impedance on reload.** Opening a project
+  or importing systems restored links without `reactance_pu` /
+  `resistance_pu` (and, on import, without the electrical metadata and
+  style), so they fell back to the defaults. Imported links also get fresh
+  ids instead of reusing ids already in the project.
+- **SLD Run All N-1 and Run Screening.** Both buttons failed (a missing
+  analyzer method, a wrong call signature, attribute access on dicts, and an
+  undefined logger that turned every error into a crash). They now report
+  the number of contingencies and violations (N-1), the stressed N-1-1 pairs,
+  or the contingencies above the PI threshold with the worst one. The
+  N-k labels were untranslated. The N-k options of Global Settings (depth,
+  redistribution, PI threshold, transformer and battery contingencies,
+  critical line threshold), which were saved but used nowhere, now preset the
+  SLD Analysis panel and select which elements are tripped; the optimisation
+  does not use them, and the form says so.
+- **SLD time controls after Analysis.** Switching Analysis off left the
+  year, hour and playback controls disabled; with results loaded they come
+  back and the diagram shows the results again.
+- **Geo imports in a projected CRS** (for example a UTM shapefile, or a
+  GeoJSON with a projected `crs` member) are reprojected to WGS84 instead of
+  being drawn in the wrong place.
+- **Degradation labels.** The generator, battery, electrolyzer and AC/DC
+  converter forms labelled degradation in %/yr while the value is a fraction
+  per year; the labels now say frac/yr.
+- **Reservoir section for new hydro units.** The generator form only showed
+  the Reservoir section when a reservoir capacity was already set, so a hydro
+  unit created in the Studio could never get one. It now shows for fuel
+  Water too.
+- **Fuel route waypoints.** Clicking empty map space while tracing a fuel
+  route now adds a waypoint, as for transmission lines.
+- **Script editor.** `Ctrl+Enter` runs the current script (the Run tooltip
+  announced it); the auto-indent preference works; editor preferences apply
+  from startup, not only after the Preferences dialog is closed.
+- **Interruptions calendar dates.** Hours were turned into dates with the
+  real calendar, so in a leap base year every date after 28 February was a
+  day off. Dates now follow the model calendar (8,760 h per year, no
+  29 February).
+- **Building-footprint demand split (Grid Builder).** Each node's bus split
+  counted every building in the domain, snapped to that node's own buses,
+  which biased the split of multi-node domains. Each building now belongs to
+  the node of its nearest bus, and only a node's own buildings set its split.
+- **GEM plants with a blank status** are kept, as documented; an early
+  status filter dropped them, and kept "construction" / "mothballed" rows only
+  to skip them later.
+- Grid Builder texts: the demand step header said "Step 6" (it is step 3);
+  tooltips no longer mention an auto-connect step that no longer runs; the
+  national-demand override tooltip says what 0 does for each forecast
+  engine; the "Populate from Nodes" tooltip says what the button does.
 
 - The dataset root (`ESFEX_DATA_ROOT`) defaults to `~/.esfex/data`. It
   defaulted to a maintainer-local volume, so the Grid Builder's Geofabrik
