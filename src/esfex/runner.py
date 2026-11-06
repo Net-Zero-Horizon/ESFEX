@@ -1044,6 +1044,7 @@ class Orchestrator:
         first_bus_of_node: dict[int, int] = {}
         for bus_idx, bus in enumerate(merged_buses):
             first_bus_of_node.setdefault(bus.parent_node, bus_idx)
+        link_line_ids: set[str] = set()
         for link in electrical_links:
             if len(link.systems) < 2:
                 continue
@@ -1060,8 +1061,15 @@ class Orchestrator:
                 global_node_b = off_b + nb
                 from_bus_idx = first_bus_of_node.get(global_node_a)
                 to_bus_idx = first_bus_of_node.get(global_node_b)
+                # Several links between the same two systems each restart idx
+                line_id = f"link_{sa}_{sb}_{idx}"
+                k = 2
+                while line_id in link_line_ids:
+                    line_id = f"link_{sa}_{sb}_{idx}_{k}"
+                    k += 1
+                link_line_ids.add(line_id)
                 merged_lines_geo.append(TransmissionLineGeo(
-                    line_id=f"link_{sa}_{sb}_{idx}",
+                    line_id=line_id,
                     from_node=global_node_a,
                     to_node=global_node_b,
                     from_bus=from_bus_idx,
