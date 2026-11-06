@@ -82,6 +82,53 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
     return result
 
 
+def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
+    """Primary-energy transport routes for the ``fuel_route`` inter-system links.
+
+    Each connection of a fuel link joins two merged (global) nodes. Like a
+    GUI fuel route it becomes two one-way routes, ``…_fwd`` and ``…_rev``,
+    for the link's fuel: route capacity = ``existing_capacity_MW`` (fuel
+    units/day), ``transport_cost`` = ``cost_per_mw_km`` ($/unit/km),
+    ``losses_fraction`` = ``loss_factor`` (per 100 km). Capacity investment
+    on the route follows the fuel's ``fuel_infrastructure``, so the link's
+    ``max_investment_MW`` / ``investment_cost_per_MW`` are not used.
+    """
+    def _at(seq, idx, default=0.0):
+        return float(seq[idx]) if idx < len(seq) and seq[idx] is not None else default
+
+    routes: list[dict] = []
+    for link in links:
+        if link.link_type != "fuel_route" or len(link.systems) < 2:
+            continue
+        sa, sb = link.systems[0], link.systems[1]
+        if sa not in offsets or sb not in offsets:
+            continue
+        if not link.fuel:
+            logger.warning(f"Fuel-route link {sa}-{sb} has no fuel; it is ignored.")
+            continue
+        if any(link.max_investment_mw) or any(link.investment_cost_per_mw):
+            logger.warning(
+                f"Fuel-route link {sa}-{sb}: max_investment_MW / investment_cost_per_MW "
+                f"are not used; route investment follows fuel_infrastructure.{link.fuel}.")
+        for idx, (na, nb) in enumerate(link.connections):
+            ga, gb = offsets[sa] + na, offsets[sb] + nb
+            params = {link.fuel: {
+                "capacity": _at(link.existing_capacity_mw, idx),
+                "transport_cost": _at(link.cost_per_mw_km, idx),
+                "losses_fraction": _at(link.loss_factor, idx),
+            }}
+            dist = _at(link.distance_km, idx)
+            for suffix, frm, to in (("fwd", ga, gb), ("rev", gb, ga)):
+                routes.append({
+                    "route_id": f"link_{sa}_{sb}_{idx}_{suffix}",
+                    "from_node": frm,
+                    "to_node": to,
+                    "distance_km": dist,
+                    "fuel_params": {f: dict(p) for f, p in params.items()},
+                })
+    return routes
+
+
 @dataclass
 class SimulationState:
     """Tracks state across simulation years."""
@@ -289,9 +336,14 @@ class Orchestrator:
         batteries / technologies from system *A* have zero entries at
         positions that belong to system *B*, and vice-versa.
 
-        Inter-system links (``config.meta_network.systems_links``) are
-        injected into the merged adjacency matrix so the optimiser
-        "sees" them as regular transmission lines.
+        Inter-system links (``config.meta_network.systems_links``) of
+        type ``transmission`` are injected into the merged adjacency
+        matrix so the optimiser "sees" them as regular transmission lines;
+        ``fuel_route`` links become primary-energy transport routes
+        (``fuel_transport_routes``) between the two systems' nodes.
+
+        Each system keeps its own CO2 budget and violation penalty over
+        its own nodes (``co2_budget_by_system``).
 
         Returns
         -------
@@ -308,6 +360,7 @@ class Orchestrator:
         from esfex.config.schema import (
             SystemConfig, NodeConfig, TechnologyConfig,
             BatteryTechnologyConfig, GeneratorConfig, BatteryConfig,
+            CO2BudgetConfig, SystemCO2Budget,
         )
 
         sys_names = list(config.meta_network.systems)
@@ -358,8 +411,13 @@ class Orchestrator:
                 for j in range(nc):
                     merged_adj[(off + i) * total_nodes + (off + j)] = src[i * nc + j]
 
+        # Electrical inter-system links. Fuel-route links carry fuel, not
+        # power: they become primary-energy routes further down.
+        electrical_links = [lk for lk in config.meta_network.systems_links
+                            if lk.link_type == "transmission"]
+
         # Inject inter-system links
-        for link in config.meta_network.systems_links:
+        for link in electrical_links:
             if len(link.systems) < 2:
                 continue
             sa, sb = link.systems[0], link.systems[1]
@@ -393,7 +451,7 @@ class Orchestrator:
         trans_inv_max = _concat_node_list("transference_invest_max")
 
         # Inject inter-system link investment data (per-node: set at both endpoints)
-        for link in config.meta_network.systems_links:
+        for link in electrical_links:
             if len(link.systems) < 2:
                 continue
             sa, sb = link.systems[0], link.systems[1]
@@ -591,7 +649,29 @@ class Orchestrator:
         for sys in systems:
             merged_fuels.update(sys.fuels)
 
+        # CO2 budget: each system keeps its own budget and violation
+        # penalty over its own nodes (the dispatch adds one constraint per
+        # system). The merged ``co2_budget`` is only their total, for display.
+        co2_by_system: list = []
+        if len(systems) > 1:
+            for sname, sys, nc in zip(sys_names, systems, node_counts):
+                co2_by_system.append(SystemCO2Budget(
+                    system=sname,
+                    first_node=offsets[sname],
+                    num_nodes=nc,
+                    enabled=sys.co2_budget.enabled,
+                    annual_budget=sys.co2_budget.annual_budget,
+                    violation_penalty=sys.penalties.co2_budget_violation,
+                ))
+            merged_co2_budget = CO2BudgetConfig(
+                enabled=any(b.enabled for b in co2_by_system),
+                annual_budget=sum(b.annual_budget for b in co2_by_system if b.enabled),
+            )
+        else:
+            merged_co2_budget = base.co2_budget
+
         # Merge penalties: take max of each penalty across systems
+        # (co2_budget_violation is applied per system, see above)
         merged_penalties_d = base.penalties.model_dump()
         for sys in systems[1:]:
             pd2 = sys.penalties.model_dump()
@@ -714,7 +794,7 @@ class Orchestrator:
         first_bus_of_node: dict[int, int] = {}
         for bus_idx, bus in enumerate(merged_buses):
             first_bus_of_node.setdefault(bus.parent_node, bus_idx)
-        for link in config.meta_network.systems_links:
+        for link in electrical_links:
             if len(link.systems) < 2:
                 continue
             sa, sb = link.systems[0], link.systems[1]
@@ -956,6 +1036,7 @@ class Orchestrator:
                     if r.get(k) is not None:
                         r[k] = int(r[k]) + off
                 merged_routes.append(r)
+        merged_routes.extend(_fuel_link_routes(config.meta_network.systems_links, offsets))
 
         merged_conv_techs: dict = {}
         merged_seasonal: dict = {}
@@ -1074,7 +1155,8 @@ class Orchestrator:
             battery_technologies=merged_bat_techs,
             fuels=merged_fuels,
             penalties=base.penalties.__class__(**merged_penalties_d),
-            co2_budget=base.co2_budget,
+            co2_budget=merged_co2_budget,
+            co2_budget_by_system=co2_by_system,
             criticality_penalties=base.criticality_penalties,
             ev_initial_soc=merged_ev_soc,
             ev_categories=merged_ev_categories,

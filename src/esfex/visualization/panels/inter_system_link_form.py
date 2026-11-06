@@ -73,6 +73,15 @@ class InterSystemLinkForm(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
+        # Fuel carried by a fuel-route link (hidden for transmission links).
+        # On a fuel route, capacity is the route's daily capacity in the
+        # fuel's unit, operational cost is $/unit/km and the loss factor is
+        # per 100 km (see SystemLinkConfig).
+        self._fuel = QComboBox()
+        self._fuel.setEditable(True)
+        self._fuel.currentTextChanged.connect(self._on_changed)
+        layout.addRow(tr("generator_form.fuel"), self._fuel)
+
         self._capacity = QDoubleSpinBox()
         self._capacity.setRange(0, 1e6)
         self._capacity.editingFinished.connect(self._on_changed)
@@ -152,6 +161,7 @@ class InterSystemLinkForm(QWidget):
         self._current_type.setToolTip(tr("electrical.inherited_tooltip"))
         layout.addRow(tr("line_form.current_type"), self._current_type)
 
+        self._props_layout = layout
         outer.addWidget(grp)
 
         # --- Economic properties ---
@@ -247,6 +257,16 @@ class InterSystemLinkForm(QWidget):
         self._updating = True
         try:
             self._refresh_header(link)
+            is_fuel = link.link_type == "fuel_route"
+            self._props_layout.setRowVisible(self._fuel, is_fuel)
+            self._fuel.clear()
+            if is_fuel:
+                names = set()
+                for sname in (link.from_system, link.to_system):
+                    st = self._state_of(sname)
+                    names.update(getattr(st, "fuels", {}) or {})
+                self._fuel.addItems(sorted(names))
+                self._fuel.setCurrentText(link.fuel or "")
             self._capacity.setValue(float(link.capacity_mw or 0.0))
             self._voltage.setValue(float(link.voltage_kv or 0.0))
             lt_idx = self._line_type.findText(link.line_type or "")
@@ -403,6 +423,8 @@ class InterSystemLinkForm(QWidget):
         # ``or None``) — otherwise the next load_element would render
         # the field as the special-value text ("Default" / "Global"),
         # which the user perceived as "not editable".
+        if link.link_type == "fuel_route":
+            link.fuel = self._fuel.currentText().strip()
         link.capacity_mw = float(self._capacity.value())
         link.voltage_kv = float(self._voltage.value())
         link.line_type = self._line_type.currentText() or None

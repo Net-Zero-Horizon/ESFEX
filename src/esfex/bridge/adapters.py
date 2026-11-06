@@ -1887,9 +1887,29 @@ class PowerSystemAdapter:
             acopf_q_min_ratio=float(getattr(sys.ac_power_flow, 'q_min_ratio', 0.5)),
             gen_q_limits=_build_gen_q_limits(sys),
             gen_q_limits_min=_build_gen_q_limits_min(sys),
+            co2_budget_groups=self._co2_budget_groups(sys, ESFEX),
         )
 
         return jl_input
+
+    @staticmethod
+    def _co2_budget_groups(sys, ESFEX):
+        """Per-system CO2 budgets of a merged run as ``CO2BudgetGroup``s.
+
+        Empty for a single system: the dispatch then uses ``co2_budget`` and
+        ``co2_budget_violation_penalty`` over all nodes.
+        """
+        jl = get_julia()
+        groups = jl.seval("CO2BudgetGroup[]")
+        for b in getattr(sys, "co2_budget_by_system", None) or []:
+            nodes = [b.first_node + k + 1 for k in range(b.num_nodes)]   # 1-indexed
+            jl.seval("push!")(groups, ESFEX.CO2BudgetGroup(
+                str(b.system),
+                py_to_julia_int_vector(nodes),
+                float(b.annual_budget) if b.enabled else float("inf"),
+                scale_cost(float(b.violation_penalty)),
+            ))
+        return groups
 
     def write_lp(self, filepath: str) -> None:
         """

@@ -2982,6 +2982,7 @@ class MainWindow(QMainWindow):
                         self.model.add_inter_system_link(
                             link_id=lk.link_id,
                             link_type=lk.link_type,
+                            fuel=lk.fuel,
                             from_system=lk.from_system,
                             to_system=lk.to_system,
                             from_node=lk.from_node,
@@ -7112,6 +7113,7 @@ class MainWindow(QMainWindow):
             self.model.add_inter_system_link(
                 link_id=lk.link_id,
                 link_type=lk.link_type,
+                fuel=lk.fuel,
                 from_system=lk.from_system,
                 to_system=lk.to_system,
                 from_node=lk.from_node,

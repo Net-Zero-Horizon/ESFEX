@@ -281,7 +281,8 @@ def config_to_inter_system_links(
 
             link = GuiInterSystemLink(
                 link_id=f"islink_{counter}",
-                link_type="transmission",
+                link_type=getattr(sl, "link_type", None) or "transmission",
+                fuel=getattr(sl, "fuel", None) or "",
                 from_system=from_sys,
                 to_system=to_sys,
                 from_node=conn[0],
@@ -326,14 +327,16 @@ def inter_system_links_to_config_dict(
     if meta is None:
         return
 
-    # Group by (from_system, to_system)
-    groups: dict[tuple[str, str], list[GuiInterSystemLink]] = defaultdict(list)
+    # One systems_links entry per (from_system, to_system, type, fuel):
+    # the type and fuel are per entry, the rest are per-connection lists.
+    groups: dict[tuple[str, str, str, str], list[GuiInterSystemLink]] = defaultdict(list)
     for lk in links:
-        key = (lk.from_system, lk.to_system)
-        groups[key].append(lk)
+        link_type = lk.link_type or "transmission"
+        fuel = (lk.fuel or "") if link_type == "fuel_route" else ""
+        groups[(lk.from_system, lk.to_system, link_type, fuel)].append(lk)
 
     systems_links = []
-    for (from_sys, to_sys), group in groups.items():
+    for (from_sys, to_sys, link_type, fuel), group in groups.items():
         # Per-link GUI metadata so the map polyline survives save→load.
         # SystemLinkConfig now accepts these as optional fields; the
         # solver pipeline ignores them.
@@ -367,6 +370,11 @@ def inter_system_links_to_config_dict(
 
         sl = {
             "systems": [from_sys, to_sys],
+            "link_type": link_type,
+        }
+        if link_type == "fuel_route":
+            sl["fuel"] = fuel or None
+        sl.update({
             "connections": [[lk.from_node, lk.to_node] for lk in group],
             "existing_capacity_MW": [lk.capacity_mw for lk in group],
             "max_investment_MW": [lk.max_investment_mw for lk in group],
@@ -391,7 +399,7 @@ def inter_system_links_to_config_dict(
             "current_type":     [lk.current_type or "AC"   for lk in group],
             "decorative":       [bool(lk.decorative)       for lk in group],
             "style":            style_per_link,
-        }
+        })
         systems_links.append(sl)
     meta["systems_links"] = systems_links
 
