@@ -412,6 +412,33 @@ def extract_year_profile(
         raise ValueError(f"Unsupported profile type: {type(full_profile)}")
 
 
+def _read_node_profile(
+    file_path: Path,
+    num_nodes: Optional[int],
+    date_start: Optional[str],
+) -> np.ndarray:
+    """Hourly profile of a CSV/Excel file as ``(hours, num_nodes)``.
+
+    Header rows are skipped and Feb 29 rows dropped (by the calendar from
+    ``date_start`` when given, and always for a file of exactly 8784 rows).
+    A single column is copied to every node; missing columns repeat the
+    last one; extra columns are dropped.
+    """
+    profile = drop_leap_days(
+        read_hourly_table(file_path),
+        parse_date_start(date_start) if date_start else None,
+    )
+    if num_nodes is not None and profile.shape[1] != num_nodes:
+        if profile.shape[1] == 1:
+            profile = np.tile(profile, (1, num_nodes))
+        elif profile.shape[1] < num_nodes:
+            padding = np.tile(profile[:, -1:], (1, num_nodes - profile.shape[1]))
+            profile = np.hstack([profile, padding])
+        else:
+            profile = profile[:, :num_nodes]
+    return profile
+
+
 def load_availability_profile(
     file_path: Union[str, Path],
     temporal_resolution_hours: int = 1,
@@ -451,31 +478,9 @@ def load_availability_profile(
         return np.ones((hours, nodes))
 
     try:
-        availability = drop_leap_days(
-            read_hourly_table(file_path),
-            parse_date_start(date_start) if date_start else None,
-        )
-
-        # Adjust columns to match num_nodes.
-        # Availability is a per-generator temporal profile, so a single-column
-        # file is the common case — broadcast it to all nodes.
-        if num_nodes is not None and availability.shape[1] != num_nodes:
-            if availability.shape[1] == 1:
-                # Single profile → replicate for every node
-                availability = np.tile(availability, (1, num_nodes))
-            elif availability.shape[1] < num_nodes:
-                # Partial columns → replicate the last column for missing nodes
-                padding = np.tile(
-                    availability[:, -1:],
-                    (1, num_nodes - availability.shape[1]),
-                )
-                availability = np.hstack([availability, padding])
-            else:
-                # More columns than nodes → truncate
-                availability = availability[:, :num_nodes]
-
-        # Clip to [0, 1]
-        availability = np.clip(availability, 0.0, 1.0)
+        # Availability is a per-generator capacity factor: a single-column
+        # file is the common case and is broadcast to all nodes.
+        availability = np.clip(_read_node_profile(file_path, num_nodes, date_start), 0.0, 1.0)
 
         # Apply temporal aggregation using MEAN (availability is a capacity factor)
         if temporal_resolution_hours > 1:
@@ -492,3 +497,35 @@ def load_availability_profile(
         hours = HOURS_STD_YEAR // temporal_resolution_hours
         nodes = num_nodes or 10
         return np.ones((hours, nodes))
+
+
+def load_inflow_profile(
+    file_path: Union[str, Path],
+    temporal_resolution_hours: int = 1,
+    num_nodes: Optional[int] = None,
+    date_start: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Load a reservoir inflow profile (MW-eq per hour) from a CSV or Excel file.
+
+    Rows, columns and Feb 29 are handled as in
+    :func:`load_availability_profile`, but the values are flows, not
+    capacity factors: they are not clipped to [0, 1], and a missing or
+    unreadable file raises instead of defaulting to 1.0.
+
+    Returns
+    -------
+    np.ndarray
+        Inflow array with shape (hours, nodes), averaged over
+        ``temporal_resolution_hours`` steps when that is above 1.
+    """
+    from esfex.utils.temporal import aggregate_to_resolution
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Inflow file not found: {file_path}")
+    inflow = _read_node_profile(file_path, num_nodes, date_start)
+    if temporal_resolution_hours > 1:
+        inflow = aggregate_to_resolution(inflow, temporal_resolution_hours)
+    logger.debug(f"Loaded inflow from {file_path}: shape={inflow.shape}, mean={inflow.mean():.3f}")
+    return inflow

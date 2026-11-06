@@ -104,12 +104,16 @@ class SystemCO2Budget(BaseModel):
     Built by the multi-system merge (not a YAML key): each original system
     keeps its own ``co2_budget`` and ``penalties.co2_budget_violation``
     over its own nodes (``first_node`` .. ``first_node + num_nodes - 1``,
-    0-indexed in the merged network).
+    0-indexed in the merged network, plus ``extra_nodes``).
     """
 
     system: str
     first_node: int = Field(ge=0)
     num_nodes: int = Field(ge=0)
+    # Nodes outside the contiguous range that also belong to this system:
+    # development-zone nodes, appended after every system's nodes, join the
+    # system of the bus they connect to.
+    extra_nodes: list[int] = Field(default_factory=list)
     enabled: bool = True
     annual_budget: float = Field(ge=0, description="tonnes CO2 per year")
     violation_penalty: float = Field(description="$/tCO2 over budget")

@@ -939,7 +939,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `enabled` | bool | `true` | Enforce the budget |
 | `annual_budget` | float (≥ 0) | `1000000` | Annual budget (t CO₂/year) |
 
-The budget covers the system's own power plants. In a multi-system run each system keeps its own budget, enabled flag and `penalties.co2_budget_violation`: the dispatch adds one budget constraint per system over that system's nodes.
+The budget covers the system's own power plants. In a multi-system run each system keeps its own budget, enabled flag and `penalties.co2_budget_violation`: the dispatch adds one budget constraint per system over that system's nodes, including the nodes of development zones connected to its buses.
 
 ---
 
