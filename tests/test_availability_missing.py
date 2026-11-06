@@ -7,6 +7,7 @@ dispatch.
 """
 
 import logging
+from datetime import datetime
 import sys
 from types import SimpleNamespace
 
@@ -24,7 +25,8 @@ def _preload(tmp_path, generators=None, technologies=None):
     sysc = _make_system_config(num_nodes=2, generators=generators or {},
                                technologies=technologies or {})
     fake = SimpleNamespace(primary_system=sysc,
-                           config_path=str(tmp_path / "case.yaml"))
+                           config_path=str(tmp_path / "case.yaml"),
+                           _data_start=lambda: datetime(2025, 1, 1))
     return Orchestrator._preload_availability_profiles(fake, 2)
 
 
