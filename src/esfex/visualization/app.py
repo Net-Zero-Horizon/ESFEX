@@ -64,7 +64,8 @@ def _get_or_create_app() -> QApplication:
     return app
 
 
-def run_studio(config=None, system: str | None = None) -> MainWindow:
+def run_studio(config=None, system: str | None = None,
+               output: str | None = None) -> MainWindow:
     """Create and show the editor window.
 
     Parameters
@@ -73,6 +74,8 @@ def run_studio(config=None, system: str | None = None) -> MainWindow:
         An existing configuration to load into the editor.
     system : str | None
         Name of the system to focus on (default: first).
+    output : str | None
+        File that File > Save writes to (default: the ``config`` file).
 
     Returns
     -------
@@ -146,6 +149,11 @@ def run_studio(config=None, system: str | None = None) -> MainWindow:
                 with open(config_path, "r", encoding="utf-8") as fh:
                     window._raw_config_dict = _yaml.safe_load(fh) or {}
             # Actual population happens in Phase 3 (GuiModel + serializer)
+        if config_path is not None:
+            window._config_path = str(config_path)
+            window._load_base_dir = str(config_path.parent)
+    if output:
+        window._config_path = str(output)
 
     splash.set_progress(85, tr("splash.loading_plugins"))
 

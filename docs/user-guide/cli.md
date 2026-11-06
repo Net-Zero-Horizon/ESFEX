@@ -42,7 +42,7 @@ esfex run -c CONFIG [OPTIONS]
 | `--verbose` | `-v` | Flag | off | Debug-level console logging, solver output on, and the configuration summary table |
 | `--dry-run` | | Flag | off | Load and validate the configuration, then exit without starting Julia |
 
-The value passed to `--solver` is not checked by the CLI; a solver that is not installed (see [`list-solvers`](#esfex-list-solvers)) fails when the first model is solved.
+`--mode` and `--solver` must be one of the values listed (the solver name is case-insensitive); anything else stops the command with exit code 2 before the configuration is loaded. The CLI does not check that the solver is installed: one that is not (see [`list-solvers`](#esfex-list-solvers)) fails when the first model is solved.
 
 ### Examples
 
@@ -108,7 +108,7 @@ Solver: (from config)
 ```
 
 !!! note
-    The `Mode:` and `Solver:` header lines show only what was passed with `-m` / `-s`. Without `-m` the header reads `Mode: None`; the summary table shows the mode and solver that are actually used.
+    The `Mode:` and `Solver:` header lines show what was passed with `-m` / `-s`, or `(from config)` when the option was omitted; the summary table shows the mode and solver that are actually used.
 
 Each simulated year then logs a result line of the form:
 
@@ -317,10 +317,10 @@ PySide6 is a core dependency, so no extra installation is needed.
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--config` | `-c` | Path | none | Existing YAML configuration to open |
-| `--output` | `-o` | Path | none | Currently has no effect (see note) |
+| `--output` | `-o` | Path | the `-c` file | File that File → Save writes to |
 
 !!! note
-    The configuration is saved from inside the Studio (File → Save / Save As). `-o/--output` is not passed to the Studio, so it does not change where the file is written.
+    The configuration is saved from inside the Studio. File → Save writes to the `-o` file, or to the `-c` file when `-o` is not given; File → Save As picks another file. Relative data paths in the `-c` file are resolved against its folder.
 
 ### Examples
 
@@ -330,6 +330,9 @@ esfex studio
 
 # Open an existing configuration
 esfex studio -c island_system.yaml
+
+# Edit a copy: File → Save writes island_v2.yaml, not the original
+esfex studio -c island_system.yaml -o island_v2.yaml
 ```
 
 ### Console Output
@@ -339,7 +342,7 @@ ESFEX - Studio
 Loading: island_system.yaml
 ```
 
-When the window closes, the CLI prints `Configuration saved to: <path>` if the configuration was saved during the session, or `Studio closed without saving.` otherwise. The printed path is the `-c` (or `-o`) argument, not necessarily the file you chose in the Save dialog.
+When the window closes, the CLI prints `Configuration saved.` if the configuration was saved during the session, or `Studio closed without saving.` otherwise.
 
 See the [GUI Editor](../gui/overview.md) pages for what the Studio can do.
 

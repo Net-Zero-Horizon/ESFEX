@@ -6,6 +6,7 @@ and exporting results.
 """
 
 import sys
+import typing
 from pathlib import Path
 from typing import Optional
 
@@ -88,6 +89,31 @@ except Exception:
 
 console = Console(force_terminal=True)
 
+# Values `run --mode/--solver` accept: the schema's (esfex/__init__ already
+# imports it, so this costs nothing at startup).
+from esfex.config.schema import ESFEXConfig as _ESFEXConfig, SolverConfig as _SolverConfig
+
+SIMULATION_MODES: tuple[str, ...] = typing.get_args(
+    _ESFEXConfig.model_fields["simulation_mode"].annotation)
+SOLVER_NAMES: tuple[str, ...] = typing.get_args(
+    _SolverConfig.model_fields["name"].annotation)
+
+
+def _check_mode(value: Optional[str]) -> Optional[str]:
+    if value is not None and value not in SIMULATION_MODES:
+        raise typer.BadParameter(
+            f"'{value}' is not a simulation mode; use one of: {', '.join(SIMULATION_MODES)}")
+    return value
+
+
+def _check_solver(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.lower() not in SOLVER_NAMES:
+        raise typer.BadParameter(
+            f"'{value}' is not a supported solver; use one of: {', '.join(SOLVER_NAMES)}")
+    return value.lower()
+
 
 @app.command()
 def run(
@@ -105,14 +131,17 @@ def run(
         None,
         "--mode",
         "-m",
-        help="Simulation mode: 'development' or 'unit_commitment'. "
+        help=f"Simulation mode: {', '.join(SIMULATION_MODES)}. "
              "If omitted, the value from the config file is used.",
+        callback=_check_mode,
     ),
     solver: Optional[str] = typer.Option(
         None,
         "--solver",
         "-s",
-        help="Override solver from config: 'highs', 'cbc', 'glpk', 'gurobi', 'cplex'",
+        help=f"Override the config's solver: {', '.join(SOLVER_NAMES)}. "
+             "If omitted, the value from the config file is used.",
+        callback=_check_solver,
     ),
     output: Optional[Path] = typer.Option(
         None,
@@ -161,7 +190,7 @@ def run(
     if verbose:
         console.print(f"[bold blue]ESFEX[/bold blue] - Power System Optimization")
         console.print(f"Configuration: {config}")
-        console.print(f"Mode: {mode}")
+        console.print(f"Mode: {mode or '(from config)'}")
         console.print(f"Solver: {solver or '(from config)'}")
         console.print()
 
@@ -379,7 +408,7 @@ def studio(
         None,
         "--output",
         "-o",
-        help="Output YAML path (default: overwrites input)",
+        help="YAML path File > Save writes to (default: the --config file)",
     ),
 ):
     """
@@ -402,11 +431,11 @@ def studio(
     if config:
         console.print(f"Loading: {config}")
 
-    result = launch_studio(config=str(config) if config else None, blocking=True)
+    result = launch_studio(config=str(config) if config else None, blocking=True,
+                           output=str(output) if output else None)
 
     if result:
-        out_path = output or config or Path("esfex_config.yaml")
-        console.print(f"[green]Configuration saved to: {out_path}[/green]")
+        console.print("[green]Configuration saved.[/green]")
     else:
         console.print("[yellow]Studio closed without saving.[/yellow]")
 

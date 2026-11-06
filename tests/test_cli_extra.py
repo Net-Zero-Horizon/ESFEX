@@ -205,6 +205,40 @@ class TestStudio:
             )
         assert result.exit_code == 0
         assert "saved" in result.output.lower()
+        # -o reaches the Studio (it used to be dropped).
+        fake_vis.launch_studio.assert_called_once_with(
+            config=str(tmp_path / "in.yaml"), blocking=True,
+            output=str(tmp_path / "out.yaml"))
+
+    def test_launch_studio_passes_output_and_reloads_saved_file(
+            self, tmp_path, monkeypatch):
+        """launch_studio hands ``output`` to the window and returns the
+        configuration reloaded from the file the user saved."""
+        pytest.importorskip("PySide6")
+        import esfex.visualization as vis
+        import esfex.visualization.app as vis_app
+
+        window = SimpleNamespace(_last_saved_path=None)
+        calls = {}
+
+        def fake_run_studio(config=None, system=None, output=None):
+            calls.update(config=config, output=output)
+            return window
+
+        app_obj = MagicMock()
+        app_obj.exec.side_effect = lambda: setattr(
+            window, "_last_saved_path", str(tmp_path / "out.yaml"))
+        monkeypatch.setattr(vis_app, "_get_or_create_app", lambda: app_obj)
+        monkeypatch.setattr(vis_app, "run_studio", fake_run_studio)
+        with patch("esfex.config.loader.load_config", return_value="CFG") as load:
+            result = vis.launch_studio("in.yaml", output=tmp_path / "out.yaml")
+        assert calls == {"config": "in.yaml", "output": str(tmp_path / "out.yaml")}
+        load.assert_called_once_with(str(tmp_path / "out.yaml"))
+        assert result == "CFG"
+
+        app_obj.exec.side_effect = None
+        window._last_saved_path = None
+        assert vis.launch_studio("in.yaml") is None
 
     def test_not_saved(self):
         fake_vis = SimpleNamespace(launch_studio=MagicMock(return_value=False))

@@ -369,8 +369,12 @@ class MainWindow(QMainWindow):
         self.model = GuiModel(self)
         self._loaded_config = None  # ESFEXConfig (set externally)
         self._raw_config_dict: dict | None = None  # raw YAML dict for GUI-only keys
-        self._result_config = None  # set on export/save
         self._config_path: Optional[str] = None
+        # Path of the last successful File > Save (read by launch_studio).
+        self._last_saved_path: Optional[str] = None
+        # Directory relative data paths resolve against when the file was
+        # loaded from somewhere other than _config_path (``studio -c in -o out``).
+        self._load_base_dir: Optional[str] = None
         self._last_output_dir: str = ""
         self._all_states: dict[str, object] = {}  # system_name -> GuiSystemState
         self._current_system_name: str = ""
@@ -3420,8 +3424,8 @@ class MainWindow(QMainWindow):
         """Run ``_populate_from_config`` after the first paint."""
         self._populate_from_config(
             self._loaded_config, raw_dict=self._raw_config_dict,
-            base_dir=(str(Path(self._config_path).parent)
-                      if self._config_path else None),
+            base_dir=self._load_base_dir or (str(Path(self._config_path).parent)
+                                             if self._config_path else None),
         )
         self.console.update_namespace(
             config=self._loaded_config, state=self.model.state,
@@ -7436,6 +7440,7 @@ class MainWindow(QMainWindow):
             finally:
                 progress.close()
             self._config_path = path
+            self._last_saved_path = path
             # State on disk now matches in-memory state.
             self._clear_modified()
             self._update_window_title()

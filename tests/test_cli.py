@@ -280,6 +280,49 @@ class TestRunCommand:
         assert result.exit_code == 0
         assert mock_esfex_config.solver.name == "cbc"
 
+    @pytest.mark.parametrize("flag,value", [("--mode", "operational"),
+                                            ("--solver", "mosek")])
+    def test_unknown_mode_or_solver_rejected(self, minimal_config_path,
+                                             mock_esfex_config, flag, value):
+        """--mode/--solver are checked against the schema before anything runs
+        (they used to be assigned to the config unchecked)."""
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config) as load:
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path), flag, value, "--dry-run"])
+        assert result.exit_code == 2
+        assert value in result.output
+        load.assert_not_called()
+
+    def test_every_schema_mode_and_solver_accepted(self, minimal_config_path,
+                                                   mock_esfex_config):
+        from esfex.cli import SIMULATION_MODES, SOLVER_NAMES
+        assert set(SIMULATION_MODES) == {"development", "unit_commitment",
+                                         "economic_dispatch"}
+        assert {"clarabel", "scs", "ipopt", "scip", "xpress"} <= set(SOLVER_NAMES)
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config):
+            result = runner.invoke(app, [
+                "run", "--config", str(minimal_config_path),
+                "--mode", "economic_dispatch", "--solver", "Ipopt", "--dry-run"])
+        assert result.exit_code == 0
+        assert mock_esfex_config.simulation_mode == "economic_dispatch"
+        assert mock_esfex_config.solver.name == "ipopt"
+
+    def test_help_lists_every_solver(self):
+        from esfex.cli import SOLVER_NAMES
+        result = runner.invoke(app, ["run", "--help"], terminal_width=400)
+        out = " ".join(result.output.split())
+        for name in SOLVER_NAMES:
+            assert name in out
+
+    def test_verbose_header_without_mode(self, minimal_config_path, mock_esfex_config):
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config):
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path), "--dry-run", "--verbose"])
+        assert result.exit_code == 0
+        out = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "Mode: None" not in out
+        assert "Mode: (from config)" in out
+
     def test_config_load_error_handled(self, minimal_config_path):
         from esfex.config.loader import ConfigLoadError
         with patch(_PATCH_LOAD_CONFIG, side_effect=ConfigLoadError("parse error")):
