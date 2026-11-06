@@ -345,24 +345,24 @@ The Benders master also contains TECH, BUD, RET-2, CAP, TXN and RE-2/RE-3.
 | `pp_transport_cap_{f}_r{r}_{p}` | PE-2 | Transport capacity |
 | `pp_ne_max_{f}_{s}_{n}_{p}`, `pp_ne_satisfy_{f}_{s}_{n}_{p}` | PE-6 | Non-electric demand |
 
-A period's shipment `T[r, p]` leaves its origin evenly over the period's steps and reaches the destination tank `τ` steps later, times `(1 − losses_fraction * distance_km / 100)` (PE-3, PE-3b); these arrivals and departures enter the tank balance below. There are no periodic storage levels.
+A period's shipment `T[r, p]` leaves its origin evenly over the period's steps and reaches the destination tank `τ` steps later, times `(1 − losses_fraction * distance_km / 100)` (PE-3, PE-3b); these arrivals and departures enter the tank balance below. In rolling-horizon dispatch, fuel shipped in a window's committed steps that arrives after them is a fixed arrival of the next window (`scheduled_arrivals`). There are no periodic storage levels.
 
 ### Tanks and Hourly Use
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `hr_storage_initial_{f}_{n}` | PE-H1 | Tank initial level |
-| `hr_storage_balance_{f}_{n}_{t}` | PE-4 | `V[t+1] = V[t] + eta * (local supply + arrivals) - drawn - departures` (no loss on V) |
-| `hr_storage_dispatch_rate_*` | PE-H3 | Drawn <= rate × capacity |
+| `hr_storage_balance_{f}_{n}_{t}` | PE-4 | `V[t+1] = V[t] + eta * (local supply + arrivals [+ electrolyzer H2 for Hydrogen]) - drawn - departures` (no loss on V) |
+| `hr_storage_dispatch_rate_*` | PE-H3 | Drawn <= rate × Δt × capacity (rate per hour; only at nodes with a tank) |
 | `hr_storage_min_*`, `hr_storage_max_*`, `hr_storage_min_final_*` | PE-5 | Tank level bounds (after each step; minimum also at period ends) |
 | `hr_storage_min_last_{f}_{n}` | PE-5 | Development mode: the window ends with the tank >= 10 % of capacity (no cyclic storage) |
 | `hr_demand_coverage_{f}_{n}_{t}` | PE-5e | Drawn + shortfall >= fuel for power + non-electric use |
 | `hr_ne_limit_{f}_{s}_{n}_{t}` | PE-H6 | Hourly non-electric use limit |
 | `hr_emissions_*`, `hr_emissions_direct_*`, `hr_total_emissions_{n}_{t}` | PE-EM | Emissions |
 | `link_supply_storage_in_*`, `link_ne_*` | PE-LINK | A period's local supply and non-electric use add up over its steps |
-| `pe_coupling_gen{g}_{b}_{t}` | PE-8 | `gen_output * Δt <= fuel_for_power[node(b), t] * mwhe_per_unit` (inequality, per bus) |
+| `pe_coupling_gen{g}_n{n}_{t}` | PE-8 | `Σ_b∈n gen_output[g, b, t] * Δt <= fuel_for_power[n, t] * mwhe_per_unit` (inequality, per unit and node) |
 
-`primary_energy.jl` also defines electrolyzer constraints (`electrolyzer_max_power_*`, `h2_production_*`, `electrolyzer_ramp_*`), and `electrolyzer.jl` its own versions; neither is used by the runner (the adapter passes no electrolyzer to the primary-energy model). The active electrolyzer constraints are ELZ-1/ELZ-2 in `power_system.jl`.
+The dispatch electrolyzers (ELZ-1/ELZ-2 in `power_system.jl`) have no constraint of their own here: their hydrogen is a term of the `Hydrogen` tank balance (PE-H2). `electrolyzer.jl` defines its own electrolyzer constraints, which the runner does not use.
 
 ---
 
@@ -434,7 +434,7 @@ Each SPORES objective replaces the cost objective (and any previous SPORES objec
 | Module | Approximate Constraint Families | Main Variables |
 |--------|----------------------|-----------|
 | `power_system.jl` | ~45 families + PWL segments | gen_output, gen_status, bat_charge, bat_discharge, bat_soc, reservoir_level, reservoir_pump, reservoir_spillage, load_shed, curtailment, reserves, ev_charging, ev_v2g, ev_soc, electrolyzer_power, gen_seg_output, bat_seg_discharge |
-| `master_problem.jl` | ~25 families | tech_investment, bat_tech_power_investment, bat_tech_capacity_investment, transfer_investment, gen_life_extension, bat_life_extension, reservoir_investment, fuel storage/transport investment, re_penetration_ratio, slacks |
+| `master_problem.jl` | ~25 families | tech_investment, bat_tech_power_investment, bat_tech_capacity_investment, transfer_investment, gen_life_extension, bat_life_extension, reservoir_investment, re_penetration_ratio, slacks |
 | `benders.jl` | ~5 families + reused master and dispatch families | theta, master and subproblem copies |
 | `transmission_dc.jl` | ~10 families | power_flow_by_line, voltage_angle, ploss, converter flows |
 | `primary_energy.jl` | ~30 families | fuel supply, transport, storage, hourly storage flows, fuel for power |

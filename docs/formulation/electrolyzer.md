@@ -1,6 +1,6 @@
 # Electrolyzer Model
 
-Electrolyzers convert power to hydrogen (P2H2) [**[49]**](../reference/bibliography.md#ref49) and are a common sector-coupling technology [**[50]**](../reference/bibliography.md#ref50). In ESFEX the electrolyzer is a bounded, controllable electrical load in the operational dispatch (`power_system.jl`); its hydrogen output is reported in the results but not modelled.
+Electrolyzers convert power to hydrogen (P2H2) [**[49]**](../reference/bibliography.md#ref49) and are a common sector-coupling technology [**[50]**](../reference/bibliography.md#ref50). In ESFEX the electrolyzer is a bounded, controllable electrical load in the operational dispatch (`power_system.jl`). With the primary-energy model on and a fuel source named `Hydrogen`, its hydrogen fills that fuel's tank at its node; otherwise the hydrogen is only reported.
 
 ---
 
@@ -18,8 +18,9 @@ What ESFEX models today:
 - The electrolyzer's power consumption in the operational dispatch, bounded by its rated power and ramp rates, as a load in the power balance
 - Its variable and fixed costs
 - Every entry under `electrolyzers`, each with its own power and hydrogen output in the results
+- With primary energy: the hydrogen enters the `Hydrogen` tank of the electrolyzer's node ([Primary Energy](primary-energy.md#power-system-coupling), PE-H2), where hydrogen-fuelled generators and non-electric hydrogen demand draw it (role 2)
 
-What it does not model: hydrogen as a commodity (the output is only reported), hydrogen demand or storage coupling, investment in new electrolyzers, minimum operating point, and the electrolyzer in the master problem. Because the dispatch gives the hydrogen no value, it plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`. The sector-coupling role (2) is not implemented.
+What it does not model: investment in new electrolyzers, minimum operating point, a market value for hydrogen, and the electrolyzer in the master problem. Without a `Hydrogen` primary-energy source the dispatch gives the hydrogen no value, and the electrolyzer plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`.
 
 ---
 
@@ -97,11 +98,11 @@ where \(r^{up}_b\), \(r^{down}_b\) are `ramp_up` and `ramp_down` in fractions of
 
 ### Not implemented
 
-- **Hydrogen balance.** The hydrogen produced is reported (see [Results](#72-results)) but not modelled: no hydrogen demand, storage or revenue is linked to the electrolyzer.
+- **Hydrogen balance without primary energy.** Without a `Hydrogen` primary-energy source the hydrogen produced is only reported (see [Results](#72-results)).
 - **Minimum operating point.** `min_power` is not used; the electrolyzer can run at any level between 0 and its rated power.
 - **Investment.** `invest_cost`, `invest_max_power` and `life_time` are not used by the dispatch, and the master problem has no electrolyzer.
 
-The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electrolyzer_constraints!`, ...) and the electrolyzer block of `primary_energy.jl` (investment, `h2_production`, `electrolyzer_max_power_*`) model investment and hydrogen output, but no run calls them: the primary-energy adapter passes no electrolyzer configuration.
+The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electrolyzer_constraints!`, ...) model investment and hydrogen output, but no run calls them.
 
 ---
 
@@ -154,7 +155,7 @@ electrolyzers:
     min_power: [0.1]              # not used by the dispatch
     ramp_up: [0.5]                # fraction of rated power per hour (0 = no limit)
     ramp_down: [0.5]
-    eff_at_rated: [0.70]          # hydrogen reported in the results
+    eff_at_rated: [0.70]          # hydrogen output (reported; fills a Hydrogen fuel tank)
     eff_at_min: [0.65]
     energy_per_kg_h2: 55.0        # kWh per kg H2
     fixed_cost: [3.4]             # $/MW per hour (about 30000 $/MW/year)
@@ -177,13 +178,13 @@ electrolyzers:
 | `variable_cost` | \(c^{var}\) | \$/MWh | Yes | Variable cost |
 | `fixed_cost` | \(c^{fix}\) | \$/MW/h | Yes (constant) | Fixed cost per hour |
 | `min_power` | -- | fraction | No | Minimum operating point |
-| `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | \(\eta\), \(e^{H_2}\) | --, kWh/kg | Results only | Hydrogen reported in the results (not in the optimisation) |
+| `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | \(\eta\), \(e^{H_2}\) | --, kWh/kg | With a `Hydrogen` primary-energy source | Hydrogen into the `Hydrogen` tank (PE-H2, in t); always reported in the results |
 | `water_cost` | -- | \$/kg H2 | No | Water cost |
 | `invest_cost`, `invest_max_power`, `life_time` | -- | -- | No | Investment |
 
 ### 7.2 Results
 
-Each electrolyzer's power and hydrogen production are kept per node and hour in the year results (`YearResults.electrolyzer_power`, `YearResults.electrolyzer_h2`, shape electrolyzer × node × hour, in configuration order) and written to the HDF5 file under `electrolyzer_power/{name}` (MW) and `electrolyzer_h2/{name}` (kg/h); see [HDF5 Output Schema](../reference/hdf5-output-schema.md#electrolyzer-data). The hydrogen output is computed after the solve, with the same conversion as the primary-energy hydrogen balance:
+Each electrolyzer's power and hydrogen production are kept per node and hour in the year results (`YearResults.electrolyzer_power`, `YearResults.electrolyzer_h2`, shape electrolyzer × node × hour, in configuration order) and written to the HDF5 file under `electrolyzer_power/{name}` (MW) and `electrolyzer_h2/{name}` (kg/h); see [HDF5 Output Schema](../reference/hdf5-output-schema.md#electrolyzer-data). The hydrogen output is computed after the solve, with the same conversion as the primary-energy hydrogen balance (which takes it in tonnes per step):
 
 \[
 H_2 = P^{elz} \cdot \frac{1000 \cdot (\eta^{rated} + \eta^{min}) / 2}{e^{H_2}} \quad \text{[kg/h]}

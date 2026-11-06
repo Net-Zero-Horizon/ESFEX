@@ -536,6 +536,8 @@ Wraps the electrolyzer model (`electrolyzer.jl`). Handles hydrogen production op
 
 Wraps the primary energy model (`primary_energy.jl`). Optimizes fuel supply chains including storage, transport, and procurement.
 
+`integrate_with_power_system(ps)` adds the block to the dispatch model: the fuel coupling of the generators and the hydrogen of the dispatch's electrolyzers into the `Hydrogen` tank. For rolling horizons, `get_final_storage_levels(step=k)` and `get_in_transit_arrivals(step=k)` give the tank levels and the fuel still in transit after the `k` committed steps; the runner passes them to the next window's adapter as `initial_storage_levels` and `scheduled_arrivals` (`{fuel: array [node, step]}`).
+
 ---
 
 ## Helper Functions
