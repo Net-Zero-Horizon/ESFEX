@@ -291,6 +291,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 | `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*` | OP-2b | Battery-technology SOC: initial, dynamics (`× Δt`), cyclic |
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |
+| `lol_sec_sum_y{y}_d{d}_n{n}_t{t}`, `lol_sec_residual_y{y}_d{d}_n{n}_t{t}` | OP-5 | Bus load shed minus sectoral LOL is in [0, bus demand not covered by any sector] (the sectoral LOL is part of the load shed) |
 | `re_min_day_s{s}_y{y}_d{d}` | RE-DAY-1 | RE generation (existing + technologies) + FRE slack >= target × day demand |
 | `re_ratio_lb_s{s}_y{y}_d{d}` | RE-DAY-2 | RE ratio <= the day's achieved share |
 | `max_curtailment_y{y}_d{d}` | CURT-1 | Curtailment (existing + technologies) <= `max_curtailment_ratio` × RE generation |
