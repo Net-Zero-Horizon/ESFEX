@@ -641,6 +641,44 @@ import Ipopt
             @test rd.objective > rf.objective + 0.5
         end
 
+        @testset "reservoir pumping draws power at its own bus (multi-bus)" begin
+            # One node split into two buses; a pumped reservoir sits on bus 2.
+            # The DC/AC KCL looked the reservoir up by NODE index (1) in the
+            # per-bus arrays, found no reservoir on bus 1 and dropped the pump
+            # from the balance: pumped water was free. With no other source
+            # and an empty reservoir, nothing can be served.
+            H = 4
+            hydro = GeneratorConfig(
+                "PumpedHydro", "Renewable", "Water", [0.0, 100.0], [0.0, 0.0],
+                [1.0, 1.0], [1.0, 1.0], [100.0, 100.0], [100.0, 100.0], [0.0, 0.0],
+                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
+                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], ones(H, 2), true,
+                [60.0, 60.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 50.0, "AC",
+                [0.0, 500.0], [0.0, 0.0], [0.0, 0.0], [0.0, 1.0], zeros(H, 2),
+                [1.0, 1.0], [0.0, 0.0], [0.0, 50.0], [0.8, 0.8], true,
+                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
+            )
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 0.0),
+                     BusData(2, 1, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            line = TransmissionLineData("L12", 1, 2, 10.0, 0.1, 0.0, 0.0,
+                                        200.0, 220.0, 1, 50.0, "AC")
+            net = NetworkConfig(1, 2, buses, [1, 1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.6, 1, [0.0], [0.0],
+                                [line], TransformerData[], ACDCConverterData[],
+                                FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "pump", year = 2025, network = net, generators = [hydro],
+                batteries = BatteryConfig[], demand = reshape([0.0, 10.0, 10.0, 10.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                pwl_loss_segments = 0)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test res.load_shed_total ≈ 30.0 atol = 1e-4
+        end
+
         @testset "two-bus transmission + renewable + battery" begin
             H = 2; N = 2
             gas  = mkgen("GasCC", "Non-renewable", "Gas", [100.0, 0.0],

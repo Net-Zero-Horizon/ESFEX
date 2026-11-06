@@ -579,8 +579,8 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             if vars.reservoir_pump !== nothing
                 for g in vars.gens_at_bus[i]
                     gen = input.generators[g]
-                    nidx = b2n[i]
-                    if gen.reservoir_capacity[nidx] > 0 && gen.reservoir_pump_capacity[nidx] > 0
+                    # Reservoir arrays are per bus (expanded by the adapter).
+                    if gen.reservoir_capacity[i] > 0 && gen.reservoir_pump_capacity[i] > 0
                         add_to_expression!(reservoir_pump_term, vars.reservoir_pump[g, i, t])
                     end
                 end
