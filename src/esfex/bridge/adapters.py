@@ -1372,6 +1372,7 @@ class PowerSystemAdapter:
         # Create virtual generators from investment units in units_config
         # These are created by _build_config_from_cumulative() but don't exist
         # in sys.generators — they represent technology investments from MasterProblem
+        per_bus_gen_keys: set = set()
         for key, vdata in self.units_config.items():
             if key in sys.generators:
                 continue  # Already handled above
@@ -1412,6 +1413,9 @@ class PowerSystemAdapter:
                 frequency_hz=vdata.get("frequency_hz", 50.0),
                 current_type=vdata.get("current_type", "AC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),
+                # The technology's bidding curve, so the dispatch prices the
+                # unit as the master did (flat fuel_cost otherwise).
+                fuel_cost_curve=vdata.get("fuel_cost_curve"),
             )
 
             # Load availability profile for virtual generator
@@ -1459,6 +1463,8 @@ class PowerSystemAdapter:
                                                     bus_to_node=b2n_arg)
             jl.seval("push!")(jl_generators, jl_vgen)
             gen_order.append((key, vgen))
+            if is_per_bus and b2n_arg is not None:
+                per_bus_gen_keys.add(key)
             avail_shape = v_avail.shape if v_avail is not None else "NONE"
             avail_mean = float(np.mean(v_avail)) if v_avail is not None else 0.0
             logger.info(f"Virtual gen: {vdata.get('name', key)}, type={vdata.get('type')}, "
@@ -1559,6 +1565,7 @@ class PowerSystemAdapter:
             gen_order, [], num_buses,
             bus_to_node=bus_to_node_0idx if need_expansion else None,
             gen_bus_per_node=gen_bus_per_node,
+            per_bus_keys=per_bus_gen_keys,
         )
         jl_bat_cost_curves = build_bat_cost_curves_dict(
             bat_order, num_buses,
