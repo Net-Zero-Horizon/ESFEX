@@ -980,6 +980,52 @@ import Ipopt
             @test ESFEX.with_loss_model(t, 0, 100.0).pwl_losses === nothing
         end
 
+        @testset "line flow cost is charged on |flow|" begin
+            # Inter-system links carry distance × cost_per_mw_km per MWh; the
+            # dispatch charged nothing. A cheap unit at the far end serves the
+            # load over the line while the flow cost stays below the price gap.
+            function flow_run(cost; cheap_bus = 1)
+                H = 2; N = 2
+                fc = cheap_bus == 1 ? [1.0e-5, 1.0e-4] : [1.0e-4, 1.0e-5]
+                gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 200.0], fc,
+                            ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("link_A_B_0", 1, 2, 150.0, 0.1, 0.0, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC", cost)
+                net = NetworkConfig(N, N, buses, [1, 2],
+                                    [0.0 150.0; 150.0 0.0], [0.0 100.0; 100.0 0.0],
+                                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                    [line], TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                demand = cheap_bus == 1 ? [0.0 100.0; 0.0 100.0] : [100.0 0.0; 100.0 0.0]
+                input = PowerSystemInput(
+                    name = "flowcost", year = 2025, network = net, generators = [gas],
+                    batteries = BatteryConfig[], demand = demand,
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = 0)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                imported = sum(value(vars.gen_output[1, cheap_bus, t]) for t in 1:H)
+                return imported, res.cost_breakdown.line_flow_cost
+            end
+            imported, cost = flow_run(5.0e-5)
+            @test imported ≈ 200.0 atol = 1e-6
+            @test cost ≈ 200.0 * 5.0e-5 rtol = 1e-6
+            imported, cost = flow_run(5.0e-5; cheap_bus = 2)    # reverse direction
+            @test imported ≈ 200.0 atol = 1e-6
+            @test cost ≈ 200.0 * 5.0e-5 rtol = 1e-6
+            imported, cost = flow_run(2.0e-4)                   # dearer than the gap
+            @test imported ≈ 0.0 atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-9
+            # Default constructor: no flow cost
+            @test TransmissionLineData("L", 1, 2, 1.0, 0.1, 0.0, 0.0, 1.0, 220.0,
+                                       1, 50.0, "AC").flow_cost == 0.0
+        end
+
         @testset "end-of-year SOC floor" begin
             # Rolling windows leave the end SOC free; the year's last window
             # gets a soft floor so the battery does not end the year emptier

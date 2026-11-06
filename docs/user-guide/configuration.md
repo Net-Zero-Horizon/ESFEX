@@ -594,7 +594,7 @@ meta_network:
       cost_per_mw_km: [0.0]               # flow cost, $ per MWh and km
 ```
 
-`systems_links` is a list. Each list field holds one value per entry of `connections`. All listed systems are merged into a single network, and each link becomes a transmission line in both the master problem and the operational dispatch. The first system in `meta_network.systems` is the primary system; some features (for example development zones) read only the primary system. See [Inter-System Links](../gui/inter-system-links.md).
+`systems_links` is a list. Each list field holds one value per entry of `connections`. All listed systems are merged into a single network, and each link becomes a transmission line in both the master problem and the operational dispatch. The master and the dispatch charge every MWh the link carries, in either direction, `distance_km × cost_per_mw_km` (reported as `line_flow_cost` in the dispatch cost breakdown). The first system in `meta_network.systems` is the primary system; some features (for example development zones) read only the primary system. See [Inter-System Links](../gui/inter-system-links.md).
 
 ---
 

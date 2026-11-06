@@ -189,7 +189,7 @@ One entry of `meta_network.systems_links`. Each list holds one value per link; a
 | `investment_cost_per_mw` / `investment_cost_per_MW` | list[float] | required | Investment cost per link ($/MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
 | `loss_factor` | list[float] | required | Transmission: not used (losses come from `resistance_pu`). Fuel route: route `losses_fraction` (fraction per 100 km) |
 | `distance_km` | list[float] | required | Length per link (km) |
-| `cost_per_mw_km` | list[float] | required | Transmission: operating cost of the flow, `distance_km` × `cost_per_mw_km` per MWh carried, charged by the master (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
+| `cost_per_mw_km` | list[float] | required | Transmission: operating cost of the flow, `distance_km` × `cost_per_mw_km` per MWh carried in either direction, charged by the master and the dispatch (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
 | `reactance_pu` | list[float] | `[]` | Series reactance per link (p.u.). Empty: derived from length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`; 0.01 without a length |
 | `resistance_pu` | list[float] | `[]` | Series resistance per link (p.u.). Empty: 0 |
 | `waypoints` | list[list[dict]] | `[]` | GUI-only: per-link waypoints (list of {lat, lng}) for map polyline |
@@ -412,7 +412,7 @@ See [Nodes and buses](../user-guide/configuration.md#nodes-and-buses) in the gui
 | `resistance_pu` | float \| null | `null` | Resistance (p.u.). Missing → 0 |
 | `susceptance_pu` | float \| null | `null` | Susceptance (p.u.). Missing → 0 |
 | `num_circuits` | int | `1` | Parallel circuits |
-| `cost_per_mw_km` | float (≥ 0) | `0` | Operating cost of the flow ($ per MWh and km): the master charges `length_km` × `cost_per_mw_km` × \|flow\|. Set by a multi-system run on its inter-system links |
+| `cost_per_mw_km` | float (≥ 0) | `0` | Operating cost of the flow ($ per MWh and km): the master and the dispatch (DC power flow, not ACOPF) charge `length_km` × `cost_per_mw_km` × \|flow\|. Set by a multi-system run on its inter-system links |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` | `"AC"` | Current type |
 | `from_endpoint_type` | str \| null | `null` | Studio endpoint reference (`bus`, `generator`, `battery`, `transformer`, ...) |

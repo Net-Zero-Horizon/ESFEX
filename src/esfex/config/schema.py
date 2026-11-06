@@ -215,7 +215,7 @@ class TransmissionLineGeo(BaseModel):
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1
     # Operating cost of the flow ($ per MWh per km), set on inter-system
-    # links: the master charges length_km × cost_per_mw_km × |flow|
+    # links: the master and the dispatch charge length_km × cost_per_mw_km × |flow|
     cost_per_mw_km: float = Field(default=0.0, ge=0)
 
     # Electrical properties

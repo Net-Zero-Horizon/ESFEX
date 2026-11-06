@@ -62,6 +62,10 @@ Per-line transmission data for enhanced DC/AC power flow.
 - `length_km::Float64`: Line length (km)
 - `voltage_kv::Float64`: Rated voltage (kV)
 - `num_circuits::Int`: Number of parallel circuits
+- `frequency_hz::Float64`, `current_type::String`: "AC" or "DC"
+- `flow_cost::Float64`: Cost per MWh carried in either direction (solver cost
+  units/MWh; 0 = free). Inter-system links of a merged run get
+  `distance_km × cost_per_mw_km`. Optional (12-argument constructor = 0).
 """
 struct TransmissionLineData
     line_id::String
@@ -76,7 +80,15 @@ struct TransmissionLineData
     num_circuits::Int
     frequency_hz::Float64
     current_type::String  # "AC" or "DC"
+    flow_cost::Float64    # cost per MWh carried, either direction (0 = free)
 end
+
+TransmissionLineData(line_id, from_node, to_node, capacity_mw, reactance_pu,
+                     resistance_pu, susceptance_pu, length_km, voltage_kv,
+                     num_circuits, frequency_hz, current_type) =
+    TransmissionLineData(line_id, from_node, to_node, capacity_mw, reactance_pu,
+                         resistance_pu, susceptance_pu, length_km, voltage_kv,
+                         num_circuits, frequency_hz, current_type, 0.0)
 
 """
     BusData
@@ -1657,6 +1669,8 @@ struct CostBreakdown
     pe_electrolyzer_cost::Float64
     # N-1 SCOPF reliability-shortfall penalty.
     n1_security_shortfall_cost::Float64
+    # Flow cost of lines with a flow_cost (inter-system links, × |flow|).
+    line_flow_cost::Float64
     total::Float64
 end
 

@@ -28,6 +28,14 @@ def scale_cost(val: float) -> float:
     return val * COST_SCALE
 
 
+def line_flow_cost_per_mwh(line) -> float:
+    """Flow cost of a line in $ per MWh carried: ``length_km × cost_per_mw_km``
+    (inter-system links; 0 for other lines). The master and the dispatch both
+    charge it on |flow|."""
+    cost = float(getattr(line, "cost_per_mw_km", 0.0) or 0.0)
+    return max(0.0, cost * float(getattr(line, "length_km", 0.0) or 0.0))
+
+
 def scale_cost_list(arr: list) -> list:
     """Scale a list of monetary values from $ to M$."""
     return [x * COST_SCALE for x in arr]
@@ -596,6 +604,7 @@ def convert_transmission_line_data(
         line.num_circuits,
         float(frequency_hz),
         str(current_type),
+        scale_cost(line_flow_cost_per_mwh(line)),
     )
 
 
@@ -1944,6 +1953,7 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "pe_electrolyzer_cost": float(cb.pe_electrolyzer_cost) * COST_UNSCALE,
             # N-1 SCOPF reliability shortfall.
             "n1_security_shortfall_cost": float(cb.n1_security_shortfall_cost) * COST_UNSCALE,
+            "line_flow_cost": float(cb.line_flow_cost) * COST_UNSCALE,
             "total": float(cb.total) * COST_UNSCALE,
         }
 
