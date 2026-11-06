@@ -52,7 +52,7 @@ from esfex.bridge.converters import (
     scale_cost_list,
 )
 from esfex.bridge.julia_setup import get_julia, get_esfex_module
-from esfex.io.demand import load_availability_profile
+from esfex.io.demand import load_availability_profile, load_inflow_profile
 
 
 logger = logging.getLogger(__name__)
@@ -518,13 +518,25 @@ def _expand_powersystem_result(
     for key in (
         "gen_output", "curtailment",
         "gen_status", "gen_startup",
-        "bat_charge", "bat_discharge", "bat_soc",
+        "bat_charge", "bat_discharge", "bat_soc", "bat_spillage",
+        "reservoir_level", "reservoir_spillage", "reservoir_pump",
+        "electrolyzer_power", "electrolyzer_h2",
     ):
         arr = result.get(key)
         if arr is None:
             continue
         a = _np.asarray(arr)
         if a.ndim == 3 and a.shape[1] == rm.n_reduced_buses:
+            result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
+
+    # ── Per-unit investments [unit x bus]: bus axis = 1 ──
+    for key in ("gen_investment", "bat_investment_power", "bat_investment_capacity",
+                "reservoir_invest_capacity"):
+        arr = result.get(key)
+        if arr is None:
+            continue
+        a = _np.asarray(arr)
+        if a.ndim == 2 and a.shape[1] == rm.n_reduced_buses:
             result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
 
     # ── Per-bus 2-D arrays: bus axis = 0 ──
@@ -1968,7 +1980,8 @@ class PowerSystemAdapter:
         jl = get_julia()
         groups = jl.seval("CO2BudgetGroup[]")
         for b in getattr(sys, "co2_budget_by_system", None) or []:
-            nodes = [b.first_node + k + 1 for k in range(b.num_nodes)]   # 1-indexed
+            nodes = ([b.first_node + k + 1 for k in range(b.num_nodes)]  # 1-indexed
+                     + [n + 1 for n in b.extra_nodes])
             jl.seval("push!")(groups, ESFEX.CO2BudgetGroup(
                 str(b.system),
                 py_to_julia_int_vector(nodes),
@@ -2308,6 +2321,14 @@ class MasterProblemAdapter:
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
+        # Pre-loaded reservoir inflow cache {gen_key: hourly array}
+        inflow_cache: Optional[Dict[str, np.ndarray]] = None,
+        # Timestamp of the first data row ("DD/MM/YYYY HH:MM") for profiles
+        # read from disk (Feb 29 rows are dropped by this calendar)
+        date_start: Optional[str] = None,
+        # Horizon hour of the first planned hour: profiles start there
+        # (myopic masters plan one later year at a time)
+        profile_start_hour: int = 0,
         # Master-problem solver method and Benders settings
         solver_method: str = "monolithic",
         benders_max_iterations: int = 50,
@@ -2349,7 +2370,13 @@ class MasterProblemAdapter:
             use_stochastic: Enable stochastic two-stage optimization
             stochastic_scenarios: List of scenario dicts with name/probability/multipliers
             config_path: Path to config file for resolving relative availability/inflow paths
-            availability_cache: Pre-loaded availability profiles {key: array}
+            availability_cache: Pre-loaded hourly availability profiles {key: array},
+                the ones the dispatch uses (the runner's cache)
+            inflow_cache: Pre-loaded hourly reservoir inflows {gen_key: array}
+            date_start: First data row's timestamp, for profiles read from disk
+            profile_start_hour: Horizon hour (year index × 8760 + hour) of the
+                first planned hour; every profile is rotated to start there,
+                wrapping around when it is shorter, as in the dispatch
             **kwargs: Additional parameters (system_config: explicit SystemConfig override)
         """
         system_config_override = kwargs.pop("system_config", None)
@@ -2362,6 +2389,9 @@ class MasterProblemAdapter:
 
         self._config_path = config_path
         self._availability_cache = availability_cache or {}
+        self._inflow_cache = inflow_cache or {}
+        self._date_start = date_start
+        self._profile_start_hour = int(profile_start_hour or 0)
 
         self.years = years
         self.base_year = base_year
@@ -2528,6 +2558,41 @@ class MasterProblemAdapter:
         pairs_str = ", ".join(f"({f}, {t})" for f, t in self.transmission_lines)
         return jl.seval(f"Tuple{{Int64,Int64}}[{pairs_str}]")
 
+    def _master_profile(self, cache: Dict[str, np.ndarray], key: str,
+                        file_name: Optional[str], num_nodes: int, loader,
+                        required: bool = True) -> Optional[np.ndarray]:
+        """Hourly profile of one unit for the master, at its resolution.
+
+        Takes the dispatch's preloaded profile (``cache[key]``) when it has
+        one with ``num_nodes`` columns, else reads ``file_name`` with
+        ``loader`` and the run's ``date_start`` (so Feb 29 is dropped by the
+        data's calendar, as in the dispatch). A missing file gives None when
+        not ``required``. The profile is rotated to start at
+        ``profile_start_hour`` (wrapping around) and averaged to the master's
+        resolution.
+        """
+        prof = cache.get(key)
+        if prof is not None and (np.ndim(prof) != 2 or np.shape(prof)[1] != num_nodes):
+            prof = None
+        if prof is None:
+            if not file_name:
+                return None
+            from pathlib import Path
+            config_dir = Path(self._config_path).parent if self._config_path else Path('.')
+            path = config_dir / file_name
+            if not path.exists():
+                path = Path(file_name)
+            if not required and not path.exists():
+                return None
+            prof = loader(path, temporal_resolution_hours=1, num_nodes=num_nodes,
+                          date_start=self._date_start)
+        prof = np.asarray(prof, dtype=float)
+        if self._profile_start_hour and len(prof) > 0:
+            prof = np.roll(prof, -(self._profile_start_hour % len(prof)), axis=0)
+        if self.temporal_resolution_hours > 1:
+            prof = aggregate_to_resolution(prof, target_hours=self.temporal_resolution_hours)
+        return prof
+
     def _create_input(self) -> Any:
         """Create the Julia MasterProblemInput struct."""
         ESFEX = get_esfex_module()
@@ -2589,21 +2654,13 @@ class MasterProblemAdapter:
         for key, gen in sys.generators.items():
             if key in ext_gen_costs:
                 gen = gen.model_copy(update={"invest_cost": ext_gen_costs[key]})
-            # Load availability profile if specified
-            availability = None
-            if hasattr(gen, 'availability_file') and gen.availability_file:
-                from pathlib import Path
-                # Resolve relative path from config directory
-                config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
-                avail_path = config_dir / gen.availability_file
-                if not avail_path.exists():
-                    avail_path = Path(gen.availability_file)
-                availability = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=self.temporal_resolution_hours,
-                    num_nodes=num_nodes
-                )
-                logger.debug(f"Loaded availability for {gen.name}: shape={availability.shape}")
+            # Availability: the dispatch's profile (runner cache) when there
+            # is one, else read from disk with the same calendar.
+            availability = self._master_profile(
+                self._availability_cache, key, getattr(gen, 'availability_file', None),
+                num_nodes, load_availability_profile)
+            if availability is not None:
+                logger.debug(f"Availability for {gen.name}: shape={availability.shape}")
 
             # Apply geographic fuel transport cost adjustment
             gen_to_convert = gen
@@ -2612,21 +2669,12 @@ class MasterProblemAdapter:
                 gen_dict['fuel_cost'] = fuel_adjustments[key]
                 gen_to_convert = GeneratorConfig(**gen_dict)
 
-            # Load reservoir inflow profile if specified
-            inflow = None
-            if hasattr(gen, 'reservoir_inflow_file') and gen.reservoir_inflow_file:
-                from pathlib import Path
-                config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
-                inflow_path = config_dir / gen.reservoir_inflow_file
-                if not inflow_path.exists():
-                    inflow_path = Path(gen.reservoir_inflow_file)
-                if inflow_path.exists():
-                    inflow = load_availability_profile(
-                        inflow_path,
-                        temporal_resolution_hours=self.temporal_resolution_hours,
-                        num_nodes=num_nodes
-                    )
-                    logger.debug(f"Loaded inflow for {gen.name}: shape={inflow.shape}")
+            # Reservoir inflow (MW-eq, not clipped), same sources as above
+            inflow = self._master_profile(
+                self._inflow_cache, key, getattr(gen, 'reservoir_inflow_file', None),
+                num_nodes, load_inflow_profile, required=False)
+            if inflow is not None:
+                logger.debug(f"Inflow for {gen.name}: shape={inflow.shape}")
 
             gen_bus_map = gen_bus_per_node.get(key)
             jl_gen = convert_generator_config(gen_to_convert, availability, inflow,
@@ -2652,28 +2700,11 @@ class MasterProblemAdapter:
         jl_technologies = jl.seval("TechnologyConfig[]")
         for key, tech in sys.technologies.items():
             # Use cached availability if available, otherwise load from disk
-            tech_availability = None
-            if key in self._availability_cache:
-                cached = self._availability_cache[key]
-                if self.temporal_resolution_hours > 1:
-                    tech_availability = aggregate_to_resolution(
-                        cached, target_hours=self.temporal_resolution_hours,
-                    )
-                else:
-                    tech_availability = cached
-                logger.debug(f"Using cached availability for tech {tech.name}: shape={tech_availability.shape}")
-            elif tech.availability_file:
-                from pathlib import Path
-                config_dir = Path(self._config_path).parent if self._config_path else Path('.')
-                avail_path = config_dir / tech.availability_file
-                if not avail_path.exists():
-                    avail_path = Path(tech.availability_file)
-                tech_availability = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=self.temporal_resolution_hours,
-                    num_nodes=num_nodes,
-                )
-                logger.debug(f"Loaded availability for tech {tech.name}: shape={tech_availability.shape}")
+            tech_availability = self._master_profile(
+                self._availability_cache, key, tech.availability_file,
+                num_nodes, load_availability_profile)
+            if tech_availability is not None:
+                logger.debug(f"Availability for tech {tech.name}: shape={tech_availability.shape}")
             jl_tech = convert_technology_config(tech, tech_availability, bus_to_node=b2n_arg)
             jl.seval("push!")(jl_technologies, jl_tech)
             tech_order.append((key, tech))

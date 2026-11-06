@@ -996,7 +996,12 @@ class ESFEXAPI:
         solver : str, optional
             Solver name; default: the config's ``solver.name``.
         year : int, optional
-            Year to dispatch (default: the year of ``date_start``).
+            Data year to dispatch (default: the year of ``date_start``).
+            Year ``Y`` is the ``(Y - year of date_start)``-th 8760-h block
+            of the demand and profile files (a file with fewer years repeats
+            its first year, as in a full run); the result is labelled ``Y``
+            and outage windows count from 1 January of the year of
+            ``date_start``, as in a full run.
         output_dir : str or Path
             Directory for the HDF5 results file and the run log.
 
@@ -1011,12 +1016,20 @@ class ESFEXAPI:
         >>> print(res.objective, res.gen_output.shape)
         """
         from esfex.runner import Orchestrator
+        from esfex.utils.temporal import parse_date_start
 
         config, config_path = ESFEXAPI._run_config(config, solver)
         if config.simulation_mode == "development":
             config = config.model_copy(update={"simulation_mode": "economic_dispatch"})
+        first_year = parse_date_start(config.date_start).year
+        year = first_year if year is None else int(year)
+        if year < first_year:
+            raise ValueError(
+                f"year {year} is before the data's first year {first_year} (date_start)")
         orch = Orchestrator(config, output_dir=Path(output_dir), config_path=config_path)
-        results = orch.run(years=1, start_year=year)
+        # The horizon starts at the data's first year, so year Y keeps its
+        # own data block and outage base year; only Y is dispatched.
+        results = orch.run(years=year - first_year + 1, dispatch_years=[year])
         if not results:
             raise RuntimeError(
                 f"Dispatch failed; see the log in {Path(output_dir) / 'logs'}")

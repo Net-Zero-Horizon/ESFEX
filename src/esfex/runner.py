@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional, Dict, List, Tuple, Union
+from typing import Any, Iterable, Optional, Dict, List, Tuple, Union
 
 import sys
 
@@ -152,6 +152,112 @@ def _concat_window_series(windows) -> dict:
         ])
         for k in keys
     }
+
+
+def unique_unit_names(names: list[str]) -> list[str]:
+    """Index-aligned unit names with homonyms made unique.
+
+    The first unit keeps its name; later ones with the same name get
+    `` (1)``, `` (2)``… (skipping a candidate that is already taken). This
+    is the one convention of the results file: the runner's name lists,
+    the HDF5 dataset names and the readers that strip the suffix to find a
+    unit's configuration (``financial_analysis``, the results charts).
+    """
+    used = set()
+    out: list[str] = []
+    for name in names:
+        name = str(name)
+        cand, k = name, 0
+        while cand in used:
+            k += 1
+            cand = f"{name} ({k})"
+        used.add(cand)
+        out.append(cand)
+    return out
+
+
+def _profile_year_block(profile: np.ndarray, year_idx: int, steps: int) -> np.ndarray:
+    """Rows of ``profile`` for year ``year_idx`` of the horizon.
+
+    Same rule as the dispatch (``absolute_start_hour``): step ``t`` of year
+    ``k`` is row ``k × steps_per_year + t``, wrapping around a shorter
+    profile, so a multi-year profile gives each year its own block and a
+    one-year profile repeats.
+    """
+    n = len(profile)
+    if n == 0 or steps <= 0:
+        return profile[:0]
+    return np.take(profile, (year_idx * steps + np.arange(steps)) % n, axis=0)
+
+
+def _pe_period_bounds(n_steps: int, period_steps: int) -> list[tuple[int, int]]:
+    """``[start, end)`` steps of each primary-energy period of a window.
+
+    Mirrors ``create_temporal_mapping`` in primary_energy.jl: periods of
+    ``min(period_steps, n_steps)`` steps, the last one possibly shorter.
+    """
+    length = min(period_steps, n_steps) if period_steps > 0 else n_steps
+    length = max(length, 1)
+    return [(s, min(s + length, n_steps)) for s in range(0, n_steps, length)]
+
+
+def _merge_pe_windows(windows, period_steps: int) -> dict:
+    """Join the primary-energy results of the rolling-horizon windows.
+
+    ``windows`` is a list of ``(pe_result, window_steps, keep_steps)``.
+    Per-period series (fuel supply, non-electric demand served, fuel
+    shortfall, transport flows ``[route x period]``) are spread evenly over
+    the steps of their period, cut to the window's committed steps (the
+    overlap tail belongs to the next window), joined along time and summed
+    back into periods of ``period_steps`` steps from the start of the year.
+    Windows may have different period counts (the last one is shorter).
+    Costs count the committed share of each window (``keep / steps``), like
+    the dispatch objective. Investments and end-of-year tank levels come
+    from the last window.
+    """
+    def _committed_steps(arr, n_steps, keep):
+        arr = np.asarray(arr, dtype=float)
+        bounds = _pe_period_bounds(n_steps, period_steps)
+        if arr.shape[-1] != len(bounds):
+            raise ValueError(
+                f"primary-energy series has {arr.shape[-1]} periods, "
+                f"expected {len(bounds)} for {n_steps} steps")
+        per_step = np.concatenate(
+            [np.repeat(arr[..., [p]] / (e - s), e - s, axis=-1)
+             for p, (s, e) in enumerate(bounds)], axis=-1)
+        return per_step[..., :keep]
+
+    def _to_periods(series):
+        total = series.shape[-1]
+        return np.stack(
+            [series[..., s:e].sum(axis=-1) for s, e in _pe_period_bounds(total, period_steps)],
+            axis=-1)
+
+    merged: dict = {}
+    for key in ("total_fuel_supply", "total_ne_demand_satisfied",
+                "total_loss_of_supply", "transport_flows"):
+        fuels: list = []
+        for pe, _, _ in windows:
+            fuels.extend(f for f in (pe.get(key) or {}) if f not in fuels)
+        merged[key] = {}
+        for fuel in fuels:
+            parts = []
+            shape = next(np.asarray(pe[key][fuel]).shape[:-1] for pe, _, _ in windows
+                         if fuel in (pe.get(key) or {}))
+            for pe, n_steps, keep in windows:
+                arr = (pe.get(key) or {}).get(fuel)
+                parts.append(_committed_steps(arr, n_steps, keep) if arr is not None
+                             else np.zeros(shape + (keep,)))
+            merged[key][fuel] = _to_periods(np.concatenate(parts, axis=-1))
+    last_pe = windows[-1][0]
+    merged["final_storage_levels"] = last_pe.get("final_storage_levels", {})
+    merged["transport_investments"] = last_pe.get("transport_investments", {})
+    merged["storage_investments"] = last_pe.get("storage_investments", {})
+    for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
+        merged[cost_key] = sum(
+            float(pe.get(cost_key, 0.0)) * (keep / n_steps if n_steps > 0 else 1.0)
+            for pe, n_steps, keep in windows)
+    return merged
 
 
 @dataclass
@@ -1317,6 +1423,7 @@ class Orchestrator:
         years: Optional[int] = None,
         start_year: Optional[int] = None,
         master_only: bool = False,
+        dispatch_years: Optional[Iterable[int]] = None,
     ) -> list[YearResults]:
         """
         Run the full simulation.
@@ -1329,10 +1436,20 @@ class Orchestrator:
             years: Number of years to simulate (default: 25)
             start_year: Label of the first simulated year. Default: the
                 year of ``date_start``. When given, the date labels start
-                on ``date_start``'s day and time in this year.
+                on ``date_start``'s day and time in this year. It only
+                relabels: the data are still read from the first row, and
+                the Feb 29 rows dropped are those of the data's own calendar
+                (``date_start``).
             master_only: Stop after step 1 (development mode only). The
                 decisions are left in ``self.master_solution`` (None if the
                 master problem failed) and no year results are returned.
+            dispatch_years: Run the operational dispatch only for these years
+                of the horizon (labels); the others are skipped, while every
+                year keeps its own data block (year index x 8760 h) and the
+                master problem still plans the whole horizon. In
+                ``unit_commitment`` mode the first of them is dispatched
+                instead of the first horizon year. Default: every year (or
+                the ``ESFEX_OPS_ONLY_YEARS`` environment variable).
 
         Returns:
             List of YearResults for each simulated year
@@ -1348,17 +1465,38 @@ class Orchestrator:
         end_year = start_year + years
         years_range = list(range(start_year, end_year))
 
+        # Years that run the operational dispatch (None: all of them).
+        if dispatch_years is not None:
+            ops_only = {int(y) for y in dispatch_years}
+        else:
+            env_years = os.environ.get("ESFEX_OPS_ONLY_YEARS", "").strip()
+            ops_only = ({int(y) for y in env_years.replace(",", " ").split() if y}
+                        if env_years else None)
+            if ops_only:
+                logger.warning(
+                    f"[DEBUG] ESFEX_OPS_ONLY_YEARS={sorted(ops_only)} "
+                    f"— skipping all other operational years")
+        if ops_only is not None:
+            unknown = sorted(ops_only - set(years_range))
+            if unknown or not ops_only:
+                raise ValueError(
+                    f"dispatch_years {unknown or '[]'} outside the horizon "
+                    f"{years_range[0]}-{years_range[-1]}")
+
         # unit_commitment mode is a single-shot dispatch over the first
-        # ``unit_commitment_hours`` hours starting at ``start_year``;
-        # iterating the full planning horizon would repeat the same
-        # short window N times. Cap years_range to one year here so the
-        # downstream year-by-year operational loop only runs once.
+        # ``unit_commitment_hours`` hours of one year; iterating the full
+        # planning horizon would repeat the same short window N times.
+        # Dispatch one year only: the first horizon year, or the first of
+        # ``dispatch_years`` (years before it keep their data blocks).
         # (development mode plans the whole horizon — unchanged.)
         if self.config.simulation_mode == "unit_commitment":
-            years_range = years_range[:1]
+            uc_year = min(ops_only) if ops_only else years_range[0]
+            years_range = years_range[:years_range.index(uc_year) + 1]
+            ops_only = {uc_year}
             end_year = years_range[-1] + 1
+        run_years = [y for y in years_range if ops_only is None or y in ops_only]
 
-        logger.info(f"Starting simulation: {start_year} to {end_year}")
+        logger.info(f"Starting simulation: {run_years[0]} to {run_years[-1] + 1}")
         start_time = time.time()
 
         # Plugin hook: pre_simulation
@@ -1456,18 +1594,18 @@ class Orchestrator:
         # fuel directly (no name-parsing). The config's ``technology``
         # field is unreliable here (orphan IDs like ``tech_5`` that don't
         # resolve in the ``technologies`` dict), so we rely on fuel only.
-        self._gen_names = [
+        self._gen_names = unique_unit_names([
             gen.name if hasattr(gen, 'name') else key
             for key, gen in self.primary_system.generators.items()
-        ]
+        ])
         self._gen_fuels = [
             (getattr(gen, 'fuel', None) or '') or ''
             for _, gen in self.primary_system.generators.items()
         ]
-        self._bat_names = [
+        self._bat_names = unique_unit_names([
             bat.name if hasattr(bat, 'name') else key
             for key, bat in self.primary_system.batteries.items()
-        ]
+        ])
 
         # Preload all availability profiles ONCE (cache for operational phase)
         self._availability_cache = self._preload_availability_profiles(num_nodes)
@@ -1593,10 +1731,10 @@ class Orchestrator:
         self._initialize_hdf5(
             hdf5_path,
             num_nodes=num_nodes,
-            # Years actually run (unit_commitment runs only the first one)
-            num_years=len(years_range),
-            start_year=start_year,
-            end_year=end_year,
+            # Years actually dispatched (unit_commitment runs only one)
+            num_years=len(run_years),
+            start_year=run_years[0],
+            end_year=run_years[-1] + 1,
         )
 
         # ============================================================
@@ -1696,26 +1834,14 @@ class Orchestrator:
             self._progress = progress
             year_task = progress.add_task(
                 f"[cyan]Operational Dispatch[/cyan]",
-                total=num_years
+                total=len(run_years)
             )
             window_task = progress.add_task(
                 "[dim]Windows[/dim]", total=1, visible=False
             )
 
-            _ops_only = os.environ.get("ESFEX_OPS_ONLY_YEARS", "").strip()
-            _ops_only_set = (
-                {int(y) for y in _ops_only.replace(",", " ").split() if y}
-                if _ops_only else None
-            )
-            if _ops_only_set:
-                logger.warning(
-                    f"[DEBUG] ESFEX_OPS_ONLY_YEARS={sorted(_ops_only_set)} "
-                    f"— skipping all other operational years"
-                )
-
             for year_idx, year in enumerate(years_range):
-                if _ops_only_set is not None and year not in _ops_only_set:
-                    progress.update(year_task, advance=1)
+                if ops_only is not None and year not in ops_only:
                     continue
                 logger.debug(f"Year {year} ({year_idx+1}/{num_years})")
                 self.state.year = year
@@ -1815,7 +1941,7 @@ class Orchestrator:
                     # a phantom fre_penetration slack (see _estimate_achievable_re).
                     if year_re_target > 0:
                         achievable_re = self._estimate_achievable_re(
-                            cumulative_units_config, year_demand
+                            cumulative_units_config, year_demand, year_idx=y_idx
                         )
                         capped = min(year_re_target, achievable_re)
                         if capped < year_re_target - 1e-4:
@@ -1919,8 +2045,13 @@ class Orchestrator:
             return start.replace(year=int(start_year), month=3, day=1)
 
     def _data_start(self) -> datetime:
-        """Timestamp of the first data row (set by run(); else ``date_start``)."""
-        return getattr(self, '_start_date', None) or self._resolve_start_date()
+        """Timestamp of the first data row: ``date_start``.
+
+        This is the data's own calendar, which decides the Feb 29 rows that
+        are dropped; ``run(start_year=...)`` only relabels the years and
+        never changes it.
+        """
+        return self._resolve_start_date()
 
     def _load_demand(
         self,
@@ -1954,9 +2085,12 @@ class Orchestrator:
                     return cand
             return fp
 
-        # Hour 0 is date_start; labels skip Feb 29 (every model year is 8760 h).
+        # Hour 0 is the first data row; labels start at the (possibly
+        # relabelled) start date and skip Feb 29 (every model year is 8760 h).
+        # The Feb 29 rows dropped are those of the data's calendar.
         start_date = self._data_start()
-        time_index = list(model_time_index(start_date, total_hours_needed).to_pydatetime())
+        label_start = getattr(self, '_start_date', None) or start_date
+        time_index = list(model_time_index(label_start, total_hours_needed).to_pydatetime())
 
         # Load demand per system and concatenate
         demand_parts: list[np.ndarray] = []
@@ -2368,6 +2502,50 @@ class Orchestrator:
             logger.warning(f"Year index {year_idx} out of range. Using first year.")
             return full_demand[:hours_per_year, :]
 
+    def _renewable_available(
+        self,
+        units,
+        hours: int,
+        num_nodes: int,
+        year_idx: int = 0,
+    ) -> np.ndarray:
+        """Renewable power available per step and node, ``(hours, nodes)``.
+
+        ``units`` yields ``(availability_key, rated_per_node)``. Each unit
+        counts ``rated × availability``, with the profile read like the
+        dispatch reads it: year ``year_idx``'s block (horizon hour, wrapping
+        around a shorter profile), and 1.0 in every hour for a unit without a
+        profile (the dispatch runs such a unit at full capacity).
+        """
+        cache = getattr(self, '_availability_cache', None) or {}
+        re_available = np.zeros((hours, num_nodes))
+        for avail_key, rated in units:
+            rated = np.asarray(rated, dtype=float)[:num_nodes]
+            if not np.any(rated > 0):
+                continue
+            availability = cache.get(avail_key)
+            if availability is None or len(availability) == 0:
+                re_available[:, :len(rated)] += np.maximum(rated, 0.0)
+                continue
+            block = _profile_year_block(np.asarray(availability, dtype=float), year_idx, hours)
+            for n in range(len(rated)):
+                if rated[n] <= 0:
+                    continue
+                if block.ndim == 1:
+                    re_available[:, n] += rated[n] * block
+                elif n < block.shape[1]:
+                    re_available[:, n] += rated[n] * block[:, n]
+        return re_available
+
+    def _existing_renewables(self, num_nodes: int):
+        """``(key, rated_per_node)`` of the configured renewable generators."""
+        return [
+            (key, [gen.rated_power[n] if n < len(gen.rated_power) else 0.0
+                   for n in range(num_nodes)])
+            for key, gen in self.primary_system.generators.items()
+            if gen.type == "Renewable"
+        ]
+
     def _calculate_initial_re_penetration(
         self,
         first_year_demand: np.ndarray,
@@ -2377,7 +2555,8 @@ class Orchestrator:
         For each timestep, the usable RE is ``min(RE_available, demand)``
         because excess RE above demand is curtailed.  This gives a realistic
         estimate that accounts for the temporal mismatch between renewable
-        availability and load profiles.
+        availability and load profiles. A renewable unit without an
+        availability profile counts at full capacity, as in the dispatch.
 
         Args:
             first_year_demand: Demand array for first year (hours × nodes)
@@ -2385,35 +2564,10 @@ class Orchestrator:
         Returns:
             Initial RE penetration as fraction (0-1)
         """
-        sys = self.primary_system
         hours = first_year_demand.shape[0]
         num_nodes = first_year_demand.shape[1]
-
-        # Build per-timestep RE availability at each node
-        re_available = np.zeros((hours, num_nodes))
-
-        for gen_key, gen in sys.generators.items():
-            if gen.type != "Renewable":
-                continue
-            availability = None
-            if hasattr(self, '_availability_cache'):
-                availability = self._availability_cache.get(gen_key)
-
-            for n in range(num_nodes):
-                rated = gen.rated_power[n] if n < len(gen.rated_power) else 0.0
-                if rated <= 0:
-                    continue
-                if availability is not None and len(availability) > 0:
-                    avail_hours = min(hours, len(availability))
-                    if availability.ndim == 2 and n < availability.shape[1]:
-                        avail_profile = availability[:avail_hours, n]
-                    elif availability.ndim == 1:
-                        avail_profile = availability[:avail_hours]
-                    else:
-                        continue
-                    re_available[:avail_hours, n] += rated * avail_profile
-                else:
-                    continue
+        re_available = self._renewable_available(
+            self._existing_renewables(num_nodes), hours, num_nodes)
 
         # Per-timestep: usable RE = min(RE_available, demand)
         demand = first_year_demand[:hours, :]
@@ -2434,6 +2588,7 @@ class Orchestrator:
         self,
         units_config: dict[str, Any],
         year_demand: np.ndarray,
+        year_idx: int = 0,
     ) -> float:
         """Upper bound on RE penetration the FIXED yearly plan can deliver.
 
@@ -2449,10 +2604,11 @@ class Orchestrator:
         so penalizing it against the aspirational target produces a phantom
         fre_penetration slack. Capping at the achievable level removes it without
         changing physical dispatch (RE is still fully used via curtailment_cost).
+        Profiles are read like the dispatch reads them (``_renewable_available``).
         """
         hours, num_nodes = year_demand.shape
-        re_available = np.zeros((hours, num_nodes))
-        cache = getattr(self, '_availability_cache', {}) or {}
+        b2n = getattr(self, '_bus_to_node', None)
+        units = []
         for ukey, udata in units_config.items():
             if udata.get("type") != "Renewable":
                 continue
@@ -2463,16 +2619,12 @@ class Orchestrator:
             # lives in the cache under the bare technology key. Existing units
             # use their own gen_key directly.
             avail_key = ukey[4:] if ukey.startswith("inv_") else ukey
-            availability = cache.get(avail_key)
-            if availability is None:
-                continue
             # rated_power may be per-node (existing gens, len == num_nodes) or
             # per-bus (investment units, len == num_buses). Availability and
             # demand here are per-node, so aggregate rated to per-node first —
             # otherwise per-bus arrays get indexed as if they were per-node,
             # reading only the first num_nodes buses and grossly undercounting.
             arr = list(rated)
-            b2n = getattr(self, '_bus_to_node', None)
             rated_per_node = np.zeros(num_nodes)
             if len(arr) == num_nodes:
                 rated_per_node = np.asarray(arr[:num_nodes], dtype=float)
@@ -2484,15 +2636,8 @@ class Orchestrator:
             else:
                 m = min(len(arr), num_nodes)
                 rated_per_node[:m] = arr[:m]
-            ah = min(hours, len(availability))
-            for n in range(num_nodes):
-                r = rated_per_node[n]
-                if r <= 0:
-                    continue
-                if availability.ndim == 2 and n < availability.shape[1]:
-                    re_available[:ah, n] += r * availability[:ah, n]
-                elif availability.ndim == 1:
-                    re_available[:ah, n] += r * availability[:ah]
+            units.append((avail_key, rated_per_node))
+        re_available = self._renewable_available(units, hours, num_nodes, year_idx)
         usable_re = float(np.minimum(re_available, year_demand[:hours]).sum())
         total_demand = float(year_demand.sum())
         return usable_re / total_demand if total_demand > 0 else 0.0
@@ -2517,34 +2662,14 @@ class Orchestrator:
             sname = list(self._system_node_offsets.keys())[0] if self._system_node_offsets else self.system_name
             return {sname: self._calculate_initial_re_penetration(first_year_demand)}
 
-        sys = self.primary_system
         hours = first_year_demand.shape[0]
         num_nodes = first_year_demand.shape[1]
         sys_names = list(self._system_node_offsets.keys())
         result = {}
 
-        # Build per-timestep RE availability at each node (global)
-        re_available = np.zeros((hours, num_nodes))
-        for gen_key, gen in sys.generators.items():
-            if gen.type != "Renewable":
-                continue
-            availability = None
-            if hasattr(self, '_availability_cache'):
-                availability = self._availability_cache.get(gen_key)
-
-            for n in range(num_nodes):
-                rated = gen.rated_power[n] if n < len(gen.rated_power) else 0.0
-                if rated <= 0:
-                    continue
-                if availability is not None and len(availability) > 0:
-                    avail_hours = min(hours, len(availability))
-                    if availability.ndim == 2 and n < availability.shape[1]:
-                        avail_profile = availability[:avail_hours, n]
-                    elif availability.ndim == 1:
-                        avail_profile = availability[:avail_hours]
-                    else:
-                        continue
-                    re_available[:avail_hours, n] += rated * avail_profile
+        # Per-timestep RE availability at each node (global)
+        re_available = self._renewable_available(
+            self._existing_renewables(num_nodes), hours, num_nodes)
 
         for i, sname in enumerate(sys_names):
             off = self._system_node_offsets[sname]
@@ -2642,6 +2767,20 @@ class Orchestrator:
 
         return result
 
+    def _aggregate_unit_buses_to_nodes(self, arr):
+        """Sum a ``[unit x bus]`` array (e.g. investments) into ``[unit x node]``."""
+        if arr is None or self._bus_to_node is None:
+            return arr
+        arr = np.asarray(arr)
+        b2n = self._bus_to_node
+        if arr.ndim != 2 or arr.shape[1] != len(b2n):
+            return arr
+        out = np.zeros((arr.shape[0], self._num_nodes), dtype=float)
+        for b, n in enumerate(b2n):
+            if 0 <= n < self._num_nodes:
+                out[:, n] += arr[:, b]
+        return out
+
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
@@ -2729,9 +2868,9 @@ class Orchestrator:
             num_nodes: Number of nodes in the system
 
         Returns:
-            Dictionary mapping gen_key -> inflow array (hours x nodes)
+            Dictionary mapping gen_key -> inflow array (hours x nodes, MW-eq)
         """
-        from esfex.io.demand import load_availability_profile
+        from esfex.io.demand import load_inflow_profile
         from pathlib import Path
 
         cache = {}
@@ -2755,7 +2894,7 @@ class Orchestrator:
                 cache[gen_key] = file_cache[file_key]
             else:
                 try:
-                    inflow = load_availability_profile(
+                    inflow = load_inflow_profile(
                         inflow_path,
                         temporal_resolution_hours=1,
                         num_nodes=num_nodes,
@@ -3047,12 +3186,8 @@ class Orchestrator:
                             avail = self._availability_cache[gen_key]
                             if resolution_hours > 1:
                                 avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
-                            yr_start_agg = y_idx * hours_per_year_agg
-                            yr_end_agg = min((y_idx + 1) * hours_per_year_agg, avail.shape[0])
-                            if yr_end_agg > yr_start_agg:
-                                year_avail_dict[gen_key] = avail[yr_start_agg:yr_end_agg, :]
-                            else:
-                                year_avail_dict[gen_key] = avail[:hours_per_year_agg, :]
+                            year_avail_dict[gen_key] = _profile_year_block(
+                                avail, y_idx, hours_per_year_agg)
                         if year_avail_dict:
                             year_availability = year_avail_dict
 
@@ -3129,6 +3264,11 @@ class Orchestrator:
                     stochastic_scenarios=stochastic_scenario_dicts,
                     config_path=str(self.config_path) if self.config_path else None,
                     availability_cache=self._availability_cache,
+                    inflow_cache=getattr(self, "_inflow_cache", None),
+                    date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
+                    # This year's block of multi-year profiles (horizon hour
+                    # y_idx × 8760, wrapping around), as in the dispatch
+                    profile_start_hour=y_idx * hours_per_year_raw,
                     system_config=self.master_system,
                 )
 
@@ -3488,11 +3628,10 @@ class Orchestrator:
                     if re_availability_for_tsam:
                         year_availability = {}
                         for name, avail in re_availability_for_tsam.items():
-                            if year_end <= avail.shape[0]:
-                                year_avail = avail[year_start:year_end, :]
-                            else:
-                                # Tile if availability data is shorter than horizon
-                                year_avail = avail[:hours_per_year, :]
+                            # Horizon-hour rule of the dispatch: this year's
+                            # block, wrapping around a shorter profile
+                            year_avail = _profile_year_block(
+                                avail, y_idx, year_end - year_start)
                             if year_avail.shape[0] > 0:
                                 year_availability[name] = year_avail
                         if not year_availability:
@@ -3595,6 +3734,8 @@ class Orchestrator:
                 config_path=str(self.config_path) if self.config_path else None,
                 # Pre-loaded availability cache (includes zone-extended profiles)
                 availability_cache=self._availability_cache,
+                inflow_cache=getattr(self, "_inflow_cache", None),
+                date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                 system_config=self.master_system,
             )
 
@@ -4801,7 +4942,8 @@ class Orchestrator:
             if window_result.get("transfer_investment") is not None:
                 last_transfer_investment = window_result["transfer_investment"]
             if window_result.get("primary_energy") is not None:
-                all_pe_results.append(window_result["primary_energy"])
+                all_pe_results.append(
+                    (window_result["primary_energy"], end_hour - start_hour, keep_hours))
             # N-1 security results
             # A window without binding N-1 duals returns None: zero-fill it.
             all_n1_gen_duals.append((
@@ -4814,7 +4956,7 @@ class Orchestrator:
                     if bc not in all_n1_binding:
                         all_n1_binding.append(bc)
             all_n1_trans_duals.append((window_result.get("n1_trans_reserve_duals") or {}, keep_hours))
-            total_n1_security_cost += window_result.get("n1_security_cost", 0.0)
+            total_n1_security_cost += (window_result.get("n1_security_cost") or 0.0) * kept_fraction
 
         # No window solved: the whole year produced no dispatch. Surface the
         # underlying solver/model error instead of exporting an empty result
@@ -4874,33 +5016,9 @@ class Orchestrator:
         combined_n1_trans_duals = _concat_window_series(all_n1_trans_duals)
         n1_gen_duals_arr = _concat_window_series(all_n1_gen_duals).get("d")
 
-        # Merge primary energy results across windows
-        pe_merged = None
-        if all_pe_results:
-            pe_merged = {}
-            for key in ("total_fuel_supply", "total_ne_demand_satisfied", "total_loss_of_supply"):
-                pe_merged[key] = {}
-                for pe in all_pe_results:
-                    if key in pe:
-                        for fuel, arr in pe[key].items():
-                            if fuel in pe_merged[key]:
-                                pe_merged[key][fuel] = pe_merged[key][fuel] + arr
-                            else:
-                                pe_merged[key][fuel] = arr.copy()
-            last_pe = all_pe_results[-1]
-            pe_merged["final_storage_levels"] = last_pe.get("final_storage_levels", {})
-            pe_merged["transport_investments"] = last_pe.get("transport_investments", {})
-            pe_merged["storage_investments"] = last_pe.get("storage_investments", {})
-            # Sum transport flows across windows
-            pe_merged["transport_flows"] = {}
-            for pe in all_pe_results:
-                for fuel, arr in pe.get("transport_flows", {}).items():
-                    if fuel in pe_merged["transport_flows"]:
-                        pe_merged["transport_flows"][fuel] = pe_merged["transport_flows"][fuel] + arr
-                    else:
-                        pe_merged["transport_flows"][fuel] = arr.copy()
-            for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
-                pe_merged[cost_key] = sum(pe.get(cost_key, 0.0) for pe in all_pe_results)
+        # Merge primary energy results across windows (committed steps only)
+        pe_merged = (_merge_pe_windows(all_pe_results, self._pe_period_steps())
+                     if all_pe_results else None)
 
         # Average RE penetration
         avg_re = total_re_penetration / num_solved if num_solved > 0 else 0.0
@@ -4934,6 +5052,11 @@ class Orchestrator:
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
             electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
             electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
+            # Investments [unit x bus]: SUM across buses in same node
+            last_gen_investment = self._aggregate_unit_buses_to_nodes(last_gen_investment)
+            last_bat_inv_power = self._aggregate_unit_buses_to_nodes(last_bat_inv_power)
+            last_bat_inv_capacity = self._aggregate_unit_buses_to_nodes(last_bat_inv_capacity)
+            last_reservoir_invest = self._aggregate_unit_buses_to_nodes(last_reservoir_invest)
             # Status variables: MAX across buses (1 if active at any bus)
             gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
             # Prices: MAX across buses (highest marginal price)
@@ -5501,6 +5624,11 @@ class Orchestrator:
                         f"storage_cap={fv['storage_capacity']}")
         return pe_sources
 
+    def _pe_period_steps(self) -> int:
+        """Primary-energy period length in timesteps (``primary_energy_resolution`` hours)."""
+        res_h = getattr(self.config.temporal, 'resolution_hours', 1) or 1
+        return max(1, int(self.config.temporal.primary_energy_resolution) // res_h)
+
     def _solve_window(
         self,
         year: int,
@@ -5569,7 +5697,7 @@ class Orchestrator:
                 base_year=self.state.base_year,
                 mode=ps_mode,
                 availability_cache=self._availability_cache,
-                inflow_cache=self._inflow_cache,
+                inflow_cache=getattr(self, "_inflow_cache", None),
                 start_hour=start_hour,
                 boundary_conditions=boundary_conditions,
                 units_config=units_config,
@@ -5653,7 +5781,7 @@ class Orchestrator:
 
                     # Convert PE resolution from real hours to timestep units
                     res_h = getattr(self.config.temporal, 'resolution_hours', 1)
-                    pe_res_timesteps = max(1, self.config.temporal.primary_energy_resolution // res_h)
+                    pe_res_timesteps = self._pe_period_steps()
 
                     # Scale max_availability for temporal resolution: PE model treats
                     # each timestep as 1h, but each is res_h real hours. The PE model
@@ -5826,6 +5954,21 @@ class Orchestrator:
                 # Electrolyzers [electrolyzer x bus x hour]: MW drawn, kg/h H2
                 "electrolyzer_power": solution.get('electrolyzer_power'),
                 "electrolyzer_h2": solution.get('electrolyzer_h2'),
+                # Battery spillage [bat x bus x hour], inertia deficit
+                # [hour], transfer margin {(from_bus, to_bus): [hour]}
+                "bat_spillage": solution.get('bat_spillage'),
+                "loss_of_inertia": solution.get('loss_of_inertia'),
+                "transfer_margin": solution.get('transfer_margin'),
+                # Reservoir hydro [gen x bus x hour] (level: hour+1 columns)
+                "reservoir_level": solution.get('reservoir_level'),
+                "reservoir_spillage": solution.get('reservoir_spillage'),
+                "reservoir_pump": solution.get('reservoir_pump'),
+                "reservoir_invest_capacity": solution.get('reservoir_invest_capacity'),
+                # N-1 security: duals, binding contingencies, security cost
+                "n1_gen_reserve_duals": solution.get('n1_gen_reserve_duals'),
+                "n1_trans_reserve_duals": solution.get('n1_trans_reserve_duals'),
+                "n1_binding_contingencies": solution.get('n1_binding_contingencies'),
+                "n1_security_cost": solution.get('n1_security_cost', 0.0),
                 # Investment arrays
                 "gen_investment": solution.get('gen_investment'),
                 "bat_investment_power": solution.get('bat_investment_power'),
@@ -6212,25 +6355,11 @@ class Orchestrator:
                 continue
             bat_names.append(vdata.get("name", key))
 
-        # Deduplicate names (HDF5 datasets require unique names within a group)
-        def _dedup(names: list[str]) -> list[str]:
-            seen: dict[str, int] = {}
-            out: list[str] = []
-            for n in names:
-                if n in seen:
-                    seen[n] += 1
-                    out.append(f"{n} ({seen[n]})")
-                else:
-                    seen[n] = 0
-                    out.append(n)
-            return out
-
-        # _dedup may suffix duplicates with " (N)"; apply to names only,
-        # not fuels — the fuel list stays index-aligned with the pre-dedup
-        # gen_names because _dedup preserves order and length.
-        self._gen_names = _dedup(gen_names)
+        # Homonyms get a " (N)" suffix (HDF5 needs unique dataset names);
+        # order and length are kept, so the fuel list stays index-aligned.
+        self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
-        self._bat_names = _dedup(bat_names)
+        self._bat_names = unique_unit_names(bat_names)
 
     # ------------------------------------------------------------------
     # System-unit mapping (for per-system HDF5 export)
@@ -6952,21 +7081,11 @@ class Orchestrator:
     def _h5_unit_names(cls, names: list[str]) -> list[str]:
         """HDF5 dataset names for a unit list, index-aligned and unique.
 
-        Names are passed through ``_h5safe``; a name already used (two
-        units with the same name, or ``"A/B"`` next to ``"A - B"``) gets
-        a ``_2``, ``_3``… suffix.
+        Names are passed through ``_h5safe`` and made unique with
+        :func:`unique_unit_names` (a homonym, or ``"A/B"`` next to
+        ``"A - B"``, gets a `` (1)``, `` (2)``… suffix).
         """
-        out: list[str] = []
-        used: set[str] = set()
-        for name in names:
-            safe = cls._h5safe(str(name))
-            cand, k = safe, 1
-            while cand in used:
-                k += 1
-                cand = f"{safe}_{k}"
-            used.add(cand)
-            out.append(cand)
-        return out
+        return unique_unit_names([cls._h5safe(str(name)) for name in names])
 
     def _append_year_to_hdf5(self, path: Path, result: YearResults):
         """Append year results to HDF5 file with legacy-compatible structure."""
@@ -7536,7 +7655,8 @@ class Orchestrator:
             # --- Reservoir hydro data (per generator) ---
             if result.reservoir_level is not None:
                 res_group = scenario.create_group("reservoir_level")
-                res_group.attrs["description"] = "Reservoir water level [nodes x hours+1] per gen"
+                res_group.attrs["description"] = (
+                    "Reservoir water level at the start of each hour [nodes x hours] per gen")
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_level.shape[0]:
                         ds = res_group.create_dataset(
@@ -7556,6 +7676,16 @@ class Orchestrator:
                         )
                         ds.attrs["units"] = "MW-eq"
 
+            if result.reservoir_invest_capacity is not None:
+                rinv_group = scenario.create_group("reservoir_invest_capacity")
+                rinv_group.attrs["description"] = "Reservoir capacity investment [nodes] per gen"
+                for g, name in enumerate(self._gen_names):
+                    if g < result.reservoir_invest_capacity.shape[0]:
+                        ds = rinv_group.create_dataset(
+                            gen_ds[g], data=result.reservoir_invest_capacity[g],
+                        )
+                        ds.attrs["units"] = "MWh"
+
             if result.reservoir_pump is not None:
                 pump_group = scenario.create_group("reservoir_pump")
                 pump_group.attrs["description"] = "Reservoir pump power [nodes x hours] per gen"
@@ -7569,8 +7699,9 @@ class Orchestrator:
 
             # --- Electrolyzers (per electrolyzer, config order) ---
             if result.electrolyzer_power is not None:
-                elz_names = [getattr(e, "name", None) or key for key, e in
-                             (self.primary_system.electrolyzers or {}).items()]
+                elz_names = self._h5_unit_names(
+                    [getattr(e, "name", None) or key for key, e in
+                     (self.primary_system.electrolyzers or {}).items()])
                 for group_name, data, units, desc in (
                     ("electrolyzer_power", result.electrolyzer_power, "MW",
                      "Electrolyzer power drawn [nodes x hours] per electrolyzer"),
@@ -7584,7 +7715,7 @@ class Orchestrator:
                     for e, name in enumerate(elz_names):
                         if e < data.shape[0]:
                             ds = elz_group.create_dataset(
-                                self._h5safe(name), data=data[e],
+                                name, data=data[e],
                                 chunks=True, compression="gzip",
                             )
                             ds.attrs["units"] = units

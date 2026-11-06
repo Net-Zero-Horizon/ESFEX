@@ -54,7 +54,7 @@ The Master Problem is a **linear program (LP)**. All investment variables are co
 | Mode | What is solved | Consequence |
 |------|----------------|-------------|
 | `perfect_foresight` (default) | One model covering every year of the horizon | Investment timing sees all future demand, costs and targets |
-| `myopic` | One single-year model per year, solved in sequence; capacity built in earlier years is added to the system as existing capacity | Each decision only sees the current year |
+| `myopic` | One single-year model per year, solved in sequence; capacity built in earlier years is added to the system as existing capacity. Each year's model reads that year's block of multi-year availability and inflow profiles | Each decision only sees the current year |
 
 The two modes treat the RE target differently. See [RE Penetration Trajectory](#re-penetration-trajectory).
 
@@ -96,7 +96,7 @@ Each representative day's cost is scaled by (days in the year) / `representative
 
 ### TSAM Clustering
 
-With `use_tsam: true`, peak-based selection is replaced by time-series clustering. In that case `representative_days` and `min_day_separation` are ignored. For each year, the daily profiles of demand and of the existing renewable generators' availability are clustered into `tsam_num_periods` representative days (`tsam_method: kmedoids` or `kmeans`). Each day is weighted by the size of its cluster. With `tsam_inter_period_linking: true`, the state of charge of existing batteries (and reservoir levels) is carried across the representative days in chronological order, which lets the model represent seasonal storage.
+With `use_tsam: true`, peak-based selection is replaced by time-series clustering. In that case `representative_days` and `min_day_separation` are ignored. For each year, the daily profiles of demand and of the existing renewable generators' availability (that year's block of a multi-year profile, a shorter profile repeating, as in the dispatch) are clustered into `tsam_num_periods` representative days (`tsam_method: kmedoids` or `kmeans`). Each day is weighted by the size of its cluster. With `tsam_inter_period_linking: true`, the state of charge of existing batteries (and reservoir levels) is carried across the representative days in chronological order, which lets the model represent seasonal storage.
 
 
 ### Time Resolution
@@ -214,7 +214,7 @@ Technology investments are not life-extended: they leave the capacity sum when t
 
 ### RE Penetration Trajectory
 
-The starting share \(\rho^{init}\) is always computed from the existing renewable generators and the first year of demand. There is no configuration key for it.
+The starting share \(\rho^{init}\) is always computed from the existing renewable generators and the first year of demand: per hour, the smaller of demand and the renewable output available (rated power × availability; a renewable unit without an availability profile counts at full capacity, as in the dispatch). There is no configuration key for it.
 
 In `perfect_foresight` mode, the yearly target path is:
 

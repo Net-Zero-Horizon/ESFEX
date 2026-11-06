@@ -34,7 +34,7 @@ Per reservoir generator \(g\), node \(b\), and hour \(t\):
 | \(S_{g,b,t}\) | \(\mathbb{R}_+\) | MW-eq | Spillage (release without generation) | `reservoir_spillage[g,b,t]` |
 | \(U_{g,b,t}\) | \(\mathbb{R}_+\) | MW | Pump-back power (charging the reservoir) | `reservoir_pump[g,b,t]` |
 
-Parameters: reservoir capacity \(C\), turbine efficiency \(\eta\), pump efficiency \(\eta_p\), evaporation rate \(\rho\), hourly inflow \(W_t\), minimum/maximum level fractions \(\ell^{\min},\ell^{\max}\), initial fraction \(\ell^0\), minimum release \(R^{\min}\), head-min factor \(\phi\), cascade delay \(\tau\), and rated power \(\bar P\).
+Parameters: reservoir capacity \(C\), turbine efficiency \(\eta\), pump efficiency \(\eta_p\), evaporation rate \(\rho\), hourly inflow \(W_t\) (MW-eq, read from `reservoir_inflow_file` as given, not clipped), minimum/maximum level fractions \(\ell^{\min},\ell^{\max}\), initial fraction \(\ell^0\), minimum release \(R^{\min}\), head-min factor \(\phi\), cascade delay \(\tau\), and rated power \(\bar P\).
 
 ---
 

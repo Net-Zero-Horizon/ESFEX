@@ -386,6 +386,18 @@ def expand_config_with_zones(
 
     cfg.nodes.num_nodes = new_num_nodes
 
+    # A zone node belongs to the system of the bus it connects to, so its
+    # emissions count against that system's CO2 budget.
+    if cfg.co2_budget_by_system:
+        budgets = []
+        for b in cfg.co2_budget_by_system:
+            extra = list(b.extra_nodes) + [
+                m.virtual_node_idx for m in mappings
+                if b.first_node <= m.nearest_bus_parent_node < b.first_node + b.num_nodes
+            ]
+            budgets.append(b.model_copy(update={"extra_nodes": extra}))
+        cfg.co2_budget_by_system = budgets
+
     # ── Phase 3: Expand generator per-node arrays ─────────────────────
     for gen_key, gen in cfg.generators.items():
         for m in mappings:

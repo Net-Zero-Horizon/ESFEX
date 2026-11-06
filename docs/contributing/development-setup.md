@@ -410,7 +410,7 @@ ESFEX's own variables:
 | `ESFEX_PLUGIN_PATH` | Extra plugin search directories (`os.pathsep`-separated) | unset |
 | `ESFEX_DUMP_IIS` | `1` = write the IIS of the first infeasible model (Gurobi only) | unset |
 | `ESFEX_IIS_DIR` | Directory for the IIS / infeasible LP file | `/tmp` |
-| `ESFEX_OPS_ONLY_YEARS` | Debug: run operational dispatch only for these years (comma- or space-separated) | unset |
+| `ESFEX_OPS_ONLY_YEARS` | Debug: run operational dispatch only for these years (comma- or space-separated); same as `Orchestrator.run(dispatch_years=...)`, which takes precedence | unset |
 | `ESFEX_DATA_ROOT` | Dataset root (`esfex.paths`): demand-model training data and the caches the Studio writes (Geofabrik extracts, OSM tiles, CMIP6 subsets); `~` is expanded | `~/.esfex/data` |
 | `ESFEX_XGB_DEVICE` | XGBoost device for demand models: `auto`, `cpu`, `cuda` | `auto` |
 | `ESFEX_CMIP6_MODEL` | CMIP6 model used for climate projections | `MPI-ESM1-2-HR` |

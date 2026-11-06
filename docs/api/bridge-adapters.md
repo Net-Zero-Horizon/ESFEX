@@ -226,6 +226,9 @@ class MasterProblemAdapter:
         system_node_ranges: Optional[List[tuple]] = None,
         config_path: Optional[str] = None,
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
+        inflow_cache: Optional[Dict[str, np.ndarray]] = None,
+        date_start: Optional[str] = None,
+        profile_start_hour: int = 0,
         solver_method: str = "monolithic",
         benders_max_iterations: int = 50,
         benders_tolerance: float = 1e-4,
@@ -256,7 +259,10 @@ class MasterProblemAdapter:
 | `use_stochastic`, `stochastic_scenarios` | `bool`, `list[dict]` | Build the two-stage stochastic master (`create_stochastic_master_problem`): shared investment, one representative-day operation per scenario. Ignored, with a warning, when `solver_method="benders"`. |
 | `system_node_ranges` | `list[tuple]` | `(name, first_bus, num_buses, initial_re)` per system (1-indexed buses), for per-system RE targets in multi-system runs. |
 | `config_path` | `str` | Path to config file for resolving relative availability file paths. |
-| `availability_cache` | `dict` | Pre-loaded availability profiles for generators and technologies. |
+| `availability_cache` | `dict` | Pre-loaded hourly availability profiles for generators and technologies (the runner passes the dispatch's cache). A unit not in it is read from its file. |
+| `inflow_cache` | `dict` | Pre-loaded hourly reservoir inflows (MW-eq) by generator key; a unit not in it is read from its `reservoir_inflow_file` (not clipped). |
+| `date_start` | `str` | Timestamp of the first data row (`"DD/MM/YYYY HH:MM"`) for profiles read from disk, so Feb 29 is dropped by the data's calendar as in the dispatch. |
+| `profile_start_hour` | `int` | Horizon hour (year index × 8760 + hour) of the first planned hour: every profile is rotated to start there, wrapping around a shorter one. The myopic runner passes `y_idx × 8760` for each one-year model. |
 | `solver_method` | `str` | `"monolithic"` (one JuMP model) or `"benders"` (`run_benders_decomposition`). |
 | `benders_max_iterations`, `benders_tolerance`, `benders_lol_penalty_cap` | `int`, `float`, `float` | Benders settings: iteration cap, relative gap for convergence, cap on the load-shedding penalty in the subproblems. |
 
