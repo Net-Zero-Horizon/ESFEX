@@ -92,6 +92,7 @@ console = Console(force_terminal=True)
 # Values `run --mode/--solver` accept: the schema's (esfex/__init__ already
 # imports it, so this costs nothing at startup).
 from esfex.config.schema import ESFEXConfig as _ESFEXConfig, SolverConfig as _SolverConfig
+from esfex.utils.temporal import DEFAULT_RUN_YEARS
 
 SIMULATION_MODES: tuple[str, ...] = typing.get_args(
     _ESFEXConfig.model_fields["simulation_mode"].annotation)
@@ -153,7 +154,7 @@ def run(
         None,
         "--years",
         "-y",
-        help="Number of years to simulate (default: 25)",
+        help=f"Number of years to simulate (default: {DEFAULT_RUN_YEARS})",
     ),
     start_year: Optional[int] = typer.Option(
         None,

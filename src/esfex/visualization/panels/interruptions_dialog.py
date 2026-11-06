@@ -28,13 +28,14 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
 
 from esfex.visualization.data.gui_model import GuiModel, GuiOutageWindow
 from esfex.visualization.i18n import tr
+from esfex.utils.temporal import DEFAULT_RUN_YEARS
 from esfex.visualization.ui_scale import scaled
 
 _RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 
 # Years a Studio run simulates: the Run button launches ``esfex run`` without
-# ``--years``, so ``Orchestrator.run`` uses its default of 25 years.
-STUDIO_RUN_YEARS = 25
+# ``--years``, so ``Orchestrator.run`` uses its default.
+STUDIO_RUN_YEARS = DEFAULT_RUN_YEARS
 
 
 def horizon_base_year(global_settings) -> int:
