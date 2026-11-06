@@ -2,9 +2,13 @@
 
 A dedicated dialog that hosts a D3 timeline (embedded QtWebEngine, offline —
 no CDN) where each infrastructure element is a row and each scheduled
-interruption is a draggable bar over ``[start_hour, end_hour)`` of the base
-year (absolute horizon hours, hour 0 = Jan 1 of base_year: a window happens
-once unless marked as repeating every year). Reads/writes ``model.state.outage_schedule`` (list of GuiOutageWindow).
+interruption is a draggable bar over ``[start_hour, end_hour)`` of the
+simulation horizon (absolute horizon hours, hour 0 = Jan 1 of the base year,
+the year of ``global_settings.date_start``; every year is 8760 h; a window
+happens once unless marked as repeating every year). The timeline spans the
+whole horizon a Studio run simulates (:data:`STUDIO_RUN_YEARS` years),
+extended to the end of any window already scheduled later. Reads/writes
+``model.state.outage_schedule`` (list of GuiOutageWindow).
 
 The Python↔JS contract is a tiny QWebChannel bridge:
 
@@ -27,6 +31,28 @@ from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scaled
 
 _RESOURCES_DIR = Path(__file__).parent.parent / "resources"
+
+# Years a Studio run simulates: the Run button launches ``esfex run`` without
+# ``--years``, so ``Orchestrator.run`` uses its default of 25 years.
+STUDIO_RUN_YEARS = 25
+
+
+def horizon_base_year(global_settings) -> int:
+    """Year of hour 0 of the horizon: the year of ``date_start``."""
+    from esfex.utils.temporal import parse_date_start
+    try:
+        return parse_date_start(global_settings.date_start).year
+    except (AttributeError, TypeError, ValueError):
+        return 2025
+
+
+def horizon_hours(schedule, years: int = STUDIO_RUN_YEARS) -> int:
+    """Hours the calendar spans: ``years`` model years of 8760 h, extended
+    by whole years to cover the latest scheduled window."""
+    from esfex.utils.temporal import HOURS_STD_YEAR
+    latest = max((int(ow.end_hour) for ow in schedule), default=0)
+    n_years = max(years, -(-latest // HOURS_STD_YEAR))
+    return n_years * HOURS_STD_YEAR
 
 # Element categories exposed in the calendar (order = display order). Each maps
 # a schedule element_type to a translated group label and a state collector.
@@ -137,8 +163,8 @@ class InterruptionsDialog(QDialog):
         if self._focus:
             focus = {"element_type": self._focus[0], "element_id": self._focus[1]}
         return json.dumps({
-            "base_year": int(getattr(s, "base_year", 2025)),
-            "horizon_hours": 8760,
+            "base_year": horizon_base_year(self.model.global_settings),
+            "horizon_hours": horizon_hours(getattr(s, "outage_schedule", [])),
             "groups": self._collect_groups(),
             "schedule": schedule,
             "focus": focus,

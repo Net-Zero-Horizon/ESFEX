@@ -1,4 +1,4 @@
-/* Interruptions calendar — D3 Gantt timeline over the horizon year.
+/* Interruptions calendar — D3 Gantt timeline over the simulation horizon.
  * Rows = infrastructure elements (grouped by category); bars = scheduled
  * outages over [start_hour, end_hour). Fully offline (bundled d3). Talks to
  * Python via the QWebChannel `bridge` (get_data / commit). */
@@ -124,18 +124,34 @@ function render() {
         .attr("width", LEFT + plotW + PAD_R)
         .attr("height", contentH);
 
-    // Month grid + axis labels
+    // Grid + axis labels: months when the horizon is one year, otherwise
+    // one line per model year (labelled every few years so labels fit).
     var gGrid = svg.append("g");
-    for (var mo = 0; mo <= 12; mo++) {
-        var h = partsToHour(baseYear, mo, 1, 0, 0);
-        if (h < 0 || h > horizon) continue;
-        gGrid.append("line").attr("class", "grid-line month")
-            .attr("x1", x(h)).attr("x2", x(h)).attr("y1", TOP).attr("y2", contentH - 8);
-        if (mo < 12) {
-            gGrid.append("text").attr("class", "axis-label")
-                .attr("x", x(h) + 4).attr("y", 16)
-                .text(new Date(Date.UTC(2025, mo, 1))
-                      .toLocaleString("default", { month: "short", timeZone: "UTC" }));
+    var nYears = Math.ceil(horizon / H_YEAR);
+    if (nYears <= 1) {
+        for (var mo = 0; mo <= 12; mo++) {
+            var h = partsToHour(baseYear, mo, 1, 0, 0);
+            if (h < 0 || h > horizon) continue;
+            gGrid.append("line").attr("class", "grid-line month")
+                .attr("x1", x(h)).attr("x2", x(h)).attr("y1", TOP).attr("y2", contentH - 8);
+            if (mo < 12) {
+                gGrid.append("text").attr("class", "axis-label")
+                    .attr("x", x(h) + 4).attr("y", 16)
+                    .text(new Date(Date.UTC(2025, mo, 1))
+                          .toLocaleString("default", { month: "short", timeZone: "UTC" }));
+            }
+        }
+    } else {
+        var every = Math.max(1, Math.ceil(nYears * 44 / plotW));
+        for (var yi = 0; yi <= nYears; yi++) {
+            var hy = yi * H_YEAR;
+            if (hy > horizon) break;
+            gGrid.append("line").attr("class", "grid-line month")
+                .attr("x1", x(hy)).attr("x2", x(hy)).attr("y1", TOP).attr("y2", contentH - 8);
+            if (yi < nYears && yi % every === 0) {
+                gGrid.append("text").attr("class", "axis-label")
+                    .attr("x", x(hy) + 4).attr("y", 16).text(String(baseYear + yi));
+            }
         }
     }
 

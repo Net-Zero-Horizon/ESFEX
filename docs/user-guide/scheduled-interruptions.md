@@ -31,7 +31,7 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 
 ### The interruptions calendar
 
-**Edit → Interruptions…** opens the **Service Interruptions** calendar for the current system. It is a Gantt-style timeline over the base year (8,760 hours), with one row per element, grouped by category:
+**Edit → Interruptions…** opens the **Service Interruptions** calendar for the current system. It is a Gantt-style timeline over the whole simulation horizon, with one row per element, grouped by category. The horizon starts on 1 January of the year of `date_start` (Global Settings) and spans the 25 years a Studio run simulates (8,760 hours each), or more if a window is already scheduled later; the axis shows months for a one-year horizon and years otherwise. The element rows are:
 
 - Generators
 - Batteries
@@ -47,7 +47,7 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 | **Start** / **End** | The window's hour range, shown as dates. Dates follow the model calendar: every year has 8,760 hours and no 29 February, so in a leap base year 1 March is still hour 1,416 and a date typed as 29 February is read as 28 February |
 | **Availability** | Capacity fraction during the window (0 = full cut, 1 = no effect) |
 | **Note** | Optional free-text label shown on the calendar |
-| **Repeat every year** | Repeat the window in every simulated year (`recurring`); unchecked, it happens once, in the base year |
+| **Repeat every year** | Repeat the window in every simulated year (`recurring`); unchecked, it happens once, at its hours of the horizon |
 
 Use **Add** / **Delete** to manage windows directly. Windows with `end <= start` are dropped when you apply.
 
