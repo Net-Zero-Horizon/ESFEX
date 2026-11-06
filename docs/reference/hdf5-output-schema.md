@@ -65,7 +65,7 @@ A group can be present and empty, for example the battery groups in a run withou
 |-----------|------|-------------|
 | `creation_date` | string | ISO 8601 creation timestamp |
 | `num_nodes` | int | Number of network nodes (all systems merged) |
-| `num_years` | int | The `years` argument of `run()` |
+| `num_years` | int | Number of years simulated (the `years` argument of `run()`; 1 in unit-commitment mode) |
 | `export_type` | string | `"incremental_results"` |
 | `temporal_resolution_hours` | int | Time step (hours) |
 | `simulation_mode` | string | `"development"` or `"unit_commitment"` |
@@ -137,6 +137,8 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | `renewable_penetration` | (num_years,) | float | RE penetration (0-1) |
 | `co2_emissions` | (num_years,) | float | Annual CO2 (tonnes) |
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
+
+Energy and CO2 totals here and in the scenario attributes below are sums of the per-step rates times `temporal_resolution_hours`, so they are MWh and tonnes at any time step.
 | `n1_security_cost` | (num_years,) | float | Incremental cost of N-1 security ($) |
 
 ---
@@ -255,7 +257,7 @@ Investments below 0.1 and retirement fractions below 0.01 are not written. Batte
 
 ### Dataset Naming
 
-Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). In `generation/`, `gen_status/` and `gen_startup/`, repeated names get a `_2`, `_3`, ... suffix. The other per-unit groups do not de-duplicate names, so two units with the same name make the write fail.
+Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery) gets a `_2`, `_3`, ... suffix. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...).
 
 Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape` and `units`.
 
@@ -453,19 +455,19 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 
 | Dataset | Shape | Type | Units | Description |
 |---------|-------|------|-------|-------------|
-| `demand` | see below | float32 | MW | Gross demand (same content as `/demand/year_YYYY_base_demand`) |
+| `demand` | (num_nodes, hours) | float32 | MW | Gross demand (same content as `/demand/year_YYYY_base_demand`, transposed); attribute `dimensions = "nodes x hours"` |
 | `reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve held as free capacity |
 | `reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve held as free capacity |
 | `loss_of_reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve deficit |
 | `loss_of_reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve deficit |
 | `loss_load` | (num_nodes, hours) | float64 | MW | Load shedding |
-| `CO2_emissions` | (num_nodes, hours) | float64 | tonnes | Hourly CO2 emissions |
+| `CO2_emissions` | (num_nodes, hours) | float64 | tCO2/h | CO2 emission rate per step; × `temporal_resolution_hours` gives the tonnes emitted in the step |
 | `voltage_angle` | (num_nodes, hours) | float64 | radians | Voltage angles (max over a node's buses) |
 | `voltage_magnitude` | (num_buses, hours) | float64 | p.u. | Voltage magnitude, ACOPF modes only |
 | `reactive_generation` | (generators, num_buses, hours) | float64 | MVAr | Reactive power, ACOPF modes only |
 | `rooftop_generation` | (hours, num_nodes) | float64 | MW | Behind-the-meter rooftop solar, already subtracted from the demand sent to the model; diagnostic only |
 
-The detailed `demand` is transposed to `(num_nodes, hours)` only when it has more hours than nodes. When there are more nodes than hours (for example a 24-hour unit-commitment run on a 72-node system) it stays `(hours, num_nodes)`. Orient it by the axis whose length equals the number of time steps.
+The detailed `demand` is always `(num_nodes, hours)` and carries `dimensions = "nodes x hours"`. Files written before this attribute existed transposed it only when there were more hours than nodes; with more nodes than hours (for example a 24-hour unit-commitment run on a 72-node system) they kept `(hours, num_nodes)`. `esfex.io.exporter.demand_node_hours(dataset, n_hours)` reads either layout as `(num_nodes, hours)`, using the number of time steps (the length of `electricity_prices`) for old files; the results viewer and `load_results()` use it.
 
 ### Economic Data
 
@@ -480,11 +482,11 @@ The detailed `demand` is transposed to `(num_nodes, hours)` only when it has mor
 
 | Dataset | Shape | Units | Description |
 |---------|-------|-------|-------------|
-| `power_flow` | (num_nodes, num_nodes, hours') | MW | Flow from node i to node j, aggregated from bus-pair flows; lines inside one node are dropped |
+| `power_flow` | (num_nodes, num_nodes, hours) | MW | Flow from node i to node j, aggregated from bus-pair flows; lines inside one node are dropped |
 | `transfer_investment` | (num_nodes, num_nodes) | MW | Transmission investment |
-| `transfer_margin` | (num_nodes, num_nodes, hours') | MW | Transfer margin slack |
+| `transfer_margin` | (num_nodes, num_nodes, hours) | MW | Transfer margin slack, aggregated from bus pairs like `power_flow` |
 
-`hours'` can be larger than `hours`: with a rolling horizon, the window arrays of `power_flow` and `transfer_margin` are concatenated including the overlap hours.
+With a rolling horizon, each window contributes only its committed steps (the overlap tail is dropped), as for every other time series.
 
 ### EV Data
 
@@ -508,7 +510,7 @@ The detailed `demand` is transposed to `(num_nodes, hours)` only when it has mor
 
 #### technology_selling_prices/{generator_name}
 
-Revenue analysis, one group per generator name (despite the group name, not per technology). Generators that never produce are skipped. Generator names are not sanitized here, so a name containing `/` (for example `Cuba/Solar PV`) creates nested groups (`Cuba/Solar PV/`).
+Revenue analysis, one group per generator (despite the group name, not per technology), named like the generator's `generation/` dataset (see [Dataset Naming](#dataset-naming)). Generators that never produce are skipped.
 
 **Attributes:**
 
@@ -566,7 +568,7 @@ Written when N-1 security results exist.
 | `global/cost_breakdown/year_YYYY/` | Same attributes as `/cost_breakdown/year_YYYY/` |
 | `global/demand/year_YYYY_base_demand` | Same array as `/demand/year_YYYY_base_demand`, `(hours, num_nodes)` float32 |
 
-`inter_system/detailed_results/year_YYYY_threshold_0/power_flow/{A}_to_{B}` holds the hourly net flow (MW) from system A to system B. It is written only for runs with more than one system.
+`inter_system/detailed_results/year_YYYY_threshold_0/power_flow/{A}_to_{B}` holds the hourly flow (MW) on the lines from system A to system B (each line's bus ends are mapped to their nodes, then to their systems). It is written only for runs with more than one system.
 
 Per-system copies of `detailed_results/` and `summary_results/` are not written; readers slice the global node axis with the `subsystem_*` root attributes.
 
@@ -614,15 +616,15 @@ Virtual unit names start with `"Investment "`. They do not appear in `system_con
 | Capacity factor | `capacity_factor/{name}` | (N, H) | float64 | 0-1 |
 | LCOE | `lcoe/{name}` | (N, H) | float64 | $/MWh |
 | VALLCOE | `vallcoe/{name}` | (N, H) | float64 | $/MWh |
-| Demand (detailed) | `demand` | (N, H), or (H, N) if N > H | float32 | MW |
+| Demand (detailed) | `demand` | (N, H); (H, N) in older files when N ≥ H | float32 | MW |
 | Demand (per year) | `/demand/year_YYYY_base_demand` | (H, N) | float32 | MW |
 | Rooftop solar | `rooftop_generation` | (H, N) | float64 | MW |
-| Power flow | `power_flow` | (N, N, H') | float64 | MW |
+| Power flow | `power_flow` | (N, N, H) | float64 | MW |
 | Prices | `electricity_prices` | (H,) | float64 | $/MWh |
 | Nodal prices | `nodal_electricity_prices` | (N, H) | float64 | $/MWh |
 | Loss of load | `loss_load` | (N, H) | float64 | MW |
 
-Where **N** = `num_nodes`, **H** = time steps in the year (8760 at hourly resolution, 8760 / `temporal_resolution_hours` otherwise; the unit-commitment horizon in UC mode), and **H'** ≥ H (see [Network Data](#network-data)).
+Where **N** = `num_nodes` and **H** = time steps in the year (8760 at hourly resolution, 8760 / `temporal_resolution_hours` otherwise; the unit-commitment horizon in UC mode).
 
 ---
 

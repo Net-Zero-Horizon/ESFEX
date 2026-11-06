@@ -18,6 +18,40 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# ``dimensions`` attribute of the scenario ``demand`` dataset in files that
+# always store it [node, step], like the other per-node datasets.
+NODE_HOUR_DIMENSIONS = "nodes x hours"
+
+
+def demand_is_step_major(ds, n_hours: Optional[int] = None) -> bool:
+    """True when a scenario ``demand`` dataset is stored ``[step, node]``.
+
+    Files carrying ``attrs["dimensions"] == "nodes x hours"`` are always
+    ``[node, step]``. Older files transposed demand to ``[node, step]`` only
+    when there were more steps than nodes and otherwise kept
+    ``[step, node]``; for those, ``n_hours`` (the number of steps, e.g. the
+    length of ``electricity_prices``) decides. Without it, or when steps
+    equal nodes, an old file is taken as ``[node, step]``.
+    """
+    shape = getattr(ds, "shape", ())
+    if len(shape) != 2:
+        return False
+    attrs = getattr(ds, "attrs", None)
+    dims = attrs.get("dimensions") if attrs is not None else None
+    if isinstance(dims, bytes):
+        dims = dims.decode()
+    if dims == NODE_HOUR_DIMENSIONS:
+        return False
+    return bool(n_hours) and shape[1] != n_hours and shape[0] == n_hours
+
+
+def demand_node_hours(ds, n_hours: Optional[int] = None) -> np.ndarray:
+    """Read a scenario ``demand`` dataset as a ``[node, step]`` array
+    (see :func:`demand_is_step_major` for old files)."""
+    arr = np.asarray(ds[()])
+    return arr.T if demand_is_step_major(ds, n_hours) else arr
+
+
 # Names of the leading axes of the 3-D [from, to, step] datasets.
 _PAIR_AXES = ("from_node", "to_node")
 

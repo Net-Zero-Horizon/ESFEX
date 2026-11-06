@@ -129,6 +129,27 @@ def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
     return routes
 
 
+def _concat_window_series(windows) -> dict:
+    """Join per-window ``{key: series}`` dicts along time.
+
+    ``windows`` is a list of ``(dict, keep_steps)``: each series is cut to
+    the window's committed steps (the overlap tail belongs to the next
+    window), and a key missing from a window (no variable or no binding
+    dual there) is zero-filled so every series stays aligned with the
+    year's time axis.
+    """
+    keys: list = []
+    for d, _ in windows:
+        keys.extend(k for k in d if k not in keys)
+    return {
+        k: np.concatenate([
+            np.asarray(d[k], dtype=float)[:n] if k in d else np.zeros(n)
+            for d, n in windows
+        ])
+        for k in keys
+    }
+
+
 @dataclass
 class SimulationState:
     """Tracks state across simulation years."""
@@ -1517,7 +1538,8 @@ class Orchestrator:
         self._initialize_hdf5(
             hdf5_path,
             num_nodes=num_nodes,
-            num_years=years,
+            # Years actually run (unit_commitment runs only the first one)
+            num_years=len(years_range),
             start_year=start_year,
             end_year=end_year,
         )
@@ -2467,6 +2489,35 @@ class Orchestrator:
                         f"demand: {total_dem:.0f})")
 
         return result
+
+    def _bus_pairs_to_node_flows(self, pair_series: dict, num_nodes: int) -> np.ndarray:
+        """Sum ``{(from_bus, to_bus): series}`` into a ``[from_node, to_node, step]`` array.
+
+        The LP keys power flows and transfer margins by operational bus
+        index; map both ends through ``bus_to_node`` and drop lines inside
+        a node.
+        """
+        n_steps = max((len(v) for v in pair_series.values()), default=0)
+        out = np.zeros((num_nodes, num_nodes, n_steps))
+        for (i, j), series in pair_series.items():
+            nodes = self._bus_pair_nodes(i, j)
+            if nodes is None or nodes[0] >= num_nodes or nodes[1] >= num_nodes:
+                continue
+            out[nodes[0], nodes[1], :len(series)] += series
+        return out
+
+    def _bus_pair_nodes(self, i: int, j: int) -> Optional[tuple[int, int]]:
+        """(from_node, to_node) of a bus pair; None for intra-node or unknown buses."""
+        b2n = self._bus_to_node
+        if b2n is None:
+            ni, nj = i, j
+        else:
+            if not (0 <= i < len(b2n) and 0 <= j < len(b2n)):
+                return None
+            ni, nj = b2n[i], b2n[j]
+        if ni == nj or ni < 0 or nj < 0:
+            return None
+        return ni, nj
 
     def _aggregate_buses_to_nodes(self, arr, method="sum"):
         """Aggregate bus-level array to node-level.
@@ -4587,17 +4638,6 @@ class Orchestrator:
                 else:
                     return arr[..., :keep_h]
 
-            def _merge_n1_trans_duals(duals_list):
-                """Merge N-1 transmission dual dicts across windows."""
-                merged = {}
-                for d in duals_list:
-                    for key, arr in d.items():
-                        if key in merged:
-                            merged[key] = np.concatenate([merged[key], np.asarray(arr)])
-                        else:
-                            merged[key] = np.asarray(arr)
-                return merged
-
             # Accumulate scalar results (scale by kept fraction)
             total_solve_time += window_result.get("solve_time", 0.0)
             total_re_penetration += window_result.get("re_penetration", 0.0)
@@ -4655,8 +4695,9 @@ class Orchestrator:
             if window_result.get("reactive_generation") is not None:
                 all_reactive_generation.append(
                     _trim(window_result["reactive_generation"], keep_hours))
-            if window_result.get("power_flow") is not None:
-                all_power_flow.append(window_result["power_flow"])
+            # Keyed series (power flow, transfer margin, N-1 duals) keep
+            # only the committed steps too, with keys aligned across windows.
+            all_power_flow.append((window_result.get("power_flow") or {}, keep_hours))
             if window_result.get("bat_spillage") is not None:
                 all_bat_spillage.append(_trim(window_result["bat_spillage"], keep_hours))
             if window_result.get("ev_charging") is not None:
@@ -4669,8 +4710,7 @@ class Orchestrator:
                 all_ev_loss.append(_trim(window_result["ev_loss"], keep_hours))
             if window_result.get("loss_of_inertia") is not None:
                 all_loss_of_inertia.append(_trim(window_result["loss_of_inertia"], keep_hours))
-            if window_result.get("transfer_margin") is not None:
-                all_transfer_margin.append(window_result["transfer_margin"])
+            all_transfer_margin.append((window_result.get("transfer_margin") or {}, keep_hours))
             if window_result.get("reservoir_level") is not None:
                 all_reservoir_level.append(_trim(window_result["reservoir_level"], keep_hours))
             if window_result.get("reservoir_spillage") is not None:
@@ -4691,14 +4731,17 @@ class Orchestrator:
             if window_result.get("primary_energy") is not None:
                 all_pe_results.append(window_result["primary_energy"])
             # N-1 security results
-            if window_result.get("n1_gen_reserve_duals") is not None:
-                all_n1_gen_duals.append(_trim(window_result["n1_gen_reserve_duals"], keep_hours))
+            # A window without binding N-1 duals returns None: zero-fill it.
+            all_n1_gen_duals.append((
+                {"d": window_result["n1_gen_reserve_duals"]}
+                if window_result.get("n1_gen_reserve_duals") is not None else {},
+                keep_hours,
+            ))
             if window_result.get("n1_binding_contingencies") is not None:
                 for bc in window_result["n1_binding_contingencies"]:
                     if bc not in all_n1_binding:
                         all_n1_binding.append(bc)
-            if window_result.get("n1_trans_reserve_duals") is not None:
-                all_n1_trans_duals.append(window_result["n1_trans_reserve_duals"])
+            all_n1_trans_duals.append((window_result.get("n1_trans_reserve_duals") or {}, keep_hours))
             total_n1_security_cost += window_result.get("n1_security_cost", 0.0)
 
         # No window solved: the whole year produced no dispatch. Surface the
@@ -4749,23 +4792,11 @@ class Orchestrator:
         reservoir_spillage = np.concatenate(all_reservoir_spillage, axis=-1) if all_reservoir_spillage else None
         reservoir_pump = np.concatenate(all_reservoir_pump, axis=-1) if all_reservoir_pump else None
 
-        # Combine power_flow dicts across windows
-        combined_power_flow = {}
-        for pf_dict in all_power_flow:
-            for key, arr in pf_dict.items():
-                if key in combined_power_flow:
-                    combined_power_flow[key] = np.concatenate([combined_power_flow[key], arr])
-                else:
-                    combined_power_flow[key] = np.array(arr)
-
-        # Combine transfer_margin dicts across windows
-        combined_transfer_margin = {}
-        for tm_dict in all_transfer_margin:
-            for key, arr in tm_dict.items():
-                if key in combined_transfer_margin:
-                    combined_transfer_margin[key] = np.concatenate([combined_transfer_margin[key], arr])
-                else:
-                    combined_transfer_margin[key] = np.array(arr)
+        # Combine keyed series across windows (committed steps only)
+        combined_power_flow = _concat_window_series(all_power_flow)
+        combined_transfer_margin = _concat_window_series(all_transfer_margin)
+        combined_n1_trans_duals = _concat_window_series(all_n1_trans_duals)
+        n1_gen_duals_arr = _concat_window_series(all_n1_gen_duals).get("d")
 
         # Merge primary energy results across windows
         pe_merged = None
@@ -4884,8 +4915,8 @@ class Orchestrator:
             emissions=total_emissions,
             total_generation=total_generation,
             total_demand=total_demand_val,
-            n1_gen_reserve_duals=np.concatenate(all_n1_gen_duals) if all_n1_gen_duals else None,
-            n1_trans_reserve_duals=_merge_n1_trans_duals(all_n1_trans_duals) if all_n1_trans_duals else None,
+            n1_gen_reserve_duals=n1_gen_duals_arr,
+            n1_trans_reserve_duals=combined_n1_trans_duals if combined_n1_trans_duals else None,
             n1_binding_contingencies=all_n1_binding if all_n1_binding else None,
             n1_security_cost=total_n1_security_cost,
             cost_breakdown=accumulated_cost_breakdown if accumulated_cost_breakdown else None,
@@ -5225,11 +5256,16 @@ class Orchestrator:
             tech_prices = {}
             n_gen = result.gen_output.shape[0]
             hours = result.gen_output.shape[2]
+            # Keyed by the unit's HDF5 dataset name: unique (homonymous
+            # generators no longer overwrite each other) and '/'-free.
+            known = list(getattr(self, "_gen_names", None) or [])
+            names = known if len(known) == len(generators) else [gen.name for gen in generators]
+            ds_names = self._h5_unit_names(names)
 
             for g, gen in enumerate(generators):
                 if g >= n_gen:
                     break
-                name = gen.name
+                name = ds_names[g]
                 rows = []
                 total_gen = 0.0
                 total_rev = 0.0
@@ -6813,12 +6849,36 @@ class Orchestrator:
         """
         return name.replace("/", " - ")
 
+    @classmethod
+    def _h5_unit_names(cls, names: list[str]) -> list[str]:
+        """HDF5 dataset names for a unit list, index-aligned and unique.
+
+        Names are passed through ``_h5safe``; a name already used (two
+        units with the same name, or ``"A/B"`` next to ``"A - B"``) gets
+        a ``_2``, ``_3``… suffix.
+        """
+        out: list[str] = []
+        used: set[str] = set()
+        for name in names:
+            safe = cls._h5safe(str(name))
+            cand, k = safe, 1
+            while cand in used:
+                k += 1
+                cand = f"{safe}_{k}"
+            used.add(cand)
+            out.append(cand)
+        return out
+
     def _append_year_to_hdf5(self, path: Path, result: YearResults):
         """Append year results to HDF5 file with legacy-compatible structure."""
         import h5py
 
         num_nodes = self._num_nodes
         hours = result.gen_output.shape[-1] if result.gen_output is not None else 0
+        # One dataset name per unit, shared by every per-generator and
+        # per-battery group so the same unit has the same name everywhere.
+        gen_ds = self._h5_unit_names(self._gen_names)
+        bat_ds = self._h5_unit_names(self._bat_names)
 
         with h5py.File(path, "a") as f:
             # ==============================================================
@@ -6882,13 +6942,9 @@ class Orchestrator:
                 # missing (shouldn't happen, but the export should never
                 # crash on stale state).
                 gen_fuels = getattr(self, '_gen_fuels', []) or []
-                _seen_gen: dict[str, int] = {}
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_output.shape[0]:
-                        # Deduplicate HDF5 dataset names
-                        safe = self._h5safe(name)
-                        _seen_gen[safe] = _seen_gen.get(safe, 0) + 1
-                        ds_name = safe if _seen_gen[safe] == 1 else f"{safe}_{_seen_gen[safe]}"
+                        ds_name = gen_ds[g]
                         ds = gen_group.create_dataset(
                             ds_name, data=result.gen_output[g],
                             chunks=True, compression="gzip",
@@ -6908,12 +6964,9 @@ class Orchestrator:
                 status_group.attrs["description"] = (
                     "Generator on/off status [nodes x hours] for each generator (1=on, 0=off)"
                 )
-                _seen_st: dict[str, int] = {}
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_status.shape[0]:
-                        safe = self._h5safe(name)
-                        _seen_st[safe] = _seen_st.get(safe, 0) + 1
-                        ds_name = safe if _seen_st[safe] == 1 else f"{safe}_{_seen_st[safe]}"
+                        ds_name = gen_ds[g]
                         ds = status_group.create_dataset(
                             ds_name, data=result.gen_status[g],
                             chunks=True, compression="gzip",
@@ -6927,12 +6980,9 @@ class Orchestrator:
                 startup_group.attrs["description"] = (
                     "Generator startup events [nodes x hours] for each generator"
                 )
-                _seen_su: dict[str, int] = {}
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_startup.shape[0]:
-                        safe = self._h5safe(name)
-                        _seen_su[safe] = _seen_su.get(safe, 0) + 1
-                        ds_name = safe if _seen_su[safe] == 1 else f"{safe}_{_seen_su[safe]}"
+                        ds_name = gen_ds[g]
                         ds = startup_group.create_dataset(
                             ds_name, data=result.gen_startup[g],
                             chunks=True, compression="gzip",
@@ -6974,7 +7024,7 @@ class Orchestrator:
                     for b, name in enumerate(self._bat_names):
                         if b < bat_data.shape[0]:
                             ds = bat_group.create_dataset(
-                                self._h5safe(name), data=bat_data[b],
+                                bat_ds[b], data=bat_data[b],
                                 chunks=True, compression="gzip",
                             )
                             ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6989,7 +7039,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_soc.shape[0]:
                         ds = soc_group.create_dataset(
-                            self._h5safe(name), data=result.bat_soc[b],
+                            bat_ds[b], data=result.bat_soc[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7043,8 +7093,13 @@ class Orchestrator:
                     "CO2_emissions", data=result.co2_emissions,
                     chunks=True, compression="gzip",
                 )
-                ds.attrs["units"] = "tonnes CO2"
-                ds.attrs["description"] = "CO2 emissions per node and hour"
+                # Rate per step, like the MW datasets: tonnes in a step
+                # are value × temporal_resolution_hours.
+                ds.attrs["units"] = "tCO2/h"
+                ds.attrs["description"] = (
+                    "CO2 emission rate per node and time step "
+                    "(x temporal_resolution_hours = tonnes per step)"
+                )
 
             # --- Voltage angle [node x hour] ---
             if result.voltage_angle is not None:
@@ -7075,17 +7130,17 @@ class Orchestrator:
 
             # --- Demand data ---
             if result.demand is not None:
+                # result.demand is [step, node]; store [node, step] like
+                # every other per-node dataset, whatever the shape (the
+                # orientation used to depend on steps > nodes).
                 demand_array = np.array(result.demand, dtype=np.float32)
-                # Ensure [node x hour] orientation
-                if demand_array.ndim == 2 and demand_array.shape[0] > demand_array.shape[1]:
-                    demand_data = demand_array.T
-                else:
-                    demand_data = demand_array
+                demand_data = demand_array.T if demand_array.ndim == 2 else demand_array
                 ds = scenario.create_dataset(
                     "demand", data=demand_data,
                     chunks=True, compression="gzip",
                 )
                 ds.attrs["units"] = "MW"
+                ds.attrs["dimensions"] = "nodes x hours"
                 ds.attrs["description"] = "Total system demand"
 
             # --- Electricity prices ---
@@ -7115,23 +7170,9 @@ class Orchestrator:
             # bus-pair flows up to (from_node, to_node) via bus_to_node;
             # drop intra-node bus lines.
             if result.power_flow and isinstance(result.power_flow, dict):
-                max_hours = max(
-                    (len(v) for v in result.power_flow.values()), default=0
-                )
+                flow_array = self._bus_pairs_to_node_flows(result.power_flow, num_nodes)
+                max_hours = flow_array.shape[-1]
                 if max_hours > 0:
-                    flow_array = np.zeros((num_nodes, num_nodes, max_hours))
-                    b2n = self._bus_to_node
-                    for (i, j), flow in result.power_flow.items():
-                        if b2n is None:
-                            ni, nj = i, j
-                        else:
-                            if i >= len(b2n) or j >= len(b2n):
-                                continue
-                            ni, nj = b2n[i], b2n[j]
-                        if ni == nj:
-                            continue  # intra-node bus line
-                        if 0 <= ni < num_nodes and 0 <= nj < num_nodes:
-                            flow_array[ni, nj, :len(flow)] += flow
                     ds = scenario.create_dataset(
                         "power_flow", data=flow_array,
                         chunks=True, compression="gzip",
@@ -7167,7 +7208,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_investment_array.shape[0]:
                         ds = inv_group.create_dataset(
-                            self._h5safe(name), data=result.gen_investment_array[g],
+                            gen_ds[g], data=result.gen_investment_array[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes]"
@@ -7180,7 +7221,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_investment_power.shape[0]:
                         ds = inv_group.create_dataset(
-                            self._h5safe(name), data=result.bat_investment_power[b],
+                            bat_ds[b], data=result.bat_investment_power[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes]"
@@ -7192,7 +7233,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_investment_capacity.shape[0]:
                         ds = inv_group.create_dataset(
-                            self._h5safe(name), data=result.bat_investment_capacity[b],
+                            bat_ds[b], data=result.bat_investment_capacity[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes]"
@@ -7205,7 +7246,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.capacity_factor.shape[0]:
                         ds = cf_group.create_dataset(
-                            self._h5safe(name), data=result.capacity_factor[g],
+                            gen_ds[g], data=result.capacity_factor[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7218,7 +7259,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.lcoe.shape[0]:
                         ds = lcoe_group.create_dataset(
-                            self._h5safe(name), data=result.lcoe[g],
+                            gen_ds[g], data=result.lcoe[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7231,7 +7272,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.vallcoe.shape[0]:
                         ds = vallcoe_group.create_dataset(
-                            self._h5safe(name), data=result.vallcoe[g],
+                            gen_ds[g], data=result.vallcoe[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7244,7 +7285,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_spillage.shape[0]:
                         ds = spill_group.create_dataset(
-                            self._h5safe(name), data=result.bat_spillage[b],
+                            bat_ds[b], data=result.bat_spillage[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7257,7 +7298,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_capacity_factor.shape[0]:
                         ds = bcf_group.create_dataset(
-                            self._h5safe(name), data=result.bat_capacity_factor[b],
+                            bat_ds[b], data=result.bat_capacity_factor[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7270,7 +7311,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_lcoe.shape[0]:
                         ds = blcoe_group.create_dataset(
-                            self._h5safe(name), data=result.bat_lcoe[b],
+                            bat_ds[b], data=result.bat_lcoe[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7283,7 +7324,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_vallcoe.shape[0]:
                         ds = bvallcoe_group.create_dataset(
-                            self._h5safe(name), data=result.bat_vallcoe[b],
+                            bat_ds[b], data=result.bat_vallcoe[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -7343,15 +7384,11 @@ class Orchestrator:
                 ds.attrs["description"] = "System-wide inertia deficit per hour"
 
             # --- Transfer margin [from_node x to_node x hour] ---
+            # Keyed by bus pair like power_flow; summed to node pairs.
             if result.transfer_margin and isinstance(result.transfer_margin, dict):
-                max_hours_tm = max(
-                    (len(v) for v in result.transfer_margin.values()), default=0
-                )
+                tm_array = self._bus_pairs_to_node_flows(result.transfer_margin, num_nodes)
+                max_hours_tm = tm_array.shape[-1]
                 if max_hours_tm > 0:
-                    tm_array = np.zeros((num_nodes, num_nodes, max_hours_tm))
-                    for (i, j), margin in result.transfer_margin.items():
-                        if i < num_nodes and j < num_nodes:
-                            tm_array[i, j, :len(margin)] = margin
                     ds = scenario.create_dataset(
                         "transfer_margin", data=tm_array,
                         chunks=True, compression="gzip",
@@ -7385,7 +7422,7 @@ class Orchestrator:
                 tsp_group = scenario.create_group("technology_selling_prices")
                 tsp_group.attrs["description"] = "Revenue-weighted price data per technology"
                 for tech_name, data in result.technology_selling_prices.items():
-                    tech_group = tsp_group.create_group(tech_name)
+                    tech_group = tsp_group.create_group(self._h5safe(tech_name))
                     tech_group.attrs["total_generation"] = data["total_generation"]
                     tech_group.attrs["total_revenue"] = data["total_revenue"]
                     tech_group.attrs["average_selling_price"] = data["average_selling_price"]
@@ -7404,7 +7441,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_level.shape[0]:
                         ds = res_group.create_dataset(
-                            self._h5safe(name), data=result.reservoir_level[g],
+                            gen_ds[g], data=result.reservoir_level[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MWh-eq"
@@ -7415,7 +7452,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_spillage.shape[0]:
                         ds = spill_group.create_dataset(
-                            self._h5safe(name), data=result.reservoir_spillage[g],
+                            gen_ds[g], data=result.reservoir_spillage[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW-eq"
@@ -7426,7 +7463,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_pump.shape[0]:
                         ds = pump_group.create_dataset(
-                            self._h5safe(name), data=result.reservoir_pump[g],
+                            gen_ds[g], data=result.reservoir_pump[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW"
@@ -7584,11 +7621,15 @@ class Orchestrator:
                     for n in range(smap["node_offset"], smap["node_offset"] + smap["node_count"]):
                         node_to_sys[n] = sname
 
-                # Aggregate flows between system pairs
+                # Aggregate flows between system pairs. power_flow is keyed
+                # by bus pair: map each end to its node, then its system.
                 inter_flows: dict[tuple[str, str], np.ndarray] = {}
                 for (i, j), flow in result.power_flow.items():
-                    sys_i = node_to_sys.get(i)
-                    sys_j = node_to_sys.get(j)
+                    nodes = self._bus_pair_nodes(i, j)
+                    if nodes is None:
+                        continue
+                    sys_i = node_to_sys.get(nodes[0])
+                    sys_j = node_to_sys.get(nodes[1])
                     if sys_i and sys_j and sys_i != sys_j:
                         pair = (sys_i, sys_j)
                         if pair not in inter_flows:

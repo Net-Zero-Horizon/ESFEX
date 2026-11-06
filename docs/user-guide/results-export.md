@@ -78,7 +78,7 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 
 | Entry | Shape | Units | Description |
 |-------|-------|-------|-------------|
-| `demand` | (N, T), or (T, N) if N > T | MW | Gross demand (float32): base demand, plus EV demand when EV optimisation is off. Rooftop solar is not subtracted |
+| `demand` | (N, T) | MW | Gross demand (float32): base demand, plus EV demand when EV optimisation is off. Rooftop solar is not subtracted. Files written before the `dimensions` attribute was added hold it (T, N) when N ≥ T; `esfex.io.exporter.demand_node_hours()` reads both |
 | `generation/{gen_name}` | (N, T) | MW | Per-generator output (group, one dataset per unit; attribute `fuel`) |
 | `gen_status/{gen_name}` | (N, T) | 0/1 | Commitment status (UC mode only) |
 | `gen_startup/{gen_name}` | (N, T) | 0-1 | Startup events (UC mode only) |
@@ -93,7 +93,7 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 | `reserve_static`, `reserve_dynamic` | (N, T) | MW | Reserve held as free capacity (at most the requirement; not generated energy) |
 | `loss_of_reserve_static`, `loss_of_reserve_dynamic` | (N, T) | MW | Unmet reserves |
 | `loss_load` | (N, T) | MW | Unserved demand |
-| `CO2_emissions` | (N, T) | tonnes | Per-node emissions |
+| `CO2_emissions` | (N, T) | tCO2/h | Per-node emission rate; × `temporal_resolution_hours` gives tonnes per step |
 | `nodal_electricity_prices` | (N, T) | $/MWh | LMPs per node (max over a node's buses) |
 | `nodal_electricity_prices_congestion` | (N, T) | $/MWh | Nodal price minus the system average |
 | `electricity_prices` | (T,) | $/MWh | Mean of the nodal prices |
@@ -101,8 +101,8 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 | `voltage_angle` | (N, T) | radians | Voltage angles |
 | `voltage_magnitude` | (buses, T) | p.u. | ACOPF modes only |
 | `reactive_generation` | (G, buses, T) | MVAr | ACOPF modes only |
-| `power_flow` | (N, N, T') | MW | Inter-node flows aggregated from bus-pair flows (T' can exceed T) |
-| `transfer_margin` | (N, N, T') | MW | Transfer margin slack |
+| `power_flow` | (N, N, T) | MW | Inter-node flows aggregated from bus-pair flows |
+| `transfer_margin` | (N, N, T) | MW | Transfer margin slack, aggregated from bus pairs |
 | `transfer_investment` | (N, N) | MW | Transmission investment |
 | `loss_of_inertia` | (T,) | GW*s | System inertia deficit |
 | `rooftop_generation` | (T, N) | MW | Behind-the-meter rooftop solar (note: `(T, N)` not `(N, T)`) |
@@ -110,13 +110,13 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 | `reservoir_level/`, `reservoir_spillage/`, `reservoir_pump/` | (N, T) | MWh-eq / MW | Per-generator reservoir hydro (groups; level has T+1 steps) |
 | `gen_investment_power/`, `bat_investment_power/`, `bat_investment_capacity/` | (N,) | MW / MWh | Per-unit investments (groups) |
 | `capacity_factor/{gen}`, `lcoe/{gen}`, `vallcoe/{gen}` | (N, T) | various | Per-generator derived metrics |
-| `technology_selling_prices/{gen_name}/prices_weights` | (K, 3) | mixed | Revenue analysis per generator name (price, MW, timestep). Names are not sanitized here, so `Cuba/Solar PV` becomes the nested group `Cuba/Solar PV/` |
+| `technology_selling_prices/{gen_name}/prices_weights` | (K, 3) | mixed | Revenue analysis per generator (price, MW, timestep), named like its `generation/` dataset |
 | `primary_energy/` | groups | various | Fuel supply chain results (if enabled) |
 | `n1_security/` | group | various | N-1 duals and binding contingencies (if enabled) |
 
 Scenario attributes include `year`, `feasible`, `total_cost`, `renewable_penetration`, `co2_emissions`, `solve_time`, `total_generation`, `total_demand`, `load_shed`, `master_re_target`, and the master problem's investment and retirement decisions as `investment_*` / `retirement_*` attributes (see [HDF5 Output Schema](../reference/hdf5-output-schema.md#detailed_resultsyear_yyyy_threshold_0)).
 
-Where `N` = `num_nodes`, `T` = hours in the year at `temporal_resolution_hours` cadence (e.g. 2920 for 3-hourly), and `T'` for `power_flow` and `transfer_margin` is longer than `T` when the rolling horizon has overlap (the overlap hours are kept). `/demand/year_YYYY_base_demand` holds the same demand as `(T, N)`.
+Where `N` = `num_nodes` and `T` = time steps in the year at `temporal_resolution_hours` cadence (e.g. 2920 for 3-hourly). `/demand/year_YYYY_base_demand` holds the same demand as `(T, N)`. The energy and CO2 attributes (`total_generation`, `total_demand`, `load_shed`, `co2_emissions`) are MWh and tonnes at any step length.
 
 ### `summary_results/` (per-year scalars)
 
