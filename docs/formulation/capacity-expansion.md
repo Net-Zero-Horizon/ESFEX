@@ -198,7 +198,7 @@ Operational costs come from the representative day subproblems, scaled to a year
 C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{OBJ-4}
 \]
 
-where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, 8760 or 8784). The cost for each representative day is (from `day_operational_cost`):
+where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, always 8760: every modelled year has 8760 h, leap years included). The cost for each representative day is (from `day_operational_cost`):
 
 \[
 \begin{aligned}

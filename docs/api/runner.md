@@ -60,7 +60,7 @@ orch = Orchestrator(
 def run(
     self,
     years: Optional[int] = None,
-    start_year: int = 2025,
+    start_year: Optional[int] = None,
 ) -> list[YearResults]
 ```
 
@@ -72,7 +72,7 @@ Execute the full simulation: Master Problem (capacity expansion) followed by yea
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `years` | `Optional[int]` | `25` | Number of years to simulate |
-| `start_year` | `int` | `2025` | First simulation year |
+| `start_year` | `Optional[int]` | year of `date_start` | Label of the first simulated year. When given, the date labels start on `date_start`'s day and time in this year. It does not select demand rows |
 
 **Returns:** `list[YearResults]` -- One result object per simulated year.
 

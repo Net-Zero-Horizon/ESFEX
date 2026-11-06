@@ -126,6 +126,11 @@ def run(
         "-y",
         help="Number of years to simulate (default: 25)",
     ),
+    start_year: Optional[int] = typer.Option(
+        None,
+        "--start-year",
+        help="Label of the first simulated year (default: the year of date_start)",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -250,7 +255,7 @@ def run(
     # Run optimization
     try:
         orchestrator = Orchestrator(cfg, output_dir=output_dir, config_path=config)
-        results = orchestrator.run(years=years)
+        results = orchestrator.run(years=years, start_year=start_year)
 
         _safe_console_print("\nOptimization completed successfully!", style="green")
         _safe_console_print(f"Results saved to: {output_dir}")

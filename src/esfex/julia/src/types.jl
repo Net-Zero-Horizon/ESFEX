@@ -15,13 +15,12 @@ Matrices are indexed as [time, node] (Julia column-major order).
 # Note: JuMP and MOI are imported from the parent module (ESFEX.jl)
 # These will be available when types.jl is included from ESFEX.jl
 
-using Dates: isleapyear
-
-"""Standard (non-leap) year hours. Use `hours_in_year(year)` for year-specific calculations."""
+"""Hours in every modelled year. Leap years are modelled as 8760 h too."""
 const HOURS_STD_YEAR = 8760
 
-"""Return number of hours in a calendar year (8760 or 8784 for leap years)."""
-hours_in_year(year::Int) = isleapyear(year) ? 8784 : HOURS_STD_YEAR
+"""Hours of a modelled year: always `HOURS_STD_YEAR`. Demand and profiles come
+in 8760-h blocks (Feb 29 is dropped on input), so a leap year is not longer."""
+hours_in_year(year::Int) = HOURS_STD_YEAR
 
 # =============================================================================
 # PWL (Piecewise Linear) Transmission Loss Model
@@ -1108,7 +1107,7 @@ struct PowerSystemInput
     max_decommission_cost_per_mw::Float64  # Cap on decommissioning cost ($/MW)
     max_npv_penalty_per_mw::Float64        # Cap on NPV-based penalty ($/MW)
 
-    # Hours in this specific year (8760 or 8784 for leap years)
+    # Hours in this year (always 8760: leap years are modelled as 8760 h)
     hours_per_year::Int
 
     # PWL loss model: 0=no losses, -1=linear legacy, N>0=PWL with N segments
@@ -2326,7 +2325,7 @@ struct MasterProblemInput
     max_decommission_cost_per_mw::Float64  # Cap on decommissioning cost ($/MW)
     force_replacement_threshold::Float64   # NPV threshold for forced replacement ($)
 
-    # Hours per year (indexed by year_idx; 8760 or 8784 for leap years)
+    # Hours per year (indexed by year_idx; always 8760, leap years included)
     hours_per_year::Vector{Int}
 
     # Reserve parameters (for operational constraints in master)
@@ -2757,7 +2756,7 @@ Input configuration for multi-system Master Problem.
 - `time_limit::Float64`: Solver time limit
 - `gap::Float64`: MIP gap
 - `verbose::Bool`: Verbose output
-- `hours_per_year::Vector{Int}`: Hours per year (8760 or 8784 for leap years)
+- `hours_per_year::Vector{Int}`: Hours per year (always 8760, leap years included)
 """
 struct MultiSystemMasterInput
     systems::Vector{SystemConfig}

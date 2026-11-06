@@ -21,8 +21,8 @@ np.savetxt("solar.csv", solar, fmt="%.4f")
 Put both files next to the configuration file; relative paths in the configuration are resolved from the configuration's folder.
 
 !!! note "Demand and availability files"
-    - **CSV** files are read without a header row. **Excel** demand files are read with the first row as a header, so put column names in the first row.
-    - Demand is in MW, one column per node, 8760 rows per year. If the file holds at least one year but fewer years than simulated, the first year is repeated for the remaining years.
+    - Data start in the first row, in CSV and Excel files alike; a header row (for example node names) is optional and skipped.
+    - Demand is in MW, one column per node, 8760 rows per year (leap years too: Feb 29 rows are dropped). If the file holds at least one year but fewer years than simulated, the first year is repeated for the remaining years.
     - An availability file with a single column is applied to every node. Values are clipped to 0..1.
 
 See [Demand Data](../user-guide/demand-data.md) and [Availability Profiles](../user-guide/availability-profiles.md) for the full formats.
@@ -191,7 +191,7 @@ Then run a 10-year study:
 esfex run -c my_system.yaml --years 10 --verbose
 ```
 
-Without `--years`, ESFEX simulates 25 years. The years are labelled from 2025.
+Without `--years`, ESFEX simulates 25 years. The years are labelled from the year of `date_start` (2025 here); `--start-year` changes the first label.
 
 Execution stages:
 

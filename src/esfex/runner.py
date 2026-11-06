@@ -15,7 +15,7 @@ import os
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, Dict, List, Tuple
@@ -35,13 +35,16 @@ from esfex.models.ev import (
     generate_ev_profiles,
     generate_v2g_availability,
 )
-from esfex.io.demand import create_sectoral_demand
+from esfex.io.demand import _read_tabular, create_sectoral_demand, read_hourly_table
 from esfex.utils import aggregate_demand_to_resolution
 from esfex.utils.per_unit import derived_reactance_pu, system_s_base
 from esfex.utils.temporal import (
     HOURS_STD_YEAR,
     aggregate_to_resolution,
+    drop_leap_days,
     hours_for_year,
+    model_time_index,
+    parse_date_start,
 )
 from esfex.zones import expand_config_with_zones
 
@@ -1273,7 +1276,7 @@ class Orchestrator:
     def run(
         self,
         years: Optional[int] = None,
-        start_year: int = 2025,
+        start_year: Optional[int] = None,
     ) -> list[YearResults]:
         """
         Run the full simulation.
@@ -1284,12 +1287,16 @@ class Orchestrator:
 
         Args:
             years: Number of years to simulate (default: 25)
-            start_year: First year of simulation
+            start_year: Label of the first simulated year. Default: the
+                year of ``date_start``. When given, the date labels start
+                on ``date_start``'s day and time in this year.
 
         Returns:
             List of YearResults for each simulated year
         """
         years = years or 25
+        self._start_date = self._resolve_start_date(start_year)
+        start_year = self._start_date.year
         end_year = start_year + years
         years_range = list(range(start_year, end_year))
 
@@ -1843,6 +1850,20 @@ class Orchestrator:
 
         return self.results
 
+    def _resolve_start_date(self, start_year: Optional[int] = None) -> datetime:
+        """Timestamp of hour 0: ``date_start``, moved to ``start_year`` if given."""
+        start = parse_date_start(getattr(self.config, 'date_start', "01/01/2025 00:00"))
+        if start_year is None or start_year == start.year:
+            return start
+        try:
+            return start.replace(year=int(start_year))
+        except ValueError:  # 29 Feb in a common year
+            return start.replace(year=int(start_year), month=3, day=1)
+
+    def _data_start(self) -> datetime:
+        """Timestamp of the first data row (set by run(); else ``date_start``)."""
+        return getattr(self, '_start_date', None) or self._resolve_start_date()
+
     def _load_demand(
         self,
         years: int,
@@ -1875,9 +1896,9 @@ class Orchestrator:
                     return cand
             return fp
 
-        date_start_str = getattr(self.config, 'date_start', "01/01/2025 00:00")
-        start_date = datetime.strptime(date_start_str, "%d/%m/%Y %H:%M")
-        time_index = [start_date + timedelta(hours=i) for i in range(total_hours_needed)]
+        # Hour 0 is date_start; labels skip Feb 29 (every model year is 8760 h).
+        start_date = self._data_start()
+        time_index = list(model_time_index(start_date, total_hours_needed).to_pydatetime())
 
         # Load demand per system and concatenate
         demand_parts: list[np.ndarray] = []
@@ -1897,8 +1918,7 @@ class Orchestrator:
             elif sys.demand_path:
                 dp = _resolve_demand(sys.demand_path)
                 # Single file — check if it's a multi-column file or a single-node file
-                suffix = dp.suffix.lower()
-                test_df = pd.read_csv(dp, header=None, nrows=2) if suffix == ".csv" else pd.read_excel(dp, nrows=2)
+                test_df = _read_tabular(dp, nrows=2)
                 if test_df.shape[1] >= expected_nodes:
                     # Multi-column file covers all nodes
                     file_list = [dp]
@@ -1920,11 +1940,7 @@ class Orchestrator:
                     fp = file_list[0]
                     if not fp.exists():
                         raise FileNotFoundError(f"Demand file not found: {fp}")
-                    suffix = fp.suffix.lower()
-                    df = pd.read_csv(fp, header=None) if suffix == ".csv" else pd.read_excel(fp)
-                    raw = df.values
-                    if raw.ndim == 1:
-                        raw = raw.reshape(-1, 1)
+                    raw = read_hourly_table(fp)
                 else:
                     # Multiple per-node files — load and hstack
                     node_arrays = []
@@ -1933,15 +1949,19 @@ class Orchestrator:
                             raise FileNotFoundError(
                                 f"Per-node demand file missing for '{sname}' node {ni}: {fp}"
                             )
-                        suffix = fp.suffix.lower()
-                        ndf = pd.read_csv(fp, header=None) if suffix == ".csv" else pd.read_excel(fp)
-                        arr = ndf.values
-                        if arr.ndim == 1:
-                            arr = arr.reshape(-1, 1)
+                        arr = read_hourly_table(fp)
                         node_arrays.append(arr[:, :1])  # take first column only
                     min_h = min(a.shape[0] for a in node_arrays)
                     raw = np.hstack([a[:min_h] for a in node_arrays])
 
+                # Model years are 8760 h: drop Feb 29 rows of leap-year data.
+                n_read = raw.shape[0]
+                raw = drop_leap_days(raw, start_date)
+                if raw.shape[0] != n_read:
+                    logger.info(
+                        f"Demand for '{sname}': dropped {n_read - raw.shape[0]} "
+                        f"Feb 29 hours (every model year is {HOURS_STD_YEAR} h)"
+                    )
                 file_hours = raw.shape[0]
                 file_nodes = raw.shape[1]
                 logger.debug(f"Read demand for '{sname}': {file_hours}h × {file_nodes} nodes")
@@ -2623,7 +2643,8 @@ class Orchestrator:
                     availability = load_availability_profile(
                         avail_path,
                         temporal_resolution_hours=1,  # Load at full resolution
-                        num_nodes=num_nodes
+                        num_nodes=num_nodes,
+                        date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                     )
                     file_cache[file_key] = availability
                     cache[gen_key] = availability
@@ -2653,7 +2674,8 @@ class Orchestrator:
                     availability = load_availability_profile(
                         avail_path,
                         temporal_resolution_hours=1,
-                        num_nodes=num_nodes
+                        num_nodes=num_nodes,
+                        date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                     )
                     file_cache[file_key] = availability
                     cache[tech_key] = availability
@@ -2701,7 +2723,8 @@ class Orchestrator:
                     inflow = load_availability_profile(
                         inflow_path,
                         temporal_resolution_hours=1,
-                        num_nodes=num_nodes
+                        num_nodes=num_nodes,
+                        date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                     )
                     file_cache[file_key] = inflow
                     cache[gen_key] = inflow

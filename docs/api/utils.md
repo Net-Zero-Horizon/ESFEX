@@ -298,10 +298,10 @@ Adjust transmission investment costs and capacity limits based on year progressi
 ### Constants
 
 ```python
-HOURS_STD_YEAR: int = 8760  # Standard (non-leap) year hours
+HOURS_STD_YEAR: int = 8760  # Hours in every modelled year, leap years included
 ```
 
-Use `hours_for_year(year)` for year-specific calculations that account for leap years.
+Every modelled year has 8760 h. Input data come in 8760-row years (Feb 29 rows are dropped with `drop_leap_days`) and date labels skip Feb 29 (`model_time_index`).
 
 ### aggregate_to_resolution
 
@@ -410,7 +410,7 @@ Calculate the number of timesteps after aggregation: `original_hours // target_h
 def get_hours_per_year(leap_year: bool = False) -> int
 ```
 
-Get hours in a year: 8760 (standard) or 8784 (leap year).
+Get hours in a *calendar* year: 8760 (standard) or 8784 (leap year). Calendar arithmetic only; the model does not use it.
 
 ### hours_for_year
 
@@ -418,14 +418,37 @@ Get hours in a year: 8760 (standard) or 8784 (leap year).
 def hours_for_year(year: int) -> int
 ```
 
-Get hours for a specific calendar year. Uses `calendar.isleap()` for accuracy.
+Hours of a modelled year: always `HOURS_STD_YEAR` (8760), leap years included.
 
 ```python
 from esfex.utils.temporal import hours_for_year
 
-print(hours_for_year(2024))  # 8784 (leap year)
+print(hours_for_year(2024))  # 8760
 print(hours_for_year(2025))  # 8760
 ```
+
+### model_time_index
+
+```python
+def model_time_index(start, periods: int, step_hours: int = 1) -> pd.DatetimeIndex
+```
+
+Date labels for `periods` model timesteps from `start`, skipping Feb 29: in a leap year 28 Feb 23:00 is followed by 1 Mar 00:00, so each 8760-h year runs from 1 January to 31 December.
+
+```python
+from esfex.utils.temporal import model_time_index
+
+idx = model_time_index("2028-01-01", 8760)
+print(idx[1416], idx[-1])  # 2028-03-01 00:00:00 2028-12-31 23:00:00
+```
+
+### drop_leap_days
+
+```python
+def drop_leap_days(data: np.ndarray, start=None) -> np.ndarray
+```
+
+Remove the Feb 29 rows of an hourly series so every year is 8760 rows. `start` is the timestamp of the first row. Rows on Feb 29 by that calendar are dropped when this leaves a whole number of 8760-row years; a series of exactly 8784 rows is one leap year from 1 January whatever `start` is. Other series are returned unchanged.
 
 ### calculate_rolling_horizon_windows
 

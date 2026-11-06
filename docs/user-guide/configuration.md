@@ -55,7 +55,7 @@ In `development` mode the master problem decides investments and retirements for
 
 `unit_commitment_hours` is not a window size: in `unit_commitment` mode the run is cut to one year and to the first `unit_commitment_hours` hours of it (at most 8,760).
 
-`date_start` labels the hourly time index of the results. Demand is always read from the first row of the demand file.
+`date_start` labels the hourly time index of the results, and its year is the first year label (`esfex run --start-year` overrides it). Demand is always read from the first row of the demand file. Every modelled year has 8,760 hours, leap years included: Feb 29 is skipped in the labels and dropped from leap-year data (see [Demand Data](demand-data.md#leap-years)).
 
 ---
 
