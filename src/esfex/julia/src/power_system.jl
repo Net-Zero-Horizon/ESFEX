@@ -190,7 +190,12 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
             # Add converter variables/constraints BEFORE DC constraints
             # so KCL can reference converter flow variables
             add_converter_constraints!(model, vars, input)
-            add_dc_constraints!(model, transmission, vars, input)
+            # In development mode a 0-MW candidate line can be built: keep its
+            # flow free (not fixed to 0 as a negligible line).
+            expandable = input.mode == "development" ?
+                dev_expandable_lines(transmission, input.network) : Set{Int}()
+            add_dc_constraints!(model, transmission, vars, input;
+                expandable_lines = expandable)
             add_line_capacity_constraints!(model, transmission, vars, input)
         end
     else
