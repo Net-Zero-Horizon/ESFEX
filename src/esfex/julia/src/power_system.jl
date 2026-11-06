@@ -190,7 +190,12 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
             # Add converter variables/constraints BEFORE DC constraints
             # so KCL can reference converter flow variables
             add_converter_constraints!(model, vars, input)
-            add_dc_constraints!(model, transmission, vars, input)
+            # In development mode a 0-MW candidate line can be built: keep its
+            # flow free (not fixed to 0 as a negligible line).
+            expandable = input.mode == "development" ?
+                dev_expandable_lines(transmission, input.network) : Set{Int}()
+            add_dc_constraints!(model, transmission, vars, input;
+                expandable_lines = expandable)
             add_line_capacity_constraints!(model, transmission, vars, input)
         end
     else
@@ -519,8 +524,9 @@ function build_variables!(model, input::PowerSystemInput)
 
     # Electrolyzer power variable (optional)
     electrolyzer_power = nothing
-    if input.electrolyzer_config !== nothing
-        @variable(model, electrolyzer_power_var[1:n_bus, 1:hours] >= 0)
+    if !isempty(input.electrolyzers)
+        @variable(model,
+            electrolyzer_power_var[1:length(input.electrolyzers), 1:n_bus, 1:hours] >= 0)
         electrolyzer_power = electrolyzer_power_var
     end
 
@@ -637,9 +643,11 @@ function build_variables!(model, input::PowerSystemInput)
     # Only created for generators/batteries with >1 cost segment.
     # =========================================================================
     gen_seg_output = Dict{Tuple{Int,Int}, Any}()
+    # A curve at a bus where the unit has no output variable (no capacity
+    # there) is skipped, as in the master.
     for (g, bus_curves) in input.gen_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1
+            if length(segs) > 1 && b in buses_of_gen[g]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="gseg_$(g)_$(b)")
@@ -656,7 +664,7 @@ function build_variables!(model, input::PowerSystemInput)
     bat_seg_discharge = Dict{Tuple{Int,Int}, Any}()
     for (bi, bus_curves) in input.bat_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1
+            if length(segs) > 1 && b in buses_of_bat[bi]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="bseg_$(bi)_$(b)")
@@ -841,23 +849,23 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
 
     # Load shedding penalty (VOLL × MWh) — node-level
     #
-    # IMPORTANT: only price load_shed *directly* when there is no
-    # sectoral decomposition.  When sectoral_load_shed_cost is also in
-    # the objective AND sum(sectoral_lol) == load_shed (the linking
-    # equality), pricing load_shed here would double-count every shed
-    # MWh — once via VOLL, and again via VOLL × criticality_multiplier
-    # (cuba.yaml: medium=10, high=100, critical=1000).  The sectoral
-    # expression already represents the criticality-weighted cost.
+    # With a sectoral decomposition, the sectors' shed is priced at
+    # VOLL × criticality below (cuba.yaml: medium=10, high=100,
+    # critical=1000); only the unclassified remainder
+    # (load_shed − Σ sectoral shed, see add_sectoral_demand_constraints!)
+    # is priced here, at VOLL. Pricing all of load_shed here would
+    # double-count every sectoral MWh.
     n_node = input.network.num_nodes
     has_sectoral = vars.loss_of_load_sectoral !== nothing &&
                    !isempty(vars.loss_of_load_sectoral)
-    load_shed_cost = if has_sectoral
-        AffExpr(0.0)  # priced via sectoral_load_shed_cost below
-    else
-        @expression(model,
-            input.loss_of_load_penalty *
-            sum(vars.load_shed[b, t] for b in 1:n_bus, t in 1:hours)
-        )
+    load_shed_cost = @expression(model,
+        input.loss_of_load_penalty *
+        sum(vars.load_shed[b, t] for b in 1:n_bus, t in 1:hours)
+    )
+    if has_sectoral
+        for lol_vars in values(vars.loss_of_load_sectoral), n in 1:n_node, t in 1:hours
+            add_to_expression!(load_shed_cost, -input.loss_of_load_penalty, lol_vars[n, t])
+        end
     end
 
 
@@ -1124,17 +1132,19 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Variable cost on power consumption
     # ==========================================================================
     electrolyzer_cost = AffExpr(0.0)
-    if vars.electrolyzer_power !== nothing && input.electrolyzer_config !== nothing
-        config = input.electrolyzer_config
-        for b in 1:n_bus, t in 1:hours
-            if length(config.variable_cost) >= b
-                add_to_expression!(electrolyzer_cost, config.variable_cost[b], vars.electrolyzer_power[b, t])
+    if vars.electrolyzer_power !== nothing
+        for (e, config) in enumerate(input.electrolyzers)
+            for b in 1:n_bus, t in 1:hours
+                if length(config.variable_cost) >= b
+                    add_to_expression!(electrolyzer_cost, config.variable_cost[b],
+                                       vars.electrolyzer_power[e, b, t])
+                end
             end
-        end
-        # Fixed cost on rated power (annualized per hour × hours)
-        for b in 1:n_bus
-            if length(config.rated_power) >= b && length(config.fixed_cost) >= b
-                add_to_expression!(electrolyzer_cost, config.rated_power[b] * config.fixed_cost[b] * hours)
+            # Fixed cost on rated power (annualized per hour × hours)
+            for b in 1:n_bus
+                if length(config.rated_power) >= b && length(config.fixed_cost) >= b
+                    add_to_expression!(electrolyzer_cost, config.rated_power[b] * config.fixed_cost[b] * hours)
+                end
             end
         end
     end
@@ -1402,7 +1412,7 @@ function add_demand_constraints!(model, vars::PowerSystemVariables, input;
 
             # Electrolyzer power (demand side)
             electrolyzer_term = if vars.electrolyzer_power !== nothing
-                vars.electrolyzer_power[b, t]
+                electrolyzer_load(vars, b, t)
             else
                 AffExpr(0.0)
             end
@@ -3127,6 +3137,19 @@ function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerS
     _charge_n1_shortfall!(model, n1_cost, input)
 end
 
+"""
+    _sectoral_demand_at(input, sector, t, ni) -> Float64
+
+Demand of `sector` at node `ni` and step `t` (MW, >= 0); 0 when the sector's
+array does not cover that node or step.
+"""
+function _sectoral_demand_at(input, sector, t, ni)
+    arr = get(input.sectoral_demand, sector, nothing)
+    arr === nothing && return 0.0
+    (t <= size(arr, 1) && ni <= size(arr, 2)) || return 0.0
+    return max(0.0, arr[t, ni])
+end
+
 # Export the new constraint functions
 export add_renewable_constraint!, add_co2_constraint!, add_co2_emissions_definition!, add_curtailment_constraints!
 export add_n1_security_constraints!, identify_n1_critical_elements
@@ -3135,12 +3158,17 @@ export add_scopf_constraints!
 """
     add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Add sectoral load shedding constraints:
-1. Sum of sectoral LOL == total LOL (decomposition)
-2. Per-sector LOL cap: lol_sector <= sectoral_demand[sector]
-3. Criticality ordering: higher criticality sectors shed last
+Add sectoral load shedding constraints, per node and step:
+1. Each sector sheds at most its own demand: lol_sector <= sectoral_demand[sector].
+2. The node's shed splits into the sectors' shed plus an unclassified
+   remainder: load_shed - sum(lol_sector) in [0, max(0, demand - sum(sectoral_demand))].
 
-Matches legacy PowerSystem.py lines 1175-1230.
+The remainder covers node demand that no sector accounts for (sectoral data
+missing for a node, or not matching the demand passed in), so the split is
+always feasible. The objective prices each sector's shed at
+VOLL x criticality and the remainder at VOLL (multiplier 1). With the per-sector
+caps, the cheapest sector can no longer absorb all shed: dearer sectors are
+shed only once the cheaper ones are fully shed.
 """
 function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     if vars.loss_of_load_sectoral === nothing || isempty(vars.loss_of_load_sectoral)
@@ -3159,31 +3187,34 @@ function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, inp
     end
 
     for ni in 1:n_node, t in 1:hours
-        # 1. Sum of sectoral LOL == total LOL across this node's buses.
+        # 1. Each sector sheds at most its own demand. Without this cap the
+        # whole shed went to the sector with the lowest criticality, so all
+        # unserved energy was priced at the cheapest multiplier.
         sector_lol_sum = AffExpr(0.0)
+        sector_demand_sum = 0.0
         for sector in sectors
-            add_to_expression!(sector_lol_sum, 1.0, vars.loss_of_load_sectoral[sector][ni, t])
+            lol = vars.loss_of_load_sectoral[sector][ni, t]
+            add_to_expression!(sector_lol_sum, 1.0, lol)
+            sec_dem = _sectoral_demand_at(input, sector, t, ni)
+            sector_demand_sum += sec_dem
+            @constraint(model, lol <= sec_dem,
+                base_name = "sectoral_lol_cap_$(sector)_$(ni)_$(t)")
         end
         node_load_shed = AffExpr(0.0)
         for b in buses_of_node[ni]
             add_to_expression!(node_load_shed, 1.0, vars.load_shed[b, t])
         end
-        @constraint(model, sector_lol_sum == node_load_shed,
+
+        # 2. The node's shed = sectoral shed + an unclassified remainder,
+        # bounded by the demand no sector accounts for. Sectoral data can
+        # miss a node (e.g. the Grid Builder split demand across new buses
+        # without rebuilding the sector shares); the remainder keeps the
+        # split feasible there instead of forcing load_shed = 0.
+        residual_cap = max(0.0, input.demand[t, ni] - sector_demand_sum)
+        @constraint(model, node_load_shed - sector_lol_sum >= 0.0,
             base_name = "sectoral_lol_sum_$(ni)_$(t)")
-
-        # 2. Per-sector LOL cap relaxed.  The original cap
-        # `lol_sector <= sectoral_demand[sector][t, node]` is correct
-        # in principle, but in real configs sectoral_demand isn't
-        # always populated for every (sector, node, t) triple — when
-        # the Grid Builder splits node demand across buses without
-        # rebuilding sectoral aggregates, the cap forces lol_sector=0
-        # and the equality `sum(lol_sector) == load_shed` then forces
-        # load_shed=0, making the LP infeasible whenever the bus-level
-        # demand exceeds what gen + import can serve.  load_shed is
-        # already priced by VOLL × MWh via the sectoral cost term, so
-        # leaving sectoral LOL unbounded does not change the optimal
-        # dispatch; it only avoids spurious infeasibility.
-
+        @constraint(model, node_load_shed - sector_lol_sum <= residual_cap,
+            base_name = "sectoral_lol_residual_$(ni)_$(t)")
     end
 
     # B13: Demand shifting: what leaves a step is at most flexibility_ratio of
@@ -3326,37 +3357,51 @@ end
 """
     add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Bound electrolyzer consumption by its rated power per bus and apply its ramp
-rates (fraction of rated power per hour, scaled to the time step; <= 0 = no
-limit). The dispatch has no electrolyzer investment variable, so a bus
+Bound each electrolyzer's consumption by its rated power per bus and apply its
+ramp rates (fraction of rated power per hour, scaled to the time step; <= 0 =
+no limit). The dispatch has no electrolyzer investment variable, so a bus
 without rated power gets no electrolyzer load.
 """
 function add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     vars.electrolyzer_power === nothing && return
-    config = input.electrolyzer_config
-    config === nothing && return
     hours = input.temporal.hours
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
-    for b in 1:size(vars.electrolyzer_power, 1)
-        rated = b <= length(config.rated_power) ? config.rated_power[b] : 0.0
-        for t in 1:hours
-            @constraint(model, vars.electrolyzer_power[b, t] <= rated,
-                base_name = "electrolyzer_max_b$(b)_t$(t)")
-        end
-        rated > 0 || continue
-        ramp_up = b <= length(config.ramp_up) ? config.ramp_up[b] : 0.0
-        ramp_down = b <= length(config.ramp_down) ? config.ramp_down[b] : 0.0
-        up_limit = rated * min(1.0, ramp_up * tres)
-        down_limit = rated * min(1.0, ramp_down * tres)
-        for t in 2:hours
-            ramp_up > 0 && @constraint(model,
-                vars.electrolyzer_power[b, t] - vars.electrolyzer_power[b, t-1] <= up_limit,
-                base_name = "electrolyzer_ramp_up_b$(b)_t$(t)")
-            ramp_down > 0 && @constraint(model,
-                vars.electrolyzer_power[b, t-1] - vars.electrolyzer_power[b, t] <= down_limit,
-                base_name = "electrolyzer_ramp_down_b$(b)_t$(t)")
+    for (e, config) in enumerate(input.electrolyzers)
+        sfx = e == 1 ? "" : "_e$(e)"  # names unchanged for the first one
+        for b in 1:size(vars.electrolyzer_power, 2)
+            rated = b <= length(config.rated_power) ? config.rated_power[b] : 0.0
+            for t in 1:hours
+                @constraint(model, vars.electrolyzer_power[e, b, t] <= rated,
+                    base_name = "electrolyzer_max$(sfx)_b$(b)_t$(t)")
+            end
+            rated > 0 || continue
+            ramp_up = b <= length(config.ramp_up) ? config.ramp_up[b] : 0.0
+            ramp_down = b <= length(config.ramp_down) ? config.ramp_down[b] : 0.0
+            up_limit = rated * min(1.0, ramp_up * tres)
+            down_limit = rated * min(1.0, ramp_down * tres)
+            for t in 2:hours
+                ramp_up > 0 && @constraint(model,
+                    vars.electrolyzer_power[e, b, t] - vars.electrolyzer_power[e, b, t-1] <= up_limit,
+                    base_name = "electrolyzer_ramp_up$(sfx)_b$(b)_t$(t)")
+                ramp_down > 0 && @constraint(model,
+                    vars.electrolyzer_power[e, b, t-1] - vars.electrolyzer_power[e, b, t] <= down_limit,
+                    base_name = "electrolyzer_ramp_down$(sfx)_b$(b)_t$(t)")
+            end
         end
     end
+end
+
+"""
+    electrolyzer_load(vars, b, t) -> AffExpr
+
+Total electrolyzer power drawn at bus `b` in step `t` (all electrolyzers).
+"""
+function electrolyzer_load(vars, b::Int, t::Int)
+    load = AffExpr(0.0)
+    for e in axes(vars.electrolyzer_power, 1)
+        add_to_expression!(load, vars.electrolyzer_power[e, b, t])
+    end
+    return load
 end
 
 """
@@ -4112,6 +4157,18 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         qgen_out = extract_acopf_reactive_gen(vars.acopf_vars, n_gen, n_bus, hours)
     end
 
+    # Electrolyzers: power drawn and hydrogen produced (electrolyzer × bus × hour)
+    elz_power_out = nothing
+    elz_h2_out = nothing
+    if has_values(model) && vars.electrolyzer_power !== nothing
+        elz_power_out = value.(vars.electrolyzer_power)
+        elz_h2_out = zeros(size(elz_power_out))
+        for (e, ec) in enumerate(input.electrolyzers), b in 1:size(elz_power_out, 2)
+            b <= length(ec.eff_at_rated) || continue
+            elz_h2_out[e, b, :] .= elz_power_out[e, b, :] .* electrolyzer_h2_per_mwh(ec, b)
+        end
+    end
+
     return PowerSystemResult(
         status, obj, solve_t,
         gen_out, gen_stat, gen_start, gen_shut,
@@ -4131,6 +4188,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         res_level_out, res_spillage_out, res_pump_out, res_invest_cap_out,
         n1_gen_duals, n1_trans_duals, n1_binding, n1_cost,
         cost_bd,
+        elz_power_out, elz_h2_out,
     )
 end
 

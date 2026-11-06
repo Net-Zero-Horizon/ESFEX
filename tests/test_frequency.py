@@ -1,6 +1,7 @@
 """Unit tests for frequency stability analysis module."""
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ from esfex.analysis.frequency import (
     FrequencyAnalyzer,
     FrequencyResponse,
     GeneratorFreqParams,
+    analyzer_settings,
 )
 
 
@@ -289,3 +291,38 @@ class TestFrequencyAnalyzer:
         # H_total should only include gen_0 and gen_2
         expected_h = 5 * 80 + 5 * 60  # = 700 MW·s
         assert resp.h_total_mws == pytest.approx(expected_h)
+
+
+class TestAnalyzerSettings:
+    """The SLD frequency gauge takes its limits from the system's frequency
+    keys (they used to be ignored: 50 Hz / 2 Hz/s / 49 Hz were hard-coded)."""
+
+    @staticmethod
+    def _system(**kw):
+        base = dict(frequency_nominal=50.0, frequency_nadir_limit=49.0,
+                    rocof_limit=2.0, load_damping=0.01)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    @staticmethod
+    def _state(*freqs):
+        return SimpleNamespace(buses={f"b{i}": SimpleNamespace(frequency_hz=f)
+                                      for i, f in enumerate(freqs)})
+
+    def test_system_keys_are_used(self):
+        kw = analyzer_settings(self._system(frequency_nominal=60.0,
+                                            frequency_nadir_limit=59.3,
+                                            rocof_limit=0.5, load_damping=0.02))
+        assert kw == {"f_nom": 60.0, "nadir_limit": 59.3,
+                      "rocof_limit": 0.5, "load_damping": 0.02}
+        analyzer = FrequencyAnalyzer([], **kw)
+        assert analyzer.f_nom == 60.0 and analyzer.rocof_limit == 0.5
+
+    def test_default_system_follows_bus_frequency(self):
+        kw = analyzer_settings(self._system(), self._state(60.0))
+        assert kw["f_nom"] == 60.0
+        assert kw["nadir_limit"] == pytest.approx(59.0)
+
+    def test_no_system_gives_defaults(self):
+        assert analyzer_settings() == {"f_nom": 50.0, "nadir_limit": 49.0,
+                                       "rocof_limit": 2.0, "load_damping": 0.01}

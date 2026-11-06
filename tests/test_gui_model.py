@@ -719,7 +719,6 @@ class TestGuiSystemSettings:
         assert ss.max_decommission_cost_per_mw == 5e5
         assert ss.force_replacement == -5e5
         assert ss.life_extension_cost_factor == 0.20
-        assert ss.loss_demand_threshold == 0.05
         assert ss.inertia_limit_threshold == 0.1
         assert ss.sim_rooftop is False
         assert ss.co2_budget_enabled is True

@@ -5,16 +5,21 @@ Provides functions to aggregate time series data to coarser
 temporal resolutions (e.g., hourly → 3-hourly) using mean or max aggregation.
 """
 
-import calendar
 import warnings
-from typing import Union
+from datetime import datetime
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
 
-# Standard (non-leap) year hours — use as default for sizing and GUI limits.
-# For year-specific calculations, use hours_for_year(year) instead.
+# Hours in every modelled year. Demand and profiles are read in 8760-h blocks,
+# so leap years are modelled as 8760 h too: Feb 29 is dropped from input data
+# (drop_leap_days) and from result date labels (model_time_index).
 HOURS_STD_YEAR: int = 8760
+
+# Feb 29 in an hourly series that starts on 1 Jan of a leap year.
+_FEB29_START = 59 * 24
+_FEB29_END = _FEB29_START + 24
 
 
 def aggregate_to_resolution(
@@ -276,7 +281,10 @@ def get_aggregated_timesteps(original_hours: int, target_hours: int) -> int:
 
 def get_hours_per_year(leap_year: bool = False) -> int:
     """
-    Get the number of hours in a year.
+    Get the number of hours in a *calendar* year.
+
+    This is calendar arithmetic only. The model treats every year as
+    ``HOURS_STD_YEAR`` hours; use :func:`hours_for_year` for model years.
 
     Parameters
     ----------
@@ -292,8 +300,66 @@ def get_hours_per_year(leap_year: bool = False) -> int:
 
 
 def hours_for_year(year: int) -> int:
-    """Return hours in a specific calendar year (8760 or 8784 for leap years)."""
-    return 8784 if calendar.isleap(year) else HOURS_STD_YEAR
+    """Return the hours of a modelled year: always ``HOURS_STD_YEAR`` (8760).
+
+    Leap years are not longer in the model. Input data come in 8760-h
+    blocks and Feb 29 is dropped from them and from the result labels.
+    """
+    return HOURS_STD_YEAR
+
+
+def parse_date_start(date_start: str) -> datetime:
+    """Parse the config ``date_start`` string (``DD/MM/YYYY HH:MM``)."""
+    return datetime.strptime(date_start, "%d/%m/%Y %H:%M")
+
+
+def _is_feb29(index: pd.DatetimeIndex) -> np.ndarray:
+    return np.asarray((index.month == 2) & (index.day == 29))
+
+
+def model_time_index(
+    start: Union[str, datetime, pd.Timestamp],
+    periods: int,
+    step_hours: int = 1,
+) -> pd.DatetimeIndex:
+    """Date labels for ``periods`` model timesteps starting at ``start``.
+
+    Model years have 8760 h, so Feb 29 is skipped: the step after
+    28 Feb 23:00 is 1 Mar 00:00, and every year ends on 31 Dec.
+    """
+    start = pd.Timestamp(start)
+    step_hours = max(1, int(step_hours))
+    # At most one Feb 29 per started year: generate enough spare steps.
+    years_spanned = periods * step_hours // HOURS_STD_YEAR + 2
+    spare = years_spanned * -(-24 // step_hours)
+    idx = pd.date_range(start, periods=periods + spare, freq=f"{step_hours}h")
+    return idx[~_is_feb29(idx)][:periods]
+
+
+def drop_leap_days(
+    data: np.ndarray,
+    start: Optional[Union[str, datetime, pd.Timestamp]] = None,
+) -> np.ndarray:
+    """Remove Feb 29 rows from an hourly series so each year is 8760 rows.
+
+    ``start`` is the timestamp of the first row (the config ``date_start``).
+    Rows that fall on Feb 29 by that calendar are dropped when this leaves a
+    whole number of 8760-h years. A series of exactly 8784 rows is one leap
+    calendar year from 1 Jan whatever ``start`` is, and loses rows
+    1416-1439. Anything else (already in 8760-h blocks, or a length that
+    does not match a calendar) is returned unchanged.
+    """
+    n = data.shape[0]
+    if n == 0 or n % HOURS_STD_YEAR == 0:
+        return data
+    if start is not None:
+        stamps = pd.date_range(pd.Timestamp(start), periods=n, freq="h")
+        feb29 = _is_feb29(stamps)
+        if feb29.any() and (n - int(feb29.sum())) % HOURS_STD_YEAR == 0:
+            return data[~feb29]
+    if n == HOURS_STD_YEAR + 24:
+        return np.concatenate([data[:_FEB29_START], data[_FEB29_END:]])
+    return data
 
 
 def calculate_rolling_horizon_windows(

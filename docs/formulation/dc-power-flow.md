@@ -86,7 +86,7 @@ where \(x_l\) is the line reactance in p.u. and \(S_{base}\) converts the per-un
 
 - **Parallel circuits**: a line with `num_circuits` \(k\) uses reactance `reactance_pu / k` and capacity `capacity_mw × k`.
 - **Missing reactance**: a line without `reactance_pu` gets `length_km × reactance_per_km / Z_base`, with \(Z_{base} = V^2 / S_{base}\) and \(V\) the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. when it has no length. A reactance \(\leq 0\) is replaced by 0.01 p.u. `dc_power_flow.base_impedance` is ignored (a warning is logged when it is set to anything but 100).
-- **Negligible lines**: a branch with capacity below 0.1 MW has its flow fixed to zero (`flow_zero_{l}_{t}`) unless investment can expand it (a candidate corridor of 0 MW in the master problem).
+- **Negligible lines**: a branch with capacity below 0.1 MW has its flow fixed to zero (`flow_zero_{l}_{t}`) unless investment can expand it: a candidate corridor of 0 MW in the master problem, such as a development-zone link, or a corridor whose ends both allow transference investment in a development-mode dispatch.
 
 DC-2 replaced an earlier cycle-based KVL formulation; one equation per line handles parallel lines and disconnected networks directly.
 

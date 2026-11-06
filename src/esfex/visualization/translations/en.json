@@ -775,7 +775,6 @@
     "target_re": "Target RE Penetration (frac):",
     "min_increment": "Min Annual Increment (frac):",
     "max_increment": "Max Annual Increment (frac):",
-    "loss_demand_thr": "Loss Demand Threshold (frac):",
     "inertia_limit_thr": "Min. System Inertia (MW·s):",
     "sim_rooftop": "Simulate Rooftop:",
     "co2_annual": "CO2 Annual Budget (tonnes/year):",
@@ -1375,7 +1374,8 @@
     "error": "Error",
     "warning": "Warning",
     "info": "Info",
-    "enable": "Enable"
+    "enable": "Enable",
+    "no_effect": "No effect in the current model; kept so existing files load."
   },
   "custom_constraints": {
     "title": "Custom Constraints",

@@ -144,12 +144,13 @@ Units are read from a `generators:` / `batteries:` mapping or from legacy system
 
 - **Fuels:** `name`, `unit`, `emission_factor` (default 0), `energy_content`, `price_base` (default 0), `price_growth_rate`.
 - **Primary energy sources:** `name`, `unit`, `max_availability`, `import_cost`, `storage_capacity`, `initial_storage_level`, `min_storage_level` (0.1), `storage_investment_cost`, `transport_cost`, `transport_losses`, `max_storage_investment_per_node`, `max_transport_investment_per_arc`, plus any other schema field when present (`transport_transit_days_per_100km`, `disruption_start_hour`, `disruption_end_hour`, `disruption_availability`).
-- **Penalties:** keys are lower-cased before lookup, so `LOSS_OF_LOAD` and `loss_of_load` are the same. Read: `loss_of_load`, `loss_of_reserve_static`, `loss_of_reserve_dynamic`, `loss_of_inertia`, `transfer_margin` (also `TransferMargin`), `curtailment_cost`, `curtailment_excess_penalty`, `re_excess_penalty`, `max_curtailment_ratio`, `rooftop_curtailment`, `co2_cost`, `co2_budget_violation`, `fre_penetration_loss`, `ev_loss`, `loss_of_fuel_supply`, `transport_congestion`, `storage_violation`, `non_electric_demand_loss`, `soc_violation`, `delay_retirement_per_mw`, `coupling_slack_penalty`. A `curtailment` key is read but `PenaltiesConfig` has no such field, so it has no effect. `ev_loss` defaults to `loss_of_load` when absent.
+- **Penalties:** keys are lower-cased before lookup, so `LOSS_OF_LOAD` and `loss_of_load` are the same. Read: `loss_of_load`, `loss_of_reserve_static`, `loss_of_reserve_dynamic`, `loss_of_inertia`, `transfer_margin` (also `TransferMargin`), `curtailment_cost`, `curtailment_excess_penalty`, `re_excess_penalty`, `max_curtailment_ratio`, `rooftop_curtailment`, `co2_cost`, `co2_budget_violation`, `fre_penetration_loss`, `ev_loss`, `loss_of_fuel_supply`, `transport_congestion`, `storage_violation`, `non_electric_demand_loss`, `soc_violation`, `delay_retirement_per_mw`, `coupling_slack_penalty`. `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation` load but have no effect (`PENALTIES_WITHOUT_EFFECT` in `config/schema.py`). `ev_loss` defaults to `loss_of_load` when absent.
 - **DC power flow:** fields are taken from the nested `dc_power_flow` mapping. `base_impedance`, `reactance_per_km`, `voltage_level_kv`, `max_angle_diff_deg` and `slack_bus` fall back to flat system keys `dc_<field>` or `DC_<FIELD>`; those flat keys are then removed.
 - **Electrolyzers:** a single `electrolyzer:` mapping becomes `electrolyzers["electrolyzer"]`; an `electrolyzers:` mapping is converted entry by entry.
 - **Buses:** a `current_type` other than `AC`/`DC` is replaced by `AC` with a warning.
 - **Technologies and battery technologies:** passed to `TechnologyConfig(**data)` / `BatteryTechnologyConfig(**data)` with `name` defaulting to the key, so every schema field (including `fuel_cost_curve` and `throughput_degradation_cost`) is read.
 - **Demand sectors, EV categories, rooftop solar, stochastic scenarios, CO₂ budget:** passed to their models unchanged.
+- **Name and alias both given:** when a system sets a field under its name and its alias (`target_re_penetration` and `TARGET_RE_PENETRATION`), the name is used and the alias dropped, with a warning when the values differ. Studio files up to 0.3.0 hold both: the alias with the value the file was opened with, the name with the edited value.
 
 ### Fuel-cost linking and non-fuel O&M adder
 
@@ -166,7 +167,7 @@ After the units are built, and only if the system has a non-empty `fuels` block,
 
     The adder is applied at every node whose fuel cost is positive, and skipped for the whole unit if its largest `maintenance_cost` is already at least half the adder. It applies whether the fuel cost was given or computed in step 1. Other fuel names get no adder.
 
-The loader logs how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
+The loader logs (INFO) each unit that receives the adder, with the resulting `maintenance_cost`, and how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
 
 ---
 
@@ -186,7 +187,7 @@ Raised by `load_config()` when:
 - Pydantic validation fails (type mismatch, missing required field, value out of range, failed cross-field validator);
 - conversion fails for another reason, such as a required unit key missing.
 
-Unknown keys never raise.
+Unknown keys never raise. `load_config()` logs a warning for each key that nothing reads, with its dotted path (for example `systems.Cuba.generators.gas_1.dorop`), and returns them in `config.unknown_keys` (a list of str; empty for a clean file). `load_system_config()` logs them too. The check is `esfex.config.unknown_keys.find_unknown_keys(raw_dict)`; it mirrors the loader's translations, so aliases, flat `dc_*` keys, case-insensitive penalty keys, `unit_*` / `bat_*` units and the Studio's metadata keys are not reported.
 
 ```python
 from esfex.config.loader import load_config, ConfigLoadError

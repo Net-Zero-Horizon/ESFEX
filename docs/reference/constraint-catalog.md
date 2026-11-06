@@ -158,17 +158,16 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `electrolyzer_max_b{b}_t{t}` | ELZ-1 | Power at most the rated power (0 where none is configured) |
+| `electrolyzer_max_b{b}_t{t}` | ELZ-1 | Power at most the rated power (0 where none is configured); `electrolyzer_max_e{e}_b{b}_t{t}` for the second and later electrolyzers |
 | `electrolyzer_ramp_up_b{b}_t{t}`, `electrolyzer_ramp_down_b{b}_t{t}` | ELZ-2 | `±(P[t] - P[t-1]) <= rated * min(1, ramp * Δt)`; omitted when the ramp is 0 |
 
 ### Demand & Sectoral
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `sectoral_lol_sum_{ni}_{t}` | SEC-1 | Sum of sectoral LOL = load shed on the node's buses |
+| `sectoral_lol_cap_{sector}_{ni}_{t}` | SEC-1 | Sectoral LOL <= the sector's demand at the node |
+| `sectoral_lol_sum_{ni}_{t}`, `sectoral_lol_residual_{ni}_{t}` | SEC-2 | Load shed on the node's buses minus the sectoral LOL is in [0, node demand not covered by any sector]; that remainder is priced at VOLL |
 | `demand_shift_out_cap_{sector}_{ni}_{t}` | SHIFT-1 | Demand shifted out of a step at most `flexibility_ratio` × sector demand (flexible sectors with `delay_tolerance > 0`); the net shift enters the power balance |
-
-There is no per-sector LOL cap in the dispatch.
 
 ### Investment & Cost Limits
 
@@ -293,6 +292,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 | `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*` | OP-2b | Battery-technology SOC: initial, dynamics (`× Δt`), cyclic |
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |
+| `lol_sec_sum_y{y}_d{d}_n{n}_t{t}`, `lol_sec_residual_y{y}_d{d}_n{n}_t{t}` | OP-5 | Bus load shed minus sectoral LOL is in [0, bus demand not covered by any sector] (the sectoral LOL is part of the load shed) |
 | `re_min_day_s{s}_y{y}_d{d}` | RE-DAY-1 | RE generation (existing + technologies) + FRE slack >= target × day demand |
 | `re_ratio_lb_s{s}_y{y}_d{d}` | RE-DAY-2 | RE ratio <= the day's achieved share |
 | `max_curtailment_y{y}_d{d}` | CURT-1 | Curtailment (existing + technologies) <= `max_curtailment_ratio` × RE generation |

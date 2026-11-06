@@ -4,8 +4,8 @@ transmission_acopf.jl - AC Optimal Power Flow Formulations
 Implements multiple ACOPF formulations as JuMP constraints, integrated into
 the ESFEX operational dispatch model. The user selects one via power_flow_mode:
 
-  - "acopf_soc"   : Second-Order Cone relaxation (W-space)  — convex, HiGHS
-  - "acopf_qc"    : Quadratic Convex relaxation (W-space + McCormick) — convex, HiGHS
+  - "acopf_soc"   : Second-Order Cone relaxation (W-space)  — convex, conic solver
+  - "acopf_qc"    : Quadratic Convex relaxation (W-space + McCormick) — convex, conic solver
   - "acopf_sdp"   : Semidefinite Programming relaxation — convex, SCS/Mosek
   - "acopf_polar"  : Polar NLP (exact, V-θ) — nonlinear, Ipopt
   - "acopf_rect"   : Rectangular NLP (exact, e-f) — nonlinear, Ipopt
@@ -547,8 +547,8 @@ Add formulation-specific constraints that link voltage variables to power flow.
 """
 function add_acopf_voltage_constraints!(model, net, av, hours, ::SOCFormulation)
     # SOC relaxation: wr² + wi² ≤ w_i × w_j (per branch).
-    # Use JuMP's canonical RotatedSecondOrderCone set — Clarabel, Mosek,
-    # Gurobi and HiGHS-conic accept it natively, and MOI's bridge layer
+    # Use JuMP's canonical RotatedSecondOrderCone set — Clarabel, SCS, Mosek
+    # and Gurobi accept it natively (HiGHS does not), and MOI's bridge layer
     # expands it to the equivalent quadratic inequality for Ipopt/NLP.
     # The cone {(t, u, x) : 2·t·u ≥ ‖x‖², t ≥ 0, u ≥ 0} with t=w_i/2,
     # u=w_j, x=[wr, wi] gives exactly 2·(w_i/2)·w_j = w_i·w_j ≥ wr² + wi².
@@ -879,7 +879,7 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
 
             # Electrolyzer
             electrolyzer_term = vars.electrolyzer_power !== nothing ?
-                vars.electrolyzer_power[i, t] : AffExpr(0.0)
+                electrolyzer_load(vars, i, t) : AffExpr(0.0)
 
             # ACDC converters
             acdc_term = AffExpr(0.0)
@@ -918,8 +918,8 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
             if vars.reservoir_pump !== nothing
                 for g in vars.gens_at_bus[i]
                     gen = input.generators[g]
-                    ni = input.network.bus_to_node[i]
-                    if gen.reservoir_capacity[ni] > 0 && gen.reservoir_pump_capacity[ni] > 0
+                    # Reservoir arrays are per bus (expanded by the adapter).
+                    if gen.reservoir_capacity[i] > 0 && gen.reservoir_pump_capacity[i] > 0
                         add_to_expression!(reservoir_pump_term, vars.reservoir_pump[g, i, t])
                     end
                 end
@@ -1160,7 +1160,8 @@ end
 # =============================================================================
 
 function _validate_solver_for_formulation(model, ::Union{SOCFormulation, QCFormulation})
-    # SOC/QC require SOCP support — HiGHS 1.5+, Gurobi, CPLEX, Mosek
+    # SOC/QC require SOCP support — Clarabel, SCS, Gurobi, CPLEX, Xpress, Mosek
+    # (not HiGHS: it rejects second-order cone constraints)
     # No easy way to check at model creation time; solver will error if unsupported
 end
 

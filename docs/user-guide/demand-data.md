@@ -14,7 +14,7 @@ systems:
 
 ### CSV (.csv)
 
-Comma-separated, **no header row**: every row is an hour of data.
+Comma-separated. Every row is an hour of data; a header row is optional (see below).
 
 ```csv
 120.5,65.3,38.2
@@ -28,14 +28,14 @@ Comma-separated, **no header row**: every row is an hour of data.
 
 One worksheet, one column per node.
 
-!!! note "The first Excel row is read as a header"
-    A simulation run reads Excel demand files with the first row as column headers, so that row is **not** used as data. Put a header row (for example node names) at the top of the sheet, or use CSV. Without a header, the first hour of the file is dropped and every later row moves up by one hour. The Python API ([`load_demand_data`](#python-api)) reads Excel without a header, so the API and a run do not see the same rows for the same file.
+!!! note "Header rows"
+    Data start in the first row, for CSV and Excel alike. Leading rows with a non-numeric cell (for example a row of node names) are skipped as headers, so a file with or without a header row gives the same hours. The run and the [Python API](#python-api) read the same rows.
 
 ### Format Rules
 
 | Rule | Description |
 |------|-------------|
-| **Rows** | One per hour. Every simulated year is exactly **8,760 rows**; leap days are not handled |
+| **Rows** | One per hour. Every simulated year is exactly **8,760 rows** (see [Leap years](#leap-years)) |
 | **Columns** | One per node, in node order (node 0 first). The run does not check the column count |
 | **Values** | Electrical demand in MW, non-negative |
 | **No index column** | Do not include timestamps or row numbers |
@@ -79,7 +79,7 @@ A relative `demand_path` is looked up in the directory of the configuration file
 
 ## Time Alignment and Multi-Year Demand
 
-The first data row is the first hour of the simulation. `date_start` (format `DD/MM/YYYY HH:MM`) only labels the hours in the results; it does not select rows. The horizon length is set by the run (`esfex run --years N`, default 25), and year labels start at 2025.
+The first data row is the first hour of the simulation. `date_start` (format `DD/MM/YYYY HH:MM`) labels that hour; it does not select rows. The horizon length is set by the run (`esfex run --years N`, default 25). Year labels start at the year of `date_start`; `esfex run --start-year YYYY` relabels them, and the date labels then start on the same day and time of `date_start` in that year.
 
 The run needs `years × 8,760` rows:
 
@@ -99,6 +99,16 @@ What the run does with the rows it finds:
 | < 8,760 | Used as-is, with a warning. Provide at least one full year |
 
 There is no demand-growth key: a single-year file gives the same demand every year, in the master problem and in the dispatch. To model growth, write every year into the file.
+
+### Leap years
+
+Every modelled year has 8,760 hours, leap years included: the master problem, the dispatch and the annual scaling all use 8,760 h per year. Feb 29 does not exist in the model:
+
+- If the file has the extra 24 rows of Feb 29, they are dropped when it is read (logged as `dropped 24 Feb 29 hours`). Feb 29 is found from the calendar that starts at `date_start`, provided the file is then a whole number of 8,760-row years. A file of exactly 8,784 rows is taken as one leap year from 1 January, whatever `date_start` says.
+- Files already in 8,760-row years are used as they are.
+- Date labels skip Feb 29: in a leap year, 28 Feb 23:00 is followed by 1 Mar 00:00, and every year runs from 1 January to 31 December.
+
+Availability and reservoir-inflow profiles follow the same rule.
 
 
 ---
@@ -234,8 +244,8 @@ systems:
 
 A YAML file that omits `criticality_penalties` gets the schema defaults. These are large multipliers on top of `LOSS_OF_LOAD`, so set `criticality_penalties` explicitly.
 
-!!! note "Sector priorities in operational dispatch"
-    In operational dispatch, the load shed at a node is split into per-sector amounts whose sum equals the node's shed load, but each sector's amount is **not** capped by that sector's demand. The optimizer therefore books all shed energy to the sector with the lowest multiplier, so unserved energy costs `LOSS_OF_LOAD × (lowest multiplier among the configured sectors)`. In the master problem's representative days, each sector's shed load is capped by its demand, so the priority order applies there.
+!!! note "Sector priorities"
+    The load shed at a node is split into per-sector amounts, each capped by that sector's demand, so the optimizer sheds the cheapest sector first and moves to a dearer one only when the cheaper one is fully shed. Demand that no sector accounts for (sector shares missing for a node) is shed at `LOSS_OF_LOAD` with multiplier 1. The master problem's representative days apply the same per-sector caps.
 
 ### Sector Fields
 
@@ -288,7 +298,7 @@ The demand file is always hourly. With `temporal.resolution_hours > 1` the run a
 
 ## Python API
 
-These helpers are for preparing and inspecting data; a simulation run does not use them. They read both CSV and Excel files **without** a header row.
+These helpers are for preparing and inspecting data; a simulation run does not call them, but they read the rows a run reads: header rows are skipped, Feb 29 rows are dropped and every year is an 8,760-row block from the year of `date_start`.
 
 ### Loading Demand Data
 
@@ -300,7 +310,7 @@ demand, hours, num_nodes, years, time_index = load_demand_data(
     date_start="01/01/2025 00:00",
 )
 print(demand.shape)              # (hours, nodes)
-print(years)                     # calendar years covered by the rows
+print(years)                     # model years covered (one per 8,760 rows)
 print(f"Peak demand: {demand.max():.1f} MW")
 ```
 
@@ -320,7 +330,9 @@ sectoral = create_sectoral_demand(demand, sector_distribution)
 
 ### DemandDataManager
 
-Converts a demand file to a temporary HDF5 file indexed by **calendar** year (8,784 hours in leap years, unlike a run), for fast year-by-year access:
+`load_demand_data(..., year_to_load=2026)` returns only that year's 8,760-row block.
+
+Converts a demand file to a temporary HDF5 file indexed by model year (8,760-row blocks, as in a run), for fast year-by-year access:
 
 ```python
 from esfex.io.demand import DemandDataManager
@@ -342,9 +354,10 @@ mgr.cleanup()
 | `Per-node demand file missing for '<system>' node <i>: <path>` | An entry of `demand_paths` (or an auto-discovered `demand_node_<i>` sibling) is missing | Check the file names |
 | `demand_paths has N entries but system has M nodes` | `demand_paths` length does not match `nodes.num_nodes` | Give exactly one file per node |
 | `No demand_path or demand_paths configured for system '<system>'` | Neither key is set | Add `demand_path` or `demand_paths` |
+| `<path>: non-numeric value in data row <n>` | A text cell below the header rows | Data rows must contain numbers only |
 | `Demand for '<system>' has <n>h — tiling first year for <N> years.` (warning) | The file is shorter than the horizon | Expected for single-year files. Add the missing years if you want them to differ |
 | `Sector distribution normalized for N nodes` (warning) | Some node's sector fractions do not sum to 1 | Fix the fractions in `sector_distribution` |
-| Demand looks shifted by one hour (Excel) | The first Excel row was read as a header | Add a header row, or use CSV |
+| Demand looks shifted by one day from March on | A leap-year file was not recognised (its length is not a calendar span from `date_start`) | Remove the Feb 29 rows, or set `date_start` to the file's first hour |
 | Demand counted twice on a node | Several `load`/`mixed` buses with fractions that sum to more than 1 | Set `demand_fraction` so a node's load buses sum to 1 |
 
 ### Best Practices

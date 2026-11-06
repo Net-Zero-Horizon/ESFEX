@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 # Category display labels
 _CATEGORY_LABELS: dict[str, str] = {
     "structural": "Structural (nodes, lines)",
+    "configuration": "Configuration (unknown YAML keys)",
     "electrical": "Electrical (buses, equipment references)",
     "demand": "Demand (load data, coverage)",
     "generation": "Generation (adequacy, availability files)",

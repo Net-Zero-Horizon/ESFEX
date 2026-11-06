@@ -9,7 +9,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 - **Default**: `required` means loading fails without it. "required by loader" means the schema has a default but the loader indexes the key directly, so a missing key fails with `Failed to load configuration: '<key>'`.
 
 !!! warning "Unknown keys are ignored"
-    The models do not forbid extra keys. A misspelled or obsolete key (for example `min_up_time` instead of `min_up`) is dropped without an error or warning, and the default is used.
+    The models do not forbid extra keys. A misspelled or obsolete key (for example `min_up_time` instead of `min_up`) is dropped and the default is used. The loader logs a warning with the key's full path, and `esfex validate` and the Studio's validation list it.
 
 ---
 
@@ -19,7 +19,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 |---|---|---|---|
 | `simulation_mode` | `development` \| `unit_commitment` \| `economic_dispatch` | `"development"` | `development`: master problem (capacity expansion) then operational dispatch for every year. `economic_dispatch`: dispatch only (LP), no master problem. `unit_commitment`: dispatch only with binary commitment (MIP), first year only |
 | `unit_commitment_hours` | int (≥ 1) | `24` | `unit_commitment` mode only: number of hours of the first year that are dispatched (capped at 8,760) |
-| `date_start` | str | `"01/01/2025 00:00"` | Start timestamp `DD/MM/YYYY HH:MM`. Labels the hourly time index; demand is read from the first row of the file |
+| `date_start` | str | `"01/01/2025 00:00"` | Start timestamp `DD/MM/YYYY HH:MM` of the first data row. Labels the hourly time index (Feb 29 skipped: every model year is 8,760 h) and gives the first year label unless `esfex run --start-year` is set. It does not select rows: demand is read from the first row of the file |
 | `temporal` | [TemporalConfig](#temporalconfig) | see [TemporalConfig](#temporalconfig) | Time resolution and rolling horizon |
 | `solver` | [SolverConfig](#solverconfig) | see [SolverConfig](#solverconfig) | Solver backend and options |
 | `network_reduction` | [NetworkReductionConfig](#networkreductionconfig) | see [NetworkReductionConfig](#networkreductionconfig) | Optional internal reduction of the bus network before solving |
@@ -58,7 +58,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 | `time_limit` | int (≥ 0) | `10800` | Time limit per solve (seconds, `0` = unlimited) |
 | `gap` | float (0–1) | `0.01` | Relative MIP gap |
 | `verbose` | bool | `false` | Print solver output |
-| `scale_constraints` | bool | `true` | Not used by the model in 0.3.0 |
+| `scale_constraints` | bool | `true` | No effect: read by neither the model nor the solvers |
 | `options` | dict[str, any] | `{}` | Solver-specific options passed to JuMP. See [Solver Guide](../user-guide/solver-guide.md) |
 
 HiGHS options that apply to one LP method only (for example `primal_feasibility_tolerance` or `simplex_scale_strategy` for simplex, `ipm_optimality_tolerance` for IPM) are dropped with a warning unless `options.solver_method` is set explicitly to a matching method. See the [Solver Guide](../user-guide/solver-guide.md).
@@ -221,7 +221,7 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `demand_scale` | float (> 0) | `1` | Multiplier applied to all demand |
 | `discount_rate` | float (0–1) | `0.05` | Discount rate |
 | `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in NPV calculations ($/MWh) |
-| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Passed to the operational model; no constraint uses it in 0.3.0 |
+| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Deprecated and ignored: accepted so older case files load, but not passed to the model (no constraint ever used it). The Studio no longer shows or writes it |
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target. See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |
@@ -569,7 +569,7 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `fuel_cost` | list[float] | required | Fuel cost per node ($/MWh). Required key; if all zero and `fuel` is in `fuels`, the loader computes it (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `fixed_cost` | list[float] | required | Fixed O&M per node, applied per MWh generated ($/MWh) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
-| `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`) |
+| `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`). Where it is 0, the technology with the same `fuel` and `type` supplies it |
 | `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader (legacy per-unit investment; use `technologies`) |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` \| `AC_DC` | `"AC"` | `AC`, `DC` or `AC_DC` |
@@ -651,7 +651,7 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh) |
 | `throughput_degradation_cost` | list[float] \| null | `null` | Cycling cost per MWh discharged, per node ($/MWh). `null` means 0 |
 | `discharge_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present. |
-| `invest_cost` | list[float] | required by loader | Power investment cost per node ($/MW). Required by the loader; prices life extension |
+| `invest_cost` | list[float] | required by loader | Power investment cost per node ($/MW). Required by the loader; prices life extension. Where it is 0, the battery technology named by `technology` (else the first one) supplies `invest_cost_power` |
 | `invest_cost_energy` | list[float] | `[0.0]` | Energy investment cost per node ($/MWh). Missing → copy of `invest_cost` |
 | `invest_max_power` | list[float] | required by loader | Maximum power investment per node (MW). Required by the loader |
 | `invest_max_capacity` | list[float] | `[0.0]` | Maximum energy investment per node (MWh). Missing → zeros |
@@ -903,7 +903,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 
 ## PenaltiesConfig
 
-Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). A `curtailment` key is accepted for backward compatibility but has no effect; use `curtailment_cost`.
+Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes them and shows them disabled.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -912,6 +912,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_reserve_dynamic` | float | `100` | $/MW dynamic reserve deficit |
 | `loss_of_inertia` | float | `200` | $/MW-s inertia deficit |
 | `transfer_margin` | float | `100` | Transfer-margin violation ($/MW). YAML also accepts `TransferMargin` |
+| `curtailment` | float | `100` | No effect (the Studio writes it as `Curtailment`): curtailed RE is priced by `curtailment_cost` and `curtailment_excess_penalty`. |
 | `max_curtailment_ratio` | float (0–1) | `0.05` | Cap on RE curtailment as a fraction of RE generation. Hard constraint per representative day in the monolithic master, soft (with `curtailment_excess_penalty`) under Benders; not enforced in operational dispatch |
 | `curtailment_cost` | float (≥ 0) | `20` | Cost of curtailed RE in operational dispatch ($/MWh) |
 | `curtailment_excess_penalty` | float (≥ 0) | `500` | Benders master: penalty on curtailment above `max_curtailment_ratio` ($/MWh) |
@@ -923,9 +924,9 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
 | `coupling_slack_penalty` | float | `1` | No effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack (kept so existing files load). |
-| `transport_congestion` | float | `100` | $/MW congestion |
-| `storage_violation` | float | `100` | $/MW storage violation |
-| `non_electric_demand_loss` | float | `100` | $/unit fuel demand unmet |
+| `transport_congestion` | float | `100` | No effect: fuel transport has no congestion slack (kept so existing files load). |
+| `storage_violation` | float | `100` | No effect: fuel storage has no violation slack (kept so existing files load). |
+| `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
 | `soc_violation` | float | `1000000` | $/MWh SOC limit violation. |
 | `delay_retirement_per_mw` | float | `50000` | $/MW delay retirement penalty. |
 
@@ -1134,9 +1135,11 @@ Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` 
 
 Nested under the top-level `risk` key. See [Risk and Resilience](../formulation/risk-resilience.md).
 
+The block holds the settings of the Studio's Risk & Resilience Workbench (analysis and post-processing). Neither the master problem nor the dispatch reads it, `enabled` included; the only risk input to the optimization is the per-element `risk_coefficient` of generators, batteries and technologies.
+
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | `false` | Enable the risk module |
+| `enabled` | bool | `false` | Set by the Workbench's Apply; the optimization does not read it |
 | `risk_measure` | `expected` \| `cvar` \| `minimax_regret` | `"expected"` | `expected`, `cvar` or `minimax_regret` |
 | `cvar_alpha` | float (> 0, < 1) | `0.95` | CVaR confidence level (0.95 → worst 5 % of scenarios) |
 | `cvar_lambda` | float (0–1) | `0.5` | Risk-aversion weight (0 = risk-neutral, 1 = pure CVaR) |

@@ -269,6 +269,21 @@ class TestSldResultsLoaderEnhanced:
             assert "rocof_ok" in freq
             assert freq["nadir_hz"] <= 50.0
 
+    def test_frequency_gauge_uses_system_keys(self, tmp_path):
+        """frequency_nominal / rocof_limit of the system set the gauge."""
+        from types import SimpleNamespace
+        from esfex.visualization.sld.sld_results_loader import SldResultsLoader
+        system = SimpleNamespace(frequency_nominal=60.0, frequency_nadir_limit=59.4,
+                                 rocof_limit=0.5, load_damping=0.02)
+        loader = SldResultsLoader(_create_test_hdf5(tmp_path), _create_mock_state(),
+                                  system_config=system)
+        fa = loader._freq_analyzer
+        assert fa is not None
+        assert (fa.f_nom, fa.nadir_limit, fa.rocof_limit, fa.load_damping) == (
+            60.0, 59.4, 0.5, 0.02)
+        freq = loader.get_timestep(2030, 0)["system"]["frequency"]
+        assert freq["f_nom_hz"] == 60.0
+
     def test_missing_datasets_graceful(self, tmp_path):
         """Missing HDF5 datasets should return defaults, not crash."""
         h5_path = tmp_path / "minimal.h5"

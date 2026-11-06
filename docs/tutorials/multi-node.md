@@ -315,7 +315,7 @@ The multi-node simulation takes longer because the optimizer considers transmiss
 
 ## Step 4: Interpreting Network Results
 
-The run writes `results/multi_node_system_<ddmmyyyy>_<HHMM>.h5`. Per-year results are under `detailed_results/year_<YYYY>_threshold_0/`, with years labelled from 2025. The snippets below look at year 5 (2029) of the newest file:
+The run writes `results/multi_node_system_<ddmmyyyy>_<HHMM>.h5`. Per-year results are under `detailed_results/year_<YYYY>_threshold_0/`, with years labelled from the year of `date_start` (2025). The snippets below look at year 5 (2029) of the newest file:
 
 ```python
 from pathlib import Path

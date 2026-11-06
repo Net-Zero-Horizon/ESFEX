@@ -62,7 +62,7 @@ The mode restricts the solver list: solvers that cannot handle the formulation a
 | Mode | Compatible solvers |
 |------|--------------------|
 | DC OPF, DC OPF + AC Verify | HiGHS, Gurobi, GLPK, CBC, SCIP, CPLEX, Xpress |
-| AC OPF — SOC, AC OPF — QC | HiGHS, Gurobi, CPLEX, Xpress, Clarabel, SCS |
+| AC OPF — SOC, AC OPF — QC | Gurobi, CPLEX, Xpress, Clarabel, SCS |
 | AC OPF — SDP | SCS, Clarabel |
 | AC OPF — Polar, AC OPF — Rect | Ipopt |
 
@@ -167,7 +167,7 @@ Settings stored in the `risk:` block of the YAML. The fields are greyed out unti
 | Time Limit (s) | 10800 (YAML), 3600 (new project) | Maximum solve time per optimization problem |
 | Gap (frac) | 0.01 (YAML), 0.001 (new project) | Relative MIP optimality gap. Only relevant for MIP problems (unit commitment). |
 | Verbose | Off | Print the full solver log in the Run Output tab |
-| Scale Constraints | On (YAML), Off (new project) | Written to the YAML (`solver.scale_constraints`) but not used by the solver interface |
+| Scale Constraints | On (YAML), Off (new project) | No effect: written to the YAML (`solver.scale_constraints`) but read by neither the model nor the solvers, so the checkbox is disabled |
 
 Below these fields, the group shows the options specific to the selected solver (for example presolve or LP method). They are stored in `solver.options`.
 
@@ -228,7 +228,7 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | Loss Reserve (Dynamic) | 100 | $/MW | Dynamic (frequency response) reserve shortfall |
 | Loss of Inertia | 200 | $/MW·s | Inertia shortfall below the Min. System Inertia |
 | Transfer Margin | 100 | $/MW | Transfer margin violation |
-| Curtailment | 100 | -- | Not a schema field: the loader drops it, so it has no effect. Use Curtailment Cost. |
+| Curtailment | 100 | -- | No effect (disabled): curtailed RE is priced by Curtailment Cost and Curtailment Excess Penalty. |
 | Max Curtailment Ratio | 0.05 | fraction | Curtailment allowed as a fraction of RE generation before Curtailment Excess Penalty applies |
 | Curtailment Cost ($/MWh) | 20 | $/MWh | Cost of each curtailed MWh of RE |
 | Curtailment Excess Penalty ($/MWh) | 500 | $/MWh | Curtailment above the Max Curtailment Ratio |
@@ -239,10 +239,10 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | FRE Penetration Loss | 100 | $/MWh | Shortfall from the RE target |
 | EV Loss | 50,000 | $/MWh | EV driving energy not supplied. Same as Loss of Load by default; a lower value makes leaving EVs uncharged cheaper than generating. |
 | Loss of Fuel Supply | 100 | $/unit | Fuel supply deficit |
-| PE Coupling Slack | 1 | $/unit | Saved in the YAML; not used by the current model (the fuel model has no periodic–hourly coupling slack) |
-| Transport Congestion | 100 | $/MW | Saved in the YAML; not used by the current model |
-| Storage Violation | 100 | $/MW | Saved in the YAML; not used by the current model |
-| Non-Electric Demand Loss | 100 | $/unit | Saved in the YAML; not used by the current model |
+| PE Coupling Slack | 1 | $/unit | No effect (disabled): the fuel model has no periodic–hourly coupling slack |
+| Transport Congestion | 100 | $/MW | No effect (disabled): fuel transport has no congestion slack |
+| Storage Violation | 100 | $/MW | No effect (disabled): fuel storage has no violation slack |
+| Non-Electric Demand Loss | 100 | $/unit | Non-electric (sectoral) fuel demand left unmet |
 
 #### Criticality (Load Shedding Priority)
 

@@ -126,6 +126,7 @@ def launch_studio(
     config: Optional[Union["ESFEXConfig", str, Path]] = None,
     system: Optional[str] = None,
     blocking: bool = True,
+    output: Optional[Union[str, Path]] = None,
 ) -> Optional["ESFEXConfig"]:
     """Launch the GIS-based power system editor.
 
@@ -139,12 +140,15 @@ def launch_studio(
     blocking : bool
         If ``True`` (default), block until the editor window is closed
         and return the (possibly modified) configuration.
+    output : str | Path | None
+        File that File > Save writes to. Default: the ``config`` file
+        when it is a path, otherwise Save asks for one.
 
     Returns
     -------
     ESFEXConfig | None
-        The configuration object if the user saved, ``None`` if they
-        cancelled or closed without saving.
+        The configuration as last saved (reloaded from the saved file) if
+        the user saved, ``None`` if they closed without saving.
     """
     # Must run before QtWebEngine spawns its render helper, or the map
     # crash-loops with STATUS_DLL_NOT_FOUND when launched outside an
@@ -159,10 +163,15 @@ def launch_studio(
     from esfex.visualization.app import _get_or_create_app, run_studio
 
     app = _get_or_create_app()
-    window = run_studio(config=config, system=system)
+    window = run_studio(config=config, system=system,
+                        output=str(output) if output else None)
 
     if blocking:
         app.exec()
-        return getattr(window, "_result_config", None)
+        saved = getattr(window, "_last_saved_path", None)
+        if not saved:
+            return None
+        from esfex.config.loader import load_config
+        return load_config(saved)
 
     return None

@@ -14,6 +14,7 @@ from esfex.utils.temporal import HOURS_STD_YEAR
 from esfex.config.schema import (
     GeoCoordinate,
     ESFEXConfig,
+    RiskConfig,
     SystemConfig,
     normalize_scenario_multipliers,
 )
@@ -204,7 +205,22 @@ def config_to_gui_states(
     states: dict[str, GuiSystemState] = {}
     for sys_name, sys_config in config.systems.items():
         states[sys_name] = _system_to_gui_state(sys_config, base_dir=base_dir)
+    _assign_unknown_keys(states, getattr(config, "unknown_keys", []))
     return states
+
+
+def _assign_unknown_keys(states: dict[str, GuiSystemState], keys: list[str]) -> None:
+    """Give each state the unknown keys under ``systems.<its name>.``; keys
+    outside any system go to the first state, so validation lists them once."""
+    if not states or not isinstance(keys, list):
+        return
+    first = next(iter(states))
+    for name, state in states.items():
+        prefix = f"systems.{name}."
+        state.unknown_config_keys = [k for k in keys if k.startswith(prefix)]
+    states[first].unknown_config_keys += [
+        k for k in keys
+        if not any(k.startswith(f"systems.{n}.") for n in states)]
 
 
 def config_to_inter_system_links(
@@ -1115,7 +1131,6 @@ def _system_to_gui_state(sys: SystemConfig,
         max_decommission_cost_per_mw=getattr(sys, 'max_decommission_cost_per_mw', 5e5),
         force_replacement=getattr(sys, 'force_replacement', -5e5),
         life_extension_cost_factor=getattr(sys, 'life_extension_cost_factor', 0.20),
-        loss_demand_threshold=getattr(sys, 'loss_demand_threshold', 0.05),
         inertia_limit_threshold=getattr(sys, 'inertia_limit_threshold', 0.1),
         sim_rooftop=getattr(sys, 'sim_rooftop', False),
     )
@@ -2220,6 +2235,26 @@ def config_to_global_settings(
             g.mp_mga_slack_fraction = getattr(mga, 'slack_fraction', 0.05)
             g.mp_mga_investment_threshold = getattr(mga, 'investment_threshold', 0.1)
 
+    # Risk & Resilience: the fields global_settings_to_config_dict writes.
+    # Without reading them back, the next save reset them to the defaults.
+    rk = getattr(config, 'risk', None)
+    if isinstance(rk, RiskConfig):
+        g.risk_enabled = rk.enabled
+        g.risk_measure = rk.risk_measure
+        g.risk_cvar_alpha = rk.cvar_alpha
+        g.risk_cvar_lambda = rk.cvar_lambda
+        g.risk_combination_method = rk.combination_method
+        g.risk_voll_residential = rk.voll.residential
+        g.risk_voll_commercial = rk.voll.commercial
+        g.risk_voll_industrial = rk.voll.industrial
+        g.risk_voll_critical = rk.voll.critical
+        g.risk_base_temperature = rk.demand_base_temperature
+        g.risk_heating_coefficient = rk.demand_heating_coefficient
+        g.risk_cooling_coefficient = rk.demand_cooling_coefficient
+        g.risk_insurance_premium_rate = rk.insurance_premium_rate
+        g.risk_monte_carlo_samples = rk.monte_carlo_samples
+        g.risk_monte_carlo_seed = rk.monte_carlo_seed
+
     # visual_scaling is a GUI-only key not in the Pydantic schema,
     # so it must be read from the raw YAML dict.
     vs_dict = (raw_dict or {}).get("visual_scaling")
@@ -2499,6 +2534,7 @@ def gui_state_to_yaml(
             config_dict["systems"][sys_name] = {"name": sys_name}
         sys_dict = config_dict["systems"][sys_name]
         _apply_gui_state_to_dict(state, sys_dict)
+        _drop_shadowed_aliases(SystemConfig, sys_dict)
 
     if inter_system_links:
         inter_system_links_to_config_dict(inter_system_links, config_dict)
@@ -2742,6 +2778,19 @@ def _build_fuel_transport_routes(state: GuiSystemState) -> list[dict]:
                 })
 
     return routes
+
+
+def _drop_shadowed_aliases(model, d: dict) -> None:
+    """Drop the alias key of every *model* field also present by name.
+
+    The base config is dumped by alias (``TARGET_RE_PENETRATION``) and the
+    Studio then writes its edited value by field name
+    (``target_re_penetration``); pydantic prefers the alias, so the stale
+    value would win on the next load.
+    """
+    for name, field in model.model_fields.items():
+        if field.alias and field.alias != name and name in d:
+            d.pop(field.alias, None)
 
 
 def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
@@ -3453,7 +3502,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     sys_dict["max_decommission_cost_per_mw"] = s.max_decommission_cost_per_mw
     sys_dict["force_replacement"] = s.force_replacement
     sys_dict["life_extension_cost_factor"] = s.life_extension_cost_factor
-    sys_dict["LOSS_DEMAND_TRHESHOLD"] = s.loss_demand_threshold
     sys_dict["inertia_limit_threshold"] = s.inertia_limit_threshold
     sys_dict["sim_rooftop"] = s.sim_rooftop
 

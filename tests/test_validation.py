@@ -232,7 +232,7 @@ class TestCategoryOrder:
 
     def test_contains_expected_categories(self):
         expected = {
-            "structural", "electrical", "demand",
+            "structural", "configuration", "electrical", "demand",
             "generation", "fuel_network", "connectivity",
             "realism", "topology_audit",
         }
@@ -1812,10 +1812,10 @@ class TestCountValidators:
 
     def test_all_categories(self):
         n = count_validators()
-        # structural(3) + electrical(5) + demand(1) + generation(1)
-        # + fuel_network(3) + connectivity(1) + realism(1)
-        # + topology_audit(1) = 16
-        assert n == 16
+        # structural(3) + configuration(1) + electrical(5) + demand(1)
+        # + generation(1) + fuel_network(3) + connectivity(1) + realism(1)
+        # + topology_audit(1) = 17
+        assert n == 17
 
     def test_single_category_structural(self):
         n = count_validators({"structural"})

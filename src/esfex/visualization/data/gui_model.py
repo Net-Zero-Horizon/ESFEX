@@ -536,7 +536,6 @@ class GuiSystemSettings:
     max_decommission_cost_per_mw: float = 5e5
     force_replacement: float = -5e5
     life_extension_cost_factor: float = 0.20
-    loss_demand_threshold: float = 0.05
     inertia_limit_threshold: float = 0.1
     sim_rooftop: bool = False
     # CO2 budget (merged from former GuiCO2Budget)
@@ -1085,6 +1084,10 @@ class GuiSystemState:
 
     # Raw passthrough for fields not edited in the GUI
     raw_extras: dict = field(default_factory=dict)
+
+    # Keys of the loaded file that ESFEX ignores (ESFEXConfig.unknown_keys),
+    # listed by validation; not written back on save.
+    unknown_config_keys: list[str] = field(default_factory=list)
 
 
 # ── Checkpoint suspension helper ─────────────────────────────────

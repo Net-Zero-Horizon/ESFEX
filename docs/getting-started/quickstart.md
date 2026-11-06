@@ -21,8 +21,8 @@ np.savetxt("solar.csv", solar, fmt="%.4f")
 Put both files next to the configuration file; relative paths in the configuration are resolved from the configuration's folder.
 
 !!! note "Demand and availability files"
-    - **CSV** files are read without a header row. **Excel** demand files are read with the first row as a header, so put column names in the first row.
-    - Demand is in MW, one column per node, 8760 rows per year. If the file holds at least one year but fewer years than simulated, the first year is repeated for the remaining years.
+    - Data start in the first row, in CSV and Excel files alike; a header row (for example node names) is optional and skipped.
+    - Demand is in MW, one column per node, 8760 rows per year (leap years too: Feb 29 rows are dropped). If the file holds at least one year but fewer years than simulated, the first year is repeated for the remaining years.
     - An availability file with a single column is applied to every node. Values are clipped to 0..1.
 
 See [Demand Data](../user-guide/demand-data.md) and [Availability Profiles](../user-guide/availability-profiles.md) for the full formats.
@@ -127,7 +127,7 @@ systems:
 | `temporal` | Rolling-horizon window and overlap for the hourly dispatch. 48 h with 24 h overlap is the default. |
 | `solver` | The optimization solver. HiGHS ships with ESFEX. See the [Solver Guide](../user-guide/solver-guide.md). |
 | `master_problem` | Capacity-expansion settings. `representative_days` (default 5) is the number of days per year the master problem optimizes. |
-| `systems.island` | One power system. Some system keys have upper-case legacy names (`TARGET_RE_PENETRATION`, `LOSS_DEMAND_TRHESHOLD`, ...), as the Studio writes them; the lower-case field name (`target_re_penetration`) is accepted as well. |
+| `systems.island` | One power system. Some system keys have upper-case legacy names (`TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, ...), as the Studio writes them; the lower-case field name (`target_re_penetration`) is accepted as well. |
 | `nodes` | Network topology. `nodes_connections` is the N × N matrix of line capacities, flattened row by row. |
 | `generators` | Existing units. Every per-node field is a list with one entry per node. The loader requires all fields shown here; it does not fill in defaults. For an existing unit, `invest_cost` is used to price keeping it beyond its `life_time` (see [Age-Based Retirement](concepts.md#age-based-retirement)). |
 | `technologies` / `battery_technologies` | Investment candidates. The master problem decides how much to build, where and when. |
@@ -136,7 +136,7 @@ systems:
 Settings not listed take their defaults. Two of them matter for this example: `master_problem.planning_mode` is `perfect_foresight`, and `co2_budget` is enabled with 1,000,000 t/year. The diesel unit has no CO₂ emissions here because no `fuels:` block gives Diesel an emission factor; see the [Configuration Guide](../user-guide/configuration.md).
 
 !!! warning "Unknown keys are ignored"
-    A misspelled key (for example `representative_days_per_year` instead of `representative_days`) is silently ignored and the default is used. Check spellings against the [Configuration Reference](../reference/config-reference.md).
+    A misspelled key (for example `representative_days_per_year` instead of `representative_days`) is ignored and the default is used. The loader logs a warning naming it, and `esfex validate` lists it. Check spellings against the [Configuration Reference](../reference/config-reference.md).
 
 ---
 
@@ -170,7 +170,7 @@ Configuration is valid!
 
 The counts include existing units only, not the investment candidates.
 
-Validation catches YAML syntax errors, missing required unit fields (reported as e.g. `Failed to load configuration: 'min_power'`), wrong types and out-of-range values. It does **not** check per-node list lengths, unknown keys, or whether `demand.csv` and `solar.csv` exist; those surface when the run starts. See the [CLI reference](../user-guide/cli.md#esfex-validate).
+Validation catches YAML syntax errors, missing required unit fields (reported as e.g. `Failed to load configuration: 'min_power'`), wrong types and out-of-range values. Unknown keys are listed but do not fail validation. It does **not** check per-node list lengths or whether `demand.csv` and `solar.csv` exist; those surface when the run starts. See the [CLI reference](../user-guide/cli.md#esfex-validate).
 
 ---
 
@@ -191,7 +191,7 @@ Then run a 10-year study:
 esfex run -c my_system.yaml --years 10 --verbose
 ```
 
-Without `--years`, ESFEX simulates 25 years. The years are labelled from 2025.
+Without `--years`, ESFEX simulates 25 years. The years are labelled from the year of `date_start` (2025 here); `--start-year` changes the first label.
 
 Execution stages:
 
