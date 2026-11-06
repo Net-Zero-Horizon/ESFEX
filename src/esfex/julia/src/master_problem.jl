@@ -1274,10 +1274,14 @@ end
 # =============================================================================
 
 """
-    build_investment_cost_expression(vars, input)
+    build_investment_cost_expression(vars, input; mult=nothing, discount_rate=input.discount_rate)
 
 Build the NPV investment cost expression (first-stage costs only).
 Returns an AffExpr containing discounted investment costs at period starts.
+A stochastic scenario's `mult` scales the technology investment costs
+(`invest_cost_renewables` / `invest_cost_conventional`), battery technology
+power and energy costs (`invest_cost_storage` × `bat_invest_cost_power` /
+`bat_invest_cost_capacity`) and transmission (`invest_cost_transmission`).
 """
 function build_investment_cost_expression(
     vars::MasterProblemVariables,
@@ -1292,6 +1296,8 @@ function build_investment_cost_expression(
     m_re = mult === nothing ? 1.0 : mult.invest_cost_renewables
     m_conv = mult === nothing ? 1.0 : mult.invest_cost_conventional
     m_sto = mult === nothing ? 1.0 : mult.invest_cost_storage
+    m_bat_p = mult === nothing ? m_sto : m_sto * mult.bat_invest_cost_power
+    m_bat_e = mult === nothing ? m_sto : m_sto * mult.bat_invest_cost_capacity
     m_tx = mult === nothing ? 1.0 : mult.invest_cost_transmission
 
     inv_cost = AffExpr(0.0)
@@ -1319,10 +1325,10 @@ function build_investment_cost_expression(
             for n in 1:n_buses
                 add_to_expression!(investment_cost,
                     vars.bat_tech_power_investment[y_idx][bt][n],
-                    btech.invest_cost_power[n] * m_sto)
+                    btech.invest_cost_power[n] * m_bat_p)
                 add_to_expression!(investment_cost,
                     vars.bat_tech_capacity_investment[y_idx][bt][n],
-                    btech.invest_cost_capacity[n] * m_sto)
+                    btech.invest_cost_capacity[n] * m_bat_e)
             end
         end
 
@@ -1374,19 +1380,23 @@ function build_investment_cost_expression(
 end
 
 """
-    build_annual_asset_cost(vars, input, y_idx)
+    build_annual_asset_cost(vars, input, y_idx; mult=nothing)
 
 Undiscounted per-year cost of existing assets: life extension of units past
-their lifetime and (incremental, LP-linear) decommissioning.
+their lifetime and (incremental, LP-linear) decommissioning. A stochastic
+scenario's `mult` scales the generator and battery decommissioning costs.
 """
 function build_annual_asset_cost(
     vars::MasterProblemVariables,
     input::MasterProblemInput,
-    y_idx::Int
+    y_idx::Int;
+    mult::Union{Nothing, ScenarioMultipliers} = nothing
 )::AffExpr
     n_buses = input.network.num_buses
     n_gen = length(input.generators)
     n_bat = length(input.batteries)
+    m_gen_decomm = mult === nothing ? 1.0 : mult.gen_decommissioning_cost
+    m_bat_decomm = mult === nothing ? 1.0 : mult.bat_decommissioning_cost
     annual_cost = AffExpr(0.0)
 
     # Life extension costs (annual): cost to keep units past lifetime
@@ -1416,7 +1426,7 @@ function build_annual_asset_cost(
         gen = input.generators[g]
         for n in 1:n_buses
             rated_power = gen.rated_power[n]
-            decomm_cost = gen.decommissioning_cost[n]
+            decomm_cost = gen.decommissioning_cost[n] * m_gen_decomm
             if rated_power <= 0 || decomm_cost <= 0
                 continue
             end
@@ -1453,7 +1463,7 @@ function build_annual_asset_cost(
         bat = input.batteries[b]
         for n in 1:n_buses
             base_power = bat.max_discharge_power[n]
-            decomm_cost = bat.decommissioning_cost[n]
+            decomm_cost = bat.decommissioning_cost[n] * m_bat_decomm
             if base_power <= 0 || decomm_cost <= 0
                 continue
             end
@@ -3617,10 +3627,16 @@ end
 The master input a stochastic scenario operates on in year `year_idx`:
 - demand × `demand_growth`^(year_idx − 1) (an annual factor: 1.02 = +2 %/year)
 - fuel cost × `fuel_cost` × `fuel_price_growth`^(year_idx − 1), for generators
-  and candidate technologies
+  (piecewise fuel-cost curves included) and candidate technologies
+- fixed O&M × `gen_fixed_cost` (generators, technologies)
 - maintenance cost × `maintenance_cost` (generators, batteries, technologies)
 - CO2 cost × `carbon_price`
-Investment-cost and discount multipliers act on the objective instead.
+- penalties: loss of load (and the sectoral penalties derived from it) ×
+  `penalty_loss_of_load`, static and dynamic reserve shortfall ×
+  `penalty_loss_of_reserve`, curtailment × `penalty_curtailment`, RE
+  penetration shortfall × `penalty_fre_penetration`
+Investment-cost, decommissioning and discount multipliers act on the
+objective instead.
 """
 function scenario_master_input(
     input::MasterProblemInput,
@@ -3629,21 +3645,37 @@ function scenario_master_input(
 )::MasterProblemInput
     fuel = mult.fuel_cost * mult.fuel_price_growth^(year_idx - 1)
     maint = mult.maintenance_cost
+    fixed = mult.gen_fixed_cost
     gens = [with_fields(g; fuel_cost=g.fuel_cost .* fuel,
+                        fixed_cost=g.fixed_cost .* fixed,
                         maintenance_cost=g.maintenance_cost .* maint)
             for g in input.generators]
     bats = [with_fields(b; maintenance_cost=b.maintenance_cost .* maint)
             for b in input.batteries]
     techs = [with_fields(t; fuel_cost=t.fuel_cost .* fuel,
+                         fixed_cost=t.fixed_cost .* fixed,
                          maintenance_cost=t.maintenance_cost .* maint)
              for t in input.technologies]
     btechs = [with_fields(bt; maintenance_cost=bt.maintenance_cost .* maint)
               for bt in input.battery_technologies]
+    # A generator with a fuel-cost curve is charged its segments, not fuel_cost
+    gen_curves = Dict{Int, Dict{Int, Vector{CostSegment}}}(
+        g => Dict{Int, Vector{CostSegment}}(
+            n => [CostSegment(s.fraction, s.marginal_cost * fuel) for s in segs]
+            for (n, segs) in bus_curves)
+        for (g, bus_curves) in input.gen_cost_curves)
     return with_fields(input;
         generators=gens, batteries=bats,
         technologies=techs, battery_technologies=btechs,
+        gen_cost_curves=gen_curves,
         base_demand=input.base_demand .* mult.demand_growth^(year_idx - 1),
-        co2_cost=input.co2_cost * mult.carbon_price)
+        co2_cost=input.co2_cost * mult.carbon_price,
+        loss_of_load_penalty=input.loss_of_load_penalty * mult.penalty_loss_of_load,
+        loss_of_reserve_static=input.loss_of_reserve_static * mult.penalty_loss_of_reserve,
+        loss_of_reserve_dynamic=input.loss_of_reserve_dynamic * mult.penalty_loss_of_reserve,
+        curtailment_cost=input.curtailment_cost * mult.penalty_curtailment,
+        fre_penetration_loss_penalty=input.fre_penetration_loss_penalty *
+                                     mult.penalty_fre_penetration)
 end
 
 """
@@ -3675,7 +3707,8 @@ function build_stochastic_objective!(
 
         for y_idx in 1:num_years
             df = 1.0 / ((1.0 + rate)^(y_idx - 1))
-            add_to_expression!(total_cost, build_annual_asset_cost(vars, input, y_idx), prob * df)
+            add_to_expression!(total_cost,
+                build_annual_asset_cost(vars, input, y_idx; mult=mult), prob * df)
             for day_cost in get(scenario_costs[k], y_idx, AffExpr[])
                 add_to_expression!(total_cost, day_cost, prob * df)
             end

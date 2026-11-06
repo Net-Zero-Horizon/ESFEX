@@ -40,6 +40,7 @@ from esfex.config.schema import (
     DCPowerFlowConfig,
     GeneratorConfig,
     NodeConfig,
+    ScenarioMultipliers,
     SolverConfig,
     SystemConfig,
     TechnologyConfig,
@@ -1986,19 +1987,10 @@ def convert_scenario(scenario: dict) -> Any:
 
     ESFEX = get_esfex_module()
 
-    multipliers = scenario.get("multipliers", {})
+    # Validating translates legacy Studio keys and drops keys with no effect
+    mult = ScenarioMultipliers.model_validate(scenario.get("multipliers") or {})
     jl_multipliers = ESFEX.ScenarioMultipliers(
-        float(multipliers.get("invest_cost_renewables", 1.0)),
-        float(multipliers.get("invest_cost_conventional", 1.0)),
-        float(multipliers.get("fuel_cost", 1.0)),
-        float(multipliers.get("maintenance_cost", 1.0)),
-        float(multipliers.get("invest_cost_storage", 1.0)),
-        float(multipliers.get("invest_cost_transmission", 1.0)),
-        float(multipliers.get("discount_rate", 1.0)),
-        float(multipliers.get("demand_growth", 1.0)),
-        float(multipliers.get("fuel_price_growth", 1.0)),
-        float(multipliers.get("carbon_price", 1.0)),
-    )
+        **{name: float(value) for name, value in mult.model_dump().items()})
 
     return ESFEX.Scenario(
         scenario["name"],

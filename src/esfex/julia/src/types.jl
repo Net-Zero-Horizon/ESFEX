@@ -2815,37 +2815,58 @@ end
 """
     ScenarioMultipliers
 
-Cost and parameter multipliers for a scenario.
+Cost and parameter multipliers for a stochastic scenario (all 1.0 by default).
 
 # Fields
-- `invest_cost_renewables::Float64`: Multiplier for renewable investment costs
-- `invest_cost_conventional::Float64`: Multiplier for conventional investment costs
-- `fuel_cost::Float64`: Multiplier for fuel costs
-- `maintenance_cost::Float64`: Multiplier for maintenance costs
-- `invest_cost_storage::Float64`: Multiplier for storage investment costs
-- `invest_cost_transmission::Float64`: Multiplier for transmission investment costs
-- `discount_rate::Float64`: Scenario-specific discount rate adjustment
-- `demand_growth::Float64`: Scenario-specific demand growth adjustment (scales operational costs)
-- `fuel_price_growth::Float64`: Multiplier for fuel price escalation over time
-- `carbon_price::Float64`: Multiplier for carbon price / CO2 cost
+- `invest_cost_renewables::Float64`: Investment cost of renewable technologies
+- `invest_cost_conventional::Float64`: Investment cost of non-renewable technologies
+- `fuel_cost::Float64`: Fuel cost of generators (incl. PWL fuel curves) and technologies
+- `maintenance_cost::Float64`: Maintenance cost of generators, batteries and technologies
+- `invest_cost_storage::Float64`: Battery technology investment (power and energy)
+- `invest_cost_transmission::Float64`: Transmission investment cost
+- `discount_rate::Float64`: Scenario discount rate = base rate × multiplier
+- `demand_growth::Float64`: Annual demand factor, demand × m^(year_idx − 1)
+- `fuel_price_growth::Float64`: Annual fuel price factor, fuel × m^(year_idx − 1)
+- `carbon_price::Float64`: CO2 cost
+- `gen_fixed_cost::Float64`: Fixed O&M of generators and technologies
+- `gen_decommissioning_cost::Float64`: Decommissioning cost of existing generators
+- `bat_decommissioning_cost::Float64`: Decommissioning cost of existing batteries
+- `bat_invest_cost_power::Float64`: Battery technology power investment (× `invest_cost_storage`)
+- `bat_invest_cost_capacity::Float64`: Battery technology energy investment (× `invest_cost_storage`)
+- `penalty_loss_of_load::Float64`: Loss-of-load penalty (sectoral penalties included)
+- `penalty_loss_of_reserve::Float64`: Static and dynamic reserve shortfall penalties
+- `penalty_curtailment::Float64`: Curtailment cost
+- `penalty_fre_penetration::Float64`: RE-penetration shortfall penalty
 """
-struct ScenarioMultipliers
-    invest_cost_renewables::Float64
-    invest_cost_conventional::Float64
-    fuel_cost::Float64
-    maintenance_cost::Float64
-    invest_cost_storage::Float64
-    invest_cost_transmission::Float64
-    discount_rate::Float64
-    demand_growth::Float64
-    fuel_price_growth::Float64
-    carbon_price::Float64
+Base.@kwdef struct ScenarioMultipliers
+    invest_cost_renewables::Float64 = 1.0
+    invest_cost_conventional::Float64 = 1.0
+    fuel_cost::Float64 = 1.0
+    maintenance_cost::Float64 = 1.0
+    invest_cost_storage::Float64 = 1.0
+    invest_cost_transmission::Float64 = 1.0
+    discount_rate::Float64 = 1.0
+    demand_growth::Float64 = 1.0
+    fuel_price_growth::Float64 = 1.0
+    carbon_price::Float64 = 1.0
+    gen_fixed_cost::Float64 = 1.0
+    gen_decommissioning_cost::Float64 = 1.0
+    bat_decommissioning_cost::Float64 = 1.0
+    bat_invest_cost_power::Float64 = 1.0
+    bat_invest_cost_capacity::Float64 = 1.0
+    penalty_loss_of_load::Float64 = 1.0
+    penalty_loss_of_reserve::Float64 = 1.0
+    penalty_curtailment::Float64 = 1.0
+    penalty_fre_penetration::Float64 = 1.0
 end
 
-# Default multipliers (all 1.0 = no change from base costs)
-function ScenarioMultipliers()
-    return ScenarioMultipliers(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
-end
+# The original ten positional multipliers; the others stay at 1.0
+ScenarioMultipliers(invest_cost_renewables, invest_cost_conventional, fuel_cost,
+                    maintenance_cost, invest_cost_storage, invest_cost_transmission,
+                    discount_rate, demand_growth, fuel_price_growth, carbon_price) =
+    ScenarioMultipliers(; invest_cost_renewables, invest_cost_conventional, fuel_cost,
+                        maintenance_cost, invest_cost_storage, invest_cost_transmission,
+                        discount_rate, demand_growth, fuel_price_growth, carbon_price)
 
 """
     Scenario

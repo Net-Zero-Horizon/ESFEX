@@ -1048,7 +1048,13 @@ class RooftopSolarConfig(BaseModel):
 
 
 class ScenarioMultipliers(BaseModel):
-    """Cost and demand multipliers for stochastic scenarios."""
+    """Cost and demand multipliers for stochastic scenarios.
+
+    Every field scales a term of the stochastic master problem (see
+    ``scenario_master_input`` and ``build_investment_cost_expression`` in
+    ``master_problem.jl``). Keys in :data:`SCENARIO_MULTIPLIER_ALIASES` are
+    translated to these fields; any other key is dropped with a warning.
+    """
 
     invest_cost_renewables: float = 1.0
     invest_cost_storage: float = 1.0
@@ -1060,6 +1066,100 @@ class ScenarioMultipliers(BaseModel):
     demand_growth: float = 1.0
     fuel_price_growth: float = 1.0
     carbon_price: float = 1.0
+    # Fixed O&M ($/MWh) of generators and candidate technologies
+    gen_fixed_cost: float = 1.0
+    # Decommissioning of existing generators / batteries
+    gen_decommissioning_cost: float = 1.0
+    bat_decommissioning_cost: float = 1.0
+    # Battery technology investment, on top of invest_cost_storage
+    bat_invest_cost_power: float = 1.0
+    bat_invest_cost_capacity: float = 1.0
+    # Penalties of the scenario's operation
+    penalty_loss_of_load: float = 1.0
+    penalty_loss_of_reserve: float = 1.0
+    penalty_curtailment: float = 1.0
+    penalty_fre_penetration: float = 1.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _translate_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return normalize_scenario_multipliers(data)
+        return data
+
+
+# Keys the Studio offered before its catalog matched the model, mapped to the
+# fields they scale. gen_invest_cost scales both technology classes.
+SCENARIO_MULTIPLIER_ALIASES: dict[str, tuple[str, ...]] = {
+    "gen_invest_cost": ("invest_cost_renewables", "invest_cost_conventional"),
+    "gen_fuel_cost": ("fuel_cost",),
+    "fuel_price": ("fuel_cost",),
+    "gen_maintenance_cost": ("maintenance_cost",),
+    "transmission_invest_cost": ("invest_cost_transmission",),
+    "fuel_price_growth_rate": ("fuel_price_growth",),
+    "penalty_co2_cost": ("carbon_price",),
+}
+
+# Keys the Studio used to offer that cannot change the master's plan: it has
+# no start-up, electrolyzer, converter, fuel import, fuel shortfall or CO2
+# budget term, charges neither battery maintenance nor inter-system per-MW·km
+# flows, and its fuel storage/transport investments are not linked to any
+# constraint.
+SCENARIO_MULTIPLIERS_WITHOUT_EFFECT: frozenset[str] = frozenset({
+    "gen_start_up_cost",
+    "bat_maintenance_cost",
+    "transmission_cost_per_mw_km",
+    "electrolyzer_invest_cost",
+    "electrolyzer_fixed_cost",
+    "electrolyzer_variable_cost",
+    "electrolyzer_water_cost",
+    "converter_invest_cost",
+    "converter_variable_cost",
+    "fuel_import_cost",
+    "fuel_storage_invest_cost",
+    "fuel_transport_cost",
+    "penalty_loss_of_fuel_supply",
+    "penalty_co2_budget_violation",
+})
+
+
+def normalize_scenario_multipliers(raw: dict[str, Any]) -> dict[str, Any]:
+    """Map a scenario's multiplier keys onto :class:`ScenarioMultipliers` fields.
+
+    Aliases are translated; when several keys scale the same field their values
+    multiply (``gen_invest_cost: 1.1`` with ``invest_cost_renewables: 0.8``
+    gives renewables 0.88 and conventional 1.1). Keys with no effect on the
+    master problem are dropped, each with a warning.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    fields = ScenarioMultipliers.model_fields
+    out: dict[str, Any] = {}
+    sources: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        if key in fields:
+            targets: tuple[str, ...] = (key,)
+        elif key in SCENARIO_MULTIPLIER_ALIASES:
+            targets = SCENARIO_MULTIPLIER_ALIASES[key]
+        else:
+            reason = ("the master problem has no cost term it scales"
+                      if key in SCENARIO_MULTIPLIERS_WITHOUT_EFFECT
+                      else "unknown key")
+            log.warning("Stochastic scenario multiplier '%s' ignored: %s", key, reason)
+            continue
+        for field in targets:
+            if field in out:
+                out[field] = float(out[field]) * float(value)
+            else:
+                out[field] = value
+            sources.setdefault(field, []).append(key)
+    for field, keys in sources.items():
+        if len(keys) > 1:
+            log.warning("Stochastic scenario multipliers %s all scale '%s'; "
+                        "using their product %g", ", ".join(keys), field,
+                        float(out[field]))
+    return out
 
 
 class StochasticScenarioConfig(BaseModel):

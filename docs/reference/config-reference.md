@@ -1032,7 +1032,7 @@ The budget covers the system's own power plants. In a multi-system run each syst
 
 ## ScenarioMultipliers
 
-Each scenario of the stochastic master has its own operation (demand and operating costs) and values the common investment plan with its own investment-cost multipliers. See [Stochastic Programming](../formulation/stochastic-programming.md).
+Each scenario of the stochastic master has its own operation (demand, operating costs and penalties) and values the common investment plan with its own investment-cost multipliers. Every multiplier defaults to 1 (no change). See [Stochastic Programming](../formulation/stochastic-programming.md).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1040,12 +1040,23 @@ Each scenario of the stochastic master has its own operation (demand and operati
 | `invest_cost_storage` | float | `1` | Multiplier on battery technology investment cost (power and energy) |
 | `invest_cost_conventional` | float | `1` | Multiplier on the investment cost of non-renewable technologies |
 | `invest_cost_transmission` | float | `1` | Multiplier on transmission investment cost |
-| `fuel_cost` | float | `1` | Multiplier on the fuel cost of generators and technologies in the scenario's operation |
-| `maintenance_cost` | float | `1` | Multiplier on maintenance cost (generators, batteries, technologies) in the scenario's operation |
+| `fuel_cost` | float | `1` | Multiplier on the fuel cost of generators (fuel-cost curves included) and technologies in the scenario's operation |
+| `maintenance_cost` | float | `1` | Multiplier on the maintenance cost of generators and technologies in the scenario's operation (the master does not charge battery maintenance) |
 | `discount_rate` | float | `1` | Multiplier on the discount rate used for the scenario's costs |
 | `demand_growth` | float | `1` | Annual demand factor: the scenario's demand in year *y* is the base demand × `demand_growth`^(y−1). 1.02 = +2 %/year relative to the base case |
 | `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost × `fuel_price_growth`^(y−1) |
 | `carbon_price` | float | `1` | Multiplier on `co2_cost` in the scenario's operation |
+| `gen_fixed_cost` | float | `1` | Multiplier on the fixed O&M ($/MWh) of generators and technologies in the scenario's operation |
+| `gen_decommissioning_cost` | float | `1` | Multiplier on the decommissioning cost of existing generators |
+| `bat_decommissioning_cost` | float | `1` | Multiplier on the decommissioning cost of existing batteries |
+| `bat_invest_cost_power` | float | `1` | Multiplier on battery technology power cost ($/MW), applied on top of `invest_cost_storage` |
+| `bat_invest_cost_capacity` | float | `1` | Multiplier on battery technology energy cost ($/MWh), applied on top of `invest_cost_storage` |
+| `penalty_loss_of_load` | float | `1` | Multiplier on `penalties.loss_of_load` (and the sectoral penalties derived from it) in the scenario's operation |
+| `penalty_loss_of_reserve` | float | `1` | Multiplier on `penalties.loss_of_reserve_static` and `loss_of_reserve_dynamic` |
+| `penalty_curtailment` | float | `1` | Multiplier on `penalties.curtailment_cost` |
+| `penalty_fre_penetration` | float | `1` | Multiplier on `penalties.fre_penetration_loss` |
+
+Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. Keys that end up on the same field multiply, with a warning. Any other key is ignored with a warning.
 
 ---
 

@@ -1539,15 +1539,16 @@ class TestStochasticScenarioToConfigDict:
         scenarios = [
             GuiStochasticScenario(
                 name="Multi", probability=0.5,
-                multipliers={"demand": 1.1, "fuel_cost": 1.3, "invest": 0.9},
+                multipliers={"demand_growth": 1.1, "fuel_cost": 1.3,
+                             "invest_cost_renewables": 0.9},
             ),
         ]
         sys_dict: dict[str, Any] = {}
         stochastic_scenarios_to_config_dict(scenarios, sys_dict)
         m = sys_dict["stochastic_scenarios"][0]["multipliers"]
-        assert m["demand"] == pytest.approx(1.1)
+        assert m["demand_growth"] == pytest.approx(1.1)
         assert m["fuel_cost"] == pytest.approx(1.3)
-        assert m["invest"] == pytest.approx(0.9)
+        assert m["invest_cost_renewables"] == pytest.approx(0.9)
 
     def test_empty_multipliers(self):
         scenarios = [

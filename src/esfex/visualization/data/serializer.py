@@ -15,6 +15,7 @@ from esfex.config.schema import (
     GeoCoordinate,
     ESFEXConfig,
     SystemConfig,
+    normalize_scenario_multipliers,
 )
 from esfex.visualization.data.gui_model import (
     RENEWABLE_FUELS,
@@ -2241,12 +2242,14 @@ def config_to_stochastic_scenarios(
     if primary is None:
         return scenarios
     for sc_cfg in getattr(primary, 'stochastic_scenarios', []):
-        # sc_cfg is StochasticScenarioConfig with .multipliers: ScenarioMultipliers
+        # sc_cfg is StochasticScenarioConfig with .multipliers: ScenarioMultipliers.
+        # Only the keys the file sets become rows (legacy keys already translated).
         multipliers: dict[str, float] = {}
         if hasattr(sc_cfg, 'multipliers') and sc_cfg.multipliers is not None:
             mult = sc_cfg.multipliers
-            for k in mult.model_fields:
-                multipliers[k] = float(getattr(mult, k, 1.0))
+            for k in type(mult).model_fields:
+                if k in mult.model_fields_set:
+                    multipliers[k] = float(getattr(mult, k, 1.0))
         sc = GuiStochasticScenario(
             name=sc_cfg.name,
             probability=sc_cfg.probability,
@@ -2380,12 +2383,14 @@ def stochastic_scenarios_to_config_dict(
     """
     if not scenarios:
         return
+    # Legacy keys are written under their model names; keys with no effect
+    # are dropped with a warning.
     sys_dict["stochastic_scenarios"] = [
         {
             "name": sc.name,
             "probability": sc.probability,
             "description": sc.description,
-            "multipliers": dict(sc.multipliers),
+            "multipliers": normalize_scenario_multipliers(dict(sc.multipliers)),
         }
         for sc in scenarios
     ]

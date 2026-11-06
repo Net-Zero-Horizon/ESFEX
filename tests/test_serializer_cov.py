@@ -472,12 +472,12 @@ def test_stochastic_scenarios_to_dict_empty_noop():
 def test_stochastic_scenarios_to_dict_writes():
     sc = GuiStochasticScenario(name="dry", probability=0.3,
                                description="dry year",
-                               multipliers={"demand": 1.1})
+                               multipliers={"demand_growth": 1.1})
     d = {}
     S.stochastic_scenarios_to_config_dict([sc], d)
     assert d["stochastic_scenarios"] == [{
         "name": "dry", "probability": 0.3, "description": "dry year",
-        "multipliers": {"demand": 1.1},
+        "multipliers": {"demand_growth": 1.1},
     }]
 
 

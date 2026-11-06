@@ -346,6 +346,13 @@ import Ipopt
             m = ScenarioMultipliers()  # all-1.0 default
             @test all(getfield(m, f) == 1.0 for f in fieldnames(ScenarioMultipliers))
             @test m.invest_cost_renewables == 1.0 && m.carbon_price == 1.0
+            # By name, or the original ten positional values (the rest stay 1.0)
+            mk = ScenarioMultipliers(penalty_curtailment=2.0, bat_invest_cost_power=0.5)
+            @test mk.penalty_curtailment == 2.0 && mk.bat_invest_cost_power == 0.5
+            @test mk.fuel_cost == 1.0
+            m10 = ScenarioMultipliers(0.5, 1.5, 2.0, 1.1, 0.8, 1.3, 0.95, 1.2, 1.4, 3.0)
+            @test m10.invest_cost_renewables == 0.5 && m10.carbon_price == 3.0
+            @test m10.gen_fixed_cost == 1.0 && m10.penalty_loss_of_load == 1.0
             sc = Scenario("base", 0.5, m)
             @test sc.name == "base" && sc.probability == 0.5
             @test sc.multipliers === m
