@@ -336,31 +336,29 @@ The Benders master also contains TECH, BUD, RET-2, CAP, TXN and RE-2/RE-3.
 | `inv_transport_limit_{f}_{ip}_r{r}` | PE-INV1 | Transport investment <= route capacity × expansion limit |
 | `inv_storage_limit_{f}_{ip}_{n}` | PE-INV2 | Storage investment <= base capacity × expansion limit |
 
-### Periodic Supply, Transport and Storage
+### Periodic Supply, Transport and Demand
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `pp_max_supply_{f}_{n}_{p}` | PE-1 | Supply <= annual availability prorated to the period × disruption factor + excess slack |
 | `pp_transport_cap_{f}_r{r}_{p}` | PE-2 | Transport capacity |
-| received = `T[r, p−τ] * (1 − losses_fraction * distance_km / 100)` | PE-3 | Transport losses |
-| `pp_balance_{f}_{n}_{p}` | PE-4 | Periodic fuel balance |
-| `pp_storage_initial_{f}_{n}`, `pp_storage_continuity_*` | PE-4a | Periodic storage initial level and continuity |
-| `pp_storage_max_start_*`, `pp_storage_max_end_*`, `pp_storage_min_end_*` | PE-5 | Periodic storage bounds |
-| `pp_storage_min_last_*` | PE-6 | Development mode: last period ends at >= 10 % of capacity (no cyclic storage) |
-| `pp_ne_max_{f}_{s}_{n}_{p}`, `pp_ne_satisfy_{f}_{s}_{n}_{p}` | PE-7 | Non-electric demand |
+| `pp_ne_max_{f}_{s}_{n}_{p}`, `pp_ne_satisfy_{f}_{s}_{n}_{p}` | PE-6 | Non-electric demand |
 
-### Hourly Storage and Use
+A period's shipment `T[r, p]` leaves its origin evenly over the period's steps and reaches the destination tank `τ` steps later, times `(1 − losses_fraction * distance_km / 100)` (PE-3, PE-3b); these arrivals and departures enter the tank balance below. There are no periodic storage levels.
+
+### Tanks and Hourly Use
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `hr_storage_initial_{f}_{n}` | PE-H1 | Hourly storage initial level |
-| `hr_storage_balance_{f}_{n}_{t}` | PE-H2 | `V[t+1] = V[t] + in*eta - out` (no loss on V) |
-| `hr_storage_max_out_*`, `hr_storage_dispatch_rate_*` | PE-H3 | Outflow <= level; outflow <= rate × capacity |
-| `hr_storage_min_*`, `hr_storage_max_*`, `hr_storage_min_final_*` | PE-H4 | Hourly level bounds |
-| `hr_demand_coverage_{f}_{n}_{t}` | PE-H5 | Outflow + loss >= fuel for power + non-electric use |
+| `hr_storage_initial_{f}_{n}` | PE-H1 | Tank initial level |
+| `hr_storage_balance_{f}_{n}_{t}` | PE-4 | `V[t+1] = V[t] + eta * (local supply + arrivals) - drawn - departures` (no loss on V) |
+| `hr_storage_dispatch_rate_*` | PE-H3 | Drawn <= rate × capacity |
+| `hr_storage_min_*`, `hr_storage_max_*`, `hr_storage_min_final_*` | PE-5 | Tank level bounds (after each step; minimum also at period ends) |
+| `hr_storage_min_last_{f}_{n}` | PE-5 | Development mode: the window ends with the tank >= 10 % of capacity (no cyclic storage) |
+| `hr_demand_coverage_{f}_{n}_{t}` | PE-5e | Drawn + shortfall >= fuel for power + non-electric use |
 | `hr_ne_limit_{f}_{s}_{n}_{t}` | PE-H6 | Hourly non-electric use limit |
 | `hr_emissions_*`, `hr_emissions_direct_*`, `hr_total_emissions_{n}_{t}` | PE-EM | Emissions |
-| `link_storage_start_*`, `link_storage_end_*`, `link_net_storage_*`, `link_supply_storage_in_*`, `link_ne_*` | PE-LINK | Periodic–hourly linking |
+| `link_supply_storage_in_*`, `link_ne_*` | PE-LINK | A period's local supply and non-electric use add up over its steps |
 | `pe_coupling_gen{g}_{b}_{t}` | PE-8 | `gen_output * Δt <= fuel_for_power[node(b), t] * mwhe_per_unit` (inequality, per bus) |
 
 `primary_energy.jl` also defines electrolyzer constraints (`electrolyzer_max_power_*`, `h2_production_*`, `electrolyzer_ramp_*`), and `electrolyzer.jl` its own versions; neither is used by the runner (the adapter passes no electrolyzer to the primary-energy model). The active electrolyzer constraints are ELZ-1/ELZ-2 in `power_system.jl`.

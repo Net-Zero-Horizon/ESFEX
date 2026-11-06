@@ -19,8 +19,8 @@ The primary energy model operates at a coarser temporal resolution than the hour
 
 | Scale | Resolution | Variables |
 |-------|-----------|-----------|
-| Hourly | 1 hour | Generator fuel consumption (from power system) |
-| Primary period | 24-168 hours | Fuel supply, transport, storage |
+| Hourly (time step) | 1 step of the dispatch | Tank levels, local supply into the tanks, fuel drawn for generators and non-electric use, shortfall |
+| Primary period | `primary_energy_resolution` (24 h default) | Supply limits, route shipments, non-electric demand per sector |
 | Investment period | 1 year | Infrastructure investment |
 
 The temporal mapping is built by `create_temporal_mapping()`:
@@ -38,23 +38,24 @@ The `TemporalMapping` struct stores:
 - `hours_in_primary_period`: Lists all hours belonging to each primary period
 - `num_primary_periods` / `num_investment_periods`: Period counts
 
-This multi-scale approach reduces the number of decision variables for slow-varying quantities (fuel supply scheduling, storage management) while preserving hourly resolution for the fast electrical dispatch coupling.
+Fuel is stored in one tank per fuel and node, balanced every time step; there is no separate periodic storage. The periods only carry the supply limits and the shipment decisions, which are spread over the period's steps.
 
 ## Decision Variables
 
 | Variable | Indices | Units | Description |
 |----------|---------|-------|-------------|
-| \(S_{f,n,p}\) | fuel, node, period | units/period | Fuel supply at node \(n\) |
-| \(T_{f,r,p}\) | fuel, route, period | units/period | Fuel transport on route \(r\) |
-| \(V^{start}_{f,n,p}\) | fuel, node, period | units | Fuel storage level at period start |
-| \(V^{end}_{f,n,p}\) | fuel, node, period | units | Fuel storage level at period end |
-| \(V^{hr}_{f,n,t}\) | fuel, node, hour | units | Hourly fuel storage level |
+| \(S_{f,n,p}\) | fuel, node, period | units/period | Local fuel supply at node \(n\) (`pp_supply_*`) |
+| \(s^{in}_{f,n,t}\) | fuel, node, hour | units/step | Local supply delivered into the tank (`hr_storage_in_*`) |
+| \(T_{f,r,p}\) | fuel, route, period | units/period | Fuel shipped on route \(r\) |
+| \(V^{hr}_{f,n,t}\) | fuel, node, hour | units | Tank level at the start of step \(t\) (`hr_storage_*`, steps 1 … H+1) |
+| \(s^{out}_{f,n,t}\) | fuel, node, hour | units/step | Fuel drawn from the tank (`hr_storage_out_*`) |
 | \(I^{stor}_{f,n,ip}\) | fuel, node, inv. period | units | Storage capacity investment |
 | \(I^{trans}_{f,r,ip}\) | fuel, route, inv. period | units/day | Transport capacity investment |
 | \(W^{ne}_{f,s,n,p}\) | fuel, sector, node, period | units/period | Non-electric fuel consumption |
 | \(W^{elec}_{g,n,t}\) | generator, node, hour | units/step | Fuel drawn for generator \(g\) (`hr_fuel_power_gen{g}`) |
-| \(L^{hr}_{f,n,t}\) | fuel, node, hour | units/step | Hourly fuel shortfall (penalized) |
-| \(L^{fuel}_{f,n,p}\) | fuel, node, period | units/period | Fuel supply shortfall (penalized) |
+| \(L^{hr}_{f,n,t}\) | fuel, node, hour | units/step | Fuel shortfall: use the tank cannot cover (penalized) |
+| \(X^{supply}_{f,n,p}\) | fuel, node, period | units/period | Supply above the period's limit (penalized) |
+| \(U^{ne}_{f,s,n,p}\) | fuel, sector, node, period | units/period | Unmet non-electric demand (penalized) |
 | \(E^{fuel}_{f,n,t}\) | fuel, node, hour | tonnes CO2 | Emissions from non-electric consumption |
 
 Built by `build_primary_energy_variables!()`.
@@ -83,9 +84,11 @@ with \(S^{year}_{f,n}\) = `max_availability[n]` (units/year), \(|p|\) the hours 
 #### Source Disruption
 
 A source can be configured with a disruption window — an hour range
-\([h^{start}, h^{end})\) over which its availability is scaled to a fraction
-\(a \in [0,1]\) (\(a = 0\) is a full cut). The per-period supply cap is reduced
-by the share of the period's hours that fall inside the window:
+\([h^{start}, h^{end})\) in absolute horizon hours (hour 0 = Jan 1 of
+`base_year`, 8760 h per modelled year, so it happens once) over which its
+availability is scaled to a fraction \(a \in [0,1]\) (\(a = 0\) is a full
+cut). The per-period supply cap is reduced by the share of the period's hours
+that fall inside the window:
 
 \[
 \bar{S}^{disrupted}_{f,n,p} = \bar{S}_{f,n,p} \cdot \big( 1 - \phi_{f,p}(1 - a) \big),
@@ -94,7 +97,7 @@ by the share of the period's hours that fall inside the window:
 \tag{PE-1b}
 \]
 
-where \(\phi_{f,p}\) is the fraction of period \(p\)'s hours under the disruption. This models a supply-side shock (a terminal or pipeline down for several days). On its own it forces the consuming node onto its tank; together with the transport lead time (PE-3b) — the next shipment still in transit — and a finite tank, it reproduces real fuel-supply stress, with the penalised shortfall curtailing generation once the tank empties.
+where \(\phi_{f,p}\) is the fraction of period \(p\)'s hours under the disruption, each hour located in the horizon from the window's year and its start hour within the year. A scheduled interruption of type `fuel_source` ([Scheduled interruptions](../user-guide/scheduled-interruptions.md)) sets this window for the model windows it overlaps. This models a supply-side shock (a terminal or pipeline down for several days). On its own it forces the consuming node onto its tank; together with the transport lead time (PE-3b) — the next shipment still in transit — and a finite tank, it reproduces real fuel-supply stress, with the penalised shortfall curtailing generation once the tank empties.
 
 ### Transport
 
@@ -111,7 +114,7 @@ T_{f,r,p} \leq \left(\bar{T}^{base}_{f,r} + C^{cumul}_{f,r} + I^{trans}_{f,r,ip}
 \tag{PE-2}
 \]
 
-where \(\bar{T}^{base}_{f,r}\) is the base daily capacity, \(C^{cumul}_{f,r}\) is cumulative capacity from prior investments, \(I^{trans}_{f,r,ip}\) is new investment in the current investment period, and \(\Delta_p^{days}\) is the number of days in primary period \(p\).
+where \(\bar{T}^{base}_{f,r}\) is the base daily capacity, \(C^{cumul}_{f,r}\) is cumulative capacity from prior investments, \(I^{trans}_{f,r,ip}\) is new investment in the current investment period, and \(\Delta_p^{days}\) is the number of days in primary period \(p\) (its steps times the step length). Constraint `pp_transport_cap_{fuel}_r{r}_{p}`.
 
 ### Transport Losses
 
@@ -122,86 +125,70 @@ T^{received}_{f,r,p} = T_{f,r,p} \cdot (1 - \lambda^{trans}_f \cdot d_r / 100)
 \tag{PE-3}
 \]
 
-where \(\lambda^{trans}_f\) is the loss fraction per 100 km (`losses_fraction` in the route's `fuel_params`) and \(d_r\) is the route distance in km. This captures pipeline leakage, evaporation during tanker transport, and similar physical losses.
+where \(\lambda^{trans}_f\) is the loss fraction per 100 km (`losses_fraction` in the route's `fuel_params`) and \(d_r\) is the route distance in km (the delivered share is floored at 0). This captures pipeline leakage, evaporation during tanker transport, and similar physical losses.
 
 ### Transport Lead Time
 
-A plant runs from a local tank (its node storage), which the generator draws down hour by hour — so **tank → generator is instantaneous**. The supply stress lives upstream: replenishing that tank from the source takes time. Each fuel carries a lead time \(\delta_f\) in **days per 100 km** of route distance; the per-route delay in primary periods is
+A plant runs from a local tank (its node storage), which the generator draws down hour by hour — so **tank → generator is instantaneous**. The supply stress lives upstream: replenishing that tank from the source takes time. Each fuel carries a lead time \(\delta_f\) in **days per 100 km** of route distance; the per-route delay in time steps is
 
 \[
-\tau_{f,r} = \mathrm{round}\!\left( \frac{\delta_f \cdot d_r / 100}{\Delta_p} \right)
+\tau_{f,r} = \mathrm{round}\!\left( \frac{24 \, \delta_f \cdot d_r / 100}{\Delta t} \right)
 \tag{PE-3b}
 \]
 
-where \(\Delta_p\) is the period length in days. Fuel dispatched on route \(r\) at period \(p\) then arrives at the destination at period \(p + \tau_{f,r}\), so the **received inflow** at node \(n\), period \(p\), uses the *shifted* transport variable:
+where \(\Delta t\) is the step length in hours. A period's shipment leaves its origin evenly over the period's \(|p|\) steps and reaches the destination \(\tau_{f,r}\) steps later, net of losses:
 
 \[
-T^{received}_{f,r,p} = T_{f,r,\,p-\tau_{f,r}} \cdot (1 - \lambda^{trans}_f \cdot d_r / 100), \qquad p - \tau_{f,r} \ge 1
+\text{dep}_{f,n,t} = \sum_{r:\,from(r)=n} \frac{T_{f,r,p(t)}}{|p(t)|}, \qquad
+\text{arr}_{f,n,t} = \sum_{r:\,to(r)=n,\; t-\tau_{f,r} \ge 1} (1 - \lambda^{trans}_f d_r / 100) \, \frac{T_{f,r,p(t-\tau_{f,r})}}{|p(t-\tau_{f,r})|}
 \]
 
-Shipments dispatched before the window (\(p - \tau_{f,r} < 1\)) fall outside it and are not counted in that window (a small boundary effect that storage buffers; the rolling horizon carries the rest). With \(\delta_f = 0\) the inflow reduces to PE-3 (instantaneous transport, the default). Combined with a source disruption and a finite tank, a lead time reproduces real supply stress: a cut drains the tank while the next shipment is still in transit, and if the tank empties the penalised fuel shortfall curtails generation.
+where \(p(t)\) is the period of step \(t\). Fuel still in transit when the window ends does not reach this window, and the next window does not see shipments made before it (a boundary effect that the tanks buffer). With \(\delta_f = 0\) the fuel arrives in the step it leaves (the default). Combined with a source disruption and a finite tank, a lead time reproduces real supply stress: a cut drains the tank while the next shipment is still in transit, and if the tank empties the penalised fuel shortfall curtails generation.
 
 ### Storage
 
-Fuel storage provides temporal flexibility between supply scheduling and consumption. Storage is modeled at two scales:
-
-**Periodic storage balance** (primary period granularity):
+Each fuel has one tank per node, balanced every time step. Local supply and arriving shipments go into the tank; generators, non-electric use and departing shipments draw from it:
 
 \[
-V^{start}_{f,n,p} + S_{f,n,p} + \sum_{r: to(r)=n} T^{received}_{f,r,p} = V^{end}_{f,n,p} + W^{ne,total}_{f,n,p} + \sum_{r: from(r)=n} T_{f,r,p} + L^{fuel}_{f,n,p} + \Delta V^{hr}_{f,n,p}
+V^{hr}_{f,n,t+1} = V^{hr}_{f,n,t} + \eta^{stor}_f \left( s^{in}_{f,n,t} + \text{arr}_{f,n,t} \right) - s^{out}_{f,n,t} - \text{dep}_{f,n,t}
 \tag{PE-4}
-\]
-
-where:
-
-- \(W^{ne,total}_{f,n,p} = \sum_s W^{ne}_{f,s,n,p}\) is total non-electric consumption across all sectors
-- \(\Delta V^{hr}_{f,n,p}\) is the net hourly storage change (coupling variable linking periodic and hourly scales)
-- \(L^{fuel}_{f,n,p}\) is the fuel supply shortfall slack
-
-**Hourly storage dynamics** (used for electricity coupling):
-
-\[
-V^{hr}_{f,n,t+1} = V^{hr}_{f,n,t} + \text{storage\_in}_{f,n,t} \cdot \eta^{stor}_f - \text{storage\_out}_{f,n,t}
-\tag{PE-4b}
 \]
 
 where \(\eta^{stor}_f\) is the storage efficiency (`efficiency` in `fuel_infrastructure.storage_facilities`, default 0.8), applied to inflows only; stored fuel does not decay. Constraint `hr_storage_balance_{fuel}_{n}_{t}`. For a fuel named `Hydrogen` the code can add an hourly production term, but no run supplies one (electrolyzers are not coupled to the primary-energy model; see [Electrolyzer](electrolyzer.md)).
 
-**Storage continuity** between periods:
+The local supply of a period is delivered into the tank over its steps, freely within the period:
 
 \[
-V^{start}_{f,n,p} = V^{end}_{f,n,p-1} \quad \forall f, n, p \geq 2
-\tag{PE-4c}
+\sum_{t \in p} s^{in}_{f,n,t} = S_{f,n,p}
+\tag{PE-4a}
 \]
 
-For the first period (\(p=1\)), the periodic and hourly levels start from the configured initial level, or, in rolling-horizon dispatch after the first window, from the level the previous window left:
+(`link_supply_storage_in_{fuel}_{n}_{p}`). Fuel drawn in a step must cover what is burnt and consumed in that step; the gap, if any, is the shortfall (PE-5e).
+
+The tank starts from the configured initial level or, in rolling-horizon dispatch after the first window, from the level the previous window left at its last committed step:
 
 \[
-V^{start}_{f,n,1} = V^{hr}_{f,n,1} = V^{init}_{f,n} \cdot \bar{V}_{f,n}
+V^{hr}_{f,n,1} = V^{init}_{f,n} \cdot \bar{V}_{f,n}
 \]
 
-with \(V^{init}_{f,n}\) = `initial_storage_level[n]` and \(\bar{V}_{f,n}\) = `storage_capacity[n]`. There is no cyclic (end = start) storage condition. In `development` mode the last period must end at least 10 % full, \(V^{end}_{f,n,P} \ge 0.1\,(\bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip})\) (`pp_storage_min_last_*`, fixed fraction).
+with \(V^{init}_{f,n}\) = `initial_storage_level[n]` and \(\bar{V}_{f,n}\) = `storage_capacity[n]` (`hr_storage_initial_{fuel}_{n}`). There is no cyclic (end = start) storage condition. In `development` mode, for fuels with a `fuel_infrastructure` entry, the window must end with each tank at least 10 % full, \(V^{hr}_{f,n,H+1} \ge 0.1\,(\bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip})\) (`hr_storage_min_last_*`, fixed fraction).
 
 ### Storage Bounds
 
-Storage levels are bounded by capacity (existing plus investment):
+Tank levels are bounded by capacity (existing plus investment):
 
 \[
-V^{end}_{f,n,p} \leq \bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip} \quad \forall f, n, p
+V^{hr}_{f,n,t+1} \leq \bar{V}^{tot}_{f,n} = \bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip} \quad \forall f, n, t
 \tag{PE-5a}
 \]
 
-\[
-V^{start}_{f,n,p} \leq \bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip} \quad \forall f, n, p
-\tag{PE-5b}
-\]
+(`hr_storage_max_*`). At a node with no tank capacity at all (no base capacity and none built) the level is not bounded: the tank there only passes fuel through within the window.
 
-**Tank safety floor (operational reserve).** The plant tank cannot be drawn below a configured minimum level \(\underline{v}_f \in [0,1]\) (`min_storage_level`, a fraction of capacity) — an operational reserve that must be held back. It applies at nodes with base storage capacity, to every hourly level (against base capacity) and to the period ends (against total capacity \(\bar{V}^{tot}_{f,n} = \bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip}\)):
+**Tank safety floor (operational reserve).** The plant tank cannot be drawn below a configured minimum level \(\underline{v}_f \in [0,1]\) (`min_storage_level`, a fraction of capacity) — an operational reserve that must be held back. It applies at nodes with base storage capacity, to the level after every step (against base capacity, `hr_storage_min_*`) and at the period ends (against total capacity \(\bar{V}^{tot}_{f,n}\), `hr_storage_min_final_*`):
 
 \[
-V^{hr}_{f,n,t} \ge \underline{v}_f \cdot \bar{V}_{f,n}, \qquad
-V^{hr}_{f,n,\text{end}(p)+1} \ge \underline{v}_f \cdot \bar{V}^{tot}_{f,n}, \qquad
-V^{end}_{f,n,p} \ge \underline{v}_f \cdot \bar{V}^{tot}_{f,n}
+V^{hr}_{f,n,t+1} \ge \underline{v}_f \cdot \bar{V}_{f,n}, \qquad
+V^{hr}_{f,n,\text{end}(p)+1} \ge \underline{v}_f \cdot \bar{V}^{tot}_{f,n}
 \tag{PE-5c}
 \]
 
@@ -218,33 +205,31 @@ where \(\xi^{stor}_f\) and \(\xi^{trans}_f\) are the `expansion_limit` of the fu
 
 ### Hourly Fuel Use
 
-Each hour, the fuel drawn from the node's tank must cover the fuel burnt by generators and the hourly non-electric consumption; any gap is an hourly shortfall \(L^{hr}_{f,n,t}\), penalized at `penalties.loss_of_fuel_supply`:
+Each step, the fuel drawn from the node's tank must cover the fuel burnt by generators and the non-electric consumption of that step; any gap is a shortfall \(L^{hr}_{f,n,t}\), penalized at `penalties.loss_of_fuel_supply`:
 
 \[
-\text{storage\_out}_{f,n,t} + L^{hr}_{f,n,t} \geq \sum_{g \in \mathcal{G}_f} W^{elec}_{g,n,t} + \sum_s W^{ne,hr}_{f,s,n,t}
+s^{out}_{f,n,t} + L^{hr}_{f,n,t} \geq \sum_{g \in \mathcal{G}_f} W^{elec}_{g,n,t} + \sum_s W^{ne,hr}_{f,s,n,t}
 \tag{PE-5e}
 \]
+
+Fuel that arrives in a step can be used in that step: the tank level after the step (PE-4) cannot go below zero, which is the only availability limit. The shortfall is therefore a real deficit — fuel the tank does not hold.
 
 (`hr_demand_coverage_{fuel}_{n}_{t}`). Further hourly constraints:
 
 | Constraint | Form |
 |------------|------|
-| `hr_storage_max_out_*` | \(\text{storage\_out}_{f,n,t} \le V^{hr}_{f,n,t}\) |
-| `hr_storage_dispatch_rate_*` | \(\text{storage\_out}_{f,n,t} \le \rho_f \cdot \bar{V}^{tot}_{f,n}\), only when `max_hourly_dispatch_rate_fraction_of_capacity` \(\rho_f \ge 0\) |
-| `hr_storage_max_*` | \(V^{hr}_{f,n,t} \le \bar{V}^{tot}_{f,n}\) |
+| `hr_storage_dispatch_rate_*` | \(s^{out}_{f,n,t} \le \rho_f \cdot \bar{V}^{tot}_{f,n}\), only when `max_hourly_dispatch_rate_fraction_of_capacity` \(\rho_f \ge 0\) |
+| `hr_storage_max_*` | \(V^{hr}_{f,n,t+1} \le \bar{V}^{tot}_{f,n}\) (PE-5a) |
 | `hr_ne_limit_*` | \(W^{ne,hr}_{f,s,n,t} \le D^{ne}_{f,s,n,p} / |p|\) (non-electric use spread evenly over the period) |
 
 ### Linking the Two Time Scales
 
 | Constraint | Form |
 |------------|------|
-| `link_storage_start_*` | \(V^{hr}_{f,n,\text{first}(p)} + \text{slack}^{start}_{f,n,p} \ge V^{start}_{f,n,p}\) |
-| `link_storage_end_*` | \(V^{hr}_{f,n,\text{last}(p)+1} + \text{slack}^{end}_{f,n,p} \ge V^{end}_{f,n,p}\) |
-| `link_net_storage_*` | \(\Delta V^{hr}_{f,n,p} = \sum_{t \in p} (\text{storage\_out}_{f,n,t} - \eta^{stor}_f \, \text{storage\_in}_{f,n,t})\) |
-| `link_supply_storage_in_*` | \(\sum_{t \in p} \text{storage\_in}_{f,n,t} = S_{f,n,p}\) |
+| `link_supply_storage_in_*` | \(\sum_{t \in p} s^{in}_{f,n,t} = S_{f,n,p}\) (PE-4a) |
 | `link_ne_*` | \(\sum_{t \in p} W^{ne,hr}_{f,s,n,t} = W^{ne}_{f,s,n,p}\) |
 
-The slacks are penalized at `penalties.coupling_slack_penalty`.
+Shipments are linked through the arrivals and departures of PE-3b. There are no periodic storage levels and no linking slacks; `penalties.coupling_slack_penalty` has no effect.
 
 ## Non-Electric Fuel Demand
 
@@ -320,10 +305,10 @@ with \(c^{stor,inv}_f\) and \(c^{trans,inv}_f\) the `investment_cost` of the fue
 
 ### Penalty Costs
 
-Periodic and hourly shortfalls and excess supply are penalized at \(c^{pen}\) = `penalties.loss_of_fuel_supply`, unmet non-electric demand at \(c^{ne}\) = `penalties.non_electric_demand_loss`, and the linking slacks at \(c^{link}\) = `penalties.coupling_slack_penalty`:
+Fuel shortfalls and excess supply are penalized at \(c^{pen}\) = `penalties.loss_of_fuel_supply` and unmet non-electric demand at \(c^{ne}\) = `penalties.non_electric_demand_loss`:
 
 \[
-C^{penalty} = c^{pen} \left( \sum_{f,n,p} \left( L^{fuel}_{f,n,p} + X^{supply}_{f,n,p} \right) + \sum_{f,n,t} L^{hr}_{f,n,t} \right) + c^{ne} \sum_{f,s,n,p} U^{ne}_{f,s,n,p} + c^{link} \sum_{f,n,p} \left( \text{slack}^{start}_{f,n,p} + \text{slack}^{end}_{f,n,p} \right)
+C^{penalty} = c^{pen} \left( \sum_{f,n,p} X^{supply}_{f,n,p} + \sum_{f,n,t} L^{hr}_{f,n,t} \right) + c^{ne} \sum_{f,s,n,p} U^{ne}_{f,s,n,p}
 \]
 
 When the block is coupled to the dispatch, the fuel a coupled generator burns is paid here (supply price); the dispatch then drops that generator's `fuel_cost` from its objective and cost breakdown, so the fuel is not charged twice. Generators with a cost curve keep it.
@@ -435,7 +420,7 @@ with the terms defined above. The PE terms are added to the operational dispatch
 | Transport cost | Operating cost proportional to distance |
 | Storage investment | Annualized infrastructure cost |
 | Transport investment | Annualized route capacity cost |
-| Shortfall and slack penalties | Unmet fuel use (periodic and hourly), excess supply, linking slacks |
+| Shortfall penalties | Fuel shortfall, unmet non-electric demand, excess supply |
 
 ## Power System Coupling
 

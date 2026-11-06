@@ -2468,6 +2468,7 @@
     "delete": "Delete",
     "availability": "Availability",
     "label_field": "Note",
+    "recurring": "Repeat every year",
     "start": "Start",
     "end": "End",
     "empty_hint": "Drag on a row to add an interruption; click one to edit."

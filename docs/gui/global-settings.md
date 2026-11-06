@@ -237,7 +237,7 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | FRE Penetration Loss | 100 | $/MWh | Shortfall from the RE target |
 | EV Loss | 50,000 | $/MWh | EV driving energy not supplied. Same as Loss of Load by default; a lower value makes leaving EVs uncharged cheaper than generating. |
 | Loss of Fuel Supply | 100 | $/unit | Fuel supply deficit |
-| PE Coupling Slack | 1 | $/unit | Slack between the periodic fuel model and hourly dispatch |
+| PE Coupling Slack | 1 | $/unit | Saved in the YAML; not used by the current model (the fuel model has no periodic–hourly coupling slack) |
 | Transport Congestion | 100 | $/MW | Saved in the YAML; not used by the current model |
 | Storage Violation | 100 | $/MW | Saved in the YAML; not used by the current model |
 | Non-Electric Demand Loss | 100 | $/unit | Saved in the YAML; not used by the current model |
