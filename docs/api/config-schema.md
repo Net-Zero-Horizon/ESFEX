@@ -365,7 +365,7 @@ class SolverConfig(BaseModel):
     time_limit: int = 10800            # seconds, 0 = unlimited
     gap: float = 0.01                  # MIP optimality gap
     verbose: bool = False
-    scale_constraints: bool = True     # not used in 0.3.0
+    scale_constraints: bool = True     # no effect (not read by the model or the solvers)
     options: dict[str, Any] = {}       # solver-specific options
 ```
 

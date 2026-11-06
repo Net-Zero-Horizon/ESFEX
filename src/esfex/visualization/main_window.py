@@ -992,6 +992,12 @@ class MainWindow(QMainWindow):
 
         return bar
 
+    def _current_system_config(self):
+        """The loaded :class:`SystemConfig` of the system being edited, or None."""
+        cfg = self._loaded_config
+        systems = getattr(cfg, "systems", None) or {}
+        return systems.get(self._current_system_name)
+
     def _on_sld_load_results(self):
         """Open HDF5 file picker and load results for SLD overlay."""
         from PySide6.QtWidgets import QFileDialog
@@ -1005,7 +1011,8 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            loader = SldResultsLoader(path, self.model.state)
+            loader = SldResultsLoader(path, self.model.state,
+                                      system_config=self._current_system_config())
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load results:\n{e}")
             return
@@ -1193,19 +1200,13 @@ class MainWindow(QMainWindow):
             try:
                 from esfex.analysis.frequency import (
                     FrequencyAnalyzer,
+                    analyzer_settings,
                     build_gen_freq_params_from_state,
                 )
                 params = build_gen_freq_params_from_state(self.model.state)
-                # Read nominal frequency from the system's buses
-                f_nom = 50.0
-                for bus in self.model.state.buses.values():
-                    if bus.frequency_hz and bus.frequency_hz > 0:
-                        f_nom = bus.frequency_hz
-                        break
-                # Adapt nadir limit to the system frequency
-                nadir_limit = f_nom - 1.0  # 1 Hz below nominal
                 self._analysis_freq_analyzer = FrequencyAnalyzer(
-                    params, f_nom=f_nom, nadir_limit=nadir_limit,
+                    params, **analyzer_settings(self._current_system_config(),
+                                                self.model.state),
                 )
             except Exception:
                 log.debug("Could not build frequency analyzer from state", exc_info=True)
