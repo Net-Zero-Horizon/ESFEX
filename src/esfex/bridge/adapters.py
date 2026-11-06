@@ -2296,6 +2296,9 @@ class MasterProblemAdapter:
         # Per-system node ranges for per-system RE constraints
         # List of (name, first_bus_1indexed, num_buses, initial_re)
         system_node_ranges: Optional[List[tuple]] = None,
+        # RE targets {(system_1idx, year_1idx): share} replacing the RE-1
+        # trajectory (myopic mode: each year's target from the full horizon)
+        re_target_override: Optional[dict] = None,
         # Config path for resolving relative file paths (availability, inflow)
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
@@ -2323,6 +2326,8 @@ class MasterProblemAdapter:
             initial_re_penetration: Initial RE penetration ratio
             min_re_increment: Minimum annual RE penetration increment
             max_re_increment: Maximum annual RE penetration increment
+            re_target_override: RE targets {(system, year): share}, both
+                1-based, that replace the RE-1 trajectory (myopic mode)
             slack_penalty: Penalty for violating soft constraints
             life_extension_cost_factor: Cost factor for life extension
             decommissioning_cost_factor: Cost factor for decommissioning
@@ -2363,6 +2368,7 @@ class MasterProblemAdapter:
         self.min_re_increment = min_re_increment
         self.max_re_increment = max_re_increment
         self.system_node_ranges = system_node_ranges or []
+        self.re_target_override = re_target_override or {}
         self.slack_penalty = slack_penalty
         self.life_extension_cost_factor = life_extension_cost_factor
         self.decommissioning_cost_factor = decommissioning_cost_factor
@@ -2819,6 +2825,10 @@ class MasterProblemAdapter:
             bat_cost_curves=jl_bat_cost_curves,
             tech_cost_curves=jl_tech_cost_curves,
             benders_lol_penalty_cap=scale_cost(self.benders_lol_penalty_cap),
+            re_target_override=jl.seval(
+                "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
+                    f"({int(s)}, {int(y)}) => {float(v)!r}"
+                    for (s, y), v in self.re_target_override.items()) + ")"),
         )
 
         return jl_input

@@ -191,6 +191,27 @@ class YearResults:
 
 
 
+def re_target_trajectory(initial: float, target: float, num_years: int,
+                         min_inc: float, max_inc: float) -> list[float]:
+    """Yearly RE targets of the planning horizon (RE-1, as the Julia
+    ``calculate_target_ratios``): the initial share in year 1, then a
+    linear path to ``target`` whose yearly step is clamped to
+    ``[min_inc, max_inc]``."""
+    path: list[float] = []
+    for y in range(num_years):
+        if y == 0:
+            path.append(initial)
+            continue
+        tau = initial + y / (num_years - 1) * (target - initial)
+        step = tau - path[-1]
+        if step < min_inc:
+            tau = path[-1] + min_inc
+        elif step > max_inc:
+            tau = path[-1] + max_inc
+        path.append(tau)
+    return path
+
+
 def _warn_flat_renewable(kind: str, key: str) -> None:
     """Log that a renewable unit without an availability profile is modelled
     as available in every hour (capacity factor 1.0)."""
@@ -2776,6 +2797,17 @@ class Orchestrator:
             # Per-system current RE tracking
             current_re_per_system: dict[str, float] = dict(per_system_initial_re)
 
+            # Each year's RE target follows the perfect-foresight trajectory
+            # (RE-1: initial -> TARGET_RE_PENETRATION over the horizon, steps
+            # clamped to the annual increments), not last year's outcome.
+            min_inc = getattr(primary, 'min_annual_increment', 0.01)
+            max_inc = getattr(primary, 'max_annual_increment', 0.10)
+            re_paths = [re_target_trajectory(overall_initial_re, target_re, num_years,
+                                             min_inc, max_inc)]
+            if system_node_ranges:
+                re_paths = [re_target_trajectory(init, target_re, num_years, min_inc, max_inc)
+                            for _, _, _, init in system_node_ranges]
+
             # Accumulation state
             investments_by_year: dict[int, dict] = {}
             retirements_by_year: dict[int, dict] = {}
@@ -2787,12 +2819,9 @@ class Orchestrator:
             for y_idx, year in enumerate(years_range):
                 logger.debug(f"\n--- Myopic: Year {year} ({y_idx+1}/{num_years}) ---")
 
-                # 1. Compute interpolated RE target for this year
-                if num_years > 1:
-                    progress = y_idx / (num_years - 1)
-                else:
-                    progress = 1.0
-                year_target_re = overall_initial_re + progress * (target_re - overall_initial_re)
+                # 1. This year's RE target on the horizon trajectory
+                year_targets = {(s + 1, 1): path[y_idx] for s, path in enumerate(re_paths)}
+                year_target_re = re_paths[0][y_idx]
                 logger.debug(f"  RE target: {year_target_re:.2%} (current: {current_re:.2%})")
 
                 # 2. Prepare modified system config with accumulated investments
@@ -2897,9 +2926,10 @@ class Orchestrator:
                     max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
                     target_re_penetration=year_target_re,
                     initial_re_penetration=current_re,
-                    min_re_increment=getattr(primary, 'min_annual_increment', 0.01),
-                    max_re_increment=getattr(primary, 'max_annual_increment', 0.10),
+                    min_re_increment=min_inc,
+                    max_re_increment=max_inc,
                     system_node_ranges=year_sys_ranges,
+                    re_target_override=year_targets,
                     temporal_resolution_hours=resolution_hours,
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,

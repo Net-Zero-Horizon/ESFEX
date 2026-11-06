@@ -514,6 +514,16 @@ import Ipopt
             @test shed2 ≈ 24 * 60.0 rtol = 1e-6
             @test crit2 ≈ 24 * 30.0 rtol = 1e-6     # cheap sector holds only 30 MW
             @test obj2 > 100 * obj1                  # criticality is priced
+
+            # A myopic year's target comes from the horizon trajectory: the
+            # override replaces RE-1 (which gives year 1 its initial share).
+            mk(ov) = MasterProblemInput(
+                years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                target_re_penetration = 0.8, initial_re_penetration = 0.1,
+                re_target_override = ov)
+            @test calculate_target_ratios(mk(Dict{Tuple{Int,Int},Float64}()))[(1, 1)] ≈ 0.1
+            @test calculate_target_ratios(mk(Dict((1, 1) => 0.42)))[(1, 1)] ≈ 0.42
         end
 
         @testset "custom constraints (linear cap binds)" begin

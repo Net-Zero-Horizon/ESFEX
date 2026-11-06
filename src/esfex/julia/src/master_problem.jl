@@ -29,6 +29,7 @@ using JuMP: objective_function
 Calculate progressive RE penetration targets for each year.
 Linear interpolation from initial to target penetration.
 Applies min/max increment constraints as in Python legacy (lines 99-122).
+Entries of `input.re_target_override` replace the computed targets.
 """
 function calculate_target_ratios(input::MasterProblemInput)::Dict{Tuple{Int,Int}, Float64}
     num_years = length(input.years)
@@ -60,6 +61,7 @@ function calculate_target_ratios(input::MasterProblemInput)::Dict{Tuple{Int,Int}
         end
     end
 
+    merge!(targets, input.re_target_override)
     return targets
 end
 
