@@ -196,12 +196,12 @@ Renewable technologies are further limited by their availability profile in each
 
 From that year on, the master may keep any part of it online with a continuous **life-extension** variable, up to its degraded capacity. Life extension:
 
-- costs `invest_cost × life_extension_cost_factor` per MW per year (default factor 0.20), using the existing unit's own `invest_cost`;
+- costs `invest_cost × life_extension_cost_factor` per MW per year (default factor 0.20), using the existing unit's own `invest_cost`, or its candidate's where that is 0 (see below);
 - can only decrease from one year to the next (capacity, once retired, does not come back);
 - avoids the unit's `decommissioning_cost`, which is charged on the capacity that retires.
 
-!!! note
-    Existing units with `invest_cost: [0.0]` (common in configurations exported from the Studio) can be life-extended at zero cost. In that case they never retire in the master.
+!!! note "Units with `invest_cost` 0"
+    Existing units often have `invest_cost: [0.0]` (the Studio default). At a node where it is 0, life extension is priced with the investment cost of the unit's candidate: for a generator, the technology with the same `fuel` and `type` (the one named by the generator's `technology` field if several match, else the first in the configuration); for a battery, the battery technology named by its `technology` field, else the first battery technology (`invest_cost_power`). With no candidate the extension stays free, and a warning names the unit (`... extending its life is free in the master problem`); such a unit never retires in the master.
 
 Technology investments are not life-extended: they leave the capacity sum when they reach `lifetime`.
 

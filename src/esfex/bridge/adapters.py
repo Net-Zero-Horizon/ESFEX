@@ -669,6 +669,83 @@ def _resolve_element_bus_mapping(
     return gen_bus_per_node, bat_bus_per_node
 
 
+# Units already warned about free life extension, so the master of every
+# myopic year does not repeat the warning: (system, kind, unit key).
+_FREE_EXTENSION_WARNED: set = set()
+
+
+def life_extension_invest_costs(sys) -> tuple[dict, dict]:
+    """Investment costs that price the life extension of existing units.
+
+    The master charges a life-extended MW ``invest_cost x
+    life_extension_cost_factor`` per year. Existing units often carry an
+    ``invest_cost`` of 0 (the Studio default), which made extension free.
+    Where a unit's ``invest_cost`` is 0 at a node, the candidate it would be
+    replaced with supplies the cost: for a generator, the technology with
+    the same fuel and type (the one named by its ``technology`` field
+    first, else the first in config order); for a battery, the battery
+    technology named by its ``technology`` field, else the first battery
+    technology. Without a candidate the extension stays free and a warning
+    is logged once per unit.
+
+    Returns:
+        ``(gen_costs, bat_costs)``: per-node ``invest_cost`` lists for the
+        generator / battery keys that changed.
+    """
+    def _fill(own, candidate):
+        out = list(own)
+        for n, c in enumerate(out):
+            if c <= 0 and candidate:
+                out[n] = float(candidate[n] if n < len(candidate) else candidate[-1])
+        return out
+
+    def _warn(kind, key):
+        tag = (getattr(sys, "name", ""), kind, key)
+        if tag not in _FREE_EXTENSION_WARNED:
+            _FREE_EXTENSION_WARNED.add(tag)
+            logger.warning(
+                "%s %r has invest_cost 0 and no candidate %s to take it "
+                "from: extending its life is free in the master problem.",
+                kind, key,
+                "technology with the same fuel and type" if kind == "Generator"
+                else "battery technology")
+
+    gen_costs: dict = {}
+    techs = getattr(sys, "technologies", None) or {}
+    for key, gen in (getattr(sys, "generators", None) or {}).items():
+        if not any(p > 0 for p in gen.rated_power):
+            continue
+        if all(c > 0 for c in gen.invest_cost[:len(gen.rated_power)]):
+            continue
+        matches = [(k, t) for k, t in techs.items()
+                   if t.fuel == gen.fuel and t.type == gen.type]
+        named = [m for m in matches
+                 if getattr(gen, "technology", None) in (m[0], m[1].name)]
+        if not (named or matches):
+            _warn("Generator", key)
+            continue
+        _, tech = (named or matches)[0]
+        own = list(gen.invest_cost) + [0.0] * (len(gen.rated_power) - len(gen.invest_cost))
+        gen_costs[key] = _fill(own, tech.invest_cost)
+
+    bat_costs: dict = {}
+    btechs = getattr(sys, "battery_technologies", None) or {}
+    for key, bat in (getattr(sys, "batteries", None) or {}).items():
+        if not any(p > 0 for p in bat.rated_power):
+            continue
+        if all(c > 0 for c in bat.invest_cost[:len(bat.rated_power)]):
+            continue
+        named = [(k, t) for k, t in btechs.items() if bat.technology in (k, t.name)]
+        if not (named or btechs):
+            _warn("Battery", key)
+            continue
+        _, btech = (named or list(btechs.items()))[0]
+        own = list(bat.invest_cost) + [0.0] * (len(bat.rated_power) - len(bat.invest_cost))
+        bat_costs[key] = _fill(own, btech.invest_cost_power)
+
+    return gen_costs, bat_costs
+
+
 def _compute_geographic_fuel_adjustments(
     sys_config: "SystemConfig",
 ) -> Dict[str, List[float]]:
@@ -2483,10 +2560,16 @@ class MasterProblemAdapter:
         # bus_index).  See _resolve_element_bus_mapping.
         gen_bus_per_node, bat_bus_per_node = _resolve_element_bus_mapping(sys)
 
+        # Life extension is priced at invest_cost; units without one take it
+        # from their candidate technology (life_extension_invest_costs).
+        ext_gen_costs, ext_bat_costs = life_extension_invest_costs(sys)
+
         # Convert generators with availability profiles
         gen_order = []  # (key, python_config) in Julia push order
         jl_generators = jl.seval("GeneratorConfig[]")
         for key, gen in sys.generators.items():
+            if key in ext_gen_costs:
+                gen = gen.model_copy(update={"invest_cost": ext_gen_costs[key]})
             # Load availability profile if specified
             availability = None
             if hasattr(gen, 'availability_file') and gen.availability_file:
@@ -2537,6 +2620,8 @@ class MasterProblemAdapter:
         bat_order = []  # (key, python_config) in Julia push order
         jl_batteries = jl.seval("BatteryConfig[]")
         for key, bat in sys.batteries.items():
+            if key in ext_bat_costs:
+                bat = bat.model_copy(update={"invest_cost": ext_bat_costs[key]})
             bat_bus_map = bat_bus_per_node.get(key)
             jl_bat = convert_battery_config(bat, bus_to_node=b2n_arg,
                                              bus_per_node=bat_bus_map)
