@@ -275,6 +275,9 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
     end
     t_n1 = time() - t0
 
+    # Per-MWh flow cost of lines that carry one (inter-system links)
+    add_line_flow_costs!(model, vars, input)
+
     # User-defined constraints (declarative config + plugin overlays). Additive,
     # applied after all base constraints; no-op when none are supplied.
     apply_user_constraints!(model, vars, input, custom_constraints)
@@ -2977,6 +2980,36 @@ function _add_line_n1_reserve!(model, vars::PowerSystemVariables, input::PowerSy
 end
 
 """
+    add_line_flow_costs!(model, vars, input)
+
+Charge each line with a `flow_cost` for the energy it carries in either
+direction: `|f_l,t| ≤ a_l,t` (`line_flow_abs_l*_t*_pos/neg`) and
+`Δt × flow_cost_l × a_l,t` in the objective and in the `line_flow_cost`
+breakdown. Lines without a cost get no variables. Needs per-line DC flows; no
+effect in ACOPF or single-bus runs.
+"""
+function add_line_flow_costs!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+    lines = input.network.transmission_lines
+    any(l -> l.flow_cost > 0, lines) || return
+    cost = AffExpr(0.0)
+    for (k, lf) in enumerate(_line_flows(vars, input))
+        c = lines[k].flow_cost
+        (lf === nothing || c <= 0) && continue
+        pf, _ = lf
+        for t in 1:input.temporal.hours
+            a = @variable(model, lower_bound = 0, base_name = "line_flow_abs_l$(k)_t$(t)")
+            @constraint(model, a >= pf[t], base_name = "line_flow_abs_l$(k)_t$(t)_pos")
+            @constraint(model, a >= -pf[t], base_name = "line_flow_abs_l$(k)_t$(t)_neg")
+            add_to_expression!(cost, c, a)
+        end
+    end
+    isempty(cost.terms) && return
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    @objective(model, Min, objective_function(model) + tres * cost)
+    model.ext[:cost_expressions][:line_flow_cost] = cost
+end
+
+"""
     _charge_n1_shortfall!(model, n1_cost, input)
 
 The objective is built before the N-1 constraints: add their priced slacks
@@ -4250,6 +4283,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             _v(:pe_electrolyzer_cost, false),
             # N-1 reliability-shortfall: same $/MWh scale as load shed (× tres).
             _v(:n1_security_shortfall_cost),
+            _v(:line_flow_cost),
             obj,
         )
     end

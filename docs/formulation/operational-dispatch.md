@@ -131,7 +131,7 @@ The total system cost over the window is minimized. Terms priced per MWh are wri
 \min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{start}} + Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) \tag{OBJ}
 \]
 
-Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2) and the cost-ceiling violation (COST-1).
+Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
 
 ### 3.1 Operational Costs
 
@@ -308,6 +308,16 @@ where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are 
 ### 3.16 Reservoir Costs
 
 Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). In development mode, reservoir capacity investment is charged at `reservoir_invest_cost` per MWh. See [Reservoir Hydropower](reservoir-hydro.md).
+
+### 3.17 Line Flow Cost
+
+Lines with a `cost_per_mw_km` (the inter-system links of a merged multi-system run) pay \(c^{\text{flow}}_l\) = `length_km × cost_per_mw_km` (\$/MWh, the `flow_cost` of `TransmissionLineData`) for the energy they carry in either direction, as the master does:
+
+\[
+Z^{\text{flow}} = \Delta t \sum_{l,t} c^{\text{flow}}_l \, a_{l,t}, \qquad a_{l,t} \geq f_{l,t}, \quad a_{l,t} \geq -f_{l,t} \tag{OBJ-17}
+\]
+
+(`line_flow_abs_l*_t*_pos/neg`, `add_line_flow_costs!`), reported as `line_flow_cost`. Lines without a cost get no variables. It needs the per-line DC flows, so it has no effect in ACOPF runs.
 
 !!! note "Complete objective"
     The objective is (OBJ) above. \(Z^{\text{bat}}\) includes the throughput cost (OBJ-3b), \(Z^{\text{pen}}\) the EV, SOC, RE-target and rooftop penalties, and \(Z^{\text{spill}}\) both battery and reservoir spillage. The V2G compensation (OBJ-8) is reported but not part of the objective.

@@ -72,7 +72,7 @@ The link form mirrors the transmission line form. A read-only header shows the t
 | | Current Type | -- | AC or DC |
 | **Economic** | Investment cost | $/MW | Cost per MW of new transfer capacity |
 | | Max investment | MW | Maximum new capacity the optimizer may build. 0 means no expansion. |
-| | Operational cost | $/MW·km | Transmission links: flow cost; each MWh the link carries costs length × this value in the master problem. Fuel routes: transport cost in $ per fuel unit per km. |
+| | Operational cost | $/MW·km | Transmission links: flow cost; each MWh the link carries, in either direction, costs length × this value in the master problem and in the dispatch. Fuel routes: transport cost in $ per fuel unit per km. |
 | | Loss factor | fraction | Must be between 0 and 1. Transmission links: stored in the configuration, not used by the current solver. Fuel routes: fuel lost per 100 km. |
 | **Appearance** | Color, width, opacity | -- | Map style |
 
@@ -80,7 +80,7 @@ Buttons at the bottom: **Delete Line** and **Edit Trace**.
 
 ### How Links Enter the Model
 
-When the systems are merged for the simulation, each transmission link becomes a transmission line between the first bus of each endpoint node, with the link's capacity, length, and per-unit reactance and resistance. The investment cost and maximum are applied as transfer-investment parameters at both endpoint nodes (the larger value wins if several links meet at a node). Voltage, type, circuits, frequency, and current type are kept for display and do not change the solver. Multiple links between the same pair of systems are allowed and act as separate lines.
+When the systems are merged for the simulation, each transmission link becomes a transmission line between the first bus of each endpoint node, with the link's capacity, length, and per-unit reactance and resistance. The investment cost and maximum are applied as transfer-investment parameters at both endpoint nodes (the larger value wins if several links meet at a node). The operational cost becomes the line's flow cost, length × cost per MWh carried, charged in the master and the dispatch (`line_flow_cost` in the dispatch cost breakdown). Voltage, type, circuits, frequency, and current type are kept for display and do not change the solver. Multiple links between the same pair of systems are allowed and act as separate lines.
 
 Each fuel route link becomes two one-way fuel transport routes (`link<k>_<A>_<B>_<fuel>_<i>_fwd` and `_rev`, where `k` is the link's position in `systems_links` and `i` its connection, so several fuel links between the same systems keep distinct ids) between its two nodes, added to the merged `fuel_transport_routes`. It is not part of the electrical network. The link fields map as follows:
 

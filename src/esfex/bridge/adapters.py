@@ -37,6 +37,7 @@ from esfex.bridge.converters import (
     compile_outage_factor,
     absolute_start_hour,
     fuel_source_outage_windows,
+    line_flow_cost_per_mwh,
     outage_window_spans,
     outage_window_tuple,
     convert_battery_config,
@@ -2467,7 +2468,7 @@ def _line_flow_costs(sys) -> dict[tuple[int, int], float]:
     """
     acc: dict[tuple[int, int], list[float]] = {}
     for line in sys.transmission_lines_geo or []:
-        cost = float(getattr(line, 'cost_per_mw_km', 0.0) or 0.0) * float(line.length_km or 0.0)
+        cost = line_flow_cost_per_mwh(line)
         if cost <= 0 or line.from_bus is None or line.to_bus is None:
             continue
         a, b = line.from_bus + 1, line.to_bus + 1
