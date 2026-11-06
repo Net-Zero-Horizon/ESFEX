@@ -341,6 +341,34 @@ def build_gen_freq_params_from_hdf5(
     return params
 
 
+def analyzer_settings(system=None, state=None) -> dict[str, float]:
+    """:class:`FrequencyAnalyzer` keyword arguments from a system's
+    frequency keys (``load_damping``, ``frequency_nominal``, ``rocof_limit``,
+    ``frequency_nadir_limit`` of :class:`~esfex.config.schema.SystemConfig`).
+
+    A system left at the default 50 Hz takes its nominal frequency from the
+    first bus of *state* (a GuiSystemState) with a frequency, and a nadir
+    limit left at the default 49 Hz becomes 1 Hz below that nominal, so a
+    60 Hz grid needs no extra keys.
+    """
+    f_nom = getattr(system, "frequency_nominal", _DEFAULT_F_NOM)
+    nadir = getattr(system, "frequency_nadir_limit", _DEFAULT_NADIR_LIMIT)
+    if f_nom == _DEFAULT_F_NOM and state is not None:
+        for bus in getattr(state, "buses", {}).values():
+            f_bus = getattr(bus, "frequency_hz", None)
+            if isinstance(f_bus, (int, float)) and f_bus > 0:
+                f_nom = float(f_bus)
+                break
+    if nadir == _DEFAULT_NADIR_LIMIT:
+        nadir = f_nom - (_DEFAULT_F_NOM - _DEFAULT_NADIR_LIMIT)
+    return {
+        "load_damping": getattr(system, "load_damping", _DEFAULT_LOAD_DAMPING),
+        "f_nom": f_nom,
+        "rocof_limit": getattr(system, "rocof_limit", _DEFAULT_ROCOF_LIMIT),
+        "nadir_limit": nadir,
+    }
+
+
 def build_gen_freq_params_from_state(state) -> list[GeneratorFreqParams]:
     """Build generator frequency parameters directly from GuiSystemState.
 

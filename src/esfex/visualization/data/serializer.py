@@ -14,6 +14,7 @@ from esfex.utils.temporal import HOURS_STD_YEAR
 from esfex.config.schema import (
     GeoCoordinate,
     ESFEXConfig,
+    RiskConfig,
     SystemConfig,
     normalize_scenario_multipliers,
 )
@@ -2214,6 +2215,26 @@ def config_to_global_settings(
             g.mp_mga_num_alternatives = getattr(mga, 'num_alternatives', 10)
             g.mp_mga_slack_fraction = getattr(mga, 'slack_fraction', 0.05)
             g.mp_mga_investment_threshold = getattr(mga, 'investment_threshold', 0.1)
+
+    # Risk & Resilience: the fields global_settings_to_config_dict writes.
+    # Without reading them back, the next save reset them to the defaults.
+    rk = getattr(config, 'risk', None)
+    if isinstance(rk, RiskConfig):
+        g.risk_enabled = rk.enabled
+        g.risk_measure = rk.risk_measure
+        g.risk_cvar_alpha = rk.cvar_alpha
+        g.risk_cvar_lambda = rk.cvar_lambda
+        g.risk_combination_method = rk.combination_method
+        g.risk_voll_residential = rk.voll.residential
+        g.risk_voll_commercial = rk.voll.commercial
+        g.risk_voll_industrial = rk.voll.industrial
+        g.risk_voll_critical = rk.voll.critical
+        g.risk_base_temperature = rk.demand_base_temperature
+        g.risk_heating_coefficient = rk.demand_heating_coefficient
+        g.risk_cooling_coefficient = rk.demand_cooling_coefficient
+        g.risk_insurance_premium_rate = rk.insurance_premium_rate
+        g.risk_monte_carlo_samples = rk.monte_carlo_samples
+        g.risk_monte_carlo_seed = rk.monte_carlo_seed
 
     # visual_scaling is a GUI-only key not in the Pydantic schema,
     # so it must be read from the raw YAML dict.

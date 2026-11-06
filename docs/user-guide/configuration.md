@@ -104,7 +104,7 @@ solver:
     ipm_optimality_tolerance: 1.0e-8
 ```
 
-The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them (`acopf_sdp`, `acopf_polar`, `acopf_rect`). `scale_constraints` is accepted but not used in 0.3.0. See the [Solver Guide](solver-guide.md) for tuning.
+The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them: `acopf_soc`, `acopf_qc` and `acopf_sdp` need a conic solver (HiGHS has no second-order cones), `acopf_polar` and `acopf_rect` need Ipopt. `scale_constraints` has no effect: it loads, but neither the model nor the solvers read it. See the [Solver Guide](solver-guide.md) for tuning.
 
 ---
 
@@ -465,14 +465,12 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
       ev_loss: 10000000.0               # $/MWh EV driving not supplied (omit: = loss_of_load)
       rooftop_curtailment: 5.0          # $/MWh
       loss_of_fuel_supply: 100.0
-      transport_congestion: 100.0
-      storage_violation: 100.0
-      non_electric_demand_loss: 100.0
+      non_electric_demand_loss: 100.0   # $/unit non-electric fuel demand not served
 ```
 
 The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the monolithic master problem and a soft one (priced with `curtailment_excess_penalty`) under Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`soc_violation`, `delay_retirement_per_mw` and `coupling_slack_penalty` can also be set here (`coupling_slack_penalty` has no effect: the primary-energy model has no coupling slack). A `curtailment` key is accepted but has no effect.
+`soc_violation` and `delay_retirement_per_mw` can also be set here. `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation` load without a warning (the Studio writes them) but have no effect: the model has no such slacks, and curtailed RE is priced by `curtailment_cost`.
 
 `loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
 

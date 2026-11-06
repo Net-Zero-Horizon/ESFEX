@@ -622,6 +622,24 @@ def test_global_settings_roundtrip_console_and_scaling():
     assert g2.visual_scaling.marker_min_px == 7.5
 
 
+def test_risk_settings_survive_load_and_save():
+    """The Studio writes the risk block from its global settings; loading
+    must read it back, or the next save resets it to the defaults."""
+    from esfex.config.schema import RiskConfig
+    cfg = _minimal_config()
+    cfg.risk = RiskConfig(
+        enabled=True, risk_measure="cvar", cvar_alpha=0.9, cvar_lambda=0.3,
+        combination_method="copula", voll={"residential": 7000.0, "critical": 9e4},
+        demand_base_temperature=21.0, demand_heating_coefficient=0.7,
+        demand_cooling_coefficient=3.0, insurance_premium_rate=0.01,
+        monte_carlo_samples=500, monte_carlo_seed=7)
+    g = S.config_to_global_settings(cfg, raw_dict={})
+    cd = {}
+    S.global_settings_to_config_dict(g, cd)
+    saved = RiskConfig(**cd["risk"])
+    assert saved == cfg.risk
+
+
 # ---------------------------------------------------------------------------
 # config_to_gui_states
 # ---------------------------------------------------------------------------

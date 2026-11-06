@@ -31,7 +31,7 @@ The operational dispatch formulation is chosen per system with `power_flow_mode`
 | `power_flow_mode` | Problem class | Compatible solvers |
 |-------------------|---------------|--------------------|
 | `dcopf` (default), `dcopf_ac_verify` | LP (MIP in unit commitment) | `highs`, `gurobi`, `cplex`, `xpress`, `glpk`, `cbc`, `scip` |
-| `acopf_soc`, `acopf_qc` | Convex SOCP / QC relaxation | `highs`, `gurobi`, `cplex`, `xpress`, `clarabel`, `scs` |
+| `acopf_soc`, `acopf_qc` | Convex SOCP / QC relaxation | `gurobi`, `cplex`, `xpress`, `clarabel`, `scs` (not `highs`: it has no second-order cones) |
 | `acopf_sdp` | Semidefinite relaxation | `scs`, `clarabel` |
 | `acopf_polar`, `acopf_rect` | Exact nonlinear AC-OPF | `ipopt` |
 
@@ -67,7 +67,7 @@ solver:
 | `time_limit` | int | `10800` | Maximum solve time per model, in seconds. Ignored by SCS. |
 | `gap` | float | `0.01` | MIP relative optimality gap (0.01 = 1%). Ignored for pure LP. Not passed to GLPK (set `mip_gap` in `options`). For Ipopt, the value is passed as its convergence tolerance `tol`. |
 | `verbose` | bool | `false` | Print the solver log. Overridden by `logging.console_level` (`basic` turns it off, `debug` turns it on) and by `esfex run -v`. |
-| `scale_constraints` | bool | `true` | Accepted for compatibility with the Studio, but currently not used by the model or the solvers. |
+| `scale_constraints` | bool | `true` | No effect: accepted for compatibility with the Studio (which shows it disabled), but not used by the model or the solvers. |
 | `options` | dict | `{}` | Solver-specific options (see [Advanced Solver Options](#advanced-solver-options)) |
 
 ### CLI Override

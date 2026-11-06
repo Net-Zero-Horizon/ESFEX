@@ -46,6 +46,10 @@ class PenaltiesConfig(BaseModel):
     loss_of_reserve_dynamic: float = Field(default=100, description="$/MW dynamic reserve deficit")
     loss_of_inertia: float = Field(default=200, description="$/MW-s inertia deficit")
     transfer_margin: float = Field(default=100, description="$/MW transfer margin violation")
+    curtailment: float = Field(
+        default=100,
+        description="No effect: curtailed RE is priced by curtailment_cost and "
+                    "curtailment_excess_penalty (the Studio writes it as 'Curtailment')")
     max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Max curtailment as fraction of RE generation (0.05 = 5%)")
     curtailment_cost: float = Field(default=20.0, ge=0, description="$/MWh penalty for curtailed RE energy")
     curtailment_excess_penalty: float = Field(default=500.0, ge=0, description="$/MWh penalty for curtailment exceeding ratio limit")
@@ -63,8 +67,10 @@ class PenaltiesConfig(BaseModel):
         default=1.0,
         description="No effect: the primary-energy model has no periodic-hourly "
                     "coupling slack any more (kept so existing files load)")
-    transport_congestion: float = Field(default=100, description="$/MW congestion")
-    storage_violation: float = Field(default=100, description="$/MW storage violation")
+    transport_congestion: float = Field(
+        default=100, description="No effect: fuel transport has no congestion slack")
+    storage_violation: float = Field(
+        default=100, description="No effect: fuel storage has no violation slack")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
     delay_retirement_per_mw: float = Field(default=50000, description="$/MW delay retirement penalty")
@@ -76,6 +82,13 @@ class PenaltiesConfig(BaseModel):
         if self.ev_loss is None:
             self.ev_loss = self.loss_of_load
         return self
+
+
+# Penalty keys that load (the Studio writes them) but price nothing in the
+# model.
+PENALTIES_WITHOUT_EFFECT: frozenset[str] = frozenset({
+    "curtailment", "coupling_slack_penalty", "transport_congestion", "storage_violation",
+})
 
 
 class CO2BudgetConfig(BaseModel):
@@ -1356,8 +1369,10 @@ class RiskCriteriaConfig(BaseModel):
 class RiskConfig(BaseModel):
     """Risk & Resilience Analysis configuration.
 
-    When ``enabled`` is *False* (default), the entire risk module is skipped
-    and no additional variables or constraints are added to the optimisation.
+    Settings of the Studio's Risk & Resilience Workbench (analysis and
+    post-processing). The optimisation does not read this block, ``enabled``
+    included; risk reaches it only through the per-element
+    ``risk_coefficient``.
     """
 
     enabled: bool = False
@@ -1460,7 +1475,10 @@ class SolverConfig(BaseModel):
     time_limit: int = Field(default=10800, ge=0, description="Seconds (0 = unlimited)")
     gap: float = Field(default=0.01, ge=0, le=1, description="MIP optimality gap")
     verbose: bool = False
-    scale_constraints: bool = True
+    scale_constraints: bool = Field(
+        default=True,
+        description="No effect: not read by the model or the solvers (kept so "
+                    "existing files load)")
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="Solver-specific options (e.g. presolve, lp_method)",
@@ -1961,8 +1979,8 @@ class SystemConfig(BaseModel):
     power_flow_mode: Literal[
         "dcopf",           # Pure DC optimal power flow (default)
         "dcopf_ac_verify", # DCOPF + Newton-Raphson AC verification (post-hoc)
-        "acopf_soc",       # AC-OPF: Second-Order Cone relaxation (convex, HiGHS)
-        "acopf_qc",        # AC-OPF: Quadratic Convex relaxation (tighter, HiGHS)
+        "acopf_soc",       # AC-OPF: Second-Order Cone relaxation (convex, Clarabel/SCS)
+        "acopf_qc",        # AC-OPF: Quadratic Convex relaxation (tighter, Clarabel/SCS)
         "acopf_sdp",       # AC-OPF: Semidefinite Programming relaxation (tightest convex, SCS/Mosek)
         "acopf_polar",     # AC-OPF: Polar NLP exact formulation (Ipopt)
         "acopf_rect",      # AC-OPF: Rectangular NLP exact formulation (Ipopt)
