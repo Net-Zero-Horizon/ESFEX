@@ -89,6 +89,15 @@ function initSld() {
         })
         .on('end', function() { _scheduleViewUpdate(true); });
     svg.call(zoomBehavior);
+    // Double-click opens the substation under the pointer (zooms elsewhere).
+    svg.on('dblclick.zoom', null).on('dblclick', _onDoubleClick);
+    document.addEventListener('keydown', function(event) {
+        if (_site && (event.key === 'Escape' || event.key === 'Backspace')) {
+            event.preventDefault();
+            closeSite();
+        }
+    });
+    document.getElementById('sld-bc-system').addEventListener('click', closeSite);
 
     svg.on('click', function(event) {
         if (event.target === svg.node() || event.target.tagName === 'svg') {
@@ -157,7 +166,7 @@ function layoutAndRender(jsonStr) {
             // step entirely. This is the PowerFactory-style grid layout
             // which is O(n) and finishes before the spinner even paints.
             currentLayouted = elkGraph;
-            render(data, elkGraph);
+            _renderActive();            // stays in an open substation if it still exists
             _showLoading(false);
             _ensureFitView(function() {
                 _setDiagramVisible(true);
@@ -167,7 +176,7 @@ function layoutAndRender(jsonStr) {
         }
         elk.layout(elkGraph).then(function(layouted) {
             currentLayouted = layouted;
-            render(data, layouted);
+            _renderActive();
             _showLoading(false);
             // Wait for valid container dimensions, apply fitView, then reveal
             _ensureFitView(function() {
@@ -286,6 +295,11 @@ function render(data, layouted) {
     if (!(currentData && currentData.elkGraph
           && currentData.elkGraph.precomputedLayout)) {
         _fixEdgeEndpoints(layouted, busH);
+    }
+
+    // ── Open substation: lines to other substations end in short stubs ──
+    if (data.siteView && layouted.edges) {
+        _cutStubs(layouted.edges, (data.nodeGroups || [])[0], busH, stubLen, eqSize);
     }
 
     // ── Draw node group backgrounds ──
@@ -683,10 +697,9 @@ function _buildOrthogonalRoute(start, end, laneY) {
 // Drawing: Node groups (substation backgrounds)
 // ══════════════════════════════════════════════════════════════════
 
-function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
+/** Frame of a substation group in diagram space, { x, y, w, h }, or null. */
+function _frameRect(ng, busH, stubLen, eqSize) {
     var busIds = ng.busIds || [];
-    if (busIds.length === 0) return;
-
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     busIds.forEach(function(bid) {
         var bl = busLayout[bid];
@@ -711,13 +724,18 @@ function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
             maxY = Math.max(maxY, bl.y + eqExtentY);
         }
     });
-    if (minX === Infinity) return;
+    if (minX === Infinity) return null;
 
     var pad = 30, titleH = 28;
-    var gx = minX - pad;
-    var gy = minY - pad - titleH;
-    var gw = maxX - minX + 2 * pad;
-    var gh = maxY - minY + 2 * pad + titleH;
+    return { x: minX - pad, y: minY - pad - titleH,
+             w: maxX - minX + 2 * pad, h: maxY - minY + 2 * pad + titleH };
+}
+
+function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
+    var busIds = ng.busIds || [];
+    var fr = _frameRect(ng, busH, stubLen, eqSize);
+    if (!fr) return;
+    var gx = fr.x, gy = fr.y, gw = fr.w, gh = fr.h;
 
     // Group outline (no fill, no shadow)
     layer.append('rect')
@@ -739,7 +757,7 @@ function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
     // Names that are only an imported identifier ("Substation way/424481948")
     // yield to real names.
     var idOnly = /\d{5,}/.test(ng.name || '');
-    _frames.push({ name: ng.name || '', x: gx, y: gy, w: gw, h: gh,
+    _frames.push({ name: ng.name || '', key: _groupKey(ng), x: gx, y: gy, w: gw, h: gh,
                    prio: (idOnly ? 0 : 1e12) + maxKv * 1e6 + busIds.length * 1e3
                          + Math.min(999, gw * gh / 1e4) });
 
@@ -1265,7 +1283,9 @@ function _drawEdge(layer, edge, busH) {
     // Verify connectivity
     var srcId = (edge.sources && edge.sources[0]) || '';
     var tgtId = (edge.targets && edge.targets[0]) || '';
-    if (!busLayout[srcId] || !busLayout[tgtId]) return;
+    var stub = props.stubEnd ? props : null;   // one end outside the open substation
+    if (stub ? !busLayout[stub.stubEnd === 'target' ? srcId : tgtId]
+             : (!busLayout[srcId] || !busLayout[tgtId])) return;
 
     var edgeOwner = edge.id || (srcId + '->' + tgtId);
     // Register this line's path as an obstacle (tagged with its own id) so
@@ -1287,23 +1307,20 @@ function _drawEdge(layer, edge, busH) {
         .attr('stroke', 'transparent')
         .attr('stroke-width', 14);
 
-    // Connection dots at bus bars
+    // Connection dots at bus bars (a stub has a bar at one end only)
     var sec0 = sections[0];
     var secLast = sections[sections.length - 1];
-    g.append('circle')
-        .attr('cx', sec0.startPoint.x).attr('cy', sec0.startPoint.y)
-        .attr('r', 5).attr('fill', color)
-        .attr('stroke', _darken(color, 0.25)).attr('stroke-width', 1);
-    g.append('circle')
-        .attr('cx', secLast.endPoint.x).attr('cy', secLast.endPoint.y)
-        .attr('r', 5).attr('fill', color)
-        .attr('stroke', _darken(color, 0.25)).attr('stroke-width', 1);
-
-    // Register connection dots as obstacles (owned by this edge)
-    _addObstacle(sec0.startPoint.x - 6, sec0.startPoint.y - 6,
-                 sec0.startPoint.x + 6, sec0.startPoint.y + 6, edgeOwner);
-    _addObstacle(secLast.endPoint.x - 6, secLast.endPoint.y - 6,
-                 secLast.endPoint.x + 6, secLast.endPoint.y + 6, edgeOwner);
+    var dots = [];
+    if (!stub || stub.stubEnd === 'target') dots.push(sec0.startPoint);
+    if (!stub || stub.stubEnd === 'source') dots.push(secLast.endPoint);
+    dots.forEach(function(p) {
+        g.append('circle')
+            .attr('cx', p.x).attr('cy', p.y)
+            .attr('r', 5).attr('fill', color)
+            .attr('stroke', _darken(color, 0.25)).attr('stroke-width', 1);
+        // Register connection dots as obstacles (owned by this edge)
+        _addObstacle(p.x - 6, p.y - 6, p.x + 6, p.y + 6, edgeOwner);
+    });
 
     // Edge path. Vertical transformers draw their own stubs around the
     // symbol (below) so no line crosses over the windings.
@@ -1359,7 +1376,8 @@ function _drawEdge(layer, edge, busH) {
         // other bars): the two coupled windings sit on the polyline, along
         // its direction, on a free spot of an inner segment.
         var r2 = 11, off2 = 8;
-        var spot = _placeOnRoute(sections, r2 + 2, off2 + r2 + 2, edgeOwner);
+        var spot = stub ? stub.stubSymbol
+                        : _placeOnRoute(sections, r2 + 2, off2 + r2 + 2, edgeOwner);
         var vert = spot ? spot.vertical : true;
         if (spot) mid = { x: spot.x, y: spot.y };
         var ox = vert ? 0 : off2, oy = vert ? off2 : 0;
@@ -1396,7 +1414,11 @@ function _drawEdge(layer, edge, busH) {
     // Defer the label to the final pass (after every bar/equipment/edge is a
     // registered obstacle) so it can avoid ALL elements while still resting on
     // its own line.
-    if (labelsVisible && props.label) {
+    if (stub) _drawStubEnd(g, stub, color);
+
+    // A stub's own label would crowd the neighbouring stubs: it shows the
+    // far substation instead, and the line label stays in the tooltip.
+    if (labelsVisible && props.label && !stub) {
         _pendingLabels.push({
             g: g, props: props, sections: sections, mid: mid,
             edgeType: edgeType, color: color, owner: edgeOwner,
@@ -1412,11 +1434,16 @@ function _drawEdge(layer, edge, busH) {
         event.stopPropagation();
         if (props.elementType) _selectElement(props.elementType, props.elementId, g);
     }).on('mouseenter', function(event) {
-        _showTooltip(event, (typeNames[edgeType] || 'Edge') + ' ' + (props.elementId || ''), props.label || '');
+        _showTooltip(event, (typeNames[edgeType] || 'Edge') + ' ' + (props.elementId || ''),
+                     (props.label || '') + (stub ? (props.label ? ' \u2014 ' : '') + 'to ' + stub.stubName : ''));
     }).on('mouseleave', _hideTooltip);
 
     if (props.elementType) {
         elementRegistry[props.elementType + ':' + props.elementId] = { group: g, props: props };
+        // The results overlays look lines up as 'line:<id>'.
+        if (props.elementType === 'transmission') {
+            elementRegistry['line:' + props.elementId] = elementRegistry['transmission:' + props.elementId];
+        }
     }
 }
 
@@ -1803,6 +1830,8 @@ function clearSelection() {
 function highlightElement(type, id) {
     clearSelection();
     var key = type + ':' + id;
+    // Not in the open substation: show it in the whole system.
+    if (_site && !elementRegistry[key]) closeSite();
     var e = elementRegistry[key];
     if (e) {
         selectedKey = key;
@@ -1847,6 +1876,7 @@ function _updateDiagramBounds(gGrid) {
             [diagramBounds.x + diagramBounds.w + 50, diagramBounds.y + diagramBounds.h + 50],
         ]);
     svg.call(zoomBehavior);
+    svg.on('dblclick.zoom', null);   // double-click is handled by _onDoubleClick
 }
 
 /**
@@ -1883,6 +1913,302 @@ function fitView(animate) {
 
 
 // ══════════════════════════════════════════════════════════════════
+// Substation drill-down
+// ══════════════════════════════════════════════════════════════════
+//
+// Double-clicking a substation frame opens it on its own: its buses,
+// equipment and internal transformers at full size, and every line to
+// another substation cut to a short straight stub that ends in the far
+// substation's name ("→ Name", click to open that one). The breadcrumb
+// (top left) or Escape goes back to the whole system, at the zoom it
+// was left at. Element ids are unchanged, so selection and the results
+// overlays work the same in both views.
+
+var STUB_OUT = 40;              // stub length outside the frame
+var STUB_OUT_XFMR = 80;         // room for a transformer symbol on the stub
+var _site = null;               // { key, name } of the open substation
+var _systemView = null;         // system-view zoom to restore on the way back
+var _ctgJson = null;            // last contingency overlay, redrawn on view change
+
+function _groupKey(ng) {
+    return ng.siteId != null ? 'site:' + ng.siteId : 'node:' + ng.nodeId;
+}
+
+function _sectionPoints(sections) {
+    var pts = [];
+    sections.forEach(function(sec) {
+        pts.push(sec.startPoint);
+        if (sec.bendPoints) sec.bendPoints.forEach(function(bp) { pts.push(bp); });
+        pts.push(sec.endPoint);
+    });
+    return pts;
+}
+
+/**
+ * Data for one substation: its buses and internal edges, and its lines to
+ * other substations marked as stubs with the far substation's name. A far
+ * end on an unframed junction (a tap point) is followed through it to the
+ * nearest substations behind it; the stub names up to two of them and
+ * links to the first.
+ */
+function _siteData(key) {
+    if (!currentData || !currentLayouted) return null;
+    var groups = currentData.nodeGroups || [];
+    var ng = null, groupOf = {};
+    groups.forEach(function(g) {
+        if (_groupKey(g) === key) ng = g;
+        (g.busIds || []).forEach(function(b) { groupOf[b] = g; });
+    });
+    if (!ng) return null;
+    var inside = {};
+    ng.busIds.forEach(function(b) { inside[b] = true; });
+    var label = {}, adj = {};
+    (currentLayouted.children || []).forEach(function(c) {
+        label[c.id] = (c.properties && c.properties.label) || c.id;
+    });
+    var allEdges = currentLayouted.edges || [];
+    allEdges.forEach(function(e) {
+        var s = e.sources[0], t = e.targets[0];
+        (adj[s] = adj[s] || []).push(t);
+        (adj[t] = adj[t] || []).push(s);
+    });
+    function farEnd(bid) {
+        if (groupOf[bid]) return { name: groupOf[bid].name, key: _groupKey(groupOf[bid]) };
+        // Unframed junction (a tap point): the nearest substations behind it.
+        var seen = {}, level = [bid], found = [];
+        seen[bid] = true;
+        while (level.length && !found.length) {
+            var next = [];
+            level.forEach(function(b) {
+                (adj[b] || []).forEach(function(n) {
+                    if (seen[n] || inside[n]) return;
+                    seen[n] = true;
+                    if (!groupOf[n]) next.push(n);
+                    else if (found.indexOf(groupOf[n]) < 0) found.push(groupOf[n]);
+                });
+            });
+            level = next;
+        }
+        if (!found.length) return { name: label[bid] || bid, key: null };
+        found.sort(function(a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+        var name = found.slice(0, 2).map(function(g) { return g.name; }).join(' / ');
+        if (found.length > 2) name += ' +' + (found.length - 2);
+        return { name: name, key: _groupKey(found[0]) };
+    }
+    var edges = [];
+    allEdges.forEach(function(e) {
+        var si = !!inside[e.sources[0]], ti = !!inside[e.targets[0]];
+        if (si && ti) { edges.push(e); return; }
+        if (!si && !ti) return;
+        var far = farEnd(si ? e.targets[0] : e.sources[0]);
+        var c = {};
+        for (var k in e) c[k] = e[k];
+        c.fullSections = e.sections || [];
+        c.properties = {};
+        for (var p in (e.properties || {})) c.properties[p] = e.properties[p];
+        c.properties.stubEnd = si ? 'target' : 'source';
+        c.properties.stubName = far.name;
+        c.properties.stubSite = far.key;
+        edges.push(c);
+    });
+    var elkGraph = {};
+    for (var k2 in currentLayouted) elkGraph[k2] = currentLayouted[k2];
+    elkGraph.children = (currentLayouted.children || []).filter(function(c) { return inside[c.id]; });
+    elkGraph.edges = edges;
+    var data = {};
+    for (var k3 in currentData) data[k3] = currentData[k3];
+    data.elkGraph = elkGraph;
+    data.nodeGroups = [ng];
+    data.siteView = true;
+    return { data: data, layouted: elkGraph, ng: ng };
+}
+
+/** Direction a stub leaves its bar: away from the bar face it starts on. */
+function _stubDir(bl, a, seq, busH) {
+    if (bl) {
+        if (bl.orientation === 90) {
+            var cx = bl.x + busH / 2;
+            if (Math.abs(a.x - cx) > 0.5) return { x: a.x > cx ? 1 : -1, y: 0 };
+        } else {
+            var cy = bl.y + busH / 2;
+            if (Math.abs(a.y - cy) > 0.5) return { x: 0, y: a.y > cy ? 1 : -1 };
+        }
+    }
+    for (var i = 1; i < seq.length; i++) {
+        var dx = seq[i].x - a.x, dy = seq[i].y - a.y;
+        if (Math.abs(dx) + Math.abs(dy) > 0.5) {
+            return Math.abs(dx) >= Math.abs(dy) ? { x: Math.sign(dx), y: 0 }
+                                                : { x: 0, y: Math.sign(dy) };
+        }
+    }
+    return { x: 0, y: -1 };
+}
+
+/**
+ * Replace each stub edge's route by a straight run from its terminal, out
+ * of the bar face it leaves, to STUB_OUT beyond the substation frame. The
+ * terminals of one face are spread along the bar, so the stubs run side by
+ * side and never cross. Where two stubs are too close for their names to
+ * sit side by side, the second one runs on past the first name. The edge
+ * keeps its source → target direction.
+ */
+function _cutStubs(edges, ng, busH, stubLen, eqSize) {
+    var fr = ng ? _frameRect(ng, busH, stubLen, eqSize) : null;
+    if (!fr) return;
+    var sides = {};                 // frame side -> stubs leaving through it
+    edges.forEach(function(e) {
+        var p = e.properties || {};
+        if (!p.stubEnd || !e.fullSections || !e.fullSections.length) return;
+        var pts = _sectionPoints(e.fullSections);
+        var inSrc = p.stubEnd === 'target';
+        var seq = inSrc ? pts : pts.slice().reverse();
+        var a = seq[0];
+        var d = _stubDir(busLayout[inSrc ? e.sources[0] : e.targets[0]], a, seq, busH);
+        var dist = d.x > 0 ? fr.x + fr.w - a.x : d.x < 0 ? a.x - fr.x
+                 : d.y > 0 ? fr.y + fr.h - a.y : a.y - fr.y;
+        dist = Math.max(dist, 10);
+        var isX = p.edgeType === 'transformer';
+        var side = d.x + ',' + d.y;
+        (sides[side] = sides[side] || []).push({
+            e: e, a: a, d: d, inSrc: inSrc, isX: isX, dist: dist,
+            reach: isX ? STUB_OUT_XFMR : STUB_OUT,      // beyond the frame
+            pos: d.x ? a.y : a.x,                       // position along the side
+            text: (p.stubName || '').length * 6 + 16,   // name length, with arrow
+        });
+    });
+    Object.keys(sides).forEach(function(side) {
+        var list = sides[side].sort(function(u, v) { return u.pos - v.pos; });
+        list.forEach(function(st, i) {
+            var prev = list[i - 1];
+            if (prev && st.pos - prev.pos < 13 && st.reach < prev.reach + prev.text &&
+                prev.reach < st.reach + st.text) {
+                st.reach = prev.reach + prev.text + 6;
+            }
+            var a = st.a, d = st.d, p = st.e.properties;
+            var len = st.dist + st.reach;
+            var tip = { x: a.x + d.x * len, y: a.y + d.y * len };
+            st.e.sections = [st.inSrc ? { startPoint: a, endPoint: tip }
+                                      : { startPoint: tip, endPoint: a }];
+            p.stubTip = tip;
+            p.stubDir = d;
+            var m = st.dist + STUB_OUT_XFMR / 2;
+            p.stubSymbol = st.isX ? { x: a.x + d.x * m, y: a.y + d.y * m, vertical: d.y !== 0 } : null;
+        });
+    });
+}
+
+/** Far substation's name at the end of a stub; a link when it can be opened. */
+function _drawStubEnd(g, stub, color) {
+    var tip = stub.stubTip, d = stub.stubDir;
+    if (!tip || !d) return;
+    var x = tip.x + d.x * 4, y = tip.y + d.y * 4;
+    var out = d.x > 0 || d.y < 0;            // text reads away from the bar
+    var txt = out ? '→ ' + stub.stubName : stub.stubName + ' ←';
+    var t = g.append('text')
+        .attr('class', 'stub-end' + (stub.stubSite ? ' stub-link' : ''))
+        .attr('x', x).attr('y', y)
+        .attr('text-anchor', out ? 'start' : 'end')
+        .attr('dominant-baseline', 'central')
+        .attr('font-family', 'Segoe UI, Roboto, sans-serif')
+        .attr('font-size', '10px').attr('font-weight', '600')
+        .attr('fill', T.groupTitle)
+        .text(txt);
+    var len = txt.length * 6 + 4;
+    if (d.y !== 0) {
+        t.attr('transform', 'rotate(-90,' + x + ',' + y + ')');
+        _addObstacle(x - 7, d.y < 0 ? y - len : y, x + 7, d.y < 0 ? y : y + len);
+    } else {
+        _addObstacle(d.x > 0 ? x : x - len, y - 7, d.x > 0 ? x + len : x, y + 7);
+    }
+    if (stub.stubSite) {
+        t.on('click', function(event) {
+            event.stopPropagation();
+            openSite(stub.stubSite);
+        });
+    }
+}
+
+/** Render the open substation, or the whole system. */
+function _renderActive() {
+    if (_site) {
+        var sd = _siteData(_site.key);
+        if (sd) {
+            _site.name = sd.ng.name;
+            render(sd.data, sd.layouted);
+            _updateBreadcrumb();
+            return;
+        }
+        _site = null;            // gone after a rebuild
+        _systemView = null;
+    }
+    render(currentData, currentLayouted);
+    _updateBreadcrumb();
+}
+
+/** Redraw the results overlays on the elements of the current view. */
+function _redrawOverlays() {
+    if (currentOpsData) _drawOperationalData(currentOpsData);
+    if (_ctgJson) updateContingencyData(_ctgJson);
+}
+
+/** Open one substation by its group key. Returns false if there is none. */
+function openSite(key) {
+    var sd = _siteData(key);
+    if (!sd) return false;
+    if (!_site) _systemView = d3.zoomTransform(svg.node());
+    _site = { key: key, name: sd.ng.name };
+    clearSelection();
+    _hideTooltip();
+    render(sd.data, sd.layouted);
+    _updateBreadcrumb();
+    fitView(false);
+    _redrawOverlays();
+    return true;
+}
+
+/** Back to the whole system, at the zoom it was left at. */
+function closeSite() {
+    if (!_site) return;
+    _site = null;
+    clearSelection();
+    _hideTooltip();
+    render(currentData, currentLayouted);
+    _updateBreadcrumb();
+    fitView(false);              // sets the zoom limits for the system
+    if (_systemView) svg.call(zoomBehavior.transform, _systemView);
+    _systemView = null;
+    _redrawOverlays();
+}
+
+function _updateBreadcrumb() {
+    var bc = document.getElementById('sld-breadcrumb');
+    if (!bc) return;
+    bc.style.display = _site ? 'flex' : 'none';
+    if (_site) document.getElementById('sld-bc-site').textContent = _site.name;
+}
+
+/** Substation frame under a diagram point (the smallest, if nested). */
+function _frameAt(x, y) {
+    var hit = null;
+    _frames.forEach(function(f) {
+        if (f.key && x >= f.x && x <= f.x + f.w && y >= f.y && y <= f.y + f.h &&
+            (!hit || f.w * f.h < hit.w * hit.h)) hit = f;
+    });
+    return hit;
+}
+
+function _onDoubleClick(event) {
+    if (event.target.closest && event.target.closest('.sld-minimap, .sld-legend')) return;
+    var pt = d3.pointer(event, svg.node());
+    if (!_site) {
+        var f = _frameAt.apply(null, d3.zoomTransform(svg.node()).invert(pt));
+        if (f && openSite(f.key)) return;
+    }
+    svg.transition().duration(250).call(zoomBehavior.scaleBy, 2, pt);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
 // Level of detail, viewport culling and overview names
 // ══════════════════════════════════════════════════════════════════
 //
@@ -1912,6 +2238,9 @@ var _viewFrame = null;
 var _viewFinal = false;
 
 function _lodFor(k) {
+    // An open substation is small and can't be zoomed out past its fit:
+    // always at full detail, even when it only fits at a small scale.
+    if (_site) return '';
     return k < LOD_FAR ? 'lod-far' : (k < LOD_NEAR ? 'lod-mid' : '');
 }
 
@@ -2029,7 +2358,7 @@ function _updateCulling(t, final) {
 /** Substation names at a fixed screen size while the diagram text is hidden. */
 function _updateNames(t, final) {
     var g = svg.select('.sld-names');
-    if (t.k >= LOD_NEAR || !_frames.length) {
+    if (t.k >= LOD_NEAR || !_frames.length || _site) {
         g.remove();
         _namesAt = null;
         return;
@@ -2100,7 +2429,7 @@ function _drawMinimap() {
     _minimapBox = null;
     if (!diagramBounds || !rootGroup) return;
     // Only worth showing for systems big enough to get lost in.
-    if (Object.keys(busLayout).length < 12) return;
+    if (_site || Object.keys(busLayout).length < 12) return;
 
     var db = diagramBounds;
     if (db.w <= 0 || db.h <= 0) return;
@@ -2235,10 +2564,17 @@ function _updateMinimapViewport() {
 
 function toggleLabels(show) {
     labelsVisible = show;
-    if (currentData && currentLayouted) {
-        render(currentData, currentLayouted);
-        fitView(false);  // Reapply current zoom after re-render
-    }
+    _rerenderKeepingView();
+}
+
+/** Redraw the current view (system or substation) at the same zoom. */
+function _rerenderKeepingView() {
+    if (!currentData || !currentLayouted) return;
+    var t = d3.zoomTransform(svg.node());
+    _renderActive();
+    fitView(false);              // zoom limits for the redrawn diagram
+    svg.call(zoomBehavior.transform, t);
+    _redrawOverlays();
 }
 
 function updateTheme(json) {
@@ -2246,10 +2582,7 @@ function updateTheme(json) {
         var c = JSON.parse(json);
         for (var k in c) if (T.hasOwnProperty(k)) T[k] = c[k];
         document.body.style.background = T.bg;
-        if (currentData && currentLayouted) {
-            render(currentData, currentLayouted);
-            fitView(false);
-        }
+        _rerenderKeepingView();
     } catch(e) {}
 }
 
@@ -2493,7 +2826,10 @@ function updateOperationalData(jsonStr) {
         console.error('SLD ops: bad JSON', e); return;
     }
     currentOpsData = ops;
+    _drawOperationalData(ops);
+}
 
+function _drawOperationalData(ops) {
     // Remove previous overlay
     rootGroup.selectAll('.layer-ops').remove();
     svg.selectAll('.ops-info-bar').remove();
@@ -2536,6 +2872,7 @@ function updateOperationalData(jsonStr) {
 /** Remove operational overlay. */
 function clearOperationalData() {
     currentOpsData = null;
+    _ctgJson = null;
     if (rootGroup) {
         rootGroup.selectAll('.layer-ops').remove();
         rootGroup.selectAll('.layer-contingency').remove();
@@ -3054,6 +3391,7 @@ function updateContingencyData(jsonStr) {
     try { ctg = JSON.parse(jsonStr); } catch(e) {
         console.error('SLD contingency: bad JSON', e); return;
     }
+    _ctgJson = jsonStr;
 
     // Remove previous contingency overlay
     rootGroup.selectAll('.layer-contingency').remove();
@@ -3277,6 +3615,7 @@ function updateContingencyData(jsonStr) {
 
 /** Remove contingency overlay. */
 function clearContingencyData() {
+    _ctgJson = null;
     if (rootGroup) rootGroup.selectAll('.layer-contingency').remove();
     if (svg) {
         svg.selectAll('.contingency-badge').remove();
@@ -3483,7 +3822,7 @@ function _drawPowerFlowStatusBadge(ops) {
     var gBadge = svg.append('g').attr('class', 'pf-status-badge');
 
     var bx = 10;
-    var by = 12;
+    var by = _site ? 48 : 12;    // below the breadcrumb of an open substation
     var bw = 200;
     var bh = 36;
 

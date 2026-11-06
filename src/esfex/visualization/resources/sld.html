@@ -85,10 +85,31 @@
         vector-effect: non-scaling-stroke; stroke-width: 1px; stroke-dasharray: none;
         fill: #8A96A3; fill-opacity: 0.08;
     }
+
+    /* Substation drill-down: breadcrumb back to the whole system, and the
+       far-substation names at the end of the line stubs. */
+    #sld-breadcrumb {
+        display: none;
+        position: absolute; top: 10px; left: 10px; z-index: 400;
+        align-items: center; gap: 6px; max-width: calc(100% - 20px);
+        padding: 5px 10px; border-radius: 5px;
+        background: rgba(255, 255, 255, 0.92); border: 1px solid #D5DBE1;
+        font: 600 12px 'Segoe UI', Roboto, sans-serif; color: #2C3E50;
+    }
+    #sld-breadcrumb button {
+        border: 0; background: none; padding: 0; cursor: pointer;
+        font: inherit; color: #2E86DE;
+    }
+    #sld-breadcrumb button:hover { text-decoration: underline; }
+    #sld-breadcrumb .sep { color: #95A5A6; }
+    #sld-bc-site { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stub-link { cursor: pointer; }
+    .stub-link:hover { fill: #2E86DE; text-decoration: underline; }
 </style>
 </head>
 <body>
 <div id="sld-container"></div>
+<div id="sld-breadcrumb"><button id="sld-bc-system" title="Back to the whole system (Esc)">System</button><span class="sep">&rsaquo;</span><span id="sld-bc-site"></span></div>
 <div id="empty-message">No elements to display.<br>Add nodes and equipment in the Geographic View.</div>
 <div id="sld-loading"><div class="spinner"></div><div class="spinner-text">Laying out diagram...</div></div>
 <div id="sld-tooltip"><span class="tt-label"></span><div class="tt-sub"></div></div>
