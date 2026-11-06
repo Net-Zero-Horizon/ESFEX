@@ -886,12 +886,18 @@ class GuiGlobalSettings:
     risk_voll_commercial: float = 25000.0
     risk_voll_industrial: float = 15000.0
     risk_voll_critical: float = 100000.0
-    risk_base_temperature: float = 18.0
-    risk_heating_coefficient: float = 0.0
-    risk_cooling_coefficient: float = 0.0
+    # Same defaults as RiskConfig (schema).
+    risk_base_temperature: float = 24.0
+    risk_heating_coefficient: float = 0.5
+    risk_cooling_coefficient: float = 2.5
     risk_insurance_premium_rate: float = 0.0
     risk_monte_carlo_samples: int = 1000
     risk_monte_carlo_seed: int = 42
+    # Scenarios set by the Risk & Resilience Workbench (Apply), saved as
+    # ``risk.climate_scenarios`` / ``risk.hazard_scenarios`` (dicts with the
+    # ClimateScenarioConfig / HazardScenarioConfig fields).
+    risk_climate_scenarios: list[dict] = field(default_factory=list)
+    risk_hazard_scenarios: list[dict] = field(default_factory=list)
 
     # Set to True by serializer when loading from file (skip pref override)
     _loaded_from_file: bool = field(default=False, repr=False)

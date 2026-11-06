@@ -3652,15 +3652,19 @@ def _apply_small_gen_absorb(
 def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
     """Plausibility and operability checks (``network_validation``).
 
-    * Probable duplicate plants (same normalised name, or same fuel within
-      15 km), e.g. one unit imported from both OSM and GEM.
+    * Probable duplicate plants (within 15 km and the same normalised name,
+      or the same fuel and a shared distinctive name word), e.g. one unit
+      imported from both OSM and GEM. Per-node instances of one generator
+      key are not compared.
     * Reserve margin above 100 % of peak demand (info: plausible with a lot
       of variable renewables, otherwise capacity is likely over-counted).
     * Deliverability: a max-flow from generator buses to demand buses through
-      line, transformer and converter ratings; demand that cannot be reached
-      at peak points to an under-sized corridor.
+      line, transformer and converter ratings, each node's peak split over
+      its own demand buses; demand that generation could serve but the
+      network cannot reach at peak points to an under-sized corridor.
 
-    Capacity below peak demand is reported by the generation check.
+    Capacity below peak demand is reported by the generation check, not as
+    a bottleneck.
     """
     from esfex.visualization.data.network_validation import validate_network
 
@@ -3704,7 +3708,8 @@ def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
                 f"Transmission bottleneck: only {feas['deliverable_mw']:.0f} of "
                 f"{feas['peak_demand_mw']:.0f} MW peak demand can be delivered "
                 f"through the line/transformer ratings; "
-                f"{feas['unservable_mw']:.0f} MW is cut off behind "
+                f"{feas['unservable_mw']:.0f} MW that the installed "
+                "generation could serve is cut off behind "
                 "under-sized corridors (max-flow check)"),
         ))
     return issues
@@ -5988,11 +5993,12 @@ def validate_inter_system_links(
       - ``loss_factor`` in [0, 1]
       - persisted ``from_endpoint`` / ``to_endpoint`` bus IDs exist in
         their respective state
-      - no two links connect the same ordered (from_sys/from_node,
+      - no two links of the same kind (``link_type``, and fuel for fuel
+        routes) connect the same ordered (from_sys/from_node,
         to_sys/to_node) pair (silent duplicate would inflate capacity)
     """
     issues: list[ValidationIssue] = []
-    seen: set[tuple[str, int, str, int]] = set()
+    seen: set[tuple] = set()
 
     for lk in links or []:
         lid = lk.link_id
@@ -6109,17 +6115,24 @@ def validate_inter_system_links(
                     "ignores it; choose the fuel it carries"),
             ))
 
-        # Duplicate detection (same ordered endpoints)
-        key = (lk.from_system, lk.from_node, lk.to_system, lk.to_node)
+        # Duplicate detection (same ordered endpoints and kind: a power line
+        # and a fuel route on one pair, or fuel routes for two fuels, are
+        # different links)
+        is_fuel = lk.link_type == "fuel_route"
+        key = (lk.link_type, (lk.fuel or "").strip() if is_fuel else "",
+               lk.from_system, lk.from_node, lk.to_system, lk.to_node)
         if key in seen:
             issues.append(ValidationIssue(
                 severity="warning", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
                 message=(
-                    f"Link {lid}: duplicate of an earlier link "
+                    f"Link {lid}: duplicate of an earlier "
+                    f"{'fuel route' if is_fuel else 'link'} "
                     f"({lk.from_system}:{lk.from_node} → "
-                    f"{lk.to_system}:{lk.to_node}); merged adjacency uses "
-                    "max() so the second entry is silently ignored"),
+                    f"{lk.to_system}:{lk.to_node}); "
+                    + ("merge the two routes into one" if is_fuel else
+                       "merged adjacency uses max() so the second entry "
+                       "is silently ignored")),
             ))
         else:
             seen.add(key)

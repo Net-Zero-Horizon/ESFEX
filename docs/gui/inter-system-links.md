@@ -117,6 +117,7 @@ The routes only carry fuel when primary energy is modelled for that fuel (see [P
 
 - Right-click the link in the tree and select **Delete**, or use the **Delete** button below the tree or **Delete Line** in the form.
 - Links are removed automatically when either connected system is deleted.
+- Deleting links, including the last one, persists on save: the saved `meta_network.systems_links` lists exactly the links in the Studio.
 - Renaming a system updates its links; see [System Management](system-management.md#renaming-a-system).
 
 
@@ -137,7 +138,7 @@ The Validate dialog does not check inter-system links. They are checked by the a
 | Endpoint buses exist in their systems | Warning (the line may not be drawn) |
 | A transmission link has a capacity above 0 | Warning (it carries no power otherwise) |
 | A fuel route link has a fuel | Warning (the run ignores it otherwise) |
-| No two links join the same pair of nodes | Warning (the second one is ignored) |
+| No two links of the same kind join the same pair of nodes (a transmission link and a fuel route, or fuel routes for different fuels, may share a pair) | Warning (the second one is ignored) |
 
 
 ---

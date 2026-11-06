@@ -144,6 +144,9 @@ def run_studio(config=None, system: str | None = None,
             config = load_config(config_path)
         if isinstance(config, ESFEXConfig):
             window._loaded_config = config
+            # The GUI is populated once the map is ready (_on_map_ready);
+            # until then nothing may be saved over the user's file.
+            window._set_project_load_pending(True)
             # Read raw YAML dict for GUI-only keys (e.g. visual_scaling)
             if config_path and config_path.is_file():
                 with open(config_path, "r", encoding="utf-8") as fh:
