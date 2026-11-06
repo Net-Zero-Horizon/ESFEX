@@ -96,17 +96,11 @@ class LineForm(QWidget):
         self._length_km.setReadOnly(True)
         layout.addRow(tr("line_form.length"), self._length_km)
 
-        self._base_impedance = QDoubleSpinBox()
-        self._base_impedance.setRange(0, 1e6)
-        self._base_impedance.setDecimals(2)
-        self._base_impedance.setSpecialValueText("Default")
-        self._base_impedance.editingFinished.connect(self._on_changed)
-        layout.addRow(tr("line_form.base_impedance"), self._base_impedance)
-
         self._reactance_per_km = QDoubleSpinBox()
         self._reactance_per_km.setRange(0, 100)
         self._reactance_per_km.setDecimals(4)
         self._reactance_per_km.setSpecialValueText("Default")
+        self._reactance_per_km.setToolTip(tr("line_form.reactance_per_km_tip"))
         self._reactance_per_km.editingFinished.connect(self._on_changed)
         layout.addRow(tr("line_form.reactance_per_km"), self._reactance_per_km)
 
@@ -220,7 +214,6 @@ class LineForm(QWidget):
             self._line_type.setCurrentIndex(lt_idx)
 
         self._length_km.setValue(line.length_km or 0)
-        self._base_impedance.setValue(line.base_impedance or 0)
         self._reactance_per_km.setValue(line.reactance_per_km or 0)
         self._reactance_pu.setValue(line.reactance_pu or 0)
         self._resistance_pu.setValue(line.resistance_pu or 0)
@@ -346,7 +339,6 @@ class LineForm(QWidget):
         return [
             ("capacity_mw", self._capacity),
             ("line_type", self._line_type),
-            ("base_impedance", self._base_impedance),
             ("reactance_per_km", self._reactance_per_km),
             ("reactance_pu", self._reactance_pu),
             ("resistance_pu", self._resistance_pu),
@@ -387,7 +379,6 @@ class LineForm(QWidget):
         field_to_kwarg = {
             "capacity_mw": "capacity_mw",
             "line_type": "line_type",
-            "base_impedance": "base_impedance",
             "reactance_per_km": "reactance_per_km",
             "reactance_pu": "reactance_pu",
             "resistance_pu": "resistance_pu",
@@ -403,7 +394,7 @@ class LineForm(QWidget):
                     val = val or None
             else:
                 val = w.value()
-                if attr in ("voltage_kv", "base_impedance", "reactance_per_km",
+                if attr in ("voltage_kv", "reactance_per_km",
                             "reactance_pu", "resistance_pu", "susceptance_pu",
                             "length_km"):
                     val = val or None

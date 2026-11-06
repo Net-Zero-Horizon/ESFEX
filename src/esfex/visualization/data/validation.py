@@ -168,6 +168,7 @@ _CATEGORY_VALIDATORS: dict[str, list[str]] = {
     ],
     "connectivity": ["_validate_connectivity"],
     "topology_audit": ["_validate_topology_audit"],
+    "realism": ["_validate_realism"],
 }
 
 # All category keys in display order
@@ -179,6 +180,7 @@ CATEGORY_ORDER: list[str] = [
     "generation",
     "fuel_network",
     "connectivity",
+    "realism",
     "topology_audit",
 ]
 
@@ -3647,6 +3649,67 @@ def _apply_small_gen_absorb(
 # ── Network repair ───────────────────────────────────────────────
 
 
+def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
+    """Plausibility and operability checks (``network_validation``).
+
+    * Probable duplicate plants (same normalised name, or same fuel within
+      15 km), e.g. one unit imported from both OSM and GEM.
+    * Reserve margin above 100 % of peak demand (info: plausible with a lot
+      of variable renewables, otherwise capacity is likely over-counted).
+    * Deliverability: a max-flow from generator buses to demand buses through
+      line, transformer and converter ratings; demand that cannot be reached
+      at peak points to an under-sized corridor.
+
+    Capacity below peak demand is reported by the generation check.
+    """
+    from esfex.visualization.data.network_validation import validate_network
+
+    issues: list[ValidationIssue] = []
+    peak = sum(n.demand.peak_mw or 0.0 for n in state.nodes)
+    try:
+        rep = validate_network(state, peak_demand_mw=peak)
+    except Exception as exc:  # never block validation on the heuristics
+        return [ValidationIssue(
+            severity="info", category="Realism",
+            message=f"Realism checks skipped: {exc}")]
+
+    for d in rep.duplicates:
+        extra = d["total_mw"] - d["total_mw"] / d["count"]
+        # Info: units of one plant on one bus also match (same fuel, same
+        # coordinates), so this is a hint, not a fault.
+        issues.append(ValidationIssue(
+            severity="info", category="Realism",
+            element_type="generator", element_id=d["members"][0],
+            message=(
+                f"Probable duplicate plant: {d['count']} {d['fuel']} units "
+                f"named like '{d['name']}' close together "
+                f"({', '.join(d['members'][:5])}"
+                f"{', ...' if d['count'] > 5 else ''}); if they are the same "
+                f"plant, capacity is over-counted by ~{extra:.0f} MW"),
+        ))
+    if rep.reserve_margin is not None and rep.reserve_margin > 1.0:
+        issues.append(ValidationIssue(
+            severity="info", category="Realism",
+            message=(
+                f"Installed capacity {rep.total_capacity_mw:.0f} MW is "
+                f"{rep.reserve_margin:.0%} above peak demand ({peak:.0f} MW). "
+                "Plausible with a lot of solar/wind; otherwise check for "
+                "duplicate or retired units"),
+        ))
+    feas = rep.feasibility or {}
+    if feas and not feas.get("feasible", True):
+        issues.append(ValidationIssue(
+            severity="warning", category="Realism",
+            message=(
+                f"Transmission bottleneck: only {feas['deliverable_mw']:.0f} of "
+                f"{feas['peak_demand_mw']:.0f} MW peak demand can be delivered "
+                f"through the line/transformer ratings; "
+                f"{feas['unservable_mw']:.0f} MW is cut off behind "
+                "under-sized corridors (max-flow check)"),
+        ))
+    return issues
+
+
 def _validate_topology_audit(
     state: GuiSystemState,
 ) -> list[ValidationIssue]:
@@ -5296,11 +5359,15 @@ def apply_simplification_level(
 
     Each iteration:
       1. repair_network             — fix broken references, self-loops
-      2. consolidate_parallel_lines — merge parallel lines
-      3. aggregate_equipment        — absorb-in-place + cleanup source chains
-      4. (L2+) prune_radial_buses   — remove degree-1 empty buses
-      5. (L2+) eliminate_series     — Kron reduction
-      6. repair_network             — fix artifacts from above
+      2. (L1+) consolidate_parallel_lines — merge parallel lines
+      3. (L1+) aggregate_equipment  — absorb-in-place + cleanup source chains
+      4. repair_network             — fix artifacts from above
+
+    Level 2 and above then run one equivalent-network reduction
+    (``reduce_to_node_mesh``: one bus per node, equivalent branches between
+    nodes); levels 3 and 4 are the same as level 2. The radial / series /
+    voltage-collapse steps in the loop below only run for ``level >= 2``
+    without the reduction, which no caller uses.
 
     Equipment aggregation uses absorb-in-place: the target generator
     KEEPS its existing connection chain, source generators are removed

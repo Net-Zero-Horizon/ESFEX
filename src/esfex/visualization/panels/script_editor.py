@@ -130,8 +130,11 @@ class _LineNumberArea(QWidget):
 class _CodeEditor(QPlainTextEdit):
     """Text editor with line numbers and Python syntax highlighting."""
 
+    runRequested = Signal()  # Ctrl+Enter
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._auto_indent = True
         self.setObjectName("consoleWidget")
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setTabStopDistance(
@@ -146,8 +149,22 @@ class _CodeEditor(QPlainTextEdit):
         self.updateRequest.connect(self._update_line_area)
         self._update_line_area_width()
 
-    # -- Tab inserts spaces --
+    # -- Tab inserts spaces; Ctrl+Enter runs; Enter keeps the indent --
     def keyPressEvent(self, event):
+        is_enter = event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if is_enter and mods == Qt.KeyboardModifier.ControlModifier:
+            self.runRequested.emit()
+            return
+        if is_enter and mods == Qt.KeyboardModifier.NoModifier and self._auto_indent:
+            line = self.textCursor().block().text()
+            col = self.textCursor().positionInBlock()
+            indent = line[:len(line) - len(line.lstrip(" \t"))]
+            if line[:col].rstrip().endswith(":"):
+                indent += "    "
+            self.textCursor().insertText("\n" + indent)
+            self.ensureCursorVisible()
+            return
         if event.key() == Qt.Key.Key_Tab:
             self.insertPlainText("    ")
             return
@@ -217,6 +234,10 @@ class _CodeEditor(QPlainTextEdit):
                 self._update_line_area_width()
             else:
                 self.setViewportMargins(0, 0, 0, 0)
+
+        auto_indent = prefs.get("auto_indent")
+        if auto_indent is not None:
+            self._auto_indent = bool(auto_indent)
 
         word_wrap = prefs.get("word_wrap")
         if word_wrap is not None:
@@ -350,6 +371,7 @@ class ScriptEditor(QWidget):
 
     def _add_tab(self, title: str, content: str = "") -> _CodeEditor:
         editor = _CodeEditor()
+        editor.runRequested.connect(self._on_run)
         if self._editor_prefs:
             editor.apply_editor_preferences(self._editor_prefs)
         if content:

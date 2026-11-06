@@ -49,7 +49,7 @@ All forms of electricity production: solar PV, wind turbines, diesel engines, ga
 | **Existing Capacity** | Rated Power | MW | Nameplate capacity. |
 | | Life Time | years | Expected operational life. |
 | | Initial Age | years | Age of the unit at the start of the horizon. |
-| | Degradation | %/yr | Annual capacity degradation. Despite the label, the value is a fraction per year: 0.005 means 0.5 %/yr. |
+| | Degradation | fraction/yr | Annual capacity degradation, as a fraction per year: 0.005 means 0.5 %/yr. |
 | | Risk Coefficient | 0-1 | Geographic risk derating factor, normally computed by the Risk workflow. 1.0 = no derating. |
 | **Operating Parameters** | Min Power | pu | Minimum stable output as a fraction of rated power. Applied with unit commitment. |
 | | Min Up / Min Down | h | Minimum on / off time after a start / stop. Unit commitment only. |
@@ -72,11 +72,11 @@ There are no investment fields on the generator form: new capacity is configured
 
 #### Reservoir Mode (Hydro Generators)
 
-The **Reservoir** section is hidden by default. It appears only for a generator whose reservoir capacity is above 0, for example one imported from a configuration file that defines a reservoir. It does not depend on the fuel, and a generator created in the Studio cannot enable it from the form. With a reservoir, hydro is dispatched against a water-energy budget rather than as firm capacity.
+The **Reservoir** section appears for a generator whose fuel is `Water`, and for any generator whose reservoir capacity is above 0. To give a new hydro unit a reservoir, set its fuel to `Water` and enter a Reservoir Capacity. With a reservoir, hydro is dispatched against a water-energy budget rather than as firm capacity.
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| Reservoir Capacity | MWh | Maximum energy storage of the reservoir. Setting it to 0 hides the section. |
+| Reservoir Capacity | MWh | Maximum energy storage of the reservoir. 0 = no reservoir (run-of-river); on a non-`Water` generator, 0 also hides the section. |
 | Initial Level | frac | Starting level as a fraction of reservoir capacity |
 | Min Level / Max Level | frac | Allowed level band |
 | Inflow File | path | CSV with hourly inflow in MW-equivalent |
@@ -113,7 +113,7 @@ All forms of energy storage: lithium-ion, flow batteries, pumped hydro, compress
 | | SOC Initial | frac | Starting state of charge (0.0 to 1.0) at the start of each year. Rolling windows carry the SOC from one to the next; at the end of the year the battery must be back to at least this level (within `soc_end_tolerance`, soft). |
 | | Max DoD | frac | Maximum depth of discharge. |
 | **Lifetime** | Life Time / Initial Age | years | Expected life and age at the start of the horizon. |
-| | Degradation | %/yr | Annual capacity degradation, entered as a fraction per year (0.01 = 1 %/yr) despite the label. |
+| | Degradation | fraction/yr | Annual capacity degradation, as a fraction per year (0.01 = 1 %/yr). |
 | | Risk Coefficient | 0-1 | Geographic risk derating factor. 1.0 = no derating. |
 | **Operating Parameters** | Min Power | pu | Minimum stable output (unit commitment). |
 | | Min Up / Min Down | h | Minimum on / off time (unit commitment). |
@@ -166,9 +166,8 @@ Electrical connections between buses or equipment: overhead lines, underground c
 | | Voltage | kV | Operating voltage. |
 | | Type | -- | overhead, underground or submarine (blank = unspecified). |
 | | Length | km | Line length. 0 (shown as "Auto") = a distance is computed when the model is built. |
-| | Base Impedance | ohm | Base impedance used to derive the per-unit reactance from the length. 0 = "Default" (global value). |
-| | Reactance per km | ohm/km | Used with the length when no per-unit reactance is set. 0 = "Default". |
-| | Reactance / Resistance / Susceptance | pu | Per-unit X, R and B. 0 = "Global" (derived from length × reactance per km / base impedance, or global defaults). |
+| | Reactance per km | ohm/km | This line's series reactance per km (saved as `reactance_per_km`). Used with the length when no per-unit reactance is set. 0 = "Default" (the system's DC power flow reactance per km). |
+| | Reactance / Resistance / Susceptance | pu | Per-unit X, R and B on the system base (`ac_power_flow.base_mva`). Reactance 0 = "Global": derived as length × reactance per km / Z_base, with Z_base = V² / S_base from the line voltage; 0.01 pu without a length. |
 | | Circuits | -- | Number of parallel circuits (1 to 10). |
 | | Frequency / Current Type | Hz, -- | Inherited from the connected bus. |
 | **Appearance** | Color, Width | -, px | Line colour and width (0 = auto, uses the global line scaling). |
@@ -205,8 +204,8 @@ Electrical connection points at a given voltage. Each bus belongs to a parent no
 | Frequency | Hz | System frequency |
 | Current Type | -- | `AC` or `DC` |
 | Bus Type | -- | `PQ`, `PV` or `slack`. The slack bus is the angle reference for power flow. A network uses a single slack bus; choosing `slack` when another bus already has it shows a warning. |
-| Role | -- | `connection` (pure junction, no demand), `load` (serves demand) or `mixed` (equipment and demand). Default `connection`. On every save, export or run the Studio recomputes the role from the topology (bus with generation or storage: `mixed`; only bus of its node, or low-voltage bus below 100 kV / LV side of a step-down transformer: `load`; otherwise `connection`), so a role set by hand can be overwritten. |
-| Demand Fraction | frac | Share of the parent node's demand served by this bus. Forced to 0 and disabled for `connection` buses. The fractions of a node's buses should sum to 1.0. At save time, a node whose fractions do not sum to 1.0 gets its demand redistributed over its `load` buses; when a configuration is loaded, fractions are rescaled per node to sum to 1.0, with a warning. |
+| Role | -- | `connection` (pure junction, no demand), `load` (serves demand) or `mixed` (equipment and demand). Default `connection`. On every save, export or run the Studio sets the role of the other buses from the topology (bus with generation or storage: `mixed`; only bus of its node, or low-voltage bus below 100 kV / LV side of a step-down transformer: `load`; otherwise `connection`). A role you pick in this field is yours: it is kept on save and reload (the project stores the list of such buses in `_gui_layout.user_set_bus_roles`), a `connection` bus you set never receives demand, and a `mixed` bus you set counts as a demand bus. |
+| Demand Fraction | frac | Share of the parent node's demand served by this bus. Forced to 0 and disabled for `connection` buses. The fractions of a node's buses should sum to 1.0. At save time, a node whose fractions do not sum to 1.0 gets its demand redistributed over its `load` buses (and the `mixed` buses whose role you set); if every bus of a node is a `connection` you set, the node's demand has nowhere to go and a warning is logged; when a configuration is loaded, fractions are rescaled per node to sum to 1.0, with a warning. |
 | Color, Size | -, px | Marker style (Appearance section) |
 
 ### AC/DC Converter
@@ -231,7 +230,7 @@ Interfaces between AC and DC buses for HVDC transmission and DC-coupled storage.
 | **Economics** | Fixed Cost | $/MW/yr | Annual fixed O&M |
 | | Variable Cost | $/MWh | Cost per MWh transferred |
 | **Lifecycle** | Lifetime / Initial Age | years | Expected life and current age |
-| | Degradation Rate | %/yr | Entered as a fraction per year (0 to 0.1; 0.005 = 0.5 %/yr) despite the label |
+| | Degradation Rate | fraction/yr | Fraction per year (0 to 0.1; 0.005 = 0.5 %/yr) |
 
 ### Frequency Converter
 
@@ -344,7 +343,7 @@ Converts electricity to hydrogen, enabling power-to-gas coupling.
 | | Variable Cost | $/MWh | Cost per MWh of electricity consumed |
 | | Water Cost | $/m³ | Cost of water |
 | **Lifecycle** | Lifetime / Initial Age | years | Expected life and current age |
-| | Degradation Rate | %/yr | Entered as a fraction per year (0.01 = 1 %/yr) despite the label |
+| | Degradation Rate | fraction/yr | Fraction per year (0.01 = 1 %/yr) |
 
 Investment in new electrolyzer capacity is configured in the [Investment Portfolio](#investment-portfolio). The **Delete Electrolyzer** button asks for confirmation.
 
@@ -464,7 +463,7 @@ Each entry defines where and how much new capacity of one technology the optimiz
 | | Type | Generator, Battery / Storage, Electrolyzer, AC/DC Converter, Freq. Converter, Transmission, Fuel Storage or Fuel Transport |
 | | Technology | Optional reference to a Technologies entry |
 | **Investment per Node** | Node / Invest Cost ($/MW) / Invest Max (MW) | One row per node. Batteries add Energy Cost ($/MWh) and Energy Max (MWh). |
-| | Populate from Nodes | Adds a row for every node not yet in the table |
+| | Populate from Nodes | Adds a row, with default values, for every node of the system not yet in the table |
 | | Delete Entry | Deletes the entry after a confirmation |
 
 This is the only place where per-node investment costs and limits are set; the node, generator, battery and line forms have no investment fields.

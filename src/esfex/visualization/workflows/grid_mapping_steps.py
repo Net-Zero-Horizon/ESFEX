@@ -951,7 +951,7 @@ _CRITERIA = [
 
 
 class GridMappingBuildStep(QWidget):
-    """Configure node placement, build and auto-connect the network."""
+    """Configure node placement, build and simplify the network."""
 
     buildFinished = Signal()
 
@@ -1200,14 +1200,14 @@ class GridMappingBuildStep(QWidget):
         simp_form = QFormLayout()
         simp_form.setContentsMargins(0, 0, 0, 0)
         self._combo_simplify = QComboBox()
-        for value, label in [
-            (0, "0 — Cleanup only"),
-            (1, "1 — Aggregate equipment & parallel lines"),
-            (2, "2 — + Radial / series bus elimination"),
-            (3, "3 — + Intra-node voltage collapse"),
-            (4, "4 — + Full node collapse"),
+        # apply_simplification_level runs the same equivalent-network
+        # reduction for every level >= 2, so only three levels are offered.
+        for value, key in [
+            (0, "grid_builder.simplify_level_0"),
+            (1, "grid_builder.simplify_level_1"),
+            (2, "grid_builder.simplify_level_2"),
         ]:
-            self._combo_simplify.addItem(label, value)
+            self._combo_simplify.addItem(tr(key), value)
         self._combo_simplify.setCurrentIndex(0)
         # Compute the natural pixel width of the widest item and force
         # the combo to at least that wide. setMinimumContentsLength
@@ -1229,8 +1229,8 @@ class GridMappingBuildStep(QWidget):
         simp_form.addRow("Simplification level:", self._combo_simplify)
 
         # Drop tiny isolated subgraphs (single-bus substations from OSM
-        # that the auto-connect distance limit couldn't bridge). The
-        # largest component is always kept — this only removes debris.
+        # that no line joins to the grid). The largest component is always
+        # kept — this only removes debris.
         self._spin_min_component = QSpinBox()
         self._spin_min_component.setRange(1, 50)
         self._spin_min_component.setValue(2)
@@ -5629,8 +5629,16 @@ class GridMappingDemandStep(QWidget):
         fallback = self._spin_fallback.value()
         from esfex.visualization.workflows._wizard_utils import stop_thread
         stop_thread(getattr(self, "_classify_worker", None))
+        # Every bus of the state decides which node a building belongs to,
+        # so a node's split counts only its own buildings.
+        state = self._model.state if self._model else None
+        reference = [
+            (b.latitude, b.longitude, (None, b.parent_node))
+            for b in (state.buses.values() if state is not None else [])
+        ]
         self._classify_worker = ClassifyDistributeWorker(
             self._buildings_gdf, rules, fallback, list(self._targets),
+            reference_buses=reference or None,
         )
         self._classify_worker.progress.connect(self._on_classify_dist_progress)
         self._classify_worker.finished.connect(self._on_classify_dist_done)

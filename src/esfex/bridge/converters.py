@@ -562,7 +562,9 @@ def convert_transmission_line_data(
     reactance_pu = line.reactance_pu
     if reactance_pu is None or reactance_pu <= 0:
         from esfex.utils.per_unit import derived_reactance_pu
-        reactance_pu = derived_reactance_pu(length_km, line.voltage_kv, dc_config, s_base_mva)
+        reactance_pu = derived_reactance_pu(
+            length_km, line.voltage_kv, dc_config, s_base_mva,
+            getattr(line, "reactance_per_km", None))
 
     resistance_pu = line.resistance_pu if line.resistance_pu is not None else 0.0
     susceptance_pu = line.susceptance_pu if line.susceptance_pu is not None else 0.0

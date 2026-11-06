@@ -64,23 +64,38 @@ def detect_duplicate_plants(state, radius_km: float = 15.0) -> list[dict]:
     def union(a, b):
         parent[find(a)] = find(b)
 
-    for i, (gid_a, ga) in enumerate(gens):
-        na = _norm_name(ga.name)
-        la, lo = coord(ga)
-        for gid_b, gb in gens[i + 1:]:
-            same = False
-            nb = _norm_name(gb.name)
-            if na and nb and na == nb:
-                same = True
-            elif ga.fuel == gb.fuel and None not in (la, lo):
-                lb, ob = coord(gb)
-                if None not in (lb, ob):
-                    dkm = math.hypot((la - lb) * 111.0,
-                                     (lo - ob) * 111.0 * math.cos(math.radians(la)))
-                    if dkm <= radius_km:
-                        same = True
-            if same:
-                union(gid_a, gid_b)
+    # Same normalised name → same plant. Grouped by name (linear), so the
+    # check also runs on the Studio's Validate for large Grid Builder networks.
+    by_name: dict[str, str] = {}
+    for gid, g in gens:
+        n = _norm_name(g.name)
+        if n:
+            if n in by_name:
+                union(gid, by_name[n])
+            else:
+                by_name[n] = gid
+
+    # Same fuel within ``radius_km``: compare only units of the same fuel in
+    # neighbouring latitude bands one radius wide.
+    band = radius_km / 111.0
+    bands: dict[tuple, list] = defaultdict(list)
+    located = []
+    for gid, g in gens:
+        la, lo = coord(g)
+        if la is None or lo is None:
+            continue
+        key = (g.fuel, math.floor(la / band))
+        located.append((gid, g.fuel, la, lo, key))
+        bands[key].append((gid, la, lo))
+    for gid_a, fuel, la, lo, (_, k) in located:
+        cos_la = math.cos(math.radians(la))
+        for kk in (k - 1, k, k + 1):
+            for gid_b, lb, ob in bands.get((fuel, kk), ()):
+                if gid_b == gid_a:
+                    continue
+                dkm = math.hypot((la - lb) * 111.0, (lo - ob) * 111.0 * cos_la)
+                if dkm <= radius_km:
+                    union(gid_a, gid_b)
 
     groups: dict[str, list] = defaultdict(list)
     for gid, _ in gens:

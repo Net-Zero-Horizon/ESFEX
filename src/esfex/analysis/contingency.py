@@ -1542,6 +1542,156 @@ class ContingencyAnalyzer:
         return flows
 
 
+_ALL_CONTINGENCY_TYPES = frozenset({"generator", "line", "transformer", "battery"})
+
+
+def _dc_analyzer(analyzer: Any) -> "ContingencyAnalyzer | None":
+    """The DC analyzer behind ``analyzer`` (itself, or an AC analyzer's fallback)."""
+    if isinstance(analyzer, ContingencyAnalyzer):
+        return analyzer
+    return getattr(analyzer, "_dc_fallback", None)
+
+
+def _selected(
+    analyzer: Any, snapshot: dict[str, Any], c: dict[str, Any],
+    types, min_line_loading: float,
+) -> bool:
+    """Contingency of an allowed type; a line/transformer loaded enough."""
+    if c["type"] not in types:
+        return False
+    if min_line_loading <= 0 or c["type"] not in ("line", "transformer"):
+        return True
+    eid = c["element_id"]
+    cap = snapshot.get("lines", {}).get(f"edge_{eid}", {}).get("capacity_mw") or 0.0
+    if cap <= 0:
+        dc = _dc_analyzer(analyzer)
+        branch = dc._branch_by_id.get(eid) if dc is not None else None
+        cap = branch.capacity_mw if branch is not None else 0.0
+    if cap <= 0:
+        return True
+    return abs(c.get("impact_mw", 0.0)) / cap >= min_line_loading
+
+
+def _trip(analyzer: Any, snapshot: dict[str, Any], c: dict[str, Any]):
+    if c["type"] in ("generator", "battery"):
+        return analyzer.analyze_generator_loss(snapshot, c["element_id"])
+    if c["type"] in ("line", "transformer"):
+        return analyzer.analyze_line_loss(snapshot, c["element_id"])
+    return None
+
+
+class _redistribution:
+    """Temporarily set a DC analyzer's redistribution mode."""
+
+    def __init__(self, analyzer: Any, mode: str | None) -> None:
+        self._an = _dc_analyzer(analyzer)
+        self._mode = mode
+        self._prev = None
+
+    def __enter__(self):
+        if self._an is not None and self._mode:
+            self._prev = self._an.redistribution_mode
+            self._an.redistribution_mode = self._mode
+        return self
+
+    def __exit__(self, *exc):
+        if self._prev is not None:
+            self._an.redistribution_mode = self._prev
+        return False
+
+
+def run_all_contingencies(
+    analyzer: Any,
+    snapshot: dict[str, Any],
+    depth: str = "n1",
+    redistribution: str | None = "pro_rata",
+    types: set[str] | frozenset[str] = _ALL_CONTINGENCY_TYPES,
+    min_line_loading: float = 0.0,
+    stress_threshold_pct: float = 80.0,
+    max_pairs: int = 20,
+) -> list[ContingencyResult]:
+    """Trip every contingency of the snapshot and return the results.
+
+    Works with the DC :class:`ContingencyAnalyzer` and the AC analyzer
+    (same ``get_contingency_list`` / ``analyze_*_loss`` API).
+
+    * ``depth="n1"``: one result per contingency of ``types``.
+    * ``depth="n1_1"``: the stressed N-1-1 pairs of
+      :meth:`ContingencyAnalyzer.screen_n1_1` (first outage of ``types``,
+      second outage a line loaded above ``stress_threshold_pct`` after it).
+      Needs the DC analyzer (an AC analyzer uses its DC fallback).
+
+    Lines and transformers loaded below ``min_line_loading`` (fraction of
+    capacity, ``n1_security.critical_line_threshold``) are not tripped.
+    ``redistribution`` ("pro_rata" or "droop") applies to the DC analyzer;
+    the AC analyzer always redistributes pro rata.
+    """
+    with _redistribution(analyzer, redistribution):
+        if depth == "n1_1":
+            dc = _dc_analyzer(analyzer)
+            if dc is None:
+                raise ValueError("N-1-1 analysis needs the DC contingency analyzer")
+            pairs = dc.screen_n1_1(
+                snapshot, stress_threshold_pct=stress_threshold_pct,
+                max_pairs=10**9,
+            )
+            pairs = [p for p in pairs
+                     if _selected(dc, snapshot, p["first_contingency"],
+                                  types, min_line_loading)][:max_pairs]
+            return [p["result"] for p in pairs]
+        results: list[ContingencyResult] = []
+        for c in analyzer.get_contingency_list(snapshot):
+            if not _selected(analyzer, snapshot, c, types, min_line_loading):
+                continue
+            r = _trip(analyzer, snapshot, c)
+            if r is not None:
+                results.append(r)
+        return results
+
+
+def screen_all_contingencies(
+    analyzer: Any,
+    snapshot: dict[str, Any],
+    pi_threshold: float = 0.0,
+    redistribution: str | None = "pro_rata",
+    types: set[str] | frozenset[str] = _ALL_CONTINGENCY_TYPES,
+    min_line_loading: float = 0.0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Rank contingencies by Performance Index (DC power flow).
+
+    Returns ``(ranked, n_total)``: the contingencies with
+    ``PI >= pi_threshold`` (dicts with ``type``, ``element_id``,
+    ``description``, ``pi``, ``contingency_result``), highest PI first, and
+    the number of contingencies screened. ``pi_threshold = 0`` keeps all;
+    ``types`` and ``min_line_loading`` select as in :func:`run_all_contingencies`.
+    PI needs the DC analyzer; an AC analyzer is screened with its DC fallback.
+    """
+    dc = _dc_analyzer(analyzer)
+    if dc is None:
+        raise ValueError("Screening needs the DC contingency analyzer (PTDF/LODF)")
+    ranked: list[dict[str, Any]] = []
+    n_total = 0
+    with _redistribution(dc, redistribution):
+        for c in dc.get_contingency_list(snapshot):
+            if not _selected(dc, snapshot, c, types, min_line_loading):
+                continue
+            result = _trip(dc, snapshot, c)
+            if result is None:
+                continue
+            n_total += 1
+            pi = dc._compute_performance_index(result)
+            if pi >= pi_threshold:
+                ranked.append({
+                    "type": c["type"],
+                    "element_id": c["element_id"],
+                    "description": c["description"],
+                    "pi": round(pi, 4),
+                    "contingency_result": result,
+                })
+    ranked.sort(key=lambda r: r["pi"], reverse=True)
+    return ranked, n_total
+
+
 def build_contingency_from_state(
     state: Any,
     num_nodes: int,

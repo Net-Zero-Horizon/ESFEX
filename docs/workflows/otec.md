@@ -131,7 +131,7 @@ Batch inverse design over every feasible site in a region (OTEX `run_regional_op
 - **Cap CAPEX**: optional per-site CAPEX cap (default 300 M$), for questions such as "which sites stay viable if CAPEX per site is capped?".
 - **Run regional** shows a site map coloured by LCOE, a portfolio summary and a table. **Feasible only** filters the view.
 - **Export CSV** saves the results as CSV or HDF5.
-- **Cluster zones** groups feasible sites into development-zone polygons (DBSCAN, with a 10 km buffer; the LCOE threshold is the highest LCOE in the results, so every feasible site is eligible) and draws them on the panel's map. The zones are not added to the system model.
+- **Cluster zones** groups feasible sites into development-zone polygons (DBSCAN, buffered by the scenario's zone buffer, 10 km by default; the LCOE threshold is the highest LCOE in the results, so every feasible site is eligible) and draws them on the panel's map. The zones are not added to the system model.
 
 
 ---

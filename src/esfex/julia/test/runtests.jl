@@ -1204,7 +1204,7 @@ import Ipopt
                                 TransmissionLineData[], TransformerData[],
                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
             function solve_n1(gens, load; mode = "economic_dispatch", scopf = false,
-                              corrective = false)
+                              corrective = false, rtype = "largest_unit", rpct = 0.15)
                 input = PowerSystemInput(
                     name = "n1", year = 2025, network = net, generators = gens,
                     batteries = BatteryConfig[], demand = fill(load, H, 1),
@@ -1213,6 +1213,8 @@ import Ipopt
                     loss_of_load_penalty = 100.0,
                     n1_security_enabled = true, n1_generation_enabled = true,
                     n1_scopf_enabled = scopf, n1_corrective_enabled = corrective,
+                    n1_generation_reserve_type = rtype,
+                    n1_generation_reserve_percentage = rpct,
                     mode = mode, solver_name = "highs", verbose = false)
                 model, vars = create_power_system(input)
                 optimize!(model)
@@ -1256,6 +1258,19 @@ import Ipopt
             gen, _, cost, _ = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4; ramp = 0.25)],
                                        50.0; scopf = true, corrective = true)
             @test gen ≈ [15.0, 35.0] atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-6
+
+            # Reserve type "percentage" (was ignored: always largest unit).
+            # One 60 MW unit serving 50 MW: losing it leaves nothing (50 MW
+            # short), but a 50 % reserve only needs 25 MW of headroom, of
+            # which the unit itself provides 10.
+            _, _, cost, _ = solve_n1([ngen("A", 60.0, 1.0e-5)], 50.0)
+            @test cost ≈ 50.0 * H atol = 1e-6
+            _, _, cost, _ = solve_n1([ngen("A", 60.0, 1.0e-5)], 50.0;
+                                     rtype = "percentage", rpct = 0.5)
+            @test cost ≈ 15.0 * H atol = 1e-6
+            _, _, cost, _ = solve_n1([ngen("A", 60.0, 1.0e-5)], 50.0;
+                                     rtype = "percentage", rpct = 0.2)
             @test cost ≈ 0.0 atol = 1e-6
         end
 

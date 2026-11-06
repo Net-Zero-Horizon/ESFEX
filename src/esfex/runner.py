@@ -74,7 +74,8 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
             continue
         x = line.reactance_pu
         if x is None or x <= 0:
-            x = derived_reactance_pu(line.length_km, line.voltage_kv, dc_config, s_base_mva)
+            x = derived_reactance_pu(line.length_km, line.voltage_kv, dc_config,
+                                     s_base_mva, line.reactance_per_km)
         n = max(line.num_circuits, 1)
         by_pair.setdefault((min(a, b), max(a, b)), []).append(
             ((line.resistance_pu or 0.0) / n, x / n))

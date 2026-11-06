@@ -47,6 +47,7 @@ from esfex.visualization.data.serializer import (
     config_to_stochastic_scenarios,
     gui_state_to_yaml,
     inter_system_links_to_config_dict,
+    rename_system_in_config,
 )
 from esfex.visualization.map_widget import MapWidget
 from esfex.visualization.sld_widget import SldWidget
@@ -85,6 +86,10 @@ from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 logger = logging.getLogger(__name__)
+# The SLD analysis handlers log through ``log``; it was never defined, so
+# every one of their fallbacks (no AC bridge, analyzer build failure, N-k
+# error) raised NameError instead of logging.
+log = logger
 
 _SUPPORTED_GEO_EXTENSIONS = {".geojson", ".json", ".shp", ".kml", ".kmz", ".gpkg"}
 
@@ -99,14 +104,55 @@ class _GeoAssetInfo:
     is_domain: bool = False   # applied as a workflow domain
 
 
+_WGS84_CRS_NAMES = {
+    "urn:ogc:def:crs:ogc:1.3:crs84", "urn:ogc:def:crs:epsg::4326",
+    "epsg:4326", "crs84", "ogc:crs84",
+}
+
+
+def _geojson_needs_reprojection(data: dict) -> bool:
+    """True when a GeoJSON declares a ``crs`` member other than WGS84.
+
+    RFC 7946 GeoJSON is always WGS84 and has no ``crs``; older files
+    (GeoJSON 2008, QGIS exports) may name a projected CRS there.
+    """
+    crs = data.get("crs") if isinstance(data, dict) else None
+    if not isinstance(crs, dict):
+        return False
+    name = str((crs.get("properties") or {}).get("name", "")).strip().lower()
+    return bool(name) and name not in _WGS84_CRS_NAMES
+
+
+def _to_wgs84(gdf):
+    """Reproject a GeoDataFrame to WGS84 (EPSG:4326), the map's coordinates.
+
+    A layer without a CRS is assumed to be WGS84 already (logged).
+    """
+    if gdf.crs is None:
+        logger.warning(
+            "Geo file has no coordinate reference system; assuming WGS84 "
+            "longitude/latitude.")
+        return gdf
+    if gdf.crs.to_epsg() != 4326:
+        logger.info("Reprojecting geo file from %s to WGS84", gdf.crs)
+        return gdf.to_crs(epsg=4326)
+    return gdf
+
+
 def _read_geo_file(path: str) -> tuple[str, dict]:
-    """Read any supported geo file, return (geojson_str, geojson_dict)."""
+    """Read any supported geo file, return (geojson_str, geojson_dict).
+
+    The result is always in WGS84 longitude/latitude (what the map and the
+    model use): files in a projected CRS (e.g. a UTM shapefile) are
+    reprojected.
+    """
     ext = Path(path).suffix.lower()
     if ext in (".geojson", ".json"):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return json.dumps(data), data
-    # All other formats require geopandas
+        if not _geojson_needs_reprojection(data):
+            return json.dumps(data), data
+    # All other formats (and GeoJSON in a projected CRS) require geopandas
     import geopandas as gpd  # noqa: F811
     if ext == ".kmz":
         import zipfile
@@ -118,8 +164,9 @@ def _read_geo_file(path: str) -> tuple[str, dict]:
                 gdf = gpd.read_file(kml_file, driver="KML")
     elif ext == ".kml":
         gdf = gpd.read_file(path, driver="KML")
-    else:  # .shp, .gpkg
+    else:  # .shp, .gpkg, projected GeoJSON
         gdf = gpd.read_file(path)
+    gdf = _to_wgs84(gdf)
     geojson_str = gdf.to_json()
     return geojson_str, json.loads(geojson_str)
 
@@ -701,6 +748,9 @@ class MainWindow(QMainWindow):
 
         self._user_prefs = load_preferences()
         apply_shortcuts(self._action_registry, get_shortcuts(self._user_prefs))
+        # Editor preferences apply from startup, not only after the
+        # Preferences dialog is closed.
+        self.script_editor.apply_preferences(self._user_prefs.get("editor", {}))
 
         # Auto-save timer (controlled by preferences)
         self._auto_save_timer = QTimer(self)
@@ -1031,13 +1081,22 @@ class MainWindow(QMainWindow):
         self._sld_hour_slider.setMaximum(max_h)
         self._sld_hour_spin.setMaximum(max_h)
 
+        self._enable_sld_results_controls()
+
+    def _enable_sld_results_controls(self):
+        """Put the SLD back in results mode for the loaded HDF5 file.
+
+        Builds the results contingency analyzer, enables the time controls
+        and redraws the overlay. Used after loading results and when the
+        Analysis mode (which disables those controls) is switched off.
+        """
+        loader = getattr(self, "_sld_results_loader", None)
+        if loader is None:
+            return
         # Build contingency analyzer (Level 2)
         self._sld_contingency_analyzer = None
         try:
-            from esfex.analysis.contingency import (
-                ContingencyAnalyzer,
-                build_contingency_from_state,
-            )
+            from esfex.analysis.contingency import build_contingency_from_state
             self._sld_contingency_analyzer = build_contingency_from_state(
                 self.model.state,
                 loader.num_nodes,
@@ -1191,6 +1250,11 @@ class MainWindow(QMainWindow):
 
             # Populate the analysis panel from current editor state
             self._analysis_panel.populate()
+            g = self.model.global_settings
+            self._analysis_panel.set_nk_defaults(
+                g.n1_contingency_depth, g.n1_redistribution_mode,
+                g.n1_pi_screening_threshold,
+            )
 
             # Build analyzers from editor state
             self._analysis_freq_analyzer = None
@@ -1303,6 +1367,11 @@ class MainWindow(QMainWindow):
             self._sld_contingency_combo.blockSignals(False)
             self._sld_btn_export.setEnabled(False)
             self._sld_btn_clear.setEnabled(False)
+            self._sld_contingency_analyzer = None
+
+            # Results loaded before Analysis was switched on: give the time
+            # controls (disabled in analysis mode) and the overlay back.
+            self._enable_sld_results_controls()
 
             # Restore properties panel
             self._restore_properties_panel()
@@ -1595,6 +1664,16 @@ class MainWindow(QMainWindow):
         result_dict = dataclasses.asdict(result)
         self.sld_widget.update_contingency_data(json.dumps(result_dict))
 
+    def _nk_contingency_types(self) -> set[str]:
+        """Element types the N-k runs trip (Global Settings > N-1 Security)."""
+        g = self.model.global_settings
+        types = {"generator", "line"}
+        if g.n1_transformer_contingencies:
+            types.add("transformer")
+        if g.n1_battery_contingencies:
+            types.add("battery")
+        return types
+
     def _on_run_all_n1(self, depth: str, redispatch: str, pi_threshold: float):
         """Run full N-1 or N-1-1 analysis on the current scenario snapshot."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
@@ -1602,33 +1681,25 @@ class MainWindow(QMainWindow):
             self._analysis_panel.update_nk_summary("No contingency analyzer available.")
             return
 
+        from esfex.analysis.contingency import run_all_contingencies
         from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
         scenario = self._analysis_panel.get_scenario()
         snapshot = build_snapshot_from_scenario(self.model.state, scenario)
 
         try:
-            if depth == "n1_1" and hasattr(analyzer, "analyze_n1_1"):
-                results = analyzer.analyze_n1_1(
-                    snapshot, redistribution=redispatch
-                )
-                n_ctg = len(results) if results else 0
-                n_violations = sum(
-                    1 for r in (results or []) if not r.is_secure
-                )
-                self._analysis_panel.update_nk_summary(
-                    f"N-1-1: {n_ctg} pairs analyzed, {n_violations} violations"
-                )
+            results = run_all_contingencies(
+                analyzer, snapshot, depth=depth, redistribution=redispatch,
+                types=self._nk_contingency_types(),
+                min_line_loading=self.model.global_settings.n1_critical_line_threshold,
+            )
+            n_violations = sum(1 for r in results if not r.is_secure)
+            if depth == "n1_1":
+                text = (f"N-1-1: {len(results)} stressed pairs analyzed, "
+                        f"{n_violations} violations")
             else:
-                results = analyzer.analyze_all_contingencies(
-                    snapshot, redistribution=redispatch
-                )
-                n_ctg = len(results) if results else 0
-                n_violations = sum(
-                    1 for r in (results or []) if not r.is_secure
-                )
-                self._analysis_panel.update_nk_summary(
-                    f"N-1: {n_ctg} contingencies, {n_violations} violations"
-                )
+                text = (f"N-1: {len(results)} contingencies, "
+                        f"{n_violations} violations")
+            self._analysis_panel.update_nk_summary(text)
         except Exception as exc:
             log.warning("N-1 analysis failed: %s", exc, exc_info=True)
             self._analysis_panel.update_nk_summary(f"Error: {exc}")
@@ -1640,26 +1711,22 @@ class MainWindow(QMainWindow):
             self._analysis_panel.update_nk_summary("No contingency analyzer available.")
             return
 
+        from esfex.analysis.contingency import screen_all_contingencies
         from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
         scenario = self._analysis_panel.get_scenario()
         snapshot = build_snapshot_from_scenario(self.model.state, scenario)
 
         try:
-            if hasattr(analyzer, "screen_contingencies"):
-                ranked = analyzer.screen_contingencies(
-                    snapshot, pi_threshold=pi_threshold
-                )
-                n_total = len(ranked) if ranked else 0
-                n_critical = sum(
-                    1 for r in (ranked or []) if r.pi > pi_threshold
-                ) if pi_threshold > 0 else n_total
-                self._analysis_panel.update_nk_summary(
-                    f"Screening: {n_critical}/{n_total} critical contingencies"
-                )
-            else:
-                self._analysis_panel.update_nk_summary(
-                    "Screening not available (no PTDF/LODF support)"
-                )
+            ranked, n_total = screen_all_contingencies(
+                analyzer, snapshot, pi_threshold=pi_threshold,
+                redistribution=redispatch, types=self._nk_contingency_types(),
+                min_line_loading=self.model.global_settings.n1_critical_line_threshold,
+            )
+            worst = (f"; worst: {ranked[0]['element_id']} (PI {ranked[0]['pi']:.2f})"
+                     if ranked else "")
+            self._analysis_panel.update_nk_summary(
+                f"Screening: {len(ranked)}/{n_total} critical contingencies{worst}"
+            )
         except Exception as exc:
             log.warning("Screening failed: %s", exc, exc_info=True)
             self._analysis_panel.update_nk_summary(f"Error: {exc}")
@@ -2291,23 +2358,43 @@ class MainWindow(QMainWindow):
         return element_id
 
     def _on_system_renamed(self, old_name: str, new_name: str):
-        """Handle system name change from the system settings form."""
+        """Handle system name change from the system settings form.
+
+        The name is a key in several places: ``_all_states``, the element
+        tree, inter-system links, ``systems_to_simulate`` and the loaded
+        base config (``systems`` and ``meta_network``). All of them follow
+        the rename, so the system keeps its links and stays in Validate/Run.
+        """
+        state = self._all_states.get(old_name)
         if new_name in self._all_states and new_name != old_name:
             QMessageBox.warning(
                 self, tr("messages.duplicate_name_title"),
                 tr("messages.duplicate_name", name=new_name),
             )
-            # Revert
-            self._model.state.name = old_name
+            # Revert the name the form already wrote into the state.
+            if state is not None:
+                state.name = old_name
+            self.model.state.name = old_name
+            form = getattr(self, "_system_form", None)
+            if form is not None:
+                form.load_element()
             return
-        # Update _all_states dict
-        state = self._all_states.pop(old_name, None)
-        if state is not None:
-            self._all_states[new_name] = state
+        # Rebuild _all_states in place of the old key (order matters: the
+        # first system is the primary one for new projects).
+        self._all_states = {
+            (new_name if name == old_name else name): st
+            for name, st in self._all_states.items()
+        }
         if self._current_system_name == old_name:
             self._current_system_name = new_name
+        self.model.rename_system_references(old_name, new_name)
+        rename_system_in_config(self._loaded_config, old_name, new_name)
         # Update element tree
         self.element_tree.rename_system(old_name, new_name)
+        self._sync_systems_to_form()
+        self._invalidate_validation()
+        # Map ids of the other systems carry a "<system>/" prefix; re-render.
+        self.model.stateLoaded.emit()
 
     def _update_map_actions_state(self):
         """Enable/disable map-element toolbar actions based on system count."""
@@ -2984,24 +3071,7 @@ class MainWindow(QMainWindow):
                 for lk in config_to_inter_system_links(config):
                     # Only add links whose both systems exist in the studio
                     if lk.from_system in self._all_states and lk.to_system in self._all_states:
-                        self.model.add_inter_system_link(
-                            link_id=lk.link_id,
-                            link_type=lk.link_type,
-                            fuel=lk.fuel,
-                            from_system=lk.from_system,
-                            to_system=lk.to_system,
-                            from_node=lk.from_node,
-                            to_node=lk.to_node,
-                            capacity_mw=lk.capacity_mw,
-                            investment_cost=lk.investment_cost,
-                            max_investment_mw=lk.max_investment_mw,
-                            loss_factor=lk.loss_factor,
-                            distance_km=lk.distance_km,
-                            cost_per_mw_km=lk.cost_per_mw_km,
-                            waypoints=lk.waypoints,
-                            from_endpoint=lk.from_endpoint,
-                            to_endpoint=lk.to_endpoint,
-                        )
+                        self.model.restore_inter_system_link(lk, keep_id=False)
 
                 QMessageBox.information(
                     self, tr("common.info"),
@@ -7115,38 +7185,9 @@ class MainWindow(QMainWindow):
         self.model.clear_inter_system_links()
         self.element_tree.clear_inter_system_links()
         for lk in config_to_inter_system_links(config):
-            self.model.add_inter_system_link(
-                link_id=lk.link_id,
-                link_type=lk.link_type,
-                fuel=lk.fuel,
-                from_system=lk.from_system,
-                to_system=lk.to_system,
-                from_node=lk.from_node,
-                to_node=lk.to_node,
-                capacity_mw=lk.capacity_mw,
-                investment_cost=lk.investment_cost,
-                max_investment_mw=lk.max_investment_mw,
-                loss_factor=lk.loss_factor,
-                distance_km=lk.distance_km,
-                cost_per_mw_km=lk.cost_per_mw_km,
-                # Restore GUI geometry + LineForm-parity electrical
-                # metadata, all saved in SystemLinkConfig.* so the
-                # polyline and the properties form round-trip cleanly.
-                waypoints=lk.waypoints,
-                from_endpoint=lk.from_endpoint,
-                to_endpoint=lk.to_endpoint,
-                voltage_kv=lk.voltage_kv,
-                line_type=lk.line_type,
-                length_km=lk.length_km,
-                base_impedance=lk.base_impedance,
-                reactance_per_km=lk.reactance_per_km,
-                susceptance_pu=lk.susceptance_pu,
-                num_circuits=lk.num_circuits,
-                frequency_hz=lk.frequency_hz,
-                current_type=lk.current_type,
-                decorative=lk.decorative,
-                style=lk.style,
-            )
+            # Every parsed field (geometry, impedance, LineForm-parity
+            # metadata, style) is restored.
+            self.model.restore_inter_system_link(lk)
 
         self._update_map_actions_state()
         self._restore_geo_assets(raw_dict)
