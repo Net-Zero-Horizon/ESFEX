@@ -375,6 +375,65 @@ Per-release notes are also published on the
 
 ### Fixed
 
+- **Myopic planning remembers earlier years.** Each one-year master in
+  `planning_mode: myopic` planned from the base-year fleet: the aged units
+  and the capacity built in earlier years were applied to a copy of the
+  configuration the master never read, and were matched by technology key
+  against generator keys, so they never applied. Every year rebuilt what the
+  year before had built, and the operational dispatch received none of the
+  myopic investments. Each year's master now starts from the merged master
+  system with its units aged by the years elapsed, holds the capacity built
+  in earlier years as existing units of their technology (at the nodes where
+  they were built, ageing from their build year, retired at the technology's
+  lifetime), and can only build what is left of each technology's
+  `invest_max_power` / `invest_max_capacity` (a limit over the whole
+  horizon, as in perfect foresight). The dispatch of each year now gets that
+  year's capacity, like a perfect-foresight run.
+
+- **Reservoir inflow on the master's representative days.** Each
+  representative day of the master problem (also each TSAM period and each
+  Benders subproblem) read the availability profiles of its own hours, but
+  the reservoir inflow from the start of the profile: every day saw the
+  inflow of the first hours of the year (the first hours of the year's block
+  in a myopic run). Hydro investment and dispatch in the master were planned
+  on that inflow. Each day now reads the inflow of its own hours.
+
+- **Distinct ids for fuel routes between the same systems.** The routes of
+  an inter-system `fuel_route` link were named `link_<A>_<B>_<i>_fwd|rev`
+  with `i` counted within the link, so two fuel links between the same
+  systems (Diesel and LNG, say) produced the same route ids. The ids are now
+  `link<k>_<A>_<B>_<fuel>_<i>_fwd|rev`, with `k` the link's position in
+  `systems_links`.
+
+- **`esfex studio` no longer ends in a traceback after "Save anyway".**
+  When the last save wrote a configuration with errors, reloading the file
+  after the window closed raised and the CLI printed a traceback. It now
+  says the file was saved but does not validate, prints the error, and exits
+  with code 1. `launch_studio()` raises the new
+  `esfex.config.loader.SavedConfigInvalidError` (a `ConfigLoadError`, with
+  the file in `path`), and the `esfex-studio` launcher closes quietly.
+
+- **Primary-energy cost totals in $.** The `total_fuel_cost`,
+  `total_transport_cost` and `total_loss_penalty` attributes of each year's
+  `primary_energy` group were written in M$ (the solver's internal unit),
+  while every other cost in the results file is in $ and the Studio's
+  primary-energy cost charts read them as $ (showing values a million times
+  too small). They are now in $; the primary-energy tutorial said M$ and is
+  corrected.
+
+- **Minimum output of units built by the master.** The dispatch's units for
+  master investments stored the technology's `min_output` times the built
+  MW in `min_power`, which every other unit reads as a fraction of rated
+  power. With unit commitment their minimum stable output was
+  `min_output × rated²` MW, so a built thermal unit with a minimum output
+  could not be committed. `min_power` is now the technology's `min_output`
+  per node.
+
+- Two transmission links between the same two systems no longer share a
+  line id: each link restarts its connection index, so the second one's
+  lines were also named `link_<A>_<B>_0`; later ones now get a `_2`, `_3`…
+  suffix.
+
 - **Reservoir, battery-spillage, inertia, transfer-margin and N-1 results are
   kept.** The rolling-horizon window result left them out, so
   `YearResults.reservoir_level` / `reservoir_spillage` / `reservoir_pump` /

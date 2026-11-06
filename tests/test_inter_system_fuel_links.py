@@ -114,6 +114,16 @@ def test_transmission_link_is_still_a_line():
     assert op.fuel_transport_routes == []
 
 
+def test_transmission_links_between_the_same_systems_get_distinct_line_ids():
+    # Each link restarts its connection index: two links on the same pair
+    # used to share the id link_A_B_0.
+    links = [_fuel_link(link_type="transmission", fuel=None),
+             _fuel_link(link_type="transmission", fuel=None)]
+    _, op, _ = Orchestrator._merge_systems(_config(*links))
+    ids = [ln.line_id for ln in op.transmission_lines_geo if ln.line_id.startswith("link_")]
+    assert ids == ["link_A_B_0", "link_A_B_0_2"]
+
+
 def test_fuel_link_without_fuel_is_ignored(caplog):
     _, op, _ = Orchestrator._merge_systems(_config(_fuel_link(fuel=None)))
     assert op.fuel_transport_routes == []
