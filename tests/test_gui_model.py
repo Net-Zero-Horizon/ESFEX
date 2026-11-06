@@ -406,7 +406,6 @@ class TestGuiTransmissionLine:
         assert tl.from_endpoint is None
         assert tl.to_endpoint is None
         assert tl.length_km is None
-        assert tl.base_impedance is None
         assert tl.reactance_per_km is None
         assert tl.reactance_pu is None
         assert tl.resistance_pu is None
@@ -1076,7 +1075,8 @@ class TestGuiGlobalSettings:
         assert gs.solver_specific_options == {}
         # N1
         assert gs.n1_enabled is False
-        assert gs.n1_apply_to_modes == ["unit_commitment"]
+        # Same default as N1SecurityConfig.apply_to_modes (was UC only).
+        assert gs.n1_apply_to_modes == ["development", "unit_commitment"]
         assert gs.n1_transmission_enabled is True
         assert gs.n1_transmission_reserve_factor == 0.70
         assert gs.n1_critical_line_threshold == 0.0

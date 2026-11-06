@@ -787,7 +787,8 @@ function initializeMap() {
                     }
                 }
             }
-        } else if (currentMode === 'add_line') {
+        } else if (currentMode === 'add_line' || currentMode === 'add_fuel_route') {
+            // Both traces take waypoints from clicks on empty map space.
             _onMapClickForTrace(e);
         } else if (currentMode === 'select') {
             bridge.on_element_deselected();
@@ -830,7 +831,7 @@ function setMode(mode) {
     currentMode = mode;
 
     // Cancel any in-progress trace when mode changes
-    if (mode !== 'add_line') {
+    if (mode !== 'add_line' && mode !== 'add_fuel_route') {
         cancelPolylineTrace();
     }
 
@@ -853,6 +854,7 @@ function setMode(mode) {
     }
     var labels = {
         'add_line': 'Click an element to start drawing a transmission line (ESC to cancel)',
+        'add_fuel_route': 'Click a fuel source or storage to start drawing a fuel route (ESC to cancel)',
         'add_generator': 'Click on map to place generators (ESC to stop)',
         'add_battery': 'Click on map to place energy storage units (ESC to stop)',
         'add_transformer': 'Click on map to place transformers (ESC to stop)',

@@ -201,6 +201,12 @@ class TransmissionLineGeo(BaseModel):
     # Power flow properties (per-line overrides for global DC power flow defaults)
     length_km: Optional[float] = None
     reactance_pu: Optional[float] = None
+    reactance_per_km: Optional[float] = Field(
+        default=None, ge=0,
+        description="Series reactance (ohm/km) used to derive reactance_pu "
+                    "from length_km when reactance_pu is not set; "
+                    "None or 0 = dc_power_flow.reactance_per_km",
+    )
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1
@@ -650,7 +656,7 @@ class GeneratorConfig(BaseModel):
     # Per-node arrays (length = num_nodes)
     life_time: list[int] = Field(description="Lifetime per node (years)")
     initial_age: list[int] = Field(description="Initial age per node (years)")
-    degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
+    degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     decommissioning_cost: list[float] = Field(description="Decommissioning cost per node ($/MW)")
     rated_power: list[float] = Field(description="Installed capacity per node (MW)")
     min_power: list[float] = Field(description="Minimum output fraction per node")
@@ -838,7 +844,7 @@ class TechnologyConfig(BaseModel):
     invest_max_power: list[float] = Field(description="Max investment per node (MW)")
     availability_file: Optional[str] = Field(None, alias="Availability")
     eff_at_rated: list[float] = Field(description="Efficiency at rated power per node")
-    degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
+    degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     lifetime: int = Field(description="Economic lifetime (years)")
     min_output: list[float] = Field(default_factory=lambda: [0.0], description="Min output fraction per node")
     ramp_up: list[float] = Field(default_factory=lambda: [1.0], description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
@@ -882,7 +888,7 @@ class BatteryTechnologyConfig(BaseModel):
     max_duration_hours: float = Field(default=24.0, ge=0, description="Max energy-to-power ratio (hours)")
     efficiency_charge: list[float] = Field(description="Charge efficiency per node (0-1)")
     efficiency_discharge: list[float] = Field(description="Discharge efficiency per node (0-1)")
-    degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
+    degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     lifetime: int = Field(description="Economic lifetime (years)")
     soc_initial: list[float] = Field(default_factory=lambda: [0.5], description="Initial SOC fraction per node")
     max_DoD: list[float] = Field(default_factory=lambda: [0.9], description="Max depth of discharge per node")

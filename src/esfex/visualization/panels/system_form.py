@@ -110,8 +110,9 @@ class SystemForm(QWidget):
         gl.addRow(tr("system_form.max_increment"), self._max_increment)
 
         self._inertia_limit_thr = QDoubleSpinBox()
-        self._inertia_limit_thr.setRange(0, 1)
-        self._inertia_limit_thr.setDecimals(4)
+        # Absolute MW·s (Σ output × H of online units), not a fraction.
+        self._inertia_limit_thr.setRange(0, 1e8)
+        self._inertia_limit_thr.setDecimals(1)
         self._inertia_limit_thr.editingFinished.connect(self._on_changed)
         gl.addRow(tr("system_form.inertia_limit_thr"), self._inertia_limit_thr)
 

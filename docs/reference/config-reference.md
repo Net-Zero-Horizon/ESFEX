@@ -92,19 +92,19 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `apply_to_modes` | list[str] | `["development", "unit_commitment"]` | Simulation modes in which N-1 is applied |
 | `transmission_enabled` | bool | `true` | Include line contingencies |
 | `transmission_reserve_factor` | float (0–1) | `0.7` | Pre-contingency loading limit as a fraction of line rating |
-| `critical_line_threshold` | float (≥ 0) | `0` | Minimum utilisation for a line to be screened |
+| `critical_line_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: minimum loading (fraction of capacity) for a line or transformer to be tripped by Run All N-1 / Screening. Not used by the optimisation. |
 | `generation_enabled` | bool | `true` | Include generator contingencies |
-| `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit` or `percentage` of load |
+| `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. |
 | `generation_reserve_percentage` | float (0–1) | `0.15` | Reserve fraction when `generation_reserve_type: percentage` |
 | `scopf_enabled` | bool | `false` | Use SCOPF instead of preventive N-1 reserves: post-contingency (LODF) flow limits for every pair of lines, in one solve, with priced overloads. |
 | `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative) |
 | `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
-| `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Contingency analysis depth. 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
-| `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | How generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
-| `pi_screening_threshold` | float (≥ 0) | `0` | Performance Index threshold for contingency screening. 0 = no screening (analyze all contingencies). Higher values filter out low-impact contingencies. |
-| `transformer_contingencies` | bool | `false` | Include transformer outages in N-1 contingency analysis. |
-| `battery_contingencies` | bool | `false` | Include battery/storage outages in N-1 contingency analysis. Discharging batteries act as generation loss. |
+| `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
+| `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | Studio SLD analysis only: how generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
+| `pi_screening_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: Performance Index threshold for contingency screening. 0 = no screening (analyze all contingencies). Higher values filter out low-impact contingencies. |
+| `transformer_contingencies` | bool | `false` | Studio SLD analysis only: include transformer outages. |
+| `battery_contingencies` | bool | `false` | Studio SLD analysis only: include battery/storage outages. Discharging batteries act as generation loss. |
 
 ---
 
@@ -240,7 +240,7 @@ There is no `demand_growth` or `initial_re_penetration` key; both are ignored if
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `sim_rooftop` / `SIM_ROOFTOP` | bool | `false` | Simulate rooftop solar (needs `rooftop_solar_config`) |
-| `inertia_limit_threshold` / `INERTIA_LIMIT_THRESHOLD` | float (≥ 0) | `0.1` | Minimum system inertia requirement |
+| `inertia_limit_threshold` / `INERTIA_LIMIT_THRESHOLD` | float (≥ 0) | `0.1` | Minimum system inertia requirement in MW·s (Σ output × H), an absolute value |
 | `load_damping` | float (≥ 0) | `0.01` | Load damping coefficient D (pu): fraction of demand that reduces per Hz deviation |
 | `frequency_nominal` | float (> 0) | `50` | Nominal system frequency (Hz) |
 | `rocof_limit` | float (> 0) | `2` | Maximum allowable ROCOF before protection trips (Hz/s) |
@@ -407,6 +407,7 @@ See [Nodes and buses](../user-guide/configuration.md#nodes-and-buses) in the gui
 | `line_type` | `overhead` \| `underground` \| `submarine` \| null | `null` | `overhead`, `underground` or `submarine` |
 | `length_km` | float \| null | `null` | Length (km) |
 | `reactance_pu` | float \| null | `null` | Reactance (p.u. on `ac_power_flow.base_mva`). Missing → length × `reactance_per_km` / Z_base with Z_base = V² / `base_mva` (V = `voltage_kv`, else `voltage_level_kv`); 0.01 without a length |
+| `reactance_per_km` | float (≥ 0) \| null | `null` | This line's reactance (Ω/km) for the derivation above; null or 0 = `dc_power_flow.reactance_per_km` |
 | `resistance_pu` | float \| null | `null` | Resistance (p.u.). Missing → 0 |
 | `susceptance_pu` | float \| null | `null` | Susceptance (p.u.). Missing → 0 |
 | `num_circuits` | int | `1` | Parallel circuits |

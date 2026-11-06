@@ -713,7 +713,7 @@ where:
 
 - \(h_{g,n}\) is the inertia constant of generator \(g\) at bus \(n\) (`inertia[n]`)
 - \(h^{\text{bat}}_{b,n}\) is the synthetic inertia constant of battery \(b\) (`inertia[n]`)
-- \(H^{\min}_t\) is the minimum inertia requirement in MW·s (the system key `INERTIA_LIMIT_THRESHOLD`, default 0.1, or an hourly profile). It is an absolute value, not a fraction of demand or capacity, although the Studio labels the field as a fraction; the default 0.1 MW·s is effectively no requirement. The constraint is skipped in hours where it is \(\leq 0\)
+- \(H^{\min}_t\) is the minimum inertia requirement in MW·s (the system key `INERTIA_LIMIT_THRESHOLD`, default 0.1, or an hourly profile). It is an absolute value, not a fraction of demand or capacity (the Studio's Min. System Inertia field); the default 0.1 MW·s is effectively no requirement. The constraint is skipped in hours where it is \(\leq 0\)
 - \(H_t\) is the inertia shortfall slack, penalized by `loss_of_inertia_penalty`
 
 Inertia is contributed by synchronous generators proportionally to their output and by storage systems proportionally to their power throughput.
@@ -853,7 +853,9 @@ where \(\omega\) is the `transmission_reserve_factor`. Every transmission line w
 
 Both slacks are priced at `loss_of_reserve_static` per MW and time step (reported as `n1_security_shortfall_cost`), so an insecure fleet or network shows up as a cost instead of an infeasible model.
 
-`generation_reserve_type`, `generation_reserve_percentage`, `critical_line_threshold` and `scopf_max_iterations` are read from the configuration but not used by any constraint.
+With `generation_reserve_type: percentage` the right-hand side of N1-1 is `generation_reserve_percentage` × the total demand of step \(t\) instead of the largest unit's output, and no unit is excluded from \(H^{\text{N1}}_t\) (same constraint and shortfall names).
+
+`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` configure the post-hoc contingency analysis of the Studio's single-line diagram, not the optimisation. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint.
 
 #### SCOPF variant
 

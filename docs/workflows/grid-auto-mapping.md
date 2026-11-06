@@ -36,7 +36,7 @@ All four sources are enabled by default. Combining them (OSM topology, plant dat
 |--------|---------|-------------|
 | **OpenStreetMap** | Enabled | Crowd-sourced geographic data. Provides substations, generators, transmission lines, transformers, AC/DC converters, energy storage, fuel entry points and fuel storage. The authoritative source for network topology. Fetched from the Overpass API or from a local Geofabrik extract (see [Country-scale OSM (Geofabrik)](#country-scale-osm-geofabrik)). |
 | **WRI Global Power Plant Database** | Enabled | World Resources Institute database (~30,000 plants worldwide) with capacity and fuel type. |
-| **GEM Global Power Plants (2025)** | Enabled | Global Energy Monitor database (February 2025 update): capacity, fuel, commissioning year, owner and technology sub-type. Only units with status "operating" are kept. |
+| **GEM Global Power Plants (2025)** | Enabled | Global Energy Monitor database (February 2025 update): capacity, fuel, commissioning year, owner and technology sub-type. Only units with status "operating" (or a blank status) are kept. |
 | **GridFinder (predicted lines)** | Enabled | ML-predicted line routes from satellite night-lights (Zenodo dataset). Geometry only: voltage and capacity are derived from the buses each line connects. GridFinder lines are kept only where OSM has no line, and their endpoints snap to buses within 2 km, so they fill gaps in OSM coverage. |
 
 **Filters:**
@@ -142,7 +142,7 @@ With auto-creation unchecked, a node editor appears: a table (Name, Lat, Lng) wi
 |---------|-------|---------|-------------|
 | Generate availability profiles | on/off | on | After the build, write one availability CSV per generator (see [Availability profiles](#availability-profiles)). |
 | Station merge radius | 0.05 -- 5 km | 1.0 km | Buses of the same voltage within this radius are treated as one physical station and merged. This is what connects line endpoints to their substation. It is a "same station" tolerance, not a reach distance: lines are never snapped to a distant bus. Increase it if large substations split into separate components; decrease it if two distinct stations merge. |
-| Simplification level | 0 -- 4 | 0 | Simplification applied after the build, before the network is drawn (see below). |
+| Simplification level | 0 -- 2 | 0 | Simplification applied after the build, before the network is drawn (see below). |
 | Drop isolated < N bus(es) | 1 -- 50 | 2 | Connected components with fewer buses than N are removed. The largest component is always kept. Set to 1 to keep everything. |
 
 **Simplification levels:**
@@ -151,9 +151,9 @@ With auto-creation unchecked, a node editor appears: a table (Name, Lat, Lng) wi
 |-------|--------|
 | 0 -- Cleanup only | Repairs broken references and self-loops, removes orphaned fuel infrastructure and buses with nothing attached. |
 | 1 -- Aggregate equipment & parallel lines | Level 0, plus merging of parallel lines and aggregation of equivalent generators and batteries in place. |
-| 2 -- 4 | Level 1, plus an equivalent-network reduction (PyPSA-style): each node becomes one bus carrying its aggregated generation and demand, and nodes are joined by one equivalent branch per connected node pair (capacities summed, \(1/x_{eq} = \sum 1/x_i\)). A node containing an AC/DC or frequency converter keeps one bus per side of the converter. |
+| 2 -- Equivalent network (one bus per node) | Level 1, plus an equivalent-network reduction (PyPSA-style): each node becomes one bus carrying its aggregated generation and demand, and nodes are joined by one equivalent branch per connected node pair (capacities summed, \(1/x_{eq} = \sum 1/x_i\)). A node containing an AC/DC or frequency converter keeps one bus per side of the converter. |
 
-Levels 2, 3 and 4 currently run the same reduction. The combo labels for these levels ("Radial / series bus elimination", "Intra-node voltage collapse", "Full node collapse") describe an older pruning scheme.
+Levels 3 and 4 of earlier versions ran the same reduction as level 2 and are no longer offered; `apply_simplification_level` still accepts them as level 2. The selective L1–L4 suggestions of the Validate dialog's **Network reduction (levels)** check are a different tool (radial, series, voltage and node collapse suggestions you apply one by one).
 
 #### Build pipeline
 
@@ -324,7 +324,7 @@ When several sources report the same asset, `deduplicate_features` keeps one rec
 2. **OSM-authoritative gap fill.** Every OSM generator is kept. A GEM or WRI generator is kept only if no OSM generator of the same fuel with a capacity of at least 2 MW lies within 2 km. OSM markers without a real capacity therefore do not hide a GEM/WRI entry with a known capacity.
 3. **Plausibility caps.** A capacity above the largest plausible single plant for its fuel is capped: hydro 27 GW, nuclear 8.3 GW, gas and oil 8.2 GW, coal 7.7 GW, solar 4.8 GW, wind 3.6 GW, biomass/biogas/waste 3.1 GW, geothermal 0.5 GW (unknown fuels 27 GW).
 
-The GEM fetcher only returns units with status "operating".
+The GEM fetcher returns units with status "operating" and units with a blank status; units with any other status (construction, mothballed, retired, ...) are skipped and counted in the progress message.
 
 **Other point features:** batteries are merged by proximity (1 km) and capacity (±20%); substations by proximity (1 km); transformers by proximity (0.5 km). The higher-priority source (OSM > GEM > WRI > GridFinder) is kept and its empty fields are filled from the duplicate.
 

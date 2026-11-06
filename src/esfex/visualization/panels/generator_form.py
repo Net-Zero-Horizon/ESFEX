@@ -337,9 +337,10 @@ class GeneratorForm(QWidget):
         self._reservoir_group.setVisible(False)
         layout.addWidget(self._reservoir_group)
 
-        # Connect reservoir_capacity to show/hide the group
-        # (disconnect first since _dbl_spin already connected _on_changed)
-        self._reservoir_capacity.valueChanged.connect(self._on_reservoir_toggled)
+        # The section shows for hydro (fuel "Water") or when a reservoir is
+        # set, so a new hydro unit (capacity 0) can get one.
+        self._reservoir_capacity.valueChanged.connect(self._update_reservoir_visibility)
+        self._fuel.currentIndexChanged.connect(self._update_reservoir_visibility)
 
         # --- Appearance ---
         self._style_widget = VisualStyleWidget(
@@ -475,7 +476,7 @@ class GeneratorForm(QWidget):
         self._cascade_downstream.blockSignals(False)
         self._cascade_delay_hours.setValue(
             int(getattr(inst, "cascade_delay_hours", 0) or 0))
-        self._reservoir_group.setVisible(inst.reservoir_capacity > 0)
+        self._update_reservoir_visibility()
 
         # Set default color based on generator type before loading style
         from esfex.visualization.data.default_colors import get_generator_color
@@ -641,9 +642,11 @@ class GeneratorForm(QWidget):
         self._fuel_curve_stack.setVisible(idx > 0)
         self._on_changed()
 
-    def _on_reservoir_toggled(self, val):
-        """Show/hide reservoir fields based on capacity."""
-        self._reservoir_group.setVisible(val > 0)
+    def _update_reservoir_visibility(self, *_args):
+        """Show the reservoir fields for hydro units or units with a reservoir."""
+        self._reservoir_group.setVisible(
+            self._fuel.currentText() == "Water"
+            or self._reservoir_capacity.value() > 0)
 
     def _browse_inflow_file(self):
         from PySide6.QtWidgets import QFileDialog

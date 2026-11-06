@@ -96,10 +96,10 @@ Use **Add Rule** and **Remove Rule** to edit the table. Rules are evaluated in o
 w_b = A_b \times d_r \tag{DD-1}
 \]
 
-where \(A_b\) is the footprint area and \(d_r\) the weight per m² of the matching rule. For each node, every building in the domain is assigned to the nearest of that node's eligible buses, and the bus fraction is the bus's share of the assigned weight:
+where \(A_b\) is the footprint area and \(d_r\) the weight per m² of the matching rule. Each building belongs to the node of its nearest bus (any bus of the system), and within that node it is assigned to the nearest eligible bus. A bus fraction is the bus's share of the weight of its node's buildings; a node with no buildings is split equally:
 
 \[
-f_i = \frac{\sum_{b \to i} w_b}{\sum_{b} w_b} \tag{DD-2}
+f_i = \frac{\sum_{b \to i} w_b}{\sum_{b \in n} w_b} \tag{DD-2}
 \]
 
 Weights are relative: scaling all of them by the same factor does not change the fractions.

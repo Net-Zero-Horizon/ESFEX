@@ -204,7 +204,8 @@ def _build_graph(
         length = float(line.length_km) if line.length_km is not None else 0.0
         x_raw = line.reactance_pu
         if x_raw is None or float(x_raw) <= 0:
-            x_pu = derived_reactance_pu(length, line.voltage_kv, dc_cfg, s_base)
+            x_pu = derived_reactance_pu(length, line.voltage_kv, dc_cfg, s_base,
+                                        getattr(line, "reactance_per_km", None))
         else:
             x_pu = float(x_raw)
         r_pu = float(line.resistance_pu) if line.resistance_pu is not None else 0.0

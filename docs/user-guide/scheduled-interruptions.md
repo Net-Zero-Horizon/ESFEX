@@ -44,7 +44,7 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 
 | Field | Meaning |
 | --- | --- |
-| **Start** / **End** | The window's hour range within the year |
+| **Start** / **End** | The window's hour range, shown as dates. Dates follow the model calendar: every year has 8,760 hours and no 29 February, so in a leap base year 1 March is still hour 1,416 and a date typed as 29 February is read as 28 February |
 | **Availability** | Capacity fraction during the window (0 = full cut, 1 = no effect) |
 | **Note** | Optional free-text label shown on the calendar |
 | **Repeat every year** | Repeat the window in every simulated year (`recurring`); unchecked, it happens once, in the base year |

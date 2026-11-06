@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -126,6 +127,10 @@ class GuiBus:
     latitude: float = 0.0               # Absolute map position
     longitude: float = 0.0
     style: VisualStyle = field(default_factory=VisualStyle)
+    # GUI-only: True once the user picks the role in the bus form. The
+    # role repair run on save (repair_bus_roles_and_demand) then keeps it.
+    # Saved as the ``_gui_layout.user_set_bus_roles`` list of bus ids.
+    role_user_set: bool = False
 
 
 @dataclass
@@ -269,8 +274,8 @@ class GuiTransmissionLine:
     to_endpoint: Optional[EndpointRef] = None
     # Power flow properties
     length_km: Optional[float] = None          # None = auto-calculate from coords
-    base_impedance: Optional[float] = None     # ohm (None = system default)
-    reactance_per_km: Optional[float] = None   # ohm/km (None = system default)
+    reactance_per_km: Optional[float] = None   # ohm/km (None = system default);
+                                               # derives reactance_pu from length
     reactance_pu: Optional[float] = None       # None = use global default
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
@@ -828,7 +833,7 @@ class GuiGlobalSettings:
     # N1 Security
     n1_enabled: bool = False
     n1_apply_to_modes: list[str] = field(
-        default_factory=lambda: ["unit_commitment"]
+        default_factory=lambda: ["development", "unit_commitment"]
     )
     n1_transmission_enabled: bool = True
     n1_transmission_reserve_factor: float = 0.70
@@ -1419,6 +1424,42 @@ class GuiModel(QObject):
     def clear_inter_system_links(self):
         self._inter_system_links.clear()
         self._next_islink_id = 0
+
+    def restore_inter_system_link(
+        self, link: GuiInterSystemLink, keep_id: bool = True,
+    ) -> str:
+        """Add a link parsed from a config, keeping every field.
+
+        Used by the load paths so nothing parsed by
+        ``config_to_inter_system_links`` (reactance, resistance, style, ...)
+        falls back to the dataclass defaults. ``keep_id=False`` assigns a
+        fresh id (for links merged into a project that already has links).
+        """
+        kwargs = {f.name: getattr(link, f.name) for f in dataclasses.fields(link)}
+        if not keep_id:
+            kwargs["link_id"] = None
+        return self.add_inter_system_link(**kwargs)
+
+    def rename_system_references(self, old_name: str, new_name: str) -> None:
+        """Point inter-system links and the simulation selection at a renamed system.
+
+        ``systems_to_simulate`` keeps its order, so the renamed system stays
+        selected (and keeps its position) for Validate and Run.
+        """
+        for lk in self._inter_system_links:
+            changed = False
+            if lk.from_system == old_name:
+                lk.from_system = new_name
+                changed = True
+            if lk.to_system == old_name:
+                lk.to_system = new_name
+                changed = True
+            if changed:
+                self.interSystemLinkUpdated.emit(lk.link_id)
+        g = self.global_settings
+        g.systems_to_simulate = [
+            new_name if s == old_name else s for s in g.systems_to_simulate
+        ]
 
     # ------------------------------------------------------------------
     # Node operations

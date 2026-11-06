@@ -64,9 +64,8 @@ The link form mirrors the transmission line form. A read-only header shows the t
 | | Capacity | MW | Existing transfer capacity. Set to 0 if the link only represents a possible investment. On a fuel route: route capacity in fuel units per day. |
 | | Voltage | kV | Nominal voltage |
 | | Type | -- | overhead, underground, or submarine |
-| | Length | km | Physical length. Computed from the trace; editable. |
-| | Base Impedance | ohm | Base impedance for per-unit conversion |
-| | Reactance per km | ohm/km | Series reactance per km |
+| | Length | km | Physical length. Computed from the trace and the endpoints (read-only; move the endpoints or edit the trace to change it). |
+| | Reactance per km | ohm/km | Series reactance per km; stored with the link, not used by the run (set the per-unit reactance) |
 | | Reactance / Resistance / Susceptance | pu | Per-unit line parameters |
 | | Circuits | -- | Number of circuits (1–10) |
 | | Frequency | Hz | Nominal frequency |
@@ -118,7 +117,7 @@ The routes only carry fuel when primary energy is modelled for that fuel (see [P
 
 - Right-click the link in the tree and select **Delete**, or use the **Delete** button below the tree or **Delete Line** in the form.
 - Links are removed automatically when either connected system is deleted.
-- Renaming a system does not update its links; see [System Management](system-management.md#renaming-a-system).
+- Renaming a system updates its links; see [System Management](system-management.md#renaming-a-system).
 
 
 ---
@@ -136,7 +135,9 @@ The Validate dialog does not check inter-system links. They are checked by the a
 | Capacity, costs, and distance are not negative | Error |
 | Loss factor is between 0 and 1 | Error |
 | Endpoint buses exist in their systems | Warning (the line may not be drawn) |
+| A transmission link has a capacity above 0 | Warning (it carries no power otherwise) |
 | A fuel route link has a fuel | Warning (the run ignores it otherwise) |
+| No two links join the same pair of nodes | Warning (the second one is ignored) |
 
 
 ---
