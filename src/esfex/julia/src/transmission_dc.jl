@@ -513,7 +513,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 
             # Electrolyzer power (demand side)
             electrolyzer_term = if vars.electrolyzer_power !== nothing
-                vars.electrolyzer_power[i, t]
+                electrolyzer_load(vars, i, t)
             else
                 AffExpr(0.0)
             end
@@ -579,8 +579,8 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             if vars.reservoir_pump !== nothing
                 for g in vars.gens_at_bus[i]
                     gen = input.generators[g]
-                    nidx = b2n[i]
-                    if gen.reservoir_capacity[nidx] > 0 && gen.reservoir_pump_capacity[nidx] > 0
+                    # Reservoir arrays are per bus (expanded by the adapter).
+                    if gen.reservoir_capacity[i] > 0 && gen.reservoir_pump_capacity[i] > 0
                         add_to_expression!(reservoir_pump_term, vars.reservoir_pump[g, i, t])
                     end
                 end
@@ -751,6 +751,27 @@ function dev_corridor_investment!(model, vars::PowerSystemVariables, input, i::I
     add_to_expression!(transfer_cost,
         max(get(net.transference_invest_cost, i, 0.0), get(net.transference_invest_cost, j, 0.0)), inv)
     return inv
+end
+
+"""
+    dev_expandable_lines(transmission, network) -> Set{Int}
+
+Lines that development-mode investment can expand: the first line of each
+corridor whose ends both allow transference investment, the line
+`dev_corridor_investment!` gives the capacity to.
+"""
+function dev_expandable_lines(transmission::TransmissionDC, network)
+    out = Set{Int}()
+    seen = Set{Tuple{Int,Int}}()
+    for (ℓ, (i, j)) in enumerate(transmission.lines)
+        key = i < j ? (i, j) : (j, i)
+        key in seen && continue
+        push!(seen, key)
+        max_inv = min(get(network.transference_invest_max, i, 0.0),
+                      get(network.transference_invest_max, j, 0.0))
+        max_inv > 0 && push!(out, ℓ)
+    end
+    return out
 end
 
 """

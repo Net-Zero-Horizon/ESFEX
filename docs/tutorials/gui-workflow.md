@@ -300,6 +300,7 @@ See [Inter-System Links](../gui/inter-system-links.md) for details and current l
 1. Click **Validate** in the toolbar.
 2. The validation dialog has one checkbox per check category:
     - **Structural** (nodes, lines)
+    - **Configuration** (keys of the opened YAML file that ESFEX ignores)
     - **Electrical** (buses, equipment references)
     - **Demand** (load data, coverage)
     - **Generation** (adequacy, availability files)

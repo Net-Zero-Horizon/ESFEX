@@ -238,6 +238,27 @@ def _investment_axes(tech_idx, year_idx):
     }
 
 
+def _lookup_axis_entry(kind, m, entry):
+    """1-based index of ``entry`` on a named axis, or None if unknown.
+
+    Names match as strings, so a YAML ``1`` finds the key ``"1"`` and
+    ``"2030"`` finds the year 2030. On a unit or technology axis an integer
+    that names no key is a 1-based position, like on the numeric axes.
+    """
+    for key in (entry, str(entry)):
+        if key in m:
+            return m[key]
+    if kind == "year":
+        try:
+            return m.get(int(entry))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(entry, (int, np.integer)) and not isinstance(entry, bool) \
+            and 1 <= int(entry) <= len(m):
+        return int(entry)
+    return None
+
+
 def _resolve_one(cc, name_axes) -> dict:
     """Resolve a single constraint into a plain spec with 1-based Julia indices
     (``"all"`` → -1). Raises ValueError on an unknown name."""
@@ -255,12 +276,13 @@ def _resolve_one(cc, name_axes) -> dict:
                 resolved.append(-1)
             elif pos in axes:
                 kind, m = axes[pos]
-                if entry not in m:
+                idx = _lookup_axis_entry(kind, m, entry)
+                if idx is None:
                     raise ValueError(
                         f"custom constraint '{cc.name}': unknown {kind} "
                         f"'{entry}' for variable '{t.variable}'"
                     )
-                resolved.append(m[entry])
+                resolved.append(idx)
             else:
                 resolved.append(int(entry))
         terms.append({"variable": t.variable, "index": resolved,
@@ -672,6 +694,83 @@ def _resolve_element_bus_mapping(
     return gen_bus_per_node, bat_bus_per_node
 
 
+# Units already warned about free life extension, so the master of every
+# myopic year does not repeat the warning: (system, kind, unit key).
+_FREE_EXTENSION_WARNED: set = set()
+
+
+def life_extension_invest_costs(sys) -> tuple[dict, dict]:
+    """Investment costs that price the life extension of existing units.
+
+    The master charges a life-extended MW ``invest_cost x
+    life_extension_cost_factor`` per year. Existing units often carry an
+    ``invest_cost`` of 0 (the Studio default), which made extension free.
+    Where a unit's ``invest_cost`` is 0 at a node, the candidate it would be
+    replaced with supplies the cost: for a generator, the technology with
+    the same fuel and type (the one named by its ``technology`` field
+    first, else the first in config order); for a battery, the battery
+    technology named by its ``technology`` field, else the first battery
+    technology. Without a candidate the extension stays free and a warning
+    is logged once per unit.
+
+    Returns:
+        ``(gen_costs, bat_costs)``: per-node ``invest_cost`` lists for the
+        generator / battery keys that changed.
+    """
+    def _fill(own, candidate):
+        out = list(own)
+        for n, c in enumerate(out):
+            if c <= 0 and candidate:
+                out[n] = float(candidate[n] if n < len(candidate) else candidate[-1])
+        return out
+
+    def _warn(kind, key):
+        tag = (getattr(sys, "name", ""), kind, key)
+        if tag not in _FREE_EXTENSION_WARNED:
+            _FREE_EXTENSION_WARNED.add(tag)
+            logger.warning(
+                "%s %r has invest_cost 0 and no candidate %s to take it "
+                "from: extending its life is free in the master problem.",
+                kind, key,
+                "technology with the same fuel and type" if kind == "Generator"
+                else "battery technology")
+
+    gen_costs: dict = {}
+    techs = getattr(sys, "technologies", None) or {}
+    for key, gen in (getattr(sys, "generators", None) or {}).items():
+        if not any(p > 0 for p in gen.rated_power):
+            continue
+        if all(c > 0 for c in gen.invest_cost[:len(gen.rated_power)]):
+            continue
+        matches = [(k, t) for k, t in techs.items()
+                   if t.fuel == gen.fuel and t.type == gen.type]
+        named = [m for m in matches
+                 if getattr(gen, "technology", None) in (m[0], m[1].name)]
+        if not (named or matches):
+            _warn("Generator", key)
+            continue
+        _, tech = (named or matches)[0]
+        own = list(gen.invest_cost) + [0.0] * (len(gen.rated_power) - len(gen.invest_cost))
+        gen_costs[key] = _fill(own, tech.invest_cost)
+
+    bat_costs: dict = {}
+    btechs = getattr(sys, "battery_technologies", None) or {}
+    for key, bat in (getattr(sys, "batteries", None) or {}).items():
+        if not any(p > 0 for p in bat.rated_power):
+            continue
+        if all(c > 0 for c in bat.invest_cost[:len(bat.rated_power)]):
+            continue
+        named = [(k, t) for k, t in btechs.items() if bat.technology in (k, t.name)]
+        if not (named or btechs):
+            _warn("Battery", key)
+            continue
+        _, btech = (named or list(btechs.items()))[0]
+        own = list(bat.invest_cost) + [0.0] * (len(bat.rated_power) - len(bat.invest_cost))
+        bat_costs[key] = _fill(own, btech.invest_cost_power)
+
+    return gen_costs, bat_costs
+
+
 def _compute_geographic_fuel_adjustments(
     sys_config: "SystemConfig",
 ) -> Dict[str, List[float]]:
@@ -1019,23 +1118,30 @@ class PowerSystemAdapter:
         logger.debug(f"PowerSystemAdapter initialized: {hours}h, {num_nodes} nodes, mode={mode}")
 
     def _slice_availability(self, cached: np.ndarray, resolution_hours: int) -> Optional[np.ndarray]:
-        """Slice a cached availability profile to the current window."""
+        """Slice a cached hourly profile (availability, inflow) to this window.
+
+        ``start_hour`` counts from the start of the model year. The profile is
+        indexed by horizon hour (year index × 8760 + hour), wrapping around
+        when it is shorter, as in the master problem: a multi-year profile
+        gives each year its own block, a one-year profile repeats.
+        """
+        start = absolute_start_hour(self.year, self.base_year, self.start_hour) % max(len(cached), 1)
         if resolution_hours > 1 and len(cached) > self.hours:
             resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
-            start_idx = self.start_hour // resolution_hours
+            start_idx = start // resolution_hours
             end_idx = start_idx + self.hours
             return resampled[start_idx:end_idx]
         else:
-            end_h = self.start_hour + self.hours
+            end_h = start + self.hours
             if end_h <= len(cached):
-                return cached[self.start_hour:end_h]
-            elif self.start_hour < len(cached):
+                return cached[start:end_h]
+            elif start < len(cached):
                 return np.concatenate([
-                    cached[self.start_hour:],
+                    cached[start:],
                     cached[:end_h - len(cached)]
                 ])
             else:
-                wrapped_start = self.start_hour % len(cached)
+                wrapped_start = start % len(cached)
                 wrapped_end = wrapped_start + self.hours
                 if wrapped_end <= len(cached):
                     return cached[wrapped_start:wrapped_end]
@@ -1225,36 +1331,11 @@ class PowerSystemAdapter:
             # Use cached availability if available, otherwise load from file
             availability = None
             if key in self.availability_cache:
-                # Use pre-loaded cache (already at full resolution, slice window)
-                cached = self.availability_cache[key]
-                if resolution_hours > 1 and len(cached) > self.hours:
-                    # Aggregate to temporal resolution using MEAN (correct for capacity factors)
-                    resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
-                    start_idx = self.start_hour // resolution_hours
-                    end_idx = start_idx + self.hours
-                    availability = resampled[start_idx:end_idx]
-                else:
-                    # Slice from correct window offset within the year
-                    end_h = self.start_hour + self.hours
-                    if end_h <= len(cached):
-                        availability = cached[self.start_hour:end_h]
-                    elif self.start_hour < len(cached):
-                        # Window extends beyond available data — wrap around
-                        availability = np.concatenate([
-                            cached[self.start_hour:],
-                            cached[:end_h - len(cached)]
-                        ])
-                    else:
-                        # start_hour beyond data — wrap
-                        wrapped_start = self.start_hour % len(cached)
-                        wrapped_end = wrapped_start + self.hours
-                        if wrapped_end <= len(cached):
-                            availability = cached[wrapped_start:wrapped_end]
-                        else:
-                            availability = np.concatenate([
-                                cached[wrapped_start:],
-                                cached[:wrapped_end - len(cached)]
-                            ])
+                # Pre-loaded cache at full resolution: slice this year's window
+                # (mean aggregation for resolution > 1, correct for capacity factors)
+                availability = self._slice_availability(
+                    self.availability_cache[key], resolution_hours
+                )
             elif hasattr(gen, 'availability_file') and gen.availability_file:
                 # Fallback: load from file if not cached. Resolve like demand
                 # paths: absolute paths (GUI-written, run from a /tmp config)
@@ -1264,23 +1345,21 @@ class PowerSystemAdapter:
                 from pathlib import Path
                 from esfex.utils.paths import resolve_project_data_file
                 config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
+                # A profile that cannot be read is an error: skipping here
+                # dropped the whole generator from the dispatch.
                 try:
                     avail_path = resolve_project_data_file(config_dir, gen.availability_file)
-                except ValueError:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Skipping generator %r: availability_file %r resolves "
-                        "outside config directory %s (refusing path traversal)",
-                        key, gen.availability_file, config_dir,
-                    )
-                    continue
+                except ValueError as e:
+                    raise ValueError(
+                        f"Generator {key!r}: availability_file "
+                        f"{gen.availability_file!r} resolves outside config "
+                        f"directory {config_dir} (refusing path traversal)"
+                    ) from e
                 if not avail_path.exists():
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "availability_file %r not found under %s",
-                        gen.availability_file, config_dir,
+                    raise FileNotFoundError(
+                        f"Generator {key!r}: availability_file "
+                        f"{gen.availability_file!r} not found under {config_dir}"
                     )
-                    continue
                 availability = load_availability_profile(
                     avail_path,
                     temporal_resolution_hours=resolution_hours,
@@ -1314,34 +1393,10 @@ class PowerSystemAdapter:
             # Reservoir inflow profile
             inflow = None
             if key in self.inflow_cache:
-                cached_inflow = self.inflow_cache[key]
-                if resolution_hours > 1:
-                    # Aggregate inflow using MEAN (m³/s average over period)
-                    resampled_inflow = aggregate_to_resolution(
-                        cached_inflow, target_hours=resolution_hours
-                    )
-                    start_idx = self.start_hour // resolution_hours
-                    end_idx = start_idx + self.hours
-                    inflow = resampled_inflow[start_idx:end_idx]
-                else:
-                    end_h = self.start_hour + self.hours
-                    if end_h <= len(cached_inflow):
-                        inflow = cached_inflow[self.start_hour:end_h]
-                    elif self.start_hour < len(cached_inflow):
-                        inflow = np.concatenate([
-                            cached_inflow[self.start_hour:],
-                            cached_inflow[:end_h - len(cached_inflow)]
-                        ])
-                    else:
-                        wrapped_start = self.start_hour % len(cached_inflow)
-                        wrapped_end = wrapped_start + self.hours
-                        if wrapped_end <= len(cached_inflow):
-                            inflow = cached_inflow[wrapped_start:wrapped_end]
-                        else:
-                            inflow = np.concatenate([
-                                cached_inflow[wrapped_start:],
-                                cached_inflow[:wrapped_end - len(cached_inflow)]
-                            ])
+                # Mean aggregation for resolution > 1 (m³/s average over period)
+                inflow = self._slice_availability(
+                    self.inflow_cache[key], resolution_hours
+                )
 
             # Apply scheduled interruptions as an availability mask. Materialise
             # a ones matrix for dispatchable units (no CF profile) so the outage
@@ -1377,6 +1432,7 @@ class PowerSystemAdapter:
         # Create virtual generators from investment units in units_config
         # These are created by _build_config_from_cumulative() but don't exist
         # in sys.generators — they represent technology investments from MasterProblem
+        per_bus_gen_keys: set = set()
         for key, vdata in self.units_config.items():
             if key in sys.generators:
                 continue  # Already handled above
@@ -1417,6 +1473,9 @@ class PowerSystemAdapter:
                 frequency_hz=vdata.get("frequency_hz", 50.0),
                 current_type=vdata.get("current_type", "AC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),
+                # The technology's bidding curve, so the dispatch prices the
+                # unit as the master did (flat fuel_cost otherwise).
+                fuel_cost_curve=vdata.get("fuel_cost_curve"),
             )
 
             # Load availability profile for virtual generator
@@ -1464,6 +1523,8 @@ class PowerSystemAdapter:
                                                     bus_to_node=b2n_arg)
             jl.seval("push!")(jl_generators, jl_vgen)
             gen_order.append((key, vgen))
+            if is_per_bus and b2n_arg is not None:
+                per_bus_gen_keys.add(key)
             avail_shape = v_avail.shape if v_avail is not None else "NONE"
             avail_mean = float(np.mean(v_avail)) if v_avail is not None else 0.0
             logger.info(f"Virtual gen: {vdata.get('name', key)}, type={vdata.get('type')}, "
@@ -1564,6 +1625,7 @@ class PowerSystemAdapter:
             gen_order, [], num_buses,
             bus_to_node=bus_to_node_0idx if need_expansion else None,
             gen_bus_per_node=gen_bus_per_node,
+            per_bus_keys=per_bus_gen_keys,
         )
         jl_bat_cost_curves = build_bat_cost_curves_dict(
             bat_order, num_buses,
@@ -1662,22 +1724,21 @@ class PowerSystemAdapter:
                 py_to_julia_vector(initial_soc),
             )
 
-        # Build electrolyzer config if available
-        jl_electrolyzer = jl.seval("nothing")
-        electrolyzers = getattr(sys, 'electrolyzers', {})
-        if electrolyzers:
-            e = next(iter(electrolyzers.values()))
+        # Electrolyzers, in config order (results follow the same order).
+        # The Julia electrolyzer is indexed by bus; its config lists are per
+        # node. Map them like generators: capacity at the node's first bus,
+        # properties replicated to every bus of the node.
+        jl_electrolyzers = jl.seval("ElectrolyzerConfig[]")
+        electrolyzers = getattr(sys, 'electrolyzers', None) or {}
 
-            # The Julia electrolyzer is indexed by bus; its config lists are
-            # per node. Map them like generators: capacity at the node's first
-            # bus, properties replicated to every bus of the node.
-            def _elz(values, mode="property"):
-                values = [float(v) for v in values]
-                if b2n_arg is None:
-                    return values
-                return expand_node_to_bus_array(values, b2n_arg, mode=mode)
+        def _elz(values, mode="property"):
+            values = [float(v) for v in values]
+            if b2n_arg is None:
+                return values
+            return expand_node_to_bus_array(values, b2n_arg, mode=mode)
 
-            jl_electrolyzer = ESFEX.ElectrolyzerConfig(
+        for e in electrolyzers.values():
+            jl_elz = ESFEX.ElectrolyzerConfig(
                 py_to_julia_vector(_elz(e.rated_power, "capacity")),
                 py_to_julia_vector(_elz(e.eff_at_rated)),
                 py_to_julia_vector(_elz(e.eff_at_min)),
@@ -1691,6 +1752,7 @@ class PowerSystemAdapter:
                 scale_cost(float(e.water_cost)),
                 py_to_julia_vector(_elz(e.life_time)),
             )
+            jl.seval("push!")(jl_electrolyzers, jl_elz)
 
         # Get N-1 security settings — only enable for applicable modes
         n1 = self.esfex_config.n1_security if self.esfex_config else N1SecurityConfig()
@@ -1805,7 +1867,7 @@ class PowerSystemAdapter:
             outage_masks=jl_outage_masks,
             fuel_co2=jl_fuel_co2,
             ev_config=jl_ev_config,
-            electrolyzer_config=jl_electrolyzer,
+            electrolyzers=jl_electrolyzers,
             sectoral_criticality=jl_sectoral_criticality,
             sectoral_delay_tolerance=jl_shift_delay,
             sectoral_flexibility_ratio=jl_shift_ratio,
@@ -1834,7 +1896,6 @@ class PowerSystemAdapter:
             co2_budget_violation_penalty=scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
             delay_retirement_penalty_per_mw=scale_cost(float(getattr(sys.penalties, 'delay_retirement_per_mw', 50000.0))),
             # Demand constraints — load shedding bounded to fraction of demand
-            loss_demand_threshold=float(sys.loss_demand_threshold),
             max_annual_system_cost=scale_cost(float(getattr(sys, 'max_annual_system_cost', float('inf')))),
             # Electricity price for time-varying V2G compensation and flex demand benefit
             electricity_price=py_to_julia_vector(
@@ -2222,7 +2283,7 @@ class MasterProblemAdapter:
         min_re_increment: float = 0.0,
         max_re_increment: float = 1.0,
         slack_penalty: float = 1e6,
-        life_extension_cost_factor: float = 0.3,
+        life_extension_cost_factor: Optional[float] = None,
         decommissioning_cost_factor: float = 0.1,
         temporal_resolution_hours: int = 24,
         representative_days_per_year: int = 12,
@@ -2240,6 +2301,9 @@ class MasterProblemAdapter:
         # Per-system node ranges for per-system RE constraints
         # List of (name, first_bus_1indexed, num_buses, initial_re)
         system_node_ranges: Optional[List[tuple]] = None,
+        # RE targets {(system_1idx, year_1idx): share} replacing the RE-1
+        # trajectory (myopic mode: each year's target from the full horizon)
+        re_target_override: Optional[dict] = None,
         # Config path for resolving relative file paths (availability, inflow)
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
@@ -2267,8 +2331,11 @@ class MasterProblemAdapter:
             initial_re_penetration: Initial RE penetration ratio
             min_re_increment: Minimum annual RE penetration increment
             max_re_increment: Maximum annual RE penetration increment
+            re_target_override: RE targets {(system, year): share}, both
+                1-based, that replace the RE-1 trajectory (myopic mode)
             slack_penalty: Penalty for violating soft constraints
             life_extension_cost_factor: Cost factor for life extension
+                (default: the system's life_extension_cost_factor)
             decommissioning_cost_factor: Cost factor for decommissioning
             temporal_resolution_hours: Hours per timestep
             investment_resolution_hours: Hours per investment period (8760=annual)
@@ -2307,6 +2374,7 @@ class MasterProblemAdapter:
         self.min_re_increment = min_re_increment
         self.max_re_increment = max_re_increment
         self.system_node_ranges = system_node_ranges or []
+        self.re_target_override = re_target_override or {}
         self.slack_penalty = slack_penalty
         self.life_extension_cost_factor = life_extension_cost_factor
         self.decommissioning_cost_factor = decommissioning_cost_factor
@@ -2337,6 +2405,13 @@ class MasterProblemAdapter:
         self.inertia_limit = float(getattr(
             self.system_config, 'INERTIA_LIMIT',
             getattr(self.system_config, 'inertia_limit', 0.0)))
+
+        # Life extension: the system's life_extension_cost_factor unless the
+        # caller overrides it (the runner never passed it, so the config key
+        # had no effect and a hard-coded 0.3 applied).
+        if self.life_extension_cost_factor is None:
+            self.life_extension_cost_factor = float(getattr(
+                self.system_config, 'life_extension_cost_factor', 0.20))
 
         # CO2: same sources as the dispatch (fuels' emission factors and
         # penalties.co2_cost), so the plan sees the carbon cost it will pay.
@@ -2504,10 +2579,16 @@ class MasterProblemAdapter:
         # bus_index).  See _resolve_element_bus_mapping.
         gen_bus_per_node, bat_bus_per_node = _resolve_element_bus_mapping(sys)
 
+        # Life extension is priced at invest_cost; units without one take it
+        # from their candidate technology (life_extension_invest_costs).
+        ext_gen_costs, ext_bat_costs = life_extension_invest_costs(sys)
+
         # Convert generators with availability profiles
         gen_order = []  # (key, python_config) in Julia push order
         jl_generators = jl.seval("GeneratorConfig[]")
         for key, gen in sys.generators.items():
+            if key in ext_gen_costs:
+                gen = gen.model_copy(update={"invest_cost": ext_gen_costs[key]})
             # Load availability profile if specified
             availability = None
             if hasattr(gen, 'availability_file') and gen.availability_file:
@@ -2558,6 +2639,8 @@ class MasterProblemAdapter:
         bat_order = []  # (key, python_config) in Julia push order
         jl_batteries = jl.seval("BatteryConfig[]")
         for key, bat in sys.batteries.items():
+            if key in ext_bat_costs:
+                bat = bat.model_copy(update={"invest_cost": ext_bat_costs[key]})
             bat_bus_map = bat_bus_per_node.get(key)
             jl_bat = convert_battery_config(bat, bus_to_node=b2n_arg,
                                              bus_per_node=bat_bus_map)
@@ -2755,6 +2838,10 @@ class MasterProblemAdapter:
             bat_cost_curves=jl_bat_cost_curves,
             tech_cost_curves=jl_tech_cost_curves,
             benders_lol_penalty_cap=scale_cost(self.benders_lol_penalty_cap),
+            re_target_override=jl.seval(
+                "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
+                    f"({int(s)}, {int(y)}) => {float(v)!r}"
+                    for (s, y), v in self.re_target_override.items()) + ")"),
         )
 
         return jl_input

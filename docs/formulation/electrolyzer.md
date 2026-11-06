@@ -1,6 +1,6 @@
 # Electrolyzer Model
 
-Electrolyzers convert power to hydrogen (P2H2) [**[49]**](../reference/bibliography.md#ref49) and are a common sector-coupling technology [**[50]**](../reference/bibliography.md#ref50). In ESFEX the electrolyzer is a bounded, controllable electrical load in the operational dispatch (`power_system.jl`); its hydrogen output is not modelled.
+Electrolyzers convert power to hydrogen (P2H2) [**[49]**](../reference/bibliography.md#ref49) and are a common sector-coupling technology [**[50]**](../reference/bibliography.md#ref50). In ESFEX the electrolyzer is a bounded, controllable electrical load in the operational dispatch (`power_system.jl`); its hydrogen output is reported in the results but not modelled.
 
 ---
 
@@ -17,8 +17,9 @@ What ESFEX models today:
 
 - The electrolyzer's power consumption in the operational dispatch, bounded by its rated power and ramp rates, as a load in the power balance
 - Its variable and fixed costs
+- Every entry under `electrolyzers`, each with its own power and hydrogen output in the results
 
-What it does not model: hydrogen output, hydrogen demand or storage coupling, investment in new electrolyzers, minimum operating point, and the electrolyzer in the master problem. Because the dispatch gives the hydrogen no value, it plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`. The sector-coupling role (2) is not implemented.
+What it does not model: hydrogen as a commodity (the output is only reported), hydrogen demand or storage coupling, investment in new electrolyzers, minimum operating point, and the electrolyzer in the master problem. Because the dispatch gives the hydrogen no value, it plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`. The sector-coupling role (2) is not implemented.
 
 ---
 
@@ -60,12 +61,9 @@ The model parameter `energy_per_kg_h2` captures the total system-level energy co
 
 | Variable | Domain | Units | Description | Julia Name |
 |----------|--------|-------|-------------|------------|
-| \(P^{elz}_{b,t}\) | \(\mathbb{R}_+\) | MW | Power consumption at bus \(b\), time step \(t\) | `electrolyzer_power[b,t]` |
+| \(P^{elz}_{e,b,t}\) | \(\mathbb{R}_+\) | MW | Power consumption of electrolyzer \(e\) at bus \(b\), time step \(t\) | `electrolyzer_power[e,b,t]` |
 
-The variable is created in `build_variables!()` (`power_system.jl`) when the system has at least one electrolyzer. It is indexed by bus: the per-node configuration lists are mapped onto buses like generators, with the rated power at the node's first bus and the other parameters copied to every bus of the node.
-
-!!! warning "One electrolyzer per system"
-    Only the first entry under `electrolyzers` is used; further entries are ignored. To model several sites, put them in one entry with per-node lists.
+The variable is created in `build_variables!()` (`power_system.jl`) when the system has at least one electrolyzer, with one index \(e\) per entry under `electrolyzers`, in configuration order. It is indexed by bus: each electrolyzer's per-node configuration lists are mapped onto buses like generators, with the rated power at the node's first bus and the other parameters copied to every bus of the node. The constraints and costs below hold for each electrolyzer \(e\); the subscript \(e\) is left out.
 
 ---
 
@@ -81,7 +79,7 @@ P^{elz}_{b,t} \leq \bar{P}^{elz}_b \quad \forall b, t
 \tag{ELZ-1}
 \]
 
-where \(\bar{P}^{elz}_b\) is `rated_power` mapped to bus \(b\). A bus without rated power gets no electrolyzer load: there is no investment variable. Constraint `electrolyzer_max_b{b}_t{t}`.
+where \(\bar{P}^{elz}_b\) is `rated_power` mapped to bus \(b\). A bus without rated power gets no electrolyzer load: there is no investment variable. Constraint `electrolyzer_max_b{b}_t{t}` for the first electrolyzer, `electrolyzer_max_e{e}_b{b}_t{t}` for the others.
 
 ### ELZ-2: Ramp Rates
 
@@ -95,11 +93,11 @@ P^{elz}_{b,t-1} - P^{elz}_{b,t} \leq \bar{P}^{elz}_b \cdot \min\left(1, r^{down}
 \tag{ELZ-2b}
 \]
 
-where \(r^{up}_b\), \(r^{down}_b\) are `ramp_up` and `ramp_down` in fractions of rated power per hour and \(\Delta t\) is the time step (`resolution_hours`). A rate of 0 or less means no limit, and the constraint is omitted. The limits apply inside a window only, not across rolling-horizon window boundaries. Constraints `electrolyzer_ramp_up_b{b}_t{t}` and `electrolyzer_ramp_down_b{b}_t{t}`.
+where \(r^{up}_b\), \(r^{down}_b\) are `ramp_up` and `ramp_down` in fractions of rated power per hour and \(\Delta t\) is the time step (`resolution_hours`). A rate of 0 or less means no limit, and the constraint is omitted. The limits apply inside a window only, not across rolling-horizon window boundaries. Constraints `electrolyzer_ramp_up_b{b}_t{t}` and `electrolyzer_ramp_down_b{b}_t{t}` (with `_e{e}` after `up`/`down` for the second and later electrolyzers).
 
 ### Not implemented
 
-- **Hydrogen production.** `eff_at_rated`, `eff_at_min` and `energy_per_kg_h2` are read but no hydrogen output is computed in the dispatch, and no hydrogen demand or storage is linked to the electrolyzer.
+- **Hydrogen balance.** The hydrogen produced is reported (see [Results](#72-results)) but not modelled: no hydrogen demand, storage or revenue is linked to the electrolyzer.
 - **Minimum operating point.** `min_power` is not used; the electrolyzer can run at any level between 0 and its rated power.
 - **Investment.** `invest_cost`, `invest_max_power` and `life_time` are not used by the dispatch, and the master problem has no electrolyzer.
 
@@ -133,10 +131,10 @@ where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) i
 ## 6. Power System Coupling
 
 
-\(P^{elz}_{b,t}\) is a load on the demand side of the bus power balance, in the single-bus balance (PB-1), the DC network balance (DC-1) and the ACOPF balance:
+The power of all electrolyzers at a bus is a load on the demand side of the bus power balance, in the single-bus balance (PB-1), the DC network balance (DC-1) and the ACOPF balance:
 
 \[
-\sum_g P_{g,b,t} + \ldots = D_{b,t} + P^{elz}_{b,t} + \sum_k P^{ch}_{k,b,t} + \ldots
+\sum_g P_{g,b,t} + \ldots = D_{b,t} + \sum_e P^{elz}_{e,b,t} + \sum_k P^{ch}_{k,b,t} + \ldots
 \]
 
 ---
@@ -156,9 +154,9 @@ electrolyzers:
     min_power: [0.1]              # not used by the dispatch
     ramp_up: [0.5]                # fraction of rated power per hour (0 = no limit)
     ramp_down: [0.5]
-    eff_at_rated: [0.70]          # read, not used (no H2 output)
+    eff_at_rated: [0.70]          # hydrogen reported in the results
     eff_at_min: [0.65]
-    energy_per_kg_h2: 55.0        # kWh per kg H2, not used
+    energy_per_kg_h2: 55.0        # kWh per kg H2
     fixed_cost: [3.4]             # $/MW per hour (about 30000 $/MW/year)
     variable_cost: [2.0]          # $/MWh
     water_cost: 0.05              # not used
@@ -179,11 +177,17 @@ electrolyzers:
 | `variable_cost` | \(c^{var}\) | \$/MWh | Yes | Variable cost |
 | `fixed_cost` | \(c^{fix}\) | \$/MW/h | Yes (constant) | Fixed cost per hour |
 | `min_power` | -- | fraction | No | Minimum operating point |
-| `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | -- | -- | No | Hydrogen conversion |
+| `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | \(\eta\), \(e^{H_2}\) | --, kWh/kg | Results only | Hydrogen reported in the results (not in the optimisation) |
 | `water_cost` | -- | \$/kg H2 | No | Water cost |
 | `invest_cost`, `invest_max_power`, `life_time` | -- | -- | No | Investment |
 
-Electrolyzer results are not written to the HDF5 output.
+### 7.2 Results
+
+Each electrolyzer's power and hydrogen production are kept per node and hour in the year results (`YearResults.electrolyzer_power`, `YearResults.electrolyzer_h2`, shape electrolyzer × node × hour, in configuration order) and written to the HDF5 file under `electrolyzer_power/{name}` (MW) and `electrolyzer_h2/{name}` (kg/h); see [HDF5 Output Schema](../reference/hdf5-output-schema.md#electrolyzer-data). The hydrogen output is computed after the solve, with the same conversion as the primary-energy hydrogen balance:
+
+\[
+H_2 = P^{elz} \cdot \frac{1000 \cdot (\eta^{rated} + \eta^{min}) / 2}{e^{H_2}} \quad \text{[kg/h]}
+\]
 
 ---
 
@@ -193,11 +197,12 @@ Electrolyzer results are not written to the HDF5 output.
 
 | Function | Purpose | File |
 |----------|---------|------|
-| `build_variables!()` | Creates `electrolyzer_power` (bus × time) | `power_system.jl` |
+| `build_variables!()` | Creates `electrolyzer_power` (electrolyzer × bus × time) | `power_system.jl` |
 | `add_electrolyzer_dispatch_constraints!()` | ELZ-1 and ELZ-2 | `power_system.jl` |
 | `build_objective!()` | `electrolyzer_cost` (ELZ-OBJ) | `power_system.jl` |
 | `add_demand_constraints!()`, `add_dc_constraints!()`, `add_acopf_power_balance!()` | Load term in the power balance | `power_system.jl`, `transmission_dc.jl`, `transmission_acopf.jl` |
-| `PowerSystemAdapter` | Builds `ElectrolyzerConfig` from the first `electrolyzers` entry | `bridge/adapters.py` |
+| `extract_solution()` | `electrolyzer_power`, `electrolyzer_h2` results | `power_system.jl` |
+| `PowerSystemAdapter` | Builds one `ElectrolyzerConfig` per `electrolyzers` entry | `bridge/adapters.py` |
 
 ---
 

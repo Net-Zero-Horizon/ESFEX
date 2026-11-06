@@ -387,14 +387,14 @@ The relaxations are conic problems; the exact formulations are nonlinear program
 
 | Formulation | Problem type | Solvers |
 |-------------|--------------|---------|
-| SOC (`acopf_soc`) | SOCP (rotated and standard cones) | `clarabel`, `scs`, `gurobi`, `cplex`, `xpress` (`highs` is also listed) |
+| SOC (`acopf_soc`) | SOCP (rotated and standard cones) | `clarabel`, `scs`, `gurobi`, `cplex`, `xpress` |
 | QC (`acopf_qc`) | SOCP + linear | same as SOC |
 | SDP (`acopf_sdp`) | SDP (PSD cone) | `scs`, `clarabel` |
 | Polar (`acopf_polar`) | NLP (trigonometric), nonconvex | `ipopt` |
 | Rectangular (`acopf_rect`) | NLP (polynomial), nonconvex | `ipopt` |
 
 !!! note "Conic solvers"
-    HiGHS is in the list for SOC and QC, but HiGHS solves LP, MIP and QP, not second-order cone programs; use Clarabel, SCS or a commercial conic solver. Real networks can produce wide coefficient ranges, which first-order (SCS) and interior-point (Clarabel) conic solvers may handle poorly; if one reports an infeasible or unbounded status, try another.
+    HiGHS solves LP, MIP and QP but not second-order cone programs, so it cannot solve SOC or QC (JuMP reports that `RotatedSecondOrderCone` constraints are not supported); use Clarabel, SCS or a commercial conic solver. Real networks can produce wide coefficient ranges, which first-order (SCS) and interior-point (Clarabel) conic solvers may handle poorly; if one reports an infeasible or unbounded status, try another.
 
 The solver is set in the top-level `solver` section (see [Configuration](#configuration)).
 

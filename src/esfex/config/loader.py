@@ -50,6 +50,7 @@ from esfex.config.schema import (
     TransmissionLineGeo,
     canonical_unit_type,
 )
+from esfex.config.unknown_keys import find_unknown_keys, find_unknown_system_keys
 
 
 class ConfigLoadError(Exception):
@@ -246,6 +247,23 @@ def _convert_primary_energy_source(name: str, data: dict[str, Any]) -> PrimaryEn
     )
     _pass_through(PrimaryEnergySourceConfig, data, kwargs)
     return PrimaryEnergySourceConfig(**kwargs)
+
+
+def _prefer_field_names(model: type, data: dict[str, Any]) -> None:
+    """Where *data* gives a field both by name and by alias, keep the name.
+
+    Studio versions up to 0.3.0 saved settings such as
+    ``target_re_penetration`` twice: the loaded value under the alias
+    (``TARGET_RE_PENETRATION``) and the edited one under the name. Pydantic
+    takes the alias, which silently discarded the edit.
+    """
+    for name, field in model.model_fields.items():
+        alias = field.alias
+        if alias and alias != name and name in data and alias in data:
+            if data[alias] != data[name]:
+                log.warning("Both %s (%r) and %s (%r) are set; using %s.",
+                            name, data[name], alias, data[alias], name)
+            del data[alias]
 
 
 def _warn_zero_ramps(generators: dict[str, GeneratorConfig]) -> None:
@@ -542,6 +560,12 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             try:
                 _g.maintenance_cost = _new_maint
                 _linked_maint += 1
+                log.info(
+                    "Generator %s (fuel %s): added the non-fuel O&M adder of %g $/MWh "
+                    "to maintenance_cost (now %s). Set maintenance_cost to at least "
+                    "%g $/MWh to keep your own value.",
+                    _gk, _fuel_name, _adder, _new_maint, _adder * 0.5,
+                )
             except Exception as _exc:
                 log.warning("Cannot set maintenance_cost on %s: %s", _g.name, _exc)
 
@@ -560,6 +584,7 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
                 ),
             )
 
+    _prefer_field_names(SystemConfig, system_data)
     system = SystemConfig(
         generators=generators,
         batteries=batteries,
@@ -589,12 +614,29 @@ def _warn_demandless_nodes(system: SystemConfig) -> None:
         )
 
 
+# Unknown keys logged one per line up to this many; the rest are counted.
+_UNKNOWN_KEYS_LOGGED = 50
+
+
+def _warn_unknown_keys(keys: list[str]) -> None:
+    """Log each configuration key nothing reads (misspelt or obsolete)."""
+    for key in keys[:_UNKNOWN_KEYS_LOGGED]:
+        log.warning("Unknown configuration key %s is ignored (misspelt or obsolete?)", key)
+    if len(keys) > _UNKNOWN_KEYS_LOGGED:
+        log.warning("... and %d more unknown configuration keys, also ignored",
+                    len(keys) - _UNKNOWN_KEYS_LOGGED)
+
+
 def load_config(path: Union[str, Path]) -> ESFEXConfig:
     """
     Load and validate a ESFEX configuration file.
 
     Supports both single-file configurations (with embedded systems)
     and references to external system files.
+
+    Keys that nothing reads (misspelt or obsolete) do not stop the load: each
+    is logged as a warning with its full path, and the list is kept in
+    ``config.unknown_keys``.
 
     Args:
         path: Path to the main YAML configuration file
@@ -609,17 +651,22 @@ def load_config(path: Union[str, Path]) -> ESFEXConfig:
     raw_config = load_yaml(path)
 
     try:
-        # Check if systems are embedded or need to be loaded from separate files
-        if "systems" in raw_config and isinstance(raw_config["systems"], dict):
-            # Systems are embedded - convert each one
-            converted_systems = {}
-            for sys_name, sys_data in raw_config["systems"].items():
+        # Systems are embedded or given as paths to their own files.
+        systems_raw = raw_config.get("systems")
+        if isinstance(systems_raw, dict):
+            for sys_name, sys_data in list(systems_raw.items()):
                 if isinstance(sys_data, str):
-                    # It's a file path reference
-                    sys_path = path.parent / sys_data
-                    sys_data = load_yaml(sys_path)
-                converted_systems[sys_name] = _convert_system(sys_data)
-            raw_config["systems"] = converted_systems
+                    systems_raw[sys_name] = load_yaml(path.parent / sys_data)
+
+        # Before the converters below consume the dicts.
+        unknown = find_unknown_keys(raw_config)
+        _warn_unknown_keys(unknown)
+
+        if isinstance(systems_raw, dict):
+            raw_config["systems"] = {
+                sys_name: _convert_system(sys_data)
+                for sys_name, sys_data in systems_raw.items()
+            }
 
         # Convert temporal config
         if "temporal" in raw_config and isinstance(raw_config["temporal"], dict):
@@ -650,6 +697,7 @@ def load_config(path: Union[str, Path]) -> ESFEXConfig:
 
         # Validate with Pydantic
         config = ESFEXConfig(**raw_config)
+        config._unknown_keys = unknown
         return config
 
     except ValidationError as e:
@@ -672,6 +720,7 @@ def load_system_config(path: Union[str, Path]) -> SystemConfig:
         Validated SystemConfig object
     """
     raw_data = load_yaml(path)
+    _warn_unknown_keys(find_unknown_system_keys(raw_data))
 
     try:
         return _convert_system(raw_data)

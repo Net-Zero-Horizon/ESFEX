@@ -16,7 +16,7 @@
 using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
-             coefficient, objective_function
+             coefficient, objective_function, all_variables, name
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -31,9 +31,10 @@ import Ipopt
     @testset "hours_in_year" begin
         @test ESFEX.HOURS_STD_YEAR == 8760
         @test ESFEX.hours_in_year(2025) == 8760  # common year
-        @test ESFEX.hours_in_year(2024) == 8784  # leap year
-        @test ESFEX.hours_in_year(2000) == 8784  # divisible by 400 -> leap
-        @test ESFEX.hours_in_year(1900) == 8760  # divisible by 100 not 400 -> common
+        # Leap years are modelled as 8760 h (data come in 8760-h blocks)
+        @test ESFEX.hours_in_year(2024) == 8760
+        @test ESFEX.hours_in_year(2000) == 8760
+        @test ESFEX.hours_in_year(1900) == 8760
     end
 
     @testset "parse_acopf_formulation" begin
@@ -436,6 +437,103 @@ import Ipopt
             @test size(res.gen_output) == (1, 1, H)
         end
 
+        @testset "sectoral shed bounded by each sector's demand" begin
+            # 100 MW of load, 40 MW of gas: 60 MW must be shed. The cheap
+            # sector holds only 30 MW, so the other 30 MW come out of the
+            # critical sector. The per-sector cap was dropped, and all 60 MW
+            # went to the cheap sector at its multiplier.
+            H = 1
+            gen = mkgen("Gas", "Non-renewable", "Gas", [40.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function shed_split(sec_dem)
+                input = PowerSystemInput(
+                    name = "sec", year = 2025, network = net, generators = [gen],
+                    batteries = BatteryConfig[], demand = reshape([100.0], H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    sectoral_demand = Dict(k => reshape([v], H, 1) for (k, v) in sec_dem),
+                    sectoral_criticality = Dict("cheap" => 1.0, "critical" => 1000.0),
+                    loss_of_load_penalty = 0.01,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                lol = Dict(k => value(v[1, 1]) for (k, v) in vars.loss_of_load_sectoral)
+                return lol, res
+            end
+            lol, res = shed_split(Dict("cheap" => 30.0, "critical" => 70.0))
+            @test res.load_shed_total ≈ 60.0 atol = 1e-6
+            @test lol["cheap"] ≈ 30.0 atol = 1e-6
+            @test lol["critical"] ≈ 30.0 atol = 1e-6
+            @test res.cost_breakdown.load_shedding_cost ≈
+                  0.01 * (30.0 * 1.0 + 30.0 * 1000.0) rtol = 1e-6
+            # Sectors covering only part of the node's demand: the rest is an
+            # unclassified remainder priced at VOLL, shed before the critical
+            # sector; the model stays feasible.
+            lol, res = shed_split(Dict("critical" => 50.0))
+            @test res.load_shed_total ≈ 60.0 atol = 1e-6
+            @test lol["critical"] ≈ 10.0 atol = 1e-6
+            @test res.cost_breakdown.load_shedding_cost ≈
+                  0.01 * (50.0 + 10.0 * 1000.0) rtol = 1e-6
+        end
+
+        @testset "master: sectoral shed is part of load shed" begin
+            # One bus, 100 MW of load, 40 MW of gas and nothing to build:
+            # 60 MW must be shed on each representative day. The sectoral
+            # shed used to be an extra injection next to load_shed, so a day
+            # could shed up to ~2x its demand and the bus's own load_shed (at
+            # plain VOLL) absorbed every MWh: the sector's criticality had no
+            # effect on the plan's cost.
+            H = 48
+            gas = mkgen("Gas", "Non-renewable", "Gas", [40.0],
+                        [1.0], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function master_shed(crit)
+                inp = MasterProblemInput(
+                    years = [2025], network = net, generators = [gas],
+                    batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    loss_of_load_penalty = 10.0,
+                    sectoral_demand = Dict("cheap" => fill(30.0, H, 1),
+                                           "critical" => fill(70.0, H, 1)),
+                    sectoral_criticality = Dict("cheap" => 1.0, "critical" => crit),
+                    verbose = false)
+                model, mvars, _ = create_master_problem(inp; use_representative_days = true)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                byname(pfx) = [v for v in all_variables(model) if startswith(name(v), pfx)]
+                shed = sum(value.(byname("op_y1_d1_ll[")))
+                lol_crit = sum(value.(byname("op_y1_d1_lol_critical[")))
+                return objective_value(model), shed, lol_crit
+            end
+            obj1, shed1, _ = master_shed(1.0)
+            obj2, shed2, crit2 = master_shed(1000.0)
+            @test shed1 ≈ 24 * 60.0 rtol = 1e-6     # exactly the unmet load
+            @test shed2 ≈ 24 * 60.0 rtol = 1e-6
+            @test crit2 ≈ 24 * 30.0 rtol = 1e-6     # cheap sector holds only 30 MW
+            @test obj2 > 100 * obj1                  # criticality is priced
+
+            # A myopic year's target comes from the horizon trajectory: the
+            # override replaces RE-1 (which gives year 1 its initial share).
+            mk(ov) = MasterProblemInput(
+                years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                target_re_penetration = 0.8, initial_re_penetration = 0.1,
+                re_target_override = ov)
+            @test calculate_target_ratios(mk(Dict{Tuple{Int,Int},Float64}()))[(1, 1)] ≈ 0.1
+            @test calculate_target_ratios(mk(Dict((1, 1) => 0.42)))[(1, 1)] ≈ 0.42
+        end
+
         @testset "custom constraints (linear cap binds)" begin
             H = 2
             gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
@@ -646,6 +744,44 @@ import Ipopt
             @test hydro_full > hydro_derated * 1.5
             # The throttled hydro is replaced by gas -> more expensive.
             @test rd.objective > rf.objective + 0.5
+        end
+
+        @testset "reservoir pumping draws power at its own bus (multi-bus)" begin
+            # One node split into two buses; a pumped reservoir sits on bus 2.
+            # The DC/AC KCL looked the reservoir up by NODE index (1) in the
+            # per-bus arrays, found no reservoir on bus 1 and dropped the pump
+            # from the balance: pumped water was free. With no other source
+            # and an empty reservoir, nothing can be served.
+            H = 4
+            hydro = GeneratorConfig(
+                "PumpedHydro", "Renewable", "Water", [0.0, 100.0], [0.0, 0.0],
+                [1.0, 1.0], [1.0, 1.0], [100.0, 100.0], [100.0, 100.0], [0.0, 0.0],
+                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
+                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], ones(H, 2), true,
+                [60.0, 60.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 50.0, "AC",
+                [0.0, 500.0], [0.0, 0.0], [0.0, 0.0], [0.0, 1.0], zeros(H, 2),
+                [1.0, 1.0], [0.0, 0.0], [0.0, 50.0], [0.8, 0.8], true,
+                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
+            )
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 0.0),
+                     BusData(2, 1, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            line = TransmissionLineData("L12", 1, 2, 10.0, 0.1, 0.0, 0.0,
+                                        200.0, 220.0, 1, 50.0, "AC")
+            net = NetworkConfig(1, 2, buses, [1, 1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.6, 1, [0.0], [0.0],
+                                [line], TransformerData[], ACDCConverterData[],
+                                FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "pump", year = 2025, network = net, generators = [hydro],
+                batteries = BatteryConfig[], demand = reshape([0.0, 10.0, 10.0, 10.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                pwl_loss_segments = 0)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test res.load_shed_total ≈ 30.0 atol = 1e-4
         end
 
         @testset "two-bus transmission + renewable + battery" begin
@@ -890,20 +1026,53 @@ import Ipopt
             model, vars = create_power_system(input)
             optimize!(model)
             @test string(termination_status(model)) == "OPTIMAL"
-            p = value.(vars.electrolyzer_power[1, :])
+            p = value.(vars.electrolyzer_power[1, 1, :])
             @test all(p .<= 5.0 + 1e-6)
             @test p ≈ [2.0, 4.0, 5.0] atol = 1e-6   # 12 MW gas − 10 MW load, then ramp
         end
 
+        @testset "every electrolyzer is dispatched and reported" begin
+            # Only the first electrolyzer of a system reached the model. Two
+            # paying electrolyzers of 5 and 3 MW on 20 MW of spare gas: both
+            # run at rated power, and each reports its own power and H2.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [30.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            elz(rated, eff) = ElectrolyzerConfig([rated], [eff], [eff], 50.0, [0.0], [0.0],
+                                                 [0.0], [0.0], [0.0], [-5.0e-4], 0.0, [20.0])
+            input = PowerSystemInput(
+                name = "elz2", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([10.0, 10.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                electrolyzers = [elz(5.0, 0.7), elz(3.0, 0.5)],
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test size(res.electrolyzer_power) == (2, 1, H)
+            @test res.electrolyzer_power[1, 1, :] ≈ [5.0, 5.0] atol = 1e-6
+            @test res.electrolyzer_power[2, 1, :] ≈ [3.0, 3.0] atol = 1e-6
+            # kg/h = MW × 1000 × eff / (kWh/kg)
+            @test res.electrolyzer_h2[1, 1, 1] ≈ 5.0 * 1000 * 0.7 / 50 atol = 1e-6
+            @test res.electrolyzer_h2[2, 1, 1] ≈ 3.0 * 1000 * 0.5 / 50 atol = 1e-6
+            @test res.total_generation ≈ 2 * (10.0 + 8.0) atol = 1e-6
+        end
+
         @testset "development-mode transmission is bounded and charged" begin
             # tf_inv had no upper bound and no cost: the dispatch built any line for free.
-            function dev_line(inv_max, inv_cost)
+            function dev_line(inv_max, inv_cost; base_cap = 10.0)
                 H = 1; N = 2
                 gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [3.0e-5, 3.0e-5],
                             ones(H, N); nb = N, H = H)
                 buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
                          BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
-                line = TransmissionLineData("L12", 1, 2, 10.0, 0.1, 0.0, 0.0,
+                line = TransmissionLineData("L12", 1, 2, base_cap, 0.1, 0.0, 0.0,
                                             100.0, 220.0, 1, 50.0, "AC")
                 net = NetworkConfig(N, N, buses, [1, 2], [0.0 10.0; 10.0 0.0],
                                     [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
@@ -935,6 +1104,12 @@ import Ipopt
             # like generator investment (1 h of 8760 here)
             _, _, _, obj2 = dev_line([25.0, 30.0], [1.0e-4, 4.0e-4])
             @test obj2 - obj ≈ 25.0 * 2.0e-4 / 8760 atol = 1e-10
+            # A 0-MW candidate line (e.g. a development-zone link) carries what
+            # is built on it; its flow used to be fixed to 0 as "negligible"
+            # while the investment was still bought.
+            inv, shed, _, _ = dev_line([25.0, 30.0], [1.0e-4, 2.0e-4]; base_cap = 0.0)
+            @test inv ≈ 25.0 atol = 1e-6
+            @test shed ≈ 25.0 atol = 1e-6
         end
 
         @testset "transmission corridor charged once, at its dearer end" begin

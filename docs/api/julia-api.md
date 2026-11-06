@@ -69,7 +69,7 @@ struct PowerSystemInput
     # Optional subsystem configurations
     fuel_co2::Dict{String, Float64}
     ev_config::Union{EVConfig, Nothing}
-    electrolyzer_config::Union{ElectrolyzerConfig, Nothing}
+    electrolyzers::Vector{ElectrolyzerConfig}   # keyword `electrolyzer_config` (one) still accepted
     # N-1 security
     n1_security_enabled::Bool
     n1_transmission_enabled::Bool

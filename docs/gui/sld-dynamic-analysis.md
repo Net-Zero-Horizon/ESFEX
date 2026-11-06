@@ -225,7 +225,7 @@ With results loaded, the gauge reads these values from the HDF5 file. In analysi
 
 ### System Parameters
 
-The schema has system-level frequency keys:
+The gauge reads the system-level frequency keys of the system being edited:
 
 ```yaml
 systems:
@@ -236,7 +236,7 @@ systems:
     frequency_nadir_limit: 49.0   # Min frequency threshold (Hz)
 ```
 
-The SLD gauge does not read them. It uses fixed values: load damping 0.01 pu and ROCOF limit 2.0 Hz/s. With results loaded, nominal frequency is 50 Hz and the nadir limit 49.0 Hz. In analysis mode, nominal frequency is taken from the first bus that has a frequency set, and the nadir limit is 1 Hz below nominal. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
+Both with results loaded and in analysis mode, `load_damping` and `rocof_limit` are used as set. A `frequency_nominal` left at the default 50 Hz is replaced by the frequency of the first bus that has one (so a 60 Hz grid works without the key), and a `frequency_nadir_limit` left at the default 49 Hz becomes 1 Hz below the nominal frequency. Systems created in the Studio, which does not edit these keys, get the defaults. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
 
 
 ---

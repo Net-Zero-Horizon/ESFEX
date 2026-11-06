@@ -775,7 +775,6 @@
     "target_re": "目標RE普及率 (frac):",
     "min_increment": "最小年間増加率 (frac):",
     "max_increment": "最大年間増加率 (frac):",
-    "loss_demand_thr": "需要損失閾値 (frac):",
     "inertia_limit_thr": "最小系統慣性 (MW·s):",
     "sim_rooftop": "屋上太陽光シミュレーション:",
     "co2_annual": "CO2年間予算 (トン/年):",
@@ -1375,7 +1374,8 @@
     "error": "エラー",
     "warning": "警告",
     "info": "情報",
-    "enable": "有効化"
+    "enable": "有効化",
+    "no_effect": "現在のモデルでは効果がありません。既存のファイルを読み込めるように残しています。"
   },
   "custom_constraints": {
     "title": "カスタム制約",

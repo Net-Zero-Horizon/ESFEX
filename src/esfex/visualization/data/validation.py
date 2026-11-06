@@ -151,6 +151,7 @@ class SimplificationPlan:
 # Category → validator list mapping
 _CATEGORY_VALIDATORS: dict[str, list[str]] = {
     "structural": ["_validate_nodes", "_validate_lines", "_validate_line_connections"],
+    "configuration": ["_validate_config_keys"],
     "electrical": [
         "_validate_buses",
         "_validate_generators",
@@ -173,6 +174,7 @@ _CATEGORY_VALIDATORS: dict[str, list[str]] = {
 # All category keys in display order
 CATEGORY_ORDER: list[str] = [
     "structural",
+    "configuration",
     "electrical",
     "demand",
     "generation",
@@ -253,6 +255,18 @@ def validate_state(
 
 
 # ── Structural validators ────────────────────────────────────────
+
+
+def _validate_config_keys(state: GuiSystemState) -> list[ValidationIssue]:
+    """List the loaded file's keys that ESFEX ignores (misspelt or obsolete)."""
+    return [
+        ValidationIssue(
+            severity="warning", category="Configuration",
+            message=f"Unknown key {key} is ignored (misspelt or obsolete?) "
+                    "and is not kept when the project is saved",
+        )
+        for key in getattr(state, "unknown_config_keys", None) or []
+    ]
 
 
 def _validate_nodes(state: GuiSystemState) -> list[ValidationIssue]:

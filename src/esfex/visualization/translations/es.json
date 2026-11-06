@@ -796,7 +796,6 @@
     "target_re": "Penetración RE Objetivo (frac):",
     "min_increment": "Incremento Anual Mín. (frac):",
     "max_increment": "Incremento Anual Máx. (frac):",
-    "loss_demand_thr": "Umbral Pérdida de Demanda (frac):",
     "inertia_limit_thr": "Inercia Mínima del Sistema (MW·s):",
     "sim_rooftop": "Simular Solar en Techos:",
     "co2_annual": "Presupuesto Anual CO2 (toneladas/año):",
@@ -1375,7 +1374,8 @@
     "error": "Error",
     "warning": "Advertencia",
     "info": "Info",
-    "enable": "Habilitar"
+    "enable": "Habilitar",
+    "no_effect": "Sin efecto en el modelo actual; se conserva para que los archivos existentes carguen."
   },
   "custom_constraints": {
     "title": "Restricciones Personalizadas",

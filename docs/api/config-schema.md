@@ -6,7 +6,7 @@ Pydantic v2 models for the ESFEX configuration. YAML files are normally loaded w
 
 General behaviour:
 
-- **Extra keys are ignored.** No model sets `extra="forbid"`, so unknown keys are dropped without an error.
+- **Extra keys are ignored.** No model sets `extra="forbid"`, so unknown keys are dropped without an error. [`load_config()`](config-loader.md) reports them: it logs each one and keeps the list in `ESFEXConfig.unknown_keys`.
 - **Aliases.** `SystemConfig`, `GeneratorConfig`, `TechnologyConfig` and `SystemLinkConfig` set `populate_by_name=True` and accept both the field name and its alias (for example `target_re_penetration` and `TARGET_RE_PENETRATION`, `availability_file` and `Availability`). `BatteryConfig` does not, so it only accepts the alias `Availability`; passing `availability_file=` drops the value.
 - **Per-node lists.** Fields typed `list[...]` on equipment hold one value per node. Their length is not validated.
 
@@ -87,7 +87,7 @@ class ESFEXConfig(BaseModel):
 | Field | Default | Description |
 |-------|---------|-------------|
 | `simulation_mode` | `"development"` | `development`: master problem then dispatch. `economic_dispatch`: LP dispatch only. `unit_commitment`: MIP dispatch of the first `unit_commitment_hours` hours of the first year |
-| `date_start` | `"01/01/2025 00:00"` | Start timestamp used to label the hourly time index |
+| `date_start` | `"01/01/2025 00:00"` | Timestamp of the first data row. Labels the hourly time index (Feb 29 skipped) and gives the first year label |
 | `enable_primary_energy` | `True` | Include the fuel supply chain |
 
 **Validator:** every name in `meta_network.systems` must be a key of `systems` (`ValueError: System 'x' referenced in meta_network but not defined in systems`).
@@ -365,7 +365,7 @@ class SolverConfig(BaseModel):
     time_limit: int = 10800            # seconds, 0 = unlimited
     gap: float = 0.01                  # MIP optimality gap
     verbose: bool = False
-    scale_constraints: bool = True     # not used in 0.3.0
+    scale_constraints: bool = True     # no effect (not read by the model or the solvers)
     options: dict[str, Any] = {}       # solver-specific options
 ```
 

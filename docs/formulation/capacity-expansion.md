@@ -107,7 +107,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | Symbol | Units | Description | Julia field |
 |--------|-------|-------------|-------------|
 | \(\bar{P}_{g,n}\) | MW | Rated power of an existing generator | `gen.rated_power[n]` |
-| \(c^{inv}_{g,n}\) | \$/MW | Investment cost of an existing generator (used to price life extension) | `gen.invest_cost[n]` |
+| \(c^{inv}_{g,n}\) | \$/MW | Investment cost of an existing generator (used to price life extension; the candidate technology's when 0, see OBJ-3b) | `gen.invest_cost[n]` |
 | \(c^{inv}_{k,n}\) | \$/MW | Technology investment cost | `tech.invest_cost[n]` |
 | \(\bar{I}_{k,n}\) | MW | Maximum cumulative technology investment | `tech.invest_max[n]` |
 | \(\tau_{g,n}\), \(\tau_{k,n}\) | years | Lifetime | `life_time[n]` |
@@ -187,7 +187,9 @@ where \(d_{r}\) is the length of fuel route \(r\) (km), and \(c^{ft}_f\) is the 
 C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y \tag{OBJ-3b}
 \]
 
-Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\). With an investment cost of 0, life extension is free.
+Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
+
+Where an existing unit's investment cost is 0 at a node (the Studio default), \(c^{inv}\) is taken from the unit's candidate when the master input is built (`life_extension_invest_costs` in `bridge/adapters.py`): for a generator, the technology with the same `fuel` and `type` (the one its `technology` field names if several match, else the first in configuration order); for a battery, the battery technology its `technology` field names, else the first battery technology (`invest_cost_power`). A unit with no candidate keeps \(c^{inv} = 0\), so its extension is free; a warning names it once per run.
 
 ### 5.2 Operational Cost
 
@@ -198,7 +200,7 @@ Operational costs come from the representative day subproblems, scaled to a year
 C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{OBJ-4}
 \]
 
-where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, 8760 or 8784). The cost for each representative day is (from `day_operational_cost`):
+where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, always 8760: every modelled year has 8760 h, leap years included). The cost for each representative day is (from `day_operational_cost`):
 
 \[
 \begin{aligned}
@@ -209,10 +211,10 @@ C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}
 \]
 
 \[
-\quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot \kappa_s \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
+\quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot (\kappa_s - 1) \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
 \]
 
-where \(\kappa_s\) is the criticality weight for sector \(s\). Unlike the dispatch, the master charges both \(L^{day}\) and \(L^{sec,day}\). The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well, with the same scaling.
+where \(\kappa_s\) is the criticality weight for sector \(s\). The sectoral shed \(L^{sec,day}\) is part of \(L^{day}\) (SEC-2), which OBJ-5 already charges at VOLL; OBJ-6 adds the criticality premium, so a sector's shed MWh costs \(c^{VOLL} \kappa_s\) and the unclassified remainder \(c^{VOLL}\), as in the dispatch. The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well, with the same scaling.
 
 !!! note "PWL cost curves in the master problem"
     When existing generators have a `fuel_cost_curve` configured, the representative day operational cost (OBJ-5) uses the same piecewise-linear (PWL) fuel cost decomposition as the operational dispatch formulation (see [Operational Dispatch -- PWL Fuel Cost](operational-dispatch.md#311-piecewise-linear-pwl-fuel-cost-decomposition)). The same applies to existing batteries with `discharge_cost_curve`, which then replaces the throughput cost. Candidate technologies are costed at their flat `fuel_cost`; their cost curves are not used by the master.
@@ -370,7 +372,7 @@ RE targets are set per system \(\sigma\) (one global system when the configurati
 \rho^{target}_{\sigma,1} = \rho^{init}_\sigma, \qquad \rho^{target}_{\sigma,y} = \rho^{init}_\sigma + \frac{y - 1}{Y - 1} \left( \rho^{target} - \rho^{init}_\sigma \right) \quad (y \geq 2) \tag{RE-1}
 \]
 
-with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\).
+with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\). In myopic planning each one-year master takes its year's \(\rho^{target}_{\sigma,y}\) from this trajectory over the whole horizon (`re_target_override`), while RE-3 starts from the share reached the year before.
 
 **RE-2: RE target** (soft, `re_target_s{σ}_y{y}`):
 
@@ -438,7 +440,7 @@ The day reuses the operational-dispatch constraint builders of `power_system.jl`
 For each bus and time step (DC-1 with these extra terms, or PB-1 on a single bus):
 
 \[
-\sum_{g} P^{day}_{g,n,t} + \sum_k P^{tech}_{k,n,t} + \sum_{b} P^{dis,day}_{b,n,t} + \sum_k \left( P^{bt,dis}_{k,n,t} - P^{bt,ch}_{k,n,t} \right) + L^{day}_{n,t} + \sum_{s} L^{sec,day}_{s,n,t} = D^{day}_{n,t} + \sum_{b} P^{ch,day}_{b,n,t} + \sum_{\ell} K_{n,\ell} f^{day}_{\ell,t} \tag{PB-1}
+\sum_{g} P^{day}_{g,n,t} + \sum_k P^{tech}_{k,n,t} + \sum_{b} P^{dis,day}_{b,n,t} + \sum_k \left( P^{bt,dis}_{k,n,t} - P^{bt,ch}_{k,n,t} \right) + L^{day}_{n,t} = D^{day}_{n,t} + \sum_{b} P^{ch,day}_{b,n,t} + \sum_{\ell} K_{n,\ell} f^{day}_{\ell,t} \tag{PB-1}
 \]
 
 where the demand at bus \(n\) is the parent node's demand times the bus demand fraction:
@@ -447,7 +449,7 @@ where the demand at bus \(n\) is the parent node's demand times the bus demand f
 D^{day}_{n,t} = D_{t, \text{parent}(n)} \cdot \alpha_n \tag{PB-2}
 \]
 
-\(L^{day}_{n,t} \leq D^{day}_{n,t}\) as in the dispatch (PB-1b). Note that the sectoral loss of load \(L^{sec,day}\) also enters the supply side, bounded only per sector by SEC-1 below and not linked to \(L^{day}\); a day can therefore shed up to about twice its demand at VOLL prices. Curtailment does **not** appear in the power balance.
+\(L^{day}_{n,t} \leq D^{day}_{n,t}\) as in the dispatch (PB-1b). The sectoral loss of load \(L^{sec,day}\) is a split of \(L^{day}\) (SEC-2 below), not a separate injection, so a day sheds at most its demand. Curtailment does **not** appear in the power balance.
 
 #### 8.3.2 Generator Capacity Linked to Investment
 
@@ -525,6 +527,14 @@ Each sector's load shedding cannot exceed the sector's demand at that bus and st
 \[
 L^{sec,day}_{s,n,t} \leq \max\left(0,\, D^{sec}_{s,\text{parent}(n),t} \cdot \alpha_n \right) \qquad \forall\, s,\, n,\, t \tag{SEC-1}
 \]
+
+The bus's load shed splits into the sectors' shed plus a remainder bounded by the bus demand that no sector accounts for (`lol_sec_sum_*`, `lol_sec_residual_*`):
+
+\[
+0 \;\leq\; L^{day}_{n,t} - \sum_{s} L^{sec,day}_{s,n,t} \;\leq\; \max\Big(0,\, D^{day}_{n,t} - \sum_{s} D^{sec}_{s,\text{parent}(n),t} \cdot \alpha_n\Big) \qquad \forall\, n,\, t \tag{SEC-2}
+\]
+
+Sectoral demand is scaled by the year's demand growth like \(D^{day}\). The Benders subproblems use the same constraints.
 
 ### 8.4 Cost Scaling
 
@@ -1160,7 +1170,7 @@ Technology investments become **virtual generators** (and virtual batteries) for
 1. Computes cumulative investment per technology per year
 2. Creates synthetic generator entries with `rated_power = cumulative_investment`
 3. Passes these virtual generators to the operational dispatch adapter
-4. Gives them the availability profile and cost parameters of the technology; the fuel cost is the flat `fuel_cost` (a technology's `fuel_cost_curve` is not carried over)
+4. Gives them the availability profile and cost parameters of the technology, including its `fuel_cost_curve` (per bus), so the dispatch prices built capacity with the technology's bidding curve; the master itself plans with the flat `fuel_cost` (see the note on cost curves above)
 
 ---
 

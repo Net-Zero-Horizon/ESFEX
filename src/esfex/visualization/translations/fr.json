@@ -775,7 +775,6 @@
     "target_re": "Pénétration ER cible (frac) :",
     "min_increment": "Incrément annuel min. (frac) :",
     "max_increment": "Incrément annuel max. (frac) :",
-    "loss_demand_thr": "Seuil de perte de demande (frac) :",
     "inertia_limit_thr": "Inertie minimale du système (MW·s) :",
     "sim_rooftop": "Simuler le solaire en toiture :",
     "co2_annual": "Budget annuel CO2 (tonnes/an) :",
@@ -1375,7 +1374,8 @@
     "error": "Erreur",
     "warning": "Avertissement",
     "info": "Info",
-    "enable": "Activer"
+    "enable": "Activer",
+    "no_effect": "Sans effet dans le modèle actuel ; conservé pour que les fichiers existants se chargent."
   },
   "custom_constraints": {
     "title": "Contraintes personnalisées",

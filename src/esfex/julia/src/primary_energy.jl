@@ -186,7 +186,7 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
     # prorated based on the actual fraction of the year covered, not the window duration.
     # Using window duration (total_operational_hours) would allow each window to access
     # 100% of annual availability, leading to over-consumption across multiple windows.
-    scaling_base_hours = Float64(hours_in_year(input.year))  # Full year hours (8760 or 8784 for leap)
+    scaling_base_hours = Float64(hours_in_year(input.year))  # Full year hours (always 8760 for leap)
     # Absolute horizon hour at which the window's first step starts (hour 0 =
     # Jan 1 of base_year); disruption windows are given in these hours.
     window_hour0 = _window_start_hour(input)
@@ -979,7 +979,7 @@ function add_electrolyzer_constraints!(
     for n in 1:n_nodes
         # Total capacity = existing + invested
         total_cap = ec.rated_power[n] + vars.electrolyzer_investment[n]
-        avg_eff = (ec.eff_at_rated[n] + ec.eff_at_min[n]) / 2.0
+        h2_rate = electrolyzer_h2_per_mwh(ec, n)
 
         for t in 1:n_hours
             # Power limit
@@ -991,7 +991,7 @@ function add_electrolyzer_constraints!(
             # H2 production: H2[kg] = Power[MW] * 1000 * eff / (kWh/kg)
             @constraint(model,
                 vars.h2_production[n, t] ==
-                vars.electrolyzer_power[n, t] * MW_TO_KW * avg_eff / ec.energy_per_kg_h2,
+                vars.electrolyzer_power[n, t] * h2_rate,
                 base_name = "h2_production_$(n)_$(t)"
             )
 

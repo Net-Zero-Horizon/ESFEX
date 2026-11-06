@@ -59,7 +59,7 @@ esfex info
 ```
 
 !!! note
-    `environment.yml` currently pins Python below 3.13. To use Python 3.13, install with pip.
+    `environment.yml` allows the same Python versions as pip (3.10–3.13).
 
 ## Development Installation
 
