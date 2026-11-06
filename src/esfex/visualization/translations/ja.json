@@ -1453,6 +1453,8 @@
     "saved_msg": "設定を保存しました:\n{path}",
     "save_error_title": "保存エラー",
     "save_error_msg": "設定の保存に失敗しました:\n{e}",
+    "save_blocked_loading": "プロジェクトを読み込み中のため、まだ保存できません。",
+    "save_refused_empty_project": "保存しませんでした: プロジェクトが空のため、保存すると次のファイルに定義されたシステムが上書きされます\n{path}",
     "no_data_title": "データなし",
     "no_data_msg": "{key} データが見つかりません。",
     "no_coords_title": "座標なし",

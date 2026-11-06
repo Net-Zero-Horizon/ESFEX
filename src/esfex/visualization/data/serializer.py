@@ -2474,12 +2474,19 @@ def gui_state_to_yaml(
     global_settings: GuiGlobalSettings | None = None,
     stochastic_scenarios: list[GuiStochasticScenario] | None = None,
     geo_assets: dict | None = None,
+    data_base_dir: str | Path | None = None,
 ) -> None:
     """Export GUI state to YAML, preserving non-GUI config fields.
 
     ``geo_assets`` (a ``{asset_id: _GeoAssetInfo-like}`` mapping) is written as a
     top-level GUI-only ``_geo_assets`` key with the GeoJSON inlined, so projects
-    stay self-contained (and ride along inside a ``.esfexp`` bundle)."""
+    stay self-contained (and ride along inside a ``.esfexp`` bundle).
+
+    ``data_base_dir`` is the directory the relative data paths of the states
+    resolve against (the folder the project was loaded from). When the output
+    file lives elsewhere, each relative demand / availability / inflow path is
+    rebased onto the output folder (or made absolute when the file is not
+    under it) so the written config still finds its data."""
     config_dict = base_config.model_dump(mode="python", by_alias=True)
 
     # Update meta_network.systems — use selected systems if available,
@@ -2556,6 +2563,8 @@ def gui_state_to_yaml(
     config_dict = _to_native(config_dict)
 
     output_path = Path(output_path)
+    if data_base_dir is not None:
+        _rebase_data_paths(config_dict, Path(data_base_dir), output_path.parent)
     if geo_assets:
         config_dict["_geo_assets"] = {
             aid: {
@@ -2568,6 +2577,35 @@ def gui_state_to_yaml(
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+
+def _rebase_data_paths(config_dict: dict, src_dir: Path, dest_dir: Path) -> None:
+    """Rewrite relative data paths written for ``src_dir`` so they resolve the
+    same from ``dest_dir``: relative to ``dest_dir`` when the file lies under
+    it (the runner refuses ``../`` paths), absolute otherwise."""
+    import os
+
+    from esfex.visualization.data.project_bundle import map_data_paths
+
+    src = Path(os.path.abspath(src_dir))
+    dest = Path(os.path.abspath(dest_dir))
+    if src == dest:
+        return
+
+    def _rebase(raw: str, _kind: str):
+        p = Path(raw)
+        if p.is_absolute():
+            return None
+        target = Path(os.path.normpath(src / p))
+        if not target.exists() and (Path.cwd() / p).exists():
+            # Loaders fall back to the CWD for relative paths; keep that file.
+            target = Path(os.path.normpath(Path.cwd() / p))
+        try:
+            return target.relative_to(dest).as_posix()
+        except ValueError:
+            return str(target)
+
+    map_data_paths(config_dict, _rebase)
 
 
 def _to_native(obj):

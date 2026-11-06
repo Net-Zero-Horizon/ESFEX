@@ -188,6 +188,15 @@ Typical session steps:
 
 Save and Export As write the same YAML, which includes map coordinates, line waypoints, and marker styles. The file can be run with `esfex run` as is. Before writing, both run an automatic validation; if it finds errors, a dialog asks "Save anyway?".
 
+Relative data paths (demand, availability and inflow files) are written so they still work from the new file: when you save to a different folder than the one the configuration was loaded from, each relative path is rewritten relative to the new file if the data lies under its folder, and as an absolute path otherwise. Export Project resolves them against the folder the configuration was loaded from.
+
+Some saves are refused to protect your files:
+
+- While a configuration opened with `esfex studio -c` is still loading (it is loaded once the map is ready), Save, Export As and Export Project are disabled, and closing the window does not offer to save.
+- An empty project (no system, or only an empty placeholder system with at most one node and no generators, storage, lines or technologies) is not saved over a file that already defines systems.
+
+**Autosave** (File > Preferences… > General, off by default) writes only to `~/.cache/esfex/autosave.yaml`, never to your configuration file, and the window keeps showing unsaved changes until you save with Save or Export As.
+
 
 ---
 

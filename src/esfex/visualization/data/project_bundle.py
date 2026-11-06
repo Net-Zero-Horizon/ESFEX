@@ -94,25 +94,34 @@ class _Bundler:
         return rel
 
 
-def _rewrite_refs(cfg: dict, bundler: _Bundler) -> None:
-    """Walk a config dict, bundling every referenced file and rewriting its
-    path to the bundle-relative location (kept as-is when not found)."""
+def map_data_paths(cfg: dict, fn) -> None:
+    """Rewrite every data-file reference of a config dict in place.
+
+    ``fn(path, kind)`` is called for each non-empty path string, with ``kind``
+    one of ``"demand"``, ``"availability"`` or ``"inflow"``; it returns the
+    replacement, or ``None`` to keep the path. Covers ``demand_paths`` /
+    ``demand_path`` and the availability / inflow files of generators,
+    batteries and technologies — the files a runnable config needs besides
+    itself. Shared by the project bundler and the serializer's path rebasing.
+    """
     systems = cfg.get("systems")
     if not isinstance(systems, dict):
         return
+
+    def _apply(v, kind):
+        if isinstance(v, str) and v:
+            return fn(v, kind) or v
+        return v
+
     for sys in systems.values():
         if not isinstance(sys, dict):
             continue  # external system file refs are inlined by the GUI exporter
 
         dps = sys.get("demand_paths")
         if isinstance(dps, list):
-            sys["demand_paths"] = [
-                (bundler.add(p, "demand") or p) if isinstance(p, str) else p
-                for p in dps
-            ]
-        dp = sys.get("demand_path")
-        if isinstance(dp, str) and dp:
-            sys["demand_path"] = bundler.add(dp, "demand") or dp
+            sys["demand_paths"] = [_apply(p, "demand") for p in dps]
+        if "demand_path" in sys:
+            sys["demand_path"] = _apply(sys["demand_path"], "demand")
 
         for grp in ("generators", "batteries", "technologies",
                     "battery_technologies"):
@@ -123,13 +132,17 @@ def _rewrite_refs(cfg: dict, bundler: _Bundler) -> None:
                 if not isinstance(e, dict):
                     continue
                 for key in ("Availability", "availability_file"):
-                    v = e.get(key)
-                    if isinstance(v, str) and v:
-                        e[key] = bundler.add(v, "availability") or v
-                inflow = e.get("reservoir_inflow_file")
-                if isinstance(inflow, str) and inflow:
-                    e["reservoir_inflow_file"] = (
-                        bundler.add(inflow, "inflow") or inflow)
+                    if key in e:
+                        e[key] = _apply(e[key], "availability")
+                if "reservoir_inflow_file" in e:
+                    e["reservoir_inflow_file"] = _apply(
+                        e["reservoir_inflow_file"], "inflow")
+
+
+def _rewrite_refs(cfg: dict, bundler: _Bundler) -> None:
+    """Walk a config dict, bundling every referenced file and rewriting its
+    path to the bundle-relative location (kept as-is when not found)."""
+    map_data_paths(cfg, bundler.add)
 
 
 def export_project(

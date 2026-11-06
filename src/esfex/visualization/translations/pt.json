@@ -1453,6 +1453,8 @@
     "saved_msg": "Configuração guardada em:\n{path}",
     "save_error_title": "Erro ao guardar",
     "save_error_msg": "Falha ao guardar a configuração:\n{e}",
+    "save_blocked_loading": "O projeto ainda está a carregar; ainda não pode ser guardado.",
+    "save_refused_empty_project": "Não guardado: o projeto está vazio e guardá-lo substituiria os sistemas definidos em\n{path}",
     "no_data_title": "Sem dados",
     "no_data_msg": "Não foram encontrados dados de {key}.",
     "no_coords_title": "Sem coordenadas",

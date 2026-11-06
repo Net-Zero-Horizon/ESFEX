@@ -1453,6 +1453,8 @@
     "saved_msg": "Configuration enregistrée vers :\n{path}",
     "save_error_title": "Erreur d'enregistrement",
     "save_error_msg": "Échec de l'enregistrement de la configuration :\n{e}",
+    "save_blocked_loading": "Le projet est encore en cours de chargement ; il ne peut pas encore être enregistré.",
+    "save_refused_empty_project": "Non enregistré : le projet est vide et l'enregistrer écraserait les systèmes définis dans\n{path}",
     "no_data_title": "Aucune donnée",
     "no_data_msg": "Aucune donnée {key} trouvée.",
     "no_coords_title": "Aucune coordonnée",
