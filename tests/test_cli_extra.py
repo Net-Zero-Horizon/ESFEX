@@ -240,6 +240,26 @@ class TestStudio:
         window._last_saved_path = None
         assert vis.launch_studio("in.yaml") is None
 
+    def test_saved_invalid_config_is_reported_not_raised(self, tmp_path, monkeypatch):
+        """"Save anyway" on a configuration with errors: the file is
+        written, reloading it fails after the window closes. The CLI used to
+        end in a traceback."""
+        pytest.importorskip("PySide6")
+        import esfex.visualization.app as vis_app
+
+        saved = tmp_path / "bad.yaml"
+        saved.write_text("meta_network:\n  systems: [Nowhere]\nsystems: {}\n")
+        window = SimpleNamespace(_last_saved_path=str(saved))
+        monkeypatch.setattr(vis_app, "_get_or_create_app", lambda: MagicMock())
+        monkeypatch.setattr(vis_app, "run_studio", lambda **kw: window)
+        result = runner.invoke(app, ["studio", "-o", str(saved)])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        out = "".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
+        assert f"savedto{saved}" in out
+        assert "doesnotvalidate" in out
+        assert "esfexvalidate-c" in out
+
     def test_not_saved(self):
         fake_vis = SimpleNamespace(launch_studio=MagicMock(return_value=False))
         with patch.dict(sys.modules, {"esfex.visualization": fake_vis}):

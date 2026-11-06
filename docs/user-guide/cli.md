@@ -343,7 +343,7 @@ ESFEX - Studio
 Loading: island_system.yaml
 ```
 
-When the window closes, the CLI prints `Configuration saved.` if the configuration was saved during the session, or `Studio closed without saving.` otherwise.
+When the window closes, the CLI prints `Configuration saved.` if the configuration was saved during the session, or `Studio closed without saving.` otherwise. If the last save was a "Save anyway" on a configuration with errors, the file is written but does not load: the CLI prints `Configuration saved to <file>, but it does not validate:` with the error, and exits with code 1. (From Python, `launch_studio()` raises `esfex.config.loader.SavedConfigInvalidError`, with the file in `path` and the loader's error in `error`.)
 
 See the [GUI Editor](../gui/overview.md) pages for what the Studio can do.
 

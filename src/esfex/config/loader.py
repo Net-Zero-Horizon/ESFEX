@@ -59,6 +59,22 @@ class ConfigLoadError(Exception):
     pass
 
 
+class SavedConfigInvalidError(ConfigLoadError):
+    """A configuration the Studio saved does not load.
+
+    Raised by :func:`esfex.visualization.launch_studio` after the window
+    closes when the user chose "Save anyway" on a configuration with
+    errors: the file is written, but reloading it fails. ``path`` is the
+    saved file and ``error`` the loader's exception.
+    """
+
+    def __init__(self, path: Union[str, Path], error: Exception):
+        self.path = str(path)
+        self.error = error
+        super().__init__(
+            f"Configuration saved to {self.path}, but it does not validate: {error}")
+
+
 def load_yaml(path: Union[str, Path]) -> dict[str, Any]:
     """
     Load a YAML file and return its contents as a dictionary.
