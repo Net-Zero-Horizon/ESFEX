@@ -277,8 +277,8 @@ Point" and "Fuel Source".)
 | -- Max Import Rate | units/h | Maximum supply (import) rate |
 | -- Import Cost | $/unit | Cost per unit of fuel supplied here |
 | -- Transit (days/100km) | days/100km | Source→tank replenishment lead time. Models supply stress: a shipment dispatched now arrives after this delay scaled by route distance. `0` = instantaneous. |
-| -- Disrupt. Start (h) | hour | Supply-disruption window start (inclusive). |
-| -- Disrupt. End (h) | hour | Supply-disruption window end (exclusive). `end <= start` disables the disruption. |
+| -- Disrupt. Start (h) | hour | Supply-disruption window start (inclusive), in horizon hours: hour 0 = 1 January of the base year, 8760 per year. |
+| -- Disrupt. End (h) | hour | Supply-disruption window end (exclusive), in horizon hours. `end <= start` disables the disruption. |
 | -- Disrupt. Avail. (0-1) | fraction | Availability during the disruption window (`0` = full cut, `1` = no disruption). |
 
 ### Fuel Storage

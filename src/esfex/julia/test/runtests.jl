@@ -1332,6 +1332,40 @@ import Ipopt
             @test coefficient(model.ext[:cost_expressions][:fuel_cost], v) ≈ 0.0 atol = 1e-15
         end
 
+        @testset "primary energy: one tank per node, shipments reach it" begin
+            # Node 1 buys fuel and ships it 100 km to node 2 (no supply, no
+            # tank) whose 10/day non-electric demand it serves. Shipped fuel
+            # used to enter only a periodic balance, never node 2's tank.
+            function solve_route(transit_days)
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0, [87600.0, 0.0], [100.0, 0.0],
+                                  [0.0, 0.0], 0.0, [0.0, 0.0], 0.0, 0.0, transit_days)
+                route = TransportRoute("r", 1, 2, 100.0,
+                    Dict("Gas" => FuelRouteParams(50.0, 0.0, 0.0)))
+                ne = NonElectricDemandConfig("Industrial", "Gas", [0.0, 3650.0], 0.0, ones(12))
+                inp = PrimaryEnergyInput(2025, 2025, 2, 72, [fuel],
+                    Dict{String, FuelInfrastructureConfig}(), [ne], [route],
+                    Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 72, 0.05,
+                    1000.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, 0)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                short = value.(vars.ne_demand_shortfall_periodic[("Gas", "Industrial")])
+                return [sum(short[:, p]) for p in 1:3],
+                       sum(value.(vars.fuel_loss_of_supply_hourly["Gas"]))
+            end
+            short, loss = solve_route(0.0)
+            @test sum(short) ≈ 0.0 atol = 1e-6
+            @test loss ≈ 0.0 atol = 1e-6
+            # 1 day per 100 km: day 1's demand waits for the first shipment
+            short, loss = solve_route(1.0)
+            @test short ≈ [10.0, 0.0, 0.0] atol = 1e-6
+            @test loss ≈ 0.0 atol = 1e-6
+        end
+
         @testset "CO2 factor is per MWh of fuel" begin
             # 0.2 t per MWh of fuel at 50 % rated efficiency is 0.4 t per MWh
             # of electricity; the factor used to be applied per MWh_e.

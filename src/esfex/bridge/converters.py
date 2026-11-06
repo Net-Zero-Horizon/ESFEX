@@ -964,6 +964,46 @@ def convert_network_config(
     )
 
 
+def absolute_start_hour(year, base_year, hour_in_year) -> int:
+    """Horizon hour of ``hour_in_year`` in ``year`` (hour 0 = Jan 1 of ``base_year``).
+
+    Every modelled year is 8760 h long.
+    """
+    years = int(year or 0) - int(base_year if base_year is not None else (year or 0))
+    return max(0, years) * HOURS_STD_YEAR + int(hour_in_year or 0)
+
+
+def outage_window_spans(window, lo: int, hi: int) -> list:
+    """Absolute ``[start, end)`` hour spans of one outage window overlapping ``[lo, hi)``.
+
+    ``window`` is ``(start_hour, end_hour, availability[, recurring])`` in
+    absolute horizon hours (hour 0 = Jan 1 of ``base_year``; every modelled
+    year is 8760 h). A one-off window happens once. A recurring window repeats
+    every year at the same hours of the year (its start is taken modulo 8760),
+    including a window that runs over the new year.
+    """
+    w0, w1 = int(window[0]), int(window[1])
+    if len(window) < 4 or not window[3]:
+        return [(w0, w1)] if w1 > lo and w0 < hi else []
+    length = w1 - w0
+    s = w0 % HOURS_STD_YEAR
+    first = (lo - length - s) // HOURS_STD_YEAR
+    last = (hi - s) // HOURS_STD_YEAR
+    spans = []
+    for k in range(first, last + 1):
+        a = s + k * HOURS_STD_YEAR
+        b = a + length
+        if b > lo and a < hi:
+            spans.append((a, b))
+    return spans
+
+
+def outage_window_tuple(ow) -> tuple:
+    """``(start_hour, end_hour, availability, recurring)`` of an ``OutageWindow``."""
+    return (ow.start_hour, ow.end_hour, ow.availability,
+            bool(getattr(ow, "recurring", False)))
+
+
 def compile_outage_factor(
     windows: list,
     start_hour: int,
@@ -972,8 +1012,10 @@ def compile_outage_factor(
 ) -> np.ndarray:
     """Per-timestep availability factor in [0, 1] from scheduled outage windows.
 
-    ``windows`` is a list of ``(start_hour, end_hour, availability)`` triples in
-    absolute hour-of-horizon coordinates (``[start, end)``). The result has
+    ``windows`` is a list of ``(start_hour, end_hour, availability[, recurring])``
+    tuples in absolute hour-of-horizon coordinates (``[start, end)``, hour 0 =
+    Jan 1 of ``base_year``; see :func:`outage_window_spans`). ``start_hour`` is
+    the absolute horizon hour at which the window starts. The result has
     length ``hours`` — the current rolling-horizon window at
     ``resolution_hours`` resolution — where local period ``i`` covers absolute
     hours ``[(start_hour // res + i) * res, ...)``.
@@ -988,27 +1030,31 @@ def compile_outage_factor(
         return factor
     res = max(1, int(resolution_hours))
     base_period = start_hour // res
-    for i in range(hours):
-        p_start = (base_period + i) * res
-        p_end = p_start + res
-        for w0, w1, wav in windows:
-            lo = max(p_start, w0)
-            hi = min(p_end, w1)
-            if hi > lo:
-                frac = (hi - lo) / res
-                factor[i] *= (1.0 - frac) + frac * float(wav)
+    lo = base_period * res
+    hi = lo + hours * res
+    for w in windows:
+        wav = float(w[2])
+        for w0, w1 in outage_window_spans(w, lo, hi):
+            # Only the periods the span touches
+            i0 = max(0, (w0 - lo) // res)
+            i1 = min(hours, -(-(w1 - lo) // res))
+            for i in range(i0, i1):
+                p_start = lo + i * res
+                frac = (min(p_start + res, w1) - max(p_start, w0)) / res
+                if frac > 0:
+                    factor[i] *= (1.0 - frac) + frac * wav
     return factor
 
 
 def fuel_source_outage_windows(outage_schedule, fuel_name: str) -> list:
-    """Scheduled outage windows for a fuel source, as ``(start, end, avail)``.
+    """Scheduled outage windows for a fuel source, as ``(start, end, avail, recurring)``.
 
     Fuel-source outages reuse ``FuelConfig``'s built-in single-window disruption
-    in the primary-energy model (no Julia change), so the caller applies the
-    first window and warns if more than one is scheduled.
+    in the primary-energy model (no Julia change), so the caller applies one
+    window per model window and warns if several overlap it.
     """
     return [
-        (ow.start_hour, ow.end_hour, ow.availability)
+        outage_window_tuple(ow)
         for ow in (outage_schedule or [])
         if ow.element_type == "fuel_source" and ow.element_id == fuel_name
     ]
@@ -1026,7 +1072,7 @@ def build_outage_mask_matrix(
     Row ``i`` is the per-timestep availability factor for element ``id_order[i]``
     (see :func:`compile_outage_factor`), defaulting to all-ones for elements with
     no scheduled outage. ``windows_by_id`` maps an element id to its list of
-    ``(start_hour, end_hour, availability)`` windows.
+    ``(start_hour, end_hour, availability[, recurring])`` windows.
 
     Returns ``None`` when no element in ``id_order`` has an outage, so callers
     can skip populating the mask entirely (keeping the model identical).

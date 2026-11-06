@@ -74,6 +74,7 @@ function boot(data) {
     document.getElementById("lbl-end").textContent = I.end || "End";
     document.getElementById("lbl-avail").textContent = I.availability || "Availability";
     document.getElementById("lbl-label").textContent = I.label || "Note";
+    document.getElementById("lbl-recurring").textContent = I.recurring || "Repeat every year";
     document.getElementById("btn-delete").textContent = I.delete || "Delete";
     wireForm();
     render();
@@ -249,6 +250,9 @@ function wireForm() {
     document.getElementById("in-label").addEventListener("input", function () {
         if (selected) { selected.label = this.value; commitDeferred(); }
     });
+    document.getElementById("in-recurring").addEventListener("change", function () {
+        if (selected) { selected.recurring = this.checked; commit(); }
+    });
     document.getElementById("btn-delete").addEventListener("click", function () {
         if (!selected) return;
         schedule = schedule.filter(function (o) { return o !== selected; });
@@ -268,6 +272,7 @@ function fillForm() {
     document.getElementById("in-avail").value = pct;
     document.getElementById("avail-val").textContent = pct + "%";
     document.getElementById("in-label").value = selected.label || "";
+    document.getElementById("in-recurring").checked = !!selected.recurring;
 }
 
 // ── Commit to Python ───────────────────────────────────────────────
@@ -284,6 +289,7 @@ function commit() {
             element_type: d.element_type, element_id: d.element_id,
             start_hour: d.start_hour, end_hour: d.end_hour,
             availability: d.availability, label: d.label || "",
+            recurring: !!d.recurring,
         };
     });
     window._bridge.commit(JSON.stringify(out));

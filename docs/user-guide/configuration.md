@@ -472,7 +472,7 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
 
 The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the monolithic master problem and a soft one (priced with `curtailment_excess_penalty`) under Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`soc_violation`, `delay_retirement_per_mw` and `coupling_slack_penalty` can also be set here. A `curtailment` key is accepted but has no effect.
+`soc_violation`, `delay_retirement_per_mw` and `coupling_slack_penalty` can also be set here (`coupling_slack_penalty` has no effect: the primary-energy model has no coupling slack). A `curtailment` key is accepted but has no effect.
 
 `loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
 

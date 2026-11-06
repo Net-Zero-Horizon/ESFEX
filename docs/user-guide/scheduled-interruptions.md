@@ -16,8 +16,8 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 
 ## How it works
 
-- **Hours within the year.** `start_hour` and `end_hour` count from the first hour of a simulated year (hour 0). A window covers `[start_hour, end_hour)`: start inclusive, end exclusive. A one-week maintenance from the start of week 20 is `start_hour = 20 * 168 = 3360`, `end_hour = 3360 + 168 = 3528`.
-- **Every year.** The same window applies in **every** simulated year. A `start_hour` of 8760 or more never takes effect.
+- **Hours of the horizon.** `start_hour` and `end_hour` count from the first hour of the base year (hour 0 = 1 January of `base_year`, 00:00). Every simulated year is 8,760 hours, so year *k* of the horizon starts at hour `k * 8760`. A window covers `[start_hour, end_hour)`: start inclusive, end exclusive. A one-week maintenance from the start of week 20 of the base year is `start_hour = 20 * 168 = 3360`, `end_hour = 3360 + 168 = 3528`; the same week two years later is `3360 + 2 * 8760`.
+- **Once, or every year.** A window happens once, at the hours given. Set `recurring: true` to repeat it every year at the same hours of the year (its `start_hour` is then taken modulo 8,760, and a window that runs past 31 December continues into 1 January).
 - **Availability multiplier.** During the window the element's capacity is multiplied by `availability` ∈ [0, 1]. Outside the window the element is fully available.
 - **Per element.** Each window targets exactly one element.
 - **Overlaps multiply.** Overlapping windows on the same element compound: two windows of 0.5 in the same hour give 0.25.
@@ -31,7 +31,7 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 
 ### The interruptions calendar
 
-**Edit → Interruptions…** opens the **Service Interruptions** calendar for the current system. It is a Gantt-style timeline over one year (8,760 hours), with one row per element, grouped by category:
+**Edit → Interruptions…** opens the **Service Interruptions** calendar for the current system. It is a Gantt-style timeline over the base year (8,760 hours), with one row per element, grouped by category:
 
 - Generators
 - Batteries
@@ -47,6 +47,7 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 | **Start** / **End** | The window's hour range within the year |
 | **Availability** | Capacity fraction during the window (0 = full cut, 1 = no effect) |
 | **Note** | Optional free-text label shown on the calendar |
+| **Repeat every year** | Repeat the window in every simulated year (`recurring`); unchecked, it happens once, in the base year |
 
 Use **Add** / **Delete** to manage windows directly. Windows with `end <= start` are dropped when you apply.
 
@@ -72,12 +73,13 @@ systems:
         availability: 0.0         # fully offline
         label: "Annual refuelling"
 
-      # Summer 50 % derate of a transmission line (by line_id)
+      # Summer 50 % derate of a transmission line (by line_id), every year
       - element_type: line
         element_id: L_north_tie
         start_hour: 4344          # ~1 July
         end_hour: 5088
         availability: 0.5
+        recurring: true
         label: "Conductor thermal derate"
 ```
 
@@ -97,7 +99,7 @@ systems:
 | `fuel_route` | no | — | Accepted, but currently has no effect |
 
 !!! note "`fuel_source` windows"
-    A `fuel_source` window is passed to the primary-energy model's built-in supply-disruption window, so it only matters when primary-energy modelling is active (`enable_primary_energy` and `primary_energy_sources`). The primary-energy model supports **one** window per fuel: only the first is used, and a warning is logged if more are given. That disruption window is measured in hours from the start of each **operational window**, not from the start of the year. With the default rolling horizon it therefore does not fall on the hours you entered. It only lines up with hours of the year when `temporal.use_rolling_horizon: false`.
+    A `fuel_source` window is passed to the primary-energy model's built-in supply-disruption window, so it only matters when primary-energy modelling is active (`enable_primary_energy` and `primary_energy_sources`). It uses the same horizon hours as the other windows. The primary-energy model takes **one** window per fuel in each operational window: the first scheduled window that falls inside it is used, and a warning is logged if more than one does. The disruption scales the fuel's supply limit for each primary-energy period by the share of the period's hours inside the window.
 
 ### Window fields
 
@@ -106,9 +108,10 @@ systems:
 | `element_type` | yes | — | One of the types above |
 | `element_id` | yes | — | Target element key or id (see table) |
 | `node` | no | none | Generators and batteries: node of the unit to cut (none = every node) |
-| `start_hour` | yes | — | Hour within the year, inclusive (≥ 0) |
-| `end_hour` | yes | — | Hour within the year, exclusive (> `start_hour`) |
+| `start_hour` | yes | — | Horizon hour, inclusive (≥ 0; hour 0 = 1 January of `base_year`) |
+| `end_hour` | yes | — | Horizon hour, exclusive (> `start_hour`) |
 | `availability` | no | `0.0` | Capacity fraction in the window (0 = full cut, 1 = none) |
+| `recurring` | no | `false` | Repeat the window every year at the same hours of the year |
 | `label` | no | `""` | Optional note shown on the calendar |
 
 ---
