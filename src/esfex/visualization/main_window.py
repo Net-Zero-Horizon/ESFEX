@@ -369,8 +369,12 @@ class MainWindow(QMainWindow):
         self.model = GuiModel(self)
         self._loaded_config = None  # ESFEXConfig (set externally)
         self._raw_config_dict: dict | None = None  # raw YAML dict for GUI-only keys
-        self._result_config = None  # set on export/save
         self._config_path: Optional[str] = None
+        # Path of the last successful File > Save (read by launch_studio).
+        self._last_saved_path: Optional[str] = None
+        # Directory relative data paths resolve against when the file was
+        # loaded from somewhere other than _config_path (``studio -c in -o out``).
+        self._load_base_dir: Optional[str] = None
         self._last_output_dir: str = ""
         self._all_states: dict[str, object] = {}  # system_name -> GuiSystemState
         self._current_system_name: str = ""
@@ -988,6 +992,12 @@ class MainWindow(QMainWindow):
 
         return bar
 
+    def _current_system_config(self):
+        """The loaded :class:`SystemConfig` of the system being edited, or None."""
+        cfg = self._loaded_config
+        systems = getattr(cfg, "systems", None) or {}
+        return systems.get(self._current_system_name)
+
     def _on_sld_load_results(self):
         """Open HDF5 file picker and load results for SLD overlay."""
         from PySide6.QtWidgets import QFileDialog
@@ -1001,7 +1011,8 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            loader = SldResultsLoader(path, self.model.state)
+            loader = SldResultsLoader(path, self.model.state,
+                                      system_config=self._current_system_config())
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load results:\n{e}")
             return
@@ -1189,19 +1200,13 @@ class MainWindow(QMainWindow):
             try:
                 from esfex.analysis.frequency import (
                     FrequencyAnalyzer,
+                    analyzer_settings,
                     build_gen_freq_params_from_state,
                 )
                 params = build_gen_freq_params_from_state(self.model.state)
-                # Read nominal frequency from the system's buses
-                f_nom = 50.0
-                for bus in self.model.state.buses.values():
-                    if bus.frequency_hz and bus.frequency_hz > 0:
-                        f_nom = bus.frequency_hz
-                        break
-                # Adapt nadir limit to the system frequency
-                nadir_limit = f_nom - 1.0  # 1 Hz below nominal
                 self._analysis_freq_analyzer = FrequencyAnalyzer(
-                    params, f_nom=f_nom, nadir_limit=nadir_limit,
+                    params, **analyzer_settings(self._current_system_config(),
+                                                self.model.state),
                 )
             except Exception:
                 log.debug("Could not build frequency analyzer from state", exc_info=True)
@@ -3420,8 +3425,8 @@ class MainWindow(QMainWindow):
         """Run ``_populate_from_config`` after the first paint."""
         self._populate_from_config(
             self._loaded_config, raw_dict=self._raw_config_dict,
-            base_dir=(str(Path(self._config_path).parent)
-                      if self._config_path else None),
+            base_dir=self._load_base_dir or (str(Path(self._config_path).parent)
+                                             if self._config_path else None),
         )
         self.console.update_namespace(
             config=self._loaded_config, state=self.model.state,
@@ -7436,6 +7441,11 @@ class MainWindow(QMainWindow):
             finally:
                 progress.close()
             self._config_path = path
+            self._last_saved_path = path
+            # The saved file no longer holds the loaded file's unknown keys.
+            for _st in self._all_states.values():
+                if _st is not None:
+                    _st.unknown_config_keys = []
             # State on disk now matches in-memory state.
             self._clear_modified()
             self._update_window_title()

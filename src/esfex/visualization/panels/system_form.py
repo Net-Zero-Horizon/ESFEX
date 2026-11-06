@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.config.schema import PENALTIES_WITHOUT_EFFECT
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scaled
@@ -203,6 +204,9 @@ class SystemForm(QWidget):
             spin.setRange(lo, hi)
             spin.setDecimals(2 if hi > 1 else 4)
             spin.editingFinished.connect(self._on_changed)
+            if field_name in PENALTIES_WITHOUT_EFFECT:
+                spin.setEnabled(False)
+                spin.setToolTip(tr("common.no_effect"))
             pl.addRow(label, spin)
             self._penalty_widgets[field_name] = spin
 

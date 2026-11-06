@@ -173,7 +173,7 @@ conda activate esfex
 esfex info
 ```
 
-`environment.yml` currently pins Python below 3.13; use pip for Python 3.13.
+`environment.yml` allows the same Python versions as pip (3.10–3.13).
 
 ### From source (development mode)
 

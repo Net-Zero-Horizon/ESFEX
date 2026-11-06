@@ -159,6 +159,26 @@ class TestSolverOptions:
                 )
 
 
+class TestFormulationSolvers:
+    def test_cone_formulations_exclude_highs(self):
+        """SOC/QC add (Rotated)SecondOrderCone constraints, which HiGHS
+        rejects ("not supported by the solver"); the Studio must not offer it."""
+        from esfex.config.solver import FORMULATION_SOLVERS
+        for mode in ("acopf_soc", "acopf_qc", "acopf_sdp"):
+            assert "highs" not in FORMULATION_SOLVERS[mode]
+            assert {"clarabel", "scs"} <= FORMULATION_SOLVERS[mode]
+
+    def test_every_power_flow_mode_and_solver_is_known(self):
+        import typing
+        from esfex.config.schema import SystemConfig
+        from esfex.config.solver import FORMULATION_SOLVERS
+        modes = typing.get_args(SystemConfig.model_fields["power_flow_mode"].annotation)
+        solvers = set(typing.get_args(SolverConfig.model_fields["name"].annotation))
+        assert set(FORMULATION_SOLVERS) == set(modes)
+        for names in FORMULATION_SOLVERS.values():
+            assert names <= solvers
+
+
 # ---------------------------------------------------------------------------
 # _can_import
 # ---------------------------------------------------------------------------

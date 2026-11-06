@@ -1378,7 +1378,8 @@
     "error": "Error",
     "warning": "Warning",
     "info": "Info",
-    "enable": "Enable"
+    "enable": "Enable",
+    "no_effect": "No effect in the current model; kept so existing files load."
   },
   "custom_constraints": {
     "title": "Custom Constraints",

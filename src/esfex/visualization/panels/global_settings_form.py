@@ -139,8 +139,8 @@ class GlobalSettingsForm(QWidget):
         # ── Section 3: Power Flow formulation ──
         # Placed BEFORE the solver section on purpose: the OPF formulation
         # constrains which solvers are valid (AC-OPF NLP modes need Ipopt,
-        # acopf_sdp needs SCS/Mosek, convex relaxations work with HiGHS/
-        # Gurobi), so the user picks the formulation first. The OPF formulation
+        # acopf_sdp needs SCS/Mosek, SOC/QC relaxations need a conic solver:
+        # Clarabel/SCS/Gurobi), so the user picks the formulation first. The OPF formulation
         # is also a MODEL-WIDE choice — multi-system configs merge into a
         # single network solved with one formulation (runner._merge_systems) —
         # hence Global Settings, not per-System. Data stays on model.state
@@ -310,8 +310,12 @@ class GlobalSettingsForm(QWidget):
         self._solver_verbose.toggled.connect(self._on_changed)
         svl.addRow("", self._solver_verbose)
 
+        # solver.scale_constraints is not read by the model or the solvers;
+        # shown disabled so the YAML value is still visible.
         self._solver_scale = QCheckBox(tr("global_form.scale_constraints"))
         self._solver_scale.toggled.connect(self._on_changed)
+        self._solver_scale.setEnabled(False)
+        self._solver_scale.setToolTip(tr("common.no_effect"))
         svl.addRow("", self._solver_scale)
 
         # Solver-specific options live INSIDE the unified group as a

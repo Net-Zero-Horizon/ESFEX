@@ -387,14 +387,15 @@ THREADS_INERT_WHEN: dict[str, dict[str, list[str]]] = {
 # so picking an incompatible solver makes the operational solve fail. The GUI
 # greys out incompatible solvers once a formulation is selected.
 #   dcopf / dcopf_ac_verify : linear program → any LP/MIP solver
-#   acopf_soc / acopf_qc    : convex SOCP/QC  → conic-capable solvers
+#   acopf_soc / acopf_qc    : convex SOCP/QC  → conic-capable solvers (not HiGHS,
+#                             which rejects second-order cone constraints)
 #   acopf_sdp               : semidefinite    → SDP-capable conic solvers
 #   acopf_polar / acopf_rect: exact nonlinear → a general NLP solver (Ipopt)
 FORMULATION_SOLVERS: dict[str, set[str]] = {
     "dcopf":           {"highs", "gurobi", "glpk", "cbc", "scip", "cplex", "xpress"},
     "dcopf_ac_verify": {"highs", "gurobi", "glpk", "cbc", "scip", "cplex", "xpress"},
-    "acopf_soc":       {"highs", "gurobi", "cplex", "xpress", "clarabel", "scs"},
-    "acopf_qc":        {"highs", "gurobi", "cplex", "xpress", "clarabel", "scs"},
+    "acopf_soc":       {"gurobi", "cplex", "xpress", "clarabel", "scs"},
+    "acopf_qc":        {"gurobi", "cplex", "xpress", "clarabel", "scs"},
     "acopf_sdp":       {"scs", "clarabel"},
     "acopf_polar":     {"ipopt"},
     "acopf_rect":      {"ipopt"},

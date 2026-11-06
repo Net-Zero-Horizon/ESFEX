@@ -642,6 +642,20 @@ class TestFuelLinking:
         # Gas adder is 60.0, fuel_cost>0 at both nodes
         assert maint[0] == pytest.approx(60.0)
 
+    def test_non_fuel_adder_logged_per_generator(self, caplog):
+        """Each unit that receives the adder is named in the log."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _thermal_gen(
+            name="GP", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[0.0, 0.0])
+        data["unit_1"] = _thermal_gen(
+            name="GQ", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[40.0, 40.0])
+        with caplog.at_level(logging.INFO, logger="esfex.config.loader"):
+            _convert_system(data)
+        lines = [r.getMessage() for r in caplog.records if "non-fuel O&M adder" in r.getMessage()]
+        assert len(lines) == 1
+        assert "unit_0" in lines[0] and "60" in lines[0]
+
     def test_existing_substantial_maintenance_not_doubled(self):
         """If maintenance already >= adder*0.5, skip the LCOE add."""
         data = _minimal_system()
@@ -793,3 +807,25 @@ class TestLoadSystemConfigValidation:
         p.write_text(yaml.dump({"name": "OnlyName"}), encoding="utf-8")
         with pytest.raises(ConfigLoadError):
             load_system_config(p)
+
+
+class TestFieldNameAndAlias:
+    def test_field_name_wins_over_alias(self, caplog):
+        """Studio files up to 0.3.0 hold a setting twice: the loaded value under
+        its alias and the user's edit under the field name. Pydantic preferred
+        the alias, which discarded the edit."""
+        data = _minimal_system()
+        data.update(TARGET_RE_PENETRATION=1.0, target_re_penetration=0.8,
+                    FORCE_REPLACEMENT=-5e5, force_replacement=-5e5)
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.target_re_penetration == 0.8
+        assert sc.force_replacement == -5e5
+        warned = [r.getMessage() for r in caplog.records if "are set; using" in r.getMessage()]
+        assert len(warned) == 1 and "target_re_penetration" in warned[0]
+
+    def test_alias_alone_still_read(self):
+        data = _minimal_system()
+        data.pop("target_re_penetration", None)
+        data["TARGET_RE_PENETRATION"] = 0.7
+        assert _convert_system(data).target_re_penetration == 0.7
