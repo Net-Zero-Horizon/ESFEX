@@ -81,6 +81,9 @@ struct PowerSystemInput
     battery_soc_prev::Dict{Int, Dict{Int, Float64}}   # MWh
     hours_per_year::Int
     power_flow_mode::String                    # "dcopf" (default) or "acopf_soc|qc|sdp|polar|rect"
+    # Per-system CO2 budgets of a merged multi-system run; empty = one budget
+    # over all nodes from co2_budget / co2_budget_violation_penalty
+    co2_budget_groups::Vector{CO2BudgetGroup}  # CO2BudgetGroup(name, nodes, budget, violation_penalty)
     # ... additional fields (see types.jl for full list)
 end
 ```
@@ -317,7 +320,7 @@ end
 | `add_inertia_constraints!` | `(model, vars, input)` | System inertia floor from synchronous generators. |
 | `add_curtailment_constraints!` | `(model, vars, input)` | Defines `curtailment[n,t]` as available minus dispatched variable RE at each node (reservoir hydro excluded). |
 | `add_renewable_constraint!` | `(model, vars, input)` | RE penetration target: `renewable_gen >= target * total_gen`. |
-| `add_co2_constraint!` | `(model, vars, input)` | CO2 budget: `sum(fuel_gen * emission_factor / eff_at_rated) <= co2_budget` scaled to the window's share of the year, with a penalised violation slack. |
+| `add_co2_constraint!` | `(model, vars, input)` | CO2 budget: `sum(fuel_gen * emission_factor / eff_at_rated) <= co2_budget` scaled to the window's share of the year, with a penalised violation slack. With `co2_budget_groups` (multi-system run), one such constraint per group (system), over its nodes, with its own budget and penalty. |
 | `add_ev_constraints!` | `(model, vars, input)` | EV charging scheduling and V2G dispatch with SOC tracking. |
 | `add_sectoral_demand_constraints!` | `(model, vars, input)` | Per-sector loss-of-load with criticality-weighted penalties and demand shifting. |
 | `add_n1_security_constraints!` | `(model, vars, input)` | N-1 contingency constraints for transmission and generation. |

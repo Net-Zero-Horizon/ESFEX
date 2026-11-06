@@ -132,6 +132,7 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 |---------------|--------|-------------|
 | `co2_emissions_def_n{ni}_t{t}` | CO2-1 | Emissions definition per node and step |
 | `CO2_budget_constraint` | CO2-2 | `Δt·sum(emission_factor / eff_at_rated * gen_output) <= annual_budget * window_hours / hours_per_year + violation` (t) |
+| `CO2_budget_constraint[{system}]` | CO2-2 | Multi-system run: the same, one per system over that system's nodes, with its own budget and violation penalty |
 
 ### Inertia
 

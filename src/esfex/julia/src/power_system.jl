@@ -531,12 +531,16 @@ function build_variables!(model, input::PowerSystemInput)
         loss_of_inertia = loss_of_inertia_var
     end
 
-    # CO2 budget violation slack variable
-    # Single variable for total emissions exceeding budget
+    # CO2 budget violation slack: one variable (t over budget) per budget
+    # group that has a budget. A single group keeps the plain name.
     co2_budget_violation = nothing
-    if !isinf(input.co2_budget) && input.co2_budget > 0
-        @variable(model, co2_budget_violation_var >= 0)
-        co2_budget_violation = co2_budget_violation_var
+    co2_groups = co2_budget_groups(input)
+    for (k, grp) in enumerate(co2_groups)
+        has_co2_budget(grp) || continue
+        co2_budget_violation === nothing && (co2_budget_violation = Dict{Int, VariableRef}())
+        co2_budget_violation[k] = @variable(model, lower_bound = 0,
+            base_name = length(co2_groups) == 1 ? "co2_budget_violation_var" :
+                        "co2_budget_violation_var[$(grp.name)]")
     end
 
     # Rooftop solar curtailment (node × hour)
@@ -1062,11 +1066,14 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # ==========================================================================
     # The violation is in tonnes, not per step, but this cost sits with the
     # energy costs that are multiplied by the step length: divide it back out.
+    # Each budget group pays its own penalty.
     co2_budget_violation_cost = AffExpr(0.0)
     if vars.co2_budget_violation !== nothing
-        co2_budget_violation_cost = @expression(model,
-            input.co2_budget_violation_penalty / temporal_resolution_hours * vars.co2_budget_violation
-        )
+        co2_groups = co2_budget_groups(input)
+        for (k, viol) in vars.co2_budget_violation
+            add_to_expression!(co2_budget_violation_cost,
+                co2_groups[k].violation_penalty / temporal_resolution_hours, viol)
+        end
     end
 
     # ==========================================================================
@@ -2543,51 +2550,70 @@ function add_renewable_constraint!(model, vars::PowerSystemVariables, input)
 end
 
 """
+    co2_budget_groups(input::PowerSystemInput) -> Vector{CO2BudgetGroup}
+
+The CO2 budgets of the dispatch: the per-system groups of a merged
+multi-system run, or one group over all nodes built from `co2_budget` and
+`co2_budget_violation_penalty`.
+"""
+function co2_budget_groups(input::PowerSystemInput)
+    isempty(input.co2_budget_groups) || return input.co2_budget_groups
+    return [CO2BudgetGroup(input.name, collect(1:input.network.num_nodes),
+                           input.co2_budget, input.co2_budget_violation_penalty)]
+end
+
+has_co2_budget(grp::CO2BudgetGroup) = !isinf(grp.budget) && grp.budget > 0
+
+"""
     add_co2_constraint!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Add CO2 emissions budget constraint with violation slack variable.
+Add one CO2 emissions budget constraint per budget group (one per system in
+a merged multi-system run), each with its own violation slack:
 
-Matches Python legacy (power_system.py lines 2660-2664):
-  total_co2_emissions <= budget + CO2_budget_violation
+  sum(CO2 of the group's generators) <= budget × window fraction + violation
 
-The violation variable is penalized in the objective function.
+The violation variables are penalized in the objective at each group's own
+penalty.
 """
 function add_co2_constraint!(model, vars::PowerSystemVariables, input::PowerSystemInput)
-    # Skip if no CO2 budget set
-    if isinf(input.co2_budget) || input.co2_budget <= 0
-        return
-    end
+    groups = co2_budget_groups(input)
+    any(has_co2_budget, groups) || return
+    # Without per-system groups the single budget covers every bus.
+    per_system = !isempty(input.co2_budget_groups)
 
     n_gen = length(input.generators)
-    n_bus = input.network.num_buses
     hours = input.temporal.hours
+    b2n = input.network.bus_to_node
 
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
 
-    # Total CO2 emissions (t): output (MW) × step length (h) × intensity (t/MWh_e)
-    total_co2 = AffExpr(0.0)
-
-    for g in 1:n_gen, b in vars.buses_of_gen[g]
-        co2_factor = co2_per_mwh(input.fuel_co2, input.generators[g], b)
-        co2_factor == 0.0 && continue
-        for t in 1:hours
-            add_to_expression!(total_co2, co2_factor * tres, vars.gen_output[g, b, t])
-        end
-    end
-
     # Scale CO2 budget by window fraction (matches Python legacy: budget * hours * tres / year_hours)
     window_fraction = hours * tres / Float64(input.hours_per_year)
-    scaled_budget = input.co2_budget * window_fraction
 
-    # CO2 budget constraint with violation slack
-    # total_co2 <= scaled_budget + violation
-    if vars.co2_budget_violation !== nothing
-        @constraint(model, total_co2 <= scaled_budget + vars.co2_budget_violation,
-                   base_name = "CO2_budget_constraint")
-    else
-        # Fallback to hard constraint if no violation variable
-        @constraint(model, total_co2 <= scaled_budget,
-                   base_name = "CO2_budget_constraint")
+    for (k, grp) in enumerate(groups)
+        has_co2_budget(grp) || continue
+        in_group = Set(grp.nodes)
+
+        # Group CO2 emissions (t): output (MW) × step length (h) × intensity (t/MWh_e)
+        total_co2 = AffExpr(0.0)
+        for g in 1:n_gen, b in vars.buses_of_gen[g]
+            per_system && !(b2n[b] in in_group) && continue
+            co2_factor = co2_per_mwh(input.fuel_co2, input.generators[g], b)
+            co2_factor == 0.0 && continue
+            for t in 1:hours
+                add_to_expression!(total_co2, co2_factor * tres, vars.gen_output[g, b, t])
+            end
+        end
+
+        scaled_budget = grp.budget * window_fraction
+        cname = length(groups) == 1 ? "CO2_budget_constraint" : "CO2_budget_constraint[$(grp.name)]"
+        if vars.co2_budget_violation !== nothing && haskey(vars.co2_budget_violation, k)
+            @constraint(model, total_co2 <= scaled_budget + vars.co2_budget_violation[k],
+                       base_name = cname)
+        else
+            # Fallback to hard constraint if no violation variable
+            @constraint(model, total_co2 <= scaled_budget, base_name = cname)
+        end
     end
 end
 

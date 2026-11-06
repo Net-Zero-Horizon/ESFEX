@@ -281,13 +281,15 @@ The model selects the formulation from `network.num_buses`.
 
 ## Inter-System Links
 
-When several systems are coupled by inter-system links (`meta_network.systems_links`), the runner merges all systems into one network before building the models. Each link connection becomes an ordinary transmission line between the first bus of each endpoint node, with:
+When several systems are coupled by inter-system links (`meta_network.systems_links`), the runner merges all systems into one network before building the models. Each connection of a `link_type: transmission` link (the default) becomes an ordinary transmission line between the first bus of each endpoint node, with:
 
 - capacity `existing_capacity_MW`
 - length `distance_km`
 - `reactance_pu` and `resistance_pu` when given (otherwise the usual defaults for lines)
 
 The link then follows DC-1 to DC-3 and the configured loss model like any other line, inside one angle reference. Investment uses `max_investment_MW` and `investment_cost_per_MW`, which are written into `transference_invest_max` and `transference_invest_cost` at both endpoint nodes (the larger value where a node already has one). `loss_factor`, `cost_per_mw_km` and `meta_network.inter_system_loss_segments` are not used by this path.
+
+A `link_type: fuel_route` link is not part of the electrical network: its connections become primary-energy fuel transport routes for its `fuel` (see [Inter-System Links](../gui/inter-system-links.md#how-links-enter-the-model) for the field mapping).
 
 A merged system without `transmission_lines_geo` keeps its internal network: each node pair connected in `nodes_connections` becomes a line between the first buses of the two nodes, with that capacity, the `fuel_transport_distances` entry as length and the adjacency defaults (X from the length, R = 0.1 × X). Systems with lines use only their lines.
 
