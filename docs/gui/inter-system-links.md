@@ -137,7 +137,7 @@ The Validate dialog does not check inter-system links. They are checked by the a
 | Endpoint buses exist in their systems | Warning (the line may not be drawn) |
 | A transmission link has a capacity above 0 | Warning (it carries no power otherwise) |
 | A fuel route link has a fuel | Warning (the run ignores it otherwise) |
-| No two links join the same pair of nodes | Warning (the second one is ignored) |
+| No two links of the same kind join the same pair of nodes (a transmission link and a fuel route, or fuel routes for different fuels, may share a pair) | Warning (the second one is ignored) |
 
 
 ---

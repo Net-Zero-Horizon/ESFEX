@@ -1425,6 +1425,22 @@ def test_inter_system_links_none_input():
     assert V.validate_inter_system_links(None, {}) == []
 
 
+def test_inter_system_links_duplicate_respects_link_type_and_fuel():
+    """A power line and a fuel route on one pair (or fuel routes for two
+    fuels) are different links; the same kind twice is a duplicate."""
+    states = _isl_states()
+    line = _isl(link_id="line")
+    diesel = _isl(link_id="diesel", link_type="fuel_route", fuel="Diesel")
+    lng = _isl(link_id="lng", link_type="fuel_route", fuel="LNG")
+    issues = V.validate_inter_system_links([line, diesel, lng], states)
+    assert not any("duplicate" in i.message for i in issues)
+    again = _isl(link_id="diesel2", link_type="fuel_route", fuel="Diesel")
+    issues = V.validate_inter_system_links([line, diesel, again], states)
+    dups = [i for i in issues if "duplicate" in i.message]
+    assert [i.element_id for i in dups] == ["diesel2"]
+    assert "fuel route" in dups[0].message
+
+
 # ── reduce_to_node_mesh (PyPSA-style equivalent-network reduction) ──────
 # Replaces the ad-hoc L2+ pruning that stranded generation on weak sub-buses.
 # Each node → one bus with aggregated gen+demand; inter-node branches are the
