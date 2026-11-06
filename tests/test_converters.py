@@ -443,8 +443,8 @@ class TestConvertScenario:
         with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
-        for arg in sm_call:
+        sm_call = mock_esfex.ScenarioMultipliers.call_args.kwargs
+        for arg in sm_call.values():
             assert arg == 1.0
 
     def test_missing_multipliers_key_uses_defaults(self, mock_esfex):
@@ -479,17 +479,10 @@ class TestConvertScenario:
         with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
-        assert sm_call[0] == 0.5   # invest_cost_renewables
-        assert sm_call[1] == 1.5   # invest_cost_conventional
-        assert sm_call[2] == 2.0   # fuel_cost
-        assert sm_call[3] == 1.1   # maintenance_cost
-        assert sm_call[4] == 0.8   # invest_cost_storage
-        assert sm_call[5] == 1.3   # invest_cost_transmission
-        assert sm_call[6] == 0.95  # discount_rate
-        assert sm_call[7] == 1.2   # demand_growth
-        assert sm_call[8] == 1.4   # fuel_price_growth
-        assert sm_call[9] == 3.0   # carbon_price
+        # Passed by name (the Julia struct has a keyword constructor)
+        sm_call = mock_esfex.ScenarioMultipliers.call_args.kwargs
+        for key, value in scenario["multipliers"].items():
+            assert sm_call[key] == value
 
     def test_probability_is_float(self, mock_esfex):
         scenario = {"name": "test", "probability": 1}
@@ -500,7 +493,9 @@ class TestConvertScenario:
         call_args = mock_esfex.Scenario.call_args[0]
         assert isinstance(call_args[1], float)
 
-    def test_ten_multiplier_arguments(self, mock_esfex):
+    def test_every_multiplier_field_is_passed(self, mock_esfex):
+        from esfex.config.schema import ScenarioMultipliers
+
         scenario = {
             "name": "test",
             "probability": 1.0,
@@ -510,8 +505,8 @@ class TestConvertScenario:
         with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
-        assert len(sm_call) == 10
+        sm_call = mock_esfex.ScenarioMultipliers.call_args.kwargs
+        assert set(sm_call) == set(ScenarioMultipliers.model_fields)
 
 
 # ---------------------------------------------------------------------------

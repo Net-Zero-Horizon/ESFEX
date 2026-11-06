@@ -275,9 +275,18 @@ Type a name and click **Add**; **Remove Selected** deletes the selected scenario
 
 ### Cost Multipliers
 
-**Add Multiplier** opens a list of about 30 keys, grouped as Investment, Operational, Fuel, Penalty, Demand and Financial (for example `Generator investment cost`, `Fuel base price`, `Loss of load penalty (VOLL)`, `Demand growth factor`, `Discount rate`). Each added key becomes a column with one multiplier per scenario (default 1.0). **Remove Selected Multiplier** removes a column.
+**Add Multiplier** opens the list of multipliers, grouped as Investment, Operational, Fuel, Penalty, Demand and Financial. Each added multiplier becomes a row with one value per scenario (default 1.0). **Remove Selected Multiplier** removes a row.
 
-Only `Demand growth factor` (`demand_growth`) and `Discount rate` (`discount_rate`) currently reach the model. The other keys are written to the YAML under names that the scenario schema does not know, so the loader ignores them. To vary investment, fuel, maintenance or carbon costs, edit the scenario's `multipliers` block in the YAML with the schema keys listed in [Stochastic Programming](../formulation/stochastic-programming.md).
+| Group | Multipliers (YAML key) |
+|-------|------------------------|
+| Investment | Renewable / conventional technology investment cost (`invest_cost_renewables`, `invest_cost_conventional`), battery investment cost for power and energy together (`invest_cost_storage`) or separately (`bat_invest_cost_power`, `bat_invest_cost_capacity`, applied on top of `invest_cost_storage`), transmission investment cost (`invest_cost_transmission`), generator and battery decommissioning cost (`gen_decommissioning_cost`, `bat_decommissioning_cost`) |
+| Operational | Fixed O&M of generators and technologies (`gen_fixed_cost`), maintenance cost (`maintenance_cost`) |
+| Fuel | Fuel cost (`fuel_cost`), fuel price escalation as an annual factor (`fuel_price_growth`) |
+| Penalty | Loss of load (`penalty_loss_of_load`), CO2 emission cost (`carbon_price`), loss of reserve (`penalty_loss_of_reserve`), curtailment (`penalty_curtailment`), RE penetration shortfall (`penalty_fre_penetration`) |
+| Demand | Demand growth as an annual factor (`demand_growth`) |
+| Financial | Discount rate (`discount_rate`) |
+
+Each one scales a term of the stochastic master; see [Stochastic Programming](../formulation/stochastic-programming.md#22-scenario-multipliers) for what it applies to. A project saved by an earlier version may contain other keys: the ones that mean one of these multipliers (for example `gen_fuel_cost` or `fuel_price` for `fuel_cost`, `gen_invest_cost` for both technology investment costs) are translated when the project is opened, and the rest (start-up, electrolyzer, converter, fuel import and fuel infrastructure costs, battery maintenance, cost per MW·km, loss of fuel supply and CO2 budget penalties) are dropped with a warning in the log, because the master problem has no cost they could scale.
 
 ### Using Stochastic Optimization
 
@@ -297,7 +306,7 @@ Investment decisions are common to all scenarios (first stage); operation is eva
 |-------|-------|---------|
 | **Global** | All systems | Solver, temporal resolution, power flow mode, N-1 security, simulation mode |
 | **System** | One system | Demand scale, RE targets, penalties, CO2 budget, discount rate |
-| **Scenarios** | Stored with the first system | Demand growth and discount-rate multipliers |
+| **Scenarios** | Stored with the first system | Cost, penalty, demand-growth and discount-rate multipliers |
 
 - Global settings cannot be overridden per system. Different temporal resolutions require separate projects.
 - System settings are independent. Connected systems can have different RE targets, penalties and CO2 budgets.
