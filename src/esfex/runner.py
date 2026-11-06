@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple, Union
 
 import sys
 
@@ -245,8 +245,8 @@ class Orchestrator:
     def __init__(
         self,
         config: ESFEXConfig,
-        output_dir: Optional[Path] = None,
-        config_path: Optional[Path] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        config_path: Optional[Union[str, Path]] = None,
     ):
         """
         Initialize the orchestrator.
@@ -287,7 +287,7 @@ class Orchestrator:
         # Plugin manager (runtime overlays — never modifies core source)
         from esfex.plugins import get_plugin_manager
         self._pm = get_plugin_manager()
-        self._pm.load_all(config, gui_mode=False, project_dir=config_path.parent if config_path else None)
+        self._pm.load_all(config, gui_mode=False, project_dir=self.config_path.parent if self.config_path else None)
         self._pm.register_julia_modules()
 
         # Progress tracking
