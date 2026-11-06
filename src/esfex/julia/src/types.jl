@@ -1694,13 +1694,14 @@ struct PowerSystemResult
     # Load shedding (node × hour)
     load_shed::Matrix{Float64}
 
-    # CO2 emissions (node × hour)
+    # CO2 emission rate, tCO2/h (bus × step); × resolution_hours for tonnes
     co2_emissions::Matrix{Float64}
 
     # Dual prices (node × hour)
     energy_prices::Matrix{Float64}
 
-    # System metrics
+    # System metrics: energy totals in MWh and total_co2 in tCO2 over the
+    # window (step rates × resolution_hours)
     total_generation::Float64
     total_demand::Float64
     total_losses::Float64
