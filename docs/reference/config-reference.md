@@ -856,8 +856,8 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `transport_cost` | float | required | $/unit/km transport cost |
 | `transport_losses` | float | required | Loss fraction per 100 km |
 | `transport_transit_days_per_100km` | float (≥ 0) | `0` | Source->tank replenishment lead time, in days per 100 km of route distance. 0 = instantaneous transport. |
-| `disruption_start_hour` | int (≥ 0) | `0` | Supply-disruption window start hour (inclusive). |
-| `disruption_end_hour` | int (≥ 0) | `0` | Supply-disruption window end hour (exclusive). end <= start disables the disruption. |
+| `disruption_start_hour` | int (≥ 0) | `0` | Supply-disruption window start, absolute horizon hour (hour 0 = 1 January of `base_year`, 8760 h per year), inclusive. |
+| `disruption_end_hour` | int (≥ 0) | `0` | Supply-disruption window end, absolute horizon hour (exclusive). end <= start disables the disruption. |
 | `disruption_availability` | float (0–1) | `1` | Availability fraction during the disruption window (0 = full cut, 1 = none). |
 | `max_storage_investment_per_node` | float | required | Maximum storage investment per node (units) |
 | `max_transport_investment_per_arc` | float | required | Maximum transport investment per arc (units) |
@@ -919,7 +919,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `fre_penetration_loss` | float | `100` | $/MWh RE shortfall |
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
-| `coupling_slack_penalty` | float | `1` | $/unit PE periodic-hourly coupling slack. |
+| `coupling_slack_penalty` | float | `1` | No effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack (kept so existing files load). |
 | `transport_congestion` | float | `100` | $/MW congestion |
 | `storage_violation` | float | `100` | $/MW storage violation |
 | `non_electric_demand_loss` | float | `100` | $/unit fuel demand unmet |
@@ -1093,10 +1093,11 @@ Each scenario of the stochastic master has its own operation (demand and operati
 | `element_type` | `generator` \| `line` \| `battery` \| `transformer` \| `acdc_converter` \| `freq_converter` \| `electrolyzer` \| `fuel_source` \| `fuel_storage` \| `fuel_route` | required | Kind of element taken out |
 | `element_id` | str | required | Generator/battery/electrolyzer/fuel-source key, or list index as a string for lines, transformers, converters and fuel routes. A generator/battery id of the form `<unit key>_n<node>` (saved by earlier Studio versions) is read as that unit and node |
 | `node` | int (≥ 0) or null | `null` | Generators / batteries: cut only the unit's capacity at this node (`null` = every node). Battery windows apply to the whole battery |
-| `start_hour` | int (≥ 0) | required | First hour (inclusive) of the window, counted from the first simulated hour |
+| `start_hour` | int (≥ 0) | required | First hour (inclusive) of the window, in horizon hours: hour 0 = 1 January of `base_year`, 8760 h per simulated year |
 | `end_hour` | int (> 0) | required | End hour (exclusive); must be > `start_hour` |
 | `availability` | float (0.0–1.0) | `0` | Capacity fraction available during the window (0 = full outage) |
 | `label` | str | `""` | Note shown on the calendar |
+| `recurring` | bool | `false` | Repeat the window every year at the same hours of the year (`start_hour` taken modulo 8760). `false`: it happens once |
 
 ---
 

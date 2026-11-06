@@ -32,7 +32,10 @@ from esfex.bridge.converters import (
     build_outage_mask_by_id,
     build_outage_mask_matrix,
     compile_outage_factor,
+    absolute_start_hour,
     fuel_source_outage_windows,
+    outage_window_spans,
+    outage_window_tuple,
     convert_battery_config,
     convert_battery_technology_config,
     convert_generator_config,
@@ -1191,13 +1194,15 @@ class PowerSystemAdapter:
         # windows once, keyed by type then id. Generators fold their windows into
         # the availability matrix in the loop below; other element categories are
         # compiled into the centralised outage_masks dict passed to Julia.
+        # Windows are in absolute horizon hours: locate this window in them.
+        outage_hour0 = absolute_start_hour(self.year, self.base_year, self.start_hour)
         outage_by_type: dict[str, dict[str, list]] = {}
         # Generator / battery windows may target one node of the unit.
         outage_nodes: dict[str, dict[str, list]] = {}
         for _ow in getattr(sys, "outage_schedule", None) or []:
             outage_by_type.setdefault(_ow.element_type, {}).setdefault(
                 _ow.element_id, []
-            ).append((_ow.start_hour, _ow.end_hour, _ow.availability))
+            ).append(outage_window_tuple(_ow))
             outage_nodes.setdefault(_ow.element_type, {}).setdefault(
                 _ow.element_id, []
             ).append(getattr(_ow, "node", None))
@@ -1355,7 +1360,7 @@ class PowerSystemAdapter:
                     if not windows:
                         continue
                     factor = compile_outage_factor(
-                        windows, self.start_hour, self.hours, resolution_hours
+                        windows, outage_hour0, self.hours, resolution_hours
                     )
                     if node is None:
                         availability = availability * factor[:, None]
@@ -1743,7 +1748,7 @@ class PowerSystemAdapter:
         bat_mask = build_outage_mask_matrix(
             bat_windows_by_key,
             [k for k, _ in bat_order],
-            self.start_hour, self.hours, resolution_hours,
+            outage_hour0, self.hours, resolution_hours,
         )
         if bat_mask is not None:
             jl.seval("setindex!")(
@@ -1751,7 +1756,7 @@ class PowerSystemAdapter:
         # Lines: id-addressed (multi-stage filtered) → Dict{line_id → factor}.
         line_masks = build_outage_mask_by_id(
             outage_by_type.get("line", {}),
-            self.start_hour, self.hours, resolution_hours,
+            outage_hour0, self.hours, resolution_hours,
         )
         if line_masks is not None:
             jl_line_masks = jl.seval("Dict{String, Vector{Float64}}()")
@@ -1763,7 +1768,7 @@ class PowerSystemAdapter:
         for _cat in ("acdc_converter", "freq_converter", "transformer"):
             _m = build_outage_mask_by_id(
                 outage_by_type.get(_cat, {}),
-                self.start_hour, self.hours, resolution_hours,
+                outage_hour0, self.hours, resolution_hours,
             )
             if _m is not None:
                 _jl_m = jl.seval("Dict{String, Vector{Float64}}()")
@@ -3877,19 +3882,27 @@ class PrimaryEnergyAdapter:
             fuel_def = self.fuels_definition.get(fuel_name, {})
 
             # Scheduled fuel-source outages reuse FuelConfig's built-in
-            # disruption window (start/end/availability). Applies the first
-            # scheduled window; the PE model supports one window per source.
+            # disruption window (start/end/availability, absolute horizon
+            # hours). The PE model takes one window per source: the first
+            # scheduled one that falls inside this model window.
             d_start = int(fuel_cfg.get('disruption_start_hour', 0))
             d_end = int(fuel_cfg.get('disruption_end_hour', 0))
             d_avail = float(fuel_cfg.get('disruption_availability', 1.0))
-            _fw = fuel_source_outage_windows(self.outage_schedule, fuel_name)
-            if _fw:
-                d_start, d_end, d_avail = int(_fw[0][0]), int(_fw[0][1]), float(_fw[0][2])
-                if len(_fw) > 1:
+            win_lo = absolute_start_hour(self.year, self.base_year, self.year_hour_offset)
+            win_hi = win_lo + int(self.hours) * max(1, int(self.step_hours))
+            _spans = [
+                (a, b, float(w[2]))
+                for w in fuel_source_outage_windows(self.outage_schedule, fuel_name)
+                for a, b in outage_window_spans(w, win_lo, win_hi)
+            ]
+            if _spans:
+                d_start, d_end, d_avail = _spans[0]
+                if len(_spans) > 1:
                     logger.warning(
-                        "Fuel source %r has %d scheduled outages; the primary-"
-                        "energy model applies one window per source — using the "
-                        "first (%d–%d h).", fuel_name, len(_fw), _fw[0][0], _fw[0][1],
+                        "Fuel source %r has %d scheduled outages in hours %d–%d; "
+                        "the primary-energy model applies one window per source "
+                        "— using the first (%d–%d h).", fuel_name, len(_spans),
+                        win_lo, win_hi, d_start, d_end,
                     )
 
             # Cost fields go through scale_cost to match the M$ convention of
@@ -4254,13 +4267,6 @@ class PrimaryEnergyAdapter:
                 total = float(jl.seval("m -> sum(JuMP.value.(m))")(mat))
                 info[f'supply_periodic_{fuel}'] = total
 
-            # fuel_loss_of_supply_periodic: fuel → [node, period]
-            for fuel_jl in self._jl_vars.fuel_loss_of_supply_periodic:
-                fuel = str(fuel_jl)
-                mat = self._jl_vars.fuel_loss_of_supply_periodic[fuel_jl]
-                total = float(jl.seval("m -> sum(JuMP.value.(m))")(mat))
-                info[f'loss_periodic_{fuel}'] = total
-
             # hourly loss: hr_loss_supply
             if hasattr(self._jl_vars, 'fuel_loss_of_supply_hourly'):
                 for fuel_jl in self._jl_vars.fuel_loss_of_supply_hourly:
@@ -4290,12 +4296,11 @@ class PrimaryEnergyAdapter:
 
     def get_final_storage_levels(self, step: Optional[int] = None) -> Dict[str, Dict[int, float]]:
         """
-        Get final HOURLY storage levels for carry-over to next window.
+        Get the tank levels for carry-over to the next window.
 
-        Uses the hourly storage level after *step* timesteps (default: the
-        whole window, t=hours+1) rather than the periodic storage_level_end,
-        which can be higher due to coupling slack constraints. Rolling
-        horizons pass the committed steps, where the next window starts.
+        Uses the tank level after *step* timesteps (default: the whole
+        window, t=hours+1). Rolling horizons pass the committed steps, where
+        the next window starts.
 
         Returns:
             Dictionary with {fuel_id: {node_idx: level}}
@@ -4304,7 +4309,7 @@ class PrimaryEnergyAdapter:
         from juliacall import convert as jl_convert
 
         final_levels = {}
-        # Extract from hourly storage level variables (more accurate than periodic)
+        # Tank levels (the model's only fuel storage)
         for fuel_name_jl in self._jl_vars.fuel_storage_level_hourly:
             fuel_name = str(fuel_name_jl)
             mat = self._jl_vars.fuel_storage_level_hourly[fuel_name_jl]
@@ -4317,7 +4322,7 @@ class PrimaryEnergyAdapter:
                     val = float(jl.seval("JuMP.value")(mat[n + 1, last_t]))
                     final_levels[fuel_name][n] = val
                 except Exception:
-                    # Fallback to periodic storage_level_end
+                    # Fallback to the window-end level of the results
                     try:
                         results = self.get_results()
                         levels = results['final_storage_levels'].get(fuel_name, [])

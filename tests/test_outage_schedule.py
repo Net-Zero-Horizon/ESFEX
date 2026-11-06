@@ -330,7 +330,7 @@ class TestFuelSourceOutageWindows:
             OutageWindow(element_type="generator", element_id="Gas", start_hour=0, end_hour=5),
         ]
         w = fuel_source_outage_windows(sched, "Gas")
-        assert w == [(0, 48, 0.0)]
+        assert w == [(0, 48, 0.0, False)]
 
     def test_multiple_windows_returned_in_order(self):
         sched = [
@@ -338,12 +338,72 @@ class TestFuelSourceOutageWindows:
             OutageWindow(element_type="fuel_source", element_id="Gas", start_hour=100, end_hour=148, availability=0.5),
         ]
         w = fuel_source_outage_windows(sched, "Gas")
-        assert w == [(0, 48, 0.0), (100, 148, 0.5)]
+        assert w == [(0, 48, 0.0, False), (100, 148, 0.5, False)]
 
     def test_no_match_empty(self):
         assert fuel_source_outage_windows([], "Gas") == []
         sched = [OutageWindow(element_type="fuel_source", element_id="Coal", start_hour=0, end_hour=1)]
         assert fuel_source_outage_windows(sched, "Gas") == []
+
+
+# ---------------------------------------------------------------------------
+# Absolute horizon hours and recurring windows
+# ---------------------------------------------------------------------------
+class TestAbsoluteHorizonHours:
+    def test_one_off_window_does_not_repeat_next_year(self):
+        # Window on day 1 of the base year; the same hours of year 1 start at 8760
+        assert compile_outage_factor([(0, 24, 0.0)], start_hour=8760, hours=48).min() == 1.0
+
+    def test_window_in_a_later_year(self):
+        f = compile_outage_factor([(8760 + 24, 8760 + 48, 0.0)], start_hour=8760, hours=72)
+        np.testing.assert_array_equal(f[24:48], 0.0)
+        assert f[:24].min() == 1.0 and f[48:].min() == 1.0
+
+    def test_recurring_window_repeats_every_year(self):
+        w = [(24, 48, 0.0, True)]
+        for year in range(3):
+            f = compile_outage_factor(w, start_hour=year * 8760, hours=72)
+            np.testing.assert_array_equal(f[24:48], 0.0)
+            assert f[:24].min() == 1.0 and f[48:].min() == 1.0
+
+    def test_recurring_window_over_new_year(self):
+        # Dec 31 12:00 to Jan 1 12:00, every year
+        w = [(8748, 8772, 0.0, True)]
+        f = compile_outage_factor(w, start_hour=2 * 8760, hours=24)
+        np.testing.assert_array_equal(f[:12], 0.0)
+        assert f[12:].min() == 1.0
+        f = compile_outage_factor(w, start_hour=2 * 8760 - 24, hours=24)
+        np.testing.assert_array_equal(f[12:], 0.0)
+
+    def test_recurring_start_taken_modulo_year(self):
+        a = compile_outage_factor([(30, 40, 0.0, True)], start_hour=8760, hours=48)
+        b = compile_outage_factor([(8760 + 30, 8760 + 40, 0.0, True)], start_hour=8760, hours=48)
+        np.testing.assert_array_equal(a, b)
+
+    def test_schema_recurring_defaults_false(self):
+        w = OutageWindow(element_type="line", element_id="3", start_hour=0, end_hour=24)
+        assert w.recurring is False
+        assert OutageWindow(element_type="line", element_id="3", start_hour=0,
+                            end_hour=24, recurring=True).recurring is True
+
+    def test_recurring_survives_gui_round_trip(self):
+        from test_serializer import _make_esfex_config, _make_system_config
+        from esfex.visualization.data.serializer import (
+            _apply_gui_state_to_dict,
+            config_to_gui_states,
+        )
+
+        sc = _make_system_config()
+        sc.outage_schedule = [
+            OutageWindow(element_type="line", element_id="L1", start_hour=0,
+                         end_hour=48, recurring=True),
+            OutageWindow(element_type="line", element_id="L2", start_hour=0, end_hour=48),
+        ]
+        state = config_to_gui_states(_make_esfex_config(sc))["TestSystem"]
+        assert [o.recurring for o in state.outage_schedule] == [True, False]
+        sys_dict: dict = {}
+        _apply_gui_state_to_dict(state, sys_dict)
+        assert [OutageWindow(**d).recurring for d in sys_dict["outage_schedule"]] == [True, False]
 
 
 # ---------------------------------------------------------------------------
@@ -439,3 +499,39 @@ def test_outage_on_one_node_cuts_only_that_node():
     np.testing.assert_allclose(out[1, :2], 0.0, atol=1e-6)        # node 1 cut
     assert out[1, 2] > 0                                           # back after the window
     assert out[0, :2].sum() > 0                                    # node 0 keeps running
+
+
+@pytest.mark.julia
+@pytest.mark.parametrize("year, recurring, cut", [
+    (2025, False, True),    # scheduled in the base year
+    (2026, False, False),   # happens once: not again a year later
+    (2026, True, True),     # repeats every year
+])
+def test_generator_outage_in_absolute_hours(year, recurring, cut):
+    """A window on the first hours of the base year cuts the unit in that
+    year only, unless it recurs (it used to repeat every year)."""
+    import sys as _sys
+    _sys.path.insert(0, "tests")
+    from test_runner import _make_generator, _make_node_config
+
+    from esfex.bridge.adapters import PowerSystemAdapter
+
+    gas = _make_generator("Gas", "Non-renewable", "Gas", [100.0, 100.0],
+                          degradation_rate=[0.0, 0.0], fuel_cost=[50.0, 10.0])
+    sysc = SystemConfig(
+        name="o", nodes=_make_node_config(2), generators={"gas": gas},
+        outage_schedule=[OutageWindow(element_type="generator", element_id="gas",
+                                      node=1, start_hour=0, end_hour=2,
+                                      recurring=recurring)],
+    )
+    ps = PowerSystemAdapter(
+        config=sysc, demand=np.full((3, 2), 30.0), hours=3, num_nodes=2,
+        year=year, base_year=2025, mode="economic_dispatch",
+    )
+    ps.build_model()
+    assert ps.solve() == 1
+    out = np.asarray(ps.get_solution_values()["gen_output"])[0]   # [bus, hour]
+    if cut:
+        np.testing.assert_allclose(out[1, :2], 0.0, atol=1e-6)
+    else:
+        assert out[1, :2].min() > 0

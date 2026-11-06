@@ -1614,6 +1614,8 @@ struct CostBreakdown
     pe_excess_cost::Float64
     pe_transport_cost::Float64
     pe_investment_cost::Float64
+    # Always 0: the periodic storage layer and its coupling slacks were
+    # removed; the field stays so result files keep their layout.
     pe_coupling_slack_cost::Float64
     pe_electrolyzer_cost::Float64
     # N-1 SCOPF reliability-shortfall penalty.
@@ -1757,12 +1759,14 @@ struct FuelConfig
     transport_losses::Float64
     # Source -> plant-tank replenishment lead time, in days per 100 km of route
     # distance (symmetric with transport_losses). 0 = instantaneous (the prior
-    # behaviour). The per-route delay in primary periods is derived from this
-    # and the route's distance, then the transport inflow is shifted by it.
+    # behaviour). The per-route delay in time steps is derived from this and
+    # the route's distance; shipments reach the destination tank that much later.
     transport_transit_days_per_100km::Float64
     # Source disruption: during the hour window [disruption_start_hour,
     # disruption_end_hour) the source's availability is scaled to
     # disruption_availability (0 = full cut, 1 = none). end <= start disables it.
+    # Hours are absolute horizon hours (hour 0 = Jan 1 of base_year, 8760 h
+    # per modelled year), like scheduled outage windows.
     # Lets a supply cut (terminal down for N days) be configured; combined with
     # the transit lead time and a finite tank it reproduces supply stress.
     disruption_start_hour::Int
@@ -1905,7 +1909,8 @@ Complete input for the Primary Energy optimization model.
 - `investment_resolution::Int`: Resolution for investment decisions (hours)
 - `discount_rate::Float64`: Discount rate for annualization
 - `loss_of_fuel_supply_penalty::Float64`: Penalty for fuel shortfall (\$/unit)
-- `coupling_slack_penalty::Float64`: Penalty for periodic-hourly coupling slack (\$/unit)
+- `coupling_slack_penalty::Float64`: Unused (the periodic storage layer and its
+    coupling slacks were removed); kept so existing call sites still construct
 - `mode::String`: Operation mode ("development", "economic_dispatch", "unit_commitment")
 - `cumulative_capacities::Dict`: Previously accumulated infrastructure investments
 - `initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}`: Initial storage levels
@@ -2058,21 +2063,20 @@ Container for primary energy decision variables organized by temporal scale.
 - `transport_capacity_investment`: New transport capacity [fuel, inv_period, route]
 - `storage_capacity_investment`: New storage capacity [fuel, inv_period, node]
 
-# Primary Period Scale (planning resolution)
-- `fuel_supply_periodic`: Fuel supply [fuel, node, period]
-- `fuel_transport_periodic`: Fuel transport [fuel, route, period]
+# Primary Period Scale (planning resolution: supply limits and shipments)
+- `fuel_supply_periodic`: Local fuel supply [fuel, node, period]
+- `fuel_excess_supply_periodic`: Supply above the period's limit (penalised) [fuel, node, period]
+- `fuel_transport_periodic`: Fuel shipped on each route [fuel, route, period]
 - `non_electric_consumption_periodic`: NE consumption [fuel, sector, node, period]
-- `storage_level_start`: Storage at period start [fuel, node, period]
-- `storage_level_end`: Storage at period end [fuel, node, period]
-- `fuel_loss_of_supply_periodic`: Unmet demand penalty [fuel, node, period]
-- `net_hourly_storage_change`: Net storage change for period [fuel, node, period]
+- `ne_demand_shortfall_periodic`: Unmet NE demand [fuel, sector, node, period]
 
-# Hourly Operational Scale
-- `fuel_storage_level_hourly`: Hourly storage level [fuel, node, hour]
-- `fuel_storage_in_hourly`: Hourly storage inflow [fuel, node, hour]
-- `fuel_storage_out_hourly`: Hourly storage outflow [fuel, node, hour]
+# Hourly Operational Scale (the only fuel storage layer)
+- `fuel_storage_level_hourly`: Tank level [fuel, node, hour+1]
+- `fuel_storage_in_hourly`: Local supply delivered into the tank [fuel, node, hour]
+- `fuel_storage_out_hourly`: Fuel drawn from the tank for consumption [fuel, node, hour]
 - `fuel_for_power_hourly`: Fuel for power generation [gen_idx, node, hour]
 - `non_electric_consumption_hourly`: Hourly NE consumption [fuel, sector, node, hour]
+- `fuel_loss_of_supply_hourly`: Consumption not covered by the tank [fuel, node, hour]
 """
 mutable struct PrimaryEnergyVariables
     # Investment scale
@@ -2083,11 +2087,7 @@ mutable struct PrimaryEnergyVariables
     fuel_supply_periodic::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
     fuel_transport_periodic::Dict{String, Matrix{VariableRef}}  # fuel => [route, period]
     non_electric_consumption_periodic::Dict{Tuple{String, String}, Matrix{VariableRef}}  # (fuel, sector) => [node, period]
-    storage_level_start::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
-    storage_level_end::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
-    fuel_loss_of_supply_periodic::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
     fuel_excess_supply_periodic::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
-    net_hourly_storage_change::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
 
     # Hourly operational scale
     fuel_storage_level_hourly::Dict{String, Matrix{VariableRef}}  # fuel => [node, hour+1]
@@ -2098,10 +2098,6 @@ mutable struct PrimaryEnergyVariables
     fuel_loss_of_supply_hourly::Dict{String, Matrix{VariableRef}}  # fuel => [node, hour]
     primary_sector_emissions_hourly::Dict{String, Matrix{VariableRef}}  # fuel => [node, hour]
     total_primary_emissions_hourly::Matrix{VariableRef}  # [node, hour]
-
-    # Coupling slack variables
-    coupling_slack_start::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
-    coupling_slack_end::Dict{String, Matrix{VariableRef}}  # fuel => [node, period]
 
     # Electrolyzer variables (E1: joint H2 production optimization)
     electrolyzer_power::Union{Nothing, Matrix{VariableRef}}  # [node, hour]

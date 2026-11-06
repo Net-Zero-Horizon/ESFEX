@@ -2,8 +2,9 @@
 
 A dedicated dialog that hosts a D3 timeline (embedded QtWebEngine, offline —
 no CDN) where each infrastructure element is a row and each scheduled
-interruption is a draggable bar over ``[start_hour, end_hour)`` of the horizon
-year. Reads/writes ``model.state.outage_schedule`` (list of GuiOutageWindow).
+interruption is a draggable bar over ``[start_hour, end_hour)`` of the base
+year (absolute horizon hours, hour 0 = Jan 1 of base_year: a window happens
+once unless marked as repeating every year). Reads/writes ``model.state.outage_schedule`` (list of GuiOutageWindow).
 
 The Python↔JS contract is a tiny QWebChannel bridge:
 
@@ -128,6 +129,7 @@ class InterruptionsDialog(QDialog):
                 "end_hour": int(ow.end_hour),
                 "availability": float(ow.availability),
                 "label": ow.label,
+                "recurring": bool(getattr(ow, "recurring", False)),
             }
             for ow in getattr(s, "outage_schedule", [])
         ]
@@ -146,6 +148,7 @@ class InterruptionsDialog(QDialog):
                 "delete": tr("interruptions.delete"),
                 "availability": tr("interruptions.availability"),
                 "label": tr("interruptions.label_field"),
+                "recurring": tr("interruptions.recurring"),
                 "start": tr("interruptions.start"),
                 "end": tr("interruptions.end"),
                 "empty": tr("interruptions.empty_hint"),
@@ -195,6 +198,7 @@ class InterruptionsDialog(QDialog):
                     end_hour=end,
                     availability=max(0.0, min(1.0, float(d.get("availability", 0.0)))),
                     label=str(d.get("label", "")),
+                    recurring=bool(d.get("recurring", False)),
                 ))
             except (KeyError, ValueError, TypeError):
                 continue

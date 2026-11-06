@@ -2480,6 +2480,7 @@
     "delete": "削除",
     "availability": "稼働率",
     "label_field": "メモ",
+    "recurring": "毎年繰り返す",
     "start": "開始",
     "end": "終了",
     "empty_hint": "行をドラッグして停止を追加、クリックで編集。"

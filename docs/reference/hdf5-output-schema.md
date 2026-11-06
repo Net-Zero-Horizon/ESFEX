@@ -198,7 +198,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
 | `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
-| `pe_coupling_slack_cost` | float | $ | Penalty on the power/primary-energy coupling slack |
+| `pe_coupling_slack_cost` | float | $ | Always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
 | `pe_electrolyzer_cost` | float | $ | Electrolyzer cost in the primary energy model |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `total` | float | $ | Sum of all cost components |

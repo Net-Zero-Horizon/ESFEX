@@ -59,7 +59,10 @@ class PenaltiesConfig(BaseModel):
         description="$/MWh EV driving energy not supplied (default: loss_of_load)",
     )
     loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
-    coupling_slack_penalty: float = Field(default=1.0, description="$/unit PE periodic-hourly coupling slack")
+    coupling_slack_penalty: float = Field(
+        default=1.0,
+        description="No effect: the primary-energy model has no periodic-hourly "
+                    "coupling slack any more (kept so existing files load)")
     transport_congestion: float = Field(default=100, description="$/MW congestion")
     storage_violation: float = Field(default=100, description="$/MW storage violation")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
@@ -921,10 +924,12 @@ class PrimaryEnergySourceConfig(BaseModel):
         "of route distance. 0 = instantaneous transport.")
     disruption_start_hour: int = Field(
         default=0, ge=0,
-        description="Supply-disruption window start hour (inclusive).")
+        description="Supply-disruption window start, absolute horizon hour "
+        "(hour 0 = Jan 1 of base_year, 8760 h per year), inclusive.")
     disruption_end_hour: int = Field(
         default=0, ge=0,
-        description="Supply-disruption window end hour (exclusive). "
+        description="Supply-disruption window end, absolute horizon hour "
+        "(exclusive). "
         "end <= start disables the disruption.")
     disruption_availability: float = Field(
         default=1.0, ge=0, le=1,
@@ -1746,8 +1751,11 @@ class OutageWindow(BaseModel):
 
     Applies the capacity/availability multiplier ``availability`` to the target
     element over the absolute hour window ``[start_hour, end_hour)`` of the
-    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00). A value of
-    ``0.0`` is a full outage; ``0.5`` a 50 % derate. This is the single record
+    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00; every
+    modelled year is 8760 h, so year ``k`` starts at hour ``k * 8760``). The
+    window happens once; with ``recurring`` it repeats every year at the same
+    hours of the year. A value of ``0.0`` is a full outage; ``0.5`` a 50 %
+    derate. This is the single record
     the interruptions calendar reads and writes; the bridge compiles the whole
     schedule into per-element, per-timestep capacity masks for the Julia model.
     """
@@ -1771,6 +1779,11 @@ class OutageWindow(BaseModel):
                     "(0 = full cut, 1 = no effect).",
     )
     label: str = Field(default="", description="Optional note shown on the calendar")
+    recurring: bool = Field(
+        default=False,
+        description="Repeat the window every year at the same hours of the year "
+                    "(start_hour taken modulo 8760). False: it happens once.",
+    )
 
     @model_validator(mode="after")
     def _check_window(self) -> "OutageWindow":

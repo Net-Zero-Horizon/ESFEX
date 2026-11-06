@@ -2468,6 +2468,7 @@
     "delete": "Eliminar",
     "availability": "Disponibilidad",
     "label_field": "Nota",
+    "recurring": "Repetir cada año",
     "start": "Inicio",
     "end": "Fin",
     "empty_hint": "Arrastra sobre una fila para añadir una interrupción; haz clic para editar."
