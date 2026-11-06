@@ -365,7 +365,7 @@ A per-node offer curve can replace the flat `fuel_cost` of a technology:
 | `linear` | `price_at_zero`, `price_at_max`, `num_segments` | equal blocks priced at their mid-point |
 | `exponential` | `base_price`, `scale_factor`, `num_segments` | equal blocks priced at `base_price × exp(scale_factor × mid-point)` |
 
-Missing prices fall back to the scalar `fuel_cost`. A generator `fuel_cost_curve` or battery `discharge_cost_curve` prices that unit in both the dispatch and the master problem. On technologies, the curve prices the built capacity in the operational dispatch; the master problem plans with the flat `fuel_cost`. Details in [CostCurveConfig](../reference/config-reference.md#costcurveconfig).
+Missing prices fall back to the scalar `fuel_cost`. A generator `fuel_cost_curve` or battery `discharge_cost_curve` prices that unit in both the dispatch and the master problem. On a technology, the curve prices its output in the master problem (on every bus of the node) and the capacity built from it in the operational dispatch. Details in [CostCurveConfig](../reference/config-reference.md#costcurveconfig).
 
 ### Battery Technologies
 

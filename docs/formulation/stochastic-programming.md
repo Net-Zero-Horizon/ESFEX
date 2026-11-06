@@ -40,7 +40,7 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | Multiplier | Applies to | Where |
 |-----------|-----------|-------|
 | `demand_growth` | Demand: \(D_{y,n,t} \cdot m^{dem}_s{}^{\,(y-1)}\). An annual factor: 1.02 = +2 %/year relative to the base case, compounding | Scenario operation |
-| `fuel_cost` | Fuel cost of generators (piecewise fuel-cost curves included) and candidate technologies | Scenario operation |
+| `fuel_cost` | Fuel cost of generators and candidate technologies (piecewise fuel-cost curves included) | Scenario operation |
 | `fuel_price_growth` | Extra annual fuel price escalation: fuel cost × \(m^{fpg}_s{}^{\,(y-1)}\) | Scenario operation |
 | `gen_fixed_cost` | Fixed O&M (\$/MWh) of generators and candidate technologies | Scenario operation |
 | `maintenance_cost` | Maintenance cost of generators, batteries, technologies and battery technologies | Scenario operation |

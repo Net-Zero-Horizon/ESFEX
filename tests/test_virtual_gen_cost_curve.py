@@ -58,7 +58,7 @@ def test_virtual_generator_gets_the_technology_curve(tmp_path, monkeypatch):
     def spy(generators, *args, **kwargs):
         out = real(generators, *args, **kwargs)
         seen.append(([k for k, _ in generators],
-                     {k: g.fuel_cost_curve for k, g in generators}, out))
+                     {k: g.fuel_cost_curve for k, g in generators}, out, kwargs))
         return out
 
     monkeypatch.setattr(adapters, "build_gen_cost_curves_dict", spy)
@@ -69,11 +69,15 @@ def test_virtual_generator_gets_the_technology_curve(tmp_path, monkeypatch):
     haskey = get_julia().seval("haskey")
     dispatch_calls = [c for c in seen if "inv_gas_new" in c[1]]
     assert dispatch_calls, "no dispatch carried the gas investment"
-    keys, curves, jl_curves = dispatch_calls[0]
+    keys, curves, jl_curves, _ = dispatch_calls[0]
     assert curves["inv_gas_new"] is not None
     assert [b.price for b in curves["inv_gas_new"][0].blocks] == [40.0, 120.0]
     # ... and it reaches the Julia input as a multi-segment curve.
     assert haskey(jl_curves, keys.index("inv_gas_new") + 1)
+    # The master gets the technology's curve on every bus of its node.
+    master_calls = [c for c in seen if c[0] == ["gas_new"]]
+    assert master_calls and haskey(master_calls[0][2], 1)
+    assert master_calls[0][3].get("all_buses_of_node") is True
 
 
 @pytest.mark.julia
@@ -95,3 +99,25 @@ def test_per_bus_curves_land_on_the_units_buses():
                                      per_bus_keys={"inv_gas"})
     keys = get_julia().seval("d -> sort(collect(keys(d[1])))")(out)
     assert list(keys) == [2]
+
+
+@pytest.mark.julia
+def test_technology_curves_land_on_every_bus_of_the_node():
+    """The master may build a candidate technology at any bus of a node (its
+    per-bus arrays are laid out in "property" mode), so every bus of the node
+    gets the node's curve. The curve landed only on the node's first bus, and
+    a technology built at another bus was priced at its flat fuel_cost."""
+    from types import SimpleNamespace
+
+    from esfex.bridge.converters import build_gen_cost_curves_dict
+    from esfex.bridge.julia_setup import get_julia
+
+    curve = CostCurveConfig(curve_type="stepwise", blocks=[
+        CostCurveBlock(fraction=0.5, price=40.0),
+        CostCurveBlock(fraction=0.5, price=120.0)])
+    tech = SimpleNamespace(fuel_cost=[80.0, 80.0], fuel_cost_curve=[curve, None])
+    out = build_gen_cost_curves_dict([("gas_new", tech)], [], 3,
+                                     bus_to_node=[0, 1, 0],
+                                     all_buses_of_node=True)
+    keys = get_julia().seval("d -> sort(collect(keys(d[1])))")(out)
+    assert list(keys) == [1, 3]

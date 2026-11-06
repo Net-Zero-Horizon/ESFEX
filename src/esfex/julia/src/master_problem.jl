@@ -1744,6 +1744,7 @@ technology dispatch, RE enforcement, sectoral LoL) remains here.
 
 Returns `(tech_output, tech_day_cost)`: the candidate technologies' dispatch
 and their operating cost that `day_operational_cost` does not see (the
+offer-curve fuel cost of technologies with a `fuel_cost_curve`, the
 curtailment penalty of candidate renewables and the battery technologies'
 maintenance and throughput degradation), unscaled like `day_operational_cost`;
 the callers scale both to the year the same way.
@@ -1851,6 +1852,9 @@ function add_day_operational_constraints!(
     n_bat_tech = length(input.battery_technologies)
 
     tech_output = nothing
+    # Fuel cost of technologies with an offer curve (day_operational_cost
+    # charges the others their flat fuel_cost)
+    tech_curve_cost = AffExpr(0.0)
     if n_tech > 0
         tech_output = @variable(model,
             [t=1:n_tech, b=1:n_buses, ts=1:hours],
@@ -1871,15 +1875,20 @@ function add_day_operational_constraints!(
                         add_to_expression!(cumul_cap, vars.tech_investment[y][t][b], deg)
                     end
                 end
+                avails = Vector{Float64}(undef, hours)
                 for ts in 1:hours
                     actual_hour = start_hour + ts - 1
                     avail_hours = size(tech.availability, 1)
                     avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
                     avail = is_renewable ? tech.availability[avail_hour, b] : 1.0
+                    avails[ts] = avail
                     @constraint(model,
                         tech_output[t, b, ts] <= cumul_cap * avail,
                         base_name = "tech_cap_t$(t)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
                 end
+                add_tech_curve_segments!(model, input, tech_output, t, b,
+                    cumul_cap, avails, tech_curve_cost;
+                    suffix = "_y$(year_idx)_d$(day_idx)")
             end
         end
     end
@@ -2284,6 +2293,7 @@ function add_day_operational_constraints!(
         end
     end
 
+    add_to_expression!(tech_day_cost, tech_curve_cost)
     add_to_expression!(tech_day_cost,
         battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
 
@@ -2372,6 +2382,55 @@ co2_cost_per_mwh(input::MasterProblemInput, unit, b::Int) =
     input.co2_cost * co2_per_mwh(input.fuel_co2, unit, b)
 
 """
+    tech_curve_segments(input, tc, b)
+
+Offer-curve segments of candidate technology `tc` at bus `b`, or `nothing`
+when it is priced at its flat `fuel_cost` (no curve, or a single segment),
+the same rule the generators follow.
+"""
+function tech_curve_segments(input::MasterProblemInput, tc::Int, b::Int)
+    bus_curves = get(input.tech_cost_curves, tc, nothing)
+    bus_curves === nothing && return nothing
+    segs = get(bus_curves, b, nothing)
+    return (segs === nothing || length(segs) <= 1) ? nothing : segs
+end
+
+"""
+    add_tech_curve_segments!(model, input, tech_output, tc, b, cap, avails, cost;
+                             suffix="", store=nothing)
+
+Price candidate technology `tc`'s output at bus `b` with its offer curve, as
+the dispatch prices the generator it becomes: the output is split into one
+variable per segment, segment k is capped at `fraction_k × cap × avails[ts]`
+and its marginal cost is added to `cost`. `cap` is the cumulative capacity
+(an expression in the master, a number in a Benders subproblem). With
+`store`, each segment cap is recorded as `(cref, fraction_k × avail, tc, b, ts)`
+under `tech_seg_cap_t<tc>_b<b>_k<k>_ts<ts>` for the Benders cut gradient.
+No-op without a multi-segment curve.
+"""
+function add_tech_curve_segments!(model::Model, input::MasterProblemInput,
+                                  tech_output, tc::Int, b::Int, cap, avails::Vector{Float64},
+                                  cost::AffExpr; suffix::String = "", store = nothing)
+    segs = tech_curve_segments(input, tc, b)
+    segs === nothing && return nothing
+    n_seg = length(segs)
+    sv = @variable(model, [k=1:n_seg, ts=1:length(avails)], lower_bound = 0,
+                   base_name = "tech_seg_t$(tc)_b$(b)$(suffix)")
+    for ts in eachindex(avails)
+        @constraint(model, tech_output[tc, b, ts] == sum(sv[k, ts] for k in 1:n_seg))
+        for k in 1:n_seg
+            cname = "tech_seg_cap_t$(tc)_b$(b)_k$(k)_ts$(ts)"
+            coef = segs[k].fraction * avails[ts]
+            cref = @constraint(model, sv[k, ts] <= coef * cap,
+                               base_name = cname * suffix)
+            store === nothing || (store[cname] = (cref, coef, tc, b, ts))
+            add_to_expression!(cost, segs[k].marginal_cost, sv[k, ts])
+        end
+    end
+    return sv
+end
+
+"""
     day_operational_cost(ps_vars, input, hours; tech_output=nothing)
 
 Unscaled operating cost of one representative day or TSAM period: fuel, O&M
@@ -2421,7 +2480,10 @@ function day_operational_cost(
                 tech = input.technologies[tc]
                 for b in 1:n_buses
                     co2 = co2_cost_per_mwh(input, tech, b)
-                    total_cost = tech.fuel_cost[b] + tech.fixed_cost[b] + tech.maintenance_cost[b] + co2
+                    # With an offer curve the fuel is priced per segment
+                    # (add_tech_curve_segments!, in tech_day_cost)
+                    fuel = tech_curve_segments(input, tc, b) === nothing ? tech.fuel_cost[b] : 0.0
+                    total_cost = fuel + tech.fixed_cost[b] + tech.maintenance_cost[b] + co2
                     if total_cost > 0
                         add_to_expression!(cost, tech_output[tc, b, t], total_cost)
                     end
@@ -3677,16 +3739,18 @@ function scenario_master_input(
              for t in input.technologies]
     btechs = [with_fields(bt; maintenance_cost=bt.maintenance_cost .* maint)
               for bt in input.battery_technologies]
-    # A generator with a fuel-cost curve is charged its segments, not fuel_cost
-    gen_curves = Dict{Int, Dict{Int, Vector{CostSegment}}}(
-        g => Dict{Int, Vector{CostSegment}}(
+    # A generator or technology with a fuel-cost curve is charged its
+    # segments, not fuel_cost
+    scale_curves(curves) = Dict{Int, Dict{Int, Vector{CostSegment}}}(
+        u => Dict{Int, Vector{CostSegment}}(
             n => [CostSegment(s.fraction, s.marginal_cost * fuel) for s in segs]
             for (n, segs) in bus_curves)
-        for (g, bus_curves) in input.gen_cost_curves)
+        for (u, bus_curves) in curves)
     return with_fields(input;
         generators=gens, batteries=bats,
         technologies=techs, battery_technologies=btechs,
-        gen_cost_curves=gen_curves,
+        gen_cost_curves=scale_curves(input.gen_cost_curves),
+        tech_cost_curves=scale_curves(input.tech_cost_curves),
         base_demand=input.base_demand .* mult.demand_growth^(year_idx - 1),
         co2_cost=input.co2_cost * mult.carbon_price,
         loss_of_load_penalty=input.loss_of_load_penalty * mult.penalty_loss_of_load,

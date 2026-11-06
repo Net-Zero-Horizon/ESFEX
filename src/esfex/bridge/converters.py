@@ -178,6 +178,7 @@ def build_gen_cost_curves_dict(
     bus_to_node: Optional[list] = None,
     gen_bus_per_node: Optional[dict] = None,
     per_bus_keys: Optional[set] = None,
+    all_buses_of_node: bool = False,
 ) -> Any:
     """Build Julia ``Dict{Int, Dict{Int, Vector{CostSegment}}}`` for generators.
 
@@ -201,6 +202,10 @@ def build_gen_cost_curves_dict(
         Keys of units whose arrays (curves included) are already per bus
         (virtual generators from master investments): curve ``i`` belongs to
         bus ``i``, and buses without rated power get no curve.
+    all_buses_of_node:
+        Give the node's curve to every bus of the node (candidate
+        technologies, which the master may build at any bus of a node,
+        their per-bus arrays laid out in "property" mode).
 
     Returns
     -------
@@ -237,7 +242,9 @@ def build_gen_cost_curves_dict(
             # per-(unit, node) physical placement when available, else
             # role-aware fallback.
             if per_bus:
-                bus_1 = node_idx + 1
+                buses_1 = [node_idx + 1]
+            elif bus_to_node is not None and all_buses_of_node:
+                buses_1 = [b + 1 for b, n in enumerate(bus_to_node) if n == node_idx]
             elif bus_to_node is not None:
                 bus_0 = None
                 if gen_bus_per_node is not None:
@@ -247,12 +254,13 @@ def build_gen_cost_curves_dict(
                         (b for b, n in enumerate(bus_to_node) if n == node_idx),
                         node_idx,
                     )
-                bus_1 = bus_0 + 1
+                buses_1 = [bus_0 + 1]
             else:
-                bus_1 = node_idx + 1
+                buses_1 = [node_idx + 1]
 
-            inner[bus_1] = blocks_to_julia_cost_segments(blocks)
-            has_entries = True
+            for bus_1 in buses_1:
+                inner[bus_1] = blocks_to_julia_cost_segments(blocks)
+                has_entries = True
 
         if has_entries:
             outer[g] = inner
