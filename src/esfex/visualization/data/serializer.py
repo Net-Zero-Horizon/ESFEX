@@ -2397,6 +2397,35 @@ def stochastic_scenarios_to_config_dict(
     ]
 
 
+def rename_system_in_config(
+    config: ESFEXConfig | None, old_name: str, new_name: str,
+) -> None:
+    """Rename a system everywhere in a loaded base config, in place.
+
+    The Studio saves on top of the loaded config, so a renamed system must
+    keep its non-GUI fields (they live under the old key) and its place in
+    ``meta_network.systems`` (the first entry is the primary system) and in
+    ``meta_network.systems_links``. Order of ``systems`` is preserved.
+    """
+    if config is None or old_name == new_name:
+        return
+    systems = getattr(config, "systems", None)
+    if isinstance(systems, dict) and old_name in systems:
+        renamed = {}
+        for name, sys_cfg in systems.items():
+            if name == old_name:
+                sys_cfg.name = new_name
+                renamed[new_name] = sys_cfg
+            else:
+                renamed[name] = sys_cfg
+        config.systems = renamed
+    meta = getattr(config, "meta_network", None)
+    if meta is not None:
+        meta.systems = [new_name if s == old_name else s for s in meta.systems]
+        for sl in meta.systems_links:
+            sl.systems = [new_name if s == old_name else s for s in sl.systems]
+
+
 def gui_state_to_yaml(
     states: dict[str, GuiSystemState],
     base_config: ESFEXConfig,
@@ -2415,11 +2444,14 @@ def gui_state_to_yaml(
 
     # Update meta_network.systems — use selected systems if available,
     # otherwise include all GUI systems
+    # (names that are no longer GUI systems are dropped, so a stale selection
+    # can never point the run at a missing system).
     config_dict.setdefault("meta_network", {})
-    if global_settings and global_settings.systems_to_simulate:
-        config_dict["meta_network"]["systems"] = list(global_settings.systems_to_simulate)
-    else:
-        config_dict["meta_network"]["systems"] = list(states.keys())
+    selected = [
+        s for s in (global_settings.systems_to_simulate if global_settings else [])
+        if s in states
+    ]
+    config_dict["meta_network"]["systems"] = selected or list(states.keys())
 
     # Drop systems that were deleted in the GUI. config_dict is a full copy of
     # base_config, so a deleted system still carries its whole definition here;
@@ -2470,8 +2502,10 @@ def gui_state_to_yaml(
         global_settings_to_config_dict(global_settings, config_dict)
 
     if stochastic_scenarios:
-        # Write stochastic scenarios to the primary (first) system dict
-        primary_name = next(iter(states), None)
+        # Write stochastic scenarios to the primary system dict: the first
+        # simulated system, which is where config_to_stochastic_scenarios
+        # and the runner read them from.
+        primary_name = (config_dict["meta_network"]["systems"] or [None])[0]
         if primary_name and primary_name in config_dict.get("systems", {}):
             stochastic_scenarios_to_config_dict(
                 stochastic_scenarios, config_dict["systems"][primary_name]
