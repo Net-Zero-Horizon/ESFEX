@@ -570,7 +570,6 @@ class GuiPenalties:
     fre_penetration_loss: float = 100.0
     ev_loss: float = 50_000.0  # $/MWh — same as loss_of_load
     loss_of_fuel_supply: float = 100.0
-    coupling_slack_penalty: float = 1.0
     transport_congestion: float = 100.0
     storage_violation: float = 100.0
     non_electric_demand_loss: float = 100.0

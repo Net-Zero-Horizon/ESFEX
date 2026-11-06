@@ -195,7 +195,6 @@ class SystemForm(QWidget):
             ("fre_penetration_loss", tr("system_form.penalty_fre"), 0, 1e9),
             ("ev_loss", tr("system_form.penalty_ev"), 0, 1e9),
             ("loss_of_fuel_supply", tr("system_form.penalty_fuel_supply"), 0, 1e9),
-            ("coupling_slack_penalty", tr("system_form.penalty_coupling_slack"), 0, 1e9),
             ("transport_congestion", tr("system_form.penalty_transport"), 0, 1e9),
             ("storage_violation", tr("system_form.penalty_storage"), 0, 1e9),
             ("non_electric_demand_loss", tr("system_form.penalty_non_elec"), 0, 1e9),

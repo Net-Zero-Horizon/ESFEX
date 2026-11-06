@@ -799,7 +799,6 @@
     "penalty_fre": "Perda de penetração FRE:",
     "penalty_ev": "Perda VE:",
     "penalty_fuel_supply": "Perda de fornecimento de combustível:",
-    "penalty_coupling_slack": "Variável de folga de acoplamento PE:",
     "penalty_transport": "Congestionamento de transporte:",
     "penalty_storage": "Violação de armazenamento:",
     "penalty_non_elec": "Perda de demanda não elétrica:",
@@ -827,7 +826,7 @@
     "ac_q_min_ratio": "Razão Q mín. (×Q_max):"
   },
   "global_form": {
-    "n1_scopf_unused_tip": "Salvo na configuração mas não usado: as restrições SCOPF são construídas em uma única passagem.",
+    "n1_scopf_unused_tip": "Salvo na configuração mas não usado: as restrições SCOPF são construídas em uma única passagem. Um valor diferente do padrão gera um aviso ao carregar a configuração.",
     "n1_crit_line_tip": "Todos os N-1 e a triagem só desligam linhas e transformadores carregados a pelo menos esta fração da capacidade. 0 = todos.",
     "n1_sld_header_tip": "As configurações abaixo são os valores padrão do painel de Análise do SLD (Executar todos os N-1 e Executar triagem). Elas não alteram a otimização.",
     "n1_sld_header": "Análise de contingências do SLD (todos os N-1 / triagem):",
