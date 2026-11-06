@@ -1051,7 +1051,6 @@ class Orchestrator:
             name="_".join(sys_names),
             demand_path=None,
             demand_scale=1.0,
-            loss_demand_threshold=max(s.loss_demand_threshold for s in systems),
             life_extension_cost_factor=base.life_extension_cost_factor,
             sim_rooftop=any(s.sim_rooftop for s in systems),
             target_re_penetration=min(s.target_re_penetration for s in systems),

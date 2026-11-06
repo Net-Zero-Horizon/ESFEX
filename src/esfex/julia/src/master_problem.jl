@@ -2024,7 +2024,6 @@ function add_day_operational_constraints!(
         dynamic_reserve_contribution = input.dynamic_reserve_contribution,
         inertia_limit = input.inertia_limit,
         inertia_limit_hourly = Float64[],
-        loss_demand_threshold = 1.0,
         rooftop_generation = nothing,
         re_penetration_target = 0.0,
         soc_end_tolerance = 0.0,

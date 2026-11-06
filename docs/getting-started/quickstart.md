@@ -127,7 +127,7 @@ systems:
 | `temporal` | Rolling-horizon window and overlap for the hourly dispatch. 48 h with 24 h overlap is the default. |
 | `solver` | The optimization solver. HiGHS ships with ESFEX. See the [Solver Guide](../user-guide/solver-guide.md). |
 | `master_problem` | Capacity-expansion settings. `representative_days` (default 5) is the number of days per year the master problem optimizes. |
-| `systems.island` | One power system. Some system keys have upper-case legacy names (`TARGET_RE_PENETRATION`, `LOSS_DEMAND_TRHESHOLD`, ...), as the Studio writes them; the lower-case field name (`target_re_penetration`) is accepted as well. |
+| `systems.island` | One power system. Some system keys have upper-case legacy names (`TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, ...), as the Studio writes them; the lower-case field name (`target_re_penetration`) is accepted as well. |
 | `nodes` | Network topology. `nodes_connections` is the N × N matrix of line capacities, flattened row by row. |
 | `generators` | Existing units. Every per-node field is a list with one entry per node. The loader requires all fields shown here; it does not fill in defaults. For an existing unit, `invest_cost` is used to price keeping it beyond its `life_time` (see [Age-Based Retirement](concepts.md#age-based-retirement)). |
 | `technologies` / `battery_technologies` | Investment candidates. The master problem decides how much to build, where and when. |

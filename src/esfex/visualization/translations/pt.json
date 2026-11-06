@@ -775,7 +775,6 @@
     "target_re": "Penetração ER alvo (frac):",
     "min_increment": "Incremento anual mín. (frac):",
     "max_increment": "Incremento anual máx. (frac):",
-    "loss_demand_thr": "Limiar de perda de demanda (frac):",
     "inertia_limit_thr": "Limiar de limite de inércia (frac):",
     "sim_rooftop": "Simular solar em telhado:",
     "co2_annual": "Orçamento anual de CO2 (toneladas/ano):",

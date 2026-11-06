@@ -1105,7 +1105,6 @@ def _system_to_gui_state(sys: SystemConfig,
         max_decommission_cost_per_mw=getattr(sys, 'max_decommission_cost_per_mw', 5e5),
         force_replacement=getattr(sys, 'force_replacement', -5e5),
         life_extension_cost_factor=getattr(sys, 'life_extension_cost_factor', 0.20),
-        loss_demand_threshold=getattr(sys, 'loss_demand_threshold', 0.05),
         inertia_limit_threshold=getattr(sys, 'inertia_limit_threshold', 0.1),
         sim_rooftop=getattr(sys, 'sim_rooftop', False),
     )
@@ -3399,7 +3398,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     sys_dict["max_decommission_cost_per_mw"] = s.max_decommission_cost_per_mw
     sys_dict["force_replacement"] = s.force_replacement
     sys_dict["life_extension_cost_factor"] = s.life_extension_cost_factor
-    sys_dict["LOSS_DEMAND_TRHESHOLD"] = s.loss_demand_threshold
     sys_dict["inertia_limit_threshold"] = s.inertia_limit_threshold
     sys_dict["sim_rooftop"] = s.sim_rooftop
 

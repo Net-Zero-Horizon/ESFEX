@@ -972,7 +972,6 @@ function create_benders_subproblem(
         dynamic_reserve_contribution = input.dynamic_reserve_contribution,
         inertia_limit = input.inertia_limit,
         inertia_limit_hourly = Float64[],
-        loss_demand_threshold = 1.0,
         rooftop_generation = nothing,
         enable_angle_limits = false,
         re_penetration_target = 0.0,

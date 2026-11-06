@@ -1209,6 +1209,16 @@ class TestGuiStateToYaml:
         assert "systems" in data
         assert "MinimalSystem" in data["systems"]
 
+    def test_deprecated_loss_demand_threshold_not_written(self):
+        """No constraint ever used LOSS_DEMAND_TRHESHOLD; the Studio no
+        longer offers or writes it."""
+        state = _build_minimal_gui_state()
+        config = _make_esfex_config()
+        data = self._export_and_parse({"MinimalSystem": state}, config)
+        sys_dict = data["systems"]["MinimalSystem"]
+        assert "LOSS_DEMAND_TRHESHOLD" not in sys_dict
+        assert "loss_demand_threshold" not in sys_dict
+
     def test_output_contains_generators(self):
         state = _build_minimal_gui_state()
         config = _make_esfex_config()

@@ -219,7 +219,7 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `demand_scale` | float (> 0) | `1` | Multiplier applied to all demand |
 | `discount_rate` | float (0–1) | `0.05` | Discount rate |
 | `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in NPV calculations ($/MWh) |
-| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Passed to the operational model; no constraint uses it in 0.3.0 |
+| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Deprecated and ignored: accepted so older case files load, but not passed to the model (no constraint ever used it). The Studio no longer shows or writes it |
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target. See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |

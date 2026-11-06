@@ -775,7 +775,6 @@
     "target_re": "Pénétration ER cible (frac) :",
     "min_increment": "Incrément annuel min. (frac) :",
     "max_increment": "Incrément annuel max. (frac) :",
-    "loss_demand_thr": "Seuil de perte de demande (frac) :",
     "inertia_limit_thr": "Seuil de limite d'inertie (frac) :",
     "sim_rooftop": "Simuler le solaire en toiture :",
     "co2_annual": "Budget annuel CO2 (tonnes/an) :",
