@@ -505,13 +505,19 @@ import Ipopt
             @test res.cost_breakdown.load_shedding_cost ≈
                   0.01 * (30.0 * 1.0 + 30.0 * 1000.0) rtol = 1e-6
             # Sectors covering only part of the node's demand: the rest is an
-            # unclassified remainder priced at VOLL, shed before the critical
-            # sector; the model stays feasible.
+            # unclassified remainder, priced at the sectors' demand-weighted
+            # mean multiplier (it was VOLL × 1, cheaper than every sector);
+            # the model stays feasible.
+            lol, res = shed_split(Dict("cheap" => 20.0, "critical" => 30.0))
+            m = (20.0 * 1.0 + 30.0 * 1000.0) / 50.0
+            @test res.load_shed_total ≈ 60.0 atol = 1e-6
+            @test lol["cheap"] ≈ 20.0 atol = 1e-6       # cheapest first
+            @test lol["critical"] ≈ 0.0 atol = 1e-6     # remainder (40 of 50) before it
+            @test res.cost_breakdown.load_shedding_cost ≈
+                  0.01 * (20.0 * 1.0 + 40.0 * m) rtol = 1e-6
             lol, res = shed_split(Dict("critical" => 50.0))
             @test res.load_shed_total ≈ 60.0 atol = 1e-6
-            @test lol["critical"] ≈ 10.0 atol = 1e-6
-            @test res.cost_breakdown.load_shedding_cost ≈
-                  0.01 * (50.0 + 10.0 * 1000.0) rtol = 1e-6
+            @test res.cost_breakdown.load_shedding_cost ≈ 0.01 * 60.0 * 1000.0 rtol = 1e-6
         end
 
         @testset "master: sectoral shed is part of load shed" begin
@@ -554,6 +560,30 @@ import Ipopt
             @test shed2 ≈ 24 * 60.0 rtol = 1e-6
             @test crit2 ≈ 24 * 30.0 rtol = 1e-6     # cheap sector holds only 30 MW
             @test obj2 > 100 * obj1                  # criticality is priced
+
+            # Unclassified remainder (40 of 100 MW) at the sectors' weighted
+            # mean (≈ 683), as in the dispatch: sectors A (κ 2) and C (κ 100)
+            # are shed before it. At plain VOLL it went first.
+            gas70 = mkgen("Gas", "Non-renewable", "Gas", [70.0],
+                          [1.0], ones(H, 1); nb = 1, H = H)
+            inp = MasterProblemInput(
+                years = [2025], network = net, generators = [gas70],
+                batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 10.0,
+                sectoral_demand = Dict("A" => fill(10.0, H, 1), "C" => fill(10.0, H, 1),
+                                       "B" => fill(40.0, H, 1)),
+                sectoral_criticality = Dict("A" => 2.0, "C" => 100.0, "B" => 1000.0),
+                verbose = false)
+            model, _, _ = create_master_problem(inp; use_representative_days = true)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            byname(pfx) = [v for v in all_variables(model) if startswith(name(v), pfx)]
+            @test sum(value.(byname("op_y1_d1_ll["))) ≈ 24 * 30.0 rtol = 1e-6
+            @test sum(value.(byname("op_y1_d1_lol_A["))) ≈ 24 * 10.0 rtol = 1e-6
+            @test sum(value.(byname("op_y1_d1_lol_C["))) ≈ 24 * 10.0 rtol = 1e-6
+            @test sum(value.(byname("op_y1_d1_lol_B["))) ≈ 0.0 atol = 1e-6
 
             # A myopic year's target comes from the horizon trajectory: the
             # override replaces RE-1 (which gives year 1 its initial share).

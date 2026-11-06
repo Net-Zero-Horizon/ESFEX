@@ -853,7 +853,8 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # VOLL × criticality below (cuba.yaml: medium=10, high=100,
     # critical=1000); only the unclassified remainder
     # (load_shed − Σ sectoral shed, see add_sectoral_demand_constraints!)
-    # is priced here, at VOLL. Pricing all of load_shed here would
+    # is priced here, at VOLL × the node's demand-weighted mean criticality
+    # (sector_remainder_multiplier). Pricing all of load_shed here would
     # double-count every sectoral MWh.
     n_node = input.network.num_nodes
     has_sectoral = vars.loss_of_load_sectoral !== nothing &&
@@ -863,8 +864,21 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         sum(vars.load_shed[b, t] for b in 1:n_bus, t in 1:hours)
     )
     if has_sectoral
-        for lol_vars in values(vars.loss_of_load_sectoral), n in 1:n_node, t in 1:hours
-            add_to_expression!(load_shed_cost, -input.loss_of_load_penalty, lol_vars[n, t])
+        voll = input.loss_of_load_penalty
+        sectors = collect(keys(vars.loss_of_load_sectoral))
+        buses_of_node = [Int[] for _ in 1:n_node]
+        for b in 1:n_bus
+            push!(buses_of_node[input.network.bus_to_node[b]], b)
+        end
+        for n in 1:n_node, t in 1:hours
+            m = sector_remainder_multiplier(sectors, input.sectoral_criticality,
+                                            s -> _sectoral_demand_at(input, s, t, n))
+            for b in buses_of_node[n]
+                add_to_expression!(load_shed_cost, voll * (m - 1.0), vars.load_shed[b, t])
+            end
+            for lol_vars in values(vars.loss_of_load_sectoral)
+                add_to_expression!(load_shed_cost, -voll * m, lol_vars[n, t])
+            end
         end
     end
 
@@ -3138,6 +3152,26 @@ function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerS
 end
 
 """
+    sector_remainder_multiplier(sectors, criticality, demand_of) -> Float64
+
+VOLL multiplier of the unclassified remainder of a node's demand (the node's
+demand minus its sectors' demand) in one step: the sectors' criticality
+multipliers weighted by their demand there, `Σ_s κ_s d_s / Σ_s d_s`
+(`demand_of(sector)` gives d_s); 1 where no sector has demand. Shared by the
+dispatch and the master's representative days.
+"""
+function sector_remainder_multiplier(sectors, criticality, demand_of)
+    num = 0.0
+    den = 0.0
+    for s in sectors
+        d = max(0.0, demand_of(s))
+        num += get(criticality, s, 1.0) * d
+        den += d
+    end
+    return den > 0 ? num / den : 1.0
+end
+
+"""
     _sectoral_demand_at(input, sector, t, ni) -> Float64
 
 Demand of `sector` at node `ni` and step `t` (MW, >= 0); 0 when the sector's
@@ -3166,9 +3200,11 @@ Add sectoral load shedding constraints, per node and step:
 The remainder covers node demand that no sector accounts for (sectoral data
 missing for a node, or not matching the demand passed in), so the split is
 always feasible. The objective prices each sector's shed at
-VOLL x criticality and the remainder at VOLL (multiplier 1). With the per-sector
-caps, the cheapest sector can no longer absorb all shed: dearer sectors are
-shed only once the cheaper ones are fully shed.
+VOLL x criticality and the remainder at VOLL x the demand-weighted mean of the
+node's sector criticalities in that step (`sector_remainder_multiplier`; 1
+where no sector has demand). With the per-sector caps, the cheapest sector can
+no longer absorb all shed: dearer sectors are shed only once the cheaper ones
+are fully shed.
 """
 function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     if vars.loss_of_load_sectoral === nothing || isempty(vars.loss_of_load_sectoral)

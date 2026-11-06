@@ -206,7 +206,7 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 ### 3.4 Penalty Costs
 
 \[
-Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \Big(\sum_{n,t} \text{LS}_{n,t} - \sum_{s,i,t} \text{LOL}_{s,i,t}\Big)}_{\text{load shedding not attributed to a sector}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
+Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{i,t} m_{i,t} \Big(\sum_{n \in i} \text{LS}_{n,t} - \sum_{s} \text{LOL}_{s,i,t}\Big)}_{\text{load shedding not attributed to a sector}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
 \]
 
 \[
@@ -217,7 +217,13 @@ Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \Big(\sum_{n,t} \text{LS}_{n,t} - \
 + \underbrace{C^{\text{TM}} \sum_{i,j,t} \mu_{i,j,t}}_{\text{transfer margin}} + \underbrace{C^{\text{CO2,bud}} \, \xi^{\text{CO2}}}_{\text{CO2 budget violation}} + \underbrace{C^{\text{RC}} \sum_{n,t} \text{RC}_{n,t}}_{\text{rooftop curtailment}} \tag{OBJ-4c}
 \]
 
-Without sectoral demand the \(\text{LOL}\) terms are absent and all shed load costs \(C^{\text{VOLL}}\). With sectors, each sector's shed load is priced through \(Z^{\text{sec}}\) (OBJ-5), which carries VOLL times the sector's criticality; only the remainder that no sector accounts for (SEC-2) is priced here, at VOLL, so no shed MWh is counted twice. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
+Without sectoral demand the \(\text{LOL}\) terms are absent, \(m_{i,t} = 1\) and all shed load costs \(C^{\text{VOLL}}\). With sectors, each sector's shed load is priced through \(Z^{\text{sec}}\) (OBJ-5), which carries VOLL times the sector's criticality; only the remainder that no sector accounts for (SEC-2) is priced here, so no shed MWh is counted twice. The remainder's multiplier is the demand-weighted mean of the node's sector criticalities in that step,
+
+\[
+m_{i,t} = \frac{\sum_s \kappa_s D^{\text{sec}}_{s,i,t}}{\sum_s D^{\text{sec}}_{s,i,t}},
+\]
+
+and 1 where no sector has demand at the node. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
 
 ### 3.5 Sectoral Load Shedding Penalties
 
@@ -806,7 +812,7 @@ A sector cannot shed more than its own demand \(D^{\text{sec}}_{s,i,t}\) at the 
 0 \;\leq\; \sum_{n \in i} \text{LS}_{n,t} - \sum_{s \in \mathcal{S}} \text{LOL}_{s,i,t} \;\leq\; \max\Big(0,\; D^{\text{node}}_{t,i} - \sum_{s} D^{\text{sec}}_{s,i,t}\Big) \quad \forall i, t \tag{SEC-2}
 \]
 
-The load shed on a node's buses is split into per-sector contributions plus an unclassified remainder (`sectoral_lol_sum_*`, `sectoral_lol_residual_*`). The remainder is bounded by the node demand that no sector accounts for: it is 0 when the sector shares cover the whole demand, and it keeps the split feasible at a node whose sectoral data is missing (for example after the Grid Builder split a node's demand across new buses). The remainder is priced at \(C^{\text{VOLL}}\) (OBJ-4a).
+The load shed on a node's buses is split into per-sector contributions plus an unclassified remainder (`sectoral_lol_sum_*`, `sectoral_lol_residual_*`). The remainder is bounded by the node demand that no sector accounts for: it is 0 when the sector shares cover the whole demand, and it keeps the split feasible at a node whose sectoral data is missing (for example after the Grid Builder split a node's demand across new buses). The remainder is priced at \(C^{\text{VOLL}} m_{i,t}\), the demand-weighted mean of the node's sector criticalities (OBJ-4a).
 
 !!! note "Criticality ordering"
     Higher-criticality sectors receive a higher load shedding penalty in the objective (\(C^{\text{VOLL}} \cdot \kappa_s\)). With the per-sector cap SEC-1, the optimizer sheds the cheapest sector up to its demand before touching a dearer one. No explicit ordering constraint is needed.
