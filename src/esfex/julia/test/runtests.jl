@@ -1556,6 +1556,242 @@ import Ipopt
             @test loss ≈ 0.0 atol = 1e-6
         end
 
+        @testset "primary energy: fuel in transit reaches the next window" begin
+            # Rolling horizon of 48 steps keeping 24, 1 day of transit over
+            # 100 km. Node 1 has the supply, node 2 (no tank) a 10/day
+            # non-electric demand. Fuel shipped in a window's committed day
+            # arrives after the commit point; it was paid and never delivered,
+            # so node 2 was short on the first day of every window.
+            function pe_window(init2, arrivals, offset)
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0, [87600.0, 0.0], [100.0, 0.0],
+                                  [0.0, 0.0], 0.0, [0.0, 0.0], 0.0, 0.0, 1.0)
+                route = TransportRoute("r", 1, 2, 100.0,
+                    Dict("Gas" => FuelRouteParams(50.0, 0.0, 0.0)))
+                ne = NonElectricDemandConfig("Industrial", "Gas", [0.0, 3650.0], 0.0, ones(12))
+                inp = PrimaryEnergyInput(2025, 2025, 2, 48, [fuel],
+                    Dict{String, FuelInfrastructureConfig}(), [ne], [route],
+                    Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 48, 0.05,
+                    1000.0, 1.0, "economic_dispatch", Dict{String, Any}(),
+                    Dict("Gas" => [0.0, init2]), false,
+                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, offset,
+                    arrivals)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                short = value.(vars.ne_demand_shortfall_periodic[("Gas", "Industrial")])
+                level = value.(vars.fuel_storage_level_hourly["Gas"])
+                return short[2, 1], level[2, 25], in_transit_arrivals(vars, inp, temporal, 24)
+            end
+            init2, arrivals = 0.0, nothing
+            short_day1 = Float64[]
+            for w in 1:4
+                s, init2, arrivals = pe_window(init2, arrivals, (w - 1) * 24)
+                push!(short_day1, s)
+                # day 1's shipment is on the road at the commit point: 10
+                # units into the tank after its 0.8 inflow efficiency
+                @test sum(arrivals["Gas"]) ≈ 10.0 / 0.8 atol = 1e-6
+                @test size(arrivals["Gas"]) == (2, 24)
+            end
+            @test short_day1[1] ≈ 10.0 atol = 1e-6       # nothing on the way yet
+            @test short_day1[2:end] ≈ zeros(3) atol = 1e-6
+        end
+
+        @testset "primary energy: a unit's fuel covers all its buses at a node" begin
+            # One unit at two buses of one node, 100 MWh of load at 5 MWh per
+            # unit of fuel: 20 units. One constraint per bus against the same
+            # node fuel bought only 10 (the largest bus).
+            H = 2; nb = 2
+            gen = mkgen("Gas", "Non-renewable", "Gas", [50.0, 50.0],
+                        fill(5.0e-5, nb), ones(H, nb); nb = nb, H = H)
+            b1 = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 0.5)
+            b2 = BusData(2, 1, 220.0, 50.0, "AC", "pq", "mixed", 0.5)
+            net = NetworkConfig(1, 2, [b1, b2], [1, 1], zeros(2, 2), zeros(2, 2),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "pe", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = fill(100.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            fuel = FuelConfig("Gas", 1.0e-5, 0.0, 10.0, 0.0, [1.0e6], [0.0], [0.0], 0.0,
+                              [0.0], 0.0, 0.0, 0.0)
+            pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [fuel],
+                Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
+                TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), 24, 8760, 0.05,
+                1.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                nothing, Dict(1 => [100.0]), nothing)
+            pe_vars, temporal, prices = ESFEX.create_primary_energy_model(model, pe_in)
+            ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
+                bus_to_node = [1, 1], generators = input.generators)
+            terms = ESFEX.get_primary_energy_objective_terms(pe_vars, pe_in, temporal, prices)
+            ESFEX.@objective(model, Min, objective_function(model) + sum(values(terms)))
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            @test sum(value(vars.gen_output[1, b, 1]) for b in 1:2) ≈ 100.0 atol = 1e-6
+            @test value(pe_vars.fuel_for_power_hourly[1][1, 1]) ≈ 20.0 atol = 1e-6
+            # 40 units burnt, bought through the tank's 0.8 inflow efficiency
+            @test sum(value.(pe_vars.fuel_supply_periodic["Gas"])) ≈ 40.0 / 0.8 atol = 1e-6
+        end
+
+        @testset "electrolyzer hydrogen fills the Hydrogen tank" begin
+            # Step 1: 60 MW of sun, 5 MW of load, a 50 MW electrolyzer. Step 2:
+            # no sun; a hydrogen turbine serves the 5 MW. The hydrogen has no
+            # source but the electrolyzer: it used to be a plain load, and
+            # the turbine ran on fuel shortfall.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            sun = mkgen("PV", "Renewable", "Sun", [60.0], [0.0],
+                        reshape([1.0, 0.0], H, 1); nb = 1, H = H)
+            h2gt = mkgen("H2GT", "Non-renewable", "Hydrogen", [10.0], [0.0],
+                         ones(H, 1); nb = 1, H = H)
+            # 13 kg per MWh (1000 × 0.65 / 50)
+            elz = ElectrolyzerConfig([50.0], [0.65], [0.65], 50.0, [0.0], [0.0],
+                                     [0.0], [0.0], [0.0], [1.0e-9], 0.0, [20.0])
+            input = PowerSystemInput(
+                name = "h2", year = 2025, network = net, generators = [sun, h2gt],
+                batteries = BatteryConfig[], demand = fill(5.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                electrolyzers = [elz],
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            # Hydrogen in tonnes: 33.3 MWh/t, turbine 50 % → 16.65 MWh_e per t
+            h2 = FuelConfig("Hydrogen", 0.0, 0.0, 33.3, 0.0, [0.0], [10.0], [0.0], 0.0,
+                            [0.0], 0.0, 0.0, 0.0)
+            pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [h2],
+                Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
+                TransportRoute[], Dict(2 => ("Hydrogen", 16.65, 33.3, 0.5)), 24, 8760, 0.05,
+                1.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                nothing, Dict(2 => [10.0]), nothing)
+            pe_vars, temporal, prices = ESFEX.create_primary_energy_model(model, pe_in)
+            ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
+                generators = input.generators, electrolyzers = input.electrolyzers)
+            terms = ESFEX.get_primary_energy_objective_terms(pe_vars, pe_in, temporal, prices)
+            ESFEX.@objective(model, Min, objective_function(model) + sum(values(terms)))
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            @test value(vars.gen_output[2, 1, 2]) ≈ 5.0 atol = 1e-6
+            @test sum(value.(vars.load_shed)) ≈ 0.0 atol = 1e-6
+            @test sum(value.(pe_vars.fuel_loss_of_supply_hourly["Hydrogen"])) ≈ 0.0 atol = 1e-6
+            @test sum(value.(pe_vars.fuel_excess_supply_periodic["Hydrogen"])) ≈ 0.0 atol = 1e-6
+            # 5 MWh / 16.65 = 0.3 t used, made in step 1 (the tank keeps 0.8
+            # of what enters)
+            p1 = value(vars.electrolyzer_power[1, 1, 1])
+            @test p1 * 13.0 / 1000 * 0.8 ≥ 5.0 / 16.65 - 1e-6
+            @test value(pe_vars.fuel_storage_level_hourly["Hydrogen"][1, 2]) ≥
+                  5.0 / 16.65 - 1e-6
+            # The old fixed-production inputs are rejected, not ignored
+            bad = PrimaryEnergyInput(2025, 2025, 1, H, [h2],
+                Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
+                TransportRoute[], Dict{Int, Tuple{String, Float64, Float64, Float64}}(),
+                24, 8760, 0.05, 1.0, 1.0, "economic_dispatch", Dict{String, Any}(),
+                nothing, false, ones(H, 1), Dict{Int, Vector{Float64}}(), nothing)
+            @test_throws ArgumentError ESFEX.create_primary_energy_model(
+                ESFEX.Model(create_optimizer(solver_name = "highs")), bad)
+        end
+
+        @testset "primary energy: tank dispatch rate per hour, only where a tank is" begin
+            # 2 h steps, rate 0.1 of the tank per hour. Node 1 (100-unit tank,
+            # full) uses 15 per step and ships 5 per step's demand to node 2
+            # (no tank). The rate capped node 1 at 0.1 × 100 = 10 per step
+            # (not per hour) and node 2 at 0.1 × 0 = 0.
+            function rate_short(rate)
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0, [0.0, 0.0], [100.0, 0.0],
+                                  [1.0, 0.0], 0.0, [0.0, 0.0], 0.0, 0.0, 0.0)
+                route = TransportRoute("r", 1, 2, 100.0,
+                    Dict("Gas" => FuelRouteParams(1000.0, 0.0, 0.0)))
+                infra = Dict("Gas" => FuelInfrastructureConfig(
+                    1000.0, 0.0, 0.0, 0.0, 0.0, 1.0, 20.0, 30.0, rate))
+                # 15 and 5 per 2-h step: annual × 4 h / 8760 h per 2-step period
+                ne = NonElectricDemandConfig("Industrial", "Gas",
+                                             [15.0, 5.0] .* (2 * 8760 / 4), 0.0, ones(12))
+                inp = PrimaryEnergyInput(2025, 2025, 2, 2, [fuel], infra, [ne], [route],
+                    Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 2, 2, 0.05,
+                    1000.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 2, 0)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                return sum(value.(vars.fuel_loss_of_supply_hourly["Gas"])) +
+                       sum(value.(vars.ne_demand_shortfall_periodic[("Gas", "Industrial")])) +
+                       sum(value.(vars.fuel_excess_supply_periodic["Gas"]))
+            end
+            @test rate_short(-1.0) ≈ 0.0 atol = 1e-6   # no rate configured
+            @test rate_short(0.1) ≈ 0.0 atol = 1e-6    # 20 per step at node 1
+            @test rate_short(0.05) ≈ 2 * 5.0 atol = 1e-6  # 10 per step: 5 short per step
+        end
+
+        @testset "master charges battery maintenance and scales candidate costs" begin
+            # One representative day stands for 365: every operating cost of
+            # the day enters the objective × 365. The battery maintenance was
+            # missing from the master (the dispatch charges it on charge and
+            # discharge), and the candidate renewables' curtailment penalty
+            # was added once instead of × 365.
+            H = 24
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                        ones(H, 1); nb = 1, H = H)
+            bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
+                                [0.0], [10.0], [0.0], [0.0], 0.0, 100.0, [2.0e-6],
+                                [0.0], false, "AC", [0.0], [0.0], [0.0])
+            o = [0.0]
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [1.0], [50.0], ones(H, 1),
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            li = BatteryTechnologyConfig("LiNew", [1.0], [1.0], [10.0], [40.0], 1.0, 8.0,
+                                         [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0],
+                                         [3.0e-6], o, [4.0e-6], false, "AC", o, [1.0])
+            function master(; use_tsam = false, tres = 1)
+                inp = MasterProblemInput(
+                    temporal_resolution_hours = tres,
+                    years = [2025], network = net, generators = [gas],
+                    batteries = [bat], technologies = [pv], battery_technologies = [li],
+                    base_demand = fill(50.0, H, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    curtailment_cost = 7.0e-6, max_curtailment_ratio = 0.5,
+                    use_tsam = use_tsam,
+                    tsam_period_start_hours = use_tsam ? [[1]] : Vector{Int}[],
+                    tsam_period_weights = use_tsam ? [[365.0]] : Vector{Float64}[],
+                    tsam_chronological_order = use_tsam ? [[1]] : Vector{Int}[],
+                    verbose = false)
+                model, _, _ = create_master_problem(inp; use_representative_days = true)
+                obj = objective_function(model)
+                coef(pfx) = coefficient(obj,
+                    only(v for v in all_variables(model) if name(v) == pfx))
+                return coef
+            end
+            # (TSAM missed the step length on the curtailment penalty)
+            for tsam in (false, true), tres in (1, 2)
+                coef = master(use_tsam = tsam, tres = tres)
+                k = 365 * tres
+                @test coef("op_y1_d1_bat_ch[1,1,1]") ≈ k * 2.0e-6 rtol = 1e-9
+                @test coef("op_y1_d1_bat_dch[1,1,1]") ≈ k * 2.0e-6 rtol = 1e-9
+                @test coef("bat_tech_ch_y1_d1[1,1,1]") ≈ k * 3.0e-6 rtol = 1e-9
+                @test coef("bat_tech_dis_y1_d1[1,1,1]") ≈ k * 7.0e-6 rtol = 1e-9
+                # PV output earns back the curtailment it avoids, × 365 × step
+                @test coef("tech_out_y1_d1[1,1,1]") ≈ -k * 7.0e-6 rtol = 1e-9
+            end
+        end
+
         @testset "CO2 factor is per MWh of fuel" begin
             # 0.2 t per MWh of fuel at 50 % rated efficiency is 0.4 t per MWh
             # of electricity; the factor used to be applied per MWh_e.

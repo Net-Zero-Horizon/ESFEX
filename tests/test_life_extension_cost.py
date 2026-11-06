@@ -65,6 +65,52 @@ def test_no_candidate_stays_free_and_warns_once(caplog):
     assert len(warned) == 1 and "'coal'" in warned[0].message
 
 
+def _merged(systems):
+    """Merge systems ``{name: SystemConfig}`` as a multi-system run does."""
+    from esfex.config.schema import ESFEXConfig, MetaNetworkConfig
+    from esfex.runner import Orchestrator
+
+    cfg = ESFEXConfig(meta_network=MetaNetworkConfig(systems=list(systems)),
+                      systems={n: s.model_copy(update={"name": n})
+                               for n, s in systems.items()})
+    master, _, _ = Orchestrator._merge_systems(cfg)
+    return master
+
+
+def test_merged_systems_take_the_cost_of_their_own_system(caplog):
+    """In a merged run every key is ``{system}__{key}`` and per-node lists are
+    0 at the other systems' nodes: the named match never fired and the first
+    system's candidate (0 at B's nodes) left B's units free, with no warning."""
+    adapters._FREE_EXTENSION_WARNED.clear()
+
+    def system(gen_cost, tech_cost, bat_cost):
+        old = _make_generator("Old", "Non-renewable", "Diesel", [100.0, 50.0],
+                              invest_cost=[0.0, 0.0], technology="diesel_new")
+        bat = _make_battery("Li", 2).model_copy(
+            update={"invest_cost": [0.0, 0.0], "technology": "liion"})
+        btech = _make_battery_technology("Li-ion", 2)
+        btech.invest_cost_power[:] = [bat_cost, bat_cost]
+        return _make_system_config(
+            num_nodes=2, generators={"old": old}, batteries={"li": bat},
+            technologies={"diesel_new": _make_technology(
+                "diesel_new", "Diesel", 2, tech_type="Non-renewable",
+                invest_cost=tech_cost)},
+            battery_technologies={"liion": btech})
+
+    master = _merged({"A": system(0.0, 3.0, 5.0), "B": system(0.0, 4.0, 6.0)})
+    gen_costs, bat_costs = life_extension_invest_costs(master)
+    assert gen_costs == {"A__old": [3.0, 3.0, 0.0, 0.0], "B__old": [0.0, 0.0, 4.0, 4.0]}
+    assert bat_costs == {"A__li": [5.0, 5.0, 0.0, 0.0], "B__li": [0.0, 0.0, 6.0, 6.0]}
+
+    # B's candidate has no cost at B's nodes: still free, and said so
+    master = _merged({"A": system(0.0, 3.0, 5.0), "B": system(0.0, 0.0, 6.0)})
+    with caplog.at_level(logging.WARNING, logger="esfex.bridge.adapters"):
+        gen_costs, _ = life_extension_invest_costs(master)
+    assert gen_costs == {"A__old": [3.0, 3.0, 0.0, 0.0]}
+    warned = [r.message for r in caplog.records if "is free" in r.message]
+    assert len(warned) == 1 and "'B__old'" in warned[0] and "[2, 3]" in warned[0]
+
+
 @pytest.mark.julia
 def test_master_no_longer_extends_a_zero_cost_unit_for_free(tmp_path):
     """A 100 MW diesel past its lifetime with invest_cost 0. Extending it is
