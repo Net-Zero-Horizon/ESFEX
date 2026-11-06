@@ -5993,11 +5993,12 @@ def validate_inter_system_links(
       - ``loss_factor`` in [0, 1]
       - persisted ``from_endpoint`` / ``to_endpoint`` bus IDs exist in
         their respective state
-      - no two links connect the same ordered (from_sys/from_node,
+      - no two links of the same kind (``link_type``, and fuel for fuel
+        routes) connect the same ordered (from_sys/from_node,
         to_sys/to_node) pair (silent duplicate would inflate capacity)
     """
     issues: list[ValidationIssue] = []
-    seen: set[tuple[str, int, str, int]] = set()
+    seen: set[tuple] = set()
 
     for lk in links or []:
         lid = lk.link_id
@@ -6114,17 +6115,24 @@ def validate_inter_system_links(
                     "ignores it; choose the fuel it carries"),
             ))
 
-        # Duplicate detection (same ordered endpoints)
-        key = (lk.from_system, lk.from_node, lk.to_system, lk.to_node)
+        # Duplicate detection (same ordered endpoints and kind: a power line
+        # and a fuel route on one pair, or fuel routes for two fuels, are
+        # different links)
+        is_fuel = lk.link_type == "fuel_route"
+        key = (lk.link_type, (lk.fuel or "").strip() if is_fuel else "",
+               lk.from_system, lk.from_node, lk.to_system, lk.to_node)
         if key in seen:
             issues.append(ValidationIssue(
                 severity="warning", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
                 message=(
-                    f"Link {lid}: duplicate of an earlier link "
+                    f"Link {lid}: duplicate of an earlier "
+                    f"{'fuel route' if is_fuel else 'link'} "
                     f"({lk.from_system}:{lk.from_node} → "
-                    f"{lk.to_system}:{lk.to_node}); merged adjacency uses "
-                    "max() so the second entry is silently ignored"),
+                    f"{lk.to_system}:{lk.to_node}); "
+                    + ("merge the two routes into one" if is_fuel else
+                       "merged adjacency uses max() so the second entry "
+                       "is silently ignored")),
             ))
         else:
             seen.add(key)
