@@ -308,11 +308,11 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows: `{section: {fuel: array}}` plus cost totals |
+| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows (committed steps only, per period of `primary_energy_resolution` hours from the start of the year): `{section: {fuel: array}}` plus cost totals (committed share of each window) |
 | `n1_gen_reserve_duals` | `Optional[np.ndarray]` | `(hour,)` dual of the generation N-1 constraint |
 | `n1_trans_reserve_duals` | `Optional[dict]` | Duals of the transmission N-1 constraints |
 | `n1_binding_contingencies` | `Optional[list]` | Binding contingency IDs |
-| `n1_security_cost` | `float` | Incremental cost of N-1 security ($), default `0.0` |
+| `n1_security_cost` | `float` | Incremental cost of N-1 security ($), default `0.0`; the model does not compute it yet, so it stays `0.0` |
 
 ### System-Level Scalars
 
@@ -335,7 +335,7 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
-| `reservoir_level` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir storage level (MWh) |
+| `reservoir_level` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir storage level at the start of each hour (MWh) |
 | `reservoir_spillage` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir spillage (MW) |
 | `reservoir_pump` | `Optional[np.ndarray]` | `(gen, node, hour)` | Pump-storage pumping (MW) |
 | `reservoir_invest_capacity` | `Optional[np.ndarray]` | `(gen, node)` | Reservoir capacity investment (MWh) |

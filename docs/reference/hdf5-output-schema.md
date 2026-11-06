@@ -35,6 +35,7 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │       ├── reservoir_level/       # Reservoir water level
 │       ├── reservoir_spillage/    # Reservoir overflow
 │       ├── reservoir_pump/        # Pump-back power
+│       ├── reservoir_invest_capacity/ # Reservoir capacity built (if any)
 │       ├── electrolyzer_power/    # Electrolyzer power (if any electrolyzer)
 │       ├── electrolyzer_h2/       # Hydrogen produced (if any electrolyzer)
 │       ├── gen_investment_power/  # Generator investments
@@ -141,7 +142,7 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
 
 Energy and CO2 totals here and in the scenario attributes below are sums of the per-step rates times `temporal_resolution_hours`, so they are MWh and tonnes at any time step.
-| `n1_security_cost` | (num_years,) | float | Incremental cost of N-1 security ($) |
+| `n1_security_cost` | (num_years,) | float | Incremental cost of N-1 security ($); currently always 0 (not computed — the shortfall penalty is `n1_security_shortfall_cost` in `cost_breakdown/`) |
 
 ---
 
@@ -372,10 +373,10 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 
 | Property | Value |
 |----------|-------|
-| Shape | (num_nodes, hours+1) |
+| Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | MWh-eq |
-| Description | Reservoir water level (includes initial state, hence hours+1) |
+| Description | Reservoir water level at the start of each hour (like `battery_soc`) |
 
 #### reservoir_spillage/{generator_name}
 
@@ -394,6 +395,15 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 | Type | float64 |
 | Units | MW |
 | Description | Pump-back power consumed (demand-side load) |
+
+#### reservoir_invest_capacity/{generator_name}
+
+| Property | Value |
+|----------|-------|
+| Shape | (num_nodes,) |
+| Type | float64 |
+| Units | MWh |
+| Description | Reservoir capacity built by the dispatch model (only when it can invest) |
 
 ### Electrolyzer Data
 
@@ -560,14 +570,16 @@ Written when the primary energy model is active.
 
 | Content | Kind | Description |
 |---------|------|-------------|
-| `total_fuel_supply/{fuel}` | dataset | Fuel supplied |
-| `total_ne_demand_satisfied/{fuel}` | dataset | Non-electric demand served |
-| `total_loss_of_supply/{fuel}` | dataset | Unserved fuel demand |
+| `total_fuel_supply/{fuel}` | dataset | Fuel supplied per period of `primary_energy_resolution` hours from the start of the year |
+| `total_ne_demand_satisfied/{fuel}` | dataset | Non-electric demand served (same periods) |
+| `total_loss_of_supply/{fuel}` | dataset | Unserved fuel demand (same periods) |
 | `final_storage_levels/{fuel}` | dataset | Storage levels at the end of the year |
 | `transport_investments/{fuel}` | dataset | Transport capacity investments |
 | `storage_investments/{fuel}` | dataset | Storage capacity investments |
-| `transport_flows/{fuel}` | dataset | Flows per route and period |
+| `transport_flows/{fuel}` | dataset | Flows per route and period `[routes x periods]` |
 | `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | attributes | Cost totals ($) |
+
+Rolling-horizon windows contribute only their committed steps (the overlap with the next window is dropped, as for the dispatch arrays); window costs count in proportion to those steps.
 
 #### n1_security/
 
@@ -575,7 +587,7 @@ Written when N-1 security results exist.
 
 | Content | Kind | Description |
 |---------|------|-------------|
-| `security_cost` | attribute | Incremental cost of N-1 security ($) |
+| `security_cost` | attribute | Incremental cost of N-1 security ($); currently always 0 (see `n1_security_cost` above) |
 | `gen_reserve_duals` | dataset (hours,) | Dual of the generation N-1 reserve constraint (USD/MW) |
 | `trans_reserve_duals/line_{l}_outage_{k}_dir_{d}` | datasets | Duals of the transmission contingency constraints (USD/MW) |
 | `binding_contingencies` | dataset (bytes) | IDs of binding contingencies |
@@ -631,7 +643,7 @@ Virtual unit names start with `"Investment "`. They do not appear in `system_con
 | Bat. discharge | `battery_discharge/{name}` | (N, H) | float64 | MW |
 | Bat. SOC | `battery_soc/{name}` | (N, H) | float64 | MWh |
 | Bat. spillage | `battery_spillage/{name}` | (N, H) | float64 | MW |
-| Reservoir level | `reservoir_level/{name}` | (N, H+1) | float64 | MWh-eq |
+| Reservoir level | `reservoir_level/{name}` | (N, H) | float64 | MWh-eq |
 | Reservoir spill | `reservoir_spillage/{name}` | (N, H) | float64 | MW-eq |
 | Reservoir pump | `reservoir_pump/{name}` | (N, H) | float64 | MW |
 | Electrolyzer power | `electrolyzer_power/{name}` | (N, H) | float64 | MW |
