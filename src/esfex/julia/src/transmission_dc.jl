@@ -513,7 +513,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 
             # Electrolyzer power (demand side)
             electrolyzer_term = if vars.electrolyzer_power !== nothing
-                vars.electrolyzer_power[i, t]
+                electrolyzer_load(vars, i, t)
             else
                 AffExpr(0.0)
             end

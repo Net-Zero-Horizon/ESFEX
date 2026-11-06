@@ -321,7 +321,7 @@ Fields of `PowerSystemVariables` (`types.jl`):
 | `voltage_angle[n, t]` | node, time | `Array` |
 | `ev_charging`, `ev_v2g`, `ev_loss` | node, time | `Array` or `nothing` |
 | `ev_soc` | node, time + 1 | `Array` or `nothing` |
-| `electrolyzer_power` | bus, time | `Array` or `nothing` |
+| `electrolyzer_power` | electrolyzer, bus, time | `Array` or `nothing` |
 | `balance_constraints[(b, t)]` | bus, time | power-balance constraint references |
 
 Check the variable's construction in `build_variables!` before indexing: some arrays are per node, others per bus.

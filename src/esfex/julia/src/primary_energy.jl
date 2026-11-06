@@ -1154,7 +1154,7 @@ function add_electrolyzer_constraints!(
     for n in 1:n_nodes
         # Total capacity = existing + invested
         total_cap = ec.rated_power[n] + vars.electrolyzer_investment[n]
-        avg_eff = (ec.eff_at_rated[n] + ec.eff_at_min[n]) / 2.0
+        h2_rate = electrolyzer_h2_per_mwh(ec, n)
 
         for t in 1:n_hours
             # Power limit
@@ -1166,7 +1166,7 @@ function add_electrolyzer_constraints!(
             # H2 production: H2[kg] = Power[MW] * 1000 * eff / (kWh/kg)
             @constraint(model,
                 vars.h2_production[n, t] ==
-                vars.electrolyzer_power[n, t] * MW_TO_KW * avg_eff / ec.energy_per_kg_h2,
+                vars.electrolyzer_power[n, t] * h2_rate,
                 base_name = "h2_production_$(n)_$(t)"
             )
 

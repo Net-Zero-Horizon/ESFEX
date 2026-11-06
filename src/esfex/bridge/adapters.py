@@ -1662,22 +1662,21 @@ class PowerSystemAdapter:
                 py_to_julia_vector(initial_soc),
             )
 
-        # Build electrolyzer config if available
-        jl_electrolyzer = jl.seval("nothing")
-        electrolyzers = getattr(sys, 'electrolyzers', {})
-        if electrolyzers:
-            e = next(iter(electrolyzers.values()))
+        # Electrolyzers, in config order (results follow the same order).
+        # The Julia electrolyzer is indexed by bus; its config lists are per
+        # node. Map them like generators: capacity at the node's first bus,
+        # properties replicated to every bus of the node.
+        jl_electrolyzers = jl.seval("ElectrolyzerConfig[]")
+        electrolyzers = getattr(sys, 'electrolyzers', None) or {}
 
-            # The Julia electrolyzer is indexed by bus; its config lists are
-            # per node. Map them like generators: capacity at the node's first
-            # bus, properties replicated to every bus of the node.
-            def _elz(values, mode="property"):
-                values = [float(v) for v in values]
-                if b2n_arg is None:
-                    return values
-                return expand_node_to_bus_array(values, b2n_arg, mode=mode)
+        def _elz(values, mode="property"):
+            values = [float(v) for v in values]
+            if b2n_arg is None:
+                return values
+            return expand_node_to_bus_array(values, b2n_arg, mode=mode)
 
-            jl_electrolyzer = ESFEX.ElectrolyzerConfig(
+        for e in electrolyzers.values():
+            jl_elz = ESFEX.ElectrolyzerConfig(
                 py_to_julia_vector(_elz(e.rated_power, "capacity")),
                 py_to_julia_vector(_elz(e.eff_at_rated)),
                 py_to_julia_vector(_elz(e.eff_at_min)),
@@ -1691,6 +1690,7 @@ class PowerSystemAdapter:
                 scale_cost(float(e.water_cost)),
                 py_to_julia_vector(_elz(e.life_time)),
             )
+            jl.seval("push!")(jl_electrolyzers, jl_elz)
 
         # Get N-1 security settings — only enable for applicable modes
         n1 = self.esfex_config.n1_security if self.esfex_config else N1SecurityConfig()
@@ -1805,7 +1805,7 @@ class PowerSystemAdapter:
             outage_masks=jl_outage_masks,
             fuel_co2=jl_fuel_co2,
             ev_config=jl_ev_config,
-            electrolyzer_config=jl_electrolyzer,
+            electrolyzers=jl_electrolyzers,
             sectoral_criticality=jl_sectoral_criticality,
             sectoral_delay_tolerance=jl_shift_delay,
             sectoral_flexibility_ratio=jl_shift_ratio,

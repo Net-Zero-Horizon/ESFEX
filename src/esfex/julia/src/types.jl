@@ -834,6 +834,19 @@ struct ElectrolyzerConfig
 end
 
 """
+    electrolyzer_h2_per_mwh(ec::ElectrolyzerConfig, i::Int) -> Float64
+
+Hydrogen produced per MWh drawn at index `i` (kg/MWh):
+1000 × mean(eff_at_rated, eff_at_min) / energy_per_kg_h2. Shared by the
+primary-energy hydrogen balance and the dispatch results.
+"""
+function electrolyzer_h2_per_mwh(ec::ElectrolyzerConfig, i::Int)
+    ec.energy_per_kg_h2 > 0 || return 0.0
+    avg_eff = (ec.eff_at_rated[i] + ec.eff_at_min[i]) / 2.0
+    return 1000.0 * avg_eff / ec.energy_per_kg_h2
+end
+
+"""
     ElectrolyzerVariables
 
 Container for electrolyzer decision variables.
@@ -978,8 +991,8 @@ struct PowerSystemInput
     # EV configuration (optional)
     ev_config::Union{EVConfig, Nothing}
 
-    # Electrolyzer configuration (optional)
-    electrolyzer_config::Union{ElectrolyzerConfig, Nothing}
+    # Electrolyzers (each one per-bus arrays); empty = none
+    electrolyzers::Vector{ElectrolyzerConfig}
 
     # Sectoral load criticality weights for load shedding penalty
     sectoral_criticality::Dict{String, Float64}
@@ -1154,6 +1167,8 @@ function PowerSystemInput(;
     solver_options::Dict{String, Any} = Dict{String, Any}(),
     fuel_co2::Dict{String, Float64} = Dict{String, Float64}(),
     ev_config::Union{EVConfig, Nothing} = nothing,
+    electrolyzers::Vector{ElectrolyzerConfig} = ElectrolyzerConfig[],
+    # Single-electrolyzer form, kept for older callers; appended to `electrolyzers`.
     electrolyzer_config::Union{ElectrolyzerConfig, Nothing} = nothing,
     sectoral_criticality::Dict{String, Float64} = Dict{String, Float64}(),
     sectoral_delay_tolerance::Dict{String, Int} = Dict{String, Int}(),
@@ -1258,7 +1273,7 @@ function PowerSystemInput(;
         solver_name, threads, time_limit, gap, verbose, solver_options,
         fuel_co2,
         ev_config,
-        electrolyzer_config,
+        electrolyzer_config === nothing ? electrolyzers : vcat(electrolyzers, [electrolyzer_config]),
         sectoral_criticality,
         sectoral_delay_tolerance,
         sectoral_flexibility_ratio,
@@ -1404,8 +1419,8 @@ mutable struct PowerSystemVariables
     ev_soc::Union{Array{VariableRef, 2}, Nothing}  # node × (hour+1)
     ev_loss::Union{Array{VariableRef, 2}, Nothing}
 
-    # Electrolyzer variables (node × hour) - optional
-    electrolyzer_power::Union{Array{VariableRef, 2}, Nothing}
+    # Electrolyzer power (electrolyzer × bus × hour) - optional
+    electrolyzer_power::Union{Array{VariableRef, 3}, Nothing}
 
     # Inertia (hour) - optional
     loss_of_inertia::Union{Vector{VariableRef}, Nothing}
@@ -1713,6 +1728,11 @@ struct PowerSystemResult
 
     # Granular cost decomposition (populated after solve)
     cost_breakdown::Union{CostBreakdown, Nothing}
+
+    # Electrolyzers (electrolyzer × bus × hour): power drawn (MW) and
+    # hydrogen produced (kg/h, see electrolyzer_h2_per_mwh)
+    electrolyzer_power::Union{Array{Float64, 3}, Nothing}
+    electrolyzer_h2::Union{Array{Float64, 3}, Nothing}
 end
 
 
