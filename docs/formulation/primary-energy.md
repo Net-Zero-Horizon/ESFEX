@@ -143,7 +143,7 @@ where \(\Delta t\) is the step length in hours. A period's shipment leaves its o
 \text{arr}_{f,n,t} = \sum_{r:\,to(r)=n,\; t-\tau_{f,r} \ge 1} (1 - \lambda^{trans}_f d_r / 100) \, \frac{T_{f,r,p(t-\tau_{f,r})}}{|p(t-\tau_{f,r})|}
 \]
 
-where \(p(t)\) is the period of step \(t\). Fuel still in transit when the window ends does not reach this window, and the next window does not see shipments made before it (a boundary effect that the tanks buffer). With \(\delta_f = 0\) the fuel arrives in the step it leaves (the default). Combined with a source disruption and a finite tank, a lead time reproduces real supply stress: a cut drains the tank while the next shipment is still in transit, and if the tank empties the penalised fuel shortfall curtails generation.
+where \(p(t)\) is the period of step \(t\). In rolling-horizon dispatch, fuel that left in a window's committed steps and arrives after them (`in_transit_arrivals`) is carried to the next window with the tank levels: it arrives there in its scheduled step as a fixed term \(\text{arr}^{sched}_{f,n,t}\) added to \(\text{arr}_{f,n,t}\) (already net of losses, paid in the window that shipped it). Fuel shipped in a window's uncommitted look-ahead steps is decided again by the next window; fuel still in transit at the end of the year's last window arrives in the next year's first window. With \(\delta_f = 0\) the fuel arrives in the step it leaves (the default). Combined with a source disruption and a finite tank, a lead time reproduces real supply stress: a cut drains the tank while the next shipment is still in transit, and if the tank empties the penalised fuel shortfall curtails generation.
 
 ### Storage
 
@@ -154,7 +154,7 @@ V^{hr}_{f,n,t+1} = V^{hr}_{f,n,t} + \eta^{stor}_f \left( s^{in}_{f,n,t} + \text{
 \tag{PE-4}
 \]
 
-where \(\eta^{stor}_f\) is the storage efficiency (`efficiency` in `fuel_infrastructure.storage_facilities`, default 0.8), applied to inflows only; stored fuel does not decay. Constraint `hr_storage_balance_{fuel}_{n}_{t}`. For a fuel named `Hydrogen` the code can add an hourly production term, but no run supplies one (electrolyzers are not coupled to the primary-energy model; see [Electrolyzer](electrolyzer.md)).
+where \(\eta^{stor}_f\) is the storage efficiency (`efficiency` in `fuel_infrastructure.storage_facilities`, default 0.8), applied to inflows only; stored fuel does not decay. Constraint `hr_storage_balance_{fuel}_{n}_{t}`. The tank of the fuel named `Hydrogen` also receives the hydrogen of the dispatch electrolyzers at its node, as another inflow (see [Power System Coupling](#power-system-coupling)).
 
 The local supply of a period is delivered into the tank over its steps, freely within the period:
 
@@ -165,7 +165,7 @@ The local supply of a period is delivered into the tank over its steps, freely w
 
 (`link_supply_storage_in_{fuel}_{n}_{p}`). Fuel drawn in a step must cover what is burnt and consumed in that step; the gap, if any, is the shortfall (PE-5e).
 
-The tank starts from the configured initial level or, in rolling-horizon dispatch after the first window, from the level the previous window left at its last committed step:
+The tank starts from the configured initial level or, in rolling-horizon dispatch after the first window, from the level the previous window left at its last committed step (the fuel then still in transit arrives as scheduled, PE-3b):
 
 \[
 V^{hr}_{f,n,1} = V^{init}_{f,n} \cdot \bar{V}_{f,n}
@@ -218,7 +218,7 @@ Fuel that arrives in a step can be used in that step: the tank level after the s
 
 | Constraint | Form |
 |------------|------|
-| `hr_storage_dispatch_rate_*` | \(s^{out}_{f,n,t} \le \rho_f \cdot \bar{V}^{tot}_{f,n}\), only when `max_hourly_dispatch_rate_fraction_of_capacity` \(\rho_f \ge 0\) |
+| `hr_storage_dispatch_rate_*` | \(s^{out}_{f,n,t} \le \rho_f \, \Delta t \cdot \bar{V}^{tot}_{f,n}\), only when `max_hourly_dispatch_rate_fraction_of_capacity` \(\rho_f \ge 0\) (a fraction of the tank per hour, \(\Delta t\) the step length) and only at nodes with a tank (base or built capacity); a node without one draws what it holds |
 | `hr_storage_max_*` | \(V^{hr}_{f,n,t+1} \le \bar{V}^{tot}_{f,n}\) (PE-5a) |
 | `hr_ne_limit_*` | \(W^{ne,hr}_{f,s,n,t} \le D^{ne}_{f,s,n,p} / |p|\) (non-electric use spread evenly over the period) |
 
@@ -424,18 +424,25 @@ with the terms defined above. The PE terms are added to the operational dispatch
 
 ## Power System Coupling
 
-The primary energy model limits generator output by the fuel drawn for it, per generator, bus and time step:
+The primary energy model limits generator output by the fuel drawn for it, per generator, node and time step, summed over the generator's buses at the node:
 
 \[
-P_{g,b,t} \cdot \Delta t \leq W^{elec}_{g,n(b),t} \cdot \kappa_g \quad \forall g \in \mathcal{G}_f,\; b,\; t
+\sum_{b:\, n(b) = n} P_{g,b,t} \cdot \Delta t \leq W^{elec}_{g,n,t} \cdot \kappa_g \quad \forall g \in \mathcal{G}_f,\; n,\; t
 \tag{PE-COUPLE}
 \]
 
-where \(W^{elec}_{g,n,t}\) is the fuel for generator \(g\) at node \(n\) (`hr_fuel_power_gen{g}`, units per time step), \(\kappa_g = \bar{\eta}_g \cdot e_f\) is the electricity per fuel unit (MWh\(_e\)/unit: mean `eff_at_rated` of the generator times `energy_content` of its fuel), \(n(b)\) is the node of bus \(b\) and \(\Delta t\) the time step. Constraint `pe_coupling_gen{g}_{b}_{t}`. The fuel then has to be drawn from the node's tank through PE-5e. Generators whose fuel is `Sun`, `Wind`, `Water`, `OTEC` or has no `energy_content` are not coupled.
+where \(W^{elec}_{g,n,t}\) is the fuel for generator \(g\) at node \(n\) (`hr_fuel_power_gen{g}`, units per time step), \(\kappa_g = \bar{\eta}_g \cdot e_f\) is the electricity per fuel unit (MWh\(_e\)/unit: mean `eff_at_rated` of the generator times `energy_content` of its fuel), \(n(b)\) is the node of bus \(b\) and \(\Delta t\) the time step. Constraint `pe_coupling_gen{g}_n{n}_{t}`. The fuel then has to be drawn from the node's tank through PE-5e. Generators whose fuel is `Sun`, `Wind`, `Water`, `OTEC` or has no `energy_content` are not coupled. A generator at several buses of one node (for example the virtual unit of a technology built at two buses) burns the node's fuel once for its total output.
 
-The coupling is an inequality and is built per bus against the node-level fuel variable: when a generator sits on several buses of the same node, each bus's output is checked against the same fuel quantity.
+**Electrolyzers.** The hydrogen of every dispatch electrolyzer \(e\) at bus \(b\) flows into the `Hydrogen` tank of node \(n(b)\), as an inflow of PE-4 (scaled by \(\eta^{stor}\) like the others):
 
-Implemented in `couple_primary_energy_to_power_system!()`.
+\[
+\text{H}_{2,n,t} = \sum_{e} \sum_{b:\, n(b) = n} P^{elz}_{e,b,t} \cdot \Delta t \cdot \frac{1000\,(\eta^{rated}_e + \eta^{min}_e)/2}{e^{H_2}_e} \cdot \frac{1}{1000} \quad \text{[t per step]}
+\tag{PE-H2}
+\]
+
+so the hydrogen tank is in tonnes (give the `Hydrogen` fuel an `energy_content` in MWh/t, about 33.3 at LHV). A hydrogen-fuelled unit then runs on electrolyzer hydrogen; without a primary-energy source named `Hydrogen` the electrolyzers stay a plain load. The fuel name must be exactly `Hydrogen`.
+
+Implemented in `couple_primary_energy_to_power_system!()` (with `couple_electrolyzers_to_hydrogen_tank!()`).
 
 ## Configuration
 
@@ -505,7 +512,7 @@ systems:
         demand: [12000, 3000]               # tonnes/year per node
 ```
 
-Of the source fields, `storage_investment_cost`, `transport_cost`, `transport_losses`, `max_storage_investment_per_node` and `max_transport_investment_per_arc` are required by the schema; the model takes the investment costs and limits from `fuel_infrastructure` and the route costs and losses from `fuel_transport_routes`.
+Of the source fields, `storage_investment_cost`, `transport_cost`, `transport_losses`, `max_storage_investment_per_node` and `max_transport_investment_per_arc` are required by the schema; the model takes the investment costs and limits from `fuel_infrastructure` and the route costs and losses from `fuel_transport_routes`. The master problem does not use them either: it has no fuel model, and fuel storage and transport are built by the dispatch's primary-energy block (PE-5d).
 
 ---
 

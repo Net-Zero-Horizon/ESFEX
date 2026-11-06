@@ -1957,10 +1957,16 @@ Complete input for the Primary Energy optimization model.
 - `mode::String`: Operation mode ("development", "economic_dispatch", "unit_commitment")
 - `cumulative_capacities::Dict`: Previously accumulated infrastructure investments
 - `initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}`: Initial storage levels
-- `h2_production_hourly::Union{Matrix{Float64}, Nothing}`: H2 production from electrolyzers [hour × node] (units/hr)
-    Matches Python legacy power_system.h2_model.variables['h2_production'] (lines 703-707)
+- `h2_production_hourly`, `electrolyzer_config`: must be `nothing`. The
+    dispatch electrolyzers feed the `Hydrogen` tank instead
+    (`couple_primary_energy_to_power_system!`); kept so existing call sites
+    still construct
 - `generator_rated_power::Dict{Int, Vector{Float64}}`: Rated power per node for each gen in fuel map
     Used to skip zero-capacity nodes in PE coupling
+- `scheduled_arrivals::Union{Nothing, Dict{String, Matrix{Float64}}}`: fuel
+    shipped in an earlier window that is still in transit at this window's
+    start: fuel => [node, step], arriving at the destination tank in that
+    step (net of transport losses; `in_transit_arrivals` builds it)
 """
 struct PrimaryEnergyInput
     year::Int
@@ -1983,15 +1989,12 @@ struct PrimaryEnergyInput
     # Flag to skip investment variable creation when handled by MasterProblem
     # Matches Python legacy investment_from_master (lines 50, 72, 361-379)
     investment_from_master::Bool
-    # H2 production from electrolyzers for Hydrogen storage balance
-    # When electrolyzer_config is provided, this is IGNORED and replaced by optimization variables.
-    # When no electrolyzer config, this fixed data is used as fallback.
+    # Unused, must be nothing: the dispatch electrolyzers feed the Hydrogen tank
     h2_production_hourly::Union{Matrix{Float64}, Nothing}
     # Rated power per node for generators in fuel map, used to skip zero-capacity
     # nodes in PE coupling
     generator_rated_power::Dict{Int, Vector{Float64}}
-    # Electrolyzer configuration for joint optimization of H2 production
-    # Matches Python legacy electrolizer_model.py HydrogenProduction class
+    # Unused, must be nothing (see h2_production_hourly)
     electrolyzer_config::Union{Nothing, ElectrolyzerConfig}
     # Penalty per unit of non-electric fuel demand left unmet (per sector)
     non_electric_demand_loss_penalty::Float64
@@ -1999,9 +2002,14 @@ struct PrimaryEnergyInput
     # place each period in its month and prorate annual quantities
     step_hours::Int
     year_hour_offset::Int
+    # Fuel still in transit from earlier windows: fuel => [node, step] arrivals
+    scheduled_arrivals::Union{Nothing, Dict{String, Matrix{Float64}}}
 end
 
-# Without the three fields above: unmet non-electric demand at the fuel-supply
+# Without scheduled arrivals: no fuel in transit at the window's start.
+PrimaryEnergyInput(args::Vararg{Any, 24}) = PrimaryEnergyInput(args..., nothing)
+
+# Without the last four fields: unmet non-electric demand at the fuel-supply
 # penalty, 1 h steps, window at the start of the year.
 function PrimaryEnergyInput(
     year::Int, base_year::Int, num_nodes::Int, hours::Int,
@@ -2142,11 +2150,6 @@ mutable struct PrimaryEnergyVariables
     primary_sector_emissions_hourly::Dict{String, Matrix{VariableRef}}  # fuel => [node, hour]
     total_primary_emissions_hourly::Matrix{VariableRef}  # [node, hour]
 
-    # Electrolyzer variables (E1: joint H2 production optimization)
-    electrolyzer_power::Union{Nothing, Matrix{VariableRef}}  # [node, hour]
-    h2_production::Union{Nothing, Matrix{VariableRef}}  # [node, hour]
-    electrolyzer_investment::Union{Nothing, Vector{VariableRef}}  # [node]
-
     # Unmet non-electric demand per sector
     ne_demand_shortfall_periodic::Dict{Tuple{String, String}, Matrix{VariableRef}}  # (fuel, sector) => [node, period]
 end
@@ -2181,26 +2184,6 @@ end
 # =============================================================================
 # Master Problem Types
 # =============================================================================
-
-"""
-    PrimaryEnergyInvestmentConfig
-
-Configuration for primary energy infrastructure investment in Master Problem.
-
-# Fields
-- `fuel_id::String`: Fuel identifier
-- `storage_invest_cost::Vector{Float64}`: Storage investment cost per node (\$/unit)
-- `storage_invest_max::Vector{Float64}`: Max storage investment per node (units)
-- `transport_invest_cost::Float64`: Transport investment cost (\$/unit/km)
-- `transport_invest_max::Float64`: Max transport capacity investment (units/day)
-"""
-struct PrimaryEnergyInvestmentConfig
-    fuel_id::String
-    storage_invest_cost::Vector{Float64}
-    storage_invest_max::Vector{Float64}
-    transport_invest_cost::Float64
-    transport_invest_max::Float64
-end
 
 """
     MasterProblemInput
@@ -2328,12 +2311,6 @@ struct MasterProblemInput
     # sector_name => criticality weight (higher = more expensive to shed)
     sectoral_criticality::Dict{String, Float64}
 
-    # Primary energy investment configs (M10)
-    pe_configs::Vector{PrimaryEnergyInvestmentConfig}
-
-    # Transport routes for primary energy (route-based fuel transport)
-    transport_routes::Vector{TransportRoute}
-
     # Configurable parameters (previously hardcoded)
     reserve_margin::Float64             # Capacity adequacy reserve margin (e.g. 1.15 = 15% margin)
     npv_annual_return_rate::Float64     # NPV revenue estimation rate for investments
@@ -2429,8 +2406,6 @@ function MasterProblemInput(;
     decommissioning_cost_factor::Float64 = 0.10,
     sectoral_demand::Dict{String, Matrix{Float64}} = Dict{String, Matrix{Float64}}(),
     sectoral_criticality::Dict{String, Float64} = Dict{String, Float64}(),
-    pe_configs::Vector{PrimaryEnergyInvestmentConfig} = PrimaryEnergyInvestmentConfig[],
-    transport_routes::Vector{TransportRoute} = TransportRoute[],
     reserve_margin::Float64 = 1.15,
     npv_annual_return_rate::Float64 = 0.15,
     base_lcoe::Float64 = 9.3e-5,
@@ -2482,7 +2457,6 @@ function MasterProblemInput(;
         tsam_chronological_order, tsam_inter_period_linking,
         life_extension_cost_factor, decommissioning_cost_factor,
         sectoral_demand, sectoral_criticality,
-        pe_configs, transport_routes,
         reserve_margin, npv_annual_return_rate,
         base_lcoe, max_npv_penalty_per_mw, max_decommission_cost_per_mw, force_replacement_threshold,
         hours_per_year,
@@ -2551,12 +2525,6 @@ mutable struct MasterProblemVariables
     slack_re_target::Dict{Int, VariableRef}
     slack_capacity::Dict{Tuple{Int,Int}, VariableRef}  # (year, node) => slack
     slack_budget::Dict{Int, VariableRef}
-
-    # Primary energy investment (M10: wired from pe_configs)
-    # fuel_id => year => Vector{VariableRef} (per node)
-    fuel_storage_investment::Dict{String, Dict{Int, Vector{VariableRef}}}
-    # fuel_id => year => Dict{route_index => VariableRef}
-    fuel_transport_investment::Dict{String, Dict{Int, Dict{Int, VariableRef}}}
 
     # Inter-period SOC linking (TSAM): year_idx => (bat_idx, node_idx, period_boundary) => VariableRef
     # period_boundary = 0..K where 0 = year start, K = after last period
@@ -2927,7 +2895,6 @@ Extended variable container for multi-system and stochastic Master Problem.
 
 Includes all base MasterProblemVariables plus:
 - Inter-system investment and flow variables
-- Primary energy infrastructure variables
 - Per-scenario operational costs
 """
 mutable struct ExtendedMasterVariables
@@ -2937,11 +2904,6 @@ mutable struct ExtendedMasterVariables
 
     # Inter-system investment: year => link_idx => VariableRef
     inter_system_investment::Dict{Int, Dict{Int, VariableRef}}
-
-    # Primary energy investment:
-    # fuel_id => year => (storage_inv per node, transport_inv per route)
-    fuel_storage_investment::Dict{String, Dict{Int, Vector{VariableRef}}}
-    fuel_transport_investment::Dict{String, Dict{Int, Dict{Int, VariableRef}}}
 
     # Stochastic: scenario_name => year => operational_costs
     scenario_operational_costs::Dict{String, Dict{Int, Vector{AffExpr}}}
@@ -2983,10 +2945,6 @@ struct ExtendedMasterResult
 
     # Inter-system DC-OPF flows: (year, day, link, hour) => MW
     inter_system_flows::Dict{Tuple{Int,Int,Int,Int}, Float64}
-
-    # Primary energy investments
-    fuel_storage_investment::Dict{String, Dict{Int, Vector{Float64}}}
-    fuel_transport_investment::Dict{String, Dict{Int, Dict{Int, Float64}}}
 
     # Scenario-weighted costs
     expected_operational_cost_by_year::Vector{Float64}

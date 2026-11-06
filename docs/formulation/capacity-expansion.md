@@ -11,7 +11,7 @@ The **Master Problem** (`master_problem.jl`) determines optimal investment and r
 
 The Master Problem is a **two-stage linear program** [**[24]**](../reference/bibliography.md#ref24), [**[25]**](../reference/bibliography.md#ref25):
 
-1. **First stage (investment)**: Capacity additions of candidate technologies, battery technologies, transmission, primary-energy infrastructure and reservoir storage, plus life extension of existing units, across all planning years.
+1. **First stage (investment)**: Capacity additions of candidate technologies, battery technologies, transmission and reservoir storage, plus life extension of existing units, across all planning years.
 2. **Second stage (operational validation)**: Representative-day dispatch subproblems embedded within the master model to link investment decisions to operational feasibility.
 
 Existing generators and batteries leave service when their age reaches their configured lifetime. The model may keep part of that capacity online with continuous **life-extension** variables, charged every year at a fraction of the investment cost. There are no binary decisions, so the formulation stays a pure LP.
@@ -37,7 +37,6 @@ The master works on a node-level network: when the systems are merged for planni
 | \(\mathcal{N} = \{1, \ldots, N\}\) | Buses of the master network (one per node after merging) | `input.network.num_buses` |
 | \(\mathcal{T}_d = \{1, \ldots, H\}\) | Time steps within a representative day | `24 / temporal_resolution_hours` |
 | \(\mathcal{D}_y\) | Representative days for year \(y\) | `select_representative_days()` |
-| \(\mathcal{F}\) | Fuel types (primary energy) | `input.pe_configs` |
 | \(\mathcal{S}\) | Demand sectors | `input.sectoral_demand` |
 | \(\Sigma\) | Systems (for per-system RE targets) | `input.system_node_ranges` |
 
@@ -57,8 +56,6 @@ Investment variables exist only for period-start years \(y \in \mathcal{Y}^{inv}
 | \(I^{bat,P}_{y,k,n}\) | \([0, \bar{I}^{P}_{k,n}]\) | MW | Battery-technology power investment | `bat_tech_power_investment[y][k][n]` |
 | \(I^{bat,E}_{y,k,n}\) | \([0, \bar{I}^{E}_{k,n}]\) | MWh | Battery-technology energy investment | `bat_tech_capacity_investment[y][k][n]` |
 | \(I^{tr}_{y,i,j}\) | \([0, \bar{I}^{tr}_i]\) | MW | Transmission expansion on an existing corridor | `transfer_investment[y][(i,j)]` |
-| \(I^{fs}_{y,f,n}\) | \(\mathbb{R}_+\) | units | Fuel storage investment (every year) | `fuel_storage_investment[f][y][n]` |
-| \(I^{ft}_{y,f,r}\) | \(\mathbb{R}_+\) | units/day | Fuel transport investment on route \(r\) (every year) | `fuel_transport_investment[f][y][r]` |
 | \(I^{res}_{y,g,n}\) | \(\mathbb{R}_+\) | MWh | Reservoir storage investment (every year) | `reservoir_investment[y][g]` |
 
 ### 3.2 Life Extension, RE Tracking and Slack Variables
@@ -175,10 +172,10 @@ C^{inv}_y = \underbrace{\sum_{k,n} c^{inv}_{k,n} I^{tech}_{y,k,n}}_{\text{Techno
 \]
 
 \[
-\quad + \underbrace{\sum_{f \in \mathcal{F}} \left( \sum_{n} c^{fs}_{f,n} I^{fs}_{y,f,n} + \sum_{r} c^{ft}_f \, d_{r} \, I^{ft}_{y,f,r} \right)}_{\text{Primary energy}} + \underbrace{\sum_{g,n} c^{res}_{g,n} I^{res}_{y,g,n}}_{\text{Reservoir}} \tag{OBJ-3}
+\quad + \underbrace{\sum_{g,n} c^{res}_{g,n} I^{res}_{y,g,n}}_{\text{Reservoir}} \tag{OBJ-3}
 \]
 
-where \(d_{r}\) is the length of fuel route \(r\) (km), and \(c^{ft}_f\) is the transport investment cost per unit per km for fuel \(f\). Existing generators and batteries have no investment variable; their capacity is fixed (§6).
+Existing generators and batteries have no investment variable; their capacity is fixed (§6). The master has no fuel model and no fuel infrastructure investment: fuel storage and transport are built by the primary-energy block of the operational dispatch ([Primary Energy](primary-energy.md), PE-5d).
 
 ### 5.1b Existing-Asset Costs
 
@@ -189,7 +186,7 @@ C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{e
 
 Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
 
-Where an existing unit's investment cost is 0 at a node (the Studio default), \(c^{inv}\) is taken from the unit's candidate when the master input is built (`life_extension_invest_costs` in `bridge/adapters.py`): for a generator, the technology with the same `fuel` and `type` (the one its `technology` field names if several match, else the first in configuration order); for a battery, the battery technology its `technology` field names, else the first battery technology (`invest_cost_power`). A unit with no candidate keeps \(c^{inv} = 0\), so its extension is free; a warning names it once per run.
+Where an existing unit's investment cost is 0 at a node (the Studio default), \(c^{inv}\) is taken from the unit's candidate when the master input is built (`life_extension_invest_costs` in `bridge/adapters.py`): for a generator, the technology with the same `fuel` and `type` (the one its `technology` field names if several match, else the first in configuration order); for a battery, the battery technology its `technology` field names, else the first battery technology (`invest_cost_power`). In a multi-system run, where keys are `{system}__{key}`, the candidate comes from the unit's own system and its cost at the unit's own nodes. A unit with no candidate, or whose candidate has no cost at one of its nodes, keeps \(c^{inv} = 0\) there, so its extension is free; a warning names it once per run.
 
 ### 5.2 Operational Cost
 
@@ -205,7 +202,8 @@ where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of 
 \[
 \begin{aligned}
 C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}_{g,n} + c^{maint}_{g,n} + c^{CO_2}_g\right) P^{day}_{g,n,t} + \sum_{k,n} \left(c^{fuel}_{k,n} + c^{fix}_{k,n} + c^{maint}_{k,n} + c^{CO_2}_k\right) P^{tech}_{k,n,t} \\
-& + c^{VOLL} \sum_{n} L^{day}_{n,t} + c^{fre} \sum_{n} \lambda^{fre}_{n,t} + c^{CU} \sum_n CU^{day}_{n,t} + \sum_{b,n} c^{\text{thr}}_{b,n} P^{dis,day}_{b,n,t} \\
+& + c^{VOLL} \sum_{n} L^{day}_{n,t} + c^{fre} \sum_{n} \lambda^{fre}_{n,t} + c^{CU} \sum_n CU^{day}_{n,t} + \sum_{b,n} \left( c^{maint}_{b,n} (P^{ch,day}_{b,n,t} + P^{dis,day}_{b,n,t}) + c^{\text{thr}}_{b,n} P^{dis,day}_{b,n,t} \right) \\
+& + \sum_{k,n} \left( c^{maint}_{k,n} (P^{bt,ch}_{k,n,t} + P^{bt,dis}_{k,n,t}) + c^{\text{thr}}_{k,n} P^{bt,dis}_{k,n,t} \right) \\
 & + c^{r,sta} \sum_n \lambda^{sta}_{n,t} + c^{r,dyn} \sum_n \lambda^{dyn}_{n,t} + c^{ine} H^{day}_t \Big]
 \end{aligned} \tag{OBJ-5}
 \]
@@ -214,7 +212,7 @@ C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}
 \quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot (\kappa_s - 1) \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
 \]
 
-where \(\kappa_s\) is the criticality weight for sector \(s\). The sectoral shed \(L^{sec,day}\) is part of \(L^{day}\) (SEC-2), which OBJ-5 already charges at VOLL; OBJ-6 adds the criticality premium, so a sector's shed MWh costs \(c^{VOLL} \kappa_s\) and the unclassified remainder \(c^{VOLL}\), as in the dispatch. The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well, with the same scaling.
+where \(\kappa_s\) is the criticality weight for sector \(s\). The sectoral shed \(L^{sec,day}\) is part of \(L^{day}\) (SEC-2), which OBJ-5 already charges at VOLL; OBJ-6 adds the criticality premium, so a sector's shed MWh costs \(c^{VOLL} \kappa_s\) and the unclassified remainder \(c^{VOLL}\), as in the dispatch. The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. Batteries pay their `maintenance_cost` on every MWh charged and discharged and their throughput cost on discharge, as in the dispatch; for battery technologies (\(k\)) these are the technology's `maintenance_cost` and `throughput_degradation_cost`. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well. All of \(C^{day}\) is scaled to the year the same way (OBJ-4, or \(\Delta t \cdot w_p\) for a TSAM period of weight \(w_p\)), in the monolithic, TSAM, multi-system and stochastic masters; the Benders subproblems charge the same day cost except the candidates' curtailment, which they price only above the cap ([§11b](#11b-benders-decomposition)).
 
 !!! note "PWL cost curves in the master problem"
     When existing generators have a `fuel_cost_curve` configured, the representative day operational cost (OBJ-5) uses the same piecewise-linear (PWL) fuel cost decomposition as the operational dispatch formulation (see [Operational Dispatch -- PWL Fuel Cost](operational-dispatch.md#311-piecewise-linear-pwl-fuel-cost-decomposition)). The same applies to existing batteries with `discharge_cost_curve`, which then replaces the throughput cost. Candidate technologies are costed at their flat `fuel_cost`; their cost curves are not used by the master.

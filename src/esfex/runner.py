@@ -5825,6 +5825,8 @@ class Orchestrator:
                         outage_schedule=getattr(system_config, "outage_schedule", None),
                         step_hours=res_h,
                         year_hour_offset=start_hour,
+                        # Fuel the previous window shipped that is still in transit
+                        scheduled_arrivals=boundary_conditions.get('pe_in_transit'),
                     )
 
                     # Create PE variables in the same JuMP model
@@ -5904,10 +5906,11 @@ class Orchestrator:
             if reservoir_level is not None and hasattr(reservoir_level, 'ndim') and reservoir_level.ndim == 3:
                 new_boundary['reservoir_level'] = _state_at(reservoir_level)
 
-            # Carry PE storage levels to next window
+            # Carry PE tank levels and fuel still in transit to the next window
             if pe is not None:
                 try:
                     new_boundary['pe_storage_levels'] = pe.get_final_storage_levels(step=k)
+                    new_boundary['pe_in_transit'] = pe.get_in_transit_arrivals(step=k)
                 except Exception as e:
                     logger.warning(f"Window {window}: Could not extract PE storage levels: {e}")
                     import traceback
