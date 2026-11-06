@@ -288,3 +288,28 @@ def test_scheduled_fuel_source_outage_in_a_later_year():
     # ... unless it recurs
     assert _max_supply(_adapter(year=2026, fuels_config=fuels,
                                 outage_schedule=ow(24, 48, True))) == pytest.approx([24.0, 0.0, 24.0])
+
+
+def test_cost_totals_are_in_dollars():
+    """The block's cost totals came out of Julia in M$ and were written to the
+    results file as is, while the file (and its charts) use $ for costs."""
+    from esfex.bridge.julia_setup import get_julia
+
+    jl = get_julia()
+    a = _adapter()
+    jl._pe_in = a._create_julia_input()
+    jl.seval("using JuMP, HiGHS")
+    m, pe_vars, temporal = jl.seval("""
+        let m = Model(ESFEX.create_optimizer(solver_name = "highs"))
+            set_silent(m)
+            vars, temporal, prices = ESFEX.create_primary_energy_model(m, _pe_in)
+            @objective(m, Min, sum(values(ESFEX.get_primary_energy_objective_terms(
+                vars, _pe_in, temporal, prices))))
+            optimize!(m)
+            (m, vars, temporal)
+        end""")
+    a._jl_model, a._jl_vars, a._jl_input, a._jl_temporal = m, pe_vars, jl._pe_in, temporal
+    res = a.get_results()
+    supplied = sum(float(v.sum()) for v in res["total_fuel_supply"].values())
+    assert supplied > 1.0
+    assert res["total_fuel_cost"] == pytest.approx(supplied * 10.0)   # price_base 10 $/unit

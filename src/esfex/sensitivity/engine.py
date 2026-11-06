@@ -112,7 +112,7 @@ class SensitivityEngine:
         self.parameters = parameters
         self.kpi_names = kpi_names or list(KPI_NAMES)
         self.n_base_samples = n_base_samples
-        # Years per config-mode run (None: the `esfex run` default, 25)
+        # Years per config-mode run (None: the `esfex run` default, DEFAULT_RUN_YEARS)
         self.years = years
 
     @property

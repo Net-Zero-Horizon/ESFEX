@@ -39,6 +39,7 @@ from esfex.io.demand import _read_tabular, create_sectoral_demand, read_hourly_t
 from esfex.utils import aggregate_demand_to_resolution
 from esfex.utils.per_unit import derived_reactance_pu, system_s_base
 from esfex.utils.temporal import (
+    DEFAULT_RUN_YEARS,
     HOURS_STD_YEAR,
     aggregate_to_resolution,
     drop_leap_days,
@@ -96,12 +97,16 @@ def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
     ``losses_fraction`` = ``loss_factor`` (per 100 km). Capacity investment
     on the route follows the fuel's ``fuel_infrastructure``, so the link's
     ``max_investment_MW`` / ``investment_cost_per_MW`` are not used.
+
+    Route ids are ``link{k}_{A}_{B}_{fuel}_{i}_fwd|rev``, with ``k`` the
+    link's position in ``systems_links`` and ``i`` the connection, so two
+    fuel links between the same systems (e.g. Diesel and LNG) keep apart.
     """
     def _at(seq, idx, default=0.0):
         return float(seq[idx]) if idx < len(seq) and seq[idx] is not None else default
 
     routes: list[dict] = []
-    for link in links:
+    for pos, link in enumerate(links):
         if link.link_type != "fuel_route" or len(link.systems) < 2:
             continue
         sa, sb = link.systems[0], link.systems[1]
@@ -124,7 +129,7 @@ def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
             dist = _at(link.distance_km, idx)
             for suffix, frm, to in (("fwd", ga, gb), ("rev", gb, ga)):
                 routes.append({
-                    "route_id": f"link_{sa}_{sb}_{idx}_{suffix}",
+                    "route_id": f"link{pos}_{sa}_{sb}_{link.fuel}_{idx}_{suffix}",
                     "from_node": frm,
                     "to_node": to,
                     "distance_km": dist,
@@ -398,6 +403,81 @@ def _warn_flat_renewable(kind: str, key: str) -> None:
         "available at full capacity in every hour (capacity factor 1.0). "
         "Right for dispatchable renewables (biomass, geothermal); set a "
         "profile for solar, wind and other variable sources.", kind, key)
+
+
+def technology_unit_fields(tech, rep, rep_curve=None) -> dict:
+    """Operating parameters of a generator built from candidate technology *tech*.
+
+    Shared by the dispatch's virtual generators (master investments, per
+    bus) and the myopic master's units built in earlier years (per node).
+    ``rep(arr, default)`` lays a per-node technology list out on the unit's
+    array positions; ``rep_curve(curves)`` does the same for the bidding
+    curves (default: the technology's own list). Capacity, age, lifetime,
+    degradation and investment fields are left to the caller.
+    """
+    return {
+        "name": f"Investment {tech.name}",
+        "type": tech.type,
+        "fuel": tech.fuel,
+        # A fraction of the rated power, like every generator's min_power
+        "min_power": rep(tech.min_output, 0.0),
+        "eff_at_rated": rep(tech.eff_at_rated, 0.0),
+        "eff_at_min": rep(tech.eff_at_min, 0.0),
+        "ramp_up": rep(tech.ramp_up, 0.0),
+        "ramp_down": rep(tech.ramp_down, 0.0),
+        "min_up": rep(tech.min_up, 0),
+        "min_down": rep(tech.min_down, 0),
+        "fuel_cost": rep(tech.fuel_cost, 0.0),
+        "fuel_cost_curve": (rep_curve(tech.fuel_cost_curve) if rep_curve
+                            else (list(tech.fuel_cost_curve) if tech.fuel_cost_curve else None)),
+        "fixed_cost": rep(tech.fixed_cost, 0.0),
+        "maintenance_cost": rep(tech.maintenance_cost, 0.0),
+        "start_up_cost": rep(tech.start_up_cost, 0.0),
+        "inertia": rep(tech.inertia, 0.0),
+        "droop": rep(tech.droop, 0.05),
+        "governor_time_const": rep(tech.governor_time_const, 5.0),
+        "risk_coefficient": rep(tech.risk_coefficient, 1.0),
+        "availability_file": tech.availability_file,
+        "frequency_hz": tech.frequency_hz,
+        "current_type": tech.current_type,
+        "reservable": tech.reservable,
+    }
+
+
+def battery_technology_unit_fields(bat_tech, rep) -> dict:
+    """Operating parameters of a battery built from battery technology *bat_tech*.
+
+    Counterpart of :func:`technology_unit_fields` for storage; power,
+    energy, age, lifetime and investment fields are left to the caller.
+    """
+    return {
+        "_type": "battery",
+        "type": "Storage",
+        "name": f"Investment {bat_tech.name}",
+        "efficiency_charge": rep(bat_tech.efficiency_charge, 0.95),
+        "efficiency_discharge": rep(bat_tech.efficiency_discharge, 0.95),
+        "soc_initial": rep(bat_tech.soc_initial, 0.0),
+        "max_DoD": rep(bat_tech.max_DoD, 0.0),
+        "maintenance_cost": rep(bat_tech.maintenance_cost, 0.0),
+        "inertia": rep(bat_tech.inertia, 0.0),
+        "throughput_degradation_cost": rep(bat_tech.throughput_degradation_cost, 0.0),
+        "risk_coefficient": rep(bat_tech.risk_coefficient, 1.0),
+        "spillage": bat_tech.spillage,
+        "current_type": bat_tech.current_type,
+    }
+
+
+def _per_node_list(arr, n: int, default=0.0) -> list:
+    """A per-node list of length *n*: a single value is broadcast, a short
+    list is padded with its last value."""
+    if not arr:
+        return [default] * n
+    if len(arr) >= n:
+        return list(arr[:n])
+    if len(arr) == 1:
+        return [arr[0]] * n
+    return list(arr) + [arr[-1]] * (n - len(arr))
+
 
 class Orchestrator:
     """
@@ -1433,7 +1513,7 @@ class Orchestrator:
         2. STEP 2: Run operational subproblems year-by-year using MasterProblem decisions
 
         Args:
-            years: Number of years to simulate (default: 25)
+            years: Number of years to simulate (default: ``DEFAULT_RUN_YEARS`` = 25)
             start_year: Label of the first simulated year. Default: the
                 year of ``date_start``. When given, the date labels start
                 on ``date_start``'s day and time in this year. It only
@@ -1459,7 +1539,7 @@ class Orchestrator:
                 "master_only needs simulation_mode 'development' "
                 f"(got {self.config.simulation_mode!r})")
         self.master_solution = None
-        years = years or 25
+        years = years or DEFAULT_RUN_YEARS
         self._start_date = self._resolve_start_date(start_year)
         start_year = self._start_date.year
         end_year = start_year + years
@@ -3130,9 +3210,11 @@ class Orchestrator:
             # Accumulation state
             investments_by_year: dict[int, dict] = {}
             retirements_by_year: dict[int, dict] = {}
-            cumulative_gen_inv: dict[str, list[float]] = {}  # gen_key -> [MW per node]
-            cumulative_bat_pow_inv: dict[str, list[float]] = {}
-            cumulative_bat_cap_inv: dict[str, list[float]] = {}
+            cumulative_caps_by_year: dict[int, dict] = {}
+            # Capacity built so far: {"tech" | "bat_tech_power" |
+            # "bat_tech_capacity": {(technology key, build year index): per-node array}}
+            built: dict[str, dict[tuple[str, int], np.ndarray]] = {
+                "tech": {}, "bat_tech_power": {}, "bat_tech_capacity": {}}
             current_re = overall_initial_re
 
             for y_idx, year in enumerate(years_range):
@@ -3143,13 +3225,15 @@ class Orchestrator:
                 year_target_re = re_paths[0][y_idx]
                 logger.debug(f"  RE target: {year_target_re:.2%} (current: {current_re:.2%})")
 
-                # 2. Prepare modified system config with accumulated investments
-                modified_config = self._prepare_system_for_myopic_year(
-                    y_idx=y_idx,
-                    cumulative_gen_inv=cumulative_gen_inv,
-                    cumulative_bat_pow_inv=cumulative_bat_pow_inv,
-                    cumulative_bat_cap_inv=cumulative_bat_cap_inv,
-                )
+                # 2. The master system as this year sees it: units aged,
+                # earlier years' builds as existing units, limits reduced
+                year_system, built_gens, built_bats = self._prepare_system_for_myopic_year(
+                    y_idx, built)
+                # Built units read their technology's profile
+                year_avail_cache = dict(self._availability_cache or {})
+                for unit_key, tech_key in built_gens:
+                    if tech_key in year_avail_cache:
+                        year_avail_cache[unit_key] = year_avail_cache[tech_key]
 
                 # 3. Extract this year's demand
                 yr_start_raw = y_idx * hours_per_year_raw
@@ -3232,7 +3316,7 @@ class Orchestrator:
 
                 # 7. Create single-year MasterProblem
                 master = MasterProblemAdapter(
-                    config=modified_config,
+                    config=self.config,
                     years=[year],
                     base_year=year,
                     demand=year_demand_agg,
@@ -3263,13 +3347,13 @@ class Orchestrator:
                     use_stochastic=use_stochastic,
                     stochastic_scenarios=stochastic_scenario_dicts,
                     config_path=str(self.config_path) if self.config_path else None,
-                    availability_cache=self._availability_cache,
+                    availability_cache=year_avail_cache,
                     inflow_cache=getattr(self, "_inflow_cache", None),
                     date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                     # This year's block of multi-year profiles (horizon hour
                     # y_idx × 8760, wrapping around), as in the dispatch
                     profile_start_hour=y_idx * hours_per_year_raw,
-                    system_config=self.master_system,
+                    system_config=year_system,
                 )
 
                 # 7. Solve
@@ -3297,11 +3381,15 @@ class Orchestrator:
 
                 investments_by_year[year] = year_inv
 
-                # 9. Extract retirements
+                # 9. Extract retirements (of the original units; the built
+                # ones retire at their technology's lifetime)
+                n_gen0 = len(self.master_system.generators)
                 year_ret: dict[str, float] = {}
                 gen_life_ext = result.get('gen_life_extension', {})
                 if 1 in gen_life_ext:  # year_idx=1 for single year
                     for gen_idx, node_values in gen_life_ext[1].items():
+                        if int(gen_idx) > n_gen0:
+                            continue
                         vals = np.array(node_values) if hasattr(node_values, '__len__') else np.array([node_values])
                         retired = float(np.mean(1 - vals)) if len(vals) > 0 else 0.0
                         if retired > 0.01:
@@ -3309,14 +3397,14 @@ class Orchestrator:
                             year_ret[f'gen_{py_idx}'] = retired
                 retirements_by_year[year] = year_ret
 
-                # 10. Accumulate investments for next year
-                self._accumulate_myopic_investments(
-                    year_inv, cumulative_gen_inv,
-                    cumulative_bat_pow_inv, cumulative_bat_cap_inv,
-                    num_nodes,
-                )
+                # 10. Capacity in service this year, for the dispatch
+                cumulative_caps_by_year[year] = self._myopic_year_caps(
+                    result, built_gens, built_bats)
 
-                # 11. Update current RE penetration (global + per-system)
+                # 11. Accumulate investments for next year
+                self._accumulate_myopic_investments(year_inv, y_idx, built)
+
+                # 12. Update current RE penetration (global + per-system)
                 re_pen = result.get('re_penetration_by_year', [])
                 if re_pen:
                     current_re = float(re_pen[0]) if isinstance(re_pen, list) else float(re_pen)
@@ -3357,7 +3445,7 @@ class Orchestrator:
                     progress = y_idx / (num_years - 1) if num_years > 1 else 1.0
                     re_targets_by_year[year] = overall_initial_re + progress * (target_re - overall_initial_re)
 
-            return investments_by_year, retirements_by_year, {}, re_targets_by_year
+            return investments_by_year, retirements_by_year, cumulative_caps_by_year, re_targets_by_year
 
         except Exception as e:
             import traceback
@@ -3370,114 +3458,206 @@ class Orchestrator:
     def _prepare_system_for_myopic_year(
         self,
         y_idx: int,
-        cumulative_gen_inv: dict[str, list[float]],
-        cumulative_bat_pow_inv: dict[str, list[float]],
-        cumulative_bat_cap_inv: dict[str, list[float]],
-    ) -> 'ESFEXConfig':
-        """
-        Create a modified ESFEXConfig for a myopic year.
+        built: dict[str, dict[tuple[str, int], np.ndarray]],
+    ) -> tuple[SystemConfig, list[tuple[str, str]], list[tuple[str, str]]]:
+        """The merged master system as myopic year *y_idx* sees it.
 
-        Applies cumulative investments from previous years as existing capacity
-        and reduces invest_max accordingly. Ages existing units.
+        Starts from ``self.master_system`` (node-level, keys
+        ``{system}__{key}`` in a multi-system run):
+
+        * existing generators and batteries are *y_idx* years older;
+        * capacity built in earlier years (*built*, see
+          :meth:`_accumulate_myopic_investments`) becomes existing units with
+          their technology's parameters (:func:`technology_unit_fields`), at
+          the nodes where it was built, one unit per technology and build
+          year, aged from the build year with the technology's degradation
+          and retired at its lifetime, as perfect foresight counts its
+          investments;
+        * each technology's ``invest_max`` is reduced by what was built (the
+          limit holds for the whole horizon, as in perfect foresight).
 
         Returns:
-            Modified ESFEXConfig with updated primary system.
+            ``(system, built_gens, built_bats)``: the year's system and the
+            ``(unit key, technology key)`` of the built units it holds, in
+            the order they follow the original units.
         """
-        modified = self.config.model_copy(deep=True)
-        sys = modified.primary_system
+        from esfex.config.schema import BatteryConfig, GeneratorConfig
 
-        # Apply cumulative generator investments
-        for gen_key, gen in sys.generators.items():
-            # Age existing units
-            if y_idx > 0:
-                gen.initial_age = [age + y_idx for age in gen.initial_age]
+        base = self.master_system
+        sys = base.model_copy(deep=True)
+        n = base.num_nodes
 
-            # Apply accumulated investments to rated_power
-            if gen_key in cumulative_gen_inv:
-                inv_per_node = cumulative_gen_inv[gen_key]
-                for n in range(len(gen.rated_power)):
-                    if n < len(inv_per_node):
-                        gen.rated_power[n] += inv_per_node[n]
-                        # Reduce invest_max by already-invested capacity
-                        if n < len(gen.invest_max_power):
-                            gen.invest_max_power[n] = max(
-                                0.0, gen.invest_max_power[n] - inv_per_node[n]
-                            )
+        for gen in sys.generators.values():
+            gen.initial_age = [age + y_idx for age in gen.initial_age]
+        for bat in sys.batteries.values():
+            bat.initial_age = [age + y_idx for age in bat.initial_age]
 
-        # Apply cumulative battery investments
-        for bat_key, bat in sys.batteries.items():
-            if y_idx > 0:
-                bat.initial_age = [age + y_idx for age in bat.initial_age]
+        def rep(arr, default=0.0):
+            return _per_node_list(arr, n, default)
 
-            if bat_key in cumulative_bat_pow_inv:
-                inv_per_node = cumulative_bat_pow_inv[bat_key]
-                for n in range(len(bat.MaxChargePower)):
-                    if n < len(inv_per_node):
-                        bat.MaxChargePower[n] += inv_per_node[n]
-                        bat.MaxDischargePower[n] += inv_per_node[n]
-                        if n < len(bat.invest_max_power):
-                            bat.invest_max_power[n] = max(
-                                0.0, bat.invest_max_power[n] - inv_per_node[n]
-                            )
+        def _reduce(limits, used):
+            return [max(0.0, lim - float(used[i])) for i, lim in enumerate(rep(limits))]
 
-            if bat_key in cumulative_bat_cap_inv:
-                inv_per_node = cumulative_bat_cap_inv[bat_key]
-                for n in range(len(bat.capacity)):
-                    if n < len(inv_per_node):
-                        bat.capacity[n] += inv_per_node[n]
-                        if n < len(bat.invest_max_capacity):
-                            bat.invest_max_capacity[n] = max(
-                                0.0, bat.invest_max_capacity[n] - inv_per_node[n]
-                            )
+        built_gens: list[tuple[str, str]] = []
+        used: dict[str, np.ndarray] = {}
+        for (tech_key, build_y), power in sorted(built["tech"].items(), key=lambda kv: kv[0][1]):
+            tech = base.technologies.get(tech_key)
+            if tech is None:
+                continue
+            used[tech_key] = used.get(tech_key, np.zeros(n)) + power
+            age = y_idx - build_y
+            if age >= tech.lifetime or not np.any(power > 0):
+                continue
+            unit_key = f"{tech_key}__built_y{build_y + 1}"
+            fields = technology_unit_fields(tech, rep)
+            fields.update(
+                name=f"{tech.name} (built in year {build_y + 1})",
+                technology=tech_key,
+                rated_power=[float(p) for p in power],
+                life_time=[tech.lifetime] * n,
+                initial_age=[age] * n,
+                degradation_rate=rep(tech.degradation_rate),
+                # Life extension is priced like a new build
+                invest_cost=rep(tech.invest_cost),
+                invest_max_power=[0.0] * n,
+                decommissioning_cost=rep(tech.decommissioning_cost),
+            )
+            sys.generators[unit_key] = GeneratorConfig(**fields)
+            built_gens.append((unit_key, tech_key))
+        for tech_key, total in used.items():
+            tech = sys.technologies[tech_key]
+            tech.invest_max_power = _reduce(tech.invest_max_power, total)
 
-        return modified
+        built_bats: list[tuple[str, str]] = []
+        used_pow: dict[str, np.ndarray] = {}
+        used_cap: dict[str, np.ndarray] = {}
+        bat_keys = sorted(set(built["bat_tech_power"]) | set(built["bat_tech_capacity"]),
+                          key=lambda k: k[1])
+        for bt_key, build_y in bat_keys:
+            bat_tech = base.battery_technologies.get(bt_key)
+            if bat_tech is None:
+                continue
+            power = built["bat_tech_power"].get((bt_key, build_y), np.zeros(n))
+            energy = built["bat_tech_capacity"].get((bt_key, build_y), np.zeros(n))
+            used_pow[bt_key] = used_pow.get(bt_key, np.zeros(n)) + power
+            used_cap[bt_key] = used_cap.get(bt_key, np.zeros(n)) + energy
+            age = y_idx - build_y
+            if age >= bat_tech.lifetime or not (np.any(power > 0) or np.any(energy > 0)):
+                continue
+            unit_key = f"{bt_key}__built_y{build_y + 1}"
+            fields = battery_technology_unit_fields(bat_tech, rep)
+            fields.pop("_type")
+            pow_list = [float(p) for p in power]
+            zeros = [0.0] * n
+            fields.update(
+                name=f"{bat_tech.name} (built in year {build_y + 1})",
+                technology=bt_key,
+                capacity=[float(e) for e in energy],
+                MaxChargePower=pow_list,
+                MaxDischargePower=pow_list,
+                rated_power=pow_list,
+                min_power=zeros, eff_at_rated=[1.0] * n, eff_at_min=[1.0] * n,
+                ramp_up=[1.0] * n, ramp_down=[1.0] * n, min_up=[0] * n, min_down=[0] * n,
+                fuel_cost=zeros, fixed_cost=zeros, start_up_cost=zeros,
+                life_time=[bat_tech.lifetime] * n,
+                initial_age=[age] * n,
+                degradation_rate=rep(bat_tech.degradation_rate),
+                # Life extension is priced like a new build
+                invest_cost=rep(bat_tech.invest_cost_power),
+                invest_cost_energy=rep(bat_tech.invest_cost_energy),
+                invest_max_power=zeros, invest_max_capacity=zeros,
+                decommissioning_cost=rep(bat_tech.decommissioning_cost),
+            )
+            sys.batteries[unit_key] = BatteryConfig(**fields)
+            built_bats.append((unit_key, bt_key))
+        for bt_key in used_pow:
+            bat_tech = sys.battery_technologies[bt_key]
+            bat_tech.invest_max_power = _reduce(bat_tech.invest_max_power, used_pow[bt_key])
+            bat_tech.invest_max_capacity = _reduce(bat_tech.invest_max_capacity, used_cap[bt_key])
+
+        return sys, built_gens, built_bats
+
+    def _myopic_year_caps(
+        self,
+        result: dict,
+        built_gens: list[tuple[str, str]],
+        built_bats: list[tuple[str, str]],
+    ) -> dict[str, dict]:
+        """Capacity in service in a one-year myopic master, for the dispatch.
+
+        Same layout as the perfect-foresight ``cumulative_capacities_by_year``
+        entries (read by :meth:`_build_config_from_cumulative`): the original
+        units under ``gen`` / ``bat`` / ``bat_power``, and per technology the
+        capacity built this year plus what is left (degraded, not yet
+        retired) of the units built from it in earlier years.
+        """
+        n_gen0 = len(self.master_system.generators)
+        n_bat0 = len(self.master_system.batteries)
+        tech_idx = {k: i + 1 for i, k in enumerate(self.master_system.technologies)}
+        bt_idx = {k: i + 1 for i, k in enumerate(self.master_system.battery_technologies)}
+
+        def _year(name):
+            return result.get(name, {}).get(1, {})
+
+        def _arrays(name):
+            return {k: np.array(v, dtype=float) for k, v in _year(name).items()}
+
+        cumul_gen = _year('cumulative_gen_capacity')
+        cumul_bat = _year('cumulative_bat_capacity')
+        cumul_bat_pow = _year('cumulative_bat_power')
+        caps = {
+            'gen': {g: v for g, v in cumul_gen.items() if int(g) <= n_gen0},
+            'bat': {b: v for b, v in cumul_bat.items() if int(b) <= n_bat0},
+            'bat_power': {b: v for b, v in cumul_bat_pow.items() if int(b) <= n_bat0},
+            'tech': _arrays('cumulative_tech_capacity'),
+            'bat_tech_power': _arrays('cumulative_bat_tech_power'),
+            'bat_tech_capacity': _arrays('cumulative_bat_tech_capacity'),
+        }
+
+        def _add(target, t_jl, values):
+            if values is None:
+                return
+            values = np.array(values, dtype=float)
+            target[t_jl] = target[t_jl] + values if t_jl in target else values
+
+        for g, (_, tech_key) in enumerate(built_gens, start=n_gen0 + 1):
+            _add(caps['tech'], tech_idx[tech_key], cumul_gen.get(g))
+        for b, (_, bt_key) in enumerate(built_bats, start=n_bat0 + 1):
+            _add(caps['bat_tech_power'], bt_idx[bt_key], cumul_bat_pow.get(b))
+            _add(caps['bat_tech_capacity'], bt_idx[bt_key], cumul_bat.get(b))
+        return caps
 
     def _accumulate_myopic_investments(
         self,
         year_inv: dict[str, float],
-        cumulative_gen_inv: dict[str, list[float]],
-        cumulative_bat_pow_inv: dict[str, list[float]],
-        cumulative_bat_cap_inv: dict[str, list[float]],
-        num_nodes: int,
+        y_idx: int,
+        built: dict[str, dict[tuple[str, int], np.ndarray]],
     ) -> None:
-        """Accumulate per-node investments from a year's solution."""
-        tech_keys = list(self.primary_system.technologies.keys())
-        bat_tech_keys = list(self.primary_system.battery_technologies.keys())
+        """Record a myopic year's technology investments in *built*.
 
+        Keys of *year_inv* index the master's technologies and its network
+        buses (one per node in the merged master system; a bus-level master
+        maps each bus to its parent node). Entries go to
+        ``built[kind][(technology key, y_idx)]`` as per-node arrays.
+        """
+        sys = self.master_system
+        n = sys.num_nodes
+        buses = sys.buses or []
+        prefixes = (
+            ("tech_investment_power_", "tech", list(sys.technologies)),
+            ("bat_tech_investment_power_", "bat_tech_power", list(sys.battery_technologies)),
+            ("bat_tech_investment_capacity_", "bat_tech_capacity", list(sys.battery_technologies)),
+        )
         for inv_key, capacity in year_inv.items():
-            if capacity <= 0.1:
-                continue
-            parts = inv_key.split("_")
-
-            if inv_key.startswith("tech_investment_power_") and len(parts) >= 5:
-                tech_idx = int(parts[3])
-                node_idx = int(parts[4])
-                if tech_idx < len(tech_keys):
-                    tech_key = tech_keys[tech_idx]
-                    if tech_key not in cumulative_gen_inv:
-                        cumulative_gen_inv[tech_key] = [0.0] * num_nodes
-                    if node_idx < num_nodes:
-                        cumulative_gen_inv[tech_key][node_idx] += capacity
-
-            elif inv_key.startswith("bat_tech_investment_power_") and len(parts) >= 6:
-                bt_idx = int(parts[4])
-                node_idx = int(parts[5])
-                if bt_idx < len(bat_tech_keys):
-                    bt_key = bat_tech_keys[bt_idx]
-                    if bt_key not in cumulative_bat_pow_inv:
-                        cumulative_bat_pow_inv[bt_key] = [0.0] * num_nodes
-                    if node_idx < num_nodes:
-                        cumulative_bat_pow_inv[bt_key][node_idx] += capacity
-
-            elif inv_key.startswith("bat_tech_investment_capacity_") and len(parts) >= 6:
-                bt_idx = int(parts[4])
-                node_idx = int(parts[5])
-                if bt_idx < len(bat_tech_keys):
-                    bt_key = bat_tech_keys[bt_idx]
-                    if bt_key not in cumulative_bat_cap_inv:
-                        cumulative_bat_cap_inv[bt_key] = [0.0] * num_nodes
-                    if node_idx < num_nodes:
-                        cumulative_bat_cap_inv[bt_key][node_idx] += capacity
+            for prefix, kind, keys in prefixes:
+                if not inv_key.startswith(prefix):
+                    continue
+                t_idx, bus_idx = (int(p) for p in inv_key[len(prefix):].split("_")[:2])
+                node = buses[bus_idx].parent_node if bus_idx < len(buses) else bus_idx
+                if t_idx < len(keys) and 0 <= node < n:
+                    arr = built[kind].setdefault((keys[t_idx], y_idx), np.zeros(n))
+                    arr[node] += capacity
+                break
 
     def _solve_master_problem_foresight(
         self,
@@ -6631,9 +6811,9 @@ class Orchestrator:
                 # of the OTHER system to all buses, zeroing this system's
                 # property. Use bus_to_node mapping to put each bus's node's
                 # value at that bus.
-                def _rep(arr, n=num_buses):
+                def _rep(arr, default=0.0, n=num_buses):
                     if not arr:
-                        return [0.0] * n
+                        return [default] * n
                     if len(arr) >= n:
                         return list(arr[:n])
                     if len(arr) == 1:
@@ -6664,24 +6844,8 @@ class Orchestrator:
 
                 vgen_key = f"inv_{tech_key}"
                 updated[vgen_key] = {
-                    "name": f"Investment {tech.name}",
-                    "type": tech.type,
-                    "fuel": tech.fuel,
+                    **technology_unit_fields(tech, _rep, _rep_curve),
                     "rated_power": bus_rated,
-                    "min_power": [tech.min_output[0] * v for v in bus_rated],
-                    "eff_at_rated": _rep(tech.eff_at_rated),
-                    "eff_at_min": _rep(tech.eff_at_min),
-                    "ramp_up": _rep(tech.ramp_up),
-                    "ramp_down": _rep(tech.ramp_down),
-                    "min_up": _rep(tech.min_up),
-                    "min_down": _rep(tech.min_down),
-                    "fuel_cost": _rep(tech.fuel_cost),
-                    "fuel_cost_curve": _rep_curve(tech.fuel_cost_curve),
-                    "fixed_cost": _rep(tech.fixed_cost),
-                    "maintenance_cost": _rep(tech.maintenance_cost),
-                    "start_up_cost": _rep(tech.start_up_cost),
-                    "inertia": _rep(tech.inertia),
-                    "availability_file": tech.availability_file,
                     "Availability": tech.availability_file,
                     # Already degraded by master problem — prevent double degradation
                     "degradation_rate": [0.0] * num_buses,
@@ -6689,9 +6853,6 @@ class Orchestrator:
                     "life_time": [999] * num_buses,
                     "invest_cost": [0.0] * num_buses,
                     "invest_max_power": [0.0] * num_buses,
-                    "frequency_hz": tech.frequency_hz,
-                    "current_type": tech.current_type,
-                    "reservable": tech.reservable,
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }
@@ -6787,20 +6948,11 @@ class Orchestrator:
 
                 vbat_key = f"inv_{bt_key}"
                 updated[vbat_key] = {
-                    "_type": "battery",
-                    "type": "Storage",
-                    "name": f"Investment {bat_tech.name}",
+                    **battery_technology_unit_fields(
+                        bat_tech, lambda arr, default: _brep(arr, default=default)),
                     "capacity": bus_cap,
                     "MaxChargePower": bus_pow,
                     "MaxDischargePower": bus_pow,
-                    "efficiency_charge": _brep(bat_tech.efficiency_charge, default=0.95),
-                    "efficiency_discharge": _brep(bat_tech.efficiency_discharge, default=0.95),
-                    "soc_initial": _brep(bat_tech.soc_initial),
-                    "max_DoD": _brep(bat_tech.max_DoD),
-                    "maintenance_cost": _brep(bat_tech.maintenance_cost),
-                    "inertia": _brep(bat_tech.inertia),
-                    "spillage": bat_tech.spillage,
-                    "current_type": bat_tech.current_type,
                     # Already degraded by master problem
                     "degradation_rate": [0.0] * num_buses,
                     "initial_age": [0] * num_buses,
@@ -6809,7 +6961,6 @@ class Orchestrator:
                     "invest_cost_energy": [0.0] * num_buses,
                     "invest_max_power": [0.0] * num_buses,
                     "invest_max_capacity": [0.0] * num_buses,
-                    "throughput_degradation_cost": _brep(bat_tech.throughput_degradation_cost),
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }

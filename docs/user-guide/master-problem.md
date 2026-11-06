@@ -56,6 +56,8 @@ The Master Problem is a **linear program (LP)**. All investment variables are co
 | `perfect_foresight` (default) | One model covering every year of the horizon | Investment timing sees all future demand, costs and targets |
 | `myopic` | One single-year model per year, solved in sequence; capacity built in earlier years is added to the system as existing capacity. Each year's model reads that year's block of multi-year availability and inflow profiles | Each decision only sees the current year |
 
+In `myopic` mode, each year's model starts from the base-year fleet aged by the number of years elapsed. The capacity built in earlier years is added as existing units: one unit per technology and build year, at the nodes where it was built, with the technology's operating parameters. Each unit ages from its build year with the technology's degradation rate and retires at the end of the technology's `lifetime`, as perfect foresight counts its investments. The `invest_max_power` / `invest_max_capacity` of each technology is a limit over the whole horizon, so every year's model can only build what earlier years left. The operational dispatch of each year receives the capacity of that year's model: the existing units plus, per technology, what was built that year and what is left of earlier builds.
+
 The two modes treat the RE target differently. See [RE Penetration Trajectory](#re-penetration-trajectory).
 
 MGA/SPORES runs only in `perfect_foresight` mode.
