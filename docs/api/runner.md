@@ -63,6 +63,7 @@ def run(
     years: Optional[int] = None,
     start_year: Optional[int] = None,
     master_only: bool = False,
+    dispatch_years: Optional[Iterable[int]] = None,
 ) -> list[YearResults]
 ```
 
@@ -74,7 +75,8 @@ Execute the full simulation: Master Problem (capacity expansion) followed by yea
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `years` | `Optional[int]` | `25` | Number of years to simulate |
-| `start_year` | `Optional[int]` | year of `date_start` | Label of the first simulated year. When given, the date labels start on `date_start`'s day and time in this year. It does not select demand rows |
+| `start_year` | `Optional[int]` | year of `date_start` | Label of the first simulated year. When given, the date labels start on `date_start`'s day and time in this year. It only relabels: it does not select demand rows, and the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar |
+| `dispatch_years` | `Optional[Iterable[int]]` | all years | Run the operational dispatch only for these horizon years (labels); the others are skipped, each year keeps its own data block (year index × 8760 h) and the master problem still plans the whole horizon. In `unit_commitment` mode the first of them is dispatched instead of the first horizon year. `ValueError` for a year outside the horizon. Without it, the `ESFEX_OPS_ONLY_YEARS` environment variable is read |
 | `master_only` | `bool` | `False` | Stop after the Master Problem (step 10 below): the decisions are left in `master_solution`, the HDF5 file (system configuration only) is finalized, plugins are torn down and an empty list is returned. Needs `simulation_mode: development` (`ValueError` otherwise) |
 
 **Returns:** `list[YearResults]` -- One result object per simulated year.
@@ -300,7 +302,7 @@ class YearResults:
 | `bat_lcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery LCOE ($/MWh) |
 | `bat_vallcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery value-adjusted LCOE ($/MWh) |
 | `fuel_for_power` | `Optional[dict]` | `{gen_idx: array}` | Declared but never filled by the runner (always `None`) |
-| `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed `_2`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
+| `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed ` (1)`, ` (2)`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
 
 Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#derived-metrics).
 
@@ -308,11 +310,11 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows: `{section: {fuel: array}}` plus cost totals |
+| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows (committed steps only, per period of `primary_energy_resolution` hours from the start of the year): `{section: {fuel: array}}` plus cost totals (committed share of each window) |
 | `n1_gen_reserve_duals` | `Optional[np.ndarray]` | `(hour,)` dual of the generation N-1 constraint |
 | `n1_trans_reserve_duals` | `Optional[dict]` | Duals of the transmission N-1 constraints |
 | `n1_binding_contingencies` | `Optional[list]` | Binding contingency IDs |
-| `n1_security_cost` | `float` | Incremental cost of N-1 security ($), default `0.0` |
+| `n1_security_cost` | `float` | Incremental cost of N-1 security ($), default `0.0`; the model does not compute it yet, so it stays `0.0` |
 
 ### System-Level Scalars
 
@@ -335,7 +337,7 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
-| `reservoir_level` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir storage level (MWh) |
+| `reservoir_level` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir storage level at the start of each hour (MWh) |
 | `reservoir_spillage` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir spillage (MW) |
 | `reservoir_pump` | `Optional[np.ndarray]` | `(gen, node, hour)` | Pump-storage pumping (MW) |
 | `reservoir_invest_capacity` | `Optional[np.ndarray]` | `(gen, node)` | Reservoir capacity investment (MWh) |

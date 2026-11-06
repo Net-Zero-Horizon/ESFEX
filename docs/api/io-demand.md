@@ -163,6 +163,19 @@ Load a generator availability profile from an Excel or CSV file.
 - Values are clipped to [0, 1] after loading.
 - If `temporal_resolution_hours > 1`, applies `aggregate_to_resolution()` using MEAN aggregation.
 
+### load_inflow_profile
+
+```python
+def load_inflow_profile(
+    file_path: Union[str, Path],
+    temporal_resolution_hours: int = 1,
+    num_nodes: Optional[int] = None,
+    date_start: Optional[str] = None,
+) -> np.ndarray
+```
+
+Load a reservoir inflow profile (MW-eq per hour). Rows, columns, header rows and Feb 29 are handled as in `load_availability_profile`, but the values are flows: they are **not** clipped to [0, 1], and a missing file raises `FileNotFoundError` instead of returning ones. With `temporal_resolution_hours > 1` the steps are averaged.
+
 **Availability File Format:**
 
 Same structure as demand files: one column per node, one row per hour, values between 0 and 1.

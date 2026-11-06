@@ -332,7 +332,7 @@ System-level settings are combined as follows:
 |---------|--------------|
 | `TARGET_RE_PENETRATION` | The lowest of the systems' targets, applied to the whole network |
 | `MAX_ANNUAL_SYSTEM_COST` | Sum over the systems |
-| `co2_budget` and `penalties.co2_budget_violation` | Kept per system: the dispatch adds one CO2 budget constraint per system, over that system's nodes, with its own budget and violation penalty |
+| `co2_budget` and `penalties.co2_budget_violation` | Kept per system: the dispatch adds one CO2 budget constraint per system, over that system's nodes (development-zone nodes included, by the bus they connect to), with its own budget and violation penalty |
 | Other `penalties` | The highest value of each penalty across the systems |
 | `discount_rate`, `stochastic_scenarios`, frequency and reserve settings | Taken from the first (primary) system |
 

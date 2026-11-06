@@ -79,7 +79,7 @@ A relative `demand_path` is looked up in the directory of the configuration file
 
 ## Time Alignment and Multi-Year Demand
 
-The first data row is the first hour of the simulation. `date_start` (format `DD/MM/YYYY HH:MM`) labels that hour; it does not select rows. The horizon length is set by the run (`esfex run --years N`, default 25). Year labels start at the year of `date_start`; `esfex run --start-year YYYY` relabels them, and the date labels then start on the same day and time of `date_start` in that year.
+The first data row is the first hour of the simulation. `date_start` (format `DD/MM/YYYY HH:MM`) labels that hour; it does not select rows. The horizon length is set by the run (`esfex run --years N`, default 25). Year labels start at the year of `date_start`; `esfex run --start-year YYYY` relabels them, and the date labels then start on the same day and time of `date_start` in that year. Relabelling never changes the data rows: the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar.
 
 The run needs `years × 8,760` rows:
 

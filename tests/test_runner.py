@@ -470,13 +470,14 @@ class TestCalculateInitialREPenetration:
         expected = 438000 / 1752000
         assert abs(result - expected) < 0.01
 
-    def test_no_availability_cache_skips(self, tmp_path):
-        """When no availability file in cache, renewable is skipped."""
+    def test_no_availability_profile_counts_full_capacity(self, tmp_path):
+        """A renewable without a profile runs at capacity factor 1.0 in the
+        dispatch, so it counts at full capacity here too (it used to count 0)."""
         gens = {"solar": _make_generator("Solar", "Renewable", "Sun", [50.0, 80.0])}
         orch = self._make_orch_with_cache(tmp_path, gens, {})
         demand = np.full((100, 2), 100.0)
         result = orch._calculate_initial_re_penetration(demand)
-        assert result == 0.0
+        assert result == pytest.approx((50.0 + 80.0) / 200.0)
 
 
 # ---------------------------------------------------------------------------
