@@ -260,7 +260,7 @@ Investments below 0.1 and retirement fractions below 0.01 are not written. Batte
 
 ### Dataset Naming
 
-Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery) gets a `_2`, `_3`, ... suffix. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...).
+Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery; in electrolyzer groups, another electrolyzer) gets a ` (1)`, ` (2)`, ... suffix: two units named `Gas` are written as `Gas` and `Gas (1)`. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...). Readers that look up a unit's configuration by name (financial analysis, results charts) strip the suffix.
 
 Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape` and `units`.
 

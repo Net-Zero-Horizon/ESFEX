@@ -112,10 +112,10 @@ class TestHdf5Writer:
         orch._append_year_to_hdf5(path, result)
         with h5py.File(path, "r") as f:
             sc = f["detailed_results/year_2025_threshold_0"]
-            assert sorted(sc["generation"]) == ["Cuba - Gas", "Cuba - Gas_2", "Solar"]
+            assert sorted(sc["generation"]) == ["Cuba - Gas", "Cuba - Gas (1)", "Solar"]
             # Batteries used to crash on a homonym (no dedup)
-            assert sorted(sc["battery_soc"]) == ["BESS", "BESS_2"]
-            assert sorted(sc["battery_charge"]) == ["BESS", "BESS_2"]
+            assert sorted(sc["battery_soc"]) == ["BESS", "BESS (1)"]
+            assert sorted(sc["battery_charge"]) == ["BESS", "BESS (1)"]
             # '/' used to create nested groups
             assert list(sc["technology_selling_prices"]) == ["Cuba - Gas"]
             # demand: always [node, step], here with steps > nodes as well
@@ -129,6 +129,34 @@ class TestHdf5Writer:
             tm = sc["transfer_margin"][()]
             np.testing.assert_array_equal(tm[1, 0], np.full(H, 2.0))
             assert sc["CO2_emissions"].attrs["units"] == "tCO2/h"
+
+    def test_homonym_electrolyzers_of_two_systems(self, tmp_path):
+        """The merge keeps electrolyzer names (keys get the system prefix):
+        two systems' "Elz" crashed the export with "name already exists"."""
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        orch._gen_names, orch._gen_fuels, orch._bat_names = [], [], []
+        orch._bus_to_node = None
+        from tests.test_electrolyzer_dispatch_results import _elz
+        orch.primary_system = orch.primary_system.model_copy(update={"electrolyzers": {
+            "A__elz": _elz("Elz", 5.0), "B__elz": _elz("Elz", 3.0), "B__h2": _elz("A/B", 1.0)}})
+        path = _init_h5(orch, tmp_path, num_nodes=2)
+        power = np.arange(12.0).reshape(3, 2, 2)
+        orch._append_year_to_hdf5(path, YearResults(
+            year=2025, objective=0.0, solve_time=0.0, feasible=True,
+            electrolyzer_power=power, electrolyzer_h2=power * 10))
+        with h5py.File(path, "r") as f:
+            sc = f["detailed_results/year_2025_threshold_0"]
+            assert list(sc["electrolyzer_power"]) == ["A - B", "Elz", "Elz (1)"]
+            np.testing.assert_array_equal(sc["electrolyzer_power/Elz (1)"][()], power[1])
+            np.testing.assert_array_equal(sc["electrolyzer_h2/A - B"][()], power[2] * 10)
+
+    def test_unit_name_lists_use_the_writer_convention(self, tmp_path):
+        from esfex.runner import unique_unit_names
+        assert unique_unit_names(["A", "A", "A", "B"]) == ["A", "A (1)", "A (2)", "B"]
+        # A rebuilt name list is already unique: the writer keeps it as is.
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        names = unique_unit_names(["Cuba/Gas", "Cuba/Gas"])
+        assert orch._h5_unit_names(names) == ["Cuba - Gas", "Cuba - Gas (1)"]
 
     def test_demand_node_major_when_nodes_exceed_steps(self, tmp_path):
         orch = _create_orchestrator(tmp_path=tmp_path)
@@ -185,8 +213,8 @@ class TestSellingPriceNames:
         orch._compute_derived_metrics(res)
         tsp = res.technology_selling_prices
         assert tsp is not None
-        assert sorted(tsp) == ["Cuba - Gas", "Cuba - Gas_2"]
-        assert tsp["Cuba - Gas_2"]["total_generation"] == 6.0
+        assert sorted(tsp) == ["Cuba - Gas", "Cuba - Gas (1)"]
+        assert tsp["Cuba - Gas (1)"]["total_generation"] == 6.0
 
 
 class TestDemandReaders:
