@@ -1513,10 +1513,11 @@ class TestGlobalSettingsToConfigDict:
 class TestStochasticScenarioToConfigDict:
     """Tests for applying stochastic scenarios to a system dict."""
 
-    def test_empty_scenarios_no_change(self):
-        sys_dict: dict[str, Any] = {}
+    def test_empty_scenarios_write_empty_list(self):
+        # Deleting every scenario in the GUI must persist on save.
+        sys_dict: dict[str, Any] = {"stochastic_scenarios": [{"name": "old"}]}
         stochastic_scenarios_to_config_dict([], sys_dict)
-        assert "stochastic_scenarios" not in sys_dict
+        assert sys_dict["stochastic_scenarios"] == []
 
     def test_single_scenario(self):
         scenarios = [

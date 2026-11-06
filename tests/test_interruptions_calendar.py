@@ -66,3 +66,48 @@ def test_input_round_trip_and_feb_29(engine):
 def test_no_real_calendar_left():
     src = JS.read_text(encoding="utf-8")
     assert not re.search(r"baseMs", src)
+
+
+# ── Review round 2: horizon and base year ──────────────────────────────
+
+
+def test_clamp_uses_the_whole_horizon(engine):
+    # Edits were clamped to one year: no window after the base year.
+    _call(engine, "horizon = 25 * 8760;")
+    assert _call(engine, "clampH(20 * 8760 + 5)") == 20 * 8760 + 5
+    assert _call(engine, "clampH(26 * 8760)") == 25 * 8760
+    _call(engine, "horizon = 8760;")
+
+
+def _payload(date_start, windows):
+    import json
+    from types import SimpleNamespace
+
+    from esfex.visualization.data.gui_model import (
+        GuiGlobalSettings, GuiOutageWindow, GuiSystemState,
+    )
+    from esfex.visualization.panels.interruptions_dialog import (
+        InterruptionsDialog,
+    )
+
+    state = GuiSystemState(name="S", outage_schedule=[
+        GuiOutageWindow(element_type="generator", element_id="g",
+                        start_hour=s, end_hour=e, availability=0.0)
+        for s, e in windows])
+    model = SimpleNamespace(state=state,
+                            global_settings=GuiGlobalSettings(date_start=date_start))
+    fake = SimpleNamespace(model=model, _focus=None,
+                           _collect_groups=lambda: [], _theme_colors=lambda: {})
+    return json.loads(InterruptionsDialog._build_payload(fake))
+
+
+def test_payload_spans_the_run_horizon_from_date_start():
+    from esfex.visualization.panels.interruptions_dialog import STUDIO_RUN_YEARS
+
+    p = _payload("01/06/2030 00:00", [(100, 200)])
+    assert p["base_year"] == 2030            # not a hard-coded 2025
+    assert p["horizon_hours"] == STUDIO_RUN_YEARS * 8760
+    # A window scheduled past the default horizon stays reachable.
+    p = _payload("01/01/2025 00:00", [(30 * 8760 + 10, 30 * 8760 + 20)])
+    assert p["horizon_hours"] == 31 * 8760
+    assert p["schedule"][0]["start_hour"] == 30 * 8760 + 10

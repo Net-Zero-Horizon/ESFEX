@@ -463,10 +463,11 @@ def test_config_to_stochastic_scenarios_none_when_absent():
     assert S.config_to_stochastic_scenarios(cfg) == []
 
 
-def test_stochastic_scenarios_to_dict_empty_noop():
-    d = {}
+def test_stochastic_scenarios_to_dict_empty_clears():
+    # An empty GUI list replaces the loaded scenarios (deletion persists).
+    d = {"stochastic_scenarios": [{"name": "old", "probability": 1.0}]}
     S.stochastic_scenarios_to_config_dict([], d)
-    assert d == {}
+    assert d == {"stochastic_scenarios": []}
 
 
 def test_stochastic_scenarios_to_dict_writes():
@@ -687,11 +688,11 @@ def test_config_to_inter_system_links_no_meta_network():
     assert links == []
 
 
-def test_inter_system_links_to_dict_empty_noop():
-    cd = {"meta_network": {}}
+def test_inter_system_links_to_dict_empty_clears():
+    cd = {"meta_network": {"systems_links": [{"systems": ["A", "B"]}]}}
     S.inter_system_links_to_config_dict([], cd)
-    # no links -> early return, meta_network untouched
-    assert "systems_links" not in cd["meta_network"]
+    # no links -> the loaded links are replaced (deletion persists)
+    assert cd["meta_network"]["systems_links"] == []
 
 
 def test_inter_system_links_to_dict_no_meta_noop():

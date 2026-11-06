@@ -317,18 +317,19 @@ class _ConfigSaveWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, states, base_config, path, links, global_settings,
-                 scenarios, geo_assets, parent=None):
+                 scenarios, geo_assets, parent=None, data_base_dir=None):
         super().__init__(parent)
         self._args = (states, base_config, path, links, global_settings,
-                      scenarios, geo_assets)
+                      scenarios, geo_assets, data_base_dir)
 
     def run(self):
         try:
             from esfex.visualization.data.serializer import gui_state_to_yaml
-            states, base, path, links, gs, scen, geo = self._args
+            states, base, path, links, gs, scen, geo, data_base = self._args
             gui_state_to_yaml(
                 states, base, path, inter_system_links=links,
-                global_settings=gs, stochastic_scenarios=scen, geo_assets=geo)
+                global_settings=gs, stochastic_scenarios=scen, geo_assets=geo,
+                data_base_dir=data_base)
             self.done.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -422,6 +423,11 @@ class MainWindow(QMainWindow):
         # Directory relative data paths resolve against when the file was
         # loaded from somewhere other than _config_path (``studio -c in -o out``).
         self._load_base_dir: Optional[str] = None
+        # True while a config handed to the window (``studio -c``) waits for
+        # the map to become ready before it is populated. Every save path is
+        # blocked meanwhile: the GUI does not hold the project yet, so a save
+        # would overwrite the user's file with an empty placeholder system.
+        self._project_load_pending: bool = False
         self._last_output_dir: str = ""
         self._all_states: dict[str, object] = {}  # system_name -> GuiSystemState
         self._current_system_name: str = ""
@@ -2943,6 +2949,7 @@ class MainWindow(QMainWindow):
         self._loaded_config = None
         self._raw_config_dict = None
         self._config_path = None
+        self._load_base_dir = None
         self._last_output_dir = ""
         self._validated_ok = False
         self.toolbar.set_run_enabled(False)
@@ -3149,10 +3156,77 @@ class MainWindow(QMainWindow):
 
     def _on_save(self):
         """Save to the current config path (Ctrl+S)."""
+        if self._save_blocked_by_pending_load():
+            return
         if self._config_path:
             self._save_config_file(self._config_path)
         else:
             self._on_export()
+
+    def _set_project_load_pending(self, pending: bool) -> None:
+        """Block (``True``) or re-enable every save while a config handed to
+        the window waits for the map before it is populated."""
+        self._project_load_pending = pending
+        for act in (self._act_save, self._act_export, self._act_export_project):
+            act.setEnabled(not pending)
+
+    def _save_blocked_by_pending_load(self) -> bool:
+        """``True`` (with a status-bar note) while the project is not loaded."""
+        if not self._project_load_pending:
+            return False
+        self.statusBar().showMessage(tr("messages.save_blocked_loading"), 5000)
+        return True
+
+    def _data_base_dir(self) -> Optional[str]:
+        """Directory the relative data paths of the in-memory project resolve
+        against: the folder the config was loaded from (``_load_base_dir``),
+        else the folder of the current config path. It does not follow a Save
+        As to another folder: the in-memory paths keep their original base and
+        the serializer rebases them for each target file."""
+        if self._load_base_dir:
+            return self._load_base_dir
+        if self._config_path:
+            return str(Path(self._config_path).parent)
+        return None
+
+    def _project_is_empty(self) -> bool:
+        """``True`` when the GUI holds nothing a user built: no system, or
+        only systems with at most one node and no generators, storage, lines
+        or technologies (the placeholder ``_ensure_system_exists`` creates)."""
+        states = [st for st in self._all_states.values() if st is not None]
+        if self._current_system_name not in self._all_states:
+            states.append(self.model.state)
+        return not any(
+            len(st.nodes) > 1 or st.generators or st.batteries
+            or st.transmission_lines or st.technologies
+            for st in states
+        )
+
+    @staticmethod
+    def _file_has_systems(path: str) -> bool:
+        """``True`` if ``path`` is a YAML config defining at least one system
+        with content (generators, storage, technologies or several nodes)."""
+        import yaml as _yaml
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = _yaml.safe_load(fh)
+        except (OSError, _yaml.YAMLError):
+            return False
+        systems = data.get("systems") if isinstance(data, dict) else None
+        if not isinstance(systems, dict):
+            return False
+        for sys_dict in systems.values():
+            if isinstance(sys_dict, str):
+                return True   # external system file reference
+            if not isinstance(sys_dict, dict):
+                continue
+            if any(sys_dict.get(k) for k in ("generators", "batteries",
+                                                "technologies")):
+                return True
+            nodes = sys_dict.get("nodes")
+            if isinstance(nodes, dict) and (nodes.get("num_nodes") or 0) > 1:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Unsaved-changes tracking, autosave, close prompt
@@ -3182,15 +3256,16 @@ class MainWindow(QMainWindow):
         """Periodic autosave handler. Writes silently — no dialogs.
 
         Behaviour:
-        * No unsaved changes → no-op.
-        * Has _config_path → write to that path, clear modified flag.
-        * No _config_path → write to ~/.cache/esfex/autosave.yaml
-          (recoverable on next launch).
+        * No unsaved changes, or the project is still loading → no-op.
+        * Otherwise write to ~/.cache/esfex/autosave.yaml (recoverable on
+          next launch). Autosave never writes the user's own file (not even
+          one opened with File > Open or ``studio -c`` / ``-o``) and does
+          not clear the unsaved-changes flag: only File > Save does.
         Does NOT call _save_config_file because the latter runs
         pre-save validation that can show a blocking dialog — autosave
         must never block the user.
         """
-        if not self._modified:
+        if not self._modified or self._project_load_pending:
             return
         self._ensure_system_exists()
         if self._current_system_name:
@@ -3198,14 +3273,9 @@ class MainWindow(QMainWindow):
         if self._loaded_config is None:
             self._loaded_config = self._create_default_config()
 
-        if self._config_path:
-            target = Path(self._config_path)
-            is_cache = False
-        else:
-            cache_dir = Path.home() / ".cache" / "esfex"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            target = cache_dir / "autosave.yaml"
-            is_cache = True
+        cache_dir = Path.home() / ".cache" / "esfex"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = cache_dir / "autosave.yaml"
 
         try:
             gui_state_to_yaml(
@@ -3214,10 +3284,8 @@ class MainWindow(QMainWindow):
                 global_settings=self.model.global_settings,
                 stochastic_scenarios=self.model.stochastic_scenarios,
                 geo_assets=self._geo_assets,
+                data_base_dir=self._data_base_dir(),
             )
-            if not is_cache:
-                # Wrote to the canonical config path — clean state.
-                self._clear_modified()
             self.statusBar().showMessage(f"Autosaved to {target}", 3000)
         except Exception:
             import logging
@@ -3276,7 +3344,9 @@ class MainWindow(QMainWindow):
         in-flight optimization before closing the window."""
         from PySide6.QtWidgets import QMessageBox
 
-        if self._modified:
+        # A project still waiting to be loaded is never offered for saving:
+        # the user's file on disk is untouched and is what they keep.
+        if self._modified and not self._project_load_pending:
             ret = QMessageBox.question(
                 self, "Unsaved changes",
                 "There are unsaved changes. Save before closing?",
@@ -3318,6 +3388,8 @@ class MainWindow(QMainWindow):
     def _on_export(self):
         from PySide6.QtWidgets import QFileDialog
 
+        if self._save_blocked_by_pending_load():
+            return
         path, _ = QFileDialog.getSaveFileName(
             self, tr("menu.export_as"), "", "YAML Files (*.yaml *.yml)"
         )
@@ -3325,7 +3397,7 @@ class MainWindow(QMainWindow):
             # Ensure .yaml extension
             if not path.endswith((".yaml", ".yml")):
                 path += ".yaml"
-            self._config_path = path
+            # _save_config_file sets _config_path once the file is written.
             self._save_config_file(path)
 
     def _on_export_project(self):
@@ -3339,6 +3411,8 @@ class MainWindow(QMainWindow):
         # export_project runs on a worker thread (_ProjectExportWorker).
         from esfex.visualization.data.project_bundle import PROJECT_SUFFIX
 
+        if self._save_blocked_by_pending_load():
+            return
         # Persist current editing state, like _save_config_file does.
         self._ensure_system_exists()
         if self._current_system_name:
@@ -3359,8 +3433,9 @@ class MainWindow(QMainWindow):
         if not path.endswith(PROJECT_SUFFIX):
             path += PROJECT_SUFFIX
 
-        src_base = (str(Path(self._config_path).parent)
-                    if self._config_path else None)
+        # Relative data paths resolve against the folder the project was
+        # loaded from, not the save target (``studio -c a/cfg.yaml -o b/out``).
+        src_base = self._data_base_dir()
         progress = self._make_progress_dialog(
             tr("messages.export_project_title"),
             tr("messages.exporting_project_msg", path=Path(path).name))
@@ -3493,15 +3568,20 @@ class MainWindow(QMainWindow):
 
     def _deferred_populate(self):
         """Run ``_populate_from_config`` after the first paint."""
-        self._populate_from_config(
-            self._loaded_config, raw_dict=self._raw_config_dict,
-            base_dir=self._load_base_dir or (str(Path(self._config_path).parent)
-                                             if self._config_path else None),
-        )
-        self.console.update_namespace(
-            config=self._loaded_config, state=self.model.state,
-        )
-        self.statusBar().clearMessage()
+        try:
+            self._populate_from_config(
+                self._loaded_config, raw_dict=self._raw_config_dict,
+                base_dir=self._data_base_dir(),
+            )
+            self.console.update_namespace(
+                config=self._loaded_config, state=self.model.state,
+            )
+            self.statusBar().clearMessage()
+        finally:
+            # Saving is allowed again even if populating failed: the
+            # empty-project guard in _save_config_file still stops a
+            # placeholder from overwriting the user's file.
+            self._set_project_load_pending(False)
 
     def _on_line_drawn(self, geojson_str: str):
         data = json.loads(geojson_str)
@@ -7368,6 +7448,7 @@ class MainWindow(QMainWindow):
                 self._loaded_config = config
                 self._raw_config_dict = raw_dict
                 self._config_path = path
+                self._load_base_dir = base_dir
                 # Mirror the CLI's default (``output or Path("./results")``,
                 # cli.py:218) so the panel looks where the runner actually
                 # writes.
@@ -7424,6 +7505,16 @@ class MainWindow(QMainWindow):
 
     def _save_config_file(self, path: str):
         """Export current GUI state to YAML."""
+        if self._save_blocked_by_pending_load():
+            return
+        # Never let an empty project (no system, or only the placeholder
+        # _ensure_system_exists creates) overwrite a file that defines systems.
+        if (self._project_is_empty() and Path(path).is_file()
+                and self._file_has_systems(path)):
+            QMessageBox.warning(
+                self, tr("common.warning"),
+                tr("messages.save_refused_empty_project", path=path))
+            return
         try:
             # Ensure a system exists and sync current editing state
             self._ensure_system_exists()
@@ -7468,7 +7559,8 @@ class MainWindow(QMainWindow):
                 worker = _ConfigSaveWorker(
                     self._all_states, self._loaded_config, path,
                     self.model.inter_system_links, self.model.global_settings,
-                    self.model.stochastic_scenarios, self._geo_assets, self)
+                    self.model.stochastic_scenarios, self._geo_assets, self,
+                    data_base_dir=self._data_base_dir())
                 err: dict = {}
                 worker.failed.connect(lambda m: err.update(msg=m))
                 loop = QEventLoop()
@@ -7638,6 +7730,7 @@ class MainWindow(QMainWindow):
                 inter_system_links=self.model.inter_system_links,
                 global_settings=self.model.global_settings,
                 stochastic_scenarios=self.model.stochastic_scenarios,
+                data_base_dir=self._data_base_dir(),
             )
         except Exception as e:
             QMessageBox.critical(

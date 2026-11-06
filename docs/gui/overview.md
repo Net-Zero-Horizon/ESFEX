@@ -188,6 +188,15 @@ Typical session steps:
 
 Save and Export As write the same YAML, which includes map coordinates, line waypoints, and marker styles. The file can be run with `esfex run` as is. Before writing, both run an automatic validation; if it finds errors, a dialog asks "Save anyway?".
 
+Relative data paths (demand, availability and inflow files) are written so they still work from the new file: when you save to a different folder than the one the configuration was loaded from, each relative path is rewritten relative to the new file if the data lies under its folder, and as an absolute path otherwise. Export Project resolves them against the folder the configuration was loaded from.
+
+Some saves are refused to protect your files:
+
+- While a configuration opened with `esfex studio -c` is still loading (it is loaded once the map is ready), Save, Export As and Export Project are disabled, and closing the window does not offer to save.
+- An empty project (no system, or only an empty placeholder system with at most one node and no generators, storage, lines or technologies) is not saved over a file that already defines systems.
+
+**Autosave** (File > Preferences… > General, off by default) writes only to `~/.cache/esfex/autosave.yaml`, never to your configuration file, and the window keeps showing unsaved changes until you save with Save or Export As.
+
 
 ---
 
@@ -251,7 +260,7 @@ File menu shortcuts and toolbar actions can be reassigned under **File > Prefere
 
 Click **Validate** in the toolbar to check the configuration before running a simulation. The validation dialog:
 
-- Has one checkbox per check category: Structural, Configuration (keys of the opened YAML file that ESFEX ignores; they are not kept when the project is saved), Electrical, Demand, Generation, Fuel Network, Connectivity, Realism, and Topology Audit (GUI vs solver agreement). Topology Audit reports electrical islands, including islands with demand but no reachable generation (an error). Realism looks for probable duplicate plants (same name, or same fuel within 15 km; info), installed capacity more than twice the peak demand (info), and a transmission bottleneck: a max-flow from generator buses to demand buses through the line, transformer and converter ratings that cannot carry the peak demand (warning).
+- Has one checkbox per check category: Structural, Configuration (keys of the opened YAML file that ESFEX ignores; they are not kept when the project is saved), Electrical, Demand, Generation, Fuel Network, Connectivity, Realism, and Topology Audit (GUI vs solver agreement). Topology Audit reports electrical islands, including islands with demand but no reachable generation (an error). Realism looks for probable duplicate plants (info): units within 15 km of each other with the same name, or with the same fuel and a shared distinctive name word ("Bioeléctrica Ciro Redondo" and "Ciro Redondo power station"; generic words such as "power station" or "Parque Fotovoltaico" do not count). Instances of one generator key in several nodes (`gas_n1` … `gas_n8`) are aggregates, not plants, and are not compared. It also reports installed capacity more than twice the peak demand (info), and a transmission bottleneck (warning): a max-flow from generator buses to demand buses through the line, transformer and converter ratings, with each node's peak demand split over its own demand buses by their demand fractions, that cannot deliver the demand the installed generation could serve. Installed capacity below the peak demand is a generation shortfall, reported by the Generation category, not a bottleneck.
 - Has a **Network Simplification** checkbox that finds dead-end buses, stub lines, and unused fuel elements, and an **Apply Simplification** button to remove them.
 - Has an optional **Network reduction (levels)** check with levels L1 (equipment aggregation and parallel lines) to L4 (full node collapse), which suggests merges you can apply selectively.
 - Groups results by severity: errors, warnings, and info.

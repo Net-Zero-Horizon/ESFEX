@@ -5749,9 +5749,9 @@ class GridMappingDemandStep(QWidget):
         # voltage-kV fallback scaled into the MVA range (so a node mixing
         # MVA-rated and fallback buses stays consistent).
         mva: dict[str, float] = {}
-        for tr in state.transformers:
-            m = float(getattr(tr, "rated_power_mva", 0.0) or 0.0)
-            for bid in (tr.from_bus, tr.to_bus):
+        for trafo in state.transformers:
+            m = float(getattr(trafo, "rated_power_mva", 0.0) or 0.0)
+            for bid in (trafo.from_bus, trafo.to_bus):
                 if bid:
                     mva[bid] = mva.get(bid, 0.0) + m
         load_buses_all = [b for b in state.buses.values()

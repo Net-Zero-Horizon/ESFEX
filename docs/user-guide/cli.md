@@ -321,7 +321,7 @@ PySide6 is a core dependency, so no extra installation is needed.
 | `--output` | `-o` | Path | the `-c` file | File that File → Save writes to |
 
 !!! note
-    The configuration is saved from inside the Studio. File → Save writes to the `-o` file, or to the `-c` file when `-o` is not given; File → Save As picks another file. Relative data paths in the `-c` file are resolved against its folder.
+    The configuration is saved from inside the Studio. File → Save writes to the `-o` file, or to the `-c` file when `-o` is not given; File → Save As picks another file. Relative data paths in the `-c` file are resolved against its folder; when the `-o` file is in another folder they are rewritten so the saved file still finds the data (relative to the `-o` folder when the data lies under it, absolute otherwise). Saving is disabled until the `-c` file has finished loading, and autosave never writes to the `-c` or `-o` file (it writes `~/.cache/esfex/autosave.yaml`).
 
 ### Examples
 

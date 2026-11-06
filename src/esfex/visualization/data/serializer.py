@@ -337,9 +337,10 @@ def inter_system_links_to_config_dict(
     links: list[GuiInterSystemLink],
     config_dict: dict,
 ) -> None:
-    """Write inter-system links back into ``config_dict["meta_network"]``."""
-    if not links:
-        return
+    """Write inter-system links back into ``config_dict["meta_network"]``.
+
+    An empty list writes ``systems_links: []``: the GUI's links replace the
+    loaded file's, so deleting every link in the Studio persists on save."""
     meta = config_dict.get("meta_network")
     if meta is None:
         return
@@ -2254,6 +2255,10 @@ def config_to_global_settings(
         g.risk_insurance_premium_rate = rk.insurance_premium_rate
         g.risk_monte_carlo_samples = rk.monte_carlo_samples
         g.risk_monte_carlo_seed = rk.monte_carlo_seed
+        g.risk_climate_scenarios = [
+            sc.model_dump(mode="python") for sc in rk.climate_scenarios]
+        g.risk_hazard_scenarios = [
+            sc.model_dump(mode="python") for sc in rk.hazard_scenarios]
 
     # visual_scaling is a GUI-only key not in the Pydantic schema,
     # so it must be read from the raw YAML dict.
@@ -2409,6 +2414,47 @@ def global_settings_to_config_dict(
     config_dict["risk"]["insurance_premium_rate"] = g.risk_insurance_premium_rate
     config_dict["risk"]["monte_carlo_samples"] = g.risk_monte_carlo_samples
     config_dict["risk"]["monte_carlo_seed"] = g.risk_monte_carlo_seed
+    config_dict["risk"]["climate_scenarios"] = _risk_scenario_dicts(
+        g.risk_climate_scenarios, "climate")
+    config_dict["risk"]["hazard_scenarios"] = _risk_scenario_dicts(
+        g.risk_hazard_scenarios, "hazard")
+
+
+def _risk_scenario_dicts(scenarios, kind: str) -> list[dict]:
+    """Workbench scenario dicts as the schema stores them: keys the schema
+    does not know (``delta_source`` …) are dropped, a scenario the schema
+    rejects is skipped with a warning, and climate probabilities are rescaled
+    to sum to 1, so the saved file still loads."""
+    import logging
+
+    from pydantic import ValidationError
+
+    from esfex.config.schema import ClimateScenarioConfig, HazardScenarioConfig
+
+    model = ClimateScenarioConfig if kind == "climate" else HazardScenarioConfig
+    out = []
+    for sc in scenarios or []:
+        if not isinstance(sc, dict):
+            sc = getattr(sc, "__dict__", {})
+        try:
+            cfg = model.model_validate(
+                {k: v for k, v in sc.items() if k in model.model_fields})
+        except ValidationError as exc:
+            logging.getLogger(__name__).warning(
+                "Risk %s scenario %r not saved: %s", kind, sc.get("name"), exc)
+            continue
+        out.append(cfg.model_dump(mode="python"))
+    # The schema requires climate probabilities to sum to 1 (they weigh the
+    # futures); after a scenario is removed in the workbench they may not,
+    # and the saved file would no longer load. Rescale them instead.
+    total = sum(sc["probability"] for sc in out)
+    if kind == "climate" and out and total > 0 and abs(total - 1.0) > 0.01:
+        logging.getLogger(__name__).warning(
+            "Risk climate scenario probabilities sum to %.4f; rescaled to 1 "
+            "on save.", total)
+        for sc in out:
+            sc["probability"] = sc["probability"] / total
+    return out
 
 
 def stochastic_scenarios_to_config_dict(
@@ -2421,9 +2467,10 @@ def stochastic_scenarios_to_config_dict(
     scenarios : list of GuiStochasticScenario
     sys_dict : dict
         The system-level dict (not top-level config dict).
+
+    An empty list writes ``stochastic_scenarios: []``, so deleting every
+    scenario in the Studio persists on save.
     """
-    if not scenarios:
-        return
     # Legacy keys are written under their model names; keys with no effect
     # are dropped with a warning.
     sys_dict["stochastic_scenarios"] = [
@@ -2474,12 +2521,19 @@ def gui_state_to_yaml(
     global_settings: GuiGlobalSettings | None = None,
     stochastic_scenarios: list[GuiStochasticScenario] | None = None,
     geo_assets: dict | None = None,
+    data_base_dir: str | Path | None = None,
 ) -> None:
     """Export GUI state to YAML, preserving non-GUI config fields.
 
     ``geo_assets`` (a ``{asset_id: _GeoAssetInfo-like}`` mapping) is written as a
     top-level GUI-only ``_geo_assets`` key with the GeoJSON inlined, so projects
-    stay self-contained (and ride along inside a ``.esfexp`` bundle)."""
+    stay self-contained (and ride along inside a ``.esfexp`` bundle).
+
+    ``data_base_dir`` is the directory the relative data paths of the states
+    resolve against (the folder the project was loaded from). When the output
+    file lives elsewhere, each relative demand / availability / inflow path is
+    rebased onto the output folder (or made absolute when the file is not
+    under it) so the written config still finds its data."""
     config_dict = base_config.model_dump(mode="python", by_alias=True)
 
     # Update meta_network.systems — use selected systems if available,
@@ -2536,13 +2590,15 @@ def gui_state_to_yaml(
         _apply_gui_state_to_dict(state, sys_dict)
         _drop_shadowed_aliases(SystemConfig, sys_dict)
 
-    if inter_system_links:
+    # ``None`` keeps the base config's entries; a list (even empty) replaces
+    # them, so deleting the last link or scenario in the GUI persists.
+    if inter_system_links is not None:
         inter_system_links_to_config_dict(inter_system_links, config_dict)
 
     if global_settings:
         global_settings_to_config_dict(global_settings, config_dict)
 
-    if stochastic_scenarios:
+    if stochastic_scenarios is not None:
         # Write stochastic scenarios to the primary system dict: the first
         # simulated system, which is where config_to_stochastic_scenarios
         # and the runner read them from.
@@ -2556,6 +2612,8 @@ def gui_state_to_yaml(
     config_dict = _to_native(config_dict)
 
     output_path = Path(output_path)
+    if data_base_dir is not None:
+        _rebase_data_paths(config_dict, Path(data_base_dir), output_path.parent)
     if geo_assets:
         config_dict["_geo_assets"] = {
             aid: {
@@ -2568,6 +2626,35 @@ def gui_state_to_yaml(
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+
+def _rebase_data_paths(config_dict: dict, src_dir: Path, dest_dir: Path) -> None:
+    """Rewrite relative data paths written for ``src_dir`` so they resolve the
+    same from ``dest_dir``: relative to ``dest_dir`` when the file lies under
+    it (the runner refuses ``../`` paths), absolute otherwise."""
+    import os
+
+    from esfex.visualization.data.project_bundle import map_data_paths
+
+    src = Path(os.path.abspath(src_dir))
+    dest = Path(os.path.abspath(dest_dir))
+    if src == dest:
+        return
+
+    def _rebase(raw: str, _kind: str):
+        p = Path(raw)
+        if p.is_absolute():
+            return None
+        target = Path(os.path.normpath(src / p))
+        if not target.exists() and (Path.cwd() / p).exists():
+            # Loaders fall back to the CWD for relative paths; keep that file.
+            target = Path(os.path.normpath(Path.cwd() / p))
+        try:
+            return target.relative_to(dest).as_posix()
+        except ValueError:
+            return str(target)
+
+    map_data_paths(config_dict, _rebase)
 
 
 def _to_native(obj):

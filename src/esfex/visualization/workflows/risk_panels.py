@@ -1964,13 +1964,13 @@ class ClimateDemandsPanel(QWidget):
 
         self._spin_base_temp = QDoubleSpinBox()
         self._spin_base_temp.setRange(10.0, 30.0)
-        self._spin_base_temp.setValue(18.0)
+        self._spin_base_temp.setValue(24.0)   # RiskConfig defaults
         self._spin_base_temp.setSuffix(" \u00b0C")
         demand_form.addRow("Base Temperature:", self._spin_base_temp)
 
         self._spin_heat = QDoubleSpinBox()
         self._spin_heat.setRange(0.0, 20.0)
-        self._spin_heat.setValue(1.5)
+        self._spin_heat.setValue(0.5)
         self._spin_heat.setDecimals(1)
         self._spin_heat.setSuffix(" %/\u00b0C")
         demand_form.addRow("Heating Sensitivity:", self._spin_heat)
