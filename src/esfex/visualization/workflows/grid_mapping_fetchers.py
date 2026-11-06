@@ -675,11 +675,13 @@ def _generator_gap_fill(gens, gap_km, same_fuel=True):
     genuinely lacks (typically new renewables).
 
     An OSM generator only *covers* (blocks) another source's generator if it
-    carries a comparable REAL capacity (≥ half the other's). OSM frequently
-    maps a plant as a bare location marker with no capacity tag (e.g. Genkai
-    nuclear at 1 MW while GEM has its true 2×1180 MW); such a marker is
-    authoritative on location but not on size, so the capacitated GEM/WRI entry
-    is kept instead of being dropped and then filtered out for having no MW."""
+    carries a real capacity: at least 2 MW, an absolute floor (not a fraction
+    of the other's MW, which would double-count plants OSM merely under-tags).
+    OSM frequently maps a plant as a bare location marker with no capacity tag
+    (e.g. Genkai nuclear at 1 MW while GEM has its true 2×1180 MW); such a
+    marker is authoritative on location but not on size, so the capacitated
+    GEM/WRI entry is kept instead of being dropped and then filtered out for
+    having no MW."""
     osm = [g for g in gens if g.source == "osm"]
     if not osm:
         return list(gens)
@@ -2478,6 +2480,20 @@ class WRIGridFetcher(QThread):
 _GEM_KEEP_STATUS: frozenset = frozenset({"operating"})
 
 
+def _gem_status(value) -> str:
+    """Normalised GEM status: lower-case, '' for blank / missing (NaN)."""
+    if value is None or (isinstance(value, float) and value != value):
+        return ""
+    st = str(value).strip().lower()
+    return "" if st in ("nan", "none") else st
+
+
+def _gem_status_kept(value) -> bool:
+    """Operating plants and rows with a blank status are kept."""
+    st = _gem_status(value)
+    return not st or st in _GEM_KEEP_STATUS
+
+
 _GEM_TYPE_TO_FUEL: dict[str, tuple[str, str]] = {
     # (ESFEX fuel, gen_type)  —  keyed by GEM "Type" column (lowercase)
     "coal": ("Coal", "Non-renewable"),
@@ -2509,11 +2525,6 @@ class GEMGridFetcher(QThread):
         "Global-Integrated-Power-February-2025-update-II.xlsx"
     )
     _SHEET_NAME = "Power facilities"
-
-    # Only include plants that are (or were) physically real
-    _ACTIVE_STATUSES = frozenset({
-        "operating", "mothballed", "construction",
-    })
 
     def __init__(
         self,
@@ -2561,9 +2572,9 @@ class GEMGridFetcher(QThread):
         if self._cancelled:
             return []
 
-        # --- Filter by status (only real / existing plants) ---
-        if "Status" in df.columns:
-            df = df[df["Status"].str.lower().str.strip().isin(self._ACTIVE_STATUSES)]
+        # Status is filtered per row below (operating + blank kept, the
+        # rest counted as skipped), not here: an earlier filter dropped the
+        # blank-status rows the per-row check means to keep.
 
         # --- Coordinates ---
         df = df.dropna(subset=["Latitude", "Longitude"])
@@ -2597,8 +2608,7 @@ class GEMGridFetcher(QThread):
 
             # Keep only the operating fleet (see _GEM_KEEP_STATUS). A blank
             # status is kept; anything else that isn't "operating" is skipped.
-            _st = str(row.get("Status", "")).strip().lower()
-            if _st and _st not in _GEM_KEEP_STATUS:
+            if not _gem_status_kept(row.get("Status")):
                 skipped_status += 1
                 continue
 
@@ -2613,7 +2623,7 @@ class GEMGridFetcher(QThread):
             lng = float(row["Longitude"])
 
             raw_tags: dict[str, str] = {"gem_type": gem_type}
-            status = str(row.get("Status", ""))
+            status = _gem_status(row.get("Status"))
             if status:
                 raw_tags["status"] = status
             country = str(row.get("Country/area", ""))

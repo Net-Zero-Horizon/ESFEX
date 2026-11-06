@@ -1,12 +1,11 @@
 """Grid Builder wizard dialog.
 
-Multi-step wizard for building a power grid network from open geographic
+Three-step wizard for building a power grid network from open geographic
 databases:
   1. Region & Fetch — draw polygon, configure sources, download data
-  2. Review — inspect and toggle fetched features
-  3. Build & Connect — node placement, build network, auto-connect
-  4. Simplify — remove empty buses, aggregate generators/batteries
-  5. Demand — forecast demand per node (ML) + distribute among busbars
+  2. Build & Connect — node placement, build the network; the selected
+     simplification level is applied before the network is drawn
+  3. Demand — forecast demand per node (ML) + distribute among busbars
 """
 
 from __future__ import annotations

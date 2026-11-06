@@ -5345,11 +5345,15 @@ def apply_simplification_level(
 
     Each iteration:
       1. repair_network             — fix broken references, self-loops
-      2. consolidate_parallel_lines — merge parallel lines
-      3. aggregate_equipment        — absorb-in-place + cleanup source chains
-      4. (L2+) prune_radial_buses   — remove degree-1 empty buses
-      5. (L2+) eliminate_series     — Kron reduction
-      6. repair_network             — fix artifacts from above
+      2. (L1+) consolidate_parallel_lines — merge parallel lines
+      3. (L1+) aggregate_equipment  — absorb-in-place + cleanup source chains
+      4. repair_network             — fix artifacts from above
+
+    Level 2 and above then run one equivalent-network reduction
+    (``reduce_to_node_mesh``: one bus per node, equivalent branches between
+    nodes); levels 3 and 4 are the same as level 2. The radial / series /
+    voltage-collapse steps in the loop below only run for ``level >= 2``
+    without the reduction, which no caller uses.
 
     Equipment aggregation uses absorb-in-place: the target generator
     KEEPS its existing connection chain, source generators are removed
