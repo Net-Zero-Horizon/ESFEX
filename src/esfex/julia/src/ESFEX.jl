@@ -64,8 +64,13 @@ function _load_solver_module(name::String)
         @eval import $pkg_sym
         _SOLVER_MODULES[name] = @eval $pkg_sym
     catch e
-        error("$desc requested but $(pkg_sym).jl is not installed. " *
-              "Install with: ] add $pkg_sym")
+        # Commercial/optional solvers go into ESFEX's solver environment;
+        # the open ones ship with ESFEX, so a missing one means a broken
+        # Julia environment.
+        hint = name in ("gurobi", "cplex", "cbc") ?
+            "Install with: esfex add-solver $name" :
+            "It ships with ESFEX's Julia project: run Pkg.instantiate() on it (see the installation guide)"
+        error("$desc requested but $(pkg_sym).jl is not installed. $hint")
     end
     return _SOLVER_MODULES[name]
 end

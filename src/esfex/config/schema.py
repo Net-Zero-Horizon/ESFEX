@@ -1023,13 +1023,21 @@ class EVCategoryConfig(BaseModel):
 
 
 class RooftopSolarConfig(BaseModel):
-    """Rooftop solar simulation configuration."""
+    """Rooftop solar simulation configuration.
+
+    The runner uses adoption_scenario, weather_variability, simulation_seed,
+    base_year, target_year and degradation_rate. The per-node system counts
+    and sizes, the adoption parameters, performance_ratio and the cost
+    fields are optional and kept for the GUI and the standalone rooftex
+    workflow; the runner does not pass them to rooftex (the capacity comes
+    from rooftex or from the system's rooftop_max_potential).
+    """
 
     adoption_scenario: Literal["low", "medium", "high"] = "medium"
     weather_variability: Literal["low", "normal", "high"] = "normal"
     simulation_seed: int = 42
-    systems_per_node: list[int]
-    avg_system_size: list[float] = Field(description="kW per system")
+    systems_per_node: Optional[list[int]] = None
+    avg_system_size: Optional[list[float]] = Field(default=None, description="kW per system")
     performance_ratio: float = Field(default=0.75, ge=0, le=1)
     degradation_rate: float = Field(default=0.005, ge=0)
     cost_per_kw: float = 1200
@@ -1037,9 +1045,9 @@ class RooftopSolarConfig(BaseModel):
     o_and_m_cost: float = 20
     base_year: int = 2025
     target_year: int = 2050
-    initial_adoption: list[float]
-    max_adoption: dict[str, float]
-    adoption_rates: dict[str, float]
+    initial_adoption: Optional[list[float]] = None
+    max_adoption: Optional[dict[str, float]] = None
+    adoption_rates: Optional[dict[str, float]] = None
 
 
 # =============================================================================
