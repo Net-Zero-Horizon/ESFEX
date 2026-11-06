@@ -15,18 +15,24 @@ Each node has one tank, balanced per time step:
     drawn_t + shortfall_t >= fuel for power_t + non-electric consumption_t
 A period's route shipment leaves its origin evenly over the period's steps
 and arrives at the destination after the route's transit delay, net of
-transport losses. Local supply per step is free within the period's limit.
+transport losses; fuel still in transit when a rolling-horizon window's
+committed steps end arrives in the next window (`in_transit_arrivals`).
+Local supply per step is free within the period's limit. The `Hydrogen` tank
+also receives the hydrogen of the dispatch electrolyzers at its node.
 
 Constants:
-- MW_TO_KW: MW → kW conversion for H2 production equation
+- KG_PER_TONNE: electrolyzer output (kg) → hydrogen tank units (t)
 """
 
 using JuMP: @variable, @constraint, @expression, @objective, Model, AffExpr
 using JuMP: value, VariableRef, add_to_expression!, lower_bound, upper_bound
 
-# MW → kW conversion factor for H2 production equation
-# H2[kg/hr] = Power[MW] × MW_TO_KW × eff / energy_per_kg
-const MW_TO_KW = 1000.0
+# Electrolyzer hydrogen (kg, `electrolyzer_h2_per_mwh`) enters the Hydrogen
+# tank in tonnes
+const KG_PER_TONNE = 1000.0
+
+# The fuel whose tank receives the electrolyzers' hydrogen
+const HYDROGEN_FUEL = "Hydrogen"
 
 # =============================================================================
 # Temporal Period Mapping
@@ -162,6 +168,28 @@ Transit delay of `route` for `fuel`, in time steps of `step_hours` hours
 function _transit_steps(fuel::FuelConfig, route::TransportRoute, step_hours::Int)
     days = fuel.transport_transit_days_per_100km * route.distance_km / 100.0
     return max(0, round(Int, days * 24.0 / max(step_hours, 1)))
+end
+
+"""
+    _delivered_fraction(fparams, route) -> Float64
+
+Share of a shipment that reaches the destination (transport losses per 100 km).
+"""
+_delivered_fraction(fparams::FuelRouteParams, route::TransportRoute) =
+    max(0.0, 1.0 - fparams.transport_losses * route.distance_km / 100.0)
+
+"""
+    _storage_efficiency(input, fuel_name) -> Float64
+
+Efficiency applied to a tank's inflows (`storage_efficiency` of the fuel's
+infrastructure, 0.8 when the fuel has none).
+"""
+function _storage_efficiency(input::PrimaryEnergyInput, fuel_name::String)
+    haskey(input.infrastructure, fuel_name) &&
+        return input.infrastructure[fuel_name].storage_efficiency
+    # @debug not @warn: called per step; the default is fine.
+    @debug "Storage efficiency not configured for $fuel_name, using default 0.8"
+    return 0.8
 end
 
 """
@@ -452,40 +480,6 @@ function build_primary_energy_variables!(
         base_name = "hr_total_primary_emissions"
     )
 
-    # =========================================================================
-    # Electrolyzer Variables (E1: joint H2 production optimization)
-    # Matches Python legacy electrolizer_model.py HydrogenProduction class
-    # =========================================================================
-    elec_power = nothing
-    h2_prod = nothing
-    elec_invest = nothing
-
-    if input.electrolyzer_config !== nothing
-        ec = input.electrolyzer_config
-
-        elec_power = @variable(model,
-            [n=1:n_nodes, t=1:n_hours],
-            lower_bound = 0,
-            base_name = "electrolyzer_power"
-        )
-
-        h2_prod = @variable(model,
-            [n=1:n_nodes, t=1:n_hours],
-            lower_bound = 0,
-            base_name = "h2_production"
-        )
-
-        elec_invest = @variable(model,
-            [n=1:n_nodes],
-            lower_bound = 0,
-            base_name = "electrolyzer_invest"
-        )
-        # Set upper bounds on investment
-        for n in 1:n_nodes
-            set_upper_bound(elec_invest[n], ec.invest_max_power[n])
-        end
-    end
-
     return PrimaryEnergyVariables(
         transport_inv,
         storage_inv,
@@ -501,9 +495,6 @@ function build_primary_energy_variables!(
         loss_supply_hr,
         emissions_hr,
         total_emissions_hr,
-        elec_power,
-        h2_prod,
-        elec_invest,
         ne_short_pp
     )
 end
@@ -654,8 +645,10 @@ function add_primary_energy_constraints!(
     # =========================================================================
     # A period's route flow leaves its origin evenly over the period's steps
     # and reaches the destination tank transit-delay steps later, net of the
-    # transport losses. Fuel still in transit at the window's end does not
-    # reach this window (nor the next one).
+    # transport losses. Fuel shipped in an earlier window and still in transit
+    # arrives as scheduled (input.scheduled_arrivals); fuel this window ships
+    # in its committed steps but delivers later is carried to the next window
+    # by in_transit_arrivals.
 
     steps_in_period = Dict(p => length(temporal.hours_in_primary_period[p])
                            for p in temporal.primary_period_indices)
@@ -670,7 +663,7 @@ function add_primary_energy_constraints!(
             for (r, route) in enumerate(input.transport_routes)
                 haskey(route.fuel_params, fuel_name) || continue
                 fparams = route.fuel_params[fuel_name]
-                delivered = max(0.0, 1.0 - fparams.transport_losses * route.distance_km / 100.0)
+                delivered = _delivered_fraction(fparams, route)
                 delay = _transit_steps(fuel, route, input.step_hours)
                 from_ok = 1 <= route.from_node <= n_nodes
                 to_ok = 1 <= route.to_node <= n_nodes
@@ -685,6 +678,13 @@ function add_primary_energy_constraints!(
                             flow[r, ps], delivered / steps_in_period[ps])
                     end
                 end
+            end
+        end
+        sched = input.scheduled_arrivals === nothing ? nothing :
+                get(input.scheduled_arrivals, fuel_name, nothing)
+        if sched !== nothing
+            for n in 1:min(n_nodes, size(sched, 1)), t in 1:min(n_hours, size(sched, 2))
+                add_to_expression!(arr[n, t], sched[n, t])
             end
         end
         arrivals[fuel_name] = arr
@@ -724,40 +724,27 @@ function add_primary_energy_constraints!(
         end
     end
 
+    # Tank balances of the Hydrogen fuel, for the electrolyzer coupling
+    h2_balance = Matrix{Any}(nothing, n_nodes, n_hours)
+
     for t in 1:n_hours
         p = temporal.hour_to_primary_period[t]
         inv_p = get(temporal.primary_to_investment_period, p, 1)
 
         for fuel_name in fuel_names
             fuel = fuel_by_name[fuel_name]
-            storage_eff = if haskey(input.infrastructure, fuel_name)
-                input.infrastructure[fuel_name].storage_efficiency
-            else
-                # @debug not @warn: this check sits inside a
-                # (hours × fuels) loop — a missing config would emit
-                # tens of thousands of identical messages. The default
-                # is fine; the config gap is a setup concern, not a
-                # per-iteration runtime fault.
-                @debug "Storage efficiency not configured for $fuel_name, using default 0.8"
-                0.8
-            end
+            storage_eff = _storage_efficiency(input, fuel_name)
 
             for n in 1:n_nodes
                 # Tank balance:
                 #   level[t+1] = level[t] + (local supply + arrivals [+ H2]) * eff
                 #                - drawn - departures
-                # Hydrogen also receives electrolyzer production: a variable
-                # when electrolyzer_config is provided, else the fixed
-                # h2_production_hourly data.
+                # The Hydrogen tank also receives the dispatch electrolyzers'
+                # output, added by couple_primary_energy_to_power_system!.
                 inflow = AffExpr(0.0)
                 add_to_expression!(inflow, vars.fuel_storage_in_hourly[fuel_name][n, t])
                 add_to_expression!(inflow, arrivals[fuel_name][n, t])
-                if fuel_name == "Hydrogen" && vars.h2_production !== nothing
-                    add_to_expression!(inflow, vars.h2_production[n, t], 1.0 / MW_TO_KW)
-                elseif fuel_name == "Hydrogen" && input.h2_production_hourly !== nothing
-                    add_to_expression!(inflow, input.h2_production_hourly[t, n] / MW_TO_KW)
-                end
-                @constraint(model,
+                balance = @constraint(model,
                     vars.fuel_storage_level_hourly[fuel_name][n, t+1] ==
                     vars.fuel_storage_level_hourly[fuel_name][n, t] +
                     storage_eff * inflow -
@@ -765,16 +752,19 @@ function add_primary_energy_constraints!(
                     departures[fuel_name][n, t],
                     base_name = "hr_storage_balance_$(fuel_name)_$(n)_$(t)"
                 )
+                fuel_name == HYDROGEN_FUEL && (h2_balance[n, t] = balance)
 
                 base_cap, cumul_cap, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
 
-                # Max hourly dispatch rate (fraction of total storage capacity)
-                if haskey(input.infrastructure, fuel_name)
+                # Max dispatch rate: a fraction of the tank capacity per hour,
+                # so per step × step_hours. Only where there is a tank: a node
+                # without one draws whatever it holds.
+                if haskey(input.infrastructure, fuel_name) && (base_cap > 0 || cumul_cap > 0)
                     infra = input.infrastructure[fuel_name]
                     if infra.max_hourly_dispatch_rate >= 0
                         @constraint(model,
                             vars.fuel_storage_out_hourly[fuel_name][n, t] <=
-                            infra.max_hourly_dispatch_rate * total_cap,
+                            infra.max_hourly_dispatch_rate * input.step_hours * total_cap,
                             base_name = "hr_storage_dispatch_rate_$(fuel_name)_$(n)_$(t)"
                         )
                     end
@@ -955,60 +945,9 @@ function add_primary_energy_constraints!(
             end
         end
     end
-end
 
-"""
-    add_electrolyzer_constraints!(model, vars, input)
-
-Add electrolyzer power, production, and ramp constraints.
-Matches Python legacy electrolizer_model.py add_constraints().
-"""
-function add_electrolyzer_constraints!(
-    model::Model,
-    vars::PrimaryEnergyVariables,
-    input::PrimaryEnergyInput
-)
-    if vars.electrolyzer_power === nothing || input.electrolyzer_config === nothing
-        return
-    end
-
-    ec = input.electrolyzer_config
-    n_nodes = input.num_nodes
-    n_hours = input.hours
-
-    for n in 1:n_nodes
-        # Total capacity = existing + invested
-        total_cap = ec.rated_power[n] + vars.electrolyzer_investment[n]
-        h2_rate = electrolyzer_h2_per_mwh(ec, n)
-
-        for t in 1:n_hours
-            # Power limit
-            @constraint(model,
-                vars.electrolyzer_power[n, t] <= total_cap,
-                base_name = "electrolyzer_max_power_$(n)_$(t)"
-            )
-
-            # H2 production: H2[kg] = Power[MW] * 1000 * eff / (kWh/kg)
-            @constraint(model,
-                vars.h2_production[n, t] ==
-                vars.electrolyzer_power[n, t] * h2_rate,
-                base_name = "h2_production_$(n)_$(t)"
-            )
-
-            # Ramp constraints
-            if t > 1
-                @constraint(model,
-                    vars.electrolyzer_power[n, t] - vars.electrolyzer_power[n, t-1] <=
-                    total_cap * ec.ramp_up[n],
-                    base_name = "electrolyzer_ramp_up_$(n)_$(t)"
-                )
-                @constraint(model,
-                    vars.electrolyzer_power[n, t-1] - vars.electrolyzer_power[n, t] <=
-                    total_cap * ec.ramp_down[n],
-                    base_name = "electrolyzer_ramp_down_$(n)_$(t)"
-                )
-            end
-        end
+    if HYDROGEN_FUEL in fuel_names
+        model.ext[:pe_hydrogen_balance] = (h2_balance, _storage_efficiency(input, HYDROGEN_FUEL))
     end
 end
 
@@ -1030,8 +969,6 @@ Buckets:
   :pe_loss_cost           — fuel shortfall (hourly) and unmet non-electric demand penalties
   :pe_excess_cost         — excess-supply penalty
   :pe_transport_cost      — route transport cost × periodic flow
-  :pe_electrolyzer_cost   — PE-side electrolyzer CAPEX/OPEX (distinct from
-                            the PowerSystem-side electrolyzer in `cost_expressions`).
 """
 function get_primary_energy_objective_terms(
     vars::PrimaryEnergyVariables,
@@ -1044,7 +981,6 @@ function get_primary_energy_objective_terms(
     pe_loss_cost           = AffExpr(0.0)
     pe_excess_cost         = AffExpr(0.0)
     pe_transport_cost      = AffExpr(0.0)
-    pe_electrolyzer_cost   = AffExpr(0.0)
 
     fuel_names = [f.name for f in input.fuels]
     fuel_by_name = Dict(f.name => f for f in input.fuels)
@@ -1173,41 +1109,12 @@ function get_primary_energy_objective_terms(
         end
     end
 
-    # =========================================================================
-    # Electrolyzer Costs (E1: joint H2 production optimization)
-    # Matches Python legacy electrolizer_model.py get_objective_terms()
-    # =========================================================================
-    if vars.electrolyzer_investment !== nothing && input.electrolyzer_config !== nothing
-        ec = input.electrolyzer_config
-        n_hours = input.hours
-
-        for n in 1:n_nodes
-            # Investment cost (annualized)
-            if ec.life_time[n] > 0
-                hourly_inv_cost = ec.invest_cost[n] / ec.life_time[n] / Float64(HOURS_STD_YEAR)
-                add_to_expression!(pe_electrolyzer_cost, vars.electrolyzer_investment[n],
-                    hourly_inv_cost * n_hours)
-            end
-
-            # Fixed O&M cost: (rated + invested) * fixed_cost * hours
-            total_cap = ec.rated_power[n] + vars.electrolyzer_investment[n]
-            add_to_expression!(pe_electrolyzer_cost, total_cap, ec.fixed_cost[n] * n_hours)
-
-            # Variable + water costs
-            for t in 1:n_hours
-                add_to_expression!(pe_electrolyzer_cost, vars.electrolyzer_power[n, t], ec.variable_cost[n])
-                add_to_expression!(pe_electrolyzer_cost, vars.h2_production[n, t], ec.water_cost)
-            end
-        end
-    end
-
     return Dict{Symbol, AffExpr}(
         :pe_investment_cost     => pe_investment_cost,
         :pe_supply_cost         => pe_supply_cost,
         :pe_loss_cost           => pe_loss_cost,
         :pe_excess_cost         => pe_excess_cost,
         :pe_transport_cost      => pe_transport_cost,
-        :pe_electrolyzer_cost   => pe_electrolyzer_cost,
     )
 end
 
@@ -1216,11 +1123,17 @@ end
 # =============================================================================
 
 """
-    couple_primary_energy_to_power_system!(model, pe_vars, ps_vars, input)
+    couple_primary_energy_to_power_system!(model, pe_vars, ps_vars, input;
+        bus_to_node, resolution_hours, generators, electrolyzers)
 
 Add coupling constraints between primary energy and power system.
 
-The generator output is limited by available fuel supply.
+- A fuel-mapped unit's output at a node, summed over the node's buses, is
+  limited by the fuel it burns there:
+  `Σ_b gen_output[g,b,t] × resolution_hours ≤ fuel_for_power[g][node,t] × MWhe/unit`.
+- The dispatch electrolyzers' hydrogen (`electrolyzers`, the
+  PowerSystemInput's) flows into the `Hydrogen` tank of their node, in tonnes:
+  `electrolyzer_power × resolution_hours × electrolyzer_h2_per_mwh / 1000`.
 """
 function couple_primary_energy_to_power_system!(
     model::Model,
@@ -1229,7 +1142,8 @@ function couple_primary_energy_to_power_system!(
     input::PrimaryEnergyInput;
     bus_to_node::Vector{Int} = Int[],
     resolution_hours::Float64 = 1.0,
-    generators = nothing
+    generators = nothing,
+    electrolyzers = nothing
 )
     NUMERICAL_TOLERANCE = 1e-6
     n_nodes = input.num_nodes
@@ -1244,6 +1158,7 @@ function couple_primary_energy_to_power_system!(
 
     # If bus_to_node is empty, assume identity mapping (bus == node)
     use_b2n = !isempty(bus_to_node)
+    node_of(b) = use_b2n ? bus_to_node[b] : b
 
     n_coupling_constraints = 0
 
@@ -1270,52 +1185,146 @@ function couple_primary_energy_to_power_system!(
             @debug "PE Coupling: gen $gen_idx ($fuel_name) skipped: gen_idx > n_ps_gen ($(length(ps_vars.buses_of_gen)))"
             continue
         end
+        haskey(pe_vars.fuel_for_power_hourly, gen_idx) || continue
 
-        buses = ps_vars.buses_of_gen[gen_idx]
+        # The unit's buses grouped by node: the node's fuel covers the output
+        # at all of them together (one constraint per bus let each bus burn
+        # the same fuel again).
+        buses_by_node = Dict{Int, Vector{Int}}()
+        for b in ps_vars.buses_of_gen[gen_idx]
+            node = node_of(b)
+            1 <= node <= n_nodes || continue
+            push!(get!(buses_by_node, node, Int[]), b)
+        end
 
-        for b in buses
-            # Map bus index to node index for PE variables
-            node = use_b2n ? bus_to_node[b] : b
-            # Clamp to valid PE node range
-            if node < 1 || node > n_nodes
-                continue
-            end
-
-            # Check that fuel_for_power_hourly has this gen_idx
-            if !haskey(pe_vars.fuel_for_power_hourly, gen_idx)
-                continue
-            end
-
+        for (node, buses) in buses_by_node
             for t in 1:n_hours
-                # gen_output is in MW (power). Each timestep spans resolution_hours.
-                # Energy per timestep = gen_output_MW × resolution_hours (MWh).
-                # Fuel needed = energy / mwhe_per_unit (tons).
-                # fuel_for_power is in tons/timestep.
-                # Constraint: gen_output × resolution_hours <= fuel_for_power × mwhe_per_unit
+                # gen_output is in MW; a step spans resolution_hours, so the
+                # energy is gen_output × resolution_hours (MWh) and the fuel it
+                # needs is energy / mwhe_per_unit (fuel_for_power, units/step).
+                output = AffExpr(0.0)
+                for b in buses
+                    add_to_expression!(output, resolution_hours, ps_vars.gen_output[gen_idx, b, t])
+                end
                 @constraint(model,
-                    ps_vars.gen_output[gen_idx, b, t] * resolution_hours <=
-                    pe_vars.fuel_for_power_hourly[gen_idx][node, t] * mwhe_per_unit,
-                    base_name = "pe_coupling_gen$(gen_idx)_$(b)_$(t)"
+                    output <= pe_vars.fuel_for_power_hourly[gen_idx][node, t] * mwhe_per_unit,
+                    base_name = "pe_coupling_gen$(gen_idx)_n$(node)_$(t)"
                 )
                 n_coupling_constraints += 1
             end
 
-            if objective !== nothing && !haskey(ps_vars.gen_seg_output, (gen_idx, b))
+            objective === nothing && continue
+            for b in buses
+                haskey(ps_vars.gen_seg_output, (gen_idx, b)) && continue
                 fc = generators[gen_idx].fuel_cost[b]
-                if fc != 0
-                    for t in 1:n_hours
-                        v = ps_vars.gen_output[gen_idx, b, t]
-                        set_objective_coefficient(model, v,
-                            coefficient(objective, v) - resolution_hours * fc)
-                        ce === nothing || add_to_expression!(ce[:fuel_cost], -fc, v)
-                    end
+                fc != 0 || continue
+                for t in 1:n_hours
+                    v = ps_vars.gen_output[gen_idx, b, t]
+                    set_objective_coefficient(model, v,
+                        coefficient(objective, v) - resolution_hours * fc)
+                    ce === nothing || add_to_expression!(ce[:fuel_cost], -fc, v)
                 end
             end
         end
     end
 
+    couple_electrolyzers_to_hydrogen_tank!(model, ps_vars, input, electrolyzers;
+        node_of = node_of, resolution_hours = resolution_hours)
+
     # @debug not @info: per-window setup noise (see comment above).
     @debug "PE Coupling: Created $n_coupling_constraints constraints (resolution=$(resolution_hours)h)"
+end
+
+"""
+    couple_electrolyzers_to_hydrogen_tank!(model, ps_vars, input, electrolyzers;
+        node_of, resolution_hours)
+
+Add each dispatch electrolyzer's hydrogen to the inflow of the `Hydrogen`
+tank at its node (the balance built by `add_primary_energy_constraints!`,
+scaled by the tank's storage efficiency like every inflow). Without a
+`Hydrogen` fuel in the primary-energy model the electrolyzers stay a plain
+load, as in a run without primary energy.
+"""
+function couple_electrolyzers_to_hydrogen_tank!(model::Model, ps_vars::PowerSystemVariables,
+                                                input::PrimaryEnergyInput, electrolyzers;
+                                                node_of = identity,
+                                                resolution_hours::Float64 = 1.0)
+    (electrolyzers === nothing || isempty(electrolyzers)) && return
+    ps_vars.electrolyzer_power === nothing && return
+    h2 = get(model.ext, :pe_hydrogen_balance, nothing)
+    if h2 === nothing
+        @debug "PE Coupling: no $(HYDROGEN_FUEL) fuel; electrolyzer hydrogen is not stored"
+        return
+    end
+    balance, eff = h2
+    n_hours = min(input.hours, size(ps_vars.electrolyzer_power, 3))
+    for (e, ec) in enumerate(electrolyzers), b in 1:size(ps_vars.electrolyzer_power, 2)
+        node = node_of(b)
+        1 <= node <= size(balance, 1) || continue
+        # t of hydrogen per MW of electrolyzer power in one step
+        t_per_mw = resolution_hours * electrolyzer_h2_per_mwh(ec, b) / KG_PER_TONNE
+        t_per_mw > 0 || continue
+        for t in 1:n_hours
+            con = balance[node, t]
+            con === nothing && continue
+            # balance: level[t+1] − level[t] − eff × inflow + … == 0
+            set_normalized_coefficient(con, ps_vars.electrolyzer_power[e, b, t], -eff * t_per_mw)
+        end
+    end
+end
+
+"""
+    in_transit_arrivals(vars, input, temporal, k) -> Dict{String, Matrix{Float64}}
+
+Fuel still on its way after the window's first `k` steps (a rolling horizon's
+committed part): shipments that left in steps 1..k and arrive after step k,
+and scheduled arrivals of this window due after step k. Returns
+fuel => [node, s], the quantity reaching the node's tank in step s of a window
+that starts after step k (net of transport losses), for the next window's
+`scheduled_arrivals`. Fuels with nothing in transit are left out.
+"""
+function in_transit_arrivals(vars::PrimaryEnergyVariables, input::PrimaryEnergyInput,
+                             temporal::TemporalMapping, k::Int)
+    n_nodes = input.num_nodes
+    k = clamp(k, 0, input.hours)
+    out = Dict{String, Matrix{Float64}}()
+    for fuel in input.fuels
+        name = fuel.name
+        pending = Dict{Tuple{Int, Int}, Float64}()   # (node, step after k) => quantity
+        if haskey(vars.fuel_transport_periodic, name)
+            flow = vars.fuel_transport_periodic[name]
+            for (r, route) in enumerate(input.transport_routes)
+                haskey(route.fuel_params, name) || continue
+                1 <= route.to_node <= n_nodes || continue
+                delivered = _delivered_fraction(route.fuel_params[name], route)
+                delay = _transit_steps(fuel, route, input.step_hours)
+                for t in max(1, k - delay + 1):k     # left by step k, arrives after it
+                    p = temporal.hour_to_primary_period[t]
+                    q = value(flow[r, p]) * delivered /
+                        length(temporal.hours_in_primary_period[p])
+                    q > 1e-9 || continue
+                    key = (route.to_node, t + delay - k)
+                    pending[key] = get(pending, key, 0.0) + q
+                end
+            end
+        end
+        sched = input.scheduled_arrivals === nothing ? nothing :
+                get(input.scheduled_arrivals, name, nothing)
+        if sched !== nothing
+            for n in 1:min(n_nodes, size(sched, 1)), t in (k + 1):size(sched, 2)
+                sched[n, t] > 0 || continue
+                key = (n, t - k)
+                pending[key] = get(pending, key, 0.0) + sched[n, t]
+            end
+        end
+        isempty(pending) && continue
+        mat = zeros(n_nodes, maximum(last, keys(pending)))
+        for ((n, s), q) in pending
+            mat[n, s] += q
+        end
+        out[name] = mat
+    end
+    return out
 end
 
 # =============================================================================
@@ -1567,6 +1576,15 @@ function create_primary_energy_model(
     model::Model,
     input::PrimaryEnergyInput
 )
+    # The dispatch electrolyzers feed the Hydrogen tank
+    # (couple_primary_energy_to_power_system!); the old inputs are gone.
+    if input.h2_production_hourly !== nothing || input.electrolyzer_config !== nothing
+        throw(ArgumentError("PrimaryEnergyInput: h2_production_hourly and " *
+            "electrolyzer_config are no longer used and must be nothing; the " *
+            "dispatch electrolyzers feed the $(HYDROGEN_FUEL) tank through " *
+            "couple_primary_energy_to_power_system!(...; electrolyzers)"))
+    end
+
     # Create temporal mapping
     temporal = create_temporal_mapping(
         input.hours,
@@ -1583,9 +1601,6 @@ function create_primary_energy_model(
     # Add constraints
     add_primary_energy_constraints!(model, vars, input, temporal,
         adjusted_prices, max_supply, ne_demand)
-
-    # Add electrolyzer constraints (E1: joint H2 production optimization)
-    add_electrolyzer_constraints!(model, vars, input)
 
     return vars, temporal, adjusted_prices
 end

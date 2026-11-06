@@ -110,7 +110,7 @@ def test_unmet_non_electric_demand_priced_per_sector():
     jl._pe_in = a._create_julia_input()
     jl.seval("using JuMP, HiGHS")
     short = float(jl.seval("""
-        let m = Model(HiGHS.Optimizer)
+        let m = Model(ESFEX.create_optimizer(solver_name = "highs"))
             set_silent(m)
             vars, temporal, prices = ESFEX.create_primary_energy_model(m, _pe_in)
             @objective(m, Min, sum(values(ESFEX.get_primary_energy_objective_terms(
@@ -135,7 +135,7 @@ def test_fuel_drawn_from_the_tank_is_charged():
     jl._pe_in = _adapter(fuels_config=fuels, non_electric_demand=ne)._create_julia_input()
     jl.seval("using JuMP, HiGHS")
     supply_cost, drawn = jl.seval("""
-        let m = Model(HiGHS.Optimizer)
+        let m = Model(ESFEX.create_optimizer(solver_name = "highs"))
             set_silent(m)
             vars, temporal, prices = ESFEX.create_primary_energy_model(m, _pe_in)
             terms = ESFEX.get_primary_energy_objective_terms(vars, _pe_in, temporal, prices)
@@ -159,7 +159,7 @@ def _solve(adapter, result_expr):
     jl._pe_in = adapter._create_julia_input()
     jl.seval("using JuMP, HiGHS")
     return jl.seval(f"""
-        let m = Model(HiGHS.Optimizer)
+        let m = Model(ESFEX.create_optimizer(solver_name = "highs"))
             set_silent(m)
             vars, temporal, prices = ESFEX.create_primary_energy_model(m, _pe_in)
             terms = ESFEX.get_primary_energy_objective_terms(vars, _pe_in, temporal, prices)

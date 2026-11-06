@@ -415,10 +415,10 @@ Internal helpers shared by the monolithic master and Benders (not exported):
 | `create_primary_energy_model(model, input::PrimaryEnergyInput)` | Add the fuel supply chain (supply, storage, transport, non-electric demand) to a model. |
 | `create_temporal_mapping(hours, primary_resolution, investment_resolution)` | Map power-system hours to primary-energy steps. |
 | `build_primary_energy_variables!`, `add_primary_energy_constraints!`, `get_primary_energy_objective_terms`, `extract_primary_energy_solution` | The steps `create_primary_energy_model` runs, exposed separately. |
-| `couple_primary_energy_to_power_system!(model, pe_vars, ps_vars, input; ...)` | Link generator fuel use to fuel supply. |
-| `add_primary_energy_investment_variables!`, `add_primary_energy_investment_costs!` | Fuel storage and transport investment in the master problem. |
+| `couple_primary_energy_to_power_system!(model, pe_vars, ps_vars, input; bus_to_node, resolution_hours, generators, electrolyzers)` | Link generator fuel use to fuel supply (per unit and node) and feed the electrolyzers' hydrogen into the `Hydrogen` tank. |
+| `in_transit_arrivals(vars, input, temporal, k)` | Fuel still in transit after the window's first `k` steps, as the next window's `scheduled_arrivals` (fuel => [node, step]). |
 
-Types: `FuelConfig`, `FuelInfrastructureConfig`, `NonElectricDemandConfig`, `FuelRouteParams`, `TransportRoute`, `PrimaryEnergyInput`, `PrimaryEnergyVariables`, `PrimaryEnergyResult`, `PrimaryEnergyInvestmentConfig`.
+Types: `FuelConfig`, `FuelInfrastructureConfig`, `NonElectricDemandConfig`, `FuelRouteParams`, `TransportRoute`, `PrimaryEnergyInput`, `PrimaryEnergyVariables`, `PrimaryEnergyResult`. The master problem has no fuel infrastructure investment (fuel storage and transport are built by the dispatch's primary-energy block).
 
 ### MGA (classical HSJ loop)
 

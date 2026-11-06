@@ -43,7 +43,7 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | `fuel_cost` | Fuel cost of generators (piecewise fuel-cost curves included) and candidate technologies | Scenario operation |
 | `fuel_price_growth` | Extra annual fuel price escalation: fuel cost × \(m^{fpg}_s{}^{\,(y-1)}\) | Scenario operation |
 | `gen_fixed_cost` | Fixed O&M (\$/MWh) of generators and candidate technologies | Scenario operation |
-| `maintenance_cost` | Maintenance cost of generators and technologies (the master does not charge battery maintenance) | Scenario operation |
+| `maintenance_cost` | Maintenance cost of generators, batteries, technologies and battery technologies | Scenario operation |
 | `carbon_price` | CO2 cost (`co2_cost`) | Scenario operation |
 | `penalty_loss_of_load` | Loss-of-load penalty, and the sectoral penalties derived from it | Scenario operation |
 | `penalty_loss_of_reserve` | Static and dynamic reserve shortfall penalties | Scenario operation |
@@ -61,7 +61,7 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 
 The operation multipliers are applied by `scenario_master_input()`, which builds a copy of the master input for each scenario and year; the investment, asset and discount multipliers act on the scenario's terms of the objective (§4).
 
-The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning. That includes the keys for costs the master does not have: start-up, electrolyzer, converter, fuel import, fuel storage and transport investment, battery maintenance, inter-system cost per MW·km, and the loss-of-fuel-supply and CO2-budget penalties.
+The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning. That includes the keys for costs the master does not have: start-up, electrolyzer, converter, fuel import, fuel storage and transport investment, a separate battery-maintenance multiplier (`bat_maintenance_cost`; `maintenance_cost` scales battery maintenance too), inter-system cost per MW·km, and the loss-of-fuel-supply and CO2-budget penalties.
 
 ### 2.3 Scenario Construction
 

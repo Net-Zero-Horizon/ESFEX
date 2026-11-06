@@ -722,8 +722,11 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
     the same fuel and type (the one named by its ``technology`` field
     first, else the first in config order); for a battery, the battery
     technology named by its ``technology`` field, else the first battery
-    technology. Without a candidate the extension stays free and a warning
-    is logged once per unit.
+    technology. In a merged multi-system run (keys ``{system}__{key}``) the
+    candidate comes from the unit's own system, whose costs sit at the
+    unit's own nodes. Without a candidate, or where the candidate's cost is 0
+    at a node the unit occupies, the extension stays free and a warning is
+    logged once per unit.
 
     Returns:
         ``(gen_costs, bat_costs)``: per-node ``invest_cost`` lists for the
@@ -736,16 +739,46 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
                 out[n] = float(candidate[n] if n < len(candidate) else candidate[-1])
         return out
 
-    def _warn(kind, key):
+    def _warn(kind, key, nodes=None):
         tag = (getattr(sys, "name", ""), kind, key)
         if tag not in _FREE_EXTENSION_WARNED:
             _FREE_EXTENSION_WARNED.add(tag)
+            if nodes:
+                logger.warning(
+                    "%s %r has invest_cost 0 at node(s) %s and its candidate %s has "
+                    "none there either: extending its life there is free in the "
+                    "master problem.", kind, key, nodes,
+                    "technology" if kind == "Generator" else "battery technology")
+                return
             logger.warning(
                 "%s %r has invest_cost 0 and no candidate %s to take it "
                 "from: extending its life is free in the master problem.",
                 kind, key,
                 "technology with the same fuel and type" if kind == "Generator"
                 else "battery technology")
+
+    def _own_system(key, unit, catalogue):
+        """Candidates from the unit's own system and the system's prefix.
+
+        A merged unit has key ``{system}__{key}`` and name ``{system}/...``;
+        its system's candidates are keyed ``{system}__...`` and their
+        per-node lists are 0 at the other systems' nodes.
+        """
+        system = key.split("__", 1)[0] if "__" in key else None
+        if system is None or not str(getattr(unit, "name", "")).startswith(system + "/"):
+            return list(catalogue.items()), ""
+        prefix = system + "__"
+        return [(k, c) for k, c in catalogue.items() if k.startswith(prefix)], prefix
+
+    def _names(k, cand, prefix):
+        """A candidate's key and name, also without the merge prefix."""
+        names = {k, cand.name}
+        if prefix:
+            names |= {k[len(prefix):], str(cand.name).split("/", 1)[-1]}
+        return names
+
+    def _still_free(costs, rated):
+        return [n for n, p in enumerate(rated) if p > 0 and (n >= len(costs) or costs[n] <= 0)]
 
     gen_costs: dict = {}
     techs = getattr(sys, "technologies", None) or {}
@@ -754,16 +787,22 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
             continue
         if all(c > 0 for c in gen.invest_cost[:len(gen.rated_power)]):
             continue
-        matches = [(k, t) for k, t in techs.items()
+        candidates, prefix = _own_system(key, gen, techs)
+        matches = [(k, t) for k, t in candidates
                    if t.fuel == gen.fuel and t.type == gen.type]
         named = [m for m in matches
-                 if getattr(gen, "technology", None) in (m[0], m[1].name)]
+                 if getattr(gen, "technology", None) in _names(*m, prefix)]
         if not (named or matches):
             _warn("Generator", key)
             continue
         _, tech = (named or matches)[0]
         own = list(gen.invest_cost) + [0.0] * (len(gen.rated_power) - len(gen.invest_cost))
-        gen_costs[key] = _fill(own, tech.invest_cost)
+        filled = _fill(own, tech.invest_cost)
+        if filled != own:
+            gen_costs[key] = filled
+        free = _still_free(filled, gen.rated_power)
+        if free:
+            _warn("Generator", key, free)
 
     bat_costs: dict = {}
     btechs = getattr(sys, "battery_technologies", None) or {}
@@ -772,13 +811,19 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
             continue
         if all(c > 0 for c in bat.invest_cost[:len(bat.rated_power)]):
             continue
-        named = [(k, t) for k, t in btechs.items() if bat.technology in (k, t.name)]
-        if not (named or btechs):
+        candidates, prefix = _own_system(key, bat, btechs)
+        named = [m for m in candidates if bat.technology in _names(*m, prefix)]
+        if not (named or candidates):
             _warn("Battery", key)
             continue
-        _, btech = (named or list(btechs.items()))[0]
+        _, btech = (named or candidates)[0]
         own = list(bat.invest_cost) + [0.0] * (len(bat.rated_power) - len(bat.invest_cost))
-        bat_costs[key] = _fill(own, btech.invest_cost_power)
+        filled = _fill(own, btech.invest_cost_power)
+        if filled != own:
+            bat_costs[key] = filled
+        free = _still_free(filled, bat.rated_power)
+        if free:
+            _warn("Battery", key, free)
 
     return gen_costs, bat_costs
 
@@ -2769,26 +2814,6 @@ class MasterProblemAdapter:
             for sector_name, crit_val in sectoral_criticality.items():
                 jl_sectoral_criticality[sector_name] = float(crit_val)
 
-        # Build primary energy investment configs (H2)
-        jl_pe_configs = jl.seval("PrimaryEnergyInvestmentConfig[]")
-        pe_sources = getattr(sys, 'primary_energy_sources', {})
-        if pe_sources:
-            import math
-            num_nodes_pe = sys.nodes.num_nodes or int(math.sqrt(len(sys.nodes.nodes_connections)))
-            for fuel_id, pe_src in pe_sources.items():
-                storage_cost = [float(getattr(pe_src, 'storage_investment_cost', 0.0))] * num_nodes_pe
-                storage_max = [float(getattr(pe_src, 'max_storage_investment_per_node', 0.0))] * num_nodes_pe
-                transport_cost = float(getattr(pe_src, 'transport_cost', 0.0))
-                transport_max = float(getattr(pe_src, 'max_transport_investment_per_arc', 0.0))
-                jl_pe = ESFEX.PrimaryEnergyInvestmentConfig(
-                    fuel_id,
-                    jl.seval(f"Float64{list(storage_cost)}"),
-                    jl.seval(f"Float64{list(storage_max)}"),
-                    transport_cost,
-                    transport_max,
-                )
-                jl.seval("push!")(jl_pe_configs, jl_pe)
-
         # Create input struct using keyword constructor
         jl_input = ESFEX.MasterProblemInput(
             years=jl_years,
@@ -2828,7 +2853,6 @@ class MasterProblemAdapter:
             decommissioning_cost_factor=self.decommissioning_cost_factor,
             sectoral_demand=jl_sectoral,
             sectoral_criticality=jl_sectoral_criticality,
-            pe_configs=jl_pe_configs,
             # Configurable parameters (previously hardcoded)
             reserve_margin=float(getattr(sys, 'reserve_margin', 1.15)),
             npv_annual_return_rate=float(getattr(sys, 'npv_annual_return_rate', 0.15)),
@@ -3892,11 +3916,11 @@ class PrimaryEnergyAdapter:
         cumulative_capacities: Optional[Dict] = None,
         initial_storage_levels: Optional[Dict] = None,
         investment_from_master: bool = False,
-        h2_production_hourly: Optional[np.ndarray] = None,
         transport_routes: Optional[List[Dict]] = None,
         outage_schedule: Optional[list] = None,
         step_hours: int = 1,
         year_hour_offset: int = 0,
+        scheduled_arrivals: Optional[Dict[str, np.ndarray]] = None,
     ):
         """
         Initialize the PrimaryEnergy adapter.
@@ -3920,12 +3944,15 @@ class PrimaryEnergyAdapter:
             cumulative_capacities: Previously accumulated investments
             initial_storage_levels: Initial storage levels for carry-over
             investment_from_master: Skip investment vars when MasterProblem handles them
-            h2_production_hourly: H2 production from electrolyzers [hours x nodes]
             transport_routes: Route-based fuel transport list (preferred over distance matrix)
             step_hours: Length of a time step (h)
             year_hour_offset: First hour of the window within the year; with
                 step_hours it places periods in their month for the
                 non-electric demand's seasonal factors
+            scheduled_arrivals: Fuel shipped in an earlier window and still in
+                transit, ``{fuel: array [node, step]}`` arriving in this
+                window's steps (from the previous window's
+                :meth:`get_in_transit_arrivals`)
         """
         self.year = year
         self.base_year = base_year
@@ -3947,9 +3974,9 @@ class PrimaryEnergyAdapter:
         self.cumulative_capacities = cumulative_capacities or {'storage': {}, 'transport': {}}
         self.initial_storage_levels = initial_storage_levels
         self.investment_from_master = investment_from_master
-        self.h2_production_hourly = h2_production_hourly
         self.step_hours = step_hours
         self.year_hour_offset = year_hour_offset
+        self.scheduled_arrivals = scheduled_arrivals or {}
 
         self._jl_model = None
         self._jl_vars = None
@@ -4177,10 +4204,14 @@ class PrimaryEnergyAdapter:
                 else:
                     jl_initial_storage[fuel_name] = py_to_julia_vector(levels)
 
-        # Convert H2 production hourly (if available)
-        jl_h2_production = jl.seval("nothing")
-        if self.h2_production_hourly is not None:
-            jl_h2_production = py_to_julia_matrix(self.h2_production_hourly)
+        # Fuel still in transit from the previous window: {fuel: [node, step]}
+        jl_arrivals = jl.seval("nothing")
+        if self.scheduled_arrivals:
+            jl_arrivals = jl.seval("Dict{String, Matrix{Float64}}()")
+            for fuel_name, arr in self.scheduled_arrivals.items():
+                arr = np.asarray(arr, dtype=float)
+                if arr.ndim == 2 and arr.size:
+                    jl_arrivals[fuel_name] = py_to_julia_matrix(arr)
 
         # Build generator rated_power dict for coupling optimization (skip zero-capacity nodes)
         jl_gen_rated = jl.seval("Dict{Int, Vector{Float64}}()")
@@ -4234,12 +4265,13 @@ class PrimaryEnergyAdapter:
             jl_cumul,
             jl_initial_storage,
             self.investment_from_master,
-            jl_h2_production,
+            jl.seval("nothing"),  # h2_production_hourly (unused)
             jl_gen_rated,
-            jl.seval("nothing"),  # electrolyzer_config
+            jl.seval("nothing"),  # electrolyzer_config (unused)
             scale_cost(float(self.penalties_config.get('non_electric_demand_loss', 100.0))),
             int(self.step_hours),
             int(self.year_hour_offset),
+            jl_arrivals,
         )
 
         return jl_input
@@ -4313,7 +4345,8 @@ class PrimaryEnergyAdapter:
         jl._pe_resolution_hours = res_hours
 
         # Pass bus_to_node mapping so PE (node-indexed) can couple
-        # with PS (bus-indexed) when num_buses > num_nodes.
+        # with PS (bus-indexed) when num_buses > num_nodes, and the
+        # electrolyzers whose hydrogen fills the Hydrogen tank.
         if power_system._jl_input is not None:
             jl._ps_input = power_system._jl_input
             jl.seval("""
@@ -4321,7 +4354,8 @@ class PrimaryEnergyAdapter:
                 _pe_model, _pe_vars, _ps_vars, _pe_input;
                 bus_to_node = _ps_input.network.bus_to_node,
                 resolution_hours = _pe_resolution_hours,
-                generators = _ps_input.generators
+                generators = _ps_input.generators,
+                electrolyzers = _ps_input.electrolyzers
             )
             """)
         else:
@@ -4431,6 +4465,24 @@ class PrimaryEnergyAdapter:
         except Exception as e:
             info['debug_error'] = str(e)
         return info
+
+    def get_in_transit_arrivals(self, step: Optional[int] = None) -> Dict[str, np.ndarray]:
+        """Fuel still in transit after *step* timesteps, for the next window.
+
+        Shipments that left in steps 1..*step* (default: the whole window)
+        and arrive later, plus scheduled arrivals of this window due after
+        *step*. Pass the result as the next window's ``scheduled_arrivals``,
+        alongside :meth:`get_final_storage_levels` with the same *step*.
+
+        Returns:
+            ``{fuel: array [node, s]}``: quantity reaching the node's tank in
+            step s of the next window (net of transport losses).
+        """
+        ESFEX = get_esfex_module()
+        k = self.hours if step is None else min(int(step), self.hours)
+        jl_out = ESFEX.in_transit_arrivals(
+            self._jl_vars, self._jl_input, self._jl_temporal, k)
+        return {str(f): np.array(m, dtype=float) for f, m in jl_out.items()}
 
     def get_final_storage_levels(self, step: Optional[int] = None) -> Dict[str, Dict[int, float]]:
         """
