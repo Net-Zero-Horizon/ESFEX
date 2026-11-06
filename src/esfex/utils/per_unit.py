@@ -37,7 +37,7 @@ def derived_reactance_pu(
     v = voltage_kv or getattr(dc_config, "voltage_level_kv", 0.0)
     if not length_km or length_km <= 0 or not v or v <= 0 or s_base_mva <= 0:
         return DEFAULT_REACTANCE_PU
-    x_km = reactance_per_km if reactance_per_km and reactance_per_km > 0 \
-        else dc_config.reactance_per_km
+    own = isinstance(reactance_per_km, (int, float)) and reactance_per_km > 0
+    x_km = reactance_per_km if own else dc_config.reactance_per_km
     z_base = v * v / s_base_mva
     return length_km * x_km / z_base
