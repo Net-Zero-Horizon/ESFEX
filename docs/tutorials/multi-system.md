@@ -216,7 +216,7 @@ systems:
 
     co2_budget:
       enabled: true
-      annual_budget: 900000.0     # used for the whole merged network
+      annual_budget: 900000.0     # main_island's own plants
 
     TARGET_RE_PENETRATION: 0.80
     discount_rate: 0.08
@@ -332,10 +332,11 @@ System-level settings are combined as follows:
 |---------|--------------|
 | `TARGET_RE_PENETRATION` | The lowest of the systems' targets, applied to the whole network |
 | `MAX_ANNUAL_SYSTEM_COST` | Sum over the systems |
-| `penalties` | The highest value of each penalty across the systems |
-| `discount_rate`, `co2_budget`, `stochastic_scenarios`, frequency and reserve settings | Taken from the first (primary) system |
+| `co2_budget` and `penalties.co2_budget_violation` | Kept per system: the dispatch adds one CO2 budget constraint per system, over that system's nodes, with its own budget and violation penalty |
+| Other `penalties` | The highest value of each penalty across the systems |
+| `discount_rate`, `stochastic_scenarios`, frequency and reserve settings | Taken from the first (primary) system |
 
-So in this example the merged network is planned for a 70% RE share, with an 8% discount rate and the main island's CO2 budget.
+So in this example the merged network is planned for a 70% RE share with an 8% discount rate. The main island's plants are held to its 900,000 t budget; the small island sets no `co2_budget`, so it gets the default (enabled, 1,000,000 t/year) for its own plants.
 
 ### Why Model Separate Systems?
 
@@ -362,8 +363,25 @@ They are not separate optimizations: costs are minimized jointly, and the settin
 
 Each link becomes an ordinary transmission line between the two nodes, in the master problem and in the dispatch. An expansion is costed like any corridor: once, at the higher of the two end nodes' `transference_invest_cost`.
 
+A link can carry fuel instead of power. With `link_type: fuel_route` and a `fuel`, each connection becomes two one-way fuel transport routes between the two nodes (used when primary energy is modelled for that fuel), and no electrical line:
+
+```yaml
+meta_network:
+  systems_links:
+    - systems: [main_island, small_island]
+      link_type: fuel_route
+      fuel: Diesel
+      connections: [[2, 0]]
+      existing_capacity_MW: [200.0]   # route capacity, fuel units/day
+      max_investment_MW: [0.0]        # not used: see fuel_infrastructure
+      investment_cost_per_MW: [0.0]   # not used: see fuel_infrastructure
+      loss_factor: [0.005]            # losses per 100 km
+      distance_km: [80.0]
+      cost_per_mw_km: [0.1]           # transport cost, $/unit/km
+```
+
 !!! note "Fields without effect"
-    `loss_factor` and `cost_per_mw_km` are required by the schema, and `meta_network.dynamic_transfer_pricing` and `inter_system_loss_segments` are accepted, but the current run does not use them. Losses on the link come from `resistance_pu` like on any other line.
+    On a transmission link, `loss_factor` and `cost_per_mw_km` are required by the schema, and `meta_network.dynamic_transfer_pricing` and `inter_system_loss_segments` are accepted, but the current run does not use them. Losses on the link come from `resistance_pu` like on any other line.
 
 !!! note "Subsystems without lines"
     In the merged dispatch network, the link is a `transmission_lines_geo` entry, and the dispatch builds its network from lines. A subsystem with no `transmission_lines_geo` keeps its `nodes_connections`: each connected node pair becomes a line between the first buses of the two nodes, with the connection's capacity, the `fuel_transport_distances` entry as length (reactance from that length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`, else 0.01) and R = 0.1 × X. A subsystem with lines uses only its lines.
@@ -526,7 +544,7 @@ Expected result: interconnection lowers total system cost by:
 
 ## Key Takeaways
 
-1. **One merged problem**: The systems are planned and dispatched as one network. Each keeps its own demand, nodes and candidates, but the RE target, discount rate, CO2 budget and penalties are combined as shown above.
+1. **One merged problem**: The systems are planned and dispatched as one network. Each keeps its own demand, nodes, candidates and CO2 budget, but the RE target, discount rate and penalties are combined as shown above.
 2. **Inter-system coordination**: The master problem jointly optimizes investments across systems. It may invest more RE on the Main Island specifically to export to the Small Island.
 3. **Transfer investment**: The optimizer expands the submarine cable when the cost of cable capacity ($800,000/MW) is less than the avoided cost of local generation and storage on the Small Island.
 4. **Asymmetric benefit**: The Small Island typically benefits more from the interconnection because its local generation costs are higher.

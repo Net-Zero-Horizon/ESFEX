@@ -175,18 +175,20 @@ String enum of the SPORES objective menu. Each value names an LP objective insta
 
 ## SystemLinkConfig
 
-One entry of `meta_network.systems_links`. Each list holds one value per link; all lists must have the same length as `connections`. Linked systems are merged into one network, and links become transmission lines in both the master problem and the operational dispatch.
+One entry of `meta_network.systems_links`. Each list holds one value per link; all lists must have the same length as `connections`. Linked systems are merged into one network. Transmission links become transmission lines in both the master problem and the operational dispatch; fuel route links become two one-way primary-energy transport routes per connection (`fuel_transport_routes`) and are not part of the electrical network.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `systems` | list[str] | required | The two linked system names |
 | `connections` | list[list[int]] | required | One `[node_in_system_1, node_in_system_2]` pair per link (0-based node indices) |
-| `existing_capacity_mw` / `existing_capacity_MW` | list[float] | required | Existing capacity per link (MW) |
-| `max_investment_mw` / `max_investment_MW` | list[float] | required | Maximum new capacity per link (MW) |
-| `investment_cost_per_mw` / `investment_cost_per_MW` | list[float] | required | Investment cost per link ($/MW) |
-| `loss_factor` | list[float] | required | Not used (losses come from `resistance_pu`) |
+| `link_type` | `transmission` \| `fuel_route` | `transmission` | Electrical lines, or fuel transport routes for `fuel` |
+| `fuel` | str | `null` | Fuel carried by a `fuel_route` link (a fuel name). A fuel route without a fuel is ignored, with a warning |
+| `existing_capacity_mw` / `existing_capacity_MW` | list[float] | required | Existing capacity per link (MW). Fuel route: route capacity (fuel units/day) |
+| `max_investment_mw` / `max_investment_MW` | list[float] | required | Maximum new capacity per link (MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
+| `investment_cost_per_mw` / `investment_cost_per_MW` | list[float] | required | Investment cost per link ($/MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
+| `loss_factor` | list[float] | required | Transmission: not used (losses come from `resistance_pu`). Fuel route: route `losses_fraction` (fraction per 100 km) |
 | `distance_km` | list[float] | required | Length per link (km) |
-| `cost_per_mw_km` | list[float] | required | Not used (expansion is costed with `investment_cost_per_MW`) |
+| `cost_per_mw_km` | list[float] | required | Transmission: not used (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
 | `reactance_pu` | list[float] | `[]` | Series reactance per link (p.u.). Empty: derived from length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`; 0.01 without a length |
 | `resistance_pu` | list[float] | `[]` | Series resistance per link (p.u.). Empty: 0 |
 | `waypoints` | list[list[dict]] | `[]` | GUI-only: per-link waypoints (list of {lat, lng}) for map polyline |
@@ -934,6 +936,8 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 |---|---|---|---|
 | `enabled` | bool | `true` | Enforce the budget |
 | `annual_budget` | float (≥ 0) | `1000000` | Annual budget (t CO₂/year) |
+
+The budget covers the system's own power plants. In a multi-system run each system keeps its own budget, enabled flag and `penalties.co2_budget_violation`: the dispatch adds one budget constraint per system over that system's nodes.
 
 ---
 

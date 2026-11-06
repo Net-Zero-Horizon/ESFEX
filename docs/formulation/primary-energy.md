@@ -98,7 +98,7 @@ where \(\phi_{f,p}\) is the fraction of period \(p\)'s hours under the disruptio
 
 ### Transport
 
-Fuel transport is modeled through explicit routes connecting pairs of nodes. Each route \(r\) has:
+Fuel transport is modeled through explicit routes connecting pairs of nodes. In a multi-system run, a `fuel_route` inter-system link adds two such routes (one per direction) between nodes of the two systems; see [Inter-System Links](../gui/inter-system-links.md#how-links-enter-the-model). Each route \(r\) has:
 
 - A **from-node** and **to-node**
 - A **distance** \(d_r\) (km)
@@ -342,7 +342,7 @@ Fuels are coupled only through:
 
 1. **Shared transport routes**: A single physical pipeline or road may carry multiple fuels, each with distinct capacity and loss parameters (via `fuel_params` on `TransportRoute`)
 2. **Generator fuel assignment**: Each generator is assigned a single fuel type; the fuel consumption is determined by the generator's heat rate/efficiency
-3. **Emission budgets**: All fuel-related emissions contribute to a common CO2 budget when configured
+3. **Emission budgets**: The power-plant emissions of every fuel count against the CO2 budget of the plant's system (dispatch constraint CO2-2, one budget per system in a multi-system run). Non-electric emissions (below) are reported but not budgeted.
 
 ### Fuel Configuration Example (Multi-Fuel)
 

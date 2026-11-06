@@ -82,6 +82,23 @@ class CO2BudgetConfig(BaseModel):
     annual_budget: float = Field(default=1e6, ge=0, description="tonnes CO2 per year")
 
 
+class SystemCO2Budget(BaseModel):
+    """One system's CO2 budget inside a merged multi-system run.
+
+    Built by the multi-system merge (not a YAML key): each original system
+    keeps its own ``co2_budget`` and ``penalties.co2_budget_violation``
+    over its own nodes (``first_node`` .. ``first_node + num_nodes - 1``,
+    0-indexed in the merged network).
+    """
+
+    system: str
+    first_node: int = Field(ge=0)
+    num_nodes: int = Field(ge=0)
+    enabled: bool = True
+    annual_budget: float = Field(ge=0, description="tonnes CO2 per year")
+    violation_penalty: float = Field(description="$/tCO2 over budget")
+
+
 class CriticalityPenalties(BaseModel):
     """Penalties by load criticality level."""
 
@@ -1854,6 +1871,12 @@ class SystemConfig(BaseModel):
     fuels: dict[str, FuelConfig] = {}
     penalties: PenaltiesConfig = PenaltiesConfig()
     co2_budget: CO2BudgetConfig = CO2BudgetConfig()
+    # Set by the multi-system merge: one budget per original system. When
+    # non-empty the dispatch uses these instead of ``co2_budget`` and
+    # ``penalties.co2_budget_violation``. Never written to YAML.
+    co2_budget_by_system: list[SystemCO2Budget] = Field(
+        default_factory=list, exclude=True,
+    )
     criticality_penalties: CriticalityPenalties = CriticalityPenalties()
 
     # Demand
@@ -2092,10 +2115,29 @@ class SystemConfig(BaseModel):
 
 
 class SystemLinkConfig(BaseModel):
-    """Inter-system transmission link configuration."""
+    """Inter-system link configuration.
+
+    ``link_type="transmission"`` (default): each connection becomes an
+    electrical line of the merged network. ``link_type="fuel_route"``: each
+    connection becomes a pair of primary-energy transport routes (one per
+    direction) for ``fuel``; the per-connection lists then mean
+    ``existing_capacity_MW`` = route capacity (fuel units/day),
+    ``cost_per_mw_km`` = transport cost ($/unit/km), ``loss_factor`` =
+    losses per 100 km and ``distance_km`` = route length. Route capacity
+    investment follows ``fuel_infrastructure`` of the fuel, so
+    ``max_investment_MW`` and ``investment_cost_per_MW`` are not used.
+    """
 
     systems: list[str] = Field(description="Pair of connected systems")
     connections: list[list[int]] = Field(description="Node pairs [[n1_sys1, n1_sys2], ...]")
+    link_type: Literal["transmission", "fuel_route"] = Field(
+        default="transmission",
+        description="Electrical line(s) or primary-energy fuel route(s)",
+    )
+    fuel: Optional[str] = Field(
+        default=None,
+        description="Fuel carried by a fuel_route link (key of primary_energy_sources)",
+    )
     existing_capacity_mw: list[float] = Field(alias="existing_capacity_MW")
     max_investment_mw: list[float] = Field(alias="max_investment_MW")
     investment_cost_per_mw: list[float] = Field(alias="investment_cost_per_MW")

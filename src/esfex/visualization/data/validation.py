@@ -6019,6 +6019,15 @@ def validate_inter_system_links(
                     "max_investment > 0"),
             ))
 
+        if lk.link_type == "fuel_route" and not (lk.fuel or "").strip():
+            issues.append(ValidationIssue(
+                severity="warning", category="Inter-System",
+                element_type="inter_system_link", element_id=lid,
+                message=(
+                    f"Link {lid}: fuel route has no fuel — the run "
+                    "ignores it; choose the fuel it carries"),
+            ))
+
         # Duplicate detection (same ordered endpoints)
         key = (lk.from_system, lk.from_node, lk.to_system, lk.to_node)
         if key in seen:

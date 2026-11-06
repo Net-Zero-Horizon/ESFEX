@@ -929,6 +929,26 @@ struct CostSegment
     marginal_cost::Float64
 end
 
+"""
+    CO2BudgetGroup
+
+An annual CO2 budget over a set of nodes. A merged multi-system run has one
+per system, so each system is held to its own budget and pays its own
+violation penalty.
+
+# Fields
+- `name::String`: System name (used in the constraint name).
+- `nodes::Vector{Int}`: 1-indexed nodes whose generators count against the budget.
+- `budget::Float64`: Annual budget (t CO2). `Inf` or `<= 0` = no budget.
+- `violation_penalty::Float64`: Cost per tonne over budget (scaled like the other penalties).
+"""
+struct CO2BudgetGroup
+    name::String
+    nodes::Vector{Int}
+    budget::Float64
+    violation_penalty::Float64
+end
+
 struct PowerSystemInput
     # System identification
     name::String
@@ -1125,6 +1145,10 @@ struct PowerSystemInput
     # Values are in [0,1] (1.0 = no outage). Empty/missing ⇒ no masking (identical
     # model). Generators fold their outage into `availability` instead.
     outage_masks::Dict{String, Any}
+
+    # Per-system CO2 budgets of a merged multi-system run. Empty = one budget
+    # over all nodes from `co2_budget` / `co2_budget_violation_penalty`.
+    co2_budget_groups::Vector{CO2BudgetGroup}
 end
 
 # Constructor with sensible defaults
@@ -1244,7 +1268,8 @@ function PowerSystemInput(;
     acopf_q_min_ratio::Float64 = 0.5,
     gen_q_limits::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
     gen_q_limits_min::Dict{Int, Vector{Float64}} = Dict{Int, Vector{Float64}}(),
-    outage_masks::Dict{String, Any} = Dict{String, Any}()
+    outage_masks::Dict{String, Any} = Dict{String, Any}(),
+    co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[]
 )
     return PowerSystemInput(
         name, year, base_year,
@@ -1331,7 +1356,8 @@ function PowerSystemInput(;
         acopf_q_min_ratio,
         gen_q_limits,
         gen_q_limits_min,
-        outage_masks
+        outage_masks,
+        co2_budget_groups
     )
 end
 
@@ -1422,9 +1448,9 @@ mutable struct PowerSystemVariables
     # Flexible demand variables (sector -> node × hour)
     flexible_demand_curtailed::Union{Dict{String, Matrix{VariableRef}}, Nothing}
 
-    # CO2 budget violation slack variable
-    # Single variable for total emissions exceeding budget
-    co2_budget_violation::Union{VariableRef, Nothing}
+    # CO2 budget violation slack (t), one per budget group with a budget
+    # (group index => variable; see `co2_budget_groups`)
+    co2_budget_violation::Union{Dict{Int, VariableRef}, Nothing}
 
     # Rooftop solar curtailment (node × hour)
     rooftop_curtailment::Union{Array{VariableRef, 2}, Nothing}
