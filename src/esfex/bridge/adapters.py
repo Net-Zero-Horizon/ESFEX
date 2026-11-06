@@ -1048,8 +1048,7 @@ class PowerSystemAdapter:
         when it is shorter, as in the master problem: a multi-year profile
         gives each year its own block, a one-year profile repeats.
         """
-        year_idx = max(0, int(self.year) - int(self.base_year))
-        start = (year_idx * HOURS_STD_YEAR + self.start_hour) % max(len(cached), 1)
+        start = absolute_start_hour(self.year, self.base_year, self.start_hour) % max(len(cached), 1)
         if resolution_hours > 1 and len(cached) > self.hours:
             resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
             start_idx = start // resolution_hours
