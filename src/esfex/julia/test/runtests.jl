@@ -429,6 +429,51 @@ import Ipopt
             @test size(res.gen_output) == (1, 1, H)
         end
 
+        @testset "sectoral shed bounded by each sector's demand" begin
+            # 100 MW of load, 40 MW of gas: 60 MW must be shed. The cheap
+            # sector holds only 30 MW, so the other 30 MW come out of the
+            # critical sector. The per-sector cap was dropped, and all 60 MW
+            # went to the cheap sector at its multiplier.
+            H = 1
+            gen = mkgen("Gas", "Non-renewable", "Gas", [40.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function shed_split(sec_dem)
+                input = PowerSystemInput(
+                    name = "sec", year = 2025, network = net, generators = [gen],
+                    batteries = BatteryConfig[], demand = reshape([100.0], H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    sectoral_demand = Dict(k => reshape([v], H, 1) for (k, v) in sec_dem),
+                    sectoral_criticality = Dict("cheap" => 1.0, "critical" => 1000.0),
+                    loss_of_load_penalty = 0.01,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                lol = Dict(k => value(v[1, 1]) for (k, v) in vars.loss_of_load_sectoral)
+                return lol, res
+            end
+            lol, res = shed_split(Dict("cheap" => 30.0, "critical" => 70.0))
+            @test res.load_shed_total ≈ 60.0 atol = 1e-6
+            @test lol["cheap"] ≈ 30.0 atol = 1e-6
+            @test lol["critical"] ≈ 30.0 atol = 1e-6
+            @test res.cost_breakdown.load_shedding_cost ≈
+                  0.01 * (30.0 * 1.0 + 30.0 * 1000.0) rtol = 1e-6
+            # Sectors covering only part of the node's demand: the rest is an
+            # unclassified remainder priced at VOLL, shed before the critical
+            # sector; the model stays feasible.
+            lol, res = shed_split(Dict("critical" => 50.0))
+            @test res.load_shed_total ≈ 60.0 atol = 1e-6
+            @test lol["critical"] ≈ 10.0 atol = 1e-6
+            @test res.cost_breakdown.load_shedding_cost ≈
+                  0.01 * (50.0 + 10.0 * 1000.0) rtol = 1e-6
+        end
+
         @testset "custom constraints (linear cap binds)" begin
             H = 2
             gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],

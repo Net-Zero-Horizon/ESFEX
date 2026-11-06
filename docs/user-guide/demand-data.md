@@ -234,8 +234,8 @@ systems:
 
 A YAML file that omits `criticality_penalties` gets the schema defaults. These are large multipliers on top of `LOSS_OF_LOAD`, so set `criticality_penalties` explicitly.
 
-!!! note "Sector priorities in operational dispatch"
-    In operational dispatch, the load shed at a node is split into per-sector amounts whose sum equals the node's shed load, but each sector's amount is **not** capped by that sector's demand. The optimizer therefore books all shed energy to the sector with the lowest multiplier, so unserved energy costs `LOSS_OF_LOAD × (lowest multiplier among the configured sectors)`. In the master problem's representative days, each sector's shed load is capped by its demand, so the priority order applies there.
+!!! note "Sector priorities"
+    The load shed at a node is split into per-sector amounts, each capped by that sector's demand, so the optimizer sheds the cheapest sector first and moves to a dearer one only when the cheaper one is fully shed. Demand that no sector accounts for (sector shares missing for a node) is shed at `LOSS_OF_LOAD` with multiplier 1. The master problem's representative days apply the same per-sector caps.
 
 ### Sector Fields
 
