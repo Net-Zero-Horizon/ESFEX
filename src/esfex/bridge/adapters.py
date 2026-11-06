@@ -4392,7 +4392,8 @@ class PrimaryEnergyAdapter:
         Get primary energy results after solving.
 
         Returns:
-            Dictionary with solution values
+            Dictionary with solution values (``total_fuel_cost``,
+            ``total_transport_cost``, ``total_loss_penalty`` in $)
         """
         ESFEX = get_esfex_module()
 
@@ -4415,9 +4416,10 @@ class PrimaryEnergyAdapter:
             'total_loss_of_supply': {k: np.array(v) for k, v in jl_result.total_loss_of_supply.items()},
             'final_storage_levels': {k: np.array(v) for k, v in jl_result.final_storage_levels.items()},
             'transport_flows': {k: np.array(v) for k, v in jl_result.transport_flows.items()},
-            'total_fuel_cost': float(jl_result.total_fuel_cost),
-            'total_transport_cost': float(jl_result.total_transport_cost),
-            'total_loss_penalty': float(jl_result.total_loss_penalty),
+            # Julia costs are in M$; results are in $ like every other cost
+            'total_fuel_cost': float(jl_result.total_fuel_cost) * COST_UNSCALE,
+            'total_transport_cost': float(jl_result.total_transport_cost) * COST_UNSCALE,
+            'total_loss_penalty': float(jl_result.total_loss_penalty) * COST_UNSCALE,
         }
 
     def get_debug_info(self) -> Dict[str, Any]:
