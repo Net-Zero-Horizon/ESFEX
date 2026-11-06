@@ -1259,23 +1259,21 @@ class PowerSystemAdapter:
                 from pathlib import Path
                 from esfex.utils.paths import resolve_project_data_file
                 config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
+                # A profile that cannot be read is an error: skipping here
+                # dropped the whole generator from the dispatch.
                 try:
                     avail_path = resolve_project_data_file(config_dir, gen.availability_file)
-                except ValueError:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Skipping generator %r: availability_file %r resolves "
-                        "outside config directory %s (refusing path traversal)",
-                        key, gen.availability_file, config_dir,
-                    )
-                    continue
+                except ValueError as e:
+                    raise ValueError(
+                        f"Generator {key!r}: availability_file "
+                        f"{gen.availability_file!r} resolves outside config "
+                        f"directory {config_dir} (refusing path traversal)"
+                    ) from e
                 if not avail_path.exists():
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "availability_file %r not found under %s",
-                        gen.availability_file, config_dir,
+                    raise FileNotFoundError(
+                        f"Generator {key!r}: availability_file "
+                        f"{gen.availability_file!r} not found under {config_dir}"
                     )
-                    continue
                 availability = load_availability_profile(
                     avail_path,
                     temporal_resolution_hours=resolution_hours,

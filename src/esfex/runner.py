@@ -187,6 +187,16 @@ class YearResults:
     cost_breakdown: Optional[dict] = None
 
 
+
+def _warn_flat_renewable(kind: str, key: str) -> None:
+    """Log that a renewable unit without an availability profile is modelled
+    as available in every hour (capacity factor 1.0)."""
+    logger.warning(
+        "%s %r is Renewable but has no availability_file: it is modelled as "
+        "available at full capacity in every hour (capacity factor 1.0). "
+        "Right for dispatchable renewables (biomass, geothermal); set a "
+        "profile for solar, wind and other variable sources.", kind, key)
+
 class Orchestrator:
     """
     Main orchestrator for ESFEX simulations.
@@ -2433,6 +2443,14 @@ class Orchestrator:
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
+        A configured ``availability_file`` that cannot be resolved or found
+        is an error (a generator used to be dropped from the dispatch, a
+        technology to crash with a KeyError). A renewable unit with no file
+        at all runs at capacity factor 1.0 in every hour, which is right for
+        dispatchable renewables (biomass, geothermal, reservoir hydro) but
+        not for solar or wind: it is logged once per unit
+        (:func:`_warn_flat_renewable`).
+
         Args:
             num_nodes: Number of nodes in the system
 
@@ -2440,6 +2458,7 @@ class Orchestrator:
             Dictionary mapping gen_key -> availability array
         """
         from esfex.io.demand import load_availability_profile
+        from esfex.utils.paths import resolve_project_data_file
         from pathlib import Path
 
         cache = {}
@@ -2449,84 +2468,53 @@ class Orchestrator:
         # Track unique files to avoid loading the same file multiple times
         file_cache = {}
 
-        for gen_key, gen in sys.generators.items():
-            avail_file = getattr(gen, 'availability_file', None)
-            if not avail_file:
-                continue
-
+        def _load(kind: str, key: str, avail_file: str):
             # Resolve consistently with demand paths: an absolute path (the
             # GUI writes availability profiles at absolute locations, and runs
             # from a temp config in /tmp) is trusted as-is; a relative path is
             # resolved under config_dir, still refusing `../` traversal from a
             # yaml authored elsewhere. See utils/paths.resolve_project_data_file.
-            from esfex.utils.paths import resolve_project_data_file
             try:
                 avail_path = resolve_project_data_file(config_dir, avail_file)
-            except ValueError:
-                logger.warning(
-                    "Skipping generator %r: availability_file %r resolves "
-                    "outside config directory %s (refusing path traversal)",
-                    gen_key, avail_file, config_dir,
-                )
-                continue
+            except ValueError as e:
+                raise ValueError(
+                    f"{kind} {key!r}: availability_file {avail_file!r} resolves "
+                    f"outside config directory {config_dir} (refusing path traversal)"
+                ) from e
             if not avail_path.exists():
-                logger.warning(
-                    "Skipping generator %r: availability_file %r not found "
-                    "under %s",
-                    gen_key, avail_file, config_dir,
+                raise FileNotFoundError(
+                    f"{kind} {key!r}: availability_file {avail_file!r} not found "
+                    f"under {config_dir}"
                 )
-                continue
-
-            # Use file path as cache key (same file = same data)
             file_key = str(avail_path)
-
-            if file_key in file_cache:
-                # Reuse already loaded data
-                cache[gen_key] = file_cache[file_key]
-            else:
-                # Load and cache
-                try:
-                    availability = load_availability_profile(
-                        avail_path,
-                        temporal_resolution_hours=1,  # Load at full resolution
-                        num_nodes=num_nodes
-                    )
-                    file_cache[file_key] = availability
-                    cache[gen_key] = availability
-                except Exception as e:
-                    logger.warning(f"Failed to load availability for {gen.name}: {e}")
-
+            if file_key not in file_cache:
+                file_cache[file_key] = load_availability_profile(
+                    avail_path,
+                    temporal_resolution_hours=1,  # Load at full resolution
+                    num_nodes=num_nodes,
+                )
+            cache[key] = file_cache[file_key]
             # Also index by the original availability_file string so that
             # virtual generators can look up by file path directly.
-            cache[avail_file] = cache[gen_key]
+            cache[avail_file] = cache[key]
+
+        for gen_key, gen in sys.generators.items():
+            avail_file = getattr(gen, 'availability_file', None)
+            if avail_file:
+                _load("Generator", gen_key, avail_file)
+            elif (gen.type == "Renewable"
+                  and not any(c > 0 for c in (gen.reservoir_capacity or []))
+                  and (any(p > 0 for p in gen.rated_power)
+                       or any(p > 0 for p in gen.invest_max_power))):
+                _warn_flat_renewable("Generator", gen_key)
 
         # Also preload technology availability profiles
         for tech_key, tech in sys.technologies.items():
             avail_file = getattr(tech, 'availability_file', None)
-            if not avail_file:
-                continue
-
-            avail_path = config_dir / avail_file
-            if not avail_path.exists():
-                avail_path = Path(avail_file)
-
-            file_key = str(avail_path.resolve())
-
-            if file_key in file_cache:
-                cache[tech_key] = file_cache[file_key]
-            else:
-                try:
-                    availability = load_availability_profile(
-                        avail_path,
-                        temporal_resolution_hours=1,
-                        num_nodes=num_nodes
-                    )
-                    file_cache[file_key] = availability
-                    cache[tech_key] = availability
-                except Exception as e:
-                    logger.warning(f"Failed to load availability for tech {tech.name}: {e}")
-
-            cache[avail_file] = cache[tech_key]
+            if avail_file:
+                _load("Technology", tech_key, avail_file)
+            elif tech.type == "Renewable" and any(p > 0 for p in tech.invest_max_power):
+                _warn_flat_renewable("Technology", tech_key)
 
         logger.debug(f"Loaded {len(file_cache)} unique availability files for {len(cache)} generators/technologies")
         return cache
