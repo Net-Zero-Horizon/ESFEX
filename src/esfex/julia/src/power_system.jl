@@ -3581,6 +3581,97 @@ function recover_uc_duals!(model, vars::PowerSystemVariables, input::PowerSystem
 end
 
 """
+    _copy_with_optimizer(model, input, what) -> Union{Tuple{Model, ReferenceMap}, Nothing}
+
+`copy_model` of a built model with a fresh optimizer configured like the
+original (log off). `nothing` (with a warning naming `what`) when the copy or
+the optimizer fails.
+
+`copy_model` warns (harmlessly) that it cannot copy the entries stashed in
+`model.ext` (cost_expressions, temporal_resolution_hours); they are only read
+on the original, so `ext` is emptied across the copy and restored.
+"""
+function _copy_with_optimizer(model, input::PowerSystemInput, what::String)
+    saved_ext = copy(model.ext)
+    empty!(model.ext)
+    copied = try
+        copy_model(model)
+    catch e
+        @warn "$(what): copy_model failed" exception=e
+        nothing
+    finally
+        merge!(model.ext, saved_ext)
+    end
+    copied === nothing && return nothing
+    new_model, reference_map = copied
+    optimizer = try
+        create_optimizer(
+            solver_name=input.solver_name,
+            threads=input.threads,
+            time_limit=input.time_limit,
+            gap=input.gap,
+            verbose=false,
+            solver_options=input.solver_options,
+        )
+    catch e
+        @warn "$(what): create_optimizer failed" exception=e
+        return nothing
+    end
+    set_optimizer(new_model, optimizer)
+    return new_model, reference_map
+end
+
+"""
+    compute_n1_security_cost!(model, input::PowerSystemInput) -> Float64
+
+Cost of N-1 security in a solved window: the objective with the N-1
+constraints minus the objective of the same model solved without them
+(`n1_security.compute_security_cost`). The model is copied (with everything
+added to it after `create_power_system`, such as the primary-energy block and
+user constraints) and the copy is re-solved with the N-1 shortfall and
+overload slacks free of charge, which makes every N-1 constraint inactive
+(all of them are soft). The original model and its solution are untouched.
+
+Stores the value in `model.ext[:n1_security_cost]` (read by
+`extract_solution`) and returns it, in solver cost units. Returns 0.0 when
+N-1 is off, the model has no solution, or the re-solve fails (with a
+warning). Both solves stop at the solver's gap, so in a MIP the difference
+is exact only up to that gap.
+"""
+function compute_n1_security_cost!(model, input::PowerSystemInput)
+    model.ext[:n1_security_cost] = 0.0
+    input.n1_security_enabled || return 0.0
+    has_values(model) || return 0.0
+    ce = get(model.ext, :cost_expressions, Dict{Symbol, Any}())
+    n1_cost = get(ce, :n1_security_shortfall_cost, nothing)
+    (n1_cost === nothing || isempty(n1_cost.terms)) && return 0.0
+
+    copied = _copy_with_optimizer(model, input, "N-1 security cost")
+    copied === nothing && return 0.0
+    new_model, reference_map = copied
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    free = AffExpr(0.0)
+    for (v, c) in n1_cost.terms
+        add_to_expression!(free, tres * c, reference_map[v])
+    end
+    @objective(new_model, Min, objective_function(new_model) - free)
+    try
+        optimize!(new_model)
+    catch e
+        @warn "N-1 security cost: re-solve without N-1 threw" exception=e
+        return 0.0
+    end
+    if !has_values(new_model)
+        @warn "N-1 security cost: re-solve without N-1 found no solution " *
+              "($(termination_status(new_model))); n1_security_cost left at 0"
+        return 0.0
+    end
+    cost = objective_value(model) - objective_value(new_model)
+    model.ext[:n1_security_cost] = cost
+    return cost
+end
+
+"""
     recover_uc_duals_via_copy(model, vars::PowerSystemVariables, input::PowerSystemInput) -> Union{Matrix{Float64}, Nothing}
 
 Recover locational marginal prices from a UC (MIP) solution without
@@ -3630,40 +3721,13 @@ function recover_uc_duals_via_copy(
     end
 
     # Clone the model + attach a fresh optimizer built with the same
-    # config the MIP used. ``copy_model`` returns a ``ReferenceMap`` we
-    # use to translate the original variable / constraint handles into
-    # their copies — both ``gen_status`` (for fix) and
-    # ``balance_constraints`` (for dual lookup) live on the original.
-    # ``copy_model`` warns (harmlessly) that it cannot copy the entries we stash
-    # in ``model.ext`` (cost_expressions, temporal_resolution_hours). The
-    # dual-recovery copy never reads them — they are used
-    # on the ORIGINAL model for the cost breakdown — so empty ``ext`` across the
-    # copy to keep the solver log clean, then restore it on the original.
-    saved_ext = copy(model.ext)
-    empty!(model.ext)
-    new_model, reference_map = try
-        copy_model(model)
-    catch e
-        merge!(model.ext, saved_ext)
-        @warn "UC dual recovery (copy): copy_model failed" exception=e
-        return nothing
-    end
-    merge!(model.ext, saved_ext)
-
-    optimizer = try
-        create_optimizer(
-            solver_name=input.solver_name,
-            threads=input.threads,
-            time_limit=input.time_limit,
-            gap=input.gap,
-            verbose=false,
-            solver_options=input.solver_options,
-        )
-    catch e
-        @warn "UC dual recovery (copy): create_optimizer failed" exception=e
-        return nothing
-    end
-    set_optimizer(new_model, optimizer)
+    # config the MIP used. The ``ReferenceMap`` translates the original
+    # variable / constraint handles into their copies — both ``gen_status``
+    # (for fix) and ``balance_constraints`` (for dual lookup) live on the
+    # original.
+    copied = _copy_with_optimizer(model, input, "UC dual recovery (copy)")
+    copied === nothing && return nothing
+    new_model, reference_map = copied
 
     # On the copy: relax ``gen_status`` to continuous and pin to MIP
     # incumbent values. The original model is untouched.
@@ -4095,11 +4159,9 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         end
 
         n1_binding = isempty(binding_names) ? nothing : binding_names
-
-        # Estimate N-1 security cost: difference between obj and unconstrained
-        # (we don't have the unconstrained value, so set to 0 — computed in Python)
-        n1_cost = 0.0
     end
+    # Objective with N-1 minus without (compute_n1_security_cost!; 0 when not run)
+    n1_cost = Float64(get(model.ext, :n1_security_cost, 0.0))
 
     # ── Extract granular cost breakdown ──
     cost_bd = nothing

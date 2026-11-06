@@ -482,7 +482,7 @@ When N-1 security is active, the following data is exported to the HDF5 output f
 | `gen_reserve_duals` | `[hours]` | Dual of generation N-1 reserve constraint (USD/MW) |
 | `trans_reserve_duals/` | Group | Duals of SCOPF transmission constraints per line/outage pair |
 | `binding_contingencies` | String array | Names of binding contingency constraints |
-| `security_cost` | Scalar attr | Incremental cost of N-1 security ($) |
+| `security_cost` | Scalar attr | Cost of N-1 security ($): objective with N-1 minus objective without it, with `compute_security_cost: true`; 0 otherwise |
 
 ### Configuration
 
@@ -497,7 +497,18 @@ n1_security:
   generation_enabled: true
   scopf_enabled: false            # true: LODF post-contingency limits instead of preventive N-1
   corrective_enabled: false       # SCOPF generation N-1 by ramp-limited re-dispatch
+  compute_security_cost: false    # true: re-solve each window without N-1 for n1_security_cost
 ```
+
+### Cost of N-1 security
+
+With `compute_security_cost: true`, every operational window that has N-1 constraints is solved a second time without them (`compute_n1_security_cost!`, `power_system.jl`): the solved model is copied, including the primary-energy block and user constraints, and the copy is re-solved with the N-1 shortfall and overload slacks free of charge, which makes all N-1 constraints inactive (they are soft). The difference
+
+\[
+C^{\text{N-1}} = z^{\text{with N-1}} - z^{\text{without N-1}}
+\]
+
+is the window's `n1_security_cost`: the re-dispatch, commitment and shortfall cost that security adds. The year's value is summed over its windows. In unit commitment both solves stop at the solver's `gap`, so the difference is exact only up to that gap. The extra solve roughly doubles the solve time; with the option off, `n1_security_cost` is 0.
 
 ### Computational Impact
 

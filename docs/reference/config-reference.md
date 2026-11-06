@@ -100,6 +100,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative); another value logs a warning |
 | `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used; another value logs a warning |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
+| `compute_security_cost` | bool | `false` | Re-solve each operational window without the N-1 constraints and report objective(with N-1) − objective(without) as `n1_security_cost`. Roughly doubles the solve time. Off: `n1_security_cost` stays 0. |
 | `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
 | `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | Studio SLD analysis only: how generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
 | `pi_screening_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: Performance Index threshold for contingency screening. 0 = no screening (analyze all contingencies). Higher values filter out low-impact contingencies. |
