@@ -7,7 +7,7 @@ Pydantic v2 models for the ESFEX configuration. YAML files are normally loaded w
 General behaviour:
 
 - **Extra keys are ignored.** No model sets `extra="forbid"`, so unknown keys are dropped without an error. [`load_config()`](config-loader.md) reports them: it logs each one and keeps the list in `ESFEXConfig.unknown_keys`.
-- **Aliases.** `SystemConfig`, `GeneratorConfig`, `TechnologyConfig` and `SystemLinkConfig` set `populate_by_name=True` and accept both the field name and its alias (for example `target_re_penetration` and `TARGET_RE_PENETRATION`, `availability_file` and `Availability`). `BatteryConfig` does not, so it only accepts the alias `Availability`; passing `availability_file=` drops the value.
+- **Aliases.** `SystemConfig`, `GeneratorConfig`, `BatteryConfig`, `TechnologyConfig` and `SystemLinkConfig` set `populate_by_name=True` and accept both the field name and its alias (for example `target_re_penetration` and `TARGET_RE_PENETRATION`, `availability_file` and `Availability`).
 - **Per-node lists.** Fields typed `list[...]` on equipment hold one value per node. Their length is not validated.
 
 ## Model Hierarchy
@@ -254,7 +254,7 @@ class BatteryConfig(BaseModel):
     invest_max_capacity: list[float] = [0.0]
     throughput_degradation_cost: Optional[list[float]] = None
     discharge_cost_curve: Optional[list[CostCurveConfig]] = None
-    availability_file: Optional[str] = None   # alias "Availability" (alias only)
+    availability_file: Optional[str] = None   # alias "Availability"
     bus_index: Optional[int] = None
     bus_id_per_node: Optional[dict[int, str]] = None
     # plus the generator-style per-node lists: life_time, initial_age,
