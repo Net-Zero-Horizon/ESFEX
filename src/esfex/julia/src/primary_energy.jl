@@ -186,7 +186,7 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
     # prorated based on the actual fraction of the year covered, not the window duration.
     # Using window duration (total_operational_hours) would allow each window to access
     # 100% of annual availability, leading to over-consumption across multiple windows.
-    scaling_base_hours = Float64(hours_in_year(input.year))  # Full year hours (8760 or 8784 for leap)
+    scaling_base_hours = Float64(hours_in_year(input.year))  # Full year hours (always 8760 for leap)
     # Absolute horizon hour at which the window's first step starts (hour 0 =
     # Jan 1 of base_year); disruption windows are given in these hours.
     window_hour0 = _window_start_hour(input)
