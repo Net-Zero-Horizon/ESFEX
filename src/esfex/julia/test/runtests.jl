@@ -1015,13 +1015,13 @@ import Ipopt
 
         @testset "development-mode transmission is bounded and charged" begin
             # tf_inv had no upper bound and no cost: the dispatch built any line for free.
-            function dev_line(inv_max, inv_cost)
+            function dev_line(inv_max, inv_cost; base_cap = 10.0)
                 H = 1; N = 2
                 gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [3.0e-5, 3.0e-5],
                             ones(H, N); nb = N, H = H)
                 buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
                          BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
-                line = TransmissionLineData("L12", 1, 2, 10.0, 0.1, 0.0, 0.0,
+                line = TransmissionLineData("L12", 1, 2, base_cap, 0.1, 0.0, 0.0,
                                             100.0, 220.0, 1, 50.0, "AC")
                 net = NetworkConfig(N, N, buses, [1, 2], [0.0 10.0; 10.0 0.0],
                                     [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
@@ -1053,6 +1053,12 @@ import Ipopt
             # like generator investment (1 h of 8760 here)
             _, _, _, obj2 = dev_line([25.0, 30.0], [1.0e-4, 4.0e-4])
             @test obj2 - obj ≈ 25.0 * 2.0e-4 / 8760 atol = 1e-10
+            # A 0-MW candidate line (e.g. a development-zone link) carries what
+            # is built on it; its flow used to be fixed to 0 as "negligible"
+            # while the investment was still bought.
+            inv, shed, _, _ = dev_line([25.0, 30.0], [1.0e-4, 2.0e-4]; base_cap = 0.0)
+            @test inv ≈ 25.0 atol = 1e-6
+            @test shed ≈ 25.0 atol = 1e-6
         end
 
         @testset "transmission corridor charged once, at its dearer end" begin

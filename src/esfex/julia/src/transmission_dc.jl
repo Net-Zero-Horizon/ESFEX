@@ -754,6 +754,27 @@ function dev_corridor_investment!(model, vars::PowerSystemVariables, input, i::I
 end
 
 """
+    dev_expandable_lines(transmission, network) -> Set{Int}
+
+Lines that development-mode investment can expand: the first line of each
+corridor whose ends both allow transference investment, the line
+`dev_corridor_investment!` gives the capacity to.
+"""
+function dev_expandable_lines(transmission::TransmissionDC, network)
+    out = Set{Int}()
+    seen = Set{Tuple{Int,Int}}()
+    for (ℓ, (i, j)) in enumerate(transmission.lines)
+        key = i < j ? (i, j) : (j, i)
+        key in seen && continue
+        push!(seen, key)
+        max_inv = min(get(network.transference_invest_max, i, 0.0),
+                      get(network.transference_invest_max, j, 0.0))
+        max_inv > 0 && push!(out, ℓ)
+    end
+    return out
+end
+
+"""
     charge_transfer_investment!(model, input, transfer_cost)
 
 The objective is built before the network: add the corridor investment cost
