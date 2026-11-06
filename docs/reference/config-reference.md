@@ -855,15 +855,15 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `storage_capacity` | list[float] | required | Storage capacity per node (units) |
 | `initial_storage_level` | list[float] | required | Initial storage fraction per node |
 | `min_storage_level` | float (0–1) | `0.1` | Minimum storage level (fraction) |
-| `storage_investment_cost` | float | required | $/unit storage capacity |
+| `storage_investment_cost` | float | required | $/unit storage capacity. Not used by any model: storage investment is set in `fuel_infrastructure` |
 | `transport_cost` | float | required | $/unit/km transport cost |
 | `transport_losses` | float | required | Loss fraction per 100 km |
 | `transport_transit_days_per_100km` | float (≥ 0) | `0` | Source->tank replenishment lead time, in days per 100 km of route distance. 0 = instantaneous transport. |
 | `disruption_start_hour` | int (≥ 0) | `0` | Supply-disruption window start, absolute horizon hour (hour 0 = 1 January of `base_year`, 8760 h per year), inclusive. |
 | `disruption_end_hour` | int (≥ 0) | `0` | Supply-disruption window end, absolute horizon hour (exclusive). end <= start disables the disruption. |
 | `disruption_availability` | float (0–1) | `1` | Availability fraction during the disruption window (0 = full cut, 1 = none). |
-| `max_storage_investment_per_node` | float | required | Maximum storage investment per node (units) |
-| `max_transport_investment_per_arc` | float | required | Maximum transport investment per arc (units) |
+| `max_storage_investment_per_node` | float | required | Maximum storage investment per node (units). Not used (see `fuel_infrastructure` expansion limits) |
+| `max_transport_investment_per_arc` | float | required | Maximum transport investment per arc (units). Not used (see `fuel_infrastructure` expansion limits) |
 
 ---
 
@@ -1045,7 +1045,7 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `invest_cost_conventional` | float | `1` | Multiplier on the investment cost of non-renewable technologies |
 | `invest_cost_transmission` | float | `1` | Multiplier on transmission investment cost |
 | `fuel_cost` | float | `1` | Multiplier on the fuel cost of generators (fuel-cost curves included) and technologies in the scenario's operation |
-| `maintenance_cost` | float | `1` | Multiplier on the maintenance cost of generators and technologies in the scenario's operation (the master does not charge battery maintenance) |
+| `maintenance_cost` | float | `1` | Multiplier on the maintenance cost of generators, batteries, technologies and battery technologies in the scenario's operation |
 | `discount_rate` | float | `1` | Multiplier on the discount rate used for the scenario's costs |
 | `demand_growth` | float | `1` | Annual demand factor: the scenario's demand in year *y* is the base demand × `demand_growth`^(y−1). 1.02 = +2 %/year relative to the base case |
 | `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost × `fuel_price_growth`^(y−1) |

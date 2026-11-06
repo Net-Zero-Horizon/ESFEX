@@ -1134,9 +1134,9 @@ SCENARIO_MULTIPLIER_ALIASES: dict[str, tuple[str, ...]] = {
 
 # Keys the Studio used to offer that cannot change the master's plan: it has
 # no start-up, electrolyzer, converter, fuel import, fuel shortfall or CO2
-# budget term, charges neither battery maintenance nor inter-system per-MW·km
-# flows, and its fuel storage/transport investments are not linked to any
-# constraint.
+# budget term, no fuel storage/transport investment, does not charge
+# inter-system per-MW·km flows, and battery maintenance has no multiplier of
+# its own (``maintenance_cost`` scales it with the other maintenance costs).
 SCENARIO_MULTIPLIERS_WITHOUT_EFFECT: frozenset[str] = frozenset({
     "gen_start_up_cost",
     "bat_maintenance_cost",
