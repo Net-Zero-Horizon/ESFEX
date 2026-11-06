@@ -879,7 +879,7 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
 
             # Electrolyzer
             electrolyzer_term = vars.electrolyzer_power !== nothing ?
-                vars.electrolyzer_power[i, t] : AffExpr(0.0)
+                electrolyzer_load(vars, i, t) : AffExpr(0.0)
 
             # ACDC converters
             acdc_term = AffExpr(0.0)

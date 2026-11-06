@@ -1828,6 +1828,11 @@ def convert_power_system_result(jl_result: Any) -> dict:
     if jl_result.reservoir_invest_capacity is not None:
         result["reservoir_invest_capacity"] = julia_to_py_array(jl_result.reservoir_invest_capacity)
 
+    # Electrolyzers [electrolyzer x bus x hour]: power (MW), hydrogen (kg/h)
+    if jl_result.electrolyzer_power is not None:
+        result["electrolyzer_power"] = julia_to_py_array(jl_result.electrolyzer_power)
+        result["electrolyzer_h2"] = julia_to_py_array(jl_result.electrolyzer_h2)
+
     # N-1 security results
     if jl_result.n1_gen_reserve_duals is not None:
         result["n1_gen_reserve_duals"] = julia_to_py_array(jl_result.n1_gen_reserve_duals)

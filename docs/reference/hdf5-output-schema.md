@@ -35,6 +35,8 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │       ├── reservoir_level/       # Reservoir water level
 │       ├── reservoir_spillage/    # Reservoir overflow
 │       ├── reservoir_pump/        # Pump-back power
+│       ├── electrolyzer_power/    # Electrolyzer power (if any electrolyzer)
+│       ├── electrolyzer_h2/       # Hydrogen produced (if any electrolyzer)
 │       ├── gen_investment_power/  # Generator investments
 │       ├── bat_investment_power/  # Battery power investments
 │       ├── bat_investment_capacity/ # Battery energy investments
@@ -391,6 +393,28 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 | Units | MW |
 | Description | Pump-back power consumed (demand-side load) |
 
+### Electrolyzer Data
+
+Written when the system has electrolyzers, one dataset per entry under `electrolyzers`, named by its `name` (or key).
+
+#### electrolyzer_power/{electrolyzer_name}
+
+| Property | Value |
+|----------|-------|
+| Shape | (num_nodes, hours) |
+| Type | float64 |
+| Units | MW |
+| Description | Electric power drawn by the electrolyzer (demand-side load) |
+
+#### electrolyzer_h2/{electrolyzer_name}
+
+| Property | Value |
+|----------|-------|
+| Shape | (num_nodes, hours) |
+| Type | float64 |
+| Units | kg/h |
+| Description | Hydrogen produced: power × 1000 × mean(`eff_at_rated`, `eff_at_min`) / `energy_per_kg_h2` |
+
 ### Investment Data
 
 #### gen_investment_power/{generator_name}
@@ -608,6 +632,8 @@ Virtual unit names start with `"Investment "`. They do not appear in `system_con
 | Reservoir level | `reservoir_level/{name}` | (N, H+1) | float64 | MWh-eq |
 | Reservoir spill | `reservoir_spillage/{name}` | (N, H) | float64 | MW-eq |
 | Reservoir pump | `reservoir_pump/{name}` | (N, H) | float64 | MW |
+| Electrolyzer power | `electrolyzer_power/{name}` | (N, H) | float64 | MW |
+| Electrolyzer H2 | `electrolyzer_h2/{name}` | (N, H) | float64 | kg/h |
 | Gen. investment | `gen_investment_power/{name}` | (N,) | float64 | MW |
 | Bat. invest. power | `bat_investment_power/{name}` | (N,) | float64 | MW |
 | Bat. invest. energy | `bat_investment_capacity/{name}` | (N,) | float64 | MWh |

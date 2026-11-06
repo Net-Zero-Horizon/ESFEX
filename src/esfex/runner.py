@@ -158,6 +158,9 @@ class YearResults:
     reservoir_spillage: Optional[np.ndarray] = None
     reservoir_pump: Optional[np.ndarray] = None
     reservoir_invest_capacity: Optional[np.ndarray] = None  # [gen x node]
+    # Electrolyzers [electrolyzer x node x hour], in config order
+    electrolyzer_power: Optional[np.ndarray] = None       # MW drawn
+    electrolyzer_h2: Optional[np.ndarray] = None          # kg/h of hydrogen
     # Derived metrics (computed post-optimization)
     capacity_factor: Optional[np.ndarray] = None          # [gen x node x hour]
     lcoe: Optional[np.ndarray] = None                     # [gen x node x hour]
@@ -4268,6 +4271,8 @@ class Orchestrator:
         all_reservoir_level = []
         all_reservoir_spillage = []
         all_reservoir_pump = []
+        all_electrolyzer_power = []
+        all_electrolyzer_h2 = []
         all_pe_results: list[dict] = []
         all_n1_gen_duals = []
         all_n1_binding: list[str] = []
@@ -4582,6 +4587,9 @@ class Orchestrator:
                 all_reservoir_spillage.append(_trim(window_result["reservoir_spillage"], keep_hours))
             if window_result.get("reservoir_pump") is not None:
                 all_reservoir_pump.append(_trim(window_result["reservoir_pump"], keep_hours))
+            if window_result.get("electrolyzer_power") is not None:
+                all_electrolyzer_power.append(_trim(window_result["electrolyzer_power"], keep_hours))
+                all_electrolyzer_h2.append(_trim(window_result["electrolyzer_h2"], keep_hours))
             if window_result.get("reservoir_invest_capacity") is not None:
                 last_reservoir_invest = window_result["reservoir_invest_capacity"]
             # Investment arrays: keep from last window (not time-varying)
@@ -4653,6 +4661,10 @@ class Orchestrator:
         reservoir_level = np.concatenate(all_reservoir_level, axis=-1) if all_reservoir_level else None
         reservoir_spillage = np.concatenate(all_reservoir_spillage, axis=-1) if all_reservoir_spillage else None
         reservoir_pump = np.concatenate(all_reservoir_pump, axis=-1) if all_reservoir_pump else None
+        electrolyzer_power = (np.concatenate(all_electrolyzer_power, axis=-1)
+                              if all_electrolyzer_power else None)
+        electrolyzer_h2 = (np.concatenate(all_electrolyzer_h2, axis=-1)
+                           if all_electrolyzer_h2 else None)
 
         # Combine power_flow dicts across windows
         combined_power_flow = {}
@@ -4730,6 +4742,8 @@ class Orchestrator:
             reservoir_level = self._aggregate_buses_to_nodes(reservoir_level, "sum")
             reservoir_spillage = self._aggregate_buses_to_nodes(reservoir_spillage, "sum")
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
+            electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
+            electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
             # Status variables: MAX across buses (1 if active at any bus)
             gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
             # Prices: MAX across buses (highest marginal price)
@@ -4783,6 +4797,8 @@ class Orchestrator:
             reservoir_spillage=reservoir_spillage,
             reservoir_pump=reservoir_pump,
             reservoir_invest_capacity=last_reservoir_invest,
+            electrolyzer_power=electrolyzer_power,
+            electrolyzer_h2=electrolyzer_h2,
             primary_energy=pe_merged,
             load_shed=total_load_shed,
             re_penetration=avg_re,
@@ -5612,6 +5628,9 @@ class Orchestrator:
                 "ev_v2g": solution.get('ev_v2g'),
                 "ev_soc": solution.get('ev_soc'),
                 "ev_loss": solution.get('ev_loss'),
+                # Electrolyzers [electrolyzer x bus x hour]: MW drawn, kg/h H2
+                "electrolyzer_power": solution.get('electrolyzer_power'),
+                "electrolyzer_h2": solution.get('electrolyzer_h2'),
                 # Investment arrays
                 "gen_investment": solution.get('gen_investment'),
                 "bat_investment_power": solution.get('bat_investment_power'),
@@ -7351,6 +7370,28 @@ class Orchestrator:
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW"
+
+            # --- Electrolyzers (per electrolyzer, config order) ---
+            if result.electrolyzer_power is not None:
+                elz_names = [getattr(e, "name", None) or key for key, e in
+                             (self.primary_system.electrolyzers or {}).items()]
+                for group_name, data, units, desc in (
+                    ("electrolyzer_power", result.electrolyzer_power, "MW",
+                     "Electrolyzer power drawn [nodes x hours] per electrolyzer"),
+                    ("electrolyzer_h2", result.electrolyzer_h2, "kg/h",
+                     "Hydrogen produced [nodes x hours] per electrolyzer"),
+                ):
+                    if data is None:
+                        continue
+                    elz_group = scenario.create_group(group_name)
+                    elz_group.attrs["description"] = desc
+                    for e, name in enumerate(elz_names):
+                        if e < data.shape[0]:
+                            ds = elz_group.create_dataset(
+                                self._h5safe(name), data=data[e],
+                                chunks=True, compression="gzip",
+                            )
+                            ds.attrs["units"] = units
 
             # --- Investments (scalar attrs) ---
             if result.investments:

@@ -157,7 +157,7 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `electrolyzer_max_b{b}_t{t}` | ELZ-1 | Power at most the rated power (0 where none is configured) |
+| `electrolyzer_max_b{b}_t{t}` | ELZ-1 | Power at most the rated power (0 where none is configured); `electrolyzer_max_e{e}_b{b}_t{t}` for the second and later electrolyzers |
 | `electrolyzer_ramp_up_b{b}_t{t}`, `electrolyzer_ramp_down_b{b}_t{t}` | ELZ-2 | `±(P[t] - P[t-1]) <= rated * min(1, ramp * Δt)`; omitted when the ramp is 0 |
 
 ### Demand & Sectoral

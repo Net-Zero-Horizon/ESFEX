@@ -116,7 +116,7 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
-| \(p^{\text{elz}}_{n,t}\) | \(n,t\) | \([0, \bar{P}^{\text{elz}}_n]\) | MW | Electrolyzer power consumption (`electrolyzer_power`), at most the rated power; consecutive steps differ by at most `ramp_up` / `ramp_down` × rated power × \(\Delta t\) (no limit when the ramp is 0) |
+| \(p^{\text{elz}}_{n,t}\) | \(n,t\) | \([0, \bar{P}^{\text{elz}}_n]\) | MW | Electrolyzer power consumption, summed over the system's electrolyzers (`electrolyzer_power[e,n,t]`); each one is at most the rated power; consecutive steps differ by at most `ramp_up` / `ramp_down` × rated power × \(\Delta t\) (no limit when the ramp is 0) |
 | \(\text{RC}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Rooftop solar curtailment (`rooftop_curtailment`) |
 
 ---

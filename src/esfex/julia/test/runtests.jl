@@ -1008,9 +1008,42 @@ import Ipopt
             model, vars = create_power_system(input)
             optimize!(model)
             @test string(termination_status(model)) == "OPTIMAL"
-            p = value.(vars.electrolyzer_power[1, :])
+            p = value.(vars.electrolyzer_power[1, 1, :])
             @test all(p .<= 5.0 + 1e-6)
             @test p ≈ [2.0, 4.0, 5.0] atol = 1e-6   # 12 MW gas − 10 MW load, then ramp
+        end
+
+        @testset "every electrolyzer is dispatched and reported" begin
+            # Only the first electrolyzer of a system reached the model. Two
+            # paying electrolyzers of 5 and 3 MW on 20 MW of spare gas: both
+            # run at rated power, and each reports its own power and H2.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [30.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            elz(rated, eff) = ElectrolyzerConfig([rated], [eff], [eff], 50.0, [0.0], [0.0],
+                                                 [0.0], [0.0], [0.0], [-5.0e-4], 0.0, [20.0])
+            input = PowerSystemInput(
+                name = "elz2", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([10.0, 10.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                electrolyzers = [elz(5.0, 0.7), elz(3.0, 0.5)],
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test size(res.electrolyzer_power) == (2, 1, H)
+            @test res.electrolyzer_power[1, 1, :] ≈ [5.0, 5.0] atol = 1e-6
+            @test res.electrolyzer_power[2, 1, :] ≈ [3.0, 3.0] atol = 1e-6
+            # kg/h = MW × 1000 × eff / (kWh/kg)
+            @test res.electrolyzer_h2[1, 1, 1] ≈ 5.0 * 1000 * 0.7 / 50 atol = 1e-6
+            @test res.electrolyzer_h2[2, 1, 1] ≈ 3.0 * 1000 * 0.5 / 50 atol = 1e-6
+            @test res.total_generation ≈ 2 * (10.0 + 8.0) atol = 1e-6
         end
 
         @testset "development-mode transmission is bounded and charged" begin
