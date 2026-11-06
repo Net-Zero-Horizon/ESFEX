@@ -3652,15 +3652,19 @@ def _apply_small_gen_absorb(
 def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
     """Plausibility and operability checks (``network_validation``).
 
-    * Probable duplicate plants (same normalised name, or same fuel within
-      15 km), e.g. one unit imported from both OSM and GEM.
+    * Probable duplicate plants (within 15 km and the same normalised name,
+      or the same fuel and a shared distinctive name word), e.g. one unit
+      imported from both OSM and GEM. Per-node instances of one generator
+      key are not compared.
     * Reserve margin above 100 % of peak demand (info: plausible with a lot
       of variable renewables, otherwise capacity is likely over-counted).
     * Deliverability: a max-flow from generator buses to demand buses through
-      line, transformer and converter ratings; demand that cannot be reached
-      at peak points to an under-sized corridor.
+      line, transformer and converter ratings, each node's peak split over
+      its own demand buses; demand that generation could serve but the
+      network cannot reach at peak points to an under-sized corridor.
 
-    Capacity below peak demand is reported by the generation check.
+    Capacity below peak demand is reported by the generation check, not as
+    a bottleneck.
     """
     from esfex.visualization.data.network_validation import validate_network
 
@@ -3704,7 +3708,8 @@ def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
                 f"Transmission bottleneck: only {feas['deliverable_mw']:.0f} of "
                 f"{feas['peak_demand_mw']:.0f} MW peak demand can be delivered "
                 f"through the line/transformer ratings; "
-                f"{feas['unservable_mw']:.0f} MW is cut off behind "
+                f"{feas['unservable_mw']:.0f} MW that the installed "
+                "generation could serve is cut off behind "
                 "under-sized corridors (max-flow check)"),
         ))
     return issues
