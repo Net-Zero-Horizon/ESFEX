@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Added
 
+- **Electrolyzer hydrogen fills the hydrogen tank.** With the primary-energy
+  model on and a fuel source named `Hydrogen`, the hydrogen of every
+  dispatch electrolyzer now flows into that fuel's tank at its node (in
+  tonnes, scaled by the tank's storage efficiency like any inflow), so
+  hydrogen-fuelled units and non-electric hydrogen demand run on it. The
+  electrolyzers used to be a plain load whose hydrogen was only reported,
+  and hydrogen units drew on fuel supply or the shortfall penalty. The unused
+  `PrimaryEnergyInput` fields `h2_production_hourly` and `electrolyzer_config`
+  must now be `nothing` (an error says so), and the primary-energy block no
+  longer carries its own unused electrolyzer variables.
+
 - **Every electrolyzer is dispatched, and its results are exported.** Only
   the first entry under `electrolyzers` reached the dispatch; the others
   were ignored, and no electrolyzer result was kept. All entries are now
@@ -52,6 +63,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   field, which was saved but dropped on load, now has this effect.
 
 ### Changed
+
+- **The master problem has no fuel-infrastructure investment.** Its fuel
+  storage and transport investment variables had a cost but no effect (no
+  constraint used them and the adapter passed no routes); fuel storage and
+  transport are built by the dispatch's primary-energy block. They are
+  removed with `PrimaryEnergyInvestmentConfig`, the `pe_configs` /
+  `transport_routes` fields of `MasterProblemInput` and the
+  `add_primary_energy_investment_*` functions. The source fields
+  `storage_investment_cost`, `max_storage_investment_per_node` and
+  `max_transport_investment_per_arc` stay accepted but are documented as
+  unused.
 
 - **Each system keeps its own CO2 budget.** When several systems were
   simulated together, the merged system took the first system's
@@ -347,6 +369,178 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   subsystems are kept as built from OpenStreetMap.
 
 ### Fixed
+
+- **Reservoir, battery-spillage, inertia, transfer-margin and N-1 results are
+  kept.** The rolling-horizon window result left them out, so
+  `YearResults.reservoir_level` / `reservoir_spillage` / `reservoir_pump` /
+  `reservoir_invest_capacity`, `bat_spillage`, `loss_of_inertia`,
+  `transfer_margin` and the N-1 duals and binding contingencies were always
+  empty and their HDF5 groups (`reservoir_*`, `battery_spillage`,
+  `loss_of_inertia`, `transfer_margin`, `n1_security/`) were never written.
+  They are now forwarded, trimmed to each window's committed steps like the
+  other series, summed from buses to nodes, and expanded back to the
+  original buses under network reduction. `reservoir_level` holds the level
+  at the start of each hour (`(nodes, hours)`, like `battery_soc`); the
+  reservoir capacity built by the dispatch is written as
+  `reservoir_invest_capacity/{name}`. `n1_security_cost` is still 0: the
+  model does not compute the incremental cost of N-1 (the shortfall penalty
+  is `cost_breakdown/n1_security_shortfall_cost`), which the docs now say.
+- **Primary-energy results over rolling-horizon windows.** Each window's
+  per-period fuel supply, non-electric demand served, fuel shortfall and
+  transport flows were added element-wise to the other windows', overlap
+  included, and the fuel, transport and shortfall costs were summed in full
+  (about twice the real values with 48-h windows and a 24-h overlap); a last
+  window with fewer fuel periods than the others stopped the run with a
+  broadcast error. The year now keeps only each window's committed steps,
+  like the dispatch arrays, re-binned into periods of
+  `primary_energy_resolution` hours from the start of the year, and the
+  window costs count in proportion to those steps.
+- **Electrolyzers with the same name no longer stop a run.** The
+  multi-system merge keeps electrolyzer names, so two systems with an
+  electrolyzer called `Elz` made the HDF5 export fail with "name already
+  exists" after the first year. Electrolyzer datasets now get unique names
+  like every other per-unit group.
+- **One suffix for homonymous units.** The runner's unit lists suffixed a
+  repeated name with ` (1)`, the HDF5 writer with `_2`, and the financial
+  analysis looked for ` (N)`. Every place now uses ` (1)`, ` (2)`, ...: two
+  generators named `Gas` are written as `Gas` and `Gas (1)` (files written
+  before used `Gas_2`).
+- **`--start-year` only relabels.** The Feb 29 rows dropped from leap-year
+  demand, availability and inflow data followed the relabelled calendar, so
+  relabelling 2027-2028 data as 2024 dropped 24 hours of 2027 and kept
+  29 Feb 2028. They now always follow the data's own calendar
+  (`date_start`).
+- **`esfex.solve_dispatch(config, year=Y)` dispatches data year Y.** It ran
+  the first data year labelled Y and moved the outage base year to Y, so
+  scheduled interruptions given in horizon hours of year Y never applied. It
+  now dispatches the (Y − year of `date_start`)-th year of the data with the
+  run's own outage base year; a year before `date_start` raises
+  `ValueError`. `Orchestrator.run()` takes a new `dispatch_years` argument
+  (the same as the `ESFEX_OPS_ONLY_YEARS` debug variable) for this.
+- **Reservoir inflows above 1 MW-eq were clipped to 1.** Inflow files were
+  read with the availability loader, which clips capacity factors to
+  [0, 1]. A new `load_inflow_profile` reads them as given (a missing file is
+  an error instead of a flat 1.0).
+- **The master problem reads the same profiles as the dispatch.** It loaded
+  availability and inflow files itself without `date_start`, so multi-year
+  leap-year data kept Feb 29 in the master while the dispatch dropped it.
+  It now uses the dispatch's preloaded profiles (and the data calendar for
+  any it reads from disk). Each myopic one-year master read the first year
+  of a multi-year profile; it now reads its own year's block, and the TSAM
+  clustering of every year reads that year's block too, wrapping around a
+  shorter profile like the dispatch instead of falling back to the first
+  year.
+- **Initial RE share.** A renewable unit without an availability profile
+  counted as 0 in the initial RE share (and in the cap on the operational RE
+  target), while the dispatch runs it at full capacity. Both now count it
+  at full capacity, and the cap reads the year's own profile block.
+- **Development-zone emissions count against their system's CO2 budget.**
+  In a multi-system run zone nodes are appended after every system's nodes,
+  so they belonged to no system's budget. Each zone node now joins the
+  system of the bus it connects to.
+
+- **Fuel in transit is no longer lost between rolling-horizon windows.**
+  Fuel shipped in a window's committed steps that arrived after them was
+  paid but never delivered, and the next window saw no shipment made
+  before it: with the default 48 h / 24 h windows and a transit of a day or
+  more, a node fed only by a route was short at the start of every window.
+  The fuel still in transit at the commit point is now carried to the next
+  window (and from a year's last window to the next year) with the tank
+  levels, and arrives there in its scheduled step.
+- **A unit at several buses of a node burns the node's fuel once.** The
+  fuel coupling was one constraint per bus against the same node fuel, so
+  a unit at two buses (for example a technology built at two buses) only
+  bought fuel for its largest bus and the rest of its output was free. The
+  output is now summed over the node's buses.
+- **Tank dispatch rate.** `max_hourly_dispatch_rate_fraction_of_capacity`
+  forced zero draw at nodes without a tank (all their use ran on the
+  shortfall penalty) and was applied per time step instead of per hour. It
+  now applies only where there is a tank and is multiplied by the step
+  length.
+- **The master charges battery maintenance.** The dispatch charges a
+  battery's `maintenance_cost` on every MWh charged and discharged; the
+  master did not, and charged battery technologies neither maintenance nor
+  throughput cost. All are now in the representative-day cost (monolithic,
+  TSAM, multi-system, stochastic and Benders), and the stochastic
+  `maintenance_cost` multiplier scales them too.
+- **Candidate renewables' curtailment penalty is scaled to the year.** In
+  the master it was added once per representative day instead of × 365 /
+  days × step length (and without the step length under TSAM), so it was
+  almost free next to the other operating costs.
+- **Life extension in multi-system runs takes the unit's own candidate.**
+  In a merged run every key is `{system}__{key}` and per-node costs are 0 at
+  the other systems' nodes, so the named technology never matched and the
+  first system's candidate was used: units of the other systems kept a
+  life-extension cost of 0, with no warning. The candidate now comes from the
+  unit's own system, and a unit whose candidate has no cost at one of its
+  nodes is named in a warning.
+
+- **The Studio no longer overwrites a configuration opened with
+  `esfex studio -c`.** Autosave wrote straight into the `-c` (or `-o`)
+  file, without a prompt, and cleared the unsaved-changes mark, so the CLI
+  then reported "closed without saving". Worse, the `-c` file is loaded only
+  once the map is ready; a Save, the close prompt or an autosave before that
+  replaced the whole file with an empty `System_1`. Autosave now writes only
+  `~/.cache/esfex/autosave.yaml` (also after File > Open) and leaves the
+  unsaved-changes mark on; Save, Export As and Export Project are disabled
+  until the `-c` project has loaded, and closing does not offer to save it
+  meanwhile; and an empty project (no system, or only an empty placeholder
+  system) is never saved over a file that defines systems.
+- **`esfex studio -c a/cfg.yaml -o b/out.yaml` keeps the data paths
+  working.** Relative demand, availability and inflow paths were copied
+  unchanged, so `out.yaml` pointed at files that do not exist next to it.
+  Saving to another folder now rewrites them relative to the new file when
+  the data lies under its folder, and as absolute paths otherwise (also for
+  the autosave copy and the temporary config of a Studio run). Export
+  Project resolves them against the folder the configuration was loaded
+  from, not the `-o` folder.
+- **Realism check: the transmission bottleneck uses each node's own peak and
+  no longer blames the grid for missing generation.** The max-flow test split
+  the system peak by each bus's demand fraction divided by the sum of all
+  fractions (which add up to 1 per node), so the demand of every node was
+  wrong; and when installed capacity was below the peak (a greenfield
+  project) the shortfall was reported as a transmission bottleneck. Each
+  node's peak is now split over its own demand buses, and only demand the
+  installed generation could serve but the network cannot deliver is
+  reported; capacity below the peak stays a Generation finding.
+- **Realism check: no more "duplicate plants" made of one key's per-node
+  instances.** `gas_n1` … `gas_n8` share their key's name and were grouped
+  as one plant counted eight times (Cuba showed groups of up to 57 units).
+  Units now match only within 15 km, never within one generator key, and a
+  key with instances in several nodes is not compared; besides an identical
+  name, same-fuel neighbours must share a distinctive name word, so two
+  different "Parque Fotovoltaico" plants or unnamed OSM turbines next to each
+  other are not flagged.
+- **The interruptions calendar covers the whole simulation horizon.** It
+  spanned one year (8760 h) and clamped every edit to it, so a window could
+  not be placed after the base year, although outage hours count over the
+  whole horizon; and its base year was always 2025. It now starts on
+  1 January of the year of `date_start` and spans the 25 years a Studio run
+  simulates (more if a window is already scheduled later), with a year axis
+  for multi-year horizons.
+- **A power line and a fuel route between the same two nodes are no longer
+  reported as duplicate inter-system links.** The duplicate check ignored
+  the link type (and the fuel); it now compares links of the same kind only.
+- **Deleting the last inter-system link or the last stochastic scenario now
+  persists.** An empty list was not written, so the loaded file's links or
+  scenarios came back on the next load. The saved file now holds exactly
+  the Studio's links and scenarios, `[]` included.
+- **The Risk & Resilience Workbench's climate and hazard scenarios are
+  saved.** Apply stored them on attributes the global settings did not have,
+  and the serializer never wrote them, so they were lost on save. They are
+  now kept in the global settings, saved as `risk.climate_scenarios` /
+  `risk.hazard_scenarios` and read back on load (keys the schema does not
+  know are dropped; climate probabilities are rescaled to sum to 1 so the
+  file still loads).
+- **Studio risk defaults match the schema.** A new project used a base
+  temperature of 18 °C and heating / cooling coefficients of 0, while the
+  `risk:` block defaults to 24 °C, 0.5 and 2.5 %/°C; the Studio now uses the
+  schema's values (also in the Workbench's climate tab), and the
+  coefficient labels say %/°C instead of MW/HDD and MW/CDD.
+- **Grid Builder demand step: no crash when no forecast or no node is
+  available.** A loop variable named `tr` hid the translation function, so
+  the "run the demand forecast first" and "no nodes" messages raised
+  `UnboundLocalError`.
 
 - **Inter-system fuel routes are fuel routes.** A fuel route traced in the
   Studio between two systems was saved as an electrical link (no type, no
