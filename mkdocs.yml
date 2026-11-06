@@ -123,6 +123,7 @@ nav:
     - Element Forms: gui/element-forms.md
     - System Management: gui/system-management.md
     - Inter-System Links: gui/inter-system-links.md
+    - Single-Line Diagram: gui/sld-dynamic-analysis.md
     - Global Settings: gui/global-settings.md
     - Scripting & Automation: gui/scripting.md
     - Plugin Management: gui/plugins.md
@@ -130,10 +131,10 @@ nav:
     - Overview: workflows/index.md
     - Solar PV Assessment: workflows/solar-pv.md
     - Wind Assessment: workflows/wind.md
-    - OTEC Assessment: workflows/otec.md
+    - OTEC Studio: workflows/otec.md
     - Rooftop Solar: workflows/rooftop-solar.md
-    - Demand Distribution: workflows/demand-distribution.md
-    - Grid Auto-Mapping: workflows/grid-auto-mapping.md
+    - Demand Forecast & Distribution: workflows/demand-distribution.md
+    - Grid Builder: workflows/grid-auto-mapping.md
     - EV & V2G Assessment: workflows/ev-v2g.md
     - Financial Analysis: workflows/financial-analysis.md
   - Mathematical Formulation:
@@ -178,3 +179,4 @@ nav:
     - Development Setup: contributing/development-setup.md
     - Testing: contributing/testing.md
     - Julia Development: contributing/julia-development.md
+    - Plugin Development: contributing/plugin-development.md

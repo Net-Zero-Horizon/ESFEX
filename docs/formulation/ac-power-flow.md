@@ -1,6 +1,6 @@
 # AC Optimal Power Flow
 
-The ACOPF module implements multiple AC optimal power flow formulations as JuMP constraints, integrated into the ESFEX operational dispatch model. It is implemented in `transmission_acopf.jl` and supports four working formulations: SOC relaxation, QC relaxation, Polar NLP, and Rectangular NLP.
+The ACOPF module implements AC optimal power flow formulations as JuMP constraints in the ESFEX operational dispatch model. It is implemented in `transmission_acopf.jl` and supports five formulations: SOC, QC and SDP relaxations, Polar NLP and Rectangular NLP. ACOPF applies to operational dispatch only; the master problem and the Benders subproblems always use the [DC formulation](dc-power-flow.md).
 
 ## Overview
 
@@ -11,17 +11,15 @@ The DC power flow approximation (see [DC Power Flow](dc-power-flow.md)) lineariz
 - **Apparent power** line limits (\(P^2 + Q^2 \leq S_{max}^2\))
 - **Accurate loss** representation through full admittance modeling
 
-ESFEX provides four working formulations, selectable via `power_flow_mode`:
+The formulation is selected with the system's `power_flow_mode`:
 
 | Mode | Formulation | Type | Variables |
 |------|-------------|------|-----------|
 | `acopf_soc` | SOC Relaxation | Convex (relaxed) | \(w, w^r, w^i\) |
 | `acopf_qc` | QC Relaxation | Convex (relaxed, tighter) | \(w, w^r, w^i\) |
+| `acopf_sdp` | SDP Relaxation | Convex (relaxed, tightest) | \(w, w^r, w^i\) + full \(W\) matrix |
 | `acopf_polar` | Polar NLP | Exact (nonlinear) | \(V, \theta\) |
 | `acopf_rect` | Rectangular NLP | Exact (nonlinear) | \(e, f\) |
-
-!!! note "SDP Formulation"
-    A fifth formulation (`acopf_sdp`) is implemented but currently blocked in practice. It requires an SDP-capable solver such as MOSEK (commercial) or SCS/CSDP. Extreme coefficient ranges in real-world networks cause SCS and Clarabel to report false `DUAL_INFEASIBLE` status. MOSEK handles these ranges but requires a license.
 
 ## Formulations
 
@@ -43,6 +41,8 @@ The Second-Order Cone (SOC) relaxation [**[2]**](../reference/bibliography.md#re
 w_{i,t} \cdot w_{j,t} \geq (w^r_{l,t})^2 + (w^i_{l,t})^2 \quad \forall l, t
 \tag{SOC-1}
 \]
+
+It is written as a rotated second-order cone, \(\left(\tfrac{1}{2} w_{i,t},\, w_{j,t},\, w^r_{l,t},\, w^i_{l,t}\right) \in \mathcal{Q}_r\) (`soc_{l}_{t}`), which conic solvers take natively. The slack bus has \(w = 1\). The SOC relaxation itself has no angle-difference limit.
 
 The inequality relaxation makes the feasible set convex. The solution is a lower bound on the true AC-OPF cost. Power flow expressions are affine in \(w, w^r, w^i\) (see [Power Flow Expressions](#power-flow-expressions)).
 
@@ -80,7 +80,18 @@ Angle difference limits via tangent:
 \tag{QC-4}
 \]
 
-The QC relaxation is strictly tighter than SOC — it excludes more of the non-physical region while remaining convex.
+The QC relaxation is strictly tighter than SOC — it excludes more of the non-physical region while remaining convex. Constraint names: `qc_wr_lb/ub_{l}_{t}` (QC-1), `qc_wi_lb/ub_{l}_{t}` (QC-2), `qc_cos_env_{l}_{t}` (QC-3), `qc_angle_ub/lb_{l}_{t}` (QC-4).
+
+### SDP Relaxation
+
+The semidefinite relaxation keeps the per-branch SOC constraints (SOC-1) and adds, for each hour, a positive-semidefinite constraint on the full voltage-product matrix \(W = W_R + j W_I\) in its real form:
+
+\[
+\begin{bmatrix} W_R & -W_I \\ W_I & W_R \end{bmatrix} \succeq 0 \quad \forall t
+\tag{SDP-1}
+\]
+
+(`psd_{t}`). The diagonal holds \(w_i\); off-diagonal entries of bus pairs joined by a branch are that branch's \(w^r, w^i\), and the other pairs get free variables constrained only by SDP-1. The matrix is \(2N \times 2N\) per hour, so the model grows quickly: a warning is logged above 30 buses. Like SOC, the SDP relaxation has no angle-difference limit.
 
 ### Polar NLP
 
@@ -91,9 +102,9 @@ The exact formulation using voltage magnitude \(V\) and angle \(\theta\) variabl
 | Variable | Definition | Bounds |
 |----------|-----------|--------|
 | \(V_{i,t}\) | Voltage magnitude at bus \(i\) | \([V_{min},\; V_{max}]\) |
-| \(\theta_{i,t}\) | Voltage angle at bus \(i\) | Unbounded |
+| \(\theta_{i,t}\) | Voltage angle at bus \(i\) | \([-\pi,\; \pi]\) |
 
-Power flow expressions involve trigonometric functions of angle differences (\(\cos(\theta_i - \theta_j)\), \(\sin(\theta_i - \theta_j)\)), making the problem nonlinear and nonconvex. Angle difference limits are enforced directly:
+Power flow expressions involve trigonometric functions of angle differences (\(\cos(\theta_i - \theta_j)\), \(\sin(\theta_i - \theta_j)\)), making the problem nonlinear and nonconvex. Angle difference limits are enforced directly (`angle_ub_{l}_{t}`, `angle_lb_{l}_{t}`):
 
 \[
 |\theta_{i,t} - \theta_{j,t}| \leq \theta_{max} \quad \forall (i,j) \in \mathcal{L}, t
@@ -120,7 +131,7 @@ V_{min}^2 \leq e_{i,t}^2 + f_{i,t}^2 \leq V_{max}^2 \quad \forall i \neq \text{s
 \tag{RECT-1}
 \]
 
-Angle difference limits are expressed via cross and dot products of the voltage components:
+(`vm_lb_{i}_{t}`, `vm_ub_{i}_{t}`). Angle difference limits are expressed via cross and dot products of the voltage components (`angle_ub_rect_{l}_{t}`, `angle_lb_rect_{l}_{t}`):
 
 \[
 |f_i e_j - e_i f_j| \leq \tan(\theta_{max}) \cdot (e_i e_j + f_i f_j) \quad \forall (i,j) \in \mathcal{L}, t
@@ -149,19 +160,19 @@ where \(V_i\) and \(V_j\) are the complex bus voltages. The admittance elements 
 | \(Y_{tt}\) | \(g_s + jb_s + jb_{sh}/2\) |
 | \(Y_{tf}\) | \(-(g_s + jb_s)/\tau\) |
 
-For transmission lines, \(\tau = 1\). For transformers, \(\tau\) is the tap ratio.
+For transmission lines, \(\tau = 1\); a line with \(k\) circuits uses \(r/k\), \(x/k\), \(k \cdot b_{sh}\) and capacity \(k\) × `capacity_mw` (MW taken as MVA). For transformers, \(\tau\) is the tap ratio and there is no shunt term.
 
 The real and imaginary parts of each admittance element (\(g_{ff}, b_{ff}, g_{ft}, b_{ft}\), etc.) are precomputed in the `ACOPFBranch` struct and used directly in the power flow expressions.
 
 ### Reactance Clamping
 
-Very short lines or bus-ties can have near-zero reactance, producing extreme admittances that cause numerical issues. All branch reactances are clamped to a minimum value:
+Very short lines or bus-ties can have near-zero reactance, producing extreme admittances that cause numerical issues. Transmission line reactances are clamped to a minimum value:
 
 \[
 |x| \geq x_{min} \quad (\text{default: } 0.01 \text{ p.u.})
 \]
 
-This limits the maximum admittance magnitude to \(|b| \leq 1/x_{min} = 100\) p.u. per branch. Configured via `min_reactance_pu`.
+This limits the maximum admittance magnitude to \(|b| \leq 1/x_{min} = 100\) p.u. per line. Configured via `min_reactance_pu`. Transformers are not clamped; a transformer with zero reactance uses \(0.99 \times\) `impedance_pu`.
 
 ### Transformer Tap Ratio Normalization
 
@@ -180,7 +191,7 @@ Default bounds: \(\tau_{min} = 0.5\), \(\tau_{max} = 2.0\). Configured via `tap_
 
 The active and reactive power flows on each branch are expressed differently depending on the formulation, but all use the same precomputed admittance coefficients.
 
-### W-Space (SOC / QC)
+### W-Space (SOC / QC / SDP)
 
 Power flow expressions are **affine** in the W-space variables — no trigonometric or quadratic terms:
 
@@ -252,9 +263,11 @@ Active power balance at each bus \(n\) and hour \(t\). The injection terms are i
 where \(S_{base}\) is the system base power (MVA) and \(P_{flow,l,t}\) is the per-unit active power flow from bus \(n\) on branch \(l\), computed via the formulation-specific expressions. Both sides are in MW, keeping coefficient ratios manageable for the solver.
 
 !!! note "Injection Terms"
-    The active KCL includes the same injection terms as the DC formulation: generator output, battery discharge/charge, EV V2G/charging, electrolyzer consumption, AC/DC and frequency converter flows, reservoir pumping, rooftop solar generation/curtailment, load shedding, and static/dynamic reserves.
+    The active KCL includes the same injection terms as the DC formulation: generator output, battery discharge/charge, EV V2G/charging, electrolyzer consumption, AC/DC and frequency converter flows, reservoir pumping, rooftop solar generation/curtailment and load shedding. Reserves are free capacity, not energy, and are not in the KCL.
 
-Implemented in `add_acopf_power_balance!()`.
+Constraint name: `kcl_p_{n}_{t}`. Implemented in `add_acopf_power_balance!()`.
+
+As in the DC model, load shedding is bounded by the demand on its own bus, \(LS_{n,t} \leq \max(D_{n,t} \cdot \phi_n, 0)\), with the bound at 0 on connection buses (`max_load_shed_acopf_b{n}_t{t}`), and rooftop curtailment by the available rooftop generation of the node (`rooftop_curt_ub_n{i}_{t}`).
 
 ### AC-2: Reactive Power Balance (KCL)
 
@@ -271,11 +284,11 @@ where the reactive load is estimated from the active load using the load power f
 Q^{load}_{n,t} = D_{n,t} \cdot \phi_n \cdot \tan\!\left(\arccos(pf_{load})\right)
 \]
 
-The slack variables \(Q^{slack+}\) and \(Q^{slack-}\) absorb reactive power mismatch with a penalty cost \(c_Q\) ($/MVAr) added to the objective. This is necessary because in SOC/QC relaxations, the relaxed voltage products may not correspond to a physically realizable voltage profile, making exact reactive balance infeasible.
+(`kcl_q_{n}_{t}`). The slack variables \(Q^{slack+}\) and \(Q^{slack-}\) absorb reactive power mismatch with a penalty cost \(c_Q\) ($/MVAr) added to the objective. This is necessary because in SOC/QC relaxations, the relaxed voltage products may not correspond to a physically realizable voltage profile, making exact reactive balance infeasible.
 
 ### AC-3: Voltage Magnitude Bounds
 
-For SOC/QC formulations, voltage bounds are applied to the squared magnitude variable:
+For SOC/QC/SDP formulations, voltage bounds are applied to the squared magnitude variable:
 
 \[
 V_{min}^2 \leq w_{i,t} \leq V_{max}^2 \quad \forall i, t
@@ -298,19 +311,20 @@ V_{min}^2 \leq e_{i,t}^2 + f_{i,t}^2 \leq V_{max}^2 \quad \forall i \neq \text{s
 
 The slack bus voltage is fixed to 1.0 p.u. in all formulations.
 
-### AC-4: SOC/QC Voltage Linking
+### AC-4: W-Space Voltage Linking
 
-The SOC constraint links the W-space diagonal and off-diagonal variables (see [SOC-1](#soc-relaxation)). The QC formulation adds tighter bounds via McCormick envelopes and trigonometric inequalities (see [QC-1 through QC-4](#qc-relaxation)).
+The SOC constraint links the W-space diagonal and off-diagonal variables (see [SOC-1](#soc-relaxation)). The QC formulation adds tighter bounds via McCormick envelopes and trigonometric inequalities (see [QC-1 through QC-4](#qc-relaxation)), and the SDP formulation adds the PSD constraint (see [SDP-1](#sdp-relaxation)).
 
 ### AC-5: Angle Difference Limits
 
 Voltage angle differences across each branch are bounded. The implementation depends on the formulation:
 
-- **SOC/QC**: Angle limits are enforced indirectly through trigonometric bounds on \(w^r\) and \(w^i\) (QC-4).
+- **SOC and SDP**: no angle-difference limit.
+- **QC**: trigonometric bounds on \(w^r\) and \(w^i\) (QC-4).
 - **Polar NLP**: Direct constraint on angle variables (POLAR-1).
 - **Rectangular NLP**: Nonlinear constraint via cross/dot products (RECT-2).
 
-Default maximum angle difference: \(\theta_{max} = 30° = 0.524\) rad (same as DC, from `max_angle_diff_rad`).
+\(\theta_{max}\) is `dc_power_flow.max_angle_diff_deg` (default 30° = 0.524 rad). The DC formulation does not use it.
 
 ### AC-6: Apparent Power Line Limits
 
@@ -326,7 +340,12 @@ P_{to,l,t}^2 + Q_{to,l,t}^2 \leq \left(\frac{S^{max}_l}{S_{base}}\right)^2 \quad
 \tag{AC-6b}
 \]
 
-where \(S^{max}_l\) is the branch thermal capacity in MVA. Unlike the DC formulation which limits only active power flow (\(|f_l| \leq \bar{F}_l\)), the ACOPF limits the full apparent power magnitude. All formulations use the quadratic \(P^2 + Q^2 \leq cap^2\) form (not SOC cones) for Ipopt compatibility.
+where \(S^{max}_l\) is the branch thermal capacity in MVA. Unlike the DC formulation which limits only active power flow (\(|f_l| \leq \bar{F}_l\)), the ACOPF limits the full apparent power magnitude. The form depends on the formulation:
+
+- **SOC, QC, SDP**: a second-order cone, \(\left(S^{max}_l/S_{base},\, P,\, Q\right) \in \mathcal{Q}\).
+- **Polar, Rectangular**: the quadratic inequality \(P^2 + Q^2 \leq (S^{max}_l/S_{base})^2\), since Ipopt does not take cone constraints on nonlinear expressions.
+
+Constraint names `sline_from_{l}_{t}` and `sline_to_{l}_{t}`. A branch with capacity \(\leq 0\) has no limit. \(S^{max}_l\) is multiplied by the scheduled-outage factor of the line or transformer, and in development mode it includes the corridor's transmission investment, as in the DC formulation. N-1 transmission constraints act on DC flow variables and are therefore skipped in ACOPF.
 
 Implemented in `add_acopf_line_limits!()`.
 
@@ -339,7 +358,7 @@ Q^{min}_{g,n} \leq Q_{g,n,t} \leq Q^{max}_{g,n} \quad \forall g, n, t
 \tag{AC-7}
 \]
 
-When explicit Q limits are not provided in the configuration, they are estimated from the rated active power and default power factor:
+Explicit limits come from the generator's `q_max_mvar` and `q_min_mvar` (per node). When they are not provided, they are estimated from the rated active power and default power factor:
 
 \[
 Q^{max}_{g,n} = P^{rated}_{g,n} \cdot \tan\!\left(\arccos(pf)\right)
@@ -364,20 +383,20 @@ where \(c_Q\) is the `q_slack_penalty` (default: 100 $/MVAr). The penalty is sma
 
 ## Solver Requirements
 
-All four working formulations use Ipopt as the nonlinear solver:
+The relaxations are conic problems; the exact formulations are nonlinear programs. The solvers each formulation accepts (`FORMULATION_SOLVERS` in `config/solver.py`, used by the Studio to filter the solver list) are:
 
-| Formulation | Solver | Constraint Type | Notes |
-|-------------|--------|-----------------|-------|
-| SOC (`acopf_soc`) | Ipopt | Quadratic (NLP form) | SOC constraint written as \(w_i w_j \geq wr^2 + wi^2\) |
-| QC (`acopf_qc`) | Ipopt | Quadratic + linear (NLP form) | SOC + McCormick envelopes |
-| Polar (`acopf_polar`) | Ipopt | Nonlinear (trig) | Exact, nonconvex |
-| Rectangular (`acopf_rect`) | Ipopt | Nonlinear (polynomial) | Exact, nonconvex |
-| SDP (`acopf_sdp`) | MOSEK | PSD cone | Blocked: SCS/Clarabel fail with extreme coefficient ranges |
+| Formulation | Problem type | Solvers |
+|-------------|--------------|---------|
+| SOC (`acopf_soc`) | SOCP (rotated and standard cones) | `clarabel`, `scs`, `gurobi`, `cplex`, `xpress` (`highs` is also listed) |
+| QC (`acopf_qc`) | SOCP + linear | same as SOC |
+| SDP (`acopf_sdp`) | SDP (PSD cone) | `scs`, `clarabel` |
+| Polar (`acopf_polar`) | NLP (trigonometric), nonconvex | `ipopt` |
+| Rectangular (`acopf_rect`) | NLP (polynomial), nonconvex | `ipopt` |
 
-!!! note "Conic Solvers"
-    In theory, the SOC and QC formulations could use conic solvers (HiGHS, SCS, Clarabel). In practice, the extreme coefficient ranges arising from real-world networks (RHS values around \(2 \times 10^9\), cost coefficients around \(6 \times 10^7\)) cause SCS and Clarabel to misidentify the problem as `DUAL_INFEASIBLE`. The NLP quadratic form works reliably with Ipopt.
+!!! note "Conic solvers"
+    HiGHS is in the list for SOC and QC, but HiGHS solves LP, MIP and QP, not second-order cone programs; use Clarabel, SCS or a commercial conic solver. Real networks can produce wide coefficient ranges, which first-order (SCS) and interior-point (Clarabel) conic solvers may handle poorly; if one reports an infeasible or unbounded status, try another.
 
-Set the solver in the configuration via `solver_name: "ipopt"`.
+The solver is set in the top-level `solver` section (see [Configuration](#configuration)).
 
 ## Numerical Considerations
 
@@ -398,6 +417,7 @@ All formulations initialize voltage variables to the flat start (\(V = 1.0\) p.u
 | Formulation | Start Values |
 |-------------|-------------|
 | SOC/QC | \(w = 1.0\), \(w^r = 1.0\), \(w^i = 0.0\) |
+| SDP | none (slack bus fixed at \(w = 1\)) |
 | Polar | \(V = 1.0\), \(\theta = 0.0\) |
 | Rectangular | \(e = 1.0\), \(f = 0.0\) |
 
@@ -413,7 +433,7 @@ See [Reactance Clamping](#reactance-clamping).
 
 ## Configuration
 
-ACOPF parameters are configured in the `ac_power_flow` section of the system configuration, defined by `ACPowerFlowConfig`:
+ACOPF parameters are configured in the `ac_power_flow` section of each system, defined by `ACPowerFlowConfig`:
 
 ```yaml
 ac_power_flow:
@@ -431,7 +451,7 @@ ac_power_flow:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `base_mva` | float | 100.0 | System base power for per-unit conversion |
+| `base_mva` | float | 100.0 | System base power for per-unit conversion (also \(S_{base}\) of the DC power flow and losses) |
 | `voltage_min_pu` | float | 0.90 | Lower voltage magnitude limit (p.u.) |
 | `voltage_max_pu` | float | 1.10 | Upper voltage magnitude limit (p.u.) |
 | `default_power_factor` | float | 0.85 | Generator power factor for Q limit estimation |
@@ -442,11 +462,16 @@ ac_power_flow:
 | `tap_ratio_max` | float | 2.0 | Upper bound for valid transformer tap ratios |
 | `q_min_ratio` | float | 0.5 | Ratio for Q_min = -ratio x Q_max when Q limits not specified |
 
-The power flow mode is set at the system level:
+The power flow mode is set per system, the solver at the top level, and the angle limit in the system's `dc_power_flow` section:
 
 ```yaml
-power_flow_mode: "acopf_soc"  # or acopf_qc, acopf_polar, acopf_rect
-solver_name: "ipopt"
+solver:
+  name: clarabel                # ipopt for acopf_polar / acopf_rect
+systems:
+  my_system:
+    power_flow_mode: acopf_soc  # or acopf_qc, acopf_sdp, acopf_polar, acopf_rect
+    dc_power_flow:
+      max_angle_diff_deg: 30.0  # used by QC, Polar and Rectangular
 ```
 
 ## GUI
@@ -462,13 +487,13 @@ The ACOPF module is organized around Julia's multiple dispatch pattern:
 | `setup_acopf!()` | Main entry point — orchestrates variable creation, constraints, and line limits |
 | `ACOPFNetwork()` | Builds precomputed branch admittance data from network configuration |
 | `build_acopf_variables!()` | Creates formulation-specific voltage and reactive generation variables |
-| `add_acopf_voltage_constraints!()` | Adds SOC cones, McCormick envelopes, angle limits (dispatched by formulation) |
+| `add_acopf_voltage_constraints!()` | Adds SOC cones, QC bounds, the SDP PSD constraint, angle limits (dispatched by formulation) |
 | `add_acopf_power_balance!()` | Adds active and reactive KCL at each bus |
 | `add_acopf_line_limits!()` | Adds apparent power limits on branches |
 | `extract_acopf_voltages()` | Extracts voltage magnitude and angle from the solved model |
 | `extract_acopf_reactive_gen()` | Extracts reactive generation from the solved model |
 
-All functions dispatch on the `ACOPFFormulation` abstract type (`SOCFormulation`, `QCFormulation`, `PolarNLPFormulation`, `RectNLPFormulation`), allowing formulation-specific behavior without conditional branching.
+All functions dispatch on the `ACOPFFormulation` abstract type (`SOCFormulation`, `QCFormulation`, `SDPFormulation`, `PolarNLPFormulation`, `RectNLPFormulation`), allowing formulation-specific behavior without conditional branching.
 
 ## References
 

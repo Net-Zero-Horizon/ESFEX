@@ -28,8 +28,8 @@ struct TransmissionDC
     incidence_matrix::Matrix{Float64}   # buses × lines
     max_angle_diff_rad::Float64
     slack_bus::Int
-    line_losses::Vector{Float64}        # Per-line loss factor (0-1), legacy linear model
-    pwl_losses::Union{PWLLossSegments, Nothing}  # PWL loss model (nothing = use linear)
+    line_losses::Vector{Float64}        # Per-line series resistance R_pu (loss coefficient)
+    pwl_losses::Union{PWLLossSegments, Nothing}  # Loss segments, see with_loss_model (nothing = lossless)
     line_ids::Vector{String}            # line_id per entry in `lines` ("" = transformer/adjacency); id-addresses outage masks
 end
 
@@ -93,7 +93,9 @@ function TransmissionDC(network::NetworkConfig)
             # Transmission line
             src = transmission_src_indices[idx]
             if !isempty(network.transmission_lines) && src <= length(network.transmission_lines)
-                push!(losses, network.transmission_lines[src].resistance_pu)
+                # Per-circuit R, like the reactance in build_from_line_data
+                tl = network.transmission_lines[src]
+                push!(losses, tl.resistance_pu / tl.num_circuits)
             else
                 push!(losses, reactances[idx] * network.default_r_to_x_ratio)
             end
@@ -134,9 +136,40 @@ function TransmissionDC(network::NetworkConfig)
         network.max_angle_diff_rad,
         network.slack_bus,
         losses,
-        nothing,  # pwl_losses: computed by compute_pwl_loss_segments() after construction
+        nothing,  # pwl_losses: attached by with_loss_model() after construction
         line_ids
     )
+end
+
+"""
+    with_loss_model(transmission::TransmissionDC, segments::Int, s_base::Float64) -> TransmissionDC
+
+Attach the configured loss model (`pwl_loss_segments` / `transmission_loss_segments`):
+`segments > 0` → PWL quadratic losses with that many segments, `segments < 0` →
+linear losses (`linear_loss_segments`), `0` → lossless.
+"""
+function with_loss_model(t::TransmissionDC, segments::Int, s_base::Float64)
+    pwl = segments > 0 ? compute_pwl_loss_segments(t, segments, s_base) :
+          segments < 0 ? linear_loss_segments(t) : nothing
+    losses = segments == 0 ? zeros(length(t.lines)) : t.line_losses
+    return TransmissionDC(t.num_buses, t.lines, t.line_reactances, t.line_capacities,
+        t.incidence_matrix, t.max_angle_diff_rad, t.slack_bus, losses, pwl, t.line_ids)
+end
+
+"""
+    linear_loss_segments(transmission::TransmissionDC) -> PWLLossSegments
+
+Linear loss model as a single segment of slope `λ_l = R_pu`: a constant fraction
+`λ_l` of the flow is lost whichever way it runs, split between both ends like the
+PWL losses. (It used to scale the flow at the lower-index end by `1 - λ_l`, which
+created energy whenever the flow ran from that end.)
+"""
+function linear_loss_segments(transmission::TransmissionDC)
+    n_lines = length(transmission.lines)
+    λ = [l <= length(transmission.line_losses) ? clamp(transmission.line_losses[l], 0.0, 1.0) : 0.0
+         for l in 1:n_lines]
+    widths = [[max(transmission.line_capacities[l], 0.0)] for l in 1:n_lines]
+    return PWLLossSegments(1, widths, [[λ[l]] for l in 1:n_lines], λ)
 end
 
 """
@@ -231,7 +264,8 @@ end
     build_from_adjacency(network::NetworkConfig) -> (lines, capacities, reactances)
 
 Legacy mode: build line list from adjacency matrix with uniform reactance.
-X_ij = (reactance_per_km × distance_km) / base_impedance
+X_ij = reactance_per_km × distance_km / Z_base, Z_base = voltage_level_kv² / s_base
+(0.01 p.u. without a distance)
 Adjacency matrix is now bus×bus.
 """
 function build_from_adjacency(network::NetworkConfig)
@@ -248,7 +282,8 @@ function build_from_adjacency(network::NetworkConfig)
                 push!(lines, (i, j))
                 push!(capacities, max(cap_ij, cap_ji))
                 distance_km = network.distances[i, j]
-                x_pu = network.reactance_per_km * distance_km / network.base_impedance
+                z_base = network.voltage_level_kv^2 / network.s_base
+                x_pu = distance_km > 0 ? network.reactance_per_km * distance_km / z_base : 0.01
                 push!(reactances, x_pu)
             end
         end
@@ -289,7 +324,8 @@ Bus demand is derived from the parent node's demand scaled by demand_fraction.
 """
 function add_dc_constraints!(model, transmission::TransmissionDC,
                              vars::PowerSystemVariables, input;
-                             extra_injections_fn::Union{Nothing, Function} = nothing)
+                             extra_injections_fn::Union{Nothing, Function} = nothing,
+                             expandable_lines::Set{Int} = Set{Int}())
     n_bus = transmission.num_buses
     n_line = length(transmission.lines)
     hours = input.temporal.hours
@@ -321,6 +357,8 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     pwl = transmission.pwl_losses  # may be nothing
     pwl_loss_by_line = has_pwl ?
         [Vector{VariableRef}(undef, hours) for _ in 1:n_line] : nothing
+
+    shift_net = demand_shift_net(vars)
 
     # Detect connected components to handle disconnected networks.
     # Each connected component needs its own angle reference (slack bus).
@@ -385,7 +423,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             for ℓ in 1:n_line
                 g_l = pwl.conductances[ℓ]
                 cap_ℓ = transmission.line_capacities[ℓ]
-                if g_l <= 0 || cap_ℓ < 0.1  # lossless or negligible capacity
+                if g_l <= 0 || (cap_ℓ < 0.1 && !(ℓ in expandable_lines))  # lossless or negligible capacity
                     # Lossless line: loss = 0
                     ploss = @variable(model, lower_bound=0, upper_bound=0,
                         base_name="ploss_$(ℓ)_$(t)")
@@ -400,17 +438,23 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                     base_name="fneg_$(ℓ)_$(t)")
                 @constraint(model, pf_by_line[ℓ][t] == f_pos - f_neg)
 
-                # Incremental segment variables with PWL loss accumulation
+                # Incremental segment variables with PWL loss accumulation.
+                # Segments span the base capacity; on a line that investment can
+                # expand, the last one is left open so flow can use the built MW.
                 loss_expr = AffExpr(0.0)
                 fpos_sum = AffExpr(0.0)
                 fneg_sum = AffExpr(0.0)
                 for k in 1:N
                     w = pwl.segment_widths[ℓ][k]
                     m = pwl.slopes[ℓ][k]
-                    dp = @variable(model, lower_bound=0, upper_bound=w,
+                    dp = @variable(model, lower_bound=0,
                         base_name="dp_$(ℓ)_$(k)_$(t)")
-                    dn = @variable(model, lower_bound=0, upper_bound=w,
+                    dn = @variable(model, lower_bound=0,
                         base_name="dn_$(ℓ)_$(k)_$(t)")
+                    if k < N || !(ℓ in expandable_lines)
+                        set_upper_bound(dp, w)
+                        set_upper_bound(dn, w)
+                    end
                     add_to_expression!(fpos_sum, dp)
                     add_to_expression!(fneg_sum, dn)
                     add_to_expression!(loss_expr, m, dp)
@@ -435,7 +479,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             is_load_bus = bus_role == "load" || bus_role == "mixed"
             # Connection buses carry no demand: their KCL is pure flow balance
             # (gen ± bat ± converters + extra = Σ flows). All node-level demand
-            # variables (load_shed, reserves, EV, rooftop) are skipped because
+            # variables (load_shed, EV, rooftop) are skipped because
             # they are scaled by demand_fraction which is 0 for connection buses.
             bus_df = is_load_bus ? input.network.buses[i].demand_fraction : 0.0
 
@@ -454,7 +498,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             )
 
             # EV V2G (supply side) and charging (demand side)
-            # Node-level variables scaled by demand_fraction (same as load_shed, reserves)
+            # Node-level variables scaled by demand_fraction (same as load_shed)
             ev_v2g_term = if vars.ev_v2g !== nothing
                 vars.ev_v2g[ni, t] * bus_df
             else
@@ -530,11 +574,6 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 vars.load_shed[i, t] <= max(bus_demand, 0.0),
                 base_name = "max_load_shed_dc_b$(i)_t$(t)")
 
-            # NOTE: flex_curt is NOT in the KCL.  Flexible demand curtailment
-            # participates only in the objective (benefit) and in sectoral
-            # constraints.  Including it in the KCL allowed the model to
-            # eliminate demand at negative cost, preventing fossil dispatch.
-
             # Reservoir pump power (demand side — pumping consumes electricity)
             reservoir_pump_term = AffExpr(0.0)
             if vars.reservoir_pump !== nothing
@@ -567,23 +606,24 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 AffExpr(0.0)
             end
 
+            # Demand moved into this step by demand shifting (net, may be < 0)
+            shift_term = haskey(shift_net, (ni, t)) ? shift_net[(ni, t)] * bus_df : AffExpr(0.0)
+
             # Net injection: LHS - RHS
             # LHS: gen + bat_discharge + EV_V2G + load_shed + rooftop_gen + converter_injections + extra
-            # RHS: bus_demand + electrolyzer + bat_charge + reservoir_pump + reserves + EV_charging + rooftop_curt
-            # NOTE: flex_curt is NOT in KCL (only in objective + sectoral constraints)
-            # Node-level variables (load_shed, reserves) scaled by demand_fraction for bus-level KCL
+            # RHS: bus_demand + shifted demand + electrolyzer + bat_charge + reservoir_pump + EV_charging + rooftop_curt
+            # Reserves are headroom (add_reserve_constraints!), not energy, so not in KCL.
+            # Node-level variables (load_shed, EV, shifts) scaled by demand_fraction for bus-level KCL
             net_inj = @expression(model,
                 gen_sum + bat_discharge + ev_v2g_term + vars.load_shed[i, t] +
                 rooftop_gen_term + acdc_term + freq_term + extra_term -
-                bus_demand - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
-                vars.reserve_static[ni, t] * bus_df - vars.reserve_dynamic[ni, t] * bus_df -
+                bus_demand - shift_term - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
                 ev_charging_term - rooftop_curt_term
             )
 
             # Sum of flows using incidence matrix (per physical line)
-            # Loss models:
-            #   PWL: net_inj = Σ_l (K[i,l] × pf[l,t] - 0.5 × |K[i,l]| × loss[l,t])
-            #   Linear (legacy): incoming flows reduced by constant factor
+            # With losses (PWL or linear segments, see with_loss_model):
+            #   net_inj = Σ_l (K[i,l] × pf[l,t] + 0.5 × |K[i,l]| × loss[l,t])
             flow_sum = AffExpr(0.0)
             for ℓ in 1:n_line
                 coeff = transmission.incidence_matrix[i, ℓ]
@@ -599,13 +639,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                     add_to_expression!(flow_sum, coeff, pf_by_line[ℓ][t])
                     add_to_expression!(flow_sum, 0.5 * abs(coeff), pwl_loss_by_line[ℓ][t])
                 else
-                    # Legacy linear model: incoming flow reduced by loss factor
-                    loss_factor = ℓ <= length(transmission.line_losses) ? transmission.line_losses[ℓ] : 0.0
-                    if loss_factor > 0 && coeff > 0
-                        add_to_expression!(flow_sum, coeff * (1 - loss_factor), pf_by_line[ℓ][t])
-                    else
-                        add_to_expression!(flow_sum, coeff, pf_by_line[ℓ][t])
-                    end
+                    add_to_expression!(flow_sum, coeff, pf_by_line[ℓ][t])
                 end
             end
 
@@ -638,13 +672,14 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
         # 3. Flow-angle coupling (standard DCOPF: pf_MW = S_base/x_pu × Δθ)
         # This replaces the cycle-based KVL formulation and correctly handles
         # parallel lines (each line independently linked to bus angles).
-        # S_base (base_impedance) converts per-unit susceptance to MW/radian.
-        s_base = input.network.base_impedance
+        # S_base converts per-unit susceptance to MW/radian.
+        s_base = input.network.s_base
         for (ℓ, (i, j)) in enumerate(transmission.lines)
             cap_ℓ = transmission.line_capacities[ℓ]
             # Lines with negligible capacity add constraints without meaningful
-            # power transfer and worsen LP conditioning. Fix their flow to 0.
-            if cap_ℓ < 0.1  # < 0.1 MW is electrically negligible
+            # power transfer and worsen LP conditioning. Fix their flow to 0,
+            # unless investment can expand them (a candidate corridor starts at 0 MW).
+            if cap_ℓ < 0.1 && !(ℓ in expandable_lines)  # < 0.1 MW is electrically negligible
                 @constraint(model, pf_by_line[ℓ][t] == 0,
                     base_name = "flow_zero_$(ℓ)_$(t)")
                 continue
@@ -675,9 +710,72 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 end
 
 """
+    branch_outage_factor(input, id, t) -> Float64
+
+Scheduled-outage capacity factor (1.0 = none) of the line (`line_id`) or
+transformer (name) `id` at step `t`, from `input.outage_masks`. Lightweight
+NamedTuple inputs (master problem) carry no masks: always 1.0.
+"""
+function branch_outage_factor(input, id::AbstractString, t::Int)
+    isempty(id) && return 1.0
+    masks = hasproperty(input, :outage_masks) ? input.outage_masks : nothing
+    masks === nothing && return 1.0
+    for kind in ("line", "transformer")
+        m = get(masks, kind, nothing)
+        if m !== nothing && haskey(m, id)
+            return m[id][t]
+        end
+    end
+    return 1.0
+end
+
+"""
+    dev_corridor_investment!(model, vars, input, i, j, transfer_cost) -> Union{VariableRef, Nothing}
+
+Development-mode transmission investment of corridor (i, j), created once per
+corridor: bounded by the smaller of its ends' `transference_invest_max`, its
+cost (the dearer `transference_invest_cost`, as in the master) added to
+`transfer_cost`. Returns `nothing` when the corridor already has one (only its
+first line gets the capacity) or cannot be expanded.
+"""
+function dev_corridor_investment!(model, vars::PowerSystemVariables, input, i::Int, j::Int,
+                                  transfer_cost::AffExpr)
+    vars.transfer_investment === nothing && return nothing
+    key = i < j ? (i, j) : (j, i)
+    haskey(vars.transfer_investment, key) && return nothing
+    net = input.network
+    max_inv = min(get(net.transference_invest_max, i, 0.0), get(net.transference_invest_max, j, 0.0))
+    max_inv > 0 || return nothing
+    inv = @variable(model, lower_bound=0, upper_bound=max_inv, base_name="tf_inv_$(key[1])_$(key[2])")
+    vars.transfer_investment[key] = inv
+    add_to_expression!(transfer_cost,
+        max(get(net.transference_invest_cost, i, 0.0), get(net.transference_invest_cost, j, 0.0)), inv)
+    return inv
+end
+
+"""
+    charge_transfer_investment!(model, input, transfer_cost)
+
+The objective is built before the network: add the corridor investment cost
+to it, scaled by the window's fraction of the year like the other investment
+costs in build_objective!, and to the cost breakdown.
+"""
+function charge_transfer_investment!(model, input, transfer_cost::AffExpr)
+    iszero(transfer_cost) && return
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    year_hours = Float64(input.hours_per_year)
+    window_fraction = year_hours > 0 ? input.temporal.hours * tres / year_hours : 1.0
+    @objective(model, Min, objective_function(model) + window_fraction * transfer_cost)
+    ce = get(model.ext, :cost_expressions, nothing)
+    ce === nothing || add_to_expression!(ce[:investment_cost], transfer_cost)
+end
+
+"""
     add_line_capacity_constraints!(model, transmission::TransmissionDC, vars, input)
 
-Add thermal capacity limits for transmission lines (per physical line).
+Add thermal capacity limits for transmission lines (per physical line), scaled
+by scheduled outages. In development mode a corridor can be expanded
+(dev_corridor_investment!; it used to be unbounded and free).
 """
 function add_line_capacity_constraints!(model, transmission::TransmissionDC,
                                         vars::PowerSystemVariables, input;
@@ -685,24 +783,7 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
     hours = input.temporal.hours
     is_dev = hasproperty(input, :mode) ? input.mode == "development" : false
     pf_by_line = vars.power_flow_by_line
-
-    # Deterministic scheduled outages: id → hourly capacity factor (1.0 = none).
-    # transmission.line_ids holds a line_id (transmission lines) or a transformer
-    # name (transformer branches share this same flow constraint).
-    # Lightweight NamedTuple inputs (master problem) omit outage_masks → no outages.
-    _om = hasproperty(input, :outage_masks) ? input.outage_masks : Dict{String, Any}()
-    line_masks = get(_om, "line", nothing)
-    trafo_masks = get(_om, "transformer", nothing)
-    outage_for(ℓ, t) = begin
-        id = transmission.line_ids[ℓ]
-        isempty(id) && return 1.0
-        if line_masks !== nothing && haskey(line_masks, id)
-            return line_masks[id][t]
-        elseif trafo_masks !== nothing && haskey(trafo_masks, id)
-            return trafo_masks[id][t]
-        end
-        1.0
-    end
+    transfer_cost = AffExpr(0.0)
 
     for (ℓ, (i, j)) in enumerate(transmission.lines)
         base_capacity = transmission.line_capacities[ℓ]
@@ -710,44 +791,19 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
         if capacity_override !== nothing && haskey(capacity_override, ℓ)
             # Master: use investment-augmented line capacity (AffExpr)
             total_cap = capacity_override[ℓ]
-            for t in 1:hours
-                om = outage_for(ℓ, t)
-                @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
-                @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
-            end
         else
-            # Standard operational dispatch path
-            # Create investment variable if in development mode
-            if is_dev && vars.transfer_investment !== nothing
-                if !haskey(vars.transfer_investment, (i, j))
-                    vars.transfer_investment[(i, j)] = @variable(model,
-                        lower_bound=0, base_name="tf_inv_$(i)_$(j)")
-                end
-            end
-
-            # B10: Transfer symmetry — inv[i,j] == inv[j,i]
-            if is_dev && vars.transfer_investment !== nothing && haskey(vars.transfer_investment, (i, j))
-                if haskey(vars.transfer_investment, (j, i))
-                    @constraint(model,
-                        vars.transfer_investment[(i, j)] == vars.transfer_investment[(j, i)],
-                        base_name = "transfer_symmetry_$(i)_$(j)")
-                end
-            end
-
-            for t in 1:hours
-                if is_dev && vars.transfer_investment !== nothing && haskey(vars.transfer_investment, (i, j))
-                    total_cap = base_capacity + vars.transfer_investment[(i, j)]
-                else
-                    total_cap = base_capacity
-                end
-
-                # Bidirectional flow limits per physical line (× outage factor)
-                om = outage_for(ℓ, t)
-                @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
-                @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
-            end
+            inv = is_dev ? dev_corridor_investment!(model, vars, input, i, j, transfer_cost) : nothing
+            total_cap = inv === nothing ? base_capacity : base_capacity + inv
+        end
+        for t in 1:hours
+            # Bidirectional flow limits per physical line (× outage factor)
+            om = branch_outage_factor(input, transmission.line_ids[ℓ], t)
+            @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
+            @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
         end
     end
+
+    charge_transfer_investment!(model, input, transfer_cost)
 end
 
 """

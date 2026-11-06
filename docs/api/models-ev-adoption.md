@@ -1,6 +1,8 @@
 # EV Adoption Model
 Module: `esfex.models.ev_adoption`
 
+This module re-exports the external `evrex` package (installed as a dependency, `evrex>=0.1.0`). The names below are importable from both `esfex.models.ev_adoption` and `evrex`.
+
 Provides four transport electrification adoption models that project year-by-year EV fleet evolution and energy demand. Each method returns a uniform `EVAdoptionCurve` structure for comparison and downstream integration.
 
 ---
@@ -27,8 +29,12 @@ Macroeconomic, cost, and policy inputs.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `country_iso` | `str` | `""` | ISO-3 country code |
 | `gdp_per_capita` | `float` | `5000` | GDP per capita (USD) |
 | `urbanization_pct` | `float` | `75` | Urbanization rate (%) |
+| `population` | `int` | `1000000` | Population |
+| `inflation_rate` | `float` | `0.03` | Annual inflation rate (filled by the data fetchers; not used by the adoption methods) |
+| `gdp_growth_rate` | `float` | `0.03` | Annual GDP growth rate (used by the logistic method to grow GDP per capita) |
 | `ev_price` | `dict[str, float]` | per category | EV purchase price (USD) |
 | `ice_price` | `dict[str, float]` | per category | ICE purchase price (USD) |
 | `battery_cost_per_kwh` | `float` | `140` | Battery pack cost ($/kWh) |
@@ -39,7 +45,9 @@ Macroeconomic, cost, and policy inputs.
 | `maintenance_diff_annual` | `float` | `500` | Annual maintenance differential (ICE - EV, $) |
 | `ice_phaseout_year` | `int` | `0` | ICE ban year (0 = no ban) |
 | `ev_subsidy_pct` | `float` | `0.0` | EV purchase subsidy (fraction) |
+| `registration_tax_diff` | `float` | `0.0` | Registration tax difference, ICE minus EV ($); the `registration_tax` term of the TCO formula |
 | `emission_target_pct` | `float` | `0.0` | Emission reduction target (%) |
+| `battery_cost_trajectory` | `dict[int, float]` | `{}` | Battery pack cost ($/kWh) by year; where a year is present it overrides the decline-rate projection |
 
 ### EVAdoptionCurve
 
@@ -54,7 +62,28 @@ Uniform output from all adoption methods.
 | `total_fleet_ev` | `list[int]` | Total EV count per year |
 | `energy_demand_gwh` | `list[float]` | Annual EV energy demand (GWh) |
 | `peak_charging_mw` | `list[float]` | Peak simultaneous charging (MW) |
+| `confidence_low` | `list[float]` | Lower confidence band (left empty by the four methods) |
+| `confidence_high` | `list[float]` | Upper confidence band (left empty by the four methods) |
 | `parameters` | `dict` | Method-specific parameters used |
+
+### EVValidationData
+
+Observed EV stock for comparing against a projection (returned by the `evrex` IEA data fetcher).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `label` | `str` | required | Series label |
+| `years` | `list[int]` | `[]` | Years |
+| `ev_stock` | `list[int]` | `[]` | EV stock per year |
+| `source` | `str` | `"manual"` | Data source |
+
+### Constants
+
+| Name | Value |
+|------|-------|
+| `DEFAULT_CATEGORIES` | `("light", "medium", "heavy", "buses")` |
+| `DEFAULT_CATEGORY_SHARES` | Initial and final EV share of each category, e.g. `{"light": (0.75, 0.65), "medium": (0.12, 0.18), ...}` |
+| `DEFAULT_ENERGY_CONSUMPTION` | kWh/100 km per category: `{"light": 18.0, "medium": 25.0, "heavy": 55.0, "buses": 80.0}` |
 
 ---
 

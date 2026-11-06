@@ -531,8 +531,11 @@ def extract_kpis(model: LPModel, obj_val: float,
 
     for name, val in solution.items():
         # bat_tech_* shares the "bat_" prefix; test before tech_inv.
-        if name.startswith(("bat_tech_pow_inv_", "bat_tech_cap_inv_")):
+        # Battery KPI is power (MW), like config mode; energy is not added.
+        if name.startswith("bat_tech_pow_inv_"):
             bat_inv_total += val
+        elif name.startswith("bat_tech_cap_inv_"):
+            continue
         elif name.startswith("tech_inv_"):
             gen_inv_total += val
         elif "curtail" in name.lower():

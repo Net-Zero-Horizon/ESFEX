@@ -1,83 +1,126 @@
 # HDF5 Output Schema
 
+The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.h5` (for example `isla_juventud_15012026_1030.h5`) in the output directory. Without a config path the system name replaces the stem. The file is created by `Orchestrator._initialize_hdf5()`, extended once per year by `_append_year_to_hdf5()`, and closed by `_finalize_hdf5()` (see `src/esfex/runner.py`).
+
 ## File Structure Overview
 
 ```
-results.h5
-├── [Root Attributes]              # Metadata
-├── system_configuration/          # Static system definition
-│   ├── generators/                # Generator parameters
-│   └── batteries/                 # Battery parameters
-├── summary_results/               # Per-year summary (expandable)
-├── demand/                        # Input demand data
+<config_stem>_<ddmmyyyy>_<HHMM>.h5
+├── [Root Attributes]              # Metadata and subsystem layout
+├── system_configuration/          # Static system definition (written once)
+│   ├── generators/generator_{g}/  # Existing generators (attributes)
+│   ├── batteries/battery_{b}/     # Existing batteries (attributes)
+│   ├── nodes/                     # Node data (datasets + attributes)
+│   ├── technologies/              # Investment technologies (if any)
+│   ├── battery_technologies/      # Battery investment technologies (if any)
+│   ├── transmission_lines/        # Line geometry (if transmission_lines_geo is set)
+│   └── fuel_routes/               # Fuel route geometry (if any)
+├── summary_results/               # Per-year scalars (expandable datasets)
+├── demand/
 │   └── year_YYYY_base_demand      # Per-year demand
-├── cost_breakdown/                # Granular cost decomposition
-│   └── year_YYYY/                 # Per-year cost components (attrs)
-└── detailed_results/              # Full time-series results
-    └── year_YYYY_threshold_0/     # Per-year detailed data
-        ├── generation/            # Generator output
-        ├── gen_status/            # On/off status (UC mode)
-        ├── gen_startup/           # Startup events
-        ├── gen_shutdown/          # Shutdown events
-        ├── battery_charge/        # Charging power
-        ├── battery_discharge/     # Discharging power
-        ├── battery_soc/           # State of charge
-        ├── battery_spillage/      # Energy spillage
-        ├── battery_capacity_factor/ # Battery CF
-        ├── battery_lcoe/          # Battery LCOE
-        ├── battery_vallcoe/       # Battery VALLCOE
-        ├── reservoir_level/       # Reservoir water level
-        ├── reservoir_spillage/    # Reservoir overflow
-        ├── reservoir_pump/        # Pump-back power
-        ├── gen_investment_power/   # Generator investments
-        ├── bat_investment_power/   # Battery power investments
-        ├── bat_investment_capacity/ # Battery energy investments
-        ├── capacity_factor/       # Generator CF
-        ├── lcoe/                  # Generator LCOE
-        ├── vallcoe/               # Generator VALLCOE
-        ├── technology_selling_prices/ # Revenue analysis
-        └── [scalar datasets]      # System-level time series
+├── cost_breakdown/
+│   └── year_YYYY/                 # Per-year cost components (attributes)
+├── detailed_results/
+│   └── year_YYYY_threshold_0/     # Per-year time series
+│       ├── generation/            # Generator output
+│       ├── gen_status/            # On/off status (UC mode)
+│       ├── gen_startup/           # Startup events (UC mode)
+│       ├── battery_charge/        # Charging power
+│       ├── battery_discharge/     # Discharging power
+│       ├── battery_soc/           # State of charge
+│       ├── battery_spillage/      # Energy spillage
+│       ├── battery_capacity_factor/
+│       ├── battery_lcoe/
+│       ├── battery_vallcoe/
+│       ├── reservoir_level/       # Reservoir water level
+│       ├── reservoir_spillage/    # Reservoir overflow
+│       ├── reservoir_pump/        # Pump-back power
+│       ├── gen_investment_power/  # Generator investments
+│       ├── bat_investment_power/  # Battery power investments
+│       ├── bat_investment_capacity/ # Battery energy investments
+│       ├── capacity_factor/       # Generator CF
+│       ├── lcoe/                  # Generator LCOE
+│       ├── vallcoe/               # Generator VALLCOE
+│       ├── technology_selling_prices/ # Revenue analysis per generator
+│       ├── primary_energy/        # Fuel supply chain results (if enabled)
+│       ├── n1_security/           # N-1 security results (if enabled)
+│       └── [datasets]             # Per-node and system-level time series
+├── global/
+│   ├── summary_results/           # Per-year scalars for the whole meta-network
+│   ├── cost_breakdown/year_YYYY/  # Same attributes as /cost_breakdown
+│   └── demand/year_YYYY_base_demand
+├── inter_system/
+│   └── detailed_results/
+│       └── year_YYYY_threshold_0/
+│           └── power_flow/{A}_to_{B}  # Multi-system runs only
+├── mga/                           # Only when MGA / SPORES is enabled
+└── plugins/{name}/                # Optional, written by plugins in post_year
 ```
+
+A group can be present and empty, for example the battery groups in a run without batteries. Groups and datasets marked "if" are only written when the corresponding result exists.
 
 ## Root Attributes
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `creation_date` | string | ISO 8601 creation timestamp |
-| `num_nodes` | int | Number of network nodes |
-| `num_years` | int | Number of simulation years |
+| `num_nodes` | int | Number of network nodes (all systems merged) |
+| `num_years` | int | The `years` argument of `run()` |
 | `export_type` | string | `"incremental_results"` |
 | `temporal_resolution_hours` | int | Time step (hours) |
 | `simulation_mode` | string | `"development"` or `"unit_commitment"` |
-| `years_range` | string | Format: `"YYYY-ZZZZ"` |
-| `target_re` | float | RE penetration target |
-| `export_complete` | bool | Whether export finished successfully |
-| `last_update` | string | ISO 8601 last update timestamp |
-| `export_timestamp` | string | ISO 8601 export timestamp |
+| `years_range` | string | `"YYYY-ZZZZ"`, first and last simulated year |
+| `num_systems` | int | Number of systems in the meta-network |
+| `subsystem_names` | string[] | System names, in node order |
+| `subsystem_offsets` | int[] | First node index of each system |
+| `subsystem_node_counts` | int[] | Number of nodes of each system |
+| `export_complete` | bool | `True` once the run finished and the file was finalized |
+| `last_update` | string | ISO 8601 timestamp of the last year written |
+| `export_timestamp` | string | ISO 8601 timestamp of finalization |
+
+The `subsystem_*` attributes are written for single-system runs too. Readers use them to slice a system's nodes out of the global node axis.
 
 ---
 
 ## system_configuration/
 
-Static system configuration stored once at file creation.
+Static system configuration stored once at file creation, from the merged operational system. It describes the units that exist in the configuration; investment candidates are listed under `technologies/` and `battery_technologies/`, not under `generators/`.
 
 ### system_configuration/generators/generator_{g}/
 
-Per-generator attributes stored as HDF5 attributes:
+One group per configured generator, with every field of `GeneratorConfig.model_dump()` as an attribute (`name`, `type`, `fuel`, `rated_power`, `invest_cost`, `life_time`, `initial_age`, ...). Group attribute `num_generators` on `generators/`.
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `name` | string | Generator name |
-| `type` | string | "Renewable" or "Non-renewable" |
-| `fuel` | string | Fuel type |
-| `rated_power` | float array | Per-node rated power (MW) |
-| `invest_cost` | float array | Per-node investment cost ($/MW) |
-| `life_time` | int array | Per-node lifetime (years) |
-| `initial_age` | int array | Per-node initial age (years) |
+Strings, ints, floats and bools are stored as-is. Every other value (lists, dicts, `None`) is stored as its Python `str()`. Per-node lists therefore come back as strings such as `"[20.0, 0.0, 0.0]"`; parse them with `ast.literal_eval`.
 
 ### system_configuration/batteries/battery_{b}/
 
-Per-battery attributes (same structure as generators, plus battery-specific fields).
+Same encoding, from `BatteryConfig.model_dump()`. Group attribute `num_batteries`.
+
+### system_configuration/nodes/
+
+| Content | Kind | Description |
+|---------|------|-------------|
+| `num_nodes` | attribute | Number of nodes |
+| numeric node fields (`nodes_connections`, `losses`, `reserve_static`, ...) | datasets | Numeric lists from `NodesConfig.model_dump()` |
+| other node fields (`node_names`, `node_coordinates`, ...) | attributes | Stored as `str()` |
+| `latitude`, `longitude` | datasets | Node coordinates (0.0 where missing), when `node_coordinates` is set |
+| `name` | dataset (string) | `node_names`, or the coordinate labels |
+
+### system_configuration/technologies/technology_{i}/
+
+Attributes `key`, `name`, `type`, `fuel`, `invest_cost` (string-encoded list) and `color` (if set). Group attribute `num_technologies`.
+
+### system_configuration/battery_technologies/battery_technology_{i}/
+
+Attributes `key`, `name`, `invest_cost_power`, `invest_cost_energy` (string-encoded lists) and `color` (if set). Group attribute `num_battery_technologies`.
+
+### system_configuration/transmission_lines/line_{i}/
+
+Attributes `line_id`, `from_node`, `to_node`, `capacity_mw`; dataset `waypoints` `(k, 2)` of `[latitude, longitude]` if the line has waypoints. Group attribute `num_lines`.
+
+### system_configuration/fuel_routes/route_{i}/
+
+Attributes `route_id`, `from_node`, `to_node`, `distance_km`; dataset `waypoints` `(k, 2)` if present. Group attribute `num_routes`.
 
 ---
 
@@ -88,12 +131,13 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | Dataset | Shape | Type | Description |
 |---------|-------|------|-------------|
 | `year` | (num_years,) | int | Simulation year |
-| `threshold` | (num_years,) | int | Threshold iteration |
+| `threshold` | (num_years,) | int | Always 0 |
 | `feasible` | (num_years,) | int | 1 if feasible, 0 if not |
 | `total_cost` | (num_years,) | float | Total annual cost ($) |
 | `renewable_penetration` | (num_years,) | float | RE penetration (0-1) |
 | `co2_emissions` | (num_years,) | float | Annual CO2 (tonnes) |
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
+| `n1_security_cost` | (num_years,) | float | Incremental cost of N-1 security ($) |
 
 ---
 
@@ -103,16 +147,18 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 
 | Property | Value |
 |----------|-------|
-| Shape | (hours,) or (num_nodes, hours) |
-| Type | float64 |
+| Shape | (hours, num_nodes) |
+| Type | float32 |
 | Units | MW |
-| Description | Base demand profile for the year |
+| Description | Gross demand of the year: base demand from the demand files, plus EV demand when EV optimisation is off. Rooftop solar is not subtracted |
+
+Despite the name, this is the same total demand array as `detailed_results/.../demand`, but always written as `(hours, num_nodes)`.
 
 ---
 
 ## cost_breakdown/
 
-Granular decomposition of the annual system cost into 27 individual components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, accumulated across rolling horizon windows.
+Granular decomposition of the annual system cost into 35 components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, accumulated across rolling horizon windows.
 
 This group is present when the optimizer exports per-component cost data. The [Financial Analysis](../api/models-financial-analysis.md) module reads this group directly; when it is absent, costs are recalculated from generation output and system configuration.
 
@@ -136,7 +182,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `soc_violation_cost` | float | $ | Battery SOC violation penalty |
 | `transfer_margin_cost` | float | $ | Transfer margin deficit penalty |
 | `v2g_compensation` | float | $ | V2G compensation (negative = credit) |
-| `flexible_demand_benefit` | float | $ | Demand flexibility benefit (negative = credit) |
+| `flexible_demand_benefit` | float | $ | Always 0 (flexible demand is shifted, not curtailed) |
 | `investment_cost` | float | $ | Capital investment cost |
 | `electrolyzer_cost` | float | $ | Electrolyzer operation cost |
 | `converter_cost` | float | $ | AC/DC converter cost |
@@ -147,6 +193,14 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `rooftop_curtailment_cost` | float | $ | Rooftop solar curtailment penalty |
 | `npv_penalty_cost` | float | $ | NPV lifecycle penalty |
 | `reservoir_invest_cost` | float | $ | Reservoir capacity investment cost |
+| `pe_supply_cost` | float | $ | Primary energy supply cost |
+| `pe_loss_cost` | float | $ | Primary energy loss-of-supply penalty |
+| `pe_excess_cost` | float | $ | Primary energy excess penalty |
+| `pe_transport_cost` | float | $ | Primary energy transport cost |
+| `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
+| `pe_coupling_slack_cost` | float | $ | Penalty on the power/primary-energy coupling slack |
+| `pe_electrolyzer_cost` | float | $ | Electrolyzer cost in the primary energy model |
+| `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `total` | float | $ | Sum of all cost components |
 
 ### Reading Cost Breakdown
@@ -154,7 +208,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 ```python
 import h5py
 
-with h5py.File("results_system.h5", "r") as f:
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
     if "cost_breakdown" in f:
         for year_key in sorted(f["cost_breakdown"].keys()):
             attrs = dict(f[f"cost_breakdown/{year_key}"].attrs)
@@ -167,15 +221,17 @@ with h5py.File("results_system.h5", "r") as f:
 
 ## detailed_results/year_YYYY_threshold_0/
 
-Full time-series results for each year. The `threshold_0` suffix is the convergence threshold iteration.
+Full time-series results for each year. The `threshold_0` suffix is fixed.
+
+Node axes are at node level: when the operational network has buses that differ from the nodes, bus results are aggregated to nodes before writing (sum for quantities; max for `gen_status`, `nodal_electricity_prices` and `voltage_angle`). `voltage_magnitude` and `reactive_generation` stay at bus level.
 
 ### Attributes (Per-Year Metadata)
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `year` | int | Simulation year |
-| `threshold` | int | Threshold iteration index |
-| `feasible` | int | Feasibility flag |
+| `threshold` | int | Always 0 |
+| `feasible` | bool | Feasibility flag |
 | `total_cost` | float | Total annual cost ($) |
 | `renewable_penetration` | float | Final RE penetration |
 | `co2_emissions` | float | Annual CO2 emissions (tonnes) |
@@ -183,16 +239,25 @@ Full time-series results for each year. The `threshold_0` suffix is the converge
 | `total_generation` | float | Total energy generated (MWh) |
 | `total_demand` | float | Total energy demand (MWh) |
 | `load_shed` | float | Total unserved energy (MWh) |
+| `master_re_target` | float | RE penetration target from the master problem for this year |
 
-Investment/retirement attributes (per generator/battery):
+Investment and retirement decisions of the master problem for this year are stored as scalar attributes. Keys use 0-based technology, node and generator *indices*, not names:
 
 | Pattern | Description |
 |---------|-------------|
-| `investment_gen_{name}_node_{n}` | Generator investment at node n (MW) |
-| `investment_bat_{name}_power_node_{n}` | Battery power investment (MW) |
-| `investment_bat_{name}_capacity_node_{n}` | Battery energy investment (MWh) |
-| `retirement_gen_{name}_node_{n}` | Generator retirement flag |
-| `retirement_bat_{name}_node_{n}` | Battery retirement flag |
+| `investment_tech_investment_power_{t}_{n}` | New capacity of technology `t` at node `n` (MW) |
+| `investment_bat_tech_investment_power_{bt}_{n}` | New power of battery technology `bt` at node `n` (MW) |
+| `investment_bat_tech_investment_capacity_{bt}_{n}` | New energy of battery technology `bt` at node `n` (MWh) |
+| `investment_transfer_investment_{i}_{j}` | New transmission capacity from node `i` to node `j` (MW) |
+| `retirement_gen_{g}` | Fraction (0-1) of existing generator `g` retired by this year |
+
+Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`.
+
+### Dataset Naming
+
+Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). In `generation/`, `gen_status/` and `gen_startup/`, repeated names get a `_2`, `_3`, ... suffix. The other per-unit groups do not de-duplicate names, so two units with the same name make the write fail.
+
+Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape` and `units`.
 
 ### Generation Data
 
@@ -211,8 +276,8 @@ Investment/retirement attributes (per generator/battery):
 |----------|-------|
 | Shape | (num_nodes, hours) |
 | Type | float64 |
-| Units | Binary (0/1) or continuous (0-1) |
-| Description | Generator commitment status (UC mode: binary; ED mode: continuous) |
+| Units | Binary (0/1) |
+| Description | Commitment status. Written only in unit-commitment mode |
 
 #### gen_startup/{generator_name}
 
@@ -220,17 +285,8 @@ Investment/retirement attributes (per generator/battery):
 |----------|-------|
 | Shape | (num_nodes, hours) |
 | Type | float64 |
-| Units | Binary (0/1) |
-| Description | Startup events |
-
-#### gen_shutdown/{generator_name}
-
-| Property | Value |
-|----------|-------|
-| Shape | (num_nodes, hours) |
-| Type | float64 |
-| Units | Binary (0/1) |
-| Description | Shutdown events |
+| Units | 0-1 |
+| Description | Startup events (continuous variable in [0, 1]). Written only in unit-commitment mode |
 
 #### curtailment
 
@@ -239,7 +295,7 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | MW |
-| Description | Aggregated renewable energy curtailment |
+| Description | Renewable curtailment summed over generators |
 
 ### Battery Data
 
@@ -286,7 +342,7 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | Fraction (0-1) |
-| Description | Battery capacity factor |
+| Description | Hourly discharge / rated discharge power |
 
 #### battery_lcoe/{battery_name}
 
@@ -295,7 +351,7 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | $/MWh |
-| Description | Levelized cost of storage |
+| Description | Levelized cost of storage (hourly) |
 
 #### battery_vallcoe/{battery_name}
 
@@ -304,7 +360,7 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | $/MWh |
-| Description | Value-adjusted LCOS |
+| Description | Value-adjusted LCOS (hourly) |
 
 ### Reservoir Data
 
@@ -373,7 +429,7 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | Fraction (0-1) |
-| Description | Generator capacity factor (output / rated) |
+| Description | Hourly output / rated power |
 
 #### lcoe/{generator_name}
 
@@ -382,7 +438,7 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | $/MWh |
-| Description | Levelized cost of energy |
+| Description | Hourly operating cost per MWh (see [Derived Metrics Formulas](#derived-metrics-formulas)) |
 
 #### vallcoe/{generator_name}
 
@@ -391,37 +447,44 @@ Investment/retirement attributes (per generator/battery):
 | Shape | (num_nodes, hours) |
 | Type | float64 |
 | Units | $/MWh |
-| Description | Value-adjusted levelized cost of energy |
+| Description | Value-adjusted LCOE (hourly) |
 
 ### System-Level Time Series
 
-| Dataset | Shape | Units | Description |
-|---------|-------|-------|-------------|
-| `demand` | (num_nodes, hours) | MW | Demand profile |
-| `reserve_static` | (num_nodes, hours) | MW | Static reserve provided |
-| `reserve_dynamic` | (num_nodes, hours) | MW | Dynamic reserve provided |
-| `loss_of_reserve_static` | (num_nodes, hours) | MW | Static reserve deficit |
-| `loss_of_reserve_dynamic` | (num_nodes, hours) | MW | Dynamic reserve deficit |
-| `loss_load` | (num_nodes, hours) | MW | Load shedding |
-| `CO2_emissions` | (num_nodes, hours) | tonnes | Hourly CO2 emissions |
-| `voltage_angle` | (num_nodes, hours) | radians | Bus voltage angles |
+| Dataset | Shape | Type | Units | Description |
+|---------|-------|------|-------|-------------|
+| `demand` | see below | float32 | MW | Gross demand (same content as `/demand/year_YYYY_base_demand`) |
+| `reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve held as free capacity |
+| `reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve held as free capacity |
+| `loss_of_reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve deficit |
+| `loss_of_reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve deficit |
+| `loss_load` | (num_nodes, hours) | float64 | MW | Load shedding |
+| `CO2_emissions` | (num_nodes, hours) | float64 | tonnes | Hourly CO2 emissions |
+| `voltage_angle` | (num_nodes, hours) | float64 | radians | Voltage angles (max over a node's buses) |
+| `voltage_magnitude` | (num_buses, hours) | float64 | p.u. | Voltage magnitude, ACOPF modes only |
+| `reactive_generation` | (generators, num_buses, hours) | float64 | MVAr | Reactive power, ACOPF modes only |
+| `rooftop_generation` | (hours, num_nodes) | float64 | MW | Behind-the-meter rooftop solar, already subtracted from the demand sent to the model; diagnostic only |
+
+The detailed `demand` is transposed to `(num_nodes, hours)` only when it has more hours than nodes. When there are more nodes than hours (for example a 24-hour unit-commitment run on a 72-node system) it stays `(hours, num_nodes)`. Orient it by the axis whose length equals the number of time steps.
 
 ### Economic Data
 
 | Dataset | Shape | Units | Description |
 |---------|-------|-------|-------------|
-| `electricity_prices` | (hours,) | $/MWh | System-average price |
-| `electricity_prices_energy` | (hours,) | $/MWh | Energy component only |
-| `nodal_electricity_prices` | (num_nodes, hours) | $/MWh | Locational marginal prices |
-| `nodal_electricity_prices_congestion` | (num_nodes, hours) | $/MWh | Congestion component |
+| `electricity_prices` | (hours,) | $/MWh | Mean of the nodal prices over nodes |
+| `electricity_prices_energy` | (hours,) | $/MWh | Energy component: same values as `electricity_prices` |
+| `nodal_electricity_prices` | (num_nodes, hours) | $/MWh | Locational marginal prices (max over a node's buses; NaN written as 0) |
+| `nodal_electricity_prices_congestion` | (num_nodes, hours) | $/MWh | Congestion component: nodal price minus the energy component |
 
 ### Network Data
 
 | Dataset | Shape | Units | Description |
 |---------|-------|-------|-------------|
-| `power_flow` | (num_nodes, num_nodes, hours) | MW | Power flow between nodes |
+| `power_flow` | (num_nodes, num_nodes, hours') | MW | Flow from node i to node j, aggregated from bus-pair flows; lines inside one node are dropped |
 | `transfer_investment` | (num_nodes, num_nodes) | MW | Transmission investment |
-| `transfer_margin` | (num_nodes, num_nodes, hours) | MW | Transfer margin used |
+| `transfer_margin` | (num_nodes, num_nodes, hours') | MW | Transfer margin slack |
+
+`hours'` can be larger than `hours`: with a rolling horizon, the window arrays of `power_flow` and `transfer_margin` are concatenated including the overlap hours.
 
 ### EV Data
 
@@ -443,17 +506,17 @@ Investment/retirement attributes (per generator/battery):
 | Units | GW*s |
 | Description | System inertia deficit |
 
-#### technology_selling_prices/{technology_name}
+#### technology_selling_prices/{generator_name}
 
-Per-technology revenue analysis.
+Revenue analysis, one group per generator name (despite the group name, not per technology). Generators that never produce are skipped. Generator names are not sanitized here, so a name containing `/` (for example `Cuba/Solar PV`) creates nested groups (`Cuba/Solar PV/`).
 
 **Attributes:**
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `total_generation` | float | Total generation (MWh) |
-| `total_revenue` | float | Total revenue ($) |
-| `average_selling_price` | float | Weighted average price ($/MWh) |
+| `total_generation` | float | Sum of hourly output over nodes and hours (MW·step) |
+| `total_revenue` | float | Sum of price × output |
+| `average_selling_price` | float | `total_revenue / total_generation` ($/MWh) |
 | `technology_type` | string | Generator type |
 
 **Dataset: `prices_weights`**
@@ -462,8 +525,50 @@ Per-technology revenue analysis.
 |----------|-------|
 | Shape | (n_entries, 3) |
 | Type | float64 |
-| Columns | [price ($/MWh), generation (MW), timestep (h)] |
-| Description | Price-quantity pairs for revenue decomposition |
+| Columns | [price ($/MWh), generation (MW), timestep] |
+| Description | One row per node and hour with output above zero |
+
+#### primary_energy/
+
+Written when the primary energy model is active.
+
+| Content | Kind | Description |
+|---------|------|-------------|
+| `total_fuel_supply/{fuel}` | dataset | Fuel supplied |
+| `total_ne_demand_satisfied/{fuel}` | dataset | Non-electric demand served |
+| `total_loss_of_supply/{fuel}` | dataset | Unserved fuel demand |
+| `final_storage_levels/{fuel}` | dataset | Storage levels at the end of the year |
+| `transport_investments/{fuel}` | dataset | Transport capacity investments |
+| `storage_investments/{fuel}` | dataset | Storage capacity investments |
+| `transport_flows/{fuel}` | dataset | Flows per route and period |
+| `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | attributes | Cost totals ($) |
+
+#### n1_security/
+
+Written when N-1 security results exist.
+
+| Content | Kind | Description |
+|---------|------|-------------|
+| `security_cost` | attribute | Incremental cost of N-1 security ($) |
+| `gen_reserve_duals` | dataset (hours,) | Dual of the generation N-1 reserve constraint (USD/MW) |
+| `trans_reserve_duals/line_{l}_outage_{k}_dir_{d}` | datasets | Duals of the transmission contingency constraints (USD/MW) |
+| `binding_contingencies` | dataset (bytes) | IDs of binding contingencies |
+
+---
+
+## global/ and inter_system/
+
+`global/` holds meta-network totals and is written for every run:
+
+| Content | Description |
+|---------|-------------|
+| `global/summary_results/{year, total_cost, renewable_penetration, co2_emissions, loss_of_load, total_generation, total_demand}` | Expandable datasets, one row per year |
+| `global/cost_breakdown/year_YYYY/` | Same attributes as `/cost_breakdown/year_YYYY/` |
+| `global/demand/year_YYYY_base_demand` | Same array as `/demand/year_YYYY_base_demand`, `(hours, num_nodes)` float32 |
+
+`inter_system/detailed_results/year_YYYY_threshold_0/power_flow/{A}_to_{B}` holds the hourly net flow (MW) from system A to system B. It is written only for runs with more than one system.
+
+Per-system copies of `detailed_results/` and `summary_results/` are not written; readers slice the global node axis with the `subsystem_*` root attributes.
 
 ---
 
@@ -484,10 +589,7 @@ Virtual units use the same dataset structure as their physical counterparts.
 
 ### Identifying Virtual Units
 
-Virtual units are identified by:
-
-- Name prefix: always starts with `"Investment "`
-- The `system_configuration/generators/generator_{g}/` attributes: virtual units have `initial_age = 0` and their `rated_power` reflects the cumulative technology investment up to that year
+Virtual unit names start with `"Investment "`. They do not appear in `system_configuration/generators/` or `batteries/`, which only list the configured units; the candidate technologies are in `system_configuration/technologies/` and `battery_technologies/`.
 
 ---
 
@@ -496,9 +598,8 @@ Virtual units are identified by:
 | Category | Dataset Pattern | Shape | dtype | Units |
 |----------|----------------|-------|-------|-------|
 | Generation | `generation/{name}` | (N, H) | float64 | MW |
-| Status | `gen_status/{name}` | (N, H) | float64 | 0-1 |
-| Startup | `gen_startup/{name}` | (N, H) | float64 | 0/1 |
-| Shutdown | `gen_shutdown/{name}` | (N, H) | float64 | 0/1 |
+| Status | `gen_status/{name}` | (N, H) | float64 | 0/1 |
+| Startup | `gen_startup/{name}` | (N, H) | float64 | 0-1 |
 | Curtailment | `curtailment` | (N, H) | float64 | MW |
 | Bat. charge | `battery_charge/{name}` | (N, H) | float64 | MW |
 | Bat. discharge | `battery_discharge/{name}` | (N, H) | float64 | MW |
@@ -513,109 +614,121 @@ Virtual units are identified by:
 | Capacity factor | `capacity_factor/{name}` | (N, H) | float64 | 0-1 |
 | LCOE | `lcoe/{name}` | (N, H) | float64 | $/MWh |
 | VALLCOE | `vallcoe/{name}` | (N, H) | float64 | $/MWh |
-| Demand | `demand` | (N, H) | float64 | MW |
-| Power flow | `power_flow` | (N, N, H) | float64 | MW |
+| Demand (detailed) | `demand` | (N, H), or (H, N) if N > H | float32 | MW |
+| Demand (per year) | `/demand/year_YYYY_base_demand` | (H, N) | float32 | MW |
+| Rooftop solar | `rooftop_generation` | (H, N) | float64 | MW |
+| Power flow | `power_flow` | (N, N, H') | float64 | MW |
 | Prices | `electricity_prices` | (H,) | float64 | $/MWh |
 | Nodal prices | `nodal_electricity_prices` | (N, H) | float64 | $/MWh |
 | Loss of load | `loss_load` | (N, H) | float64 | MW |
 
-Where **N** = `num_nodes`, **H** = total hours in the year (typically 8760).
+Where **N** = `num_nodes`, **H** = time steps in the year (8760 at hourly resolution, 8760 / `temporal_resolution_hours` otherwise; the unit-commitment horizon in UC mode), and **H'** ≥ H (see [Network Data](#network-data)).
 
 ---
 
 ## Derived Metrics Formulas
 
+Computed by `Orchestrator._compute_derived_metrics()` after each year's dispatch. All are hourly arrays per unit, node and time step; they are not annual scalars. Index g = generator, b = battery, n = node, t = time step.
+
 ### Capacity Factor
 
-$$CF_g = \frac{\sum_{t=1}^{H} P_{g,t}}{P_{rated,g} \times H}$$
+$$CF_{g,n,t} = \frac{P_{g,n,t}}{P^{rated}_{g,n}}$$
 
-Where $P_{g,t}$ is the generator output at hour $t$ and $P_{rated,g}$ is the rated power.
+For batteries, the rated discharge power replaces $P^{rated}$ and discharge replaces output.
 
-### LCOE (Levelized Cost of Energy)
+### LCOE
 
-$$LCOE_g = \frac{C_{capex,g} \times CRF + C_{opex,g} + C_{fuel,g}}{E_{annual,g}}$$
+$$LCOE_{g,n,t} = \frac{(c^{fuel}_{g,n} + c^{fixed}_{g,n} + c^{maint}_{g,n}) \, P_{g,n,t} + c^{start}_{g,n} \, SU_{g,n,t}}{P_{g,n,t}}$$
 
-Where:
+for hours with output, and 0 otherwise. $c^{fuel}$, $c^{fixed}$, $c^{maint}$ and $c^{start}$ are the generator's `fuel_cost`, `fixed_cost`, `maintenance_cost` and `start_up_cost`; $SU$ is the startup variable (UC mode). When `fuel_cost` is 0, the fuel cost is taken from the fuel registry as price / energy content / efficiency. No capital cost is included.
 
-- $C_{capex,g}$ = total capital cost ($)
-- $CRF = \frac{r(1+r)^n}{(1+r)^n - 1}$ = capital recovery factor
-- $C_{opex,g}$ = annual O&M cost ($)
-- $C_{fuel,g}$ = annual fuel cost ($)
-- $E_{annual,g}$ = annual generation (MWh)
+Battery LCOE: (charging energy × nodal price / round-trip efficiency + (charge + discharge) × maintenance cost) / discharge, for hours with discharge, clipped to [0, 10000] $/MWh.
 
 ### VALLCOE (Value-Adjusted LCOE)
 
-$$VALLCOE_g = LCOE_g - \frac{\sum_{t} \lambda_t \cdot P_{g,t}}{\sum_{t} P_{g,t}}$$
+$$VALLCOE_{g,n,t} = LCOE_{g,n,t} \times (1 + a^{energy} + a^{capacity} + a^{flex})$$
 
-Where $\lambda_t$ is the electricity price at hour $t$. Negative VALLCOE indicates profitability at market prices.
+with one set of adjustments per generator and node for the year:
+
+- $a^{energy} = 1 - \text{capture rate}$, where capture rate = (output-weighted average nodal price) / (average demand-weighted system price).
+- $a^{capacity} = 0.15 \times (0.85 - CC)$, where the capacity credit $CC$ = output in the top-10 % demand hours / (rated power × number of those hours).
+- $a^{flex} = -0.1 \times$ `ramp_up` / rated power for non-renewable generators, 0 for renewables.
+
+Battery VALLCOE uses the same energy and capacity adjustments (on discharge) and a fixed $a^{flex} = -0.05$.
 
 ---
 
 ## MGA/SPORES Results
 
-When near-optimal alternative generation is enabled (`master_problem.mga.enabled: true`), an additional `/mga/` group contains every alternative. The same layout serves both methods; the `method` and `objective` attrs disambiguate which generator produced each alternative.
+When near-optimal alternative generation is enabled (`master_problem.mga.enabled: true`), an `/mga/` group is added to the main results file (there is no separate MGA file). The same layout serves both methods; the `method` and `objective` attrs tell which generator produced each alternative.
 
 ```
-results.h5
+<results>.h5
 └── mga/
-    ├── @method = "mga" | "spores"     # Generation method (Phase-4 attr)
+    ├── @method = "mga" | "spores"
     ├── @objectives = [...]            # Distinct objectives in display order
     ├── @num_alternatives
     ├── @slack_fraction
     ├── @optimal_cost
+    ├── @export_timestamp
+    ├── @years
+    ├── generator_names                 # bytes; index of cumulative_gen_capacity axis 1
+    ├── battery_names                   # bytes
     ├── alternative_0/                  # Cost-optimal seed
-    │   ├── @is_optimal = 1
+    │   ├── @is_optimal = True
     │   ├── @objective = "cost_optimal"
-    │   ├── gen_investment              # (years x generators x nodes)
-    │   ├── bat_power_investment        # (years x batteries x nodes)
-    │   ├── bat_capacity_investment     # (years x batteries x nodes)
-    │   ├── transfer_investment         # (years x nodes x nodes)
-    │   ├── cumulative_gen_capacity     # (years x generators x nodes)
+    │   ├── tech_investment             # (years, technologies, nodes)
+    │   ├── bat_tech_power_investment   # (years, battery_technologies, nodes)
+    │   ├── bat_tech_capacity_investment # (years, battery_technologies, nodes)
+    │   ├── transfer_investment         # (n, 4) records, only if non-empty
+    │   ├── cumulative_gen_capacity     # (years, generators, nodes)
     │   └── re_penetration              # (years,)
-    ├── alternative_1/                  # First non-optimal alternative
+    ├── alternative_1/
     │   ├── @objective = "hsj_diversity"          # under method=mga
     │   │   or                "min_total_build"   # under method=spores
     │   └── ... (same datasets as alternative_0)
-    └── alternative_K/
-        └── ...
+    ├── alternative_K/
+    └── systems/{name}/                 # Multi-system runs only
+        ├── @node_offset, @node_count
+        ├── generator_names, battery_names
+        └── alternative_N/              # @cost; system slices of the datasets
 ```
 
 ### mga/ (root attributes)
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `method` | string | `"mga"` or `"spores"`. Pre-Phase-4 result files default to `"mga"` on read for back-compat |
-| `objectives` | string[] | Distinct objectives in display order. Empty list for legacy MGA runs (the historical `"hsj_diversity"` tag is implicit). Useful as a cache for the viewer's legend |
+| `method` | string | `"mga"` or `"spores"`. Older result files without it are read as `"mga"` |
+| `objectives` | string[] | Distinct objectives of the non-optimal alternatives, in display order |
 | `num_alternatives` | int | Total alternatives (including cost-optimal) |
 | `slack_fraction` | float | Cost slack used (e.g., 0.05 = 5%) |
 | `optimal_cost` | float | Cost-optimal objective value ($) |
 | `export_timestamp` | string | ISO timestamp when the `/mga/` group was written |
 | `years` | int[] | Planning-horizon years (same as the rest of the file) |
+| `num_systems` | int | Number of systems (multi-system runs only) |
 
 ### mga/alternative_N/ (Attributes)
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `alternative_id` | int | 0 = cost-optimal, 1..K = non-optimal alternatives |
-| `is_optimal` | int | 1 if cost-optimal, 0 otherwise |
+| `is_optimal` | bool | True for the cost-optimal seed |
 | `cost` | float | Actual system cost ($) |
 | `diversity_objective` | float | Objective value at this alternative. For `method=mga` this is the HSJ diversity score; for `method=spores` it is the value of the SPORES objective named by `attrs["objective"]`. Absent for `alternative_0` |
-| `objective` | string | Phase-4 tag identifying *which* objective produced this alternative. Values: `"cost_optimal"` (seed), `"hsj_diversity"` (any MGA alt), or one of `"min_total_build"`, `"max_tech_equity"`, `"max_regional_equity"`, `"evolutionary_dist"` (SPORES alts). Pre-Phase-4 files default to `"cost_optimal"` for the seed and `"hsj_diversity"` for the rest on read |
+| `objective` | string | Which objective produced this alternative: `"cost_optimal"` (seed), `"hsj_diversity"` (any MGA alt), or one of `"min_total_build"`, `"max_tech_equity"`, `"max_regional_equity"`, `"evolutionary_dist"` (SPORES alts). Older files without it are read as `"cost_optimal"` for the seed and `"hsj_diversity"` for the rest |
 
 ### mga/alternative_N/ (Datasets)
 
 | Dataset | Shape | Type | Units | Description |
 |---------|-------|------|-------|-------------|
-| `gen_investment` | (years, generators, nodes) | float64 | MW | Generator investment decisions |
-| `bat_power_investment` | (years, batteries, nodes) | float64 | MW | Battery power investment |
-| `bat_capacity_investment` | (years, batteries, nodes) | float64 | MWh | Battery energy investment |
-| `transfer_investment` | (years, nodes, nodes) | float64 | MW | Transmission investment |
-| `cumulative_gen_capacity` | (years, generators, nodes) | float64 | MW | Cumulative capacity (with degradation/retirement) |
+| `tech_investment` | (years, technologies, nodes) | float64 | MW | New capacity per technology (order of `system_configuration/technologies/`) |
+| `bat_tech_power_investment` | (years, battery_technologies, nodes) | float64 | MW | New battery power per battery technology |
+| `bat_tech_capacity_investment` | (years, battery_technologies, nodes) | float64 | MWh | New battery energy per battery technology |
+| `transfer_investment` | (n, 4) | float64 | MW | One row `[year, i, j, value]` per transmission investment; absent when there are none |
+| `cumulative_gen_capacity` | (years, generators, nodes) | float64 | MW | Cumulative capacity per generator (with degradation/retirement) |
 | `re_penetration` | (years,) | float64 | fraction | RE penetration ratio per year |
 
-### MGA Output File Naming
-
-MGA results are written to `mga_{system_name}.h5`. The main `results_{system_name}.h5` file still contains the cost-optimal solution's full operational results.
+The technology axes have length 1 (all zeros) when the system has no technologies of that kind.
 
 ---
 
@@ -627,7 +740,7 @@ MGA results are written to `mga_{system_name}.h5`. The main `results_{system_nam
 import h5py
 import numpy as np
 
-with h5py.File("results_system.h5", "r") as f:
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
     # --- Metadata ---
     num_years = f.attrs["num_years"]
     num_nodes = f.attrs["num_nodes"]
@@ -642,9 +755,10 @@ with h5py.File("results_system.h5", "r") as f:
         print(f"  Year {y}: cost=${c:,.0f}, RE={r:.1%}")
 
     # --- Detailed: generation for a specific year ---
-    gen_output = f["detailed_results/year_2030_threshold_0/generation/solar_pv"][:]
-    print(f"Solar PV output shape: {gen_output.shape}")  # (num_nodes, 8760)
-    print(f"Total solar generation: {gen_output.sum():.0f} MWh")
+    gen_grp = f["detailed_results/year_2030_threshold_0/generation"]
+    for name in gen_grp:
+        gen_output = gen_grp[name][:]          # (num_nodes, hours)
+        print(f"{name}: {gen_output.sum():.0f} MW·step, fuel={gen_grp[name].attrs['fuel']}")
 ```
 
 ### Reading Investment Decisions
@@ -652,17 +766,18 @@ with h5py.File("results_system.h5", "r") as f:
 ```python
 import h5py
 
-with h5py.File("results_system.h5", "r") as f:
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
     year_grp = f["detailed_results/year_2030_threshold_0"]
+    techs = f["system_configuration/technologies"]
 
-    # Read all investment attributes
-    for attr_name in year_grp.attrs:
-        if attr_name.startswith("investment_"):
-            value = year_grp.attrs[attr_name]
-            if value > 0:
-                print(f"  {attr_name}: {value:.1f} MW")
+    # Scalar attributes: investment_tech_investment_power_{t}_{n}, ...
+    for attr_name, value in year_grp.attrs.items():
+        if attr_name.startswith("investment_tech_investment_power_"):
+            t, n = map(int, attr_name.rsplit("_", 2)[-2:])
+            tech_name = techs[f"technology_{t}"].attrs["name"]
+            print(f"  {tech_name} at node {n}: {value:.1f} MW")
 
-    # Read generator investment arrays
+    # Per-unit investment arrays
     inv_grp = year_grp["gen_investment_power"]
     for gen_name in inv_grp:
         inv_data = inv_grp[gen_name][:]  # shape: (num_nodes,)
@@ -677,9 +792,10 @@ with h5py.File("results_system.h5", "r") as f:
 import h5py
 import matplotlib.pyplot as plt
 
-with h5py.File("results_system.h5", "r") as f:
-    soc = f["detailed_results/year_2030_threshold_0/battery_soc/li_ion"][:]
-    # Shape: (num_nodes, 8760)
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
+    soc_grp = f["detailed_results/year_2030_threshold_0/battery_soc"]
+    name = next(iter(soc_grp))
+    soc = soc_grp[name][:]                   # (num_nodes, hours)
 
     # Plot SOC for node 0 over the first week
     hours = range(168)
@@ -687,9 +803,23 @@ with h5py.File("results_system.h5", "r") as f:
     plt.plot(hours, soc[0, :168])
     plt.xlabel("Hour")
     plt.ylabel("SOC (MWh)")
-    plt.title("Battery State of Charge - Node 0, Week 1")
+    plt.title(f"{name} state of charge - Node 0, Week 1")
     plt.grid(True)
     plt.show()
+```
+
+### Reading Demand
+
+```python
+import h5py
+
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
+    hours = f["detailed_results/year_2030_threshold_0/electricity_prices"].shape[0]
+    demand = f["detailed_results/year_2030_threshold_0/demand"][:]
+    if demand.shape[0] == hours and demand.shape[1] != hours:
+        demand = demand.T                    # -> (num_nodes, hours)
+
+    base = f["demand/year_2030_base_demand"][:]   # always (hours, num_nodes)
 ```
 
 ### Reading Electricity Prices
@@ -698,7 +828,7 @@ with h5py.File("results_system.h5", "r") as f:
 import h5py
 import numpy as np
 
-with h5py.File("results_system.h5", "r") as f:
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
     year_grp = f["detailed_results/year_2030_threshold_0"]
 
     # System-average prices
@@ -708,7 +838,7 @@ with h5py.File("results_system.h5", "r") as f:
 
     # Nodal prices (locational marginal prices)
     nodal = year_grp["nodal_electricity_prices"][:]
-    print(f"Nodal prices shape: {nodal.shape}")  # (num_nodes, 8760)
+    print(f"Nodal prices shape: {nodal.shape}")  # (num_nodes, hours)
 
     # Price spread between nodes
     price_spread = nodal.max(axis=0) - nodal.min(axis=0)
@@ -720,28 +850,29 @@ with h5py.File("results_system.h5", "r") as f:
 ```python
 import h5py
 
-with h5py.File("mga_system.h5", "r") as f:
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
     if "mga" in f:
         mga = f["mga"]
-        meta = mga["metadata"]
-        n_alts = meta.attrs["num_alternatives"]
-        optimal_cost = meta.attrs["optimal_cost"]
-        slack = meta.attrs["slack_fraction"]
+        n_alts = mga.attrs["num_alternatives"]
+        optimal_cost = mga.attrs["optimal_cost"]
+        slack = mga.attrs["slack_fraction"]
 
         print(f"MGA: {n_alts} alternatives, {slack:.0%} slack")
         print(f"Optimal cost: ${optimal_cost:,.0f}")
 
-        for k in range(n_alts):
-            alt = mga[f"alternative_{k}"]
+        alt_keys = sorted((k for k in mga if k.startswith("alternative_")),
+                          key=lambda s: int(s.rsplit("_", 1)[-1]))
+        for k in alt_keys:
+            alt = mga[k]
             cost = alt.attrs["cost"]
-            gen_inv = alt["gen_investment"][:]  # (years, gens, nodes)
-            bat_inv = alt["bat_power_investment"][:]
+            tech_inv = alt["tech_investment"][:]        # (years, techs, nodes)
+            bat_inv = alt["bat_tech_power_investment"][:]
             re_pen = alt["re_penetration"][:]
 
-            print(f"\nAlternative {k}:")
+            print(f"\n{k}:")
             print(f"  Cost: ${cost:,.0f} ({(cost/optimal_cost - 1)*100:+.1f}%)")
-            print(f"  Total gen investment: {gen_inv.sum():.0f} MW")
-            print(f"  Total bat investment: {bat_inv.sum():.0f} MW")
+            print(f"  Total technology investment: {tech_inv.sum():.0f} MW")
+            print(f"  Total battery investment: {bat_inv.sum():.0f} MW")
             print(f"  Final RE penetration: {re_pen[-1]:.1%}")
 ```
 
@@ -750,32 +881,33 @@ with h5py.File("mga_system.h5", "r") as f:
 ```python
 import h5py
 
-with h5py.File("results_system.h5", "r") as f:
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
     gen_grp = f["detailed_results/year_2035_threshold_0/generation"]
 
     # List all generators (original + virtual)
     all_gens = list(gen_grp.keys())
     print(f"All generators: {all_gens}")
 
-    # Virtual generators have "Investment" prefix
+    # Virtual generators have the "Investment " prefix
     for name in all_gens:
         data = gen_grp[name][:]
-        total_mwh = data.sum()
-        if "Investment" in name:
-            print(f"  [VIRTUAL] {name}: {total_mwh:,.0f} MWh")
+        total = data.sum()
+        if name.startswith("Investment "):
+            print(f"  [VIRTUAL] {name}: {total:,.0f} MW·step")
         else:
-            print(f"  [ORIGINAL] {name}: {total_mwh:,.0f} MWh")
+            print(f"  [ORIGINAL] {name}: {total:,.0f} MW·step")
 ```
+
+Multiply sums by `temporal_resolution_hours` to get MWh.
 
 ### With the CLI
 
 ```bash
-# Export to CSV
-esfex export results.h5 --format csv --output-dir ./csv_results/
+# Export to CSV (one folder per scenario under ./csv_results/)
+esfex export -r isla_juventud_15012026_1030.h5 -f csv -o ./csv_results/
 
-# Export to Excel
-esfex export results.h5 --format excel --output results.xlsx
-
-# Export specific year
-esfex export results.h5 --format csv --year 2030
+# Export to Excel: writes ./export/isla_juventud_15012026_1030.xlsx
+esfex export -r isla_juventud_15012026_1030.h5 -f excel -o ./export/
 ```
+
+`-o` is always a directory. The export command has no year filter. See [Results Export § Export Commands](../user-guide/results-export.md#export-commands) for what each format contains and its limitations.

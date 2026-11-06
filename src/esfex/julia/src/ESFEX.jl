@@ -197,7 +197,7 @@ export add_inter_system_constraints!, build_multi_system_objective!
 # Stochastic Programming types and functions
 export ScenarioMultipliers, Scenario, StochasticMasterInput
 export create_stochastic_master_problem
-export apply_scenario_multipliers, build_stochastic_objective!
+export scenario_master_input, build_stochastic_objective!
 
 # Primary Energy Investment in Master Problem
 export PrimaryEnergyInvestmentConfig

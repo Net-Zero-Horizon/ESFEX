@@ -38,13 +38,13 @@ Load demand data from an Excel (.xlsx, .xls) or CSV file.
 
 **Behavior:**
 
-- When `year_to_load=None`: reads the entire file. For CSV files, assumes no header row (pure numeric data). For Excel files, uses pandas defaults.
+- When `year_to_load=None`: reads the entire file. Both CSV and Excel files are read with no header row (`header=None`), so every row is treated as data.
 - When `year_to_load` is specified: calculates the row range for that year based on `date_start`, then reads only those rows. This avoids loading the full multi-year file into memory.
 - Years are determined from the time span: `start_date.year` through `end_date.year`.
 
 **Demand File Format:**
 
-Hourly power demand values in MW. Each column represents a node. No header row for CSV files; Excel files may have headers that are auto-detected by pandas.
+Hourly power demand values in MW. Each column represents a node. No header row, for CSV and Excel alike.
 
 | Column 0 | Column 1 | Column 2 | ... |
 |----------|----------|----------|-----|
@@ -56,17 +56,16 @@ For a 25-year simulation with hourly resolution, the file contains `25 * 8760 = 
 
 **Multi-Year Demand and Growth Rates:**
 
-Demand growth is NOT applied inside `load_demand_data()`. The function loads raw data as-is. Growth rates are applied by the runner during simulation separately:
+Demand growth is NOT applied inside `load_demand_data()`. The function loads raw data as-is.
 
-```python
-# In runner._load_demand():
-demand_array, hours, num_nodes, years, time_index = load_demand_data(
-    config.demand_file, date_start=config.date_start
-)
-# Growth is applied separately per year during master problem setup
-```
+`load_demand_data()` is a standalone helper; the runner does not call it. `Orchestrator._load_demand()` reads each system's demand itself:
 
-The master problem applies growth via the `demand_growth` parameter passed to `MasterProblemAdapter`, scaling demand per year in the Julia optimization model.
+- It uses `demand_paths` (one file per node, stacked side by side) if set, otherwise `demand_path` (one column per node).
+- CSV files are read with `header=None`. Excel files are read with `pd.read_excel()` defaults, so the runner treats the first Excel row as a header, unlike `load_demand_data()`.
+- If the file is shorter than the simulation horizon, the first year is repeated to fill it.
+- The system's `demand_scale` is applied, and the systems of the meta-network are stacked side by side into one `(hours, nodes)` array.
+
+The runner passes every year of demand to the master problem and sets `MasterProblemAdapter(demand_growth=0.0)`, so the master uses the file values unchanged. To model growth, provide a multi-year file.
 
 **Example:**
 
@@ -148,14 +147,15 @@ Load a generator availability profile from an Excel or CSV file.
 |-----------|------|---------|-------------|
 | `file_path` | `str` or `Path` | required | Path to the availability data file. |
 | `temporal_resolution_hours` | `int` | `1` | Target temporal resolution. If > 1, the hourly data is aggregated using MEAN (appropriate for capacity factors). |
-| `num_nodes` | `int` or `None` | `None` | Expected number of nodes. If provided, pads with 1.0 or truncates to match. |
+| `num_nodes` | `int` or `None` | `None` | Expected number of nodes. If provided, the columns are broadcast, extended or truncated to match (see below). |
 
 **Returns:** Array of shape `(hours, nodes)` with values clipped to [0, 1].
 
 **Behavior:**
 
-- If the file does not exist, logs a warning and returns an array of ones (full availability).
-- If the file has fewer columns than `num_nodes`, pads with 1.0 (full availability for missing nodes).
+- If the file does not exist, or reading it fails, logs a warning or error and returns an array of ones with shape `(8760 // temporal_resolution_hours, num_nodes)` (10 columns if `num_nodes` is `None`).
+- A single-column file is copied to every node.
+- If the file has more than one column but fewer than `num_nodes`, the last column is repeated for the missing nodes.
 - If the file has more columns than `num_nodes`, truncates to the expected number.
 - Values are clipped to [0, 1] after loading.
 - If `temporal_resolution_hours > 1`, applies `aggregate_to_resolution()` using MEAN aggregation.

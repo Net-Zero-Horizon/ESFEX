@@ -11,12 +11,14 @@ The **Master Problem** (`master_problem.jl`) determines optimal investment and r
 
 The Master Problem is a **two-stage linear program** [**[24]**](../reference/bibliography.md#ref24), [**[25]**](../reference/bibliography.md#ref25):
 
-1. **First stage (investment)**: Capacity additions for generators, batteries, transmission, and primary energy infrastructure across all planning years.
+1. **First stage (investment)**: Capacity additions of candidate technologies, battery technologies, transmission, primary-energy infrastructure and reservoir storage, plus life extension of existing units, across all planning years.
 2. **Second stage (operational validation)**: Representative-day dispatch subproblems embedded within the master model to link investment decisions to operational feasibility.
 
-Retirement is handled through **age-based expiry** -- units automatically leave service when their age exceeds their configured lifetime. No binary retirement decisions are needed, keeping the formulation as a pure LP.
+Existing generators and batteries leave service when their age reaches their configured lifetime. The model may keep part of that capacity online with continuous **life-extension** variables, charged every year at a fraction of the investment cost. There are no binary decisions, so the formulation stays a pure LP.
 
-**Entry point**: `create_master_problem(input; use_representative_days=true)`
+The master works on a node-level network: when the systems are merged for planning, each node becomes one bus and the lines between nodes become synthetic master lines (`master_lines`). The operational dispatch then works on the full bus network.
+
+**Entry point**: `create_master_problem(input; use_representative_days=true)`. With `solver_method: benders` the same problem is solved by Benders decomposition (§11b).
 
 ---
 
@@ -27,14 +29,17 @@ Retirement is handled through **age-based expiry** -- units automatically leave 
 | Symbol | Description | Source |
 |--------|-------------|--------|
 | \(\mathcal{Y} = \{1, \ldots, Y\}\) | Planning years | `input.years` |
-| \(\mathcal{G} = \{1, \ldots, G\}\) | Generator types | `input.generators` |
-| \(\mathcal{G}_{RE} \subseteq \mathcal{G}\) | Renewable generators | `gen.type == "Renewable"` |
-| \(\mathcal{B} = \{1, \ldots, B\}\) | Battery types | `input.batteries` |
-| \(\mathcal{N} = \{1, \ldots, N\}\) | Nodes (buses) | `input.network.num_buses` |
-| \(\mathcal{T}_d = \{1, \ldots, H\}\) | Hours within a representative day | `24 / temporal_resolution_hours` |
+| \(\mathcal{Y}^{inv} \subseteq \mathcal{Y}\) | Investment-period start years: \(1, 1+p, 1+2p, \ldots\) with \(p\) = `investment_resolution_hours` / 8760 | `years_per_inv_period` |
+| \(\mathcal{G}\) | Existing generators | `input.generators` |
+| \(\mathcal{K}\), \(\mathcal{K}_{RE} \subseteq \mathcal{K}\) | Candidate technologies; renewable ones | `input.technologies` |
+| \(\mathcal{B}\) | Existing batteries | `input.batteries` |
+| \(\mathcal{B}^{K}\) | Candidate battery technologies | `input.battery_technologies` |
+| \(\mathcal{N} = \{1, \ldots, N\}\) | Buses of the master network (one per node after merging) | `input.network.num_buses` |
+| \(\mathcal{T}_d = \{1, \ldots, H\}\) | Time steps within a representative day | `24 / temporal_resolution_hours` |
 | \(\mathcal{D}_y\) | Representative days for year \(y\) | `select_representative_days()` |
 | \(\mathcal{F}\) | Fuel types (primary energy) | `input.pe_configs` |
 | \(\mathcal{S}\) | Demand sectors | `input.sectoral_demand` |
+| \(\Sigma\) | Systems (for per-system RE targets) | `input.system_node_ranges` |
 
 ---
 
@@ -44,75 +49,89 @@ Retirement is handled through **age-based expiry** -- units automatically leave 
 ### 3.1 Investment Variables
 
 
-| Variable | Domain | Units | Description | Julia name |
-|----------|--------|-------|-------------|------------|
-| \(I^{gen}_{y,g,n}\) | \(\mathbb{R}_+\) | MW | Generator capacity investment | `gen_investment[y][g][n]` |
-| \(I^{bat,P}_{y,b,n}\) | \(\mathbb{R}_+\) | MW | Battery power investment | `bat_power_investment[y][b][n]` |
-| \(I^{bat,E}_{y,b,n}\) | \(\mathbb{R}_+\) | MWh | Battery energy investment | `bat_capacity_investment[y][b][n]` |
-| \(I^{tr}_{y,i,j}\) | \(\mathbb{R}_+\) | MW | Transmission expansion | `transfer_investment[y][(i,j)]` |
-| \(I^{fs}_{y,f,n}\) | \(\mathbb{R}_+\) | units | Fuel storage investment | `fuel_storage_investment[f][y][n]` |
-| \(I^{ft}_{y,f,i,j}\) | \(\mathbb{R}_+\) | units/day | Fuel transport investment | `fuel_transport_investment[f][y][(i,j)]` |
-
-### 3.2 RE Tracking and Slack Variables
-
+Investment variables exist only for period-start years \(y \in \mathcal{Y}^{inv}\); the other years of a period share them.
 
 | Variable | Domain | Units | Description | Julia name |
 |----------|--------|-------|-------------|------------|
-| \(\rho_y\) | \([0, 1]\) | -- | RE penetration ratio | `re_penetration_ratio[y]` |
+| \(I^{tech}_{y,k,n}\) | \([0, \bar{I}_{k,n}]\) | MW | Technology capacity investment | `tech_investment[y][k][n]` (`tech_inv_*`) |
+| \(I^{bat,P}_{y,k,n}\) | \([0, \bar{I}^{P}_{k,n}]\) | MW | Battery-technology power investment | `bat_tech_power_investment[y][k][n]` |
+| \(I^{bat,E}_{y,k,n}\) | \([0, \bar{I}^{E}_{k,n}]\) | MWh | Battery-technology energy investment | `bat_tech_capacity_investment[y][k][n]` |
+| \(I^{tr}_{y,i,j}\) | \([0, \bar{I}^{tr}_i]\) | MW | Transmission expansion on an existing corridor | `transfer_investment[y][(i,j)]` |
+| \(I^{fs}_{y,f,n}\) | \(\mathbb{R}_+\) | units | Fuel storage investment (every year) | `fuel_storage_investment[f][y][n]` |
+| \(I^{ft}_{y,f,r}\) | \(\mathbb{R}_+\) | units/day | Fuel transport investment on route \(r\) (every year) | `fuel_transport_investment[f][y][r]` |
+| \(I^{res}_{y,g,n}\) | \(\mathbb{R}_+\) | MWh | Reservoir storage investment (every year) | `reservoir_investment[y][g]` |
+
+### 3.2 Life Extension, RE Tracking and Slack Variables
+
+
+| Variable | Domain | Units | Description | Julia name |
+|----------|--------|-------|-------------|------------|
+| \(X_{y,g,n}\) | \([0, \bar{P}_{g,n}(1-\delta_{g,n})^{a}]\) | MW | Capacity of generator \(g\) kept past its lifetime | `gen_life_extension` (`gen_life_ext_*`) |
+| \(X^{bat}_{y,b,n}\) | \([0, \bar{P}^{bat}_{b,n}]\) | MW | Battery power kept past its lifetime | `bat_life_extension` (`bat_life_ext_*`) |
+| \(\rho_{\sigma,y}\) | \([0, 1]\) | -- | RE penetration ratio of system \(\sigma\) | `re_penetration_ratio[(σ,y)]` |
 | \(s^{re}_y\) | \(\mathbb{R}_+\) | -- | RE target slack | `slack_re_target[y]` |
-| \(s^{cap}_{y,n}\) | \(\mathbb{R}_+\) | MW | Capacity adequacy slack | `slack_capacity[(y,n)]` |
+| \(s^{cap}_{y,n}\) | \(\mathbb{R}_+\) | MW | Capacity adequacy slack per node | `slack_capacity[(y,n)]` |
 | \(s^{bud}_y\) | \(\mathbb{R}_+\) | \$ | Budget slack | `slack_budget[y]` |
+
+Life-extension variables exist only for years in which the unit is past its lifetime.
 
 ### 3.3 Representative Day Operational Variables
 
 
-For each year \(y\) and representative day \(d\), a set of dispatch variables is created (struct `RepresentativeDayVariables`):
+For each year \(y\) and representative day \(d\), a set of dispatch variables is created by `create_day_ps_vars!()` (the same `PowerSystemVariables` structure as the operational dispatch, with names prefixed `rd_y{y}_d{d}`), plus the candidate-technology variables:
 
 | Variable | Domain | Units | Description | Julia name |
 |----------|--------|-------|-------------|------------|
-| \(P^{day}_{g,n,t}\) | \(\mathbb{R}_+\) | MW | Generator output | `gen_output[g,n,t]` |
-| \(C^{day}_{g,n,t}\) | \(\mathbb{R}_+\) | MW | Curtailment per generator | `curtailment[g,n,t]` |
-| \(P^{ch,day}_{b,n,t}\) | \(\mathbb{R}_+\) | MW | Battery charge | `bat_charge[b,n,t]` |
-| \(P^{dis,day}_{b,n,t}\) | \(\mathbb{R}_+\) | MW | Battery discharge | `bat_discharge[b,n,t]` |
-| \(E^{day}_{b,n,t}\) | \(\mathbb{R}_+\) | MWh | Battery SOC | `bat_soc[b,n,t]` |
-| \(L^{day}_{n,t}\) | \(\mathbb{R}_+\) | MW | Loss of load | `loss_load[n,t]` |
-| \(\phi^{day}_{i,j,t}\) | \(\mathbb{R}\) | MW | Transfer flow | `transfer[(i,j)][t]` |
+| \(P^{day}_{g,n,t}\) | \(\mathbb{R}_+\) | MW | Existing generator output | `gen_output[g,n,t]` |
+| \(P^{tech}_{k,n,t}\) | \(\mathbb{R}_+\) | MW | Technology output | `tech_out_y*_d*` |
+| \(P^{ch,day}_{b,n,t}\), \(P^{dis,day}_{b,n,t}\), \(E^{day}_{b,n,t}\) | \(\mathbb{R}_+\) | MW, MWh | Existing battery charge, discharge, SOC | `bat_charge`, `bat_discharge`, `bat_soc` |
+| \(P^{bt,ch}_{k,n,t}\), \(P^{bt,dis}_{k,n,t}\), \(E^{bt}_{k,n,t}\) | \(\mathbb{R}_+\) | MW, MWh | Battery-technology charge, discharge, SOC | `bat_tech_ch/dis/soc_y*_d*` |
+| \(CU^{day}_{n,t}\) | \(\mathbb{R}_+\) | MW | Curtailment of existing renewables per node | `curtailment[n,t]` |
+| \(L^{day}_{n,t}\) | \(\mathbb{R}_+\) | MW | Load shedding per bus | `load_shed[n,t]` |
+| \(f^{day}_{\ell,t}\) | \(\mathbb{R}\) | MW | Line flow (DC power flow) | `pf_*` |
 | \(\lambda^{fre}_{n,t}\) | \(\mathbb{R}_+\) | MW | FRE penetration loss slack | `fre_penetration_loss[n,t]` |
 | \(L^{sec,day}_{s,n,t}\) | \(\mathbb{R}_+\) | MW | Sectoral loss of load | `loss_of_load_sectoral[s][n,t]` |
+| \(r^{sta}, r^{dyn}, \lambda^{sta}, \lambda^{dyn}\) | \(\mathbb{R}_+\) | MW | Reserves and reserve shortfalls per node | `reserve_*` |
+| \(H^{day}_t\) | \(\mathbb{R}_+\) | MW-s | Inertia shortfall | `loss_of_inertia[t]` |
+
+Reservoir level, spillage and pumping variables are added for reservoir units.
 
 ---
 
 
 ## 4. Parameters
 
-### 4.1 Generator Parameters
+### 4.1 Generator and Technology Parameters
 
 
 | Symbol | Units | Description | Julia field |
 |--------|-------|-------------|-------------|
-| \(\bar{P}_{g,n}\) | MW | Rated power | `gen.rated_power[n]` |
-| \(c^{inv}_{g,n}\) | \$/MW | Investment cost | `gen.invest_cost[n]` |
-| \(\bar{I}_{g,n}\) | MW | Maximum investment | `gen.invest_max[n]` |
-| \(\tau_{g,n}\) | years | Lifetime | `gen.life_time[n]` |
-| \(a^0_{g,n}\) | years | Initial age | `gen.initial_age[n]` |
-| \(\delta_{g,n}\) | [0,1] | Annual degradation rate | `gen.degradation_rate[n]` |
-| \(\alpha_{g,t,n}\) | [0,1] | Availability factor | `gen.availability[t,n]` |
+| \(\bar{P}_{g,n}\) | MW | Rated power of an existing generator | `gen.rated_power[n]` |
+| \(c^{inv}_{g,n}\) | \$/MW | Investment cost of an existing generator (used to price life extension) | `gen.invest_cost[n]` |
+| \(c^{inv}_{k,n}\) | \$/MW | Technology investment cost | `tech.invest_cost[n]` |
+| \(\bar{I}_{k,n}\) | MW | Maximum cumulative technology investment | `tech.invest_max[n]` |
+| \(\tau_{g,n}\), \(\tau_{k,n}\) | years | Lifetime | `life_time[n]` |
+| \(a^0_{g,n}\) | years | Initial age of an existing unit | `gen.initial_age[n]` |
+| \(\delta_{g,n}\), \(\delta_{k,n}\) | [0,1] | Annual degradation rate | `degradation_rate[n]` |
+| \(\alpha_{g,t,n}\) | [0,1] | Availability factor | `availability[t,n]` |
 | \(c^{fuel}_{g,n}\) | \$/MWh | Fuel cost | `gen.fuel_cost[n]` |
 | \(c^{fix}_{g,n}\) | \$/MWh | Fixed O&M cost | `gen.fixed_cost[n]` |
 | \(c^{maint}_{g,n}\) | \$/MWh | Maintenance cost | `gen.maintenance_cost[n]` |
+| \(c^{CO_2}_g\) | \$/MWh | Carbon cost: `co2_cost` × the emission factor of the unit's fuel (per MWh of fuel) / the unit's rated efficiency | `co2_cost_per_mwh(input, gen, n)` |
+| \(c^{dec}_{g,n}\) | \$/MW | Decommissioning cost | `gen.decommissioning_cost[n]` |
+| \(\kappa^{risk}_{g,n}\) | [0,1] | Risk coefficient (capacity derating in CAP-1) | `risk_coefficient[n]` |
 
 ### 4.2 Battery Parameters
 
 
 | Symbol | Units | Description | Julia field |
 |--------|-------|-------------|-------------|
-| \(\bar{P}^{bat}_{b,n}\) | MW | Max discharge power | `bat.max_discharge_power[n]` |
-| \(\bar{E}_{b,n}\) | MWh | Energy capacity | `bat.capacity[n]` |
-| \(\eta^{ch}_{b,n}\) | [0,1] | Charge efficiency | `bat.charge_efficiency[n]` |
-| \(\eta^{dis}_{b,n}\) | [0,1] | Discharge efficiency | `bat.discharge_efficiency[n]` |
-| \(E^0_{b,n}\) | [0,1] | Initial SOC fraction | `bat.soc_initial[n]` |
-| \(h^{min}_{b}\) | hours | Minimum duration | `bat.min_duration_hours` |
-| \(h^{max}_{b}\) | hours | Maximum duration | `bat.max_duration_hours` |
+| \(\bar{P}^{bat}_{b,n}\) | MW | Max discharge power of an existing battery | `bat.max_discharge_power[n]` |
+| \(\bar{E}_{b,n}\) | MWh | Energy capacity of an existing battery | `bat.capacity[n]` |
+| \(\eta^{ch}\), \(\eta^{dis}\) | [0,1] | Charge and discharge efficiency | `charge_efficiency[n]`, `discharge_efficiency[n]` |
+| \(E^0_{b,n}\) | [0,1] | Initial SOC fraction | `soc_initial[n]` |
+| \(c^{inv,P}_{k,n}\), \(c^{inv,E}_{k,n}\) | \$/MW, \$/MWh | Battery-technology power and energy investment cost | `invest_cost_power[n]`, `invest_cost_capacity[n]` |
+| \(h^{min}_{k}\), \(h^{max}_k\) | hours | Minimum and maximum duration of a battery technology | `min_duration_hours`, `max_duration_hours` |
 | \(c^{\text{thr}}_{b,n}\) | \$/MWh | Throughput degradation cost | `bat.throughput_degradation_cost[n]` |
 
 ### 4.3 System Parameters
@@ -121,14 +140,14 @@ For each year \(y\) and representative day \(d\), a set of dispatch variables is
 | Symbol | Units | Description | Julia field |
 |--------|-------|-------------|-------------|
 | \(r\) | [0,1] | Discount rate | `input.discount_rate` |
-| \(\bar{B}_y\) | \$ | Max annual investment budget | `input.max_annual_investment` |
+| \(\bar{B}\) | \$ | Max investment budget per investment period | `input.max_annual_investment` |
 | \(\rho^{target}\) | [0,1] | Target RE penetration (final year) | `input.target_re_penetration` |
-| \(\rho^{init}\) | [0,1] | Initial RE penetration | `input.initial_re_penetration` |
-| \(\Delta\rho^{min}\) | [0,1] | Minimum annual RE increment | `input.min_re_increment` |
-| \(\Delta\rho^{max}\) | [0,1] | Maximum annual RE increment | `input.max_re_increment` |
+| \(\rho^{init}_\sigma\) | [0,1] | Initial RE penetration of system \(\sigma\) | `initial_re_penetration` / `system_node_ranges[σ].initial_re` |
+| \(\Delta\rho^{min}\), \(\Delta\rho^{max}\) | [0,1] | Minimum and maximum annual RE increment | `input.min_re_increment`, `input.max_re_increment` |
 | \(M_{res}\) | -- | Reserve margin multiplier | `input.reserve_margin` (default 1.15) |
-| \(\gamma\) | -- | Annual demand growth rate | `input.demand_growth` |
-| \(c^{VOLL}\) | \$/MW | Value of lost load penalty | `input.loss_of_load_penalty` |
+| \(\phi^{ext}\) | -- | Life-extension cost factor | `input.life_extension_cost_factor` |
+| \(c^{VOLL}\) | \$/MWh | Value of lost load penalty | `input.loss_of_load_penalty` |
+| \(c^{CU}\) | \$/MWh | Curtailment cost | `input.curtailment_cost` |
 | \(c^{fre}\) | \$/MWh | FRE penetration loss penalty | `input.fre_penetration_loss_penalty` |
 | \(c^{slack}\) | \$ | Generic slack penalty | `input.slack_penalty` |
 | \(\bar{\kappa}\) | [0,1] | Maximum curtailment ratio | `input.max_curtailment_ratio` (default 0.05) |
@@ -145,45 +164,58 @@ For each year \(y\) and representative day \(d\), a set of dispatch variables is
 The objective minimizes the NPV of total system costs over the planning horizon:
 
 \[
-\min \; Z = \sum_{y=1}^{Y} \frac{1}{(1+r)^{y-1}} \left[ C^{inv}_y + C^{op}_y \right] + C^{slack} \tag{OBJ-1}
+\min \; Z = \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_y}{(1+r)^{y-1}} + \sum_{y=1}^{Y} \frac{C^{asset}_y + C^{op}_y}{(1+r)^{y-1}} + C^{slack} \tag{OBJ-1}
 \]
 
 ### 5.1 Investment Cost
 
 
 \[
-C^{inv}_y = \underbrace{\sum_{g \in \mathcal{G}} \sum_{n \in \mathcal{N}} c^{inv}_{g,n} \cdot I^{gen}_{y,g,n}}_{\text{Generator}} + \underbrace{\sum_{b \in \mathcal{B}} \sum_{n \in \mathcal{N}} \left( c^{inv,P}_{b,n} \cdot I^{bat,P}_{y,b,n} + c^{inv,E}_{b,n} \cdot I^{bat,E}_{y,b,n} \right)}_{\text{Battery}} \tag{OBJ-2}
+C^{inv}_y = \underbrace{\sum_{k,n} c^{inv}_{k,n} I^{tech}_{y,k,n}}_{\text{Technologies}} + \underbrace{\sum_{k,n} \left( c^{inv,P}_{k,n} I^{bat,P}_{y,k,n} + c^{inv,E}_{k,n} I^{bat,E}_{y,k,n} \right)}_{\text{Battery technologies}} + \underbrace{\sum_{\{i,j\}} \max(c^{tr}_i, c^{tr}_j) \, I^{tr}_{y,\{i,j\}}}_{\text{Transmission, once per corridor}} \tag{OBJ-2}
 \]
 
 \[
-\quad + \underbrace{\sum_{(i,j)} c^{tr}_i \cdot I^{tr}_{y,i,j}}_{\text{Transmission}} + \underbrace{\sum_{f \in \mathcal{F}} \left( \sum_{n} c^{fs}_{f,n} \cdot I^{fs}_{y,f,n} + \sum_{(i,j)} c^{ft}_f \cdot d_{ij} \cdot I^{ft}_{y,f,i,j} \right)}_{\text{Primary energy}} \tag{OBJ-3}
+\quad + \underbrace{\sum_{f \in \mathcal{F}} \left( \sum_{n} c^{fs}_{f,n} I^{fs}_{y,f,n} + \sum_{r} c^{ft}_f \, d_{r} \, I^{ft}_{y,f,r} \right)}_{\text{Primary energy}} + \underbrace{\sum_{g,n} c^{res}_{g,n} I^{res}_{y,g,n}}_{\text{Reservoir}} \tag{OBJ-3}
 \]
 
-where \(d_{ij}\) is the distance between nodes \(i\) and \(j\), and \(c^{ft}_f\) is the transport investment cost per unit per km for fuel \(f\).
+where \(d_{r}\) is the length of fuel route \(r\) (km), and \(c^{ft}_f\) is the transport investment cost per unit per km for fuel \(f\). Existing generators and batteries have no investment variable; their capacity is fixed (§6).
+
+### 5.1b Existing-Asset Costs
+
+
+\[
+C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y \tag{OBJ-3b}
+\]
+
+Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\). With an investment cost of 0, life extension is free.
 
 ### 5.2 Operational Cost
 
 
-Operational costs come from the representative day subproblems, scaled to annual:
+Operational costs come from the representative day subproblems, scaled to a year:
 
 \[
-C^{op}_y = \frac{365}{D_r} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{OBJ-4}
+C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{OBJ-4}
 \]
 
-where the cost for each representative day is (from `calculate_day_operational_cost`):
+where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, 8760 or 8784). The cost for each representative day is (from `day_operational_cost`):
 
 \[
-C^{day}_{y,d} = \sum_{t=1}^{H} \left[ \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}_{g,n} + c^{maint}_{g,n}\right) P^{day}_{g,n,t} + \sum_{n} c^{VOLL} \cdot L^{day}_{n,t} + \sum_{n} c^{fre} \cdot \Delta t \cdot \lambda^{fre}_{n,t} \right] \tag{OBJ-5}
+\begin{aligned}
+C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}_{g,n} + c^{maint}_{g,n} + c^{CO_2}_g\right) P^{day}_{g,n,t} + \sum_{k,n} \left(c^{fuel}_{k,n} + c^{fix}_{k,n} + c^{maint}_{k,n} + c^{CO_2}_k\right) P^{tech}_{k,n,t} \\
+& + c^{VOLL} \sum_{n} L^{day}_{n,t} + c^{fre} \sum_{n} \lambda^{fre}_{n,t} + c^{CU} \sum_n CU^{day}_{n,t} + \sum_{b,n} c^{\text{thr}}_{b,n} P^{dis,day}_{b,n,t} \\
+& + c^{r,sta} \sum_n \lambda^{sta}_{n,t} + c^{r,dyn} \sum_n \lambda^{dyn}_{n,t} + c^{ine} H^{day}_t \Big]
+\end{aligned} \tag{OBJ-5}
 \]
 
 \[
 \quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot \kappa_s \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
 \]
 
-where \(\kappa_s\) is the criticality weight for sector \(s\) and \(\Delta t\) is `temporal_resolution_hours`.
+where \(\kappa_s\) is the criticality weight for sector \(s\). Unlike the dispatch, the master charges both \(L^{day}\) and \(L^{sec,day}\). The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well, with the same scaling.
 
 !!! note "PWL cost curves in the master problem"
-    When generators or technologies have a `fuel_cost_curve` configured, the representative day operational cost (OBJ-5) uses the same piecewise-linear (PWL) fuel cost decomposition as the operational dispatch formulation. Generator output is decomposed into segments with non-decreasing marginal costs (see [Operational Dispatch -- PWL Fuel Cost](operational-dispatch.md#311-piecewise-linear-pwl-fuel-cost-decomposition)). The same applies to batteries with `discharge_cost_curve`. This ensures that investment decisions in the master problem account for the actual shape of generator cost curves rather than assuming flat marginal costs.
+    When existing generators have a `fuel_cost_curve` configured, the representative day operational cost (OBJ-5) uses the same piecewise-linear (PWL) fuel cost decomposition as the operational dispatch formulation (see [Operational Dispatch -- PWL Fuel Cost](operational-dispatch.md#311-piecewise-linear-pwl-fuel-cost-decomposition)). The same applies to existing batteries with `discharge_cost_curve`, which then replaces the throughput cost. Candidate technologies are costed at their flat `fuel_cost`; their cost curves are not used by the master.
 
 ### 5.3 Slack Penalties
 
@@ -198,101 +230,97 @@ C^{slack} = \sum_{y=1}^{Y} \left[ c^{slack} \cdot s^{re}_y + c^{slack} \cdot s^{
 ## 6. Cumulative Capacity Expressions
 
 
-**Julia function**: `build_cumulative_capacity_expressions(vars, input, year_idx)`
+For each unit and bus, the capacity available in year \(y\) combines existing (degraded) capacity, life-extended capacity and invested capacity, each subject to age-based retirement. The capacities are built inline where they are used (`add_day_operational_constraints!`, `add_capacity_adequacy_constraints!`); `build_cumulative_capacity_expressions()` evaluates the same expressions for result extraction.
 
-A key building block for all constraints. For each technology and node, the cumulative available capacity in year \(y\) combines existing (degraded) capacity with invested capacity, both subject to age-based retirement.
-
-### 6.1 Generator Cumulative Capacity
+### 6.1 Existing Generators
 
 
 \[
-\bar{P}^{cum}_{y,g,n} = \underbrace{\bar{P}_{g,n} \cdot (1 - \delta_{g,n})^{a^{exist}_{y,g,n}} \cdot \mathbb{1}\!\left[a^{exist}_{y,g,n} < \tau_{g,n}\right]}_{\text{Existing capacity (degraded)}} + \underbrace{\sum_{\substack{y'=1 \\ a^{inv}_{y,y'} < \tau_{g,n}}}^{y} (1 - \delta_{g,n})^{a^{inv}_{y,y'}} \cdot I^{gen}_{y',g,n}}_{\text{Invested capacity (degraded)}} \tag{CUM-1}
+\bar{P}^{cum}_{y,g,n} = \begin{cases} \bar{P}_{g,n} (1 - \delta_{g,n})^{a_{y,g,n}} & a_{y,g,n} < \tau_{g,n} \\ X_{y,g,n} & \text{otherwise} \end{cases}, \qquad a_{y,g,n} = a^0_{g,n} + y - 1 \tag{CUM-1}
 \]
 
-### 6.2 Age Calculations
+### 6.2 Candidate Technologies
 
-
-| Unit Type | Age Formula | Indicator Variable | Active Condition |
-|-----------|------------|--------------------|------------------|
-| Existing  | \(a^{exist}_{y,g,n} = a^0_{g,n} + (y - 1)\) | -- | \(a^{exist}_{y,g,n} < \tau_{g,n}\) |
-| Investment (year \(y'\)) | \(a^{inv}_{y,y'} = y - y'\) | -- | \(a^{inv}_{y,y'} < \tau_{g,n}\) |
-
-The indicator function \(\mathbb{1}[\cdot]\) is evaluated at model construction time (not as a binary variable), which keeps the formulation as a pure LP.
-
-### 6.3 Battery Cumulative Capacity
-
-
-Battery cumulative power and energy follow the same structure but without degradation:
 
 \[
-\bar{P}^{bat,cum}_{y,b,n} = \bar{P}^{bat}_{b,n} \cdot \mathbb{1}\!\left[a^{exist}_{y,b,n} < \tau_{b,n}\right] + \sum_{\substack{y'=1 \\ a^{inv}_{y,y'} < \tau_{b,n}}}^{y} I^{bat,P}_{y',b,n} \tag{CUM-2}
+\bar{P}^{tech}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} (1 - \delta_{k,n})^{y-y'} \, I^{tech}_{y',k,n} \tag{CUM-1b}
 \]
 
+The conditions on age are evaluated at model construction time, so no binary variables are needed.
+
+### 6.3 Batteries
+
+
+Existing batteries are not degraded in the master; past their lifetime their power is the life-extension variable and their energy keeps the original energy-to-power ratio:
+
 \[
-\bar{E}^{cum}_{y,b,n} = \bar{E}_{b,n} \cdot \mathbb{1}\!\left[a^{exist}_{y,b,n} < \tau_{b,n}\right] + \sum_{\substack{y'=1 \\ a^{inv}_{y,y'} < \tau_{b,n}}}^{y} I^{bat,E}_{y',b,n} \tag{CUM-3}
+\bar{P}^{bat,cum}_{y,b,n} = \begin{cases} \bar{P}^{bat}_{b,n} & a_{y,b,n} < \tau_{b,n} \\ X^{bat}_{y,b,n} & \text{otherwise} \end{cases}, \qquad \bar{E}^{cum}_{y,b,n} = \begin{cases} \bar{E}_{b,n} & a_{y,b,n} < \tau_{b,n} \\ X^{bat}_{y,b,n} \, \bar{E}_{b,n} / \bar{P}^{bat}_{b,n} & \text{otherwise} \end{cases} \tag{CUM-2}
+\]
+
+Battery technologies accumulate their investments without degradation:
+
+\[
+\bar{P}^{bt}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} I^{bat,P}_{y',k,n}, \qquad \bar{E}^{bt}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} I^{bat,E}_{y',k,n} \tag{CUM-3}
 \]
 
 ### 6.4 Transmission Cumulative Capacity
 
 
 \[
-\bar{F}^{cum}_{y,i,j} = \bar{F}_{i,j} + \sum_{y'=1}^{y} I^{tr}_{y',i,j} \tag{CUM-4}
+\bar{F}^{cum}_{y,\ell} = \bar{F}_{\ell} + \sum_{y' \in \mathcal{Y}^{inv},\, y' \leq y} I^{tr}_{y',\{i(\ell),j(\ell)\}} \tag{CUM-4}
 \]
+
+The corridor's investment is added to the line once, in whichever direction the variable exists. Transmission investment does not retire.
 
 ---
 
 
 ## 7. Constraint Families
 
-### 7.1 Investment Limits (INV)
+### 7.1 Investment Limits (TECH)
 
 
 **Julia function**: `add_investment_constraints!(model, vars, input)`
 
-**INV-1: Cumulative investment limit per generator.**
-Total investment across all years must not exceed the maximum allowed:
+**TECH-1: Cumulative technology investment limit** (`cumul_tech_t*_b*`):
 
 \[
-\sum_{y=1}^{Y} I^{gen}_{y,g,n} \leq \bar{I}_{g,n} \qquad \forall\, g \in \mathcal{G},\; n \in \mathcal{N} \tag{INV-1}
+\sum_{y \in \mathcal{Y}^{inv}} I^{tech}_{y,k,n} \leq \bar{I}_{k,n} \qquad \forall\, k,\; n : \bar{I}_{k,n} > 0 \tag{TECH-1}
 \]
 
-**INV-2: Cumulative battery power investment limit.**
+**TECH-2: Cumulative battery-technology limits** (`cumul_bat_tech_pow_*`, `cumul_bat_tech_cap_*`):
 
 \[
-\sum_{y=1}^{Y} I^{bat,P}_{y,b,n} \leq \bar{I}^{bat,P}_{b,n} \qquad \forall\, b \in \mathcal{B},\; n \in \mathcal{N} \tag{INV-2a}
+\sum_{y \in \mathcal{Y}^{inv}} I^{bat,P}_{y,k,n} \leq \bar{I}^{P}_{k,n}, \qquad \sum_{y \in \mathcal{Y}^{inv}} I^{bat,E}_{y,k,n} \leq \bar{I}^{E}_{k,n} \tag{TECH-2}
 \]
 
-**INV-3: Cumulative battery energy investment limit.**
+**TECH-3: Battery-technology duration**, applied to each period's investment (`bat_tech_min_dur_*`, `bat_tech_max_dur_*`):
 
 \[
-\sum_{y=1}^{Y} I^{bat,E}_{y,b,n} \leq \bar{I}^{bat,E}_{b,n} \qquad \forall\, b \in \mathcal{B},\; n \in \mathcal{N} \tag{INV-2b}
+h^{min}_{k} \, I^{bat,P}_{y,k,n} \leq I^{bat,E}_{y,k,n} \leq h^{max}_{k} \, I^{bat,P}_{y,k,n} \qquad \forall\, y \in \mathcal{Y}^{inv},\, k,\, n \tag{TECH-3}
 \]
 
-**INV-4: Battery duration constraints.** Applied per year to each year's investment independently (not cumulative):
-
-\[
-I^{bat,E}_{y,b,n} \geq h^{min}_{b} \cdot I^{bat,P}_{y,b,n} \qquad \forall\, y,\, b,\, n \tag{INV-3a}
-\]
-
-\[
-I^{bat,E}_{y,b,n} \leq h^{max}_{b} \cdot I^{bat,P}_{y,b,n} \qquad \forall\, y,\, b,\, n \tag{INV-3b}
-\]
+**TECH-4: Node-aggregate limits.** Per-node `invest_max` values are copied to every bus of the node, so on nodes with several buses the sum over the node's buses is capped at the node value (`cumul_node_tech_*`, `cumul_node_bat_tech_pow_*`, `cumul_node_bat_tech_cap_*`). Reservoir investment has a cumulative cap per bus (`cumul_res_g*_b*`).
 
 ### 7.2 Budget Constraint (BUD)
 
 
 **Julia function**: `add_budget_constraints!(model, vars, input)`
 
-The annual investment expenditure must not exceed the budget (with slack):
+For each investment-period start year, the investment expenditure must not exceed the budget (with slack), `budget_y{y}`:
 
 \[
-\sum_{g,n} c^{inv}_{g,n} I^{gen}_{y,g,n} + \sum_{b,n} \left( c^{inv,P}_{b,n} I^{bat,P}_{y,b,n} + c^{inv,E}_{b,n} I^{bat,E}_{y,b,n} \right) + \sum_{(i,j)} c^{tr}_i I^{tr}_{y,i,j} \leq \bar{B}_y + s^{bud}_y \tag{BUD-1}
+\sum_{k,n} c^{inv}_{k,n} I^{tech}_{y,k,n} + \sum_{k,n} \left( c^{inv,P}_{k,n} I^{bat,P}_{y,k,n} + c^{inv,E}_{k,n} I^{bat,E}_{y,k,n} \right) + \sum_{\{i,j\}} \max(c^{tr}_i, c^{tr}_j) I^{tr}_{y,\{i,j\}} + \sum_{g,n} c^{res}_{g,n} I^{res}_{y,g,n} \leq \bar{B} + s^{bud}_y \tag{BUD-1}
 \]
+
+Primary-energy investment is not part of the budget.
 
 ### 7.3 Transmission Symmetry (TXN)
 
 
 **Julia function**: `add_transmission_symmetry_constraints!(model, vars, input)`
+
+Transmission investment exists only on corridors that have a line or transformer between buses \(i\) and \(j\), possibly a candidate line of 0 MW such as a development zone's interconnection. \(I^{tr}_{y,i,j}\) is created where the corridor already has capacity or where bus \(i\) allows investment (`transference_invest_max[i] > 0`). Capacity bought between buses with no line could not reach the dispatch, so it is not offered. A line of 0 MW base capacity carries flow once capacity is built on it.
 
 Bidirectional transmission investment is symmetric:
 
@@ -300,78 +328,76 @@ Bidirectional transmission investment is symmetric:
 I^{tr}_{y,i,j} = I^{tr}_{y,j,i} \qquad \forall\, y,\; i < j \tag{TXN-1}
 \]
 
+A line's capacity in year \(y\) is its base capacity plus the cumulative investment on its corridor, whichever direction the variable exists in. In the dispatch each corridor's investment is added to its line once.
+
+Each corridor is charged once, at the higher of its two ends' `transference_invest_cost` per MW, \(\max(c_i, c_j)\), whether one or both directions exist. An end left at 0 (the default) does not make the line cheaper. A development zone's interconnection therefore costs the larger of the zone's interconnection cost and the connection node's `transference_invest_cost`.
+
 ### 7.4 Capacity Adequacy (CAP)
 
 
 **Julia function**: `add_capacity_adequacy_constraints!(model, vars, input)`
 
-Total generation and storage capacity must meet peak demand with a reserve margin at each node:
+Firm generation and storage capacity, plus net imports at the peak, must meet peak demand with a reserve margin at each node:
 
 \[
-\bar{P}^{cum}_{y,g,n} + \bar{P}^{bat,cum}_{y,b,n} + s^{cap}_{y,n} \geq D^{peak}_{y,n} \cdot M_{res} \qquad \forall\, y,\; n \tag{CAP-1}
+\sum_{n' \in n} \Big[ \sum_g \alpha^{cc}_{g,n'} \kappa^{risk}_{g,n'} \bar{P}^{cum}_{y,g,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{tech}_{y,k,n'} + \sum_b \kappa^{risk}_{b,n'} \bar{P}^{bat,cum}_{y,b,n'} + \sum_k \kappa^{risk}_{k,n'} \bar{P}^{bt}_{y,k,n'} \Big] + \sum_{m} \left( f^{cap}_{y,m \to n} - f^{cap}_{y,n \to m} \right) + s^{cap}_{y,n} \geq D^{peak}_{y,n} \cdot M_{res} \qquad \forall\, y,\; \text{node } n \tag{CAP-1}
 \]
+
+\[
+0 \leq f^{cap}_{y,m \to n} \leq \sum_{i \in m,\, j \in n} \left( C_{ij} + \sum_{y' \leq y} I^{tr}_{y',i,j} \right) \tag{CAP-3}
+\]
+
+\(f^{cap}_{y,m \to n}\) (`cap_import_y…`) is the peak-hour transfer from node \(m\) to node \(n\), bounded by the existing line capacity \(C_{ij}\) between their buses plus the cumulative transfer investment. A node can therefore rely on a neighbour's surplus instead of building locally; nodal peaks are treated as coincident, which is conservative, and line losses are ignored.
 
 where the peak demand at node \(n\) in year \(y\) is:
 
 \[
-D^{peak}_{y,n} = \max_{t} \left[ D_{t,n} \right] \cdot \phi_n \cdot (1 + \gamma)^{y-1} \tag{CAP-2}
+D^{peak}_{y,n} = \max_{t \in y} \left[ D_{t,n} \right] \tag{CAP-2}
 \]
 
-The full expression for total capacity in CAP-1 sums across all generators and batteries using the cumulative expressions from equations (CUM-1) and (CUM-2).
+The constraint (`cap_adequacy_y{y}_node{n}`) is per node and sums over the node's buses. Renewables count at their capacity credit \(\alpha^{cc}\), the minimum of their availability profile (so solar counts as 0); other units count fully. \(\kappa^{risk}\) is the `risk_coefficient` (default 1; see [Risk & Resilience](risk-resilience.md)); life-extended capacity counts at its capacity credit and risk coefficient, like the unit it extends. \(D^{peak}_{y,n}\) is the maximum of the node's demand over the year's time steps.
 
 ### 7.5 RE Target Constraints (RE)
 
 
 **Julia functions**: `calculate_target_ratios(input)`, `add_re_target_constraints!()`, `add_re_increment_constraints!()`
 
-**RE-1: Target ratio calculation.** Linear interpolation from initial to target penetration:
+RE targets are set per system \(\sigma\) (one global system when the configuration has a single system).
+
+**RE-1: Target trajectory.** The first year's target is the system's initial penetration; later years interpolate linearly to the final target:
 
 \[
-\rho^{target}_y = \rho^{init} + \frac{y - 1}{Y - 1} \left( \rho^{target} - \rho^{init} \right) \tag{RE-1}
+\rho^{target}_{\sigma,1} = \rho^{init}_\sigma, \qquad \rho^{target}_{\sigma,y} = \rho^{init}_\sigma + \frac{y - 1}{Y - 1} \left( \rho^{target} - \rho^{init}_\sigma \right) \quad (y \geq 2) \tag{RE-1}
 \]
 
-with annual increment clamping:
+with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\).
+
+**RE-2: RE target** (soft, `re_target_s{σ}_y{y}`):
 
 \[
-\rho^{target}_y = \begin{cases}
-\rho^{target}_{y-1} + \Delta\rho^{min} & \text{if } \rho^{target}_y - \rho^{target}_{y-1} < \Delta\rho^{min} \\
-\rho^{target}_{y-1} + \Delta\rho^{max} & \text{if } \rho^{target}_y - \rho^{target}_{y-1} > \Delta\rho^{max} \\
-\rho^{target}_y & \text{otherwise}
-\end{cases}
+\rho_{\sigma,y} + s^{re}_y \geq \rho^{target}_{\sigma,y} \qquad \forall\, \sigma,\, y \tag{RE-2}
 \]
 
-**RE-2: RE penetration equality.** The ratio variable is forced to match the target exactly:
+**RE-3: RE increment bounds** (`re_min_increment_*`, `re_max_increment_*`), with year 1 anchored to the initial penetration:
 
 \[
-\rho_y = \rho^{target}_y \qquad \forall\, y \in \mathcal{Y} \tag{RE-2}
+\Delta\rho^{min} \leq \rho_{\sigma,y} - \rho_{\sigma,y-1} \leq \Delta\rho^{max} \qquad \forall\, \sigma,\, y, \quad \rho_{\sigma,0} = \rho^{init}_\sigma \tag{RE-3}
 \]
 
-**RE-3: RE increment bounds.** Annual change in the ratio variable is bounded:
+Each bound is added only when it is active (\(\Delta\rho^{min} > 0\), \(\Delta\rho^{max} < 1\)). The ratio \(\rho_{\sigma,y}\) is tied to the representative-day dispatch by RE-DAY-2.
+
+### 7.6 Retirement and Life Extension (RET)
+
+
+**Julia function**: `add_retirement_cascade_constraints!()`
+
+**RET-1: Age-based retirement.** An existing unit contributes its degraded capacity while \(a^0 + y - 1 < \tau\); an investment made in year \(y'\) contributes while \(y - y' < \tau\). These conditions are evaluated at model construction time.
+
+**RET-2: Life-extension cascade.** Past its lifetime a unit contributes only \(X_{y,g,n}\) (CUM-1), which can only decrease over time, so a retired MW cannot come back (`cascade_gen_g*_n*_y*`, `cascade_bat_b*_n*_y*`):
 
 \[
-\Delta\rho^{min} \leq \rho_y - \rho_{y-1} \leq \Delta\rho^{max} \qquad \forall\, y \geq 2 \tag{RE-3}
+X_{y,g,n} \leq X_{y-1,g,n}, \qquad X^{bat}_{y,b,n} \leq X^{bat}_{y-1,b,n} \qquad \forall\, y \geq 2 \tag{RET-2}
 \]
-
-### 7.6 Age-Based Retirement (RET)
-
-
-**Julia function**: `add_retirement_cascade_constraints!()` (no-op; retirement handled implicitly)
-
-Retirement is enforced structurally through the cumulative capacity expressions (Section 6). A unit contributes capacity only if its age is below its lifetime:
-
-**RET-1: Existing unit retirement.**
-
-\[
-\text{Active}(y, g, n) \iff a^0_{g,n} + (y - 1) < \tau_{g,n} \tag{RET-1}
-\]
-
-**RET-2: Investment retirement.** An investment made in year \(y'\) retires when:
-
-\[
-\text{Active}(y, y', g, n) \iff y - y' < \tau_{g,n} \tag{RET-2}
-\]
-
-These conditions are evaluated at model construction time. When the condition is false, the corresponding term is simply omitted from the capacity expression -- no binary variables are needed.
 
 ---
 
@@ -390,128 +416,114 @@ The algorithm selects high-demand days with temporal diversity:
 
 1. Compute daily peak demand for each day in the year: \(D^{peak}_d = \max_t \sum_n D_{d,t,n}\)
 2. Select the global peak day first.
-3. Divide the remaining year into \(D_r\) segments for seasonal diversity.
+3. Divide the year into \(D_r\) segments for seasonal diversity.
 4. Within each segment, select the day with the highest peak that satisfies a minimum separation constraint (\(\geq\) `min_day_separation` days from any already-selected day).
 
 ### 8.2 Operational Variables
 
 
-**Julia function**: `create_day_operational_vars!(model, input, year_idx, day_idx, hours)`
+**Julia function**: `create_day_ps_vars!(model, input, year_idx, day_idx, hours)`
 
-For each year \(y\) and representative day \(d\), a full set of hourly dispatch variables is created as described in Section 3.3. These variables are embedded within the same JuMP model as the investment variables, allowing the solver to jointly optimize investment and dispatch.
+For each year \(y\) and representative day \(d\), a full set of dispatch variables is created as described in Section 3.3. These variables are embedded within the same JuMP model as the investment variables, allowing the solver to jointly optimize investment and dispatch.
 
 ### 8.3 Operational Constraints
 
 
-**Julia function**: `add_day_operational_constraints!(model, day_vars, vars, input, year_idx, day_idx, demand, start_hour)`
+**Julia function**: `add_day_operational_constraints!(model, ps_vars, vars, input, year_idx, day_idx, demand, start_hour)`
+
+The day reuses the operational-dispatch constraint builders of `power_system.jl` and `transmission_dc.jl` in economic-dispatch mode, with the capacities of §6 passed in as expressions of the investment variables: generators, batteries, reservoirs, reserves (RES-1 to RES-3), inertia, power balance and curtailment. Rooftop solar, EVs, electrolyzers, primary energy, unit commitment and N-1 are not modelled in the master.
 
 #### 8.3.1 Power Balance
 
-\[
-\sum_{g} P^{day}_{g,n,t} + \sum_{b} P^{dis,day}_{b,n,t} + \sum_{j} \phi^{day}_{j \to n,t} + L^{day}_{n,t} + \sum_{s} L^{sec,day}_{s,n,t} = D^{day}_{n,t} + \sum_{b} P^{ch,day}_{b,n,t} + \sum_{j} \phi^{day}_{n \to j,t} \tag{PB-1}
-\]
-
-where the demand at bus \(n\), hour \(t\) in year \(y\) is:
+For each bus and time step (DC-1 with these extra terms, or PB-1 on a single bus):
 
 \[
-D^{day}_{n,t} = D_{t, \text{parent}(n)} \cdot \phi_n \cdot (1 + \gamma)^{y-1} \tag{PB-2}
+\sum_{g} P^{day}_{g,n,t} + \sum_k P^{tech}_{k,n,t} + \sum_{b} P^{dis,day}_{b,n,t} + \sum_k \left( P^{bt,dis}_{k,n,t} - P^{bt,ch}_{k,n,t} \right) + L^{day}_{n,t} + \sum_{s} L^{sec,day}_{s,n,t} = D^{day}_{n,t} + \sum_{b} P^{ch,day}_{b,n,t} + \sum_{\ell} K_{n,\ell} f^{day}_{\ell,t} \tag{PB-1}
 \]
 
-Note that curtailment does **not** appear in the power balance. It is handled separately per generator for renewables.
+where the demand at bus \(n\) is the parent node's demand times the bus demand fraction:
+
+\[
+D^{day}_{n,t} = D_{t, \text{parent}(n)} \cdot \alpha_n \tag{PB-2}
+\]
+
+\(L^{day}_{n,t} \leq D^{day}_{n,t}\) as in the dispatch (PB-1b). Note that the sectoral loss of load \(L^{sec,day}\) also enters the supply side, bounded only per sector by SEC-1 below and not linked to \(L^{day}\); a day can therefore shed up to about twice its demand at VOLL prices. Curtailment does **not** appear in the power balance.
 
 #### 8.3.2 Generator Capacity Linked to Investment
 
-For **renewable** generators:
-
 \[
-P^{day}_{g,n,t} \leq \bar{P}^{cum}_{y,g,n} \cdot \alpha_{g,t',n} \qquad \forall\, g \in \mathcal{G}_{RE} \tag{GEN-1}
+P^{day}_{g,n,t} \leq \bar{P}^{cum}_{y,g,n} \cdot \alpha_{g,t',n} \qquad \forall\, g \tag{GEN-1}
 \]
 
-where \(t' = \text{mod1}(\text{start\_hour} + t - 1,\; 8760)\) maps the representative day hour to the annual availability profile.
-
-For **conventional** generators:
-
 \[
-P^{day}_{g,n,t} \leq \bar{P}^{cum}_{y,g,n} \qquad \forall\, g \in \mathcal{G} \setminus \mathcal{G}_{RE} \tag{GEN-2}
+P^{tech}_{k,n,t} \leq \bar{P}^{tech}_{y,k,n} \cdot \alpha_{k,t',n} \quad (k \in \mathcal{K}_{RE}), \qquad P^{tech}_{k,n,t} \leq \bar{P}^{tech}_{y,k,n} \quad (k \notin \mathcal{K}_{RE}) \tag{GEN-2}
 \]
 
-The cumulative capacity \(\bar{P}^{cum}_{y,g,n}\) is the expression from Eq. (CUM-1), which is a **linear expression** in the investment variables. This is the key coupling between investment decisions and dispatch feasibility.
+where \(t' = \text{mod1}(\text{start\_hour} + t - 1,\; T_{avail})\) maps the representative day step to the availability profile (`tech_cap_t*_b*_ts*_y*_d*` for technologies). Ramp limits (GEN-3) apply to existing generators; minimum generation, commitment and minimum up/down times do not.
 
 #### 8.3.3 Battery Constraints Linked to Investment
 
-**Power limits:**
+For existing batteries (via `add_battery_constraints!` with capacity overrides):
 
 \[
-P^{ch,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n} \tag{BAT-1a}
+P^{ch,day}_{b,n,t},\; P^{dis,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n}, \qquad E^{day}_{b,n,t} \leq \bar{E}^{cum}_{y,b,n} \tag{BAT-1}
 \]
 
 \[
-P^{dis,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n} \tag{BAT-1b}
-\]
-
-**SOC capacity limit:**
-
-\[
-E^{day}_{b,n,t} \leq \bar{E}^{cum}_{y,b,n} \tag{BAT-2}
-\]
-
-**SOC dynamics:**
-
-\[
-E^{day}_{b,n,1} = E^0_{b,n} \cdot \bar{E}^{cum}_{y,b,n} + \eta^{ch}_{b,n} \cdot P^{ch,day}_{b,n,1} - \frac{P^{dis,day}_{b,n,1}}{\eta^{dis}_{b,n}} \tag{BAT-3a}
+E^{day}_{b,n,t+1} = E^{day}_{b,n,t} + \left( \eta^{ch}_{b,n} P^{ch,day}_{b,n,t} - \frac{P^{dis,day}_{b,n,t}}{\eta^{dis}_{b,n}} \right) \Delta t \tag{BAT-2}
 \]
 
 \[
-E^{day}_{b,n,t} = E^{day}_{b,n,t-1} + \eta^{ch}_{b,n} \cdot P^{ch,day}_{b,n,t} - \frac{P^{dis,day}_{b,n,t}}{\eta^{dis}_{b,n}} \qquad \forall\, t \geq 2 \tag{BAT-3b}
+E^{day}_{b,n,1} = E^{day}_{b,n,H+1} = \max(E^0_{b,n}, \underline{E}_{b,n}) \cdot \bar{E}^{cum}_{y,b,n} \tag{BAT-3}
 \]
 
-**Cyclic SOC constraint** (prevents batteries from acting as infinite energy sources):
+The day starts and ends at the initial SOC (`bat_soc_initial_*`, `bat_soc_cyclic_*`); with TSAM inter-period linking the end is the next boundary value instead (`bat_soc_link_*`). There is no self-discharge, spillage, SOC minimum or charge/discharge exclusivity in the master.
 
-\[
-E^{day}_{b,n,H} = E^0_{b,n} \cdot \bar{E}^{cum}_{y,b,n} \tag{BAT-4}
-\]
+Battery technologies have the same structure (`bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*`, `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*`), with power bounded by \(\bar{P}^{bt}\), SOC by \(\bar{E}^{bt}\), and cyclic SOC at `soc_initial` × \(\bar{E}^{bt}\); their SOC dynamics are multiplied by \(\Delta t\) as in BAT-2.
 
 #### 8.3.4 Transmission Constraints Linked to Investment
 
 \[
--\bar{F}^{cum}_{y,i,j} \leq \phi^{day}_{i,j,t} \leq \bar{F}^{cum}_{y,i,j} \tag{TRX-1}
+-\bar{F}^{cum}_{y,\ell} \leq f^{day}_{\ell,t} \leq \bar{F}^{cum}_{y,\ell} \tag{TRX-1}
 \]
 
-!!! note "PWL Transmission Losses in the Master Problem"
-    When DC power flow is enabled, the master problem uses the same piecewise linear (PWL) loss model as operational dispatch, but with **fewer segments** (default 2 vs. 3) for computational performance. Losses are split 50/50 between the two bus endpoints of each line (half-loss split), ensuring symmetric loss allocation regardless of flow direction. The number of segments is configurable via `dc_power_flow.pwl_loss_segments_master`. See [DC Power Flow -- Transmission Losses](dc-power-flow.md#transmission-losses) for the full PWL formulation.
+The flows follow the DC power flow of the dispatch (flow–angle coupling DC-2). A candidate line of 0 MW is not fixed to zero flow when it can be expanded.
+
+!!! note "Transmission losses in the Master Problem"
+    The master uses `loss_model` like the dispatch, with `pwl_loss_segments_master` segments for `pwl`. Each node link carries the equivalent reactance and resistance of the bus-level lines between its two nodes, so the master's flow split and losses follow the grid. See [DC Power Flow -- Transmission Losses](dc-power-flow.md#transmission-losses).
 
 #### 8.3.5 RE Penetration per Day
 
-Total renewable generation must meet the target ratio for each representative day:
+For each system \(\sigma\), renewable generation of existing units and candidate technologies must meet the year's target on every representative day (`re_min_day_s*_y*_d*`):
 
 \[
-\sum_{g \in \mathcal{G}_{RE}} \sum_{n,t} P^{day}_{g,n,t} + \sum_{n,t} \lambda^{fre}_{n,t} \geq \rho^{target}_y \cdot D^{total}_{y,d} \tag{RE-DAY-1}
+\sum_{g \in \mathcal{G}_{RE}} \sum_{n \in \sigma,t} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE}} \sum_{n \in \sigma, t} P^{tech}_{k,n,t} + \sum_{n \in \sigma,t} \lambda^{fre}_{n,t} \geq \rho^{target}_{\sigma,y} \cdot D^{total}_{\sigma,y,d} \tag{RE-DAY-1}
 \]
 
-where \(D^{total}_{y,d} = \sum_{n,t} D^{day}_{n,t}\) is the total demand for this day (with growth). The slack variable \(\lambda^{fre}\) allows soft enforcement, penalized in the objective.
+where \(D^{total}_{\sigma,y,d}\) is the system's total demand for this day. The slack \(\lambda^{fre}\) keeps the constraint soft; it is penalized at \(c^{fre}\) in OBJ-5.
 
-Additionally, the ratio variable is linked to actual generation:
+The ratio variable is bounded by each day's achieved share, so it equals the worst representative day (`re_ratio_lb_s*_y*_d*`):
 
 \[
-\rho_y \cdot D^{total}_{y,d} \leq \sum_{g \in \mathcal{G}_{RE}} \sum_{n,t} P^{day}_{g,n,t} + \sum_{n,t} \lambda^{fre}_{n,t} \tag{RE-DAY-2}
+\rho_{\sigma,y} \cdot D^{total}_{\sigma,y,d} \leq (\text{left-hand side of RE-DAY-1}) \tag{RE-DAY-2}
 \]
 
 #### 8.3.6 Curtailment Limit per Day
 
-When `max_curtailment_ratio < 1.0`, curtailment is limited to a fraction of renewable generation:
+When `max_curtailment_ratio < 1.0`, curtailment of existing renewables and of candidate renewable technologies is limited to a fraction of renewable generation (`max_curtailment_y*_d*`):
 
 \[
-\sum_{g,n,t} C^{day}_{g,n,t} \leq \bar{\kappa} \cdot \sum_{g \in \mathcal{G}_{RE}} \sum_{n,t} P^{day}_{g,n,t} \tag{CURT-1}
+\sum_{n,t} CU^{day}_{n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} \left( \bar{P}^{tech}_{y,k,n} \alpha_{k,t',n} - P^{tech}_{k,n,t} \right) \leq \bar{\kappa} \left( \sum_{g \in \mathcal{G}_{RE},n,t} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} P^{tech}_{k,n,t} \right) \tag{CURT-1}
 \]
 
-This forces investment in storage rather than relying on curtailment to manage surplus RE.
+This is a hard constraint. It pushes investment towards storage rather than relying on curtailment to manage surplus RE. The operational dispatch has no such cap; it prices curtailment at `curtailment_cost`.
 
 #### 8.3.7 Sectoral Loss-of-Load Bounds
 
-Each sector's load shedding cannot exceed the sector's demand at that node and hour:
+Each sector's load shedding cannot exceed the sector's demand at that bus and step (`lol_sec_ub_{s}_y*_d*_n*_t*`):
 
 \[
-L^{sec,day}_{s,n,t} \leq D^{sec}_{s,n,t} \cdot \phi_n \cdot (1+\gamma)^{y-1} \qquad \forall\, s,\, n,\, t \tag{SEC-1}
+L^{sec,day}_{s,n,t} \leq \max\left(0,\, D^{sec}_{s,\text{parent}(n),t} \cdot \alpha_n \right) \qquad \forall\, s,\, n,\, t \tag{SEC-1}
 \]
 
 ### 8.4 Cost Scaling
@@ -520,7 +532,7 @@ L^{sec,day}_{s,n,t} \leq D^{sec}_{s,n,t} \cdot \phi_n \cdot (1+\gamma)^{y-1} \qq
 Each representative day's operational cost is scaled to approximate annual costs:
 
 \[
-C^{op}_y = \frac{365}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{SCALE-1}
+C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{SCALE-1}
 \]
 
 **Julia function**: `add_representative_days_validation!(model, vars, input, targets)` orchestrates the creation of variables, constraints, and cost expressions for all representative days across all years.
@@ -557,7 +569,7 @@ The operational cost scaling becomes:
 C^{op}_y = \sum_{p=1}^{K} w_p \cdot C^{day}_{y,p} \tag{TSAM-COST}
 \]
 
-This replaces the uniform \(365/N\) scaling (SCALE-1).
+This replaces the uniform \(365/N\) scaling (SCALE-1). Only the scaling differs: each period's \(C^{day}_{y,p}\) is the same cost as for a representative day, including the reserve and inertia shortfall penalties.
 
 #### 8.5.3 Inter-Period SOC Linking
 
@@ -587,7 +599,7 @@ To enable seasonal storage representation, inter-period SOC boundary variables a
 0 \leq \text{SOC}^{bnd}_{y,b,n,p} \leq \bar{E}^{total}_{b,n,y} \quad \forall p \tag{TSAM-CAP}
 \]
 
-When `tsam_inter_period_linking = false`, the standard cyclic SOC constraint (SOC-CYC) is used per period instead, and only the weighted cost scaling is active.
+When `tsam_inter_period_linking = false`, each period is cyclic on its own (BAT-3), and only the weighted cost scaling is active.
 
 ---
 
@@ -622,13 +634,15 @@ After the initial solve, this procedure identifies units that are economically u
 For a generator with remaining life \(L_{rem} = \max(0, \tau_{g,n} - a^0_{g,n})\):
 
 \[
-\text{NPV}_g = \sum_{y=1}^{\min(L_{rem}, Y)} \frac{R_y - C_y}{(1+r)^y} \tag{NPV-1}
+\text{NPV}_g = \sum_{y=1}^{\min(\lceil L_{rem} \rceil, Y)} \frac{(R - C)(1-\delta_{g,n})^y}{(1+r)^y} - \frac{c^{dec}_{g,n} \bar{P}_{g,n}}{(1+r)^{L_{rem}}} \tag{NPV-1}
 \]
 
-where:
+where, with annual generation \(G = \bar{P}_{g,n} \cdot \overline{\alpha}_{g,n} \cdot \eta^{rated}_{g,n} \cdot H_{year}\) (mean availability times rated efficiency):
 
-- **Revenue estimate**: \(R_y = \bar{P}_{g,n} \cdot c^{inv}_{g,n} \cdot r_{return}\) (capacity value at configurable return rate, default 10% for generators)
-- **Cost**: \(C_y = \bar{P}_{g,n} \cdot (c^{fix}_{g,n} + c^{maint}_{g,n}) \cdot 8760\)
+- **Revenue**: \(R = G \cdot\) `base_lcoe`
+- **Cost**: \(C = G \cdot (c^{fuel}_{g,n} + c^{fix}_{g,n} + c^{maint}_{g,n})\)
+
+For batteries the revenue is \(\bar{P}^{bat} \cdot c^{inv,P} \cdot\) `npv_annual_return_rate` and the cost \(\bar{P}^{bat} \cdot c^{fix} \cdot H_{year}\).
 
 Units with \(\text{NPV}_g < 0\) are flagged for retirement.
 
@@ -646,86 +660,12 @@ The function returns an `NPVIterationResult` containing:
 ---
 
 
-## 10. Multi-System Master Problem
+## 10. Multi-System Planning
 
 
-**Julia function**: `create_multi_system_master_problem(input::MultiSystemMasterInput)`
+For planning across several interconnected systems (e.g. countries or regions), the runner merges all systems listed in `meta_network.systems` into one system before building the master (`Orchestrator._merge_systems` in `runner.py`). Per-node arrays are padded so that each system's units sit on its own nodes, and the inter-system links (`meta_network.systems_links`) are added to the merged network as ordinary transmission lines. The merged system is then solved by the single master described above: one set of investment variables, one objective and one discount rate, with the RE targets of §7.5 set per system (`system_node_ranges`). The operational dispatch runs on the merged bus-level network in the same way.
 
-For planning across multiple interconnected power systems (e.g., countries or regions).
-
-### 10.1 Structure
-
-
-Each system \(s\) has its own set of investment variables, operational sub-models, and RE targets. Systems are coupled through inter-system transmission links.
-
-### 10.2 Inter-System Investment Variables
-
-
-For each link \(l\) connecting system \(s_1\) (node \(n_1\)) to system \(s_2\) (node \(n_2\)):
-
-\[
-0 \leq I^{inter}_{y,l} \leq \bar{I}^{inter}_l \qquad \forall\, y,\, l \tag{INTER-1}
-\]
-
-**Cumulative limit:**
-
-\[
-\sum_{y=1}^{Y} I^{inter}_{y,l} \leq \bar{I}^{inter}_l \qquad \forall\, l \tag{INTER-2}
-\]
-
-**Symmetry for bidirectional links** (where link \(l'\) is the reverse of \(l\)):
-
-\[
-I^{inter}_{y,l} = I^{inter}_{y,l'} \qquad \forall\, y \tag{INTER-3}
-\]
-
-### 10.3 Inter-System Operational Coupling
-
-
-**Julia function**: `add_inter_system_operational_coupling!(model, ext_vars, input)`
-
-For each representative day, forward and reverse flow variables are created for each inter-system link:
-
-\[
-0 \leq F^{fwd}_{y,d,l,t} \leq \bar{F}^{inter,cum}_{y,l} \tag{INTER-4a}
-\]
-
-\[
-0 \leq F^{rev}_{y,d,l,t} \leq \bar{F}^{inter,cum}_{y,l} \tag{INTER-4b}
-\]
-
-where the cumulative inter-system capacity is:
-
-\[
-\bar{F}^{inter,cum}_{y,l} = F^{exist}_l + \sum_{y'=1}^{y} I^{inter}_{y',l} \tag{INTER-5}
-\]
-
-**Border node injection:**
-
-At the source node:
-
-\[
-\text{inj}_{s_1,n_1,t} = -F^{fwd}_{y,d,l,t} + (1 - \ell_l) \cdot F^{rev}_{y,d,l,t} \tag{INTER-6a}
-\]
-
-At the destination node:
-
-\[
-\text{inj}_{s_2,n_2,t} = (1 - \ell_l) \cdot F^{fwd}_{y,d,l,t} - F^{rev}_{y,d,l,t} \tag{INTER-6b}
-\]
-
-where \(\ell_l\) is the loss factor for link \(l\).
-
-### 10.4 Multi-System Objective
-
-
-**Julia function**: `build_multi_system_objective!(model, ext_vars, input)`
-
-\[
-\min \; Z^{multi} = \sum_{s} Z_s + \sum_{y=1}^{Y} \frac{1}{(1+r)^{y-1}} \sum_{l} c^{inter}_l \cdot I^{inter}_{y,l} + \sum_{y,d,l,t} c^{flow}_l \cdot d^{km}_l \left( F^{fwd}_{y,d,l,t} + F^{rev}_{y,d,l,t} \right) \cdot \frac{1}{(1+r)^{y-1}} \tag{MULTI-1}
-\]
-
-where \(Z_s\) is the per-system cost from Eq. (OBJ-1), \(c^{inter}_l\) is the inter-system investment cost per MW, and \(c^{flow}_l \cdot d^{km}_l\) is the distance-dependent operational flow cost.
+Julia also contains a separate multi-system formulation (`create_multi_system_master_problem`, with per-system variables, inter-system investment variables `inter_inv_y*_l*` and flow variables `inter_pf_*`), but the Python runner does not call it.
 
 ---
 
@@ -749,30 +689,62 @@ Each scenario \(\omega\) has:
 |------------|-------------|
 | `invest_cost_renewables` | Scales RE investment costs |
 | `invest_cost_conventional` | Scales conventional investment costs |
-| `fuel_cost` | Scales fuel costs |
-| `maintenance_cost` | Scales maintenance costs |
+| `fuel_cost` | Scales fuel costs in the scenario's operation |
+| `maintenance_cost` | Scales maintenance costs in the scenario's operation |
 | `invest_cost_storage` | Scales storage investment costs |
 | `invest_cost_transmission` | Scales transmission investment costs |
 | `discount_rate` | Scenario-specific discount rate adjustment |
-| `demand_growth` | Scenario-specific demand growth adjustment |
+| `demand_growth` | Annual demand factor of the scenario's operation (demand × factor^(y−1)) |
+| `fuel_price_growth` | Extra annual fuel price escalation in the scenario's operation |
+| `carbon_price` | Scales the CO2 cost in the scenario's operation |
 
 ### 11.2 Two-Stage Structure
 
 
-**First stage (here-and-now)**: Investment decisions \(I^{gen}_{y,g,n}\), \(I^{bat,P}_{y,b,n}\), \(I^{bat,E}_{y,b,n}\), \(I^{tr}_{y,i,j}\) are common across all scenarios. They use base (unmodified) investment costs.
+**First stage (here-and-now)**: Investment and life-extension decisions (\(I^{tech}\), \(I^{bat,P}\), \(I^{bat,E}\), \(I^{tr}\), \(X\)) are common across all scenarios. Each scenario values them with its own investment-cost multipliers.
 
-**Second stage (wait-and-see)**: Operational costs are scenario-dependent. Modified generators and batteries are created by applying `ScenarioMultipliers` via `apply_scenario_multipliers()`.
+**Second stage (wait-and-see)**: Each scenario has its own representative-day dispatch, built on its own demand and operating costs by `scenario_master_input()`.
 
 ### 11.3 Stochastic Objective
 
 
-**Julia function**: `build_stochastic_objective!(model, vars, input, scenarios)`
+**Julia function**: `build_stochastic_objective!(model, vars, input, scenarios, scenario_costs)`
 
 \[
-\min \; Z^{stoch} = \underbrace{\sum_{y=1}^{Y} \frac{C^{inv}_y}{(1+r)^{y-1}}}_{\text{First stage (deterministic)}} + \underbrace{\sum_{\omega} \pi_\omega \sum_{y=1}^{Y} \frac{C^{op}_{y,\omega}}{(1+r_\omega)^{y-1}}}_{\text{Second stage (expected cost)}} + C^{slack} \tag{STOCH-1}
+\min \; Z^{stoch} = \sum_{\omega} \pi_\omega \sum_{y=1}^{Y} \frac{C^{inv}_{y,\omega} + C^{asset}_y + C^{op}_{y,\omega}}{(1+r_\omega)^{y-1}} + C^{slack} \tag{STOCH-1}
 \]
 
-where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discount rate and \(C^{op}_{y,\omega}\) are the operational costs under scenario \(\omega\).
+where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discount rate, \(C^{inv}_{y,\omega}\) the investment cost with the scenario's multipliers (period-start years only), \(C^{asset}_y\) the life-extension and decommissioning cost, and \(C^{op}_{y,\omega}\) the operational cost of the scenario's own dispatch. See [Stochastic Programming](stochastic-programming.md).
+
+---
+
+
+## 11b. Benders Decomposition
+
+
+**Julia file**: `benders.jl` (entry point `run_benders_decomposition`). Selected with `master_problem.solver_method: benders`; the default is `monolithic`.
+
+Instead of one LP with all representative days embedded, Benders solves an investment-only master and one dispatch subproblem per year and representative day, linked by optimality cuts.
+
+**Master** (`create_benders_master`): the variables and constraints of §3 and §7 (TECH, BUD, RET, CAP, TXN, RE-2, RE-3) without representative days, plus one recourse variable \(\theta_y \geq 0\) per year (`theta_y{y}`, in M\$) that estimates the year's operating cost:
+
+\[
+\min \; \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_y}{(1+r)^{y-1}} + \sum_{y} \frac{C^{asset}_y + 10^6 \theta_y}{(1+r)^{y-1}} + C^{slack} \tag{BEN-1}
+\]
+
+Because the master has no dispatch, two approximations replace it:
+
+- `re_cap_link_s{σ}_y{y}`: existing plus invested renewable capacity, times its mean availability and the year's steps, must cover the RE target times annual demand.
+- `storage_adequacy_s{σ}_y{y}`: when battery technologies exist, battery energy capacity times the mean round-trip efficiency must cover \((1 - \bar{\kappa})\) of the daily renewable surplus estimated from the availability profiles.
+
+**Subproblems** (`create_benders_subproblem`): the representative-day dispatch of §8.3 with the capacities fixed at the master's values. Each day's RE share must be at least the master's RE ratio (`re_min_day_*`), as in the monolithic model. Two things differ from it:
+
+- The curtailment cap is soft (`max_curt_y*_d*` with slack `curt_excess_y*_d*`, priced at `penalties.curtailment_excess_penalty`, default 500 \$/MWh).
+- The load-shedding penalty, including the sectoral ones, is capped at `benders_lol_penalty_cap` (default 1000 \$/MW per step; 0 disables the cap) to keep the cuts numerically usable. Subproblem costs therefore differ from the monolithic objective whenever load is shed.
+
+**Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints give one cut per year and iteration (`benders_cut_y{y}_iter{k}`): \(\theta_y \geq\) intercept + gradient × (technology, battery-technology, life-extension and line capacity). The lower bound is the master objective, the upper bound the investment cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50).
+
+Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the peak-based representative days of §8.1; `use_tsam` has no effect on it.
 
 ---
 
@@ -782,20 +754,21 @@ where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discou
 
 **Julia function**: `extract_master_solution(model, vars, input)`
 
-After optimization, the following quantities are extracted:
+After optimization, the following quantities are extracted into a `MasterProblemResult`:
 
-| Output | Description | Computation |
-|--------|-------------|-------------|
-| `gen_investment[y][g]` | Generator investment per year and node (MW) | Direct variable values |
-| `bat_power_investment[y][b]` | Battery power investment (MW) | Direct variable values |
-| `bat_capacity_investment[y][b]` | Battery energy investment (MWh) | Direct variable values |
-| `transfer_investment[y][(i,j)]` | Transmission investment (MW) | Direct variable values |
-| `cumulative_gen_capacity[y][g]` | Cumulative gen capacity with degradation | Eq. (CUM-1) evaluated |
-| `cumulative_bat_capacity[y][b]` | Cumulative battery energy capacity | Eq. (CUM-3) evaluated |
-| `re_penetration_by_year[y]` | Achieved RE penetration ratio | `value(re_penetration_ratio[y])` |
-| `total_investment_by_year[y]` | Total investment cost per year (\$) | Sum of all investment costs |
-| `total_operational_cost_by_year[y]` | Total operational cost per year (\$) | From representative days |
-| `gen_life_extension[y][g]` | Retirement status (1.0 = active, 0.0 = retired) | Age check against lifetime |
+| Output | Description |
+|--------|-------------|
+| `tech_investment[y][k]` | Technology investment per period-start year and bus (MW) |
+| `bat_tech_power_investment[y][k]`, `bat_tech_capacity_investment[y][k]` | Battery-technology investment (MW, MWh) |
+| `transfer_investment[y][(i,j)]` | Transmission investment (MW) |
+| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Life-extended capacity of existing units (MW) |
+| `cumulative_gen_capacity`, `cumulative_bat_capacity`, `cumulative_bat_power` | Capacity of existing units per year (CUM-1, CUM-2) |
+| `cumulative_tech_capacity`, `cumulative_bat_tech_power`, `cumulative_bat_tech_capacity` | Cumulative technology capacity per year (CUM-1b, CUM-3) |
+| `re_penetration_by_year`, `re_penetration_by_system` | RE ratio \(\rho\) per year (and per system) |
+| `total_investment_by_year`, `total_operational_cost_by_year` | Investment and representative-day operating cost per year (\$) |
+| `reservoir_investment` | Reservoir storage investment |
+
+The runner turns the cumulative technology capacity into virtual generators and batteries for the operational dispatch (§16.3).
 
 ---
 
@@ -824,18 +797,19 @@ If the model solves successfully but with non-zero slack, the diagnostics report
 create_master_problem(input)
   |-- calculate_target_ratios(input)             # RE-1
   |-- build_master_variables!(model, input)       # All variables (Sec. 3)
-  |-- add_investment_constraints!()               # INV-1 to INV-3
+  |-- add_investment_constraints!()               # TECH-1 to TECH-4
   |-- add_budget_constraints!()                   # BUD-1
-  |-- add_retirement_cascade_constraints!()       # No-op (RET handled in CUM)
-  |-- add_capacity_adequacy_constraints!()        # CAP-1
+  |-- add_retirement_cascade_constraints!()       # RET-2
+  |-- add_capacity_adequacy_constraints!()        # CAP-1, CAP-3
   |-- add_transmission_symmetry_constraints!()    # TXN-1
-  |-- add_representative_days_validation!()       # Sec. 8
+  |-- add_representative_days_validation!()       # Sec. 8 (or add_tsam_periods_validation!)
   |     |-- select_representative_days()          # Sec. 8.1
-  |     |-- create_day_operational_vars!()        # Sec. 8.2
+  |     |-- create_day_ps_vars!()                 # Sec. 8.2
   |     |-- add_day_operational_constraints!()    # Sec. 8.3
-  |     +-- calculate_day_operational_cost()      # OBJ-5
+  |     +-- calculate_day_operational_cost()      # OBJ-5, SCALE-1
   |-- add_re_target_constraints!()                # RE-2
   |-- add_re_increment_constraints!()             # RE-3
+  |-- apply_user_constraints!()                   # custom constraints
   +-- build_master_objective!()                   # OBJ-1
 
 solve_with_npv_iteration(input)
@@ -894,16 +868,16 @@ where \(\varepsilon\) is the `slack_fraction` (e.g., 0.05 for 5% cost increase).
 
 **Julia function**: `compute_frequency_scores(alternatives, input; investment_threshold=0.1)`
 
-For each investment variable indexed by technology \(g\), node \(n\), and year \(y\), the frequency of investment across all previous alternatives is:
+For each investment variable indexed by technology \(k\), node \(n\), and year \(y\), the frequency of investment across all previous alternatives is:
 
 \[
-\text{freq}_{g,n,y} = \frac{|\{k : I^{(k)}_{g,n,y} > \tau\}|}{K_{prev}} \tag{MGA-2}
+\text{freq}_{k,n,y} = \frac{|\{a : I^{(a)}_{k,n,y} > \tau\}|}{K_{prev}} \tag{MGA-2}
 \]
 
 where \(\tau\) is the `investment_threshold` (MW) and \(K_{prev}\) is the number of alternatives found so far. The diversity score is:
 
 \[
-\sigma_{g,n,y} = 1 - 2 \cdot \text{freq}_{g,n,y} \tag{MGA-3}
+\sigma_{k,n,y} = 1 - 2 \cdot \text{freq}_{k,n,y} \tag{MGA-3}
 \]
 
 | Score range | Meaning | Effect |
@@ -922,10 +896,10 @@ Variables that have never appeared receive a default score of +1 (maximum encour
 The diversity-maximizing objective replaces the cost objective:
 
 \[
-\max \sum_{y,g,n} \frac{\sigma_{g,n,y}}{\bar{I}_{g,n}} \cdot I^{gen}_{y,g,n} + \sum_{y,b,n} \frac{\sigma^{P}_{b,n,y}}{\bar{I}^{P}_{b,n}} \cdot I^{bat,P}_{y,b,n} + \sum_{y,b,n} \frac{\sigma^{E}_{b,n,y}}{\bar{I}^{E}_{b,n}} \cdot I^{bat,E}_{y,b,n} + \sum_{y,(i,j)} \frac{\sigma^{tr}_{i,j,y}}{\bar{I}^{tr}_i} \cdot I^{tr}_{y,i,j} \tag{MGA-4}
+\max \sum_{y,k,n} \frac{\sigma_{k,n,y}}{\bar{I}_{k,n}} \cdot I^{tech}_{y,k,n} + \sum_{y,k,n} \frac{\sigma^{P}_{k,n,y}}{\bar{I}^{P}_{k,n}} \cdot I^{bat,P}_{y,k,n} + \sum_{y,k,n} \frac{\sigma^{E}_{k,n,y}}{\bar{I}^{E}_{k,n}} \cdot I^{bat,E}_{y,k,n} + \sum_{y,\{i,j\}} \frac{\sigma^{tr}_{i,j,y}}{\bar{I}^{tr}_i} \cdot I^{tr}_{y,\{i,j\}} \tag{MGA-4}
 \]
 
-Each investment variable is weighted by its diversity score and normalized by maximum investment capacity \(\bar{I}\). This normalization ensures technologies with different scales (e.g., 10 MW solar vs. 1000 MW wind) are treated comparably.
+Each investment variable (period-start years only, each transmission corridor once) is weighted by its diversity score and normalized by its maximum investment \(\bar{I}\). This normalization ensures technologies with different scales (e.g., 10 MW solar vs. 1000 MW wind) are treated comparably.
 
 ### 15.5 Cost Evaluation
 
@@ -1010,7 +984,7 @@ Selects the *smallest* near-optimal portfolio. Useful when the cost slack admits
 \min \sum_{y,t,n} I^{tech}_{y,t,n} + \sum_{y,b,n} I^{bat,P}_{y,b,n} + \sum_{y,(i,j)} I^{tr}_{y,(i,j)} \tag{SPORES-1}
 \]
 
-where the investment-period gating from § 16 still applies (the sums only run over the period-start years \(y_{\mathrm{idx}} \in \{1, 1+y_{pp}, 1+2 y_{pp}, \ldots\}\)). Battery *energy* investments are deliberately excluded from the MW sum because the units (MWh vs MW) do not combine cleanly; the energy variable is implicitly constrained through the per-tech duration limit.
+where the investment-period gating of §3.1 still applies (the sums only run over the period-start years \(y_{\mathrm{idx}} \in \{1, 1+y_{pp}, 1+2 y_{pp}, \ldots\}\)). Battery *energy* investments are deliberately excluded from the MW sum because the units (MWh vs MW) do not combine cleanly; the energy variable is implicitly constrained through the per-tech duration limit.
 
 ### 15.11 Technology equity objective
 
@@ -1120,16 +1094,7 @@ In practice, SPORES is preferable when each alternative needs to *answer a speci
 
 ### Solver Configuration
 
-The Master Problem uses HiGHS with the following settings:
-
-| Parameter | Default | Julia field |
-|-----------|---------|-------------|
-| Threads | 4 | `input.threads` |
-| Time limit | 3600 s | `input.time_limit` |
-| MIP gap | 0.01 | `input.gap` |
-| Verbose | false | `input.verbose` |
-
-Since the formulation is a pure LP (all continuous variables, age-based retirement evaluated at construction time), the MIP gap setting is effectively unused. The solver employs the simplex or interior point method for LP.
+The Master Problem uses the solver selected in the `solver` section (HiGHS by default), with its thread count, time limit and gap. Since the formulation is a pure LP (all continuous variables, age-based retirement evaluated at construction time), the MIP gap setting has no effect; the solver uses simplex or interior point.
 
 ---
 
@@ -1137,113 +1102,59 @@ Since the formulation is a pure LP (all continuous variables, age-based retireme
 ## 16. Per-Technology Investment Model
 
 
-Investment decisions can be modeled at the **technology** level rather than per-generator. This aggregates investment capacity across all generators of the same type, enabling more realistic technology-level constraints.
+The master invests per **technology**, not per existing generator: candidate technologies and battery technologies are defined separately from the existing fleet, and each has its own investment variables per bus (§3.1).
 
 ### 16.1 Technology Configuration
 
 
-Technologies are defined in the YAML configuration:
+Technologies are defined per system, keyed by name. Per-node fields are lists with one value per node:
 
 ```yaml
 technologies:
-  - name: "Solar PV"
-    type: "Renewable"
-    generators: ["Solar_Farm_1", "Solar_Farm_2"]
-    invest_min_mw: 0.0
-    invest_max_mw: 500.0
-    investment_cost_per_mw: 800000.0
-    fixed_om_per_mw: 12000.0
-    lifetime_years: 25
+  solar_pv:
+    name: Solar PV
+    type: Renewable
+    fuel: Solar
+    invest_cost: [800000.0]       # $/MW per node
+    invest_max_power: [500.0]     # MW per node (cumulative cap)
+    Availability: solar_profile.csv
+    eff_at_rated: [1.0]
+    degradation_rate: [0.005]
+    lifetime: 25
+    fixed_cost: [0.0]             # $/MWh
+    maintenance_cost: [2.0]       # $/MWh
 
 battery_technologies:
-  - name: "Li-Ion Storage"
-    batteries: ["Battery_1", "Battery_2"]
-    invest_min_power_mw: 0.0
-    invest_max_power_mw: 200.0
-    invest_max_energy_mwh: 800.0
-    power_cost_per_mw: 150000.0
-    energy_cost_per_mwh: 200000.0
-    lifetime_years: 15
+  li_ion:
+    name: Li-Ion Storage
+    invest_cost_power: [150000.0]   # $/MW
+    invest_cost_energy: [200000.0]  # $/MWh
+    invest_max_power: [200.0]       # MW
+    invest_max_capacity: [800.0]    # MWh
+    min_duration_hours: 1.0
+    max_duration_hours: 4.0
+    efficiency_charge: [0.95]
+    efficiency_discharge: [0.95]
+    degradation_rate: [0.0]
+    lifetime: 15
 ```
 
-### 16.2 Technology-Level Variables
+See the [Configuration Reference](../reference/config-reference.md) for all fields.
+
+### 16.2 Cumulative Capacity
 
 
-| Variable | Domain | Units | Description |
-|----------|--------|-------|-------------|
-| \(I^{tech}_{y,k}\) | \(\mathbb{R}_+\) | MW | Total technology \(k\) investment in year \(y\) |
-| \(I^{bat,tech,P}_{y,k}\) | \(\mathbb{R}_+\) | MW | Battery technology \(k\) power investment |
-| \(I^{bat,tech,E}_{y,k}\) | \(\mathbb{R}_+\) | MWh | Battery technology \(k\) energy investment |
+The capacity of technology \(k\) at bus \(n\) in year \(y\) is the sum of its surviving, degraded investments (CUM-1b); battery technologies follow CUM-3. Investments retire when their age reaches the technology's `lifetime`.
 
-### 16.3 Cumulative Capacity
+### 16.3 Virtual Generators
 
 
-The cumulative installed capacity for technology \(k\) at year \(y\) includes both existing capacity and all investments up to year \(y\), minus retirements:
-
-\[
-\bar{P}^{tech}_{k,y} = \bar{P}^{exist}_{k} + \sum_{y'=1}^{y} I^{tech}_{y',k} - \sum_{y'=1}^{y} R^{tech}_{y',k}
-\]
-
-where \(R^{tech}_{y',k}\) is retirement computed by age-based expiry.
-
-### 16.4 Virtual Generators
-
-
-Technology-level investments create **virtual generators** for operational dispatch. After the master problem solves, the runner:
+Technology investments become **virtual generators** (and virtual batteries) for operational dispatch. After the master problem solves, the runner:
 
 1. Computes cumulative investment per technology per year
 2. Creates synthetic generator entries with `rated_power = cumulative_investment`
 3. Passes these virtual generators to the operational dispatch adapter
-4. Virtual generators use the same availability profiles and cost parameters as the technology definition
-
-This bridge between strategic (technology-level) and operational (generator-level) modeling ensures investment decisions are reflected in detailed dispatch simulation.
-
----
-
-
-## 17. Piecewise-Linear Cost Curves in Investment
-
-
-Investment costs can vary with scale using piecewise-linear (PWL) cost curves. This captures economies of scale (decreasing marginal cost for larger projects) or diseconomies (increasing cost for difficult sites).
-
-### 17.1 Cost Curve Structure
-
-
-Each technology can define cost curve blocks:
-
-```yaml
-technologies:
-  - name: "Wind Onshore"
-    cost_curve:
-      blocks:
-        - power_mw: 100.0
-          cost_per_mw: 1200000.0   # First 100 MW at $1.2M/MW
-        - power_mw: 200.0
-          cost_per_mw: 1000000.0   # Next 200 MW at $1.0M/MW
-        - power_mw: 200.0
-          cost_per_mw: 900000.0    # Next 200 MW at $0.9M/MW
-```
-
-### 17.2 Formulation
-
-
-The total investment cost for technology \(k\) in year \(y\) is:
-
-\[
-C^{inv}_{k,y} = \sum_{s=1}^{S} c^{inv}_{k,s} \cdot \delta^{inv}_{k,y,s}
-\]
-
-where:
-- \(c^{inv}_{k,s}\) is the cost per MW in segment \(s\)
-- \(\delta^{inv}_{k,y,s}\) is the investment in segment \(s\) (bounded by segment width)
-
-The total investment equals the sum of segments:
-
-\[
-I^{tech}_{y,k} = \sum_{s=1}^{S} \delta^{inv}_{k,y,s}, \quad 0 \leq \delta^{inv}_{k,y,s} \leq \bar{\delta}_{k,s}
-\]
-
-When costs are non-increasing (\(c^{inv}_{k,1} \geq c^{inv}_{k,2} \geq \ldots\)), the formulation is convex and the LP solver naturally fills cheaper segments first without requiring binary variables.
+4. Gives them the availability profile and cost parameters of the technology; the fuel cost is the flat `fuel_cost` (a technology's `fuel_cost_curve` is not carried over)
 
 ---
 

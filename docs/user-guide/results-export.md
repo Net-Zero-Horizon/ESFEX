@@ -2,10 +2,10 @@
 
 ## HDF5 Output Structure
 
-One HDF5 file is written per run (`results/esfex_run_{hash}_{date}.h5`). The layout is organised by *kind* of data — static configuration, summary scalars, full time series, multi-system aggregates, and the MGA / SPORES sweep:
+One HDF5 file is written per run, in the output directory, named `<config_stem>_<ddmmyyyy>_<HHMM>.h5` (for example `results/isla_juventud_15012026_1030.h5`; the system name replaces the stem when there is no config file). The layout is organised by *kind* of data — static configuration, summary scalars, full time series, multi-system aggregates, and the MGA / SPORES sweep:
 
 ```
-esfex_run_…h5
+<config_stem>_<ddmmyyyy>_<HHMM>.h5
 ├── [Root attributes]              # Metadata + multi-system layout (see below)
 ├── system_configuration/          # Static system definition (generators,
 │                                  #   batteries, technologies, nodes)
@@ -16,8 +16,8 @@ esfex_run_…h5
 │   └── year_YYYY_base_demand
 ├── cost_breakdown/                # Granular cost decomposition per year
 │   └── year_YYYY/                 # Cost components as group attrs
-├── global/                        # Multi-system aggregates (always present;
-│   ├── summary_results/           #   for single-system runs == root summary)
+├── global/                        # Meta-network totals (always present;
+│   ├── summary_results/           #   for single-system runs == root totals)
 │   ├── cost_breakdown/
 │   └── demand/
 ├── inter_system/                  # Multi-system only — flows between
@@ -30,15 +30,18 @@ esfex_run_…h5
     ├── @num_alternatives
     ├── @slack_fraction
     ├── @optimal_cost
+    ├── generator_names, battery_names
     ├── alternative_0/             # Cost-optimal seed (@objective="cost_optimal")
     │   ├── tech_investment            # (years, techs, nodes)
     │   ├── bat_tech_power_investment  # (years, bat_techs, nodes)
     │   ├── bat_tech_capacity_investment # (years, bat_techs, nodes)
+    │   ├── transfer_investment        # (n, 4) [year, i, j, MW], if any
     │   ├── cumulative_gen_capacity    # (years, generators, nodes)
     │   └── re_penetration             # (years,)
     └── alternative_K/             # K = num_alternatives  (MGA) or
                                    #     len(objectives)   (SPORES)
         └── @objective = "hsj_diversity" | "min_total_build" | …
+                                   # multi-system runs also get mga/systems/{name}/
 ```
 
 **Per-system mirrors have been removed.** Earlier versions wrote a `/systems/{name}/detailed_results/` / `/systems/{name}/summary_results/` mirror per subsystem; the viewer now slices the global block on read using the subsystem root attributes. See [HDF5 Output Schema § File Structure](../reference/hdf5-output-schema.md#file-structure-overview) for the full canonical reference.
@@ -58,7 +61,7 @@ Always present:
 | `export_type` | string | `"incremental_results"` |
 | `export_complete` | bool | Whether the export finished successfully |
 
-For **multi-system runs**, additional root attrs describe how to slice the global block:
+These attributes describe how to slice the global block per system. They are written for single-system runs too:
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
@@ -67,40 +70,53 @@ For **multi-system runs**, additional root attrs describe how to slice the globa
 | `subsystem_offsets` | int[] | Starting node index of each subsystem |
 | `subsystem_node_counts` | int[] | Number of nodes in each subsystem |
 
-The viewer (see [`results_charts._open_scenario`](../api/bridge-adapters.md) and `_system_node_range`) uses these to derive a per-system view from the global block — e.g. to extract Cuba's nodes from a `(10, T)` global array, it slices `[1:10, :]`.
+The Studio results viewer (`_open_scenario` and `_system_node_range` in `esfex/visualization/panels/results_charts.py`) uses these to derive a per-system view from the global block — e.g. to extract Cuba's nodes from a `(10, T)` global array, it slices `[1:10, :]`.
 
 ### Inside `detailed_results/year_YYYY_threshold_0/`
 
-About 30 entries per scenario. Most arrays carry the global node axis as their first dimension; the viewer applies subsystem slicing on read. Names retain underscores and capitalisation as written by the runner.
+Most arrays carry the global node axis as their first dimension; the viewer applies subsystem slicing on read. Names retain underscores and capitalisation as written by the runner. Entries are written only when the result exists (for example `gen_status` only in unit-commitment mode). Per-unit datasets are named after the unit, with `/` replaced by ` - `.
 
 | Entry | Shape | Units | Description |
 |-------|-------|-------|-------------|
-| `demand` | (N, T) | MW | Total demand including growth, EV, and rooftop netting |
-| `generation/{gen_name}` | (N, T) | MW | Per-generator output (group, one dataset per unit) |
-| `gen_status/{gen_name}` | (N, T) | 0/1 | UC mode commitment status |
-| `gen_startup/{gen_name}` | (N, T) | 0/1 | Startup events (UC mode) |
-| `gen_shutdown/{gen_name}` | (N, T) | 0/1 | Shutdown events (UC mode) |
-| `curtailment` | (N, T) | MW | Renewable curtailment per node (post-Phase-2bis: per-node; legacy files had a `(T,)` aggregate) |
+| `demand` | (N, T), or (T, N) if N > T | MW | Gross demand (float32): base demand, plus EV demand when EV optimisation is off. Rooftop solar is not subtracted |
+| `generation/{gen_name}` | (N, T) | MW | Per-generator output (group, one dataset per unit; attribute `fuel`) |
+| `gen_status/{gen_name}` | (N, T) | 0/1 | Commitment status (UC mode only) |
+| `gen_startup/{gen_name}` | (N, T) | 0-1 | Startup events (UC mode only) |
+| `curtailment` | (N, T) | MW | Renewable curtailment per node, summed over generators (legacy files had a `(T,)` aggregate) |
 | `battery_charge/{bat_name}` | (N, T) | MW | Per-battery charge (group) |
 | `battery_discharge/{bat_name}` | (N, T) | MW | Per-battery discharge (group) |
 | `battery_soc/{bat_name}` | (N, T) | MWh | Per-battery SOC (group) |
+| `battery_spillage/{bat_name}` | (N, T) | MW | Per-battery spillage (group) |
 | `battery_capacity_factor/{bat_name}` | (N, T) | unitless | Per-battery CF (group) |
 | `battery_lcoe/{bat_name}` | (N, T) | $/MWh | Per-battery LCOE (group) |
 | `battery_vallcoe/{bat_name}` | (N, T) | $/MWh | Per-battery value-adjusted LCOE (group) |
-| `reserve_static`, `reserve_dynamic` | (N, T) | MW | Reserve provision |
+| `reserve_static`, `reserve_dynamic` | (N, T) | MW | Reserve held as free capacity (at most the requirement; not generated energy) |
 | `loss_of_reserve_static`, `loss_of_reserve_dynamic` | (N, T) | MW | Unmet reserves |
 | `loss_load` | (N, T) | MW | Unserved demand |
 | `CO2_emissions` | (N, T) | tonnes | Per-node emissions |
-| `nodal_electricity_prices` | (N, T) | $/MWh | LMPs per node |
-| `electricity_prices` | (T,) | $/MWh | System-wide average |
-| `voltage_angle` | (N, T) | radians | Bus angles (DC PF) |
-| `power_flow` | (N, N, T') | MW | Pairwise inter-node flows (T' can differ from T) |
+| `nodal_electricity_prices` | (N, T) | $/MWh | LMPs per node (max over a node's buses) |
+| `nodal_electricity_prices_congestion` | (N, T) | $/MWh | Nodal price minus the system average |
+| `electricity_prices` | (T,) | $/MWh | Mean of the nodal prices |
+| `electricity_prices_energy` | (T,) | $/MWh | Energy component (same values as `electricity_prices`) |
+| `voltage_angle` | (N, T) | radians | Voltage angles |
+| `voltage_magnitude` | (buses, T) | p.u. | ACOPF modes only |
+| `reactive_generation` | (G, buses, T) | MVAr | ACOPF modes only |
+| `power_flow` | (N, N, T') | MW | Inter-node flows aggregated from bus-pair flows (T' can exceed T) |
+| `transfer_margin` | (N, N, T') | MW | Transfer margin slack |
+| `transfer_investment` | (N, N) | MW | Transmission investment |
+| `loss_of_inertia` | (T,) | GW*s | System inertia deficit |
 | `rooftop_generation` | (T, N) | MW | Behind-the-meter rooftop solar (note: `(T, N)` not `(N, T)`) |
 | `EV_charging`, `EV_V2G`, `EV_soc`, `EV_loss` | (N, T) | MW / MWh | EV fleet variables |
+| `reservoir_level/`, `reservoir_spillage/`, `reservoir_pump/` | (N, T) | MWh-eq / MW | Per-generator reservoir hydro (groups; level has T+1 steps) |
+| `gen_investment_power/`, `bat_investment_power/`, `bat_investment_capacity/` | (N,) | MW / MWh | Per-unit investments (groups) |
 | `capacity_factor/{gen}`, `lcoe/{gen}`, `vallcoe/{gen}` | (N, T) | various | Per-generator derived metrics |
-| `technology_selling_prices/{system}/{tech}/prices_weights` | (K, 3) | mixed | Revenue analysis (price, MW, timestep) |
+| `technology_selling_prices/{gen_name}/prices_weights` | (K, 3) | mixed | Revenue analysis per generator name (price, MW, timestep). Names are not sanitized here, so `Cuba/Solar PV` becomes the nested group `Cuba/Solar PV/` |
+| `primary_energy/` | groups | various | Fuel supply chain results (if enabled) |
+| `n1_security/` | group | various | N-1 duals and binding contingencies (if enabled) |
 
-Where `N` = `num_nodes`, `T` = hours in the year at `temporal_resolution_hours` cadence (e.g. 2920 for 3-hourly), and `T'` for `power_flow` is the flow-specific time axis (may exceed `T`).
+Scenario attributes include `year`, `feasible`, `total_cost`, `renewable_penetration`, `co2_emissions`, `solve_time`, `total_generation`, `total_demand`, `load_shed`, `master_re_target`, and the master problem's investment and retirement decisions as `investment_*` / `retirement_*` attributes (see [HDF5 Output Schema](../reference/hdf5-output-schema.md#detailed_resultsyear_yyyy_threshold_0)).
+
+Where `N` = `num_nodes`, `T` = hours in the year at `temporal_resolution_hours` cadence (e.g. 2920 for 3-hourly), and `T'` for `power_flow` and `transfer_margin` is longer than `T` when the rolling horizon has overlap (the overlap hours are kept). `/demand/year_YYYY_base_demand` holds the same demand as `(T, N)`.
 
 ### `summary_results/` (per-year scalars)
 
@@ -132,19 +148,23 @@ Virtual units are named `Investment {Technology Name}` (e.g., `Investment Solar 
 
 ## Derived Metrics
 
-Computed post-optimization by `_compute_derived_metrics()`:
+Computed after each year's dispatch by `Orchestrator._compute_derived_metrics()`. All are hourly `(N, T)` arrays per unit (g = generator, n = node, t = time step), not annual scalars:
 
 | Metric | Formula | Units | Notes |
 |--------|---------|-------|-------|
-| **LCOE** | (fuel_cost + fixed_cost + maintenance_cost + annualized_capex) / total_generation | $/MWh | Levelized cost of electricity per generator |
-| **VALLCOE** | LCOE adjusted for system value (accounts for dispatch timing) | $/MWh | Higher for peakers, lower for baseload |
-| **Capacity Factor** | actual_generation / (rated_power * hours) | [0, 1] | Fraction of time at full output |
-| **Battery CF** | (total_charge + total_discharge) / (2 * capacity * hours) | [0, 1] | Battery utilization rate |
-| **RE Penetration** | RE_generation / total_demand | [0, 1] | Fraction of demand met by renewables |
-| **Fuel for Power** | generation / efficiency | MWh-fuel | Primary energy consumed per fuel type |
-| **Technology Selling Prices** | Weighted average price at dispatch hours | $/MWh | Revenue per technology |
+| **Capacity Factor** | output[g,n,t] / rated_power[g,n] | [0, 1] | Per hour |
+| **LCOE** | ((fuel_cost + fixed_cost + maintenance_cost) × output + start_up_cost × startup) / output | $/MWh | Hours with output only (0 otherwise). No capital cost. When `fuel_cost` is 0, uses fuel price / energy content / efficiency from the fuel registry |
+| **VALLCOE** | LCOE × (1 + energy_adj + capacity_adj + flexibility_adj) | $/MWh | energy_adj = 1 − capture rate (unit's output-weighted price / system average price); capacity_adj = 0.15 × (0.85 − output share in the top-10 % demand hours); flexibility_adj = −0.1 × ramp_up / rated power (non-renewables only) |
+| **Battery CF** | discharge[b,n,t] / rated discharge power | [0, 1] | Per hour |
+| **Battery LCOE** | (charge × price / round-trip efficiency + (charge + discharge) × maintenance_cost) / discharge | $/MWh | Hours with discharge only, clipped to [0, 10000] |
+| **Battery VALLCOE** | Battery LCOE × (1 + energy_adj + capacity_adj − 0.05) | $/MWh | Adjustments computed on discharge |
+| **Technology Selling Prices** | Σ price × output / Σ output, per generator | $/MWh | Stored with the (price, output, timestep) rows in `technology_selling_prices/` |
+
+The RE penetration (`renewable_penetration`) is computed in the dispatch, not here. Full formulas: [HDF5 Output Schema § Derived Metrics Formulas](../reference/hdf5-output-schema.md#derived-metrics-formulas).
 
 ### Capacity Factor Interpretation
+
+The annual capacity factor of a unit is the mean of its hourly values. Typical ranges:
 
 | Range | Interpretation |
 |-------|---------------|
@@ -159,68 +179,72 @@ Computed post-optimization by `_compute_derived_metrics()`:
 
 ## Export Commands
 
+`-o/--output` is always a directory (default: `export/` next to the results file). It is created if needed.
+
 ### CSV Export
 
-One CSV file per dataset, organized in subdirectories:
+One CSV file per dataset:
 
 ```bash
-esfex export -r results/esfex_run_…h5 -f csv -o results/csv/
+esfex export -r results/isla_juventud_15012026_1030.h5 -f csv -o results/csv/
 ```
 
-Output structure mirrors the HDF5 layout, with one CSV per dataset and one folder per group:
+Output structure (one folder per scenario, directly under the output directory):
 
 ```
 results/csv/
 ├── summary/                    # /summary_results/*
 │   ├── year.csv
+│   ├── threshold.csv
+│   ├── feasible.csv
 │   ├── total_cost.csv
 │   ├── renewable_penetration.csv
 │   ├── co2_emissions.csv
 │   ├── loss_of_load.csv
-│   ├── feasible.csv
 │   └── n1_security_cost.csv
-├── detailed/                   # /detailed_results/{scenario}/*
-│   └── year_2025_threshold_0/
-│       ├── generation/
-│       │   ├── Solar_PV.csv
-│       │   ├── Wind.csv
-│       │   └── …                # one CSV per generator
-│       ├── curtailment.csv
-│       ├── loss_load.csv
-│       ├── nodal_electricity_prices.csv
-│       ├── electricity_prices.csv
-│       ├── battery_charge/
-│       │   └── Li_Ion.csv
-│       ├── battery_discharge/
-│       │   └── Li_Ion.csv
-│       ├── CO2_emissions.csv
-│       ├── power_flow.csv
-│       ├── capacity_factor/
-│       ├── lcoe/
-│       └── technology_selling_prices/
+├── year_2025_threshold_0/      # /detailed_results/year_2025_threshold_0/*
+│   ├── generation/
+│   │   ├── Solar PV.csv
+│   │   └── …                   # one CSV per generator
+│   ├── curtailment.csv
+│   ├── loss_load.csv
+│   ├── nodal_electricity_prices.csv
+│   ├── electricity_prices.csv
+│   ├── battery_charge/
+│   ├── battery_discharge/
+│   ├── CO2_emissions.csv
+│   ├── capacity_factor/
+│   └── lcoe/
 └── demand/                     # /demand/*
     └── year_2025_base_demand.csv
 ```
+
+Limitations of the CSV export:
+
+- Only one group level below a scenario is exported: `technology_selling_prices/`, `primary_energy/` and `n1_security/trans_reserve_duals/` come out empty or missing.
+- Attributes are not exported, so `cost_breakdown/`, `global/`, `inter_system/`, `mga/` and `system_configuration/` are left out.
+- 3-D datasets cannot be written: on a results file with `power_flow` or `transfer_margin` (multi-node runs), the export stops with `ValueError: Must pass 2-d input` partway through the first scenario. Read these files with h5py instead (see [Python API](#python-api)).
 
 ### Excel Export
 
 Single workbook with summary and selected operational data:
 
 ```bash
-esfex export -r results/esfex_run_…h5 -f excel -o results/report.xlsx
+esfex export -r results/isla_juventud_15012026_1030.h5 -f excel -o results/
 ```
 
-Sheets:
-- **Summary**: per-year scalars from `/summary_results/` (cost, RE penetration, CO₂, load shed)
-- **Generation**: total generation per generator (summed across nodes and timesteps)
+This writes `results/isla_juventud_15012026_1030.xlsx` (the results file name with `.xlsx`). Sheets:
+
+- **Summary**: per-year scalars from `/summary_results/` (one row per year)
+- **Generation**: first year only; one column per generator, summed across nodes, one row per timestep
 
 ### JSON Export
 
 ```bash
-esfex export -r results/esfex_run_…h5 -f json -o results/data.json
+esfex export -r results/isla_juventud_15012026_1030.h5 -f json -o results/
 ```
 
-Includes metadata and summary arrays. Full hourly time-series data is omitted; use CSV or direct HDF5 access for time-series analysis.
+This writes `results/isla_juventud_15012026_1030.json` with the root attributes, the `/summary_results/` arrays, and the attributes of each scenario (all attribute values as strings). Time-series data is omitted; use CSV or direct HDF5 access for time-series analysis.
 
 
 ---
@@ -235,7 +259,7 @@ The scenario key encodes the year and the threshold iteration: `year_2025_thresh
 ```python
 import h5py
 
-with h5py.File("results/esfex_run_…h5", "r") as f:
+with h5py.File("results/isla_juventud_15012026_1030.h5", "r") as f:
     # Top-level groups
     print("Groups:", list(f.keys()))
 
@@ -286,7 +310,7 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
 import h5py
 import matplotlib.pyplot as plt
 
-with h5py.File("results/esfex_run_…h5", "r") as f:
+with h5py.File("results/isla_juventud_15012026_1030.h5", "r") as f:
     sc = f["detailed_results/year_2025_threshold_0"]
     gen_group = sc["generation"]                 # group keyed by unit name
 
@@ -312,7 +336,7 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
 ### Plotting Prices
 
 ```python
-with h5py.File("results/esfex_run_…h5", "r") as f:
+with h5py.File("results/isla_juventud_15012026_1030.h5", "r") as f:
     sc = f["detailed_results/year_2025_threshold_0"]
     lmp = sc["nodal_electricity_prices"][:]    # (N, T)
 
@@ -333,7 +357,7 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
 ### Computing Custom Metrics
 
 ```python
-with h5py.File("results/esfex_run_…h5", "r") as f:
+with h5py.File("results/isla_juventud_15012026_1030.h5", "r") as f:
     sc = f["detailed_results/year_2025_threshold_0"]
 
     # Total generation per generator (summed across nodes and time)
@@ -350,7 +374,7 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
 
     # Energy not served (ENS) and Loss of Load Events (LOLE)
     ll = sc["loss_load"][:]                    # (N, T)
-    demand = sc["demand"][:]                   # (N, T)
+    demand = sc["demand"][:]                   # (N, T); (T, N) if N > T
     ens = ll.sum() * tres                      # MWh of unserved demand
     total_demand = demand.sum() * tres
     print(f"\nENS:  {ens:,.0f} MWh ({ens/total_demand:.4%} of demand)")
@@ -365,9 +389,9 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
 ```python
 from esfex.io.exporter import ResultsExporter
 
-exporter = ResultsExporter("results/esfex_run_…h5")
+exporter = ResultsExporter("results/isla_juventud_15012026_1030.h5")
 
-# Export to CSV
+# Export to CSV (fails on files with 3-D datasets; see CSV Export above)
 exporter.to_csv("results/csv/")
 
 # Export to Excel
@@ -382,7 +406,7 @@ exporter.to_json("results/data.json")
 ```python
 from esfex.io.exporter import read_results
 
-results = read_results("results/esfex_run_…h5")
+results = read_results("results/isla_juventud_15012026_1030.h5")
 
 # Access metadata
 print(results["metadata"])
@@ -434,7 +458,7 @@ print(f"CO2 emissions:  {yr1.emissions:,.0f} tonnes")
 Near-optimal alternatives land in `/mga/` *inside the same results file* — there is no separate `mga_*.h5` file. The group root carries the metadata the viewer needs to pick a colour / label encoding (see [Near-Optimal Alternatives tutorial](../tutorials/mga.md)).
 
 ```python
-with h5py.File("results/esfex_run_…h5", "r") as f:
+with h5py.File("results/isla_juventud_15012026_1030.h5", "r") as f:
     if "mga" not in f:
         print("This run did not enable MGA / SPORES.")
     else:
@@ -449,8 +473,8 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
         print(f"Optimal cost: ${mga.attrs['optimal_cost']/1e9:.2f}B")
         print(f"Slack:        {mga.attrs['slack_fraction']*100:.1f}%")
 
-        for k in sorted(mga.keys(),
-                        key=lambda s: int(s.rsplit("_", 1)[-1])):
+        alt_keys = [k for k in mga.keys() if k.startswith("alternative_")]
+        for k in sorted(alt_keys, key=lambda s: int(s.rsplit("_", 1)[-1])):
             alt = mga[k]
             obj = alt.attrs.get("objective", b"")
             obj = obj.decode() if isinstance(obj, bytes) else str(obj)
@@ -458,9 +482,9 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
             opt = bool(alt.attrs.get("is_optimal", False))
             tag = "★" if opt else " "
             print(f"  {tag} {k:18s} cost=${cost/1e9:.2f}B  objective={obj}")
-            # Per-alternative datasets — all shape (years, …, nodes)
+            # Per-alternative datasets
             for ds in ("tech_investment", "bat_tech_power_investment",
-                       "bat_tech_capacity_investment",
+                       "bat_tech_capacity_investment", "transfer_investment",
                        "cumulative_gen_capacity", "re_penetration"):
                 if ds in alt:
                     print(f"      {ds:30s} {alt[ds].shape}")
@@ -473,7 +497,8 @@ with h5py.File("results/esfex_run_…h5", "r") as f:
 | `tech_investment` | (years, techs, nodes) | MW | New technology power installed per year, tech and node |
 | `bat_tech_power_investment` | (years, bat_techs, nodes) | MW | New battery power per year, tech and node |
 | `bat_tech_capacity_investment` | (years, bat_techs, nodes) | MWh | New battery energy per year, tech and node |
-| `cumulative_gen_capacity` | (years, generators, nodes) | MW | Total deployed capacity per generator over time |
+| `transfer_investment` | (n, 4) | MW | One row `[year, i, j, MW]` per transmission investment; absent when there are none |
+| `cumulative_gen_capacity` | (years, generators, nodes) | MW | Total deployed capacity per generator over time (generator order in `/mga/generator_names`) |
 | `re_penetration` | (years,) | fraction | Annual RE-penetration trajectory |
 
 ### Per-alternative attributes (Phase 4 export)

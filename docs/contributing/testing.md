@@ -8,6 +8,16 @@
 pytest
 ```
 
+`pyproject.toml` sets `testpaths = ["tests"]` and `addopts = "-v --tb=short"`.
+
+### Without Julia
+
+```bash
+pytest -m "not julia"
+```
+
+Tests that build and solve optimization models are marked `julia`. When `juliacall` cannot be imported, `tests/conftest.py` skips them automatically. CI runs the suite with `-m "not julia"`.
+
 ### With Coverage
 
 ```bash
@@ -18,157 +28,107 @@ open htmlcov/index.html
 ### Specific Test Files
 
 ```bash
-# Configuration tests
-pytest tests/test_schema.py
-
-# Runner tests
-pytest tests/test_runner.py
-
-# CLI tests
-pytest tests/test_cli.py
-
-# Plugin tests (framework + GUI dialog)
-pytest tests/test_plugins.py
-
-# Sensitivity tests
+pytest tests/test_schema.py            # Pydantic config models
+pytest tests/test_loader.py            # YAML loading
+pytest tests/test_runner.py            # Orchestrator (non-Julia parts)
+pytest tests/test_cli.py               # CLI
+pytest tests/test_plugins.py           # Plugin framework + plugins dialog
 pytest tests/test_sensitivity_engine.py
+pytest tests/test_docs_examples.py     # YAML examples in docs/
 ```
 
 ### Specific Test Functions
 
 ```bash
-pytest tests/test_config.py::test_load_valid_config
-pytest tests/test_runner.py -k "test_single_year"
+pytest tests/test_plugins.py::TestDiscovery
+pytest tests/test_custom_constraints.py -k "resolve"
 ```
 
-### Verbose Output
+### Editable installs
 
-```bash
-pytest -v --tb=long
-```
+If imports fail under pytest with "unknown location" errors, reinstall non-editable (`pip install ".[dev]"`). CI does the same, because the setuptools editable finder can resolve some sub-modules (for example `esfex.visualization.i18n`) as namespace packages.
 
 
 ---
 
 
-## Test Categories
+## Test Layout
+
+There is one flat `tests/` directory with about 110 `test_*.py` files, grouped by module name (`test_schema.py`, `test_loader.py`, `test_serializer.py`, `test_zones.py`, …). There is no `tests/fixtures/` directory; tests build their inputs in code or under pytest's `tmp_path`.
 
 ### Unit Tests
 
-Individual functions and classes tested in isolation:
+Most tests construct config objects directly and need neither Julia nor a display. Example from `tests/test_custom_constraints.py`:
 
 ```python
-# tests/test_config.py
-def test_load_valid_config():
-    """Test loading a valid YAML configuration."""
-    config = load_config("tests/fixtures/valid_config.yaml")
-    assert isinstance(config, ESFEXConfig)
-    assert len(config.systems) > 0
+from esfex.config.schema import CustomConstraintConfig
 
-def test_penalty_defaults():
-    """Test PenaltiesConfig default values."""
-    penalties = PenaltiesConfig()
-    assert penalties.loss_of_load == 10e6
-    assert penalties.max_curtailment_ratio == 0.05
+def test_invalid_sense_rejected():
+    with pytest.raises(ValidationError):
+        CustomConstraintConfig(name="x", sense="<", terms=[...])
 ```
 
-### Integration Tests
+### Model Tests (`julia` marker)
 
-Cross-module interaction tests:
-
-```python
-# tests/test_adapters.py
-def test_power_system_adapter_creates_input():
-    """Test that PowerSystemAdapter creates valid Julia input."""
-    config = load_config("tests/fixtures/single_node.yaml")
-    adapter = PowerSystemAdapter(config.systems["island"], ...)
-    input_data = adapter._create_input(...)
-    assert input_data["demand"].shape == (48, 1)
-```
-
-### Solver Tests
-
-Optimization model construction and solution:
+End-to-end tests build a small system in code, run the `Orchestrator`, and check the result. They reuse helper builders from other test modules: `_make_generator` and `_make_esfex_config` in `tests/test_runner.py`, `_make_system_config` and `_make_technology` in `tests/test_zones.py`. A minimal sketch in the style of `tests/test_master_co2.py`:
 
 ```python
-# tests/test_solver.py
-@pytest.mark.slow
-def test_single_node_solves():
-    """Test that a single-node system solves successfully."""
-    config = load_config("tests/fixtures/single_node.yaml")
-    orchestrator = Orchestrator(config)
-    results = orchestrator.run(num_years=1)
+import sys
+import numpy as np
+import pytest
+
+sys.path.insert(0, "tests")
+from test_runner import _make_esfex_config, _make_generator
+from test_zones import _make_system_config
+
+@pytest.mark.julia
+def test_runs_one_year(tmp_path):
+    from esfex.runner import Orchestrator
+
+    demand = tmp_path / "demand.csv"
+    np.savetxt(demand, np.full(8760, 60.0))
+    diesel = _make_generator("Diesel", "Non-renewable", "Diesel", [150.0])
+    sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],
+                               generators={"diesel": diesel})
+    sysc = sysc.model_copy(update={"demand_path": str(demand)})
+    cfg = _make_esfex_config(sysc, simulation_mode="economic_dispatch")
+
+    results = Orchestrator(cfg, output_dir=tmp_path / "out").run(years=1)
     assert results[0].feasible
 ```
 
-### GUI Tests (Optional)
+`Orchestrator.run()` takes `years` and `start_year`. Other model tests include `test_power_system_parity.py`, `test_master_problem.py`, `test_stochastic_master.py`, `test_battery_soc_carryover.py`, `test_zones.py` and `test_network_reduction.py`.
 
-Require a display server (or Xvfb on headless systems):
+### GUI Tests
 
-```bash
-# With display
-pytest tests/test_gui.py
-
-# Headless (Linux)
-xvfb-run pytest tests/test_gui.py
-```
-
-### Plugin GUI Tests
-
-Dialog and menu integration tests use mocked Qt widgets (no display server required):
+Studio tests (`test_gui_model.py`, `test_serializer.py`, `test_studio_qt_runtime.py`, `test_undo.py`, …) have no special marker. Some create Qt widgets and need a display; on a headless Linux machine run them under Xvfb, as CI does:
 
 ```bash
-pytest tests/test_plugins.py::TestPluginsDialog -v
+xvfb-run -a pytest tests/ -m "not julia"
 ```
+
+The plugins-dialog tests (`tests/test_plugins.py::TestPluginsDialog`) mock the Qt widgets and need no display.
+
+### Documentation Examples
+
+`tests/test_docs_examples.py` parses every fenced YAML block in `docs/`, checks the keys against the schema and the loader, and loads complete examples with `load_config`. Pages listed in its `KNOWN_STALE` set are expected to fail (xfail). Run it after editing a YAML example in the docs.
 
 
 ---
 
 
-## Test Fixtures
-
-### Configuration Fixtures
-
-Stored in `tests/fixtures/`:
-
-| File | Description |
-|------|-------------|
-| `valid_config.yaml` | Minimal valid configuration |
-| `single_node.yaml` | Single-node system with diesel + solar + battery |
-| `multi_node.yaml` | 3-node system with DC power flow |
-| `multi_system.yaml` | Two interconnected systems |
-| `invalid_config.yaml` | Configuration with intentional errors |
-
-### Data Fixtures
-
-| File | Description |
-|------|-------------|
-| `demand_single.csv` | 8760-hour demand for single node |
-| `demand_multi.csv` | Multi-node demand data |
-| `solar_availability.csv` | Solar capacity factor profile |
-| `wind_availability.csv` | Wind capacity factor profile |
-
-### Pytest Fixtures
+## Pytest Fixtures
 
 Defined in `tests/conftest.py`:
 
-```python
-@pytest.fixture
-def valid_config():
-    """Load a valid test configuration."""
-    return load_config("tests/fixtures/valid_config.yaml")
+| Fixture | Returns |
+|---------|---------|
+| `project_root` | Repository root |
+| `sample_demand` | 24 h × 2 nodes demand array |
+| `sample_solar_availability` | 24 h × 2 nodes solar profile |
+| `sample_wind_availability` | 24 h × 2 nodes wind profile (seeded random) |
 
-@pytest.fixture
-def single_node_config():
-    """Load single-node test configuration."""
-    return load_config("tests/fixtures/single_node.yaml")
-
-@pytest.fixture
-def mock_julia():
-    """Mock Julia bridge for unit tests."""
-    with patch("esfex.bridge.julia_setup.get_julia") as mock:
-        yield mock
-```
+`configs_dir`, `fixtures_dir` and `small_system_config` point to directories that do not exist in the repository and are not used by any test.
 
 
 ---
@@ -177,8 +137,7 @@ def mock_julia():
 ## Running Julia Tests
 
 ```bash
-cd src/esfex/julia
-julia --project=. -e 'using Pkg; Pkg.test()'
+julia --project=src/esfex/julia -e 'using Pkg; Pkg.test()'
 ```
 
 Or from the Julia REPL:
@@ -188,31 +147,29 @@ Or from the Julia REPL:
 ] test
 ```
 
+The test dependencies (Ipopt, JuMP, Test) are declared in `src/esfex/julia/test/Project.toml`.
+
 ### Julia Test Structure
 
+`src/esfex/julia/test/runtests.jl` is a single file with one top-level testset:
+
 ```julia
-# test/runtests.jl
 using Test
 using ESFEX
 
-@testset "ESFEX.jl" begin
-    @testset "Types" begin
-        # Type construction tests
-    end
-
-    @testset "Power System" begin
-        # Operational dispatch tests
-    end
-
-    @testset "Master Problem" begin
-        # Capacity expansion tests
-    end
-
-    @testset "Transmission DC" begin
-        # DC power flow tests
+@testset "ESFEX" begin
+    @testset "build_ybus" begin ... end          # one testset per function
+    @testset "create_optimizer" begin ... end
+    @testset "data structs" begin ... end
+    @testset "integration" begin
+        # small models built with create_power_system and solved, e.g.
+        # "economic dispatch (single bus)", "reserves are headroom, not energy",
+        # "ramp rate is per hour, scaled to the time step"
     end
 end
 ```
+
+Unit testsets cover the self-contained pieces (Y-bus and incidence matrix, line flows, solver factory, temporal mappings, NPV, representative-day selection, data structs). The `integration` block builds small `PowerSystemInput`s directly (a local `mkgen` helper fills the positional `GeneratorConfig` fields) and checks solved results. Larger end-to-end runs live in the Python `julia`-marked tests.
 
 
 ---
@@ -220,229 +177,56 @@ end
 
 ## Writing Tests
 
-### Test Naming Convention
-
-```python
-def test_<what>_<condition>_<expected>():
-    """<One-line description of what is being tested>."""
-```
-
-Examples:
-
-```python
-def test_load_config_missing_file_raises_error():
-def test_battery_soc_respects_cyclic_constraint():
-def test_ev_fleet_grows_with_scurve():
-```
-
 ### Testing Optimization Results
 
 Use tolerance-based assertions for solver results:
 
 ```python
-def test_power_balance():
-    """Total generation equals total demand (within tolerance)."""
-    results = run_simulation(config)
-    total_gen = results.generation.sum()
-    total_demand = results.demand.sum()
-    assert abs(total_gen - total_demand) / total_demand < 0.01  # 1% tolerance
+assert results[0].load_shed == pytest.approx(0.0, abs=1e-6)
+assert built_mw == pytest.approx(60.0, rel=1e-3)
 ```
 
 ### Testing Configuration Validation
 
 ```python
-def test_negative_capacity_rejected():
-    """Negative rated power should fail validation."""
+def test_negative_emission_factor_rejected():
     with pytest.raises(ValidationError):
-        GeneratorConfig(
-            name="test",
-            type="Renewable",
-            fuel="Solar",
-            rated_power=[-100.0],  # Invalid
-            # ... other fields
-        )
+        FuelConfig(name="Diesel", emission_factor=-0.1)
 ```
-
-
----
-
-
-## Test Patterns for New Features
 
 ### Pattern: New Configuration Field
 
-```python
-# 1. Test the default value
-def test_new_field_default():
-    """New field should have a sensible default."""
-    config = MyConfig()
-    assert config.new_field == expected_default
-
-# 2. Test explicit values from YAML
-def test_new_field_from_yaml(tmp_path):
-    """New field should load from YAML."""
-    yaml_content = """
-    my_section:
-      new_field: 42.0
-    """
-    config_file = tmp_path / "test.yaml"
-    config_file.write_text(yaml_content)
-    config = load_config(config_file)
-    assert config.my_section.new_field == 42.0
-
-# 3. Test validation rejects invalid values
-def test_new_field_rejects_negative():
-    """Negative values should raise ValidationError."""
-    with pytest.raises(ValidationError, match="new_field"):
-        MyConfig(new_field=-1.0)
-```
+1. Test the default and an explicit value on the Pydantic model (`tests/test_schema.py`).
+2. If `config/loader.py` converts the section by hand, test that the key survives `load_config` (`tests/test_loader.py`).
+3. If the field reaches Julia, add a `julia`-marked test that shows its effect on a small model.
 
 ### Pattern: New Constraint in Julia
 
-```python
-@pytest.mark.julia
-def test_new_constraint_bounds_output():
-    """New constraint should limit generator output."""
-    config = load_config("tests/fixtures/single_node.yaml")
-    # Modify config to trigger the new constraint
-    config.systems["island"].my_new_limit = 50.0
+Add a small testset to the `integration` block of `runtests.jl` that builds a `PowerSystemInput`, calls `create_power_system`, solves and checks the binding value. If the constraint depends on Python-side preprocessing, also add a `julia`-marked Python test that runs the `Orchestrator` on a minimal config.
 
-    adapter = PowerSystemAdapter(config.systems["island"], ...)
-    result = adapter.solve(...)
+### Pattern: Plugin Hook
 
-    # Check that the constraint is respected
-    max_output = result.generation.max()
-    assert max_output <= 50.0 + 1e-6  # Solver tolerance
-```
-
-### Pattern: New Plugin Hook
-
-```python
-def test_plugin_hook_called_during_simulation(tmp_path, mock_julia):
-    """Custom hook should be invoked at the correct simulation stage."""
-    from esfex.plugins import reset_plugin_manager, get_plugin_manager
-
-    reset_plugin_manager()
-
-    call_log = []
-
-    class TestPlugin(ESFEXPlugin):
-        def pre_year(self, *, year, year_idx, units_config, config):
-            call_log.append(("pre_year", year, year_idx))
-
-    # Register and run
-    pm = get_plugin_manager()
-    ctx = PluginContext(config=None, plugin_dir=tmp_path, data_dir=tmp_path)
-    plugin = TestPlugin(ctx)
-    plugin.meta = PluginMeta(name="test_hook", version="0.1.0")
-    pm._plugins.append(plugin)
-    pm._loaded = True
-
-    # ... run simulation ...
-
-    assert len(call_log) > 0
-    assert call_log[0][0] == "pre_year"
-```
-
-### Pattern: Adapter Bridge Serialization
-
-```python
-def test_new_field_reaches_julia(mock_julia):
-    """New config field should be serialized to Julia input."""
-    config = load_config("tests/fixtures/single_node.yaml")
-    adapter = PowerSystemAdapter(config.systems["island"], ...)
-
-    # Capture the Julia call
-    input_data = adapter._create_input(...)
-
-    # Verify the field was passed through
-    assert hasattr(input_data, "new_field") or "new_field" in input_data
-```
+`tests/test_plugins.py` shows how to write a plugin into `tmp_path` and point the manager at it, by patching `esfex.plugins.manager._USER_PLUGINS_DIR` and `_STATE_FILE` or by setting `ESFEX_PLUGIN_PATH`. Call `reset_plugin_manager()` between tests, since the manager is a process-wide singleton.
 
 
 ---
 
 
-## Coverage Reports
+## Coverage
 
 ### Generating Coverage
 
 ```bash
-# HTML report (detailed, browsable)
-pytest --cov=esfex --cov-report=html --cov-report=term-missing
-open htmlcov/index.html
-
-# Terminal summary
 pytest --cov=esfex --cov-report=term-missing
-
-# XML report (for CI integration)
-pytest --cov=esfex --cov-report=xml
+pytest --cov=esfex --cov-report=html
+pytest --cov=esfex --cov-report=xml      # format uploaded by CI
 ```
 
-### Reading the Coverage Report
+### What is measured
 
-`htmlcov/index.html` highlights:
+`[tool.coverage.run] omit` in `pyproject.toml` excludes code that unit tests cannot reach: the Qt windows, panels and dialogs, the Julia-bound glue (`runner.py`, `bridge/adapters.py`, `bridge/converters.py`, `analysis/native_ac_bridge.py`) and the heavy data pipelines. Coverage of those files is not reported, even when `julia`-marked tests exercise them. `[tool.coverage.report] exclude_also` drops `if TYPE_CHECKING:`, `raise NotImplementedError`, `__main__` guards and abstract methods.
 
-- **Green lines**: Covered by at least one test
-- **Red lines**: Not covered --- these are candidates for new tests
-- **Yellow lines**: Partially covered (e.g., only one branch of an `if/else`)
-
-Focus on red lines in critical modules (`runner.py`, `adapters.py`, `schema.py`). `visualization/` has lower coverage targets due to GUI automation difficulty.
-
-### Excluding Lines from Coverage
-
-Intentionally excluded lines (e.g., `if TYPE_CHECKING:` blocks, `__main__` guards):
-
-```python
-# In pyproject.toml or .coveragerc
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "if TYPE_CHECKING:",
-    "if __name__ == .__main__.:",
-    "raise NotImplementedError",
-]
-```
-
-
----
-
-
-## Markers
-
-Custom markers for test categorization:
-
-```python
-@pytest.mark.slow       # Long-running solver tests
-@pytest.mark.gui        # GUI tests (require display)
-@pytest.mark.julia      # Tests requiring Julia runtime
-@pytest.mark.solver     # Tests requiring a specific solver
-```
-
-Run specific categories:
-
-```bash
-# Skip slow tests
-pytest -m "not slow"
-
-# Only Julia tests
-pytest -m julia
-
-# Only fast unit tests
-pytest -m "not slow and not gui and not julia"
-```
-
-Register markers in `pyproject.toml` to suppress warnings:
-
-```toml
-[tool.pytest.ini_options]
-markers = [
-    "slow: long-running solver tests",
-    "gui: GUI tests requiring a display server",
-    "julia: tests that require a running Julia runtime",
-    "solver: tests that require a specific solver backend",
-]
-```
+Coverage is informational: `codecov.yml` marks both the project and patch status as `informational: true`, so coverage never fails CI or blocks a merge. There are no per-module targets.
 
 
 ---
@@ -450,103 +234,20 @@ markers = [
 
 ## Continuous Integration
 
-### Pipeline Stages
+`.github/workflows/ci.yml` runs on pushes and pull requests to `main` and on published releases:
 
-1. **Lint** (`ruff check src/ tests/`) --- Style violations and common errors. Under 10 seconds.
-2. **Type check** (`mypy src/esfex/`) --- Static type analysis.
-3. **Unit tests** (`pytest -m "not slow and not gui"`) --- No Julia or display server required. Target: under 60 seconds.
-4. **Integration tests** (`pytest -m "slow"`) --- Full Python-Julia pipeline. Runs on merge to `main` only.
-5. **Coverage report** (`pytest --cov=esfex`) --- Uploaded as CI artifact. Coverage regressions below module targets block merge.
+| Job | What it does |
+|-----|--------------|
+| `lint` | `ruff check --exit-zero src tests` on Python 3.11. Informational: findings appear as annotations but never fail the build. No mypy step. |
+| `test` | Ubuntu, Python 3.10, 3.11 and 3.12. Installs Qt system libraries and Xvfb, runs `pip install ".[dev]"` (non-editable), then `xvfb-run -a pytest tests/ -m "not julia" --cov=esfex`. Coverage from 3.11 is uploaded to Codecov. |
+| `julia` | Julia 1.11: builds `src/esfex/julia` and runs its `Pkg.test` suite with coverage. |
+| `build` | Builds sdist and wheel and checks them with `twine check` (after `test`). |
+| `publish` | On a published GitHub release only: publishes to PyPI with trusted publishing. |
 
-### Test Matrix
-
-| Python | Julia | OS |
-|--------|-------|----|
-| 3.10 | 1.9 | Ubuntu 22.04 |
-| 3.11 | 1.10 | Ubuntu 22.04 |
-| 3.12 | 1.11 | Ubuntu 22.04 |
-| 3.12 | 1.11 | macOS 14 |
-| 3.12 | 1.11 | Windows 2022 |
-
-### CI Workflow Summary
-
-```yaml
-# .github/workflows/ci.yml (simplified)
-name: CI
-on: [push, pull_request]
-
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install ruff mypy
-      - run: ruff check src/ tests/
-      - run: mypy src/esfex/
-
-  test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, macos-14, windows-2022]
-        python: ["3.10", "3.11", "3.12"]
-        julia: ["1.9", "1.10", "1.11"]
-        exclude:
-          - os: macos-14
-            python: "3.10"
-          - os: windows-2022
-            python: "3.10"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: ${{ matrix.python }} }
-      - uses: julia-actions/setup-julia@v2
-        with: { version: ${{ matrix.julia }} }
-      - run: pip install -e ".[dev]"
-      - run: pytest -m "not gui" --cov=esfex --cov-report=xml
-      - uses: codecov/codecov-action@v4
-
-  integration:
-    if: github.ref == 'refs/heads/main'
-    needs: test
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - uses: julia-actions/setup-julia@v2
-        with: { version: "1.11" }
-      - run: pip install -e ".[dev]"
-      - run: pytest -m "slow" --tb=long
-```
-
-
----
-
+There are no macOS or Windows jobs, and the `julia`-marked Python tests do not run in CI. Run `pytest -m julia` locally before changing model code.
 
 ### Troubleshooting CI Failures
 
-- **Flaky solver tests**: Use tolerance-based assertions (`abs(a - b) < tol`) instead of exact equality across platforms.
-- **Julia precompilation timeout**: Cache `~/.julia/` between runs if precompilation exceeds the job timeout.
-- **GUI tests on CI**: Excluded by default (`@pytest.mark.gui`). Require `xvfb-run` on Linux.
-
-
----
-
-
-## Coverage Goals
-
-| Module | Target |
-|--------|--------|
-| `config/` | 90% |
-| `io/` | 85% |
-| `models/` | 85% |
-| `bridge/` | 70% |
-| `plugins/` | 80% |
-| `runner.py` | 75% |
-| `visualization/` | 50% |
-| Overall | 75% |
-
-Enforced in CI. Pull requests that drop coverage below module targets receive a review warning.
+- **Solver results differ across machines**: use tolerance-based assertions instead of exact equality.
+- **GUI tests fail locally on a headless machine**: run them under `xvfb-run -a`.
+- **Import errors only under pytest**: see [Editable installs](#editable-installs).

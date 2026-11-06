@@ -2,13 +2,13 @@
 
 ## What Are Availability Profiles?
 
-A time series of **capacity factors** (0.0 to 1.0) describing the fraction of nameplate capacity available at each hour. A 100 MW solar PV generator with availability 0.85 at hour 12 can produce up to 85 MW.
+An availability profile is a time series of **capacity factors** (0.0 to 1.0): the fraction of a unit's capacity that can be used in each hour. A 100 MW solar PV generator with availability 0.85 at hour 12 can produce up to 85 MW.
 
-- **0.0** means the resource is completely unavailable (e.g., solar at night, wind during calm)
-- **1.0** means the generator can run at full rated power
-- Intermediate values reflect partial resource availability (e.g., cloudy conditions for solar, moderate wind speeds)
+- **0.0**: the resource is unavailable (solar at night, wind during calm)
+- **1.0**: the unit can run at full capacity
+- Values in between reflect partial availability (clouds, moderate wind)
 
-Non-renewable generators (diesel, gas, biomass) implicitly use a constant availability of 1.0.
+A generator without a profile has a constant availability of 1.0. A profile is not limited to renewables: in operational dispatch, the profile caps the output of **any** generator that has one (for example a seasonal derating of a biomass plant).
 
 
 ---
@@ -16,14 +16,16 @@ Non-renewable generators (diesel, gas, biomass) implicitly use a constant availa
 
 ## File Format
 
-| Format | Extension | Notes |
-|--------|-----------|-------|
-| CSV | `.csv` | No header row; pure numeric data |
-| Excel | `.xlsx`, `.xls` | First row may contain headers (auto-detected) |
+| Format | Extension | Header row |
+|--------|-----------|------------|
+| CSV | `.csv` | None. Every row is data |
+| Excel | `.xlsx`, `.xls` | None. Every row is data |
 
-### CSV Structure
+Both formats are read without a header. A text header (for example node names) is not detected; it makes the file unreadable, and the whole profile then falls back to a constant 1.0 (an error is logged, see [Troubleshooting](#common-errors-and-troubleshooting)).
 
-No header row. Each row represents one hour; each column represents one node.
+### Layout
+
+Each row is one hour; each column is one **node**.
 
 ```
 0.00,0.00,0.00
@@ -52,39 +54,44 @@ No header row. Each row represents one hour; each column represents one node.
 0.00,0.00,0.00
 ```
 
-### Tabular Layout
-
 | | Node 0 | Node 1 | Node 2 |
 |---|--------|--------|--------|
 | Hour 1 | 0.00 | 0.00 | 0.00 |
-| Hour 2 | 0.00 | 0.00 | 0.00 |
 | ... | ... | ... | ... |
 | Hour 7 | 0.15 | 0.12 | 0.18 |
-| Hour 12 | 0.85 | 0.80 | 0.90 |
-| Hour 18 | 0.10 | 0.08 | 0.12 |
+| Hour 12 | 0.90 | 0.87 | 0.92 |
 | ... | ... | ... | ... |
 | Hour 8760 | 0.00 | 0.00 | 0.00 |
 
-- **Values**: Between 0.0 (no output) and 1.0 (full rated power)
-- **Rows**: One per hour (8,760 rows for one standard year)
-- **Columns**: One per node in the system
-- **Formats**: CSV (`.csv`) or Excel (`.xlsx`)
+- **Values**: 0.0 to 1.0. Values outside this range are clipped.
+- **Rows**: one per hour; 8,760 rows for one year.
+- **Columns**: one per node. A bus uses the column of its parent node.
+
+### Column Handling
+
+The file does not need exactly one column per node:
+
+| Columns in the file | Result |
+|---------------------|--------|
+| 1 | The single profile is used at **every** node |
+| Fewer than the number of nodes | The **last** column is repeated for the missing nodes |
+| Equal to the number of nodes | Used as-is |
+| More than the number of nodes | Extra columns are dropped |
+
+Missing columns are filled from the last column, not with 1.0. No warning is logged for any of these adjustments.
+
 
 ---
 
 
 ## Example Profiles
 
-### Solar PV Profile (Typical Day)
+### Solar PV (one day)
 
 ```
 Hour,  Node 0 (South),  Node 1 (North)
   1        0.00              0.00
-  2        0.00              0.00
-  3        0.00              0.00
-  4        0.00              0.00
-  5        0.00              0.00
-  6        0.02              0.01
+  ...
   7        0.12              0.08
   8        0.30              0.22
   9        0.52              0.45
@@ -99,20 +106,12 @@ Hour,  Node 0 (South),  Node 1 (North)
  18        0.10              0.07
  19        0.01              0.00
  20        0.00              0.00
- 21        0.00              0.00
- 22        0.00              0.00
- 23        0.00              0.00
- 24        0.00              0.00
+  ...
 ```
 
-Key characteristics:
-- Zero during nighttime (typically 18:00-06:00 depending on latitude/season)
-- Peak 0.80-0.95 on clear days
-- Seasonal variation: longer daylight and higher peaks in summer
-- Spatial variation: southern nodes may exceed northern ones (Northern Hemisphere)
-- Annual average capacity factor: 0.15-0.25
+Typical features: zero at night, peaks of 0.80 to 0.95 on clear days, seasonal variation, and an annual capacity factor of roughly 0.15 to 0.25.
 
-### Wind Profile (Seasonal Pattern)
+### Wind (one day)
 
 ```
 Hour,  Node 0 (Coastal),  Node 1 (Inland)
@@ -120,42 +119,26 @@ Hour,  Node 0 (Coastal),  Node 1 (Inland)
   2        0.50               0.22
   3        0.48               0.18
   4        0.52               0.25
-  5        0.55               0.30
-  6        0.60               0.35
-  7        0.58               0.32
-  8        0.50               0.28
-  9        0.42               0.22
- 10        0.38               0.18
- 11        0.35               0.15
+  ...
  12        0.30               0.12
  13        0.28               0.10
- 14        0.32               0.15
- 15        0.40               0.20
- 16        0.45               0.25
- 17        0.50               0.30
- 18        0.55               0.35
- 19        0.58               0.38
+  ...
  20        0.60               0.40
  21        0.55               0.35
- 22        0.50               0.30
- 23        0.48               0.25
- 24        0.45               0.22
+  ...
 ```
 
-Key characteristics:
-- No fixed diurnal pattern
-- Higher hour-to-hour variability than solar
-- Seasonal: winter typically windier than summer in many regions
-- Coastal nodes often have higher, more consistent availability than inland
-- Annual average capacity factor: 0.20-0.45 depending on location
+Typical features: no fixed daily pattern, higher hour-to-hour variability than solar, and an annual capacity factor of roughly 0.20 to 0.45 depending on the site.
+
+The header lines and the hour column above are only for display. The files themselves contain numbers only.
 
 
 ---
 
 
-## Mapping Profiles to Generators in YAML
+## Mapping Profiles to Units in YAML
 
-Reference an availability profile using the `Availability` field (capital A, a YAML alias for `availability_file`):
+Reference a profile with the `Availability` key (capital A):
 
 ```yaml
 systems:
@@ -166,7 +149,7 @@ systems:
         type: Renewable
         fuel: Sun
         rated_power: [50.0, 30.0]
-        Availability: data/profile_sun_1.xlsx
+        Availability: data/profile_sun_1.csv
         # ... other fields ...
 
       wind_farm:
@@ -174,7 +157,7 @@ systems:
         type: Renewable
         fuel: Wind
         rated_power: [20.0, 0.0]
-        Availability: data/profile_wind_1.xlsx
+        Availability: data/profile_wind_1.csv
         # ... other fields ...
 
       diesel_gen:
@@ -182,7 +165,7 @@ systems:
         type: Non-renewable
         fuel: Diesel
         rated_power: [15.0, 10.0]
-        # No Availability field -- implicitly 1.0 at all hours
+        # No Availability key: constant 1.0
         # ... other fields ...
 
     technologies:
@@ -190,72 +173,64 @@ systems:
         name: Solar PV Investment
         type: Renewable
         fuel: Sun
-        invest_cost: [900000.0]
-        invest_max_power: [500.0]
-        Availability: data/profile_sun_1.xlsx
+        invest_cost: [900000.0, 900000.0]
+        invest_max_power: [500.0, 500.0]
+        Availability: data/profile_sun_1.csv
         # ... other fields ...
 ```
 
+- **Generators** read only `Availability`. The key `availability_file` is ignored for generators.
+- **Technologies** accept `Availability` or `availability_file`.
+- **Batteries** do not use availability profiles.
+
+In the master problem, renewable technologies use their profile; non-renewable technologies are taken as always available.
+
 ### Path Resolution
 
-- **Relative path**: Resolved relative to the YAML config file directory
-- **Absolute path**: Full filesystem path
-
-If relative resolution fails, ESFEX attempts the value as an absolute path before raising an error.
+| Unit | Absolute path | Relative path |
+|------|---------------|---------------|
+| Generator | Used as-is | Resolved under the directory of the configuration file. A path that leaves that directory (`../`) is refused, and the generator is skipped with a warning |
+| Technology | Used as-is | Looked up under the configuration file's directory first, then relative to the current working directory |
 
 ### Which Generators Need Profiles?
 
-| Generator Type | Availability Profile Required? | Typical Values |
-|---------------|-------------------------------|----------------|
-| Solar PV | Yes | 0.0-0.90, diurnal pattern |
-| Wind | Yes | 0.0-0.95, weather-driven |
-| Hydroelectric (run-of-river) | Yes | 0.2-0.8, seasonal |
-| Biomass | Optional | 0.85-0.95 (planned outages) |
-| Diesel / Gas / Fuel Oil | No | Implicit 1.0 |
-| OTEC | Optional | 0.90-0.95 (nearly constant) |
-| Batteries / Storage | No | Not applicable |
+| Generator Type | Profile | Typical Values |
+|---------------|---------|----------------|
+| Solar PV | Yes | 0.0 to 0.90, daily pattern |
+| Wind | Yes | 0.0 to 0.95, weather-driven |
+| Run-of-river hydro | Yes | 0.2 to 0.8, seasonal |
+| Biomass, OTEC | Optional | Near-constant, planned derating |
+| Diesel / Gas / Fuel oil | No | Constant 1.0 |
+
+For planned outages over specific dates, [Scheduled Interruptions](scheduled-interruptions.md) are an alternative to editing a profile.
+
 
 ---
 
 
 ## Temporal Resolution
 
-### Hourly Profiles (Default)
-
-Profiles are expected at hourly resolution (8,760 rows per year).
-
-### Sub-Hourly Aggregation
-
-At coarser temporal resolution (`temporal.resolution_hours`), ESFEX aggregates using the **mean** within each time block. With `resolution_hours: 6`, 8,760 hourly values become 1,460 six-hour averages.
+Profiles are hourly. With `temporal.resolution_hours > 1`, ESFEX averages each block (mean), so with `resolution_hours: 6` the 8,760 hourly values become 1,460 six-hour values.
 
 ```yaml
 temporal:
-  resolution_hours: 6      # Each time step = 6 hours
+  resolution_hours: 6
   rolling_horizon_hours: 48
-  overlap_hours: 6
+  overlap_hours: 24
 ```
-
-### Resolution Mismatch Handling
-
-- **Fewer rows than expected**: Tiled (repeated cyclically) to fill the required duration
-- **More rows than expected**: Sliced from the beginning
 
 
 ---
 
 
-## Multi-Year Profiles
+## Profile Length and Multiple Years
 
-Availability files should contain data for all years concatenated row-by-row:
+The two stages read a profile differently:
 
-| Simulation Duration | Rows Required |
-|-------------------|---------------|
-| 1 year | 8,760 |
-| 5 years | 43,800 |
-| 10 years | 87,600 |
-| 25 years | 219,000 |
+- **Operational dispatch** looks up hours by their position **within the current year**. Every simulated year therefore uses rows 1 to 8,760 of the profile. Rows beyond 8,760 are not used. A profile shorter than a year wraps around.
+- **The master problem** looks up its representative-day hours by their position **in the whole horizon**, wrapping around when the profile is shorter. With a multi-year profile, the master sees years 2, 3, … while dispatch keeps using year 1.
 
-If the file contains fewer rows than required, ESFEX tiles it cyclically. Year-specific data is recommended for studies where inter-annual variability matters.
+Use **one-year (8,760-row) profiles** so that both stages see the same data.
 
 
 ---
@@ -263,17 +238,17 @@ If the file contains fewer rows than required, ESFEX tiles it cyclically. Year-s
 
 ## How Availability Is Used in the Optimization
 
-The availability factor constrains renewable generator maximum output at each time step:
+In operational dispatch, availability caps the output of every generator in every hour:
 
-$$P_{g,n,t} \leq (\bar{P}_{g,n} + I_{g,n}) \times \alpha_{g,t,n}$$
+$$P_{g,b,t} \leq \bar{P}_{g,b,y} \times \alpha_{g,t,n(b)}$$
 
 where:
-- $P_{g,n,t}$ is the power output of generator $g$ at node $n$ in hour $t$
-- $\bar{P}_{g,n}$ is the existing rated (installed) capacity
-- $I_{g,n}$ is the investment capacity added by the optimizer
-- $\alpha_{g,t,n}$ is the availability factor from the profile
 
-The optimizer can **curtail** (produce less than available) but never exceed the availability-limited maximum.
+- $P_{g,b,t}$: output of generator $g$ at bus $b$ in hour $t$
+- $\bar{P}_{g,b,y}$: its capacity in year $y$, as set by the master problem (existing capacity after retirement and degradation, or the capacity built for an `inv_<technology>` unit)
+- $\alpha_{g,t,n(b)}$: the profile value for hour $t$ at the bus's parent node $n(b)$, multiplied by any [scheduled interruption](scheduled-interruptions.md) factor
+
+The optimizer can produce less than the available amount (curtailment), but never more. In the master problem, the profiles cap existing generators and renewable technologies on the representative days. For capacity adequacy, a renewable unit counts with its minimum availability.
 
 
 ---
@@ -283,11 +258,10 @@ The optimizer can **curtail** (produce less than available) but never exceed the
 
 ### Using ESFEX Built-in Workflows
 
-The workflow dependencies (`pvlib`, `atlite`, `geopandas`, …) are part of
-the core install — `pip install esfex` is all you need.
+The workflow dependencies (`pvlib`, `atlite`, `geopandas`, …) are part of the core install, so `pip install esfex` is all you need.
 
-- **Solar PV**: Uses `pvlib` with ERA5 reanalysis data to compute hourly capacity factors. Accounts for panel orientation, temperature losses, and inverter efficiency.
-- **Wind**: Uses `atlite` with ERA5 or MERRA-2 data to compute hourly capacity factors. Accounts for hub height, power curve, and air density corrections.
+- **Solar PV**: uses `pvlib` with ERA5 reanalysis data to compute hourly capacity factors.
+- **Wind**: uses `atlite` with ERA5 or MERRA-2 data to compute hourly capacity factors.
 
 See [Analysis Workflows](../workflows/index.md) for detailed instructions.
 
@@ -295,9 +269,9 @@ See [Analysis Workflows](../workflows/index.md) for detailed instructions.
 
 You can also generate profiles externally and save them in the required format:
 
-1. **Renewables.ninja** (https://www.renewables.ninja/): Web interface for solar and wind capacity factors from ERA5/MERRA-2. Download as CSV, reformat to match the required column structure (one column per node).
+1. **Renewables.ninja** (https://www.renewables.ninja/): solar and wind capacity factors from ERA5/MERRA-2. Download as CSV, then remove the header and timestamp columns and keep one column per node.
 
-2. **PVLIB Python** (https://pvlib-python.readthedocs.io/): Python library for solar PV modeling. Example:
+2. **PVLIB Python** (https://pvlib-python.readthedocs.io/). Example:
    ```python
    import pvlib
    import pandas as pd
@@ -316,58 +290,42 @@ You can also generate profiles externally and save them in the required format:
    capacity_factors.to_csv('profile_sun_1.csv', header=False, index=False)
    ```
 
-3. **Atlite** (https://atlite.readthedocs.io/): Python library for wind and solar resource assessment at scale. Supports ERA5, MERRA-2, and SARAH datasets.
+3. **Atlite** (https://atlite.readthedocs.io/): wind and solar resource assessment at scale (ERA5, MERRA-2, SARAH).
 
 ### Quality Checks
 
-Verify generated profiles meet these criteria:
-- All values are between 0.0 and 1.0
-- Solar profiles have zero values at night (check sunrise/sunset times for the location)
-- Annual capacity factors are reasonable for the technology and location
-- No extended periods of constant values (which may indicate data errors)
-- The correct number of rows for the simulation period
+- All values are between 0.0 and 1.0.
+- Solar profiles are zero at night.
+- Annual capacity factors are plausible for the technology and site.
+- No long runs of constant values, which may indicate data errors.
+- 8,760 rows, no header, no timestamp column.
+
 
 ---
 
 
-## Validation Rules
+## Loading Rules
 
-1. **Value range**: All values are clipped to [0.0, 1.0]. Values outside this range are silently clamped.
-
-2. **Column count**: If the file has fewer columns than the number of nodes in the system, extra columns are padded with 1.0 (full availability). If the file has more columns than nodes, extra columns are truncated.
-
-3. **Row count**: The profile must have at least enough rows for one simulation year at the configured resolution. For multi-year simulations, short profiles are tiled cyclically.
-
-4. **File existence**: If a generator specifies an `Availability` file that does not exist, ESFEX logs a warning and falls back to a default profile of 1.0 for all hours. This fallback prevents simulation failure but may produce unrealistic results for renewable generators.
-
-5. **Data type**: All values must be numeric. Non-numeric cells will cause an error during loading.
+1. **Value range**: values are clipped to [0.0, 1.0] without a warning.
+2. **Columns**: see [Column Handling](#column-handling).
+3. **Rows**: see [Profile Length and Multiple Years](#profile-length-and-multiple-years).
+4. **Missing file, generator**: the generator is skipped with a warning (`Skipping generator '<key>': availability_file '<file>' not found under <dir>`). It is then **left out of the operational dispatch model**. It does not fall back to 1.0 there.
+5. **Missing file, technology** (and the master problem's copy of a generator profile): a warning `Availability file not found: <path>, using default 1.0` is logged, and a constant 1.0 profile is used.
+6. **Unreadable file** (non-numeric cells, including a header row): an error `Error loading availability from <path>: …` is logged, and a constant 1.0 profile is used.
 
 ---
 
 
 ## Profile Caching
 
-### How Caching Works
-
-1. **Startup preloading**: The `_preload_availability_profiles()` method runs once during simulation initialization. It loads **all** availability files referenced by generators and technologies into an in-memory dictionary.
-
-2. **File-level deduplication**: If multiple generators reference the same physical file (e.g., all solar PV generators sharing `profile_sun_1.xlsx`), the file is loaded only once. Subsequent generators reuse the same NumPy array.
-
-3. **Cache key**: The cache is keyed by generator/technology name. The underlying file is resolved to an absolute path for deduplication.
-
-4. **Operational windows**: During the rolling horizon dispatch, each operational window retrieves the appropriate slice of the cached profile instead of re-reading files from disk.
-
-### Performance Impact
-
-| Scenario | Without Cache | With Cache |
-|----------|--------------|------------|
-| 25 years, 10 generators, 208 windows/year | ~52,000 file reads | 10 file reads (at startup) |
-| Load time per file | ~50 ms | 0 ms (cached) |
-| Total I/O time | ~43 minutes | ~0.5 seconds |
+1. **Startup preloading**: at the start of a run, ESFEX loads every profile referenced by a generator or technology once, at hourly resolution.
+2. **Deduplication**: units that point to the same file share one array, keyed by the resolved path.
+3. **Cache key**: the generator or technology key.
+4. **Operational windows**: each rolling-horizon window takes its slice of the cached array instead of reading the file again.
 
 ### Zone Expansion
 
-When development zones are used, cached profiles are extended to include virtual zone nodes. Each zone copies the availability profile of the nearest existing node.
+With [development zones](development-zones.md), each zone adds a node to the network. Every cached profile with one column per original node gets a column for each zone node, copied from the parent node of the bus the zone connects to.
 
 
 ---
@@ -378,38 +336,41 @@ When development zones are used, cached profiles are extended to include virtual
 ### File Not Found
 
 ```
-WARNING - Availability file not found: data/profile_sun_1.xlsx, using default 1.0
+WARNING  Skipping generator 'solar_pv': availability_file 'data/profile_sun_1.csv' not found under /path/to/project
 ```
 
-**Cause**: The path specified in `Availability` does not resolve to an existing file.
-**Solution**: Verify the path is correct relative to the YAML config file directory. Check for typos and ensure the file exists.
+**Cause**: the `Availability` path does not resolve to a file.
+**Effect**: the generator is missing from the operational dispatch.
+**Solution**: check the path relative to the configuration file's directory, or use an absolute path.
 
-### Column Count Mismatch
+### Path Outside the Project
 
 ```
-WARNING - Availability file data/profile_sun_1.xlsx has 3 columns, expected 5. Adjusting...
+WARNING  Skipping generator 'solar_pv': availability_file '../shared/sun.csv' resolves outside config directory /path/to/project (refusing path traversal)
 ```
 
-**Cause**: The profile file has a different number of columns than the system has nodes.
-**Solution**: Regenerate the profile with the correct number of columns, or let ESFEX auto-adjust (padding with 1.0 or truncating). Note that padded columns mean those nodes will have full availability, which may not be physically realistic.
+**Solution**: move the file under the project directory, or use an absolute path.
 
-### Unrealistic Results (High Curtailment or Infeasibility)
+### Profile Silently Constant at 1.0
 
-If the simulation shows excessive curtailment or unexpected infeasibility:
-- Check that solar profiles are not accidentally used for wind generators (and vice versa)
-- Verify that the temporal resolution in the config matches the profile's intended resolution
-- Confirm that the profile covers enough hours for the simulation period
+```
+ERROR  Error loading availability from /path/to/profile.xlsx: could not convert string to float: 'Node 0'
+```
 
-### Zero-Energy Renewable Output
+**Cause**: the file has a header row or other non-numeric cells.
+**Solution**: remove the header; the file must contain numbers only.
 
-If renewable generators produce zero energy despite having rated capacity:
-- Check that the `Availability` field is correctly specified (capital A)
-- Verify the profile file is not empty or filled with zeros
-- Check the logs for loading errors or fallback warnings
+### Wrong Profile at Some Nodes
 
-### Performance Issues
+The file has fewer columns than the system has nodes, so the last column was repeated. Provide one column per node, or a single column if the same profile applies everywhere.
 
-If simulation startup takes too long:
-- Large Excel files load slower than CSV. Convert `.xlsx` files to `.csv` for faster I/O
-- Profiles with millions of rows (long multi-year studies) consume significant memory. Ensure sufficient RAM is available
-- The cache holds all profiles in memory simultaneously. For very large systems (many generators, many nodes, many years), memory usage can be substantial
+### Unrealistic Results (High Curtailment or Load Shedding)
+
+- Check that solar profiles are not used for wind generators, or the other way round.
+- Check that the profile is hourly and has 8,760 rows.
+- For generators, the key must be `Availability`; `availability_file` is ignored and the generator runs at a constant 1.0.
+
+### Performance
+
+- Excel files load more slowly than CSV; convert large `.xlsx` files to `.csv`.
+- All profiles are held in memory for the whole run. Very large systems with many profiles need correspondingly more RAM.

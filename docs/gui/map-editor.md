@@ -1,6 +1,27 @@
 # Map Editor
 
-Central workspace for placing nodes, drawing transmission lines, positioning generators and storage, defining development zones, and visualizing simulation results. Powered by Leaflet.js embedded in a QWebEngineView.
+Central workspace for placing buses and equipment, drawing transmission lines and fuel routes, defining development zones, and visualizing simulation results. Powered by Leaflet.js embedded in a QWebEngineView.
+
+
+---
+
+
+## Nodes, Buses, and Equipment
+
+The Studio separates geography from electrical topology:
+
+- A **node** is a geographic aggregation (a region or substation area). It owns one or more buses and holds demand, reserves, and losses. Nodes have no marker on the map.
+- A **bus** is an electrical connection point at one voltage level. Each bus belongs to one node (its *parent node*). Lines, transformers, converters, and equipment connect to buses.
+- **Equipment** (generators, batteries, electrolyzers, converters, transformers, fuel facilities) is placed at its own map position.
+
+### Adding Nodes
+
+A new system already contains "Node 0". To add more:
+
+1. Right-click **Nodes** under the system in the Element Tree and select **Add Node**.
+2. In the node form, click **Place** next to *Centroid (geographic reference)*, then click the map. The centroid is stored as the node's latitude and longitude. **View** briefly shows a marker at the centroid.
+
+When you place a bus or a piece of equipment, it is assigned to the node whose centroid is nearest to the click. Nodes without a centroid are matched by the positions of their buses. Set the centroids before placing buses so the assignment is right; you can change a bus's node later with **Parent Node** in the bus form.
 
 
 ---
@@ -8,71 +29,38 @@ Central workspace for placing nodes, drawing transmission lines, positioning gen
 
 ## Drawing Modes
 
-Select a mode from the toolbar and interact with the map. Single-placement actions (node, generator, battery) auto-reset to selection mode. Multi-click actions (line trace, zone polygon) stay active until completed or cancelled. Press `Escape` to cancel and return to selection mode.
-
-### Placing Nodes
-
-1. Click **Node** in the toolbar (or the assigned shortcut key).
-2. Click on the map at the desired geographic location.
-3. A circular marker appears with an auto-assigned index (0, 1, 2, ...).
-4. The Properties Panel opens the Node form. Configure the node name, demand file, reserve requirements, and other parameters.
-5. The mode resets to selection.
-
-Nodes are the fundamental geographic locations. All other equipment attaches to a node. A node represents a substation, load center, or generation hub. Coordinates (latitude, longitude) are captured from the click location and stored in WGS84 format.
-
-**Tips:**
-- You can reposition a node later by dragging it in selection mode.
-- When you move a node, all attached generators, batteries, fuel entries, transformers, and connected line endpoints move with it automatically.
-- Node markers display their index number as a label. Rename nodes in the Properties Panel for clarity.
-
-### Placing Generators and Batteries
-
-1. Click **Generator** (or **Battery**) in the toolbar.
-2. Click on the map near an existing node.
-3. The element snaps to the nearest node automatically via the magnetic snapping system.
-4. A marker appears near the parent node with a shape and color indicating its type.
-5. The Properties Panel opens the corresponding form for configuration.
-6. The mode resets to selection.
-
-Marker sizes scale with rated capacity. Renewable generators (Solar, Wind, Hydro) use green markers by default; non-renewable generators (Diesel, Gas) use gray markers. Batteries use orange markers.
-
-**Tips:**
-- To change a generator or battery's parent node, edit the **Node** field in the Properties Panel.
-- Multiple generators and batteries can be attached to the same node.
-- Marker colors and shapes are customizable in the Appearance section of each element's form.
-
-### Placing Transformers
-
-1. Click **Transformer** in the toolbar.
-2. Click on the map near a node.
-3. The transformer snaps to the nearest node. It represents a voltage step-up or step-down connecting two buses.
-4. Configure the primary and secondary voltages, rated power, and impedance in the Properties Panel.
+Select a mode from the toolbar and click the map. Placement modes stay active, so you can place several elements in a row. Line, fuel route, and zone modes stay active until the trace is completed or cancelled. Press `Escape` to cancel and return to selection mode.
 
 ### Placing Buses
 
 1. Click **Bus** in the toolbar.
-2. Click on the map near an existing node.
-3. The bus snaps to the parent node. Buses represent electrical connection points at specific voltage levels within a node.
-4. Configure voltage, frequency, current type (AC/DC), and demand fraction.
+2. Click the map. The bus is created at that point, in the node with the nearest centroid.
+3. Configure name, voltage, frequency, current type, bus type (PQ/PV/slack), role, and demand fraction in the Properties Panel. New buses default to 220 kV and role *connection*.
 
-### Placing AC/DC and Frequency Converters
+### Placing Generators, Storage, and Electrolyzers
 
-1. Click **AC/DC Converter** or **Freq Converter** in the toolbar.
-2. Click near a node or bus.
-3. The converter snaps to the nearest element. Configure its connected buses, rated power, and efficiency in the form.
+1. Click **Generator**, **Storage**, or **Electrolyzer** in the toolbar.
+2. Click the map where the plant is located. The element is created at that exact point and assigned to the node with the nearest centroid.
+3. If the system has buses, the element is connected automatically: equipment → line → new low-voltage bus → line → transformer → line → nearest bus above 0.48 kV.
+4. The Properties Panel opens the form for the new element. New generators start as Renewable with 0 MW rated power.
 
-### Placing Electrolyzers
+Marker sizes scale with rated capacity (see Global Settings > Visual Scaling). Renewable generators use green markers and non-renewable generators gray markers by default; batteries use orange markers. Each form has an **Appearance** group to override color, size, shape, and opacity.
 
-1. Click **Electrolyzer** in the toolbar.
-2. Click near a node or bus.
-3. The electrolyzer snaps and creates a hydrogen production facility. Configure type (PEM, Alkaline, SOE), capacity, efficiency, and costs.
+### Placing Converters and Transformers
+
+- **AC/DC Conv.** and **Freq. Conv.**: click the map. If buses exist, the converter is connected between buses (bus_from → converter → bus_to). Configure its buses, rated power (MVA), and efficiencies in the form.
+- **Transformer**: click the map, then set the From/To buses, voltages, rated power, impedance, and losses in the form.
+
+### Placing on an Existing Line
+
+Clicking on or near an existing line or fuel route while placing an element offers to connect the element to it ("Do you want to connect … to …?"). If you accept, the line is split in two at that point and both halves connect to the new element. Generators, storage, electrolyzers, and converters are not split into the line; when buses exist they get the auto-connect chain described above instead. Dragging an existing element onto a line also offers the split.
 
 ### Placing Fuel Infrastructure
 
-Fuel entry points, fuel storage, and electrolyzers work the same way as generators -- select the mode, click near a node, and configure in the Properties Panel.
+- **Fuel Source** -- A fuel import point (port, pipeline terminal). Configure available fuels, import limits and costs, and supply-stress parameters.
+- **Fuel Store** -- A fuel storage facility. Configure capacity, initial and minimum levels.
 
-- **Fuel Source** -- A fuel import point (port, pipeline terminal). Configure available fuel types, import rates, costs, and supply-stress parameters (transit lead time, disruption window).
-- **Fuel Storage** -- Represents a fuel storage facility. Configure capacity, initial levels, and minimum levels per fuel type.
+Both are assigned to the node with the nearest centroid.
 
 
 ---
@@ -80,44 +68,35 @@ Fuel entry points, fuel storage, and electrolyzers work the same way as generato
 
 ## Drawing Lines
 
-Transmission lines and fuel routes use a **polyline trace** workflow -- a multi-click process that allows you to route lines through intermediate waypoints for geographic accuracy.
+Transmission lines and fuel routes use a **polyline trace**: click the start element, optionally add waypoints, then click the end element.
 
 ### Transmission Lines
 
 1. Click **Line** in the toolbar.
-2. Click on the starting node. The node highlights with a pulsing effect to confirm selection.
-3. A rubber-band dashed line follows your cursor from the last point.
-4. Click on the map to add intermediate waypoints that shape the route (for example, following a coastline or road corridor).
-5. Click on the destination node to complete the line.
-6. The Properties Panel opens the Line form for configuring capacity, impedance, and voltage.
-7. Press `Escape` at any point during the trace to cancel without creating the line.
+2. Click the starting bus or piece of equipment. It is highlighted, and a dashed rubber-band line follows the cursor.
+3. Click on empty map space to add waypoints that shape the route.
+4. Click the destination bus or piece of equipment to complete the line.
+5. The Properties Panel opens the Line form.
+6. Press `Escape` during the trace to cancel without creating the line.
 
 **Key behaviors:**
-- Both the start and end points must be magnetic elements (nodes, generators, batteries, transformers, or fuel entries).
-- The rubber-band line updates in real time as you move the cursor.
-- Waypoints are stored and preserved through save/load cycles.
-- Multiple parallel lines between the same pair of nodes are allowed. Each is a separate element with its own capacity and impedance.
+- Allowed endpoints are buses, generators, batteries, electrolyzers, transformers, AC/DC converters, and frequency converters. Generators, batteries, and electrolyzers can connect to a bus, a transformer, or an AC/DC converter, not to each other. Invalid combinations are rejected with a message.
+- The Line form shows the endpoints as **From bus** / **To bus** and lets you rewire them.
+- Waypoints are stored in the YAML and preserved through save/load.
+- Parallel lines between the same pair of buses are allowed; each is a separate element.
+- If the two endpoints belong to different systems, an inter-system link is created instead. See [Inter-System Links](inter-system-links.md).
 
 ### Fuel Transport Routes
 
-Same polyline trace workflow as transmission lines. Click **Fuel Route** in the toolbar, then trace from source to destination.
+Click **Fuel Route**, click a fuel source or fuel storage, then click another fuel source or fuel storage.
 
-- Fuel routes display with a **dashed line style** to distinguish them visually from electrical transmission lines.
-- Configure the transported fuel types, capacity, cost per unit-km, and loss fraction in the Properties Panel.
+- Clicking empty map space does not add waypoints in this mode, so a new route is a straight line. Use **Edit Trace** in the route form to reshape it.
+- Fuel routes are drawn as dashed lines.
+- Configure the fuel, capacity, transport cost, and losses in the Properties Panel.
 
-### Magnetic Snapping System
+### Snapping
 
-Line endpoints automatically snap to nearby magnetic elements when you click within their snap radius. The magnetic registry tracks all elements by type and ID:
-
-| Magnetic Element Types |
-|----------------------|
-| Node |
-| Generator |
-| Battery |
-| Transformer |
-| Fuel Source |
-
-When a node moves (dragged), all connected line endpoints update automatically. The snap system uses `EndpointRef(element_type, element_id)` references internally, so connections survive element repositioning.
+A trace starts and ends only by clicking a marker of an allowed type. The registered types are bus, generator, battery, electrolyzer, transformer, AC/DC converter, frequency converter (for lines), and fuel source and fuel storage (for fuel routes). Lines store their endpoints as references to these elements, so when you drag an element, the line ends attached to it follow.
 
 
 ---
@@ -127,16 +106,12 @@ When a node moves (dragged), all connected line endpoints update automatically. 
 
 Development zones define geographic areas where new generation capacity may be installed.
 
-1. Click **Zone** in the toolbar.
-2. Click on the map to define polygon vertices. Each click adds a vertex.
-3. Close the polygon by clicking near the starting point (within the snap tolerance).
-4. The Properties Panel opens the Zone form. Configure the zone's technology type, maximum capacity, and interconnection cost.
-5. The polygon fills with a semi-transparent color indicating the assigned technology.
+1. Click **Dev. Zone** in the toolbar.
+2. Click the map to add polygon vertices.
+3. Close the polygon by clicking the first vertex.
+4. The Properties Panel opens the Zone form. Configure the technology, node, interconnection costs, target bus, and allowed technologies.
 
-**Tips:**
-- Zone polygon boundaries can be edited later (see Editing Zone Boundaries below).
-- Zones are assigned colors automatically based on their technology type, drawn from a predefined palette.
-- Overlapping zones of different technologies are supported.
+Zones are drawn with a semi-transparent fill. Overlapping zones are allowed.
 
 
 ---
@@ -146,30 +121,23 @@ Development zones define geographic areas where new generation capacity may be i
 
 ### Moving Elements
 
-In selection mode (the default, or press `Escape`), drag any node to move it. The drag propagation system ensures that:
+In selection mode, drag any equipment or bus marker to move it. Lines and fuel routes attached to the element follow it. Moving an element does not change its node or bus. Dropping it on a line offers to split the line (see [Placing on an Existing Line](#placing-on-an-existing-line)).
 
-- All generators attached to the node move with it.
-- All batteries attached to the node move with it.
-- All fuel entries, fuel storage, and transformers at the node move with it.
-- All connected transmission line and fuel route endpoints update to the new position.
-
-Other elements (generators, batteries, fuel entries) can also be dragged individually to adjust their visual offset from the parent node, though their logical node assignment does not change.
+For large systems (more than 200 point elements), markers are drawn on a canvas and can only be dragged after zooming in to level 15 or closer.
 
 ### Editing Line Routes
 
-1. Select a line in the tree or on the map.
+1. Select a line or fuel route.
 2. In the Properties Panel, click the **Edit Trace** toggle button.
-3. The line's waypoint vertices become visible as draggable handles.
-4. Drag vertex handles to reshape the route. The line redraws in real time.
-5. Click **Edit Trace** again (or press `Escape`) to confirm and exit edit mode.
+3. The route's vertices become draggable handles. Drag the midpoint handles to add vertices.
+4. Click **Edit Trace** again to finish.
 
 ### Editing Zone Boundaries
 
-1. Select a zone in the tree or on the map.
+1. Select a zone.
 2. In the Properties Panel, click the **Edit Polygon** toggle button.
-3. The polygon's vertices become visible as draggable handles.
-4. Drag vertices to reshape the boundary.
-5. Click **Edit Polygon** again to confirm.
+3. Drag the vertices to reshape the boundary.
+4. Click **Edit Polygon** again to finish.
 
 
 ---
@@ -177,35 +145,27 @@ Other elements (generators, batteries, fuel entries) can also be dragged individ
 
 ## Selecting Elements
 
-- **Click** an element on the map to select it. Its property form appears in the Properties Panel and the corresponding tree item highlights.
-- **Ctrl+Click** to add more elements to the selection (for batch editing of elements of the same type).
-- **Click empty space** on the map or press `Escape` to deselect all elements.
-- **Double-click** an item in the Element Tree to center the map on that element and zoom to an appropriate level.
-- **Right-click** an element for a context menu with quick actions.
+- **Click** an element on the map to select it. Its form appears in the Properties Panel. The map selects one element at a time.
+- In selection mode, **click empty map space** to clear the selection.
+- **Double-click** an item in the Element Tree to center the map on that element.
+- **Ctrl+Click** or **Shift+Click** in the Element Tree to select several elements of the same type for batch editing.
+- **Right-click** an element on the map or in the tree for the context menu.
 
-### Selection Feedback
-
-When an element is selected:
-- Its map marker or polyline receives a highlight border (selection color from the active theme).
-- The corresponding item in the Element Tree scrolls into view and highlights.
-- The Properties Panel switches to the appropriate form and populates it with the element's data.
+Clicking an element of another system switches the active system without moving the map.
 
 
 ---
 
 
-## Copy and Paste
+## Duplicate, Copy, and Paste
 
-Copy technical properties between elements of the same type:
+Use the right-click menu on the map or in the Element Tree:
 
-1. Select an element, press `Ctrl+C`. A confirmation message appears in the status bar.
-2. Select another element of the same type, press `Ctrl+V`.
+- **Duplicate** -- Creates a copy with a new ID and name. For generators, batteries, and electrolyzers the copy is offset on the map and disconnected from any bus, so you can place and connect it.
+- **Copy Attributes** -- Copies the element's attributes to an internal clipboard. The status bar confirms the copy.
+- **Paste Attributes** -- Applies the copied attributes to another element of the same type (enabled only when the types match).
 
-**What is copied:** All technical parameters -- capacity, costs, efficiency, fuel type, impedance, etc.
-
-**What is NOT copied:** Position (latitude/longitude), ID, node assignment, and visual style. This ensures each element retains its unique identity and location.
-
-Useful for creating multiple generators with identical specifications at different nodes, or replicating battery configurations across a network.
+Copy skips the identity and position fields: ID, name, node, bus, line endpoints and waypoints, coordinates, and visual style. Everything else (capacity, costs, efficiency, fuel, impedance, etc.) is pasted.
 
 
 ---
@@ -213,17 +173,16 @@ Useful for creating multiple generators with identical specifications at differe
 
 ## Context Menu
 
-Right-click an element on the map or in the Element Tree for a context menu:
+Right-click a marker or line on the map:
 
 | Action | Description |
 |--------|-------------|
-| **Delete** | Remove the element (with dependent confirmation if needed) |
-| **Duplicate** | Create a copy with a new ID and offset position |
-| **Copy Properties** | Copy technical parameters to clipboard |
-| **Paste Properties** | Apply copied parameters (same type required) |
-| **Center Map** | Pan and zoom the map to center on this element |
-| **Edit Trace** | (Lines only) Toggle polyline vertex editing |
-| **Edit Polygon** | (Zones only) Toggle polygon vertex editing |
+| **Duplicate** | Create a copy (see above) |
+| **Copy attributes** | Copy technical attributes |
+| **Paste attributes** | Apply copied attributes (same type required) |
+| **Delete** | Remove the element immediately (undo with `Ctrl+Z`) |
+
+The Element Tree has a longer menu; see [System Management](system-management.md#context-menus).
 
 
 ---
@@ -237,21 +196,22 @@ Right-click an element on the map or in the Element Tree for a context menu:
 |--------|-----|
 | Zoom in/out | Scroll wheel, or double-click to zoom in |
 | Pan | Click and drag on empty map space |
-| Fit all elements | Click the **Fit Bounds** button in the map controls |
+| Fit all elements | Happens automatically when a configuration is loaded or a system is switched from the tree |
 | Center on element | Double-click an item in the Element Tree |
 
 ### Base Maps
 
-Switch between base map tile layers using the **Base Map** dropdown in the toolbar:
+Switch the background with the **Base Map** dropdown in the toolbar:
 
 | Base Map | Description |
 |----------|-------------|
-| **OpenStreetMap** | Standard street map with labels. Good for urban grid design. |
-| **Satellite** | Aerial/satellite imagery. Useful for identifying terrain, coastlines, and existing infrastructure. |
-| **Terrain** | Topographic map with elevation contours and hillshading. Helpful for wind and solar resource assessment. |
-| **Dark** | Minimalist dark-background map. Reduces visual clutter and works well with the Dark and Twilight themes. |
+| **OpenStreetMap** | Standard street map with labels. |
+| **Satellite** | Aerial imagery. Useful for identifying terrain, coastlines, and existing infrastructure. |
+| **Terrain** | Topographic map with elevation shading. |
+| **Dark** | Dark minimalist map. |
+| **Offline** | Country outlines from bundled Natural Earth data. Works without an internet connection. |
 
-Base map selection is independent of the application theme and persists across sessions.
+The toolbar choice applies to the current session only. The base map used at startup is set in **File > Preferences… > Map > Default base map**.
 
 
 ---
@@ -259,16 +219,29 @@ Base map selection is independent of the application theme and persists across s
 
 ## Layer Filtering
 
-The **Layer** dropdown controls element category visibility on the map:
+The **Layer** dropdown controls what is drawn on the map:
 
 | Layer | Visible Elements |
 |-------|-----------------|
-| **All** | Every element across all categories |
-| **Electrical** | Nodes, generators, batteries, lines, transformers, buses, converters |
-| **Primary Energy** | Fuel entries, fuel storage, fuel routes, electrolyzers |
-| **Results** | Simulation output overlays (generation heatmaps, power flow arrows, load shedding) |
+| **All** | Every element |
+| **Electrical** | Generators, batteries, lines, transformers, buses, converters, electrolyzers, development zones, results overlays |
+| **Primary Energy** | Fuel sources, fuel storages, development zones |
+| **Results** | Results overlays from the Map Results panel only |
 
-Layer filtering only affects map visibility. The Element Tree always shows all elements regardless of the layer filter.
+Fuel routes are visible in every layer. Layer filtering only affects the map; the Element Tree always shows all elements.
+
+
+---
+
+
+## Importing Geographic Data
+
+**File > Import Geo Asset…** loads a GeoJSON, Shapefile, KML, KMZ, or GeoPackage file as a reference overlay. Formats other than GeoJSON require `geopandas`.
+
+1. The file appears on the map and under **Geo Assets** in the Element Tree. Nothing is added to the system yet.
+2. Right-click the asset and select **Parse to System Elements...** to convert its features into buses, lines, generators, and other elements.
+
+The file is not reprojected. Provide data in WGS84 (EPSG:4326); a file in another CRS is drawn in the wrong place.
 
 
 ---
@@ -276,12 +249,7 @@ Layer filtering only affects map visibility. The Element Tree always shows all e
 
 ## Coordinate System
 
-All geographic positions use the **WGS84** coordinate reference system (EPSG:4326) with latitude and longitude in decimal degrees. This is the same system used by GPS devices, Google Maps, and OpenStreetMap.
-
-- Latitude: positive values are north of the equator, negative values are south.
-- Longitude: positive values are east of the prime meridian, negative values are west.
-
-Coordinates are preserved through save/load cycles and exported accurately in the YAML configuration. When importing geographic data (GeoJSON, Shapefile, KML), the editor reprojects to WGS84 automatically if the source uses a different CRS.
+All positions use **WGS84** (EPSG:4326) latitude and longitude in decimal degrees. Positive latitudes are north of the equator; positive longitudes are east of the prime meridian. Coordinates are saved in the YAML configuration.
 
 
 ---
@@ -289,10 +257,9 @@ Coordinates are preserved through save/load cycles and exported accurately in th
 
 ## Element Visibility and Scaling
 
-- Generator and battery markers scale in size proportional to their rated capacity, making it easy to identify large vs. small installations at a glance.
-- Transmission line widths scale with rated capacity.
-- Zone polygons use semi-transparent fills with technology-specific colors.
-- All markers include tooltip text showing the element name and key parameters on hover.
+- Generator and battery marker sizes scale with rated power or capacity, between the minimum and maximum sizes set in Global Settings > Visual Scaling. A size set in an element's Appearance group overrides the automatic size.
+- Transmission line widths scale with capacity in the same way.
+- Hovering a marker shows a tooltip with its name and size.
 
 
 ---
@@ -300,7 +267,7 @@ Coordinates are preserved through save/load cycles and exported accurately in th
 
 ## Performance Considerations
 
-- For systems with more than 500 elements, consider using layer filtering to reduce rendering load.
-- Satellite base maps consume more bandwidth than vector tile layers.
-- Zoom to a specific area before placing elements to ensure precise geographic positioning.
-- The map caches tiles locally after first load, so subsequent sessions load faster even with intermittent connectivity.
+- With more than 200 point elements, the map switches to canvas markers; detailed, draggable markers appear from zoom level 15.
+- Use layer filtering to reduce what is drawn.
+- Satellite base maps use more bandwidth than the other layers.
+- Zoom in before placing elements to position them precisely.

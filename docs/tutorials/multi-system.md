@@ -26,12 +26,13 @@ Create `multi_system.yaml`:
 ```yaml
 simulation_mode: development
 date_start: "01/01/2025 00:00"
+enable_primary_energy: false
 
 temporal:
   resolution_hours: 1
   use_rolling_horizon: true
   rolling_horizon_hours: 48
-  overlap_hours: 6
+  overlap_hours: 24
 
 solver:
   name: highs
@@ -45,101 +46,103 @@ n1_security:
 
 master_problem:
   stochastic: false
-  representative_days_per_year: 5
+  representative_days: 5
   min_day_separation: 7
-
-enable_primary_energy: false
 
 # --- Meta-Network: defines which systems exist and how they connect ---
 meta_network:
   systems:
-    - main_island
+    - main_island                 # first system = primary system
     - small_island
-  dynamic_transfer_pricing: false
 
   systems_links:
-    submarine_cable:
-      systems: [main_island, small_island]
-      from_nodes: [2]           # Node 2 of main_island
-      to_nodes: [0]             # Node 0 of small_island
-      capacity: [30.0]          # MW existing submarine cable capacity
-      invest_cost: [800000.0]   # $/MW for cable expansion
-      invest_max: [100.0]       # MW maximum cable expansion
-      losses: [0.03]            # 3% transmission losses
+    - systems: [main_island, small_island]
+      connections: [[2, 0]]       # [node of main_island, node of small_island]
+      existing_capacity_MW: [30.0]
+      max_investment_MW: [100.0]
+      investment_cost_per_MW: [800000.0]
+      distance_km: [80.0]
+      resistance_pu: [0.03]
+      loss_factor: [0.03]         # required, see the note below
+      cost_per_mw_km: [0.0]       # required, see the note below
 
-# --- System A: Main Island (3 nodes) ---
 systems:
+  # --- System A: Main Island (3 nodes) ---
   main_island:
     name: main_island
-    demand_path: main_island_demand.xlsx
+    demand_path: main_island_demand.csv
     demand_scale: 1.0
-    demand_growth: 0.02
 
     nodes:
-      adjacency_matrix:
-        - [0, 100, 50]
-        - [100, 0, 80]
-        - [50, 80, 0]
-      coordinates:
-        - [-76.80, 18.00]     # Node 0: Capital
-        - [-77.50, 18.20]     # Node 1: West Coast
-        - [-76.20, 17.80]     # Node 2: East (cable landing)
-      names: ["Capital", "West Coast", "East"]
+      nodes_connections: [  0.0, 100.0, 50.0,
+                          100.0,   0.0, 80.0,
+                           50.0,  80.0,  0.0]
+      node_coordinates:
+        - {latitude: 18.00, longitude: -76.80}   # Node 0: Capital
+        - {latitude: 18.20, longitude: -77.50}   # Node 1: West Coast
+        - {latitude: 17.80, longitude: -76.20}   # Node 2: East (cable landing)
+      node_names: ["Capital", "West Coast", "East"]
       reserve_static: [5.0, 2.0, 2.0]
       reserve_dynamic: [3.0, 1.0, 1.0]
       reserve_duration: [2, 2, 2]
       losses: [0.02, 0.02, 0.02]
 
+    # Internal lines with bus indices (one bus per node, created automatically)
+    transmission_lines_geo:
+      - {line_id: l_cap_west,  from_node: 0, to_node: 1, from_bus: 0, to_bus: 1, capacity_mw: 100.0}
+      - {line_id: l_cap_east,  from_node: 0, to_node: 2, from_bus: 0, to_bus: 2, capacity_mw: 50.0}
+      - {line_id: l_west_east, from_node: 1, to_node: 2, from_bus: 1, to_bus: 2, capacity_mw: 80.0}
+
     generators:
       solar_pv:
         name: Solar PV
         type: Renewable
-        fuel: Solar
+        fuel: Sun
+        Availability: solar_availability.csv
         rated_power: [30.0, 20.0, 40.0]
         min_power: [0.0, 0.0, 0.0]
-        invest_cost: [750000, 750000, 700000]
-        invest_max_power: [200, 150, 250]
+        min_up: [0, 0, 0]
+        min_down: [0, 0, 0]
+        ramp_up: [1.0, 1.0, 1.0]
+        ramp_down: [1.0, 1.0, 1.0]
+        eff_at_rated: [1.0, 1.0, 1.0]
+        eff_at_min: [1.0, 1.0, 1.0]
+        inertia: [0.0, 0.0, 0.0]
+        start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
         fixed_cost: [5.0, 5.0, 5.0]
         maintenance_cost: [2.0, 2.0, 2.0]
-        start_up_cost: [0.0, 0.0, 0.0]
-        decommissioning_cost: [0, 0, 0]
-        ramp_up: [1.0, 1.0, 1.0]
-        ramp_down: [1.0, 1.0, 1.0]
-        min_up_time: [0, 0, 0]
-        min_down_time: [0, 0, 0]
-        eff_at_rated: [1.0, 1.0, 1.0]
-        eff_at_min: [1.0, 1.0, 1.0]
         life_time: [25, 25, 25]
         initial_age: [3, 2, 4]
         degradation_rate: [0.005, 0.005, 0.005]
-        inertia: [0.0, 0.0, 0.0]
-        Availability: solar_availability.csv
+        decommissioning_cost: [0.0, 0.0, 0.0]
+        invest_cost: [750000.0, 750000.0, 700000.0]
+        invest_max_power: [0.0, 0.0, 0.0]
 
       wind:
         name: Wind
         type: Renewable
         fuel: Wind
+        Availability: wind_availability.csv
         rated_power: [0.0, 40.0, 0.0]
         min_power: [0.0, 0.0, 0.0]
-        invest_cost: [1200000, 1100000, 1300000]
-        invest_max_power: [100, 300, 50]
+        min_up: [0, 0, 0]
+        min_down: [0, 0, 0]
+        ramp_up: [1.0, 1.0, 1.0]
+        ramp_down: [1.0, 1.0, 1.0]
+        eff_at_rated: [1.0, 1.0, 1.0]
+        eff_at_min: [1.0, 1.0, 1.0]
+        inertia: [0.0, 0.0, 0.0]
+        start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
         fixed_cost: [8.0, 8.0, 8.0]
         maintenance_cost: [5.0, 5.0, 5.0]
-        start_up_cost: [0.0, 0.0, 0.0]
-        decommissioning_cost: [0, 0, 0]
-        ramp_up: [1.0, 1.0, 1.0]
-        ramp_down: [1.0, 1.0, 1.0]
-        min_up_time: [0, 0, 0]
-        min_down_time: [0, 0, 0]
-        eff_at_rated: [1.0, 1.0, 1.0]
-        eff_at_min: [1.0, 1.0, 1.0]
         life_time: [20, 20, 20]
         initial_age: [0, 0, 0]
         degradation_rate: [0.005, 0.005, 0.005]
-        inertia: [0.0, 0.0, 0.0]
-        Availability: wind_availability.csv
+        decommissioning_cost: [0.0, 0.0, 0.0]
+        invest_cost: [1200000.0, 1100000.0, 1300000.0]
+        invest_max_power: [0.0, 0.0, 0.0]
 
       diesel:
         name: Diesel
@@ -147,99 +150,115 @@ systems:
         fuel: Diesel
         rated_power: [200.0, 80.0, 50.0]
         min_power: [0.3, 0.3, 0.3]
-        invest_cost: [500000, 500000, 500000]
-        invest_max_power: [0.0, 0.0, 0.0]
+        min_up: [4, 4, 4]
+        min_down: [2, 2, 2]
+        ramp_up: [0.5, 0.5, 0.5]
+        ramp_down: [0.5, 0.5, 0.5]
+        eff_at_rated: [0.40, 0.40, 0.40]
+        eff_at_min: [0.30, 0.30, 0.30]
+        inertia: [5.0, 5.0, 5.0]
+        start_up_cost: [5000.0, 5000.0, 5000.0]
         fuel_cost: [80.0, 80.0, 80.0]
         fixed_cost: [3.0, 3.0, 3.0]
         maintenance_cost: [5.0, 5.0, 5.0]
-        start_up_cost: [5000, 5000, 5000]
-        decommissioning_cost: [100000, 100000, 100000]
-        ramp_up: [0.5, 0.5, 0.5]
-        ramp_down: [0.5, 0.5, 0.5]
-        min_up_time: [4, 4, 4]
-        min_down_time: [2, 2, 2]
-        eff_at_rated: [0.40, 0.40, 0.40]
-        eff_at_min: [0.30, 0.30, 0.30]
         life_time: [30, 30, 30]
         initial_age: [12, 8, 10]
         degradation_rate: [0.01, 0.01, 0.01]
-        inertia: [5.0, 5.0, 5.0]
+        decommissioning_cost: [100000.0, 100000.0, 100000.0]
+        invest_cost: [500000.0, 500000.0, 500000.0]
+        invest_max_power: [0.0, 0.0, 0.0]
 
-    batteries:
+    technologies:
+      solar_new:
+        name: Solar PV
+        type: Renewable
+        fuel: Sun
+        Availability: solar_availability.csv
+        invest_cost: [750000.0, 750000.0, 700000.0]
+        invest_max_power: [200.0, 150.0, 250.0]
+        eff_at_rated: [1.0, 1.0, 1.0]
+        degradation_rate: [0.005, 0.005, 0.005]
+        lifetime: 25
+        maintenance_cost: [2.0, 2.0, 2.0]
+
+      wind_new:
+        name: Wind
+        type: Renewable
+        fuel: Wind
+        Availability: wind_availability.csv
+        invest_cost: [1200000.0, 1100000.0, 1300000.0]
+        invest_max_power: [100.0, 300.0, 50.0]
+        eff_at_rated: [1.0, 1.0, 1.0]
+        degradation_rate: [0.005, 0.005, 0.005]
+        lifetime: 20
+        maintenance_cost: [5.0, 5.0, 5.0]
+
+    battery_technologies:
       li_ion:
         name: Li-Ion Battery
-        capacity: [0.0, 0.0, 0.0]
-        max_charge_power: [0.0, 0.0, 0.0]
-        max_discharge_power: [0.0, 0.0, 0.0]
-        charge_efficiency: [0.95, 0.95, 0.95]
-        discharge_efficiency: [0.95, 0.95, 0.95]
-        soc_min: [0.10, 0.10, 0.10]
-        soc_max: [0.95, 0.95, 0.95]
-        soc_initial: [0.50, 0.50, 0.50]
-        self_discharge: [0.0001, 0.0001, 0.0001]
-        invest_cost_power: [200000, 200000, 200000]
-        invest_cost_capacity: [150000, 150000, 150000]
-        invest_max_power: [100, 100, 100]
-        invest_max_capacity: [400, 400, 400]
+        invest_cost_power: [200000.0, 200000.0, 200000.0]
+        invest_cost_energy: [150000.0, 150000.0, 150000.0]
+        invest_max_power: [100.0, 100.0, 100.0]
+        invest_max_capacity: [400.0, 400.0, 400.0]
         min_duration_hours: 2.0
         max_duration_hours: 6.0
-        life_time: [15, 15, 15]
-        maintenance_cost: [1.0, 1.0, 1.0]
-        spillage: false
+        efficiency_charge: [0.95, 0.95, 0.95]
+        efficiency_discharge: [0.95, 0.95, 0.95]
         degradation_rate: [0.02, 0.02, 0.02]
+        lifetime: 15
 
     penalties:
-      LOSS_DEMAND_TRHESHOLD: 10000.0
-      curtailment_penalty: 50.0
-      loss_reserve_static_penalty: 500.0
-      fre_penalty: 600.0
+      loss_of_load: 10000.0
+      curtailment_cost: 50.0
+      max_curtailment_ratio: 0.05
+      loss_of_reserve_static: 500.0
+      fre_penetration_loss: 600.0
 
     co2_budget:
-      annual_limit: 800000.0
+      enabled: true
+      annual_budget: 900000.0     # used for the whole merged network
 
-    target_re_penetration: 0.80
-    initial_re_penetration: 0.0
-    max_curtailment_ratio: 0.05
+    TARGET_RE_PENETRATION: 0.80
     discount_rate: 0.08
     MAX_ANNUAL_SYSTEM_COST: 500000000.0
 
   # --- System B: Small Island (1 node) ---
   small_island:
     name: small_island
-    demand_path: small_island_demand.xlsx
+    demand_path: small_island_demand.csv
     demand_scale: 1.0
-    demand_growth: 0.03      # Higher growth on small island
 
     nodes:
-      adjacency_matrix: [[0]]
-      coordinates: [[-75.50, 17.50]]
-      names: ["Small Island"]
+      nodes_connections: [0.0]
+      node_coordinates:
+        - {latitude: 17.50, longitude: -75.50}
+      node_names: ["Small Island"]
 
     generators:
       solar_pv:
         name: Solar PV
         type: Renewable
-        fuel: Solar
+        fuel: Sun
+        Availability: solar_availability.csv
         rated_power: [10.0]
         min_power: [0.0]
-        invest_cost: [800000.0]
-        invest_max_power: [80.0]
+        min_up: [0]
+        min_down: [0]
+        ramp_up: [1.0]
+        ramp_down: [1.0]
+        eff_at_rated: [1.0]
+        eff_at_min: [1.0]
+        inertia: [0.0]
+        start_up_cost: [0.0]
         fuel_cost: [0.0]
         fixed_cost: [6.0]
         maintenance_cost: [3.0]
-        start_up_cost: [0.0]
-        decommissioning_cost: [0]
-        ramp_up: [1.0]
-        ramp_down: [1.0]
-        min_up_time: [0]
-        min_down_time: [0]
-        eff_at_rated: [1.0]
-        eff_at_min: [1.0]
         life_time: [25]
         initial_age: [2]
         degradation_rate: [0.005]
-        inertia: [0.0]
-        Availability: solar_availability.csv
+        decommissioning_cost: [0.0]
+        invest_cost: [800000.0]
+        invest_max_power: [0.0]
 
       diesel:
         name: Diesel
@@ -247,82 +266,107 @@ systems:
         fuel: Diesel
         rated_power: [40.0]
         min_power: [0.3]
-        invest_cost: [500000.0]
-        invest_max_power: [0.0]
-        fuel_cost: [120.0]        # Higher fuel cost (shipping premium)
-        fixed_cost: [5.0]
-        maintenance_cost: [8.0]
-        start_up_cost: [3000.0]
-        decommissioning_cost: [80000]
+        min_up: [3]
+        min_down: [2]
         ramp_up: [0.5]
         ramp_down: [0.5]
-        min_up_time: [3]
-        min_down_time: [2]
         eff_at_rated: [0.35]
         eff_at_min: [0.25]
+        inertia: [4.0]
+        start_up_cost: [3000.0]
+        fuel_cost: [120.0]        # higher fuel cost (shipping premium)
+        fixed_cost: [5.0]
+        maintenance_cost: [8.0]
         life_time: [25]
         initial_age: [18]
         degradation_rate: [0.015]
-        inertia: [4.0]
+        decommissioning_cost: [80000.0]
+        invest_cost: [500000.0]
+        invest_max_power: [0.0]
 
-    batteries:
+    technologies:
+      solar_new:
+        name: Solar PV
+        type: Renewable
+        fuel: Sun
+        Availability: solar_availability.csv
+        invest_cost: [800000.0]
+        invest_max_power: [80.0]
+        eff_at_rated: [1.0]
+        degradation_rate: [0.005]
+        lifetime: 25
+        maintenance_cost: [3.0]
+
+    battery_technologies:
       li_ion:
         name: Li-Ion Battery
-        capacity: [0.0]
-        max_charge_power: [0.0]
-        max_discharge_power: [0.0]
-        charge_efficiency: [0.93]
-        discharge_efficiency: [0.93]
-        soc_min: [0.15]
-        soc_max: [0.90]
-        soc_initial: [0.50]
-        self_discharge: [0.0002]
         invest_cost_power: [250000.0]
-        invest_cost_capacity: [180000.0]
+        invest_cost_energy: [180000.0]
         invest_max_power: [50.0]
         invest_max_capacity: [200.0]
         min_duration_hours: 2.0
         max_duration_hours: 4.0
-        life_time: [12]
-        maintenance_cost: [2.0]
-        spillage: false
+        efficiency_charge: [0.93]
+        efficiency_discharge: [0.93]
         degradation_rate: [0.025]
+        lifetime: 12
 
     penalties:
-      LOSS_DEMAND_TRHESHOLD: 10000.0
-      curtailment_penalty: 50.0
-      loss_reserve_static_penalty: 500.0
-      fre_penalty: 600.0
+      loss_of_load: 10000.0
+      curtailment_cost: 50.0
+      max_curtailment_ratio: 0.08
+      loss_of_reserve_static: 500.0
+      fre_penetration_loss: 600.0
 
-    co2_budget:
-      annual_limit: 100000.0
-
-    target_re_penetration: 0.70
-    initial_re_penetration: 0.0
-    max_curtailment_ratio: 0.08
-    discount_rate: 0.10         # Higher risk premium for small island
+    TARGET_RE_PENETRATION: 0.70
     MAX_ANNUAL_SYSTEM_COST: 100000000.0
 ```
 
-### Key Design Decisions
+### How the Systems Are Combined
 
-**Why separate systems instead of one big multi-node system?**
+All systems listed in `meta_network.systems` are merged into one network before solving. Their nodes are numbered in order (here main_island nodes 0-2, small_island node 3), and there is one master problem and one operational dispatch for the whole network. Unit names get the system as a prefix (`main_island/Solar PV`).
 
-Multi-system modeling is appropriate when:
+System-level settings are combined as follows:
 
-- The systems have separate regulatory environments, budgets, or RE targets
+| Setting | Merged value |
+|---------|--------------|
+| `TARGET_RE_PENETRATION` | The lowest of the systems' targets, applied to the whole network |
+| `MAX_ANNUAL_SYSTEM_COST` | Sum over the systems |
+| `penalties` | The highest value of each penalty across the systems |
+| `discount_rate`, `co2_budget`, `stochastic_scenarios`, frequency and reserve settings | Taken from the first (primary) system |
+
+So in this example the merged network is planned for a 70% RE share, with an 8% discount rate and the main island's CO2 budget.
+
+### Why Model Separate Systems?
+
+Separate systems are useful when:
+
+- Each system has its own demand file, network and candidate technologies
 - They are connected by a limited, discrete interconnector (submarine cable)
-- Each system has its own demand file, discount rate, and planning constraints
 - You want to analyze the value of interconnection vs. autarky
 
-**Inter-system link parameters:**
+They are not separate optimizations: costs are minimized jointly, and the settings in the table above are shared.
+
+### Inter-System Link Parameters
+
+`systems_links` is a list. Each field is a list with one value per entry of `connections`.
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
-| `capacity` | 30 MW | Existing submarine cable capacity |
-| `invest_cost` | $800,000/MW | High cost due to submarine installation |
-| `invest_max` | 100 MW | Maximum cable expansion |
-| `losses` | 3% | Transmission losses over the submarine cable |
+| `connections` | `[[2, 0]]` | Node 2 of main_island to node 0 of small_island |
+| `existing_capacity_MW` | 30 MW | Existing submarine cable capacity |
+| `investment_cost_per_MW` | $800,000/MW | Expansion cost; set as the transmission investment cost of both end nodes |
+| `max_investment_MW` | 100 MW | Maximum cable expansion; set as the transmission investment cap of both end nodes |
+| `distance_km` | 80 km | Line length; the reactance is derived from it when `reactance_pu` is not given |
+| `resistance_pu` | 0.03 | Series resistance, used for the line losses in the DC power flow |
+
+Each link becomes an ordinary transmission line between the two nodes, in the master problem and in the dispatch. An expansion is costed like any corridor: once, at the higher of the two end nodes' `transference_invest_cost`.
+
+!!! note "Fields without effect"
+    `loss_factor` and `cost_per_mw_km` are required by the schema, and `meta_network.dynamic_transfer_pricing` and `inter_system_loss_segments` are accepted, but the current run does not use them. Losses on the link come from `resistance_pu` like on any other line.
+
+!!! note "Subsystems without lines"
+    In the merged dispatch network, the link is a `transmission_lines_geo` entry, and the dispatch builds its network from lines. A subsystem with no `transmission_lines_geo` keeps its `nodes_connections`: each connected node pair becomes a line between the first buses of the two nodes, with the connection's capacity, the `fuel_transport_distances` entry as length (reactance from that length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`, else 0.01) and R = 0.1 × X. A subsystem with lines uses only its lines.
 
 ---
 
@@ -330,11 +374,11 @@ Multi-system modeling is appropriate when:
 
 ### Main Island Demand
 
-Create `main_island_demand.xlsx` with 8,760 rows and 3 columns (one per node). Total peak demand should be approximately 500 MW distributed across the three nodes.
+Create `main_island_demand.csv` with 8,760 rows, 3 columns (one per node) and no header. Total peak demand should be approximately 500 MW distributed across the three nodes.
 
 ### Small Island Demand
 
-Create `small_island_demand.xlsx` with 8,760 rows and 1 column. Peak demand is approximately 50 MW.
+Create `small_island_demand.csv` with 8,760 rows and 1 column. Peak demand is approximately 50 MW.
 
 ### Shared Availability Files
 
@@ -349,107 +393,130 @@ esfex validate -c multi_system.yaml
 esfex run -c multi_system.yaml --years 15 -v
 ```
 
-The multi-system simulation takes longer because the Master Problem creates investment variables for both systems plus the inter-system link. Expect 45-120 minutes.
+The multi-system simulation takes longer because the merged network has more nodes and candidates. Expect 45-120 minutes.
 
 ---
 
 ## Step 4: How Multi-System Optimization Works
 
-The optimization proceeds in three layers:
-
-1. **Master Problem**: The multi-system master problem (`create_multi_system_master_problem()`) creates investment variables for each system and adds inter-system link constraints. It sees all years simultaneously and decides:
-   - How much generation/storage to invest in each system
-   - Whether to expand the submarine cable
-   - The optimal timing for each investment
+1. **Master Problem**: One master problem covers the merged network for all years. It decides:
+    - How much generation and storage to build at each node of each system
+    - Whether to expand the submarine cable
+    - The timing of each investment
 
 2. **Investment coordination**: The optimizer trades off between:
-   - Building local generation on the Small Island (expensive: higher fuel costs, smaller scale)
-   - Building excess RE on the Main Island and exporting via the cable (requires cable expansion)
-   - A hybrid approach that balances local resilience with export economics
+    - Building local generation on the Small Island (expensive: higher fuel costs, smaller scale)
+    - Building more RE on the Main Island and exporting it over the cable (may require cable expansion)
+    - A mix of both
 
-3. **Operational dispatch**: Each system is dispatched independently for each year, with inter-system transfers modeled as fixed import/export schedules determined by the Master Problem.
+3. **Operational dispatch**: Each year, one DC power flow dispatch covers both systems. Flows over the cable are decided hour by hour like flows on any other line.
 
 ---
 
 ## Step 5: Results Analysis
 
-### Per-System Investments
+Results are written for the merged network, as for a single system: `results/multi_system_<ddmmyyyy>_<HHMM>.h5`, with node arrays over all 4 nodes. The file attributes `subsystem_names`, `subsystem_offsets` and `subsystem_node_counts` tell which nodes belong to which system.
 
 ```python
+from pathlib import Path
+
 import h5py
 import numpy as np
 
-with h5py.File("results/output.h5", "r") as f:
-    for sys_name in ["main_island", "small_island"]:
-        print(f"\n=== {sys_name.upper()} ===")
-        if f"summary_results/{sys_name}/investments" in f:
-            inv = f[f"summary_results/{sys_name}/investments"][:]
-            print("Investments (MW per year):")
-            print(inv)
+h5_path = max(Path("results").glob("multi_system_*.h5"), key=lambda p: p.stat().st_mtime)
+years = range(2025, 2040)
 
-        if f"summary_results/{sys_name}/objectives" in f:
-            obj = f[f"summary_results/{sys_name}/objectives"][:]
-            print(f"Total NPV: ${obj.sum():,.0f}")
+with h5py.File(h5_path, "r") as f:
+    names = [str(n) for n in f.attrs["subsystem_names"]]
+    offsets = list(f.attrs["subsystem_offsets"])
+    counts = list(f.attrs["subsystem_node_counts"])
+    systems = {n: range(o, o + c) for n, o, c in zip(names, offsets, counts)}
+print(systems)   # {'main_island': range(0, 3), 'small_island': range(3, 4)}
 ```
+
+### Per-System Generation and Investments
+
+Generation datasets are named after the unit, with the system prefix (`/` is written as ` - `), so they can be split by system:
+
+```python
+with h5py.File(h5_path, "r") as f:
+    grp = f["detailed_results/year_2034_threshold_0"]
+    for sys_name in systems:
+        total = sum(ds[:].sum() for name, ds in grp["generation"].items()
+                    if sys_name in name)
+        print(f"{sys_name}: {total / 1000:,.0f} GWh in 2034")
+
+    # Master problem investments of each year (technology index, node index)
+    for yr in years:
+        g = f[f"detailed_results/year_{yr}_threshold_0"]
+        inv = {k: float(v) for k, v in g.attrs.items() if k.startswith("investment_")}
+        if inv:
+            print(yr, inv)
+```
+
+Technologies are numbered across the merged system in system order (main_island's technologies first), and node indices are global.
 
 ### Inter-System Transfer Analysis
 
+The net flow between systems is stored per year under `inter_system/detailed_results/year_<YYYY>_threshold_0/power_flow/<system>_to_<system>` (MW per hour):
+
 ```python
-with h5py.File("results/output.h5", "r") as f:
-    if "summary_results/inter_system_transfer" in f:
-        transfer = f["summary_results/inter_system_transfer"][:]
-        print(f"\nSubmarine cable transfer profile:")
-        for yr, val in enumerate(transfer, 1):
-            direction = "Main -> Small" if val >= 0 else "Small -> Main"
-            print(f"  Year {yr}: {abs(val):.1f} MW avg ({direction})")
+with h5py.File(h5_path, "r") as f:
+    for yr in years:
+        grp = f.get(f"inter_system/detailed_results/year_{yr}_threshold_0/power_flow")
+        if grp is None:
+            continue
+        for pair, ds in grp.items():
+            flow = ds[:]
+            print(f"{yr} {pair}: avg {flow.mean():+.1f} MW, "
+                  f"{flow.clip(min=0).sum():,.0f} MWh forward, "
+                  f"{(-flow).clip(min=0).sum():,.0f} MWh back")
 ```
 
 ### Cable Expansion Decisions
 
+The cable is the corridor between global nodes 2 and 3:
+
 ```python
-with h5py.File("results/output.h5", "r") as f:
-    if "summary_results/inter_system_investment" in f:
-        cable_inv = f["summary_results/inter_system_investment"][:]
-        print(f"\nCable expansion: {cable_inv.sum():.1f} MW total")
-        for yr, val in enumerate(cable_inv, 1):
-            if val > 0.1:
-                print(f"  Year {yr}: +{val:.1f} MW")
+with h5py.File(h5_path, "r") as f:
+    total = 0.0
+    for yr in years:
+        attrs = f[f"detailed_results/year_{yr}_threshold_0"].attrs
+        mw = attrs.get("investment_transfer_investment_2_3", 0.0) + \
+             attrs.get("investment_transfer_investment_3_2", 0.0)
+        if mw > 0.1:
+            print(f"  {yr}: +{mw:.1f} MW")
+            total += mw
+    print(f"Cable expansion: {total:.1f} MW total")
 ```
 
 ### Comparative Cost Analysis
 
-```python
-with h5py.File("results/output.h5", "r") as f:
-    main_obj = f["summary_results/main_island/objectives"][:].sum()
-    small_obj = f["summary_results/small_island/objectives"][:].sum()
-    cable_cost = 800000 * cable_inv.sum()  # Approximate cable investment cost
+`summary_results/total_cost` is the operating cost of the whole merged network per year (from the dispatch). Investment cost is decided in the master problem and is not included.
 
-    print(f"\nTotal system cost breakdown:")
-    print(f"  Main Island NPV:  ${main_obj:,.0f}")
-    print(f"  Small Island NPV: ${small_obj:,.0f}")
-    print(f"  Cable investment:  ${cable_cost:,.0f}")
-    print(f"  Combined total:    ${main_obj + small_obj + cable_cost:,.0f}")
+```python
+with h5py.File(h5_path, "r") as f:
+    costs = f["summary_results/total_cost"][:]
+print(f"Operating cost over the horizon: ${costs.sum():,.0f}")
 ```
 
 ### Value of Interconnection
 
-To quantify cable value, compare with an isolated scenario (set `capacity: [0.0]` and `invest_max: [0.0]` in the link).
+To quantify the cable's value, run an isolated scenario with `existing_capacity_MW: [0.0]` and `max_investment_MW: [0.0]` (output to another directory with `-o isolated_results`), and compare:
 
 ```python
-# After running both scenarios:
-# isolated_results/output.h5 (no cable) vs results/output.h5 (with cable)
-with h5py.File("isolated_results/output.h5", "r") as f_iso:
-    with h5py.File("results/output.h5", "r") as f_linked:
-        iso_cost = (f_iso["summary_results/main_island/objectives"][:].sum() +
-                    f_iso["summary_results/small_island/objectives"][:].sum())
-        linked_cost = (f_linked["summary_results/main_island/objectives"][:].sum() +
-                       f_linked["summary_results/small_island/objectives"][:].sum())
-        savings = iso_cost - linked_cost
-        print(f"Value of interconnection: ${savings:,.0f} "
-              f"({savings/iso_cost:.1%} cost reduction)")
+iso_path = max(Path("isolated_results").glob("multi_system_*.h5"), key=lambda p: p.stat().st_mtime)
+with h5py.File(iso_path, "r") as f_iso, h5py.File(h5_path, "r") as f_linked:
+    iso_cost = f_iso["summary_results/total_cost"][:].sum()
+    linked_cost = f_linked["summary_results/total_cost"][:].sum()
+savings = iso_cost - linked_cost
+print(f"Operating-cost savings from interconnection: ${savings:,.0f} "
+      f"({savings / iso_cost:.1%})")
 ```
 
-Expected result: interconnection saves 5-15% of total system cost by:
+This compares operating costs only; add each run's investment (from the `investment_*` attributes and the technology costs) for a full comparison.
+
+Expected result: interconnection lowers total system cost by:
 
 - Allowing the Small Island to import cheap RE instead of running expensive local diesel ($120/MWh)
 - Reducing storage needs on the Small Island (imports provide flexibility)
@@ -459,12 +526,12 @@ Expected result: interconnection saves 5-15% of total system cost by:
 
 ## Key Takeaways
 
-1. **System independence**: Each system maintains its own RE targets, CO2 budgets, and investment constraints. The interconnection provides economic coordination without forcing identical policies.
-2. **Inter-system coordination**: The Master Problem jointly optimizes investments across systems. It may invest more RE on the Main Island specifically to export to the Small Island.
-3. **Transfer investment**: The optimizer expands the submarine cable when the marginal cost of cable capacity ($800,000/MW) is less than the avoided cost of local generation on the Small Island.
-4. **Asymmetric benefit**: The Small Island typically benefits more from the interconnection because its local generation costs are higher. However, the Main Island also benefits from economies of scale in RE investment.
-5. **Losses matter**: The 3% cable losses mean that 30 MW exported from the Main Island delivers only 29.1 MW to the Small Island. High losses reduce the value of long-distance interconnection.
-6. **Resilience trade-off**: Heavy reliance on the cable makes the Small Island vulnerable to cable outages. The `target_re_penetration` on the Small Island ensures some local generation capacity is maintained.
+1. **One merged problem**: The systems are planned and dispatched as one network. Each keeps its own demand, nodes and candidates, but the RE target, discount rate, CO2 budget and penalties are combined as shown above.
+2. **Inter-system coordination**: The master problem jointly optimizes investments across systems. It may invest more RE on the Main Island specifically to export to the Small Island.
+3. **Transfer investment**: The optimizer expands the submarine cable when the cost of cable capacity ($800,000/MW) is less than the avoided cost of local generation and storage on the Small Island.
+4. **Asymmetric benefit**: The Small Island typically benefits more from the interconnection because its local generation costs are higher.
+5. **Losses matter**: Cable losses come from `resistance_pu` and grow with the square of the flow, so a heavily loaded cable delivers proportionally less.
+6. **Resilience trade-off**: Heavy reliance on the cable makes the Small Island vulnerable to cable outages. Because the RE target applies to the merged network, it does not force local generation on the Small Island; use per-node `invest_max_power` limits or custom constraints for that.
 
 ---
 

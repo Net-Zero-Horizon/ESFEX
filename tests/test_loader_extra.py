@@ -312,6 +312,32 @@ class TestConvertSystemUnitKeys:
         sc = _convert_system(data)
         assert sc.generators["unit_2"].type == "Renewable"
 
+    @pytest.mark.parametrize("label, expected", [
+        ("renewable", "Renewable"), ("Renovable", "Renewable"),
+        ("再生可能", "Renewable"), ("non-renewable", "Non-renewable"),
+        ("No renovable", "Non-renewable"),
+    ])
+    def test_type_spelling_normalized_before_sanitizing(self, label, expected, caplog):
+        """Lower-case and localized labels are valid spellings, not unknown
+        types: a solar unit must stay Renewable so its availability applies."""
+        data = _minimal_system()
+        unit = _renewable_gen(name="Sun1")
+        unit["type"] = label
+        data["unit_2"] = unit
+        with caplog.at_level(logging.WARNING):
+            sc = _convert_system(data)
+        assert sc.generators["unit_2"].type == expected
+        assert not any("unknown type" in r.message for r in caplog.records)
+
+    def test_lower_case_storage_routed_to_batteries(self):
+        data = _minimal_system()
+        bat = _battery(name="Bat")
+        bat["type"] = "storage"
+        data["bat_1"] = bat
+        sc = _convert_system(data)
+        assert "bat_1" in sc.batteries
+        assert "bat_1" not in sc.generators
+
 
 # ---------------------------------------------------------------------------
 # _convert_system: pre-converted generators/batteries dicts
@@ -327,6 +353,16 @@ class TestConvertSystemPreConverted:
         with caplog.at_level(logging.WARNING):
             sc = _convert_system(data)
         assert sc.generators["g0"].type == "Non-renewable"
+
+    def test_generators_dict_with_localized_renewable_type(self, caplog):
+        data = _minimal_system()
+        g = _renewable_gen(name="Sol")
+        g["type"] = "Renovable"
+        data["generators"] = {"g0": g}
+        with caplog.at_level(logging.WARNING):
+            sc = _convert_system(data)
+        assert sc.generators["g0"].type == "Renewable"
+        assert not any("unknown type" in r.message for r in caplog.records)
 
     def test_batteries_dict(self):
         data = _minimal_system()

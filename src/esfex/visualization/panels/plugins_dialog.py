@@ -40,7 +40,8 @@ class PluginsDialog(QDialog):
     _COL_CATEGORY = 3
     _COL_AUTHOR = 4
     _COL_DESCRIPTION = 5
-    _NUM_COLS = 6
+    _COL_TRUSTED = 6
+    _NUM_COLS = 7
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -70,12 +71,13 @@ class PluginsDialog(QDialog):
             tr("plugins_dialog.category"),
             tr("plugins_dialog.author"),
             tr("plugins_dialog.description"),
+            tr("plugins_dialog.trusted"),
         ])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(self._COL_DESCRIPTION, QHeaderView.ResizeMode.Stretch)
-        for col in range(self._COL_ENABLED, self._COL_DESCRIPTION):
+        for col in (*range(self._COL_ENABLED, self._COL_DESCRIPTION), self._COL_TRUSTED):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self._table)
 
@@ -89,6 +91,11 @@ class PluginsDialog(QDialog):
         self._btn_install_git = QPushButton(tr("plugins_dialog.install_git"))
         self._btn_install_git.clicked.connect(self._on_install_git)
         btn_layout.addWidget(self._btn_install_git)
+
+        self._btn_trust = QPushButton(tr("plugins_dialog.trust"))
+        self._btn_trust.setEnabled(False)
+        self._btn_trust.clicked.connect(self._on_trust)
+        btn_layout.addWidget(self._btn_trust)
 
         self._btn_uninstall = QPushButton(tr("plugins_dialog.uninstall"))
         self._btn_uninstall.setEnabled(False)
@@ -121,6 +128,7 @@ class PluginsDialog(QDialog):
     def _populate_table(self) -> None:
         self._table.setRowCount(0)
         self._btn_uninstall.setEnabled(False)
+        self._btn_trust.setEnabled(False)
         # Ensure discovery ran
         if not self._pm._discovered:
             self._pm.discover()
@@ -154,6 +162,9 @@ class PluginsDialog(QDialog):
             self._table.setItem(row, self._COL_CATEGORY, self._ro_item(meta.category if meta else ""))
             self._table.setItem(row, self._COL_AUTHOR, self._ro_item(meta.author if meta else ""))
             self._table.setItem(row, self._COL_DESCRIPTION, self._ro_item(meta.description if meta else ""))
+            trusted = self._pm.is_trusted(name)
+            self._table.setItem(row, self._COL_TRUSTED, self._ro_item(
+                tr("plugins_dialog.trusted_yes") if trusted else tr("plugins_dialog.trusted_no")))
 
     @staticmethod
     def _ro_item(text: str) -> QTableWidgetItem:
@@ -165,9 +176,15 @@ class PluginsDialog(QDialog):
     # Selection tracking
     # ------------------------------------------------------------------
 
+    def _selected_name(self) -> str | None:
+        item = self._table.item(self._table.currentRow(), self._COL_NAME)
+        return item.text() if item is not None else None
+
     def _on_selection_changed(self) -> None:
         has_selection = bool(self._table.selectedItems())
         self._btn_uninstall.setEnabled(has_selection)
+        name = self._selected_name() if has_selection else None
+        self._btn_trust.setEnabled(name is not None and not self._pm.is_trusted(name))
 
     # ------------------------------------------------------------------
     # Actions
@@ -277,6 +294,25 @@ class PluginsDialog(QDialog):
         self._populate_table()
         self._hot_load_plugin(installed)
         QMessageBox.information(self, tr("common.info"), f"Installed: {installed}")
+
+    def _on_trust(self) -> None:
+        """Record the selected plugin's current files as trusted and load it."""
+        name = self._selected_name()
+        if name is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            tr("plugins_dialog.confirm_trust_title"),
+            tr("plugins_dialog.confirm_trust").replace("{name}", name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._pm.trust_plugin(name)
+        self._populate_table()
+        if self._pm.is_enabled(name):
+            self._hot_load_plugin(name)
 
     def _on_uninstall(self) -> None:
         row = self._table.currentRow()

@@ -36,6 +36,7 @@ from esfex.config.schema import (
     StochasticScenarioConfig,
     SystemConfig,
     TemporalConfig,
+    canonical_unit_type,
     normalize_cost_curve,
 )
 
@@ -220,6 +221,10 @@ class TestPenaltiesConfig:
         assert p.loss_of_load == 5e6
         assert p.co2_cost == 50
         assert p.ev_loss == 20
+
+    def test_ev_loss_defaults_to_loss_of_load(self):
+        assert PenaltiesConfig().ev_loss == PenaltiesConfig().loss_of_load
+        assert PenaltiesConfig(loss_of_load=5e4).ev_loss == 5e4
 
 
 # ========================================================================
@@ -638,7 +643,7 @@ class TestTemporalConfig:
         t = TemporalConfig()
         assert t.resolution_hours == 1
         assert t.rolling_horizon_hours == 48
-        assert t.overlap_hours == 6
+        assert t.overlap_hours == 24
         assert t.investment_resolution == 8760
         assert t.primary_energy_resolution == 24
         assert t.use_rolling_horizon is True
@@ -662,6 +667,18 @@ class TestTemporalConfig:
     def test_overlap_hours_negative_raises(self):
         with pytest.raises(ValidationError):
             TemporalConfig(overlap_hours=-1)
+
+    def test_explicit_overlap_not_below_window_raises(self):
+        with pytest.raises(ValidationError, match="overlap_hours"):
+            TemporalConfig(rolling_horizon_hours=24, overlap_hours=24)
+
+    def test_default_overlap_shrinks_for_short_window(self):
+        t = TemporalConfig(rolling_horizon_hours=24)
+        assert t.overlap_hours == 12
+
+    def test_overlap_not_checked_without_rolling_horizon(self):
+        t = TemporalConfig(rolling_horizon_hours=24, overlap_hours=24, use_rolling_horizon=False)
+        assert t.overlap_hours == 24
 
 
 # ========================================================================
@@ -972,6 +989,35 @@ class TestSystemConfig:
         assert sc.target_re_penetration == 1.0
         assert sc.sim_rooftop is False
         assert sc.penalties.loss_of_load == 10e6
+
+    def test_demand_fractions_rescaled_per_node(self, caplog):
+        # Two load buses left at the default 1.0 would serve node 0 twice.
+        data = {
+            "name": "TwoNode", "nodes": _node_2(), "generators": {"gen_0": _gen_1()},
+            "buses": [
+                {"bus_id": "a", "parent_node": 0},
+                {"bus_id": "b", "parent_node": 0},
+                {"bus_id": "c", "parent_node": 1, "demand_fraction": 0.3},
+                {"bus_id": "d", "parent_node": 1, "demand_fraction": 0.7},
+                {"bus_id": "e", "parent_node": 1, "role": "connection", "demand_fraction": 0.0},
+            ],
+        }
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            sc = SystemConfig(**data)
+        assert [b.demand_fraction for b in sc.buses] == pytest.approx([0.5, 0.5, 0.3, 0.7, 0.0])
+        assert "node(s) [0] summed to 2" in caplog.text
+
+    def test_normalized_demand_fractions_untouched(self, caplog):
+        data = {
+            "name": "TwoNode", "nodes": _node_2(), "generators": {"gen_0": _gen_1()},
+            "buses": [{"bus_id": "a", "parent_node": 0, "demand_fraction": 0.25},
+                      {"bus_id": "b", "parent_node": 0, "demand_fraction": 0.75},
+                      {"bus_id": "c", "parent_node": 1}],
+        }
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            sc = SystemConfig(**data)
+        assert [b.demand_fraction for b in sc.buses] == [0.25, 0.75, 1.0]
+        assert "demand_fraction" not in caplog.text
 
     def test_two_nodes_two_generators(self):
         data = {
@@ -1789,3 +1835,21 @@ class TestBatteryConfigCostCurve:
         assert b.discharge_cost_curve[0].curve_type == "stepwise"
         assert len(b.discharge_cost_curve[0].blocks) == 2
         assert b.discharge_cost_curve[0].blocks[0].price == 5.0
+
+
+class TestUnitTypeSpelling:
+    @pytest.mark.parametrize("label, expected", [
+        ("renewable", "Renewable"), (" Non-Renewable ", "Non-renewable"),
+        ("Renouvelable", "Renewable"), ("não renovável", "Non-renewable"),
+        ("storage", "Storage"), ("Thermal", "Thermal"),
+    ])
+    def test_canonical_unit_type(self, label, expected):
+        assert canonical_unit_type(label) == expected
+
+    def test_candidate_technology_accepts_lower_case_type(self):
+        import sys
+        sys.path.insert(0, "tests")
+        from test_zones import _make_technology
+
+        assert _make_technology("PV", "Solar", 1, tech_type="renewable").type == "Renewable"
+        assert _make_technology("CCGT", "Gas", 1, tech_type="Non renewable").type == "Non-renewable"

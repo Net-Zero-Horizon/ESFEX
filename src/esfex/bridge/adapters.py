@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 from esfex.utils.temporal import HOURS_STD_YEAR, aggregate_to_resolution
+from esfex.utils.per_unit import system_s_base
 from esfex.config.schema import (
     BatteryConfig,
     GeneratorConfig,
@@ -40,6 +41,7 @@ from esfex.bridge.converters import (
     convert_power_system_result,
     convert_technology_config,
     convert_temporal_config,
+    expand_node_to_bus_array,
     py_to_julia_matrix,
     py_to_julia_vector,
     py_to_julia_int_vector,
@@ -849,7 +851,7 @@ class TransmissionDCAdapter:
         num_nodes: int,
         nodes_config: NodeConfig,
         fuel_transport_distances: List[List[float]],
-        base_impedance: float = 100.0,
+        s_base_mva: float = 100.0,
         reactance_per_km: float = 0.4,
         voltage_level_kv: float = 220.0,
         max_angle_diff_deg: float = 30.0,
@@ -866,7 +868,7 @@ class TransmissionDCAdapter:
             num_nodes: Number of nodes in the network
             nodes_config: Node configuration
             fuel_transport_distances: Distance matrix (km)
-            base_impedance: Base impedance (Ohm)
+            s_base_mva: System power base (MVA) of the per-unit values
             reactance_per_km: Line reactance (Ohm/km)
             voltage_level_kv: Nominal voltage (kV)
             max_angle_diff_deg: Maximum angle difference (degrees, ACOPF)
@@ -887,7 +889,6 @@ class TransmissionDCAdapter:
 
         # Build a DCPowerFlowConfig from the provided parameters
         dc_config = DCPowerFlowConfig(
-            base_impedance=base_impedance,
             reactance_per_km=reactance_per_km,
             voltage_level_kv=voltage_level_kv,
             max_angle_diff_deg=max_angle_diff_deg,
@@ -902,6 +903,7 @@ class TransmissionDCAdapter:
             acdc_converters=acdc_converters,
             freq_converters=freq_converters,
             buses=buses,
+            s_base_mva=s_base_mva,
         )
 
         # Create Julia TransmissionDC instance
@@ -1190,11 +1192,25 @@ class PowerSystemAdapter:
         # the availability matrix in the loop below; other element categories are
         # compiled into the centralised outage_masks dict passed to Julia.
         outage_by_type: dict[str, dict[str, list]] = {}
+        # Generator / battery windows may target one node of the unit.
+        outage_nodes: dict[str, dict[str, list]] = {}
         for _ow in getattr(sys, "outage_schedule", None) or []:
             outage_by_type.setdefault(_ow.element_type, {}).setdefault(
                 _ow.element_id, []
             ).append((_ow.start_hour, _ow.end_hour, _ow.availability))
+            outage_nodes.setdefault(_ow.element_type, {}).setdefault(
+                _ow.element_id, []
+            ).append(getattr(_ow, "node", None))
         outage_by_gen = outage_by_type.get("generator", {})
+        bat_windows_by_key = outage_by_type.get("battery", {})
+        for _key, _nodes in outage_nodes.get("battery", {}).items():
+            _bat = sys.batteries.get(_key)
+            if _bat is not None and any(n is not None for n in _nodes) and \
+                    sum(1 for c in _bat.capacity if c > 0) > 1:
+                logger.warning(
+                    "Outage window on one node of battery %r: battery outages "
+                    "apply to the whole unit, which has capacity at several "
+                    "nodes.", _key)
 
         # Convert generators with availability profiles
         # Track order for cost curve mapping (key, python_config) in Julia push order
@@ -1327,15 +1343,24 @@ class PowerSystemAdapter:
             # still bites — Julia now caps every generator by availability.
             gen_windows = outage_by_gen.get(key)
             if gen_windows:
-                factor = compile_outage_factor(
-                    gen_windows, self.start_hour, self.hours, resolution_hours
-                )
                 if availability is None:
                     availability = np.ones((self.hours, num_nodes), dtype=float)
-                if availability.ndim == 1:
-                    availability = availability * factor
+                elif availability.ndim == 1:
+                    availability = np.repeat(availability[:, None], num_nodes, axis=1)
                 else:
-                    availability = availability * factor[:, None]
+                    availability = availability.copy()
+                win_nodes = outage_nodes["generator"][key]
+                for node in sorted({n for n in win_nodes if n is not None}) + [None]:
+                    windows = [w for w, n in zip(gen_windows, win_nodes) if n == node]
+                    if not windows:
+                        continue
+                    factor = compile_outage_factor(
+                        windows, self.start_hour, self.hours, resolution_hours
+                    )
+                    if node is None:
+                        availability = availability * factor[:, None]
+                    elif node < availability.shape[1]:
+                        availability[:, node] = availability[:, node] * factor
 
             gen_bus_map = gen_bus_per_node.get(key)
             jl_gen = convert_generator_config(gen_to_convert, availability, inflow,
@@ -1442,12 +1467,6 @@ class PowerSystemAdapter:
         # Convert batteries
         bat_order = []  # (key, python_config) in Julia push order
         jl_batteries = jl.seval("BatteryConfig[]")
-        # Boundary-conditions SOC carry-over from previous rolling window.
-        # Shape: (n_bat, n_node) in MWh.  When present we override each
-        # battery's soc_initial fractions so the next window starts where
-        # the last one ended (chronological linking).
-        bc_battery_soc = self.boundary_conditions.get('battery_soc')
-        bat_idx_counter = 0
         for key, bat in sys.batteries.items():
             # Apply updated capacities from units_config if available
             bat_to_convert = bat
@@ -1464,23 +1483,6 @@ class PowerSystemAdapter:
                         bat_dict['MaxDischargePower'] = updated_data['MaxDischargePower']
                     bat_to_convert = BatteryConfig(**bat_dict)
 
-            # SOC carry-over: override soc_initial per node from prev window.
-            if bc_battery_soc is not None and bat_idx_counter < bc_battery_soc.shape[0]:
-                cap_arr = list(bat_to_convert.capacity)
-                soc_row = bc_battery_soc[bat_idx_counter]
-                new_soc_init = []
-                for ni, c in enumerate(cap_arr):
-                    if c > 0 and ni < len(soc_row):
-                        frac = float(soc_row[ni]) / float(c)
-                        frac = max(0.0, min(1.0, frac))
-                        new_soc_init.append(frac)
-                    else:
-                        new_soc_init.append(float(bat_to_convert.soc_initial[ni])
-                                            if ni < len(bat_to_convert.soc_initial) else 0.5)
-                bat_dict = bat_to_convert.model_dump()
-                bat_dict['soc_initial'] = new_soc_init
-                bat_to_convert = BatteryConfig(**bat_dict)
-            bat_idx_counter += 1
 
             bat_bus_map = bat_bus_per_node.get(key)
             jl_bat = convert_battery_config(bat_to_convert, bus_to_node=b2n_arg,
@@ -1502,18 +1504,7 @@ class PowerSystemAdapter:
                 continue
 
             nn = len(cap)
-            # Apply SOC carry-over to virtual batteries too.
             soc_init_default = vdata.get("soc_initial", [0.5] * nn)
-            if bc_battery_soc is not None and bat_idx_counter < bc_battery_soc.shape[0]:
-                soc_row = bc_battery_soc[bat_idx_counter]
-                soc_init_default = []
-                for ni, c in enumerate(cap):
-                    if c > 0 and ni < len(soc_row):
-                        frac = float(soc_row[ni]) / float(c)
-                        soc_init_default.append(max(0.0, min(1.0, frac)))
-                    else:
-                        soc_init_default.append(0.5)
-            bat_idx_counter += 1
             vbat = BatteryConfig(
                 name=vdata.get("name", key),
                 type="Storage",
@@ -1583,6 +1574,7 @@ class PowerSystemAdapter:
             acdc_converters=getattr(sys, 'acdc_converters', None) or None,
             freq_converters=getattr(sys, 'freq_converters', None) or None,
             buses=sys.buses or None,
+            s_base_mva=system_s_base(sys),
         )
 
         # Convert temporal config (already retrieved above)
@@ -1615,13 +1607,19 @@ class PowerSystemAdapter:
             "medium": sys.criticality_penalties.medium,
             "low": sys.criticality_penalties.low,
         }
-        has_flexible_sector = False
+        # Flexible sectors can shift up to flexibility_ratio of their demand
+        # by up to delay_tolerance hours.
+        jl_shift_ratio = jl.seval("Dict{String, Float64}()")
+        jl_shift_delay = jl.seval("Dict{String, Int}()")
         if sys.electric_demand:
             for sector_name, sector_cfg in sys.electric_demand.items():
                 level = getattr(sector_cfg, 'criticality', 'medium')
                 jl_crit[sector_name] = crit_map.get(level, crit_map['medium'])
-                if getattr(sector_cfg, 'is_flexible', False) and getattr(sector_cfg, 'flexibility_ratio', 0.0) > 0:
-                    has_flexible_sector = True
+                ratio = float(getattr(sector_cfg, 'flexibility_ratio', 0.0))
+                delay = int(getattr(sector_cfg, 'delay_tolerance', 0))
+                if getattr(sector_cfg, 'is_flexible', False) and ratio > 0 and delay > 0:
+                    jl_shift_ratio[sector_name] = ratio
+                    jl_shift_delay[sector_name] = delay
         jl_sectoral_criticality = jl.seval("Dict{String, Float64}()")
         for k, v in jl_crit.items():
             jl_sectoral_criticality[k] = float(v)
@@ -1634,7 +1632,13 @@ class PowerSystemAdapter:
             num_vehicles = ev_config_data['num_vehicles']
             target_soc = float(ev_config_data.get('target_soc', 0.8))
             bat_cap_kwh = float(ev_config_data['battery_capacity_kwh'])
-            initial_soc = [target_soc * bat_cap_kwh * nv / 1000.0 for nv in num_vehicles]
+            # EV_initial_soc per node (it used to be ignored: always target_soc),
+            # kept within the fleet's SOC limits
+            lo = float(ev_config_data.get('min_soc', 0.0))
+            hi = float(ev_config_data.get('max_soc', 1.0))
+            fracs = ev_config_data.get('initial_soc_fraction') or [target_soc] * len(num_vehicles)
+            initial_soc = [min(max(float(f), lo), hi) * bat_cap_kwh * nv / 1000.0
+                           for f, nv in zip(fracs, num_vehicles)]
 
             jl_ev_config = ESFEX.EVConfig(
                 py_to_julia_vector(num_vehicles),
@@ -1658,19 +1662,29 @@ class PowerSystemAdapter:
         electrolyzers = getattr(sys, 'electrolyzers', {})
         if electrolyzers:
             e = next(iter(electrolyzers.values()))
+
+            # The Julia electrolyzer is indexed by bus; its config lists are
+            # per node. Map them like generators: capacity at the node's first
+            # bus, properties replicated to every bus of the node.
+            def _elz(values, mode="property"):
+                values = [float(v) for v in values]
+                if b2n_arg is None:
+                    return values
+                return expand_node_to_bus_array(values, b2n_arg, mode=mode)
+
             jl_electrolyzer = ESFEX.ElectrolyzerConfig(
-                py_to_julia_vector(e.rated_power),
-                py_to_julia_vector(e.eff_at_rated),
-                py_to_julia_vector(e.eff_at_min),
+                py_to_julia_vector(_elz(e.rated_power, "capacity")),
+                py_to_julia_vector(_elz(e.eff_at_rated)),
+                py_to_julia_vector(_elz(e.eff_at_min)),
                 float(e.energy_per_kg_h2),
-                py_to_julia_vector(e.ramp_up),
-                py_to_julia_vector(e.ramp_down),
-                py_to_julia_vector(scale_cost_list(e.invest_cost)),
-                py_to_julia_vector(e.invest_max_power),
-                py_to_julia_vector(scale_cost_list(e.fixed_cost)),
-                py_to_julia_vector(scale_cost_list(e.variable_cost)),
+                py_to_julia_vector(_elz(e.ramp_up)),
+                py_to_julia_vector(_elz(e.ramp_down)),
+                py_to_julia_vector(_elz(scale_cost_list(e.invest_cost))),
+                py_to_julia_vector(_elz(e.invest_max_power, "capacity")),
+                py_to_julia_vector(_elz(scale_cost_list(e.fixed_cost))),
+                py_to_julia_vector(_elz(scale_cost_list(e.variable_cost))),
                 scale_cost(float(e.water_cost)),
-                py_to_julia_vector([float(x) for x in e.life_time]),
+                py_to_julia_vector(_elz(e.life_time)),
             )
 
         # Get N-1 security settings — only enable for applicable modes
@@ -1697,12 +1711,29 @@ class PowerSystemAdapter:
                 outer[g + 1] = inner
             return outer
 
+        def _to_model_buses(arr):
+            # Boundary state (unit × bus) comes from results expanded to the
+            # original buses; with network reduction this model is built on
+            # the reduced ones, so keep the retained buses in reduced order.
+            rm = self._reduction_map
+            if (arr is not None and rm is not None and np.ndim(arr) == 2
+                    and np.shape(arr)[1] == rm.n_original_buses):
+                return np.asarray(arr)[:, rm.retained_original_indices]
+            return arr
+
         jl_gen_status_init = _np2d_to_jl_gen_bus_dict(
-            self.boundary_conditions.get('gen_status_init'))
+            _to_model_buses(self.boundary_conditions.get('gen_status_init')))
         jl_gen_output_prev = _np2d_to_jl_gen_bus_dict(
-            self.boundary_conditions.get('gen_output_prev'))
+            _to_model_buses(self.boundary_conditions.get('gen_output_prev')))
         jl_reservoir_level = _np2d_to_jl_gen_bus_dict(
-            self.boundary_conditions.get('reservoir_level'))
+            _to_model_buses(self.boundary_conditions.get('reservoir_level')))
+        # Battery SOC carried from the previous window (battery × bus, MWh),
+        # in Julia battery order (existing then virtual, as pushed above).
+        jl_battery_soc_prev = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_soc')))
+        # End-of-year SOC floor (battery × bus, MWh), set on the last window.
+        jl_bat_soc_end_min = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_soc_end_min')))
 
         # Centralised deterministic-outage masks for non-generator elements,
         # each aligned to that element's Julia push order (generators fold their
@@ -1710,7 +1741,7 @@ class PowerSystemAdapter:
         jl_outage_masks = jl.seval("Dict{String, Any}()")
         # Batteries: position-indexed matrix (unfiltered push order).
         bat_mask = build_outage_mask_matrix(
-            outage_by_type.get("battery", {}),
+            bat_windows_by_key,
             [k for k, _ in bat_order],
             self.start_hour, self.hours, resolution_hours,
         )
@@ -1771,6 +1802,8 @@ class PowerSystemAdapter:
             ev_config=jl_ev_config,
             electrolyzer_config=jl_electrolyzer,
             sectoral_criticality=jl_sectoral_criticality,
+            sectoral_delay_tolerance=jl_shift_delay,
+            sectoral_flexibility_ratio=jl_shift_ratio,
             loss_of_inertia_penalty=scale_cost(float(sys.penalties.loss_of_inertia)),
             n1_security_enabled=n1_enabled,
             n1_transmission_enabled=n1.transmission_enabled,
@@ -1788,6 +1821,7 @@ class PowerSystemAdapter:
             generator_initial_status=jl_gen_status_init,
             generator_output_prev=jl_gen_output_prev,
             reservoir_level_prev=jl_reservoir_level,
+            battery_soc_prev=jl_battery_soc_prev,
             # Penalty coefficients from config (B4)
             fre_penetration_penalty=scale_cost(float(getattr(sys.penalties, 'fre_penetration_loss', 100.0))),
             transfer_margin_penalty=scale_cost(float(getattr(sys.penalties, 'transfer_margin', 0.0))),
@@ -1813,8 +1847,11 @@ class PowerSystemAdapter:
             # Configurable parameters (previously hardcoded)
             soc_end_tolerance=float(getattr(sys, 'soc_end_tolerance', 0.05)),
             # Operational rolling windows chain SOC across windows via boundary
-            # conditions; the per-window cyclic constraint must be off.
+            # conditions; the per-window cyclic constraint must be off. Only the
+            # year's last window gets a (soft) floor back to the year-start SOC.
             cyclic_end_soc=False,
+            bat_soc_end_min=jl_bat_soc_end_min,
+            bat_soc_end_min_cyclic=bool(self.boundary_conditions.get('battery_soc_end_cyclic', False)),
             min_cycling_ratio=float(getattr(sys, 'min_cycling_ratio', 0.8)),
             min_cycling_period_days=float(getattr(sys, 'min_cycling_period_days', 7.0)),
             reserve_static_default_ratio=float(getattr(sys, 'reserve_static_default_ratio', 0.15)),
@@ -1825,7 +1862,6 @@ class PowerSystemAdapter:
                 list(getattr(sys.nodes, 'reserve_dynamic', []) or [])
             ),
             soc_violation_penalty=scale_cost(float(getattr(sys.penalties, 'soc_violation', 1e6))),
-            flexible_demand_benefit_ratio=float(getattr(sys, 'flexible_demand_benefit_ratio', 0.5)) if has_flexible_sector else 0.0,
             demand_shift_cost_rate=scale_cost(float(getattr(sys, 'demand_shift_cost_rate', 0.1))),
             dynamic_reserve_contribution=float(getattr(sys, 'dynamic_reserve_contribution', 0.5)),
             max_decommission_cost_per_mw=scale_cost(float(getattr(sys, 'max_decommission_cost_per_mw', 5e5))),
@@ -2153,7 +2189,7 @@ class MasterProblemAdapter:
         years: List[int],
         base_year: int,
         demand: np.ndarray,
-        demand_growth: float = 0.02,
+        demand_growth: float = 0.0,
         discount_rate: float = 0.05,
         max_annual_investment: float = 1e9,
         target_re_penetration: float = 0.5,
@@ -2198,7 +2234,8 @@ class MasterProblemAdapter:
             years: List of simulation years
             base_year: Base year for NPV calculations
             demand: Base demand array (hours x nodes)
-            demand_growth: Annual demand growth rate
+            demand_growth: Extra annual growth applied on top of each year's
+                demand (default 0: the demand array already holds every year)
             discount_rate: Discount rate for NPV
             max_annual_investment: Maximum annual investment budget
             target_re_penetration: Target RE penetration ratio
@@ -2276,11 +2313,14 @@ class MasterProblemAdapter:
             self.system_config, 'INERTIA_LIMIT',
             getattr(self.system_config, 'inertia_limit', 0.0)))
 
-        # CO2
-        self.fuel_co2 = getattr(self.system_config, 'fuel_co2', {})
-        if not isinstance(self.fuel_co2, dict):
-            self.fuel_co2 = {}
-        self.co2_cost = float(getattr(self.system_config, 'co2_cost', 0.0))
+        # CO2: same sources as the dispatch (fuels' emission factors and
+        # penalties.co2_cost), so the plan sees the carbon cost it will pay.
+        fuels = getattr(self.system_config, 'fuels', None) or {}
+        self.fuel_co2 = {
+            name: float(f.emission_factor)
+            for name, f in fuels.items() if f.emission_factor > 0
+        }
+        self.co2_cost = float(getattr(penalties, 'co2_cost', 0.0)) if penalties is not None else 0.0
 
         # Transmission line data for DC power flow in master problem
         self._build_transmission_line_data()
@@ -2562,6 +2602,7 @@ class MasterProblemAdapter:
             acdc_converters=getattr(sys, 'acdc_converters', None) or None,
             freq_converters=getattr(sys, 'freq_converters', None) or None,
             buses=sys.buses or None,
+            s_base_mva=system_s_base(sys),
         )
 
         # Convert years to Julia vector
@@ -2710,12 +2751,29 @@ class MasterProblemAdapter:
             # Benders builds its own investment master and per-day subproblems
             # internally during solve(); here we only need the input ready.
             self._benders_use_rep_days = use_representative_days
+            if self.use_stochastic and self.stochastic_scenarios:
+                logger.warning(
+                    "Stochastic scenarios are not supported with Benders "
+                    "decomposition; the master is solved deterministically. "
+                    "Use solver_method: monolithic for the stochastic master."
+                )
             logger.debug(
                 "MasterProblem will be solved by Benders decomposition "
                 f"(max_iter={self.benders_max_iterations}, "
                 f"tol={self.benders_tolerance})"
             )
             return
+
+        # Resolve declarative user constraints targeting the investment model
+        # (technology names → 1-based tech indices, year values → year indices).
+        jl = get_julia()
+        tech_idx = {k: i for i, k in
+                    enumerate(self.system_config.technologies.keys(), 1)}
+        year_idx = {y: i for i, y in enumerate(self.years, 1)}
+        inv_specs = resolve_investment_constraints(
+            getattr(self.system_config, "custom_constraints", None),
+            tech_idx, year_idx,
+        )
 
         if self.use_stochastic and self.stochastic_scenarios:
             jl_scenarios = self._build_julia_scenarios()
@@ -2724,25 +2782,17 @@ class MasterProblemAdapter:
                 jl_scenarios,
                 True,
             )
+            custom = _custom_constraints_to_julia(inv_specs, jl) if inv_specs else None
             (self._jl_model, self._jl_vars,
              self._jl_targets, self._jl_scenarios) = (
-                ESFEX.create_stochastic_master_problem(jl_stochastic_input)
+                ESFEX.create_stochastic_master_problem(
+                    jl_stochastic_input, custom_constraints=custom)
             )
             logger.debug(
                 f"Stochastic MasterProblem built with "
                 f"{len(self.stochastic_scenarios)} scenarios"
             )
         else:
-            # Resolve declarative user constraints targeting the investment model
-            # (technology names → 1-based tech indices, year values → year indices).
-            jl = get_julia()
-            tech_idx = {k: i for i, k in
-                        enumerate(self.system_config.technologies.keys(), 1)}
-            year_idx = {y: i for i, y in enumerate(self.years, 1)}
-            inv_specs = resolve_investment_constraints(
-                getattr(self.system_config, "custom_constraints", None),
-                tech_idx, year_idx,
-            )
             if inv_specs:
                 self._jl_model, self._jl_vars, self._jl_targets = (
                     ESFEX.create_master_problem(
@@ -2784,6 +2834,11 @@ class MasterProblemAdapter:
         """
         jl = get_julia()
 
+        if self.solver_method == "benders":
+            # Benders builds its master and subproblems inside solve(); there is
+            # no single model to export.
+            logger.debug("Benders decomposition: no master LP to export")
+            return
         if self._jl_model is None:
             raise RuntimeError("Model not built. Call build_model() first.")
 
@@ -3697,6 +3752,8 @@ class PrimaryEnergyAdapter:
         h2_production_hourly: Optional[np.ndarray] = None,
         transport_routes: Optional[List[Dict]] = None,
         outage_schedule: Optional[list] = None,
+        step_hours: int = 1,
+        year_hour_offset: int = 0,
     ):
         """
         Initialize the PrimaryEnergy adapter.
@@ -3722,6 +3779,10 @@ class PrimaryEnergyAdapter:
             investment_from_master: Skip investment vars when MasterProblem handles them
             h2_production_hourly: H2 production from electrolyzers [hours x nodes]
             transport_routes: Route-based fuel transport list (preferred over distance matrix)
+            step_hours: Length of a time step (h)
+            year_hour_offset: First hour of the window within the year; with
+                step_hours it places periods in their month for the
+                non-electric demand's seasonal factors
         """
         self.year = year
         self.base_year = base_year
@@ -3744,6 +3805,8 @@ class PrimaryEnergyAdapter:
         self.initial_storage_levels = initial_storage_levels
         self.investment_from_master = investment_from_master
         self.h2_production_hourly = h2_production_hourly
+        self.step_hours = step_hours
+        self.year_hour_offset = year_hour_offset
 
         self._jl_model = None
         self._jl_vars = None
@@ -3836,7 +3899,9 @@ class PrimaryEnergyAdapter:
                 scale_cost(float(fuel_def.get('price_base', 0.0))),
                 float(fuel_def.get('price_growth_rate', 0.0)),
                 float(fuel_def.get('energy_content', 0.0)),
-                float(fuel_cfg.get('emission_factor', 0.0)),
+                # The fuel definition (fuels.<name>.emission_factor) carries the
+                # factor; the source config has none, so this used to be 0.
+                float(fuel_def.get('emission_factor', fuel_cfg.get('emission_factor', 0.0))),
                 py_to_julia_vector(fuel_cfg.get('max_availability', [0.0] * n)),
                 py_to_julia_vector(fuel_cfg.get('storage_capacity', [0.0] * n)),
                 py_to_julia_vector(fuel_cfg.get('initial_storage_level', [0.5] * n)),
@@ -3912,16 +3977,19 @@ class PrimaryEnergyAdapter:
             sector = parts[0]
             fuel = demand_cfg.get('fuel', "_".join(parts[1:]))
 
-            # Get seasonal factors (default to even distribution)
-            seasonal = demand_cfg.get('seasonal_factors', [1.0/12.0] * 12)
+            # Monthly factors, relative to their mean (even when absent)
+            seasonal = demand_cfg.get('seasonal_factors') or [1.0] * 12
             if len(seasonal) != 12:
-                seasonal = [1.0/12.0] * 12
+                logger.warning(
+                    "Non-electric demand %r: seasonal_factors needs 12 monthly values, "
+                    "got %d; using an even profile.", demand_key, len(seasonal))
+                seasonal = [1.0] * 12
 
             jl_ne = ESFEX.NonElectricDemandConfig(
                 sector,
                 fuel,
                 py_to_julia_vector(demand_cfg.get('demand', [0.0] * n)),
-                float(demand_cfg.get('growth_rate', 0.01)),
+                float(demand_cfg.get('growth_rate', 0.0)),
                 py_to_julia_vector(seasonal),
             )
             jl.seval("push!")(jl_ne_demand, jl_ne)
@@ -3934,9 +4002,16 @@ class PrimaryEnergyAdapter:
             jl_gen_map[gen_idx + 1] = (fuel_name, mwhe_per_unit, energy_content, eff)
 
         # Convert cumulative capacities
+        # {kind: {fuel: {0-based node/route: capacity}}} -> 1-based for Julia
         jl_cumul = jl.seval("Dict{String, Any}()")
-        jl_cumul["storage"] = jl.seval("Dict{String, Dict{Int, Float64}}()")
-        jl_cumul["transport"] = jl.seval("Dict{String, Dict{Int, Dict{Int, Float64}}}()")
+        for kind in ("storage", "transport"):
+            jl_kind = jl.seval("Dict{String, Dict{Int, Float64}}()")
+            for fuel_name, by_idx in (self.cumulative_capacities.get(kind) or {}).items():
+                jl_idx = jl.seval("Dict{Int, Float64}()")
+                for idx, cap in by_idx.items():
+                    jl_idx[int(idx) + 1] = float(cap)
+                jl_kind[fuel_name] = jl_idx
+            jl_cumul[kind] = jl_kind
 
         # Convert initial storage levels
         jl_initial_storage = jl.seval("nothing")
@@ -3968,7 +4043,11 @@ class PrimaryEnergyAdapter:
 
         # Build transport routes
         jl_routes = jl.seval("TransportRoute[]")
-        for rt in self.transport_routes:
+        for i, rt in enumerate(self.transport_routes):
+            missing = [k for k in ("from_node", "to_node", "distance_km") if rt.get(k) is None]
+            if missing:
+                raise ValueError(f"Fuel transport route {rt.get('route_id', i)!r} has no "
+                                 f"{', '.join(missing)}")
             jl_fparams = jl.seval("Dict{String, FuelRouteParams}()")
             for fuel_name, fp in rt.get("fuel_params", {}).items():
                 jl_fparams[fuel_name] = ESFEX.FuelRouteParams(
@@ -3977,7 +4056,7 @@ class PrimaryEnergyAdapter:
                     float(fp.get("losses_fraction", 0.0)),
                 )
             jl_route = ESFEX.TransportRoute(
-                str(rt["route_id"]),
+                str(rt.get("route_id") or f"route_{i}"),
                 int(rt["from_node"]) + 1,   # 0-indexed Python -> 1-indexed Julia
                 int(rt["to_node"]) + 1,
                 float(rt["distance_km"]),
@@ -4007,6 +4086,9 @@ class PrimaryEnergyAdapter:
             jl_h2_production,
             jl_gen_rated,
             jl.seval("nothing"),  # electrolyzer_config
+            scale_cost(float(self.penalties_config.get('non_electric_demand_loss', 100.0))),
+            int(self.step_hours),
+            int(self.year_hour_offset),
         )
 
         return jl_input
@@ -4087,7 +4169,8 @@ class PrimaryEnergyAdapter:
             couple_primary_energy_to_power_system!(
                 _pe_model, _pe_vars, _ps_vars, _pe_input;
                 bus_to_node = _ps_input.network.bus_to_node,
-                resolution_hours = _pe_resolution_hours
+                resolution_hours = _pe_resolution_hours,
+                generators = _ps_input.generators
             )
             """)
         else:
@@ -4205,13 +4288,14 @@ class PrimaryEnergyAdapter:
             info['debug_error'] = str(e)
         return info
 
-    def get_final_storage_levels(self) -> Dict[str, Dict[int, float]]:
+    def get_final_storage_levels(self, step: Optional[int] = None) -> Dict[str, Dict[int, float]]:
         """
         Get final HOURLY storage levels for carry-over to next window.
 
-        Uses the hourly storage level at the last timestep (t=hours+1)
-        rather than the periodic storage_level_end, which can be higher
-        due to coupling slack constraints.
+        Uses the hourly storage level after *step* timesteps (default: the
+        whole window, t=hours+1) rather than the periodic storage_level_end,
+        which can be higher due to coupling slack constraints. Rolling
+        horizons pass the committed steps, where the next window starts.
 
         Returns:
             Dictionary with {fuel_id: {node_idx: level}}
@@ -4225,7 +4309,8 @@ class PrimaryEnergyAdapter:
             fuel_name = str(fuel_name_jl)
             mat = self._jl_vars.fuel_storage_level_hourly[fuel_name_jl]
             n_nodes = self.num_nodes
-            last_t = self.hours + 1  # hourly storage has hours+1 timesteps (0..hours)
+            # hourly storage has hours+1 timesteps (0..hours)
+            last_t = (self.hours if step is None else min(step, self.hours)) + 1
             final_levels[fuel_name] = {}
             for n in range(n_nodes):
                 try:

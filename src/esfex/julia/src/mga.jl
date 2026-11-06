@@ -95,6 +95,8 @@ function compute_frequency_scores(
             # Transmission investments
             if haskey(alt.transfer_investment, y_idx)
                 for ((i, j), inv_value) in alt.transfer_investment[y_idx]
+                    # One decision per corridor (both directions are held equal)
+                    haskey(alt.transfer_investment[y_idx], (j, i)) && j < i && continue
                     if inv_value > investment_threshold
                         key = "trans_$(i)_$(j)_$(y_idx)"
                         counts[key] = get(counts, key, 0) + 1
@@ -199,6 +201,8 @@ function set_spores_objective!(
     # Transmission investments
     for y_idx in 1:ypp:num_years
         for ((i, j), var) in vars.transfer_investment[y_idx]
+            # One decision per corridor (both directions are held equal)
+            haskey(vars.transfer_investment[y_idx], (j, i)) && j < i && continue
             x_max = input.network.transference_invest_max[i]
             if x_max <= 0
                 continue
@@ -417,7 +421,8 @@ function set_min_build_objective!(
         for bt in 1:n_bat_tech, n in 1:n_buses
             add_to_expression!(obj, vars.bat_tech_power_investment[y_idx][bt][n], 1.0)
         end
-        for ((_i, _j), var) in vars.transfer_investment[y_idx]
+        for ((i, j), var) in vars.transfer_investment[y_idx]
+            haskey(vars.transfer_investment[y_idx], (j, i)) && j < i && continue
             add_to_expression!(obj, var, 1.0)
         end
     end

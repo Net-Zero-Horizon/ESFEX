@@ -1182,7 +1182,6 @@ class TestConvertTransmissionLineData:
 
     def _make_dc_config(self):
         dc = MagicMock()
-        dc.base_impedance = 100.0
         dc.reactance_per_km = 0.0003
         dc.voltage_level_kv = 220.0
         return dc
@@ -1230,7 +1229,8 @@ class TestConvertTransmissionLineData:
         assert call_args[0] == "my_line"
 
     def test_fallback_reactance_from_length(self, mock_esfex):
-        """When reactance_pu is 0 or None, compute from length and dc_config."""
+        """When reactance_pu is 0 or None, compute from length on the line's
+        Z_base = V² / S_base (220 kV, 100 MVA → 484 Ω)."""
         line = self._make_line(reactance_pu=0, length_km=200.0)
         dc = self._make_dc_config()
 
@@ -1238,7 +1238,7 @@ class TestConvertTransmissionLineData:
             convert_transmission_line_data(line, dc)
 
         call_args = mock_esfex.TransmissionLineData.call_args[0]
-        expected_reactance = (200.0 * 0.0003) / 100.0
+        expected_reactance = (200.0 * 0.0003) / (220.0**2 / 100.0)
         assert call_args[4] == pytest.approx(expected_reactance)
 
     def test_capacity_passed(self, mock_esfex):

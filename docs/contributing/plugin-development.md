@@ -6,18 +6,19 @@ ESFEX plugins extend the framework without modifying its core source code. A plu
 
 - **Extend the simulation** --- inject custom logic before/after optimization steps, modify demand data, or add post-processing
 - **Extend the GUI** --- add tree categories, property forms, toolbar buttons, menu items, result variables, and map layers
-- **Extend the CLI** --- register new subcommands accessible via `esfex <plugin_name> ...`
+- **Extend the CLI** --- return Typer sub-apps from `get_cli_commands()` (currently not mounted; see [CLI Hooks](#cli-hooks))
 - **Inject Julia code** --- provide `.jl` overlay modules that are `include()`-d at runtime, adding constraints or variables to the optimization model without altering ESFEX's native Julia files
 
 ### Plugin Discovery Mechanism
 
-The `PluginManager` scans three locations in order:
+The `PluginManager` scans these locations in order:
 
 1. **User plugins directory**: `~/.esfex/plugins/`
-2. **Project-local directory**: `<project_dir>/.esfex/plugins/`
-3. **Environment variable**: directories listed in `$ESFEX_PLUGIN_PATH` (colon-separated on Linux/macOS, semicolon-separated on Windows)
+2. **Environment variable**: directories listed in `$ESFEX_PLUGIN_PATH` (colon-separated on Linux/macOS, semicolon-separated on Windows)
 
-Each subdirectory containing both a `plugin.json` and an `__init__.py` is recognized as a valid plugin. Discovery happens on startup; the first plugin found with a given name wins (duplicates are skipped with a debug log).
+Project-local plugins in `<project_dir>/.esfex/plugins/` are **not** loaded. For security, `discover()` only scans that directory when called with `include_project_dir=True`, and neither the runner nor the Studio passes it. When the runner finds such a directory next to the config file, it logs a warning and skips it.
+
+Each subdirectory containing both a `plugin.json` and an `__init__.py` is recognized as a valid plugin. Plugins are discovered and loaded when the runner is created (`Orchestrator`) and when the Studio starts (`load_all()`). The first plugin found with a given name wins (duplicates are skipped with a debug log). A discovered plugin can still be skipped at load time if it is disabled or fails the hash check (see [Trusted plugin hashes](#trusted-plugin-hashes)).
 
 
 ---
@@ -142,16 +143,7 @@ def teardown(self) -> None:
     """Called when the plugin manager shuts down. Release resources."""
 ```
 
-### Configuration Hook
-
-```python
-def get_config_schema(self) -> Optional[type[BaseModel]]:
-    """Return a Pydantic model validating the plugins.{name} config section."""
-    return None
-
-def on_config_loaded(self, config: ESFEXConfig) -> None:
-    """Called after the full configuration has been loaded and validated."""
-```
+### Plugin Configuration
 
 Plugin configuration is provided in the YAML file under `plugins.<name>`:
 
@@ -161,6 +153,10 @@ plugins:
     emission_factor_file: "data/emission_factors.csv"
     report_format: "xlsx"
 ```
+
+`ESFEXConfig.plugins` is a plain `dict[str, Any]`; ESFEX does not validate it. Read your section from the context, for example `(self.context.config.plugins or {}).get(self.meta.name, {})` (the config is `None` in the Studio when no project is loaded at startup).
+
+The base class also defines `get_config_schema()` and `on_config_loaded(config)`, but ESFEX does not call either of them at present. Validate your section yourself in `setup()` or `pre_simulation()`.
 
 
 ---
@@ -254,11 +250,13 @@ def post_year(
 ) -> None:
     """Called after each year's results are available.
 
-    hdf5_file is an open h5py.File in append mode. Plugins should write
-    their data to the 'plugins/{name}/' group to avoid namespace conflicts:
+    hdf5_file is an open h5py.File in append mode, or None if h5py
+    cannot be imported. Plugins should write their data to the
+    'plugins/{name}/' group to avoid namespace conflicts:
 
-        grp = hdf5_file.require_group(f"plugins/{self.meta.name}")
-        grp.create_dataset("co2_annual", data=self._year_emissions)
+        if hdf5_file is not None:
+            grp = hdf5_file.require_group(f"plugins/{self.meta.name}")
+            grp.create_dataset("co2_annual", data=self._year_emissions)
     """
 ```
 
@@ -286,6 +284,9 @@ def post_simulation(
 ## GUI Hooks
 
 Only called when `context.gui_mode is True`. Guard PySide6 imports behind this check.
+
+!!! warning "Only `get_menu_items` is wired at present"
+    The plugin manager looks up the Studio's panels under attribute names the main window does not have (`_tree`, `_props`, `_model`, `_toolbar`; `plugins/manager.py`, `_register_*`), so `get_tree_categories`, `get_forms` and `get_toolbar_actions` are never called. `get_menu_items` (via `menuBar()`), `get_result_variables` (results panel) and `get_translations` work.
 
 ### extend_element_tree
 
@@ -395,6 +396,9 @@ def get_translations(self) -> dict[str, dict[str, str]]:
 
 ## CLI Hooks
 
+!!! warning "Not functional at present"
+    Plugin CLI sub-commands are never mounted. At import time the CLI calls `discover()` and then `register_cli_commands(app)`, but `register_cli_commands` iterates only *loaded* plugins, and nothing loads them at that point. `esfex <plugin_name> ...` therefore fails with "No such command". The API below is what a plugin should implement once this is fixed; until then, ship a standalone script or a GUI action instead.
+
 ### register_commands
 
 ```python
@@ -440,7 +444,7 @@ class CarbonTrackerPlugin(ESFEXPlugin):
         return [app]
 ```
 
-Registers the command as `esfex carbon_tracker report results.h5`.
+Once registration works, this would expose `esfex carbon_tracker report results.h5`.
 
 
 ---
@@ -448,45 +452,47 @@ Registers the command as `esfex carbon_tracker report results.h5`.
 
 ## Julia Overlay Hooks
 
-Plugins inject Julia code via runtime overlays --- `.jl` files `include()`-d after `ESFEX.jl` loads, able to define new functions and reference existing ESFEX types and variables. Plugin Julia modules never modify ESFEX source files on disk.
+Plugins inject Julia code via runtime overlays: `.jl` files that are `include()`-d once into the Julia session after the `ESFEX` module loads. Plugin Julia modules never modify ESFEX source files on disk. The runner includes the overlays of all loaded plugins when it starts (`register_julia_modules()`); an overlay that fails to include is logged and skipped.
+
+An overlay is only included. ESFEX does not call arbitrary functions it defines. The supported way to act on the model is to register a custom constraint type with `ESFEX.register_constraint_hook!`. The hook runs when a `custom_constraints` entry in the config uses that type (see [Custom Constraints](../user-guide/custom-constraints.md)).
 
 ### register_julia_overlays
 
 ```python
 def get_julia_modules(self) -> list[Path]:
-    """Return .jl files to include() after ESFEX.jl.
-
-    These modules can define functions invoked by Julia-side callbacks
-    during model construction.
-    """
-    return [self.context.plugin_dir / "julia" / "carbon.jl"]
+    """Return .jl files to include() after ESFEX.jl."""
+    return [self.context.plugin_dir / "overlay.jl"]
 ```
 
-Example overlay module (`julia/carbon.jl`):
+Example overlay (from `examples/plugins/custom_constraint_example/overlay.jl`):
 
 ```julia
-"""
-Carbon constraint overlay for ESFEX.
+using JuMP
 
-Adds a system-wide CO2 budget constraint to the master problem.
-"""
-
-function add_carbon_budget_constraint!(model, vars, input, budget_tonnes)
-    hours = input.hours
-    generators = input.generators
-
-    total_co2 = @expression(model, sum(
-        vars.gen_output[g, n, t] * generators[g].emission_factor[n]
-        for g in 1:length(generators)
-        for n in 1:input.num_nodes
-        for t in 1:hours
-        if generators[g].emission_factor[n] > 0
-    ))
-
-    @constraint(model, carbon_budget, total_co2 <= budget_tonnes)
-    return nothing
-end
+ESFEX.register_constraint_hook!("gen_cap", function (model, vars, input, spec)
+    g = Int(spec["generator"])
+    limit = Float64(spec["limit"])
+    name = String(get(spec, "name", "gen_cap"))
+    expr = AffExpr(0.0)
+    for bus in vars.buses_of_gen[g], h in 1:input.temporal.hours
+        add_to_expression!(expr, 1.0, vars.gen_output[g, bus, h])
+    end
+    @constraint(model, expr <= limit, base_name = name)
+end)
 ```
+
+The hook is called as `fn(model, vars, input, spec)`. `spec` is a `Dict` holding the entry's `name`, `type`, `sense` and `rhs`, with its `params` flattened in. Indices are 1-based. The config entry that activates it:
+
+```yaml
+custom_constraints:
+  - name: cap_unit_1
+    type: gen_cap            # the type the overlay registered
+    params: {generator: 1, limit: 80.0}
+```
+
+`target: operational` (the default) applies the hook to the dispatch model, where `vars` and `input` are the power-system variables and input used above. `target: investment` applies it to the master problem, which has different variables (`MasterProblemVariables`), so a hook written for dispatch will not work there. A `custom_constraints` entry whose type no overlay registered stops the solve with "Unknown custom constraint type".
+
+To try the example, copy `examples/plugins/custom_constraint_example/` to `~/.esfex/plugins/`.
 
 
 ---
@@ -566,6 +572,8 @@ class CarbonTrackerPlugin(ESFEXPlugin):
     ) -> None:
         from .tracker import compute_year_emissions
 
+        if hdf5_file is None:  # h5py not importable
+            return
         year_emissions = compute_year_emissions(hdf5_file, year, config)
         self._emissions[year] = year_emissions
 
@@ -825,15 +833,13 @@ def report(
 
 ### Local Installation
 
-Copy into any scan location:
+Copy the plugin into `~/.esfex/plugins/`, or into a directory listed in `$ESFEX_PLUGIN_PATH`:
 
 ```bash
-# User-global installation
 cp -r carbon_tracker/ ~/.esfex/plugins/carbon_tracker/
-
-# Project-local installation
-cp -r carbon_tracker/ /path/to/project/.esfex/plugins/carbon_tracker/
 ```
+
+A plugin copied by hand loads only while the hash allowlist is empty; see [Trusted plugin hashes](#trusted-plugin-hashes).
 
 ### Install from ZIP
 
@@ -865,16 +871,22 @@ esfex plugin install --git https://github.com/user/esfex-carbon-tracker.git
 
 Only `https://` and `git://` URL schemes are accepted. Git hooks are disabled during clone to prevent pre-checkout remote code execution.
 
-### pip-Installable Plugins
+Only these hosts are accepted without confirmation: `github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org` (with or without `www.`) and `git.sr.ht`. Other hosts require `trust_host=True` in `install_from_git(url, target_name=None, *, force=False, trust_host=False)`. The Studio dialog asks before cloning from another host; `esfex plugin install --git` never passes `trust_host`, so installs from other hosts fail on the command line.
 
-For plugins with their own dependencies, create a standard Python package:
+### Python Dependencies
 
-```python
-# setup.py or pyproject.toml
-# After pip install, the plugin directory is placed in ~/.esfex/plugins/
-```
+ESFEX does not install plugin dependencies, and there is no pip/PyPI entry-point mechanism for plugins. `python_dependencies` in `plugin.json` is shown for information only; install the packages into the ESFEX environment yourself.
 
-The directory-based method is simplest --- no pip or PyPI integration required.
+### Trusted plugin hashes
+
+`~/.esfex/plugins.json` stores the enabled/disabled state and a `trusted_hashes` map (plugin name to SHA-256 of the plugin directory). Installing a plugin from a ZIP or git (CLI or Studio) records its hash.
+
+- While `trusted_hashes` is empty ("legacy mode"), every discovered, enabled plugin is loaded.
+- Once it holds at least one entry, a plugin is loaded only if the current hash of its directory matches the recorded one. Other plugins are skipped with a log warning.
+
+The hash covers the plugin's files except `__pycache__/`, `.pyc`/`.pyo` files and `.git/`. Because bytecode is outside the hash, `_load_plugin` deletes the plugin's `__pycache__/` directories and imports `__init__.py` with bytecode writing off, so a planted `.pyc` cannot run. See also [Plugin Management](../gui/plugins.md#trusted-plugins).
+
+After the first ZIP/git install, a plugin copied in by hand, or edited after installation, also stops loading. To approve it again, click **Trust** in the Studio's Plugin Manager, run `esfex plugin trust <name>`, or call `get_plugin_manager().trust_plugin(name)` after `discover()`; `is_trusted(name)` reports the current state. When developing a plugin, re-trust it after each edit (or keep `trusted_hashes` empty). `uninstall` removes the plugin's entry.
 
 ### Plugin Management CLI
 
@@ -891,6 +903,9 @@ esfex plugin install --git https://github.com/user/esfex-plugin.git
 # Uninstall
 esfex plugin uninstall carbon_tracker
 
+# Trust a hand-copied or edited plugin (records its current files)
+esfex plugin trust carbon_tracker
+
 # Enable / disable (persisted across sessions in ~/.esfex/plugins.json)
 esfex plugin enable carbon_tracker
 esfex plugin disable carbon_tracker
@@ -905,6 +920,7 @@ Accessible via **Plugins > Manage Plugins...** in the Studio. Provides:
 - Install from Git button (prompts for URL)
 - Uninstall button (with confirmation)
 - Open Plugins Folder button (opens `~/.esfex/plugins/` in file manager)
+- A confirmation prompt before cloning from a git host outside the default list
 
 Newly installed plugins are hot-loaded (GUI extensions appear immediately). Disabling a loaded plugin requires a restart.
 
@@ -1043,20 +1059,15 @@ def test_plugin_hook_dispatch(tmp_path):
 
 ### Testing Julia Overlays
 
-Test overlay modules in standalone Julia:
+Include the overlay into a session where `ESFEX` is loaded and check that the type is registered:
 
 ```julia
-# test/test_carbon.jl
-include("../julia/carbon.jl")
-
-using JuMP, HiGHS
-
-model = Model(HiGHS.Optimizer)
-# ... set up a minimal model ...
-# ... call add_carbon_budget_constraint!(model, vars, input, 1000.0) ...
-optimize!(model)
-@assert termination_status(model) == MOI.OPTIMAL
+using ESFEX
+include("overlay.jl")
+@assert haskey(ESFEX.CONSTRAINT_HOOKS, "gen_cap")
 ```
+
+To test the constraint itself, run a small config with a matching `custom_constraints` entry. `ESFEX.clear_constraint_hooks!()` removes all registered hooks, including the built-in `linear` one.
 
 
 ---
@@ -1082,11 +1093,15 @@ Built-in safety measures:
 
 3. **Zip Slip protection**: Before extracting any ZIP archive, all member paths are validated against the target directory. Archives containing entries that would escape the target (e.g., `../../etc/passwd`) are rejected with a `ValueError`.
 
-4. **Git clone hardening**: Git hooks are disabled during `git clone` by setting `core.hooksPath` to an empty temporary directory. This prevents pre-checkout hooks from executing arbitrary code. Only `https://` and `git://` URL schemes are accepted.
+4. **Git clone hardening**: Git hooks are disabled during `git clone` by setting `core.hooksPath` to an empty temporary directory. This prevents pre-checkout hooks from executing arbitrary code. Only `https://` and `git://` URL schemes are accepted, and hosts outside the default list need `trust_host=True`.
 
 5. **Audit logging**: The SHA-256 hash of every loaded plugin directory is logged, enabling forensic analysis of which code was executed.
 
-6. **Overwrite protection**: Installing a plugin over an existing one requires explicit `force=True` or user confirmation in the GUI dialog.
+6. **Hash allowlist**: once any plugin has been installed from a ZIP or git, only plugins whose directory hash matches `trusted_hashes` in `~/.esfex/plugins.json` are loaded (see [Trusted plugin hashes](#trusted-plugin-hashes)).
+
+7. **No project-local plugins**: `<project>/.esfex/plugins/` is not scanned, so opening someone else's project does not run their code.
+
+8. **Overwrite protection**: Installing a plugin over an existing one requires explicit `force=True` or user confirmation in the GUI dialog.
 
 ### Trusted vs. Untrusted Plugins
 
@@ -1138,8 +1153,8 @@ from esfex.plugins.manager import get_plugin_manager, reset_plugin_manager
 |--------|----------|---------|-------------|
 | `setup()` | Lifecycle | `None` | One-time initialization after instantiation |
 | `teardown()` | Lifecycle | `None` | Cleanup when shutting down |
-| `get_config_schema()` | Config | `type[BaseModel]` or `None` | Pydantic model for plugin config validation |
-| `on_config_loaded(config)` | Config | `None` | Called after config is loaded |
+| `get_config_schema()` | Config | `type[BaseModel]` or `None` | Defined but not called by ESFEX at present |
+| `on_config_loaded(config)` | Config | `None` | Defined but not called by ESFEX at present |
 | `pre_simulation(...)` | Runner | `None` | Before simulation starts |
 | `post_demand_loaded(...)` | Runner | `np.ndarray` or `None` | After demand loading; return modified demand |
 | `pre_master_problem(...)` | Runner | `None` | Before master problem solve |
@@ -1148,7 +1163,7 @@ from esfex.plugins.manager import get_plugin_manager, reset_plugin_manager
 | `post_year(...)` | Runner | `None` | After each year's results |
 | `post_simulation(...)` | Runner | `None` | After all years complete |
 | `get_julia_modules()` | Julia | `list[Path]` | Julia overlay files to include |
-| `get_cli_commands()` | CLI | `list[Typer]` | Typer sub-apps for CLI |
+| `get_cli_commands()` | CLI | `list[Typer]` | Typer sub-apps for CLI (not mounted at present) |
 | `get_tree_categories()` | GUI | `list[dict]` | Element tree categories |
 | `get_forms(model)` | GUI | `list[tuple]` | Property panel forms |
 | `get_toolbar_actions(toolbar, window)` | GUI | `list[QAction]` | Toolbar actions |
@@ -1161,15 +1176,16 @@ from esfex.plugins.manager import get_plugin_manager, reset_plugin_manager
 
 | Method | Description |
 |--------|-------------|
-| `discover(project_dir=None)` | Scan directories and return discovered plugin names |
-| `load_all(config, gui_mode, project_dir)` | Discover, load, and setup all enabled plugins |
+| `discover(project_dir=None, include_project_dir=False)` | Scan directories and return discovered plugin names |
+| `load_all(config=None, gui_mode=False, project_dir=None, include_project_dir=False)` | Discover (if not done), load, and setup all enabled, trusted plugins |
 | `load_single(name, config, gui_mode)` | Hot-load a single plugin by name |
 | `call_hook(hook_name, **kwargs)` | Dispatch a hook to all loaded plugins |
 | `enable(name)` / `disable(name)` | Persist enable/disable state |
-| `install_from_zip(path, force)` | Install plugin from ZIP archive |
-| `install_from_git(url, target_name, force)` | Install plugin from git repository |
+| `install_from_zip(zip_path, *, force=False)` | Install plugin from ZIP archive and trust its hash |
+| `install_from_git(url, target_name=None, *, force=False, trust_host=False)` | Install plugin from git repository and trust its hash |
+| `trust_plugin(name)` | Record the current hash of a discovered plugin as trusted |
 | `uninstall(name)` | Remove plugin from user plugins directory |
-| `register_julia_modules()` | Collect and register Julia overlay modules |
-| `register_cli_commands(app)` | Register plugin CLI subcommands on Typer app |
+| `register_julia_modules()` | `include()` the Julia overlays of loaded plugins |
+| `register_cli_commands(app)` | Register CLI subcommands of loaded plugins on a Typer app |
 | `register_gui_extensions(window)` | Register all GUI extensions on main window |
 | `teardown_all()` | Teardown all plugins in reverse order |

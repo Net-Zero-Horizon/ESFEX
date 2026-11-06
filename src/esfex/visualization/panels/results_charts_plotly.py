@@ -46,6 +46,7 @@ from esfex.visualization.panels.results_charts import (
     _load_investment_data,
     _load_decommissioning_data,
     _parse_invest_cost,
+    _demand_node_hours,
     _sum_nodes,
     _aggregate,
     _year_hours,
@@ -238,7 +239,7 @@ class GenerationMixChart(PlotlyChart):
                         all_gen.setdefault(rlabel, []).extend(rm.tolist())
 
                 if "demand" in sc:
-                    dem = sc["demand"][:]
+                    dem = _demand_node_hours(sc)
                     dt = _sum_nodes(dem) if dem.ndim >= 2 else dem
                     dm = _aggregate(dt, "monthly", tres)
                     demand_all.extend(dm.tolist())
@@ -640,7 +641,7 @@ class DemandCoverageChart(PlotlyChart):
 
             # Demand line
             if "demand" in sc:
-                dem = sc["demand"][:]
+                dem = _demand_node_hours(sc)
                 dt = _sum_nodes(dem) if dem.ndim >= 2 else dem
                 demand_data = dt[start_h:end_h]
                 fig.add_trace(go.Scatter(
@@ -1007,7 +1008,7 @@ class NetLoadHeatmapChart(PlotlyChart):
                 sc = h5f[_prefixed(bp, "detailed_results")][sc_key]
                 if "demand" not in sc:
                     continue
-                dem = sc["demand"][:]
+                dem = _demand_node_hours(sc)
                 demand = _sum_nodes(dem) if dem.ndim >= 2 else dem
                 yh = _year_hours(tres)
                 demand = demand[:yh]

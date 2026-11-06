@@ -15,7 +15,8 @@
 
 using Test
 using ESFEX
-using JuMP: optimize!, termination_status
+using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
+             coefficient, objective_function
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -681,13 +682,743 @@ import Ipopt
             @test haskey(res.power_flow, (1, 2))          # line flow extracted
         end
 
+        @testset "linear losses cost energy in either direction" begin
+            # The linear model scaled the flow at the lower-index end by (1 - λ),
+            # so a flow leaving bus 1 delivered more than was sent (95 MW
+            # generated for 100 MW of load).
+            function line_gen(gen_bus, segments)
+                H = 1; N = 2
+                rated = gen_bus == 1 ? [200.0, 0.0] : [0.0, 200.0]
+                gas = mkgen("Gas", "Non-renewable", "Gas", rated, [3.0e-5, 3.0e-5],
+                            ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("L12", 1, 2, 150.0, 0.1, 0.05, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC")
+                net = NetworkConfig(N, N, buses, [1, 2],
+                                    [0.0 150.0; 150.0 0.0], [0.0 100.0; 100.0 0.0],
+                                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                    [line], TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                demand = gen_bus == 1 ? [0.0 100.0] : [100.0 0.0]
+                input = PowerSystemInput(
+                    name = "loss", year = 2025, network = net, generators = [gas],
+                    batteries = BatteryConfig[], demand = demand,
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = segments)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                @test res.load_shed_total ≈ 0.0 atol = 1e-6
+                return res.total_generation
+            end
+            # λ = R = 0.05, half lost at each end: sent f(1 + λ/2), delivered f(1 - λ/2) = 100
+            expected = 100.0 * (1 + 0.025) / (1 - 0.025)
+            @test line_gen(1, -1) ≈ expected atol = 1e-6
+            @test line_gen(2, -1) ≈ expected atol = 1e-6
+            @test line_gen(1, 0) ≈ 100.0 atol = 1e-6
+
+            # The master and Benders now pick the model the same way as dispatch
+            t = TransmissionDC(NetworkConfig(2, 2,
+                [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                 BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)], [1, 2],
+                zeros(2, 2), zeros(2, 2), 100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [TransmissionLineData("L12", 1, 2, 150.0, 0.1, 0.05, 0.0, 100.0, 220.0, 1, 50.0, "AC")],
+                TransformerData[], ACDCConverterData[], FrequencyConverterData[], 0.1))
+            @test ESFEX.with_loss_model(t, 2, 100.0).pwl_losses.num_segments == 2
+            @test ESFEX.with_loss_model(t, -1, 100.0).pwl_losses.slopes == [[0.05]]
+            @test ESFEX.with_loss_model(t, 0, 100.0).pwl_losses === nothing
+        end
+
+        @testset "end-of-year SOC floor" begin
+            # Rolling windows leave the end SOC free; the year's last window
+            # gets a soft floor so the battery does not end the year emptier
+            # than it started (the next year restarts from soc_initial).
+            H = 4
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
+                                [0.0], [10.0], [0.0], [0.0], 0.0, 100.0, [0.0],
+                                [0.0], false, "AC", [0.0], [0.0], [0.0])
+            function solve_floor(gas_mw; kw...)
+                gen = mkgen("GasCC", "Non-renewable", "Gas", [gas_mw],
+                            [3.0e-5], ones(H, 1); nb = 1, H = H)
+                input = PowerSystemInput(;
+                    name = "socfloor", year = 2025, network = net, generators = [gen],
+                    batteries = [bat], demand = fill(50.0, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    cyclic_end_soc = false,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false, kw...)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return extract_solution(model, vars, input)
+            end
+
+            # No floor: the stored 20 MWh is spent for free.
+            free = solve_floor(100.0)
+            @test free.bat_soc[1, 1, end] ≈ 0.0 atol = 1e-6
+            # Single-window year: floor at its own initial SOC (20 MWh, 5 % tolerance).
+            cyc = solve_floor(100.0; bat_soc_end_min_cyclic = true)
+            @test cyc.bat_soc[1, 1, end] ≥ 19.0 - 1e-6
+            # Floor above what the window can reach (52 MW gas, 50 MW load: at most
+            # 2 MW × 0.95 × 4 h of charging): stays feasible, charges all it can
+            # and never sheds load to refill the battery.
+            short = solve_floor(52.0; bat_soc_end_min = Dict(1 => Dict(1 => 40.0)))
+            @test short.load_shed_total ≈ 0.0 atol = 1e-6
+            @test short.bat_soc[1, 1, end] ≈ 20.0 + 4 * 2.0 * 0.95 atol = 1e-4
+        end
+
+        @testset "battery SOC carried in MWh" begin
+            # The previous window's SOC is energy: used as-is (not as a
+            # fraction of a possibly degraded capacity), clamped to bounds.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            # 2 %/yr degradation, 10 years old: capacity 40 × 0.98^10 ≈ 32.7 MWh.
+            bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
+                                [0.0], [30.0], [10.0], [0.0], 0.0, 100.0, [0.0],
+                                [0.0], false, "AC", [0.02], [0.0], [0.0])
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            function start_soc(prev)
+                input = PowerSystemInput(
+                    name = "socprev", year = 2025, base_year = 2025, network = net,
+                    generators = [gen], batteries = [bat], demand = fill(50.0, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    cyclic_end_soc = false, battery_soc_prev = prev,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return extract_solution(model, vars, input).bat_soc[1, 1, 1]
+            end
+            @test start_soc(Dict(1 => Dict(1 => 12.0))) ≈ 12.0 atol = 1e-6
+            @test start_soc(Dict(1 => Dict(1 => 50.0))) ≈ 40.0 * 0.98^10 atol = 1e-6
+            @test start_soc(Dict{Int, Dict{Int, Float64}}()) ≈ 0.5 * 40.0 * 0.98^10 atol = 1e-6
+        end
+
+        @testset "ramp rate is per hour, scaled to the time step" begin
+            # ramp_up = 0.2/h on 100 MW: 20 MW per 1 h step, 40 MW per 2 h step.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function step_change(tres)
+                gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                            [3.0e-5], ones(H, 1); nb = 1, H = H)
+                gen.ramp_up[1] = 0.2
+                gen.ramp_down[1] = 0.2
+                input = PowerSystemInput(
+                    name = "ramp_tres", year = 2025, network = net, generators = [gen],
+                    batteries = BatteryConfig[], demand = reshape([20.0, 90.0], H, 1),
+                    temporal = TemporalConfig(H, tres, H, 0, H, H, 1, 1, 1),
+                    generator_output_prev = Dict(1 => Dict(1 => 20.0)),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                res = extract_solution(model, vars, input)
+                return res.gen_output[1, 1, 2] - res.gen_output[1, 1, 1]
+            end
+            @test step_change(1) ≈ 20.0 atol = 1e-6
+            @test step_change(2) ≈ 40.0 atol = 1e-6
+            @test step_change(6) > 40.0                # 0.2 × 6 ≥ 1: no limit
+        end
+
+        @testset "min up/down times are hours, not steps" begin
+            # 4 h minimum at 2-h steps spans 2 steps: at t=4 only τ = 3, 4.
+            H = 4
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            gen.min_up_time[1] = 4.0   # shares its vector with min_down_time
+            input = PowerSystemInput(
+                name = "minup", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = TemporalConfig(H, 2, H, 0, H, H, 1, 1, 1),
+                mode = "unit_commitment", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            @test constraint_by_name(model, "min_up_g1_b1_t4_tau3") !== nothing
+            @test constraint_by_name(model, "min_up_g1_b1_t4_tau2") === nothing
+            @test constraint_by_name(model, "min_down_g1_b1_t4_tau3") !== nothing
+            @test constraint_by_name(model, "min_down_g1_b1_t4_tau2") === nothing
+        end
+
+        @testset "electrolyzer limited by rated power and ramp" begin
+            # A paying electrolyzer (negative variable cost) used to absorb all
+            # spare generation: its rated power was never enforced.
+            H = 3
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [12.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            # 5 MW, ramp 0.4/h → at most 2 MW change per 1-h step.
+            elz = ElectrolyzerConfig([5.0], [0.7], [0.6], 50.0, [0.4], [0.4],
+                                     [0.0], [0.0], [0.0], [-5.0e-4], 0.0, [20.0])
+            input = PowerSystemInput(
+                name = "elz", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([10.0, 5.0, 5.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                electrolyzer_config = elz,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            p = value.(vars.electrolyzer_power[1, :])
+            @test all(p .<= 5.0 + 1e-6)
+            @test p ≈ [2.0, 4.0, 5.0] atol = 1e-6   # 12 MW gas − 10 MW load, then ramp
+        end
+
+        @testset "development-mode transmission is bounded and charged" begin
+            # tf_inv had no upper bound and no cost: the dispatch built any line for free.
+            function dev_line(inv_max, inv_cost)
+                H = 1; N = 2
+                gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [3.0e-5, 3.0e-5],
+                            ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("L12", 1, 2, 10.0, 0.1, 0.0, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC")
+                net = NetworkConfig(N, N, buses, [1, 2], [0.0 10.0; 10.0 0.0],
+                                    [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
+                                    inv_cost, inv_max, [line], TransformerData[],
+                                    ACDCConverterData[], FrequencyConverterData[], 0.1)
+                input = PowerSystemInput(
+                    name = "dev", year = 2025, network = net, generators = [gas],
+                    batteries = BatteryConfig[], demand = [0.0 50.0],
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "development", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = 0)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                inv = sum(values(res.transfer_investment); init = 0.0)
+                return inv, res.load_shed_total, res.cost_breakdown.investment_cost,
+                       objective_value(model)
+            end
+            inv, shed, _, _ = dev_line([0.0, 0.0], [0.0, 0.0])
+            @test inv ≈ 0.0 atol = 1e-6
+            @test shed ≈ 40.0 atol = 1e-6
+            # Bounded by the smaller end (25 MW), charged at the dearer one (2e-4 M$/MW)
+            inv, shed, cost, obj = dev_line([25.0, 30.0], [1.0e-4, 2.0e-4])
+            @test inv ≈ 25.0 atol = 1e-6
+            @test shed ≈ 15.0 atol = 1e-6
+            @test cost ≈ 25.0 * 2.0e-4 atol = 1e-9
+            # In the objective it is scaled by the window's share of the year,
+            # like generator investment (1 h of 8760 here)
+            _, _, _, obj2 = dev_line([25.0, 30.0], [1.0e-4, 4.0e-4])
+            @test obj2 - obj ≈ 25.0 * 2.0e-4 / 8760 atol = 1e-10
+        end
+
+        @testset "transmission corridor charged once, at its dearer end" begin
+            # Both directions of a corridor are held equal; each used to be
+            # charged its own end's cost, so a MW of line cost c_i + c_j.
+            inv = Dict((1, 2) => :a, (2, 1) => :b, (3, 1) => :zone, (2, 3) => :c)
+            costs = [0.0, 80.0, 30.0]   # bus 1 left at 0 (not set)
+            terms = Dict(ESFEX.corridor_cost_terms(inv, costs))
+            @test terms == Dict(:a => 80.0, :zone => 30.0, :c => 80.0)
+        end
+
+        @testset "reserves are headroom, not energy" begin
+            # Reserves used to enter the power balance as consumption: the model
+            # generated the dynamic reserve as real energy (70 MW for a 50 MW load).
+            H = 2
+            function rgen(name, rated, fcost; minp = 0.0, start = 0.0)
+                z = zeros(1)
+                GeneratorConfig(
+                    name, "Non-renewable", "Gas", [rated], [minp],
+                    [0.5], [0.4], ones(1), ones(1), z, z, [start],
+                    [fcost], z, z, z, z, z, ones(H, 1), true,
+                    [30.0], z, z, z, 50.0, "AC",
+                    z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z,
+                )
+            end
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function solve(gens, load, rs, rd; mode = "economic_dispatch")
+                input = PowerSystemInput(
+                    name = "res", year = 2025, network = net, generators = gens,
+                    batteries = BatteryConfig[], demand = fill(load, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_requirement = rs > 0 ? Dict(1 => rs) : Dict{Int,Float64}(),
+                    reserve_dynamic_requirement = rd > 0 ? Dict(1 => rd) : Dict{Int,Float64}(),
+                    reserve_static_default_ratio = 0.0, dynamic_reserve_contribution = 0.5,
+                    loss_of_reserve_static = 1.0, loss_of_reserve_dynamic = 1.0,
+                    loss_of_load_penalty = 100.0,
+                    mode = mode, solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                gen = [sum(value(vars.gen_output[g, 1, t]) for t in 1:H) / H for g in 1:length(gens)]
+                short = sum(value.(vars.reserve_static_loss) .+ value.(vars.reserve_dynamic_loss)) / H
+                return gen, short, value.(vars.reserve_dynamic[1, :])
+            end
+            cheap(cap) = rgen("A", cap, 1.0e-5)
+            dear(cap; kw...) = rgen("B", cap, 1.0e-4; kw...)
+
+            # Ample headroom: both reserves held, nothing generated beyond the load.
+            gen, short, rdyn = solve([cheap(100.0), dear(100.0)], 50.0, 20.0, 20.0)
+            @test sum(gen) ≈ 50.0 atol = 1e-6
+            @test short ≈ 0.0 atol = 1e-6
+            @test all(rdyn .<= 20.0 + 1e-6)
+            # Only 5 MW of headroom: dynamic reserve cannot exceed it.
+            gen, short, _ = solve([cheap(60.0), dear(50.0)], 105.0, 0.0, 20.0)
+            @test sum(gen) ≈ 105.0 atol = 1e-6
+            @test short ≈ 15.0 atol = 1e-6
+            # Static and dynamic share the same 25 MW of headroom.
+            gen, short, _ = solve([cheap(60.0), dear(50.0)], 85.0, 20.0, 20.0)
+            @test sum(gen) ≈ 85.0 atol = 1e-6
+            @test short ≈ 15.0 atol = 1e-6
+            # Unit commitment: an offline unit holds no spinning reserve, so B
+            # (minimum 20 MW) must run to keep 30 MW free.
+            gen, short, _ = solve([cheap(70.0), dear(50.0; minp = 0.4, start = 1.0e-3)],
+                                  60.0, 30.0, 0.0; mode = "unit_commitment")
+            @test gen ≈ [40.0, 20.0] atol = 1e-6
+            @test short ≈ 0.0 atol = 1e-6
+        end
+
+        @testset "preventive N-1 shortfall is priced" begin
+            # The objective was built before the N-1 constraints existed, so
+            # their shortfall slacks cost nothing and N-1 had no effect. The
+            # constraint also required the other units' OUTPUT to cover demand,
+            # which penalised every MW of the largest unit; it is headroom now.
+            H = 2
+            function ngen(name, rated, fcost; start = 0.0, ramp = 1.0)
+                z = zeros(1)
+                GeneratorConfig(
+                    name, "Non-renewable", "Gas", [rated], [0.0],
+                    [0.5], [0.4], [ramp], [ramp], z, z, [start],
+                    [fcost], z, z, z, z, z, ones(H, 1), true,
+                    [30.0], z, z, z, 50.0, "AC",
+                    z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z,
+                )
+            end
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function solve_n1(gens, load; mode = "economic_dispatch", scopf = false,
+                              corrective = false)
+                input = PowerSystemInput(
+                    name = "n1", year = 2025, network = net, generators = gens,
+                    batteries = BatteryConfig[], demand = fill(load, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0,
+                    n1_security_enabled = true, n1_generation_enabled = true,
+                    n1_scopf_enabled = scopf, n1_corrective_enabled = corrective,
+                    mode = mode, solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                gen = [value(vars.gen_output[g, 1, 1]) for g in 1:length(gens)]
+                on = vars.gen_status === nothing ? nothing :
+                    [value(vars.gen_status[g, 1, 1]) for g in 1:length(gens)]
+                return gen, objective_value(model), res.cost_breakdown.n1_security_shortfall_cost, on
+            end
+
+            # The cheap 100 MW unit is the largest; the 60 MW unit can replace
+            # its 50 MW, so the system is secure with the cheap unit running.
+            gen, _, cost, _ = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4)], 50.0)
+            @test gen ≈ [50.0, 0.0] atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-6
+            # A 30 MW backup leaves 20 MW short each hour, charged at
+            # loss_of_reserve_static and reported in the cost breakdown.
+            gen, obj, cost, _ = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 30.0, 1.0e-4)], 50.0)
+            @test cost ≈ 20.0 * H atol = 1e-6
+            @test obj >= cost
+            # Unit commitment: an offline unit cannot respond, so B is started
+            # (despite its start-up cost) and kept idle.
+            gen, _, cost, on = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4; start = 1.0e-3)], 50.0;
+                                        mode = "unit_commitment")
+            @test gen ≈ [50.0, 0.0] atol = 1e-6
+            @test on[2] ≈ 1.0 atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-6
+
+            # SCOPF uses the same headroom test; its old hard form (others'
+            # output >= demand) forced the largest unit to 0.
+            gen, _, cost, _ = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4)], 50.0;
+                                       scopf = true)
+            @test gen ≈ [50.0, 0.0] atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-6
+            _, _, cost, _ = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 30.0, 1.0e-4)], 50.0;
+                                     scopf = true)
+            @test cost ≈ 20.0 * H atol = 1e-6
+            # Corrective: B re-dispatches within one step of its ramp (0.25 pu/h
+            # of 60 MW = 15 MW), so A may carry only what B can pick up.
+            gen, _, cost, _ = solve_n1([ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4; ramp = 0.25)],
+                                       50.0; scopf = true, corrective = true)
+            @test gen ≈ [15.0, 35.0] atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-6
+        end
+
+        @testset "ACOPF line limits follow scheduled outages" begin
+            # The AC thermal limits ignored the outage masks (and investment)
+            # that the DC limits apply. Line at 20 % in step 1: 20 MVA of 50 MW.
+            H = 2
+            gen = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [1.0e-5, 1.0e-5],
+                        ones(H, 2); nb = 2, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            line = TransmissionLineData("L12", 1, 2, 100.0, 0.1, 0.01, 0.0, 100.0, 220.0, 1, 50.0, "AC")
+            net2 = NetworkConfig(2, 2, buses, [1, 2], [0.0 100.0; 100.0 0.0],
+                                 [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
+                                 [0.0, 0.0], [0.0, 0.0], [line], TransformerData[],
+                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "ac", year = 2025, network = net2, generators = [gen],
+                batteries = BatteryConfig[], demand = [0.0 50.0; 0.0 50.0],
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                outage_masks = Dict{String, Any}("line" => Dict("L12" => [0.2, 1.0])),
+                power_flow_mode = "acopf_polar", mode = "economic_dispatch",
+                solver_name = "ipopt", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) in ("LOCALLY_SOLVED", "OPTIMAL")
+            res = extract_solution(model, vars, input)
+            @test sum(res.load_shed[:, 1]) ≈ 30.0 atol = 0.5
+            @test sum(res.load_shed[:, 2]) ≈ 0.0 atol = 0.01
+        end
+
+        @testset "transmission N-1 sees every parallel line" begin
+            # Two identical 60 MW circuits carry 100 MW. N-1 limits used to read
+            # only the first circuit of a bus pair (against the pair's total
+            # capacity), and SCOPF was hard, forcing load shedding.
+            H = 2
+            gen = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [1.0e-5, 1.0e-5],
+                        ones(H, 2); nb = 2, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            lines = [TransmissionLineData(id, 1, 2, 60.0, 0.1, 0.0, 0.0, 100.0, 220.0, 1, 50.0, "AC")
+                     for id in ("L1", "L2")]
+            net2 = NetworkConfig(2, 2, buses, [1, 2], [0.0 120.0; 120.0 0.0],
+                                 [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
+                                 [0.0, 0.0], [0.0, 0.0], lines, TransformerData[],
+                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function line_n1(scopf)
+                input = PowerSystemInput(
+                    name = "n1l", year = 2025, network = net2, generators = [gen],
+                    batteries = BatteryConfig[], demand = fill(0.0, H, 2) .+ [0.0 100.0],
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0, pwl_loss_segments = 0,
+                    n1_security_enabled = true, n1_transmission_enabled = true,
+                    n1_generation_enabled = false, n1_scopf_enabled = scopf,
+                    n1_transmission_reserve_factor = 0.7,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                return res.load_shed_total, res.cost_breakdown.n1_security_shortfall_cost
+            end
+            # Preventive: each circuit at most 0.7 × 60 = 42 MW, 8 MW over each
+            shed, cost = line_n1(false)
+            @test shed ≈ 0.0 atol = 1e-6
+            @test cost ≈ 16.0 * H atol = 1e-6
+            # SCOPF: losing one circuit puts all 100 MW on the other, 40 MW over
+            # its 60 MW, for either outage; priced, not shed.
+            shed, cost = line_n1(true)
+            @test shed ≈ 0.0 atol = 1e-6
+            @test cost ≈ 80.0 * H atol = 1e-6
+        end
+
+        @testset "zero ramp rate means no ramp limit" begin
+            # A 0 ramp used to freeze the unit (|Δp| <= 0); Studio generators
+            # defaulted to it. The unit must follow load instead.
+            H = 3
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            gen.ramp_up[1] = 0.0
+            gen.ramp_down[1] = 0.0
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "ramp0", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([20.0, 80.0, 40.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            res = extract_solution(model, vars, input)
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6
+            @test vec(res.gen_output[1, 1, :]) ≈ [20.0, 80.0, 40.0] atol = 1e-6
+        end
+
+        @testset "EV driving drains the fleet battery" begin
+            # Driving energy must come out of the fleet SOC: over a cyclic
+            # window the grid supplies driving/η_c, and V2G cannot resell it.
+            H = 4
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            drive = fill(2.0, H, 1)
+            ev = EVConfig([1000.0], 50.0, 7.0, 7.0, 0.9, 0.9, 0.2, 1.0, 0.5,
+                          ones(H, 1), drive, 0.0, 1.0e6, Float64[])
+            input = PowerSystemInput(
+                name = "ev", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                ev_config = ev,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test sum(res.ev_loss) ≈ 0.0 atol = 1e-6
+            @test sum(res.ev_v2g) ≈ 0.0 atol = 1e-6
+            @test sum(res.ev_charging) ≈ sum(drive) / 0.9 atol = 1e-4
+            @test res.total_generation ≈ 4 * 50.0 + sum(drive) / 0.9 atol = 1e-4
+
+            # A V2G payment is a transfer, not a system saving: even a large
+            # one must not make cycling the fleet (19 % round-trip loss) pay.
+            ev_paid = EVConfig([1000.0], 50.0, 7.0, 7.0, 0.9, 0.9, 0.2, 1.0, 0.5,
+                               ones(H, 1), drive, 1.0, 1.0e6, Float64[])
+            inp_paid = PowerSystemInput(
+                name = "ev_paid", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                ev_config = ev_paid,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model_p, vars_p = create_power_system(inp_paid)
+            optimize!(model_p)
+            res_p = extract_solution(model_p, vars_p, inp_paid)
+            @test sum(res_p.ev_v2g) ≈ 0.0 atol = 1e-6
+            @test res_p.objective ≈ res.objective rtol = 1e-6
+        end
+
+        @testset "flexible demand shifting moves energy" begin
+            # Shift variables used to sit outside the power balance (shifting
+            # did nothing), and a curtailment "benefit" lowered the objective
+            # without changing the dispatch.
+            function peak_mwh(delay; overlap = 0)
+                H = 4
+                cheap = mkgen("Base", "Non-renewable", "Gas", [80.0], [1.0e-5],
+                              ones(H, 1); nb = 1, H = H)
+                peak = mkgen("Peak", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                             ones(H, 1); nb = 1, H = H)
+                bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+                net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                    100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                    TransmissionLineData[], TransformerData[],
+                                    ACDCConverterData[], FrequencyConverterData[], 0.1)
+                input = PowerSystemInput(
+                    name = "shift", year = 2025, network = net, generators = [cheap, peak],
+                    batteries = BatteryConfig[], demand = reshape([100.0, 100.0, 60.0, 60.0], H, 1),
+                    sectoral_demand = Dict("flex" => reshape([40.0, 40.0, 0.0, 0.0], H, 1),
+                                           "rest" => reshape([60.0, 60.0, 60.0, 60.0], H, 1)),
+                    sectoral_criticality = Dict("flex" => 1.0, "rest" => 1.0),
+                    sectoral_flexibility_ratio = Dict("flex" => 0.5),
+                    sectoral_delay_tolerance = Dict("flex" => delay),
+                    temporal = TemporalConfig(H, 1, H, overlap, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                @test res.total_generation ≈ 320.0 atol = 1e-6   # energy is moved, not removed
+                @test res.load_shed_total ≈ 0.0 atol = 1e-6
+                @test res.cost_breakdown.flexible_demand_benefit ≈ 0.0 atol = 1e-12
+                return sum(res.gen_output[2, :, :])
+            end
+            # 20 MW leave each of the first two steps for the last two: flat 80 MW
+            @test peak_mwh(2) ≈ 0.0 atol = 1e-6
+            @test peak_mwh(0) ≈ 40.0 atol = 1e-6
+            # Steps 3-4 are the overlap of a rolling window: no shifting into them
+            @test peak_mwh(2; overlap = 2) ≈ 40.0 atol = 1e-6
+
+            # Same through the DC network balance: generation at bus 1, load at bus 2
+            H = 4; N = 2
+            cheap = mkgen("Base", "Non-renewable", "Gas", [80.0, 0.0], [1.0e-5, 1.0e-5],
+                          ones(H, N); nb = N, H = H)
+            peak = mkgen("Peak", "Non-renewable", "Diesel", [0.0, 100.0], [1.0e-3, 1.0e-3],
+                         ones(H, N); nb = N, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            line = TransmissionLineData("L12", 1, 2, 200.0, 0.1, 0.0, 0.0,
+                                        100.0, 220.0, 1, 50.0, "AC")
+            net2 = NetworkConfig(N, N, buses, [1, 2], [0.0 200.0; 200.0 0.0],
+                                 [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
+                                 [0.0, 0.0], [0.0, 0.0], [line], TransformerData[],
+                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "shift_dc", year = 2025, network = net2, generators = [cheap, peak],
+                batteries = BatteryConfig[], demand = [0.0 100.0; 0.0 100.0; 0.0 60.0; 0.0 60.0],
+                sectoral_demand = Dict("flex" => [0.0 40.0; 0.0 40.0; 0.0 0.0; 0.0 0.0],
+                                       "rest" => [0.0 60.0; 0.0 60.0; 0.0 60.0; 0.0 60.0]),
+                sectoral_criticality = Dict("flex" => 1.0, "rest" => 1.0),
+                sectoral_flexibility_ratio = Dict("flex" => 0.5),
+                sectoral_delay_tolerance = Dict("flex" => 2),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1), pwl_loss_segments = 0,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            res = extract_solution(model, vars, input)
+            @test sum(res.gen_output[2, :, :]) ≈ 0.0 atol = 1e-6
+            @test res.total_generation ≈ 320.0 atol = 1e-6
+        end
+
+        @testset "fuel bought by primary energy is not charged again" begin
+            # With the primary-energy block coupled, a unit's fuel is paid
+            # through the block's fuel supply; the dispatch also charged its
+            # fuel_cost per MWh.
+            H = 2
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0], [5.0e-5],
+                        ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "pe", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            v = vars.gen_output[1, 1, 1]
+            before = coefficient(objective_function(model), v)
+            fuel = FuelConfig("Gas", 1.0e-5, 0.0, 10.0, 0.0, [1.0e6], [0.0], [0.0], 0.0,
+                              [0.0], 0.0, 0.0, 0.0)
+            pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [fuel],
+                Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
+                TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), 24, 8760, 0.05,
+                1.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                nothing, Dict(1 => [100.0]), nothing)
+            pe_vars, _, _ = ESFEX.create_primary_energy_model(model, pe_in)
+            ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
+                generators = input.generators)
+            @test before - coefficient(objective_function(model), v) ≈ 5.0e-5
+            @test coefficient(model.ext[:cost_expressions][:fuel_cost], v) ≈ 0.0 atol = 1e-15
+        end
+
+        @testset "CO2 factor is per MWh of fuel" begin
+            # 0.2 t per MWh of fuel at 50 % rated efficiency is 0.4 t per MWh
+            # of electricity; the factor used to be applied per MWh_e.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                        ones(H, 1); nb = 1, H = H)
+            @test gas.efficiency_rated == [0.5]
+            @test ESFEX.co2_per_mwh(Dict("Gas" => 0.2), gas, 1) ≈ 0.4
+            input = PowerSystemInput(
+                name = "co2f", year = 2025, network = net, generators = [gas],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                fuel_co2 = Dict("Gas" => 0.2), co2_cost = 1.0e-5,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            # 100 MWh served → 40 t
+            @test res.total_co2 ≈ 40.0 rtol = 1e-6
+            @test res.cost_breakdown.co2_emission_cost ≈ 40.0 * 1.0e-5 rtol = 1e-6
+            @test sum(value.(vars.co2_emissions)) ≈ 40.0 rtol = 1e-6
+        end
+
+        @testset "energy terms use the step length (2 h steps)" begin
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            temporal = TemporalConfig(H, 2, H, 0, H, H, 1, 1, 1)
+
+            # CO2 budget: the window's share is 100 t (4 h of 8760 h at
+            # 219 000 t/yr). Emissions are MW × 2 h × 1 t/MWh; they used to be
+            # summed in MW, letting coal emit 200 t.
+            function co2_run(penalty)
+                coal = mkgen("Coal", "Non-renewable", "Coal", [100.0], [1.0e-5],
+                             ones(H, 1); nb = 1, H = H)
+                gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                            ones(H, 1); nb = 1, H = H)
+                input = PowerSystemInput(
+                    name = "co2", year = 2025, network = net, generators = [coal, gas],
+                    batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                    temporal = temporal, fuel_co2 = Dict("Coal" => 0.5),   # / η 0.5 = 1 t/MWh_e
+                    co2_budget = 100.0 * 8760 / 4, co2_budget_violation_penalty = penalty,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                return 2.0 * sum(res.gen_output[1, :, :]), res.cost_breakdown.co2_emission_cost
+            end
+            coal_mwh, _ = co2_run(5e-4)
+            @test coal_mwh ≈ 100.0 atol = 1e-6
+            # A negligible penalty: coal serves all 200 MWh and pays for the
+            # 100 t over budget once, not once per hour of the step.
+            coal_mwh, co2_cost = co2_run(1e-9)
+            @test coal_mwh ≈ 200.0 atol = 1e-6
+            @test co2_cost ≈ 100.0 * 1e-9 rtol = 1e-6
+
+            # EV fleet: 15 MWh on board, 10 MW of driving for one 2 h step with
+            # no generation to charge from, so 5 MWh (2.5 MW) goes unserved.
+            # The SOC used to move by MW, as if the step were 1 h.
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0], [3.0e-5],
+                        reshape([0.0, 1.0], H, 1); nb = 1, H = H)
+            ev = EVConfig([1000.0], 30.0, 20.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.5,
+                          ones(H, 1), reshape([10.0, 0.0], H, 1), 0.0, 1.0e-3, [15.0])
+            input = PowerSystemInput(
+                name = "ev2h", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = zeros(H, 1),
+                temporal = temporal, ev_config = ev,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            res = extract_solution(model, vars, input)
+            @test sum(res.ev_loss) ≈ 2.5 atol = 1e-6
+            @test res.ev_soc[1, 1] ≈ 15.0 atol = 1e-6   # start of each step
+            @test res.ev_soc[1, 2] ≈ 0.0 atol = 1e-6
+        end
+
         @testset "solve_dcopf benchmark" begin
             # Cheap gen at bus 1 supplies a bus-2 load across one line.
             r = solve_dcopf(num_buses = 2, demand = [0.0, 100.0],
                             gen_bus = [1, 2], gen_cost = [10.0, 50.0],
                             gen_max = [200.0, 200.0], line_from = [1],
                             line_to = [2], line_x = [0.1], line_cap = [150.0],
-                            slack_bus = 1, base_impedance = 100.0)
+                            slack_bus = 1, s_base = 100.0)
             @test r["status"] == "OPTIMAL"
             @test r["total_cost"] ≈ 1000.0           # 100 MW * $10
             @test r["line_flows_mw"][1] ≈ 100.0      # all load flows over the line

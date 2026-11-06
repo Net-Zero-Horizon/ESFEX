@@ -456,19 +456,24 @@ def test_transport_transit_delay_causes_supply_stress():
             'Dict{String,FuelInfrastructureConfig}("Gas"=>_i)')
         ne = ESFEX.NonElectricDemandConfig(
             "Industrial", "Gas",
-            py_to_julia_vector([0.0, 36500.0]),  # demand only at node 2
+            # demand only at node 2: ~25 units over the 72 h (3000/yr prorated;
+            # the monthly factors are relative, so an even profile keeps it)
+            py_to_julia_vector([0.0, 3000.0]),
             0.0, py_to_julia_vector([1 / 12] * 12))
         jl._n = ne
         ne_demands = jl.seval("NonElectricDemandConfig[_n]")
         distances = np.array([[0.0, 100.0], [100.0, 0.0]])
+        routes = ESFEX._auto_routes_from_distances(
+            py_to_julia_matrix(distances), 2, fuels, infra_dict)
+        # Unmet non-electric demand (2000/unit) dearer than the fuel-supply
+        # slack (1000/unit), so the model serves what transport can deliver.
         inp = ESFEX.PrimaryEnergyInput(
-            2025, 2025, 2, 72, fuels, infra_dict, ne_demands,
-            py_to_julia_matrix(distances),
+            2025, 2025, 2, 72, fuels, infra_dict, ne_demands, routes,
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
             24, 72, 0.05, 1000.0, 1.0, "development",
             jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
             jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
-            jl.seval("nothing"))
+            jl.seval("nothing"), 2000.0, 1, 0)
         m = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
         jl._m = m
         jl._in = inp

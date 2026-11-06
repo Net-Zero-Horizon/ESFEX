@@ -164,8 +164,8 @@ class GuiGeneratorInstance:
     eff_at_min: float = 0.25
     min_up: int = 0
     min_down: int = 0
-    ramp_up: float = 0.0
-    ramp_down: float = 0.0
+    ramp_up: float = 1.0     # fraction of capacity per hour (0 = no limit)
+    ramp_down: float = 1.0
     inertia: float = 0.0
     droop: float = 0.05
     governor_time_const: float = 5.0
@@ -561,7 +561,7 @@ class GuiPenalties:
     co2_cost: float = 10.0
     co2_budget_violation: float = 500.0
     fre_penetration_loss: float = 100.0
-    ev_loss: float = 10.0
+    ev_loss: float = 50_000.0  # $/MWh — same as loss_of_load
     loss_of_fuel_supply: float = 100.0
     coupling_slack_penalty: float = 1.0
     transport_congestion: float = 100.0
@@ -811,7 +811,7 @@ class GuiGlobalSettings:
     # Temporal
     resolution_hours: int = 1
     rolling_horizon_hours: int = 48
-    overlap_hours: int = 6
+    overlap_hours: int = 24
     investment_resolution: int = HOURS_STD_YEAR
     primary_energy_resolution: int = 24
     use_rolling_horizon: bool = True
@@ -1554,6 +1554,31 @@ class GuiModel(QObject):
             for bus in self.state.buses.values():
                 if bus.parent_node > index:
                     bus.parent_node -= 1
+
+            # Reindex equipment node references for nodes > index. Units whose
+            # bus sat on the removed node were deleted above; the survivors
+            # still carry the OLD node index. Leaving them stale is not
+            # cosmetic: the serializer sizes the system with
+            # ``num_nodes = max(len(nodes), max(unit.node) + 1)``, so one stale
+            # reference re-inflates num_nodes past the real node count and the
+            # config no longer matches its own demand_paths ("demand_paths has
+            # 289 entries but system has 296 nodes").
+            for coll in (self.state.generators, self.state.batteries,
+                         self.state.electrolyzers):
+                for unit in coll.values():
+                    n = getattr(unit, "node", None)
+                    if isinstance(n, int) and n > index:
+                        unit.node = n - 1
+
+            # Same for the deprecated from_node/to_node mirrors on branches.
+            # They are derived from the buses at serialization, but other
+            # in-memory consumers still read them, so keep them coherent.
+            for br in (list(self.state.transmission_lines)
+                       + list(self.state.transformers)):
+                for attr in ("from_node", "to_node"):
+                    v = getattr(br, attr, None)
+                    if isinstance(v, int) and v > index:
+                        setattr(br, attr, v - 1)
 
             self.nodeRemoved.emit(index)
 

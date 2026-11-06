@@ -22,12 +22,14 @@ ESFEX is organized in three layers: Python orchestration, a Python–Julia bridg
                                |
 +------------------------------+------------------------------+
 |                       Julia Layer                            |
-|  power_system.jl   master_problem.jl   transmission_dc.jl   |
-|  primary_energy.jl   electrolyzer.jl   mga.jl   types.jl    |
+|  power_system.jl   master_problem.jl   benders.jl   mga.jl  |
+|  transmission_dc.jl  transmission_ac.jl  transmission_acopf.jl|
+|  primary_energy.jl  electrolyzer.jl  user_constraints.jl    |
 +-------------------------------------------------------------+
                                |
                           JuMP + Solver
-                     (HiGHS / Gurobi / CPLEX)
+       (bundled: HiGHS, GLPK, Clarabel, SCS, Ipopt;
+        optional: Gurobi, CPLEX, Xpress, CBC, SCIP)
 ```
 
 ---
@@ -39,12 +41,14 @@ ESFEX is organized in three layers: Python orchestration, a Python–Julia bridg
 |--------|------|
 | `config/schema.py` | Pydantic v2 models for all configuration |
 | `config/loader.py` | YAML file loading with validation |
-| `config/solver.py` | Solver detection and configuration |
-| `runner.py` | Orchestrator -- the main simulation loop |
-| `io/demand.py` | Demand data loading from Excel/CSV |
+| `config/solver.py` | Solver option catalog, formulation/solver compatibility, availability detection |
+| `runner.py` | Orchestrator -- the main simulation loop and HDF5 writing |
+| `logging_config.py` | Console verbosity levels and the run log file |
+| `io/demand.py` | Demand and availability profile loading (CSV/Excel) |
 | `io/exporter.py` | HDF5 results export to CSV, Excel, JSON |
-| `models/ev.py` | EV fleet S-curve adoption and charging profiles |
-| `models/solar_rooftop.py` | Rooftop solar adoption and generation |
+| `models/` | EV adoption and charging, rooftop solar, demand estimation, resource models |
+| `topology/` | Internal network reduction (`network_reduction`) and result expansion |
+| `analysis/` | N-1 and AC contingency analysis, frequency metrics, pandapower bridge |
 | `zones.py` | Development zone preprocessor (virtual nodes) |
 | `plugins/` | Plugin discovery, loading, and hook dispatch |
 | `sensitivity/` | Sobol global sensitivity analysis [**[11]**](../reference/bibliography.md#ref11) |
@@ -54,15 +58,16 @@ ESFEX is organized in three layers: Python orchestration, a Python–Julia bridg
 
 The runner is the central orchestrator:
 
-1. Loads and validates the YAML configuration via Pydantic
+1. Receives the configuration loaded and validated by `config/loader.py`
 2. Loads demand data for all simulation years
 3. Generates EV charging profiles (S-curve growth model)
 4. Preloads renewable availability profiles into an in-memory cache
 5. Expands development zones into virtual nodes
-6. Solves the multi-year master problem (capacity expansion)
-7. Iterates year-by-year through operational dispatch (rolling horizon)
-8. Computes derived metrics (LCOE, VALLCOE, capacity factors)
-9. Exports all results to HDF5
+6. Generates rooftop solar profiles (if enabled)
+7. Solves the multi-year master problem (capacity expansion; `development` mode only)
+8. Iterates year-by-year through operational dispatch (rolling horizon)
+9. Computes derived metrics (LCOE, VALLCOE, capacity factors)
+10. Appends each year's results to the HDF5 file
 
 The runner maintains a `SimulationState` dataclass that tracks cumulative investments, retirements, boundary conditions, and primary energy capacities across years.
 
@@ -79,10 +84,11 @@ The bridge (`bridge/`) converts between Python data structures (NumPy arrays, Py
 | Adapter | Julia Module | Purpose |
 |---------|-------------|---------|
 | `PowerSystemAdapter` | `power_system.jl` | Operational dispatch and unit commitment |
-| `MasterProblemAdapter` | `master_problem.jl` | Multi-year capacity expansion planning |
+| `MasterProblemAdapter` | `master_problem.jl`, `benders.jl` | Multi-year capacity expansion planning |
+| `TransmissionDCAdapter` | `transmission_dc.jl` | DC power-flow constraints (Kirchhoff formulation) |
 | `PrimaryEnergyAdapter` | `primary_energy.jl` | Fuel supply chain optimization |
 | `ElectrolyzerAdapter` | `electrolyzer.jl` | Power-to-hydrogen modeling |
-| `MGAAdapter` | `mga.jl` | Near-optimal alternative generation (SPORES) |
+| `MGAAdapter` | `mga.jl` | Near-optimal alternatives (MGA and SPORES) |
 
 Each adapter follows the same pattern:
 
@@ -108,14 +114,22 @@ juliacall imports Julia Main module
 Pkg.activate("src/esfex/julia/")  -- activates the Julia project
     |
     v
+push!(LOAD_PATH, "<depot>/environments/esfex_solvers")
+    |                    -- optional solvers from `esfex add-solver`
+    v
 include("src/esfex/julia/src/ESFEX.jl")  -- loads the ESFEX module
-    |
+    |                    (Pkg.instantiate() and retry if packages are missing)
     v
 using .ESFEX  -- makes all exported functions available
     |
     v
-Adapters call jl.seval("ESFEX.function_name(args...)")
+import Clarabel, Ipopt, SCS, GLPK, Cbc, SCIP, Gurobi, CPLEX, Xpress
+    |                    -- each one that is installed; missing ones are skipped
+    v
+Adapters call ESFEX functions through juliacall
 ```
+
+If a sysimage built by `esfex precompile` exists in `src/esfex/julia/`, it is passed to juliacall before Julia starts.
 
 Key characteristics:
 
@@ -123,7 +137,7 @@ Key characteristics:
 - **Shared memory**: NumPy arrays are converted to Julia arrays using `juliacall` type conversions
 - **Lazy initialization**: Julia is only started when the first adapter is used
 - **Caching**: Once initialized, the Julia runtime persists for the session
-- **Thread control**: Julia thread count is set via `JULIA_NUM_THREADS` before initialization
+- **Thread control**: ESFEX sets `JULIA_NUM_THREADS=4` before initialization unless it is already set
 
 ### Data Type Conversions (`converters.py`)
 
@@ -135,7 +149,10 @@ Key characteristics:
 | `GeneratorConfig` | `GeneratorConfig` (Julia struct) | `convert_generator_config()` |
 | `BatteryConfig` | `BatteryConfig` (Julia struct) | `convert_battery_config()` |
 | `TechnologyConfig` | `TechnologyConfig` (Julia struct) | `convert_technology_config()` |
+| `BatteryTechnologyConfig` | `BatteryTechnologyConfig` (Julia struct) | `convert_battery_technology_config()` |
 | `dict` (network) | `NetworkConfig` (Julia struct) | `convert_network_config()` |
+
+Costs are scaled from $ to M$ on the way into Julia (`scale_cost()`), which keeps the coefficient range of the models smaller.
 
 ---
 
@@ -144,19 +161,23 @@ Key characteristics:
 
 The Julia code (`julia/src/`) implements the optimization models using JuMP [**[20]**](../reference/bibliography.md#ref20):
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `ESFEX.jl` | ~100 | Module definition, exports, includes |
-| `types.jl` | ~700 | Input/output data structures (structs) |
-| `power_system.jl` | ~2,500 | Operational dispatch and unit commitment |
-| `master_problem.jl` | ~3,600 | Multi-year capacity expansion |
-| `transmission_dc.jl` | ~760 | DC power flow (KCL, KVL, cycle constraints) |
-| `transmission_ac.jl` | ~500 | AC power flow verification (Newton-Raphson post-DC) |
-| `primary_energy.jl` | ~1,580 | Fuel supply chain optimization |
-| `electrolyzer.jl` | ~290 | Power-to-hydrogen conversion |
-| `mga.jl` | ~350 | MGA/SPORES near-optimal alternative generation |
+| File | Purpose |
+|------|---------|
+| `ESFEX.jl` | Module definition, includes, exports, solver loading and `create_optimizer()` |
+| `types.jl` | Input/output data structures (structs) |
+| `power_system.jl` | Operational dispatch and unit commitment |
+| `master_problem.jl` | Multi-year capacity expansion (monolithic) |
+| `benders.jl` | Benders decomposition of the master problem (`master_problem.solver_method: benders`) |
+| `mga.jl` | MGA/SPORES near-optimal alternative generation |
+| `transmission_dc.jl` | DC power flow (bus KCL, angle-based line flows) |
+| `transmission_ac.jl` | AC power flow verification (Newton-Raphson post-DC) |
+| `transmission_acopf.jl` | AC-OPF formulations: SOC, QC, SDP, polar NLP, rectangular NLP |
+| `primary_energy.jl` | Fuel supply chain optimization |
+| `electrolyzer.jl` | Power-to-hydrogen conversion |
+| `user_constraints.jl` | Registry for user-defined (custom) constraints and plugin constraint hooks |
+| `dcopf_benchmark.jl`, `acopf_benchmark.jl` | Stand-alone DC/AC-OPF solves used for benchmarking |
 
-HiGHS [**[21]**](../reference/bibliography.md#ref21) is the default solver. Gurobi, CPLEX, SCIP, Xpress, CBC, and GLPK can be substituted via configuration.
+HiGHS [**[21]**](../reference/bibliography.md#ref21) is the default solver. GLPK, Clarabel, SCS and Ipopt are bundled as well; Gurobi, CPLEX, Xpress, CBC and SCIP can be added with `esfex add-solver`. See the [Solver Guide](../user-guide/solver-guide.md) for which solver suits which formulation.
 
 ### Optimization Models
 
@@ -164,11 +185,12 @@ HiGHS [**[21]**](../reference/bibliography.md#ref21) is the default solver. Guro
 |-------|------|-------------|
 | Master Problem | `master_problem.jl` | Multi-year LP for investment/retirement decisions across all years simultaneously |
 | Operational Dispatch | `power_system.jl` | Hourly dispatch via rolling horizon; LP (economic dispatch) or MIP (unit commitment) |
-| DC Power Flow | `transmission_dc.jl` | KCL/KVL constraints [**[1]**](../reference/bibliography.md#ref1), cycle-based formulation, N-1 contingency analysis [**[34]**](../reference/bibliography.md#ref34) |
+| DC Power Flow | `transmission_dc.jl` | Bus-level KCL with angle-based line flows [**[1]**](../reference/bibliography.md#ref1), N-1 contingency analysis [**[34]**](../reference/bibliography.md#ref34) |
 | AC Power Flow | `transmission_ac.jl` | Post-DC Newton-Raphson verification of voltages, reactive power, and losses [**[5]**](../reference/bibliography.md#ref5) |
+| AC-OPF | `transmission_acopf.jl` | AC-OPF dispatch with convex relaxations (SOC, QC, SDP) or exact NLP (polar, rectangular), selected with `power_flow_mode` |
 | Primary Energy | `primary_energy.jl` | Fuel supply chains with storage, transport, and import constraints |
 | Electrolyzer | `electrolyzer.jl` | Power-to-hydrogen conversion with capacity investment and efficiency modeling |
-| MGA/SPORES | `mga.jl` | Near-optimal alternative generation [**[7]**](../reference/bibliography.md#ref7), [**[8]**](../reference/bibliography.md#ref8) using SPORES frequency-based scoring |
+| MGA/SPORES | `mga.jl` | Near-optimal alternative generation [**[7]**](../reference/bibliography.md#ref7), [**[8]**](../reference/bibliography.md#ref8): Hop-Skip-Jump diversity (MGA) or one alternative per objective (SPORES) |
 
 ---
 
@@ -185,17 +207,18 @@ HiGHS [**[21]**](../reference/bibliography.md#ref21) is the default solver. Guro
  3. Generate EV Profiles (S-curve growth)
     |
     v
- 4. Generate Rooftop Solar Profiles
+ 4. Preload Availability Profiles (cache)
     |
     v
- 5. Preload Availability Profiles (cache)
+ 5. Expand Development Zones (virtual nodes)
     |
     v
- 6. Expand Development Zones (virtual nodes)
+ 6. Generate Rooftop Solar Profiles
     |
     v
- 7. Solve Master Problem (all years, strategic)
+ 7. Solve Master Problem (all years, strategic; development mode only)
     |   --> investments, retirements, transmission expansion
+    |   --> MGA/SPORES alternatives, if enabled (written to the mga/ group)
     v
  8. For each YEAR (y = 1..N):
     |
@@ -219,7 +242,7 @@ HiGHS [**[21]**](../reference/bibliography.md#ref21) is the default solver. Guro
     |   8f. Write year results to HDF5
     |
     v
- 9. Finalize HDF5, Plugin post_simulation hooks
+ 9. Finalize HDF5, plugin post_simulation hooks, plugin teardown
 ```
 
 ### Rolling Horizon Detail
@@ -237,7 +260,7 @@ Year (8760 hours)
 ```
 
 - Window size and overlap are set via `rolling_horizon_hours` and `overlap_hours` in the configuration
-- Results from the overlap region of the previous window provide boundary conditions (battery SOC, generator status) for the next window
+- The state at the end of the kept (non-overlapping) part of the previous window provides the boundary conditions (battery SOC, generator status and output, reservoir and fuel storage levels) for the next window, which starts there
 - Only the non-overlapping portion of each window's results is kept
 
 ## File Organization
@@ -247,25 +270,28 @@ src/esfex/
 +-- __init__.py          # Package entry: load_config, ESFEXConfig
 +-- cli.py               # CLI commands (typer)
 +-- runner.py             # Orchestrator
++-- logging_config.py     # Console verbosity and run log file
++-- paths.py              # Central data-path registry
 +-- zones.py              # Development zone preprocessor
 +-- config/
 |   +-- schema.py         # Pydantic models
 |   +-- loader.py         # YAML loading
-|   +-- solver.py         # Solver management
+|   +-- solver.py         # Solver options, compatibility, detection
 +-- bridge/
-|   +-- adapters.py       # Julia model wrappers (5 adapters)
+|   +-- adapters.py       # Julia model wrappers (6 adapters)
 |   +-- converters.py     # Data type conversion (Python <-> Julia)
-|   +-- julia_setup.py    # Julia runtime initialization (juliacall)
+|   +-- julia_setup.py    # Julia runtime, sysimage, add/remove solver
+|   +-- topology_audit.py # GUI topology vs. solver view cross-check
 +-- io/
-|   +-- demand.py         # Demand data loading
-|   +-- exporter.py       # Results export (HDF5, CSV, Excel, JSON)
-+-- models/
-|   +-- ev.py             # EV fleet modeling (S-curve adoption)
-|   +-- solar_rooftop.py  # Rooftop solar adoption
+|   +-- demand.py         # Demand and availability loading
+|   +-- exporter.py       # Results export (CSV, Excel, JSON)
++-- models/               # EV, rooftop solar, demand estimation, resource models
++-- topology/             # Network reduction and result expansion
++-- analysis/             # Contingency, frequency, pandapower bridge
 +-- plugins/
 |   +-- protocol.py       # Plugin base class (ESFEXPlugin)
 |   +-- manager.py        # Plugin discovery, loading, lifecycle
-|   +-- availability_generator/  # Built-in plugin: solar/wind profiles
+|   +-- availability_generator/  # Built-in plugin: solar/wind/OTEC profiles
 +-- sensitivity/
 |   +-- engine.py         # Sobol global sensitivity analysis
 +-- utils/
@@ -273,16 +299,20 @@ src/esfex/
 +-- julia/
 |   +-- Project.toml      # Julia project dependencies
 |   +-- Manifest.toml     # Julia dependency lockfile
+|   +-- build_sysimage.jl # Used by `esfex precompile`
 |   +-- src/
-|       +-- ESFEX.jl         # Module definition
-|       +-- types.jl          # Data structures
-|       +-- power_system.jl   # Operational dispatch
-|       +-- master_problem.jl # Capacity expansion
-|       +-- transmission_dc.jl # DC power flow
-|       +-- transmission_ac.jl # AC power flow
-|       +-- primary_energy.jl  # Fuel supply chain
-|       +-- electrolyzer.jl    # Power-to-hydrogen
-|       +-- mga.jl             # MGA/SPORES alternatives
+|       +-- ESFEX.jl              # Module definition, solver loading
+|       +-- types.jl              # Data structures
+|       +-- power_system.jl       # Operational dispatch
+|       +-- master_problem.jl     # Capacity expansion
+|       +-- benders.jl            # Benders decomposition
+|       +-- mga.jl                # MGA/SPORES alternatives
+|       +-- transmission_dc.jl    # DC power flow
+|       +-- transmission_ac.jl    # AC power flow verification
+|       +-- transmission_acopf.jl # AC-OPF formulations
+|       +-- primary_energy.jl     # Fuel supply chain
+|       +-- electrolyzer.jl       # Power-to-hydrogen
+|       +-- user_constraints.jl   # Custom constraint registry
 +-- visualization/        # Studio (PySide6 + Leaflet.js)
     +-- app.py            # Application entry point
     +-- main_window.py    # Main window layout and orchestration
@@ -303,11 +333,12 @@ ESFEX includes a directory-based plugin system. Plugins extend ESFEX without mod
 
 ### Plugin Discovery
 
-Plugins are discovered from three locations, in order:
+Plugins are discovered from:
 
 1. `~/.esfex/plugins/` -- user-level plugins
-2. `<project_dir>/.esfex/plugins/` -- project-level plugins
-3. Directories listed in the `$ESFEX_PLUGIN_PATH` environment variable
+2. Directories listed in the `$ESFEX_PLUGIN_PATH` environment variable
+
+`<project_dir>/.esfex/plugins/` is scanned only when the caller passes `include_project_dir=True` to the plugin manager. The CLI and the runner never do, so a project opened from someone else cannot run code just by shipping a plugin; a warning is logged when such a directory is skipped.
 
 Each plugin is a directory containing:
 
@@ -321,7 +352,6 @@ Plugins can hook into the simulation lifecycle at these points:
 | Hook | When |
 |------|------|
 | `setup()` | After plugin instantiation |
-| `on_config_loaded()` | After configuration is validated |
 | `pre_simulation()` | Before simulation starts |
 | `post_demand_loaded()` | After demand data is loaded (can modify demand) |
 | `pre_master_problem()` | Before capacity expansion solve |
@@ -329,7 +359,10 @@ Plugins can hook into the simulation lifecycle at these points:
 | `pre_year()` | Before each year's dispatch |
 | `post_year()` | After each year's results (can write to HDF5) |
 | `post_simulation()` | After all years complete |
-| `teardown()` | On shutdown |
+| `teardown()` | After the run, and on shutdown |
+
+!!! note
+    `ESFEXPlugin` also defines `on_config_loaded()`, `get_config_schema()` and `get_cli_commands()`, but ESFEX does not currently call them: they have no effect.
 
 ### Julia Extensions
 
@@ -340,7 +373,8 @@ Plugins can provide Julia modules via `get_julia_modules()`. These are `include(
 - Plugin names are sanitized (alphanumeric, underscore, hyphen only)
 - ZIP installation validates against Zip Slip (CWE-22)
 - Git clone disables hooks to prevent pre-checkout RCE
-- Git URLs restricted to `https://` and `git://` schemes
+- Git URLs restricted to `https://` and `git://` schemes; hosts other than github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht need explicit consent
+- Project-level plugin directories are not scanned by default (see above)
 - SHA-256 hash of plugin contents is logged on load
 
 ---

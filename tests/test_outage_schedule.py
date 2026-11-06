@@ -65,6 +65,29 @@ class TestOutageWindowSchema:
         assert len(sys2.outage_schedule) == 1
         assert sys2.outage_schedule[0].element_id == "G1"
 
+    def test_instance_id_resolved_to_unit_and_node(self, caplog):
+        """Projects saved by the Studio calendar hold per-node instance ids
+        (``<unit>_n<node>``), which no unit key matches."""
+        sys = SystemConfig(
+            name="S", nodes=NodeConfig(num_nodes=2, nodes_connections=[0.0, 1.0, 1.0, 0.0]),
+            generators={"diesel": _minimal_gen("Diesel").model_copy(update=dict(
+                rated_power=[0.0, 60.0]))},
+            outage_schedule=[
+                OutageWindow(element_type="generator", element_id="diesel_n1",
+                             start_hour=0, end_hour=5),
+                OutageWindow(element_type="generator", element_id="diesel",
+                             start_hour=5, end_hour=9),
+                OutageWindow(element_type="generator", element_id="ghost_n0",
+                             start_hour=0, end_hour=1),
+            ],
+        )
+        got = [(o.element_id, o.node) for o in sys.outage_schedule]
+        assert got == [("diesel", 1), ("diesel", None), ("ghost_n0", None)]
+
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            SystemConfig(**sys.model_dump())
+        assert "generator 'ghost_n0'" in caplog.text
+
     def test_schedule_defaults_empty(self):
         sys = SystemConfig(name="S", nodes=NodeConfig(num_nodes=1, nodes_connections=[0.0]))
         assert sys.outage_schedule == []
@@ -222,17 +245,44 @@ class TestGuiRoundTrip:
         ]
         states = config_to_gui_states(_make_esfex_config(sc))
         state = states["TestSystem"]
-        assert [o.element_id for o in state.outage_schedule] == ["gas_turbine", "L1"]
-        assert state.outage_schedule[1].availability == 0.5
+        # The calendar shows instances: a whole-unit window lands on each one.
+        assert [o.element_id for o in state.outage_schedule] == [
+            "gas_turbine_n0", "gas_turbine_n1", "L1"]
+        assert state.outage_schedule[2].availability == 0.5
 
         sys_dict: dict = {}
         _apply_gui_state_to_dict(state, sys_dict)
         got = sys_dict["outage_schedule"]
-        assert len(got) == 2
+        assert len(got) == 3
+        # Written back as unit key + node, which the adapter matches.
+        assert [(d["element_id"], d.get("node")) for d in got] == [
+            ("gas_turbine", 0), ("gas_turbine", 1), ("L1", None)]
         assert got[0]["element_type"] == "generator" and got[0]["end_hour"] == 340
-        assert got[1]["element_id"] == "L1" and got[1]["availability"] == 0.5
+        assert got[2]["availability"] == 0.5
         # Re-validates against the schema.
-        assert [OutageWindow(**d).start_hour for d in got] == [100, 0]
+        assert [OutageWindow(**d).start_hour for d in got] == [100, 100, 0]
+
+    def test_calendar_instance_exported_as_unit_and_node(self):
+        """A unit created in the Studio has a non-canonical instance id; the
+        exported window must still name its unit key and node."""
+        from esfex.visualization.data.gui_model import (
+            GuiGeneratorInstance,
+            GuiOutageWindow,
+            GuiSystemState,
+        )
+        from esfex.visualization.data.serializer import _apply_gui_state_to_dict
+
+        state = GuiSystemState(name="S")
+        state.generators["unit_1_bus_3"] = GuiGeneratorInstance(
+            instance_id="unit_1_bus_3", unit_key="unit_1", name="Diesel",
+            gen_type="Non-renewable", fuel="Diesel", node=2)
+        state.outage_schedule = [GuiOutageWindow(
+            element_type="generator", element_id="unit_1_bus_3",
+            start_hour=5, end_hour=10)]
+        sys_dict: dict = {}
+        _apply_gui_state_to_dict(state, sys_dict)
+        (od,) = sys_dict["outage_schedule"]
+        assert (od["element_id"], od["node"]) == ("unit_1", 2)
 
     def test_empty_schedule_omitted(self):
         from esfex.visualization.data.gui_model import GuiSystemState
@@ -360,3 +410,32 @@ def test_partial_derate_carried_into_julia_generator_availability():
     got = np.array([float(jl_gen.availability[t, 0]) for t in range(hours)])
     np.testing.assert_allclose(got[6:12], 0.5)
     assert got[5] == 1.0
+
+
+@pytest.mark.julia
+def test_outage_on_one_node_cuts_only_that_node():
+    """A window on one node of a unit leaves the unit's other nodes running."""
+    import sys as _sys
+    _sys.path.insert(0, "tests")
+    from test_runner import _make_generator, _make_node_config
+
+    from esfex.bridge.adapters import PowerSystemAdapter
+
+    # Node 1 is the cheaper piece, so it runs whenever it is available.
+    gas = _make_generator("Gas", "Non-renewable", "Gas", [100.0, 100.0],
+                          degradation_rate=[0.0, 0.0], fuel_cost=[50.0, 10.0])
+    sysc = SystemConfig(
+        name="o", nodes=_make_node_config(2), generators={"gas": gas},
+        outage_schedule=[OutageWindow(element_type="generator", element_id="gas_n1",
+                                      start_hour=0, end_hour=2)],
+    )
+    ps = PowerSystemAdapter(
+        config=sysc, demand=np.full((3, 2), 30.0), hours=3, num_nodes=2,
+        year=2025, base_year=2025, mode="economic_dispatch",
+    )
+    ps.build_model()
+    assert ps.solve() == 1
+    out = np.asarray(ps.get_solution_values()["gen_output"])[0]   # [bus, hour]
+    np.testing.assert_allclose(out[1, :2], 0.0, atol=1e-6)        # node 1 cut
+    assert out[1, 2] > 0                                           # back after the window
+    assert out[0, :2].sum() > 0                                    # node 0 keeps running

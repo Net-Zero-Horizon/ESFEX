@@ -478,6 +478,26 @@ class TestConvertGenerator:
         gen = _convert_generator("my_gen", sample_generator_data)
         assert gen.name == "my_gen"
 
+    def test_studio_fields_are_kept(self, sample_generator_data):
+        """Schema fields the Studio writes must survive loading."""
+        sample_generator_data.update(
+            droop=[0.04, 0.0], governor_time_const=[6.0, 0.0],
+            risk_coefficient=[0.8, 0.0], reservoir_min_release=[2.0, 0.0],
+            reservoir_head_min_factor=[0.6, 0.0],
+            cascade_downstream="lower_dam", cascade_delay_hours=3,
+            q_max_mvar=[30.0, 0.0], power_factor=0.9,
+        )
+        gen = _convert_generator("solar", sample_generator_data)
+        assert gen.droop == [0.04, 0.0]
+        assert gen.governor_time_const == [6.0, 0.0]
+        assert gen.risk_coefficient == [0.8, 0.0]
+        assert gen.reservoir_min_release == [2.0, 0.0]
+        assert gen.reservoir_head_min_factor == [0.6, 0.0]
+        assert gen.cascade_downstream == "lower_dam"
+        assert gen.cascade_delay_hours == 3
+        assert gen.q_max_mvar == [30.0, 0.0]
+        assert gen.power_factor == 0.9
+
 
 # ---------------------------------------------------------------------------
 # _convert_battery
@@ -501,6 +521,17 @@ class TestConvertBattery:
         """If invest_cost_energy missing, it defaults to invest_cost."""
         bat = _convert_battery("bat_0", sample_battery_data)
         assert bat.invest_cost_energy == sample_battery_data["invest_cost"]
+
+    def test_studio_fields_are_kept(self, sample_battery_data):
+        sample_battery_data.update(
+            throughput_degradation_cost=[1.5, 0.0], risk_coefficient=[0.9, 0.0],
+            technology="LFP", Availability="bess_avail.csv",
+        )
+        bat = _convert_battery("bat_0", sample_battery_data)
+        assert bat.throughput_degradation_cost == [1.5, 0.0]
+        assert bat.risk_coefficient == [0.9, 0.0]
+        assert bat.technology == "LFP"
+        assert bat.availability_file == "bess_avail.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +593,13 @@ class TestConvertPrimaryEnergySource:
         assert isinstance(result, PrimaryEnergySourceConfig)
         assert result.name == "LNG"
 
+        data.update(transport_transit_days_per_100km=0.5, disruption_start_hour=100,
+                    disruption_end_hour=200, disruption_availability=0.3)
+        result = _convert_primary_energy_source("LNG", data)
+        assert result.transport_transit_days_per_100km == 0.5
+        assert (result.disruption_start_hour, result.disruption_end_hour) == (100, 200)
+        assert result.disruption_availability == 0.3
+
 
 # ---------------------------------------------------------------------------
 # _convert_system
@@ -580,6 +618,34 @@ class TestConvertSystem:
         """DC power flow config is populated from system data."""
         sc = _convert_system(minimal_system_data)
         assert isinstance(sc.dc_power_flow, DCPowerFlowConfig)
+
+    def test_zero_ramp_is_reported(self, minimal_system_data, sample_generator_data, caplog):
+        sample_generator_data["ramp_up"] = [0.0, 0.0]
+        minimal_system_data["generators"] = {"solar": sample_generator_data}
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        assert "ramp_up/ramp_down = 0" in caplog.text
+        assert "solar" in caplog.text
+
+    def test_node_without_demand_bus_is_reported(self, minimal_system_data, caplog):
+        minimal_system_data["buses"] = [
+            {"bus_id": "a", "parent_node": 0},
+            {"bus_id": "b", "parent_node": 1, "role": "connection", "demand_fraction": 0.0},
+        ]
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        assert "node(s) [1]" in caplog.text
+        assert "demand is dropped" in caplog.text
+
+    def test_all_penalties_are_read(self, minimal_system_data):
+        minimal_system_data["penalties"] = {
+            "SOC_violation": 5.0e5, "delay_retirement_per_mw": 1.0e4,
+            "coupling_slack_penalty": 3.0,
+        }
+        pen = _convert_system(minimal_system_data).penalties
+        assert pen.soc_violation == 5.0e5
+        assert pen.delay_retirement_per_mw == 1.0e4
+        assert pen.coupling_slack_penalty == 3.0
 
 
 # ---------------------------------------------------------------------------

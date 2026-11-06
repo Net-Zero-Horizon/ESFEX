@@ -389,10 +389,12 @@ def calculate_co2_emissions(
     Args:
         gen_output: Generation output array [gen_idx, node, hour]
         generators: List of generator configurations
-        fuel_co2: CO2 emission factors by fuel type (tonnes/MWh)
+        fuel_co2: CO2 emission factors by fuel type (tonnes per MWh of fuel)
 
     Returns:
-        Total CO2 emissions in tonnes
+        Total CO2 emissions in tonnes. Each node's output is divided by the
+        unit's ``eff_at_rated`` there (as the dispatch does); without an
+        efficiency the factor is taken as per MWh of electricity.
     """
     total_emissions = 0.0
 
@@ -400,7 +402,9 @@ def calculate_co2_emissions(
         if gen.get("type") != "Renewable":
             fuel_type = gen.get("fuel", "Natural Gas")
             co2_factor = fuel_co2.get(fuel_type, 0)
-            gen_total = np.sum(gen_output[gen_idx, :, :])
-            total_emissions += gen_total * co2_factor
+            eff = gen.get("eff_at_rated") or []
+            for n in range(gen_output.shape[1]):
+                e = eff[n] if n < len(eff) else 0.0
+                total_emissions += np.sum(gen_output[gen_idx, n, :]) * co2_factor / (e if e > 0 else 1.0)
 
     return total_emissions

@@ -1,13 +1,15 @@
 # Solar PV Assessment
 
-Ground-mounted solar photovoltaic resource assessment using Multi-Criteria Decision Analysis (MCDA). Access via **Workflows > Solar PV Assessment**.
+Ground-mounted solar photovoltaic resource assessment using Multi-Criteria Decision Analysis (MCDA). Access via **Workflows > Solar PV Assessment...**.
 
 The wizard evaluates the technical and economic potential for solar PV deployment across a user-defined geographic domain. Starting from satellite-derived climate data and geospatial layers, it identifies feasible sites, ranks them through weighted multi-criteria scoring, computes capacity factors and LCOE, and generates development zones for integration into the system model. The resource assessment methodology follows established practices in renewable energy siting [**[55]**](../reference/bibliography.md#ref55), and the LCOE computation follows IRENA conventions [**[48]**](../reference/bibliography.md#ref48).
 
-The wizard is organized in two phases:
+The wizard has four steps. Each step stacks several panels:
 
-- **Phase A (Steps 1-5)**: Resource Assessment. Define the study domain, configure the PV module and MCDA criteria, run the spatial analysis, and inspect results with development zone generation.
-- **Phase B (Steps 6-9)**: Advanced Analysis. Characterize the solar resource in detail, evaluate project-level financials, analyze array layout and shading effects, and generate hourly availability profiles for the optimization engine.
+1. **Setup**: domain definition, then module and assessment configuration.
+2. **Suitability**: MCDA criteria and the analysis run, side by side.
+3. **Results & Economics**: results with development zones, then project financial analysis.
+4. **Refinement & Profiles**: GHI characterization, array/shading analysis, and hourly availability profile generation.
 
 All spatial and PV computations use the `solarex` library, which can also be used independently for scripting and batch analysis -- see [Scripting](#scripting).
 
@@ -15,26 +17,12 @@ All spatial and PV computations use the `solarex` library, which can also be use
 ---
 
 
-## Phase A -- Resource Assessment
+## Step 1: Setup
 
 
-### Step 1: Domain Definition
+### Domain Definition
 
-Define the geographic bounding box for the solar PV assessment.
-
-**Draw on map:**
-
-Click the "Draw Rectangle" button, then click and drag on the map to define a bounding box. The wizard minimizes while drawing is active and restores automatically when the rectangle is completed. The domain area (in km^2) updates in real time using a spherical approximation based on the midpoint latitude.
-
-**Manual entry:**
-
-Enter bounding box coordinates directly: South latitude, West longitude, North latitude, East longitude. Click "Apply Coordinates" to set the domain, then "Show on Map" to visualize it.
-
-**Validation:**
-
-- North latitude must be greater than South latitude.
-- East longitude must be greater than West longitude.
-- A domain must be defined before proceeding to Step 2.
+Define the study area with the shared domain selector: **Draw domain** on the map, or **Use imported area as domain** with an imported GeoAsset (see [Study area selector](index.md#study-area-selector)). Weather and geospatial data are downloaded for the domain's bounding box; the analysis grid is then clipped to the polygon, so only cells inside it are evaluated.
 
 **Tips:**
 
@@ -42,7 +30,7 @@ Enter bounding box coordinates directly: South latitude, West longitude, North l
 - The domain does not need to match system boundaries -- assess a larger region and select the best sites later.
 
 
-### Step 2: Module & Assessment Configuration
+### Module & Assessment Configuration
 
 Configure the PV module, orientation, and analysis parameters. The step is divided into four groups.
 
@@ -96,7 +84,12 @@ A module must be selected before proceeding.
 - Finer grid resolutions (e.g. 0.05 degrees) are appropriate for small domains; use coarser resolutions (0.25 degrees or more) for country-scale assessments.
 
 
-### Step 3: MCDA Criteria
+## Step 2: Suitability
+
+The MCDA criteria panel and the analysis panel sit side by side. The analysis reads the domain and configuration from Step 1 and the criteria from this step when you start it.
+
+
+### MCDA Criteria
 
 Configure the Multi-Criteria Decision Analysis weighting and scoring. Each criterion evaluates one aspect of site suitability, scored on a 0-1 scale (0 = unsuitable, 1 = excellent).
 
@@ -148,7 +141,7 @@ Default scores are loaded from the `solarex.DEFAULT_LULC_SCORES` dictionary.
 - The entropy method is useful when you have no prior knowledge about the relative importance of criteria -- it lets the spatial data determine the weights.
 
 
-### Step 4: Analysis
+### Analysis
 
 Run the solar PV resource assessment pipeline. Before execution, an input summary displays the domain coordinates, module details, orientation, tracking, analysis year, grid resolution, data source, MCDA method, and enabled criteria.
 
@@ -174,7 +167,10 @@ The analysis produces a `SolarPVAnalysisSummary` containing: total grid cells, f
 - The "Next" button is only enabled after the analysis completes successfully.
 
 
-### Step 5: Results & Development Zones
+## Step 3: Results & Economics
+
+
+### Results & Development Zones
 
 Inspect the analysis results and generate development zones for integration into the system model.
 
@@ -198,7 +194,7 @@ When entropy or PCA weighting was used, the computed weights are displayed with 
 
 **Development zone generation:**
 
-Click "Generate Development Zones" to cluster feasible cells into development zone polygons. The algorithm uses the minimum capacity factor threshold from Step 2, a minimum MCDA score at the 50th percentile of feasible cells, and the configured buffer distance and grid resolution. Each zone reports: zone ID, area (km^2), number of sites, average CF, average MCDA score, and total capacity (MW).
+Click "Generate Development Zones" to cluster feasible cells into development zone polygons. The algorithm uses the minimum capacity factor threshold from the configuration panel, a minimum MCDA score at the 50th percentile of feasible cells, and the configured buffer distance and grid resolution. Each zone reports: zone ID, area (km^2), number of sites, average CF, average MCDA score, and total capacity (MW).
 
 Generated zones are automatically added to the system model as `GuiDevelopmentZone` elements (technology = "Solar") and displayed on the map.
 
@@ -211,20 +207,69 @@ Generated zones are automatically added to the system model as `GuiDevelopmentZo
 
 **Tips:**
 
-- If no development zones are generated, try lowering the minimum capacity factor threshold in Step 2.
+- If no development zones are generated, try lowering the minimum capacity factor threshold in the configuration panel (Step 1).
 - Development zones can be refined manually in the studio after generation.
 - The CSV export contains all per-cell data and can be loaded into GIS tools for further analysis.
 
 
----
+### Financial Analysis
+
+Project-level financial evaluation for a representative solar PV installation, using the capacity and average capacity factor computed by the analysis.
+
+**Presets:**
+
+| Preset | CAPEX ($/kW) | OPEX ($/kW/yr) | Lifetime |
+|--------|-------------|----------------|----------|
+| Ground-mount | 1,000 | 15 | 25 years |
+| Floating | 1,400 | 25 | 25 years |
+| Custom | User-defined | User-defined | User-defined |
+
+**Input parameters:**
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| CAPEX | 1,000 $/kW | 100-10,000 | Total installed capital cost per kW of nameplate capacity |
+| OPEX | 15 $/kW/yr | 0-500 | Annual fixed operation and maintenance cost |
+| Discount Rate | 0.08 | 0.01-0.30 | Weighted average cost of capital for discounted cash flow analysis |
+| Lifetime | 25 years | 5-40 | Project economic lifetime |
+| Electricity Price | 50 $/MWh | 5-500 | Expected average electricity selling price or avoided cost |
+| Degradation Rate | 0.005/yr | 0-0.05 | Annual capacity degradation rate [**[48]**](../reference/bibliography.md#ref48) |
+
+**Computed outputs:**
+
+| Metric | Description |
+|--------|-------------|
+| LCOE | Levelized Cost of Energy ($/MWh). Total discounted costs divided by total discounted generation (see [SPV-7](#lcoe) and [SPV-8](#capital-recovery-factor-crf)). |
+| NPV | Net Present Value ($). Sum of discounted revenues minus discounted costs over the project lifetime. |
+| IRR | Internal Rate of Return (%). The discount rate at which NPV equals zero. |
+| Payback Period | Simple payback (years). Time for cumulative revenues to recover the initial investment. |
+| Annual Generation | Expected first-year energy production (MWh/yr). |
+| Total CAPEX | Capacity times CAPEX rate ($). |
+
+**Sensitivity analysis:**
+
+Select a parameter from the dropdown (CAPEX, Discount Rate, Electricity Price, or Capacity Factor) to visualize how LCOE changes when that parameter varies from 50% to 150% of its current value. The sweep runs on a background thread with 30 evaluation points and renders a chart with the current operating point marked by a vertical dashed line.
+
+**Actions:**
+
+| Action | Description |
+|--------|-------------|
+| Calculate | Compute LCOE, NPV, IRR, and payback period |
+| Export CSV | Save all input parameters and computed results to a CSV file |
+
+**Tips:**
+
+- Start with the Ground-mount preset for a baseline, then adjust parameters to match the local market.
+- The discount rate is the most influential parameter on LCOE. A 2 percentage point change in discount rate can shift LCOE by 10-20%.
+- Compare the computed LCOE against the local electricity price to assess project viability.
 
 
-## Phase B -- Advanced Analysis
+## Step 4: Refinement & Profiles
 
 
-### Step 6: GHI Characterization
+### GHI Characterization
 
-Detailed solar resource characterization using the hourly irradiance and temperature data from Phase A.
+Detailed solar resource characterization using the hourly irradiance and temperature data downloaded by the analysis.
 
 **Cell selector:**
 
@@ -256,59 +301,7 @@ A dropdown allows choosing a specific grid cell by coordinates, or "All Cells" t
 - Compare individual cells to the aggregated statistics to identify spatial variation in the solar resource.
 
 
-### Step 7: Financial Analysis
-
-Project-level financial evaluation for a representative solar PV installation, using the capacity and average capacity factor computed in Phase A.
-
-**Presets:**
-
-| Preset | CAPEX ($/kW) | OPEX ($/kW/yr) | Lifetime |
-|--------|-------------|----------------|----------|
-| Ground-mount | 1,000 | 15 | 25 years |
-| Floating | 1,400 | 25 | 25 years |
-| Custom | User-defined | User-defined | User-defined |
-
-**Input parameters:**
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| CAPEX | 1,000 $/kW | 100-10,000 | Total installed capital cost per kW of nameplate capacity |
-| OPEX | 15 $/kW/yr | 0-500 | Annual fixed operation and maintenance cost |
-| Discount Rate | 0.08 | 0.01-0.30 | Weighted average cost of capital for discounted cash flow analysis |
-| Lifetime | 25 years | 5-40 | Project economic lifetime |
-| Electricity Price | 50 $/MWh | 5-500 | Expected average electricity selling price or avoided cost |
-| Degradation Rate | 0.005/yr | 0-0.05 | Annual capacity degradation rate [**[48]**](../reference/bibliography.md#ref48) |
-
-**Computed outputs:**
-
-| Metric | Description |
-|--------|-------------|
-| LCOE | Levelized Cost of Energy ($/MWh). Total discounted costs divided by total discounted generation (see [SPV-7](#lcoe) and [SPV-8](#crf)). |
-| NPV | Net Present Value ($). Sum of discounted revenues minus discounted costs over the project lifetime. |
-| IRR | Internal Rate of Return (%). The discount rate at which NPV equals zero. |
-| Payback Period | Simple payback (years). Time for cumulative revenues to recover the initial investment. |
-| Annual Generation | Expected first-year energy production (MWh/yr). |
-| Total CAPEX | Capacity times CAPEX rate ($). |
-
-**Sensitivity analysis:**
-
-Select a parameter from the dropdown (CAPEX, Discount Rate, Electricity Price, or Capacity Factor) to visualize how LCOE changes when that parameter varies from 50% to 150% of its current value. The sweep runs on a background thread with 30 evaluation points and renders a chart with the current operating point marked by a vertical dashed line.
-
-**Actions:**
-
-| Action | Description |
-|--------|-------------|
-| Calculate | Compute LCOE, NPV, IRR, and payback period |
-| Export CSV | Save all input parameters and computed results to a CSV file |
-
-**Tips:**
-
-- Start with the Ground-mount preset for a baseline, then adjust parameters to match the local market.
-- The discount rate is the most influential parameter on LCOE. A 2 percentage point change in discount rate can shift LCOE by 10-20%.
-- Compare the computed LCOE against the local electricity price to assess project viability.
-
-
-### Step 8: Array / Shading Analysis
+### Array / Shading Analysis
 
 Evaluates inter-row shading losses and optional bifacial gain for the PV array layout. The analysis receives the site latitude, panel tilt, and capacity factor from upstream steps.
 
@@ -316,19 +309,19 @@ Evaluates inter-row shading losses and optional bifacial gain for the PV array l
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| Ground Coverage Ratio (GCR) | 0.40 | 0.15-0.90 | Ratio of module width to row pitch (see [SPV-4](#gcr)). Higher GCR = more capacity per unit area but more inter-row shading. |
+| Ground Coverage Ratio (GCR) | 0.40 | 0.15-0.90 | Ratio of module width to row pitch (see [SPV-4](#ground-coverage-ratio-gcr)). Higher GCR = more capacity per unit area but more inter-row shading. |
 | Module Height | 2.0 m | 1.0-4.0 m | Vertical extent of the module row. Affects shadow length and bifacial rear-side irradiance. |
 | Ground Albedo | 0.25 | 0.0-0.80 | Surface reflectivity. Higher albedo benefits bifacial modules (e.g., 0.50 for white gravel, 0.25 for grass). |
-| Bifacial Module | Off | On/Off | Enable bifacial gain calculation (see [SPV-6](#bifacial-gain)). Only available if the module selected in Step 2 is bifacial. |
+| Bifacial Module | Off | On/Off | Enable bifacial gain calculation (see [SPV-6](#bifacial-gain)). Only available if the module selected in Step 1 is bifacial. |
 
 **Computed outputs:**
 
 | Metric | Description |
 |--------|-------------|
-| Shading Loss | Fractional energy loss due to inter-row shading at the selected GCR (%) (see [SPV-5](#shading-loss)). |
+| Shading Loss | Fractional energy loss due to inter-row shading at the selected GCR (%) (see [SPV-5](#shading-loss-fraction)). |
 | Bifacial Gain | Additional energy from rear-side irradiance, if bifacial is enabled (+%). |
 | Net Efficiency | Combined effect: \((1 - \text{shading\_loss}) \times (1 + \text{bifacial\_gain})\). |
-| Gross CF | Capacity factor before array-level losses (from Phase A). |
+| Gross CF | Capacity factor before array-level losses (from the analysis). |
 | Net CF | Capacity factor after applying net efficiency. |
 | Annual Generation | Expected energy yield at net CF (MWh/yr). |
 
@@ -351,7 +344,7 @@ A chart showing how shading loss varies with GCR from 0.15 to 0.90. The selected
 - White gravel ground cover (albedo 0.50) combined with elevated modules (3-4 m height) maximizes bifacial gain.
 
 
-### Step 9: Availability Profile Generation
+### Availability Profile Generation
 
 Generates hourly capacity factor profiles for solar PV generators in the current system model. These profiles are the time-series files consumed by the ESFEX optimization engine (see [Availability Profiles](../user-guide/availability-profiles.md) for format details).
 
@@ -379,9 +372,9 @@ The wizard automatically identifies all renewable generators with solar fuel typ
 
 For each selected generator instance, the wizard:
 
-1. **Locates the nearest grid cell** -- Matches the generator's geographic position to the nearest cell from the Phase A analysis domain (up to 0.5 degrees distance).
-2. **Converts irradiance to capacity factors** -- If hourly GHI and temperature data are available from Phase A, applies the irradiance-to-CF model using the module parameters (efficiency, gamma_pmax, NOCT). This avoids a redundant API call.
-3. **Falls back to fresh data fetch** -- If no nearby Phase A data exists (generator is outside the analysis domain), downloads hourly weather data for the generator's location and year from the configured data source, then computes capacity factors.
+1. **Locates the nearest grid cell** -- Matches the generator's geographic position to the nearest cell of the analysis domain (up to 0.5 degrees distance).
+2. **Converts irradiance to capacity factors** -- If hourly GHI and temperature data are available from the analysis, applies the irradiance-to-CF model using the module parameters (efficiency, gamma_pmax, NOCT). This avoids a redundant API call.
+3. **Falls back to fresh data fetch** -- If no nearby analysis data exists (generator is outside the analysis domain), downloads hourly weather data for the generator's location and year from the configured data source, then computes capacity factors.
 4. **Writes CSV file** -- Saves an 8,760-row CSV file (one column per node) in the selected output directory. The file is automatically assigned as the generator's availability profile in the model.
 
 Generators with no geographic position (0, 0) are automatically skipped.
@@ -396,7 +389,7 @@ Reports the number of profiles generated and the average capacity factor across 
 
 **Tips:**
 
-- Profiles generated from Phase A data are faster than fresh API calls, since the weather data is already in memory.
+- Profiles generated from the analysis data are faster than fresh API calls, since the weather data is already in memory.
 - After generating profiles, you can proceed directly to running a simulation -- the model will use the newly created availability files.
 - Each unit key produces one CSV file with columns for each node. Multiple generator instances sharing the same unit key are written into the same file.
 
@@ -513,7 +506,7 @@ CF_{\text{net}} = CF_{\text{gross}} \times (1 - f_{\text{shade}}) \times (1 + G_
 \]
 
 
-### Levelized Cost of Energy (LCOE) [**[48]**](../reference/bibliography.md#ref48)
+### Levelized Cost of Energy (LCOE) [**[48]**](../reference/bibliography.md#ref48) {#lcoe}
 
 \[
 LCOE = \frac{CRF(r, n) \times CAPEX + O\&M_{\text{annual}}}{E_{\text{annual}}} \tag{SPV-7}
@@ -636,4 +629,4 @@ sweep_values = np.linspace(500, 1500, 20)
 lcoe_values = compute_pv_lcoe_sensitivity(inputs, "capex_per_kw", sweep_values.tolist())
 ```
 
-See the [solarex API Reference](../api/solarex.md) for full parameter documentation.
+See the [solarex package on PyPI](https://pypi.org/project/solarex/) for full parameter documentation.

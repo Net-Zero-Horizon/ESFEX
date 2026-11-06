@@ -84,6 +84,8 @@ struct ACOPFBranch
     capacity_mva::Float64
     # Tap ratio (1.0 for lines)
     tap::Float64
+    # line_id (lines) or name (transformers), for scheduled-outage masks
+    id::String
 end
 
 """
@@ -151,7 +153,8 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
             g_s, b_s + b_sh/2,           # g_tt, b_tt
             -g_s, -b_s,                  # g_tf, b_tf
             line.capacity_mw * nc,       # capacity_mva (use MW ≈ MVA for consistency)
-            1.0                          # tap
+            1.0,                         # tap
+            line.line_id
         ))
     end
 
@@ -190,7 +193,8 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
             g_s, b_s,                     # g_tt, b_tt
             -g_s / t, -b_s / t,          # g_tf, b_tf
             trafo.rated_power_mva,       # capacity_mva
-            t                            # tap
+            t,                           # tap
+            trafo.name
         ))
     end
 
@@ -844,6 +848,8 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
         set_objective_coefficient(model, q_slack_neg[i, t], q_penalty)
     end
 
+    shift_net = demand_shift_net(vars)
+
     for t in 1:hours
         for i in 1:n_bus
             # Node index and demand fraction (used by EV and other node-level vars)
@@ -932,12 +938,14 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
             extra_term = extra_injections_fn !== nothing ?
                 extra_injections_fn(i, t) : AffExpr(0.0)
 
+            # Demand moved into this step by demand shifting (net, may be < 0)
+            shift_term = haskey(shift_net, (ni, t)) ? shift_net[(ni, t)] * bus_df : AffExpr(0.0)
+
             # Net active injection (same as DC KCL).  load_shed is per-bus (B2).
             net_inj_p = @expression(model,
                 gen_sum + bat_discharge + ev_v2g_term + vars.load_shed[i, t] +
                 rooftop_gen_term + acdc_term + freq_term + extra_term -
-                bus_demand - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
-                vars.reserve_static[ni, t] * bus_df - vars.reserve_dynamic[ni, t] * bus_df -
+                bus_demand - shift_term - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
                 ev_charging_term - rooftop_curt_term
             )
 
@@ -1058,30 +1066,36 @@ does not support SecondOrderCone).
 #   when the underlying expressions are nonlinear.
 function add_acopf_line_limits!(model::Model, net::ACOPFNetwork,
                                  av::ACOPFVariables,
+                                 vars::PowerSystemVariables,
                                  input::PowerSystemInput,
                                  formulation::ACOPFFormulation)
     hours = size(input.demand, 1)
     base_mva = net.base_mva
     is_nlp = formulation isa PolarNLPFormulation || formulation isa RectNLPFormulation
+    is_dev = input.mode == "development"
+    transfer_cost = AffExpr(0.0)
 
     for (l, br) in enumerate(net.branches)
-        cap = br.capacity_mva
-        cap <= 0 && continue  # no limit
-
-        cap_pu = cap / base_mva
-        cap_pu_sq = cap_pu * cap_pu
+        br.capacity_mva <= 0 && continue  # no limit
+        # Development-mode corridor investment, as in the DC path
+        inv = is_dev ? dev_corridor_investment!(model, vars, input,
+                                                br.from_bus, br.to_bus, transfer_cost) : nothing
 
         for t in 1:hours
+            # Thermal limit (p.u.) × scheduled-outage factor
+            om = branch_outage_factor(input, br.id, t)
+            cap_pu = inv === nothing ? br.capacity_mva * om / base_mva :
+                     (br.capacity_mva + inv) * (om / base_mva)
             p_from, q_from, p_to, q_to = _branch_flow_expressions(
                 net, av, l, t, formulation)
 
             if is_nlp
                 # Ipopt: nonlinear quadratic constraint
                 @constraint(model,
-                    p_from^2 + q_from^2 <= cap_pu_sq,
+                    p_from^2 + q_from^2 <= cap_pu^2,
                     base_name = "sline_from_$(l)_$(t)")
                 @constraint(model,
-                    p_to^2 + q_to^2 <= cap_pu_sq,
+                    p_to^2 + q_to^2 <= cap_pu^2,
                     base_name = "sline_to_$(l)_$(t)")
             else
                 # Conic relaxation: SOC set
@@ -1094,6 +1108,7 @@ function add_acopf_line_limits!(model::Model, net::ACOPFNetwork,
             end
         end
     end
+    charge_transfer_investment!(model, input, transfer_cost)
 end
 
 # =============================================================================
@@ -1135,7 +1150,7 @@ function setup_acopf!(model::Model, vars::PowerSystemVariables,
                               extra_injections_fn=extra_injections_fn)
 
     # Add apparent power line limits
-    add_acopf_line_limits!(model, net, av, input, formulation)
+    add_acopf_line_limits!(model, net, av, vars, input, formulation)
 
     return av
 end

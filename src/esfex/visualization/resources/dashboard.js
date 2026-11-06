@@ -524,7 +524,7 @@ function renderCost(data) {
     // Build the waterfall: one "relative" step per cost component,
     // then one "total" bar that plotly draws as an absolute sum.
     // The solver stores benefit-type components (e.g. flexible-demand
-    // benefit, V2G compensation) as positive numbers that *reduce*
+    // benefit) as positive numbers that *reduce*
     // the objective — we keep the raw sign here because the backend
     // already returns them with the correct sign for stacking.
     const labels   = data.steps.map(s => s.label);

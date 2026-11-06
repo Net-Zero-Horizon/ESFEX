@@ -925,6 +925,7 @@ class ESFEXAPI:
         parameters: list[dict[str, Any]] | None = None,
         n_samples: int = 64,
         output_dir: Union[str, Path] = "sensitivity_output",
+        years: int | None = None,
     ):
         """Run Sobol global sensitivity analysis.
 
@@ -933,12 +934,16 @@ class ESFEXAPI:
         config_path : str or Path
             Path to YAML config file.
         parameters : list of dict, optional
-            Each dict: ``{"name": str, "lower": float, "upper": float}``.
-            If None, uses default parameter set.
+            Each dict: ``{"name": str, "lower": float, "upper": float}``,
+            where ``name`` is a config parameter key such as ``"fuel_cost"``
+            (see ``esfex.sensitivity.engine.CONFIG_PARAMETERS``).
+            If None, uses all predefined config parameters.
         n_samples : int
             Base sample count for Saltelli sampling.
         output_dir : str or Path
             Working directory for intermediate files.
+        years : int, optional
+            Years simulated per run (default: the ``esfex run`` default, 25).
 
         Returns
         -------
@@ -952,23 +957,34 @@ class ESFEXAPI:
         >>> for kpi in result.kpi_names:
         ...     print(f"{kpi}: most sensitive to {result.parameters[result.ST[kpi].argmax()]}")
         """
-        from esfex.sensitivity.engine import SensitivityEngine, SensitivityParameter
+        from esfex.sensitivity.engine import (
+            CONFIG_PARAMETERS,
+            SensitivityEngine,
+            SensitivityParameter,
+            get_config_parameters,
+        )
 
         config_path = str(Path(config_path))
         output_dir = str(Path(output_dir))
 
         if parameters is None:
-            engine = SensitivityEngine(mode="config", parameters=[], n_base_samples=n_samples)
+            params = get_config_parameters()
         else:
-            params = [
-                SensitivityParameter(
-                    name=p["name"],
-                    lower_bound=p.get("lower", 0.5),
-                    upper_bound=p.get("upper", 1.5),
-                )
-                for p in parameters
-            ]
-            engine = SensitivityEngine(mode="config", parameters=params, n_base_samples=n_samples)
+            known = {key: (display, bounds) for key, display, bounds in CONFIG_PARAMETERS}
+            params = []
+            for p in parameters:
+                key = p["name"]
+                if key not in known:
+                    raise ValueError(
+                        f"Unknown sensitivity parameter {key!r}; use one of {sorted(known)}")
+                display, (lo, hi) = known[key]
+                params.append(SensitivityParameter(
+                    name=display, key=key,
+                    lower_bound=p.get("lower", lo), upper_bound=p.get("upper", hi),
+                    category="config",
+                ))
+        engine = SensitivityEngine(mode="config", parameters=params,
+                                   n_base_samples=n_samples, years=years)
 
         def _progress(current, total, msg):
             print(f"  [{current}/{total}] {msg}")

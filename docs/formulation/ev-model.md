@@ -1,89 +1,83 @@
 # EV Model
 
-The electric vehicle (EV) model integrates fleet electrification into power system planning and operation with S-curve adoption dynamics and vehicle-to-grid (V2G) [**[51]**](../reference/bibliography.md#ref51) capability. The model captures the dual role of EV fleets as flexible electrical loads and distributed energy storage resources [**[52]**](../reference/bibliography.md#ref52).
+The electric vehicle (EV) model adds fleet electrification to the operational dispatch: S-curve fleet growth, a driving-energy profile per node, smart charging and vehicle-to-grid (V2G) [**[51]**](../reference/bibliography.md#ref51). The fleet at each node acts as a flexible load with storage [**[52]**](../reference/bibliography.md#ref52).
 
 ## Overview
 
-The EV model consists of two components:
+The EV model has two parts:
 
-1. **Python-side** (`models/ev.py`): Fleet growth modeling with logistic S-curves, multi-category vehicle definitions, and charging profile generation for each planning year.
-2. **Julia-side** (`power_system.jl`): Optimization constraints for EV charging and V2G dispatch within the operational power system model.
+1. **Python** (`models/ev.py`, `Orchestrator._build_ev_config` in `runner.py`): fleet growth with logistic S-curves per vehicle category, hourly driving-energy and V2G-availability profiles, and aggregation of the categories into one fleet parameter set per window.
+2. **Julia** (`add_ev_constraints!()` in `power_system.jl`): fleet state of charge, charging and V2G limits in the operational dispatch.
 
-The interaction between these components follows the general ESFEX data flow: the Python layer generates exogenous fleet projections and charging demand profiles, which are then passed to the Julia optimizer as parameters. The optimizer determines the optimal charging schedule and V2G dispatch subject to grid constraints.
+EV modelling is active when the system defines `ev_categories`, `ev_quantity` and `base_patterns`. It applies to the operational dispatch only: the master problem (capacity expansion) has no EV model, and the EV driving energy is not part of the demand the master plans for (see [Section 7](#7-capacity-expansion)).
 
 ---
 
 
-## 1. S-Curve Fleet Adoption
+## 1. S-Curve Fleet Growth
 
 
-EV fleet growth follows a logistic (S-curve) function that captures the characteristic adoption pattern of new technologies: slow initial uptake, rapid mid-phase growth, and eventual market saturation.
+The fleet of each category \(c\) at node \(n\) grows from its base-year count along a logistic curve:
 
 \[
-N_{EV}(y) = N_0 \cdot \frac{K}{1 + e^{-r(y - y_{mid})}}
+N_{c,n}(y) = N^{0}_{c,n} \cdot \frac{K_c}{1 + e^{-r_c (y - y^{mid}_c)}}
 \tag{EV-S}
 \]
 
-where:
-
-| Parameter | Description | Config Field | Typical Range |
-|-----------|-------------|-------------|---------------|
-| \(N_0\) | Initial fleet size (vehicles) | `ev_quantity` | System-specific |
-| \(K\) | Maximum adoption multiplier | `max_adoption` | 2--20 |
-| \(r\) | Logistic growth rate | `growth_rate` | 0.1--0.5 |
-| \(y_{mid}\) | Inflection year (steepest growth) | Computed from `mid_point_fraction` | Mid-horizon |
-
-The midpoint year \(y_{mid}\) is computed as:
-
 \[
-y_{mid} = 1 + \text{mid\_point\_fraction} \times (Y - 1)
+y^{mid}_c = y^{base} + \text{mid\_point\_fraction}_c \cdot (y^{end} - y^{base})
 \]
 
-where \(Y\) is the total number of planning years. A `mid_point_fraction` of 0.5 places the inflection at the midpoint of the planning horizon.
+| Parameter | Description | Config field | Default |
+|-----------|-------------|--------------|---------|
+| \(N^0_{c,n}\) | Base-year vehicle count per node | `ev_quantity.<category>[n]` | -- |
+| \(K_c\) | Maximum growth multiplier | `ev_categories.<category>.max_adoption` | 35 |
+| \(r_c\) | Logistic growth rate (1/year) | `ev_categories.<category>.growth_rate` | 0.14 |
+| \(\text{mid\_point\_fraction}_c\) | Position of the inflection in the run | `ev_categories.<category>.mid_point_fraction` | 0.5 |
 
-**Properties of the logistic curve:**
+\(y^{base}\) and \(y^{end}\) are the first and last simulated years, so the curve depends on the length of the run. \(K_c\) multiplies the base count: in the first year, with the defaults and a 25-year run, \(N = N^0 \cdot 35 / (1 + e^{1.75}) \approx 5.2\,N^0\). Set `ev_quantity` and \(K_c\) with this in mind.
 
-- At \(y = y_{mid}\): \(N_{EV} = N_0 \cdot K / 2\) (half of maximum adoption)
-- As \(y \to \infty\): \(N_{EV} \to N_0 \cdot K\) (saturation)
-- Growth rate is steepest at the inflection point, with slope \(N_0 \cdot K \cdot r / 4\)
-
-This produces a smooth, monotonically increasing growth trajectory that avoids the unrealistic linearity of constant annual growth assumptions.
-
-Implemented in `generate_ev_profiles()`.
+The same factor (`fleet_growth_factor()`) sizes both the driving-energy profile and the fleet limits used in the dispatch, so charging power, battery capacity and V2G power grow with the fleet.
 
 ---
 
 
-## 2. Multi-Category Vehicle Definitions
+## 2. Vehicle Categories
 
 
-Multiple vehicle categories can be defined, each with distinct technical and economic characteristics. This enables modeling of heterogeneous fleets where, for example, private sedans and commercial vehicles have different battery sizes, charging infrastructure, and usage patterns.
+Each category has its own technical parameters:
 
 ```yaml
 ev_categories:
-  sedan:
-    battery_capacity_kwh: 60.0
-    max_charge_power_kw: 11.0
-    max_discharge_power_kw: 7.0
-    charge_efficiency: 0.95
-    discharge_efficiency: 0.92
+  car:
+    battery_capacity: 60.0        # kWh per vehicle
+    charging_power: 11.0          # kW per vehicle
+    v2g_power: 7.0                # kW per vehicle
+    v2g_participation: 0.3        # share of connected vehicles offering V2G
+    efficiency_charge: 0.95
+    efficiency_discharge: 0.92
     min_soc: 0.20
-    max_soc: 0.90
-    v2g_compensation: 0.05        # $/kWh
-
-  commercial_van:
-    battery_capacity_kwh: 100.0
-    max_charge_power_kw: 22.0
-    max_discharge_power_kw: 15.0
-    charge_efficiency: 0.93
-    discharge_efficiency: 0.90
+    daily_energy_kwh: 8.0         # default: battery_capacity x 0.12
+  van:
+    battery_capacity: 100.0
+    charging_power: 22.0
+    v2g_power: 15.0
+    v2g_participation: 0.2
+    efficiency_charge: 0.93
+    efficiency_discharge: 0.90
     min_soc: 0.25
-    max_soc: 0.85
-    v2g_compensation: 0.07
+    max_adoption: 20.0
+    growth_rate: 0.2
 
 ev_quantity:
-  sedan: [1000, 1200, 1500]       # Initial count per node
-  commercial_van: [200, 250, 300]
+  car: [1000, 1200]               # base-year vehicles per node
+  van: [200, 250]
+
+base_patterns:                    # 24 hourly values per category (plug-in shape)
+  car: [0.1, 0.1, 0.1, 0.05, 0.05, 0.1, 0.3, 0.5, 0.2, 0.1, 0.1, 0.1,
+        0.1, 0.1, 0.1, 0.2, 0.4, 0.8, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1]
+  van: [0.2, 0.2, 0.2, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1,
+        0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.3, 0.4, 0.4, 0.3, 0.3, 0.2]
 ```
 
 ### 2.1 Category Parameters
@@ -91,55 +85,56 @@ ev_quantity:
 
 | Parameter | Symbol | Units | Description |
 |-----------|--------|-------|-------------|
-| `battery_capacity_kwh` | \(E^{bat}_{cat}\) | kWh | Per-vehicle battery capacity |
-| `max_charge_power_kw` | \(\bar{P}^{ch}_{cat}\) | kW | Maximum charging power per vehicle |
-| `max_discharge_power_kw` | \(\bar{P}^{dis}_{cat}\) | kW | Maximum V2G discharge power per vehicle |
-| `charge_efficiency` | \(\eta^{ch}_{cat}\) | -- | Round-trip charging efficiency |
-| `discharge_efficiency` | \(\eta^{dis}_{cat}\) | -- | V2G discharging efficiency |
-| `min_soc` | \(\underline{SOC}_{cat}\) | -- | Minimum allowable SOC fraction |
-| `max_soc` | \(\overline{SOC}_{cat}\) | -- | Maximum allowable SOC fraction |
+| `battery_capacity` | \(E^{bat}_c\) | kWh | Battery capacity per vehicle |
+| `charging_power` | \(\bar{P}^{ch}_c\) | kW | Maximum charging power per vehicle |
+| `v2g_power` | \(\bar{P}^{v2g}_c\) | kW | Maximum V2G power per vehicle |
+| `v2g_participation` | \(\phi_c\) | -- | Share of connected vehicles that offer V2G |
+| `efficiency_charge` | \(\eta^{ch}_c\) | -- | Charging efficiency |
+| `efficiency_discharge` | \(\eta^{dis}_c\) | -- | V2G discharging efficiency |
+| `min_soc` | \(\underline{SOC}_c\) | -- | Minimum state of charge (fraction) |
+| `daily_energy_kwh` | \(e^{day}_c\) | kWh/day | Driving energy per vehicle per day |
+| `max_adoption`, `growth_rate`, `mid_point_fraction` | \(K_c, r_c\) | -- | S-curve (EV-S) |
+
+The penalty for driving energy the fleet cannot supply is `penalties.ev_loss` ($/MWh, default: `penalties.loss_of_load`). A warning is logged when it is set below `loss_of_load`, because the dispatch then prefers leaving vehicles uncharged to generating.
 
 ### 2.2 Fleet Aggregation
 
 
-When multiple categories are present, their parameters are aggregated to produce nodal fleet-level quantities for the optimizer. The aggregation is weighted by the number of vehicles in each category:
+The Julia model holds one parameter set for the whole fleet. For each year, `_build_ev_config` aggregates the categories with the grown fleets \(N_c = \sum_n N_{c,n}(y)\):
+
+- Battery capacity, charging power and V2G power per vehicle are vehicle-weighted means, so the fleet's total battery energy and total charge and V2G power are exact.
+- Charging and discharging efficiency and minimum SOC are weighted by battery energy (\(N_c E^{bat}_c\)).
+- The maximum SOC is 1.0 (fixed in the runner). The SOC at the start of each window is `EV_initial_soc` of the node (a fraction, clamped to `[min_soc, 1]`), or 80 % of fleet capacity where it is not given.
+
+With \(N_n = \sum_c N_{c,n}(y)\) vehicles at node \(n\), the fleet totals are
 
 \[
-E^{total}_{EV,n} = \sum_{cat} \frac{N_{cat,n} \cdot E^{bat}_{cat}}{1000} \quad \text{[MWh]}
+E^{EV}_n = \frac{N_n \bar{E}^{bat}}{1000} \;\text{[MWh]}, \qquad
+\bar{P}^{ch}_n = \frac{N_n \bar{P}^{ch}}{1000} \;\text{[MW]}, \qquad
+\bar{P}^{v2g}_n = \frac{N_n \bar{P}^{v2g}}{1000} \;\text{[MW]}
 \]
-
-\[
-\bar{P}^{ch,total}_{n} = \sum_{cat} \frac{N_{cat,n} \cdot \bar{P}^{ch}_{cat}}{1000} \quad \text{[MW]}
-\]
-
-\[
-\bar{P}^{dis,total}_{n} = \sum_{cat} \frac{N_{cat,n} \cdot \bar{P}^{dis}_{cat}}{1000} \quad \text{[MW]}
-\]
-
-The division by 1000 converts from kW/kWh to MW/MWh.
 
 ---
 
 
-## 3. Charging Profiles
+## 3. Driving and V2G Profiles
 
 
-Base charging patterns (24-hour templates) define typical daily EV energy consumption behavior. These templates capture when vehicles are likely to be plugged in and drawing power:
+`base_patterns` gives, per category, the 24-hour shape of when vehicles charge (the share of the fleet plugged in). The pattern sets *when* energy is drawn; its magnitude comes from `daily_energy_kwh`. The driving energy of category \(c\) at node \(n\) and hour \(t\) (MWh per hour) is
 
-```yaml
-base_patterns:
-  commuter: [0.1, 0.1, 0.1, 0.05, 0.05, 0.1, 0.3, 0.5, 0.2, 0.1, 0.1, 0.1,
-             0.1, 0.1, 0.1, 0.2, 0.4, 0.8, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1]
-```
+\[
+D^{drive}_{c,n,t} = \tilde{\pi}_c(h_t) \cdot N_{c,n}(y_t) \cdot \frac{e^{day}_c}{1000 \sum_{h} \pi_c(h)}
+\]
 
-These patterns are processed as follows:
+where \(\pi_c(h)\) is the pattern value for hour of day \(h\) and \(\tilde{\pi}_c(h_t) = \text{clip}(\pi_c(h_t) + \varepsilon_t, 0, 1)\) adds Gaussian noise \(\varepsilon_t \sim N(0, 0.02)\). The noise is seeded, so a configuration always gives the same profile. The pattern repeats every day; the fleet size changes once per year. The node profile \(D^{EV}_{n,t} = \sum_c D^{drive}_{c,n,t}\) is the driving consumption passed to Julia.
 
-1. **Scaled by fleet size** \(N_{EV}(y)\) for each planning year
-2. **Multiplied by per-vehicle charging power** to obtain aggregate demand in MW
-3. **Aggregated across categories** and distributed to nodes based on fleet composition
-4. **Extended to annual profiles** by repeating the 24-hour template across all days
+The V2G power on offer uses the same pattern (noise \(N(0, 0.01)\)) and the participation share:
 
-The resulting EV charging demand profile \(D^{EV}_{n,t}\) represents the minimum energy that must be delivered to satisfy driving requirements. The optimizer may shift this charging temporally (smart charging) within the constraints defined below.
+\[
+P^{v2g,avail}_{n,t} = \sum_c \tilde{\pi}_c(h_t) \cdot \phi_c \cdot N_{c,n}(y_t) \cdot \frac{\bar{P}^{v2g}_c}{1000}
+\]
+
+The runner passes it to Julia as a fraction of the fleet's rated V2G power, \(\alpha^{v2g}_{n,t} = P^{v2g,avail}_{n,t} / \bar{P}^{v2g}_n\).
 
 ---
 
@@ -147,110 +142,81 @@ The resulting EV charging demand profile \(D^{EV}_{n,t}\) represents the minimum
 ## 4. Optimization Constraints
 
 
-The following constraints are added to the operational dispatch model by `add_ev_constraints!()` in `power_system.jl`. They model the EV fleet at each node as an aggregated flexible load with storage capability.
+`add_ev_constraints!()` adds the following per node \(n\) (EV variables are node-indexed) and time step \(t\). Nodes without vehicles get `ev_zero_*` constraints that fix all EV variables to 0.
+
+| Variable | Description |
+|----------|-------------|
+| \(P^{ch,EV}_{n,t} \ge 0\) | Fleet charging power (`ev_charging`) |
+| \(P^{V2G}_{n,t} \ge 0\) | V2G discharge power (`ev_v2g`) |
+| \(E^{EV}_{n,t} \ge 0\) | Fleet state of charge, MWh, \(t = 1 \ldots T+1\) (`ev_soc`) |
+| \(L^{EV}_{n,t} \ge 0\) | Driving energy not supplied (`ev_loss`) |
+| \(z^{EV}_{n,t} \in [0,1]\) | Charge/V2G status, relaxed (`ev_charge_status`) |
 
 ### EV-1: SOC Dynamics
 
-The fleet-level state of charge evolves according to the energy balance of charging, discharging, and driving consumption:
+Driving draws its energy from the fleet battery:
 
 \[
-E^{EV}_{n,t+1} = E^{EV}_{n,t} + \eta^{ch}_{EV} \cdot P^{ch,EV}_{n,t} - \frac{P^{V2G}_{n,t}}{\eta^{dis}_{EV}}
+E^{EV}_{n,t+1} = E^{EV}_{n,t} + \Delta t \left[ \eta^{ch} P^{ch,EV}_{n,t} - \frac{P^{V2G}_{n,t}}{\eta^{dis}} - \left(D^{EV}_{n,t} - L^{EV}_{n,t}\right) \right]
 \tag{EV-1}
 \]
 
-where:
+Powers are in MW and \(\Delta t\) is the time step; with `resolution_hours > 1` the hourly driving and availability profiles are averaged over each step. Over a window the grid must therefore supply the driving energy (divided by \(\eta^{ch}\)), and V2G can only return energy that is not needed for driving. Charging can move in time within the power and SOC limits (smart charging). Constraint `ev_soc_dynamics_n{n}_{t}`.
 
-- \(E^{EV}_{n,t}\) is the aggregated fleet SOC at node \(n\) and time step \(t\) (MWh)
-- \(\eta^{ch}_{EV}\) is the fleet-average charging efficiency
-- \(\eta^{dis}_{EV}\) is the fleet-average V2G discharging efficiency
-- The SOC variable is indexed from \(t = 1\) (initial condition) to \(t = T+1\) (end of horizon)
-
-The initial SOC is set to a configured fraction of total fleet battery capacity:
+### EV-2: Unserved Driving Energy
 
 \[
-E^{EV}_{n,1} = SOC^{init}_{EV} \cdot E^{total}_{EV,n}
-\]
-
-### EV-2: Charging Requirement (Driving Demand Satisfaction)
-
-The EV fleet must receive sufficient charging energy to satisfy driving energy consumption. A slack variable allows partial unmet demand when grid conditions are extremely constrained:
-
-\[
-P^{ch,EV}_{n,t} + L^{EV}_{n,t} \geq D^{drive}_{n,t}
+0 \le L^{EV}_{n,t} \le D^{EV}_{n,t}
 \tag{EV-2}
 \]
 
-where:
-
-- \(D^{drive}_{n,t}\) is the driving consumption profile (MW), representing the energy required for mobility
-- \(L^{EV}_{n,t} \geq 0\) is the EV charging loss/slack variable, penalized heavily in the objective to ensure driving demand is met whenever possible
-
-This constraint ensures that the optimizer schedules at least enough charging to cover driving needs, while the slack variable provides a safety valve to maintain model feasibility during extreme scarcity events.
+\(L^{EV}\) is driving energy the fleet cannot supply; it is penalized at `penalties.ev_loss`. Constraint `ev_loss_max_n{n}_{t}`.
 
 ### EV-3: Charging Power Limit
 
-The aggregate fleet charging power is bounded by the sum of individual vehicle charging capacities, with a feasibility floor:
-
 \[
-P^{ch,EV}_{n,t} \leq \max\left( \frac{\bar{P}^{ch}_{EV,kW} \cdot N_{EV,n}}{1000},\; 2 \cdot D^{drive}_{n,t} \right) \quad \forall n, t
+P^{ch,EV}_{n,t} \le \max\left( \bar{P}^{ch}_n,\; 2 D^{EV}_{n,t} \right)
 \tag{EV-3}
 \]
 
-The floor of \(2 \times D^{drive}_{n,t}\) ensures that the charging limit is never below the driving consumption, which would make the problem infeasible. The factor of 2 provides headroom for the optimizer to schedule catch-up charging.
+The floor of twice the driving energy keeps the problem feasible when the configured charging power is very low. Constraint `ev_max_charge_n{n}_{t}`.
 
-### EV-4: V2G Discharge Limit
-
-V2G discharge is bounded by the aggregate fleet discharge capacity, modulated by the fleet availability profile:
+### EV-4: V2G Limit
 
 \[
-P^{V2G}_{n,t} \leq \frac{\bar{P}^{dis}_{EV,kW} \cdot N_{EV,n}}{1000} \cdot \alpha^{V2G}_{n,t} \quad \forall n, t
+P^{V2G}_{n,t} \le \bar{P}^{v2g}_n \cdot \alpha^{v2g}_{n,t}
 \tag{EV-4}
 \]
 
-where:
-
-- \(\bar{P}^{dis}_{EV,kW}\) is the per-vehicle maximum V2G discharge power (kW)
-- \(\alpha^{V2G}_{n,t} \in [0,1]\) is the V2G availability profile, representing the fraction of the fleet connected to the grid and available for V2G at each hour
-
-The availability profile captures the fact that vehicles in transit or parked without grid connection cannot provide V2G services. Typical profiles show low availability during commute hours and high availability during nighttime and weekends.
+Constraint `ev_max_v2g_n{n}_{t}`.
 
 ### EV-5: SOC Bounds
 
-The fleet SOC is bounded by configurable minimum and maximum fractions of total battery capacity:
-
 \[
-\underline{SOC}_{EV} \cdot E^{total}_{EV,n} \leq E^{EV}_{n,t+1} \leq \overline{SOC}_{EV} \cdot E^{total}_{EV,n} \quad \forall n, t
+\underline{SOC} \cdot E^{EV}_n \le E^{EV}_{n,t+1} \le \overline{SOC} \cdot E^{EV}_n
 \tag{EV-5}
 \]
 
-where:
-
-- \(\underline{SOC}_{EV}\) is the minimum SOC fraction (e.g., 0.20), preserving battery health and ensuring minimum driving range
-- \(\overline{SOC}_{EV}\) is the maximum SOC fraction (e.g., 0.90), reflecting practical charging limits
-- \(E^{total}_{EV,n} = N_{EV,n} \cdot E^{bat}_{EV} / 1000\) is the total fleet battery capacity in MWh
-
-The SOC bounds protect battery longevity by avoiding deep discharge and overcharging, consistent with manufacturer recommendations and battery degradation science.
+with \(\overline{SOC} = 1\). Constraints `ev_soc_min_n{n}_{t}` and `ev_soc_max_n{n}_{t}`.
 
 ### EV-6: Charge/V2G Mutual Exclusivity
 
-Simultaneous charging and V2G discharge at the same node is prevented:
-
 \[
-P^{ch,EV}_{n,t} \leq M_{EV} \cdot z^{EV}_{n,t}
-\tag{EV-6a}
+P^{ch,EV}_{n,t} \le M_{EV} \, z^{EV}_{n,t}, \qquad
+P^{V2G}_{n,t} \le M_{EV} \, (1 - z^{EV}_{n,t})
+\tag{EV-6}
 \]
 
+with \(M_{EV} = \max(\bar{P}^{ch}_n, 2D^{EV}_{n,t}) + \bar{P}^{v2g}_n \alpha^{v2g}_{n,t}\). \(z^{EV}\) is continuous, so this is a relaxation; simultaneous charging and discharging loses energy and is not chosen in practice. Constraints `ev_mutex_charge_n{n}_{t}` and `ev_mutex_v2g_n{n}_{t}`.
+
+### EV-7: Initial and Cyclic SOC
+
 \[
-P^{V2G}_{n,t} \leq M_{EV} \cdot (1 - z^{EV}_{n,t})
-\tag{EV-6b}
+E^{EV}_{n,1} = 0.8 \, E^{EV}_n, \qquad E^{EV}_{n,T+1} = E^{EV}_{n,1}
+\tag{EV-7}
 \]
 
-where:
-
-- \(z^{EV}_{n,t} \in [0,1]\) is the charging status variable (relaxed from binary for LP compatibility)
-- \(M_{EV} = \bar{P}^{ch,total}_n + \bar{P}^{dis,total}_n\) is a big-M constant
-
-The relaxation from binary to continuous is valid because the objective function naturally drives the optimizer to avoid simultaneous charge and discharge (which would waste energy through round-trip losses). In practice, the relaxed variable takes values close to 0 or 1.
+Each window starts at the node's initial SOC (`EV_initial_soc`, default 80 % of fleet capacity) and must end where it started, so the fleet cannot carry energy in or out of a window. Constraints `ev_soc_initial_n{n}` and `ev_soc_cyclic_n{n}`.
 
 ---
 
@@ -258,18 +224,13 @@ The relaxation from binary to continuous is valid because the objective function
 ## 5. Power System Integration
 
 
-EV charging and V2G dispatch are fully integrated into the power balance equations of the operational dispatch model:
-
-- **Charging** \(P^{ch,EV}_{n,t}\): appears as additional electrical demand on the right-hand side of the power balance
-- **V2G** \(P^{V2G}_{n,t}\): appears as generation (supply) on the left-hand side of the power balance
-
-In the single-bus power balance (PB-1):
+Charging is a load and V2G a supply in the power balance (PB-1 for a single bus, DC-1 and the ACOPF balance for networks). EV variables are per node; at each bus they enter scaled by the bus `demand_fraction` (0 on `role="connection"` buses):
 
 \[
-\sum_g P_{g,n,t} + \sum_b P^{dis}_{b,n,t} + P^{V2G}_{n,t} + LS_{n,t} + \ldots = D_{n,t} + \sum_b P^{ch}_{b,n,t} + P^{ch,EV}_{n,t} + \ldots
+\sum_g P_{g,b,t} + \ldots + \alpha_b P^{V2G}_{n(b),t} = D_{b,t} + \ldots + \alpha_b P^{ch,EV}_{n(b),t}
 \]
 
-In the multi-bus DC power flow balance (DC-1), V2G and EV charging appear at the respective bus with the same sign conventions.
+When the EV model is active, the EV driving energy is **not** added to the demand array; the dispatch meets it only through \(P^{ch,EV}\) and EV-1. Without EV categories, no EV demand exists.
 
 ---
 
@@ -277,54 +238,26 @@ In the multi-bus DC power flow balance (DC-1), V2G and EV charging appear at the
 ## 6. Objective Terms
 
 
-The EV model contributes two terms to the operational dispatch objective function:
-
-### 6.1 V2G Compensation (Benefit)
-
-
-V2G dispatch earns revenue at the time-varying electricity price, creating an incentive for the model to use V2G when it reduces overall system cost:
+### 6.1 Unserved Driving Energy
 
 \[
-Z^{V2G} = - \sum_{n,t} \pi_t \cdot P^{V2G}_{n,t} \tag{EV-OBJ-1}
+Z^{EV,loss} = \Delta t \sum_{n,t} c^{EV,loss} L^{EV}_{n,t}
+\tag{EV-OBJ}
 \]
 
-The negative sign indicates this is subtracted from total cost (i.e., it is a benefit). The electricity price \(\pi_t\) is derived from the dual of the power balance constraint.
+with \(c^{EV,loss}\) = `penalties.ev_loss` and \(\Delta t\) the time step.
 
-### 6.2 EV Charging Loss Penalty
+### 6.2 V2G Compensation (reported only)
 
-
-Unmet EV charging demand is penalized to ensure driving requirements are satisfied:
-
-\[
-Z^{EV,loss} = \sum_{n,t} c^{EV,loss} \cdot L^{EV}_{n,t} \tag{EV-OBJ-2}
-\]
-
-where \(c^{EV,loss}\) is the EV loss penalty coefficient (`ev_config.loss_penalty`). This should be set high enough to ensure the optimizer meets driving demand under normal conditions, but below VOLL to allow shedding EV demand before critical loads.
-
-### 6.3 Penalty Hierarchy
-
-
-The penalty structure establishes a rational shedding order:
-
-\[
-c^{VOLL} \gg c^{EV,loss} > c^{curtailment}
-\]
-
-This ensures that when the system is capacity-constrained, the optimizer first curtails renewable generation, then sheds EV charging demand, and only as a last resort sheds critical electrical loads.
+The payment to EV owners for V2G energy, \(\sum_{n,t} \pi_t P^{V2G}_{n,t}\) at the electricity price \(\pi_t\), is computed and reported as `v2g_compensation` but is not part of the objective. It is a transfer between agents; the system value of V2G is the generation it displaces in the power balance.
 
 ---
 
 
-## 7. Interaction with Capacity Expansion
+## 7. Capacity Expansion
 
 
-In the Master Problem, the EV fleet parameters are projected forward using the S-curve adoption model. The fleet size \(N_{EV,n}(y)\) at each node and year determines:
-
-1. The peak EV charging demand that must be satisfied, which influences capacity adequacy requirements
-2. The available V2G capacity, which can offset investment in stationary storage
-3. The total energy throughput requirements, which influence fuel supply planning
-
-The Master Problem does not directly optimize EV charging schedules; instead, it uses representative day subproblems with projected fleet parameters to validate that investment plans are feasible given the growing EV fleet.
+The master problem has no EV model: its representative-day input carries no EV configuration. It plans with the base demand plus the EV energy profile as a fixed load (unmanaged charging); the dispatch then optimizes when the fleet charges. When the EV model is active the dispatch's demand array leaves the EV load out, since it is served through \(P^{ch,EV}\).
 
 ---
 
@@ -332,43 +265,42 @@ The Master Problem does not directly optimize EV charging schedules; instead, it
 ## 8. Configuration Reference
 
 
+EV settings are system keys (shown here without the `systems.<name>` prefix):
+
 ```yaml
-ev_config:
-  enabled: true
-  loss_penalty: 500.0             # $/MW penalty for unmet EV demand
+ev_categories:
+  car:
+    battery_capacity: 60.0
+    charging_power: 11.0
+    v2g_power: 7.0
+    v2g_participation: 0.3
+    efficiency_charge: 0.95
+    efficiency_discharge: 0.92
+    min_soc: 0.20
+    max_adoption: 10.0
+    growth_rate: 0.3
+    mid_point_fraction: 0.5
+    daily_energy_kwh: 7.2
 
-  ev_categories:
-    sedan:
-      battery_capacity_kwh: 60.0
-      max_charge_power_kw: 11.0
-      max_discharge_power_kw: 7.0
-      charge_efficiency: 0.95
-      discharge_efficiency: 0.92
-      min_soc: 0.20
-      max_soc: 0.90
-      v2g_compensation: 0.05
+ev_quantity:
+  car: [1000, 1200]
 
-  ev_quantity:
-    sedan: [1000, 1200, 1500]
+base_patterns:
+  car: [0.1, 0.1, 0.1, 0.05, 0.05, 0.1, 0.3, 0.5, 0.2, 0.1, 0.1, 0.1,
+        0.1, 0.1, 0.1, 0.2, 0.4, 0.8, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1]
 
-  growth_rate: 0.3
-  max_adoption: 10.0
-  mid_point_fraction: 0.5
-
-  base_patterns:
-    commuter: [0.1, 0.1, ...]    # 24 hourly values
-
-  v2g_availability:
-    weekday: [0.8, 0.8, 0.8, 0.8, 0.8, 0.6, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1,
-              0.1, 0.1, 0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.8, 0.8, 0.8, 0.8]
+penalties:
+  ev_loss: 10000000.0             # $/MWh, default = loss_of_load
 ```
+
+The system key `EV_initial_soc` gives each node's SOC at the start of every dispatch window (fraction of fleet capacity; 80 % where missing).
 
 ---
 
 
 ## 9. EV Adoption Modeling (Wizard)
 
-The EV & V2G Assessment Wizard (`models/ev_adoption.py`) provides four data-driven methods to *populate* the fleet parameters in sections 1-3 above, bridging real-world transport data to the optimizer inputs:
+The EV & V2G Assessment Wizard (`models/ev_adoption.py`, re-exported from the `evrex` library) provides four data-driven methods to *populate* the fleet parameters above from transport data:
 
 ### 9.1 Method Summary
 
@@ -379,22 +311,22 @@ The EV & V2G Assessment Wizard (`models/ev_adoption.py`) provides four data-driv
 | **TCO-Parity** | \(\text{adoption} = \sigma(s \cdot (TCO_{ICE} - TCO_{EV}) / TCO_{ICE})\) | Battery learning curve, fuel prices, subsidies, vehicle lifetime |
 | **Policy-Driven** | Linear sales ramp + scrappage model | ICE ban year, emission targets, vehicle lifetime |
 
-All methods produce uniform `EVAdoptionCurve` outputs (year-by-year penetration, fleet by category, energy demand, peak charging) that feed into `fit_adoption_to_ev_config()`.
+All methods produce `EVAdoptionCurve` outputs (year-by-year penetration, fleet by category, energy demand, peak charging) that feed into `fit_adoption_to_ev_config()`.
 
 ### 9.2 S-Curve Parameter Fitting
 
-The integration function `fit_adoption_to_ev_config()` uses least-squares fitting (`scipy.optimize.curve_fit`) to map any adoption trajectory to the logistic parameters \(K\), \(r\), \(y_{mid}\) from equation (EV-S), producing the `max_adoption`, `growth_rate`, and `mid_point_fraction` fields required by the optimizer.
+`fit_adoption_to_ev_config()` fits any adoption trajectory to the logistic parameters of (EV-S) by least squares (`scipy.optimize.curve_fit`), producing `max_adoption`, `growth_rate` and `mid_point_fraction`.
 
 ### 9.3 V2G Technical Potential
 
-Module `models/ev_analysis.py` provides:
+`models/ev_analysis.py` (also from `evrex`) provides:
 
-- **Charging demand characterization**: Three scenarios (uncontrolled, TOU-shifted, optimized valley-filling)
-- **V2G capacity**: Hourly discharge potential from connected-time profiles and participation rates
-- **Battery degradation**: Wohler-type cycle aging + calendar aging for NMC/LFP chemistries, yielding break-even V2G compensation rates
-- **Grid impact assessment**: Peak shaving, valley filling, arbitrage revenue, avoided grid reinforcement
+- **Charging demand characterization**: uncontrolled, TOU-shifted and optimized valley-filling scenarios
+- **V2G capacity**: hourly discharge potential from connected-time profiles and participation rates
+- **Battery degradation**: Wohler-type cycle aging plus calendar aging for NMC/LFP chemistries, giving break-even V2G compensation rates
+- **Grid impact assessment**: peak shaving, valley filling, arbitrage revenue, avoided grid reinforcement
 
-See [API: Models EV Adoption](../api/models-ev-adoption.md) and [API: Models EV Analysis](../api/models-ev-analysis.md) for full function reference.
+These analyses are not part of the optimization. See [API: Models EV Adoption](../api/models-ev-adoption.md) and [API: Models EV Analysis](../api/models-ev-analysis.md).
 
 ---
 
@@ -404,19 +336,15 @@ See [API: Models EV Adoption](../api/models-ev-adoption.md) and [API: Models EV 
 
 | Function | Language | File | Purpose |
 |----------|----------|------|---------|
-| `generate_ev_profiles()` | Python | `models/ev.py` | S-curve fleet growth and profile generation |
-| `run_ev_logistic_adoption()` | Python | `models/ev_adoption.py` | Logistic regression adoption model |
-| `run_ev_bass_diffusion()` | Python | `models/ev_adoption.py` | Bass diffusion adoption model |
-| `run_ev_tco_parity()` | Python | `models/ev_adoption.py` | TCO-parity adoption model |
-| `run_ev_policy_driven()` | Python | `models/ev_adoption.py` | Policy-driven adoption model |
-| `fit_adoption_to_ev_config()` | Python | `models/ev_adoption.py` | S-curve fitting for ESFEX config |
-| `generate_charging_profiles()` | Python | `models/ev_analysis.py` | 24h charging demand profiles |
-| `compute_v2g_potential()` | Python | `models/ev_analysis.py` | V2G capacity assessment |
-| `compute_battery_degradation()` | Python | `models/ev_analysis.py` | Wohler degradation model |
-| `assess_grid_impact()` | Python | `models/ev_analysis.py` | Grid impact analysis |
-| `add_ev_constraints!()` | Julia | `power_system.jl` | EV-1 through EV-6 constraints |
-| `build_objective!()` | Julia | `power_system.jl` | V2G compensation and EV loss penalty terms |
-| `extract_solution()` | Julia | `power_system.jl` | EV charging, V2G, and SOC time series extraction |
+| `fleet_growth_factor()` | Python | `models/ev.py` | S-curve multiplier (EV-S) |
+| `generate_ev_profiles()` | Python | `models/ev.py` | Driving-energy profiles per category and node |
+| `generate_v2g_availability()` | Python | `models/ev.py` | V2G power on offer per category and node |
+| `Orchestrator._build_ev_config()` | Python | `runner.py` | Fleet aggregation and per-window EV input |
+| `run_ev_logistic_adoption()`, `run_ev_bass_diffusion()`, `run_ev_tco_parity()`, `run_ev_policy_driven()` | Python | `models/ev_adoption.py` | Adoption models (wizard) |
+| `fit_adoption_to_ev_config()` | Python | `models/ev_adoption.py` | S-curve fitting |
+| `generate_charging_profiles()`, `compute_v2g_potential()`, `compute_battery_degradation()`, `assess_grid_impact()` | Python | `models/ev_analysis.py` | V2G and grid-impact analysis (wizard) |
+| `add_ev_constraints!()` | Julia | `power_system.jl` | EV-1 to EV-7 |
+| `build_objective!()` | Julia | `power_system.jl` | EV loss penalty; V2G compensation (reported) |
 
 ---
 

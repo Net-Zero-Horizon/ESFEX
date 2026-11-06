@@ -19,14 +19,18 @@ Three operating modes are available:
 | \(g \in \mathcal{G}\) | Generators | `1:n_gen` |
 | \(b \in \mathcal{B}\) | Batteries (storage systems) | `1:n_bat` |
 | \(n \in \mathcal{N}\) | Buses (electrical nodes) | `1:n_bus` |
-| \(t \in \mathcal{T}\) | Time steps (hours) | `1:hours` |
+| \(i \in \mathcal{I}\) | Geographic nodes (each groups one or more buses) | `1:n_node` |
+| \(t \in \mathcal{T}\) | Time steps of `resolution_hours` each | `1:hours` |
 | \(s \in \mathcal{S}\) | Demand sectors | `keys(sectoral_demand)` |
 | \(\ell \in \mathcal{L}\) | Transmission lines (physical) | `1:n_line` |
-| \(c \in \mathcal{C}\) | Independent network cycles | `1:n_cycle` |
 | \(k \in \mathcal{K}\) | AC/DC converters | `1:n_acdc` |
 | \(f \in \mathcal{F}\) | Frequency converters | `1:n_freq` |
 
-The mapping from bus to geographic node is given by `bus_to_node[n]`, written as \(n_i\). Each bus carries a `demand_fraction` \(\alpha_n\) of its parent node's demand.
+The mapping from bus to geographic node is given by `bus_to_node[n]`, written as \(n_i\). Each bus carries a `demand_fraction` \(\alpha_n\) of its parent node's demand; a bus with `role: connection` carries no demand (\(\alpha_n = 0\) in every balance and bound below).
+
+Generators, batteries, load shedding, voltage angles and electrolyzer power are indexed by bus. Curtailment, the RE-target slack, CO2 emissions, reserves, sectoral load shedding, flexible demand, EV fleet and rooftop curtailment are indexed by node; where a node-level quantity enters a bus balance it is multiplied by \(\alpha_n\). Per-node configuration arrays (capacities, costs, `invest_max`) are mapped onto the buses before the model is built.
+
+Generator and battery variables exist only for the (unit, bus) pairs with installed capacity, investment potential (development mode) or a pending delayed retirement; the model has no variables, and so no zero-capacity constraints, for the other pairs.
 
 ---
 
@@ -59,8 +63,8 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
 | \(f_{\ell,t}\) | \(\ell,t\) | free | MW | Power flow per physical line (`power_flow`) |
-| \(\theta_{n,t}\) | \(n,t\) | free | rad | Voltage angle (`voltage_angle`) |
-| \(\mu_{i,j,t}\) | \(i,j,t\) | \(\geq 0\) | MW | Transfer margin violation slack (`transfer_margin`) |
+| \(\theta_{n,t}\) | \(n,t\) | \([-\pi, \pi]\) | rad | Voltage angle (`voltage_angle`) |
+| \(\mu_{i,j,t}\) | \(i,j,t\) | \(\geq 0\) | MW | Transfer margin slack (`transfer_margin`). Created only when the network has no transmission lines; it appears in no constraint, so it is always 0 |
 
 ### 2.4 Converter Variables
 
@@ -79,16 +83,16 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 | \(r^{\text{dyn}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Dynamic reserve provision (`reserve_dynamic`) |
 | \(\lambda^{\text{sta}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Static reserve shortage (`reserve_static_loss`) |
 | \(\lambda^{\text{dyn}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Dynamic reserve shortage (`reserve_dynamic_loss`) |
-| \(\text{LS}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Load shedding (`load_shed`) |
-| \(\text{CU}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Renewable curtailment (`curtailment`) |
-| \(\phi_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | RE penetration loss slack (`fre_penetration_loss`) |
+| \(\text{LS}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Load shedding per bus (`load_shed`) |
+| \(\text{CU}_{i,t}\) | \(i,t\) | \(\geq 0\) | MW | Renewable curtailment per node (`curtailment`) |
+| \(\phi_{i,t}\) | \(i,t\) | \(\geq 0\) | MW | RE penetration loss slack per node (`fre_penetration_loss`) |
 | \(H_t\) | \(t\) | \(\geq 0\) | MW-s | Inertia shortfall (`loss_of_inertia`) |
 
 ### 2.6 Emissions Variables
 
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
-| \(\text{CO2}_{n,t}\) | \(n,t\) | \(\geq 0\) | tonnes | CO2 emissions at bus and hour (`co2_emissions`) |
+| \(\text{CO2}_{i,t}\) | \(i,t\) | \(\geq 0\) | tonnes | CO2 emissions at node and hour (`co2_emissions`) |
 | \(\xi^{\text{CO2}}\) | scalar | \(\geq 0\) | tonnes | CO2 budget violation slack (`co2_budget_violation`) |
 
 ### 2.7 EV Fleet Variables
@@ -98,7 +102,7 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 | \(p^{\text{ev,ch}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | EV charging power (`ev_charging`) |
 | \(p^{\text{v2g}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Vehicle-to-grid power (`ev_v2g`) |
 | \(E^{\text{ev}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MWh | EV fleet SOC (`ev_soc`); index 1 = initial |
-| \(\ell^{\text{ev}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | EV charging loss (`ev_loss`) |
+| \(\ell^{\text{ev}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MWh | Unserved driving energy (`ev_loss`) |
 | \(\delta^{\text{ev}}_{n,t}\) | \(n,t\) | \([0,1]\) | -- | EV charge/V2G mutex status (`ev_charge_status`) |
 
 ### 2.8 Sectoral Demand Variables
@@ -106,14 +110,13 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
 | \(\text{LOL}_{s,n,t}\) | \(s,n,t\) | \(\geq 0\) | MW | Per-sector load shedding (`loss_of_load_sectoral`) |
-| \(\text{FC}_{s,n,t}\) | \(s,n,t\) | \(\geq 0\) | MW | Flexible demand curtailed (`flexible_demand_curtailed`) |
-| \(\Delta_{s,n,t,t'}\) | \(s,n,t,t'\) | \(\geq 0\) | MW | Demand shifted from \(t\) to \(t'\) (`demand_shift`) |
+| \(\Delta_{s,n,t,t'}\) | \(s,n,t,t'\) | \(\geq 0\) | MW | Demand of flexible sector \(s\) shifted from step \(t\) to \(t'\) (`demand_shift`, `shift_{s}_{n}_{t}_{t'}`) |
 
 ### 2.9 Other Variables
 
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
-| \(p^{\text{elz}}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Electrolyzer power consumption (`electrolyzer_power`) |
+| \(p^{\text{elz}}_{n,t}\) | \(n,t\) | \([0, \bar{P}^{\text{elz}}_n]\) | MW | Electrolyzer power consumption (`electrolyzer_power`), at most the rated power; consecutive steps differ by at most `ramp_up` / `ramp_down` × rated power × \(\Delta t\) (no limit when the ramp is 0) |
 | \(\text{RC}_{n,t}\) | \(n,t\) | \(\geq 0\) | MW | Rooftop solar curtailment (`rooftop_curtailment`) |
 
 ---
@@ -122,13 +125,13 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 ## 3. Objective Function
 
 
-The total system cost over the time horizon is minimized:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). One-off terms (startup, development-mode investment, delayed retirement, forced replacement, reservoir investment) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge:
 
 \[
-\min \; Z = Z^{\text{op}} + Z^{\text{start}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{CO2}} + Z^{\text{inv}} + Z^{\text{flex}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{ret}} + Z^{\text{shift}} + Z^{\text{npv}} \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{start}} + Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) \tag{OBJ}
 \]
 
-Implemented in `build_objective!()`.
+Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2) and the cost-ceiling violation (COST-1).
 
 ### 3.1 Operational Costs
 
@@ -203,7 +206,7 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 ### 3.4 Penalty Costs
 
 \[
-Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{n,t} \text{LS}_{n,t}}_{\text{load shedding}} + \underbrace{C^{\text{CU}} \sum_{n,t} \text{CU}_{n,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{n,t} \lambda^{\text{sta}}_{n,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{n,t} \lambda^{\text{dyn}}_{n,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
+Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{n,t} \text{LS}_{n,t}}_{\text{load shedding (no sectors)}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
 \]
 
 \[
@@ -213,6 +216,8 @@ Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{n,t} \text{LS}_{n,t}}_{\text{
 \[
 + \underbrace{C^{\text{TM}} \sum_{i,j,t} \mu_{i,j,t}}_{\text{transfer margin}} + \underbrace{C^{\text{CO2,bud}} \, \xi^{\text{CO2}}}_{\text{CO2 budget violation}} + \underbrace{C^{\text{RC}} \sum_{n,t} \text{RC}_{n,t}}_{\text{rooftop curtailment}} \tag{OBJ-4c}
 \]
+
+The load-shedding term \(C^{\text{VOLL}} \sum \text{LS}\) is used only when the system has no sectoral demand. With sectors, shed load is priced only through \(Z^{\text{sec}}\) (OBJ-5), which already carries VOLL times the sector's criticality; charging both would count each shed MWh twice. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
 
 ### 3.5 Sectoral Load Shedding Penalties
 
@@ -225,26 +230,22 @@ where \(\kappa_s\) is the criticality weight for sector \(s\). Higher criticalit
 ### 3.6 CO2 Emission Cost
 
 \[
-Z^{\text{CO2}} = C^{\text{CO2}} \sum_{g,n,t} e_{\text{fuel}(g)} \, p_{g,n,t} \tag{OBJ-6}
+Z^{\text{CO2}} = C^{\text{CO2}} \sum_{g,n,t} \frac{e_{\text{fuel}(g)}}{\eta_{g,n}} \, p_{g,n,t} \tag{OBJ-6}
 \]
 
-where \(e_f\) is the emission factor (tonnes CO2/MWh) for the fuel type of generator \(g\).
+where \(e_f\) is the emission factor of the fuel of generator \(g\) in tonnes CO2 per MWh of fuel (`fuels.<fuel>.emission_factor`), and \(\eta_{g,n}\) the unit's efficiency at rated power at node \(n\) (`eff_at_rated`), so \(e_f/\eta_{g,n}\) is t per MWh of electricity. A unit without an efficiency (\(\leq 0\)) uses \(e_f\) directly.
 
-### 3.7 Flexible Demand Benefit (subtracted)
+### 3.7 Flexible Demand
+
+Flexible demand is shifted in time (SHIFT-1, OBJ-13), not curtailed: reducing a sector's demand is load shedding, priced by its criticality (OBJ-5). There is no flexible-curtailment benefit term; `flexible_demand_benefit_ratio` is not used, and the `flexible_demand_benefit` entry of the cost breakdown is 0.
+
+### 3.8 V2G Compensation (reported, not in the objective)
 
 \[
-Z^{\text{flex}} = - \sum_{s,n,t} \pi_t \cdot \beta^{\text{flex}} \cdot \text{FC}_{s,n,t} \tag{OBJ-7}
+Z^{\text{V2G}} = \sum_{n,t} \pi_t \, p^{\text{v2g}}_{n,t} \tag{OBJ-8}
 \]
 
-where \(\pi_t\) is the electricity price at hour \(t\) and \(\beta^{\text{flex}}\) is the `flexible_demand_benefit_ratio`. This term is subtracted from cost because reducing flexible demand provides economic benefit.
-
-### 3.8 V2G Compensation (subtracted)
-
-\[
-Z^{\text{V2G}} = - \sum_{n,t} \pi_t \, p^{\text{v2g}}_{n,t} \tag{OBJ-8}
-\]
-
-Time-varying compensation using the electricity price signal.
+The payment to EV owners for V2G energy, priced at the electricity price \(\pi_t\) (or at the constant `v2g_compensation` when no price is given). It is a transfer between agents, not a system cost: the value of V2G is already the generation it displaces in the power balance. It is therefore computed and reported in the cost breakdown (`v2g_compensation`) but not subtracted from the objective.
 
 ### 3.9 Battery Spillage Cost
 
@@ -252,13 +253,15 @@ Time-varying compensation using the electricity price signal.
 Z^{\text{spill}} = \sum_{b,n,t} \pi_t \cdot \text{spill}_{b,n,t} \tag{OBJ-9}
 \]
 
-Opportunity cost of energy discharged from batteries without grid injection.
+Opportunity cost of energy discharged from batteries without grid injection, at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given).
 
 ### 3.10 Investment Costs (development mode only)
 
 \[
-Z^{\text{inv}} = \sum_{g,n} c^{\text{inv}}_g \hat{P}^{\text{inv}}_{g,n} + \sum_{b,n} \left( c^{\text{inv,P}}_b \hat{P}^{\text{inv,P}}_{b,n} + c^{\text{inv,E}}_b \hat{E}^{\text{inv}}_{b,n} \right) \tag{OBJ-10}
+Z^{\text{inv}} = \sum_{g,n} c^{\text{inv}}_g \hat{P}^{\text{inv}}_{g,n} + \sum_{b,n} \left( c^{\text{inv,P}}_b \hat{P}^{\text{inv,P}}_{b,n} + c^{\text{inv,E}}_b \hat{E}^{\text{inv}}_{b,n} \right) + \sum_{(i,j)} \max(c^{\text{tr}}_i, c^{\text{tr}}_j) \, \hat{F}^{\text{inv}}_{ij} \tag{OBJ-10}
 \]
+
+where \(c^{\text{tr}}\) is `transference_invest_cost` and \(\hat{F}^{\text{inv}}_{ij}\) the corridor's transmission investment (`tf_inv_*`, DC-5).
 
 ### 3.11 Converter Costs
 
@@ -275,10 +278,10 @@ Z^{\text{elz}} = \sum_{n,t} c^{\text{elz,var}}_n \, p^{\text{elz}}_{n,t} + \sum_
 ### 3.13 Demand Shifting Cost
 
 \[
-Z^{\text{shift}} = \sum_{s,n,t,t'} |t - t'| \cdot \gamma^{\text{shift}} \cdot \Delta_{s,n,t,t'} \tag{OBJ-13}
+Z^{\text{shift}} = \sum_{s,n,t,t'} |t - t'| \, \Delta t \cdot \gamma^{\text{shift}} \cdot \Delta_{s,n,t,t'} \tag{OBJ-13}
 \]
 
-where \(\gamma^{\text{shift}}\) is the `demand_shift_cost_rate`. The cost increases with temporal distance.
+where \(\gamma^{\text{shift}}\) is the `demand_shift_cost_rate` (\$ per MWh and per hour moved) and \(|t - t'| \, \Delta t\) the shift distance in hours.
 
 ### 3.14 Delayed Retirement Penalty
 
@@ -286,7 +289,7 @@ where \(\gamma^{\text{shift}}\) is the `demand_shift_cost_rate`. The cost increa
 Z^{\text{ret}} = C^{\text{delay}} \sum_{g,n} \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \tag{OBJ-14}
 \]
 
-where \(d_{g,n} \in \{0,1\}\) is the delay retirement binary variable and \(\bar{P}^{\text{orig}}_{g,n}\) is the original rated capacity.
+where \(d_{g,n} \in \{0,1\}\) is the delay retirement binary variable (`gen_delay_ret_*`, and `bat_delay_ret_*` for batteries, with the same form), \(\bar{P}^{\text{orig}}_{g,n}\) is the original rated capacity and \(C^{\text{delay}}\) is `penalties.delay_retirement_per_mw`. A delayed unit keeps its original capacity in GEN-1.
 
 ### 3.15 NPV-Based Forced Replacement Penalty
 
@@ -294,14 +297,14 @@ where \(d_{g,n} \in \{0,1\}\) is the delay retirement binary variable and \(\bar
 Z^{\text{npv}} = \sum_{g,n} \left( C^{\text{decom}}_{g,n} \cdot \bar{P}_{g,n} + C^{\text{npv}}_{g,n} \cdot \bar{P}_{g,n} \cdot 0.1 \right) \cdot r_{g,n} \tag{OBJ-15}
 \]
 
-where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are capped at 100,000 $/MW (decommissioning) and 50,000 $/MW (NPV penalty).
+where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are capped at `max_decommission_cost_per_mw` and `max_npv_penalty_per_mw`. Batteries flagged for replacement get the analogous term: decommissioning cost × discharge power plus 10 % of the absolute negative NPV.
+
+### 3.16 Reservoir Costs
+
+Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). In development mode, reservoir capacity investment is charged at `reservoir_invest_cost` per MWh. See [Reservoir Hydropower](reservoir-hydro.md).
 
 !!! note "Complete objective"
-    The full objective assembled in `build_objective!()` is:
-
-    \[
-    \min \; Z^{\text{op}} + Z^{\text{start}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{inv}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{ret}} + Z^{\text{shift}} + Z^{\text{npv}} + Z^{\text{spill}} - Z^{\text{flex}} - Z^{\text{V2G}}
-    \]
+    The objective is (OBJ) above. \(Z^{\text{bat}}\) includes the throughput cost (OBJ-3b), \(Z^{\text{pen}}\) the EV, SOC, RE-target and rooftop penalties, and \(Z^{\text{spill}}\) both battery and reservoir spillage. The V2G compensation (OBJ-8) is reported but not part of the objective.
 
 ---
 
@@ -315,26 +318,21 @@ Implemented in `add_generator_constraints!()`.
 
 #### GEN-1: Generator Capacity Limits
 
-**Renewable generators** are limited by the availability factor \(a_{g,n,t} \in [0,1]\):
+Every generator is limited by its capacity times its availability factor \(a_{g,n,t} \in [0,1]\):
 
 \[
-p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} + \bar{P}^{\text{delay}}_{g,n} \right) \cdot a_{g,n,t} \quad \forall g \in \mathcal{G}^{\text{RE}}, n, t \tag{GEN-1a}
+p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} + \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \right) \cdot a_{g,n,t} \quad \forall g, n, t \tag{GEN-1a}
 \]
 
-**Non-renewable generators** are limited by total capacity and commitment status:
+For renewables \(a\) is the capacity-factor profile; for other units it is 1 by default. A [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies \(a\) by the outage factor of its window (0 for a full outage), for any unit type. \(\bar{P}^{\text{eff}}\) is the degraded rated power (§5), \(\hat{P}^{\text{inv}}\) the development-mode investment and \(d_{g,n}\) the delayed-retirement decision (OBJ-14).
+
+In unit commitment, non-renewable units and reservoir hydro are also tied to their commitment status:
 
 \[
-p_{g,n,t} \leq \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} + \bar{P}^{\text{delay}}_{g,n} \quad \forall g \in \mathcal{G}^{\text{NR}}, n, t \tag{GEN-1b}
+p_{g,n,t} \leq M_{g,n} \cdot u_{g,n,t}, \qquad M_{g,n} = \max\left(1.1 \cdot \max(\mathbf{D}),\; 10^4,\; 1.1 \left(\bar{P}_{g,n} + \bar{I}_{g,n}\right)\right) \tag{GEN-1b}
 \]
 
-\[
-p_{g,n,t} \leq M \cdot u_{g,n,t} \quad \forall g \in \mathcal{G}^{\text{NR}}, n, t \tag{GEN-1c}
-\]
-
-where \(M = \max(1.1 \cdot \max(\mathbf{D}),\; 10^4)\) is a big-M constant.
-
-!!! warning "Zero-capacity generators"
-    When a generator has zero rated power, zero investment potential, and no delayed retirement at a bus, the model constrains \(p_{g,n,t} \leq 0\) for all \(t\). This prevents free generation from unconstrained variables that would have zero cost in the objective (see Critical Fix #12 in the project history).
+where \(\bar{I}_{g,n}\) is `invest_max` in development mode (0 otherwise). The big-M is per generator so that it never caps a large unit below its own capacity. In economic dispatch and development mode \(u = 1\) and GEN-1b is not added.
 
 **Configuration parameters:**
 
@@ -348,19 +346,19 @@ where \(M = \max(1.1 \cdot \max(\mathbf{D}),\; 10^4)\) is a big-M constant.
 p_{g,n,t} \geq \underline{P}_{g,n} \cdot \bar{P}_{g,n} \cdot u_{g,n,t} \quad \forall g, n, t \tag{GEN-2}
 \]
 
-where \(\underline{P}_{g,n}\) is the minimum stable generation fraction (`min_power[n]`). This ensures that when a generator is committed (\(u=1\)), it produces at least its minimum output.
+where \(\underline{P}_{g,n}\) is the minimum stable generation fraction (`min_power[n]`) and \(\bar{P}_{g,n}\) the degraded rated power, without investment. This ensures that when a generator is committed (\(u=1\)), it produces at least its minimum output.
 
 #### GEN-3: Ramp Rate Constraints
 
 \[
-p_{g,n,t} - p_{g,n,t-1} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} \right) \cdot R^{\text{up}}_{g,n} \quad \forall g, n, t \geq 2 \tag{GEN-3a}
+p_{g,n,t} - p_{g,n,t-1} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} \right) \cdot \min\left(1, R^{\text{up}}_{g,n} \Delta t\right) \quad \forall g, n, t \geq 2 \tag{GEN-3a}
 \]
 
 \[
-p_{g,n,t-1} - p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} \right) \cdot R^{\text{down}}_{g,n} \quad \forall g, n, t \geq 2 \tag{GEN-3b}
+p_{g,n,t-1} - p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} \right) \cdot \min\left(1, R^{\text{down}}_{g,n} \Delta t\right) \quad \forall g, n, t \geq 2 \tag{GEN-3b}
 \]
 
-where \(R^{\text{up}}_{g,n}\) and \(R^{\text{down}}_{g,n}\) are per-unit ramp rates (`ramp_up[n]`, `ramp_down[n]`).
+where \(R^{\text{up}}_{g,n}\) and \(R^{\text{down}}_{g,n}\) are ramp rates in fractions of capacity per hour (`ramp_up[n]`, `ramp_down[n]`) and \(\Delta t\) is the time step (`resolution_hours`): with 6-hour steps a unit with `ramp_up: 0.1` may rise 60 % of its capacity from one step to the next. A rate of 0 means no ramp limit: the constraint is omitted (a literal zero would freeze the unit at its initial output). In rolling-horizon dispatch the same limits also apply between the last committed hour of one window and the first hour of the next.
 
 **Configuration parameters:**
 
@@ -394,6 +392,8 @@ u_{g,n,t} \geq u_{g,n,\tau} - u_{g,n,\tau-1} \quad \forall g, n, t, \; \tau \in 
 - `generators[g].min_up_time[n]` -- minimum on-time (hours)
 - `generators[g].min_down_time[n]` -- minimum off-time (hours)
 
+The windows above count time steps: \(T^{\text{up}}_g\) and \(T^{\text{down}}_g\) are the minimum times in hours divided by the time step (`resolution_hours`) and rounded up, so 8 h at 6-hour steps spans 2 steps.
+
 ---
 
 
@@ -404,24 +404,25 @@ Implemented in `add_battery_constraints!()`.
 #### BAT-1: Charge/Discharge Power Limits
 
 \[
-p^{\text{ch}}_{b,n,t} \leq \bar{P}^{\text{ch}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \quad \forall b, n, t \tag{BAT-1a}
+p^{\text{ch}}_{b,n,t} \leq \left( \bar{P}^{\text{ch}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \right) o_{b,t} \quad \forall b, n, t \tag{BAT-1a}
 \]
 
 \[
-p^{\text{dis}}_{b,n,t} \leq \bar{P}^{\text{dis}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \quad \forall b, n, t \tag{BAT-1b}
+p^{\text{dis}}_{b,n,t} \leq \left( \bar{P}^{\text{dis}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \right) o_{b,t} \quad \forall b, n, t \tag{BAT-1b}
 \]
 
-where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the maximum charge and discharge power ratings respectively.
+where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the (degraded) maximum charge and discharge power ratings and \(o_{b,t} \in [0,1]\) is the scheduled-interruption factor (1 outside outage windows). Battery ramp rates and availability profiles are not used in the dispatch.
 
 #### BAT-2: SOC Dynamics
 
 \[
-E_{b,n,t+1} = E_{b,n,t} \cdot (1 - \rho_b) + \eta^{\text{ch}}_b \, p^{\text{ch}}_{b,n,t} - \frac{p^{\text{dis}}_{b,n,t}}{\eta^{\text{dis}}_b} - \text{spill}_{b,n,t} \quad \forall b, n, t \tag{BAT-2}
+E_{b,n,t+1} = E_{b,n,t} \cdot (1 - \rho_b) + \left( \eta^{\text{ch}}_b \, p^{\text{ch}}_{b,n,t} - \frac{p^{\text{dis}}_{b,n,t}}{\eta^{\text{dis}}_b} - \text{spill}_{b,n,t} \right) \Delta t \quad \forall b, n, t \tag{BAT-2}
 \]
 
 where:
 
-- \(\rho_b\) is the self-discharge rate per hour (`self_discharge[n]`)
+- \(\rho_b\) is the self-discharge rate per time step (`self_discharge[n]`)
+- \(\Delta t\) is the time step (`resolution_hours`): power in MW becomes energy in MWh
 - \(\eta^{\text{ch}}_b\) is the charging efficiency (`charge_efficiency[n]`)
 - \(\eta^{\text{dis}}_b\) is the discharging efficiency (`discharge_efficiency[n]`)
 - \(\text{spill}_{b,n,t}\) is an optional spillage term for batteries that allow energy release without grid injection
@@ -432,7 +433,7 @@ where:
 E_{b,n,1} = E^{0}_{b,n} \quad \forall b, n \tag{BAT-3}
 \]
 
-where \(E^{0}_{b,n} = \text{soc\_initial}_{b,n} \times \bar{E}_{b,n}\) is the initial energy stored, given as a fraction of total capacity.
+where \(E^{0}_{b,n} = \max(\text{soc\_initial}_{b,n}, \underline{E}_b) \times \bar{E}^{\text{eff}}_{b,n}\) is the initial energy stored, given as a fraction of capacity and raised to `soc_min` if below it. In rolling-horizon dispatch every window after the first starts instead from the energy (MWh) the previous window left, clamped to \([\underline{E}_b \bar{E}^{\text{eff}}_{b,n}, \bar{E}^{\text{eff}}_{b,n}]\) (§10.2).
 
 #### BAT-4: SOC Bounds (Soft Upper)
 
@@ -452,16 +453,18 @@ where \(\underline{E}_b\) and \(\overline{E}_b\) are the minimum and maximum SOC
 - `batteries[b].soc_max[n]` -- maximum SOC as fraction of capacity
 - `soc_violation_penalty` -- penalty coefficient for SOC upper bound violation
 
-#### BAT-5: End-of-Horizon Cyclic Constraint
+#### BAT-5: End-of-Year SOC Floor
+
+Inside a year the rolling windows chain the SOC (each window starts from the SOC where the previous one's kept part ended), so intermediate windows have no end-of-window condition. Only the last window of each year (or the single window when `use_rolling_horizon: false`) gets a soft floor at the SOC the battery had at the start of the year, \(E^{\text{year}}_{b,n}\):
 
 \[
-E^{0}_{b,n} \cdot (1 - \epsilon) \leq E_{b,n,T+1} \leq E^{0}_{b,n} \cdot (1 + \epsilon) \quad \forall b, n \tag{BAT-5}
+E_{b,n,T+1} + s^{\text{end}}_{b,n} \geq E^{\text{year}}_{b,n} \cdot (1 - \epsilon), \qquad s^{\text{end}}_{b,n} \geq 0 \quad \forall b, n \tag{BAT-5}
 \]
 
-where \(\epsilon\) is the `soc_end_tolerance`. This prevents batteries from arbitrarily depleting stored energy over the optimization window.
+where \(\epsilon\) is the `soc_end_tolerance`. The shortfall \(s^{\text{end}}\) costs \(0.1 \cdot C^{\text{LOL}} / \Delta t\) per MWh in the objective: well above any generation cost, so the battery is refilled from generation, but below the cost of load shedding, so load is never shed to refill it, and a last window too short to refill stays feasible.
 
-!!! note "Why cyclic SOC matters"
-    Without end-of-horizon constraints, batteries would discharge fully at the end of each window, acting as infinite energy sources across sequential windows. The tolerance \(\epsilon\) provides flexibility while maintaining energy conservation.
+!!! note "Why the year-end floor matters"
+    Each year restarts from the configured `soc_initial`. Without the floor the last window would empty the batteries and the year would get that stored energy for free. The master problem applies the same rule (year-cyclic SOC).
 
 #### BAT-6: Charge/Discharge Mutual Exclusivity
 
@@ -473,7 +476,7 @@ p^{\text{ch}}_{b,n,t} \leq M_{\text{bat}} \cdot \delta^{\text{ch}}_{b,n,t} \quad
 p^{\text{dis}}_{b,n,t} \leq M_{\text{bat}} \cdot (1 - \delta^{\text{ch}}_{b,n,t}) \quad \forall b, n, t \tag{BAT-6b}
 \]
 
-where \(M_{\text{bat}} = \max(10^6, 2 \cdot \max(\bar{P}^{\text{ch}}, \bar{P}^{\text{dis}}))\). This prevents simultaneous charging and discharging.
+where \(M_{\text{bat}} = 2 \left( \max(\bar{P}^{\text{ch}}_{b,n}, \bar{P}^{\text{dis}}_{b,n}) + \bar{I}^{\text{P}}_{b,n} \right)\), with \(\bar{I}^{\text{P}}\) the power investment limit in development mode. \(\delta^{\text{ch}}\) is continuous in \([0,1]\), so this is a relaxation: it discourages, but does not strictly forbid, simultaneous charging and discharging.
 
 #### BAT-7: Minimum Cycling Requirement
 
@@ -498,27 +501,41 @@ Only applies to batteries with `spillage = true`.
 
 Implemented in `add_reserve_constraints!()`.
 
+Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Both requirements are held in the free capacity of reservable generators (\(\mathcal{G}^{\text{res}}\), non-renewable with `reservable: true`) and batteries at the node:
+
+\[
+H_{n,t} = \sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} \cdot u_{g,n,t} - p_{g,n,t} \right) + \sum_{b} \left( \bar{P}^{\text{dis}}_{b,n} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right)
+\]
+
+where \(u_{g,n,t}\) is the commitment status in unit commitment (an offline unit holds no spinning reserve) and 1 otherwise. A battery can raise its discharge to the limit and can stop charging.
+
 #### RES-1: Static Reserve Requirement
 
 \[
-\sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} - p_{g,n,t} \right) + \lambda^{\text{sta}}_{n,t} \geq R^{\text{sta}}_n \quad \forall n, t \tag{RES-1}
+r^{\text{sta}}_{n,t} + \lambda^{\text{sta}}_{n,t} \geq R^{\text{sta}}_n, \qquad r^{\text{sta}}_{n,t} \leq R^{\text{sta}}_n \quad \forall n, t \tag{RES-1}
 \]
 
-The available reserve is the difference between available capacity and dispatched output for reservable generators (\(\mathcal{G}^{\text{res}}\)). The shortage slack \(\lambda^{\text{sta}}_{n,t}\) is penalized in the objective.
-
-\(R^{\text{sta}}_n\) is either specified per bus (`reserve_static_requirement[n]`) or defaults to `reserve_static_default_ratio` \(\times\) bus demand.
+\(R^{\text{sta}}_n\) is either specified per node (`reserve_static_requirement[n]`) or defaults to `reserve_static_default_ratio` \(\times\) node demand. The shortage slack \(\lambda^{\text{sta}}_{n,t}\) is penalized in the objective.
 
 #### RES-2: Dynamic Reserve
 
 \[
-r^{\text{dyn}}_{n,t} \leq \sum_{g \in \mathcal{G}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}_{g,n} \quad \forall n, t \tag{RES-2a}
+r^{\text{dyn}}_{n,t} \leq \sum_{g \in \mathcal{G}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}_{g,n} \cdot u_{g,n,t} + \sum_b \alpha^{\text{dyn}} \cdot \bar{P}^{\text{dis}}_{b,n} \quad \forall n, t \tag{RES-2a}
 \]
 
 \[
-r^{\text{dyn}}_{n,t} + \lambda^{\text{dyn}}_{n,t} \geq R^{\text{dyn}}_n \quad \forall n, t \tag{RES-2b}
+r^{\text{dyn}}_{n,t} + \lambda^{\text{dyn}}_{n,t} \geq R^{\text{dyn}}_n, \qquad r^{\text{dyn}}_{n,t} \leq R^{\text{dyn}}_n \quad \forall n, t \tag{RES-2b}
 \]
 
-where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (fraction of rated power available for dynamic response).
+where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (fraction of rated power that can respond fast enough). RES-2a and RES-2b are added only at nodes with a dynamic requirement \(R^{\text{dyn}}_n > 0\) (`reserve_dynamic_requirement`); elsewhere \(r^{\text{dyn}} = 0\).
+
+#### RES-3: Shared Headroom
+
+\[
+r^{\text{sta}}_{n,t} + r^{\text{dyn}}_{n,t} \leq H_{n,t} \quad \forall n, t \tag{RES-3}
+\]
+
+A MW of free capacity counts once: static and dynamic reserve are held in the same headroom. When it is short, the shortfall is penalized through \(\lambda\); the model may also commit more units (unit commitment) or lower output at a node and import, if that is cheaper than the penalty.
 
 ---
 
@@ -531,49 +548,49 @@ where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (frac
 Implemented in `add_demand_constraints!()`. For single-bus systems:
 
 \[
-\sum_g p_{g,n,t} + \sum_b p^{\text{dis}}_{b,n,t} + p^{\text{v2g}}_{n,t} + \text{LS}_{n,t} + P^{\text{roof}}_{n,t} + \sum_s \text{FC}_{s,n,t} \tag{PB-1}
+\sum_g p_{g,n,t} + \sum_b p^{\text{dis}}_{b,n,t} + \alpha_n p^{\text{v2g}}_{n_i,t} + \text{LS}_{n,t} + \alpha_n P^{\text{roof}}_{n_i,t} \tag{PB-1}
 \]
 
 \[
-= D_{n,t} + p^{\text{elz}}_{n,t} + \sum_b p^{\text{ch}}_{b,n,t} + r^{\text{sta}}_{n,t} + r^{\text{dyn}}_{n,t} + p^{\text{ev,ch}}_{n,t} + \text{RC}_{n,t}
+= D_{n,t} + \alpha_n S_{n_i,t} + p^{\text{elz}}_{n,t} + \sum_b p^{\text{ch}}_{b,n,t} + \sum_g p^{\text{pump}}_{g,n,t} + \alpha_n p^{\text{ev,ch}}_{n_i,t} + \alpha_n \text{RC}_{n_i,t}
 \]
 
-where \(D_{n,t} = D^{\text{node}}_{t,n_i} \cdot \alpha_n\) is the bus demand derived from the parent node's demand scaled by the bus demand fraction, and \(P^{\text{roof}}_{n,t}\) is behind-the-meter rooftop solar generation.
+where \(D_{n,t} = D^{\text{node}}_{t,n_i} \cdot \alpha_n\) is the bus demand derived from the parent node's demand scaled by the bus demand fraction, \(P^{\text{roof}}\) is behind-the-meter rooftop solar generation and \(p^{\text{pump}}\) is reservoir pumping. Reserves are not in the balance: they are free capacity (RES-1 to RES-3), not energy. \(S_{i,t} = \sum_{s} \left( \sum_{t'} \Delta_{s,i,t',t} - \sum_{t'} \Delta_{s,i,t,t'} \right)\) is the net demand shifted into step \(t\) at node \(i\) (SHIFT-1); it is spread over the node's buses like the demand.
 
 !!! note "Curtailment is not in the power balance"
-    Curtailment (\(\text{CU}_{n,t}\)) does not appear in the power balance equation. It represents energy that was never dispatched (the difference between available and used renewable generation), not energy that enters and then leaves the system.
+    Curtailment (\(\text{CU}_{i,t}\)) does not appear in the power balance equation. It represents energy that was never dispatched (the difference between available and used renewable generation), not energy that enters and then leaves the system.
 
-**Load shedding threshold** (B9): If configured, load shedding is capped:
+**Load-shedding bound.** Load shedding sits on the supply side of the balance, so it is bounded by the demand at its own bus:
 
 \[
-\text{LS}_{n,t} \leq \theta^{\text{LS}} \cdot D_{n,t} \quad \text{when } \theta^{\text{LS}} < 1 \tag{PB-1b}
+\text{LS}_{n,t} \leq \max(D_{n,t},\, 0) \quad \forall n, t \tag{PB-1b}
 \]
+
+Connection buses have \(D_{n,t} = 0\) and so cannot shed. Without this bound the solver could "shed" more than a bus consumes and export the surplus, using load shedding as virtual generation. The same bound is applied in all three network formulations (`max_load_shed_b*` single-bus, `max_load_shed_dc_b*` DC-OPF, `max_load_shed_acopf_b*` AC-OPF).
 
 #### DC-1: Multi-Bus Power Balance (KCL)
 
-Implemented in `add_dc_constraints!()` in `transmission_dc.jl`. For multi-bus networks, the power balance includes transmission flows:
+Implemented in `add_dc_constraints!()` in `transmission_dc.jl`. For multi-bus networks the same terms as PB-1 are balanced against the flows on the lines incident to the bus:
 
 \[
-\underbrace{\sum_g p_{g,n,t} + \sum_b p^{\text{dis}}_{b,n,t} + p^{\text{v2g}}_{n,t} + \text{LS}_{n,t} + P^{\text{conv}}_{n,t} + \sum_s \text{FC}_{s,n,t}}_{\text{supply}} \tag{DC-1}
+\underbrace{\sum_g p_{g,n,t} + \sum_b p^{\text{dis}}_{b,n,t} + \alpha_n p^{\text{v2g}}_{n_i,t} + \text{LS}_{n,t} + \alpha_n P^{\text{roof}}_{n_i,t} + P^{\text{conv}}_{n,t}}_{\text{supply}} \tag{DC-1}
 \]
 
 \[
-- \underbrace{D_{n,t} - p^{\text{elz}}_{n,t} - \sum_b p^{\text{ch}}_{b,n,t} - r^{\text{sta}}_{n,t} - r^{\text{dyn}}_{n,t} - p^{\text{ev,ch}}_{n,t}}_{\text{demand}} = \sum_{\ell} K_{n,\ell} \, f_{\ell,t}
+- \underbrace{\left( D_{n,t} + \alpha_n S_{n_i,t} + p^{\text{elz}}_{n,t} + \sum_b p^{\text{ch}}_{b,n,t} + \sum_g p^{\text{pump}}_{g,n,t} + \alpha_n p^{\text{ev,ch}}_{n_i,t} + \alpha_n \text{RC}_{n_i,t} \right)}_{\text{demand}} = \sum_{\ell} \left( K_{n,\ell} \, f_{\ell,t} + \tfrac{1}{2} |K_{n,\ell}| \, P^{\text{loss}}_{\ell,t} \right)
 \]
 
-where \(K_{n,\ell}\) is the bus-line incidence matrix element (\(+1\) if line \(\ell\) leaves bus \(n\), \(-1\) if it enters), and \(P^{\text{conv}}_{n,t}\) aggregates AC/DC and frequency converter injections at the bus. Transmission losses are applied to incoming flows: the effective coefficient for incoming flow is \(K_{n,\ell} \cdot (1 - \rho_\ell)\) where \(\rho_\ell\) is the per-line loss factor.
+where \(K_{n,\ell}\) is the bus-line incidence matrix element (\(+1\) if line \(\ell\) leaves bus \(n\), \(-1\) if it enters), \(P^{\text{conv}}_{n,t}\) aggregates AC/DC and frequency converter injections at the bus, and \(P^{\text{loss}}_{\ell,t}\) is the loss of line \(\ell\) (piecewise-linear, or linear with `loss_model: linear`): each end supplies half of it. With `loss_model: none` the losses are zero. See [DC Power Flow](dc-power-flow.md) for the loss model.
 
 The constraint reference is stored for dual price extraction.
 
-#### DC-2: Kirchhoff's Voltage Law (KVL)
-
-For each independent cycle \(c\):
+#### DC-2: Flow–Angle Coupling
 
 \[
-\sum_\ell C_{\ell,c} \cdot x_\ell \cdot f_{\ell,t} = 0 \quad \forall c, t \tag{DC-2}
+f_{\ell,t} = \frac{S_{\text{base}}}{x_\ell} \left( \theta_{i(\ell),t} - \theta_{j(\ell),t} \right) \quad \forall \ell, t \tag{DC-2}
 \]
 
-where \(C_{\ell,c}\) is the cycle-line incidence matrix and \(x_\ell\) is the line reactance. This enforces loop consistency of voltage drops.
+where \(x_\ell\) is the line reactance in p.u. (values \(\leq 0\) are replaced by 0.01) and \(S_{\text{base}}\) the system base power. Each physical line, including parallel lines, is linked to its end-bus angles (`flow_angle_*`). A line with less than 0.1 MW capacity that cannot be expanded by investment has its flow fixed to 0 instead (`flow_zero_*`).
 
 #### DC-3: Slack Bus Reference
 
@@ -581,37 +598,31 @@ where \(C_{\ell,c}\) is the cycle-line incidence matrix and \(x_\ell\) is the li
 \theta_{\text{slack},t} = 0 \quad \forall t \tag{DC-3}
 \]
 
-#### DC-4: Voltage Angle Limits
-
-\[
-|\theta_{i,t} - \theta_{j,t}| \leq \bar{\theta} \quad \forall (i,j) \in \mathcal{L}, t \tag{DC-4}
-\]
-
-where \(\bar{\theta}\) is `max_angle_diff_rad`. Only enforced when `enable_angle_limits` is true.
+Each connected component of the network gets its own reference bus. Angles are otherwise only bounded by \([-\pi, \pi]\); the DC formulation has no angle-difference limit (`max_angle_diff_deg` applies to AC-OPF only).
 
 #### DC-5: Line Capacity Limits
 
 Implemented in `add_line_capacity_constraints!()`:
 
 \[
--\left(\bar{F}_\ell + \hat{F}^{\text{inv}}_\ell\right) \leq f_{\ell,t} \leq \bar{F}_\ell + \hat{F}^{\text{inv}}_\ell \quad \forall \ell, t \tag{DC-5}
+-\left(\bar{F}_\ell + \hat{F}^{\text{inv}}_\ell\right) o_{\ell,t} \leq f_{\ell,t} \leq \left(\bar{F}_\ell + \hat{F}^{\text{inv}}_\ell\right) o_{\ell,t} \quad \forall \ell, t \tag{DC-5}
 \]
 
-where \(\bar{F}_\ell\) is the thermal capacity and \(\hat{F}^{\text{inv}}_\ell\) is the transmission investment variable (development mode only).
+where \(\bar{F}_\ell\) is the thermal capacity, \(\hat{F}^{\text{inv}}_\ell\) is the transmission investment variable (development mode only, `tf_inv_*`: one per corridor, added to its first line, at most the smaller `transference_invest_max` of the two end buses, charged at the higher `transference_invest_cost`, as in the master) and \(o_{\ell,t}\) is the scheduled-interruption factor of the line or transformer.
 
 #### DC-6: Converter Capacity Limits
 
 Implemented in `add_converter_constraints!()`:
 
 \[
-p^{\text{rect}}_{k,t} + p^{\text{inv}}_{k,t} \leq \bar{S}_k \quad \forall k, t \tag{DC-6a}
+p^{\text{rect}}_{k,t} + p^{\text{inv}}_{k,t} \leq \bar{S}_k \, o_{k,t} \quad \forall k, t \tag{DC-6a}
 \]
 
 \[
-p^{A \to B}_{f,t} + p^{B \to A}_{f,t} \leq \bar{S}_f \quad \forall f, t \tag{DC-6b}
+p^{A \to B}_{f,t} + p^{B \to A}_{f,t} \leq \bar{S}_f \, o_{f,t} \quad \forall f, t \tag{DC-6b}
 \]
 
-where \(\bar{S}\) is the rated apparent power (MVA) of the converter.
+where \(\bar{S}\) is the rated apparent power (MVA) of the converter and \(o\) its scheduled-interruption factor.
 
 ---
 
@@ -623,32 +634,18 @@ Implemented in `add_curtailment_constraints!()`.
 #### CUR-1: Curtailment Definition
 
 \[
-\text{CU}_{n,t} = \sum_{g \in \mathcal{G}^{\text{RE}}} \left(\bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n}\right) a_{g,n,t} - \sum_{g \in \mathcal{G}^{\text{RE}}} p_{g,n,t} \quad \forall n, t \tag{CUR-1}
+\text{CU}_{i,t} = \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \left( \left(\bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n}\right) a_{g,n,t} - p_{g,n,t} \right) \quad \forall i, t \tag{CUR-1}
 \]
 
-Curtailment is defined as the difference between available renewable capacity and dispatched renewable generation at each bus and hour.
+Curtailment is defined per node as the difference between available and dispatched variable renewable generation over the node's buses. \(\mathcal{G}^{\text{RE}}_{\text{var}}\) are the renewable units without a reservoir: reservoir hydro is dispatchable within its water budget and is not counted.
 
 #### CUR-2: Curtailment Upper Bound
 
 \[
-\text{CU}_{n,t} \leq \sum_{g \in \mathcal{G}^{\text{RE}}} \left(\bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n}\right) a_{g,n,t} \quad \forall n, t \tag{CUR-2}
+\text{CU}_{i,t} \leq \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \left(\bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n}\right) a_{g,n,t} \quad \forall i, t \tag{CUR-2}
 \]
 
-Curtailment cannot exceed available renewable generation.
-
-#### CUR-3: Maximum Curtailment Ratio
-
-\[
-\sum_{n,t} \text{CU}_{n,t} \leq \rho^{\text{CU}} \cdot \sum_{g \in \mathcal{G}^{\text{RE}}, n, t} p_{g,n,t} \quad \tag{CUR-3}
-\]
-
-where \(\rho^{\text{CU}}\) is the `max_curtailment_ratio` (default: 0.05, i.e., 5%). This is a **hard constraint** (not a penalty): total curtailment across all buses and hours cannot exceed 5% of total renewable generation.
-
-This constraint serves two purposes:
-1. **Storage investment signal**: By limiting curtailment, the optimizer is forced to invest in battery storage or transmission to absorb excess renewable generation.
-2. **Policy compliance**: Many grid codes limit the fraction of renewable energy that may be wasted.
-
-When `max_curtailment_ratio = 1.0`, the constraint is inactive (all renewable generation may be curtailed).
+Curtailment cannot exceed available renewable generation. In the dispatch, curtailment is priced at `curtailment_cost` (OBJ-4a) and not capped; the `max_curtailment_ratio` cap applies only in the master problem's representative days (see [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)).
 
 ---
 
@@ -660,19 +657,19 @@ Implemented in `add_renewable_constraint!()`.
 #### RE-1: System-Wide Renewable Penetration Target
 
 \[
-\Delta t \cdot \left( \sum_{g \in \mathcal{G}^{\text{RE}}, n, t} p_{g,n,t} + \sum_{b,n,t} p^{\text{dis}}_{b,n,t} \right) + \Delta t \cdot \sum_{n,t} \phi_{n,t} \geq \tau^{\text{RE}} \cdot E^{\text{total}}_{\text{demand}} \tag{RE-1}
+\Delta t \sum_{g \in \mathcal{G}^{\text{RE}}, n, t} p_{g,n,t} + \Delta t \sum_{i,t} \phi_{i,t} \geq \tau^{\text{RE}} \cdot E^{\text{total}}_{\text{demand}} \tag{RE-1}
 \]
 
 where:
 
 - \(\Delta t\) is the temporal resolution (hours)
-- \(\tau^{\text{RE}}\) is `re_penetration_target`
-- \(E^{\text{total}}_{\text{demand}} = \sum_{t,n} D_{t,n} \cdot \Delta t\) is total energy demand
+- \(\tau^{\text{RE}}\) is `re_penetration_target`; the constraint is added only when it is positive
+- \(E^{\text{total}}_{\text{demand}} = \sum_{t,i} D_{t,i} \cdot \Delta t\) is total energy demand in the window
 
-Battery discharge is counted toward renewable delivery because storage shifts renewable energy in time. The slack variable \(\phi_{n,t}\) is penalized by \(C^{\text{FRE}}\) in the objective.
+Battery discharge does not count: a battery may have been charged from fossil generation. The slack variable \(\phi_{i,t}\) is penalized by \(C^{\text{FRE}}\) in the objective, so the target never makes the problem infeasible.
 
 !!! note "RE penetration is measured against demand, not generation"
-    This is a policy constraint. The target \(\tau^{\text{RE}}\) represents the fraction of total demand that should be served by renewable sources (including battery-mediated delivery).
+    This is a policy constraint. The target \(\tau^{\text{RE}}\) represents the fraction of total demand that should be served by renewable generation.
 
 ---
 
@@ -684,18 +681,18 @@ Implemented in `add_co2_emissions_definition!()` and `add_co2_constraint!()`.
 #### CO2-1: Emissions Definition
 
 \[
-\text{CO2}_{n,t} = \sum_g e_{\text{fuel}(g)} \cdot p_{g,n,t} \quad \forall n, t \tag{CO2-1}
+\text{CO2}_{i,t} = \sum_{n \in i} \sum_g \frac{e_{\text{fuel}(g)}}{\eta_{g,n}} \cdot p_{g,n,t} \quad \forall i, t \tag{CO2-1}
 \]
 
-where \(e_f\) is the emission factor (tonnes CO2/MWh) for fuel type \(f\), looked up from `fuel_co2`.
+with \(e_f\) (t per MWh of fuel, from `fuel_co2`) and \(\eta_{g,n}\) as in OBJ-6.
 
 #### CO2-2: CO2 Budget Constraint
 
 \[
-\sum_{g,n,t} e_{\text{fuel}(g)} \cdot p_{g,n,t} \leq \frac{T \cdot \Delta t}{8760} \cdot B^{\text{CO2}} + \xi^{\text{CO2}} \tag{CO2-2}
+\Delta t \sum_{g,n,t} \frac{e_{\text{fuel}(g)}}{\eta_{g,n}} \cdot p_{g,n,t} \leq \frac{T \cdot \Delta t}{H_{\text{year}}} \cdot B^{\text{CO2}} + \xi^{\text{CO2}} \tag{CO2-2}
 \]
 
-The annual CO2 budget \(B^{\text{CO2}}\) (`co2_budget`, tonnes/year) is scaled by the window fraction \(T \cdot \Delta t / 8760\). The violation slack \(\xi^{\text{CO2}}\) is penalized by `co2_budget_violation_penalty` in the objective.
+The annual CO2 budget \(B^{\text{CO2}}\) (`co2_budget`, tonnes/year) is scaled by the window fraction \(T \cdot \Delta t / H_{\text{year}}\), where \(H_{\text{year}}\) is the number of hours in the year (`hours_per_year`). The left-hand side is the window's emissions in tonnes (output × \(\Delta t\) × emission factor). The violation slack \(\xi^{\text{CO2}}\) is penalized by `co2_budget_violation_penalty` per tonne, once: in OBJ-4c its coefficient is \(C^{\text{CO2,bud}} / \Delta t\), so that the \(\Delta t\) of OBJ cancels.
 
 ---
 
@@ -714,7 +711,7 @@ where:
 
 - \(h_{g,n}\) is the inertia constant of generator \(g\) at bus \(n\) (`inertia[n]`)
 - \(h^{\text{bat}}_{b,n}\) is the synthetic inertia constant of battery \(b\) (`inertia[n]`)
-- \(H^{\min}_t\) is the minimum inertia requirement (from `inertia_limit` or `inertia_limit_hourly[t]`)
+- \(H^{\min}_t\) is the minimum inertia requirement in MW·s (the system key `INERTIA_LIMIT_THRESHOLD`, default 0.1, or an hourly profile). It is an absolute value, not a fraction of demand or capacity, although the Studio labels the field as a fraction; the default 0.1 MW·s is effectively no requirement. The constraint is skipped in hours where it is \(\leq 0\)
 - \(H_t\) is the inertia shortfall slack, penalized by `loss_of_inertia_penalty`
 
 Inertia is contributed by synchronous generators proportionally to their output and by storage systems proportionally to their power throughput.
@@ -729,16 +726,18 @@ Implemented in `add_ev_constraints!()`.
 #### EV-1: SOC Dynamics
 
 \[
-E^{\text{ev}}_{n,t+1} = E^{\text{ev}}_{n,t} + \eta^{\text{ev,ch}} \cdot p^{\text{ev,ch}}_{n,t} - \frac{p^{\text{v2g}}_{n,t}}{\eta^{\text{ev,dis}}} \quad \forall n, t \tag{EV-1}
+E^{\text{ev}}_{n,t+1} = E^{\text{ev}}_{n,t} + \eta^{\text{ev,ch}} \cdot p^{\text{ev,ch}}_{n,t} - \frac{p^{\text{v2g}}_{n,t}}{\eta^{\text{ev,dis}}} - \left(D^{\text{ev}}_{n,t} - \ell^{\text{ev}}_{n,t}\right) \quad \forall n, t \tag{EV-1}
 \]
 
-#### EV-2: Charging Demand Satisfaction
+where \(D^{\text{ev}}_{n,t}\) is the driving energy drawn from the fleet battery (MWh). Driving consumes the stored energy, so over the window the grid must supply it (divided by \(\eta^{\text{ev,ch}}\)) and V2G can only return energy that is not used for driving. Charging can shift in time within the power and SOC limits.
+
+#### EV-2: Unserved Driving Energy
 
 \[
-p^{\text{ev,ch}}_{n,t} + \ell^{\text{ev}}_{n,t} \geq D^{\text{ev}}_{n,t} \quad \forall n, t \tag{EV-2}
+0 \leq \ell^{\text{ev}}_{n,t} \leq D^{\text{ev}}_{n,t} \quad \forall n, t \tag{EV-2}
 \]
 
-where \(D^{\text{ev}}_{n,t}\) is the driving energy consumption profile. The slack \(\ell^{\text{ev}}_{n,t}\) allows unmet EV charging demand (penalized in objective).
+The slack \(\ell^{\text{ev}}_{n,t}\) is driving energy the fleet cannot supply, penalized in the objective at `penalties.ev_loss` (default: `loss_of_load`).
 
 #### EV-3: Charging Power Limit
 
@@ -774,7 +773,15 @@ p^{\text{ev,ch}}_{n,t} \leq M_{\text{ev}} \cdot \delta^{\text{ev}}_{n,t} \quad \
 p^{\text{v2g}}_{n,t} \leq M_{\text{ev}} \cdot (1 - \delta^{\text{ev}}_{n,t}) \quad \forall n, t \tag{EV-6b}
 \]
 
-where \(M_{\text{ev}} = P^{\text{max,ch}} + P^{\text{max,v2g}}\).
+where \(M_{\text{ev}} = P^{\text{max,ch}} + P^{\text{max,v2g}}\). \(\delta^{\text{ev}}\) is continuous in \([0,1]\), so this is a relaxation.
+
+#### EV-7: Initial and Window-End SOC
+
+\[
+E^{\text{ev}}_{n,1} = E^{\text{ev},0}_n, \qquad E^{\text{ev}}_{n,T+1} = E^{\text{ev}}_{n,1} \quad \forall n \tag{EV-7}
+\]
+
+The fleet starts each window at its initial SOC (`initial_soc`, or `target_soc` × fleet capacity) and must return to it at the end of the window (`ev_soc_cyclic_n*`). Nodes without vehicles have all EV variables fixed to 0. See [EV Model](ev-model.md) for how the fleet parameters and profiles are built.
 
 ---
 
@@ -786,29 +793,13 @@ Implemented in `add_sectoral_demand_constraints!()`.
 #### SEC-1: LOL Decomposition
 
 \[
-\sum_{s \in \mathcal{S}} \text{LOL}_{s,n,t} = \text{LS}_{n,t} \quad \forall n, t \tag{SEC-1}
+\sum_{s \in \mathcal{S}} \text{LOL}_{s,i,t} = \sum_{n \in i} \text{LS}_{n,t} \quad \forall i, t \tag{SEC-1}
 \]
 
-Total load shedding is decomposed into per-sector contributions.
-
-#### SEC-2: Per-Sector LOL Cap
-
-\[
-\text{LOL}_{s,n,t} \leq D^{s}_{n,t} \cdot \alpha_n \quad \forall s, n, t \tag{SEC-2}
-\]
-
-No sector can shed more load than its demand.
-
-#### SEC-3: Flexible Demand Curtailment Cap
-
-\[
-\text{FC}_{s,n,t} \leq D^{s}_{n,t} \cdot \alpha_n \quad \forall s, n, t \tag{SEC-3}
-\]
-
-Flexible demand curtailment cannot exceed the sector's demand. This bound is essential because \(\text{FC}\) enters the objective with a negative (benefit) coefficient; without it, the LP would be unbounded.
+The load shed on a node's buses is decomposed into per-sector contributions (`sectoral_lol_sum_*`). There is no per-sector cap in the dispatch: the sectors are bounded only through this sum and the per-bus bound PB-1b. Since shedding is priced at \(C^{\text{VOLL}} \kappa_s\) (OBJ-5), all of a node's shed load is attributed to its lowest-criticality sector.
 
 !!! note "Criticality ordering"
-    Higher-criticality sectors receive a higher load shedding penalty in the objective (\(C^{\text{VOLL}} \cdot \kappa_s\)). The optimizer naturally sheds lower-criticality sectors first. No explicit ordering constraint is needed.
+    Higher-criticality sectors receive a higher load shedding penalty in the objective (\(C^{\text{VOLL}} \cdot \kappa_s\)). No explicit ordering constraint is needed.
 
 ---
 
@@ -820,46 +811,62 @@ Implemented within `add_sectoral_demand_constraints!()`.
 #### SHIFT-1: Shift-Out Capacity
 
 \[
-\sum_{t' \neq t} \Delta_{s,n,t,t'} \leq (1 - \kappa_s) \cdot D^{s}_{n,t} \cdot \alpha_n \quad \forall s, n, t \tag{SHIFT-1}
+\sum_{t'} \Delta_{s,i,t,t'} \leq \phi_s \cdot D^{s}_{i,t} \quad \forall s, i, t \tag{SHIFT-1}
 \]
 
-The total demand shifted away from hour \(t\) is limited by the flexibility ratio \((1 - \kappa_s)\) of the sector's demand. Only flexible sectors (\(\kappa_s < 1\)) have shift variables, and shifts are restricted to a temporal delay tolerance window: \(|t - t'| \leq \tau^{\text{delay}}_s\).
+Sectors with `is_flexible: true`, `flexibility_ratio` \(\phi_s > 0\) and `delay_tolerance` \(\tau_s > 0\) hours can move demand from step \(t\) to any step \(t'\) of the same window at most \(\tau_s\) hours earlier or later (\(|t - t'| \le \lfloor \tau_s / \Delta t \rfloor\)), at the same node. What leaves a step is at most \(\phi_s\) of the sector's demand there (`demand_shift_out_cap_*`). The net shifted demand \(S_{i,t}\) enters the power balance (PB-1, DC-1), so the energy is moved, not removed, and each MWh moved costs OBJ-13.
 
-**Configuration parameters:**
-
-- `sectoral_criticality[s]` -- criticality weight (0 = fully flexible, 1 = fully critical)
-- `sectoral_delay_tolerance[s]` -- maximum shift window in hours (default 24)
-- `demand_shift_cost_rate` -- cost per MW per hour of shift distance
+In a rolling window a shift does not cross the end of the committed hours (the window length minus `overlap_hours`): demand moved into the overlap would be dropped when the next window starts from the original profile. Shifts do not cross window boundaries either.
 
 ---
 
 
 ### N-1 Security Constraints
 
-Implemented in `add_n1_security_constraints!()`.
+Implemented in `add_n1_security_constraints!()` (preventive) or, with `scopf_enabled`, in `add_scopf_constraints!()`. Both require `n1_security.enabled`.
 
-#### N1-1: Generation N-1
-
-\[
-\sum_{\substack{g,n \\ (g,n) \neq (g^*,n^*)}} p_{g,n,t} \geq \sum_n D_{n,t} \quad \forall t \tag{N1-1}
-\]
-
-where \((g^*, n^*)\) is the largest generator in the system. The remaining generation must be sufficient to cover total demand if the largest unit trips.
-
-#### N1-2: Transmission N-1
+#### N1-1: Generation N-1 (preventive)
 
 \[
--\bar{F}_\ell \cdot \omega \leq f_{\ell,t} \leq \bar{F}_\ell \cdot \omega \quad \forall \ell \in \mathcal{L}^{\text{crit}}, t \tag{N1-2}
+H^{\text{N1}}_t + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t} \quad \forall t \tag{N1-1}
 \]
 
-where \(\omega\) is the `n1_transmission_reserve_factor` (typically 0.7--0.9). Critical lines have their usable capacity reduced to reserve headroom for post-contingency flow redistribution.
+where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable non-renewable units, counted only when online in unit commitment, plus battery headroom), summed over the whole system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_shortfall_t*`) keeps the problem feasible.
 
-**Configuration parameters:**
+#### N1-2: Transmission N-1 (preventive)
 
-- `n1_security_enabled` -- master switch for N-1 constraints
-- `n1_generation_enabled` -- enable generation N-1
-- `n1_transmission_enabled` -- enable transmission N-1
-- `n1_transmission_reserve_factor` -- fraction of line capacity usable under N-1
+\[
+-\bar{F}_{\ell} \cdot \omega - s^{\text{N1,l}}_{\ell,t} \leq f_{\ell,t} \leq \bar{F}_{\ell} \cdot \omega + s^{\text{N1,l}}_{\ell,t} \quad \forall \ell: \bar{F}_{\ell} > 0, \; t \tag{N1-2}
+\]
+
+where \(\omega\) is the `transmission_reserve_factor`. Every transmission line with positive capacity is critical, each parallel circuit on its own flow (`n1_trans_reserve_l*`, over-flow slack `n1_trans_over_l*`).
+
+Both slacks are priced at `loss_of_reserve_static` per MW and time step (reported as `n1_security_shortfall_cost`), so an insecure fleet or network shows up as a cost instead of an infeasible model.
+
+`generation_reserve_type`, `generation_reserve_percentage`, `critical_line_threshold` and `scopf_max_iterations` are read from the configuration but not used by any constraint.
+
+#### SCOPF variant
+
+With `scopf_enabled`, post-contingency line limits replace N1-2. For every pair of lines \(l \neq k\) with non-negligible LODF, one set of constraints is added once (no iteration, no reserve factor), on each physical line's flow in its from→to direction:
+
+\[
+-\bar{F}_l - o_{l,t} \leq f_{l,t} + \text{LODF}_{l,k} \, f_{k,t} \leq \bar{F}_l + o_{l,t} \quad \forall l, k, t \tag{N1-3}
+\]
+
+(`scopf_line*_outage*_t*_pos/neg`), where \(o_{l,t}\) is line \(l\)'s worst post-contingency overload (`scopf_over_l*_t*`). Generation N-1 is either N1-1 (`scopf_n1_gen_reserve_t*`) or, with `corrective_enabled`, a re-dispatch form: every non-renewable unit other than \((g^*, n^*)\), reservable or not, contributes its headroom \(h_{g,n,t}\) up to what it can ramp in one step, plus battery headroom (`n1_corrective_gen_t*`):
+
+\[
+\sum_{(g,n) \neq (g^*,n^*)} r_{g,n,t} + \sum_{b,n} \left( \bar{P}^{\text{dis}}_{b,n} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right) + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t}, \quad r_{g,n,t} \leq \min\left(h_{g,n,t}, \bar{P}_{g,n} R^{\text{up}}_{g,n} \Delta t\right) \tag{N1-4}
+\]
+
+All SCOPF slacks are priced like the preventive ones.
+
+**Configuration parameters** (section `n1_security:`):
+
+- `enabled` -- master switch for N-1 constraints (default false)
+- `generation_enabled`, `transmission_enabled` -- enable each part
+- `transmission_reserve_factor` -- fraction \(\omega\) of line capacity usable under N-1 (default 0.70)
+- `scopf_enabled`, `corrective_enabled` -- SCOPF variant and corrective generation N-1
 
 ---
 
@@ -874,7 +881,9 @@ Implemented in `add_node_investment_limits!()`.
 \sum_g \hat{P}^{\text{inv}}_{g,n} + \sum_b \hat{P}^{\text{inv,P}}_{b,n} \leq \bar{I}_n \quad \forall n \tag{INV-1}
 \]
 
-where \(\bar{I}_n\) is `max_node_investment[n]` (MW).
+where \(\bar{I}_n\) is `max_node_investment[n]` (MW), summed over the node's buses (`max_node_inv_*`).
+
+Because per-node `invest_max` values are copied to every bus of the node, the investment of one unit across the buses of a node is also capped at its `invest_max` (`invest_node_gen_*`, `invest_node_bat_pow_*`, `invest_node_bat_cap_*`).
 
 ---
 
@@ -886,8 +895,10 @@ Implemented in `add_max_annual_system_cost!()`.
 #### COST-1: Operating Cost Ceiling
 
 \[
-\sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{fixed}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} \leq C^{\max}_{\text{annual}} \tag{COST-1}
+\Delta t \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{fixed}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} - s^{\text{cost}} \leq \frac{T \Delta t}{H_{\text{year}}} \, C^{\max}_{\text{annual}} \tag{COST-1}
 \]
+
+The annual ceiling `MAX_ANNUAL_SYSTEM_COST` (default 20·10⁹) is scaled to the window. The constraint is soft: the violation \(s^{\text{cost}} \geq 0\) (`cost_violation`) costs 10 × the largest generator variable cost per unit in the objective.
 
 ---
 
@@ -955,23 +966,24 @@ After solving, `extract_solution()` computes the following aggregate metrics:
 ## 8. Parameter Summary
 
 
-Penalty coefficients and their configuration paths:
+Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each system's `penalties` section; the others are system-level keys. Defaults are the schema defaults.
 
-| Parameter | Config Field | Default | Description |
-|-----------|-------------|---------|-------------|
-| \(C^{\text{VOLL}}\) | `loss_of_load_penalty` | -- | Value of lost load ($/MWh) |
-| \(C^{\text{CU}}\) | `curtailment_penalty` | -- | Curtailment cost ($/MWh) |
-| \(C^{\text{r,sta}}\) | `loss_of_reserve_static` | -- | Static reserve shortage ($/MW) |
-| \(C^{\text{r,dyn}}\) | `loss_of_reserve_dynamic` | -- | Dynamic reserve shortage ($/MW) |
-| \(C^{\text{ine}}\) | `loss_of_inertia_penalty` | -- | Inertia shortfall penalty |
-| \(C^{\text{ev}}\) | `ev_config.loss_penalty` | -- | EV demand unmet penalty |
-| \(C^{\text{FRE}}\) | `fre_penetration_penalty` | 100 | RE target shortfall ($/MWh) |
-| \(C^{\text{SOC}}\) | `soc_violation_penalty` | -- | SOC limit violation penalty |
-| \(C^{\text{TM}}\) | `transfer_margin_penalty` | 10% of VOLL | Transmission violation |
-| \(C^{\text{CO2,bud}}\) | `co2_budget_violation_penalty` | 500 | CO2 budget excess ($/tonne) |
-| \(C^{\text{RC}}\) | `rooftop_curtailment_penalty` | 5.0 | Rooftop solar curtailment |
-| \(C^{\text{delay}}\) | `delay_retirement_penalty_per_mw` | -- | Delayed retirement ($/MW) |
-| \(\gamma^{\text{shift}}\) | `demand_shift_cost_rate` | 0.1 | Shift cost per MW-hour distance |
+| Parameter | YAML key | Default | Description |
+|-----------|----------|---------|-------------|
+| \(C^{\text{VOLL}}\) | `penalties.loss_of_load` | 10 000 000 | Value of lost load (\$/MWh) |
+| \(C^{\text{CU}}\) | `penalties.curtailment_cost` | 20 | Curtailment cost (\$/MWh) |
+| \(C^{\text{r,sta}}\) | `penalties.loss_of_reserve_static` | 100 | Static reserve shortage (\$/MW per step) |
+| \(C^{\text{r,dyn}}\) | `penalties.loss_of_reserve_dynamic` | 100 | Dynamic reserve shortage (\$/MW per step) |
+| \(C^{\text{ine}}\) | `penalties.loss_of_inertia` | 200 | Inertia shortfall penalty |
+| \(C^{\text{ev}}\) | `penalties.ev_loss` | = `loss_of_load` | Unserved EV driving energy (\$/MWh) |
+| \(C^{\text{FRE}}\) | `penalties.fre_penetration_loss` | 100 | RE target shortfall (\$/MWh) |
+| \(C^{\text{SOC}}\) | `penalties.soc_violation` | 1 000 000 | SOC upper-limit violation (\$/MWh) |
+| \(C^{\text{TM}}\) | `penalties.transfer_margin` | 100 | Transfer margin slack (always 0, see §2.3) |
+| \(C^{\text{CO2}}\) | `penalties.co2_cost` | 10 | Carbon price (\$/t) |
+| \(C^{\text{CO2,bud}}\) | `penalties.co2_budget_violation` | 500 | CO2 budget excess (\$/t) |
+| \(C^{\text{RC}}\) | `penalties.rooftop_curtailment` | 5 | Rooftop solar curtailment (\$/MWh) |
+| \(C^{\text{delay}}\) | `penalties.delay_retirement_per_mw` | 50 000 | Delayed retirement (\$/MW) |
+| \(\gamma^{\text{shift}}\) | `demand_shift_cost_rate` | 0.1 | Shift cost per MWh and per hour moved (\$/MWh/h) |
 
 !!! note "Penalty tuning"
     Penalty coefficients establish a merit order for constraint relaxation. They should be set so that \(C^{\text{VOLL}} \gg C^{\text{CU}} > C^{\text{FRE}}\) to ensure that load shedding is the last resort, curtailment is preferred to shedding, and RE targets create appropriate investment signals without dominating the objective.
@@ -988,19 +1000,22 @@ Penalty coefficients and their configuration paths:
 | `build_objective!()` | Objective function | `power_system.jl` |
 | `add_generator_constraints!()` | GEN-1 through GEN-5 | `power_system.jl` |
 | `add_battery_constraints!()` | BAT-1 through BAT-8 | `power_system.jl` |
-| `add_reserve_constraints!()` | RES-1, RES-2 | `power_system.jl` |
-| `add_demand_constraints!()` | PB-1 (single bus) | `power_system.jl` |
-| `add_dc_constraints!()` | DC-1 through DC-4 | `transmission_dc.jl` |
+| `add_reserve_constraints!()` | RES-1 to RES-3 | `power_system.jl` |
+| `add_reservoir_constraints!()` | Reservoir hydro (see [Reservoir Hydropower](reservoir-hydro.md)) | `power_system.jl` |
+| `add_electrolyzer_dispatch_constraints!()` | Electrolyzer rated power and ramps | `power_system.jl` |
+| `add_demand_constraints!()` | PB-1, PB-1b (single bus) | `power_system.jl` |
+| `add_dc_constraints!()` | DC-1 to DC-3, PB-1b | `transmission_dc.jl` |
 | `add_line_capacity_constraints!()` | DC-5 | `transmission_dc.jl` |
 | `add_converter_constraints!()` | DC-6 | `transmission_dc.jl` |
-| `add_curtailment_constraints!()` | CUR-1, CUR-2, CUR-3 | `power_system.jl` |
+| `add_curtailment_constraints!()` | CUR-1, CUR-2 | `power_system.jl` |
 | `add_renewable_constraint!()` | RE-1 | `power_system.jl` |
 | `add_co2_emissions_definition!()` | CO2-1 | `power_system.jl` |
 | `add_co2_constraint!()` | CO2-2 | `power_system.jl` |
 | `add_inertia_constraints!()` | INE-1 | `power_system.jl` |
-| `add_ev_constraints!()` | EV-1 through EV-6 | `power_system.jl` |
-| `add_sectoral_demand_constraints!()` | SEC-1 through SEC-3, SHIFT-1 | `power_system.jl` |
+| `add_ev_constraints!()` | EV-1 to EV-7 | `power_system.jl` |
+| `add_sectoral_demand_constraints!()` | SEC-1, SHIFT-1 | `power_system.jl` |
 | `add_n1_security_constraints!()` | N1-1, N1-2 | `power_system.jl` |
+| `add_scopf_constraints!()` | N1-3, N1-4 | `power_system.jl` |
 | `add_node_investment_limits!()` | INV-1 | `power_system.jl` |
 | `add_max_annual_system_cost!()` | COST-1 | `power_system.jl` |
 | `extract_solution()` | Solution extraction and metrics | `power_system.jl` |
@@ -1015,44 +1030,47 @@ The full year (8760 hours) is solved as a sequence of overlapping windows rather
 
 ### 10.1 Window Structure
 
-The year is divided into windows of `rolling_horizon_hours` (default: 48) with `overlap_hours` (default: 6) of overlap:
+The year is divided into windows of `rolling_horizon_hours` (default: 48) with `overlap_hours` (default: 24) of overlap:
 
 ```
-Window 1: hours  1 — 48  → keep hours  1 — 42
-Window 2: hours 43 — 90  → keep hours 43 — 84
-Window 3: hours 85 — 132 → keep hours 85 — 126
+Window 1: hours  1 — 48  → keep hours  1 — 24
+Window 2: hours 25 — 72  → keep hours 25 — 48
+Window 3: hours 49 — 96  → keep hours 49 — 72
 ...
 ```
 
-The overlap ensures smooth transitions for battery SOC and generator status between windows.
+The overlap is a look-ahead: battery SOC has no terminal value or end condition in a rolling window, so a window only stores energy for needs inside its own horizon. An overlap of at least 24 h lets each window see the next daily peak.
 
 ### 10.2 Initial Conditions
 
-Each window (except the first) receives initial conditions from the previous window:
+Each window (except the first) receives initial conditions from the previous window. They are indexed by bus; with `network_reduction` enabled they are mapped onto the reduced network's buses:
 
 | State Variable | Initial Condition |
 |----------------|-------------------|
-| Battery SOC | SOC at last kept hour of previous window |
+| Battery SOC | Energy (MWh) at the end of the previous window's last kept hour, per battery and bus, clamped to this window's SOC bounds (carried as energy, so it stays exact when the capacity is degraded) |
 | Generator status (UC) | On/off status at last kept hour |
-| Demand shift state | Accumulated shifted energy |
+| Generator output | Output at the last kept hour; GEN-3 applies between it and the window's first step (`ramp_up_seam_*`, `ramp_down_seam_*`) |
+| Reservoir level | Water level at the end of the last kept hour; the window's end condition is relative to this level |
+
+EV fleet SOC and demand shifting are not carried: each window starts the EV fleet at its initial SOC and returns it there (EV-7).
 
 ### 10.3 Window Boundary Handling
 
-At the end of each window, the cyclic SOC constraint (BAT-5) ensures batteries return close to their initial SOC for that window. This prevents batteries from "gaming" the horizon boundary by depleting at the window edge.
+Intermediate windows have no end-of-window SOC condition: stored energy has no value at a window's end, so the overlap (look-ahead) is what makes a window keep energy for the next day. The last window of the year carries the soft year-end floor (BAT-5), so the year cannot end with less stored energy than it started with.
 
 ### 10.4 Result Stitching
 
-Results from all windows are concatenated to form the full-year dispatch:
+Results from all windows are concatenated to form the full-year dispatch, keeping the first \(K = \) `rolling_horizon_hours` − `overlap_hours` hours of each window:
 
 \[
-\mathbf{p}^{year} = [\mathbf{p}^{w_1}_{1:42}, \mathbf{p}^{w_2}_{1:42}, \ldots, \mathbf{p}^{w_N}_{1:r}]
+\mathbf{p}^{year} = [\mathbf{p}^{w_1}_{1:K}, \mathbf{p}^{w_2}_{1:K}, \ldots, \mathbf{p}^{w_N}_{1:r}]
 \]
 
-where the last window may have fewer than 42 kept hours (remainder of the year).
+where the last window may have fewer than \(K\) kept hours (remainder of the year).
 
-### 10.5 Sub-Hourly Resolution
+### 10.5 Time Resolution
 
-When `temporal_resolution < 1.0` (e.g., 0.5 hours), each hour contains `1/resolution` time steps. A 48-hour window with 30-minute resolution has 96 time steps. All constraints remain the same but operate on the finer time grid.
+`resolution_hours` is an integer of at least 1, so sub-hourly steps are not supported. With \(\Delta t > 1\) each step represents \(\Delta t\) hours: energy terms in the objective and battery SOC changes are multiplied by \(\Delta t\), ramp limits allow \(\min(1, R \Delta t)\) per step, and minimum up/down times are rounded up to whole steps.
 
 ---
 

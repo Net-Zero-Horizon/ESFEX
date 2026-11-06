@@ -130,6 +130,20 @@ end
 # =============================================================================
 
 """
+    _cumulative_capacity(input, kind, fuel, idx) -> Float64
+
+Capacity built in earlier windows: `input.cumulative_capacities[kind][fuel][idx]`
+with `kind` "storage" (idx = node) or "transport" (idx = route), 0 if absent.
+"""
+function _cumulative_capacity(input::PrimaryEnergyInput, kind::String, fuel::String, idx::Int)
+    by_fuel = get(input.cumulative_capacities, kind, nothing)
+    by_fuel isa AbstractDict || return 0.0
+    by_idx = get(by_fuel, fuel, nothing)
+    by_idx isa AbstractDict || return 0.0
+    return Float64(get(by_idx, idx, 0.0))
+end
+
+"""
     prepare_fuel_data(input, temporal)
 
 Prepare fuel supply limits and demand requirements per period.
@@ -195,21 +209,23 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
 
             if annual_demand > 1e-6
                 for p in temporal.primary_period_indices
-                    hours_in_p = temporal.hours_in_primary_period[p]
-                    if isempty(hours_in_p)
+                    steps_in_p = temporal.hours_in_primary_period[p]
+                    if isempty(steps_in_p)
                         continue
                     end
 
-                    # Get seasonal factor based on average hour's month
-                    # Match Python legacy formula (0-indexed → 1-indexed):
-                    #   month_idx_for_p = min(11, avg_hour // int(round(total_hours/12)))
-                    avg_hour = round(Int, mean(hours_in_p))
-                    hours_per_month = max(1, round(Int, input.hours / 12))
-                    month_idx = min(12, div(avg_hour - 1, hours_per_month) + 1)
-                    seasonal_factor = ne_config.seasonal_factors[month_idx]
+                    # Month of the period's mid-point, in hours of the year
+                    year_h = Float64(hours_in_year(input.year))
+                    mid_hour = input.year_hour_offset + (mean(steps_in_p) - 1) * input.step_hours
+                    month_idx = clamp(floor(Int, mid_hour / (year_h / 12)) + 1, 1, 12)
+                    # Monthly factors relative to their mean (shares summing to 1
+                    # and multipliers averaging 1 both keep the annual total)
+                    sf = ne_config.seasonal_factors
+                    sf_mean = isempty(sf) ? 0.0 : mean(sf)
+                    seasonal_factor = sf_mean > 0 ? sf[month_idx] / sf_mean : 1.0
 
-                    # Scale demand to this period
-                    fraction_of_year = length(hours_in_p) / Float64(hours_in_year(input.year))
+                    # Scale demand to this period's share of the year
+                    fraction_of_year = length(steps_in_p) * input.step_hours / year_h
                     ne_demand_periodic[key][n][p] = annual_demand * seasonal_factor * fraction_of_year
                 end
             end
@@ -288,6 +304,7 @@ function build_primary_energy_variables!(
     fuel_supply_pp = Dict{String, Matrix{VariableRef}}()
     fuel_transport_pp = Dict{String, Matrix{VariableRef}}()
     ne_consumption_pp = Dict{Tuple{String, String}, Matrix{VariableRef}}()
+    ne_short_pp = Dict{Tuple{String, String}, Matrix{VariableRef}}()
     storage_start_pp = Dict{String, Matrix{VariableRef}}()
     storage_end_pp = Dict{String, Matrix{VariableRef}}()
     loss_supply_pp = Dict{String, Matrix{VariableRef}}()
@@ -353,6 +370,11 @@ function build_primary_energy_variables!(
                 [n=1:n_nodes, p=1:n_primary],
                 lower_bound = 0,
                 base_name = "pp_ne_$(fuel_name)_$(sector)"
+            )
+            ne_short_pp[key] = @variable(model,
+                [n=1:n_nodes, p=1:n_primary],
+                lower_bound = 0,
+                base_name = "pp_ne_short_$(fuel_name)_$(sector)"
             )
         end
     end
@@ -505,7 +527,8 @@ function build_primary_energy_variables!(
         coupling_slack_end,
         elec_power,
         h2_prod,
-        elec_invest
+        elec_invest,
+        ne_short_pp
     )
 end
 
@@ -554,9 +577,11 @@ function add_primary_energy_constraints!(
                         for (r, route) in enumerate(input.transport_routes)
                             if haskey(route.fuel_params, fuel_name)
                                 fparams = route.fuel_params[fuel_name]
+                                # Expansion limit net of what earlier windows built
+                                built = _cumulative_capacity(input, "transport", fuel_name, r)
                                 @constraint(model,
                                     vars.transport_capacity_investment[fuel_name][inv_p, r] <=
-                                    fparams.capacity * infra.transport_expansion_limit,
+                                    max(0.0, fparams.capacity * infra.transport_expansion_limit - built),
                                     base_name = "inv_transport_limit_$(fuel_name)_$(inv_p)_r$(r)"
                                 )
                             end
@@ -567,9 +592,10 @@ function add_primary_energy_constraints!(
                     if haskey(vars.storage_capacity_investment, fuel_name)
                         for n in 1:n_nodes
                             base_cap = fuel.storage_capacity[n]
+                            built = _cumulative_capacity(input, "storage", fuel_name, n)
                             @constraint(model,
                                 vars.storage_capacity_investment[fuel_name][inv_p, n] <=
-                                base_cap * infra.storage_expansion_limit,
+                                max(0.0, base_cap * infra.storage_expansion_limit - built),
                                 base_name = "inv_storage_limit_$(fuel_name)_$(inv_p)_$(n)"
                             )
                         end
@@ -664,9 +690,12 @@ function add_primary_energy_constraints!(
                                 vars.non_electric_consumption_periodic[key][n, p] <= required,
                                 base_name = "pp_ne_max_$(fuel_name)_$(sector)_$(n)_$(p)"
                             )
+                            # Each sector's unmet demand has its own slack, priced at
+                            # non_electric_demand_loss (one shared fuel slack used to
+                            # cover every sector at once).
                             @constraint(model,
                                 vars.non_electric_consumption_periodic[key][n, p] +
-                                vars.fuel_loss_of_supply_periodic[fuel_name][n, p] >= required,
+                                vars.ne_demand_shortfall_periodic[key][n, p] >= required,
                                 base_name = "pp_ne_satisfy_$(fuel_name)_$(sector)_$(n)_$(p)"
                             )
                         end
@@ -704,7 +733,7 @@ function add_primary_energy_constraints!(
 
                 # Storage capacity constraints
                 base_cap = fuel.storage_capacity[n]
-                cumul_cap = get(get(get(input.cumulative_capacities, "storage", Dict()), fuel_name, Dict()), n, 0.0)
+                cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
                 inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
                     vars.storage_capacity_investment[fuel_name][inv_p, n]
                 else
@@ -732,7 +761,7 @@ function add_primary_energy_constraints!(
                 base_daily_cap = fparams.capacity
 
                 # Look up cumulative capacity using route index
-                cumul_cap = get(get(get(get(input.cumulative_capacities, "transport", Dict()), fuel_name, Dict()), "routes", Dict()), r, 0.0)
+                cumul_cap = _cumulative_capacity(input, "transport", fuel_name, r)
                 inv_cap = if haskey(vars.transport_capacity_investment, fuel_name)
                     vars.transport_capacity_investment[fuel_name][inv_p, r]
                 else
@@ -823,7 +852,7 @@ function add_primary_energy_constraints!(
                     infra = input.infrastructure[fuel_name]
                     if infra.max_hourly_dispatch_rate >= 0
                         base_cap = fuel.storage_capacity[n]
-                        cumul_cap = get(get(get(input.cumulative_capacities, "storage", Dict()), fuel_name, Dict()), n, 0.0)
+                        cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
                         inv_p = get(temporal.primary_to_investment_period, p, 1)
                         inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
                             vars.storage_capacity_investment[fuel_name][inv_p, n]
@@ -853,7 +882,7 @@ function add_primary_energy_constraints!(
 
                 # Maximum storage level
                 base_cap = fuel.storage_capacity[n]
-                cumul_cap = get(get(get(input.cumulative_capacities, "storage", Dict()), fuel_name, Dict()), n, 0.0)
+                cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
                 if base_cap > 0 || cumul_cap > 0
                     inv_p = get(temporal.primary_to_investment_period, p, 1)
                     inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
@@ -1043,7 +1072,7 @@ function add_primary_energy_constraints!(
             if fuel.min_storage_level > 0
                 for n in 1:n_nodes
                     base_cap = fuel.storage_capacity[n]
-                    cumul_cap = get(get(get(input.cumulative_capacities, "storage", Dict()), fuel_name, Dict()), n, 0.0)
+                    cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
                     inv_p = get(temporal.primary_to_investment_period, p, 1)
                     inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
                         vars.storage_capacity_investment[fuel_name][inv_p, n]
@@ -1080,7 +1109,7 @@ function add_primary_energy_constraints!(
                     for n in 1:n_nodes
                         base_cap = fuel.storage_capacity[n]
                         if base_cap > 0
-                            cumul_cap = get(get(get(input.cumulative_capacities, "storage", Dict()), fuel_name, Dict()), n, 0.0)
+                            cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
                             inv_p = get(temporal.primary_to_investment_period, p, 1)
                             inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
                                 vars.storage_capacity_investment[fuel_name][inv_p, n]
@@ -1172,7 +1201,7 @@ the dict's values into the PowerSystem objective AND merges the dict into
 
 Buckets:
   :pe_investment_cost     — transport + storage infrastructure annualised CAPEX
-  :pe_supply_cost         — base_price + import_cost × periodic supply
+  :pe_supply_cost         — base_price + import_cost × periodic supply, plus the tank drawdown (start − end level) at base_price
   :pe_loss_cost           — loss-of-supply penalty (periodic + hourly)
   :pe_excess_cost         — excess-supply penalty
   :pe_transport_cost      — route transport cost × periodic flow
@@ -1204,6 +1233,9 @@ function get_primary_energy_objective_terms(
     # Investment Costs
     # =========================================================================
 
+    # Annuities are annual: charge the window's share of the year, like the
+    # dispatch's own investment costs (the capacity carries over to later windows).
+    window_fraction = input.hours * input.step_hours / Float64(hours_in_year(input.year))
     if input.mode in ["development", "economic_dispatch"]
         for inv_p in temporal.investment_period_indices
             for fuel_name in fuel_names
@@ -1233,7 +1265,7 @@ function get_primary_energy_objective_terms(
                         for (r, route) in enumerate(input.transport_routes)
                             add_to_expression!(pe_investment_cost,
                                 vars.transport_capacity_investment[fuel_name][inv_p, r],
-                                infra.transport_investment_cost * route.distance_km * crf_transport)
+                                infra.transport_investment_cost * route.distance_km * crf_transport * window_fraction)
                         end
                     end
 
@@ -1242,7 +1274,7 @@ function get_primary_energy_objective_terms(
                         for n in 1:n_nodes
                             add_to_expression!(pe_investment_cost,
                                 vars.storage_capacity_investment[fuel_name][inv_p, n],
-                                infra.storage_investment_cost * crf_storage)
+                                infra.storage_investment_cost * crf_storage * window_fraction)
                         end
                     end
                 end
@@ -1290,6 +1322,20 @@ function get_primary_energy_objective_terms(
         end
     end
 
+    # Fuel drawn from the tanks is valued at the fuel price too (stock at the
+    # window's start minus at its end), so burning stored fuel is not free.
+    # With that, the fuel cost is the price of what is used whether it was
+    # bought now or before; the dispatch drops the coupled units' fuel_cost.
+    for fuel_name in fuel_names
+        haskey(vars.fuel_storage_level_hourly, fuel_name) || continue
+        level = vars.fuel_storage_level_hourly[fuel_name]
+        price = adjusted_prices[fuel_name]
+        for n in 1:n_nodes
+            add_to_expression!(pe_supply_cost, level[n, 1], price)
+            add_to_expression!(pe_supply_cost, level[n, size(level, 2)], -price)
+        end
+    end
+
     # =========================================================================
     # Hourly Loss Penalties
     # =========================================================================
@@ -1301,6 +1347,11 @@ function get_primary_energy_objective_terms(
                     vars.fuel_loss_of_supply_hourly[fuel_name][n, t],
                     loss_penalty)
             end
+        end
+    end
+    for short in values(vars.ne_demand_shortfall_periodic)
+        for idx in eachindex(short)
+            add_to_expression!(pe_loss_cost, short[idx], input.non_electric_demand_loss_penalty)
         end
     end
 
@@ -1379,11 +1430,19 @@ function couple_primary_energy_to_power_system!(
     ps_vars::PowerSystemVariables,
     input::PrimaryEnergyInput;
     bus_to_node::Vector{Int} = Int[],
-    resolution_hours::Float64 = 1.0
+    resolution_hours::Float64 = 1.0,
+    generators = nothing
 )
     NUMERICAL_TOLERANCE = 1e-6
     n_nodes = input.num_nodes
     n_hours = input.hours
+
+    # The fuel a coupled unit burns is bought here (fuel supply × price), so
+    # the dispatch must not also charge the unit's fuel_cost per MWh: drop it
+    # from the objective and the breakdown. Units with a cost curve keep their
+    # curve (it is a bid, not only fuel). `generators` = the PowerSystemInput's.
+    objective = generators === nothing ? nothing : objective_function(model)
+    ce = get(model.ext, :cost_expressions, nothing)
 
     # If bus_to_node is empty, assume identity mapping (bus == node)
     use_b2n = !isempty(bus_to_node)
@@ -1441,6 +1500,18 @@ function couple_primary_energy_to_power_system!(
                     base_name = "pe_coupling_gen$(gen_idx)_$(b)_$(t)"
                 )
                 n_coupling_constraints += 1
+            end
+
+            if objective !== nothing && !haskey(ps_vars.gen_seg_output, (gen_idx, b))
+                fc = generators[gen_idx].fuel_cost[b]
+                if fc != 0
+                    for t in 1:n_hours
+                        v = ps_vars.gen_output[gen_idx, b, t]
+                        set_objective_coefficient(model, v,
+                            coefficient(objective, v) - resolution_hours * fc)
+                        ce === nothing || add_to_expression!(ce[:fuel_cost], -fc, v)
+                    end
+                end
             end
         end
     end

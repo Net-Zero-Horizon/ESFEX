@@ -893,11 +893,13 @@ function create_benders_subproblem(
                     end
                 else
                     @constraint(sp_model, bat_tech_soc[bt, b, 0] == en_cap * initial_soc_frac)
+                    # SOC in MWh; charge/discharge in MW over a step of tres hours
+                    tres = input.temporal_resolution_hours
                     for ts in 1:hours
                         @constraint(sp_model,
                             bat_tech_soc[bt, b, ts] == bat_tech_soc[bt, b, ts-1]
-                                + ch_eff * bat_tech_charge[bt, b, ts]
-                                - (1.0/dis_eff) * bat_tech_discharge[bt, b, ts])
+                                + tres * (ch_eff * bat_tech_charge[bt, b, ts]
+                                          - (1.0/dis_eff) * bat_tech_discharge[bt, b, ts]))
                     end
                     @constraint(sp_model, bat_tech_soc[bt, b, hours] == en_cap * initial_soc_frac)
                 end
@@ -1034,9 +1036,8 @@ function create_benders_subproblem(
     network_lines = input.network.transmission_lines
     n_lines = length(network_lines)
     if n_buses > 1 && n_lines > 0
-        transmission = TransmissionDC(input.network)
-        add_dc_constraints!(sp_model, transmission, ps_vars, day_input;
-            extra_injections_fn=extra_fn)
+        transmission = with_loss_model(TransmissionDC(input.network),
+            input.transmission_loss_segments, input.network.s_base)
 
         # Line capacity with FIXED cumulative investment
         line_cap_override = Dict{Int, Any}()
@@ -1044,12 +1045,12 @@ function create_benders_subproblem(
             base_cap = transmission.line_capacities[l]
             inv_cap = 0.0
             for y in 1:ypp:year_idx
-                if haskey(master_vars.transfer_investment[y], (from, to))
-                    inv_cap += try
-                        value(master_vars.transfer_investment[y][(from, to)])
-                    catch
-                        0.0  # Master not yet solved (e.g., warm-start phase)
-                    end
+                v = corridor_investment(master_vars.transfer_investment[y], from, to)
+                v === nothing && continue
+                inv_cap += try
+                    value(v)
+                catch
+                    0.0  # Master not yet solved (e.g., warm-start phase)
                 end
             end
             total = base_cap + inv_cap
@@ -1057,6 +1058,11 @@ function create_benders_subproblem(
             # Store for dual extraction
             constraint_store["line_cap_$(l)"] = (from, to, total)
         end
+        # A candidate corridor (0 MW base) carries flow once capacity is built.
+        expandable = Set{Int}(l for (l, total) in line_cap_override
+                              if total > transmission.line_capacities[l])
+        add_dc_constraints!(sp_model, transmission, ps_vars, day_input;
+            extra_injections_fn=extra_fn, expandable_lines=expandable)
         add_line_capacity_constraints!(sp_model, transmission, ps_vars, day_input;
             capacity_override=line_cap_override)
     else
@@ -1182,30 +1188,31 @@ function create_benders_subproblem(
         end
     end
 
-    # Per-system RE constraints (hard equality on gross RE dispatch)
-    # Matches monolithic model: re_penetration_ratio == target.
-    # Hard upper bound on GROSS RE prevents over-dispatching beyond target.
+    # Per-system RE floor at the master's ratio, as in the monolithic master
+    # (re_min_day / re_ratio_lb). There is no upper bound: renewable output
+    # above the target on a good day is valid. (An equality here used to stop
+    # the subproblems from using renewables beyond the ratio, e.g. any at all
+    # with a 0 % target.)
     for s_idx in 1:n_sys
         target_ratio = length(fixed_caps.re_ratios) >= s_idx ? fixed_caps.re_ratios[s_idx] : fixed_caps.re_ratios[1]
 
         @constraint(sp_model,
             sys_renewable[s_idx] + sys_fre_loss[s_idx] >= target_ratio * sys_demand_day[s_idx],
             base_name = "re_min_day_s$(s_idx)_y$(year_idx)_d$(day_idx)")
-
-        @constraint(sp_model,
-            sys_renewable[s_idx] + sys_fre_loss[s_idx] <= target_ratio * sys_demand_day[s_idx],
-            base_name = "re_max_day_s$(s_idx)_y$(year_idx)_d$(day_idx)")
     end
 
     # Max curtailment — includes BOTH generator and technology RE curtailment.
     # Technology curtailment = fixed_cap × avail - tech_output (capacity not dispatched).
-    # Including it here is critical: when the RE upper bound (not the capacity
-    # constraint) limits tech dispatch, the capacity dual is 0 and the master
+    # Including it here is critical: when something other than the capacity
+    # constraint limits tech dispatch, the capacity dual is 0 and the master
     # gets no signal about overcapacity.  By including technology curtailment,
     # the dual of this constraint captures the cost of over-investment and
     # feeds it into the Benders cuts via extract_subproblem_duals.
-    total_curtailment = @expression(sp_model,
-        sum(ps_vars.curtailment[n, t] for n in 1:n_nodes, t in 1:hours))
+    # An AffExpr even for one node and one step (a bare sum would be a VariableRef)
+    total_curtailment = AffExpr(0.0)
+    for n in 1:n_nodes, t in 1:hours
+        add_to_expression!(total_curtailment, ps_vars.curtailment[n, t])
+    end
 
     # Add technology RE curtailment: available capacity - dispatched output
     # tech_avail_sum tracks Σ(fixed_cap × avail) per (tech, bus) for dual extraction
@@ -1296,8 +1303,8 @@ function create_benders_subproblem(
         add_to_expression!(day_cost, curt_excess_slack,
             input.curtailment_excess_penalty * scaling_factor)
     end
-    # NOTE: re_excess_penalty no longer used — RE upper bound is now hard
-    # (matching monolithic model's equality constraint behavior).
+    # NOTE: re_excess_penalty is not used: RE has a floor only, as in the
+    # monolithic master.
 
     @objective(sp_model, Min, day_cost)
 
@@ -1397,8 +1404,8 @@ function extract_subproblem_duals(
     # The gradient ∂Q/∂cap from this constraint = -dual(curt_cref) × Σ_ts(avail).
     # (negative because cap increases the LHS, tightening a ≤ constraint;
     #  JuMP dual for ≤ in minimization is ≤ 0, so -dual ≥ 0 = cost increase)
-    # This term is CRITICAL: when the RE upper bound (not the capacity
-    # constraint) limits tech dispatch, the capacity dual is 0 but the
+    # This term is CRITICAL: when something other than the capacity
+    # constraint limits tech dispatch, the capacity dual is 0 but the
     # curtailment dual captures the marginal cost of over-investment.
     if haskey(sp.constraint_store, "max_curt")
         curt_data = sp.constraint_store["max_curt"]

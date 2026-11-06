@@ -268,7 +268,7 @@ Network configuration for DC power flow modeling.
 - `bus_to_node::Vector{Int}`: Mapping from bus index to parent node index (1-indexed)
 - `connections::Matrix{Float64}`: Adjacency matrix with line capacities (MW)
 - `distances::Matrix{Float64}`: Distance matrix (km)
-- `base_impedance::Float64`: Base impedance (Ω)
+- `s_base::Float64`: System power base (MVA) of the per-unit line data (`ac_power_flow.base_mva`)
 - `reactance_per_km::Float64`: Line reactance per km (Ω/km)
 - `voltage_level_kv::Float64`: Nominal voltage level (kV)
 - `max_angle_diff_rad::Float64`: Maximum voltage angle difference (radians)
@@ -287,7 +287,7 @@ struct NetworkConfig
     bus_to_node::Vector{Int}
     connections::Matrix{Float64}
     distances::Matrix{Float64}
-    base_impedance::Float64
+    s_base::Float64
     reactance_per_km::Float64
     voltage_level_kv::Float64
     max_angle_diff_rad::Float64
@@ -314,8 +314,8 @@ Generator/technology configuration.
 - `min_power::Vector{Float64}`: Minimum power as fraction of rated (per node)
 - `efficiency_rated::Vector{Float64}`: Efficiency at rated power
 - `efficiency_min::Vector{Float64}`: Efficiency at minimum power
-- `ramp_up::Vector{Float64}`: Ramp up rate per node (pu/min)
-- `ramp_down::Vector{Float64}`: Ramp down rate per node (pu/min)
+- `ramp_up::Vector{Float64}`: Ramp up limit per node (fraction of capacity per hour; a step of resolution_hours may move ramp × resolution_hours, capped at 1; <= 0 = no limit)
+- `ramp_down::Vector{Float64}`: Ramp down limit per node (fraction of capacity per hour; a step of resolution_hours may move ramp × resolution_hours, capped at 1; <= 0 = no limit)
 - `min_up_time::Vector{Float64}`: Minimum up time per node (hours)
 - `min_down_time::Vector{Float64}`: Minimum down time per node (hours)
 - `start_up_cost::Vector{Float64}`: Startup cost per node (\$/start)
@@ -742,9 +742,9 @@ Configuration for electric vehicle fleet at a node.
 - `max_soc::Float64`: Maximum SOC fraction (0-1)
 - `target_soc::Float64`: Target SOC at end of day (0-1)
 - `availability_profile::Matrix{Float64}`: Fraction of vehicles available [hour, node]
-- `driving_consumption_profile::Matrix{Float64}`: Energy consumption from driving [hour, node] (MWh)
-- `v2g_compensation::Float64`: Compensation for V2G provision (\$/MWh)
-- `loss_penalty::Float64`: Penalty for not meeting target SOC (\$/MWh)
+- `driving_consumption_profile::Matrix{Float64}`: Driving energy drawn from the fleet battery [hour, node] (MWh)
+- `v2g_compensation::Float64`: Payment to owners for V2G energy (\$/MWh); reported, not part of the system cost
+- `loss_penalty::Float64`: Penalty for driving energy the fleet cannot supply (\$/MWh)
 - `initial_soc::Vector{Float64}`: Initial SOC per node (MWh)
 """
 struct EVConfig
@@ -908,7 +908,7 @@ operational dispatch or unit commitment problem.
 - `solver::SolverSettings`: Solver configuration
 
 ## Optional: CO2 factors by fuel
-- `fuel_co2::Dict{String, Float64}`: CO2 emission factors (tonnes/MWh)
+- `fuel_co2::Dict{String, Float64}`: CO2 emission factors (tonnes per MWh of fuel; divided by each unit's rated efficiency)
 """
 
 # =============================================================================
@@ -984,9 +984,11 @@ struct PowerSystemInput
     # Sectoral load criticality weights for load shedding penalty
     sectoral_criticality::Dict{String, Float64}
 
-    # Sectoral delay tolerance for demand shifting (hours)
-    # Matches Python legacy electric_demand[sector]['delay_tolerance']
+    # Demand shifting of flexible sectors: how far (hours) and how much
+    # (fraction of the sector's demand per step) demand can move.
+    # Sectors absent from these dicts are not shifted.
     sectoral_delay_tolerance::Dict{String, Int}
+    sectoral_flexibility_ratio::Dict{String, Float64}
 
     # Hourly inertia limit vector (if empty, use scalar inertia_limit)
     inertia_limit_hourly::Vector{Float64}
@@ -1024,6 +1026,10 @@ struct PowerSystemInput
     # Empty Dict = no boundary; reservoir uses configured initial fraction.
     # Populated when present: Dict{gen_idx => Dict{bus_idx => MWh}}.
     reservoir_level_prev::Dict{Int, Dict{Int, Float64}}
+    # Battery SOC at the start of this window from the previous one (MWh).
+    # Empty = no boundary; batteries use soc_initial × capacity.
+    # Dict{bat_idx => Dict{bus_idx => MWh}}.
+    battery_soc_prev::Dict{Int, Dict{Int, Float64}}
 
     # Pending retirements - units scheduled for retirement but can be delayed for feasibility
     # Matches Python legacy pending_retirements (lines 77-80, 1388-1447)
@@ -1070,11 +1076,13 @@ struct PowerSystemInput
     # Configurable parameters (previously hardcoded)
     soc_end_tolerance::Float64              # Battery end-of-horizon SOC tolerance (±fraction)
     cyclic_end_soc::Bool                    # If true, force end-of-window SOC == initial (cyclic)
+    bat_soc_end_min::Dict{Int, Dict{Int, Float64}}  # Soft floor on end-of-window SOC (MWh) [battery][bus]; empty = none
+    bat_soc_end_min_cyclic::Bool            # Soft floor = the window's own initial SOC (single-window year)
+    bat_soc_end_penalty::Float64            # Cost per MWh below the floor; <= 0 → 10% of VOLL per time step
     min_cycling_ratio::Float64              # Min battery cycling as fraction of capacity
     min_cycling_period_days::Float64        # Period for min cycling calculation (days)
     reserve_static_default_ratio::Float64   # Default static reserve as fraction of demand
     soc_violation_penalty::Float64          # Penalty for SOC limit violation
-    flexible_demand_benefit_ratio::Float64  # Fraction of price for flex demand benefit
     demand_shift_cost_rate::Float64         # Cost rate per hour of shift distance
     dynamic_reserve_contribution::Float64   # Fraction of rated_power for dynamic reserve
     max_decommission_cost_per_mw::Float64  # Cap on decommissioning cost ($/MW)
@@ -1150,6 +1158,7 @@ function PowerSystemInput(;
     electrolyzer_config::Union{ElectrolyzerConfig, Nothing} = nothing,
     sectoral_criticality::Dict{String, Float64} = Dict{String, Float64}(),
     sectoral_delay_tolerance::Dict{String, Int} = Dict{String, Int}(),
+    sectoral_flexibility_ratio::Dict{String, Float64} = Dict{String, Float64}(),
     inertia_limit_hourly::Vector{Float64} = Float64[],
     loss_of_inertia_penalty::Float64 = 1.0,
     # N-1 Security parameters (matches Python legacy power_system.py lines 55-61)
@@ -1173,6 +1182,8 @@ function PowerSystemInput(;
     # Last-timestep reservoir level from previous window (MWh-eq).
     # Empty = no boundary; reservoir uses configured initial fraction.
     reservoir_level_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
+    # Battery SOC carried from the previous window (MWh). Empty = soc_initial.
+    battery_soc_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
     # Pending retirements for delayed retirement mechanism
     pending_retirements::Dict{String, Dict{Int, Dict{Int, Float64}}} = Dict{String, Dict{Int, Dict{Int, Float64}}}(),
     # Electricity price vector (hourly) - matches Python legacy self.electricity_price
@@ -1202,11 +1213,13 @@ function PowerSystemInput(;
     # Configurable parameters (previously hardcoded)
     soc_end_tolerance::Float64 = 0.05,
     cyclic_end_soc::Bool = true,
+    bat_soc_end_min::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
+    bat_soc_end_min_cyclic::Bool = false,
+    bat_soc_end_penalty::Float64 = 0.0,
     min_cycling_ratio::Float64 = 0.8,
     min_cycling_period_days::Float64 = 7.0,
     reserve_static_default_ratio::Float64 = 0.15,
     soc_violation_penalty::Float64 = 1.0,
-    flexible_demand_benefit_ratio::Float64 = 0.5,
     demand_shift_cost_rate::Float64 = 1e-7,
     dynamic_reserve_contribution::Float64 = 0.5,
     max_decommission_cost_per_mw::Float64 = 0.5,
@@ -1250,6 +1263,7 @@ function PowerSystemInput(;
         electrolyzer_config,
         sectoral_criticality,
         sectoral_delay_tolerance,
+        sectoral_flexibility_ratio,
         inertia_limit_hourly,
         loss_of_inertia_penalty,
         n1_security_enabled,
@@ -1266,6 +1280,7 @@ function PowerSystemInput(;
         generator_initial_status,
         generator_output_prev,
         reservoir_level_prev,
+        battery_soc_prev,
         pending_retirements,
         electricity_price,
         fre_penetration_penalty,
@@ -1288,11 +1303,13 @@ function PowerSystemInput(;
         discount_rate,
         soc_end_tolerance,
         cyclic_end_soc,
+        bat_soc_end_min,
+        bat_soc_end_min_cyclic,
+        bat_soc_end_penalty,
         min_cycling_ratio,
         min_cycling_period_days,
         reserve_static_default_ratio,
         soc_violation_penalty,
-        flexible_demand_benefit_ratio,
         demand_shift_cost_rate,
         dynamic_reserve_contribution,
         max_decommission_cost_per_mw,
@@ -1928,6 +1945,41 @@ struct PrimaryEnergyInput
     # Electrolyzer configuration for joint optimization of H2 production
     # Matches Python legacy electrolizer_model.py HydrogenProduction class
     electrolyzer_config::Union{Nothing, ElectrolyzerConfig}
+    # Penalty per unit of non-electric fuel demand left unmet (per sector)
+    non_electric_demand_loss_penalty::Float64
+    # Length of a time step (h) and the window's first hour within the year:
+    # place each period in its month and prorate annual quantities
+    step_hours::Int
+    year_hour_offset::Int
+end
+
+# Without the three fields above: unmet non-electric demand at the fuel-supply
+# penalty, 1 h steps, window at the start of the year.
+function PrimaryEnergyInput(
+    year::Int, base_year::Int, num_nodes::Int, hours::Int,
+    fuels::Vector{FuelConfig},
+    infrastructure::Dict{String, FuelInfrastructureConfig},
+    non_electric_demand::Vector{NonElectricDemandConfig},
+    transport_routes::Vector{TransportRoute},
+    generator_fuel_map::Dict{Int, Tuple{String, Float64, Float64, Float64}},
+    primary_energy_resolution::Int, investment_resolution::Int,
+    discount_rate::Float64, loss_of_fuel_supply_penalty::Float64,
+    coupling_slack_penalty::Float64, mode::String,
+    cumulative_capacities::Dict{String, Any},
+    initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing},
+    investment_from_master::Bool,
+    h2_production_hourly::Union{Matrix{Float64}, Nothing},
+    generator_rated_power::Dict{Int, Vector{Float64}},
+    electrolyzer_config::Union{Nothing, ElectrolyzerConfig}
+)
+    return PrimaryEnergyInput(
+        year, base_year, num_nodes, hours, fuels, infrastructure, non_electric_demand,
+        transport_routes, generator_fuel_map, primary_energy_resolution,
+        investment_resolution, discount_rate, loss_of_fuel_supply_penalty,
+        coupling_slack_penalty, mode, cumulative_capacities, initial_storage_levels,
+        investment_from_master, h2_production_hourly, generator_rated_power,
+        electrolyzer_config, loss_of_fuel_supply_penalty, 1, 0
+    )
 end
 
 """
@@ -1992,7 +2044,8 @@ function PrimaryEnergyInput(
         generator_fuel_map, primary_energy_resolution, investment_resolution,
         discount_rate, loss_of_fuel_supply_penalty, coupling_slack_penalty, mode,
         cumulative_capacities, initial_storage_levels, investment_from_master,
-        h2_production_hourly, generator_rated_power, electrolyzer_config
+        h2_production_hourly, generator_rated_power, electrolyzer_config,
+        loss_of_fuel_supply_penalty, 1, 0
     )
 end
 
@@ -2054,6 +2107,9 @@ mutable struct PrimaryEnergyVariables
     electrolyzer_power::Union{Nothing, Matrix{VariableRef}}  # [node, hour]
     h2_production::Union{Nothing, Matrix{VariableRef}}  # [node, hour]
     electrolyzer_investment::Union{Nothing, Vector{VariableRef}}  # [node]
+
+    # Unmet non-electric demand per sector
+    ne_demand_shortfall_periodic::Dict{Tuple{String, String}, Matrix{VariableRef}}  # (fuel, sector) => [node, period]
 end
 
 """
@@ -2125,7 +2181,7 @@ Input configuration for the Master Problem (capacity expansion planning).
 
 ## Demand and Profiles
 - `base_demand::Matrix{Float64}`: Base demand [hour, node]
-- `demand_growth::Float64`: Annual demand growth rate
+- `demand_growth::Float64`: Extra annual growth applied on top of each year's slice of `base_demand` (default 0)
 
 ## Economic Parameters
 - `discount_rate::Float64`: Discount rate for NPV calculations
@@ -2302,7 +2358,7 @@ function MasterProblemInput(;
     technologies::Vector{TechnologyConfig} = TechnologyConfig[],
     battery_technologies::Vector{BatteryTechnologyConfig} = BatteryTechnologyConfig[],
     base_demand::Matrix{Float64},
-    demand_growth::Float64 = 0.02,
+    demand_growth::Float64 = 0.0,
     discount_rate::Float64 = 0.05,
     max_annual_investment::Float64 = 1e4,
     target_re_penetration::Float64 = 1.0,

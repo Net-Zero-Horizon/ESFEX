@@ -1,6 +1,6 @@
 # Utilities
 
-Modules: `esfex.utils`, `esfex.utils.helpers`, `esfex.utils.temporal`
+Modules: `esfex.utils`, `esfex.utils.helpers`, `esfex.utils.temporal`, `esfex.utils.paths`
 
 ## Module: esfex.utils.helpers
 
@@ -355,7 +355,7 @@ def aggregate_demand_to_resolution(
 ) -> Union[np.ndarray, pd.DataFrame]
 ```
 
-Aggregate demand time series using **MAX** (not mean). Preserves peak demand within each aggregated period to avoid underestimating capacity requirements.
+Aggregate demand time series using **MEAN**. Each aggregated value is the average power (MW) over the period, so when the LP multiplies it by `target_hours` the energy (MWh) matches the hourly sum. The operational LP still dispatches every aggregated step, and the master problem selects representative days from the raw hourly profiles.
 
 Same parameters and return type as `aggregate_to_resolution`.
 
@@ -368,7 +368,7 @@ from esfex.utils.temporal import aggregate_demand_to_resolution
 
 hourly_demand = np.array([100, 150, 120, 180, 140, 110])
 demand_6h = aggregate_demand_to_resolution(hourly_demand, target_hours=6)
-print(demand_6h)  # [180.] -- MAX of the 6 values
+print(demand_6h)  # [133.33] -- MEAN of the 6 values (800 MWh over 6 h)
 ```
 
 ### Why Different Aggregation Methods?
@@ -376,7 +376,7 @@ print(demand_6h)  # [180.] -- MAX of the 6 values
 | Data Type | Method | Rationale |
 |-----------|--------|-----------|
 | Availability profiles | MEAN | Average capacity factor correctly represents energy available over the period. |
-| Demand | MAX | System must meet peak demand within each period; averaging would undersize capacity. |
+| Demand | MEAN | Average power times period length preserves the energy to be served. |
 | Generation output | SUM | Total energy produced is additive. |
 | Battery SOC | LAST | Final state carries forward to next period. |
 
@@ -474,6 +474,30 @@ windows = calculate_rolling_horizon_windows(
 print(f"Total windows: {len(windows)}")  # 209
 print(windows[:3])  # [(0, 48), (42, 90), (84, 132)]
 ```
+
+---
+
+## Module: esfex.utils.paths
+
+Path-safety helpers for file paths that come from configuration data (demand, availability, inflow files). Not re-exported from `esfex.utils`; import from `esfex.utils.paths`.
+
+### safe_resolve_under
+
+```python
+def safe_resolve_under(root: Union[str, Path], candidate: Union[str, Path]) -> Path
+```
+
+Resolve `candidate` under `root` and return the resolved path. A relative candidate is joined onto `root` first; the result (symlinks and `..` collapsed) must lie inside `root`.
+
+**Raises:** `ValueError` if the resolved path is outside `root`, including absolute paths elsewhere on the host. The file does not need to exist.
+
+### resolve_project_data_file
+
+```python
+def resolve_project_data_file(config_dir: Union[str, Path], candidate: Union[str, Path]) -> Path
+```
+
+Resolve a project data-file reference. Absolute paths are returned unchanged; relative paths go through `safe_resolve_under(config_dir, candidate)`, so `../` traversal out of the config directory raises `ValueError`.
 
 ---
 

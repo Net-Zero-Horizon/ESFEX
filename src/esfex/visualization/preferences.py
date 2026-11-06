@@ -97,7 +97,7 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "default_mode": "development",
         "default_resolution": 6,
         "default_rolling_horizon": 48,
-        "default_overlap": 0,
+        "default_overlap": 24,
         "default_primary_energy": False,
         "default_log_level": "basic",
         "log_to_file": False,

@@ -464,6 +464,18 @@ class PandapowerBridge:
         if pp_idx is not None:
             self._net[pp_table].at[pp_idx, "in_service"] = in_service
 
+    def gen_in_service(self, gen_id: str) -> bool:
+        """Whether a dispatchable generator is in service in the current network."""
+        pp_idx = self._gen_id_to_pp.get(gen_id)
+        return (self._net is not None and pp_idx is not None
+                and bool(self._net.gen.at[pp_idx, "in_service"]))
+
+    def shift_gen_output(self, gen_id: str, delta_mw: float) -> None:
+        """Add ``delta_mw`` to a dispatchable generator's output."""
+        pp_idx = self._gen_id_to_pp.get(gen_id)
+        if self._net is not None and pp_idx is not None:
+            self._net.gen.at[pp_idx, "p_mw"] = float(self._net.gen.at[pp_idx, "p_mw"]) + delta_mw
+
     def rerun_power_flow(self) -> ACPowerFlowResult:
         """Rerun AC power flow on the existing network (after modifications).
 

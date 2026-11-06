@@ -2,24 +2,40 @@
 
 ## Supported Solvers
 
-ESFEX supports seven optimization solvers through JuMP [**[20]**](../reference/bibliography.md#ref20) (Julia for Mathematical Programming):
+ESFEX builds its models with JuMP [**[20]**](../reference/bibliography.md#ref20) and can hand them to ten solvers. Five ship with ESFEX; the other five are installed on demand with [`esfex add-solver`](cli.md#esfex-add-solver).
 
-| Solver | License | LP | MIP | QP | Speed | Recommended For |
-|--------|---------|:--:|:---:|:--:|-------|-----------------|
-| **HiGHS** [**[21]**](../reference/bibliography.md#ref21) | Open source (MIT) | Yes | Yes | Yes | Fast | Default; general-purpose; no license needed |
-| **Gurobi** | Commercial (free academic) | Yes | Yes | Yes | Fastest | Large-scale MIP; best performance and support |
-| **CPLEX** | Commercial (free academic) | Yes | Yes | Yes | Fast | Enterprise/industrial; IBM ecosystem |
-| **SCIP** | Open source (Apache 2.0) | Yes | Yes | No | Moderate | Research; constraint programming features |
-| **Xpress** | Commercial (free academic) | Yes | Yes | Yes | Fast | Alternative commercial solver |
-| **CBC** | Open source (EPL) | Yes | Yes | No | Moderate | Alternative open-source MIP |
-| **GLPK** | Open source (GPL) | Yes | Yes | No | Slow | Small problems; educational use; fallback |
+| Solver | `solver.name` | Shipped with ESFEX | Problem classes | License |
+|--------|---------------|:------------------:|-----------------|---------|
+| **HiGHS** [**[21]**](../reference/bibliography.md#ref21) | `highs` | Yes (default) | LP, MIP, QP | Open source (MIT) |
+| **GLPK** | `glpk` | Yes | LP, MIP | Open source (GPL) |
+| **Clarabel** | `clarabel` | Yes | LP, SOCP, SDP | Open source (Apache 2.0) |
+| **SCS** | `scs` | Yes | LP, SOCP, SDP | Open source (MIT) |
+| **Ipopt** | `ipopt` | Yes | NLP | Open source (EPL) |
+| **Gurobi** | `gurobi` | `esfex add-solver gurobi` | LP, MIP, QP, SOCP | Commercial (free academic) |
+| **CPLEX** | `cplex` | `esfex add-solver cplex` | LP, MIP, QP, SOCP | Commercial (free academic) |
+| **Xpress** | `xpress` | `esfex add-solver xpress` | LP, MIP, QP, SOCP | Commercial (free academic) |
+| **CBC** | `cbc` | `esfex add-solver cbc` | LP, MIP | Open source (EPL) |
+| **SCIP** | `scip` | `esfex add-solver scip` | LP, MIP | Open source (Apache 2.0) |
 
 ### Solver Selection Guidance
 
-- **Start with HiGHS**: Free, fast, and handles the vast majority of ESFEX models well. Default solver; no additional installation required.
-- **Use Gurobi for large models**: Best performance for large multi-year, multi-node planning models with MIP formulations. Free academic licenses available.
-- **Use CPLEX if available**: Similar performance to Gurobi; preferred if your institution already has an IBM CPLEX license.
-- **Avoid GLPK for production**: Significantly slower with weaker numerical handling. Use only for small test cases or when no other solver is available.
+- **Start with HiGHS**: free, shipped with ESFEX, and the default. It handles the LP master problem and DC-OPF dispatch well.
+- **Use Gurobi, CPLEX or Xpress for large models**, especially unit commitment (MIP), if you have a licence.
+- **Avoid GLPK for production**: it is much slower and numerically weaker. Use it only for small tests.
+- **AC-OPF needs a matching solver**: see the compatibility table below.
+
+### Formulation and Solver Compatibility
+
+The operational dispatch formulation is chosen per system with `power_flow_mode`. ESFEX passes the configured solver to the model unchanged; it does not switch solvers for you, so an incompatible choice makes the operational solve fail. The Studio greys out incompatible solvers once a formulation is selected.
+
+| `power_flow_mode` | Problem class | Compatible solvers |
+|-------------------|---------------|--------------------|
+| `dcopf` (default), `dcopf_ac_verify` | LP (MIP in unit commitment) | `highs`, `gurobi`, `cplex`, `xpress`, `glpk`, `cbc`, `scip` |
+| `acopf_soc`, `acopf_qc` | Convex SOCP / QC relaxation | `highs`, `gurobi`, `cplex`, `xpress`, `clarabel`, `scs` |
+| `acopf_sdp` | Semidefinite relaxation | `scs`, `clarabel` |
+| `acopf_polar`, `acopf_rect` | Exact nonlinear AC-OPF | `ipopt` |
+
+The master problem (capacity expansion) is always an LP and uses the same `solver` settings.
 
 
 ---
@@ -32,60 +48,56 @@ ESFEX supports seven optimization solvers through JuMP [**[20]**](../reference/b
 ```yaml
 solver:
   name: highs              # Solver name (lowercase)
-  threads: 4               # Number of parallel threads
+  threads: 4               # Parallel threads
   time_limit: 3600         # Maximum solve time in seconds (0 = unlimited)
-  gap: 0.01                # MIP optimality gap tolerance (1%)
-  verbose: false           # Show solver output in console
-  scale_constraints: true  # Enable constraint scaling
-  options:                 # Solver-specific advanced options
-    presolve: choose
-    solver_method: choose
-    parallel: choose
+  gap: 0.01                # MIP relative optimality gap (1%)
+  verbose: false           # Show solver output in the console
+  options:                 # Solver-specific options (see Advanced Solver Options)
+    solver_method: ipm
     run_crossover: 'on'
-    primal_feasibility_tolerance: 1.0e-07
-    dual_feasibility_tolerance: 1.0e-07
     ipm_optimality_tolerance: 1.0e-08
-    simplex_iteration_limit: 2147483647
-    simplex_scale_strategy: choose
 ```
 
 ### Configuration Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | string | `"highs"` | Solver name. One of: `highs`, `gurobi`, `cplex`, `cbc`, `glpk`, `scip`, `xpress` |
-| `threads` | int | `4` | Number of parallel threads for the solver |
-| `time_limit` | int | `10800` | Maximum solve time in seconds. 0 means unlimited |
-| `gap` | float | `0.01` | MIP relative optimality gap (0.01 = 1%). Ignored for pure LP |
-| `verbose` | bool | `false` | If `true`, prints full solver output to the console |
-| `scale_constraints` | bool | `true` | Enable internal constraint scaling for numerical stability |
-| `options` | dict | `{}` | Solver-specific options (see Advanced Options below) |
+| `name` | string | `"highs"` | One of `highs`, `gurobi`, `cplex`, `xpress`, `cbc`, `glpk`, `scip`, `clarabel`, `scs`, `ipopt` |
+| `threads` | int | `4` | Threads for the solver. Ignored by GLPK, Clarabel, SCS and Ipopt; for SCIP it only affects concurrent mode. |
+| `time_limit` | int | `10800` | Maximum solve time per model, in seconds. Ignored by SCS. |
+| `gap` | float | `0.01` | MIP relative optimality gap (0.01 = 1%). Ignored for pure LP. Not passed to GLPK (set `mip_gap` in `options`). For Ipopt, the value is passed as its convergence tolerance `tol`. |
+| `verbose` | bool | `false` | Print the solver log. Overridden by `logging.console_level` (`basic` turns it off, `debug` turns it on) and by `esfex run -v`. |
+| `scale_constraints` | bool | `true` | Accepted for compatibility with the Studio, but currently not used by the model or the solvers. |
+| `options` | dict | `{}` | Solver-specific options (see [Advanced Solver Options](#advanced-solver-options)) |
 
 ### CLI Override
 
-Override the solver from the command line without modifying the YAML file:
+Override the solver from the command line without editing the YAML file:
 
 ```bash
 esfex run -c config.yaml -s gurobi
 ```
 
+The `options` block is kept; options that belong to a different solver are dropped with a warning (see below).
+
 ### Checking Available Solvers
 
 ```bash
-esfex info
+esfex list-solvers
 ```
 
-Or programmatically:
+This lists all ten solvers with their availability and type (bundled or optional). Programmatically:
 
 ```python
 from esfex.config.solver import detect_available_solvers
 
-solvers = detect_available_solvers()
-for name, available in solvers.items():
-    print(f"{name}: {'Available' if available else 'Not found'}")
+for name, available in detect_available_solvers().items():
+    print(f"{name}: {'available' if available else 'not installed'}")
 ```
 
-Detection uses lightweight Python-side checks (companion package importability) and does not require starting the Julia runtime.
+Detection reads the `[deps]` of ESFEX's Julia `Project.toml` and of the `esfex_solvers` environment that `esfex add-solver` writes to. It does not start Julia and does not look at Python packages such as `gurobipy`. It tells you what is installed, not whether a licence is valid.
+
+`esfex info` starts Julia and actually loads HiGHS, Gurobi and CPLEX, which also catches licence problems for those two commercial solvers.
 
 
 ---
@@ -93,117 +105,48 @@ Detection uses lightweight Python-side checks (companion package importability) 
 
 ## Solver Installation
 
-### HiGHS (Default)
+HiGHS, GLPK, Clarabel, SCS and Ipopt are dependencies of ESFEX's Julia project and are installed automatically with it. Nothing else is needed.
 
-Bundled with the `HiGHS.jl` Julia package; no additional installation needed. HiGHS [**[21]**](../reference/bibliography.md#ref21) implements a high-performance dual revised simplex method with parallelization support.
+Gurobi, CPLEX, Xpress, CBC and SCIP are installed on demand:
 
-**Strengths**: Fast LP and MIP performance, MIT license, actively maintained, good numerical stability.
+```bash
+esfex add-solver gurobi      # or cplex, xpress, cbc, scip
+esfex list-solvers           # check
+esfex remove-solver gurobi   # uninstall
+```
+
+`add-solver` adds the Julia package to a dedicated environment (`~/.julia/environments/esfex_solvers`, or under the first entry of `JULIA_DEPOT_PATH`), which ESFEX puts on Julia's load path at startup. It survives ESFEX upgrades. After installing, the command loads the package once, so a build or licence problem is reported immediately. See the [CLI reference](cli.md#esfex-add-solver).
+
+!!! note
+    Do not use `Pkg.add("Gurobi")` (or similar) in a Julia session to make a solver available to ESFEX. That installs into whichever environment is active in that session, which ESFEX does not load.
 
 ### Gurobi
 
-Commercial solver with free academic licenses.
-
-1. **Download**: Get the installer from [gurobi.com](https://www.gurobi.com/downloads/)
-2. **Install**: Run the installer for your platform
-3. **License**: Obtain a license:
-   - **Academic**: Free license at [gurobi.com/academia](https://www.gurobi.com/academia/academic-program-and-licenses/)
-   - **Commercial**: Contact Gurobi sales
-4. **Activate license**: Run `grbgetkey <your-license-key>`
-5. **Install Julia package**:
-   ```julia
-   import Pkg
-   Pkg.add("Gurobi")
-   ```
-6. **Install Python companion** (for solver detection):
-   ```bash
-   pip install gurobipy
-   ```
-
-**Strengths**: Fastest solver for large-scale MIP, excellent numerical handling, deterministic results, comprehensive logging.
-
-**Environment variables**: Ensure `GUROBI_HOME` and `GRB_LICENSE_FILE` are set if Gurobi is installed in a non-default location.
+1. Install Gurobi from [gurobi.com](https://www.gurobi.com/downloads/) and obtain a licence (free for academics at [gurobi.com/academia](https://www.gurobi.com/academia/academic-program-and-licenses/)); activate it with `grbgetkey <your-license-key>`.
+2. Make sure `GUROBI_HOME` (and, for a non-default licence location, `GRB_LICENSE_FILE`) are set in the shell where you run the next step.
+3. `esfex add-solver gurobi`
 
 ### CPLEX
 
-Commercial solver (IBM) with free academic licenses.
-
-1. **Download**: Get CPLEX from [IBM Academic Initiative](https://www.ibm.com/academic)
-2. **Install**: Run the CPLEX installer
-3. **Set environment variable**:
-   ```bash
-   export CPLEX_STUDIO_BINARIES=/path/to/cplex/bin/x86-64_linux
-   ```
-4. **Install Julia package**:
-   ```julia
-   import Pkg
-   Pkg.add("CPLEX")
-   ```
-5. **Install Python companion** (for solver detection):
-   ```bash
-   pip install cplex
-   ```
-
-**Strengths**: Industrial-grade robustness, strong MIP performance, good integration with IBM tools.
-
-### CBC
-
-Open-source MIP solver (Coin-or Branch and Cut).
-
-1. **Install Julia package**:
-   ```julia
-   import Pkg
-   Pkg.add("Cbc")
-   ```
-2. **Optional Python companion**:
-   ```bash
-   pip install cylp
-   ```
-
-**Strengths**: Free, no license needed, decent MIP performance for moderate-size problems.
-
-**Weaknesses**: Slower than HiGHS for most problems, less actively developed.
-
-### GLPK
-
-Free LP/MIP solver (GNU Linear Programming Kit). Bundled with ESFEX's Julia project; no additional installation needed.
-
-**Strengths**: Always available, simple, well-documented.
-
-**Weaknesses**: Significantly slower than all other solvers, limited numerical precision, poor scaling for large problems. Not recommended for production simulations.
-
-### SCIP
-
-Open-source solver with strong MIP and constraint programming capabilities.
-
-1. **Install Julia package**:
-   ```julia
-   import Pkg
-   Pkg.add("SCIP")
-   ```
-2. **Optional Python companion**:
-   ```bash
-   pip install pyscipopt
-   ```
-
-**Strengths**: Research-grade solver, constraint programming support, extensible.
+1. Install IBM ILOG CPLEX Optimization Studio (free through the [IBM Academic Initiative](https://www.ibm.com/academic)).
+2. Set `CPLEX_STUDIO_BINARIES` to the CPLEX binary directory, e.g. `export CPLEX_STUDIO_BINARIES=/path/to/cplex/bin/x86-64_linux`.
+3. `esfex add-solver cplex`
 
 ### Xpress
 
-Commercial solver (FICO).
+1. Install FICO Xpress from [fico.com](https://www.fico.com/en/products/fico-xpress-optimization) and activate its licence.
+2. `esfex add-solver xpress`
 
-1. **Download**: Get Xpress from [FICO](https://www.fico.com/en/products/fico-xpress-optimization)
-2. **Install** and activate the license
-3. **Install Julia package**:
-   ```julia
-   import Pkg
-   Pkg.add("Xpress")
-   ```
-4. **Optional Python companion**:
-   ```bash
-   pip install xpress
-   ```
+### CBC and SCIP
 
-**Strengths**: Fast LP and MIP, good numerical handling.
+Open source, no licence needed:
+
+```bash
+esfex add-solver cbc
+esfex add-solver scip
+```
+
+CBC is generally slower than HiGHS. SCIP is a research-grade MIP solver; its default LP solver is single-threaded.
 
 
 ---
@@ -211,29 +154,30 @@ Commercial solver (FICO).
 
 ## When to Use LP vs MIP
 
-| Simulation Component | Formulation | When Used |
-|---------------------|-------------|-----------|
-| Master problem (capacity expansion) | LP | Always (pure LP since retirement refactoring) |
-| Operational dispatch (economic dispatch) | LP | `simulation_mode: development` |
-| Unit commitment | MIP | `simulation_mode: unit_commitment` |
+| Simulation component | Problem class | When used |
+|---------------------|---------------|-----------|
+| Master problem (capacity expansion) | LP | `development` mode (skipped in the other two modes) |
+| Operational dispatch | LP | `development` (default) and `economic_dispatch` with `power_flow_mode: dcopf` |
+| Operational dispatch with commitment | MIP | `simulation_mode: unit_commitment`, or `development` with `master_problem.use_uc_in_dispatch: true` |
+| AC-OPF dispatch | SOCP / SDP / NLP | `power_flow_mode: acopf_*` (see the [compatibility table](#formulation-and-solver-compatibility)) |
 
 ### LP (Linear Programming)
 
-Continuous variables only; solved to exact optimality regardless of the `gap` setting.
+Continuous variables only; solved to optimality within the solver tolerances regardless of the `gap` setting.
 
-- **Use for**: Capacity expansion planning, economic dispatch
-- **Solver choice**: HiGHS is excellent for LP; all solvers handle LP well
-- **Performance**: Linear in problem size; even large models solve in seconds to minutes
+- **Used for**: capacity expansion planning and economic dispatch
+- **Solver choice**: HiGHS handles LP well; all LP-capable solvers work
+- **Performance**: large models usually solve in seconds to minutes
 
 ### MIP (Mixed-Integer Programming)
 
-Includes binary or integer variables (e.g., unit commitment on/off decisions). Computationally harder; may not reach exact optimality within the time limit.
+Adds binary commitment variables (on/off status, start-ups) with minimum up/down times. Computationally harder; may not reach optimality within the time limit.
 
-- **Use for**: Unit commitment with binary start-up/shut-down decisions
-- **Solver choice**: Gurobi > CPLEX > HiGHS > CBC > SCIP > GLPK
-- **Performance**: Exponential worst-case; large models may need significant time and the `gap` parameter controls the acceptable optimality tolerance
+- **Used for**: unit commitment
+- **Solver choice**: Gurobi, CPLEX or Xpress if available; otherwise HiGHS. CBC, SCIP and GLPK are usually slower.
+- **Performance**: exponential worst case; `gap` sets the accepted optimality tolerance
 
-The master problem uses a pure LP formulation. Binary life-extension variables were replaced with age-based retirement logic, eliminating MIP complexity from the planning problem.
+The master problem has no integer variables: retirements follow unit age (see [Core Concepts](../getting-started/concepts.md#age-based-retirement)) instead of binary decisions.
 
 
 ---
@@ -243,21 +187,18 @@ The master problem uses a pure LP formulation. Binary life-extension variables w
 
 ### Thread Count
 
-More threads help for MIP (branch-and-bound parallelization) but have diminishing returns for LP (only IPM benefits). Recommended settings:
+More threads help MIP (parallel branch-and-bound) and interior-point / barrier LP methods; simplex is mostly serial. The default is `threads: 4`. Suggested values:
 
-| Mode | Recommended Threads | Notes |
+| Mode | Suggested threads | Notes |
 |------|-------------------|-------|
 | Economic dispatch (LP) | 2-4 | Simplex is mostly single-threaded; IPM benefits from parallelism |
 | Unit commitment (MIP) | 4-8 | Branch-and-bound benefits from more threads |
 | Master problem (LP) | 2-4 | Similar to economic dispatch |
-| Very large models (10+ nodes, 25 years) | 8-16 | More threads help with presolve and barrier method |
+| Very large models (10+ nodes, 25 years) | 8-16 | More threads help presolve and barrier |
 
-ESFEX reserves 2 system threads by default. You can check the recommended thread count:
+With HiGHS `solver_method: simplex`, Gurobi `method: primal_simplex`/`dual_simplex`, CPLEX `lp_method: primal_simplex`/`dual_simplex`/`network` or Xpress `DEFAULTALG: dual_simplex`/`primal_simplex`, the thread count has little effect (the Studio greys out the field). GLPK is always single-threaded.
 
-```python
-from esfex.config.solver import get_available_threads
-print(f"Recommended threads: {get_available_threads()}")
-```
+Julia's own thread count is separate: ESFEX sets `JULIA_NUM_THREADS=4` if it is not already set.
 
 ### Time Limits
 
@@ -285,22 +226,24 @@ For LP models, the solver always reaches exact optimality regardless of this set
 
 ### LP Method Selection
 
-| Method | Best For | Notes |
+| Method | Best for | Notes |
 |--------|----------|-------|
 | Dual simplex | Default choice | Fast for most problems; warm-starts well |
 | Primal simplex | Problems with many constraints | Alternative when dual simplex struggles |
-| Barrier / IPM [**[4]**](../reference/bibliography.md#ref4) | Large problems | Parallelizes well; may need crossover for exact vertex solution |
-| Concurrent | When unsure | Runs multiple methods in parallel (Gurobi only) |
+| Barrier / IPM [**[4]**](../reference/bibliography.md#ref4) | Large problems | Parallelizes well; may need crossover for a vertex solution |
+| Concurrent | When unsure | Runs several methods in parallel (Gurobi) |
 
-To select a specific method (example for HiGHS):
+Example for HiGHS:
 
 ```yaml
 solver:
   name: highs
   options:
-    solver_method: ipm    # Use interior point method
-    run_crossover: 'on'   # Enable crossover to vertex solution
+    solver_method: ipm    # interior point method
+    run_crossover: 'on'   # crossover to a vertex solution
 ```
+
+If `solver_method` is not set, HiGHS chooses the algorithm itself.
 
 
 ---
@@ -308,21 +251,30 @@ solver:
 
 ## Advanced Solver Options
 
-Each solver exposes tunable parameters through the `options` dictionary.
+Each solver exposes tunable parameters through the `options` dictionary. The tables list the options the Studio offers; the key in the first column is what you write in `options`.
+
+**Method-specific options.** Some options apply to one LP algorithm only (column *Applies when*). They are passed to the solver only when the controlling method option is set **explicitly** to one of the listed methods. If the method is left at its automatic value (`choose` / `auto`) or set to another method, the option is dropped with a warning in the log. For example, `simplex_scale_strategy` takes effect only together with `solver_method: simplex`.
+
+Keys that are not in any table are passed to the solver unchanged, so any native solver parameter can be set. Keys that belong to another solver's table are dropped with a warning (this keeps a Gurobi option from breaking a HiGHS run after `-s highs`).
 
 ### HiGHS Options
 
-| Option | Type | Values | Default | Description |
-|--------|------|--------|---------|-------------|
-| `presolve` | combo | `off`, `on`, `choose` | `choose` | Presolve reduction |
-| `solver_method` | combo | `choose`, `simplex`, `ipm` | `choose` | LP algorithm |
-| `parallel` | combo | `choose`, `off`, `on` | `choose` | Parallel computation |
-| `run_crossover` | combo | `off`, `on` | `on` | Crossover after barrier |
-| `primal_feasibility_tolerance` | float | 1e-10 to 1.0 | 1e-7 | Primal feasibility tolerance |
-| `dual_feasibility_tolerance` | float | 1e-10 to 1.0 | 1e-7 | Dual feasibility tolerance |
-| `ipm_optimality_tolerance` | float | 1e-12 to 1.0 | 1e-8 | IPM optimality tolerance |
-| `simplex_iteration_limit` | int | 0 to 2,147,483,647 | 2,147,483,647 | Max simplex iterations |
-| `simplex_scale_strategy` | combo | `off`, `choose`, `forced_equilibration`, `mean_equilibration`, `max_equilibration`, `max_value_0`, `max_value_1` | `choose` | Scaling strategy |
+| Option | Type | Values | Default | Applies when | Description |
+|--------|------|--------|---------|--------------|-------------|
+| `presolve` | combo | `off`, `on`, `choose` | `choose` | always | Presolve reduction |
+| `solver_method` | combo | `choose`, `simplex`, `ipm`, `ipx`, `hipo`, `pdlp` | `choose` | always | LP algorithm |
+| `parallel` | combo | `choose`, `off`, `on` | `choose` | always | Parallel computation |
+| `simplex_strategy` | combo | `choose`, `dual_serial`, `dual_pami`, `dual_sip`, `primal` | `choose` | `solver_method: simplex` | Simplex variant |
+| `run_crossover` | combo | `off`, `choose`, `on` | `on` | `solver_method: ipm`, `ipx` or `hipo` | Crossover after interior point |
+| `primal_feasibility_tolerance` | float | 1e-10 to 1.0 | 1e-7 | `solver_method: simplex` | Primal feasibility tolerance |
+| `dual_feasibility_tolerance` | float | 1e-10 to 1.0 | 1e-7 | `solver_method: simplex` | Dual feasibility tolerance |
+| `ipm_optimality_tolerance` | float | 1e-12 to 1.0 | 1e-8 | `solver_method: ipm`, `ipx` or `hipo` | IPM optimality tolerance |
+| `pdlp_scaling` | combo | `off`, `on` | `on` | `solver_method: pdlp` | PDLP scaling |
+| `pdlp_iteration_limit` | int | 0 to 2,147,483,647 | 2,147,483,647 | `solver_method: pdlp` | Max PDLP iterations |
+| `simplex_iteration_limit` | int | 0 to 2,147,483,647 | 2,147,483,647 | `solver_method: simplex` | Max simplex iterations |
+| `simplex_scale_strategy` | combo | `off`, `choose`, `forced_equilibration`, `mean_equilibration`, `max_equilibration`, `max_value_0`, `max_value_1` | `choose` | `solver_method: simplex` | Scaling strategy |
+
+When `solver_method: simplex` is set, ESFEX also turns crossover off.
 
 ### Gurobi Options
 
@@ -339,6 +291,8 @@ Each solver exposes tunable parameters through the `options` dictionary.
 | `heuristics` | float | 0.0 to 1.0 | 0.05 | Time fraction for MIP heuristics |
 | `iteration_limit` | int | 0 to 2,147,483,647 | 2,147,483,647 | Max iterations |
 
+Method-specific: `crossover` and `bar_conv_tol` need `method: barrier` or `concurrent`; `iteration_limit` needs `method: primal_simplex`, `dual_simplex` or `concurrent`.
+
 ### CPLEX Options
 
 | Option | Type | Values | Default | Description |
@@ -352,6 +306,8 @@ Each solver exposes tunable parameters through the `options` dictionary.
 | `barrier_conv_tol` | float | 1e-12 to 1e-1 | 1e-8 | Barrier convergence tolerance |
 | `mip_emphasis` | combo | `balanced`, `feasibility`, `optimality`, `best_bound`, `hidden_feasibility` | `balanced` | MIP solving emphasis |
 
+Method-specific: `feasibility_tol` and `optimality_tol` need `lp_method: primal_simplex`, `dual_simplex` or `network`; `barrier_conv_tol` needs `lp_method: barrier`. CPLEX ignores `solver.verbose`.
+
 ### GLPK Options
 
 | Option | Type | Values | Default | Description |
@@ -363,7 +319,7 @@ Each solver exposes tunable parameters through the `options` dictionary.
 | `tol_dj` | float | 1e-12 to 1e-1 | 1e-7 | Dual tolerance |
 | `tol_piv` | float | 1e-12 to 1.0 | 1e-10 | Pivot tolerance |
 | `it_lim` | int | 0 to 2,147,483,647 | 2,147,483,647 | Iteration limit |
-| `mip_gap` | float | 0.0 to 1.0 | 0.0 | MIP gap |
+| `mip_gap` | float | 0.0 to 1.0 | 0.0 | MIP gap (`solver.gap` is not passed to GLPK) |
 
 ### CBC Options
 
@@ -397,6 +353,12 @@ Each solver exposes tunable parameters through the `options` dictionary.
 | `OPTIMALITYTOL` | float | 1e-12 to 1e-1 | 1e-6 | Optimality tolerance |
 | `BARGAPSTOP` | float | 1e-12 to 1.0 | 1e-8 | Barrier gap stop |
 
+Method-specific: `BARGAPSTOP` needs `DEFAULTALG: barrier`.
+
+### Clarabel, SCS and Ipopt
+
+These have no option tables; any key in `options` is passed to the solver as a native parameter. ESFEX sets `time_limit` and `verbose` for Clarabel; `max_iters = 100000`, `eps_abs = eps_rel = 1e-6` and `verbose` for SCS; `max_cpu_time`, `tol` (from `solver.gap`) and `print_level` for Ipopt. Because `gap` defaults to 0.01, set a tighter value (e.g. `gap: 1.0e-6`) when running Ipopt.
+
 
 ---
 
@@ -420,12 +382,13 @@ This creates a coefficient range spanning 6-9 orders of magnitude, which can cau
 
 HiGHS uses automatic scaling by default. Other solvers also enable scaling. If you encounter numerical issues, try:
 
-**HiGHS**:
+**HiGHS** (the scaling option needs simplex to be selected explicitly):
 ```yaml
 solver:
   name: highs
   options:
-    simplex_scale_strategy: max_equilibration    # Aggressive scaling (value 4)
+    solver_method: simplex
+    simplex_scale_strategy: max_equilibration
 ```
 
 **Gurobi**:
@@ -448,7 +411,7 @@ solver:
 
 ### Guidelines for Numerical Stability
 
-1. **Keep penalty values reasonable**: Penalties above 10,000,000 can cause solver stalls or numerical warnings. The recommended range is 100-1,000,000.
+1. **Keep penalty values reasonable**: Penalties above 10,000,000 can cause solver stalls or numerical warnings. The recommended range is 100-1,000,000. Note that `penalties.loss_of_load` defaults to 10,000,000 $/MWh when not set.
 
 2. **Check coefficient ranges**: Ensure that the ratio between the largest and smallest non-zero coefficients is less than 10^6.
 
@@ -456,7 +419,7 @@ solver:
 
 4. **Use appropriate tolerances**: The default tolerances (1e-7 for primal/dual, 1e-8 for barrier) are suitable for most models. Only tighten them if you observe solution quality issues.
 
-5. **Monitor solver output**: Enable `verbose: true` for solver diagnostics.
+5. **Monitor solver output**: Enable `verbose: true` together with `logging.console_level: verbose` (or run with `esfex run -v`) for solver diagnostics. With the default `console_level: basic` the solver log is suppressed.
 
 
 ---
@@ -468,7 +431,7 @@ solver:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Solver runs for hours with no improvement | Penalty too high (e.g., `fre_penalty = 600000000`) | Reduce penalty coefficients to < 1,000 |
+| Solver runs for hours with no improvement | Penalty too high (e.g., `penalties.fre_penetration_loss: 600000000`) | Reduce penalty coefficients to < 1,000 |
 | Simplex cycling | Degenerate problem | Switch to barrier method: `solver_method: ipm` |
 | MIP not finding feasible solutions | Tight constraints | Increase `time_limit`, relax `gap`, or use a faster solver |
 
@@ -482,7 +445,7 @@ No solution satisfies all constraints simultaneously. Common causes:
 
 1. **Conflicting constraints**: Demand exceeds available generation capacity plus loss-of-load penalty budget. Check that demand data is correct and generators have sufficient capacity.
 
-2. **Reserve requirements too high**: Static or dynamic reserve requirements may be impossible to meet. Try reducing `reserve_static` or `reserve_dynamic` values.
+2. **Reserve requirements too high**: Static or dynamic reserve requirements may be impossible to meet. Try reducing `nodes.reserve_static` or `nodes.reserve_dynamic`.
 
 3. **Missing fuel supply**: Generators may not have fuel available. Check fuel entry points and supply constraints.
 
@@ -509,7 +472,7 @@ WARNING: Numerical issues detected
 The solver encountered precision issues during solution:
 
 1. **Wide coefficient range**: Check penalty/cost ratios. Reduce the largest penalties.
-2. **Enable scaling**: Set `simplex_scale_strategy: max_equilibration` for HiGHS.
+2. **Enable scaling**: For HiGHS, set `solver_method: simplex` and `simplex_scale_strategy: max_equilibration`.
 3. **Increase tolerance**: Slightly relax feasibility tolerances if the solution is acceptable.
 4. **Switch method**: Try barrier method instead of simplex (or vice versa).
 
@@ -520,7 +483,7 @@ If MIP problems (unit commitment) are excessively slow:
 1. **Increase gap**: Set `gap: 0.02` or `gap: 0.05` to accept near-optimal solutions
 2. **Reduce problem size**: Use fewer rolling horizon hours, or switch to `development` mode (LP)
 3. **Use a better solver**: Switch from GLPK/CBC to HiGHS or Gurobi
-4. **Reduce binary variables**: ESFEX's master problem is pure LP. MIP is only used in unit commitment mode
+4. **Reduce binary variables**: ESFEX's master problem is pure LP. MIP is only used in unit commitment mode and with `master_problem.use_uc_in_dispatch: true`
 
 ### Out of Memory
 
@@ -565,7 +528,11 @@ Approximate memory requirements:
 ```yaml
 solver:
   verbose: true
+logging:
+  console_level: verbose   # with the default "basic" the solver log is suppressed
 ```
+
+Or run with `esfex run -c config.yaml -v`.
 
 ### HiGHS Log Example
 

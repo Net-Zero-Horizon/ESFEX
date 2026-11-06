@@ -246,6 +246,10 @@ function build_master_variables!(
     bat_tech_power_investment = Dict{Int, Dict{Int, Vector{VariableRef}}}()
     bat_tech_capacity_investment = Dict{Int, Dict{Int, Vector{VariableRef}}}()
     transfer_investment = Dict{Int, Dict{Tuple{Int,Int}, VariableRef}}()
+    corridors = Set{Tuple{Int,Int}}()
+    for (i, j) in TransmissionDC(input.network).lines
+        push!(corridors, (i, j), (j, i))
+    end
 
     # Life extension variables
     gen_life_extension = Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}()
@@ -305,11 +309,14 @@ function build_master_variables!(
                 )
             end
 
-            # Transmission investment
+            # Transmission investment, only on corridors that exist as a line
+            # or transformer (a candidate corridor may start at 0 MW). Capacity
+            # bought between buses with no line never reaches the dispatch.
             transfer_investment[y_idx] = Dict{Tuple{Int,Int}, VariableRef}()
             for i in 1:n_buses
                 for j in 1:n_buses
-                    if i != j && (input.network.connections[i, j] > 0 || input.network.transference_invest_max[i] > 0)
+                    if i != j && (i, j) in corridors &&
+                       (input.network.connections[i, j] > 0 || input.network.transference_invest_max[i] > 0)
                         # Upper bound from transference_invest_max (use bus i as reference)
                         max_inv = input.network.transference_invest_max[i]
                         transfer_investment[y_idx][(i, j)] = @variable(model,
@@ -615,6 +622,37 @@ function add_investment_constraints!(
 end
 
 """
+    corridor_investment(inv, from, to)
+
+Investment variable (or value) of the corridor between buses `from` and `to`,
+whichever way round it is keyed: lines are stored low→high, while a variable
+exists only where its first bus allows investment (e.g. zone→grid).
+Returns `nothing` when the corridor has no investment option.
+"""
+function corridor_investment(inv::AbstractDict, from::Int, to::Int)
+    haskey(inv, (from, to)) && return inv[(from, to)]
+    return get(inv, (to, from), nothing)
+end
+
+"""
+    corridor_cost_terms(inv, costs)
+
+`(variable, cost per MW)` once per corridor. When both directions of a
+corridor exist they are held equal (TXN-1), so only the low→high one is
+charged. A corridor costs the higher of its two ends' `costs` (an end left
+at 0 does not make the line cheaper), also when only one direction exists,
+as for a development zone's interconnection.
+"""
+function corridor_cost_terms(inv::AbstractDict, costs::AbstractVector)
+    terms = Tuple{Any, Float64}[]
+    for ((i, j), var) in inv
+        haskey(inv, (j, i)) && j < i && continue
+        push!(terms, (var, max(costs[i], costs[j])))
+    end
+    return terms
+end
+
+"""
     add_transmission_symmetry_constraints!(model, vars, input)
 
 Add symmetry constraints for transmission investment.
@@ -694,8 +732,8 @@ function add_budget_constraints!(
         end
 
         # Transmission investment costs
-        for ((i, j), var) in vars.transfer_investment[y_idx]
-            trans_cost = input.network.transference_invest_cost[i]
+        for (var, trans_cost) in corridor_cost_terms(vars.transfer_investment[y_idx],
+                                                     input.network.transference_invest_cost)
             add_to_expression!(annual_cost, var, trans_cost)
         end
 
@@ -863,10 +901,14 @@ end
 
 Add capacity adequacy constraints ensuring total capacity meets peak demand.
 
-This is a simplified planning constraint that requires:
-  total_generation_capacity + total_battery_power >= peak_demand * reserve_margin
+This is a simplified planning constraint that requires, per node:
+  local_capacity + imports - exports >= peak_demand * reserve_margin
 
-With a slack variable to allow infeasibility at a penalty cost.
+Imports between two nodes are limited to the transfer capacity between
+their buses (existing lines plus cumulative transfer investment), so a node
+may rely on a neighbour's surplus instead of building locally. Nodal peaks
+are taken as coincident (conservative). With a slack variable to allow
+infeasibility at a penalty cost.
 """
 function add_capacity_adequacy_constraints!(
     model::Model,
@@ -881,8 +923,23 @@ function add_capacity_adequacy_constraints!(
     # Reserve margin (require extra capacity above peak, configurable)
     reserve_margin = input.reserve_margin
 
+    n_nodes = input.network.num_nodes
+    b2n = input.network.bus_to_node
+    # Node pairs joined by existing lines or by a transfer-investment option
+    node_pairs = Set{Tuple{Int,Int}}()
+    for i in 1:n_buses, j in 1:n_buses
+        m, n = b2n[i], b2n[j]
+        m == n && continue
+        if input.network.connections[i, j] > 0 ||
+           any(haskey(inv, (i, j)) for inv in values(vars.transfer_investment))
+            push!(node_pairs, (m, n))
+        end
+    end
+
     # Calculate peak demand for each year at each node
     for y_idx in 1:num_years
+        node_capacity = Dict{Int, AffExpr}()
+        node_peak = Dict{Int, Float64}()
         # Get year-specific demand slice (with demand growth)
         growth_factor = (1.0 + input.demand_growth)^(y_idx - 1)
         timesteps_per_year_y = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
@@ -942,7 +999,7 @@ function add_capacity_adequacy_constraints!(
                         # Past lifetime: capacity from life extension variable (if any)
                         life_ext_var = vars.gen_life_extension[y_idx][g][n]
                         if life_ext_var !== nothing
-                            add_to_expression!(total_capacity, life_ext_var * capacity_credit)
+                            add_to_expression!(total_capacity, life_ext_var, capacity_credit * risk_coef)
                         end
                     end
 
@@ -964,7 +1021,7 @@ function add_capacity_adequacy_constraints!(
                     elseif base_power > 0
                         life_ext_var = vars.bat_life_extension[y_idx][b][n]
                         if life_ext_var !== nothing
-                            add_to_expression!(total_capacity, life_ext_var)
+                            add_to_expression!(total_capacity, life_ext_var, bat_risk)
                         end
                     end
                 end
@@ -1004,9 +1061,40 @@ function add_capacity_adequacy_constraints!(
                 end
             end
 
-            # Capacity adequacy constraint: capacity + slack >= peak_demand
+            node_capacity[ni] = total_capacity
+            node_peak[ni] = peak_demand
+        end
+
+        # Peak-hour transfers: bounded by the inter-node transfer capacity
+        imports = Dict{Tuple{Int,Int}, VariableRef}()
+        for (m, n) in node_pairs
+            cap = AffExpr(0.0)
+            for i in 1:n_buses, j in 1:n_buses
+                (b2n[i] == m && b2n[j] == n) || continue
+                add_to_expression!(cap, input.network.connections[i, j])
+                for y in 1:vars.years_per_inv_period:y_idx
+                    if haskey(vars.transfer_investment, y) &&
+                       haskey(vars.transfer_investment[y], (i, j))
+                        add_to_expression!(cap, vars.transfer_investment[y][(i, j)])
+                    end
+                end
+            end
+            imports[(m, n)] = @variable(model, lower_bound = 0,
+                base_name = "cap_import_y$(y_idx)_$(m)_$(n)")
+            @constraint(model, imports[(m, n)] <= cap,
+                base_name = "cap_import_max_y$(y_idx)_$(m)_$(n)")
+        end
+
+        for ni in 1:n_nodes
+            haskey(node_capacity, ni) || continue
+            net_import = AffExpr(0.0)
+            for ((m, n), v) in imports
+                n == ni && add_to_expression!(net_import, v)
+                m == ni && add_to_expression!(net_import, -1.0, v)
+            end
+            # Capacity adequacy constraint: capacity + net imports + slack >= peak
             @constraint(model,
-                total_capacity + vars.slack_capacity[(y_idx, ni)] >= peak_demand,
+                node_capacity[ni] + net_import + vars.slack_capacity[(y_idx, ni)] >= node_peak[ni],
                 base_name = "cap_adequacy_y$(y_idx)_node$(ni)"
             )
         end
@@ -1193,27 +1281,35 @@ Returns an AffExpr containing discounted investment costs at period starts.
 """
 function build_investment_cost_expression(
     vars::MasterProblemVariables,
-    input::MasterProblemInput
+    input::MasterProblemInput;
+    mult::Union{Nothing, ScenarioMultipliers} = nothing,
+    discount_rate::Float64 = input.discount_rate
 )::AffExpr
     num_years = length(input.years)
     n_buses = input.network.num_buses
     n_gen = length(input.generators)
+    # Stochastic scenarios scale the unit investment costs
+    m_re = mult === nothing ? 1.0 : mult.invest_cost_renewables
+    m_conv = mult === nothing ? 1.0 : mult.invest_cost_conventional
+    m_sto = mult === nothing ? 1.0 : mult.invest_cost_storage
+    m_tx = mult === nothing ? 1.0 : mult.invest_cost_transmission
 
     inv_cost = AffExpr(0.0)
 
     ypp = vars.years_per_inv_period
     for y_idx in 1:ypp:num_years
-        discount_factor = 1.0 / ((1.0 + input.discount_rate)^(y_idx - 1))
+        discount_factor = 1.0 / ((1.0 + discount_rate)^(y_idx - 1))
 
         investment_cost = AffExpr(0.0)
 
         # Technology investment
         for t in 1:length(input.technologies)
             tech = input.technologies[t]
+            m_t = tech.type == "Renewable" ? m_re : m_conv
             for n in 1:n_buses
                 add_to_expression!(investment_cost,
                     vars.tech_investment[y_idx][t][n],
-                    tech.invest_cost[n])
+                    tech.invest_cost[n] * m_t)
             end
         end
 
@@ -1223,17 +1319,17 @@ function build_investment_cost_expression(
             for n in 1:n_buses
                 add_to_expression!(investment_cost,
                     vars.bat_tech_power_investment[y_idx][bt][n],
-                    btech.invest_cost_power[n])
+                    btech.invest_cost_power[n] * m_sto)
                 add_to_expression!(investment_cost,
                     vars.bat_tech_capacity_investment[y_idx][bt][n],
-                    btech.invest_cost_capacity[n])
+                    btech.invest_cost_capacity[n] * m_sto)
             end
         end
 
         # Transmission investment
-        for ((i, j), var) in vars.transfer_investment[y_idx]
-            trans_cost = input.network.transference_invest_cost[i]
-            add_to_expression!(investment_cost, var, trans_cost)
+        for (var, trans_cost) in corridor_cost_terms(vars.transfer_investment[y_idx],
+                                                     input.network.transference_invest_cost)
+            add_to_expression!(investment_cost, var, trans_cost * m_tx)
         end
 
         # Primary energy infrastructure investment (M10)
@@ -1278,6 +1374,116 @@ function build_investment_cost_expression(
 end
 
 """
+    build_annual_asset_cost(vars, input, y_idx)
+
+Undiscounted per-year cost of existing assets: life extension of units past
+their lifetime and (incremental, LP-linear) decommissioning.
+"""
+function build_annual_asset_cost(
+    vars::MasterProblemVariables,
+    input::MasterProblemInput,
+    y_idx::Int
+)::AffExpr
+    n_buses = input.network.num_buses
+    n_gen = length(input.generators)
+    n_bat = length(input.batteries)
+    annual_cost = AffExpr(0.0)
+
+    # Life extension costs (annual): cost to keep units past lifetime
+    for g in 1:n_gen
+        gen = input.generators[g]
+        for n in 1:n_buses
+            life_ext_var = vars.gen_life_extension[y_idx][g][n]
+            if life_ext_var !== nothing
+                ext_cost = gen.invest_cost[n] * input.life_extension_cost_factor
+                add_to_expression!(annual_cost, life_ext_var, ext_cost)
+            end
+        end
+    end
+    for b in 1:n_bat
+        bat = input.batteries[b]
+        for n in 1:n_buses
+            life_ext_var = vars.bat_life_extension[y_idx][b][n]
+            if life_ext_var !== nothing
+                ext_cost = bat.invest_cost_power[n] * input.life_extension_cost_factor
+                add_to_expression!(annual_cost, life_ext_var, ext_cost)
+            end
+        end
+    end
+
+    # Decommissioning costs (incremental, LP-linear)
+    for g in 1:n_gen
+        gen = input.generators[g]
+        for n in 1:n_buses
+            rated_power = gen.rated_power[n]
+            decomm_cost = gen.decommissioning_cost[n]
+            if rated_power <= 0 || decomm_cost <= 0
+                continue
+            end
+            lifetime = gen.life_time[n]
+            initial_age = gen.initial_age[n]
+            # Year index when retirement first occurs
+            retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
+
+            if y_idx == retirement_y
+                # First retirement year: decommission full capacity minus life ext
+                age = initial_age + y_idx - 1
+                deg = (1.0 - gen.degradation_rate[n]) ^ age
+                full_cap = rated_power * deg
+                add_to_expression!(annual_cost, full_cap * decomm_cost)
+                lev = vars.gen_life_extension[y_idx][g][n]
+                if lev !== nothing
+                    add_to_expression!(annual_cost, lev, -decomm_cost)
+                end
+            elseif y_idx > retirement_y
+                # Subsequent years: incremental decommissioning of life-extended capacity
+                prev = vars.gen_life_extension[y_idx - 1][g][n]
+                curr = vars.gen_life_extension[y_idx][g][n]
+                if prev !== nothing
+                    add_to_expression!(annual_cost, prev, decomm_cost)
+                    if curr !== nothing
+                        add_to_expression!(annual_cost, curr, -decomm_cost)
+                    end
+                end
+            end
+        end
+    end
+    # Battery decommissioning
+    for b in 1:n_bat
+        bat = input.batteries[b]
+        for n in 1:n_buses
+            base_power = bat.max_discharge_power[n]
+            decomm_cost = bat.decommissioning_cost[n]
+            if base_power <= 0 || decomm_cost <= 0
+                continue
+            end
+            lifetime = bat.life_time[n]
+            initial_age = bat.initial_age[n]
+            retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
+
+            if y_idx == retirement_y
+                add_to_expression!(annual_cost, base_power * decomm_cost)
+                lev = vars.bat_life_extension[y_idx][b][n]
+                if lev !== nothing
+                    add_to_expression!(annual_cost, lev, -decomm_cost)
+                end
+            elseif y_idx > retirement_y
+                prev = vars.bat_life_extension[y_idx - 1][b][n]
+                curr = vars.bat_life_extension[y_idx][b][n]
+                if prev !== nothing
+                    add_to_expression!(annual_cost, prev, decomm_cost)
+                    if curr !== nothing
+                        add_to_expression!(annual_cost, curr, -decomm_cost)
+                    end
+                end
+            end
+        end
+    end
+
+    return annual_cost
+end
+
+"""
     build_master_objective!(model, vars, input)
 
 Build the objective function: NPV of investment + operational costs.
@@ -1298,98 +1504,7 @@ function build_master_objective!(
     # Per-year costs: life extension, decommissioning, operational (every year, not just period starts)
     for y_idx in 1:num_years
         discount_factor = 1.0 / ((1.0 + input.discount_rate)^(y_idx - 1))
-        annual_cost = AffExpr(0.0)
-
-        # Life extension costs (annual): cost to keep units past lifetime
-        for g in 1:n_gen
-            gen = input.generators[g]
-            for n in 1:n_buses
-                life_ext_var = vars.gen_life_extension[y_idx][g][n]
-                if life_ext_var !== nothing
-                    ext_cost = gen.invest_cost[n] * input.life_extension_cost_factor
-                    add_to_expression!(annual_cost, life_ext_var, ext_cost)
-                end
-            end
-        end
-        for b in 1:n_bat
-            bat = input.batteries[b]
-            for n in 1:n_buses
-                life_ext_var = vars.bat_life_extension[y_idx][b][n]
-                if life_ext_var !== nothing
-                    ext_cost = bat.invest_cost_power[n] * input.life_extension_cost_factor
-                    add_to_expression!(annual_cost, life_ext_var, ext_cost)
-                end
-            end
-        end
-
-        # Decommissioning costs (incremental, LP-linear)
-        for g in 1:n_gen
-            gen = input.generators[g]
-            for n in 1:n_buses
-                rated_power = gen.rated_power[n]
-                decomm_cost = gen.decommissioning_cost[n]
-                if rated_power <= 0 || decomm_cost <= 0
-                    continue
-                end
-                lifetime = gen.life_time[n]
-                initial_age = gen.initial_age[n]
-                # Year index when retirement first occurs
-                retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
-
-                if y_idx == retirement_y
-                    # First retirement year: decommission full capacity minus life ext
-                    age = initial_age + y_idx - 1
-                    deg = (1.0 - gen.degradation_rate[n]) ^ age
-                    full_cap = rated_power * deg
-                    add_to_expression!(annual_cost, full_cap * decomm_cost)
-                    lev = vars.gen_life_extension[y_idx][g][n]
-                    if lev !== nothing
-                        add_to_expression!(annual_cost, lev, -decomm_cost)
-                    end
-                elseif y_idx > retirement_y
-                    # Subsequent years: incremental decommissioning of life-extended capacity
-                    prev = vars.gen_life_extension[y_idx - 1][g][n]
-                    curr = vars.gen_life_extension[y_idx][g][n]
-                    if prev !== nothing
-                        add_to_expression!(annual_cost, prev, decomm_cost)
-                        if curr !== nothing
-                            add_to_expression!(annual_cost, curr, -decomm_cost)
-                        end
-                    end
-                end
-            end
-        end
-        # Battery decommissioning
-        for b in 1:n_bat
-            bat = input.batteries[b]
-            for n in 1:n_buses
-                base_power = bat.max_discharge_power[n]
-                decomm_cost = bat.decommissioning_cost[n]
-                if base_power <= 0 || decomm_cost <= 0
-                    continue
-                end
-                lifetime = bat.life_time[n]
-                initial_age = bat.initial_age[n]
-                retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
-
-                if y_idx == retirement_y
-                    add_to_expression!(annual_cost, base_power * decomm_cost)
-                    lev = vars.bat_life_extension[y_idx][b][n]
-                    if lev !== nothing
-                        add_to_expression!(annual_cost, lev, -decomm_cost)
-                    end
-                elseif y_idx > retirement_y
-                    prev = vars.bat_life_extension[y_idx - 1][b][n]
-                    curr = vars.bat_life_extension[y_idx][b][n]
-                    if prev !== nothing
-                        add_to_expression!(annual_cost, prev, decomm_cost)
-                        if curr !== nothing
-                            add_to_expression!(annual_cost, curr, -decomm_cost)
-                        end
-                    end
-                end
-            end
-        end
+        annual_cost = build_annual_asset_cost(vars, input, y_idx)
 
         # Add discounted per-year costs
         add_to_expression!(total_cost, annual_cost, discount_factor)
@@ -1824,11 +1939,13 @@ function add_day_operational_constraints!(
                 else
                     @constraint(model, bat_tech_soc[bt, b, 0] == en_cap * initial_soc_frac,
                         base_name = "bt_soc_init_bt$(bt)_b$(b)_y$(year_idx)_d$(day_idx)")
+                    # SOC in MWh; charge/discharge in MW over a step of tres hours
+                    tres = input.temporal_resolution_hours
                     for ts in 1:hours
                         @constraint(model,
                             bat_tech_soc[bt, b, ts] == bat_tech_soc[bt, b, ts-1]
-                                + ch_eff * bat_tech_charge[bt, b, ts]
-                                - (1.0/dis_eff) * bat_tech_discharge[bt, b, ts],
+                                + tres * (ch_eff * bat_tech_charge[bt, b, ts]
+                                          - (1.0/dis_eff) * bat_tech_discharge[bt, b, ts]),
                             base_name = "bt_soc_dyn_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
                     end
                     @constraint(model, bat_tech_soc[bt, b, hours] == en_cap * initial_soc_frac,
@@ -1986,9 +2103,15 @@ function add_day_operational_constraints!(
     network_lines = input.network.transmission_lines
     n_lines = length(network_lines)
     if n_buses > 1 && n_lines > 0
-        transmission = TransmissionDC(input.network)
+        transmission = with_loss_model(TransmissionDC(input.network),
+            input.transmission_loss_segments, input.network.s_base)
+        inv_years = [y for y in 1:vars.years_per_inv_period:year_idx
+                     if haskey(vars.transfer_investment, y)]
+        expandable = Set{Int}(l for (l, (from, to)) in enumerate(transmission.lines)
+            if any(corridor_investment(vars.transfer_investment[y], from, to) !== nothing
+                   for y in inv_years))
         add_dc_constraints!(model, transmission, ps_vars, day_input;
-            extra_injections_fn=extra_fn)
+            extra_injections_fn=extra_fn, expandable_lines=expandable)
 
         # Build line capacity overrides with cumulative investment
         # Use transmission.lines (from TransmissionDC) which includes transformers
@@ -1996,10 +2119,9 @@ function add_day_operational_constraints!(
         for (l, (from, to)) in enumerate(transmission.lines)
             base_cap = transmission.line_capacities[l]
             inv_cap = AffExpr(0.0)
-            for y in 1:vars.years_per_inv_period:year_idx
-                if haskey(vars.transfer_investment[y], (from, to))
-                    add_to_expression!(inv_cap, vars.transfer_investment[y][(from, to)])
-                end
+            for y in inv_years
+                v = corridor_investment(vars.transfer_investment[y], from, to)
+                v === nothing || add_to_expression!(inv_cap, v)
             end
             line_cap_override[l] = base_cap + inv_cap
         end
@@ -2230,14 +2352,24 @@ function add_day_operational_constraints!(
 end
 
 """
-    calculate_day_operational_cost(ps_vars, input, year_idx, hours)
+    co2_cost_per_mwh(input, unit, b)
 
-Calculate operational cost for a representative day.
+Carbon cost of one MWh produced by `unit` (generator or technology) at bus `b`
+(\$/t × t/MWh_e, see `co2_per_mwh`), as the dispatch charges it.
 """
-function calculate_day_operational_cost(
+co2_cost_per_mwh(input::MasterProblemInput, unit, b::Int) =
+    input.co2_cost * co2_per_mwh(input.fuel_co2, unit, b)
+
+"""
+    day_operational_cost(ps_vars, input, hours; tech_output=nothing)
+
+Unscaled operating cost of one representative day or TSAM period: fuel, O&M
+and CO2, load shedding, curtailment, battery throughput and the reserve and
+inertia shortfalls. The callers scale it to a year.
+"""
+function day_operational_cost(
     ps_vars::PowerSystemVariables,
     input::MasterProblemInput,
-    year_idx::Int,
     hours::Int;
     tech_output::Union{Nothing, Any} = nothing
 )::AffExpr
@@ -2251,6 +2383,7 @@ function calculate_day_operational_cost(
         for g in 1:n_gen
             gen = input.generators[g]
             for n in ps_vars.buses_of_gen[g]
+                co2 = co2_cost_per_mwh(input, gen, n)
                 fixed_cost = gen.fixed_cost[n]
                 maint_cost = gen.maintenance_cost[n]
                 if haskey(ps_vars.gen_seg_output, (g, n))
@@ -2261,11 +2394,11 @@ function calculate_day_operational_cost(
                         add_to_expression!(cost, segs[k].marginal_cost, seg_vars[k, t])
                     end
                     add_to_expression!(cost, ps_vars.gen_output[g, n, t],
-                                      fixed_cost + maint_cost)
+                                      fixed_cost + maint_cost + co2)
                 else
                     fuel_cost = gen.fuel_cost[n]
                     add_to_expression!(cost, ps_vars.gen_output[g, n, t],
-                                      fuel_cost + fixed_cost + maint_cost)
+                                      fuel_cost + fixed_cost + maint_cost + co2)
                 end
             end
         end
@@ -2275,7 +2408,8 @@ function calculate_day_operational_cost(
             for tc in 1:n_tech
                 tech = input.technologies[tc]
                 for b in 1:n_buses
-                    total_cost = tech.fuel_cost[b] + tech.fixed_cost[b] + tech.maintenance_cost[b]
+                    co2 = co2_cost_per_mwh(input, tech, b)
+                    total_cost = tech.fuel_cost[b] + tech.fixed_cost[b] + tech.maintenance_cost[b] + co2
                     if total_cost > 0
                         add_to_expression!(cost, tech_output[tc, b, t], total_cost)
                     end
@@ -2352,11 +2486,26 @@ function calculate_day_operational_cost(
         end
     end
 
+    return cost
+end
+
+"""
+    calculate_day_operational_cost(ps_vars, input, year_idx, hours)
+
+Calculate operational cost for a representative day, scaled to the year.
+"""
+function calculate_day_operational_cost(
+    ps_vars::PowerSystemVariables,
+    input::MasterProblemInput,
+    year_idx::Int,
+    hours::Int;
+    tech_output::Union{Nothing, Any} = nothing
+)::AffExpr
     tres = max(1.0, input.temporal_resolution_hours)
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
     scaling_factor = tres * days_in_year / input.representative_days_per_year
 
-    return cost * scaling_factor
+    return day_operational_cost(ps_vars, input, hours; tech_output) * scaling_factor
 end
 
 """
@@ -2370,13 +2519,19 @@ Exactly mirrors legacy _add_representative_days_validation.
 function add_representative_days_validation!(
     model::Model,
     vars::MasterProblemVariables,
-    input::MasterProblemInput,
-    targets::Dict{Tuple{Int,Int}, Float64}
+    base_input::MasterProblemInput,
+    targets::Dict{Tuple{Int,Int}, Float64};
+    scenario::Union{Nothing, Scenario} = nothing,
+    scenario_idx::Int = 0
 )
-    num_years = length(input.years)
-    timesteps_per_day = 24 ÷ input.temporal_resolution_hours
+    num_years = length(base_input.years)
+    timesteps_per_day = 24 ÷ base_input.temporal_resolution_hours
+    day_offset = 1000 * scenario_idx   # keeps day names distinct per scenario
 
     for y_idx in 1:num_years
+        # A stochastic scenario operates on its own demand and costs
+        input = scenario === nothing ? base_input :
+            scenario_master_input(base_input, scenario.multipliers, y_idx)
         timesteps_per_year = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
 
         rep_days = select_representative_days(
@@ -2406,11 +2561,11 @@ function add_representative_days_validation!(
             day_demand = input.base_demand[start_hour:end_hour, :]
 
             # Create PowerSystemVariables for this day
-            ps_vars = create_day_ps_vars!(model, input, y_idx, day_idx, hours)
+            ps_vars = create_day_ps_vars!(model, input, y_idx, day_idx + day_offset, hours)
 
             # Add operational constraints via delegation to power_system.jl
             tech_output, tech_curt_cost = add_day_operational_constraints!(
-                model, ps_vars, vars, input, y_idx, day_idx, day_demand, start_hour
+                model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour
             )
 
             # Calculate and store operational cost (including tech curtailment penalty)
@@ -2439,102 +2594,8 @@ function calculate_day_operational_cost_tsam(
     weight::Float64;
     tech_output::Union{Nothing, Any} = nothing
 )::AffExpr
-    n_gen = length(input.generators)
-    n_buses = input.network.num_buses
-    n_nodes = input.network.num_nodes
-
-    cost = AffExpr(0.0)
-
-    for t in 1:hours
-        for g in 1:n_gen
-            gen = input.generators[g]
-            for n in ps_vars.buses_of_gen[g]
-                fixed_cost = gen.fixed_cost[n]
-                maint_cost = gen.maintenance_cost[n]
-                if haskey(ps_vars.gen_seg_output, (g, n))
-                    segs = input.gen_cost_curves[g][n]
-                    seg_vars = ps_vars.gen_seg_output[(g, n)]
-                    for k in 1:length(segs)
-                        add_to_expression!(cost, segs[k].marginal_cost, seg_vars[k, t])
-                    end
-                    add_to_expression!(cost, ps_vars.gen_output[g, n, t],
-                                      fixed_cost + maint_cost)
-                else
-                    fuel_cost = gen.fuel_cost[n]
-                    add_to_expression!(cost, ps_vars.gen_output[g, n, t],
-                                      fuel_cost + fixed_cost + maint_cost)
-                end
-            end
-        end
-
-        if tech_output !== nothing
-            n_tech = length(input.technologies)
-            for tc in 1:n_tech
-                tech = input.technologies[tc]
-                for b in 1:n_buses
-                    total_cost = tech.fuel_cost[b] + tech.fixed_cost[b] + tech.maintenance_cost[b]
-                    if total_cost > 0
-                        add_to_expression!(cost, tech_output[tc, b, t], total_cost)
-                    end
-                end
-            end
-        end
-
-        # load_shed is per-bus (B2 refactor) — iterate over buses.
-        for b in 1:n_buses
-            add_to_expression!(cost, ps_vars.load_shed[b, t], input.loss_of_load_penalty)
-        end
-
-        for n in 1:n_nodes
-            add_to_expression!(cost, ps_vars.fre_penetration_loss[n, t],
-                input.fre_penetration_loss_penalty)
-        end
-
-        # Curtailment penalty (existing renewable generators).
-        # Tech-investment curtailment is penalised separately in
-        # add_day_operational_constraints! where the tech_output expression
-        # and per-year cumul_cap are accessible. Without this term the master
-        # has no incentive to size tech to actual absorption capacity —
-        # excess renewable is spilled "for free", so master overbuilds and
-        # operational reveals the gap (curtailment 40-65% from year 2042 on
-        # despite the configured max_curtailment_ratio = 5%).
-        for n in 1:n_nodes
-            add_to_expression!(cost, ps_vars.curtailment[n, t],
-                input.curtailment_cost)
-        end
-
-        if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral)
-            for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
-                criticality = get(input.sectoral_criticality, sector, 1.0)
-                sector_penalty = input.loss_of_load_penalty * criticality
-                for n in 1:n_buses
-                    add_to_expression!(cost, lol_vars[n, t], sector_penalty)
-                end
-            end
-        end
-    end
-
-    n_bat = length(input.batteries)
-    for t in 1:hours
-        for b in 1:n_bat
-            bat = input.batteries[b]
-            for n in ps_vars.buses_of_bat[b]
-                if haskey(ps_vars.bat_seg_discharge, (b, n))
-                    segs = input.bat_cost_curves[b][n]
-                    seg_vars = ps_vars.bat_seg_discharge[(b, n)]
-                    for k in 1:length(segs)
-                        add_to_expression!(cost, segs[k].marginal_cost, seg_vars[k, t])
-                    end
-                else
-                    add_to_expression!(cost, ps_vars.bat_discharge[b, n, t],
-                                      bat.throughput_degradation_cost[n])
-                end
-            end
-        end
-    end
-
     tres = max(1.0, input.temporal_resolution_hours)
-    return cost * tres * weight
+    return day_operational_cost(ps_vars, input, hours; tech_output) * tres * weight
 end
 
 """
@@ -2549,19 +2610,26 @@ across representative periods, enabling seasonal storage representation.
 function add_tsam_periods_validation!(
     model::Model,
     vars::MasterProblemVariables,
-    input::MasterProblemInput,
-    targets::Dict{Tuple{Int,Int}, Float64}
+    base_input::MasterProblemInput,
+    targets::Dict{Tuple{Int,Int}, Float64};
+    scenario::Union{Nothing, Scenario} = nothing,
+    scenario_idx::Int = 0
 )
-    num_years = length(input.years)
-    n_bat = length(input.batteries)
-    n_buses = input.network.num_buses
-    b2n = input.network.bus_to_node
-    timesteps_per_day = 24 ÷ input.temporal_resolution_hours
+    num_years = length(base_input.years)
+    n_bat = length(base_input.batteries)
+    n_buses = base_input.network.num_buses
+    b2n = base_input.network.bus_to_node
+    timesteps_per_day = 24 ÷ base_input.temporal_resolution_hours
     # Seasonal hydro: any reservoir unit makes the inter-period reservoir chain
     # relevant (gated on the same tsam_inter_period_linking flag as batteries).
-    has_reservoir = any(any(g.reservoir_capacity .> 0) for g in input.generators)
+    has_reservoir = any(any(g.reservoir_capacity .> 0) for g in base_input.generators)
+    # Distinct names per stochastic scenario (each has its own periods and chains)
+    day_offset = 1000 * scenario_idx
+    stag = scenario_idx > 0 ? "_s$(scenario_idx)" : ""
 
     for y_idx in 1:num_years
+        input = scenario === nothing ? base_input :
+            scenario_master_input(base_input, scenario.multipliers, y_idx)
         period_starts = input.tsam_period_start_hours[y_idx]
         period_weights = input.tsam_period_weights[y_idx]
         chrono_order = input.tsam_chronological_order[y_idx]
@@ -2596,10 +2664,10 @@ function add_tsam_periods_validation!(
                     for p in 0:K
                         v = @variable(model,
                             lower_bound = 0,
-                            base_name = "soc_bnd_y$(y_idx)_b$(b)_n$(n)_p$(p)"
+                            base_name = "soc_bnd$(stag)_y$(y_idx)_b$(b)_n$(n)_p$(p)"
                         )
                         @constraint(model, v <= total_cap,
-                            base_name = "soc_bnd_cap_y$(y_idx)_b$(b)_n$(n)_p$(p)")
+                            base_name = "soc_bnd_cap$(stag)_y$(y_idx)_b$(b)_n$(n)_p$(p)")
                         vars.inter_period_soc[y_idx][(b, n, p)] = v
                     end
 
@@ -2607,7 +2675,7 @@ function add_tsam_periods_validation!(
                     @constraint(model,
                         vars.inter_period_soc[y_idx][(b, n, K)] ==
                         vars.inter_period_soc[y_idx][(b, n, 0)],
-                        base_name = "soc_year_cyclic_y$(y_idx)_b$(b)_n$(n)"
+                        base_name = "soc_year_cyclic$(stag)_y$(y_idx)_b$(b)_n$(n)"
                     )
                 end
             end
@@ -2632,7 +2700,7 @@ function add_tsam_periods_validation!(
                     for p in 0:K
                         v = @variable(model,
                             lower_bound = lo, upper_bound = hi,
-                            base_name = "reslvl_bnd_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                            base_name = "reslvl_bnd$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
                         vars.inter_period_reservoir[y_idx][(g, n, p)] = v
                     end
 
@@ -2640,7 +2708,7 @@ function add_tsam_periods_validation!(
                     @constraint(model,
                         vars.inter_period_reservoir[y_idx][(g, n, K)] ==
                         vars.inter_period_reservoir[y_idx][(g, n, 0)],
-                        base_name = "reslvl_year_cyclic_y$(y_idx)_g$(g)_n$(n)")
+                        base_name = "reslvl_year_cyclic$(stag)_y$(y_idx)_g$(g)_n$(n)")
                 end
             end
         end
@@ -2658,7 +2726,7 @@ function add_tsam_periods_validation!(
             day_demand = input.base_demand[start_hour:end_hour, :]
 
             # Create PowerSystemVariables for this period
-            ps_vars = create_day_ps_vars!(model, input, y_idx, chrono_idx, hours)
+            ps_vars = create_day_ps_vars!(model, input, y_idx, chrono_idx + day_offset, hours)
 
             # Build inter-period override dicts when seasonal linking is active.
             # Batteries chain SOC, reservoirs chain water level; both attach the
@@ -2695,7 +2763,7 @@ function add_tsam_periods_validation!(
             end
 
             tech_output, tech_curt_cost = add_day_operational_constraints!(
-                model, ps_vars, vars, input, y_idx, chrono_idx,
+                model, ps_vars, vars, input, y_idx, chrono_idx + day_offset,
                 day_demand, start_hour;
                 initial_soc_overrides=soc_initial,
                 final_soc_targets=soc_final,
@@ -3229,8 +3297,8 @@ function create_multi_system_master_problem(input::MultiSystemMasterInput)
 
                     if use_pwl
                         Δf = f_max / n_seg
-                        # Use base_impedance from the from-system for inter-system links
-                        inter_s_base = sys_inputs[link.from_system].network.base_impedance
+                        # Use the S_base of the from-system for inter-system links
+                        inter_s_base = sys_inputs[link.from_system].network.s_base
                         loss_expr = AffExpr(0.0)
                         fp_sum = AffExpr(0.0)
                         fn_sum = AffExpr(0.0)
@@ -3412,8 +3480,8 @@ function build_multi_system_objective!(
             end
 
             # Transmission investment
-            for ((i, j), var) in vars.transfer_investment[y_idx]
-                trans_cost = sys.network.transference_invest_cost[i]
+            for (var, trans_cost) in corridor_cost_terms(vars.transfer_investment[y_idx],
+                                                         sys.network.transference_invest_cost)
                 add_to_expression!(investment_cost, var, trans_cost)
             end
 
@@ -3476,217 +3544,140 @@ end
 # =============================================================================
 
 """
-    create_stochastic_master_problem(input::StochasticMasterInput)
+    create_stochastic_master_problem(input::StochasticMasterInput; custom_constraints=nothing)
 
-Create a stochastic Master Problem with multiple scenarios.
-
-Investment decisions are first-stage (common across scenarios).
-Operational costs are second-stage (scenario-specific).
+Two-stage stochastic Master Problem. Investment is first-stage, common to
+all scenarios. Each scenario has its own representative-day (or TSAM)
+operation, built on its own demand and costs (`scenario_master_input`), so
+the plan must serve every scenario and pays each one's operating cost
+weighted by its probability.
 """
-function create_stochastic_master_problem(input::StochasticMasterInput)
+function create_stochastic_master_problem(input::StochasticMasterInput;
+                                          custom_constraints = nothing)
     base_input = input.base_input
 
-    # Create base model WITH representative days / TSAM — this populates
-    # vars.operational_costs which the stochastic objective needs.
-    model, vars, targets = create_master_problem(base_input; use_representative_days=true)
-
     if !input.use_stochastic || isempty(input.scenarios)
+        model, vars, targets = create_master_problem(base_input;
+            use_representative_days=true, custom_constraints=custom_constraints)
         return model, vars, targets, input.scenarios
     end
 
-    # Replace the deterministic objective with scenario-weighted costs
-    build_stochastic_objective!(model, vars, base_input, input.scenarios)
+    # Investment structure only; the operation is added per scenario below.
+    model, vars, targets = create_master_problem(base_input;
+        use_representative_days=false, custom_constraints=custom_constraints)
+
+    scenario_costs = Dict{Int, Vector{AffExpr}}[]
+    first_soc = nothing
+    first_res = nothing
+    for (k, scenario) in enumerate(input.scenarios)
+        empty!(vars.operational_costs)
+        if base_input.use_tsam
+            add_tsam_periods_validation!(model, vars, base_input, targets;
+                scenario=scenario, scenario_idx=k)
+        else
+            add_representative_days_validation!(model, vars, base_input, targets;
+                scenario=scenario, scenario_idx=k)
+        end
+        push!(scenario_costs, copy(vars.operational_costs))
+        if k == 1
+            # Report the first scenario's seasonal chains (each scenario owns its own)
+            first_soc = copy(vars.inter_period_soc)
+            first_res = copy(vars.inter_period_reservoir)
+        end
+    end
+    merge!(empty!(vars.inter_period_soc), first_soc)
+    merge!(empty!(vars.inter_period_reservoir), first_res)
+
+    # Expected operating cost per year, for anything that reads operational_costs
+    empty!(vars.operational_costs)
+    for (k, scenario) in enumerate(input.scenarios), (y_idx, costs) in scenario_costs[k]
+        expected = get!(vars.operational_costs, y_idx, [AffExpr(0.0)])[1]
+        for c in costs
+            add_to_expression!(expected, c, scenario.probability)
+        end
+    end
+
+    build_stochastic_objective!(model, vars, base_input, input.scenarios, scenario_costs)
 
     return model, vars, targets, input.scenarios
 end
 
 """
-    apply_scenario_multipliers(input::MasterProblemInput, scenario::Scenario; year_idx=1)
+    with_fields(x; kw...)
 
-Apply scenario multipliers to create scenario-specific input.
-Returns modified copies of generators and batteries with scenario-adjusted costs.
-
-`year_idx` controls fuel_price_growth compounding: fuel_cost × fuel_price_growth^(year_idx-1).
+Copy of the immutable struct `x` with the given fields replaced.
 """
-function apply_scenario_multipliers(
-    input::MasterProblemInput,
-    scenario::Scenario;
-    year_idx::Int = 1
-)::Tuple{Vector{GeneratorConfig}, Vector{BatteryConfig}}
-    mult = scenario.multipliers
-
-    # Fuel price escalation: base multiplier × compounded growth
-    fuel_price_mult = mult.fuel_cost * (mult.fuel_price_growth ^ (year_idx - 1))
-
-    # Copy and modify generators
-    modified_gens = Vector{GeneratorConfig}()
-    for gen in input.generators
-        is_renewable = gen.type == "Renewable"
-        cost_mult = is_renewable ? mult.invest_cost_renewables : mult.invest_cost_conventional
-
-        # Create new generator with modified costs
-        new_invest_cost = gen.invest_cost .* cost_mult
-        new_fuel_cost = gen.fuel_cost .* fuel_price_mult
-        new_maintenance_cost = gen.maintenance_cost .* mult.maintenance_cost
-
-        push!(modified_gens, GeneratorConfig(
-            gen.name, gen.type, gen.fuel,
-            gen.rated_power, gen.min_power,
-            gen.efficiency_rated, gen.efficiency_min,
-            gen.ramp_up, gen.ramp_down,
-            gen.min_up_time, gen.min_down_time,
-            gen.start_up_cost, new_fuel_cost,
-            gen.fixed_cost, new_maintenance_cost,
-            gen.inertia, new_invest_cost, gen.invest_max,
-            gen.availability, gen.reservable,
-            gen.life_time, gen.initial_age, gen.degradation_rate,
-            gen.decommissioning_cost,
-            gen.frequency_hz, gen.current_type,
-            gen.reservoir_capacity, gen.reservoir_initial_level,
-            gen.reservoir_min_level, gen.reservoir_max_level,
-            gen.reservoir_inflow, gen.reservoir_turbine_efficiency,
-            gen.reservoir_evaporation_rate, gen.reservoir_pump_capacity,
-            gen.reservoir_pump_efficiency, gen.reservoir_spillage_allowed,
-            gen.reservoir_invest_cost, gen.reservoir_invest_max,
-            gen.risk_coefficient,
-            gen.reservoir_min_release,
-            gen.cascade_downstream, gen.cascade_delay_hours,
-            gen.reservoir_head_min_factor
-        ))
-    end
-
-    # Copy and modify batteries
-    modified_bats = Vector{BatteryConfig}()
-    for bat in input.batteries
-        new_invest_power = bat.invest_cost_power .* mult.invest_cost_storage
-        new_invest_capacity = bat.invest_cost_capacity .* mult.invest_cost_storage
-        new_maintenance_cost = bat.maintenance_cost .* mult.maintenance_cost
-
-        push!(modified_bats, BatteryConfig(
-            bat.name, bat.capacity,
-            bat.max_charge_power, bat.max_discharge_power,
-            bat.charge_efficiency, bat.discharge_efficiency,
-            bat.soc_min, bat.soc_max, bat.soc_initial,
-            bat.self_discharge,
-            new_invest_power, new_invest_capacity,
-            bat.invest_max_power, bat.invest_max_capacity,
-            bat.life_time, bat.initial_age, bat.decommissioning_cost,
-            bat.min_duration_hours, bat.max_duration_hours,
-            new_maintenance_cost, bat.inertia, bat.spillage;
-            degradation_rate = bat.degradation_rate,
-            throughput_degradation_cost = bat.throughput_degradation_cost,
-            risk_coefficient = bat.risk_coefficient
-        ))
-    end
-
-    return modified_gens, modified_bats
+function with_fields(x::T; kw...) where T
+    return T((haskey(kw, f) ? kw[f] : getfield(x, f) for f in fieldnames(T))...)
 end
 
 """
-    build_stochastic_objective!(model, vars, input, scenarios)
+    scenario_master_input(input, mult, year_idx)
 
-Build stochastic objective: investment + expected operational costs.
+The master input a stochastic scenario operates on in year `year_idx`:
+- demand × `demand_growth`^(year_idx − 1) (an annual factor: 1.02 = +2 %/year)
+- fuel cost × `fuel_cost` × `fuel_price_growth`^(year_idx − 1), for generators
+  and candidate technologies
+- maintenance cost × `maintenance_cost` (generators, batteries, technologies)
+- CO2 cost × `carbon_price`
+Investment-cost and discount multipliers act on the objective instead.
+"""
+function scenario_master_input(
+    input::MasterProblemInput,
+    mult::ScenarioMultipliers,
+    year_idx::Int
+)::MasterProblemInput
+    fuel = mult.fuel_cost * mult.fuel_price_growth^(year_idx - 1)
+    maint = mult.maintenance_cost
+    gens = [with_fields(g; fuel_cost=g.fuel_cost .* fuel,
+                        maintenance_cost=g.maintenance_cost .* maint)
+            for g in input.generators]
+    bats = [with_fields(b; maintenance_cost=b.maintenance_cost .* maint)
+            for b in input.batteries]
+    techs = [with_fields(t; fuel_cost=t.fuel_cost .* fuel,
+                         maintenance_cost=t.maintenance_cost .* maint)
+             for t in input.technologies]
+    btechs = [with_fields(bt; maintenance_cost=bt.maintenance_cost .* maint)
+              for bt in input.battery_technologies]
+    return with_fields(input;
+        generators=gens, batteries=bats,
+        technologies=techs, battery_technologies=btechs,
+        base_demand=input.base_demand .* mult.demand_growth^(year_idx - 1),
+        co2_cost=input.co2_cost * mult.carbon_price)
+end
+
+"""
+    build_stochastic_objective!(model, vars, input, scenarios, scenario_costs)
+
+Expected total cost over the scenarios: for each one, its investment cost
+(with its investment-cost multipliers), the existing-asset costs and its own
+operating cost, all discounted at its discount rate and weighted by its
+probability. `scenario_costs[k]` holds scenario k's operating cost per year.
 """
 function build_stochastic_objective!(
     model::Model,
     vars::MasterProblemVariables,
     input::MasterProblemInput,
-    scenarios::Vector{Scenario}
+    scenarios::Vector{Scenario},
+    scenario_costs::Vector{Dict{Int, Vector{AffExpr}}}
 )
     num_years = length(input.years)
-    n_buses = input.network.num_buses
-    b2n = input.network.bus_to_node
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
-
     total_cost = AffExpr(0.0)
 
-    # ── FIRST STAGE: Expected investment costs (scenario-weighted) ──
-    # Investment decisions are first-stage (common across scenarios),
-    # but unit costs are uncertain → weight by E[cost × probability].
-    for scenario in scenarios
+    for (k, scenario) in enumerate(scenarios)
         prob = scenario.probability
         mult = scenario.multipliers
-        scenario_discount = input.discount_rate * mult.discount_rate
+        rate = input.discount_rate * mult.discount_rate
 
-        ypp = vars.years_per_inv_period
-        # Investment costs — only at period starts
-        for y_idx in 1:ypp:num_years
-            df = 1.0 / ((1.0 + scenario_discount)^(y_idx - 1))
-            w = prob * df  # scenario weight for this year
-
-            # Technology investments (renewable vs conventional cost multiplier)
-            n_tech = length(input.technologies)
-            for t in 1:n_tech
-                tech = input.technologies[t]
-                is_re = tech.type == "Renewable"
-                cost_mult = is_re ? mult.invest_cost_renewables : mult.invest_cost_conventional
-                for n in 1:n_buses
-                    if tech.invest_cost[n] > 0
-                        add_to_expression!(total_cost,
-                            vars.tech_investment[y_idx][t][n],
-                            tech.invest_cost[n] * cost_mult * w)
-                    end
-                end
-            end
-
-            # Battery technology investments (storage cost multiplier)
-            n_bat_tech = length(input.battery_technologies)
-            for bt in 1:n_bat_tech
-                bat_tech = input.battery_technologies[bt]
-                for n in 1:n_buses
-                    if bat_tech.invest_cost_power[n] > 0
-                        add_to_expression!(total_cost,
-                            vars.bat_tech_power_investment[y_idx][bt][n],
-                            bat_tech.invest_cost_power[n] * mult.invest_cost_storage * w)
-                    end
-                    if bat_tech.invest_cost_capacity[n] > 0
-                        add_to_expression!(total_cost,
-                            vars.bat_tech_capacity_investment[y_idx][bt][n],
-                            bat_tech.invest_cost_capacity[n] * mult.invest_cost_storage * w)
-                    end
-                end
-            end
-
-            # Transmission investments
-            for ((i, j), var) in vars.transfer_investment[y_idx]
-                trans_cost = input.network.transference_invest_cost[i]
-                if trans_cost > 0
-                    add_to_expression!(total_cost, var,
-                        trans_cost * mult.invest_cost_transmission * w)
-                end
-            end
-        end
-    end
-
-    # ── SECOND STAGE: Expected operational costs (scenario-weighted) ──
-    # Operational decisions use shared representative-day variables.
-    # Operational cost scales with scenario multipliers:
-    #   - fuel_cost × fuel_price_growth^(y-1): fuel cost with year-over-year escalation
-    #   - demand_growth^(y-1): more demand → proportionally more generation cost
-    #   - carbon_price: scales CO2 cost component (when co2_cost > 0 in input)
-    for scenario in scenarios
-        prob = scenario.probability
-        mult = scenario.multipliers
-        scenario_discount = input.discount_rate * mult.discount_rate
+        add_to_expression!(total_cost,
+            build_investment_cost_expression(vars, input; mult=mult, discount_rate=rate),
+            prob)
 
         for y_idx in 1:num_years
-            df = 1.0 / ((1.0 + scenario_discount)^(y_idx - 1))
-
-            # Compound fuel price growth over the planning horizon
-            fuel_escalation = mult.fuel_cost * (mult.fuel_price_growth ^ (y_idx - 1))
-            # Demand growth scales operational costs (more demand → more generation)
-            demand_scale = mult.demand_growth ^ (y_idx - 1)
-            # Carbon price multiplier on CO2 component of operational cost
-            carbon_mult = input.co2_cost > 0 ? mult.carbon_price : 1.0
-            # Combined operational multiplier
-            op_mult = fuel_escalation * demand_scale * carbon_mult
-
-            if haskey(vars.operational_costs, y_idx)
-                for day_cost in vars.operational_costs[y_idx]
-                    add_to_expression!(total_cost, day_cost,
-                        prob * df * op_mult)
-                end
+            df = 1.0 / ((1.0 + rate)^(y_idx - 1))
+            add_to_expression!(total_cost, build_annual_asset_cost(vars, input, y_idx), prob * df)
+            for day_cost in get(scenario_costs[k], y_idx, AffExpr[])
+                add_to_expression!(total_cost, day_cost, prob * df)
             end
         end
     end

@@ -17,6 +17,28 @@ using JuMP: objective_value, termination_status, solve_time, optimizer_with_attr
 using JuMP: add_to_expression!, constraint_object
 
 # =============================================================================
+# CO2 intensity
+# =============================================================================
+
+rated_efficiency(gen::GeneratorConfig, b::Int) = gen.efficiency_rated[b]
+rated_efficiency(tech::TechnologyConfig, b::Int) = tech.eff_at_rated[b]
+
+"""
+    co2_per_mwh(fuel_co2, unit, b)
+
+Tonnes of CO2 per MWh of electricity from `unit` (generator or technology) at
+bus `b`: the fuel's emission factor, per MWh of fuel (`fuels.*.emission_factor`),
+over the unit's efficiency at rated power there. Without an efficiency (≤ 0)
+the factor is taken as per MWh of electricity. 0 for fuels without a factor.
+"""
+function co2_per_mwh(fuel_co2::Dict{String, Float64}, unit, b::Int)
+    ef = get(fuel_co2, unit.fuel, 0.0)
+    ef == 0.0 && return 0.0
+    eff = rated_efficiency(unit, b)
+    return eff > 0 ? ef / eff : ef
+end
+
+# =============================================================================
 # Temporal Upscaling Utilities
 # =============================================================================
 
@@ -123,6 +145,9 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
     add_ev_constraints!(model, vars, input)
     t_ev = time() - t0
 
+    # Electrolyzer power limits (rated power, ramp)
+    add_electrolyzer_dispatch_constraints!(model, vars, input)
+
     # Add inertia constraints (if configured)
     t0 = time()
     add_inertia_constraints!(model, vars, input)
@@ -158,27 +183,9 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
         else
             # DCOPF path (default): "dcopf" or "dcopf_ac_verify"
             t_tb = time()
-            transmission = TransmissionDC(input.network)
-            # Loss model: pwl_loss_segments > 0 → PWL, -1 → legacy linear, 0 → lossless
-            if input.pwl_loss_segments > 0
-                pwl = compute_pwl_loss_segments(transmission, input.pwl_loss_segments, Float64(input.network.base_impedance))
-                transmission = TransmissionDC(
-                    transmission.num_buses, transmission.lines,
-                    transmission.line_reactances, transmission.line_capacities,
-                    transmission.incidence_matrix, transmission.max_angle_diff_rad,
-                    transmission.slack_bus, transmission.line_losses, pwl,
-                    transmission.line_ids
-                )
-            elseif input.pwl_loss_segments == 0
-                # Lossless mode: zero out line losses
-                transmission = TransmissionDC(
-                    transmission.num_buses, transmission.lines,
-                    transmission.line_reactances, transmission.line_capacities,
-                    transmission.incidence_matrix, transmission.max_angle_diff_rad,
-                    transmission.slack_bus, zeros(length(transmission.lines)), nothing,
-                    transmission.line_ids
-                )
-            end
+            # Loss model: pwl_loss_segments > 0 → PWL, -1 → linear, 0 → lossless
+            transmission = with_loss_model(TransmissionDC(input.network),
+                input.pwl_loss_segments, input.network.s_base)
             t_transmission_build = time() - t_tb
             # Add converter variables/constraints BEFORE DC constraints
             # so KCL can reference converter flow variables
@@ -440,49 +447,39 @@ function build_variables!(model, input::PowerSystemInput)
     # Sectoral load shedding (sector -> bus × hour)
     # Created for each sector in sectoral_demand if available
     loss_of_load_sectoral = nothing
-    flexible_demand_curtailed = nothing
     if !isempty(input.sectoral_demand)
         loss_of_load_sectoral = Dict{String, Matrix{VariableRef}}()
-        # Only create flex_curt variables when the benefit ratio > 0 (i.e., flexible sectors exist).
-        # Without this guard, flex_curt would be unbounded (only lower_bound=0, no upper bound in
-        # the bounds section, and not appearing in any constraint), causing the LP to be UNBOUNDED
-        # since the objective subtracts price * ratio * flex_curt.
-        if input.flexible_demand_benefit_ratio > 0
-            flexible_demand_curtailed = Dict{String, Matrix{VariableRef}}()
-        end
         for sector in keys(input.sectoral_demand)
             loss_of_load_sectoral[sector] = @variable(model, [1:n_node, 1:hours],
                 lower_bound=0, base_name="lol_$(sector)")
-            if input.flexible_demand_benefit_ratio > 0
-                flexible_demand_curtailed[sector] = @variable(model, [1:n_node, 1:hours],
-                    lower_bound=0, base_name="flex_curt_$(sector)")
-            end
         end
     end
+    # Flexible demand is shifted (below), not curtailed: cutting demand is
+    # sectoral load shedding, priced by criticality.
+    flexible_demand_curtailed = nothing
 
-    # Demand shifting variables (P3: sparse t-to-t_dest pairs with delay tolerance)
-    # Matches Python legacy flexible_demand_shifted[sector][node][t][t_dest]
+    # Demand shifting: shift[(node, t, t_dest)] MW of a flexible sector's demand
+    # moved from step t to t_dest, at most delay_tolerance hours away. A shift
+    # never crosses the end of the committed part of a rolling window (the last
+    # hours - overlap steps), or demand pushed into the overlap would be lost
+    # when the next window restarts from the original profile.
     demand_shift = nothing
-    if !isempty(input.sectoral_demand) && !isempty(input.sectoral_criticality)
-        demand_shift = Dict{String, Dict{Tuple{Int,Int,Int}, VariableRef}}()
-        for (sector, crit) in input.sectoral_criticality
-            if haskey(input.sectoral_demand, sector) && crit < 1.0  # Only flexible sectors
-                delay = get(input.sectoral_delay_tolerance, sector, 24)
-                sector_vars = Dict{Tuple{Int,Int,Int}, VariableRef}()
-                for b in 1:n_node, t in 1:hours
-                    t_min = max(1, t - delay)
-                    t_max = min(hours, t + delay)
-                    for t_dest in t_min:t_max
-                        if t_dest != t
-                            sector_vars[(b, t, t_dest)] = @variable(model,
-                                lower_bound=0,
-                                base_name="shift_$(sector)_$(b)_$(t)_$(t_dest)")
-                        end
-                    end
-                end
-                demand_shift[sector] = sector_vars
+    tres_shift = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    committed = max(1, hours - input.temporal.overlap_hours ÷ tres_shift)
+    for (sector, ratio) in input.sectoral_flexibility_ratio
+        (ratio > 0 && haskey(input.sectoral_demand, sector)) || continue
+        delay = get(input.sectoral_delay_tolerance, sector, 0) ÷ tres_shift
+        delay > 0 || continue
+        demand_shift === nothing && (demand_shift = Dict{String, Dict{Tuple{Int,Int,Int}, VariableRef}}())
+        sector_vars = Dict{Tuple{Int,Int,Int}, VariableRef}()
+        for ni in 1:n_node, t in 1:hours
+            for t_dest in max(1, t - delay):min(hours, t + delay)
+                (t_dest == t || (t <= committed) != (t_dest <= committed)) && continue
+                sector_vars[(ni, t, t_dest)] = @variable(model, lower_bound=0,
+                    base_name="shift_$(sector)_$(ni)_$(t)_$(t_dest)")
             end
         end
+        demand_shift[sector] = sector_vars
     end
 
     # Investment variables (development mode only)
@@ -896,14 +893,11 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     co2_cost_expr = AffExpr(0.0)
     if input.co2_cost > 0
         # CO2 cost based on fuel type and emissions — sparse iteration
-        for g in 1:n_gen
-            fuel = input.generators[g].fuel
-            if haskey(input.fuel_co2, fuel)
-                co2_factor = input.fuel_co2[fuel]  # tonnes CO2/MWh
-                coeff = input.co2_cost * co2_factor
-                for b in vars.buses_of_gen[g], t in 1:hours
-                    add_to_expression!(co2_cost_expr, coeff, vars.gen_output[g, b, t])
-                end
+        for g in 1:n_gen, b in vars.buses_of_gen[g]
+            coeff = input.co2_cost * co2_per_mwh(input.fuel_co2, input.generators[g], b)
+            coeff == 0.0 && continue
+            for t in 1:hours
+                add_to_expression!(co2_cost_expr, coeff, vars.gen_output[g, b, t])
             end
         end
     end
@@ -1017,7 +1011,9 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
 
     # ==========================================================================
     # V2G Compensation
-    # Income from V2G services - SUBTRACTED from cost as it reduces total cost
+    # Payment to EV owners for V2G energy. It is a transfer between agents,
+    # not a system cost: the benefit of V2G is already the generation it
+    # displaces in the power balance. Reported only, never in the objective.
     # ==========================================================================
     v2g_compensation = AffExpr(0.0)
     if vars.ev_v2g !== nothing && input.ev_config !== nothing
@@ -1057,25 +1053,19 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Benefit from demand reduction - SUBTRACTED as it reduces cost
     # Valued at 50% of electricity price (price response benefit)
     # ==========================================================================
+    # No flexible curtailment (demand is shifted instead): kept at 0 for the breakdown.
     flexible_demand_benefit = AffExpr(0.0)
-    if vars.flexible_demand_curtailed !== nothing && !isempty(vars.flexible_demand_curtailed)
-        has_elec_price_flex = !isempty(input.electricity_price) && length(input.electricity_price) >= hours
-        for (sector, flex_vars) in vars.flexible_demand_curtailed
-            for n in 1:n_node, t in 1:hours
-                price_t = has_elec_price_flex ? input.electricity_price[t] : input.loss_of_load_penalty * 0.01
-                add_to_expression!(flexible_demand_benefit, flex_vars[n, t], price_t * input.flexible_demand_benefit_ratio)
-            end
-        end
-    end
 
     # ==========================================================================
     # CO2 Budget Violation Penalty
     # Penalty for exceeding CO2 budget - default 500 per tonne
     # ==========================================================================
+    # The violation is in tonnes, not per step, but this cost sits with the
+    # energy costs that are multiplied by the step length: divide it back out.
     co2_budget_violation_cost = AffExpr(0.0)
     if vars.co2_budget_violation !== nothing
         co2_budget_violation_cost = @expression(model,
-            input.co2_budget_violation_penalty * vars.co2_budget_violation
+            input.co2_budget_violation_penalty / temporal_resolution_hours * vars.co2_budget_violation
         )
     end
 
@@ -1166,14 +1156,15 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     end
 
     # ==========================================================================
-    # Demand Shifting Cost (P10: distance-weighted cost)
-    # Matches Python: shifted * abs(t - t_dest) * 0.1
+    # Demand Shifting Cost: demand_shift_cost_rate per MWh and per hour moved
+    # (an energy cost, so the MW variable is multiplied by Δt with the others)
     # ==========================================================================
     demand_shift_cost = AffExpr(0.0)
     if vars.demand_shift !== nothing && !isempty(vars.demand_shift)
         for (sector, shift_vars) in vars.demand_shift
             for ((b, t, t_dest), var) in shift_vars
-                add_to_expression!(demand_shift_cost, var, abs(t - t_dest) * input.demand_shift_cost_rate)
+                add_to_expression!(demand_shift_cost, var,
+                    abs(t - t_dest) * temporal_resolution_hours * input.demand_shift_cost_rate)
             end
         end
     end
@@ -1266,10 +1257,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Energy-based costs ($/MWh × MW) must be scaled by this factor.
     # Non-energy costs (investment $/MW, startup events, retirement) are NOT scaled.
     # ==========================================================================
-    # N-1 reliability-shortfall penalty (set by add_n1_security_constraints!;
-    # AffExpr(0.0) when N-1 is disabled or fully met).
-    n1_penalty_cost = get(model.ext, :n1_penalty_cost, AffExpr(0.0))
-
     energy_costs = (
         fuel_cost + fixed_cost + maintenance_cost +
         battery_maintenance_cost + battery_throughput_degradation_cost +
@@ -1278,12 +1265,11 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         co2_cost_expr +
         inertia_cost + ev_loss_cost + fre_penetration_cost +
         soc_violation_cost + transfer_margin_cost +
-        sectoral_load_shed_cost - flexible_demand_benefit - v2g_compensation +
+        sectoral_load_shed_cost - flexible_demand_benefit +
         co2_budget_violation_cost + rooftop_curtailment_cost + spillage_cost +
         converter_cost + electrolyzer_cost +
         demand_shift_cost +
-        reservoir_spillage_cost +
-        n1_penalty_cost
+        reservoir_spillage_cost
     )
     # Scale non-energy (one-shot annual) costs by the window's fraction
     # of the year, so that summing operational rolling-window objectives
@@ -1336,7 +1322,8 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         :rooftop_curtailment_cost => rooftop_curtailment_cost,
         :npv_penalty_cost => npv_penalty_cost,
         :reservoir_invest_cost => reservoir_invest_cost,
-        :n1_security_shortfall_cost => n1_penalty_cost,
+        # Added by add_n1_security_constraints!, which runs after this.
+        :n1_security_shortfall_cost => AffExpr(0.0),
     )
     model.ext[:temporal_resolution_hours] = temporal_resolution_hours
 end
@@ -1364,6 +1351,8 @@ function add_demand_constraints!(model, vars::PowerSystemVariables, input;
     # Callers (create_power_system, master_problem.jl) choose DCOPF
     # (add_dc_constraints!) vs copper-plate balance; this function MUST add
     # balance constraints unconditionally.
+
+    shift_net = demand_shift_net(vars)
 
     for t in 1:hours
         for b in 1:n_bus
@@ -1446,17 +1435,18 @@ function add_demand_constraints!(model, vars::PowerSystemVariables, input;
                 AffExpr(0.0)
             end
 
-            # NOTE: flex_curt is NOT in the KCL.  It participates only in the
-            # objective (benefit) and sectoral constraints.  Including it here
-            # allowed the model to eliminate demand at negative cost.
+            # Demand moved into this step by demand shifting (net, may be < 0)
+            shift_term = haskey(shift_net, (ni, t)) ? shift_net[(ni, t)] * bus_df : AffExpr(0.0)
 
             # Power balance (node-level vars scaled by demand_fraction for bus-level KCL):
             # LHS: gen_output + bat_discharge + EV_V2G + load_shed + rooftop_gen + extra
-            # RHS: bus_demand + electrolyzer + bat_charge + reserves + EV_charging + rooftop_curtailment
+            # RHS: bus_demand + shifted demand + electrolyzer + bat_charge + EV_charging + rooftop_curtailment
+            # Reserves are headroom, not energy: they are held in
+            # add_reserve_constraints! and do not enter the balance.
             con = @constraint(model,
                 total_gen + bat_discharge + ev_v2g_term + vars.load_shed[b, t] + rooftop_gen_term + extra_term ==
-                bus_demand + electrolyzer_term + bat_charge_sum + reservoir_pump_term +
-                vars.reserve_static[ni, t] * bus_df + vars.reserve_dynamic[ni, t] * bus_df + ev_charging_term + rooftop_curt_term
+                bus_demand + shift_term + electrolyzer_term + bat_charge_sum + reservoir_pump_term +
+                ev_charging_term + rooftop_curt_term
             )
 
             # Store constraint reference for dual extraction
@@ -1517,6 +1507,7 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
     n_gen = length(input.generators)
     n_bus = input.network.num_buses
     hours = input.temporal.hours
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
     # UC mode is identified by gen_startup being present (gen_status always exists)
     is_uc = vars.gen_startup !== nothing
     is_dev = vars.gen_investment !== nothing
@@ -1635,34 +1626,43 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                 end
             end
 
-            # Ramp constraints (always active for sparse — all entries have capacity)
-            ramp_up_limit = total_capacity * gen.ramp_up[b]
-            ramp_down_limit = total_capacity * gen.ramp_down[b]
+            # Ramp constraints. Ramp rates are a fraction of capacity per
+            # hour, so a step of `tres` hours may move `ramp × tres` (capped
+            # at full capacity). A ramp rate <= 0 means "no ramp limit": a
+            # literal zero would freeze the unit at its first-window output
+            # for the whole year (Studio units used to default to 0).
+            has_ramp_up = gen.ramp_up[b] > 0
+            has_ramp_down = gen.ramp_down[b] > 0
+            ramp_up_limit = total_capacity * min(1.0, gen.ramp_up[b] * tres)
+            ramp_down_limit = total_capacity * min(1.0, gen.ramp_down[b] * tres)
             # t=1 ramp from prev-window output (rolling-horizon seam).
             # Empty Dict = no boundary; skip the t=1 constraint to preserve
             # the legacy free-start behaviour of the first window.
             prev_out = get(get(input.generator_output_prev, g, Dict{Int,Float64}()), b, NaN)
             if !isnan(prev_out)
-                @constraint(model,
+                has_ramp_up && @constraint(model,
                     vars.gen_output[g, b, 1] - prev_out <= ramp_up_limit,
                     base_name = "ramp_up_seam_g$(g)_b$(b)")
-                @constraint(model,
+                has_ramp_down && @constraint(model,
                     prev_out - vars.gen_output[g, b, 1] <= ramp_down_limit,
                     base_name = "ramp_down_seam_g$(g)_b$(b)")
             end
             for t in 2:hours
-                @constraint(model,
+                has_ramp_up && @constraint(model,
                     vars.gen_output[g, b, t] - vars.gen_output[g, b, t-1] <= ramp_up_limit
                 )
-                @constraint(model,
+                has_ramp_down && @constraint(model,
                     vars.gen_output[g, b, t-1] - vars.gen_output[g, b, t] <= ramp_down_limit
                 )
             end
 
             # Unit commitment logic (only in operational dispatch, not master)
             if capacity_override === nothing && is_uc && rated > 0
-                min_up = Int(gen.min_up_time[b])
-                min_down = Int(gen.min_down_time[b])
+                # min_up / min_down are in hours; the constraints count time
+                # steps. Round up so a step longer than the minimum still
+                # enforces at least one step (8 h at 6-h steps → 2 steps).
+                min_up = ceil(Int, gen.min_up_time[b] / tres)
+                min_down = ceil(Int, gen.min_down_time[b] / tres)
 
                 for t in 1:hours
                     if t > 1
@@ -1882,6 +1882,15 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                     soc_init_frac = bat.soc_min[b]
                 end
                 soc_init = soc_init_frac * capacity
+                # Rolling horizon: start from the energy the previous window
+                # left (MWh), kept within this window's SOC bounds. Carrying
+                # energy rather than a fraction keeps it exact when the
+                # capacity is degraded.
+                prev_soc = hasproperty(input, :battery_soc_prev) ?
+                    get(get(input.battery_soc_prev, bi, Dict{Int,Float64}()), b, NaN) : NaN
+                if !isnan(prev_soc)
+                    soc_init = clamp(prev_soc, bat.soc_min[b] * capacity, capacity)
+                end
 
                 @constraint(model,
                     vars.bat_soc[bi, b, 1] == soc_init,
@@ -1974,6 +1983,31 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                         vars.bat_soc[bi, b, hours+1] <= initial_soc_energy * (1.0 + soc_tol),
                         base_name = "bat_soc_end_upper_$(bi)_$(b)"
                     )
+                elseif hasproperty(input, :bat_soc_end_min)
+                    # Soft end-of-year floor (last rolling window, or the single
+                    # window of a year): the battery may not finish the year with
+                    # less energy than it started with. The shortfall is priced
+                    # below load shedding, so it is refilled from generation but
+                    # never by shedding load, and a short last window that cannot
+                    # refill stays feasible.
+                    end_floor = if haskey(input.bat_soc_end_min, bi) && haskey(input.bat_soc_end_min[bi], b)
+                        input.bat_soc_end_min[bi][b]
+                    elseif input.bat_soc_end_min_cyclic
+                        soc_init
+                    else
+                        0.0
+                    end
+                    if end_floor > 0
+                        shortfall = @variable(model, lower_bound = 0.0,
+                            base_name = "bat_soc_end_short_$(bi)_$(b)")
+                        @constraint(model,
+                            vars.bat_soc[bi, b, hours+1] + shortfall >=
+                            end_floor * (1.0 - input.soc_end_tolerance),
+                            base_name = "bat_soc_end_floor_$(bi)_$(b)")
+                        penalty = input.bat_soc_end_penalty > 0 ? input.bat_soc_end_penalty :
+                            0.1 * input.loss_of_load_penalty / tres
+                        JuMP.set_objective_coefficient(model, shortfall, penalty)
+                    end
                 end
 
                 # Minimum daily cycling constraint
@@ -2247,7 +2281,12 @@ end
 """
     add_reserve_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Add spinning reserve requirements.
+Add the static (spinning) and dynamic (frequency response) reserve
+requirements per node. Reserve is headroom, not energy: both are held in the
+free capacity of reservable generators and batteries, and share it (a MW of
+headroom counts once). In unit commitment only committed generators hold
+headroom. Dynamic reserve is further limited to
+`dynamic_reserve_contribution` of the rated power that can respond.
 """
 function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
@@ -2272,9 +2311,13 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
         end
     end
 
+    # Spinning reserve: in unit commitment an offline unit holds no headroom.
+    spinning = capacity_override === nothing && vars.gen_status !== nothing &&
+        vars.gen_startup !== nothing
+
     for t in 1:hours
         for ni in 1:n_node
-            # Available reserve from reservable non-renewable generators at this node
+            # Free headroom of reservable non-renewable generators at this node
             available_reserve = AffExpr(0.0)
             for b in node_buses[ni]
                 for g in vars.gens_at_bus[b]
@@ -2287,8 +2330,12 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                         add_to_expression!(available_reserve, cap_g_b)
                         add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
                     elseif gen.rated_power[b] > 0
-                        add_to_expression!(available_reserve,
-                            gen.rated_power[b] * gen.availability[t, b])
+                        cap_t = gen.rated_power[b] * gen.availability[t, b]
+                        if spinning
+                            add_to_expression!(available_reserve, cap_t, vars.gen_status[g, b, t])
+                        else
+                            add_to_expression!(available_reserve, cap_t)
+                        end
                         add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
                     end
                 end
@@ -2311,13 +2358,19 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                 input.reserve_static_requirement[ni] : input.reserve_static_default_ratio * max(node_demand, 0.0)
 
             @constraint(model,
-                available_reserve + vars.reserve_static_loss[ni, t] >= reserve_req,
+                vars.reserve_static[ni, t] + vars.reserve_static_loss[ni, t] >= reserve_req,
                 base_name = "reserve_static_$(ni)_$(t)"
             )
 
             @constraint(model,
                 vars.reserve_static[ni, t] <= reserve_req,
                 base_name = "reserve_static_ub_$(ni)_$(t)"
+            )
+
+            # Static and dynamic reserve are held in the same free headroom
+            @constraint(model,
+                vars.reserve_static[ni, t] + vars.reserve_dynamic[ni, t] <= available_reserve,
+                base_name = "reserve_headroom_$(ni)_$(t)"
             )
 
             # Dynamic reserve at node level
@@ -2332,7 +2385,13 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                                 add_to_expression!(available_dynamic,
                                     capacity_override[(g, b)], input.dynamic_reserve_contribution)
                             elseif gen.rated_power[b] > 0
-                                add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, gen.rated_power[b])
+                                if spinning
+                                    add_to_expression!(available_dynamic,
+                                        input.dynamic_reserve_contribution * gen.rated_power[b],
+                                        vars.gen_status[g, b, t])
+                                else
+                                    add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, gen.rated_power[b])
+                                end
                             end
                         end
                     end
@@ -2352,6 +2411,9 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                 @constraint(model,
                     vars.reserve_dynamic[ni, t] + vars.reserve_dynamic_loss[ni, t] >= reserve_req_dynamic,
                     base_name = "reserve_dynamic_req_$(ni)_$(t)")
+                @constraint(model,
+                    vars.reserve_dynamic[ni, t] <= reserve_req_dynamic,
+                    base_name = "reserve_dynamic_ub_$(ni)_$(t)")
             else
                 @constraint(model,
                     vars.reserve_dynamic[ni, t] <= 0,
@@ -2500,21 +2562,20 @@ function add_co2_constraint!(model, vars::PowerSystemVariables, input::PowerSyst
     n_bus = input.network.num_buses
     hours = input.temporal.hours
 
-    # Calculate total CO2 emissions — sparse iteration
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+
+    # Total CO2 emissions (t): output (MW) × step length (h) × intensity (t/MWh_e)
     total_co2 = AffExpr(0.0)
 
-    for g in 1:n_gen
-        fuel = input.generators[g].fuel
-        if haskey(input.fuel_co2, fuel)
-            co2_factor = input.fuel_co2[fuel]  # tonnes CO2/MWh
-            for b in vars.buses_of_gen[g], t in 1:hours
-                add_to_expression!(total_co2, co2_factor, vars.gen_output[g, b, t])
-            end
+    for g in 1:n_gen, b in vars.buses_of_gen[g]
+        co2_factor = co2_per_mwh(input.fuel_co2, input.generators[g], b)
+        co2_factor == 0.0 && continue
+        for t in 1:hours
+            add_to_expression!(total_co2, co2_factor * tres, vars.gen_output[g, b, t])
         end
     end
 
     # Scale CO2 budget by window fraction (matches Python legacy: budget * hours * tres / year_hours)
-    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
     window_fraction = hours * tres / Float64(input.hours_per_year)
     scaled_budget = input.co2_budget * window_fraction
 
@@ -2535,8 +2596,7 @@ end
 
 Define CO2 emissions at each node and hour.
 
-Matches Python legacy (power_system.py lines 2553-2558):
-  CO2_emissions[node, t] == sum(gen_output[gen][node][t] * fuel_CO2[fuel] for gen)
+  CO2_emissions[node, t] == sum(gen_output[g, b, t] * co2_per_mwh(g, b) for g, b at node)
 """
 function add_co2_emissions_definition!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     n_gen = length(input.generators)
@@ -2555,11 +2615,9 @@ function add_co2_emissions_definition!(model, vars::PowerSystemVariables, input:
         co2_expr = AffExpr(0.0)
         for b in node_buses[ni]
             for g in vars.gens_at_bus[b]
-                fuel = input.generators[g].fuel
-                if haskey(input.fuel_co2, fuel)
-                    co2_factor = input.fuel_co2[fuel]
-                    add_to_expression!(co2_expr, co2_factor, vars.gen_output[g, b, t])
-                end
+                co2_factor = co2_per_mwh(input.fuel_co2, input.generators[g], b)
+                co2_factor == 0.0 && continue
+                add_to_expression!(co2_expr, co2_factor, vars.gen_output[g, b, t])
             end
         end
 
@@ -2699,118 +2757,170 @@ end
 """
     add_n1_security_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Add N-1 security constraints to ensure system can operate after losing largest single element.
+Preventive N-1 security: the system must survive the loss of its largest
+element without re-dispatch.
 
-Implements two types of N-1 security:
-1. Generation N-1: System must meet demand even if largest generator fails
-2. Transmission N-1: Lines must reserve capacity for post-contingency redistribution
+1. Generation N-1: the headroom of the other reservable units (online ones in
+   unit commitment) and of the batteries must cover the largest unit's output.
+2. Transmission N-1: each line carries at most `n1_transmission_reserve_factor`
+   of its capacity, leaving room for post-contingency redistribution.
+
+Both are soft: shortfalls are priced at `loss_of_reserve_static`.
 """
 function add_n1_security_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
-    # Skip if N-1 security not enabled
-    if !input.n1_security_enabled
-        return
-    end
-
-    n_gen = length(input.generators)
-    n_bus = input.network.num_buses
-    hours = input.temporal.hours
-
-    # N-1 is a SOFT security criterion: a fleet/network that cannot survive
-    # the loss of its largest element produces a penalised reliability
-    # SHORTFALL, never an infeasible LP.  A hard N-1 constraint made
-    # unit_commitment of a fixed inadequate fleet INFEASIBLE with no
-    # recourse (the original cuba.yaml failure mode).  The shortfall is
-    # priced like a static-reserve shortage (loss_of_reserve_static).
-    n1_penalty = input.loss_of_reserve_static
+    input.n1_security_enabled || return
     n1_cost = AffExpr(0.0)
+    if input.n1_generation_enabled
+        _add_gen_n1!(model, vars, input, n1_cost; corrective = false,
+                     cname = "n1_gen_reserve_system")
+    end
+    if input.n1_transmission_enabled
+        _add_line_n1_reserve!(model, vars, input, n1_cost)
+    end
+    _charge_n1_shortfall!(model, n1_cost, input)
+end
 
-    # Identify critical elements
-    critical_elements = identify_n1_critical_elements(input)
+"""
+    _n1_largest_unit(input) -> (g, b)
 
-    # ========================================
-    # 1. GENERATION N-1 CONSTRAINTS
-    # ========================================
-    if input.n1_generation_enabled && !isempty(critical_elements["generators"])
-        # Find the largest generator in the entire system
-        system_largest_gen = 0
-        system_largest_capacity = 0.0
-        system_largest_bus = 0
-
-        for (bus, gen_info) in critical_elements["generators"]
-            if gen_info["capacity"] > system_largest_capacity
-                system_largest_capacity = gen_info["capacity"]
-                system_largest_gen = gen_info["gen_idx"]
-                system_largest_bus = bus
-            end
-        end
-
-        # Apply N-1 at system level: total generation - largest unit >= total demand
-        # This allows the network to redistribute power when the largest unit fails
-        for t in 1:hours
-            # Total system generation EXCLUDING the largest unit — sparse iteration
-            total_system_generation = AffExpr(0.0)
-            for g in 1:n_gen
-                for b in vars.buses_of_gen[g]
-                    if !(g == system_largest_gen && b == system_largest_bus)
-                        add_to_expression!(total_system_generation, 1.0, vars.gen_output[g, b, t])
-                    end
-                end
-            end
-
-            # Total system demand (sum over all buses)
-            total_system_demand = sum(
-                input.demand[t, input.network.bus_to_node[b]] *
-                input.network.buses[b].demand_fraction
-                for b in 1:n_bus
-            )
-
-            # SOFT N-1: generation (minus largest) + shortfall >= demand.
-            # The shortfall slack is penalised in the objective so the LP
-            # quantifies the security deficit instead of going infeasible.
-            n1_short = @variable(model, lower_bound = 0,
-                base_name = "n1_gen_shortfall_t$(t)")
-            @constraint(model,
-                total_system_generation + n1_short >= total_system_demand,
-                base_name = "n1_gen_reserve_system_t$(t)"
-            )
-            add_to_expression!(n1_cost, n1_penalty, n1_short)
+Generator and bus of the largest unit by rated power, or (0, 0) if none.
+"""
+function _n1_largest_unit(input::PowerSystemInput)
+    best = (0, 0)
+    best_cap = 0.0
+    for (g, gen) in enumerate(input.generators), b in eachindex(gen.rated_power)
+        if gen.rated_power[b] > best_cap
+            best_cap = gen.rated_power[b]
+            best = (g, b)
         end
     end
+    return best
+end
 
-    # ========================================
-    # 2. TRANSMISSION N-1 CONSTRAINTS
-    # ========================================
-    if input.n1_transmission_enabled && !isempty(critical_elements["lines"])
-        reserve_factor = input.n1_transmission_reserve_factor
+"""
+    _add_gen_n1!(model, vars, input, n1_cost; corrective, cname)
 
-        for (i, j, capacity) in critical_elements["lines"]
-            # Usable capacity under N-1 criteria (reserve some capacity for post-contingency flows)
-            usable_capacity = capacity * reserve_factor
+Generation N-1: if the largest unit (g*, b*) trips, the rest of the system must
+replace its output. For each step
 
-            for t in 1:hours
-                # Limit flow in both directions (SOFT: a penalised slack
-                # absorbs any post-contingency over-flow so the LP stays
-                # feasible and reports the violation as a cost).
-                if haskey(vars.power_flow, (i, j))
-                    n1_over = @variable(model, lower_bound = 0,
-                        base_name = "n1_trans_over_$(i)_$(j)_t$(t)")
-                    @constraint(model,
-                        vars.power_flow[(i, j)][t] <= usable_capacity + n1_over,
-                        base_name = "n1_trans_reserve_$(i)_$(j)_t$(t)_pos"
-                    )
-                    @constraint(model,
-                        vars.power_flow[(i, j)][t] >= -usable_capacity - n1_over,
-                        base_name = "n1_trans_reserve_$(i)_$(j)_t$(t)_neg"
-                    )
-                    add_to_expression!(n1_cost, n1_penalty, n1_over)
+    cover_t + shortfall_t ≥ gen_output[g*, b*, t]      (constraint `\$(cname)_t\$(t)`)
+
+with cover_t the batteries' headroom (max discharge − discharge + charge) plus,
+per non-renewable unit other than (g*, b*), its headroom
+(available capacity, × status in unit commitment, − output):
+- preventive (`corrective = false`): reservable units only, full headroom
+  (spinning reserve, the RES-3 rule);
+- corrective: every non-renewable unit, re-dispatched within one step of its
+  ramp limit (`ramp_up × Δt` of rated power; no limit when the ramp is 0).
+
+The shortfall is priced at `loss_of_reserve_static` through `n1_cost`.
+"""
+function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput,
+                      n1_cost::AffExpr; corrective::Bool, cname::String)
+    g_star, b_star = _n1_largest_unit(input)
+    (g_star == 0 || !(b_star in vars.buses_of_gen[g_star])) && return
+    spinning = vars.gen_status !== nothing && vars.gen_startup !== nothing
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    for t in 1:input.temporal.hours
+        cover = AffExpr(0.0)
+        for (g, gen) in enumerate(input.generators)
+            gen.type == "Renewable" && continue
+            corrective || gen.reservable || continue
+            for b in vars.buses_of_gen[g]
+                ((g, b) == (g_star, b_star) || gen.rated_power[b] <= 0) && continue
+                headroom = AffExpr(0.0)
+                cap_t = gen.rated_power[b] * gen.availability[t, b]
+                if spinning
+                    add_to_expression!(headroom, cap_t, vars.gen_status[g, b, t])
+                else
+                    add_to_expression!(headroom, cap_t)
+                end
+                add_to_expression!(headroom, -1.0, vars.gen_output[g, b, t])
+                ramp = corrective && gen.ramp_up[b] > 0 ? gen.ramp_up[b] * tres : Inf
+                if ramp < 1
+                    response = @variable(model, lower_bound = 0,
+                        upper_bound = gen.rated_power[b] * ramp,
+                        base_name = "$(cname)_response_g$(g)_b$(b)_t$(t)")
+                    @constraint(model, response <= headroom)
+                    add_to_expression!(cover, response)
+                else
+                    add_to_expression!(cover, headroom)
                 end
             end
         end
+        for bi in eachindex(input.batteries), b in vars.buses_of_bat[bi]
+            bat = input.batteries[bi]
+            if bat.max_discharge_power[b] > 0
+                add_to_expression!(cover, bat.max_discharge_power[b])
+                add_to_expression!(cover, -1.0, vars.bat_discharge[bi, b, t])
+                add_to_expression!(cover, 1.0, vars.bat_charge[bi, b, t])
+            end
+        end
+        short = @variable(model, lower_bound = 0, base_name = "$(cname)_shortfall_t$(t)")
+        @constraint(model, cover + short >= vars.gen_output[g_star, b_star, t],
+            base_name = "$(cname)_t$(t)")
+        add_to_expression!(n1_cost, input.loss_of_reserve_static, short)
     end
+end
 
-    # Expose the N-1 reliability-shortfall cost so the objective can price
-    # it (mirrors the reserve-shortage penalty pattern).
-    model.ext[:n1_penalty_cost] = n1_cost
+"""
+    _line_flows(vars, input) -> Vector{Union{Nothing, Tuple{Vector{VariableRef}, Float64}}}
+
+For each entry of `input.network.transmission_lines`: its own flow variables
+(`power_flow_by_line`, one per physical line) and the sign that turns them into
+its from→to direction (TransmissionDC stores lines low→high bus and skips
+self-loops), or `nothing` for a self-loop or a run without DC flows.
+"""
+function _line_flows(vars::PowerSystemVariables, input::PowerSystemInput)
+    lines = input.network.transmission_lines
+    out = Vector{Union{Nothing, Tuple{Vector{VariableRef}, Float64}}}(nothing, length(lines))
+    vars.power_flow_by_line === nothing && return out
+    idx = 0
+    for (k, line) in enumerate(lines)
+        line.from_node == line.to_node && continue
+        idx += 1
+        idx <= length(vars.power_flow_by_line) || break
+        out[k] = (vars.power_flow_by_line[idx], line.from_node < line.to_node ? 1.0 : -1.0)
+    end
+    return out
+end
+
+"""
+    _add_line_n1_reserve!(model, vars, input, n1_cost)
+
+Preventive transmission N-1: each physical line (parallel circuits each on
+their own) carries at most `n1_transmission_reserve_factor` × its capacity;
+the excess is a priced slack (`n1_trans_over_l*_t*`).
+"""
+function _add_line_n1_reserve!(model, vars::PowerSystemVariables, input::PowerSystemInput,
+                               n1_cost::AffExpr)
+    factor = input.n1_transmission_reserve_factor
+    for (k, lf) in enumerate(_line_flows(vars, input))
+        lf === nothing && continue
+        pf, _ = lf
+        line = input.network.transmission_lines[k]
+        usable = line.capacity_mw * line.num_circuits * factor
+        usable > 0 || continue
+        for t in 1:input.temporal.hours
+            over = @variable(model, lower_bound = 0, base_name = "n1_trans_over_l$(k)_t$(t)")
+            @constraint(model, pf[t] <= usable + over, base_name = "n1_trans_reserve_l$(k)_t$(t)_pos")
+            @constraint(model, pf[t] >= -usable - over, base_name = "n1_trans_reserve_l$(k)_t$(t)_neg")
+            add_to_expression!(n1_cost, input.loss_of_reserve_static, over)
+        end
+    end
+end
+
+"""
+    _charge_n1_shortfall!(model, n1_cost, input)
+
+The objective is built before the N-1 constraints: add their priced slacks
+to it (an energy cost, scaled by the step length as in build_objective!) and
+to the cost breakdown.
+"""
+function _charge_n1_shortfall!(model, n1_cost::AffExpr, input::PowerSystemInput)
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    @objective(model, Min, objective_function(model) + tres * n1_cost)
+    model.ext[:cost_expressions][:n1_security_shortfall_cost] = n1_cost
 end
 
 # =============================================================================
@@ -2920,227 +3030,59 @@ function _build_lodf_matrix(ptdf::Matrix{Float64}, lines)
 end
 
 """
-    _get_flow_variable(vars, i, j, t)
+    add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Get the power flow variable for line (i,j) at time t.
-Returns nothing if no flow variable exists for this bus pair.
+Security-constrained OPF (`n1_scopf_enabled`):
+1. Transmission: for every outage of line k, every other line l stays within
+   its capacity after the flow of k redistributes through the LODF:
+   |f_l + LODF[l,k] f_k| ≤ cap_l + over_l,t (`scopf_line*_outage*_t*_pos/neg`).
+   Flows are per physical line, in each line's from→to direction.
+2. Generation: preventive N-1 (`scopf_n1_gen_reserve_t*`, as in
+   add_n1_security_constraints!) or, with `n1_corrective_enabled`, corrective
+   re-dispatch within ramp limits (`n1_corrective_gen_t*`).
+
+All are soft: overloads and shortfalls are priced at `loss_of_reserve_static`.
 """
-function _get_flow_variable(vars::PowerSystemVariables, i::Int, j::Int, t::Int)
-    if haskey(vars.power_flow, (i, j))
-        return vars.power_flow[(i, j)][t]
-    elseif haskey(vars.power_flow, (j, i))
-        return -vars.power_flow[(j, i)][t]  # Reverse direction
-    end
-    return nothing
-end
-
-"""
-    _add_corrective_gen_n1!(model, vars, input)
-
-Add generation N-1 constraints with corrective actions.
-Instead of simply requiring remaining generation >= demand (preventive),
-allow post-contingency re-dispatch within ramp limits and battery response.
-
-For each hour t:
-  Σ gen_output[g,b,t] (excl largest) + battery_headroom >= demand[t]
-
-Battery headroom = Σ max(0, bat_max_discharge_power - bat_discharge[b,t])
-"""
-function _add_corrective_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput)
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
-    n_bus = input.network.num_buses
-    hours = input.temporal.hours
-
-    # Find system-wide largest generator
-    system_largest_gen = 0
-    system_largest_capacity = 0.0
-    system_largest_bus = 0
-
-    for g in 1:n_gen
-        for b in 1:n_bus
-            cap = input.generators[g].rated_power[b]
-            if cap > system_largest_capacity
-                system_largest_capacity = cap
-                system_largest_gen = g
-                system_largest_bus = b
-            end
-        end
-    end
-
-    if system_largest_gen == 0
-        return
-    end
-
-    for t in 1:hours
-        # Generation (excluding largest)
-        remaining_gen = AffExpr(0.0)
-        for g in 1:n_gen
-            for b in vars.buses_of_gen[g]
-                if !(g == system_largest_gen && b == system_largest_bus)
-                    add_to_expression!(remaining_gen, 1.0, vars.gen_output[g, b, t])
-                end
-            end
-        end
-
-        # Battery corrective response: available discharge headroom
-        battery_headroom = AffExpr(0.0)
-        for b_idx in 1:n_bat
-            bat = input.batteries[b_idx]
-            for b in 1:n_bus
-                rated = bat.max_discharge_power[b]
-                if rated > 0
-                    # Headroom = max_discharge_power - current_discharge
-                    # (battery can ramp up discharge to its rated discharge power)
-                    add_to_expression!(battery_headroom, rated)
-                    add_to_expression!(battery_headroom, -1.0, vars.bat_discharge[b_idx, b, t])
-                end
-            end
-        end
-
-        # Total demand
-        total_demand = sum(
-            input.demand[t, input.network.bus_to_node[b]] *
-            input.network.buses[b].demand_fraction
-            for b in 1:n_bus
-        )
-
-        @constraint(model,
-            remaining_gen + battery_headroom >= total_demand,
-            base_name = "n1_corrective_gen_t$(t)"
-        )
-    end
-end
-
-"""
-    add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput;
-                           max_scopf_iterations::Int=5,
-                           violation_tolerance::Float64=0.01)
-
-Iterative Security-Constrained OPF:
-1. Solve base-case dispatch (no N-1 constraints)
-2. Evaluate all N-1 contingencies using PTDF/LODF
-3. Add constraints only for contingencies that cause violations
-4. Re-solve and repeat until no new violations found
-
-This is more efficient than the preventive approach in add_n1_security_constraints!
-because it only adds constraints for binding contingencies.
-"""
-function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput;
-                                 max_scopf_iterations::Int=5,
-                                 violation_tolerance::Float64=0.01)
-    if !input.n1_security_enabled
-        return
-    end
-
-    n_bus = input.network.num_buses
-    n_gen = length(input.generators)
+function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+    input.n1_security_enabled || return
     hours = input.temporal.hours
     lines = input.network.transmission_lines
-    n_lines = length(lines)
+    n1_cost = AffExpr(0.0)
 
-    # Build PTDF matrix for the network
-    ptdf = _build_ptdf_matrix(input)
-
-    # Build LODF matrix from PTDF
-    lodf = _build_lodf_matrix(ptdf, lines)
-
-    # For each critical line outage, add post-contingency flow constraints
-    # only when they would be violated
-    if input.n1_transmission_enabled
-        for k in 1:n_lines
-            line_k = lines[k]
-            cap_k = line_k.capacity_mw * line_k.num_circuits
-            if cap_k <= 0
-                continue
-            end
-
-            for l in 1:n_lines
-                if l == k
-                    continue
+    if input.n1_transmission_enabled && !isempty(lines)
+        lodf = _build_lodf_matrix(_build_ptdf_matrix(input), lines)
+        flows = _line_flows(vars, input)
+        caps = [line.capacity_mw * line.num_circuits for line in lines]
+        over = Dict{Tuple{Int,Int}, VariableRef}()   # (l, t) → worst overload of l
+        for k in eachindex(lines), l in eachindex(lines)
+            (l == k || caps[k] <= 0 || caps[l] <= 0 || abs(lodf[l, k]) < 1e-6) && continue
+            (flows[l] === nothing || flows[k] === nothing) && continue
+            (pf_l, s_l), (pf_k, s_k) = flows[l], flows[k]
+            for t in 1:hours
+                o = get!(over, (l, t)) do
+                    v = @variable(model, lower_bound = 0, base_name = "scopf_over_l$(l)_t$(t)")
+                    add_to_expression!(n1_cost, input.loss_of_reserve_static, v)
+                    v
                 end
-                line_l = lines[l]
-                cap_l = line_l.capacity_mw * line_l.num_circuits
-                if cap_l <= 0 || abs(lodf[l, k]) < 1e-6
-                    continue
-                end
-
-                # Post-contingency flow on line l when line k is out:
-                # f_l_post = f_l_pre + LODF[l,k] × f_k_pre
-                # |f_l_post| <= cap_l
-                # i.e., |f_l + LODF[l,k] × f_k| <= cap_l
-
-                i_l, j_l = line_l.from_node, line_l.to_node
-                i_k, j_k = line_k.from_node, line_k.to_node
-
-                lodf_lk = lodf[l, k]
-
-                for t in 1:hours
-                    # Get the flow variables for line l and line k
-                    flow_l = _get_flow_variable(vars, i_l, j_l, t)
-                    flow_k = _get_flow_variable(vars, i_k, j_k, t)
-
-                    if flow_l !== nothing && flow_k !== nothing
-                        # f_l + LODF[l,k] × f_k <= cap_l
-                        @constraint(model,
-                            flow_l + lodf_lk * flow_k <= cap_l,
-                            base_name = "scopf_line$(l)_outage$(k)_t$(t)_pos"
-                        )
-                        # -(f_l + LODF[l,k] × f_k) <= cap_l
-                        @constraint(model,
-                            flow_l + lodf_lk * flow_k >= -cap_l,
-                            base_name = "scopf_line$(l)_outage$(k)_t$(t)_neg"
-                        )
-                    end
-                end
+                post = s_l * pf_l[t] + lodf[l, k] * s_k * pf_k[t]
+                @constraint(model, post <= caps[l] + o,
+                    base_name = "scopf_line$(l)_outage$(k)_t$(t)_pos")
+                @constraint(model, post >= -caps[l] - o,
+                    base_name = "scopf_line$(l)_outage$(k)_t$(t)_neg")
             end
         end
     end
 
-    # Generation N-1 with corrective actions
     if input.n1_generation_enabled
         if input.n1_corrective_enabled
-            _add_corrective_gen_n1!(model, vars, input)
+            _add_gen_n1!(model, vars, input, n1_cost; corrective = true,
+                         cname = "n1_corrective_gen")
         else
-            # Fall back to preventive generation N-1 from identify_n1_critical_elements
-            critical_elements = identify_n1_critical_elements(input)
-            if !isempty(critical_elements["generators"])
-                system_largest_gen = 0
-                system_largest_capacity = 0.0
-                system_largest_bus = 0
-
-                for (bus, gen_info) in critical_elements["generators"]
-                    if gen_info["capacity"] > system_largest_capacity
-                        system_largest_capacity = gen_info["capacity"]
-                        system_largest_gen = gen_info["gen_idx"]
-                        system_largest_bus = bus
-                    end
-                end
-
-                for t in 1:hours
-                    total_system_generation = AffExpr(0.0)
-                    for g in 1:n_gen
-                        for b in vars.buses_of_gen[g]
-                            if !(g == system_largest_gen && b == system_largest_bus)
-                                add_to_expression!(total_system_generation, 1.0, vars.gen_output[g, b, t])
-                            end
-                        end
-                    end
-
-                    total_system_demand = sum(
-                        input.demand[t, input.network.bus_to_node[b]] *
-                        input.network.buses[b].demand_fraction
-                        for b in 1:n_bus
-                    )
-
-                    @constraint(model,
-                        total_system_generation >= total_system_demand,
-                        base_name = "scopf_n1_gen_reserve_t$(t)"
-                    )
-                end
-            end
+            _add_gen_n1!(model, vars, input, n1_cost; corrective = false,
+                         cname = "scopf_n1_gen_reserve")
         end
     end
+    _charge_n1_shortfall!(model, n1_cost, input)
 end
 
 # Export the new constraint functions
@@ -3200,41 +3142,41 @@ function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, inp
         # leaving sectoral LOL unbounded does not change the optimal
         # dispatch; it only avoids spurious infeasibility.
 
-        # 3. Flexible demand curtailment upper bound
-        if vars.flexible_demand_curtailed !== nothing
-            for sector in sectors
-                if haskey(vars.flexible_demand_curtailed, sector) && haskey(input.sectoral_demand, sector)
-                    sec_dem = max(0.0, input.sectoral_demand[sector][t, ni])
-                    @constraint(model, vars.flexible_demand_curtailed[sector][ni, t] <= sec_dem,
-                        base_name = "flex_curt_cap_$(sector)_$(ni)_$(t)")
-                end
-            end
-        end
     end
 
-    # B13: Demand shifting constraints (node-level)
-    if vars.demand_shift !== nothing && !isempty(vars.demand_shift)
+    # B13: Demand shifting: what leaves a step is at most flexibility_ratio of
+    # the sector's demand there.
+    if vars.demand_shift !== nothing
         for (sector, shift_vars) in vars.demand_shift
-            crit = get(input.sectoral_criticality, sector, 1.0)
-            flex_ratio = 1.0 - crit
-
-            for ni in 1:n_node
-                for t in 1:hours
-                    if haskey(input.sectoral_demand, sector)
-                        sec_dem = max(0.0, input.sectoral_demand[sector][t, ni])
-                        shift_from_t = AffExpr(0.0)
-                        for ((vn, vt, vt_dest), var) in shift_vars
-                            if vn == ni && vt == t
-                                add_to_expression!(shift_from_t, var)
-                            end
-                        end
-                        @constraint(model, shift_from_t <= flex_ratio * sec_dem,
-                            base_name = "demand_shift_out_cap_$(sector)_$(ni)_$(t)")
-                    end
-                end
+            ratio = input.sectoral_flexibility_ratio[sector]
+            out = Dict{Tuple{Int,Int}, AffExpr}()
+            for ((ni, t, _), var) in shift_vars
+                add_to_expression!(get!(out, (ni, t), AffExpr(0.0)), var)
+            end
+            for ((ni, t), expr) in out
+                sec_dem = max(0.0, input.sectoral_demand[sector][t, ni])
+                @constraint(model, expr <= ratio * sec_dem,
+                    base_name = "demand_shift_out_cap_$(sector)_$(ni)_$(t)")
             end
         end
     end
+end
+
+"""
+    demand_shift_net(vars) -> Dict{Tuple{Int,Int}, AffExpr}
+
+Net demand moved into each (node, step) by demand shifting: shifts in minus
+shifts out, summed over flexible sectors. Added to the demand side of the bus
+balances, scaled by the bus's demand_fraction like the other node-level terms.
+"""
+function demand_shift_net(vars)
+    net = Dict{Tuple{Int,Int}, AffExpr}()
+    vars.demand_shift === nothing && return net
+    for shift_vars in values(vars.demand_shift), ((ni, t, t_dest), var) in shift_vars
+        add_to_expression!(get!(net, (ni, t_dest), AffExpr(0.0)), var)
+        add_to_expression!(get!(net, (ni, t), AffExpr(0.0)), -1.0, var)
+    end
+    return net
 end
 
 """
@@ -3340,15 +3282,53 @@ function add_max_annual_system_cost!(model, vars::PowerSystemVariables, input::P
 end
 
 """
+    add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+
+Bound electrolyzer consumption by its rated power per bus and apply its ramp
+rates (fraction of rated power per hour, scaled to the time step; <= 0 = no
+limit). The dispatch has no electrolyzer investment variable, so a bus
+without rated power gets no electrolyzer load.
+"""
+function add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+    vars.electrolyzer_power === nothing && return
+    config = input.electrolyzer_config
+    config === nothing && return
+    hours = input.temporal.hours
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    for b in 1:size(vars.electrolyzer_power, 1)
+        rated = b <= length(config.rated_power) ? config.rated_power[b] : 0.0
+        for t in 1:hours
+            @constraint(model, vars.electrolyzer_power[b, t] <= rated,
+                base_name = "electrolyzer_max_b$(b)_t$(t)")
+        end
+        rated > 0 || continue
+        ramp_up = b <= length(config.ramp_up) ? config.ramp_up[b] : 0.0
+        ramp_down = b <= length(config.ramp_down) ? config.ramp_down[b] : 0.0
+        up_limit = rated * min(1.0, ramp_up * tres)
+        down_limit = rated * min(1.0, ramp_down * tres)
+        for t in 2:hours
+            ramp_up > 0 && @constraint(model,
+                vars.electrolyzer_power[b, t] - vars.electrolyzer_power[b, t-1] <= up_limit,
+                base_name = "electrolyzer_ramp_up_b$(b)_t$(t)")
+            ramp_down > 0 && @constraint(model,
+                vars.electrolyzer_power[b, t-1] - vars.electrolyzer_power[b, t] <= down_limit,
+                base_name = "electrolyzer_ramp_down_b$(b)_t$(t)")
+        end
+    end
+end
+
+"""
     add_ev_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
 Add EV fleet constraints: SOC dynamics, charging/V2G limits, mutual exclusivity.
 
-Matches legacy PowerSystem.py EV constraints (lines 2345-2497):
-- SOC dynamics: SOC[t+1] = SOC[t] + charging*η - V2G/η
-- Charging demand satisfaction: charging + loss >= driving_consumption
+- SOC dynamics: SOC[t+1] = SOC[t] + charging*η_c - V2G/η_d - (driving - loss)
+- Unserved driving energy: 0 <= loss <= driving, penalised in the objective
 - Charging/V2G power limits
 - Charge/V2G mutual exclusivity via Big-M relaxation
+
+Driving energy leaves the fleet battery, so the grid must supply it (plus
+losses) and the same energy cannot be sold back through V2G.
 """
 function add_ev_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     if input.ev_config === nothing || vars.ev_charging === nothing
@@ -3358,6 +3338,7 @@ function add_ev_constraints!(model, vars::PowerSystemVariables, input::PowerSyst
     ev = input.ev_config
     n_node = input.network.num_nodes
     hours = input.temporal.hours
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
 
     for ni in 1:n_node
         # Skip nodes with no EV fleet
@@ -3383,18 +3364,18 @@ function add_ev_constraints!(model, vars::PowerSystemVariables, input::PowerSyst
         end
 
         for t in 1:hours
-            # SOC dynamics (MWh)
-            @constraint(model,
-                vars.ev_soc[ni, t+1] == vars.ev_soc[ni, t]
-                    + vars.ev_charging[ni, t] * ev.charge_efficiency
-                    - vars.ev_v2g[ni, t] / ev.discharge_efficiency,
-                base_name = "ev_soc_dynamics_n$(ni)_$(t)")
-
-            # Charging demand satisfaction: charging + loss >= driving consumption
+            # SOC dynamics (MWh): driving draws on the battery; the part the
+            # fleet cannot supply is unserved driving (ev_loss). Powers are MW
+            # over a step of tres hours.
             ev_demand = ev.driving_consumption_profile[t, ni]
             @constraint(model,
-                vars.ev_charging[ni, t] + vars.ev_loss[ni, t] >= ev_demand,
-                base_name = "ev_demand_n$(ni)_$(t)")
+                vars.ev_soc[ni, t+1] == vars.ev_soc[ni, t]
+                    + tres * (vars.ev_charging[ni, t] * ev.charge_efficiency
+                              - vars.ev_v2g[ni, t] / ev.discharge_efficiency
+                              - (ev_demand - vars.ev_loss[ni, t])),
+                base_name = "ev_soc_dynamics_n$(ni)_$(t)")
+            @constraint(model, vars.ev_loss[ni, t] <= ev_demand,
+                base_name = "ev_loss_max_n$(ni)_$(t)")
 
             # Charging power limit
             max_charge = ev.max_charge_power_kw * ev.num_vehicles[ni] / 1000.0
@@ -3567,8 +3548,8 @@ function recover_uc_duals_via_copy(
     # their copies — both ``gen_status`` (for fix) and
     # ``balance_constraints`` (for dual lookup) live on the original.
     # ``copy_model`` warns (harmlessly) that it cannot copy the entries we stash
-    # in ``model.ext`` (cost_expressions, temporal_resolution_hours,
-    # n1_penalty_cost). The dual-recovery copy never reads them — they are used
+    # in ``model.ext`` (cost_expressions, temporal_resolution_hours). The
+    # dual-recovery copy never reads them — they are used
     # on the ORIGINAL model for the cost breakdown — so empty ``ext`` across the
     # copy to keep the solver log clean, then restore it on the original.
     saved_ext = copy(model.ext)
@@ -3818,12 +3799,10 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
 
     # CO2 emissions (using fuel_co2 factors if available)
     total_co2 = 0.0
-    for g in 1:n_gen
-        fuel = input.generators[g].fuel
-        if haskey(input.fuel_co2, fuel)
-            co2_factor = input.fuel_co2[fuel]
-            total_co2 += sum(gen_out[g, :, :]) * co2_factor
-        end
+    for g in 1:n_gen, b in 1:size(gen_out, 2)
+        co2_factor = co2_per_mwh(input.fuel_co2, input.generators[g], b)
+        co2_factor == 0.0 && continue
+        total_co2 += sum(gen_out[g, b, :]) * co2_factor
     end
 
     # Power flow values (legacy node-pair dict)
@@ -3947,11 +3926,13 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
     if has_values(model) && has_duals(model) && input.n1_security_enabled
         binding_names = String[]
 
-        # Generation N-1 reserve duals (scopf_n1_gen_reserve_t*)
+        # Generation N-1 duals: preventive, SCOPF or corrective constraint
         if input.n1_generation_enabled
             gen_duals = zeros(hours)
+            prefix = !input.n1_scopf_enabled ? "n1_gen_reserve_system" :
+                     input.n1_corrective_enabled ? "n1_corrective_gen" : "scopf_n1_gen_reserve"
             for t in 1:hours
-                cname = "scopf_n1_gen_reserve_t$(t)"
+                cname = "$(prefix)_t$(t)"
                 try
                     con = constraint_by_name(model, cname)
                     if con !== nothing
