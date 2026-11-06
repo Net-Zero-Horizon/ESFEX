@@ -9,7 +9,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 - **Default**: `required` means loading fails without it. "required by loader" means the schema has a default but the loader indexes the key directly, so a missing key fails with `Failed to load configuration: '<key>'`.
 
 !!! warning "Unknown keys are ignored"
-    The models do not forbid extra keys. A misspelled or obsolete key (for example `min_up_time` instead of `min_up`) is dropped without an error or warning, and the default is used.
+    The models do not forbid extra keys. A misspelled or obsolete key (for example `min_up_time` instead of `min_up`) is dropped and the default is used. The loader logs a warning with the key's full path, and `esfex validate` and the Studio's validation list it.
 
 ---
 

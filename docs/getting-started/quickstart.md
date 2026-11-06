@@ -136,7 +136,7 @@ systems:
 Settings not listed take their defaults. Two of them matter for this example: `master_problem.planning_mode` is `perfect_foresight`, and `co2_budget` is enabled with 1,000,000 t/year. The diesel unit has no CO₂ emissions here because no `fuels:` block gives Diesel an emission factor; see the [Configuration Guide](../user-guide/configuration.md).
 
 !!! warning "Unknown keys are ignored"
-    A misspelled key (for example `representative_days_per_year` instead of `representative_days`) is silently ignored and the default is used. Check spellings against the [Configuration Reference](../reference/config-reference.md).
+    A misspelled key (for example `representative_days_per_year` instead of `representative_days`) is ignored and the default is used. The loader logs a warning naming it, and `esfex validate` lists it. Check spellings against the [Configuration Reference](../reference/config-reference.md).
 
 ---
 
@@ -170,7 +170,7 @@ Configuration is valid!
 
 The counts include existing units only, not the investment candidates.
 
-Validation catches YAML syntax errors, missing required unit fields (reported as e.g. `Failed to load configuration: 'min_power'`), wrong types and out-of-range values. It does **not** check per-node list lengths, unknown keys, or whether `demand.csv` and `solar.csv` exist; those surface when the run starts. See the [CLI reference](../user-guide/cli.md#esfex-validate).
+Validation catches YAML syntax errors, missing required unit fields (reported as e.g. `Failed to load configuration: 'min_power'`), wrong types and out-of-range values. Unknown keys are listed but do not fail validation. It does **not** check per-node list lengths or whether `demand.csv` and `solar.csv` exist; those surface when the run starts. See the [CLI reference](../user-guide/cli.md#esfex-validate).
 
 ---
 

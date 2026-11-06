@@ -205,7 +205,22 @@ def config_to_gui_states(
     states: dict[str, GuiSystemState] = {}
     for sys_name, sys_config in config.systems.items():
         states[sys_name] = _system_to_gui_state(sys_config, base_dir=base_dir)
+    _assign_unknown_keys(states, getattr(config, "unknown_keys", []))
     return states
+
+
+def _assign_unknown_keys(states: dict[str, GuiSystemState], keys: list[str]) -> None:
+    """Give each state the unknown keys under ``systems.<its name>.``; keys
+    outside any system go to the first state, so validation lists them once."""
+    if not states or not isinstance(keys, list):
+        return
+    first = next(iter(states))
+    for name, state in states.items():
+        prefix = f"systems.{name}."
+        state.unknown_config_keys = [k for k in keys if k.startswith(prefix)]
+    states[first].unknown_config_keys += [
+        k for k in keys
+        if not any(k.startswith(f"systems.{n}.") for n in states)]
 
 
 def config_to_inter_system_links(
@@ -2483,6 +2498,7 @@ def gui_state_to_yaml(
             config_dict["systems"][sys_name] = {"name": sys_name}
         sys_dict = config_dict["systems"][sys_name]
         _apply_gui_state_to_dict(state, sys_dict)
+        _drop_shadowed_aliases(SystemConfig, sys_dict)
 
     if inter_system_links:
         inter_system_links_to_config_dict(inter_system_links, config_dict)
@@ -2724,6 +2740,19 @@ def _build_fuel_transport_routes(state: GuiSystemState) -> list[dict]:
                 })
 
     return routes
+
+
+def _drop_shadowed_aliases(model, d: dict) -> None:
+    """Drop the alias key of every *model* field also present by name.
+
+    The base config is dumped by alias (``TARGET_RE_PENETRATION``) and the
+    Studio then writes its edited value by field name
+    (``target_re_penetration``); pydantic prefers the alias, so the stale
+    value would win on the next load.
+    """
+    for name, field in model.model_fields.items():
+        if field.alias and field.alias != name and name in d:
+            d.pop(field.alias, None)
 
 
 def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):

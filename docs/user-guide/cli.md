@@ -164,12 +164,12 @@ esfex validate -c CONFIG
 - Every generator and battery under `generators:` / `batteries:` has all required fields (for example `min_power`, `ramp_up`, `fuel_cost`; see the [Configuration Guide](configuration.md)).
 - Pydantic types, ranges and allowed values (e.g. `solver.gap` between 0 and 1, `simulation_mode`, `power_flow_mode`).
 - Every system listed in `meta_network.systems` is defined under `systems`.
+- Unknown or misspelled keys are listed after `Configuration is valid!`, each with its full path (for example `systems.island.generators.diesel.min_up_time`). They are ignored, so they do not make the file invalid.
 
 What is **not** checked:
 
 - Per-node array lengths (a `rated_power` list longer than the number of nodes is accepted).
 - Whether the demand and availability files exist. A missing demand file fails the run when demand is loaded. A missing availability file only logs a warning and the run continues; an investment technology without its profile is then treated as available in every hour.
-- Unknown or misspelled keys. They are ignored without a message.
 - Unknown generator `type` values. They are replaced by `Non-renewable` with a logged warning.
 
 Julia is not started, so a successful validation says nothing about the Julia backend or the installed solvers. Use [`esfex info`](#esfex-info) and [`esfex list-solvers`](#esfex-list-solvers) for that.

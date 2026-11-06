@@ -125,6 +125,7 @@ def mock_esfex_config():
     """Create a mock ESFEXConfig object."""
     cfg = MagicMock()
     cfg.simulation_mode = "development"
+    cfg.unknown_keys = []
     cfg.solver = MagicMock()
     cfg.solver.name = "highs"
     cfg.solver.verbose = False
@@ -216,6 +217,16 @@ class TestValidateCommand:
             result = runner.invoke(app, ["validate", "--config", str(minimal_config_path)])
         assert result.exit_code != 0
         assert "bad config" in result.output
+
+    def test_lists_unknown_keys(self, minimal_config_path):
+        """Misspelt keys are listed (the file is still valid: warn, don't reject)."""
+        cfg = yaml.safe_load(minimal_config_path.read_text())
+        cfg["systems"]["test_system"]["generators"]["gen_0"]["min_up_time"] = 2
+        minimal_config_path.write_text(yaml.dump(cfg))
+        result = runner.invoke(app, ["validate", "--config", str(minimal_config_path)])
+        assert result.exit_code == 0
+        assert "1 unknown key(s)" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "systems.test_system.generators.gen_0.min_up_time" in result.output
 
     def test_shows_config_summary(self, minimal_config_path, mock_esfex_config):
         with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config):

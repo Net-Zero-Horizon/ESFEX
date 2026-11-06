@@ -4,10 +4,10 @@ An ESFEX run is described by one YAML file. `esfex.config.loader.load_config()` 
 
 The configuration drives a two-stage decomposition [**[25]**](../reference/bibliography.md#ref25): capacity expansion in the master problem [**[24]**](../reference/bibliography.md#ref24), then operational dispatch over a rolling horizon.
 
-!!! warning "Unknown keys are silently ignored"
-    **Unknown keys are not errors.** The models accept and drop keys they do not define, so a typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` loads without complaint and has no effect.
+!!! warning "Unknown keys are ignored, with a warning"
+    **Unknown keys are not errors.** A typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` has no effect. The loader logs a warning for each one with its full path (for example `Unknown configuration key systems.island.generators.diesel.min_up_time is ignored`), `esfex validate -c <file>` lists them, and so does the Studio's validation (category *Configuration*).
 
-    Check spelling against the reference. `esfex validate -c <file>` catches type errors and missing required keys, but not ignored keys.
+    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling` and `_geo_assets`, and the free-form `plugins` and `solver.options`. Stochastic scenario multipliers report their own unknown keys.
 
 ---
 
@@ -624,7 +624,7 @@ A system file contains the system mapping itself (`name`, `nodes`, `generators`,
 
 It does **not** check:
 
-- unknown or misspelled keys (dropped without a message);
+- unknown or misspelled keys: these are listed (as warnings), not rejected;
 - the length of per-node arrays against the node count;
 - that demand, availability or inflow files exist (they are opened when the run starts).
 

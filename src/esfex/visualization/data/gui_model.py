@@ -1081,6 +1081,10 @@ class GuiSystemState:
     # Raw passthrough for fields not edited in the GUI
     raw_extras: dict = field(default_factory=dict)
 
+    # Keys of the loaded file that ESFEX ignores (ESFEXConfig.unknown_keys),
+    # listed by validation; not written back on save.
+    unknown_config_keys: list[str] = field(default_factory=list)
+
 
 # ── Checkpoint suspension helper ─────────────────────────────────
 

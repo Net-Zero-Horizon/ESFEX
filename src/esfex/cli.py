@@ -333,6 +333,11 @@ def validate(
     try:
         cfg = load_config(config)
         console.print("[green]Configuration is valid![/green]")
+        if cfg.unknown_keys:
+            console.print(f"[yellow]{len(cfg.unknown_keys)} unknown key(s) are ignored "
+                          "(misspelt or obsolete?):[/yellow]")
+            for key in cfg.unknown_keys:
+                console.print(f"  {key}", markup=False)
         _show_config_summary(cfg)
 
     except ConfigLoadError as e:

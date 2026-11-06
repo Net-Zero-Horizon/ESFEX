@@ -150,6 +150,7 @@ Units are read from a `generators:` / `batteries:` mapping or from legacy system
 - **Buses:** a `current_type` other than `AC`/`DC` is replaced by `AC` with a warning.
 - **Technologies and battery technologies:** passed to `TechnologyConfig(**data)` / `BatteryTechnologyConfig(**data)` with `name` defaulting to the key, so every schema field (including `fuel_cost_curve` and `throughput_degradation_cost`) is read.
 - **Demand sectors, EV categories, rooftop solar, stochastic scenarios, CO₂ budget:** passed to their models unchanged.
+- **Name and alias both given:** when a system sets a field under its name and its alias (`target_re_penetration` and `TARGET_RE_PENETRATION`), the name is used and the alias dropped, with a warning when the values differ. Studio files up to 0.3.0 hold both: the alias with the value the file was opened with, the name with the edited value.
 
 ### Fuel-cost linking and non-fuel O&M adder
 
@@ -186,7 +187,7 @@ Raised by `load_config()` when:
 - Pydantic validation fails (type mismatch, missing required field, value out of range, failed cross-field validator);
 - conversion fails for another reason, such as a required unit key missing.
 
-Unknown keys never raise.
+Unknown keys never raise. `load_config()` logs a warning for each key that nothing reads, with its dotted path (for example `systems.Cuba.generators.gas_1.dorop`), and returns them in `config.unknown_keys` (a list of str; empty for a clean file). `load_system_config()` logs them too. The check is `esfex.config.unknown_keys.find_unknown_keys(raw_dict)`; it mirrors the loader's translations, so aliases, flat `dc_*` keys, case-insensitive penalty keys, `unit_*` / `bat_*` units and the Studio's metadata keys are not reported.
 
 ```python
 from esfex.config.loader import load_config, ConfigLoadError
