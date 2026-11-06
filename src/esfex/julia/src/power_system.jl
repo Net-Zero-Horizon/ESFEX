@@ -638,9 +638,11 @@ function build_variables!(model, input::PowerSystemInput)
     # Only created for generators/batteries with >1 cost segment.
     # =========================================================================
     gen_seg_output = Dict{Tuple{Int,Int}, Any}()
+    # A curve at a bus where the unit has no output variable (no capacity
+    # there) is skipped, as in the master.
     for (g, bus_curves) in input.gen_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1
+            if length(segs) > 1 && b in buses_of_gen[g]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="gseg_$(g)_$(b)")
@@ -657,7 +659,7 @@ function build_variables!(model, input::PowerSystemInput)
     bat_seg_discharge = Dict{Tuple{Int,Int}, Any}()
     for (bi, bus_curves) in input.bat_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1
+            if length(segs) > 1 && b in buses_of_bat[bi]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="bseg_$(bi)_$(b)")

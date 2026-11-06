@@ -27,7 +27,7 @@ import pandas as pd
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
-from esfex.config.schema import ESFEXConfig, SystemConfig
+from esfex.config.schema import CostCurveConfig, ESFEXConfig, SystemConfig
 from esfex.bridge.adapters import PowerSystemAdapter, MasterProblemAdapter, PrimaryEnergyAdapter
 from esfex.models.ev import (
     aggregate_ev_profiles,
@@ -6313,6 +6313,21 @@ class Orchestrator:
                         return out
                     return [arr[0]] * n
 
+                def _rep_curve(curves, n=num_buses):
+                    # The technology's per-node bidding curves, per bus. A
+                    # bus whose node has no curve gets a flat one (its
+                    # fuel_cost). None when the technology has no curve.
+                    if not curves:
+                        return None
+                    if len(curves) == 1:
+                        return [curves[0]] * n
+                    out = []
+                    for _b in range(n):
+                        _nidx = bus_to_node[_b] if bus_to_node is not None else _b
+                        out.append(curves[_nidx] if _nidx < len(curves)
+                                   else CostCurveConfig())
+                    return out
+
                 vgen_key = f"inv_{tech_key}"
                 updated[vgen_key] = {
                     "name": f"Investment {tech.name}",
@@ -6327,6 +6342,7 @@ class Orchestrator:
                     "min_up": _rep(tech.min_up),
                     "min_down": _rep(tech.min_down),
                     "fuel_cost": _rep(tech.fuel_cost),
+                    "fuel_cost_curve": _rep_curve(tech.fuel_cost_curve),
                     "fixed_cost": _rep(tech.fixed_cost),
                     "maintenance_cost": _rep(tech.maintenance_cost),
                     "start_up_cost": _rep(tech.start_up_cost),

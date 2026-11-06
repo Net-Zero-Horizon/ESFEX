@@ -1162,7 +1162,7 @@ Technology investments become **virtual generators** (and virtual batteries) for
 1. Computes cumulative investment per technology per year
 2. Creates synthetic generator entries with `rated_power = cumulative_investment`
 3. Passes these virtual generators to the operational dispatch adapter
-4. Gives them the availability profile and cost parameters of the technology; the fuel cost is the flat `fuel_cost` (a technology's `fuel_cost_curve` is not carried over)
+4. Gives them the availability profile and cost parameters of the technology, including its `fuel_cost_curve` (per bus), so the dispatch prices built capacity with the technology's bidding curve; the master itself plans with the flat `fuel_cost` (see the note on cost curves above)
 
 ---
 
