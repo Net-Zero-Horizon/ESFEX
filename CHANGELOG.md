@@ -160,6 +160,19 @@ Per-release notes are also published on the
   declared but never filled. `PrimaryEnergyAdapter.get_results()` returns it
   as `fuel_for_power` (keyed by generator index).
 
+- **Warning for stochastic multipliers that have nothing to scale.** A
+  scenario multiplier other than 1 whose term the configuration lacks used
+  to be accepted without a trace: `gen_start_up_cost` without
+  `master_problem.use_uc_in_dispatch` (the master models start-ups only
+  then), the fuel-chain and electrolyzer keys (`fuel_import_cost`,
+  `fuel_transport_cost`, `fuel_storage_invest_cost`,
+  `penalty_loss_of_fuel_supply`, `electrolyzer_*`) with primary energy
+  off, and `transmission_cost_per_mw_km` when no line or electrical
+  inter-system link has a `cost_per_mw_km`. `load_config` now logs a
+  warning naming the scenario, the key and the reason (development mode,
+  `master_problem.stochastic` on, first system's scenarios: the ones the
+  master uses).
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -503,6 +516,11 @@ Per-release notes are also published on the
 - `BatteryConfig` accepts both `availability_file` and `Availability`
   (the docs said only the alias), and generators accept both names too
   (the docs said `availability_file` was ignored for generators).
+
+- Lint: `ReductionMap` is imported for type checking in `bridge/adapters.py`
+  (it was an undefined name in an annotation); the duplicate
+  `_haversine_km` and unused imports in the Grid Builder steps, the
+  adapters and the Studio serializer were removed.
 
 ### Fixed
 
@@ -1219,6 +1237,163 @@ Per-release notes are also published on the
   key translations (`esfex.config.legacy_keys`), and penalties are read
   from every `PenaltiesConfig` field instead of a hand-kept list, so the
   two cannot drift apart again.
+
+- **`invest_cost_conventional` scales conventional technologies again.** In
+  a stochastic master the multiplier for conventional (non-renewable)
+  candidate technologies was overwritten by `converter_invest_cost`, so
+  those technologies were priced with the converter multiplier and
+  `invest_cost_conventional` had no effect. Each multiplier now scales only
+  its own builds.
+
+- **Master fuel routes deliver what they ship.** The master's fuel block
+  applied each route's transit delay inside its cyclic representative day,
+  so shipments that left in the day's last steps never arrived: they were
+  paid for and lost, and the master bought fuel shortfall or over-sized the
+  route instead. The master now has no transit delay, as documented (with
+  one supply period a day the flow leaves evenly, so wrapping the delay
+  around the day would deliver the same). The dispatch keeps its delays.
+
+- **Fuel supply limits are right at steps longer than 1 h.** A source's
+  annual `max_availability` was prorated to each supply period by its number
+  of steps instead of its hours, so with 2 h steps a period got half its
+  share (a third with 3 h), in the master and the dispatch. The proration
+  now uses steps × step length, like the non-electric demand.
+
+- **The year's investment total counts every build.**
+  `total_investment_by_year` of the master result (and its Python
+  conversion) left out
+  transmission and the master's fuel storage, route and electrolyzer
+  builds. They are now included.
+
+- **Inter-system link flow cost per line in the master.** The master charged
+  a link's flow cost on every line and transformer between the same pair of
+  buses; the dispatch charges it only on the link line. The master now reads
+  each line's own `flow_cost`, as the dispatch does (and
+  `transmission_cost_per_mw_km` scales it per scenario). The
+  `line_flow_cost` field of `MasterProblemInput` is gone.
+
+- **Flat offer curves set the price.** A `flat` `fuel_cost_curve` whose
+  `flat_price` differs from the unit's `fuel_cost` (or any single-block
+  curve) was ignored, and the unit was priced at `fuel_cost`, for existing
+  generators and candidate technologies, in the master and the dispatch.
+  Such a curve now prices the output at its own price. A flat curve without
+  `flat_price` still costs nothing extra (no segment variables).
+
+- **Reservoir capacity built by the master is used.** The master charged
+  `reservoir_invest_cost` for reservoir expansion but its representative
+  days never saw the larger reservoir, and the built capacity never reached
+  the dispatch or the next myopic year. The master's level band now includes
+  the capacity built up to each year, the dispatch gets it as existing
+  reservoir capacity from its build year on (perfect foresight and myopic),
+  and a myopic year's master counts earlier builds and has that much less
+  left to build. Master results report it per year as
+  `reservoir_investment_{g}_{n}` (MWh; HDF5 scenario attribute
+  `investment_reservoir_investment_{g}_{n}`, per node). Benders subproblems
+  still use the existing reservoir capacity only.
+
+- **Benders reaches the monolithic master's plan.** With
+  `master_problem.solver_method: benders`, the subproblems left out several
+  terms the monolithic master has, and the cuts did not see several master
+  decisions, so Benders planned a different system:
+  - **Converters** carried no power in the subproblems, so load behind a
+    converter was shed, and converter capacity was charged but never built.
+    The subproblems now model AC/DC and frequency converters at their rated
+    power plus the MW the master builds, with their variable cost, and the
+    cuts price converter builds.
+  - **CO2 budget.** The subproblems ignored each system's annual CO2 budget.
+    The budget couples all representative days of a year, so the Benders
+    master now shares it out: one variable per system, year and day, the
+    share of the budget the day may use (the shares sum to at most 1). Each
+    subproblem holds the day's emissions, scaled to the year, to its share
+    plus a violation slack at the system's `co2_budget_violation` penalty.
+    Summed over the days this is the monolithic budget with the same
+    penalty, so both reach the same optimum; the cuts tell the master which
+    days a tonne of allowance is worth most on.
+  - **Inter-system link flow cost** (`cost_per_mw_km`) and **LP start-ups**
+    (`use_uc_in_dispatch`) were free in the subproblems; they are now
+    charged as in the monolithic master.
+  - **Curtailment of candidate renewables** was not charged
+    `curtailment_cost` in the subproblems, unlike the monolithic master
+    (with `max_curtailment_ratio` < 1). It is now, and the cut includes the
+    curtailment cost each MW of capacity adds.
+  - **Reservoir builds** were charged by the Benders master but the
+    subproblems kept the reservoir at its existing size, so Benders never
+    built reservoir capacity. The subproblems' level bounds now include the
+    MWh the master built, and the cuts price it.
+  - **Line builds, life extension and the RE ratio** had no gradient in the
+    cuts, so Benders never built transmission or extended a unit's life on
+    operating grounds, and the subproblems used the master's RE ratio
+    instead of the year's target as the RE floor. Every master quantity a
+    subproblem reads is now a copy variable whose dual enters the cut, and
+    the subproblems apply both RE floors (target and ratio) like the
+    monolithic master.
+  - Because every such quantity now has a gradient, a cut is added for every
+    year in every iteration; a plan with no investment option used to run to
+    `benders_max_iterations` without converging.
+  - **Cut coefficients were scaled down twice.** The Benders master divided
+    every cut coefficient by 10⁶ on the assumption that costs arrive in $,
+    but the bridge already sends them in M$. Gradients per MWh (reservoir,
+    fuel tank) or per tonne fell below the solver's 10⁻⁹ coefficient
+    tolerance and were dropped, so the master never saw them. The recourse
+    variables are now in the input's cost units.
+
+  A master or subproblem that fails to solve is now written as an LP file
+  only with verbose output, to the system's temporary folder (it was always
+  written to `/tmp`).
+
+- **Studio: a one-node fuel tank outage stays on its node.** The outage
+  calendar's windows had no node, so loading and saving a project turned a
+  `fuel_storage` window at one node into a window on that fuel's tanks at
+  every node. The node is now kept through load, the calendar and save.
+
+- **Studio: OK in the interruptions calendar no longer deletes the
+  schedule.** The dialog started from an empty schedule and filled it only
+  when the page reported an edit, so opening the calendar and pressing OK
+  without editing removed every outage window. It now starts from the
+  project's schedule.
+
+- **Builds of years the dispatch skips reach the later years.** With
+  `Orchestrator.run(dispatch_years=...)` (or `ESFEX_OPS_ONLY_YEARS`) the
+  year loop skipped a year before adding the transmission and converter
+  capacity the master built in it; those builds are per-year increments, so
+  they were lost for every later dispatched year. They are now applied for
+  skipped years too.
+
+- **No false "ignored" warning for tank outages on entry-point fuels.**
+  The outage check took the valid `fuel_storage` fuels only from
+  `primary_energy_sources`; when the fuels come from `fuel_entry_points`
+  (no `primary_energy_sources`), a window on one of them was reported as
+  ignored although the fuel model applies it.
+
+- **Rooftop solar keeps rooftex's defaults per system, and multi-node
+  systems keep their rooftop solar.** Every multi-node or multi-system run
+  goes through the system merge, which padded `rooftop_max_potential`,
+  `systems_per_node`, `avg_system_size` and `initial_adoption` with 0 for
+  systems (or nodes) that do not set them. Without `rooftop_max_potential`
+  the merged list of zeros set every node's potential to 0, so rooftop
+  solar disappeared from any multi-node system; a system without
+  `systems_per_node` next to one with it got 0 rooftop systems at its
+  nodes. Unset entries are now `null` and take rooftex's default at that
+  node (initial adoption 0.05; the potential rooftex draws where the
+  system/size lists are missing), a short list repeats its last value as
+  rooftex does, and the nodes of a system without rooftop solar
+  (`SIM_ROOFTOP` off or no `rooftop_solar_config`) get potential 0. The
+  per-node lists now accept `null` entries.
+
+- **Myopic electrolyzer builds retire after their life time.** The myopic
+  master carried every electrolyzer build into all later years, while
+  perfect foresight retires a build after the electrolyzer's `life_time`.
+  A myopic year now gets only the builds still in service; its room to
+  build is still reduced by everything built so far, as the
+  perfect-foresight build limit counts every build.
+
+- **HDF5 names of fuel results.** `primary_energy/fuel_for_power` replaced
+  `/` with `_` in unit names, so a unit `A/B` collided with a unit `A_B`
+  and its name differed from the unit's other datasets;
+  `master_fuel_capacity` wrote raw fuel names (a `/` made nested groups)
+  and electrolyzer keys without de-duplication. Both now use the results
+  file's unit-name convention (`/` → ` - `, a clash gets ` (1)`), and
+  `fuel_for_power/{unit}` uses the unit's name of the per-generator groups.
 
 ## [0.3.0] — 2026-08-27
 
