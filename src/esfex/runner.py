@@ -2622,25 +2622,55 @@ class Orchestrator:
         return current
 
     @staticmethod
-    def _system_with_electrolyzers(system_config, added: dict, reduce_invest: bool = False):
+    def _system_with_electrolyzers(system_config, added: dict, used: Optional[dict] = None):
         """``system_config`` with ``added`` ({electrolyzer key: MW per node})
-        added to the electrolyzers' ``rated_power``; with ``reduce_invest``
-        also taken off their ``invest_max_power`` (a myopic year's room)."""
-        added = {k: v for k, v in (added or {}).items() if any(x > 1e-9 for x in v)}
-        if not added:
+        added to the electrolyzers' ``rated_power`` and ``used`` (same
+        shape) taken off their ``invest_max_power`` (a myopic year: the
+        builds still in service, and everything built so far, retired or
+        not, since the build limit counts every build)."""
+        def _nz(d):
+            return {k: v for k, v in (d or {}).items() if any(x > 1e-9 for x in v)}
+        added, used = _nz(added), _nz(used)
+        if not added and not used:
             return system_config
         elz = dict(system_config.electrolyzers or {})
-        for key, add in added.items():
+
+        def _at(lst, n):
+            return lst[n] if n < len(lst) else 0.0
+        for key in set(added) | set(used):
             if key not in elz:
                 continue
             e = elz[key]
-            upd = {"rated_power": [float(r) + (add[n] if n < len(add) else 0.0)
-                                   for n, r in enumerate(e.rated_power)]}
-            if reduce_invest:
-                upd["invest_max_power"] = [max(0.0, float(m) - (add[n] if n < len(add) else 0.0))
+            upd = {}
+            if key in added:
+                upd["rated_power"] = [float(r) + _at(added[key], n)
+                                      for n, r in enumerate(e.rated_power)]
+            if key in used:
+                upd["invest_max_power"] = [max(0.0, float(m) - _at(used[key], n))
                                            for n, m in enumerate(e.invest_max_power)]
             elz[key] = e.model_copy(update=upd)
         return system_config.model_copy(update={"electrolyzers": elz})
+
+    @staticmethod
+    def _myopic_electrolyzers(builds: dict, system_config, y_idx: int) -> tuple[dict, dict]:
+        """Electrolyzer power earlier myopic years built ({key: {build year
+        index: MW per node}}): ``(in service in year y_idx, built in all)``,
+        {key: MW per node} each. A build retires after the electrolyzer's
+        ``life_time`` at its node (0 = never), as in perfect foresight."""
+        in_service: dict[str, list[float]] = {}
+        total: dict[str, list[float]] = {}
+        elz = system_config.electrolyzers or {}
+        for key, by_year in builds.items():
+            life = list(getattr(elz.get(key), "life_time", None) or [])
+            for b_idx, per_node in by_year.items():
+                tot = total.setdefault(key, [0.0] * len(per_node))
+                cur = in_service.setdefault(key, [0.0] * len(per_node))
+                for n, v in enumerate(per_node):
+                    tot[n] += v
+                    lt = life[n] if n < len(life) else 0
+                    if lt <= 0 or y_idx - b_idx < lt:
+                        cur[n] += v
+        return in_service, total
 
     def _dispatch_system(self, year: int):
         """The operational system of ``year``: ``primary_system`` with the
@@ -3473,6 +3503,8 @@ class Orchestrator:
             # "bat_tech_capacity": {(technology key, build year index): per-node array}}
             built: dict[str, dict[tuple[str, int], np.ndarray]] = {
                 "tech": {}, "bat_tech_power": {}, "bat_tech_capacity": {}}
+            # Electrolyzer power the master built: {key: {year index: MW per node}}
+            elz_builds: dict[str, dict[int, list[float]]] = {}
             current_re = overall_initial_re
 
             for y_idx, year in enumerate(years_range):
@@ -3488,12 +3520,15 @@ class Orchestrator:
                 year_system, built_gens, built_bats = self._prepare_system_for_myopic_year(
                     y_idx, built)
                 # Fuel storage, routes and electrolyzers earlier years built
-                # (#89): existing capacity now, less room to build
+                # (#89): existing capacity now, less room to build. Storage
+                # and routes never retire; an electrolyzer build retires
+                # after its life_time, as in perfect foresight.
                 fuel_carried = ((getattr(self, "_master_fuel_by_year", None) or {})
                                 .get(years_range[y_idx - 1]) if y_idx > 0 else None)
+                elz_live, elz_used = self._myopic_electrolyzers(elz_builds, year_system, y_idx)
                 if fuel_carried:
-                    year_system = self._system_with_electrolyzers(
-                        year_system, fuel_carried.get("electrolyzer") or {}, reduce_invest=True)
+                    fuel_carried = dict(fuel_carried, electrolyzer=elz_live)
+                year_system = self._system_with_electrolyzers(year_system, elz_live, elz_used)
                 # Built units read their technology's profile
                 year_avail_cache = dict(self._availability_cache or {})
                 for unit_key, tech_key in built_gens:
@@ -3640,6 +3675,11 @@ class Orchestrator:
 
                 result = master.get_solution_values()
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
+                to_caps = getattr(master, "fuel_capacities_by_year", None)
+                year_elz = ((to_caps(result) if to_caps is not None else {})
+                            .get(1, {}).get("electrolyzer", {}))
+                for key, per_node in year_elz.items():
+                    elz_builds.setdefault(key, {})[y_idx] = list(per_node)
                 solution = result.get('solution', {})
                 year_data = solution.get(year, {})
 
