@@ -2,16 +2,17 @@
 benders.jl - Benders Decomposition for Master Problem
 
 Decomposes the monolithic capacity expansion problem into:
-- Master: investment decisions + recourse variables θ[y]
+- Master: investment decisions + recourse variables θ[y,d]
 - Subproblems: operational dispatch per (year, representative day) with fixed capacities
 
 Algorithm:
-1. Create Benders master (investment-only)
+1. Create Benders master (investment-only), one θ[y,d] per (year, representative day)
 2. Iterate:
    a. Solve master → x*, θ*; LB = objective
-   b. Fix capacities from x*, solve all subproblems → Q_y
-   c. UB = min(UB, inv_cost(x*) + Σ Q_y)
-   d. Generate optimality cuts: θ[y] ≥ intercept + gradient^T × x
+   b. Fix capacities from x*, solve all subproblems → Q_{y,d}
+   c. If a subproblem breaks the curtailment limit, add a feasibility cut;
+      otherwise UB = min(UB, first-stage cost(x*) + Σ Q_{y,d})
+   d. Generate one optimality cut per subproblem: θ[y,d] ≥ intercept + gradient^T × x
    e. Check convergence: (UB - LB) / |UB| < tolerance
 """
 
@@ -19,7 +20,7 @@ Algorithm:
 # Constants
 # =============================================================================
 
-# Cost scaling factor of the Benders cuts: theta[y] represents
+# Cost scaling factor of the Benders cuts: theta represents
 # operational_cost / COST_SCALE, and the cuts and objective account for it.
 # The bridge already sends every cost in M$ (converters.scale_cost), so theta
 # is in the input's units (1.0). With 1e6 here theta was in units of 1e12 $:
@@ -27,18 +28,9 @@ Algorithm:
 # 1e-9 matrix tolerance and was dropped, so the master never saw it.
 const COST_SCALE = 1.0
 
-# Maximum loss-of-load penalty ($/MW per timestep) used in Benders subproblems.
-# The monolithic model uses Big-M penalties (e.g. $10M) which work fine for a single
-# solve, but in Benders they create trillion-dollar subproblem costs that make cuts
-# ineffective (intercepts overflow, gradients too steep → theta stays at 0).
-# Cap at $10,000/MW-timestep: still ~60× the most expensive generator ($167/MWh diesel),
-# so load shedding remains heavily penalized. At the optimal solution load shedding ≈ 0,
-# so the capped and uncapped problems have the same optimal investment decisions.
-# With temporal resolution 6h, diesel fuel_cost=$167/MWh is the most expensive generator.
-# Cap at $250 (1.5× diesel) gives a max annual load-shed cost of ~$219M vs optimal ~$50M,
-# a 4:1 ratio that Benders cuts can approximate effectively.
-# Default fallback only — overridden by input.benders_lol_penalty_cap when available
-const BENDERS_LOL_PENALTY_CAP_DEFAULT = 1000.0
+# Curtailment above the limit (MW summed over the day's steps) below which a
+# subproblem counts as meeting it
+const CURTAILMENT_FEAS_TOL = 1e-6
 
 # =============================================================================
 # Types
@@ -297,320 +289,43 @@ function extract_copy_duals(sp)
 end
 
 # =============================================================================
-# RE Capacity–Target Linking (Benders master)
-# =============================================================================
-
-"""
-    add_benders_re_capacity_linking!(model, vars, input, targets)
-
-Link RE investment variables to RE penetration targets in the Benders master.
-
-Without this, `re_penetration_ratio[y]` is a free variable that trivially
-equals the target without requiring any RE investment.  This constraint
-estimates annual RE energy potential from:
-  - Existing RE generators (age-based retirement + degradation)
-  - Technology investments (cumulative, with degradation)
-and requires the total to cover `target[y] × annual_demand`.
-
-The estimate uses average availability across all timesteps for each
-(technology, bus) pair.
-"""
-function add_benders_re_capacity_linking!(
-    model::Model,
-    vars::MasterProblemVariables,
-    input::MasterProblemInput,
-    targets::Dict{Tuple{Int,Int}, Float64}
-)
-    num_years = length(input.years)
-    n_gen = length(input.generators)
-    n_tech = length(input.technologies)
-    n_buses = input.network.num_buses
-    ypp = vars.years_per_inv_period
-
-    # Precompute average availability per technology per bus
-    avg_avail = Dict{Tuple{Int,Int}, Float64}()
-    for tc in 1:n_tech
-        tech = input.technologies[tc]
-        if tech.type != "Renewable"
-            continue
-        end
-        for b in 1:n_buses
-            avail_hours = size(tech.availability, 1)
-            if avail_hours > 0
-                avg_avail[(tc, b)] = sum(tech.availability[:, b]) / avail_hours
-            else
-                avg_avail[(tc, b)] = 0.0
-            end
-        end
-    end
-
-    # Build system ranges (default: single system covering all buses)
-    sys_ranges = input.system_node_ranges
-    if isempty(sys_ranges)
-        sys_ranges = [SystemNodeRange("global", 1, n_buses, input.initial_re_penetration)]
-    end
-
-    # For each year and each system, estimate RE energy and require >= target × demand
-    for y_idx in 1:num_years
-        growth_factor = (1.0 + input.demand_growth)^(y_idx - 1)
-        timesteps_per_year = length(input.hours_per_year) > 0 ?
-            input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours : 8760
-        year_start = (y_idx - 1) * timesteps_per_year + 1
-        year_end = min(y_idx * timesteps_per_year, size(input.base_demand, 1))
-        ts_per_year = Float64(timesteps_per_year)
-
-        for (s_idx, sr) in enumerate(sys_ranges)
-            target = get(targets, (s_idx, y_idx), 0.0)
-            if target <= 0.0
-                continue
-            end
-
-            sys_first = sr.first_bus
-            sys_last = sr.first_bus + sr.num_buses - 1
-
-            # Annual demand for this system's buses
-            annual_demand = sum(input.base_demand[year_start:year_end, sys_first:sys_last]) * growth_factor
-
-            # --- Existing RE generators (only system buses) ---
-            existing_re_energy = 0.0
-            for g in 1:n_gen
-                gen = input.generators[g]
-                if gen.type != "Renewable"
-                    continue
-                end
-                for b in sys_first:sys_last
-                    rated = gen.rated_power[b]
-                    if rated <= 0
-                        continue
-                    end
-                    lifetime = gen.life_time[b]
-                    initial_age = gen.initial_age[b]
-                    age = initial_age + (y_idx - 1)
-                    if age >= lifetime
-                        continue
-                    end
-                    deg = (1.0 - gen.degradation_rate[b])^age
-                    avail_hours = size(gen.availability, 1)
-                    avg_a = avail_hours > 0 ? sum(gen.availability[:, b]) / avail_hours : 0.3
-                    existing_re_energy += rated * deg * avg_a * ts_per_year
-                end
-            end
-
-            # --- Technology investment RE capacity (only system buses) ---
-            tech_re_energy = AffExpr(0.0)
-            for tc in 1:n_tech
-                tech = input.technologies[tc]
-                if tech.type != "Renewable"
-                    continue
-                end
-                tech_lifetime = tech.life_time[1]
-                tech_deg = tech.degradation_rate[1]
-                for b in sys_first:sys_last
-                    avg_a = get(avg_avail, (tc, b), 0.0)
-                    if avg_a <= 0.0
-                        continue
-                    end
-                    for y in 1:ypp:y_idx
-                        inv_age = y_idx - y
-                        if inv_age < tech_lifetime
-                            deg = (1.0 - tech_deg) ^ inv_age
-                            coeff = deg * avg_a * ts_per_year
-                            add_to_expression!(tech_re_energy,
-                                vars.tech_investment[y][tc][b], coeff)
-                        end
-                    end
-                end
-            end
-
-            @constraint(model,
-                existing_re_energy + tech_re_energy >= target * annual_demand,
-                base_name = "re_cap_link_s$(s_idx)_y$(y_idx)")
-
-            # NOTE: No hard upper bound on RE energy here.  The storage adequacy
-            # constraint (add_benders_storage_adequacy!) handles excess RE by
-            # requiring matching battery investment.  A hard upper bound would
-            # prevent the master from investing in RE+battery combinations that
-            # the subproblem can efficiently dispatch.
-        end
-    end
-end
-
-
-# =============================================================================
-# Storage Adequacy (Benders master)
-# =============================================================================
-
-"""
-    add_benders_storage_adequacy!(model, vars, input, targets)
-
-Link battery investment to RE investment in the Benders master.
-
-Standard Benders decomposition suffers from **dual degeneracy** when battery
-capacity is zero: all three battery variable types (charge, discharge, SOC)
-are simultaneously constrained to zero, so each individual constraint dual
-is zero—even though the joint value of adding battery capacity is large.
-This means the Benders cuts never signal the master to invest in batteries.
-
-Fix: for each year and system, require battery energy capacity ≥ the
-estimated daily excess RE energy (scaled by round-trip efficiency and the
-max curtailment ratio).  The daily excess is computed from the availability
-profiles' intra-day temporal mismatch—no hardcoded values.
-
-Physics: solar generates in ~half the day but demand is spread over the
-full day.  The excess energy above the intra-day average must be stored
-(or curtailed).  This constraint ensures enough storage to absorb
-(1 - max_curtailment_ratio) of that excess.
-"""
-function add_benders_storage_adequacy!(
-    model::Model,
-    vars::MasterProblemVariables,
-    input::MasterProblemInput,
-    targets::Dict{Tuple{Int,Int}, Float64}
-)
-    n_tech = length(input.technologies)
-    n_bat_tech = length(input.battery_technologies)
-    if n_bat_tech == 0
-        return  # nothing to constrain
-    end
-    n_buses = input.network.num_buses
-    num_years = length(input.years)
-    ypp = vars.years_per_inv_period
-    tres = Float64(input.temporal_resolution_hours)
-    timesteps_per_day = round(Int, 24.0 / tres)
-
-    # ---- Compute temporal mismatch per RE technology per bus ----
-    # For each 24h period in the availability profile, mismatch = the total
-    # excess energy in timesteps where availability exceeds the daily average.
-    # Units: MWh per MW of installed capacity per average day.
-    mismatch = Dict{Tuple{Int,Int}, Float64}()
-    for tc in 1:n_tech
-        tech = input.technologies[tc]
-        if tech.type != "Renewable"
-            continue
-        end
-        for b in 1:n_buses
-            avail_rows = size(tech.availability, 1)
-            if avail_rows < timesteps_per_day
-                continue
-            end
-            n_full_days = avail_rows ÷ timesteps_per_day
-            total_excess = 0.0
-            for d in 1:n_full_days
-                day_start = (d - 1) * timesteps_per_day + 1
-                day_avail = [tech.availability[day_start + ts - 1, b] for ts in 1:timesteps_per_day]
-                day_mean = sum(day_avail) / timesteps_per_day
-                for ts in 1:timesteps_per_day
-                    excess = day_avail[ts] - day_mean
-                    if excess > 0
-                        total_excess += excess * tres  # MWh per MW
-                    end
-                end
-            end
-            mismatch[(tc, b)] = total_excess / n_full_days  # average daily excess
-        end
-    end
-
-    # ---- Compute average round-trip efficiency from battery technologies ----
-    avg_eff = 0.9  # safe default
-    eff_sum = 0.0
-    eff_count = 0
-    for bt in 1:n_bat_tech
-        btech = input.battery_technologies[bt]
-        for b in 1:n_buses
-            ch = btech.charge_efficiency[b]
-            dis = btech.discharge_efficiency[b]
-            if ch > 0 && dis > 0
-                eff_sum += sqrt(ch * dis)
-                eff_count += 1
-            end
-        end
-    end
-    if eff_count > 0
-        avg_eff = eff_sum / eff_count
-    end
-
-    # ---- Build per-system, per-year storage adequacy constraints ----
-    sys_ranges = input.system_node_ranges
-    if isempty(sys_ranges)
-        sys_ranges = [SystemNodeRange("global", 1, n_buses, input.initial_re_penetration)]
-    end
-
-    curt_margin = input.max_curtailment_ratio  # e.g. 0.05
-
-    for y_idx in 1:num_years
-        for (s_idx, sr) in enumerate(sys_ranges)
-            target = get(targets, (s_idx, y_idx), 0.0)
-            if target <= 0.0
-                continue
-            end
-
-            sys_first = sr.first_bus
-            sys_last = sr.first_bus + sr.num_buses - 1
-
-            # LHS: total battery energy capacity (cumulative) in this system
-            bat_energy_expr = AffExpr(0.0)
-            for bt in 1:n_bat_tech
-                btech = input.battery_technologies[bt]
-                bt_lifetime = btech.life_time[1]
-                for b in sys_first:sys_last
-                    for y in 1:ypp:y_idx
-                        inv_age = y_idx - y
-                        if inv_age < bt_lifetime
-                            add_to_expression!(bat_energy_expr,
-                                vars.bat_tech_capacity_investment[y][bt][b], 1.0)
-                        end
-                    end
-                end
-            end
-
-            # RHS: excess RE energy requiring storage (per average day)
-            # excess = Σ tech_cumul_cap × mismatch_per_day
-            excess_re_expr = AffExpr(0.0)
-            for tc in 1:n_tech
-                tech = input.technologies[tc]
-                if tech.type != "Renewable"
-                    continue
-                end
-                tech_lifetime = tech.life_time[1]
-                tech_deg = tech.degradation_rate[1]
-                for b in sys_first:sys_last
-                    m = get(mismatch, (tc, b), 0.0)
-                    if m <= 0.0
-                        continue
-                    end
-                    for y in 1:ypp:y_idx
-                        inv_age = y_idx - y
-                        if inv_age < tech_lifetime
-                            deg = (1.0 - tech_deg) ^ inv_age
-                            add_to_expression!(excess_re_expr,
-                                vars.tech_investment[y][tc][b], deg * m)
-                        end
-                    end
-                end
-            end
-
-            # Constraint: bat_energy × efficiency ≥ (1 - curt_margin) × daily_excess
-            # Battery cycles once per day; energy capacity must cover one day's excess.
-            @constraint(model,
-                bat_energy_expr * avg_eff >= (1.0 - curt_margin) * excess_re_expr,
-                base_name = "storage_adequacy_s$(s_idx)_y$(y_idx)")
-        end
-    end
-end
-
-
-# =============================================================================
 # Benders Master Problem (investment only)
 # =============================================================================
 
 """
-    create_benders_master(input)
+    benders_rep_days(input) -> Dict{Int, Vector{Int}}
 
-Create investment-only master problem with recourse variables θ[y].
-Reuses existing constraint functions but skips operational embedding.
+First step of each representative day of each year, selected as the
+monolithic master selects them (`select_representative_days`).
+"""
+function benders_rep_days(input::MasterProblemInput)
+    timesteps_per_day = 24 ÷ input.temporal_resolution_hours
+    rep_days_by_year = Dict{Int, Vector{Int}}()
+    for y_idx in eachindex(input.years)
+        timesteps_per_year = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
+        rep_days_by_year[y_idx] = select_representative_days(
+            input.base_demand, y_idx, input.representative_days_per_year,
+            input.min_day_separation, timesteps_per_day, timesteps_per_year)
+    end
+    return rep_days_by_year
+end
+
+"""
+    create_benders_master(input; rep_days_by_year=benders_rep_days(input))
+
+Investment-only master: the investment constraints and objective of the
+monolithic master (`create_master_problem` without its representative days),
+plus one recourse variable θ[(y, d)] per year and representative day for
+that day's operating cost (multi-cut). Returns
+`(model, vars, targets, theta, inv_cost_expr)`.
+
+It has no constraint of its own linking investment to the RE ratio or to
+storage: the subproblems' `re_ratio_lb` prices the ratio through its copy,
+and the cuts carry the value of every capacity.
 """
 function create_benders_master(
-    input::MasterProblemInput
+    input::MasterProblemInput;
+    rep_days_by_year::Dict{Int, Vector{Int}} = benders_rep_days(input)
 )
     model = Model(create_optimizer(
         solver_name=input.solver_name,
@@ -628,7 +343,7 @@ function create_benders_master(
     targets = calculate_target_ratios(input)
     vars = build_master_variables!(model, input)
 
-    # Add all investment-only constraints (reuse existing functions)
+    # The investment constraints of the monolithic master
     add_investment_constraints!(model, vars, input)
     add_budget_constraints!(model, vars, input)
     add_retirement_cascade_constraints!(model, vars, input)
@@ -637,151 +352,28 @@ function create_benders_master(
     add_re_target_constraints!(model, vars, input, targets)
     add_re_increment_constraints!(model, vars, input)
 
-    # =========================================================================
-    # RE capacity–target linking constraints (Benders-specific)
-    # =========================================================================
-    # In the monolithic formulation, re_penetration_ratio is linked to actual
-    # generation via add_annual_renewable_constraints!.  In Benders the
-    # subproblems handle generation, but the master has NO link between
-    # investment variables and re_penetration_ratio — meaning the RE target is
-    # trivially satisfied by setting the free variable, without investing.
-    #
-    # Fix: for each year, estimate the annual renewable energy potential from
-    # existing + invested RE capacity (capacity × avg availability × hours/year)
-    # and require it to cover target × demand.  This is an approximation; the
-    # subproblems refine it, but it forces the master to invest in enough RE
-    # capacity to have any hope of meeting the target.
-    # =========================================================================
-    add_benders_re_capacity_linking!(model, vars, input, targets)
-
-    # Storage adequacy: link battery investment to RE investment via temporal
-    # mismatch.  Without this, Benders dual degeneracy at zero battery capacity
-    # prevents any signal for battery investment from reaching the master.
-    add_benders_storage_adequacy!(model, vars, input, targets)
-
     # NOTE: NO add_representative_days_validation! — this is the decomposed part
 
-    # Add recourse variables θ[y] (one per year, approximates operational cost)
-    # θ[y] is in units of actual_cost / COST_SCALE; cuts and objective use
-    # COST_SCALE accordingly.
+    # θ[(y, d)] is in units of actual_cost / COST_SCALE; cuts and objective
+    # use COST_SCALE accordingly.
     num_years = length(input.years)
-    theta = Dict{Int, VariableRef}()
-    for y_idx in 1:num_years
-        theta[y_idx] = @variable(model,
-            lower_bound = 0,
-            base_name = "theta_y$(y_idx)")
+    theta = Dict{Tuple{Int,Int}, VariableRef}()
+    for y_idx in 1:num_years, d in eachindex(get(rep_days_by_year, y_idx, Int[]))
+        theta[(y_idx, d)] = @variable(model, lower_bound = 0,
+            base_name = "theta_y$(y_idx)_d$(d)")
     end
 
-    # Objective: investment cost + discounted θ
+    # Objective as build_master_objective!, with θ for the operating cost
     inv_cost_expr = build_investment_cost_expression(vars, input)
-
-    # Per-year costs (life extension, decommissioning, slack penalties) + θ
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
-    n_buses = input.network.num_buses
     total_cost = copy(inv_cost_expr)
-
     for y_idx in 1:num_years
         discount_factor = 1.0 / ((1.0 + input.discount_rate)^(y_idx - 1))
-        annual_cost = AffExpr(0.0)
-
-        # Life extension costs
-        for g in 1:n_gen
-            gen = input.generators[g]
-            for n in 1:n_buses
-                life_ext_var = vars.gen_life_extension[y_idx][g][n]
-                if life_ext_var !== nothing
-                    ext_cost = gen.invest_cost[n] * input.life_extension_cost_factor
-                    add_to_expression!(annual_cost, life_ext_var, ext_cost)
-                end
-            end
-        end
-        for b in 1:n_bat
-            bat = input.batteries[b]
-            for n in 1:n_buses
-                life_ext_var = vars.bat_life_extension[y_idx][b][n]
-                if life_ext_var !== nothing
-                    ext_cost = bat.invest_cost_power[n] * input.life_extension_cost_factor
-                    add_to_expression!(annual_cost, life_ext_var, ext_cost)
-                end
-            end
+        add_to_expression!(total_cost, build_annual_asset_cost(vars, input, y_idx),
+                           discount_factor)
+        for d in eachindex(get(rep_days_by_year, y_idx, Int[]))
+            add_to_expression!(total_cost, theta[(y_idx, d)], discount_factor * COST_SCALE)
         end
 
-        # Decommissioning costs (same as build_master_objective!)
-        for g in 1:n_gen
-            gen = input.generators[g]
-            for n in 1:n_buses
-                rated_power = gen.rated_power[n]
-                decomm_cost = gen.decommissioning_cost[n]
-                if rated_power <= 0 || decomm_cost <= 0
-                    continue
-                end
-                lifetime = gen.life_time[n]
-                initial_age = gen.initial_age[n]
-                retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
-
-                if y_idx == retirement_y
-                    age = initial_age + y_idx - 1
-                    deg = (1.0 - gen.degradation_rate[n]) ^ age
-                    full_cap = rated_power * deg
-                    add_to_expression!(annual_cost, full_cap * decomm_cost)
-                    lev = vars.gen_life_extension[y_idx][g][n]
-                    if lev !== nothing
-                        add_to_expression!(annual_cost, lev, -decomm_cost)
-                    end
-                elseif y_idx > retirement_y
-                    prev = vars.gen_life_extension[y_idx - 1][g][n]
-                    curr = vars.gen_life_extension[y_idx][g][n]
-                    if prev !== nothing
-                        add_to_expression!(annual_cost, prev, decomm_cost)
-                        if curr !== nothing
-                            add_to_expression!(annual_cost, curr, -decomm_cost)
-                        end
-                    end
-                end
-            end
-        end
-        for b in 1:n_bat
-            bat = input.batteries[b]
-            for n in 1:n_buses
-                base_power = bat.max_discharge_power[n]
-                decomm_cost = bat.decommissioning_cost[n]
-                if base_power <= 0 || decomm_cost <= 0
-                    continue
-                end
-                lifetime = bat.life_time[n]
-                initial_age = bat.initial_age[n]
-                retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
-
-                if y_idx == retirement_y
-                    add_to_expression!(annual_cost, base_power * decomm_cost)
-                    lev = vars.bat_life_extension[y_idx][b][n]
-                    if lev !== nothing
-                        add_to_expression!(annual_cost, lev, -decomm_cost)
-                    end
-                elseif y_idx > retirement_y
-                    prev = vars.bat_life_extension[y_idx - 1][b][n]
-                    curr = vars.bat_life_extension[y_idx][b][n]
-                    if prev !== nothing
-                        add_to_expression!(annual_cost, prev, decomm_cost)
-                        if curr !== nothing
-                            add_to_expression!(annual_cost, curr, -decomm_cost)
-                        end
-                    end
-                end
-            end
-        end
-
-        # M2 (#89): electrolyzer fixed cost
-        add_to_expression!(annual_cost, master_fuel_annual_cost(vars, input, y_idx))
-
-        add_to_expression!(total_cost, annual_cost, discount_factor)
-
-        # Add discounted theta (operational cost approximation)
-        # theta is in scaled units, so multiply by COST_SCALE to get actual $
-        add_to_expression!(total_cost, theta[y_idx], discount_factor * COST_SCALE)
-
-        # Slack penalties
         add_to_expression!(total_cost, vars.slack_re_target[y_idx], input.slack_penalty)
         add_to_expression!(total_cost, vars.slack_budget[y_idx], input.slack_penalty)
         for ni in 1:input.network.num_nodes
@@ -799,6 +391,47 @@ end
 # =============================================================================
 
 """
+    existing_capacities(input, year_idx, life_ext) -> (gen, bat_power, bat_energy)
+
+Capacity of the existing generators and batteries in year `year_idx`, as
+`build_cumulative_capacity_expressions` has it: the rated power (degraded,
+for generators) while a unit is within its lifetime, and past it
+`life_ext(kind, i, b, full)`, the life-extended MW of generator
+(`kind = :gen`) or battery (`:bat`) `i` at bus `b`, whose most is `full`.
+Battery energy scales with the life-extended power.
+"""
+function existing_capacities(input::MasterProblemInput, year_idx::Int, life_ext::Function)
+    n_buses = input.network.num_buses
+    gen_cap = Dict{Tuple{Int,Int}, Float64}()
+    for (g, gen) in enumerate(input.generators), b in 1:n_buses
+        rated_power = gen.rated_power[b]
+        rated_power > 0 || continue
+        age_at_year = gen.initial_age[b] + (year_idx - 1)
+        full = rated_power * (1.0 - gen.degradation_rate[b]) ^ age_at_year
+        cap = age_at_year < gen.life_time[b] ? full : life_ext(:gen, g, b, full)
+        cap > 1e-8 && (gen_cap[(g, b)] = cap)
+    end
+
+    bat_pow = Dict{Tuple{Int,Int}, Float64}()
+    bat_en = Dict{Tuple{Int,Int}, Float64}()
+    for (bi, bat) in enumerate(input.batteries), b in 1:n_buses
+        base_power = max(bat.max_discharge_power[b], 0.0)
+        base_cap = max(bat.capacity[b], 0.0)
+        if bat.initial_age[b] + (year_idx - 1) < bat.life_time[b]
+            pow, en = base_power, base_cap
+        elseif base_power > 0
+            pow = life_ext(:bat, bi, b, base_power)
+            en = pow * base_cap / base_power
+        else
+            pow, en = 0.0, 0.0
+        end
+        pow > 1e-8 && (bat_pow[(bi, b)] = pow)
+        en > 1e-8 && (bat_en[(bi, b)] = en)
+    end
+    return gen_cap, bat_pow, bat_en
+end
+
+"""
     evaluate_fixed_capacities(vars, input, year_idx; ctx=BendersCopyContext())
 
 Compute fixed capacity values from master solution for a given year.
@@ -812,71 +445,18 @@ function evaluate_fixed_capacities(
     year_idx::Int;
     ctx::BendersCopyContext = BendersCopyContext()
 )::FixedCapacities
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
     n_tech = length(input.technologies)
     n_bat_tech = length(input.battery_technologies)
     n_buses = input.network.num_buses
     ypp = vars.years_per_inv_period
 
-    # Existing generator capacity (with life extension)
-    gen_cap = Dict{Tuple{Int,Int}, Float64}()
-    for g in 1:n_gen
-        gen = input.generators[g]
-        for b in 1:n_buses
-            cap = 0.0
-            rated_power = gen.rated_power[b]
-            lifetime = gen.life_time[b]
-            initial_age = gen.initial_age[b]
-            age_at_year = initial_age + (year_idx - 1)
-            degradation_rate = gen.degradation_rate[b]
-
-            if age_at_year < lifetime && rated_power > 0
-                cap = rated_power * (1.0 - degradation_rate) ^ age_at_year
-            elseif rated_power > 0
-                life_ext_var = vars.gen_life_extension[year_idx][g][b]
-                if life_ext_var !== nothing
-                    cap = value(life_ext_var)
-                end
-            end
-            if cap > 1e-8
-                gen_cap[(g, b)] = cap
-            end
-        end
-    end
-
-    # Existing battery capacity (with life extension)
-    bat_pow = Dict{Tuple{Int,Int}, Float64}()
-    bat_en = Dict{Tuple{Int,Int}, Float64}()
-    for bi in 1:n_bat
-        bat = input.batteries[bi]
-        for b in 1:n_buses
-            pow = 0.0
-            en = 0.0
-            base_power = bat.max_discharge_power[b]
-            base_cap = bat.capacity[b]
-            lifetime = bat.life_time[b]
-            initial_age = bat.initial_age[b]
-            age_at_year = initial_age + (year_idx - 1)
-
-            if age_at_year < lifetime
-                pow = base_power > 0 ? base_power : 0.0
-                en = base_cap > 0 ? base_cap : 0.0
-            elseif base_power > 0
-                life_ext_var = vars.bat_life_extension[year_idx][bi][b]
-                if life_ext_var !== nothing
-                    pow = value(life_ext_var)
-                    en = base_cap > 0 ? pow * (base_cap / base_power) : 0.0
-                end
-            end
-            if pow > 1e-8
-                bat_pow[(bi, b)] = pow
-            end
-            if en > 1e-8
-                bat_en[(bi, b)] = en
-            end
-        end
-    end
+    # Existing generators and batteries (with life extension)
+    gen_cap, bat_pow, bat_en = existing_capacities(input, year_idx,
+        (kind, i, b, _) -> begin
+            v = (kind === :gen ? vars.gen_life_extension :
+                                 vars.bat_life_extension)[year_idx][i][b]
+            v === nothing ? 0.0 : value(v)
+        end)
 
     # Technology cumulative investment capacity
     tech_cap = Dict{Tuple{Int,Int}, Float64}()
@@ -1294,11 +874,8 @@ function create_benders_subproblem(
     # =========================================================================
     # Sectoral split of the load shed (same as the monolithic master)
     # =========================================================================
-    # The remainder is priced like the load shed below (capped VOLL if set)
-    lol_cap = input.benders_lol_penalty_cap
     remainder_premium = add_day_sectoral_shed_constraints!(sp_model, ps_vars, input,
-        demand_slice, start_hour, growth_factor;
-        voll = lol_cap > 0 ? min(lol_cap, input.loss_of_load_penalty) : input.loss_of_load_penalty)
+        demand_slice, start_hour, growth_factor)
 
     # =========================================================================
     # RE Penetration with FIXED ratio — PER SYSTEM
@@ -1453,12 +1030,12 @@ function create_benders_subproblem(
                         add_to_expression!(tech_curve_cost, -input.curtailment_cost,
                                            tech_output[tc, b, ts])
                     end
-                    cumul_cap > 0 || continue
-                    # tech curtailment = cap × avail - tech_output
+                    # tech curtailment = cap × avail - tech_output; also at
+                    # zero capacity, so the cut sees what building adds
                     add_to_expression!(total_curtailment, cumul_cap * avail)
                     add_to_expression!(total_curtailment, -1.0, tech_output[tc, b, ts])
                 end
-                cumul_cap > 0 && (tech_avail_sum[(tc, b)] = avail_total)
+                tech_avail_sum[(tc, b)] = avail_total
                 if charge_tech_curt && avail_total > 0
                     tech_curt_grad[(tc, b)] = input.curtailment_cost * avail_total
                 end
@@ -1466,22 +1043,24 @@ function create_benders_subproblem(
         end
     end
 
-    curt_excess_slack = @variable(sp_model,
-        lower_bound = 0,
-        base_name = "curt_excess_y$(year_idx)_d$(day_idx)")
-    curt_cref = nothing
-    if input.max_curtailment_ratio < 1.0
+    # Hard, as in the monolithic master (and only with renewable output to
+    # cap). Its slack is fixed to zero; `solve_benders_day!` frees it to
+    # measure the violation when the master's capacities cannot meet the
+    # limit, for a feasibility cut.
+    if input.max_curtailment_ratio < 1.0 && !isempty(total_renewable.terms)
+        curt_excess = @variable(sp_model, lower_bound = 0, upper_bound = 0,
+            base_name = "curt_excess_y$(year_idx)_d$(day_idx)")
         curt_cref = @constraint(sp_model,
-            total_curtailment <= input.max_curtailment_ratio * total_renewable + curt_excess_slack,
+            total_curtailment <= input.max_curtailment_ratio * total_renewable + curt_excess,
             base_name = "max_curt_y$(year_idx)_d$(day_idx)")
         # Store for dual extraction — needed for Benders cut gradient
         constraint_store["max_curt"] = (curt_cref, tech_avail_sum)
+        constraint_store["curt_excess"] = curt_excess
     end
 
     # =========================================================================
     # Objective: operational cost (includes annualization scaling factor)
     # =========================================================================
-    # Compute scaling factor first (needed for penalty cap adjustment)
     tres = max(1.0, input.temporal_resolution_hours)
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
     scaling_factor = tres * days_in_year / input.representative_days_per_year
@@ -1500,42 +1079,6 @@ function create_benders_subproblem(
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
         tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium)
 
-    # Cap load-shedding penalties for Benders numerical stability.
-    # calculate_day_operational_cost already includes scaling_factor internally,
-    # so our adjustment must also include it.
-    lol_penalty_cap = input.benders_lol_penalty_cap
-    if lol_penalty_cap > 0 && input.loss_of_load_penalty > lol_penalty_cap
-        lol_diff = lol_penalty_cap - input.loss_of_load_penalty  # negative
-        # load_shed is per bus.
-        for t in 1:hours
-            for n in 1:n_buses
-                add_to_expression!(day_cost, ps_vars.load_shed[n, t], lol_diff * scaling_factor)
-            end
-        end
-        # Also cap the sectoral criticality premium, VOLL × (κ − 1)
-        # (day_operational_cost), so a sector's MWh costs cap × κ.
-        if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral)
-            for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
-                criticality = get(input.sectoral_criticality, sector, 1.0)
-                sec_diff = lol_diff * (criticality - 1.0)
-                for t in 1:hours
-                    for n in 1:n_buses
-                        add_to_expression!(day_cost, lol_vars[n, t], sec_diff * scaling_factor)
-                    end
-                end
-            end
-        end
-    end
-
-    # Curtailment penalties — feeds back to Benders master via cuts.
-    # The max_curtailment_ratio soft constraint (above) tracks total curtailment
-    # including technology investments.  Only EXCESS curtailment (above the
-    # threshold) is penalized — a flat per-MWh curtailment cost would make
-    # batteries artificially attractive by inflating the gradient signal.
-    if input.curtailment_excess_penalty > 0
-        add_to_expression!(day_cost, curt_excess_slack,
-            input.curtailment_excess_penalty * scaling_factor)
-    end
     # NOTE: re_excess_penalty is not used: RE has a floor only, as in the
     # monolithic master.
 
@@ -1576,14 +1119,18 @@ end
 # =============================================================================
 
 """
-    extract_subproblem_duals(sp, input)
+    extract_subproblem_duals(sp, input; cost_terms=true)
 
 Extract aggregated dual values from a solved subproblem for Benders cut generation.
 Returns duals aggregated by (tech/bat_tech, bus) across timesteps.
+`cost_terms=false` leaves out the capacity terms of the day's cost
+(curtailment cost), for a subproblem solved for its least curtailment
+violation rather than its cost.
 """
 function extract_subproblem_duals(
     sp::SubproblemData,
-    input::MasterProblemInput
+    input::MasterProblemInput;
+    cost_terms::Bool = true
 )
     n_tech = length(input.technologies)
     n_bat_tech = length(input.battery_technologies)
@@ -1688,8 +1235,11 @@ function extract_subproblem_duals(
 
     # curtailment_cost × (cap × avail − output): cap × avail is a constant of
     # the subproblem, so its cost per MW of capacity is added explicitly
-    for ((tc, b), g) in get(sp.constraint_store, "tech_curt_cost", Dict{Tuple{Int,Int}, Float64}())
-        tech_duals[(tc, b)] = get(tech_duals, (tc, b), 0.0) + g
+    if cost_terms
+        for ((tc, b), g) in get(sp.constraint_store, "tech_curt_cost",
+                                Dict{Tuple{Int,Int}, Float64}())
+            tech_duals[(tc, b)] = get(tech_duals, (tc, b), 0.0) + g
+        end
     end
 
     return tech_duals, bt_pow_duals, bt_cap_duals
@@ -1805,25 +1355,17 @@ function build_optimality_cut(
 end
 
 """
-    add_optimality_cut!(model, theta, cut, year_idx, vars, input, iteration;
-                        ctx=BendersCopyContext())
+    benders_cut_expr(cut, year_idx, vars, input; ctx=BendersCopyContext()) -> AffExpr
 
-Add a single Benders optimality cut to the master problem.
-θ[y] ≥ intercept + Σ gradient × investment_variable
+`intercept + Σ gradient × master variable` of a cut from year `year_idx`.
 """
-function add_optimality_cut!(
-    model::Model,
-    theta::Dict{Int, VariableRef},
+function benders_cut_expr(
     cut::BendersCut,
     year_idx::Int,
     vars::MasterProblemVariables,
-    input::MasterProblemInput,
-    iteration::Int;
+    input::MasterProblemInput;
     ctx::BendersCopyContext = BendersCopyContext()
 )
-    n_buses = input.network.num_buses
-    ypp = vars.years_per_inv_period
-
     # Divide all cut coefficients by COST_SCALE since theta is in scaled units
     inv_scale = 1.0 / COST_SCALE
 
@@ -1861,10 +1403,86 @@ function add_optimality_cut!(
         add_to_expression!(rhs, benders_copy_expr(vars, input, year_idx, k, ctx),
                            grad * inv_scale)
     end
+    return rhs
+end
 
-    @constraint(model,
-        theta[year_idx] >= rhs,
-        base_name = "benders_cut_y$(year_idx)_iter$(iteration)")
+"""
+    add_optimality_cut!(model, theta, cut, year_idx, vars, input, name;
+                        ctx=BendersCopyContext())
+
+Add a Benders optimality cut `θ ≥ intercept + Σ gradient × investment_variable`
+for the recourse variable `theta` of one (year, representative day).
+"""
+function add_optimality_cut!(
+    model::Model,
+    theta::VariableRef,
+    cut::BendersCut,
+    year_idx::Int,
+    vars::MasterProblemVariables,
+    input::MasterProblemInput,
+    name::String;
+    ctx::BendersCopyContext = BendersCopyContext()
+)
+    return @constraint(model, theta >= benders_cut_expr(cut, year_idx, vars, input; ctx),
+                       base_name = name)
+end
+
+"""
+    add_feasibility_cut!(model, cut, year_idx, vars, input, name;
+                         ctx=BendersCopyContext())
+
+Add a Benders feasibility cut `intercept + Σ gradient × investment_variable ≤ 0`,
+built from a subproblem's least curtailment violation (`solve_benders_day!`):
+the capacities must let the day meet its curtailment limit.
+"""
+function add_feasibility_cut!(
+    model::Model,
+    cut::BendersCut,
+    year_idx::Int,
+    vars::MasterProblemVariables,
+    input::MasterProblemInput,
+    name::String;
+    ctx::BendersCopyContext = BendersCopyContext()
+)
+    return @constraint(model, benders_cut_expr(cut, year_idx, vars, input; ctx) <= 0,
+                       base_name = name)
+end
+
+"""
+    solve_benders_day!(sp) -> Symbol
+
+Solve subproblem `sp`, with its curtailment limit hard as in the monolithic
+master. Returns `:optimal`; `:infeasible` when the fixed capacities cannot
+meet the limit, `sp` then holding its least violation (the limit's slack
+freed and minimised), whose duals give a feasibility cut; or `:failed`.
+"""
+function solve_benders_day!(sp::SubproblemData)
+    solved(m) = termination_status(m) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
+    optimize!(sp.model)
+    solved(sp.model) && return :optimal
+
+    slack = get(sp.constraint_store, "curt_excess", nothing)
+    if slack !== nothing &&
+       termination_status(sp.model) in (MOI.INFEASIBLE, MOI.INFEASIBLE_OR_UNBOUNDED)
+        cost = objective_function(sp.model)
+        delete_upper_bound(slack)
+        @objective(sp.model, Min, slack)
+        optimize!(sp.model)
+        solved(sp.model) && objective_value(sp.model) > CURTAILMENT_FEAS_TOL &&
+            return :infeasible
+        set_upper_bound(slack, 0.0)
+        @objective(sp.model, Min, cost)
+    end
+
+    # Retry with fresh optimizer: serial dual simplex, no scaling
+    set_optimizer(sp.model, HiGHS.Optimizer)
+    set_attribute(sp.model, "output_flag", false)
+    set_attribute(sp.model, "threads", 1)
+    set_attribute(sp.model, "simplex_strategy", 1)  # serial dual simplex
+    set_attribute(sp.model, "simplex_scale_strategy", 0)  # auto scaling
+    set_attribute(sp.model, "presolve", "on")
+    optimize!(sp.model)
+    return solved(sp.model) ? :optimal : :failed
 end
 
 # =============================================================================
@@ -1876,6 +1494,12 @@ end
 
 Run Benders decomposition to solve the master problem.
 Separates investment (master) from operational (subproblems) decisions.
+
+Each representative day of each year has its own recourse variable and gets
+its own cut every iteration (multi-cut). A day whose curtailment limit the
+master's capacities cannot meet adds a feasibility cut instead, and that
+iteration gives no upper bound. The returned plan and operating costs are
+those of the iteration with the best upper bound.
 
 # Arguments
 - `input::MasterProblemInput`: Problem specification
@@ -1897,75 +1521,98 @@ function run_benders_decomposition(
     start_time = time()
     num_years = length(input.years)
     timesteps_per_day = 24 ÷ input.temporal_resolution_hours
+    discount(y) = 1.0 / ((1.0 + input.discount_rate)^(y - 1))
 
     # =========================================================================
-    # Step 0: Create Benders master
+    # Step 0: Representative days and the Benders master
     # =========================================================================
     @info "Benders: Creating investment master problem..."
-    master_model, vars, targets, theta, inv_cost_expr = create_benders_master(input)
-
-    # =========================================================================
-    # Step 1: Pre-select representative days for each year
-    # =========================================================================
-    rep_days_by_year = Dict{Int, Vector{Int}}()
-    for y_idx in 1:num_years
-        timesteps_per_year = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
-        rep_days = select_representative_days(
-            input.base_demand,
-            y_idx,
-            input.representative_days_per_year,
-            input.min_day_separation,
-            timesteps_per_day,
-            timesteps_per_year
-        )
-        rep_days_by_year[y_idx] = rep_days
-    end
+    rep_days_by_year = benders_rep_days(input)
+    master_model, vars, targets, theta, inv_cost_expr =
+        create_benders_master(input; rep_days_by_year)
+    ypp = vars.years_per_inv_period
 
     # Master side of the copy variables: CO2 allocations per day, line ends
     ctx = BendersCopyContext(add_benders_co2_allocation!(master_model, input, rep_days_by_year),
                              benders_line_ends(input))
 
+    # Solve every representative day of year `y_idx` at capacities `caps` and
+    # queue its cut in `cuts` as (kind, year, day, cut). Returns the year's
+    # operating cost, whether every day solved, and whether every day met
+    # its curtailment limit.
+    function evaluate_year!(cuts, y_idx, caps, iter)
+        year_cost = 0.0
+        solved = true
+        feasible = true
+        for (day_idx, start_hour) in enumerate(rep_days_by_year[y_idx])
+            end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
+            end_hour >= start_hour || continue
+            sp = create_benders_subproblem(input, y_idx, day_idx,
+                input.base_demand[start_hour:end_hour, :], start_hour, caps, vars)
+            status = solve_benders_day!(sp)
+            if status === :failed || !has_duals(sp.model)
+                @warn "Benders: Subproblem (y=$(y_idx), d=$(day_idx)) failed after retry: " *
+                      "$(termination_status(sp.model))"
+                solved = false
+                # Save the first failing LPs for diagnosis (verbose runs)
+                if verbose_benders && iter <= 5
+                    lp = joinpath(tempdir(),
+                        "benders_sp_failed_y$(y_idx)_d$(day_idx)_iter$(iter).lp")
+                    try
+                        write_to_file(sp.model, lp)
+                        @info "  Debug LP written to $(lp)"
+                    catch; end
+                end
+                continue
+            end
+            infeasible = status === :infeasible
+            td, bpd, bcd = extract_subproblem_duals(sp, input; cost_terms = !infeasible)
+            cut = build_optimality_cut(objective_value(sp.model), td, bpd, bcd,
+                caps, input, y_idx, ypp; fuel_duals = extract_copy_duals(sp))
+            push!(cuts, (infeasible ? :feasibility : :optimality, y_idx, day_idx, cut))
+            if infeasible
+                feasible = false
+            else
+                year_cost += objective_value(sp.model)
+            end
+        end
+        return year_cost, solved, feasible
+    end
+
+    function add_cuts!(cuts, iter)
+        for (kind, y_idx, d, cut) in cuts
+            if kind === :feasibility
+                add_feasibility_cut!(master_model, cut, y_idx, vars, input,
+                    "benders_feas_y$(y_idx)_d$(d)_iter$(iter)"; ctx)
+            else
+                add_optimality_cut!(master_model, theta[(y_idx, d)], cut, y_idx, vars, input,
+                    "benders_cut_y$(y_idx)_d$(d)_iter$(iter)"; ctx)
+            end
+        end
+        empty!(cuts)
+    end
+
     # =========================================================================
-    # Step 1.5: Warm-start — Compute minimum operational costs as theta lower bounds
+    # Step 1: Warm-start cuts
     # =========================================================================
-    # With no theta bounds, the master invests minimally (theta=0 means "operational
-    # cost is free"). Subproblems then have massive load shedding → cuts have
-    # trillion-dollar intercepts that never bind. Fix: compute Q(∞) for each year
-    # (dispatch with unlimited capacity → no load shedding → minimum possible
-    # operational cost). This is a valid theta lower bound since Q(x) >= Q(∞)
-    # (more capacity can only help). Also generate cuts from a high-investment point.
-    @info "Benders: Computing warm-start theta bounds..."
-    n_gen_ws = length(input.generators)
-    n_bat_ws = length(input.batteries)
+    # Cuts from two high-investment points, before the first master solve
+    # (with θ = 0 the master would first invest minimally). Generators and
+    # batteries in service run at the capacity the subproblems give them
+    # (degraded rated power): it is not a master variable, so a cut built at
+    # another value would not bound the true cost. Life-extended units, the
+    # candidates and every copy carry their gradient, so any value is valid.
+    # A point that breaks the curtailment limit gives a feasibility cut.
+    @info "Benders: Computing warm-start cuts..."
     n_tech_ws = length(input.technologies)
     n_bat_tech_ws = length(input.battery_technologies)
     n_buses_ws = input.network.num_buses
+    cuts = Tuple{Symbol, Int, Int, BendersCut}[]
 
     for y_idx in 1:num_years
-        # Create FixedCapacities with very large capacity (no load shedding)
-        warm_gen_cap = Dict{Tuple{Int,Int}, Float64}()
-        for g in 1:n_gen_ws
-            gen = input.generators[g]
-            for b in 1:n_buses_ws
-                rated = gen.rated_power[b]
-                if rated > 0
-                    warm_gen_cap[(g, b)] = rated  # full original capacity
-                end
-            end
-        end
-        warm_bat_pow = Dict{Tuple{Int,Int}, Float64}()
-        warm_bat_en = Dict{Tuple{Int,Int}, Float64}()
-        for bi in 1:n_bat_ws
-            bat = input.batteries[bi]
-            for b in 1:n_buses_ws
-                pow = bat.max_discharge_power[b]
-                cap = bat.capacity[b]
-                if pow > 0
-                    warm_bat_pow[(bi, b)] = pow
-                    warm_bat_en[(bi, b)] = cap
-                end
-            end
-        end
+        warm_gen_cap, warm_bat_pow, warm_bat_en = existing_capacities(input, y_idx,
+            (kind, i, b, full) ->
+                (kind === :gen ? vars.gen_life_extension :
+                                 vars.bat_life_extension)[y_idx][i][b] === nothing ? 0.0 : full)
         # Large technology capacity (1000 MW each) — eliminates capacity constraints
         warm_tech_cap = Dict{Tuple{Int,Int}, Float64}()
         for t in 1:n_tech_ws
@@ -1990,61 +1637,7 @@ function run_benders_decomposition(
             Dict{Int, Float64}(),  # line capacity (handled in subproblem)
             warm_re_ratios
         )
-
-        year_min_cost = 0.0
-        year_tech_duals = Dict{Tuple{Int,Int}, Float64}()
-        year_bt_pow_duals = Dict{Tuple{Int,Int}, Float64}()
-        year_bt_cap_duals = Dict{Tuple{Int,Int}, Float64}()
-        year_fuel_duals = Dict{Tuple{Symbol, String, Int}, Float64}()  # M2 (#89)
-
-        for (day_idx, start_hour) in enumerate(rep_days_by_year[y_idx])
-            end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
-            hours = end_hour - start_hour + 1
-            if hours < 1 continue end
-            day_demand = input.base_demand[start_hour:end_hour, :]
-
-            sp = create_benders_subproblem(
-                input, y_idx, day_idx, day_demand, start_hour, warm_caps, vars
-            )
-            optimize!(sp.model)
-            sp_status = termination_status(sp.model)
-            if sp_status == MOI.OPTIMAL || sp_status == MOI.LOCALLY_SOLVED
-                year_min_cost += objective_value(sp.model)
-                if has_duals(sp.model)
-                    td, bpd, bcd = extract_subproblem_duals(sp, input)
-                    for (k, v) in td
-                        year_tech_duals[k] = get(year_tech_duals, k, 0.0) + v
-                    end
-                    for (k, v) in bpd
-                        year_bt_pow_duals[k] = get(year_bt_pow_duals, k, 0.0) + v
-                    end
-                    for (k, v) in bcd
-                        year_bt_cap_duals[k] = get(year_bt_cap_duals, k, 0.0) + v
-                    end
-                    for (k, v) in extract_copy_duals(sp)
-                        year_fuel_duals[k] = get(year_fuel_duals, k, 0.0) + v
-                    end
-                end
-            end
-        end
-
-        # NOTE: We do NOT set theta lower bounds from Q(1000MW) here.
-        # With curtailment_excess_penalty active, Q(1000MW) >> Q(optimal) because
-        # 1000 MW/bus generates far more RE than demand, incurring huge curtailment
-        # penalties. That makes Q(1000MW) an upper bound on Q, not a lower bound.
-        # The theta variable already has lower_bound=0 from its declaration.
-
-        # Add warm-start cut from high-investment point
-        if !isempty(year_tech_duals) || !isempty(year_bt_pow_duals) ||
-           !isempty(year_bt_cap_duals) || !isempty(year_fuel_duals)
-            cut = build_optimality_cut(
-                year_min_cost,
-                year_tech_duals, year_bt_pow_duals, year_bt_cap_duals,
-                warm_caps, input, y_idx, vars.years_per_inv_period;
-                fuel_duals = year_fuel_duals
-            )
-            add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, 0; ctx)
-        end
+        year_min_cost, _, _ = evaluate_year!(cuts, y_idx, warm_caps, 0)
 
         # Second warm-start: moderate battery capacity to reveal battery value.
         # The first warm-start uses oversized batteries (1000 MW) → constraints
@@ -2095,49 +1688,14 @@ function run_benders_decomposition(
                 mod_tech_cap, mod_bt_pow, mod_bt_en,
                 Dict{Int, Float64}(), warm_re_ratios
             )
-
-            mod_cost = 0.0
-            mod_td = Dict{Tuple{Int,Int}, Float64}()
-            mod_bpd = Dict{Tuple{Int,Int}, Float64}()
-            mod_bcd = Dict{Tuple{Int,Int}, Float64}()
-            mod_fd = Dict{Tuple{Symbol, String, Int}, Float64}()  # M2 (#89)
-
-            for (day_idx2, start_hour2) in enumerate(rep_days_by_year[y_idx])
-                end_hour2 = min(start_hour2 + timesteps_per_day - 1, size(input.base_demand, 1))
-                hours2 = end_hour2 - start_hour2 + 1
-                if hours2 < 1 continue end
-                day_demand2 = input.base_demand[start_hour2:end_hour2, :]
-                sp2 = create_benders_subproblem(
-                    input, y_idx, day_idx2, day_demand2, start_hour2, mod_caps, vars
-                )
-                optimize!(sp2.model)
-                sp2_status = termination_status(sp2.model)
-                if sp2_status == MOI.OPTIMAL || sp2_status == MOI.LOCALLY_SOLVED
-                    mod_cost += objective_value(sp2.model)
-                    if has_duals(sp2.model)
-                        td2, bpd2, bcd2 = extract_subproblem_duals(sp2, input)
-                        for (k, v) in td2; mod_td[k] = get(mod_td, k, 0.0) + v; end
-                        for (k, v) in bpd2; mod_bpd[k] = get(mod_bpd, k, 0.0) + v; end
-                        for (k, v) in bcd2; mod_bcd[k] = get(mod_bcd, k, 0.0) + v; end
-                        for (k, v) in extract_copy_duals(sp2); mod_fd[k] = get(mod_fd, k, 0.0) + v; end
-                    end
-                end
-            end
-
-            if !isempty(mod_td) || !isempty(mod_bpd) || !isempty(mod_bcd) || !isempty(mod_fd)
-                mod_cut = build_optimality_cut(
-                    mod_cost, mod_td, mod_bpd, mod_bcd,
-                    mod_caps, input, y_idx, vars.years_per_inv_period;
-                    fuel_duals = mod_fd
-                )
-                add_optimality_cut!(master_model, theta, mod_cut, y_idx, vars, input, 0; ctx)
-            end
+            evaluate_year!(cuts, y_idx, mod_caps, 0)
         end
 
         if verbose_benders && (y_idx <= 3 || y_idx == num_years)
-            @info "  Warm-start y$(y_idx): warm_cost = $(round(year_min_cost, sigdigits=4)) (cut added)"
+            @info "  Warm-start y$(y_idx): warm_cost = $(round(year_min_cost, sigdigits=4)) (cuts added)"
         end
     end
+    add_cuts!(cuts, 0)
     @info "Benders: Warm-start complete. Cuts added from high-investment points."
 
     # =========================================================================
@@ -2146,10 +1704,13 @@ function run_benders_decomposition(
     lb_history = Float64[]
     ub_history = Float64[]
     best_ub = Inf
-    converged = false
-    # Best-primal tracking: save year_ops from the iteration that achieved best_ub.
-    # Used at max-iterations to avoid using a potentially worse final-solve result.
+    # The iteration with the best upper bound: its master values (θ aside)
+    # and operating costs are what the run returns
+    best_iter = 0
+    best_values = Dict{VariableRef, Float64}()
     best_year_ops = zeros(num_years)
+    year_operational_costs = zeros(num_years)
+    theta_vars = Set(values(theta))
 
     # Create optimizer factory for resetting between iterations
     master_optimizer = create_optimizer(
@@ -2160,6 +1721,29 @@ function run_benders_decomposition(
         verbose=input.verbose
     )
 
+    # The best iteration's plan: the master as solved if that is the last
+    # solve, otherwise re-solved with its variables fixed to the best values
+    function best_solution(last_solved_iter)
+        if best_iter == 0
+            @warn "Benders: no iteration solved every subproblem within the " *
+                  "curtailment limit; returning the last master solution."
+            set_optimizer(master_model, master_optimizer)
+            optimize!(master_model)
+            return extract_master_solution_from_benders(master_model, vars, input,
+                                                        year_operational_costs)
+        end
+        if best_iter != last_solved_iter
+            for (v, x) in best_values
+                fix(v, is_integer(v) || is_binary(v) ? round(x) : x; force = true)
+            end
+            set_optimizer(master_model, master_optimizer)
+            optimize!(master_model)
+        end
+        return extract_master_solution_from_benders(master_model, vars, input, best_year_ops;
+                                                    objective = best_ub)
+    end
+
+    iterations = 0
     for iter in 1:max_iterations
         # ----- Solve master -----
         # Reset optimizer state before each solve to avoid HiGHS internal state
@@ -2179,6 +1763,7 @@ function run_benders_decomposition(
             end
             break
         end
+        iterations = iter
 
         lb = objective_value(master_model)
         push!(lb_history, lb)
@@ -2188,10 +1773,7 @@ function run_benders_decomposition(
 
         if verbose_benders
             # Log theta values for diagnostics
-            theta_sum_actual = sum(
-                value(theta[y]) * COST_SCALE
-                for y in 1:num_years
-            )
+            theta_sum_actual = sum(value(t) * COST_SCALE for t in values(theta); init = 0.0)
             @info "Benders iteration $(iter): LB = $(round(lb, digits=2)), " *
                   "inv_cost = $(round(inv_cost_val, digits=0)), " *
                   "Σθ(actual\$) = $(round(theta_sum_actual, digits=0))"
@@ -2200,122 +1782,38 @@ function run_benders_decomposition(
         # ----- Solve subproblems for each year -----
         total_operational_cost = 0.0
         year_operational_costs = zeros(num_years)
-        year_cuts = Dict{Int, BendersCut}()
         all_subproblems_solved = true
 
         for y_idx in 1:num_years
+            isempty(rep_days_by_year[y_idx]) && continue
             # Evaluate fixed capacities from master solution
             fixed_caps = evaluate_fixed_capacities(vars, input, y_idx; ctx)
-
-            rep_days = rep_days_by_year[y_idx]
-            if isempty(rep_days)
-                continue
-            end
-
-            year_cost = 0.0
-            year_tech_duals = Dict{Tuple{Int,Int}, Float64}()
-            year_bt_pow_duals = Dict{Tuple{Int,Int}, Float64}()
-            year_bt_cap_duals = Dict{Tuple{Int,Int}, Float64}()
-            year_fuel_duals = Dict{Tuple{Symbol, String, Int}, Float64}()  # M2 (#89)
-
-            for (day_idx, start_hour) in enumerate(rep_days)
-                end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
-                hours = end_hour - start_hour + 1
-                if hours < 1
-                    continue
-                end
-
-                day_demand = input.base_demand[start_hour:end_hour, :]
-
-                # Create and solve subproblem
-                sp = create_benders_subproblem(
-                    input, y_idx, day_idx, day_demand, start_hour, fixed_caps, vars
-                )
-                optimize!(sp.model)
-
-                sp_status = termination_status(sp.model)
-                if sp_status != MOI.OPTIMAL && sp_status != MOI.LOCALLY_SOLVED
-                    # Retry with fresh optimizer: serial dual simplex, no scaling
-                    set_optimizer(sp.model, HiGHS.Optimizer)
-                    set_attribute(sp.model, "output_flag", false)
-                    set_attribute(sp.model, "threads", 1)
-                    set_attribute(sp.model, "simplex_strategy", 1)  # serial dual simplex
-                    set_attribute(sp.model, "simplex_scale_strategy", 0)  # auto scaling
-                    set_attribute(sp.model, "presolve", "on")
-                    optimize!(sp.model)
-                    sp_status = termination_status(sp.model)
-                    if sp_status != MOI.OPTIMAL && sp_status != MOI.LOCALLY_SOLVED
-                        @warn "Benders: Subproblem (y=$(y_idx), d=$(day_idx)) failed after retry: $(sp_status)"
-                        all_subproblems_solved = false
-                        # Save the first failing LPs for diagnosis (verbose runs)
-                        if verbose_benders && iter <= 5
-                            lp = joinpath(tempdir(),
-                                "benders_sp_failed_y$(y_idx)_d$(day_idx)_iter$(iter).lp")
-                            try
-                                write_to_file(sp.model, lp)
-                                @info "  Debug LP written to $(lp)"
-                            catch; end
-                        end
-                        continue
-                    end
-                end
-
-                sp_cost = objective_value(sp.model)
-                year_cost += sp_cost
-
-                # Extract duals
-                if has_duals(sp.model)
-                    td, bpd, bcd = extract_subproblem_duals(sp, input)
-                    for (k, v) in td
-                        year_tech_duals[k] = get(year_tech_duals, k, 0.0) + v
-                    end
-                    for (k, v) in bpd
-                        year_bt_pow_duals[k] = get(year_bt_pow_duals, k, 0.0) + v
-                    end
-                    for (k, v) in bcd
-                        year_bt_cap_duals[k] = get(year_bt_cap_duals, k, 0.0) + v
-                    end
-                    for (k, v) in extract_copy_duals(sp)
-                        year_fuel_duals[k] = get(year_fuel_duals, k, 0.0) + v
-                    end
-                end
-            end
-
-            discount_factor = 1.0 / ((1.0 + input.discount_rate)^(y_idx - 1))
+            year_cost, solved, feasible = evaluate_year!(cuts, y_idx, fixed_caps, iter)
+            all_subproblems_solved &= solved && feasible
             year_operational_costs[y_idx] = year_cost
-            total_operational_cost += discount_factor * year_cost
-
-            # Build aggregated cut for this year. It is added even when every
-            # gradient is zero: θ ≥ Q is then what tells the master the year's
-            # operating cost (every master quantity a subproblem reads is a
-            # capacity constraint or a copy with a gradient, so the cut is valid).
-            year_cuts[y_idx] = build_optimality_cut(
-                year_cost,
-                year_tech_duals, year_bt_pow_duals, year_bt_cap_duals,
-                fixed_caps, input, y_idx, vars.years_per_inv_period;
-                fuel_duals = year_fuel_duals
-            )
+            total_operational_cost += discount(y_idx) * year_cost
         end
 
         # ----- Compute upper bound -----
         # UB = first-stage cost (investment + life ext + decomm + slack) + actual operational cost
-        # The master objective includes theta[y] * COST_SCALE * discount(y), so subtract that
-        theta_contribution = sum(
-            value(theta[y]) * COST_SCALE * (1.0 / ((1.0 + input.discount_rate)^(y - 1)))
-            for y in 1:num_years
-        )
+        # The master objective includes θ × COST_SCALE × discount, so subtract that
+        theta_contribution = sum(value(t) * COST_SCALE * discount(y)
+                                 for ((y, _), t) in theta; init = 0.0)
         master_first_stage = value(objective_function(master_model)) - theta_contribution
         ub = master_first_stage + total_operational_cost
-        # Only update best_ub when ALL subproblems solved successfully;
-        # otherwise total_operational_cost understates the true cost
+        # Only an iteration whose subproblems all solved within the
+        # curtailment limit gives an upper bound
         if all_subproblems_solved && ub < best_ub
             best_ub = ub
+            best_iter = iter
             best_year_ops = copy(year_operational_costs)
+            best_values = Dict(v => value(v) for v in all_variables(master_model)
+                               if !(v in theta_vars))
         end
         push!(ub_history, best_ub)
 
         # ----- Check convergence -----
-        gap = abs(best_ub - lb) / max(abs(best_ub), 1e-10)
+        gap = isfinite(best_ub) ? abs(best_ub - lb) / max(abs(best_ub), 1e-10) : Inf
         if verbose_benders
             @info "  UB = $(round(best_ub, digits=2)), gap = $(round(gap*100, digits=4))%, " *
                   "first_stage = $(round(master_first_stage, digits=0)), " *
@@ -2323,48 +1821,29 @@ function run_benders_decomposition(
             # Log per-year breakdown for first 3 iterations
             if iter <= 3
                 for y in 1:min(5, num_years)
-                    theta_val = value(theta[y]) * COST_SCALE
-                    disc = 1.0 / ((1.0 + input.discount_rate)^(y - 1))
+                    theta_val = sum(value(theta[(y, d)]) * COST_SCALE
+                                    for d in eachindex(rep_days_by_year[y]); init = 0.0)
                     @info "    y$(y): θ=$(round(theta_val, sigdigits=4)), " *
                           "actual_Q=$(round(year_operational_costs[y], sigdigits=4)), " *
-                          "disc=$(round(disc, sigdigits=4))"
+                          "disc=$(round(discount(y), sigdigits=4))"
                 end
             end
         end
 
         if gap < tolerance
             @info "Benders: Converged in $(iter) iterations (gap = $(round(gap*100, digits=4))%)"
-            converged = true
-
-            # Extract final solution
-            solution = extract_master_solution_from_benders(
-                master_model, vars, input, year_operational_costs
-            )
-
             return BendersResult(
-                solution, best_ub, iter, gap,
+                best_solution(iter), best_ub, iter, gap,
                 lb_history, ub_history,
                 time() - start_time
             )
         end
 
         # ----- Add cuts -----
-        cuts_added = 0
-        for (y_idx, cut) in sort(collect(year_cuts), by=first)
-            add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, iter; ctx)
-            cuts_added += 1
-
-            if verbose_benders && iter <= 3
-                max_tech = isempty(cut.tech_gradients) ? 0.0 : maximum(abs, values(cut.tech_gradients))
-                max_bt = isempty(cut.bat_tech_pow_gradients) ? 0.0 : maximum(abs, values(cut.bat_tech_pow_gradients))
-                @info "    Cut y$(y_idx): intercept=$(round(cut.intercept, sigdigits=4)), " *
-                      "max_tech_grad=$(round(max_tech, sigdigits=4)), max_bt_grad=$(round(max_bt, sigdigits=4)), " *
-                      "n_tech=$(length(cut.tech_gradients)), n_bt=$(length(cut.bat_tech_pow_gradients))"
-            end
-        end
-
+        n_cuts = length(cuts)
+        add_cuts!(cuts, iter)
         if verbose_benders
-            @info "  Added $(cuts_added) cuts"
+            @info "  Added $(n_cuts) cuts"
         end
     end
 
@@ -2382,22 +1861,18 @@ function run_benders_decomposition(
         )
     end
 
-    # Reached max iterations without convergence
-    final_gap = abs(best_ub - lb_history[end]) / max(abs(best_ub), 1e-10)
-    @warn "Benders: Max iterations ($(max_iterations)) reached. " *
+    # Reached max iterations (or a master solve failed) without convergence
+    final_gap = isfinite(best_ub) ?
+        abs(best_ub - lb_history[end]) / max(abs(best_ub), 1e-10) : Inf
+    @warn (iterations == max_iterations ?
+           "Benders: Max iterations ($(max_iterations)) reached. " :
+           "Benders: Stopped after $(iterations) iterations without converging. ") *
           "Final gap = $(round(final_gap * 100, digits=4))%"
 
-    # Solve master one final time so variable values are available for extraction.
-    # (Adding cuts in the last iteration invalidates the cached solution.)
-    set_optimizer(master_model, master_optimizer)
-    optimize!(master_model)
-
-    # Use the best-primal year_ops (from the iteration that achieved best_ub).
-    # This avoids using a final-solve that may differ from the best-found solution.
-    solution = extract_master_solution_from_benders(master_model, vars, input, best_year_ops)
-
+    # Cuts were added after the last solve, so the best iteration's plan is
+    # always re-solved with its values fixed
     return BendersResult(
-        solution, best_ub, max_iterations, final_gap,
+        best_solution(-1), best_ub, iterations, final_gap,
         lb_history, ub_history,
         time() - start_time
     )
@@ -2408,17 +1883,20 @@ end
 # =============================================================================
 
 """
-    extract_master_solution_from_benders(model, vars, input, year_operational_costs)
+    extract_master_solution_from_benders(model, vars, input, year_operational_costs;
+                                         objective=nothing)
 
 Extract a MasterProblemResult from the Benders master solution.
 Reuses the logic from extract_master_solution but provides operational costs
-from subproblem solves instead of embedded variables.
+from subproblem solves instead of embedded variables, and `objective` (the
+plan's upper bound) instead of the master's objective when given.
 """
 function extract_master_solution_from_benders(
     model::Model,
     vars::MasterProblemVariables,
     input::MasterProblemInput,
-    year_operational_costs::Vector{Float64}
+    year_operational_costs::Vector{Float64};
+    objective::Union{Nothing, Float64} = nothing
 )::MasterProblemResult
     # Use existing extraction (it handles investment vars, cumulative caps, etc.)
     result = extract_master_solution(model, vars, input)
@@ -2426,7 +1904,7 @@ function extract_master_solution_from_benders(
     # Override operational costs with values from subproblem solves
     return MasterProblemResult(
         result.status,
-        result.objective,
+        objective === nothing ? result.objective : objective,
         result.solve_time,
         result.tech_investment,
         result.bat_tech_power_investment,

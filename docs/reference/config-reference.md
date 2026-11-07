@@ -119,7 +119,6 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `solver_method` | `monolithic` \| `benders` | `"monolithic"` | Master-problem solver: 'monolithic' or 'benders'. |
 | `benders_max_iterations` | int (≥ 1) | `50` | Maximum Benders iterations (benders solver only). |
 | `benders_tolerance` | float (> 0.0) | `0.0001` | Relative optimality-gap tolerance for Benders convergence. |
-| `benders_lol_penalty_cap` | float (≥ 0.0) | `1000` | Cap on the loss-of-load penalty ($/MW per timestep) inside Benders subproblems for numerical stability (0 disables the cap). |
 | `use_tsam` | bool | `false` | Enable TSAM clustering for representative period selection. When true, representative_days and min_day_separation are ignored. |
 | `tsam_num_periods` | int (2–365) | `10` | Number of representative periods for TSAM clustering. |
 | `tsam_method` | `kmedoids` \| `kmeans` | `"kmedoids"` | Clustering method for TSAM. |
@@ -905,7 +904,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 
 ## PenaltiesConfig
 
-Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes the last three and shows them disabled; `coupling_slack_penalty` is deprecated, no longer written by the Studio, and logs a warning when present.
+Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Five keys load but price nothing in the current model: `curtailment`, `curtailment_excess_penalty`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes all but `coupling_slack_penalty` and shows them disabled; `coupling_slack_penalty` is deprecated, no longer written by the Studio, and logs a warning when present.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -914,10 +913,10 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_reserve_dynamic` | float | `100` | $/MW dynamic reserve deficit |
 | `loss_of_inertia` | float | `200` | $/MW-s inertia deficit |
 | `transfer_margin` | float | `100` | Transfer-margin violation ($/MW). YAML also accepts `TransferMargin` |
-| `curtailment` | float | `100` | No effect (the Studio writes it as `Curtailment`): curtailed RE is priced by `curtailment_cost` and `curtailment_excess_penalty`. |
-| `max_curtailment_ratio` | float (0–1) | `0.05` | Cap on RE curtailment as a fraction of RE generation. Hard constraint per representative day in the monolithic master, soft (with `curtailment_excess_penalty`) under Benders; not enforced in operational dispatch |
+| `curtailment` | float | `100` | No effect (the Studio writes it as `Curtailment`): curtailed RE is priced by `curtailment_cost`. |
+| `max_curtailment_ratio` | float (0–1) | `0.05` | Cap on RE curtailment as a fraction of RE generation. Hard constraint per representative day in the master problem (monolithic and Benders); not enforced in operational dispatch |
 | `curtailment_cost` | float (≥ 0) | `20` | Cost of curtailed RE in operational dispatch ($/MWh) |
-| `curtailment_excess_penalty` | float (≥ 0) | `500` | Benders master: penalty on curtailment above `max_curtailment_ratio` ($/MWh) |
+| `curtailment_excess_penalty` | float (≥ 0) | `500` | No effect: `max_curtailment_ratio` is a hard limit in the master problem, monolithic and Benders (kept so existing files load). |
 | `re_excess_penalty` | float (≥ 0) | `100` | $/MWh penalty for RE generation exceeding target |
 | `rooftop_curtailment` | float | `5` | $/MWh rooftop curtailed |
 | `co2_cost` | float | `10` | $/tCO2 |

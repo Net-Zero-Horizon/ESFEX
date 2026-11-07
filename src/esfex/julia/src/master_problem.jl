@@ -2558,15 +2558,15 @@ shed at most its demand (PB-1b). `day_operational_cost` charges `load_shed` at
 VOLL and adds the criticality premium on the sectoral part. `label` names the
 constraints; `nothing` leaves them unnamed (Benders subproblems).
 
-Returns the unscaled premium of the unclassified remainder above `voll`:
-`voll × (m − 1) × (load_shed − Σ sector shed)`, with `m` the remainder's
+Returns the unscaled premium of the unclassified remainder above VOLL
+(`loss_of_load_penalty`): `VOLL × (m − 1) × (load_shed − Σ sector shed)`, with `m` the remainder's
 multiplier (`sector_remainder_multiplier`, the dispatch's rule); the caller
 adds it to the day's cost.
 """
 function add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
                                             start_hour::Int, growth_factor::Float64;
-                                            label::Union{Nothing, String} = nothing,
-                                            voll::Float64 = input.loss_of_load_penalty)
+                                            label::Union{Nothing, String} = nothing)
+    voll = input.loss_of_load_penalty
     premium = AffExpr(0.0)
     lol = ps_vars.loss_of_load_sectoral
     (lol === nothing || isempty(lol)) && return premium
