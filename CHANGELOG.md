@@ -173,6 +173,45 @@ Per-release notes are also published on the
   `master_problem.stochastic` on, first system's scenarios: the ones the
   master uses).
 
+- **Battery ramp limits, fixed cost, reserve flag and availability profile.**
+  These battery fields were read from the configuration and then ignored
+  (and every battery held reserve). They now apply in the operational
+  dispatch and in the master problem alike, including the Benders
+  subproblems:
+  - `ramp_up` / `ramp_down`: how fast charge or discharge power may rise /
+    fall per hour, as a fraction of `MaxChargePower` / `MaxDischargePower`
+    (× `resolution_hours` per step). 0, the new default, means no limit. A
+    rolling window starts from the charge and discharge at the end of the
+    previous window's committed part (the first window of each year starts
+    free).
+  - `fixed_cost`: fixed O&M in $ per MW of `MaxDischargePower` per year
+    (it was labelled $/MWh). The master charges it every year on the power in
+    service (within the battery's lifetime, or its life-extended MW); each
+    dispatch window charges its share of the year, reported in
+    `fixed_om_cost`.
+  - `reservable`: only reservable batteries hold static and dynamic reserve
+    (and count in the preventive N-1 cover). Their headroom now uses the
+    degraded, available discharge power; in the master a retired battery
+    whose life is not extended no longer counts its nameplate power as
+    reserve.
+  - `Availability`: the profile multiplies the battery's charge and
+    discharge power (and the power it offers as reserve) each hour.
+
+  Battery technologies take the same five fields; the master applies the
+  availability and ramp limits to the batteries it builds and charges the
+  fixed cost on the power built, and the batteries it hands to the dispatch
+  keep them (they were always reservable, with no ramp limit or fixed cost).
+  The Studio battery form has a *Provides reserves* checkbox and shows the
+  fixed cost in $/MW·yr.
+
+- **Converter minimum power.** `min_power_mva` of AC/DC and frequency
+  converters was never read. With unit commitment in the dispatch
+  (`unit_commitment` mode or `use_uc_in_dispatch`) a converter is now either
+  off or carries at least `min_power_mva` in one direction (an on/off binary
+  per direction and step); the energy prices are recovered with those
+  binaries fixed. Economic dispatch and the master problem (LP) still ignore
+  it.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -589,6 +628,59 @@ Per-release notes are also published on the
   usual unknown-key warning. The Studio's checkbox is now labelled "Use
   SCOPF" (it was "Use Iterative SCOPF").
 
+- **Battery fields that had no effect are removed.** `min_power`, `min_up`,
+  `min_down`, `eff_at_rated`, `eff_at_min`, `start_up_cost` and `fuel_cost`
+  are no longer battery fields: the loader no longer requires them (nor
+  `ramp_up`, `ramp_down`, `fixed_cost`, now optional), the Studio form no
+  longer shows them and saves projects without them. A file that still has
+  them loads, with an unknown-key warning for each.
+
+- **Settings that had no effect were removed.** They loaded (some were even
+  required) but no model, solver or report read them:
+  - `solver.scale_constraints`, with its Studio checkbox in Global Settings
+    and in **File > Preferences**;
+  - `dc_power_flow.base_impedance`, its flat `DC_BASE_IMPEDANCE` spelling and
+    its load-time warning, and `systems_links[].base_impedance` (per-unit
+    values use `ac_power_flow.base_mva` and V²/`base_mva` per line);
+  - the system keys `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` and
+    `flexible_demand_benefit_ratio`, and the always-zero
+    `flexible_demand_benefit` term of the dispatch objective and of the cost
+    breakdown (`CostBreakdown`, HDF5 `cost_breakdown`);
+  - `meta_network.dynamic_transfer_pricing` and
+    `meta_network.inter_system_loss_segments`;
+  - `rooftop_solar_config.cost_per_kw`, `cost_reduction_rate` and
+    `o_and_m_cost` (rooftop solar is behind the meter, with no investment to
+    price), with their Studio fields;
+  - `primary_energy_sources.*.storage_investment_cost`,
+    `max_storage_investment_per_node` and `max_transport_investment_per_arc`,
+    which the loader required (the master takes fuel storage and route
+    investment from `fuel_infrastructure`);
+  - `price_sensitivity` of the `electric_demand` sectors and of
+    `non_electric_demand` (the Studio's node form loses the Price Sens.
+    column);
+  - the electrolyzer fields `technology`, `min_power`, `initial_age` and
+    `degradation_rate` (the loader required the last three), with their
+    Studio fields;
+  - `risk.hazard_data_sources`, `risk.fragility_curves` and
+    `risk.risk_criteria`; the Workbench classifies nodes with the fixed
+    thresholds documented under *Risk classification*.
+
+  A configuration that still sets one of them gets the usual unknown-key
+  warning; Studio projects saved earlier still open and are saved without
+  them.
+
+- **Dead code removed.** The Julia multi-system master, which Python never
+  built (`MultiSystemMasterInput`, `create_multi_system_master_problem`,
+  `add_inter_system_constraints!`, `build_multi_system_objective!`,
+  `InterSystemLink`, `SystemConfig`, `ExtendedMasterVariables`,
+  `ExtendedMasterResult`), with the Python converters
+  `convert_inter_system_link` / `convert_system_config`; the helper
+  `esfex.models.integrate_rooftop_solar`, which no run called; and the unused
+  `PrimaryEnergyInput` fields `investment_from_master`,
+  `h2_production_hourly` and `electrolyzer_config` (three positional
+  arguments fewer; the 20- and 17-argument short forms replace the 23- and
+  20-argument ones).
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -969,8 +1061,6 @@ Per-release notes are also published on the
   `AttributeError`; a `str` path now works like a `Path`.
 - **`environment.yml` pinned Python below 3.13** although ESFEX supports
   3.13; it now allows the same versions as pip (3.10–3.13).
-- `solver.scale_constraints` is read by nothing; it is documented as such
-  and shown disabled in the Studio.
 - The loader names each generator that receives the non-fuel O&M adder in
   the log (INFO), with the resulting `maintenance_cost`.
 
@@ -1457,6 +1547,38 @@ Per-release notes are also published on the
   and electrolyzer keys without de-duplication. Both now use the results
   file's unit-name convention (`/` → ` - `, a clash gets ` (1)`), and
   `fuel_for_power/{unit}` uses the unit's name of the per-generator groups.
+
+- **Flat battery discharge curves are priced.** A `discharge_cost_curve`
+  that reduces to one segment (a `flat` curve with a `flat_price`) was
+  skipped, so the discharge stayed at `throughput_degradation_cost`. It is
+  now priced at its own price in the dispatch and in the master, as flat
+  generator curves are (a flat curve at the battery's own throughput cost is
+  still skipped, since it changes nothing).
+
+- **Battery technology energy in the Benders cuts.** The cut gradient of a
+  battery technology's energy now includes the duals of the day's initial
+  and cyclic SOC constraints (both proportional to the energy built), not
+  only of the SOC limit.
+
+- **Configuration reference: battery `technology`.** It was documented as a
+  label with no effect; it names the battery technology whose
+  `invest_cost_power` prices life extension where the battery's own
+  `invest_cost` is 0.
+
+- **The Risk Workbench opens with the project's saved settings.** It always
+  started from the defaults (expected value, CVaR α 0.95 and λ 0.5,
+  independent combination, no scenarios), so a second **Apply** overwrote the
+  saved `risk.*` values. It now loads the saved risk measure, CVaR α and λ,
+  combination method and climate and hazard scenarios, and shows them in its
+  controls.
+
+- **Documentation.** The HDF5 schema lists the master's converter investment
+  attributes (`investment_converter_investment_acdc_{c}` /
+  `_freq_{c}`, MW). `gen_life_extension` / `bat_life_extension` of the master
+  result are documented as what they hold, a 0/1 flag per node (1 while the
+  unit is within its original `life_time`), not MW. Generator and battery
+  `invest_cost` are no longer labelled deprecated: they price life
+  extension, and a 0 is filled from the matching technology.
 
 ## [0.3.0] — 2026-08-27
 
