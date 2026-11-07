@@ -19,12 +19,13 @@ Algorithm:
 # Constants
 # =============================================================================
 
-# Cost scaling factor for numerical stability in Benders cuts.
-# theta[y] represents operational_cost / COST_SCALE.
-# Cuts and objective account for this scaling, so final results are in actual dollars.
-# With COST_SCALE = 1e6, theta is in millions of dollars, keeping LP coefficients
-# within ~1e6 instead of ~1e12 (well within HiGHS tolerance).
-const COST_SCALE = 1e6
+# Cost scaling factor of the Benders cuts: theta[y] represents
+# operational_cost / COST_SCALE, and the cuts and objective account for it.
+# The bridge already sends every cost in M$ (converters.scale_cost), so theta
+# is in the input's units (1.0). With 1e6 here theta was in units of 1e12 $:
+# a cut coefficient per MWh (reservoir, fuel tank, CO2) fell below HiGHS's
+# 1e-9 matrix tolerance and was dropped, so the master never saw it.
+const COST_SCALE = 1.0
 
 # Maximum loss-of-load penalty ($/MW per timestep) used in Benders subproblems.
 # The monolithic model uses Big-M penalties (e.g. $10M) which work fine for a single
@@ -122,6 +123,7 @@ end
 #   (:storage | :transport | :electrolyzer, …)  fuel block (M2, master_fuel.jl)
 #   (:converter, "acdc" | "freq", c)  converter MW built up to the year
 #   (:line, "", l)                    MW built on line l's corridor up to the year
+#   (:reservoir, "g", b)              reservoir MWh built up to the year
 #   (:gen_life, "g", b), (:bat_life, "bi", b)  life-extended MW this year
 #   (:re_ratio, "s", 0)               system s's RE ratio this year
 #   (:co2, "k", d)                    share of group k's CO2 budget given to day d
@@ -168,9 +170,7 @@ Subproblem d then holds its emissions, scaled to the year like its cost, to
 Summed over the days this is the monolithic constraint
 `Σ_d emissions ≤ budget + viol` with `viol = Σ_d v` at the same price, so
 both have the same optimum; the cuts carry ∂cost/∂a to the master, which
-moves allowance to the days where it saves the most. (A share rather than
-tonnes keeps the cut coefficient in range: per tonne it would be ~1e-10 in
-the master's scaled θ units, below the solver's coefficient tolerance.)
+moves allowance to the days where it saves the most.
 """
 function add_benders_co2_allocation!(model::Model, input::MasterProblemInput,
                                      rep_days_by_year::Dict{Int, Vector{Int}})
@@ -213,6 +213,8 @@ function benders_copy_expr(vars::MasterProblemVariables, input::MasterProblemInp
             v = corridor_investment(vars.transfer_investment[y], from, to)
             v === nothing || add_to_expression!(expr, v)
         end
+    elseif kind === :reservoir
+        add_to_expression!(expr, reservoir_capacity_built(vars, parse(Int, name), i, year_idx))
     elseif kind === :gen_life
         add_to_expression!(expr, vars.gen_life_extension[year_idx][parse(Int, name)][i])
     elseif kind === :bat_life
@@ -225,6 +227,26 @@ function benders_copy_expr(vars::MasterProblemVariables, input::MasterProblemInp
         add_to_expression!(expr, master_fuel_extra_expr(vars.fuel, input, year_idx, key))
     end
     return expr
+end
+
+"""
+    benders_reservoir_builds(vars, input, year_idx) -> Vector{Tuple{Int,Int}}
+
+`(generator, bus)` of the reservoirs the master can have expanded by year
+`year_idx` (an existing reservoir with `reservoir_invest_max` > 0 and a
+build variable up to that year), as `add_day_operational_constraints!`
+selects them.
+"""
+function benders_reservoir_builds(vars::MasterProblemVariables, input::MasterProblemInput,
+                                  year_idx::Int)
+    out = Tuple{Int,Int}[]
+    for (g, gen) in enumerate(input.generators), b in 1:input.network.num_buses
+        gen.reservoir_capacity[b] > 0 && gen.reservoir_invest_max[b] > 0 || continue
+        any(haskey(get(vars.reservoir_investment, y, Dict{Int, Vector{VariableRef}}()), g)
+            for y in 1:vars.years_per_inv_period:year_idx) || continue
+        push!(out, (g, b))
+    end
+    return out
 end
 
 """
@@ -640,8 +662,8 @@ function create_benders_master(
     # NOTE: NO add_representative_days_validation! — this is the decomposed part
 
     # Add recourse variables θ[y] (one per year, approximates operational cost)
-    # θ[y] is in SCALED units (actual_cost / COST_SCALE) to keep LP coefficients
-    # in a numerically stable range. Cuts and objective use COST_SCALE accordingly.
+    # θ[y] is in units of actual_cost / COST_SCALE; cuts and objective use
+    # COST_SCALE accordingly.
     num_years = length(input.years)
     theta = Dict{Int, VariableRef}()
     for y_idx in 1:num_years
@@ -920,6 +942,10 @@ function evaluate_fixed_capacities(
         k = (:line, "", l)
         copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
     end
+    for (g, b) in benders_reservoir_builds(vars, input, year_idx)
+        k = (:reservoir, string(g), b)
+        copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
+    end
     for ((y, grp, d), v) in ctx.co2_alloc
         y == year_idx && (copies[(:co2, string(grp), d)] = value(v))
     end
@@ -1184,8 +1210,13 @@ function create_benders_subproblem(
         capacity_override_power=total_cap_bat_power,
         capacity_override_energy=total_cap_bat_energy)
     # Reservoir water balance — keep the Benders subproblem consistent with the
-    # monolithic master (no-op when the day has no reservoir variables).
-    add_reservoir_constraints!(sp_model, ps_vars, day_input)
+    # monolithic master (no-op when the day has no reservoir variables). The
+    # level bounds include a copy of the reservoir capacity built so far.
+    res_cap = Dict{Tuple{Int,Int}, Any}(
+        (g, b) => input.generators[g].reservoir_capacity[b] +
+                  copy_of((:reservoir, string(g), b))
+        for (g, b) in benders_reservoir_builds(master_vars, input, year_idx))
+    add_reservoir_constraints!(sp_model, ps_vars, day_input; capacity_override=res_cap)
     add_reserve_constraints!(sp_model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         demand_scale=1.0)
