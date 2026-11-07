@@ -205,7 +205,7 @@ class SimulationState:
 
 Complete results for one simulation year, including all optimization variables, derived metrics, and scalar summaries.
 
-Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities; max for `gen_status`, `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), also for the `power_flow`, `transfer_margin` and N-1 dual series; a key missing from a window (no binding dual there) is zero-filled for that window's steps.
+Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities; max for `gen_status`, `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), also for the `power_flow`, `transfer_margin` and N-1 dual series; a key missing from a window (no binding dual there) is zero-filled for that window's steps. The scalars (`objective`, `emissions`, `load_shed`, `total_generation`, `total_demand`) and `cost_breakdown` likewise add up each window's committed steps only ([Result Stitching](../formulation/operational-dispatch.md#104-result-stitching)).
 
 ```python
 @dataclass

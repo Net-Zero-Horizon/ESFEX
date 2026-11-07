@@ -437,6 +437,38 @@ import Ipopt
             @test size(res.gen_output) == (1, 1, H)
         end
 
+        @testset "committed steps of a rolling window" begin
+            # A window keeps its first `keep` steps: the totals, the cost
+            # breakdown and the objective cover those, not keep/H of the window.
+            H, keep = 4, 2
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                        [3.0e-5], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "ed", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([20.0, 40.0, 60.0, 80.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            full = extract_solution(model, vars, input)
+            cs = ESFEX.committed_steps(vars, H, keep)
+            part = extract_solution(model, vars, input; committed = cs)
+            @test part.total_demand ≈ 60.0
+            @test part.total_generation ≈ 60.0 atol = 1e-6
+            @test part.cost_breakdown.fuel_cost ≈ 3.0e-5 * 60.0 rtol = 1e-6
+            @test part.objective ≈ part.cost_breakdown.total
+            @test part.objective < full.objective * keep / H   # growing load
+            @test size(part.gen_output) == (1, 1, H)           # arrays: whole window
+            all_kept = ESFEX.committed_steps(vars, H, H)
+            @test extract_solution(model, vars, input; committed = all_kept).objective ≈
+                  full.objective rtol = 1e-12
+        end
+
         @testset "sectoral shed bounded by each sector's demand" begin
             # 100 MW of load, 40 MW of gas: 60 MW must be shed. The cheap
             # sector holds only 30 MW, so the other 30 MW come out of the
