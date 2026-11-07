@@ -215,14 +215,6 @@ function master_fuel_day_input(input::MasterProblemInput, year_idx::Int,
         year_hour_offset = mod(start_hour - 1, steps_per_year) * tres)
 end
 
-# Whether candidate technology tc is charged a cost curve at bus b (it then
-# keeps it, like a dispatch unit with a curve)
-function _tech_has_curve(input::MasterProblemInput, tc::Int, b::Int)
-    curves = get(input.tech_cost_curves, tc, nothing)
-    curves === nothing && return false
-    return length(get(curves, b, CostSegment[])) > 1
-end
-
 """
     add_master_fuel_day!(model, ps_vars, input, year_idx, start_hour, hours,
                          tech_output; extra) -> AffExpr
@@ -330,7 +322,8 @@ function add_master_fuel_day!(model::Model, ps_vars::PowerSystemVariables,
             end
             for b in 1:n_buses
                 node_ok(b) || continue
-                _tech_has_curve(input, tc, b) && continue
+                # A technology priced by its offer curve keeps it
+                tech_curve_segments(input, tc, b) === nothing || continue
                 fc = tech.fuel_cost[b]
                 fc != 0 || continue
                 for t in 1:hours
