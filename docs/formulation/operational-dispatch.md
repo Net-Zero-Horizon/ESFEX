@@ -877,7 +877,7 @@ Both slacks are priced at `loss_of_reserve_static` per MW and time step (reporte
 
 With `generation_reserve_type: percentage` the right-hand side of N1-1 is `generation_reserve_percentage` × the total demand of step \(t\) instead of the largest unit's output, and no unit is excluded from \(H^{\text{N1}}_t\) (same constraint and shortfall names).
 
-`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` configure the post-hoc contingency analysis of the Studio's single-line diagram, not the optimisation. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint; a value other than the default logs a warning when the configuration is loaded.
+`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` configure the post-hoc contingency analysis of the Studio's single-line diagram, not the optimisation.
 
 #### SCOPF variant
 

@@ -1049,8 +1049,6 @@ struct PowerSystemInput
     n1_generation_reserve_percentage::Float64  # Used if reserve_type == "percentage"
     n1_scopf_enabled::Bool                    # Use SCOPF instead of preventive N-1
     n1_corrective_enabled::Bool               # Allow corrective actions (battery response)
-    n1_scopf_max_iterations::Int              # Max SCOPF iterations
-    n1_scopf_violation_tolerance::Float64     # Violation tolerance for SCOPF convergence
 
     # Rooftop solar generation (hours × nodes) - optional
     rooftop_generation::Union{Matrix{Float64}, Nothing}
@@ -1220,8 +1218,6 @@ function PowerSystemInput(;
     n1_generation_reserve_percentage::Float64 = 0.15,
     n1_scopf_enabled::Bool = false,
     n1_corrective_enabled::Bool = false,
-    n1_scopf_max_iterations::Int = 5,
-    n1_scopf_violation_tolerance::Float64 = 0.01,
     # Rooftop solar generation
     rooftop_generation::Union{Matrix{Float64}, Nothing} = nothing,
     # Generator initial status for rolling horizon carry-over
@@ -1324,8 +1320,6 @@ function PowerSystemInput(;
         n1_generation_reserve_percentage,
         n1_scopf_enabled,
         n1_corrective_enabled,
-        n1_scopf_max_iterations,
-        n1_scopf_violation_tolerance,
         rooftop_generation,
         generator_initial_status,
         generator_output_prev,
@@ -1665,9 +1659,6 @@ struct CostBreakdown
     pe_excess_cost::Float64
     pe_transport_cost::Float64
     pe_investment_cost::Float64
-    # Always 0: the periodic storage layer and its coupling slacks were
-    # removed; the field stays so result files keep their layout.
-    pe_coupling_slack_cost::Float64
     # The electrolyzers' cost (electrolyzer_cost) when their hydrogen fills the
     # primary-energy Hydrogen tank; a view of it, not an extra cost.
     pe_electrolyzer_cost::Float64
@@ -1970,8 +1961,6 @@ Complete input for the Primary Energy optimization model.
 - `investment_resolution::Int`: Resolution for investment decisions (hours)
 - `discount_rate::Float64`: Discount rate for annualization
 - `loss_of_fuel_supply_penalty::Float64`: Penalty for fuel shortfall (\$/unit)
-- `coupling_slack_penalty::Float64`: Unused (the periodic storage layer and its
-    coupling slacks were removed); kept so existing call sites still construct
 - `mode::String`: Operation mode ("development", "economic_dispatch",
     "unit_commitment"; "master" for a representative day of the master)
 - `cumulative_capacities::Dict`: Fuel storage/transport capacity built by the
@@ -2003,7 +1992,6 @@ struct PrimaryEnergyInput
     investment_resolution::Int
     discount_rate::Float64
     loss_of_fuel_supply_penalty::Float64
-    coupling_slack_penalty::Float64
     mode::String
     cumulative_capacities::Dict{String, Any}
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}
@@ -2028,7 +2016,7 @@ struct PrimaryEnergyInput
 end
 
 # Without scheduled arrivals: no fuel in transit at the window's start.
-PrimaryEnergyInput(args::Vararg{Any, 24}) = PrimaryEnergyInput(args..., nothing)
+PrimaryEnergyInput(args::Vararg{Any, 23}) = PrimaryEnergyInput(args..., nothing)
 
 # Without the last four fields: unmet non-electric demand at the fuel-supply
 # penalty, 1 h steps, window at the start of the year.
@@ -2041,7 +2029,7 @@ function PrimaryEnergyInput(
     generator_fuel_map::Dict{Int, Tuple{String, Float64, Float64, Float64}},
     primary_energy_resolution::Int, investment_resolution::Int,
     discount_rate::Float64, loss_of_fuel_supply_penalty::Float64,
-    coupling_slack_penalty::Float64, mode::String,
+    mode::String,
     cumulative_capacities::Dict{String, Any},
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing},
     investment_from_master::Bool,
@@ -2053,7 +2041,7 @@ function PrimaryEnergyInput(
         year, base_year, num_nodes, hours, fuels, infrastructure, non_electric_demand,
         transport_routes, generator_fuel_map, primary_energy_resolution,
         investment_resolution, discount_rate, loss_of_fuel_supply_penalty,
-        coupling_slack_penalty, mode, cumulative_capacities, initial_storage_levels,
+        mode, cumulative_capacities, initial_storage_levels,
         investment_from_master, h2_production_hourly, generator_rated_power,
         electrolyzer_config, loss_of_fuel_supply_penalty, 1, 0
     )
@@ -2105,7 +2093,6 @@ function PrimaryEnergyInput(
     investment_resolution::Int,
     discount_rate::Float64,
     loss_of_fuel_supply_penalty::Float64,
-    coupling_slack_penalty::Float64,
     mode::String,
     cumulative_capacities::Dict{String, Any},
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing},
@@ -2119,7 +2106,7 @@ function PrimaryEnergyInput(
         year, base_year, num_nodes, hours, fuels, infrastructure, non_electric_demand,
         routes,
         generator_fuel_map, primary_energy_resolution, investment_resolution,
-        discount_rate, loss_of_fuel_supply_penalty, coupling_slack_penalty, mode,
+        discount_rate, loss_of_fuel_supply_penalty, mode,
         cumulative_capacities, initial_storage_levels, investment_from_master,
         h2_production_hourly, generator_rated_power, electrolyzer_config,
         loss_of_fuel_supply_penalty, 1, 0
@@ -2346,7 +2333,6 @@ struct MasterProblemInput
     fre_penetration_loss_penalty::Float64  # $/MWh RE shortfall (config: FRE_penetration_loss)
     max_curtailment_ratio::Float64      # Max curtailment as fraction of RE generation (0.05 = 5%)
     curtailment_cost::Float64           # $/MWh penalty for curtailed RE energy
-    re_excess_penalty::Float64          # $/MWh penalty for RE generation exceeding target
 
     # Operational
     temporal_resolution_hours::Int
@@ -2460,7 +2446,6 @@ function MasterProblemInput(;
     fre_penetration_loss_penalty::Float64 = 1e-4,
     max_curtailment_ratio::Float64 = 0.05,
     curtailment_cost::Float64 = 2e-5,
-    re_excess_penalty::Float64 = 1e-4,
     temporal_resolution_hours::Int = 1,
     representative_days_per_year::Int = 2,
     min_day_separation::Int = 30,
@@ -2520,7 +2505,7 @@ function MasterProblemInput(;
         min_re_increment, max_re_increment,
         system_node_ranges,
         slack_penalty, loss_of_load_penalty, fre_penetration_loss_penalty,
-        max_curtailment_ratio, curtailment_cost, re_excess_penalty,
+        max_curtailment_ratio, curtailment_cost,
         temporal_resolution_hours, representative_days_per_year, min_day_separation,
         investment_resolution_hours,
         use_tsam, tsam_period_start_hours, tsam_period_weights,

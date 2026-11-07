@@ -2025,8 +2025,6 @@ class PowerSystemAdapter:
             n1_generation_reserve_percentage=n1.generation_reserve_percentage,
             n1_scopf_enabled=n1.scopf_enabled,
             n1_corrective_enabled=n1.corrective_enabled,
-            n1_scopf_max_iterations=int(n1.scopf_max_iterations),
-            n1_scopf_violation_tolerance=float(n1.scopf_violation_tolerance),
             # Rolling-horizon seam: per-window-N initial state from window N-1.
             # All three default to empty Dict (no boundary) → Julia preserves
             # legacy behaviour for the first window of every year.
@@ -2945,7 +2943,6 @@ class MasterProblemAdapter:
         fre_penetration_loss_penalty = scale_cost(float(penalties.fre_penetration_loss))  # $/MWh → M$/MWh
         max_curtailment_ratio = float(getattr(penalties, 'max_curtailment_ratio', 0.05))  # fraction (no scaling)
         curtailment_cost = scale_cost(float(getattr(penalties, 'curtailment_cost', 20.0)))  # $/MWh → M$/MWh
-        re_excess_penalty = scale_cost(float(getattr(penalties, 're_excess_penalty', 100.0)))  # $/MWh → M$/MWh
 
         # Build sectoral demand for master problem (M2)
         jl_sectoral = jl.seval("Dict{String, Matrix{Float64}}()")
@@ -2989,7 +2986,6 @@ class MasterProblemAdapter:
             fre_penetration_loss_penalty=fre_penetration_loss_penalty,
             max_curtailment_ratio=max_curtailment_ratio,
             curtailment_cost=curtailment_cost,
-            re_excess_penalty=re_excess_penalty,
             temporal_resolution_hours=self.temporal_resolution_hours,
             representative_days_per_year=self.representative_days_per_year,
             min_day_separation=self.min_day_separation,
@@ -4610,7 +4606,6 @@ class PrimaryEnergyAdapter:
             self.investment_resolution,
             self.discount_rate,
             scale_cost(float(self.penalties_config.get('loss_of_fuel_supply', 1000.0))),
-            scale_cost(float(self.penalties_config.get('coupling_slack_penalty', 1.0))),
             self.mode,
             jl_cumul,
             jl_initial_storage,

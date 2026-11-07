@@ -126,9 +126,7 @@ Adds security constraints for the loss of a single element to the dispatch. See 
 | Generation | On | Generator outage constraints |
 | Reserve Type | Largest Unit | `Largest Unit`: the headroom of the other units and batteries must cover the output of the largest unit. `Percentage`: the headroom of all units and batteries must cover Reserve Percentage × the system demand of each step. |
 | Reserve Percentage (frac) | 0.15 | Used when Reserve Type is `Percentage` |
-| Use Iterative SCOPF | Off | Replace preventive N-1 reserves with post-contingency (LODF) line limits for every pair of lines, added in one solve (not iterative) |
-| SCOPF Max Iterations | 5 | Enabled when SCOPF is on (1 to 20); saved but not used (the SCOPF constraints are built in one pass). A value other than 5 logs a warning when the run loads the configuration |
-| SCOPF Violation Tolerance (MW) | 0.01 | Enabled when SCOPF is on; saved but not used. A value other than 0.01 logs a warning when the run loads the configuration |
+| Use SCOPF | Off | Replace preventive N-1 reserves with post-contingency (LODF) line limits for every pair of lines, added in one solve (not iterative) |
 | Allow Corrective Actions | Off | Allow post-contingency battery and generator re-dispatch instead of preventive reserve |
 | Compute N-1 Security Cost | Off | Re-solve each operational window without the N-1 constraints and report the objective difference as the N-1 security cost (`compute_security_cost`). Roughly doubles the solve time; off, the cost is reported as 0 |
 | *SLD contingency analysis* | | The fields below do not change the optimisation: they set up **Run All N-1** and **Run Screening** in the SLD Analysis panel |
@@ -229,19 +227,14 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | Loss Reserve (Dynamic) | 100 | $/MW | Dynamic (frequency response) reserve shortfall |
 | Loss of Inertia | 200 | $/MW·s | Inertia shortfall below the Min. System Inertia |
 | Transfer Margin | 100 | $/MW | Transfer margin violation |
-| Curtailment | 100 | -- | No effect (disabled): curtailed RE is priced by Curtailment Cost and Curtailment Excess Penalty. |
-| Max Curtailment Ratio | 0.05 | fraction | Curtailment allowed as a fraction of RE generation before Curtailment Excess Penalty applies |
+| Max Curtailment Ratio | 0.05 | fraction | Hard cap on curtailment as a fraction of RE generation, per representative day of the master problem (not enforced in operational dispatch, which charges Curtailment Cost) |
 | Curtailment Cost ($/MWh) | 20 | $/MWh | Cost of each curtailed MWh of RE |
-| Curtailment Excess Penalty ($/MWh) | 500 | $/MWh | Curtailment above the Max Curtailment Ratio |
-| RE Excess Penalty ($/MWh) | 100 | $/MWh | RE generation above the target |
 | Rooftop Curtailment | 5 | $/MWh | Curtailed rooftop PV |
 | CO2 Cost | 10 | $/t | Carbon price on all emissions |
 | CO2 Budget Violation | 500 | $/t | Emissions above the CO2 budget |
 | FRE Penetration Loss | 100 | $/MWh | Shortfall from the RE target |
 | EV Loss | 50,000 | $/MWh | EV driving energy not supplied. Same as Loss of Load by default; a lower value makes leaving EVs uncharged cheaper than generating. |
 | Loss of Fuel Supply | 100 | $/unit | Fuel supply deficit |
-| Transport Congestion | 100 | $/MW | No effect (disabled): fuel transport has no congestion slack |
-| Storage Violation | 100 | $/MW | No effect (disabled): fuel storage has no violation slack |
 | Non-Electric Demand Loss | 100 | $/unit | Non-electric (sectoral) fuel demand left unmet |
 
 #### Criticality (Load Shedding Priority)

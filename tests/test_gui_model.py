@@ -746,7 +746,6 @@ class TestGuiPenalties:
         assert p.loss_of_reserve_dynamic == 100.0
         assert p.loss_of_inertia == 200.0
         assert p.transfer_margin == 100.0
-        assert p.curtailment == 100.0
         assert p.max_curtailment_ratio == 0.05
         assert p.rooftop_curtailment == 5.0
         assert p.co2_cost == 10.0
@@ -754,8 +753,6 @@ class TestGuiPenalties:
         assert p.fre_penetration_loss == 100.0
         assert p.ev_loss == p.loss_of_load
         assert p.loss_of_fuel_supply == 100.0
-        assert p.transport_congestion == 100.0
-        assert p.storage_violation == 100.0
         assert p.non_electric_demand_loss == 100.0
         # Criticality penalties (single-digit relative weights, not absolute $).
         assert p.criticality_critical == 3.0
