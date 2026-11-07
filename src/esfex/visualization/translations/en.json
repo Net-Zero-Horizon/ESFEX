@@ -1000,6 +1000,12 @@
     "mult_penalty_loss_of_reserve": "Loss of reserve penalty",
     "mult_penalty_curtailment": "Curtailment penalty",
     "mult_penalty_fre_penetration": "RE penetration shortfall penalty",
+    "mult_gen_start_up_cost": "Generator start-up cost",
+    "mult_bat_maintenance_cost": "Battery maintenance cost",
+    "mult_transmission_cost_per_mw_km": "Inter-system link flow cost (per MW·km)",
+    "mult_converter_invest_cost": "AC/DC & freq. converter investment cost",
+    "mult_converter_variable_cost": "AC/DC & freq. converter variable cost",
+    "mult_penalty_co2_budget_violation": "CO2 budget violation penalty",
     "mult_demand_growth": "Demand growth factor",
     "mult_discount_rate": "Discount rate"
   },

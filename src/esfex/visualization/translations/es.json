@@ -1000,6 +1000,12 @@
     "mult_penalty_loss_of_reserve": "Penalidad por pérdida de reserva",
     "mult_penalty_curtailment": "Penalidad por curtailment",
     "mult_penalty_fre_penetration": "Penalidad por déficit de penetración RE",
+    "mult_gen_start_up_cost": "Costo de arranque de generador",
+    "mult_bat_maintenance_cost": "Costo de mantenimiento de batería",
+    "mult_transmission_cost_per_mw_km": "Costo de flujo de enlaces entre sistemas (por MW·km)",
+    "mult_converter_invest_cost": "Costo de inversión de convertidor AC/DC y frec.",
+    "mult_converter_variable_cost": "Costo variable de convertidor AC/DC y frec.",
+    "mult_penalty_co2_budget_violation": "Penalidad por violación de presupuesto CO2",
     "mult_demand_growth": "Factor de crecimiento de demanda",
     "mult_discount_rate": "Tasa de descuento"
   },
