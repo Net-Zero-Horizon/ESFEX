@@ -124,7 +124,7 @@ where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) i
 | \(c^{var}_b\) (`variable_cost`) | \$/MWh | Variable cost of the electricity consumed |
 | \(c^{fix}_b\) (`fixed_cost`) | \$/MW per hour | Fixed cost on rated power. It is applied per hour of the window, so a yearly figure in \$/MW/year must be divided by 8760. It is a constant and does not affect the dispatch |
 
-`water_cost` is not used.
+`water_cost` is not used. The cost is reported as `electrolyzer_cost` and, when the electrolyzers feed the primary-energy `Hydrogen` tank, also as `pe_electrolyzer_cost` (the same amount, charged once).
 
 ---
 
