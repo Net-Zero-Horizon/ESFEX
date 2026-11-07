@@ -1056,12 +1056,15 @@ class EVCategoryConfig(BaseModel):
 class RooftopSolarConfig(BaseModel):
     """Rooftop solar simulation configuration.
 
-    The runner uses adoption_scenario, weather_variability, simulation_seed,
-    base_year, target_year and degradation_rate. The per-node system counts
-    and sizes, the adoption parameters, performance_ratio and the cost
-    fields are optional and kept for the GUI and the standalone rooftex
-    workflow; the runner does not pass them to rooftex (the capacity comes
-    from rooftex or from the system's rooftop_max_potential).
+    The runner passes adoption_scenario, weather_variability,
+    simulation_seed, performance_ratio, systems_per_node, avg_system_size,
+    initial_adoption, max_adoption and adoption_rates to rooftex (unset or
+    empty: rooftex defaults), and uses base_year, target_year and
+    degradation_rate for the yearly capacity. max_adoption and
+    adoption_rates are keyed by adoption scenario ("low", "medium",
+    "high"). The cost fields are kept for the GUI and the standalone
+    rooftex workflow: rooftop solar is behind the meter, with no investment
+    decision in the model to price.
     """
 
     adoption_scenario: Literal["low", "medium", "high"] = "medium"

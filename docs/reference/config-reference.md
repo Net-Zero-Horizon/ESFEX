@@ -97,8 +97,8 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. |
 | `generation_reserve_percentage` | float (0–1) | `0.15` | Reserve fraction when `generation_reserve_type: percentage` |
 | `scopf_enabled` | bool | `false` | Use SCOPF instead of preventive N-1 reserves: post-contingency (LODF) flow limits for every pair of lines, in one solve, with priced overloads. |
-| `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative) |
-| `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used |
+| `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative); another value logs a warning |
+| `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used; another value logs a warning |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
 | `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
 | `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | Studio SLD analysis only: how generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
@@ -904,7 +904,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 
 ## PenaltiesConfig
 
-Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes them and shows them disabled.
+Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Four keys load but price nothing in the current model: `curtailment`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes the last three and shows them disabled; `coupling_slack_penalty` is deprecated, no longer written by the Studio, and logs a warning when present.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -924,7 +924,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `fre_penetration_loss` | float | `100` | $/MWh RE shortfall |
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
-| `coupling_slack_penalty` | float | `1` | No effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack (kept so existing files load). |
+| `coupling_slack_penalty` | float | `1` | Deprecated, no effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack. Existing files still load, with a warning. |
 | `transport_congestion` | float | `100` | No effect: fuel transport has no congestion slack (kept so existing files load). |
 | `storage_violation` | float | `100` | No effect: fuel storage has no violation slack (kept so existing files load). |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
@@ -1007,20 +1007,20 @@ The budget covers the system's own power plants. The dispatch and the master pro
 | `adoption_scenario` | `low` \| `medium` \| `high` | `"medium"` | Adoption scenario |
 | `weather_variability` | `low` \| `normal` \| `high` | `"normal"` | Weather variability |
 | `simulation_seed` | int | `42` | Random seed |
-| `systems_per_node` | list[int] \| null | `null` | Rooftop systems per node (not used by the runner) |
-| `avg_system_size` | list[float] \| null | `null` | Average system size per node, kW (not used by the runner) |
-| `performance_ratio` | float (0–1) | `0.75` | Performance ratio (not used by the runner) |
+| `systems_per_node` | list[int] \| null | `null` | Rooftop systems per node; with `avg_system_size`, sets rooftex's potential |
+| `avg_system_size` | list[float] \| null | `null` | Average system size per node, kW |
+| `performance_ratio` | float (0–1) | `0.75` | Performance ratio of the rooftex profile |
 | `degradation_rate` | float (≥ 0) | `0.005` | Degradation (fraction/year) |
 | `cost_per_kw` | float | `1200` | Installation cost, $/kW (not used by the runner) |
 | `cost_reduction_rate` | float | `0.08` | Annual cost reduction (not used by the runner) |
 | `o_and_m_cost` | float | `20` | O&M cost, $/kW/year (not used by the runner) |
 | `base_year` | int | `2025` | Reference year |
 | `target_year` | int | `2050` | Target year |
-| `initial_adoption` | list[float] \| null | `null` | Current adoption per node (not used by the runner) |
-| `max_adoption` | dict[str, float] \| null | `null` | Maximum adoption per scenario (not used by the runner) |
-| `adoption_rates` | dict[str, float] \| null | `null` | Adoption growth rate per scenario (not used by the runner) |
+| `initial_adoption` | list[float] \| null | `null` | Current adoption per node (passed to rooftex, which 0.1.1 does not use) |
+| `max_adoption` | dict[str, float] \| null | `null` | Maximum adoption per scenario (`low`, `medium`, `high`) |
+| `adoption_rates` | dict[str, float] \| null | `null` | Adoption growth rate per scenario |
 
-The runner passes only `adoption_scenario`, `weather_variability` and `simulation_seed` to rooftex and uses `base_year`, `target_year` and `degradation_rate` for the yearly capacity; the per-node capacity comes from rooftex or from the system's `rooftop_max_potential`. See [Rooftop Solar](../formulation/rooftop-solar.md).
+The runner passes every field except the cost fields, `base_year`, `target_year` and `degradation_rate` to rooftex (unset or empty: rooftex's defaults) and uses `base_year`, `target_year` and `degradation_rate` for the yearly capacity; the per-node capacity comes from rooftex or from the system's `rooftop_max_potential`. See [Rooftop Solar](../formulation/rooftop-solar.md).
 
 ---
 

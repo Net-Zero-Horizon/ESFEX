@@ -327,7 +327,8 @@ end
 | `add_ev_constraints!` | `(model, vars, input)` | EV charging scheduling and V2G dispatch with SOC tracking. |
 | `add_sectoral_demand_constraints!` | `(model, vars, input)` | Per-sector loss-of-load with criticality-weighted penalties and demand shifting. |
 | `add_n1_security_constraints!` | `(model, vars, input)` | N-1 contingency constraints for transmission and generation. |
-| `extract_solution` | `(model, vars, input) -> PowerSystemResult` | Extract all variable values into a structured result. |
+| `extract_solution` | `(model, vars, input; committed=nothing) -> PowerSystemResult` | Extract all variable values into a structured result. With `committed` (from `committed_steps`), the objective, scalar totals and cost breakdown cover only a rolling window's kept steps. |
+| `committed_steps` | `(ps_vars, hours, keep; pe_vars, pe_temporal) -> CommittedSteps` | Share of each variable in a window's first `keep` steps (1 / 0 per step, period share for primary-energy periods, `keep / hours` for variables without a step). `committed_value(cs, expr)` values a solved expression over those steps. |
 | `recover_uc_duals!` | `(model, vars, input) -> Bool` | UC only: fix the commitment binaries to their rounded values on the model itself and re-solve as an LP so balance duals (prices) exist. Mutates the model. |
 | `recover_uc_duals_via_copy` | `(model, vars, input) -> Union{Matrix, Nothing}` | Same on a copy of the model; returns the `[bus x hour]` price matrix in M$/MWh, or `nothing`. Used by `PowerSystemAdapter`. |
 

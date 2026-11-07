@@ -799,7 +799,6 @@
     "penalty_fre": "FRE Penetration Loss:",
     "penalty_ev": "EV Loss:",
     "penalty_fuel_supply": "Loss of Fuel Supply:",
-    "penalty_coupling_slack": "PE Coupling Slack:",
     "penalty_transport": "Transport Congestion:",
     "penalty_storage": "Storage Violation:",
     "penalty_non_elec": "Non-Electric Demand Loss:",
@@ -827,7 +826,7 @@
     "ac_q_min_ratio": "Q Min Ratio (×Q_max):"
   },
   "global_form": {
-    "n1_scopf_unused_tip": "Saved in the configuration but not used: the SCOPF constraints are built in a single pass.",
+    "n1_scopf_unused_tip": "Saved in the configuration but not used: the SCOPF constraints are built in a single pass. A value other than the default logs a warning when the configuration is loaded.",
     "n1_crit_line_tip": "Run All N-1 and Screening trip only lines and transformers loaded at or above this fraction of their capacity. 0 = all of them.",
     "n1_sld_header_tip": "The settings below are the defaults of the SLD Analysis panel (Run All N-1 and Run Screening). They do not change the optimisation.",
     "n1_sld_header": "SLD contingency analysis (Run All N-1 / Screening):",

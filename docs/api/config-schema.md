@@ -569,14 +569,14 @@ class RooftopSolarConfig(BaseModel):
     adoption_scenario: Literal["low", "medium", "high"] = "medium"
     weather_variability: Literal["low", "normal", "high"] = "normal"
     simulation_seed: int = 42
-    systems_per_node: Optional[list[int]] = None      # not used by the runner
-    avg_system_size: Optional[list[float]] = None     # kW per system; not used
-    performance_ratio: float = 0.75                   # not used by the runner
+    systems_per_node: Optional[list[int]] = None      # passed to rooftex
+    avg_system_size: Optional[list[float]] = None     # kW per system; passed to rooftex
+    performance_ratio: float = 0.75                   # passed to rooftex
     cost_per_kw: float = 1200                         # not used by the runner
     cost_reduction_rate: float = 0.08                 # not used by the runner
-    initial_adoption: Optional[list[float]] = None    # not used by the runner
-    max_adoption: Optional[dict[str, float]] = None   # not used by the runner
-    adoption_rates: Optional[dict[str, float]] = None # not used by the runner
+    initial_adoption: Optional[list[float]] = None    # passed to rooftex
+    max_adoption: Optional[dict[str, float]] = None   # per scenario; passed to rooftex
+    adoption_rates: Optional[dict[str, float]] = None # per scenario; passed to rooftex
     ...
 ```
 

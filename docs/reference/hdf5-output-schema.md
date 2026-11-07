@@ -163,7 +163,7 @@ Despite the name, this is the same total demand array as `detailed_results/.../d
 
 ## cost_breakdown/
 
-Granular decomposition of the annual system cost into 35 components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, accumulated across rolling horizon windows.
+Granular decomposition of the annual system cost into 35 components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, summed over the rolling-horizon windows. Each window counts only its committed steps (the overlap tail is solved again by the next window); costs with no time step (investment annuities, CO2-budget slack) count for the committed share of the window.
 
 This group is present when the optimizer exports per-component cost data. The [Financial Analysis](../api/models-financial-analysis.md) module reads this group directly; when it is absent, costs are recalculated from generation output and system configuration.
 
@@ -203,7 +203,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
 | `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
-| `pe_coupling_slack_cost` | float | $ | Always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
+| `pe_coupling_slack_cost` | float | $ | Deprecated, always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
 | `pe_electrolyzer_cost` | float | $ | Electrolyzer cost in the primary energy model |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `total` | float | $ | Sum of all cost components |
@@ -254,9 +254,9 @@ Investment and retirement decisions of the master problem for this year are stor
 | `investment_bat_tech_investment_power_{bt}_{n}` | New power of battery technology `bt` at node `n` (MW) |
 | `investment_bat_tech_investment_capacity_{bt}_{n}` | New energy of battery technology `bt` at node `n` (MWh) |
 | `investment_transfer_investment_{i}_{j}` | New transmission capacity from node `i` to node `j` (MW) |
-| `retirement_gen_{g}` | Fraction (0-1) of existing generator `g` retired by this year |
+| `retirement_gen_{g}` | Share (0-1) of existing generator `g`'s capacity (`rated_power` summed over nodes) retired by this year |
 
-Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`.
+The node index `n` (and `i`, `j`) is always a node: when the master solves on buses (a one-node system with several buses, development zones), the buses of a node are summed onto it, and transmission built between two buses of the same node is not listed. Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`.
 
 ### Dataset Naming
 
@@ -577,9 +577,10 @@ Written when the primary energy model is active.
 | `transport_investments/{fuel}` | dataset | Transport capacity investments |
 | `storage_investments/{fuel}` | dataset | Storage capacity investments |
 | `transport_flows/{fuel}` | dataset | Flows per route and period `[routes x periods]` |
+| `fuel_for_power/{unit}` | dataset | Fuel burnt by each fuel-coupled unit `[nodes x steps]`, in fuel units per step (attribute `units`) |
 | `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | attributes | Cost totals ($) |
 
-Rolling-horizon windows contribute only their committed steps (the overlap with the next window is dropped, as for the dispatch arrays); window costs count in proportion to those steps.
+Rolling-horizon windows contribute only their committed steps (the overlap with the next window is dropped, as for the dispatch arrays). The cost totals add up each window's committed steps: a period's supply and flows count for the share of its steps that the window keeps.
 
 #### n1_security/
 
@@ -768,7 +769,7 @@ When near-optimal alternative generation is enabled (`master_problem.mga.enabled
 | `cumulative_gen_capacity` | (years, generators, nodes) | float64 | MW | Cumulative capacity per generator (with degradation/retirement) |
 | `re_penetration` | (years,) | float64 | fraction | RE penetration ratio per year |
 
-The technology axes have length 1 (all zeros) when the system has no technologies of that kind.
+The technology axes have length 1 (all zeros) when the system has no technologies of that kind. The node axis and `i`, `j` are nodes: a bus-level master's buses are summed onto their node (transmission between two buses of one node is left out).
 
 ---
 
