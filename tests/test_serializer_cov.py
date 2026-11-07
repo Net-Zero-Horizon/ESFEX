@@ -780,3 +780,15 @@ def test_gui_state_to_yaml_writes_loadable_file(tmp_path):
     assert "systems" in loaded
     assert "Gamma" in loaded["systems"]
     assert loaded["meta_network"]["systems"] == ["Gamma"]
+
+
+def test_n1_compute_security_cost_round_trips():
+    g = GuiGlobalSettings()
+    g.n1_compute_security_cost = True
+    cd = {}
+    S.global_settings_to_config_dict(g, cd)
+    assert cd["n1_security"]["compute_security_cost"] is True
+    cfg = _minimal_config()
+    cfg = cfg.model_copy(update={"n1_security": cfg.n1_security.model_copy(
+        update={"compute_security_cost": True})})
+    assert S.config_to_global_settings(cfg).n1_compute_security_cost is True

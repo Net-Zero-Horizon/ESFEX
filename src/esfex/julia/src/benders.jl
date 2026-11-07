@@ -1038,8 +1038,11 @@ function create_benders_subproblem(
     # =========================================================================
     # Sectoral split of the load shed (same as the monolithic master)
     # =========================================================================
-    add_day_sectoral_shed_constraints!(sp_model, ps_vars, input, demand_slice,
-        start_hour, growth_factor)
+    # The remainder is priced like the load shed below (capped VOLL if set)
+    lol_cap = input.benders_lol_penalty_cap
+    remainder_premium = add_day_sectoral_shed_constraints!(sp_model, ps_vars, input,
+        demand_slice, start_hour, growth_factor;
+        voll = lol_cap > 0 ? min(lol_cap, input.loss_of_load_penalty) : input.loss_of_load_penalty)
 
     # =========================================================================
     # RE Penetration with FIXED ratio — PER SYSTEM
@@ -1213,7 +1216,7 @@ function create_benders_subproblem(
     add_to_expression!(tech_curve_cost,
         battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
-        tech_output=tech_output, tech_day_cost=tech_curve_cost)
+        tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium)
 
     # Cap load-shedding penalties for Benders numerical stability.
     # calculate_day_operational_cost already includes scaling_factor internally,

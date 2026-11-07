@@ -262,6 +262,15 @@ def _build_graph(
     return graph, skipped, n_lines, n_tf
 
 
+def _merged_cost_per_mw_km(originals, length_km: float) -> float:
+    """``cost_per_mw_km`` of a merged line whose per-MWh flow cost
+    (``length × cost_per_mw_km``) is that of its originals: each carries
+    ``|flow_share|`` of the merged flow, so the costs add with those weights."""
+    from esfex.bridge.converters import line_flow_cost_per_mwh
+    per_mwh = sum(abs(share) * line_flow_cost_per_mwh(line) for line, share in originals)
+    return per_mwh / length_km if per_mwh > 0 and length_km > 0 else 0.0
+
+
 def _fixed_point_reduce(
     graph: _ReductionGraph,
     max_iters: int = 20,
@@ -444,6 +453,9 @@ def _build_reduced_system(
                 frequency_hz=_proto_attr("frequency_hz", 50.0),
                 current_type=_proto_attr("current_type", "AC"),
                 line_type=_proto_attr("line_type", None),
+                cost_per_mw_km=_merged_cost_per_mw_km(
+                    [(original_lines[oi], os) for oi, _, os in line_refs_raw],
+                    edge.length_km),
             )
         )
 

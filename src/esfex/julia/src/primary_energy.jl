@@ -504,9 +504,18 @@ end
 # =============================================================================
 
 """
-    add_primary_energy_constraints!(model, vars, input, temporal, adjusted_prices, max_supply, ne_demand)
+    add_primary_energy_constraints!(model, vars, input, temporal, adjusted_prices,
+                                    max_supply, ne_demand; outage_masks)
 
 Add all primary energy constraints to the model.
+
+`outage_masks` holds the scheduled interruptions of the window, as
+availability factors in [0, 1] per step (1 = no outage):
+- `"fuel_storage"` => fuel => [node × step]: the tank's contents are locked
+  in proportion to the outage (frozen at a full outage, so the node's fuel
+  only passes through), and its minimum levels do not apply;
+- `"fuel_route"` => route_id => [step]: the route's capacity in a period is
+  scaled by the period's mean factor (shipments are per period).
 """
 function add_primary_energy_constraints!(
     model::Model,
@@ -515,10 +524,20 @@ function add_primary_energy_constraints!(
     temporal::TemporalMapping,
     adjusted_prices::Dict{String, Float64},
     max_supply::Dict{String, Dict{Int, Dict{Int, Float64}}},
-    ne_demand::Dict{Tuple{String, String}, Dict{Int, Dict{Int, Float64}}}
+    ne_demand::Dict{Tuple{String, String}, Dict{Int, Dict{Int, Float64}}};
+    outage_masks::Dict{String, Any} = Dict{String, Any}()
 )
     n_nodes = input.num_nodes
     n_hours = input.hours
+
+    # Scheduled outages (1.0 = available)
+    tank_masks = get(outage_masks, "fuel_storage", Dict{String, Matrix{Float64}}())
+    route_masks = get(outage_masks, "fuel_route", Dict{String, Vector{Float64}}())
+    function tank_avail(fuel_name, n, t)
+        mask = get(tank_masks, fuel_name, nothing)
+        (mask === nothing || n > size(mask, 1) || t > size(mask, 2)) && return 1.0
+        return mask[n, t]
+    end
 
     fuel_names = [f.name for f in input.fuels]
     fuel_by_name = Dict(f.name => f for f in input.fuels)
@@ -631,9 +650,17 @@ function add_primary_energy_constraints!(
 
                 total_daily_cap = base_daily_cap + cumul_cap + inv_cap
 
+                # Scheduled route outage: the period's mean availability
+                avail = 1.0
+                rmask = get(route_masks, route.route_id, nothing)
+                if rmask !== nothing
+                    steps = [t for t in temporal.hours_in_primary_period[p] if t <= length(rmask)]
+                    isempty(steps) || (avail = sum(rmask[t] for t in steps) / length(steps))
+                end
+
                 @constraint(model,
                     vars.fuel_transport_periodic[fuel_name][r, p] <=
-                    total_daily_cap * days_in_p,
+                    total_daily_cap * days_in_p * avail,
                     base_name = "pp_transport_cap_$(fuel_name)_r$(r)_$(p)"
                 )
             end
@@ -770,8 +797,9 @@ function add_primary_energy_constraints!(
                     end
                 end
 
-                # Minimum storage level (after each step; the initial level is given)
-                if fuel.min_storage_level > 0 && base_cap > 0
+                # Minimum storage level (after each step; the initial level is
+                # given). Not while the tank is out of service.
+                if fuel.min_storage_level > 0 && base_cap > 0 && tank_avail(fuel_name, n, t) >= 1.0
                     @constraint(model,
                         vars.fuel_storage_level_hourly[fuel_name][n, t+1] >=
                         fuel.min_storage_level * base_cap,
@@ -779,14 +807,13 @@ function add_primary_energy_constraints!(
                     )
                 end
 
-                # Maximum storage level. A node without any tank capacity has
-                # no bound: its tank only buffers fuel within the window.
-                if base_cap > 0 || cumul_cap > 0
-                    @constraint(model,
-                        vars.fuel_storage_level_hourly[fuel_name][n, t+1] <= total_cap,
-                        base_name = "hr_storage_max_$(fuel_name)_$(n)_$(t)"
-                    )
-                end
+                # Maximum storage level. A node without any tank capacity
+                # holds nothing: its fuel passes through within the step (it
+                # used to be unbounded, a free buffer within the window).
+                @constraint(model,
+                    vars.fuel_storage_level_hourly[fuel_name][n, t+1] <= total_cap,
+                    base_name = "hr_storage_max_$(fuel_name)_$(n)_$(t)"
+                )
 
                 # Fuel needed for power + NE consumption <= drawn + shortfall
                 fuel_for_power = AffExpr(0.0)
@@ -892,8 +919,9 @@ function add_primary_energy_constraints!(
                     base_name = "link_supply_storage_in_$(fuel_name)_$(n)_$(p)"
                 )
 
-                # Minimum storage level at the period's end (on the total capacity)
-                if fuel.min_storage_level > 0
+                # Minimum storage level at the period's end (on the total
+                # capacity), unless the tank is out of service then
+                if fuel.min_storage_level > 0 && tank_avail(fuel_name, n, last_hour) >= 1.0
                     base_cap, cumul_cap, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
                     if base_cap > 0 || cumul_cap > 0
                         @constraint(model,
@@ -933,7 +961,7 @@ function add_primary_energy_constraints!(
                 fuel = fuel_by_name[fuel_name]
                 for n in 1:n_nodes
                     base_cap, _, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
-                    if base_cap > 0
+                    if base_cap > 0 && tank_avail(fuel_name, n, last_hour) >= 1.0
                         min_fill = 0.1
                         @constraint(model,
                             vars.fuel_storage_level_hourly[fuel_name][n, last_hour + 1] >=
@@ -942,6 +970,38 @@ function add_primary_energy_constraints!(
                         )
                     end
                 end
+            end
+        end
+    end
+
+    # =========================================================================
+    # VI. Scheduled tank outages
+    # =========================================================================
+    # Over each run of steps with availability a_t < 1, starting at step s,
+    # the share (1 − a_t) of the level at s is locked in the tank and only
+    # a_t of its capacity is usable:
+    #   (1 − a_t) L_s ≤ level[t+1] ≤ (1 − a_t) L_s + a_t × capacity
+    # A full outage freezes the level; the node's fuel then only passes through.
+    for (fuel_name, mask) in tank_masks
+        haskey(fuel_by_name, fuel_name) || continue
+        fuel = fuel_by_name[fuel_name]
+        level = vars.fuel_storage_level_hourly[fuel_name]
+        for n in 1:min(n_nodes, size(mask, 1))
+            start = 0
+            for t in 1:min(n_hours, size(mask, 2))
+                a = mask[n, t]
+                if a >= 1.0
+                    start = 0
+                    continue
+                end
+                start == 0 && (start = t)
+                inv_p = get(temporal.primary_to_investment_period,
+                            temporal.hour_to_primary_period[t], 1)
+                _, _, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
+                @constraint(model, level[n, t+1] >= (1.0 - a) * level[n, start],
+                    base_name = "hr_storage_outage_lo_$(fuel_name)_$(n)_$(t)")
+                @constraint(model, level[n, t+1] <= (1.0 - a) * level[n, start] + a * total_cap,
+                    base_name = "hr_storage_outage_hi_$(fuel_name)_$(n)_$(t)")
             end
         end
     end
@@ -1244,6 +1304,9 @@ tank at its node (the balance built by `add_primary_energy_constraints!`,
 scaled by the tank's storage efficiency like every inflow). Without a
 `Hydrogen` fuel in the primary-energy model the electrolyzers stay a plain
 load, as in a run without primary energy.
+
+The electrolyzers' cost charged by the dispatch (`electrolyzer_cost`) is then
+also reported as `pe_electrolyzer_cost` (the same money, not charged again).
 """
 function couple_electrolyzers_to_hydrogen_tank!(model::Model, ps_vars::PowerSystemVariables,
                                                 input::PrimaryEnergyInput, electrolyzers;
@@ -1257,6 +1320,12 @@ function couple_electrolyzers_to_hydrogen_tank!(model::Model, ps_vars::PowerSyst
         return
     end
     balance, eff = h2
+    ce = get(model.ext, :cost_expressions, nothing)
+    if ce !== nothing && haskey(ce, :electrolyzer_cost)
+        # Breakdown only: :electrolyzer_cost is an energy term (× step length
+        # at extraction), the PE entries are not.
+        ce[:pe_electrolyzer_cost] = resolution_hours * ce[:electrolyzer_cost]
+    end
     n_hours = min(input.hours, size(ps_vars.electrolyzer_power, 3))
     for (e, ec) in enumerate(electrolyzers), b in 1:size(ps_vars.electrolyzer_power, 2)
         node = node_of(b)
@@ -1567,13 +1636,15 @@ end
 # =============================================================================
 
 """
-    create_primary_energy_model(model, input)
+    create_primary_energy_model(model, input; outage_masks)
 
 Create the primary energy optimization model components.
 
 # Arguments
 - `model::Model`: JuMP model to add variables and constraints to
 - `input::PrimaryEnergyInput`: Primary energy configuration
+- `outage_masks`: scheduled tank and route outages of the window (see
+  `add_primary_energy_constraints!`); empty = none
 
 # Returns
 - `vars::PrimaryEnergyVariables`: Variable container
@@ -1581,7 +1652,8 @@ Create the primary energy optimization model components.
 """
 function create_primary_energy_model(
     model::Model,
-    input::PrimaryEnergyInput
+    input::PrimaryEnergyInput;
+    outage_masks::Dict{String, Any} = Dict{String, Any}()
 )
     # The dispatch electrolyzers feed the Hydrogen tank
     # (couple_primary_energy_to_power_system!); the old inputs are gone.
@@ -1607,7 +1679,7 @@ function create_primary_energy_model(
 
     # Add constraints
     add_primary_energy_constraints!(model, vars, input, temporal,
-        adjusted_prices, max_supply, ne_demand)
+        adjusted_prices, max_supply, ne_demand; outage_masks)
 
     return vars, temporal, adjusted_prices
 end

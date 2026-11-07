@@ -100,6 +100,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative); another value logs a warning |
 | `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used; another value logs a warning |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
+| `compute_security_cost` | bool | `false` | Re-solve each operational window without the N-1 constraints and report objective(with N-1) − objective(without) as `n1_security_cost`. Roughly doubles the solve time. Off: `n1_security_cost` stays 0. |
 | `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
 | `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | Studio SLD analysis only: how generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
 | `pi_screening_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: Performance Index threshold for contingency screening. 0 = no screening (analyze all contingencies). Higher values filter out low-impact contingencies. |
@@ -188,7 +189,7 @@ One entry of `meta_network.systems_links`. Each list holds one value per link; a
 | `investment_cost_per_mw` / `investment_cost_per_MW` | list[float] | required | Investment cost per link ($/MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
 | `loss_factor` | list[float] | required | Transmission: not used (losses come from `resistance_pu`). Fuel route: route `losses_fraction` (fraction per 100 km) |
 | `distance_km` | list[float] | required | Length per link (km) |
-| `cost_per_mw_km` | list[float] | required | Transmission: operating cost of the flow, `distance_km` × `cost_per_mw_km` per MWh carried, charged by the master (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
+| `cost_per_mw_km` | list[float] | required | Transmission: operating cost of the flow, `distance_km` × `cost_per_mw_km` per MWh carried in either direction, charged by the master and the dispatch (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
 | `reactance_pu` | list[float] | `[]` | Series reactance per link (p.u.). Empty: derived from length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`; 0.01 without a length |
 | `resistance_pu` | list[float] | `[]` | Series resistance per link (p.u.). Empty: 0 |
 | `waypoints` | list[list[dict]] | `[]` | GUI-only: per-link waypoints (list of {lat, lng}) for map polyline |
@@ -411,7 +412,7 @@ See [Nodes and buses](../user-guide/configuration.md#nodes-and-buses) in the gui
 | `resistance_pu` | float \| null | `null` | Resistance (p.u.). Missing → 0 |
 | `susceptance_pu` | float \| null | `null` | Susceptance (p.u.). Missing → 0 |
 | `num_circuits` | int | `1` | Parallel circuits |
-| `cost_per_mw_km` | float (≥ 0) | `0` | Operating cost of the flow ($ per MWh and km): the master charges `length_km` × `cost_per_mw_km` × \|flow\|. Set by a multi-system run on its inter-system links |
+| `cost_per_mw_km` | float (≥ 0) | `0` | Operating cost of the flow ($ per MWh and km): the master and the dispatch (DC power flow, not ACOPF) charge `length_km` × `cost_per_mw_km` × \|flow\|. Set by a multi-system run on its inter-system links |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` | `"AC"` | Current type |
 | `from_endpoint_type` | str \| null | `null` | Studio endpoint reference (`bus`, `generator`, `battery`, `transformer`, ...) |
@@ -1117,8 +1118,8 @@ Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `element_type` | `generator` \| `line` \| `battery` \| `transformer` \| `acdc_converter` \| `freq_converter` \| `electrolyzer` \| `fuel_source` \| `fuel_storage` \| `fuel_route` | required | Kind of element taken out |
-| `element_id` | str | required | Generator/battery/electrolyzer/fuel-source key, or list index as a string for lines, transformers, converters and fuel routes. A generator/battery id of the form `<unit key>_n<node>` (saved by earlier Studio versions) is read as that unit and node |
-| `node` | int (≥ 0) or null | `null` | Generators / batteries: cut only the unit's capacity at this node (`null` = every node). Battery windows apply to the whole battery |
+| `element_id` | str | required | Generator/battery/electrolyzer key, fuel name (`fuel_source`, `fuel_storage`), `line_id` or name (lines, transformers, converters), or `route_id` of a fuel route (`route_<i>` for a route without one). A generator/battery id of the form `<unit key>_n<node>` (saved by earlier Studio versions) is read as that unit and node |
+| `node` | int (≥ 0) or null | `null` | Generators: cut only the unit's capacity at this node; `fuel_storage`: only the fuel's tank at this node (`null` = every node). Battery and electrolyzer windows apply to the whole unit |
 | `start_hour` | int (≥ 0) | required | First hour (inclusive) of the window, in horizon hours: hour 0 = 1 January of `base_year`, 8760 h per simulated year |
 | `end_hour` | int (> 0) | required | End hour (exclusive); must be > `start_hour` |
 | `availability` | float (0.0–1.0) | `0` | Capacity fraction available during the window (0 = full outage) |

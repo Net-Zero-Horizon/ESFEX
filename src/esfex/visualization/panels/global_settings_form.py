@@ -411,6 +411,11 @@ class GlobalSettingsForm(QWidget):
         self._n1_corrective.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_corrective)
 
+        self._n1_security_cost = QCheckBox(tr("global_form.n1_security_cost"))
+        self._n1_security_cost.setToolTip(tr("global_form.n1_security_cost_tip"))
+        self._n1_security_cost.toggled.connect(self._on_changed)
+        n1l.addRow("", self._n1_security_cost)
+
         # ── SLD contingency analysis (Run All N-1 / Screening) ──
         # Not part of the optimisation: defaults of the SLD Analysis panel.
         n1_sld_header = QLabel(tr("global_form.n1_sld_header"))
@@ -863,6 +868,7 @@ class GlobalSettingsForm(QWidget):
         self._n1_scopf_max_iter.setValue(g.n1_scopf_max_iterations)
         self._n1_scopf_tol.setValue(g.n1_scopf_violation_tolerance)
         self._n1_corrective.setChecked(g.n1_corrective_enabled)
+        self._n1_security_cost.setChecked(g.n1_compute_security_cost)
         self._n1_scopf_max_iter.setEnabled(g.n1_scopf_enabled)
         self._n1_scopf_tol.setEnabled(g.n1_scopf_enabled)
         idx = self._n1_depth.findData(g.n1_contingency_depth)
@@ -1142,6 +1148,7 @@ class GlobalSettingsForm(QWidget):
         g.n1_scopf_max_iterations = self._n1_scopf_max_iter.value()
         g.n1_scopf_violation_tolerance = self._n1_scopf_tol.value()
         g.n1_corrective_enabled = self._n1_corrective.isChecked()
+        g.n1_compute_security_cost = self._n1_security_cost.isChecked()
         g.n1_contingency_depth = self._n1_depth.currentData() or "n1"
         g.n1_redistribution_mode = self._n1_redispatch.currentData() or "pro_rata"
         g.n1_pi_screening_threshold = self._n1_pi_threshold.value()

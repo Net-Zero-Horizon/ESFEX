@@ -37,6 +37,7 @@ from esfex.bridge.converters import (
     compile_outage_factor,
     absolute_start_hour,
     fuel_source_outage_windows,
+    line_flow_cost_per_mwh,
     outage_window_spans,
     outage_window_tuple,
     convert_battery_config,
@@ -1962,6 +1963,18 @@ class PowerSystemAdapter:
                 jl.seval("setindex!")(
                     jl_line_masks, py_to_julia_vector(fac), str(lid))
             jl.seval("setindex!")(jl_outage_masks, jl_line_masks, "line")
+        # Electrolyzers: position-indexed matrix in config order (whole unit).
+        elz_windows = outage_by_type.get("electrolyzer", {})
+        if any(n is not None for ns in outage_nodes.get("electrolyzer", {}).values() for n in ns):
+            logger.warning("Outage window on one node of an electrolyzer: electrolyzer "
+                           "outages apply to the whole unit.")
+        elz_mask = build_outage_mask_matrix(
+            elz_windows, list(electrolyzers.keys()),
+            outage_hour0, self.hours, resolution_hours,
+        )
+        if elz_mask is not None:
+            jl.seval("setindex!")(
+                jl_outage_masks, py_to_julia_matrix(elz_mask), "electrolyzer")
         # Converters (AC/DC, frequency) and transformers: id-addressed by name.
         for _cat in ("acdc_converter", "freq_converter", "transformer"):
             _m = build_outage_mask_by_id(
@@ -2165,6 +2178,19 @@ class PowerSystemAdapter:
 
         status_code = self._map_termination_status(jl)
 
+        # Cost of N-1 security (opt-in): re-solve a copy without the N-1
+        # constraints; extract_solution reports the objective difference.
+        if status_code == 1 and self._n1_security_cost_requested():
+            try:
+                t0 = _time.perf_counter()
+                cost = float(jl.seval("compute_n1_security_cost!")(
+                    self._jl_model, self._jl_input))
+                logger.info(
+                    f"⏱ N-1 security cost re-solve: {_time.perf_counter() - t0:.2f}s "
+                    f"(cost={cost:.6g} M$)")
+            except Exception as exc:
+                logger.warning(f"N-1 security cost skipped due to bridge error: {exc}")
+
         # UC dual recovery (Ruta A v2): MIPs have no duals, so a UC solve
         # otherwise produces ``prices = 0`` in the HDF5 export. We clone
         # the model (``recover_uc_duals_via_copy``), fix ``gen_status``
@@ -2200,6 +2226,12 @@ class PowerSystemAdapter:
                 )
 
         return status_code
+
+    def _n1_security_cost_requested(self) -> bool:
+        """``n1_security.compute_security_cost`` is on and N-1 applies to this mode."""
+        n1 = getattr(self.esfex_config, "n1_security", None) if self.esfex_config else None
+        return bool(n1 is not None and n1.enabled and n1.compute_security_cost
+                    and self.mode in n1.apply_to_modes)
 
     def _map_termination_status(self, jl) -> int:
         """Map JuMP termination status to PuLP-compatible code.
@@ -2448,7 +2480,7 @@ def _line_flow_costs(sys) -> dict[tuple[int, int], float]:
     """
     acc: dict[tuple[int, int], list[float]] = {}
     for line in sys.transmission_lines_geo or []:
-        cost = float(getattr(line, 'cost_per_mw_km', 0.0) or 0.0) * float(line.length_km or 0.0)
+        cost = line_flow_cost_per_mwh(line)
         if cost <= 0 or line.from_bus is None or line.to_bus is None:
             continue
         a, b = line.from_bus + 1, line.to_bus + 1
@@ -4495,9 +4527,62 @@ class PrimaryEnergyAdapter:
 
         # Create model components
         self._jl_vars, self._jl_temporal, self._adjusted_prices = \
-            ESFEX.create_primary_energy_model(model, self._jl_input)
+            ESFEX.create_primary_energy_model(
+                model, self._jl_input, outage_masks=self._outage_masks())
 
         logger.debug("PrimaryEnergy variables created")
+
+    def _outage_masks(self) -> Any:
+        """Scheduled tank and route outages of this window, for Julia.
+
+        ``fuel_storage`` windows (``element_id`` = fuel, ``node`` = one node or
+        None for all) give ``{fuel: [node × step]}``; ``fuel_route`` windows
+        (``element_id`` = the route's ``route_id``, ``route_<i>`` for a route
+        without one) give ``{route_id: [step]}``. Factors compound like the
+        other outage masks (:func:`compile_outage_factor`).
+        """
+        jl = get_julia()
+        out = jl.seval("Dict{String, Any}()")
+        win_lo = absolute_start_hour(self.year, self.base_year, self.year_hour_offset)
+        res = max(1, int(self.step_hours))
+        route_ids = {str(rt.get("route_id") or f"route_{i}")
+                     for i, rt in enumerate(self.transport_routes)}
+        tanks: dict[str, np.ndarray] = {}
+        routes: dict[str, np.ndarray] = {}
+        for ow in self.outage_schedule:
+            if ow.element_type not in ("fuel_storage", "fuel_route"):
+                continue
+            fac = compile_outage_factor([outage_window_tuple(ow)], win_lo, self.hours, res)
+            if np.all(fac >= 1.0):
+                continue
+            if ow.element_type == "fuel_storage":
+                if ow.element_id not in self.fuels_config:
+                    logger.warning("Outage window for fuel storage %r: no such fuel; "
+                                   "ignored.", ow.element_id)
+                    continue
+                mask = tanks.setdefault(ow.element_id, np.ones((self.num_nodes, self.hours)))
+                nodes = range(self.num_nodes) if ow.node is None else [ow.node]
+                for n in nodes:
+                    if 0 <= n < self.num_nodes:
+                        mask[n] *= fac
+            else:
+                if ow.element_id not in route_ids:
+                    logger.warning("Outage window for fuel route %r: no such route_id; "
+                                   "ignored.", ow.element_id)
+                    continue
+                routes.setdefault(ow.element_id, np.ones(self.hours))
+                routes[ow.element_id] *= fac
+        if tanks:
+            jl_tanks = jl.seval("Dict{String, Matrix{Float64}}()")
+            for fuel, mask in tanks.items():
+                jl_tanks[fuel] = py_to_julia_matrix(mask)
+            jl.seval("setindex!")(out, jl_tanks, "fuel_storage")
+        if routes:
+            jl_routes = jl.seval("Dict{String, Vector{Float64}}()")
+            for rid, fac in routes.items():
+                jl_routes[rid] = py_to_julia_vector(fac)
+            jl.seval("setindex!")(out, jl_routes, "fuel_route")
+        return out
 
     def add_constraints(self, model: Any):
         """Add primary energy constraints (called by create_variables)."""

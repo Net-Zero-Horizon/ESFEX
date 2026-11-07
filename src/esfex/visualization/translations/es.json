@@ -906,6 +906,8 @@
     "n1_scopf_tol": "Tolerancia de Violación SCOPF (MW):",
     "n1_corrective": "Permitir Acciones Correctivas",
     "n1_corrective_tip": "Permitir re-despacho post-contingencia de baterías y generadores en lugar de reservar capacidad preventiva. Menos conservador pero más realista para sistemas con almacenamiento.",
+    "n1_security_cost": "Calcular el coste de seguridad N-1",
+    "n1_security_cost_tip": "Vuelve a resolver cada ventana operativa sin las restricciones N-1 e informa de la diferencia de objetivo como coste de seguridad N-1. Duplica aproximadamente el tiempo de resolución. Desactivado, el coste de seguridad se informa como 0.",
     "n1_depth": "Profundidad de Contingencia:",
     "n1_redispatch": "Modo de Redistribución:",
     "n1_redispatch_prorata": "Pro-rata (proporcional a capacidad)",
