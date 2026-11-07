@@ -2010,7 +2010,7 @@ class TestBuildGenCostCurvesDict:
         mock_outer.__setitem__.assert_not_called()
 
     def test_flat_curve_skipped(self):
-        """Generator with flat curve (1 segment) -> empty outer dict."""
+        """Flat curve at the unit's fuel_cost (1 segment) -> empty outer dict."""
         mock_jl = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
@@ -2051,6 +2051,31 @@ class TestBuildGenCostCurvesDict:
         assert result is mock_outer
         # Outer dict should not have any generator entry (flat curve skipped)
         mock_outer.__setitem__.assert_not_called()
+
+    def test_flat_curve_with_its_own_price_is_kept(self):
+        """A flat curve whose flat_price differs from fuel_cost prices the
+        unit: it reaches Julia as one segment (it used to be dropped)."""
+        from types import SimpleNamespace
+
+        mock_jl = MagicMock()
+        mock_outer = MagicMock()
+
+        def seval_side_effect(expr):
+            if "Dict{Int, Dict{Int, Vector" in expr:
+                return mock_outer
+            return MagicMock()
+
+        mock_jl.seval.side_effect = seval_side_effect
+        flat_curve = CostCurveConfig(curve_type="flat", flat_price=70.0)
+        gen = SimpleNamespace(fuel_cost_curve=[flat_curve], fuel_cost=[100.0])
+        with (
+            patch(_PATCH_GET_JULIA, return_value=mock_jl),
+            patch(_PATCH_GET_ESFEX, return_value=MagicMock()),
+        ):
+            build_gen_cost_curves_dict(generators=[("gen_0", gen)], gen_configs=[],
+                                       num_buses=1)
+        mock_outer.__setitem__.assert_called_once()
+        assert mock_outer.__setitem__.call_args[0][0] == 1
 
     def test_multi_segment_curve(self):
         """Generator with multi-segment curve -> outer dict has entry."""

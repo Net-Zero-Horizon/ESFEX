@@ -103,8 +103,9 @@ def test_link_flow_cost_per_master_corridor():
 
 
 def test_merged_master_line_carries_the_link_flow_cost():
-    from esfex.bridge.adapters import _line_flow_costs
-    from esfex.bridge.converters import scale_cost
+    # The master charges each line its own flow_cost, as the dispatch does
+    # (it used to charge a per-bus-pair cost on every branch of the pair)
+    from esfex.bridge.converters import line_flow_cost_per_mwh
 
     a = _make_system_config(num_nodes=1)
     a = a.model_copy(update={"name": "A"})
@@ -114,7 +115,7 @@ def test_merged_master_line_carries_the_link_flow_cost():
     master, _, _ = Orchestrator._merge_systems(cfg)
     (line,) = master.transmission_lines_geo
     assert line.length_km * line.cost_per_mw_km == pytest.approx(100.0)   # $/MWh
-    assert _line_flow_costs(master) == {(1, 2): pytest.approx(scale_cost(100.0))}
+    assert line_flow_cost_per_mwh(line) == pytest.approx(100.0)
 
 
 def test_master_co2_budget_groups():

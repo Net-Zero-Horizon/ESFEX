@@ -167,7 +167,7 @@ Z^{\text{op,pwl}}_{g,n} = \sum_{t} \sum_{k=1}^{K} c_k \cdot p^{(k)}_{g,n,t} \tag
 
 **Convexity.** The marginal costs must be non-decreasing (\(c_1 \leq c_2 \leq \cdots \leq c_K\)). This ensures that the LP solver fills the cheaper segments first, which is necessary for the decomposition to correctly represent the cost curve without requiring explicit ordering constraints.
 
-**Flat curve special case.** When `curve_type = "flat"` (or no curve is configured), \(K = 1\), \(f_1 = 1\), and \(c_1 = c^{\text{fuel}}_{g,n}\). The formulation reduces exactly to the original Eq. (OBJ-1) with no additional variables or constraints.
+**Flat curve special case.** When `curve_type = "flat"`, \(K = 1\), \(f_1 = 1\) and \(c_1\) is `flat_price`, so the unit's output is priced at `flat_price` instead of its fuel cost (one segment variable per step). Without a `flat_price` (or with `flat_price` equal to the fuel cost), or with no curve configured, \(c_1 = c^{\text{fuel}}_{g,n}\) and the formulation reduces exactly to the original Eq. (OBJ-1) with no additional variables or constraints. The master problem follows the same rule for generators and candidate technologies.
 
 **Stepwise curves.** Each block in the `blocks` list directly maps to a segment: \(f_k = \text{block}_k.\text{fraction}\), \(c_k = \text{block}_k.\text{price}\).
 

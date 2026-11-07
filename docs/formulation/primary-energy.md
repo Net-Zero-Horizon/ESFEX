@@ -81,7 +81,7 @@ where \(X^{supply}_{f,n,p}\) is an excess-supply slack penalized at `penalties.l
 \bar{S}_{f,n,p} = S^{year}_{f,n} \cdot \frac{|p|}{H_{year}}
 \]
 
-with \(S^{year}_{f,n}\) = `max_availability[n]` (units/year), \(|p|\) the hours in period \(p\) and \(H_{year}\) the hours of the year (always 8760, leap years included). Proration uses the full year, so in rolling-horizon dispatch each window can only use its share of the annual availability. There are no seasonal supply profiles. Constraint `pp_max_supply_{fuel}_{n}_{p}`.
+with \(S^{year}_{f,n}\) = `max_availability[n]` (units/year), \(|p|\) the hours in period \(p\) (its steps × the step length, so 2 h steps get the same limit as 1 h steps) and \(H_{year}\) the hours of the year (always 8760, leap years included). Proration uses the full year, so in rolling-horizon dispatch each window can only use its share of the annual availability. There are no seasonal supply profiles. Constraint `pp_max_supply_{fuel}_{n}_{p}`.
 
 #### Source Disruption
 

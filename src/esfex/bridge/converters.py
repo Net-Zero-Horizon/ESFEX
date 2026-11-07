@@ -190,8 +190,11 @@ def build_gen_cost_curves_dict(
 ) -> Any:
     """Build Julia ``Dict{Int, Dict{Int, Vector{CostSegment}}}`` for generators.
 
-    Only generators with multi-segment (>1) curves are included.
-    Flat curves (1 segment) are skipped — those use the original code path.
+    Every curve that changes the unit's price is included: multi-segment
+    curves, and single-segment (flat) curves whose price differs from the
+    unit's ``fuel_cost`` (the solver then charges that price instead). A flat
+    curve at ``fuel_cost`` (e.g. no ``flat_price``) is skipped, since it
+    prices the output exactly as having no curve does.
 
     Parameters
     ----------
@@ -242,8 +245,9 @@ def build_gen_cost_curves_dict(
             if per_bus and not (node_idx < len(gen.rated_power)
                                 and gen.rated_power[node_idx] > 0):
                 continue  # no unit at this bus: no output variable to split
-            blocks = normalize_cost_curve(curve, fallback_price=gen.fuel_cost[node_idx])
-            if len(blocks) <= 1:
+            fuel_cost = gen.fuel_cost[node_idx] if node_idx < len(gen.fuel_cost) else 0.0
+            blocks = normalize_cost_curve(curve, fallback_price=fuel_cost)
+            if len(blocks) == 1 and blocks[0].price == fuel_cost:
                 continue
 
             # Determine bus index (1-based) for this node — use the

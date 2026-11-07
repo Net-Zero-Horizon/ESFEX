@@ -262,10 +262,11 @@ def test_source_disruption_uses_absolute_horizon_hours():
     # A disruption in the first days of the base year does not repeat later
     assert _max_supply(_adapter(year=2026, fuels_config=fuels(0, 24))) == \
         pytest.approx([24.0, 24.0, 24.0])
-    # 2 h steps: half of the first 12-step period is cut
+    # 2 h steps: half of the first 12-step (24 h) period is cut; a period
+    # gets 24 h of availability, not 12 (steps used to be counted as hours)
     got = _max_supply(_adapter(hours=36, step_hours=2, primary_energy_resolution=12,
                                fuels_config=fuels(12, 24)))
-    assert got[:2] == pytest.approx([6.0, 12.0])
+    assert got[:2] == pytest.approx([12.0, 24.0])
 
 
 def test_scheduled_fuel_source_outage_in_a_later_year():

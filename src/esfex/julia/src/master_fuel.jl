@@ -197,6 +197,12 @@ end
 The fuel model of one representative day: the system's primary-energy input
 for year `year_idx`, `hours` steps of `temporal_resolution_hours` starting at
 master step `start_hour`, one supply period.
+
+Routes have no transit delay here: the day is cyclic, so a shipment that
+left in its last steps would arrive after the day ended and be lost (paid
+for, never delivered). With one supply period the flow leaves evenly over
+the day, so a delay wrapped around the cyclic day would deliver the same
+even arrivals as no delay at all.
 """
 function master_fuel_day_input(input::MasterProblemInput, year_idx::Int,
                                start_hour::Int, hours::Int)
@@ -204,6 +210,7 @@ function master_fuel_day_input(input::MasterProblemInput, year_idx::Int,
     tres = max(1, input.temporal_resolution_hours)
     steps_per_year = max(1, input.hours_per_year[year_idx] ÷ tres)
     return with_fields(pe;
+        fuels = [with_fields(f; transport_transit_days_per_100km = 0.0) for f in pe.fuels],
         year = input.years[year_idx],
         hours = hours,
         primary_energy_resolution = hours,
@@ -347,29 +354,27 @@ function master_fuel_day_scale(input::MasterProblemInput)
 end
 
 """
-    master_fuel_investment_cost(vars, input; mult=nothing, discount_rate) -> AffExpr
+    master_fuel_investment_terms(vars, input; mult=nothing) -> Vector{(year_idx, var, cost)}
 
-Overnight cost of the fuel storage, route transport and electrolyzer builds,
-discounted to the build year like the master's other investments.
+Each fuel storage, route transport and electrolyzer build variable with its
+build year and overnight cost per unit built (not discounted).
 `fuel_storage_invest_cost`, `fuel_transport_cost` (D-5: it also scales the
 route investment) and `electrolyzer_invest_cost` scale them per scenario.
 """
-function master_fuel_investment_cost(vars::MasterProblemVariables, input::MasterProblemInput;
-                                     mult::Union{Nothing, ScenarioMultipliers} = nothing,
-                                     discount_rate::Float64 = input.discount_rate)
-    cost = AffExpr(0.0)
+function master_fuel_investment_terms(vars::MasterProblemVariables, input::MasterProblemInput;
+                                      mult::Union{Nothing, ScenarioMultipliers} = nothing)
+    terms = Tuple{Int, VariableRef, Float64}[]
     fv = vars.fuel
-    (fv === nothing || !has_master_fuel(input)) && return cost
+    (fv === nothing || !has_master_fuel(input)) && return terms
     pe = input.primary_energy.pe
     m_sto = mult === nothing ? 1.0 : mult.fuel_storage_invest_cost
     m_tr = mult === nothing ? 1.0 : mult.fuel_transport_cost
     m_elz = mult === nothing ? 1.0 : mult.electrolyzer_invest_cost
-    df(y) = 1.0 / ((1.0 + discount_rate)^(y - 1))
     for (y, by_fuel) in fv.storage, (fname, v) in by_fuel
         infra = get(pe.infrastructure, fname, nothing)
         infra === nothing && continue
         for n in eachindex(v)
-            add_to_expression!(cost, v[n], df(y) * m_sto * infra.storage_investment_cost)
+            push!(terms, (y, v[n], m_sto * infra.storage_investment_cost))
         end
     end
     for (y, by_fuel) in fv.transport, (fname, v) in by_fuel
@@ -377,14 +382,31 @@ function master_fuel_investment_cost(vars::MasterProblemVariables, input::Master
         infra === nothing && continue
         for r in eachindex(v)
             km = pe.transport_routes[r].distance_km
-            add_to_expression!(cost, v[r], df(y) * m_tr * infra.transport_investment_cost * km)
+            push!(terms, (y, v[r], m_tr * infra.transport_investment_cost * km))
         end
     end
     for (y, by_elz) in fv.electrolyzer, (e, v) in by_elz
         ec = input.primary_energy.electrolyzers[e]
         for b in eachindex(v)
-            add_to_expression!(cost, v[b], df(y) * m_elz * _elz_value(ec.invest_cost, b))
+            push!(terms, (y, v[b], m_elz * _elz_value(ec.invest_cost, b)))
         end
+    end
+    return terms
+end
+
+"""
+    master_fuel_investment_cost(vars, input; mult=nothing, discount_rate) -> AffExpr
+
+Overnight cost of the fuel storage, route transport and electrolyzer builds,
+discounted to the build year like the master's other investments
+(`master_fuel_investment_terms`).
+"""
+function master_fuel_investment_cost(vars::MasterProblemVariables, input::MasterProblemInput;
+                                     mult::Union{Nothing, ScenarioMultipliers} = nothing,
+                                     discount_rate::Float64 = input.discount_rate)
+    cost = AffExpr(0.0)
+    for (y, v, c) in master_fuel_investment_terms(vars, input; mult = mult)
+        add_to_expression!(cost, v, c / ((1.0 + discount_rate)^(y - 1)))
     end
     return cost
 end
