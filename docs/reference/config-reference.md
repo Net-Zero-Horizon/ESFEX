@@ -1006,20 +1006,20 @@ The budget covers the system's own power plants. In a multi-system run each syst
 | `adoption_scenario` | `low` \| `medium` \| `high` | `"medium"` | Adoption scenario |
 | `weather_variability` | `low` \| `normal` \| `high` | `"normal"` | Weather variability |
 | `simulation_seed` | int | `42` | Random seed |
-| `systems_per_node` | list[int] \| null | `null` | Rooftop systems per node (not used by the runner) |
-| `avg_system_size` | list[float] \| null | `null` | Average system size per node, kW (not used by the runner) |
-| `performance_ratio` | float (0–1) | `0.75` | Performance ratio (not used by the runner) |
+| `systems_per_node` | list[int] \| null | `null` | Rooftop systems per node; with `avg_system_size`, sets rooftex's potential |
+| `avg_system_size` | list[float] \| null | `null` | Average system size per node, kW |
+| `performance_ratio` | float (0–1) | `0.75` | Performance ratio of the rooftex profile |
 | `degradation_rate` | float (≥ 0) | `0.005` | Degradation (fraction/year) |
 | `cost_per_kw` | float | `1200` | Installation cost, $/kW (not used by the runner) |
 | `cost_reduction_rate` | float | `0.08` | Annual cost reduction (not used by the runner) |
 | `o_and_m_cost` | float | `20` | O&M cost, $/kW/year (not used by the runner) |
 | `base_year` | int | `2025` | Reference year |
 | `target_year` | int | `2050` | Target year |
-| `initial_adoption` | list[float] \| null | `null` | Current adoption per node (not used by the runner) |
-| `max_adoption` | dict[str, float] \| null | `null` | Maximum adoption per scenario (not used by the runner) |
-| `adoption_rates` | dict[str, float] \| null | `null` | Adoption growth rate per scenario (not used by the runner) |
+| `initial_adoption` | list[float] \| null | `null` | Current adoption per node (passed to rooftex, which 0.1.1 does not use) |
+| `max_adoption` | dict[str, float] \| null | `null` | Maximum adoption per scenario (`low`, `medium`, `high`) |
+| `adoption_rates` | dict[str, float] \| null | `null` | Adoption growth rate per scenario |
 
-The runner passes only `adoption_scenario`, `weather_variability` and `simulation_seed` to rooftex and uses `base_year`, `target_year` and `degradation_rate` for the yearly capacity; the per-node capacity comes from rooftex or from the system's `rooftop_max_potential`. See [Rooftop Solar](../formulation/rooftop-solar.md).
+The runner passes every field except the cost fields, `base_year`, `target_year` and `degradation_rate` to rooftex (unset or empty: rooftex's defaults) and uses `base_year`, `target_year` and `degradation_rate` for the yearly capacity; the per-node capacity comes from rooftex or from the system's `rooftop_max_potential`. See [Rooftop Solar](../formulation/rooftop-solar.md).
 
 ---
 
