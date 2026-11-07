@@ -41,6 +41,9 @@ _COST_MULTIPLIER_CATALOG: list[tuple[str, str, str]] = [
     ("gen_decommissioning_cost", "stochastic_form.mult_gen_decommissioning_cost", "stochastic_form.group_investment"),
     ("bat_decommissioning_cost", "stochastic_form.mult_bat_decommissioning_cost", "stochastic_form.group_investment"),
     ("converter_invest_cost", "stochastic_form.mult_converter_invest_cost", "stochastic_form.group_investment"),
+    # M2 (#89): fuel infrastructure and electrolyzers built by the master
+    ("fuel_storage_invest_cost", "stochastic_form.mult_fuel_storage_invest_cost", "stochastic_form.group_investment"),
+    ("electrolyzer_invest_cost", "stochastic_form.mult_electrolyzer_invest_cost", "stochastic_form.group_investment"),
     # --- Operational ---
     ("gen_fixed_cost", "stochastic_form.mult_gen_fixed_cost", "stochastic_form.group_operational"),
     ("maintenance_cost", "stochastic_form.mult_maintenance_cost", "stochastic_form.group_operational"),
@@ -48,12 +51,6 @@ _COST_MULTIPLIER_CATALOG: list[tuple[str, str, str]] = [
     ("gen_start_up_cost", "stochastic_form.mult_gen_start_up_cost", "stochastic_form.group_operational"),
     ("converter_variable_cost", "stochastic_form.mult_converter_variable_cost", "stochastic_form.group_operational"),
     ("transmission_cost_per_mw_km", "stochastic_form.mult_transmission_cost_per_mw_km", "stochastic_form.group_operational"),
-    # M2 (#89): fuel infrastructure and electrolyzers built by the master
-    ("fuel_storage_invest_cost", "stochastic_form.mult_fuel_storage_invest_cost", "stochastic_form.group_investment"),
-    ("electrolyzer_invest_cost", "stochastic_form.mult_electrolyzer_invest_cost", "stochastic_form.group_investment"),
-    # --- Operational ---
-    ("gen_fixed_cost", "stochastic_form.mult_gen_fixed_cost", "stochastic_form.group_operational"),
-    ("maintenance_cost", "stochastic_form.mult_maintenance_cost", "stochastic_form.group_operational"),
     # M2 (#89): electrolyzer operation
     ("electrolyzer_fixed_cost", "stochastic_form.mult_electrolyzer_fixed_cost", "stochastic_form.group_operational"),
     ("electrolyzer_variable_cost", "stochastic_form.mult_electrolyzer_variable_cost", "stochastic_form.group_operational"),
