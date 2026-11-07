@@ -106,6 +106,7 @@ include("power_system.jl")
 include("primary_energy.jl")
 include("committed_steps.jl")
 include("master_problem.jl")
+include("master_fuel.jl")   # fuel block of the master (#89)
 include("benders.jl")
 include("mga.jl")
 include("electrolyzer.jl")
@@ -184,6 +185,10 @@ export add_retirement_cascade_constraints!, add_re_target_constraints!
 export add_re_increment_constraints!
 export add_capacity_adequacy_constraints!, add_transmission_symmetry_constraints!
 export build_master_objective!, extract_master_solution
+
+# Fuel block of the master (#89)
+export MasterFuelInput, MasterFuelVariables, add_master_fuel_day!
+export extract_master_fuel_solution, master_fuel_keys
 
 # Benders decomposition (optional master-problem solver)
 export BendersResult, run_benders_decomposition

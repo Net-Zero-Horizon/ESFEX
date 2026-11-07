@@ -108,8 +108,8 @@ Each source is keyed by the fuel it supplies. All per-node values are lists with
 | `storage_capacity` | units, per node | Fuel tank capacity |
 | `initial_storage_level` | fraction, per node | Starting inventory as a fraction of capacity |
 | `min_storage_level` | fraction | Safety stock that must be kept (default 0.1) |
-| `storage_investment_cost`, `max_storage_investment_per_node` | $/unit, units | Cost and cap of new fuel storage in the master problem (required) |
-| `transport_cost`, `max_transport_investment_per_arc` | $/unit/km, units | Cost per km and cap of new route capacity in the master problem (required) |
+| `storage_investment_cost`, `max_storage_investment_per_node` | $/unit, units | Required by the loader but not used: the master takes storage costs and limits from `fuel_infrastructure` |
+| `transport_cost`, `max_transport_investment_per_arc` | $/unit/km, units | Required by the loader but not used: route costs come from `fuel_transport_routes`, route investment from `fuel_infrastructure` |
 | `transport_losses` | fraction per 100 km | Required by the loader; the dispatch uses the per-route losses below |
 | `transport_transit_days_per_100km` | days | Optional delivery lead time along routes (default 0, instantaneous): a shipment reaches the destination tank that many days per 100 km after it leaves |
 | `disruption_start_hour`, `disruption_end_hour`, `disruption_availability` | hour, hour, fraction | Optional supply cut: availability is scaled to `disruption_availability` inside the window. Hours count from 1 January of the base year (8760 per year), like [scheduled interruptions](../user-guide/scheduled-interruptions.md) |
@@ -200,7 +200,7 @@ received = 100 * (1 - 0.005 * 150 / 100) = 100 * 0.9925 = 99.25 tonnes
       transport_pipelines: {}
 ```
 
-`efficiency` (default 0.8 when a fuel has no entry) applies in every mode. The investment fields (`investment_cost`, `expansion_limit`, `lifetime`) only act when the dispatch itself may invest in fuel infrastructure, which is the case in `simulation_mode: economic_dispatch`. `expansion_limit: 2.0` means new capacity may reach twice the existing capacity, so the total cannot exceed 3x the original.
+`efficiency` (default 0.8 when a fuel has no entry) applies in every mode. The investment fields (`investment_cost`, `expansion_limit`) are used by the master problem, which builds fuel storage and route capacity on its representative days in `simulation_mode: development`; each dispatch year then uses what was built as existing capacity. A run without a master (`economic_dispatch`, `unit_commitment`) builds none. `expansion_limit: 2.0` means new capacity may reach twice the existing capacity, so the total cannot exceed 3x the original. Built capacity does not retire within the horizon, so `lifetime` is not used.
 
 ---
 

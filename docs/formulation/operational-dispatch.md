@@ -282,8 +282,10 @@ Added by `charge_converter_costs!()` after `add_converter_constraints!()` has cr
 ### 3.12 Electrolyzer Costs
 
 \[
-Z^{\text{elz}} = \sum_{n,t} c^{\text{elz,var}}_n \, p^{\text{elz}}_{n,t} + \sum_n \bar{P}^{\text{elz}}_n \, c^{\text{elz,fix}}_n \cdot T \tag{OBJ-12}
+Z^{\text{elz}} = \sum_{n,t} \left(c^{\text{elz,var}}_n + c^{\text{water}} h_n\right) p^{\text{elz}}_{n,t} + \sum_n \bar{P}^{\text{elz}}_n \, c^{\text{elz,fix}}_n \cdot T \tag{OBJ-12}
 \]
+
+with \(c^{\text{water}}\) the `water_cost` (\$/kg) and \(h_n\) the kg of hydrogen per MWh drawn ([Electrolyzer](electrolyzer.md#5-objective-terms)). \(\bar{P}^{\text{elz}}_n\) includes the electrolyzer power the master built.
 
 ### 3.13 Demand Shifting Cost
 

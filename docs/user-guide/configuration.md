@@ -23,7 +23,7 @@ The configuration drives a two-stage decomposition [**[25]**](../reference/bibli
 | `n1_security` | N-1 contingency constraints | no |
 | `master_problem` | Capacity-expansion settings | no |
 | `network_reduction` | Internal bus-network reduction | no |
-| `enable_primary_energy` | Include the fuel supply chain (default `true`) | no |
+| `enable_primary_energy` | Include the fuel supply chain (default `true`), in the dispatch and in the master problem, which then builds fuel storage, routes and electrolyzers and charges fuel-coupled units the fuel price | no |
 | `meta_network` | Systems to simulate and links between them | **yes** |
 | `systems` | One configuration per system, inline or as a file path | **yes** |
 | `risk` | Risk and resilience module | no |

@@ -40,8 +40,16 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | Multiplier | Applies to | Where |
 |-----------|-----------|-------|
 | `demand_growth` | Demand: \(D_{y,n,t} \cdot m^{dem}_s{}^{\,(y-1)}\). An annual factor: 1.02 = +2 %/year relative to the base case, compounding | Scenario operation |
-| `fuel_cost` | Fuel cost of generators and candidate technologies (piecewise fuel-cost curves included) | Scenario operation |
-| `fuel_price_growth` | Extra annual fuel price escalation: fuel cost × \(m^{fpg}_s{}^{\,(y-1)}\) | Scenario operation |
+| `fuel_cost` | Fuel cost of generators (piecewise fuel-cost curves included) and candidate technologies, and the fuel prices of the master's fuel balance (which fuel-coupled units pay instead of their `fuel_cost`) | Scenario operation |
+| `fuel_price_growth` | Extra annual fuel price escalation: fuel cost and fuel prices × \(m^{fpg}_s{}^{\,(y-1)}\) | Scenario operation |
+| `fuel_import_cost` | Per-node fuel import cost of the fuel balance | Scenario operation |
+| `fuel_transport_cost` | Route transport cost (per unit·km) and route capacity investment | Scenario operation and investment cost |
+| `penalty_loss_of_fuel_supply` | Fuel shortfall and excess-supply penalty (`loss_of_fuel_supply`) | Scenario operation |
+| `electrolyzer_variable_cost` | Electrolyzer variable cost (per MWh drawn) | Scenario operation |
+| `electrolyzer_water_cost` | Electrolyzer water cost (per kg of hydrogen) | Scenario operation |
+| `electrolyzer_fixed_cost` | Electrolyzer fixed cost (existing and built power) | Scenario asset cost |
+| `fuel_storage_invest_cost` | Fuel storage investment | Scenario investment cost |
+| `electrolyzer_invest_cost` | Electrolyzer investment | Scenario investment cost |
 | `gen_fixed_cost` | Fixed O&M (\$/MWh) of generators and candidate technologies | Scenario operation |
 | `maintenance_cost` | Maintenance cost of generators, batteries, technologies and battery technologies | Scenario operation |
 | `carbon_price` | CO2 cost (`co2_cost`) | Scenario operation |
@@ -65,9 +73,9 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | `bat_decommissioning_cost` | Decommissioning cost of existing batteries | Scenario asset cost |
 | `discount_rate` | Discount rate: \(r_s = r \cdot m^{disc}_s\) | Scenario discounting |
 
-The operation multipliers are applied by `scenario_master_input()`, which builds a copy of the master input for each scenario and year; the investment, asset and discount multipliers act on the scenario's terms of the objective (§4).
+The operation multipliers are applied by `scenario_master_input()`, which builds a copy of the master input for each scenario and year; the investment, asset and discount multipliers act on the scenario's terms of the objective (§4). The fuel and electrolyzer multipliers act on the master's fuel block, which exists only when primary energy is on (see [Capacity Expansion](capacity-expansion.md#fuel-block)); without it they have no effect.
 
-The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning. That includes the keys for costs the master does not have: electrolyzer, fuel import, fuel storage and transport investment, and the loss-of-fuel-supply penalty.
+The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning.
 
 `gen_start_up_cost` only has an effect when the dispatch commits units (`master_problem.use_uc_in_dispatch`): only then does the master model start-ups (see [Capacity Expansion](capacity-expansion.md)). `transmission_cost_per_mw_km` scales the operating cost of the flow on inter-system links; their investment per MW is scaled by `invest_cost_transmission`.
 

@@ -111,7 +111,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | \(a^0_{g,n}\) | years | Initial age of an existing unit | `gen.initial_age[n]` |
 | \(\delta_{g,n}\), \(\delta_{k,n}\) | [0,1] | Annual degradation rate | `degradation_rate[n]` |
 | \(\alpha_{g,t,n}\) | [0,1] | Availability factor | `availability[t,n]` |
-| \(c^{fuel}_{g,n}\) | \$/MWh | Fuel cost | `gen.fuel_cost[n]` |
+| \(c^{fuel}_{g,n}\) | \$/MWh | Fuel cost; with primary energy on, fuel-coupled units pay the fuel price through the fuel balance instead (§8.3.12) | `gen.fuel_cost[n]` |
 | \(c^{fix}_{g,n}\) | \$/MWh | Fixed O&M cost | `gen.fixed_cost[n]` |
 | \(c^{maint}_{g,n}\) | \$/MWh | Maintenance cost | `gen.maintenance_cost[n]` |
 | \(c^{CO_2}_g\) | \$/MWh | Carbon cost: `co2_cost` × the emission factor of the unit's fuel (per MWh of fuel) / the unit's rated efficiency | `co2_cost_per_mwh(input, gen, n)` |
@@ -445,7 +445,7 @@ For each year \(y\) and representative day \(d\), a full set of dispatch variabl
 
 **Julia function**: `add_day_operational_constraints!(model, ps_vars, vars, input, year_idx, day_idx, demand, start_hour)`
 
-The day reuses the operational-dispatch constraint builders of `power_system.jl` and `transmission_dc.jl` in economic-dispatch mode, with the capacities of §6 passed in as expressions of the investment variables: generators, batteries, reservoirs, reserves (RES-1 to RES-3), inertia, power balance and curtailment. Rooftop solar, EVs, electrolyzers, primary energy, unit commitment and N-1 are not modelled in the master.
+The day reuses the operational-dispatch constraint builders of `power_system.jl` and `transmission_dc.jl` in economic-dispatch mode, with the capacities of §6 passed in as expressions of the investment variables: generators, batteries, reservoirs, reserves (RES-1 to RES-3), inertia, power balance and curtailment. With primary energy on, the day also has the fuel block of §8.3.12 (fuel balance and electrolyzers). Rooftop solar, EVs, unit commitment and N-1 are not modelled in the master.
 
 #### 8.3.1 Power Balance
 
@@ -581,6 +581,39 @@ Each system's annual CO2 budget holds in the master as in the dispatch (one budg
 \]
 
 (\(\Delta t \cdot w_p\) for a TSAM period), with \(e\) the emission factor per MWh of electricity (`co2_per_mwh`). \(V_{\sigma,y}\) is charged at the system's `co2_budget_violation` penalty in \(C^{op}_y\). A budget that is disabled or not finite adds nothing.
+
+<a id="fuel-block"></a>
+
+#### 8.3.12 Fuel Balance, Fuel Infrastructure and Electrolyzers
+
+**Julia file**: `master_fuel.jl` (`add_master_fuel_day!`). Active whenever primary energy is: `enable_primary_energy: true` and the system has `primary_energy_sources` or `fuel_entry_points`, the same switch as the dispatch's fuel model.
+
+On each representative day (or TSAM period) the master builds the dispatch's own [primary-energy model](primary-energy.md) for that day, with the same fuel prices, import costs, supply limits, tanks, routes, non-electric demand and penalties, so master and dispatch charge the same fuel costs. Three things differ, because a representative day is not a chronological window:
+
+- each tank ends the day at the level it started with (`hr_storage_cyclic_*`, also for TSAM periods), so drawing it down is worth nothing;
+- route shipments arrive the same day (no transit delay);
+- the supply-limit period is the day, which is the dispatch's default 24 h `primary_energy_resolution`.
+
+Supply limits and disruption windows use the day's absolute horizon hours, as in the dispatch.
+
+**Fuel-coupled units.** A generator or candidate technology whose fuel is in the model (it has an `energy_content`) burns tank fuel: \(\sum_{b \in n} \Delta t \, P_{g,b,t} \le \kappa_g W^{elec}_{g,n,t}\), with \(\kappa_g\) = mean `eff_at_rated` × `energy_content` (PE coupling, `pe_coupling_gen*` and `pe_coupling_tech*`). Like the dispatch, the master then does not also charge such a unit its flat `fuel_cost`: the fuel is paid through the fuel balance, at the fuel's price plus the node's import cost. A unit with a fuel-cost curve keeps its curve.
+
+**Electrolyzers.** Each electrolyzer draws power at its bus (`op_y*_d*_elz`), a load in the power balance, capped at its existing plus built power and ramp-limited as in the dispatch. Its hydrogen fills the node's `Hydrogen` tank. Without a `Hydrogen` fuel it is only a load. Without primary energy the master has no electrolyzers.
+
+**Investments** (per investment-period start year \(y\)): fuel storage \(I^{stor}_{f,n,y}\) (`fuel_storage_inv_y{y}_{fuel}`), route capacity \(I^{trans}_{f,r,y}\) (`fuel_transport_inv_y{y}_{fuel}`) and electrolyzer power \(I^{elz}_{e,b,y}\) (`elz_inv_y{y}_e{e}`), within the expansion limits of [PE-5d](primary-energy.md) and `invest_max_power` over the horizon. Fuel capacity stays in service for the rest of the horizon. An electrolyzer build retires after its `life_time`. Costs:
+
+| Cost | Charged as | Where |
+|---|---|---|
+| Fuel storage | `storage_investment_cost` × units, overnight at the build year | investment cost (§5.1) |
+| Route capacity | `transport_investment_cost` × km × units/day, overnight | investment cost (§5.1) |
+| Electrolyzer power | `invest_cost` × MW, overnight | investment cost (§5.1) |
+| Electrolyzer fixed cost | `fixed_cost` (\$/MW per hour) × hours of the year × (rated + built) MW | existing-asset cost (§5.1b) |
+| Fuel bought, route transport, fuel shortfall and excess, unmet non-electric demand | as in the dispatch | day cost |
+| Electrolyzer variable and water cost | \(\Delta t\,(c^{var}_b + c^{water}\,h_b)\,P^{elz}_{b,t}\), with \(h_b\) the kg of hydrogen per MWh | day cost |
+
+The day's fuel cost is already in \$ (fuel amounts per step), so it is scaled to the year by \((H_{year}/24)/|\mathcal{D}_y|\), or by the TSAM period weight, without the \(\Delta t\) of SCALE-1.
+
+**Hand-off to the dispatch.** The master is the only model that builds fuel infrastructure and electrolyzers. Each dispatch year receives the storage and route capacity in service that year as existing capacity (`cumulative_capacities` of the fuel model), and the built electrolyzer power is added to each electrolyzer's `rated_power`. A myopic master starts each year from what earlier years built, with that much less room to build. A run without a master (`economic_dispatch` or `unit_commitment` mode) builds no fuel infrastructure.
 
 ### 8.4 Cost Scaling
 
@@ -809,7 +842,7 @@ Because the master has no dispatch, two approximations replace it:
 - The curtailment cap is soft (`max_curt_y*_d*` with slack `curt_excess_y*_d*`, priced at `penalties.curtailment_excess_penalty`, default 500 \$/MWh).
 - The load-shedding penalty, including the sectoral ones, is capped at `benders_lol_penalty_cap` (default 1000 \$/MW per step; 0 disables the cap) to keep the cuts numerically usable. Subproblem costs therefore differ from the monolithic objective whenever load is shed.
 
-**Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints give one cut per year and iteration (`benders_cut_y{y}_iter{k}`): \(\theta_y \geq\) intercept + gradient × (technology, battery-technology, life-extension and line capacity). The lower bound is the master objective, the upper bound the investment cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50).
+**Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints give one cut per year and iteration (`benders_cut_y{y}_iter{k}`): \(\theta_y \geq\) intercept + gradient × (technology, battery-technology, life-extension and line capacity). With the fuel block (§8.3.12) each subproblem fixes the fuel storage, route and electrolyzer capacity in service that year through a copy variable (`fuel_cap_*`), and the dual of its fixing constraint is that capacity's gradient. The cut then also holds when every gradient is zero, so a year's flat fuel cost reaches \(\theta_y\). The lower bound is the master objective, the upper bound the investment cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50).
 
 The subproblems do not have the converters, the link flow cost, the LP start-ups or the CO2 budget of §8.3.8–8.3.11 (the CO2 budget couples all days of a year, so it does not split per day), and the Benders master builds no converter capacity.
 
