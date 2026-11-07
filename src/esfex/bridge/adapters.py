@@ -2526,7 +2526,6 @@ class MasterProblemAdapter:
         solver_method: str = "monolithic",
         benders_max_iterations: int = 50,
         benders_tolerance: float = 1e-4,
-        benders_lol_penalty_cap: float = 1000.0,
         **kwargs,
     ):
         """
@@ -2665,7 +2664,6 @@ class MasterProblemAdapter:
         self.solver_method = str(solver_method or "monolithic").lower()
         self.benders_max_iterations = int(benders_max_iterations)
         self.benders_tolerance = float(benders_tolerance)
-        self.benders_lol_penalty_cap = float(benders_lol_penalty_cap)
 
         self._jl_model = None
         self._jl_vars = None
@@ -2947,7 +2945,6 @@ class MasterProblemAdapter:
         fre_penetration_loss_penalty = scale_cost(float(penalties.fre_penetration_loss))  # $/MWh → M$/MWh
         max_curtailment_ratio = float(getattr(penalties, 'max_curtailment_ratio', 0.05))  # fraction (no scaling)
         curtailment_cost = scale_cost(float(getattr(penalties, 'curtailment_cost', 20.0)))  # $/MWh → M$/MWh
-        curtailment_excess_penalty = scale_cost(float(getattr(penalties, 'curtailment_excess_penalty', 500.0)))  # $/MWh → M$/MWh
         re_excess_penalty = scale_cost(float(getattr(penalties, 're_excess_penalty', 100.0)))  # $/MWh → M$/MWh
 
         # Build sectoral demand for master problem (M2)
@@ -2992,7 +2989,6 @@ class MasterProblemAdapter:
             fre_penetration_loss_penalty=fre_penetration_loss_penalty,
             max_curtailment_ratio=max_curtailment_ratio,
             curtailment_cost=curtailment_cost,
-            curtailment_excess_penalty=curtailment_excess_penalty,
             re_excess_penalty=re_excess_penalty,
             temporal_resolution_hours=self.temporal_resolution_hours,
             representative_days_per_year=self.representative_days_per_year,
@@ -3046,7 +3042,6 @@ class MasterProblemAdapter:
             gen_cost_curves=jl_gen_cost_curves,
             bat_cost_curves=jl_bat_cost_curves,
             tech_cost_curves=jl_tech_cost_curves,
-            benders_lol_penalty_cap=scale_cost(self.benders_lol_penalty_cap),
             re_target_override=jl.seval(
                 "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
                     f"({int(s)}, {int(y)}) => {float(v)!r}"
@@ -3081,6 +3076,33 @@ class MasterProblemAdapter:
 
         self._jl_input = self._create_input()
 
+        # Resolve declarative user constraints targeting the investment model
+        # (technology names → 1-based tech indices, year values → year indices).
+        jl = get_julia()
+        tech_idx = {k: i for i, k in
+                    enumerate(self.system_config.technologies.keys(), 1)}
+        year_idx = {y: i for i, y in enumerate(self.years, 1)}
+        inv_specs = resolve_investment_constraints(
+            getattr(self.system_config, "custom_constraints", None),
+            tech_idx, year_idx,
+        )
+
+        if self.solver_method == "benders":
+            # The Benders master has neither TSAM periods nor user
+            # constraints: solve the monolithic master instead of dropping them
+            unsupported = []
+            if self.use_tsam:
+                unsupported.append("TSAM periods (use_tsam)")
+            if inv_specs:
+                unsupported.append("user investment constraints (custom_constraints)")
+            if unsupported:
+                logger.warning(
+                    "Benders decomposition does not support "
+                    f"{' or '.join(unsupported)}; solving the monolithic master "
+                    "problem instead."
+                )
+                self.solver_method = "monolithic"
+
         if self.solver_method == "benders":
             # Benders builds its own investment master and per-day subproblems
             # internally during solve(); here we only need the input ready.
@@ -3097,17 +3119,6 @@ class MasterProblemAdapter:
                 f"tol={self.benders_tolerance})"
             )
             return
-
-        # Resolve declarative user constraints targeting the investment model
-        # (technology names → 1-based tech indices, year values → year indices).
-        jl = get_julia()
-        tech_idx = {k: i for i, k in
-                    enumerate(self.system_config.technologies.keys(), 1)}
-        year_idx = {y: i for i, y in enumerate(self.years, 1)}
-        inv_specs = resolve_investment_constraints(
-            getattr(self.system_config, "custom_constraints", None),
-            tech_idx, year_idx,
-        )
 
         if self.use_stochastic and self.stochastic_scenarios:
             jl_scenarios = self._build_julia_scenarios()

@@ -236,7 +236,6 @@ class MasterProblemAdapter:
         solver_method: str = "monolithic",
         benders_max_iterations: int = 50,
         benders_tolerance: float = 1e-4,
-        benders_lol_penalty_cap: float = 1000.0,
         **kwargs
     ) -> None
 ```
@@ -268,7 +267,7 @@ class MasterProblemAdapter:
 | `date_start` | `str` | Timestamp of the first data row (`"DD/MM/YYYY HH:MM"`) for profiles read from disk, so Feb 29 is dropped by the data's calendar as in the dispatch. |
 | `profile_start_hour` | `int` | Horizon hour (year index × 8760 + hour) of the first planned hour: every profile is rotated to start there, wrapping around a shorter one. The myopic runner passes `y_idx × 8760` for each one-year model. |
 | `solver_method` | `str` | `"monolithic"` (one JuMP model) or `"benders"` (`run_benders_decomposition`). |
-| `benders_max_iterations`, `benders_tolerance`, `benders_lol_penalty_cap` | `int`, `float`, `float` | Benders settings: iteration cap, relative gap for convergence, cap on the load-shedding penalty in the subproblems. |
+| `benders_max_iterations`, `benders_tolerance` | `int`, `float` | Benders settings: iteration cap and relative gap for convergence. |
 
 **Methods:**
 
@@ -278,7 +277,7 @@ class MasterProblemAdapter:
 def build_model(self, use_representative_days: bool = True) -> None
 ```
 
-Build the JuMP capacity expansion model. If `use_representative_days` is True, includes operational validation constraints using representative days (peak demand days or TSAM clusters). With `solver_method="benders"` it only prepares the Julia input; the models are built during `solve()`.
+Build the JuMP capacity expansion model. If `use_representative_days` is True, includes operational validation constraints using representative days (peak demand days or TSAM clusters). With `solver_method="benders"` it only prepares the Julia input; the models are built during `solve()`. With `use_tsam` or investment-target custom constraints, which Benders does not model, it logs a warning, sets `solver_method` to `"monolithic"` and builds the monolithic master.
 
 ### solve
 

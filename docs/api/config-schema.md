@@ -399,7 +399,7 @@ class PenaltiesConfig(BaseModel):
     transfer_margin: float = 100
     max_curtailment_ratio: float = 0.05        # 0-1
     curtailment_cost: float = 20.0             # $/MWh, operational dispatch
-    curtailment_excess_penalty: float = 500.0  # $/MWh, Benders master
+    curtailment_excess_penalty: float = 500.0  # no effect (curtailment limit is hard)
     re_excess_penalty: float = 100.0
     rooftop_curtailment: float = 5
     co2_cost: float = 10                       # $/tCO2
@@ -429,7 +429,6 @@ class MasterProblemConfig(BaseModel):
     solver_method: Literal["monolithic", "benders"] = "monolithic"
     benders_max_iterations: int = 50
     benders_tolerance: float = 1e-4
-    benders_lol_penalty_cap: float = 1000.0
     use_tsam: bool = False
     tsam_num_periods: int = 10
     tsam_method: Literal["kmedoids", "kmeans"] = "kmedoids"

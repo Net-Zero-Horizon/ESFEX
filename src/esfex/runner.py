@@ -3668,7 +3668,6 @@ class Orchestrator:
                     solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                     benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                     benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
-                    benders_lol_penalty_cap=master_cfg.benders_lol_penalty_cap if master_cfg else 1000.0,
                     use_tsam=use_tsam,
                     tsam_period_start_hours=tsam_starts_y,
                     tsam_period_weights=tsam_weights_y,
@@ -4309,7 +4308,6 @@ class Orchestrator:
                 solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                 benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                 benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
-                benders_lol_penalty_cap=master_cfg.benders_lol_penalty_cap if master_cfg else 1000.0,
                 # TSAM parameters
                 use_tsam=use_tsam,
                 tsam_period_start_hours=tsam_starts,

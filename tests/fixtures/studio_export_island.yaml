@@ -46,7 +46,6 @@ master_problem:
   solver_method: monolithic
   benders_max_iterations: 50
   benders_tolerance: 0.0001
-  benders_lol_penalty_cap: 1000.0
   use_tsam: false
   tsam_num_periods: 10
   tsam_method: kmedoids

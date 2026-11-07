@@ -134,7 +134,7 @@ The penalties are set per system under `penalties:` (key names are case-insensit
 | Unserved demand (loss of load) | `loss_of_load` | 10,000,000 $/MWh | Value of lost load [**[33]**](../reference/bibliography.md#ref33) -- the economic damage of not serving demand |
 | RE penetration shortfall | `fre_penetration_loss` | 100 $/MWh | Policy cost of missing the renewable energy target |
 | Reserve shortfall | `loss_of_reserve_static`, `loss_of_reserve_dynamic` | 100 $/MW | Cost of not holding the required reserve |
-| Curtailment | `curtailment_cost`, `curtailment_excess_penalty` | 20, 500 $/MWh | Cost of curtailed renewable energy, and of curtailment above `max_curtailment_ratio` |
+| Curtailment | `curtailment_cost` | 20 $/MWh | Cost of curtailed renewable energy (the master problem also caps curtailment at `max_curtailment_ratio` of RE output) |
 | CO₂ budget violation | `co2_budget_violation` | 500 $/t | Penalty for exceeding the annual emissions budget (`co2_budget`) |
 
 All penalty values are user-configurable. Higher penalties push the optimizer harder to satisfy the constraint; lower values allow more violation when it is cost-effective. Setting penalties too high can cause numerical issues. Do not confuse `loss_of_load` with the deprecated system-level `LOSS_DEMAND_TRHESHOLD`, which is ignored. See the [Configuration Reference](../reference/config-reference.md) for all penalty keys.

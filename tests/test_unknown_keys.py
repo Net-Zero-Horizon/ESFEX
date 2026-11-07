@@ -172,6 +172,18 @@ def test_load_config_clean_file_has_no_unknown_keys(tmp_path, caplog):
     assert not [r for r in caplog.records if "Unknown configuration key" in r.getMessage()]
 
 
+def test_removed_benders_lol_penalty_cap_is_reported(tmp_path, caplog):
+    """``benders_lol_penalty_cap`` was removed (Benders charges the full
+    VOLL); an old file that still sets it gets the generic warning."""
+    raw = _raw()
+    raw["master_problem"]["benders_lol_penalty_cap"] = 1000.0
+    with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+        cfg = load_config(_write(tmp_path, raw))
+    assert cfg.unknown_keys == ["master_problem.benders_lol_penalty_cap"]
+    assert any("master_problem.benders_lol_penalty_cap" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_system_files_are_checked(tmp_path):
     raw = _raw()
     sysd = raw["systems"]["island"]
