@@ -94,9 +94,12 @@ systems:
 | `acdc_converter` | yes | Converter name | Scales the rated power |
 | `freq_converter` | yes | Converter name | Scales the rated power |
 | `fuel_source` | no | Fuel name | Primary-energy supply disruption (see below) |
-| `electrolyzer` | no | Electrolyzer key | Accepted, but currently has no effect |
-| `fuel_storage` | no | — | Accepted, but currently has no effect |
-| `fuel_route` | no | — | Accepted, but currently has no effect |
+| `electrolyzer` | no | Electrolyzer key | Scales the electrolyzer's rated power (whole unit) |
+| `fuel_storage` | no | Fuel name (optionally with `node`) | The fuel's tank at the window's node, or at every node of the system: its contents are locked in proportion to the outage and only the available share of its capacity can be used (see below) |
+| `fuel_route` | no | `route_id` of the fuel transport route (`route_<i>` for a route without one) | Scales the route's capacity (see below) |
+
+!!! note "`fuel_storage` and `fuel_route` windows"
+    Like `fuel_source`, they only matter when primary-energy modelling is active. A tank out of service keeps the fuel it held: with `availability: 0` its level is frozen and the node's fuel only passes through, as at a node without a tank; with `availability: 0.5` half of its contents stay locked and only half of its capacity can be used. Its minimum levels do not apply during the outage. A route's capacity is scaled per primary-energy period by the share of the period's hours available, because shipments are decided per period. Unknown fuels are reported at load time; unknown route ids are reported, and ignored, when the run reaches the window.
 
 !!! note "`fuel_source` windows"
     A `fuel_source` window is passed to the primary-energy model's built-in supply-disruption window, so it only matters when primary-energy modelling is active (`enable_primary_energy` and `primary_energy_sources`). It uses the same horizon hours as the other windows. The primary-energy model takes **one** window per fuel in each operational window: the first scheduled window that falls inside it is used, and a warning is logged if more than one does. The disruption scales the fuel's supply limit for each primary-energy period by the share of the period's hours inside the window.
@@ -107,7 +110,7 @@ systems:
 | --- | --- | --- | --- |
 | `element_type` | yes | — | One of the types above |
 | `element_id` | yes | — | Target element key or id (see table) |
-| `node` | no | none | Generators and batteries: node of the unit to cut (none = every node) |
+| `node` | no | none | Generators: node of the unit to cut; `fuel_storage`: node of the tank (none = every node). Batteries and electrolyzers are cut as a whole unit |
 | `start_hour` | yes | — | Horizon hour, inclusive (≥ 0; hour 0 = 1 January of `base_year`) |
 | `end_hour` | yes | — | Horizon hour, exclusive (> `start_hour`) |
 | `availability` | no | `0.0` | Capacity fraction in the window (0 = full cut, 1 = none) |
@@ -141,6 +144,6 @@ outage_schedule:
 
 - An empty `outage_schedule` leaves the model unchanged.
 - `availability = 0.0` removes the element for the window, and a value in `(0, 1)` derates it. The reduced capacity is a hard cap that dispatch cannot exceed.
-- Reference elements by their config keys, `line_id` or names. An unknown generator or battery `element_id` is reported with a warning at load time and ignored; for other element types an unknown id is ignored without a warning, so check names when a scheduled outage seems to have no effect.
+- Reference elements by their config keys, `line_id`, `route_id` or names. An unknown generator, battery, electrolyzer or `fuel_storage` fuel is reported with a warning at load time and an unknown fuel route when the run reaches the window, and the window is ignored; for other element types an unknown id is ignored without a warning, so check names when a scheduled outage seems to have no effect.
 - Windows round-trip through save/load and `.esfexp` bundles.
 - Maintenance driven by operating hours (every *X* hours of operation) is not modelled; place the windows manually.

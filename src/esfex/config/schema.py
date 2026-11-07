@@ -1939,14 +1939,17 @@ class OutageWindow(BaseModel):
 
     element_type: OutageElementType
     element_id: str = Field(
-        description="Target element key (dict-keyed types: generators, "
-                    "batteries, electrolyzers, fuel sources) or list index as a "
-                    "string (lines, transformers, converters, fuel routes)."
+        description="Target element: unit key (generators, batteries, "
+                    "electrolyzers), fuel name (fuel_source, fuel_storage), "
+                    "line_id or name (lines, transformers, converters) or "
+                    "route_id (fuel routes; route_<i> for a route without one)."
     )
     node: Optional[int] = Field(
         default=None, ge=0,
-        description="Generators / batteries: only the unit's capacity at this "
-                    "node is cut (None = every node of the unit).",
+        description="Generators: only the unit's capacity at this node is cut; "
+                    "fuel_storage: only the fuel's tank at this node (None = "
+                    "every node). Batteries and electrolyzers are always cut "
+                    "as a whole unit.",
     )
     start_hour: int = Field(ge=0, description="Absolute horizon hour, inclusive")
     end_hour: int = Field(gt=0, description="Absolute horizon hour, exclusive")
@@ -2224,13 +2227,16 @@ class SystemConfig(BaseModel):
         The Studio names per-node pieces of a unit ``<unit_key>_n<node>``;
         projects saved before the calendar wrote unit keys hold those ids,
         which no unit matches. Rewrite them to (unit key, node) and warn
-        about windows whose element does not exist.
+        about windows whose element (generator, battery, electrolyzer or
+        fuel_storage fuel) does not exist.
         """
         if not self.outage_schedule:
             return self
         import logging
         import re
-        keys = {"generator": set(self.generators), "battery": set(self.batteries)}
+        keys = {"generator": set(self.generators), "battery": set(self.batteries),
+                "electrolyzer": set(self.electrolyzers or {}),
+                "fuel_storage": set(self.primary_energy_sources or {})}
         unknown = []
         for i, ow in enumerate(self.outage_schedule):
             units = keys.get(ow.element_type)

@@ -1414,17 +1414,24 @@ class Orchestrator:
                     "terms": [_remap_term(t, sname) for t in cc.terms],
                 }))
 
-        # Interruptions address generators and batteries by key (renamed
-        # above) and lines / transformers / converters by their own id (kept).
-        # No consumer reads the electrolyzer / fuel_* types yet.
-        _outage_keyed = {"generator", "battery"}
+        # Interruptions address generators, batteries and electrolyzers by
+        # key (renamed above), lines / transformers / converters / fuel routes
+        # by their own id (kept) and fuel tanks by fuel and node: a tank
+        # window without a node covers only its own system's nodes.
+        _outage_keyed = {"generator", "battery", "electrolyzer"}
         merged_outages: list = []
-        for sname, sys in zip(sys_names, systems):
+        for sname, sys, nc in zip(sys_names, systems, node_counts):
+            off = offsets[sname]
             for ow in (sys.outage_schedule or []):
                 if ow.element_type in _outage_keyed:
                     ow = ow.model_copy(update={
                         "element_id": f"{sname}__{ow.element_id}",
-                        "node": None if ow.node is None else ow.node + offsets[sname]})
+                        "node": None if ow.node is None else ow.node + off})
+                elif ow.element_type == "fuel_storage":
+                    nodes = range(nc) if ow.node is None else [ow.node]
+                    merged_outages.extend(ow.model_copy(update={"node": n + off})
+                                          for n in nodes)
+                    continue
                 merged_outages.append(ow)
 
         # Development zones: technology and unit keys follow the merged

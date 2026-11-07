@@ -1180,6 +1180,18 @@ import Ipopt
             p = value.(vars.electrolyzer_power[1, 1, :])
             @test all(p .<= 5.0 + 1e-6)
             @test p ≈ [2.0, 4.0, 5.0] atol = 1e-6   # 12 MW gas − 10 MW load, then ramp
+
+            # Scheduled outage (was accepted but ignored): out in step 2, half in step 3
+            input = PowerSystemInput(
+                name = "elz", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([10.0, 5.0, 5.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                electrolyzer_config = elz,
+                outage_masks = Dict{String, Any}("electrolyzer" => [1.0 0.0 0.5]),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test value.(vars.electrolyzer_power[1, 1, :]) ≈ [2.0, 0.0, 2.0] atol = 1e-6
         end
 
         @testset "every electrolyzer is dispatched and reported" begin
@@ -1739,6 +1751,76 @@ import Ipopt
             short, loss = solve_route(1.0)
             @test short ≈ [10.0, 0.0, 0.0] atol = 1e-6
             @test loss ≈ 0.0 atol = 1e-6
+        end
+
+        @testset "primary energy: scheduled tank and route outages, no-tank nodes" begin
+            # One day per period, 48 hourly steps, a 10/day (or 30/day)
+            # non-electric demand. Returns the fuel shortfall of the window.
+            function pe_short(; cap = 0.0, init = 0.0, avail = 87600.0, ne = 3650.0,
+                              disrupt = (0, 0), masks = Dict{String, Any}(),
+                              route_cap = 0.0)
+                two = route_cap > 0
+                n = two ? 2 : 1
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0,
+                                  two ? [avail, 0.0] : [avail], two ? [0.0, cap] : [cap],
+                                  two ? [0.0, init] : [init], 0.0, zeros(n), 0.0, 0.0, 0.0,
+                                  disrupt[1], disrupt[2], 0.0)
+                routes = two ? [TransportRoute("r1", 1, 2, 100.0,
+                                Dict("Gas" => FuelRouteParams(route_cap, 0.0, 0.0)))] :
+                               TransportRoute[]
+                ned = NonElectricDemandConfig("Industrial", "Gas",
+                                              two ? [0.0, ne] : [ne], 0.0, ones(12))
+                inp = PrimaryEnergyInput(2025, 2025, n, 48, [fuel],
+                    Dict{String, FuelInfrastructureConfig}(), [ned], routes,
+                    Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 48, 0.05,
+                    1000.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, 0)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp;
+                                                                           outage_masks = masks)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                short = sum(value.(vars.ne_demand_shortfall_periodic[("Gas", "Industrial")])) +
+                        sum(value.(vars.fuel_loss_of_supply_hourly["Gas"]))
+                return short, value.(vars.fuel_storage_level_hourly["Gas"])
+            end
+
+            # #121: supply is cut on day 2. A node without a tank could keep
+            # day 1's fuel for day 2 (its level had no upper bound); now only
+            # a real tank carries fuel over.
+            short, level = pe_short(disrupt = (24, 48))
+            @test short ≈ 10.0 atol = 1e-6
+            @test maximum(level) ≈ 0.0 atol = 1e-9
+            short, _ = pe_short(cap = 100.0, disrupt = (24, 48))
+            @test short ≈ 0.0 atol = 1e-6
+
+            # Tank outage (fuel_storage): a full, 100-unit tank and no supply
+            # serving 30/day for 2 days. Out of service, its level is frozen.
+            tank(a) = Dict{String, Any}("fuel_storage" =>
+                Dict("Gas" => fill(a, 1, 48)))
+            short, _ = pe_short(cap = 100.0, init = 1.0, avail = 0.0, ne = 3.0 * 3650.0)
+            @test short ≈ 0.0 atol = 1e-6
+            short, level = pe_short(cap = 100.0, init = 1.0, avail = 0.0, ne = 3.0 * 3650.0,
+                                    masks = tank(0.0))
+            @test short ≈ 60.0 atol = 1e-6
+            @test all(abs.(level .- 100.0) .< 1e-6)
+            # Half out of service: 50 locked, 50 usable
+            short, _ = pe_short(cap = 100.0, init = 1.0, avail = 0.0, ne = 3.0 * 3650.0,
+                                masks = tank(0.5))
+            @test short ≈ 10.0 atol = 1e-6
+
+            # Route outage (fuel_route): node 1 ships up to 15/day to node 2's
+            # 10/day demand (12 usable after the 0.8 inflow efficiency). At
+            # half capacity on day 1 only 7.5 × 0.8 = 6 arrive.
+            short, _ = pe_short(route_cap = 15.0)
+            @test short ≈ 0.0 atol = 1e-6
+            route = Dict{String, Any}("fuel_route" =>
+                Dict("r1" => vcat(fill(0.5, 24), ones(24))))
+            short, _ = pe_short(route_cap = 15.0, masks = route)
+            @test short ≈ 4.0 atol = 1e-6
         end
 
         @testset "primary energy: fuel in transit reaches the next window" begin
