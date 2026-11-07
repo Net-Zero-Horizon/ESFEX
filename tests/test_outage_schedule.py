@@ -88,6 +88,27 @@ class TestOutageWindowSchema:
             SystemConfig(**sys.model_dump())
         assert "generator 'ghost_n0'" in caplog.text
 
+    def test_fuel_storage_of_an_entry_point_fuel_is_known(self, caplog):
+        """Without primary_energy_sources the fuels come from the entry
+        points; a tank window on one of them is not "ignored"."""
+        from esfex.config.schema import FuelEntryPointConfig, GeoCoordinate
+        entry = FuelEntryPointConfig(
+            name="Port", fuels=["Diesel"], node=0,
+            coordinate=GeoCoordinate(latitude=0.0, longitude=0.0))
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            SystemConfig(
+                name="S", nodes=NodeConfig(num_nodes=1, nodes_connections=[0.0]),
+                fuel_entry_points=[entry],
+                outage_schedule=[
+                    OutageWindow(element_type="fuel_storage", element_id="Diesel",
+                                 start_hour=0, end_hour=5),
+                    OutageWindow(element_type="fuel_storage", element_id="LNG",
+                                 start_hour=0, end_hour=5),
+                ],
+            )
+        assert "fuel_storage 'Diesel'" not in caplog.text
+        assert "fuel_storage 'LNG'" in caplog.text
+
     def test_schedule_defaults_empty(self):
         sys = SystemConfig(name="S", nodes=NodeConfig(num_nodes=1, nodes_connections=[0.0]))
         assert sys.outage_schedule == []
