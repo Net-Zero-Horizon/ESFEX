@@ -952,13 +952,18 @@ class Orchestrator:
             merged_rooftop_potential.extend(rp[:nc] if len(rp) >= nc else rp + [0.0] * (nc - len(rp)))
 
         # Merge rooftop_solar_config: take the first non-empty config as the
-        # template and concat per-node arrays across systems (zeros padding).
+        # template and concat per-node arrays across systems (zeros padding;
+        # a list no system sets stays unset).
         merged_rooftop_solar_config = None
         rooftop_template = next((s.rooftop_solar_config for s in systems
                                  if s.rooftop_solar_config is not None), None)
         if rooftop_template is not None:
             rsc_d = rooftop_template.model_dump()
             for list_field in ('systems_per_node', 'avg_system_size', 'initial_adoption'):
+                if not any(getattr(s.rooftop_solar_config, list_field, None)
+                           for s in systems if s.rooftop_solar_config is not None):
+                    rsc_d[list_field] = None
+                    continue
                 merged_list: list = []
                 for sys, nc in zip(systems, node_counts):
                     src_cfg = sys.rooftop_solar_config
@@ -969,19 +974,21 @@ class Orchestrator:
                         zero = 0 if list_field == 'systems_per_node' else 0.0
                         merged_list.extend(src_list + [zero] * (nc - len(src_list)))
                 rsc_d[list_field] = merged_list
-            # Re-key per-node dicts (max_adoption, adoption_rates) by global node idx
+            # max_adoption / adoption_rates are keyed by adoption scenario
+            # ("low", "medium", "high"), not by node: the merged run has one
+            # rooftop configuration, so the first system that sets one wins.
             for dict_field in ('max_adoption', 'adoption_rates'):
-                merged_dict: dict = {}
-                for sname, sys in zip(sys_names, systems):
-                    src_cfg = sys.rooftop_solar_config
-                    src_dict = getattr(src_cfg, dict_field, {}) or {} if src_cfg else {}
-                    for k, v in src_dict.items():
-                        try:
-                            local_idx = int(k)
-                        except (TypeError, ValueError):
-                            continue
-                        merged_dict[str(offsets[sname] + local_idx)] = float(v)
-                rsc_d[dict_field] = merged_dict
+                set_by = [(sname, dict(getattr(sys.rooftop_solar_config, dict_field)))
+                          for sname, sys in zip(sys_names, systems)
+                          if sys.rooftop_solar_config is not None
+                          and getattr(sys.rooftop_solar_config, dict_field, None)]
+                rsc_d[dict_field] = set_by[0][1] if set_by else None
+                ignored = [sname for sname, d in set_by[1:] if d != set_by[0][1]]
+                if ignored:
+                    logger.warning(
+                        f"rooftop_solar_config.{dict_field} differs between systems; "
+                        f"the merged run uses {set_by[0][0]!r}'s and ignores "
+                        f"{', '.join(repr(s) for s in ignored)}'s")
             merged_rooftop_solar_config = rooftop_template.__class__(**rsc_d)
 
         # Merge EV categories / quantities (pad per-node arrays)
@@ -3022,6 +3029,14 @@ class Orchestrator:
             adoption_scenario=cfg.adoption_scenario,
             weather_variability=cfg.weather_variability,
             seed=cfg.simulation_seed,
+            performance_ratio=cfg.performance_ratio,
+            # Unset (or empty, as the Studio writes them) → rooftex defaults:
+            # potential drawn per node, default scenario rates and caps.
+            initial_adoption=cfg.initial_adoption or None,
+            systems_per_node=cfg.systems_per_node or None,
+            avg_system_size_kw=cfg.avg_system_size or None,
+            adoption_rates=cfg.adoption_rates or None,
+            max_adoption=cfg.max_adoption or None,
         )
         _rooftop_result = generate_profiles(_rooftop_cfg)
         rooftop_availability = _rooftop_result.availability
