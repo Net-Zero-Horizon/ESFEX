@@ -232,8 +232,9 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
             for p in temporal.primary_period_indices
                 hrs = temporal.hours_in_primary_period[p]
                 hours_in_p = length(hrs)
-                # Scale availability proportionally to this period's duration relative to full year
-                fraction = hours_in_p / scaling_base_hours
+                # Scale availability proportionally to this period's duration
+                # (steps × step length, in hours) relative to the full year
+                fraction = hours_in_p * step_h / scaling_base_hours
                 # Source disruption: scale availability by the fraction of this
                 # period's hours that fall inside the disruption window (reduced
                 # to disruption_availability there). Step s covers the absolute

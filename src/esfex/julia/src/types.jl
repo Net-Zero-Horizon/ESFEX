@@ -1138,8 +1138,9 @@ struct PowerSystemInput
     pwl_loss_segments::Int
 
     # Bidding/offer cost curves: gen_index => Dict{bus_index => Vector{CostSegment}}
-    # Only populated for generators with multi-segment curves (>1 block).
-    # For flat-cost generators the dict is empty → zero overhead.
+    # Only populated for generators whose curve changes their price (several
+    # blocks, or one block priced away from fuel_cost); a single block prices
+    # the output at its own marginal cost. Empty otherwise → zero overhead.
     gen_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}}
     bat_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}}
 
@@ -1520,7 +1521,8 @@ mutable struct PowerSystemVariables
     bats_at_bus::Vector{Vector{Int}}    # bus_idx → [bat indices with capacity here]
 
     # Segment output variables for PWL cost curves (bidding curves)
-    # Only populated for units with >1 segment; empty otherwise.
+    # Only populated for units with a curve (generators: one segment or more;
+    # batteries: more than one); empty otherwise.
     # (gen/bat_idx, bus) → Matrix{VariableRef} [segment × hour]
     gen_seg_output::Dict{Tuple{Int,Int}, Any}
     bat_seg_discharge::Dict{Tuple{Int,Int}, Any}
@@ -2278,12 +2280,9 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `life_extension_cost_factor::Float64`: Fraction of investment cost for annual extension
 - `decommissioning_cost_factor::Float64`: Fraction of investment cost for decommissioning
 
-## CO2 budget, line flow costs, start-ups
+## CO2 budget, start-ups
 - `co2_budget_groups::Vector{CO2BudgetGroup}`: Annual CO2 budget per system
   with its own violation penalty (empty = none)
-- `line_flow_cost::Dict{Tuple{Int,Int}, Float64}`: Cost per MWh of |flow| on a
-  corridor (from_bus < to_bus), e.g. distance × cost per MW·km of an
-  inter-system link
 - `unit_commitment::Bool`: The dispatch commits units; the master then has
   LP-relaxed commitment and start-up costs
 
@@ -2428,13 +2427,10 @@ struct MasterProblemInput
     # whole horizon's trajectory. Empty = RE-1.
     re_target_override::Dict{Tuple{Int,Int}, Float64}
 
-    # --- CO2 budget, line flow costs, start-ups (as in the dispatch) ---
+    # --- CO2 budget, start-ups (as in the dispatch) ---
     # Annual CO2 budgets, one per system (empty = no budget). Each pays its
     # own violation penalty, as the dispatch's `co2_budget_groups`.
     co2_budget_groups::Vector{CO2BudgetGroup}
-    # Cost per MWh of |flow| on a corridor (from_bus, to_bus), from < to,
-    # 1-indexed: distance × cost per MW·km of an inter-system link.
-    line_flow_cost::Dict{Tuple{Int,Int}, Float64}
     # The dispatch commits units (unit commitment): the master's day
     # operation then has LP-relaxed commitment and start-up costs.
     unit_commitment::Bool
@@ -2517,7 +2513,6 @@ function MasterProblemInput(;
     benders_lol_penalty_cap::Float64 = 1000.0,
     re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
     co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[],
-    line_flow_cost::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
     unit_commitment::Bool = false,
     primary_energy::Union{Nothing, MasterFuelInput} = nothing
 )
@@ -2553,7 +2548,7 @@ function MasterProblemInput(;
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         benders_lol_penalty_cap,
         re_target_override,
-        co2_budget_groups, line_flow_cost, unit_commitment,
+        co2_budget_groups, unit_commitment,
         primary_energy
     )
 end
@@ -2929,7 +2924,7 @@ Cost and parameter multipliers for a stochastic scenario (all 1.0 by default).
 - `gen_start_up_cost::Float64`: Generator start-up cost (LP start-ups of the master)
 - `bat_maintenance_cost::Float64`: Battery maintenance only (× `maintenance_cost`)
 - `transmission_cost_per_mw_km::Float64`: Flow cost of lines with a per-MW·km
-  cost (inter-system links, `line_flow_cost`)
+  cost (inter-system links, the lines' `flow_cost`)
 - `converter_invest_cost::Float64`: AC/DC and frequency converter investment
 - `converter_variable_cost::Float64`: AC/DC and frequency converter variable cost
 - `penalty_co2_budget_violation::Float64`: CO2 budget violation penalty

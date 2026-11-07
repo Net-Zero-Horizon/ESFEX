@@ -2005,6 +2005,27 @@ import Ipopt
             @test rate_short(0.05) ≈ 2 * 5.0 atol = 1e-6  # 10 per step: 5 short per step
         end
 
+        @testset "primary energy: supply limit per period counts step hours" begin
+            # 8760 units a year of supply and of demand: 24 per 24 h period at
+            # any step length. The supply limit counted steps, not hours, so
+            # 2 h steps got 12 and 3 h steps 8.
+            for tres in (1, 2, 3)
+                H = 24 ÷ tres
+                gasf = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0, [8760.0], [0.0], [0.0], 0.0,
+                                  [0.0], 0.0, 0.0, 0.0)
+                ne = NonElectricDemandConfig("Industrial", "Gas", [8760.0], 0.0, ones(12))
+                pe = PrimaryEnergyInput(2025, 2025, 1, H, [gasf],
+                    Dict{String, FuelInfrastructureConfig}(), [ne], TransportRoute[],
+                    Dict{Int, Tuple{String, Float64, Float64, Float64}}(), H, H, 0.05, 1.0,
+                    1.0, "economic_dispatch", Dict{String, Any}(), nothing, false, nothing,
+                    Dict{Int, Vector{Float64}}(), nothing, 1.0, tres, 0)
+                tm = ESFEX.create_temporal_mapping(H, H, H)
+                _, ms, ned = ESFEX.prepare_fuel_data(pe, tm)
+                @test ms["Gas"][1][1] ≈ 24.0 rtol = 1e-12
+                @test ned[("Gas", "Industrial")][1][1] ≈ 24.0 rtol = 1e-12
+            end
+        end
+
         # ── M2 (#89): fuel block of the master ──────────────────────────────
         # Gas at 3e-5 per unit (+ 0.5e-5 import), 5 MWh_e per unit; an
         # existing 30 MW electrolyzer (variable 2e-5 per MWh, water 1e-7 per
@@ -2016,7 +2037,7 @@ import Ipopt
                         nb = 1, H = H)
             elz = ElectrolyzerConfig([elz_rated], [0.65], [0.65], 50.0, [0.0], [0.0],
                                      [1.0e-3], [elz_max], [1.0e-6], [2.0e-5], 1.0e-7, [20.0])
-            gasf = FuelConfig("Gas", 3.0e-5, 0.0, 10.0, 0.0, [1.0e6 * tres], [0.0], [0.0],
+            gasf = FuelConfig("Gas", 3.0e-5, 0.0, 10.0, 0.0, [1.0e6], [0.0], [0.0],
                               0.0, [0.5e-5], 0.0, 0.0, 0.0)
             h2 = FuelConfig("Hydrogen", 0.0, 0.0, 33.3, 0.0, [0.0], [0.0], [0.0], 0.0,
                             [0.0], 0.0, 0.0, 0.0)
@@ -2106,14 +2127,14 @@ import Ipopt
         # a 100 km route to node 1 of 100 units/day that may grow 3-fold.
         # Hydrogen demand at node 1, and an electrolyzer that must be built.
         # Two years of one 24 h day each.
-        function fuel_invest_input()
+        function fuel_invest_input(; transit = 0.0)
             H = 24
             gas = mkgen("Gas", "Non-renewable", "Gas", [200.0], [5.0e-5], ones(H, 1);
                         nb = 1, H = H)
             elz = ElectrolyzerConfig([0.0], [0.65], [0.65], 50.0, [0.0], [0.0],
                                      [1.0e-3], [50.0], [1.0e-6], [2.0e-5], 1.0e-7, [20.0])
             gasf = FuelConfig("Gas", 3.0e-5, 0.0, 10.0, 0.0, [0.0, 1.0e6], [10.0, 0.0],
-                              [1.0, 0.0], 0.0, [5.0e-4, 1.0e-5], 0.0, 0.0, 0.0)
+                              [1.0, 0.0], 0.0, [5.0e-4, 1.0e-5], 0.0, 0.0, transit)
             h2 = FuelConfig("Hydrogen", 0.0, 0.0, 33.3, 0.0, [0.0, 0.0], [0.0, 0.0],
                             [0.0, 0.0], 0.0, [0.0, 0.0], 0.0, 0.0, 0.0)
             infra = Dict("Gas" => FuelInfrastructureConfig(100.0, 1.0e-6, 3.0, 1.0e-4, 2.0,
@@ -2160,6 +2181,29 @@ import Ipopt
             @test bf["storage_capacity"][1]["Gas"][1] ≈ fi["storage_capacity"][1]["Gas"][1] rtol = 1e-4
             @test bf["transport_capacity"][1]["Gas"][1] ≈ fi["transport_capacity"][1]["Gas"][1] rtol = 1e-4
             @test bf["electrolyzer_capacity"][1][1][1] ≈ elz_mw rtol = 1e-4
+            # The fuel builds count in the year's investment total (they
+            # were left out); no other build in this case
+            res = extract_master_solution(model, mv, inp)
+            @test res.total_investment_by_year[1] > 0
+            @test sum(res.total_investment_by_year) ≈
+                  value(ESFEX.master_fuel_investment_cost(mv, inp; discount_rate = 0.0)) rtol = 1e-9
+
+            # A route transit delay changes nothing in the cyclic day: the
+            # shipments of the day's last steps used to arrive after its end
+            # (paid for, never delivered), so the master bought a fuel
+            # shortfall or over-sized the route.
+            for transit in (0.25, 1.0)
+                tinp = fuel_invest_input(; transit = transit)
+                tm, tv, _ = create_master_problem(tinp; use_representative_days = true)
+                ESFEX.set_silent(tm)
+                optimize!(tm)
+                @test string(termination_status(tm)) == "OPTIMAL"
+                @test objective_value(tm) ≈ objective_value(model) rtol = 1e-6
+                tfi = extract_master_solution(tm, tv, tinp).fuel_investment
+                @test tfi["transport"][1]["Gas"][1] ≈ fi["transport"][1]["Gas"][1] rtol = 1e-6
+                pv, _ = tm.ext[:master_fuel_last_day]
+                @test sum(value.(pv.fuel_loss_of_supply_hourly["Gas"])) ≈ 0.0 atol = 1e-6
+            end
         end
 
         @testset "stochastic fuel and electrolyzer multipliers" begin
@@ -2303,6 +2347,41 @@ import Ipopt
             @test tech_energy(mkinput(Dict{Int, Dict{Int, Vector{CostSegment}}}())) ≈
                   24 * 100.0 rtol = 1e-6
             @test tech_energy(mkinput(curve)) ≈ 24 * 50.0 rtol = 1e-6
+            # A flat curve (one segment) prices the output at its own price:
+            # at 1e-4, above diesel, the gas does not run. A single segment
+            # used to be ignored (priced at the flat fuel_cost 1e-5).
+            flat = Dict(1 => Dict(1 => [CostSegment(1.0, 1.0e-4)]))
+            @test tech_energy(mkinput(flat)) ≈ 0.0 atol = 1e-6
+            # Same rule for an existing generator, in the master and the dispatch
+            gas_gen = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                            ones(H, 1); nb = 1, H = H)
+            for curves in (Dict{Int, Dict{Int, Vector{CostSegment}}}(),
+                           Dict(2 => Dict(1 => [CostSegment(1.0, 1.0e-4)])))
+                ginp = MasterProblemInput(
+                    years = [2025], network = net, generators = [diesel, gas_gen],
+                    batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    gen_cost_curves = curves, verbose = false)
+                gm, _, _ = create_master_problem(ginp; use_representative_days = true)
+                optimize!(gm)
+                @test string(termination_status(gm)) == "OPTIMAL"
+                gas_mwh = sum(value(v) for v in all_variables(gm)
+                              if startswith(name(v), "op_y1_d1_gen[2,"))
+                dinput = PowerSystemInput(
+                    name = "flat", year = 2025, network = net,
+                    generators = [diesel, gas_gen], batteries = BatteryConfig[],
+                    demand = fill(100.0, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    gen_cost_curves = curves,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                dm, dv = create_power_system(dinput)
+                optimize!(dm)
+                @test string(termination_status(dm)) == "OPTIMAL"
+                expected = isempty(curves) ? 24 * 100.0 : 0.0
+                @test gas_mwh ≈ expected atol = 1e-6
+                @test sum(value.(dv.gen_output[2, 1, :])) ≈ expected atol = 1e-6
+            end
 
             # Benders: the subproblem prices the segments too, and the cut
             # gradient includes the segment caps (fraction × capacity), so it
@@ -2684,30 +2763,137 @@ import Ipopt
             @test value(mvars.converter_investment[1][("acdc", 1)]) ≈ 0.0 atol = 1e-6
         end
 
-        @testset "master: flow cost of inter-system links" begin
-            # 10 MW flow every hour on a line charging 3e-6 per MWh: the plan
-            # costs 10 × 24 × 365 × 3e-6 more; the multiplier doubles it.
+        @testset "master reservoir builds raise the reservoir's level bounds" begin
+            # 50 MW hydro with 25 MWh/h of inflow and a 100 MWh reservoir
+            # (starts and ends at 50 MWh); no load for 12 h, then 50 MW for
+            # 12 h, with diesel at 1e-3 as the alternative. Storing the
+            # first half's 300 MWh needs 350 MWh: the master builds 250. The
+            # build used to be charged but never added to the reservoir.
+            hydro = ESFEX.with_fields(
+                mkgen("Hydro", "Renewable", "Water", [50.0], [0.0], ones(H24, 1);
+                      nb = 1, H = H24);
+                reservoir_capacity = [100.0], reservoir_initial_level = [0.5],
+                reservoir_min_level = [0.0], reservoir_max_level = [1.0],
+                reservoir_inflow = fill(25.0, H24, 1), reservoir_turbine_efficiency = [1.0],
+                reservoir_evaporation_rate = [0.0], reservoir_pump_capacity = [0.0],
+                reservoir_pump_efficiency = [1.0], reservoir_spillage_allowed = true,
+                reservoir_invest_cost = [1.0e-6], reservoir_invest_max = [1000.0])
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                           ones(H24, 1); nb = 1, H = H24)
+            dem = reshape(vcat(zeros(12), fill(50.0, 12)), H24, 1)
+            inp = MasterProblemInput(
+                years = [2025, 2026], network = net1, generators = [hydro, diesel],
+                batteries = BatteryConfig[], base_demand = vcat(dem, dem),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                hours_per_year = [24, 24], verbose = false)
+            model, mvars = master1(inp)
+            res = extract_master_solution(model, mvars, inp)
+            @test res.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-6
+            # Built once: year 2 already has it
+            @test get(res.reservoir_investment[2], 1, [0.0])[1] ≈ 0.0 atol = 1e-6
+            @test res.total_investment_by_year[1] ≈ 250.0 * 1.0e-6 rtol = 1e-6
+            # Year 2 still has it: the hydro covers all 600 MWh of the load
+            @test sum(mvals(model, "op_y2_d1_gen[1,")) ≈ 600.0 rtol = 1e-6
+        end
+
+        @testset "total_investment_by_year counts transmission builds" begin
+            # 10 MW line to the load bus: the master adds 40 MW, charged at
+            # the dearer end (2e-4 per MW); it was left out of the total.
             buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
                      BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
             line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
                                         1, 50.0, "AC")
-            net2 = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
-                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+            net = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [1.0e-4, 2.0e-4], [100.0, 100.0],
                 [line], TransformerData[], ACDCConverterData[], FrequencyConverterData[], 0.1)
             gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 100.0], [1.0e-5, 1.0e-3],
                         ones(H24, 2); nb = 2, H = H24)
+            inp = MasterProblemInput(
+                years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = hcat(zeros(H24), fill(50.0, H24)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, verbose = false)
+            model, mvars = master1(inp)
+            res = extract_master_solution(model, mvars, inp)
+            built = maximum(values(res.transfer_investment[1]))
+            @test built ≈ 40.0 rtol = 1e-6
+            @test res.total_investment_by_year[1] ≈ 40.0 * 2.0e-4 rtol = 1e-6
+        end
+
+        @testset "invest_cost_conventional and converter_invest_cost scale their own builds" begin
+            # converter_invest_cost overwrote invest_cost_conventional, so
+            # conventional technologies were priced with the converter one.
+            o = [0.0]
+            gt = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0], [50.0], ones(H24, 1),
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            c = ACDCConverterData("c1", "VSC", 1, 1, 220.0, 320.0, 10.0, 0.0, 1.0, 1.0,
+                                  0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 2.0, 0.0, 0.0, 20.0,
+                                  30, 0, 0.0)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5], ones(H24, 1);
+                        nb = 1, H = H24)
+            inp = MasterProblemInput(years = [2025],
+                network = ESFEX.with_fields(net1; acdc_converters = [c]),
+                generators = [gas], batteries = BatteryConfig[], technologies = [gt],
+                base_demand = fill(50.0, H24, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, verbose = false)
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp)
+            vt = vars.tech_investment[1][1][1]
+            vc = vars.converter_investment[1][("acdc", 1)]
+            function coefs(m)
+                e = ESFEX.build_investment_cost_expression(vars, inp; mult = m)
+                return coefficient(e, vt), coefficient(e, vc)
+            end
+            @test coefs(ScenarioMultipliers()) == (1.0, 2.0)
+            @test coefs(ScenarioMultipliers(invest_cost_conventional = 3.0)) == (3.0, 2.0)
+            @test coefs(ScenarioMultipliers(converter_invest_cost = 7.0)) == (1.0, 14.0)
+        end
+
+        @testset "master: flow cost of inter-system links" begin
+            # 10 MW flow every hour on a line charging 3e-6 per MWh: the plan
+            # costs 10 × 24 × 365 × 3e-6 more; the multiplier doubles it.
+            # A parallel line and a transformer on the same bus pair carry
+            # 10 MW each and charge nothing, as in the dispatch: the master
+            # used to charge the pair's cost on all three.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            link(cost) = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                              1, 50.0, "AC", cost)
+            other = TransmissionLineData("l2", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                         1, 50.0, "AC")
+            trafo = TransformerData("T1", 1, 2, 220.0, 220.0, 10.0, 0.1, 0.0, 0.1, 1.0, 0.0)
+            net2(cost) = NetworkConfig(2, 2, buses, [1, 2], [0 20.0; 20.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [link(cost), other], [trafo], ACDCConverterData[], FrequencyConverterData[],
+                0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 100.0], [1.0e-5, 1.0e-3],
+                        ones(H24, 2); nb = 2, H = H24)
             mk(cost) = MasterProblemInput(
-                years = [2025], network = net2, generators = [gas],
+                years = [2025], network = net2(cost), generators = [gas],
                 batteries = BatteryConfig[], base_demand = fill(50.0, H24, 2),
                 target_re_penetration = 0.0, initial_re_penetration = 0.0,
                 representative_days_per_year = 1, min_day_separation = 1,
-                transmission_loss_segments = 0, line_flow_cost = cost, verbose = false)
-            m0, _ = master1(mk(Dict{Tuple{Int,Int},Float64}()))
-            m1, _ = master1(mk(Dict((1, 2) => 3.0e-6)))
-            m2, _ = master1(mk(Dict((1, 2) => 3.0e-6));
+                transmission_loss_segments = 0, verbose = false)
+            m0, _ = master1(mk(0.0))
+            m1, _ = master1(mk(3.0e-6))
+            m2, _ = master1(mk(3.0e-6);
                             mult = ScenarioMultipliers(transmission_cost_per_mw_km = 2.0))
             @test objective_value(m1) - objective_value(m0) ≈ 10 * 24 * 365 * 3.0e-6 rtol = 1e-6
             @test objective_value(m2) - objective_value(m0) ≈ 2 * 10 * 24 * 365 * 3.0e-6 rtol = 1e-6
+            # Same per-line charge in the dispatch over the day
+            input = PowerSystemInput(
+                name = "flow", year = 2025, network = net2(3.0e-6), generators = [gas],
+                batteries = BatteryConfig[], demand = fill(50.0, H24, 2),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                pwl_loss_segments = 0,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            dmodel, _ = create_power_system(input)
+            optimize!(dmodel)
+            @test value(dmodel.ext[:cost_expressions][:line_flow_cost]) ≈ 10 * 24 * 3.0e-6 rtol = 1e-6
         end
 
         @testset "scenario_master_input: start-up, battery maintenance, converter, link, CO2 multipliers" begin
@@ -2725,12 +2911,14 @@ import Ipopt
                                          [3.0], o, [4.0], false, "AC", o, [1.0])
             c = ACDCConverterData("c1", "VSC", 1, 1, 220.0, 320.0, 10.0, 0.0, 1.0, 1.0,
                                   0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0, 0.0, 5.0, 0.0, 30, 0, 0.0)
-            net = ESFEX.with_fields(net1; acdc_converters = [c])
+            ln = TransmissionLineData("l1", 1, 1, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                      1, 50.0, "AC", 4.0)
+            net = ESFEX.with_fields(net1; acdc_converters = [c], transmission_lines = [ln])
             inp = MasterProblemInput(
                 years = [2025], network = net, generators = [gen], batteries = [bat],
                 battery_technologies = [li], base_demand = fill(50.0, H24, 1),
                 co2_budget_groups = [CO2BudgetGroup("A", [1], 10.0, 7.0)],
-                line_flow_cost = Dict((1, 2) => 4.0), verbose = false)
+                verbose = false)
             si = ESFEX.scenario_master_input(inp, ScenarioMultipliers(
                 maintenance_cost = 2.0, bat_maintenance_cost = 3.0, gen_start_up_cost = 5.0,
                 converter_variable_cost = 6.0, transmission_cost_per_mw_km = 7.0,
@@ -2740,7 +2928,7 @@ import Ipopt
             @test si.batteries[1].maintenance_cost == [12.0]
             @test si.battery_technologies[1].maintenance_cost == [18.0]
             @test si.network.acdc_converters[1].variable_cost == 30.0
-            @test si.line_flow_cost[(1, 2)] == 28.0
+            @test si.network.transmission_lines[1].flow_cost == 28.0
             @test si.co2_budget_groups[1].violation_penalty == 56.0
             @test si.co2_budget_groups[1].budget == 10.0
         end

@@ -56,7 +56,7 @@ Investment variables exist only for period-start years \(y \in \mathcal{Y}^{inv}
 | \(I^{bat,P}_{y,k,n}\) | \([0, \bar{I}^{P}_{k,n}]\) | MW | Battery-technology power investment | `bat_tech_power_investment[y][k][n]` |
 | \(I^{bat,E}_{y,k,n}\) | \([0, \bar{I}^{E}_{k,n}]\) | MWh | Battery-technology energy investment | `bat_tech_capacity_investment[y][k][n]` |
 | \(I^{tr}_{y,i,j}\) | \([0, \bar{I}^{tr}_i]\) | MW | Transmission expansion on an existing corridor | `transfer_investment[y][(i,j)]` |
-| \(I^{res}_{y,g,n}\) | \(\mathbb{R}_+\) | MWh | Reservoir storage investment (every year) | `reservoir_investment[y][g]` |
+| \(I^{res}_{y,g,n}\) | \(\mathbb{R}_+\) | MWh | Reservoir storage investment (investment-period starts) | `reservoir_investment[y][g]` |
 
 ### 3.2 Life Extension, RE Tracking and Slack Variables
 
@@ -560,7 +560,7 @@ The master network has one bus per node, so a converter joins its `from_node` an
 
 #### 8.3.9 Flow Cost of Inter-System Links
 
-An electrical inter-system link charges `distance_km` × `cost_per_mw_km` per MWh it carries. In a merged run its node link gets that cost (`line_flow_cost`; several links between the same two nodes share their capacity-weighted mean), and the day's cost includes \(c^{flow}_\ell |f^{day}_{\ell,t}|\), with \(|f|\) an auxiliary variable above \(\pm f\).
+An electrical inter-system link charges `distance_km` × `cost_per_mw_km` per MWh it carries. In a merged run its node link gets that cost as the line's `flow_cost` (several links between the same two nodes share their capacity-weighted mean), and the day's cost includes \(c^{flow}_\ell |f^{day}_{\ell,t}|\) for each line \(\ell\) with a flow cost, with \(|f|\) an auxiliary variable above \(\pm f\). As in the dispatch, each line pays its own cost: other lines and transformers between the same buses pay none.
 
 #### 8.3.10 Start-ups (LP)
 
@@ -591,7 +591,7 @@ Each system's annual CO2 budget holds in the master as in the dispatch (one budg
 On each representative day (or TSAM period) the master builds the dispatch's own [primary-energy model](primary-energy.md) for that day, with the same fuel prices, import costs, supply limits, tanks, routes, non-electric demand and penalties, so master and dispatch charge the same fuel costs. Three things differ, because a representative day is not a chronological window:
 
 - each tank ends the day at the level it started with (`hr_storage_cyclic_*`, also for TSAM periods), so drawing it down is worth nothing;
-- route shipments arrive the same day (no transit delay);
+- route shipments arrive the same day (no transit delay: in a cyclic day a delayed shipment that left in the last steps would never arrive, and with one supply period a day the flow leaves evenly, so wrapping the delay around the day would deliver the same);
 - the supply-limit period is the day, which is the dispatch's default 24 h `primary_energy_resolution`.
 
 Supply limits and disruption windows use the day's absolute horizon hours, as in the dispatch.
@@ -867,7 +867,7 @@ After optimization, the following quantities are extracted into a `MasterProblem
 | `cumulative_gen_capacity`, `cumulative_bat_capacity`, `cumulative_bat_power` | Capacity of existing units per year (CUM-1, CUM-2) |
 | `cumulative_tech_capacity`, `cumulative_bat_tech_power`, `cumulative_bat_tech_capacity` | Cumulative technology capacity per year (CUM-1b, CUM-3) |
 | `re_penetration_by_year`, `re_penetration_by_system` | RE ratio \(\rho\) per year (and per system) |
-| `total_investment_by_year`, `total_operational_cost_by_year` | Investment and representative-day operating cost per year (\$) |
+| `total_investment_by_year`, `total_operational_cost_by_year` | Investment (undiscounted overnight cost of every build of the year: technologies, battery technologies, transmission, converters, reservoirs, fuel storage, routes and electrolyzers) and representative-day operating cost per year (\$) |
 | `reservoir_investment` | Reservoir storage investment |
 
 The runner turns the cumulative technology capacity into virtual generators and batteries for the operational dispatch (§16.3).
