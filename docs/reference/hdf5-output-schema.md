@@ -142,7 +142,7 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
 
 Energy and CO2 totals here and in the scenario attributes below are sums of the per-step rates times `temporal_resolution_hours`, so they are MWh and tonnes at any time step.
-| `n1_security_cost` | (num_years,) | float | Incremental cost of N-1 security ($); currently always 0 (not computed — the shortfall penalty is `n1_security_shortfall_cost` in `cost_breakdown/`) |
+| `n1_security_cost` | (num_years,) | float | Cost of N-1 security ($): objective with N-1 minus objective without it, with `n1_security.compute_security_cost: true`; 0 otherwise. The shortfall penalty alone is `n1_security_shortfall_cost` in `cost_breakdown/` |
 
 ---
 
@@ -204,9 +204,10 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
 | `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
 | `pe_coupling_slack_cost` | float | $ | Deprecated, always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
-| `pe_electrolyzer_cost` | float | $ | Electrolyzer cost in the primary energy model |
+| `pe_electrolyzer_cost` | float | $ | The electrolyzers' cost (`electrolyzer_cost`) when their hydrogen fills the primary-energy `Hydrogen` tank, 0 otherwise. The same money as `electrolyzer_cost`, not an extra cost: do not add both |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
-| `total` | float | $ | Sum of all cost components |
+| `line_flow_cost` | float | $ | Flow cost of lines with a `cost_per_mw_km` (inter-system links: length × `cost_per_mw_km` × MWh carried) |
+| `total` | float | $ | Objective value of the dispatch. Reporting-only entries such as `pe_electrolyzer_cost` (a view of `electrolyzer_cost`) are not part of it |
 
 ### Reading Cost Breakdown
 
@@ -588,7 +589,7 @@ Written when N-1 security results exist.
 
 | Content | Kind | Description |
 |---------|------|-------------|
-| `security_cost` | attribute | Incremental cost of N-1 security ($); currently always 0 (see `n1_security_cost` above) |
+| `security_cost` | attribute | Cost of N-1 security ($); 0 unless `compute_security_cost` is on (see `n1_security_cost` above) |
 | `gen_reserve_duals` | dataset (hours,) | Dual of the generation N-1 reserve constraint (USD/MW) |
 | `trans_reserve_duals/line_{l}_outage_{k}_dir_{d}` | datasets | Duals of the transmission contingency constraints (USD/MW) |
 | `binding_contingencies` | dataset (bytes) | IDs of binding contingencies |

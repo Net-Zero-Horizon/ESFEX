@@ -535,6 +535,7 @@ class N1SecurityConfig(BaseModel):
     scopf_max_iterations: int = 5
     scopf_violation_tolerance: float = 0.01
     corrective_enabled: bool = False
+    compute_security_cost: bool = False
     contingency_depth: Literal["n1", "n1_1"] = "n1"
     redistribution_mode: Literal["pro_rata", "droop"] = "pro_rata"
     pi_screening_threshold: float = 0.0

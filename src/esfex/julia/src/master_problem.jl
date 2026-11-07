@@ -2183,8 +2183,8 @@ function add_day_operational_constraints!(
     # =========================================================================
     # Sectoral split of the load shed (M2) — master-specific
     # =========================================================================
-    add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
-        start_hour, growth_factor; label = "y$(year_idx)_d$(day_idx)")
+    remainder_premium = add_day_sectoral_shed_constraints!(model, ps_vars, input,
+        demand_slice, start_hour, growth_factor; label = "y$(year_idx)_d$(day_idx)")
 
     # =========================================================================
     # CRITICAL: Per-System Renewable Penetration Constraints — master-specific
@@ -2289,6 +2289,8 @@ function add_day_operational_constraints!(
     # explicit economic basis (the max_curtailment_ratio constraint alone
     # empirically does not bind for the full-year operational LP).
     tech_day_cost = AffExpr(0.0)
+    # Unclassified sectoral remainder above plain VOLL (as the dispatch prices it)
+    add_to_expression!(tech_day_cost, remainder_premium)
 
     if input.max_curtailment_ratio < 1.0
         # Build as AffExpr explicitly: when the sum collapses to a single
@@ -2500,18 +2502,26 @@ The sectoral shed is part of `load_shed`, not an extra injection: the bus can
 shed at most its demand (PB-1b). `day_operational_cost` charges `load_shed` at
 VOLL and adds the criticality premium on the sectoral part. `label` names the
 constraints; `nothing` leaves them unnamed (Benders subproblems).
+
+Returns the unscaled premium of the unclassified remainder above `voll`:
+`voll × (m − 1) × (load_shed − Σ sector shed)`, with `m` the remainder's
+multiplier (`sector_remainder_multiplier`, the dispatch's rule); the caller
+adds it to the day's cost.
 """
 function add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
                                             start_hour::Int, growth_factor::Float64;
-                                            label::Union{Nothing, String} = nothing)
+                                            label::Union{Nothing, String} = nothing,
+                                            voll::Float64 = input.loss_of_load_penalty)
+    premium = AffExpr(0.0)
     lol = ps_vars.loss_of_load_sectoral
-    (lol === nothing || isempty(lol)) && return
+    (lol === nothing || isempty(lol)) && return premium
     hours = size(demand_slice, 1)
     for t in 1:hours, b in 1:input.network.num_buses
         parent = input.network.bus_to_node[b]
         frac = input.network.buses[b].demand_fraction
         sector_shed = AffExpr(0.0)
         sector_demand = 0.0
+        sec_vals = Dict{String, Float64}()
         for (sector, lol_vars) in lol
             sec_val = 0.0
             sec_dem = get(input.sectoral_demand, sector, nothing)
@@ -2519,6 +2529,7 @@ function add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
                 hour_in_year = mod1(start_hour + t - 1, size(sec_dem, 1))
                 sec_val = max(0.0, sec_dem[hour_in_year, parent] * frac * growth_factor)
             end
+            sec_vals[sector] = sec_val
             sector_demand += sec_val
             add_to_expression!(sector_shed, lol_vars[b, t])
             @constraint(model, lol_vars[b, t] <= sec_val,
@@ -2529,7 +2540,14 @@ function add_day_sectoral_shed_constraints!(model, ps_vars, input, demand_slice,
             base_name = label === nothing ? "" : "lol_sec_sum_$(label)_n$(b)_t$(t)")
         @constraint(model, ps_vars.load_shed[b, t] - sector_shed <= residual_cap,
             base_name = label === nothing ? "" : "lol_sec_residual_$(label)_n$(b)_t$(t)")
+        m = sector_remainder_multiplier(keys(lol), input.sectoral_criticality,
+                                        s -> sec_vals[s])
+        if m != 1.0
+            add_to_expression!(premium, voll * (m - 1.0), ps_vars.load_shed[b, t])
+            add_to_expression!(premium, -voll * (m - 1.0), sector_shed)
+        end
     end
+    return premium
 end
 
 """
@@ -2676,8 +2694,9 @@ function day_operational_cost(
 
         # Sectoral shed is part of load_shed (add_day_sectoral_shed_constraints!),
         # which is already charged VOLL above: add the criticality premium
-        # VOLL × (κ − 1), so a sector's MWh costs VOLL × κ and the unclassified
-        # remainder VOLL.
+        # VOLL × (κ − 1), so a sector's MWh costs VOLL × κ. The unclassified
+        # remainder's premium (weighted mean criticality) comes from
+        # add_day_sectoral_shed_constraints!.
         if ps_vars.loss_of_load_sectoral !== nothing && !isempty(ps_vars.loss_of_load_sectoral)
             for (sector, lol_vars) in ps_vars.loss_of_load_sectoral
                 criticality = get(input.sectoral_criticality, sector, 1.0)

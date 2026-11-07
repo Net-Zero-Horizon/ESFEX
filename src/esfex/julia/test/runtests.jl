@@ -505,13 +505,19 @@ import Ipopt
             @test res.cost_breakdown.load_shedding_cost ≈
                   0.01 * (30.0 * 1.0 + 30.0 * 1000.0) rtol = 1e-6
             # Sectors covering only part of the node's demand: the rest is an
-            # unclassified remainder priced at VOLL, shed before the critical
-            # sector; the model stays feasible.
+            # unclassified remainder, priced at the sectors' demand-weighted
+            # mean multiplier (it was VOLL × 1, cheaper than every sector);
+            # the model stays feasible.
+            lol, res = shed_split(Dict("cheap" => 20.0, "critical" => 30.0))
+            m = (20.0 * 1.0 + 30.0 * 1000.0) / 50.0
+            @test res.load_shed_total ≈ 60.0 atol = 1e-6
+            @test lol["cheap"] ≈ 20.0 atol = 1e-6       # cheapest first
+            @test lol["critical"] ≈ 0.0 atol = 1e-6     # remainder (40 of 50) before it
+            @test res.cost_breakdown.load_shedding_cost ≈
+                  0.01 * (20.0 * 1.0 + 40.0 * m) rtol = 1e-6
             lol, res = shed_split(Dict("critical" => 50.0))
             @test res.load_shed_total ≈ 60.0 atol = 1e-6
-            @test lol["critical"] ≈ 10.0 atol = 1e-6
-            @test res.cost_breakdown.load_shedding_cost ≈
-                  0.01 * (50.0 + 10.0 * 1000.0) rtol = 1e-6
+            @test res.cost_breakdown.load_shedding_cost ≈ 0.01 * 60.0 * 1000.0 rtol = 1e-6
         end
 
         @testset "master: sectoral shed is part of load shed" begin
@@ -554,6 +560,30 @@ import Ipopt
             @test shed2 ≈ 24 * 60.0 rtol = 1e-6
             @test crit2 ≈ 24 * 30.0 rtol = 1e-6     # cheap sector holds only 30 MW
             @test obj2 > 100 * obj1                  # criticality is priced
+
+            # Unclassified remainder (40 of 100 MW) at the sectors' weighted
+            # mean (≈ 683), as in the dispatch: sectors A (κ 2) and C (κ 100)
+            # are shed before it. At plain VOLL it went first.
+            gas70 = mkgen("Gas", "Non-renewable", "Gas", [70.0],
+                          [1.0], ones(H, 1); nb = 1, H = H)
+            inp = MasterProblemInput(
+                years = [2025], network = net, generators = [gas70],
+                batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 10.0,
+                sectoral_demand = Dict("A" => fill(10.0, H, 1), "C" => fill(10.0, H, 1),
+                                       "B" => fill(40.0, H, 1)),
+                sectoral_criticality = Dict("A" => 2.0, "C" => 100.0, "B" => 1000.0),
+                verbose = false)
+            model, _, _ = create_master_problem(inp; use_representative_days = true)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            byname(pfx) = [v for v in all_variables(model) if startswith(name(v), pfx)]
+            @test sum(value.(byname("op_y1_d1_ll["))) ≈ 24 * 30.0 rtol = 1e-6
+            @test sum(value.(byname("op_y1_d1_lol_A["))) ≈ 24 * 10.0 rtol = 1e-6
+            @test sum(value.(byname("op_y1_d1_lol_C["))) ≈ 24 * 10.0 rtol = 1e-6
+            @test sum(value.(byname("op_y1_d1_lol_B["))) ≈ 0.0 atol = 1e-6
 
             # A myopic year's target comes from the horizon trajectory: the
             # override replaces RE-1 (which gives year 1 its initial share).
@@ -950,6 +980,52 @@ import Ipopt
             @test ESFEX.with_loss_model(t, 0, 100.0).pwl_losses === nothing
         end
 
+        @testset "line flow cost is charged on |flow|" begin
+            # Inter-system links carry distance × cost_per_mw_km per MWh; the
+            # dispatch charged nothing. A cheap unit at the far end serves the
+            # load over the line while the flow cost stays below the price gap.
+            function flow_run(cost; cheap_bus = 1)
+                H = 2; N = 2
+                fc = cheap_bus == 1 ? [1.0e-5, 1.0e-4] : [1.0e-4, 1.0e-5]
+                gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 200.0], fc,
+                            ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("link_A_B_0", 1, 2, 150.0, 0.1, 0.0, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC", cost)
+                net = NetworkConfig(N, N, buses, [1, 2],
+                                    [0.0 150.0; 150.0 0.0], [0.0 100.0; 100.0 0.0],
+                                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                    [line], TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                demand = cheap_bus == 1 ? [0.0 100.0; 0.0 100.0] : [100.0 0.0; 100.0 0.0]
+                input = PowerSystemInput(
+                    name = "flowcost", year = 2025, network = net, generators = [gas],
+                    batteries = BatteryConfig[], demand = demand,
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = 0)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                imported = sum(value(vars.gen_output[1, cheap_bus, t]) for t in 1:H)
+                return imported, res.cost_breakdown.line_flow_cost
+            end
+            imported, cost = flow_run(5.0e-5)
+            @test imported ≈ 200.0 atol = 1e-6
+            @test cost ≈ 200.0 * 5.0e-5 rtol = 1e-6
+            imported, cost = flow_run(5.0e-5; cheap_bus = 2)    # reverse direction
+            @test imported ≈ 200.0 atol = 1e-6
+            @test cost ≈ 200.0 * 5.0e-5 rtol = 1e-6
+            imported, cost = flow_run(2.0e-4)                   # dearer than the gap
+            @test imported ≈ 0.0 atol = 1e-6
+            @test cost ≈ 0.0 atol = 1e-9
+            # Default constructor: no flow cost
+            @test TransmissionLineData("L", 1, 2, 1.0, 0.1, 0.0, 0.0, 1.0, 220.0,
+                                       1, 50.0, "AC").flow_cost == 0.0
+        end
+
         @testset "end-of-year SOC floor" begin
             # Rolling windows leave the end SOC free; the year's last window
             # gets a soft floor so the battery does not end the year emptier
@@ -1104,6 +1180,18 @@ import Ipopt
             p = value.(vars.electrolyzer_power[1, 1, :])
             @test all(p .<= 5.0 + 1e-6)
             @test p ≈ [2.0, 4.0, 5.0] atol = 1e-6   # 12 MW gas − 10 MW load, then ramp
+
+            # Scheduled outage (was accepted but ignored): out in step 2, half in step 3
+            input = PowerSystemInput(
+                name = "elz", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = reshape([10.0, 5.0, 5.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                electrolyzer_config = elz,
+                outage_masks = Dict{String, Any}("electrolyzer" => [1.0 0.0 0.5]),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test value.(vars.electrolyzer_power[1, 1, :]) ≈ [2.0, 0.0, 2.0] atol = 1e-6
         end
 
         @testset "every electrolyzer is dispatched and reported" begin
@@ -1347,6 +1435,40 @@ import Ipopt
             _, _, cost, _ = solve_n1([ngen("A", 60.0, 1.0e-5)], 50.0;
                                      rtype = "percentage", rpct = 0.2)
             @test cost ≈ 0.0 atol = 1e-6
+
+            # n1_security_cost = objective with N-1 − objective without it
+            # (was always 0). Corrective N-1 moves 35 MW from A to the dearer
+            # B in both steps; a short backup only adds the shortfall penalty.
+            function n1_security(gens; kw...)
+                input = PowerSystemInput(;
+                    name = "n1", year = 2025, network = net, generators = gens,
+                    batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0,
+                    n1_security_enabled = true, n1_generation_enabled = true,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    kw...)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                before = extract_solution(model, vars, input).n1_security_cost
+                c = compute_n1_security_cost!(model, input)
+                res = extract_solution(model, vars, input)
+                return before, c, res.n1_security_cost, value(vars.gen_output[1, 1, 1])
+            end
+            before, c, stored, a_out = n1_security(
+                [ngen("A", 100.0, 1.0e-5), ngen("B", 60.0, 1.0e-4; ramp = 0.25)];
+                n1_scopf_enabled = true, n1_corrective_enabled = true)
+            @test before == 0.0                       # not computed: stays 0
+            @test c ≈ 35.0 * (1.0e-4 - 1.0e-5) * H rtol = 1e-6
+            @test stored ≈ c
+            @test a_out ≈ 15.0 atol = 1e-6            # original solution untouched
+            _, c, _, _ = n1_security([ngen("A", 100.0, 1.0e-5), ngen("B", 30.0, 1.0e-4)])
+            @test c ≈ 20.0 * H rtol = 1e-6
+            # N-1 off: nothing to compute
+            _, c, stored, _ = n1_security([ngen("A", 100.0, 1.0e-5)];
+                                          n1_security_enabled = false)
+            @test c == 0.0 && stored == 0.0
         end
 
         @testset "ACOPF line limits follow scheduled outages" begin
@@ -1631,6 +1753,76 @@ import Ipopt
             @test loss ≈ 0.0 atol = 1e-6
         end
 
+        @testset "primary energy: scheduled tank and route outages, no-tank nodes" begin
+            # One day per period, 48 hourly steps, a 10/day (or 30/day)
+            # non-electric demand. Returns the fuel shortfall of the window.
+            function pe_short(; cap = 0.0, init = 0.0, avail = 87600.0, ne = 3650.0,
+                              disrupt = (0, 0), masks = Dict{String, Any}(),
+                              route_cap = 0.0)
+                two = route_cap > 0
+                n = two ? 2 : 1
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0,
+                                  two ? [avail, 0.0] : [avail], two ? [0.0, cap] : [cap],
+                                  two ? [0.0, init] : [init], 0.0, zeros(n), 0.0, 0.0, 0.0,
+                                  disrupt[1], disrupt[2], 0.0)
+                routes = two ? [TransportRoute("r1", 1, 2, 100.0,
+                                Dict("Gas" => FuelRouteParams(route_cap, 0.0, 0.0)))] :
+                               TransportRoute[]
+                ned = NonElectricDemandConfig("Industrial", "Gas",
+                                              two ? [0.0, ne] : [ne], 0.0, ones(12))
+                inp = PrimaryEnergyInput(2025, 2025, n, 48, [fuel],
+                    Dict{String, FuelInfrastructureConfig}(), [ned], routes,
+                    Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 48, 0.05,
+                    1000.0, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
+                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, 0)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp;
+                                                                           outage_masks = masks)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                short = sum(value.(vars.ne_demand_shortfall_periodic[("Gas", "Industrial")])) +
+                        sum(value.(vars.fuel_loss_of_supply_hourly["Gas"]))
+                return short, value.(vars.fuel_storage_level_hourly["Gas"])
+            end
+
+            # #121: supply is cut on day 2. A node without a tank could keep
+            # day 1's fuel for day 2 (its level had no upper bound); now only
+            # a real tank carries fuel over.
+            short, level = pe_short(disrupt = (24, 48))
+            @test short ≈ 10.0 atol = 1e-6
+            @test maximum(level) ≈ 0.0 atol = 1e-9
+            short, _ = pe_short(cap = 100.0, disrupt = (24, 48))
+            @test short ≈ 0.0 atol = 1e-6
+
+            # Tank outage (fuel_storage): a full, 100-unit tank and no supply
+            # serving 30/day for 2 days. Out of service, its level is frozen.
+            tank(a) = Dict{String, Any}("fuel_storage" =>
+                Dict("Gas" => fill(a, 1, 48)))
+            short, _ = pe_short(cap = 100.0, init = 1.0, avail = 0.0, ne = 3.0 * 3650.0)
+            @test short ≈ 0.0 atol = 1e-6
+            short, level = pe_short(cap = 100.0, init = 1.0, avail = 0.0, ne = 3.0 * 3650.0,
+                                    masks = tank(0.0))
+            @test short ≈ 60.0 atol = 1e-6
+            @test all(abs.(level .- 100.0) .< 1e-6)
+            # Half out of service: 50 locked, 50 usable
+            short, _ = pe_short(cap = 100.0, init = 1.0, avail = 0.0, ne = 3.0 * 3650.0,
+                                masks = tank(0.5))
+            @test short ≈ 10.0 atol = 1e-6
+
+            # Route outage (fuel_route): node 1 ships up to 15/day to node 2's
+            # 10/day demand (12 usable after the 0.8 inflow efficiency). At
+            # half capacity on day 1 only 7.5 × 0.8 = 6 arrive.
+            short, _ = pe_short(route_cap = 15.0)
+            @test short ≈ 0.0 atol = 1e-6
+            route = Dict{String, Any}("fuel_route" =>
+                Dict("r1" => vcat(fill(0.5, 24), ones(24))))
+            short, _ = pe_short(route_cap = 15.0, masks = route)
+            @test short ≈ 4.0 atol = 1e-6
+        end
+
         @testset "primary energy: fuel in transit reaches the next window" begin
             # Rolling horizon of 48 steps keeping 24, 1 day of transit over
             # 100 km. Node 1 has the supply, node 2 (no tank) a 10/day
@@ -1764,6 +1956,10 @@ import Ipopt
             @test p1 * 13.0 / 1000 * 0.8 ≥ 5.0 / 16.65 - 1e-6
             @test value(pe_vars.fuel_storage_level_hourly["Hydrogen"][1, 2]) ≥
                   5.0 / 16.65 - 1e-6
+            # pe_electrolyzer_cost reports the electrolyzer cost charged (was 0)
+            cb = extract_solution(model, vars, input).cost_breakdown
+            @test cb.electrolyzer_cost > 0
+            @test cb.pe_electrolyzer_cost ≈ cb.electrolyzer_cost rtol = 1e-9
             # The old fixed-production inputs are rejected, not ignored
             bad = PrimaryEnergyInput(2025, 2025, 1, H, [h2],
                 Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
@@ -2346,6 +2542,59 @@ import Ipopt
             @test si.line_flow_cost[(1, 2)] == 28.0
             @test si.co2_budget_groups[1].violation_penalty == 56.0
             @test si.co2_budget_groups[1].budget == 10.0
+        end
+
+        @testset "dispatch charges converter costs and full start-ups" begin
+            # Converter variable cost: build_objective! ran before the
+            # converter variables existed, so the term was always empty.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            conv = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, 40.0, 0.0,
+                1.0, 1.0, 0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0e-3, 0.0, 2.0e-6, 50.0,
+                30, 0, 0.0)
+            net2 = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [line], TransformerData[], [conv], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 0.0], [1.0e-5, 0.0],
+                        ones(H24, 2); nb = 2, H = H24)
+            input = PowerSystemInput(
+                name = "conv", year = 2025, network = net2, generators = [gas],
+                batteries = BatteryConfig[], demand = hcat(zeros(H24), fill(50.0, H24)),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                pwl_loss_segments = 0,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            rect = value.(vars.acdc_rectify[1, :])
+            @test sum(rect) ≈ 40.0 * H24 atol = 1e-6
+            res = extract_solution(model, vars, input)
+            @test res.cost_breakdown.converter_cost ≈ sum(rect) * 2.0e-6 rtol = 1e-6
+            @test coefficient(objective_function(model), vars.acdc_rectify[1, 1]) ≈ 2.0e-6
+
+            # Start-ups are events: one start costs start_up_cost, not
+            # start_up_cost × window/8760 (the objective prorated it).
+            gen = ESFEX.with_fields(
+                mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                      ones(H24, 1); nb = 1, H = H24);
+                min_power = [0.5], start_up_cost = [2.0e-3])
+            input = PowerSystemInput(
+                name = "uc", year = 2025, network = net1, generators = [gen],
+                batteries = BatteryConfig[],
+                demand = reshape(vcat(zeros(12), fill(100.0, 12)), H24, 1),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                mode = "unit_commitment", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test coefficient(objective_function(model), vars.gen_startup[1, 1, 13]) ≈ 2.0e-3
+            res = extract_solution(model, vars, input)
+            @test objective_value(model) ≈ res.cost_breakdown.fuel_cost +
+                res.cost_breakdown.fixed_om_cost + res.cost_breakdown.maintenance_cost +
+                res.cost_breakdown.startup_cost + res.cost_breakdown.co2_emission_cost +
+                res.cost_breakdown.load_shedding_cost + res.cost_breakdown.fre_penetration_cost +
+                res.cost_breakdown.reserve_static_cost + res.cost_breakdown.reserve_dynamic_cost +
+                res.cost_breakdown.inertia_cost rtol = 1e-6
         end
 
         @testset "solve_dcopf benchmark" begin

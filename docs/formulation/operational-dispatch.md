@@ -125,13 +125,13 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). One-off terms (startup, development-mode investment, delayed retirement, forced replacement, reservoir investment) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual one-off terms (development-mode investment, delayed retirement, forced replacement, reservoir investment) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{start}} + Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
-Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2) and the cost-ceiling violation (COST-1).
+Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
 
 ### 3.1 Operational Costs
 
@@ -186,6 +186,8 @@ Z^{\text{op,pwl}}_{g,n} = \sum_{t} \sum_{k=1}^{K} c_k \cdot p^{(k)}_{g,n,t} \tag
 Z^{\text{start}} = \sum_{g,n,t} c^{\text{su}}_{g,n} \, v_{g,n,t} \tag{OBJ-2}
 \]
 
+Each start costs its full `start_up_cost`, in the objective and in the `startup_cost` breakdown; it is not prorated like the annual one-off terms.
+
 ### 3.3 Battery Maintenance Cost
 
 \[
@@ -206,7 +208,7 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 ### 3.4 Penalty Costs
 
 \[
-Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \Big(\sum_{n,t} \text{LS}_{n,t} - \sum_{s,i,t} \text{LOL}_{s,i,t}\Big)}_{\text{load shedding not attributed to a sector}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
+Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \sum_{i,t} m_{i,t} \Big(\sum_{n \in i} \text{LS}_{n,t} - \sum_{s} \text{LOL}_{s,i,t}\Big)}_{\text{load shedding not attributed to a sector}} + \underbrace{C^{\text{CU}} \sum_{i,t} \text{CU}_{i,t}}_{\text{curtailment}} + \underbrace{C^{\text{r,sta}} \sum_{i,t} \lambda^{\text{sta}}_{i,t}}_{\text{static reserve}} + \underbrace{C^{\text{r,dyn}} \sum_{i,t} \lambda^{\text{dyn}}_{i,t}}_{\text{dynamic reserve}} \tag{OBJ-4a}
 \]
 
 \[
@@ -217,7 +219,13 @@ Z^{\text{pen}} = \underbrace{C^{\text{VOLL}} \Big(\sum_{n,t} \text{LS}_{n,t} - \
 + \underbrace{C^{\text{TM}} \sum_{i,j,t} \mu_{i,j,t}}_{\text{transfer margin}} + \underbrace{C^{\text{CO2,bud}} \, \xi^{\text{CO2}}}_{\text{CO2 budget violation}} + \underbrace{C^{\text{RC}} \sum_{n,t} \text{RC}_{n,t}}_{\text{rooftop curtailment}} \tag{OBJ-4c}
 \]
 
-Without sectoral demand the \(\text{LOL}\) terms are absent and all shed load costs \(C^{\text{VOLL}}\). With sectors, each sector's shed load is priced through \(Z^{\text{sec}}\) (OBJ-5), which carries VOLL times the sector's criticality; only the remainder that no sector accounts for (SEC-2) is priced here, at VOLL, so no shed MWh is counted twice. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
+Without sectoral demand the \(\text{LOL}\) terms are absent, \(m_{i,t} = 1\) and all shed load costs \(C^{\text{VOLL}}\). With sectors, each sector's shed load is priced through \(Z^{\text{sec}}\) (OBJ-5), which carries VOLL times the sector's criticality; only the remainder that no sector accounts for (SEC-2) is priced here, so no shed MWh is counted twice. The remainder's multiplier is the demand-weighted mean of the node's sector criticalities in that step,
+
+\[
+m_{i,t} = \frac{\sum_s \kappa_s D^{\text{sec}}_{s,i,t}}{\sum_s D^{\text{sec}}_{s,i,t}},
+\]
+
+and 1 where no sector has demand at the node. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
 
 ### 3.5 Sectoral Load Shedding Penalties
 
@@ -269,6 +277,8 @@ where \(c^{\text{tr}}\) is `transference_invest_cost` and \(\hat{F}^{\text{inv}}
 Z^{\text{conv}} = \sum_{k,t} c^{\text{var}}_k \left( p^{\text{rect}}_{k,t} + p^{\text{inv}}_{k,t} \right) + \sum_{f,t} c^{\text{var}}_f \left( p^{A \to B}_{f,t} + p^{B \to A}_{f,t} \right) \tag{OBJ-11}
 \]
 
+Added by `charge_converter_costs!()` after `add_converter_constraints!()` has created the converter variables (`build_objective!()` runs before them), and reported as `converter_cost`.
+
 ### 3.12 Electrolyzer Costs
 
 \[
@@ -302,6 +312,16 @@ where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are 
 ### 3.16 Reservoir Costs
 
 Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). In development mode, reservoir capacity investment is charged at `reservoir_invest_cost` per MWh. See [Reservoir Hydropower](reservoir-hydro.md).
+
+### 3.17 Line Flow Cost
+
+Lines with a `cost_per_mw_km` (the inter-system links of a merged multi-system run) pay \(c^{\text{flow}}_l\) = `length_km × cost_per_mw_km` (\$/MWh, the `flow_cost` of `TransmissionLineData`) for the energy they carry in either direction, as the master does:
+
+\[
+Z^{\text{flow}} = \Delta t \sum_{l,t} c^{\text{flow}}_l \, a_{l,t}, \qquad a_{l,t} \geq f_{l,t}, \quad a_{l,t} \geq -f_{l,t} \tag{OBJ-17}
+\]
+
+(`line_flow_abs_l*_t*_pos/neg`, `add_line_flow_costs!`), reported as `line_flow_cost`. Lines without a cost get no variables. It needs the per-line DC flows, so it has no effect in ACOPF runs.
 
 !!! note "Complete objective"
     The objective is (OBJ) above. \(Z^{\text{bat}}\) includes the throughput cost (OBJ-3b), \(Z^{\text{pen}}\) the EV, SOC, RE-target and rooftop penalties, and \(Z^{\text{spill}}\) both battery and reservoir spillage. The V2G compensation (OBJ-8) is reported but not part of the objective.
@@ -806,7 +826,7 @@ A sector cannot shed more than its own demand \(D^{\text{sec}}_{s,i,t}\) at the 
 0 \;\leq\; \sum_{n \in i} \text{LS}_{n,t} - \sum_{s \in \mathcal{S}} \text{LOL}_{s,i,t} \;\leq\; \max\Big(0,\; D^{\text{node}}_{t,i} - \sum_{s} D^{\text{sec}}_{s,i,t}\Big) \quad \forall i, t \tag{SEC-2}
 \]
 
-The load shed on a node's buses is split into per-sector contributions plus an unclassified remainder (`sectoral_lol_sum_*`, `sectoral_lol_residual_*`). The remainder is bounded by the node demand that no sector accounts for: it is 0 when the sector shares cover the whole demand, and it keeps the split feasible at a node whose sectoral data is missing (for example after the Grid Builder split a node's demand across new buses). The remainder is priced at \(C^{\text{VOLL}}\) (OBJ-4a).
+The load shed on a node's buses is split into per-sector contributions plus an unclassified remainder (`sectoral_lol_sum_*`, `sectoral_lol_residual_*`). The remainder is bounded by the node demand that no sector accounts for: it is 0 when the sector shares cover the whole demand, and it keeps the split feasible at a node whose sectoral data is missing (for example after the Grid Builder split a node's demand across new buses). The remainder is priced at \(C^{\text{VOLL}} m_{i,t}\), the demand-weighted mean of the node's sector criticalities (OBJ-4a).
 
 !!! note "Criticality ordering"
     Higher-criticality sectors receive a higher load shedding penalty in the objective (\(C^{\text{VOLL}} \cdot \kappa_s\)). With the per-sector cap SEC-1, the optimizer sheds the cheapest sector up to its demand before touching a dearer one. No explicit ordering constraint is needed.
@@ -879,6 +899,7 @@ All SCOPF slacks are priced like the preventive ones.
 - `generation_enabled`, `transmission_enabled` -- enable each part
 - `transmission_reserve_factor` -- fraction \(\omega\) of line capacity usable under N-1 (default 0.70)
 - `scopf_enabled`, `corrective_enabled` -- SCOPF variant and corrective generation N-1
+- `compute_security_cost` -- re-solve each window without N-1 and report the objective difference as `n1_security_cost` (see [Cost of N-1 security](dc-power-flow.md#cost-of-n-1-security))
 
 ---
 

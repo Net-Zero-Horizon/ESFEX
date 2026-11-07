@@ -114,7 +114,7 @@ T_{f,r,p} \leq \left(\bar{T}^{base}_{f,r} + C^{cumul}_{f,r} + I^{trans}_{f,r,ip}
 \tag{PE-2}
 \]
 
-where \(\bar{T}^{base}_{f,r}\) is the base daily capacity, \(C^{cumul}_{f,r}\) is cumulative capacity from prior investments, \(I^{trans}_{f,r,ip}\) is new investment in the current investment period, and \(\Delta_p^{days}\) is the number of days in primary period \(p\) (its steps times the step length). Constraint `pp_transport_cap_{fuel}_r{r}_{p}`.
+where \(\bar{T}^{base}_{f,r}\) is the base daily capacity, \(C^{cumul}_{f,r}\) is cumulative capacity from prior investments, \(I^{trans}_{f,r,ip}\) is new investment in the current investment period, and \(\Delta_p^{days}\) is the number of days in primary period \(p\) (its steps times the step length). Constraint `pp_transport_cap_{fuel}_r{r}_{p}`. A `fuel_route` [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies the right-hand side by the mean availability of the period's steps (shipments are decided per period).
 
 ### Transport Losses
 
@@ -182,7 +182,16 @@ V^{hr}_{f,n,t+1} \leq \bar{V}^{tot}_{f,n} = \bar{V}_{f,n} + C^{cumul,stor}_{f,n}
 \tag{PE-5a}
 \]
 
-(`hr_storage_max_*`). At a node with no tank capacity at all (no base capacity and none built) the level is not bounded: the tank there only passes fuel through within the window.
+(`hr_storage_max_*`). At a node with no tank capacity at all (no base capacity and none built) the bound is 0: fuel only passes through, so what arrives or is supplied in a step must be used or shipped on in that step.
+
+**Scheduled tank outages.** A `fuel_storage` [scheduled interruption](../user-guide/scheduled-interruptions.md) of availability \(a_{f,n,t} < 1\) locks the share \(1 - a\) of the fuel the tank held when the outage began (step \(s\)) and leaves only \(a\) of its capacity usable:
+
+\[
+(1 - a_{f,n,t})\, V^{hr}_{f,n,s} \le V^{hr}_{f,n,t+1} \le (1 - a_{f,n,t})\, V^{hr}_{f,n,s} + a_{f,n,t}\, \bar{V}^{tot}_{f,n}
+\tag{PE-5d}
+\]
+
+(`hr_storage_outage_lo_*`, `hr_storage_outage_hi_*`). A full outage (\(a = 0\)) freezes the level: the node's fuel only passes through, as at a node without a tank. The minimum levels PE-5c and the development-mode 10 % end fill do not apply while the tank is out of service.
 
 **Tank safety floor (operational reserve).** The plant tank cannot be drawn below a configured minimum level \(\underline{v}_f \in [0,1]\) (`min_storage_level`, a fraction of capacity) — an operational reserve that must be held back. It applies at nodes with base storage capacity, to the level after every step (against base capacity, `hr_storage_min_*`) and at the period ends (against total capacity \(\bar{V}^{tot}_{f,n}\), `hr_storage_min_final_*`):
 

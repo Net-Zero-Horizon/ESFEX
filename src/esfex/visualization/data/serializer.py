@@ -2202,6 +2202,7 @@ def config_to_global_settings(
         g.n1_scopf_max_iterations = getattr(n1, 'scopf_max_iterations', 5)
         g.n1_scopf_violation_tolerance = getattr(n1, 'scopf_violation_tolerance', 0.01)
         g.n1_corrective_enabled = getattr(n1, 'corrective_enabled', False)
+        g.n1_compute_security_cost = getattr(n1, 'compute_security_cost', False)
         g.n1_contingency_depth = getattr(n1, 'contingency_depth', 'n1')
         g.n1_redistribution_mode = getattr(n1, 'redistribution_mode', 'pro_rata')
         g.n1_pi_screening_threshold = getattr(n1, 'pi_screening_threshold', 0.0)
@@ -2350,6 +2351,7 @@ def global_settings_to_config_dict(
     config_dict["n1_security"]["scopf_max_iterations"] = g.n1_scopf_max_iterations
     config_dict["n1_security"]["scopf_violation_tolerance"] = g.n1_scopf_violation_tolerance
     config_dict["n1_security"]["corrective_enabled"] = g.n1_corrective_enabled
+    config_dict["n1_security"]["compute_security_cost"] = g.n1_compute_security_cost
     config_dict["n1_security"]["contingency_depth"] = g.n1_contingency_depth
     config_dict["n1_security"]["redistribution_mode"] = g.n1_redistribution_mode
     config_dict["n1_security"]["pi_screening_threshold"] = g.n1_pi_screening_threshold

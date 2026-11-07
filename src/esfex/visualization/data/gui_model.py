@@ -844,6 +844,7 @@ class GuiGlobalSettings:
     n1_scopf_max_iterations: int = 5
     n1_scopf_violation_tolerance: float = 0.01
     n1_corrective_enabled: bool = False
+    n1_compute_security_cost: bool = False
     n1_contingency_depth: str = "n1"
     n1_redistribution_mode: str = "pro_rata"
     n1_pi_screening_threshold: float = 0.0

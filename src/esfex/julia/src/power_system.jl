@@ -205,6 +205,9 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
     end
     t_power_flow = time() - t0
 
+    # Converter variables exist now (every power-flow path above creates them)
+    charge_converter_costs!(model, vars, input)
+
     # Add sectoral demand constraints (B8: sum sectoral LOL == total LOL, criticality ordering)
     t0 = time()
     add_sectoral_demand_constraints!(model, vars, input)
@@ -274,6 +277,9 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
         add_n1_security_constraints!(model, vars, input)
     end
     t_n1 = time() - t0
+
+    # Per-MWh flow cost of lines that carry one (inter-system links)
+    add_line_flow_costs!(model, vars, input)
 
     # User-defined constraints (declarative config + plugin overlays). Additive,
     # applied after all base constraints; no-op when none are supplied.
@@ -853,7 +859,8 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # VOLL × criticality below (cuba.yaml: medium=10, high=100,
     # critical=1000); only the unclassified remainder
     # (load_shed − Σ sectoral shed, see add_sectoral_demand_constraints!)
-    # is priced here, at VOLL. Pricing all of load_shed here would
+    # is priced here, at VOLL × the node's demand-weighted mean criticality
+    # (sector_remainder_multiplier). Pricing all of load_shed here would
     # double-count every sectoral MWh.
     n_node = input.network.num_nodes
     has_sectoral = vars.loss_of_load_sectoral !== nothing &&
@@ -863,8 +870,21 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         sum(vars.load_shed[b, t] for b in 1:n_bus, t in 1:hours)
     )
     if has_sectoral
-        for lol_vars in values(vars.loss_of_load_sectoral), n in 1:n_node, t in 1:hours
-            add_to_expression!(load_shed_cost, -input.loss_of_load_penalty, lol_vars[n, t])
+        voll = input.loss_of_load_penalty
+        sectors = collect(keys(vars.loss_of_load_sectoral))
+        buses_of_node = [Int[] for _ in 1:n_node]
+        for b in 1:n_bus
+            push!(buses_of_node[input.network.bus_to_node[b]], b)
+        end
+        for n in 1:n_node, t in 1:hours
+            m = sector_remainder_multiplier(sectors, input.sectoral_criticality,
+                                            s -> _sectoral_demand_at(input, s, t, n))
+            for b in buses_of_node[n]
+                add_to_expression!(load_shed_cost, voll * (m - 1.0), vars.load_shed[b, t])
+            end
+            for lol_vars in values(vars.loss_of_load_sectoral)
+                add_to_expression!(load_shed_cost, -voll * m, lol_vars[n, t])
+            end
         end
     end
 
@@ -1122,10 +1142,9 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         end
     end
 
-    # ==========================================================================
-    # Converter Variable Costs (AC/DC + frequency converters)
-    # ==========================================================================
-    converter_cost = add_converter_objective_terms(vars, input)
+    # Converter variable costs are charged by charge_converter_costs! once
+    # add_converter_constraints! has created the converter variables (after
+    # this function); building them here gave an empty expression.
 
     # ==========================================================================
     # Electrolyzer Costs (A4 fix: was computed but not added to objective)
@@ -1284,7 +1303,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         soc_violation_cost + transfer_margin_cost +
         sectoral_load_shed_cost - flexible_demand_benefit +
         co2_budget_violation_cost + rooftop_curtailment_cost + spillage_cost +
-        converter_cost + electrolyzer_cost +
+        electrolyzer_cost +
         demand_shift_cost +
         reservoir_spillage_cost
     )
@@ -1300,13 +1319,16 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     non_energy_window_fraction = annual_hours > 0 ?
         window_real_hours / annual_hours : 1.0
     non_energy_costs = (
-        startup_cost + investment_cost +
+        investment_cost +
         delay_retirement_cost + npv_penalty_cost +
         reservoir_invest_cost
     )
+    # Start-ups are events inside the window: charged in full, neither per
+    # MWh nor prorated (they were prorated × window/year like the annual costs)
     @objective(model, Min,
         temporal_resolution_hours * energy_costs +
-        non_energy_window_fraction * non_energy_costs
+        non_energy_window_fraction * non_energy_costs +
+        startup_cost
     )
 
     # Store individual cost expressions for granular extraction after solve.
@@ -1331,7 +1353,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         :flexible_demand_benefit => flexible_demand_benefit,
         :investment_cost => investment_cost,
         :electrolyzer_cost => electrolyzer_cost,
-        :converter_cost => converter_cost,
+        :converter_cost => AffExpr(0.0),   # set by charge_converter_costs!
         :spillage_cost => spillage_cost,
         :delay_retirement_cost => delay_retirement_cost,
         :reservoir_spillage_cost => reservoir_spillage_cost,
@@ -2963,6 +2985,52 @@ function _add_line_n1_reserve!(model, vars::PowerSystemVariables, input::PowerSy
 end
 
 """
+    charge_converter_costs!(model, vars, input)
+
+Add the converters' variable cost (`add_converter_objective_terms`, an energy
+cost × step length) to the objective and to the `converter_cost` breakdown.
+Called after `add_converter_constraints!`: `build_objective!` runs before the
+converter variables exist.
+"""
+function charge_converter_costs!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+    cost = add_converter_objective_terms(vars, input)
+    (isempty(cost.terms) && cost.constant == 0) && return
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    @objective(model, Min, objective_function(model) + tres * cost)
+    model.ext[:cost_expressions][:converter_cost] = cost
+end
+
+"""
+    add_line_flow_costs!(model, vars, input)
+
+Charge each line with a `flow_cost` for the energy it carries in either
+direction: `|f_l,t| ≤ a_l,t` (`line_flow_abs_l*_t*_pos/neg`) and
+`Δt × flow_cost_l × a_l,t` in the objective and in the `line_flow_cost`
+breakdown. Lines without a cost get no variables. Needs per-line DC flows; no
+effect in ACOPF or single-bus runs.
+"""
+function add_line_flow_costs!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+    lines = input.network.transmission_lines
+    any(l -> l.flow_cost > 0, lines) || return
+    cost = AffExpr(0.0)
+    for (k, lf) in enumerate(_line_flows(vars, input))
+        c = lines[k].flow_cost
+        (lf === nothing || c <= 0) && continue
+        pf, _ = lf
+        for t in 1:input.temporal.hours
+            a = @variable(model, lower_bound = 0, base_name = "line_flow_abs_l$(k)_t$(t)")
+            @constraint(model, a >= pf[t], base_name = "line_flow_abs_l$(k)_t$(t)_pos")
+            @constraint(model, a >= -pf[t], base_name = "line_flow_abs_l$(k)_t$(t)_neg")
+            add_to_expression!(cost, c, a)
+        end
+    end
+    isempty(cost.terms) && return
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    @objective(model, Min, objective_function(model) + tres * cost)
+    model.ext[:cost_expressions][:line_flow_cost] = cost
+end
+
+"""
     _charge_n1_shortfall!(model, n1_cost, input)
 
 The objective is built before the N-1 constraints: add their priced slacks
@@ -3138,6 +3206,26 @@ function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerS
 end
 
 """
+    sector_remainder_multiplier(sectors, criticality, demand_of) -> Float64
+
+VOLL multiplier of the unclassified remainder of a node's demand (the node's
+demand minus its sectors' demand) in one step: the sectors' criticality
+multipliers weighted by their demand there, `Σ_s κ_s d_s / Σ_s d_s`
+(`demand_of(sector)` gives d_s); 1 where no sector has demand. Shared by the
+dispatch and the master's representative days.
+"""
+function sector_remainder_multiplier(sectors, criticality, demand_of)
+    num = 0.0
+    den = 0.0
+    for s in sectors
+        d = max(0.0, demand_of(s))
+        num += get(criticality, s, 1.0) * d
+        den += d
+    end
+    return den > 0 ? num / den : 1.0
+end
+
+"""
     _sectoral_demand_at(input, sector, t, ni) -> Float64
 
 Demand of `sector` at node `ni` and step `t` (MW, >= 0); 0 when the sector's
@@ -3166,9 +3254,11 @@ Add sectoral load shedding constraints, per node and step:
 The remainder covers node demand that no sector accounts for (sectoral data
 missing for a node, or not matching the demand passed in), so the split is
 always feasible. The objective prices each sector's shed at
-VOLL x criticality and the remainder at VOLL (multiplier 1). With the per-sector
-caps, the cheapest sector can no longer absorb all shed: dearer sectors are
-shed only once the cheaper ones are fully shed.
+VOLL x criticality and the remainder at VOLL x the demand-weighted mean of the
+node's sector criticalities in that step (`sector_remainder_multiplier`; 1
+where no sector has demand). With the per-sector caps, the cheapest sector can
+no longer absorb all shed: dearer sectors are shed only once the cheaper ones
+are fully shed.
 """
 function add_sectoral_demand_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     if vars.loss_of_load_sectoral === nothing || isempty(vars.loss_of_load_sectoral)
@@ -3357,21 +3447,26 @@ end
 """
     add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Bound each electrolyzer's consumption by its rated power per bus and apply its
-ramp rates (fraction of rated power per hour, scaled to the time step; <= 0 =
-no limit). The dispatch has no electrolyzer investment variable, so a bus
-without rated power gets no electrolyzer load.
+Bound each electrolyzer's consumption by its rated power per bus, times its
+scheduled-outage availability (`outage_masks["electrolyzer"]`, electrolyzer ×
+step, whole unit), and apply its ramp rates (fraction of rated power per
+hour, scaled to the time step; <= 0 = no limit). The dispatch has no
+electrolyzer investment variable, so a bus without rated power gets no
+electrolyzer load.
 """
 function add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     vars.electrolyzer_power === nothing && return
     hours = input.temporal.hours
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    outage = get(input.outage_masks, "electrolyzer", nothing)
+    avail(e, t) = (outage === nothing || e > size(outage, 1) || t > size(outage, 2)) ?
+        1.0 : outage[e, t]
     for (e, config) in enumerate(input.electrolyzers)
         sfx = e == 1 ? "" : "_e$(e)"  # names unchanged for the first one
         for b in 1:size(vars.electrolyzer_power, 2)
             rated = b <= length(config.rated_power) ? config.rated_power[b] : 0.0
             for t in 1:hours
-                @constraint(model, vars.electrolyzer_power[e, b, t] <= rated,
+                @constraint(model, vars.electrolyzer_power[e, b, t] <= rated * avail(e, t),
                     base_name = "electrolyzer_max$(sfx)_b$(b)_t$(t)")
             end
             rated > 0 || continue
@@ -3581,6 +3676,97 @@ function recover_uc_duals!(model, vars::PowerSystemVariables, input::PowerSystem
 end
 
 """
+    _copy_with_optimizer(model, input, what) -> Union{Tuple{Model, ReferenceMap}, Nothing}
+
+`copy_model` of a built model with a fresh optimizer configured like the
+original (log off). `nothing` (with a warning naming `what`) when the copy or
+the optimizer fails.
+
+`copy_model` warns (harmlessly) that it cannot copy the entries stashed in
+`model.ext` (cost_expressions, temporal_resolution_hours); they are only read
+on the original, so `ext` is emptied across the copy and restored.
+"""
+function _copy_with_optimizer(model, input::PowerSystemInput, what::String)
+    saved_ext = copy(model.ext)
+    empty!(model.ext)
+    copied = try
+        copy_model(model)
+    catch e
+        @warn "$(what): copy_model failed" exception=e
+        nothing
+    finally
+        merge!(model.ext, saved_ext)
+    end
+    copied === nothing && return nothing
+    new_model, reference_map = copied
+    optimizer = try
+        create_optimizer(
+            solver_name=input.solver_name,
+            threads=input.threads,
+            time_limit=input.time_limit,
+            gap=input.gap,
+            verbose=false,
+            solver_options=input.solver_options,
+        )
+    catch e
+        @warn "$(what): create_optimizer failed" exception=e
+        return nothing
+    end
+    set_optimizer(new_model, optimizer)
+    return new_model, reference_map
+end
+
+"""
+    compute_n1_security_cost!(model, input::PowerSystemInput) -> Float64
+
+Cost of N-1 security in a solved window: the objective with the N-1
+constraints minus the objective of the same model solved without them
+(`n1_security.compute_security_cost`). The model is copied (with everything
+added to it after `create_power_system`, such as the primary-energy block and
+user constraints) and the copy is re-solved with the N-1 shortfall and
+overload slacks free of charge, which makes every N-1 constraint inactive
+(all of them are soft). The original model and its solution are untouched.
+
+Stores the value in `model.ext[:n1_security_cost]` (read by
+`extract_solution`) and returns it, in solver cost units. Returns 0.0 when
+N-1 is off, the model has no solution, or the re-solve fails (with a
+warning). Both solves stop at the solver's gap, so in a MIP the difference
+is exact only up to that gap.
+"""
+function compute_n1_security_cost!(model, input::PowerSystemInput)
+    model.ext[:n1_security_cost] = 0.0
+    input.n1_security_enabled || return 0.0
+    has_values(model) || return 0.0
+    ce = get(model.ext, :cost_expressions, Dict{Symbol, Any}())
+    n1_cost = get(ce, :n1_security_shortfall_cost, nothing)
+    (n1_cost === nothing || isempty(n1_cost.terms)) && return 0.0
+
+    copied = _copy_with_optimizer(model, input, "N-1 security cost")
+    copied === nothing && return 0.0
+    new_model, reference_map = copied
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    free = AffExpr(0.0)
+    for (v, c) in n1_cost.terms
+        add_to_expression!(free, tres * c, reference_map[v])
+    end
+    @objective(new_model, Min, objective_function(new_model) - free)
+    try
+        optimize!(new_model)
+    catch e
+        @warn "N-1 security cost: re-solve without N-1 threw" exception=e
+        return 0.0
+    end
+    if !has_values(new_model)
+        @warn "N-1 security cost: re-solve without N-1 found no solution " *
+              "($(termination_status(new_model))); n1_security_cost left at 0"
+        return 0.0
+    end
+    cost = objective_value(model) - objective_value(new_model)
+    model.ext[:n1_security_cost] = cost
+    return cost
+end
+
+"""
     recover_uc_duals_via_copy(model, vars::PowerSystemVariables, input::PowerSystemInput) -> Union{Matrix{Float64}, Nothing}
 
 Recover locational marginal prices from a UC (MIP) solution without
@@ -3630,40 +3816,13 @@ function recover_uc_duals_via_copy(
     end
 
     # Clone the model + attach a fresh optimizer built with the same
-    # config the MIP used. ``copy_model`` returns a ``ReferenceMap`` we
-    # use to translate the original variable / constraint handles into
-    # their copies — both ``gen_status`` (for fix) and
-    # ``balance_constraints`` (for dual lookup) live on the original.
-    # ``copy_model`` warns (harmlessly) that it cannot copy the entries we stash
-    # in ``model.ext`` (cost_expressions, temporal_resolution_hours). The
-    # dual-recovery copy never reads them — they are used
-    # on the ORIGINAL model for the cost breakdown — so empty ``ext`` across the
-    # copy to keep the solver log clean, then restore it on the original.
-    saved_ext = copy(model.ext)
-    empty!(model.ext)
-    new_model, reference_map = try
-        copy_model(model)
-    catch e
-        merge!(model.ext, saved_ext)
-        @warn "UC dual recovery (copy): copy_model failed" exception=e
-        return nothing
-    end
-    merge!(model.ext, saved_ext)
-
-    optimizer = try
-        create_optimizer(
-            solver_name=input.solver_name,
-            threads=input.threads,
-            time_limit=input.time_limit,
-            gap=input.gap,
-            verbose=false,
-            solver_options=input.solver_options,
-        )
-    catch e
-        @warn "UC dual recovery (copy): create_optimizer failed" exception=e
-        return nothing
-    end
-    set_optimizer(new_model, optimizer)
+    # config the MIP used. The ``ReferenceMap`` translates the original
+    # variable / constraint handles into their copies — both ``gen_status``
+    # (for fix) and ``balance_constraints`` (for dual lookup) live on the
+    # original.
+    copied = _copy_with_optimizer(model, input, "UC dual recovery (copy)")
+    copied === nothing && return nothing
+    new_model, reference_map = copied
 
     # On the copy: relax ``gen_status`` to continuous and pin to MIP
     # incumbent values. The original model is untouched.
@@ -4095,11 +4254,9 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         end
 
         n1_binding = isempty(binding_names) ? nothing : binding_names
-
-        # Estimate N-1 security cost: difference between obj and unconstrained
-        # (we don't have the unconstrained value, so set to 0 — computed in Python)
-        n1_cost = 0.0
     end
+    # Objective with N-1 minus without (compute_n1_security_cost!; 0 when not run)
+    n1_cost = Float64(get(model.ext, :n1_security_cost, 0.0))
 
     # ── Extract granular cost breakdown ──
     cost_bd = nothing
@@ -4152,6 +4309,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             _v(:pe_electrolyzer_cost, false),
             # N-1 reliability-shortfall: same $/MWh scale as load shed (× tres).
             _v(:n1_security_shortfall_cost),
+            _v(:line_flow_cost),
             obj,
         )
     end

@@ -868,6 +868,7 @@ class DashboardLoader:
         ("investment_cost",          "Investment (CAPEX)"),
         ("electrolyzer_cost",        "Electrolyzer"),
         ("converter_cost",           "Converter"),
+        ("line_flow_cost",           "Line flow cost"),
         ("reservoir_invest_cost",    "Reservoir CAPEX"),
         ("load_shedding_cost",       "Load shedding"),
         ("curtailment_cost",         "Curtailment"),

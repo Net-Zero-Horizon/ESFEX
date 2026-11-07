@@ -1120,6 +1120,7 @@ class Orchestrator:
             for idx, (na, nb) in enumerate(link.connections):
                 cap = link.existing_capacity_mw[idx] if idx < len(link.existing_capacity_mw) else 0.0
                 dist = link.distance_km[idx] if idx < len(link.distance_km) else 0.0
+                cost_km = link.cost_per_mw_km[idx] if idx < len(link.cost_per_mw_km) else 0.0
                 x_pu = link.reactance_pu[idx] if idx < len(link.reactance_pu) else None
                 r_pu = link.resistance_pu[idx] if idx < len(link.resistance_pu) else None
                 global_node_a = off_a + na
@@ -1143,6 +1144,8 @@ class Orchestrator:
                     length_km=dist,
                     reactance_pu=x_pu,
                     resistance_pu=r_pu,
+                    # The link's flow cost (length × cost per MWh), as in the master
+                    cost_per_mw_km=max(0.0, float(cost_km)),
                 ))
 
         # A system without per-line data is wired by its nodes_connections.
@@ -1411,17 +1414,24 @@ class Orchestrator:
                     "terms": [_remap_term(t, sname) for t in cc.terms],
                 }))
 
-        # Interruptions address generators and batteries by key (renamed
-        # above) and lines / transformers / converters by their own id (kept).
-        # No consumer reads the electrolyzer / fuel_* types yet.
-        _outage_keyed = {"generator", "battery"}
+        # Interruptions address generators, batteries and electrolyzers by
+        # key (renamed above), lines / transformers / converters / fuel routes
+        # by their own id (kept) and fuel tanks by fuel and node: a tank
+        # window without a node covers only its own system's nodes.
+        _outage_keyed = {"generator", "battery", "electrolyzer"}
         merged_outages: list = []
-        for sname, sys in zip(sys_names, systems):
+        for sname, sys, nc in zip(sys_names, systems, node_counts):
+            off = offsets[sname]
             for ow in (sys.outage_schedule or []):
                 if ow.element_type in _outage_keyed:
                     ow = ow.model_copy(update={
                         "element_id": f"{sname}__{ow.element_id}",
-                        "node": None if ow.node is None else ow.node + offsets[sname]})
+                        "node": None if ow.node is None else ow.node + off})
+                elif ow.element_type == "fuel_storage":
+                    nodes = range(nc) if ow.node is None else [ow.node]
+                    merged_outages.extend(ow.model_copy(update={"node": n + off})
+                                          for n in nodes)
+                    continue
                 merged_outages.append(ow)
 
         # Development zones: technology and unit keys follow the merged
