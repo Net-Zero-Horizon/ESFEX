@@ -3426,21 +3426,26 @@ end
 """
     add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Bound each electrolyzer's consumption by its rated power per bus and apply its
-ramp rates (fraction of rated power per hour, scaled to the time step; <= 0 =
-no limit). The dispatch has no electrolyzer investment variable, so a bus
-without rated power gets no electrolyzer load.
+Bound each electrolyzer's consumption by its rated power per bus, times its
+scheduled-outage availability (`outage_masks["electrolyzer"]`, electrolyzer ×
+step, whole unit), and apply its ramp rates (fraction of rated power per
+hour, scaled to the time step; <= 0 = no limit). The dispatch has no
+electrolyzer investment variable, so a bus without rated power gets no
+electrolyzer load.
 """
 function add_electrolyzer_dispatch_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
     vars.electrolyzer_power === nothing && return
     hours = input.temporal.hours
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    outage = get(input.outage_masks, "electrolyzer", nothing)
+    avail(e, t) = (outage === nothing || e > size(outage, 1) || t > size(outage, 2)) ?
+        1.0 : outage[e, t]
     for (e, config) in enumerate(input.electrolyzers)
         sfx = e == 1 ? "" : "_e$(e)"  # names unchanged for the first one
         for b in 1:size(vars.electrolyzer_power, 2)
             rated = b <= length(config.rated_power) ? config.rated_power[b] : 0.0
             for t in 1:hours
-                @constraint(model, vars.electrolyzer_power[e, b, t] <= rated,
+                @constraint(model, vars.electrolyzer_power[e, b, t] <= rated * avail(e, t),
                     base_name = "electrolyzer_max$(sfx)_b$(b)_t$(t)")
             end
             rated > 0 || continue

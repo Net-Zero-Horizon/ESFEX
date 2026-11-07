@@ -1963,6 +1963,18 @@ class PowerSystemAdapter:
                 jl.seval("setindex!")(
                     jl_line_masks, py_to_julia_vector(fac), str(lid))
             jl.seval("setindex!")(jl_outage_masks, jl_line_masks, "line")
+        # Electrolyzers: position-indexed matrix in config order (whole unit).
+        elz_windows = outage_by_type.get("electrolyzer", {})
+        if any(n is not None for ns in outage_nodes.get("electrolyzer", {}).values() for n in ns):
+            logger.warning("Outage window on one node of an electrolyzer: electrolyzer "
+                           "outages apply to the whole unit.")
+        elz_mask = build_outage_mask_matrix(
+            elz_windows, list(electrolyzers.keys()),
+            outage_hour0, self.hours, resolution_hours,
+        )
+        if elz_mask is not None:
+            jl.seval("setindex!")(
+                jl_outage_masks, py_to_julia_matrix(elz_mask), "electrolyzer")
         # Converters (AC/DC, frequency) and transformers: id-addressed by name.
         for _cat in ("acdc_converter", "freq_converter", "transformer"):
             _m = build_outage_mask_by_id(
@@ -4515,9 +4527,62 @@ class PrimaryEnergyAdapter:
 
         # Create model components
         self._jl_vars, self._jl_temporal, self._adjusted_prices = \
-            ESFEX.create_primary_energy_model(model, self._jl_input)
+            ESFEX.create_primary_energy_model(
+                model, self._jl_input, outage_masks=self._outage_masks())
 
         logger.debug("PrimaryEnergy variables created")
+
+    def _outage_masks(self) -> Any:
+        """Scheduled tank and route outages of this window, for Julia.
+
+        ``fuel_storage`` windows (``element_id`` = fuel, ``node`` = one node or
+        None for all) give ``{fuel: [node × step]}``; ``fuel_route`` windows
+        (``element_id`` = the route's ``route_id``, ``route_<i>`` for a route
+        without one) give ``{route_id: [step]}``. Factors compound like the
+        other outage masks (:func:`compile_outage_factor`).
+        """
+        jl = get_julia()
+        out = jl.seval("Dict{String, Any}()")
+        win_lo = absolute_start_hour(self.year, self.base_year, self.year_hour_offset)
+        res = max(1, int(self.step_hours))
+        route_ids = {str(rt.get("route_id") or f"route_{i}")
+                     for i, rt in enumerate(self.transport_routes)}
+        tanks: dict[str, np.ndarray] = {}
+        routes: dict[str, np.ndarray] = {}
+        for ow in self.outage_schedule:
+            if ow.element_type not in ("fuel_storage", "fuel_route"):
+                continue
+            fac = compile_outage_factor([outage_window_tuple(ow)], win_lo, self.hours, res)
+            if np.all(fac >= 1.0):
+                continue
+            if ow.element_type == "fuel_storage":
+                if ow.element_id not in self.fuels_config:
+                    logger.warning("Outage window for fuel storage %r: no such fuel; "
+                                   "ignored.", ow.element_id)
+                    continue
+                mask = tanks.setdefault(ow.element_id, np.ones((self.num_nodes, self.hours)))
+                nodes = range(self.num_nodes) if ow.node is None else [ow.node]
+                for n in nodes:
+                    if 0 <= n < self.num_nodes:
+                        mask[n] *= fac
+            else:
+                if ow.element_id not in route_ids:
+                    logger.warning("Outage window for fuel route %r: no such route_id; "
+                                   "ignored.", ow.element_id)
+                    continue
+                routes.setdefault(ow.element_id, np.ones(self.hours))
+                routes[ow.element_id] *= fac
+        if tanks:
+            jl_tanks = jl.seval("Dict{String, Matrix{Float64}}()")
+            for fuel, mask in tanks.items():
+                jl_tanks[fuel] = py_to_julia_matrix(mask)
+            jl.seval("setindex!")(out, jl_tanks, "fuel_storage")
+        if routes:
+            jl_routes = jl.seval("Dict{String, Vector{Float64}}()")
+            for rid, fac in routes.items():
+                jl_routes[rid] = py_to_julia_vector(fac)
+            jl.seval("setindex!")(out, jl_routes, "fuel_route")
+        return out
 
     def add_constraints(self, model: Any):
         """Add primary energy constraints (called by create_variables)."""

@@ -109,7 +109,7 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * bse
 | `scopf_n1_gen_reserve_t{t}` | N1-1 | SCOPF: same headroom test as `n1_gen_reserve_system_t{t}`, slack `scopf_n1_gen_reserve_shortfall_t{t}` |
 | `n1_corrective_gen_t{t}` | N1-4 | SCOPF + corrective: ramp-limited headroom of all non-renewable units (`n1_corrective_gen_response_*`) + battery headroom + shortfall >= output of the largest unit |
 
-The N-1 slacks are meant to be priced at `loss_of_reserve_static`, but the objective is built before they exist, so in the current code they are free.
+The N-1 slacks are priced at `loss_of_reserve_static` × Δt; they are added to the objective after the constraints are built (`n1_security_shortfall_cost`). With `compute_security_cost`, a copy of the solved window is re-solved with these slacks free (`compute_n1_security_cost!`) to report the cost of N-1 security.
 
 ### Curtailment
 
@@ -158,7 +158,7 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `electrolyzer_max_b{b}_t{t}` | ELZ-1 | Power at most the rated power (0 where none is configured); `electrolyzer_max_e{e}_b{b}_t{t}` for the second and later electrolyzers |
+| `electrolyzer_max_b{b}_t{t}` | ELZ-1 | Power at most the rated power × scheduled-outage availability (0 where none is configured); `electrolyzer_max_e{e}_b{b}_t{t}` for the second and later electrolyzers |
 | `electrolyzer_ramp_up_b{b}_t{t}`, `electrolyzer_ramp_down_b{b}_t{t}` | ELZ-2 | `±(P[t] - P[t-1]) <= rated * min(1, ramp * Δt)`; omitted when the ramp is 0 |
 
 ### Demand & Sectoral
@@ -224,6 +224,7 @@ There is no DC angle-difference limit; `max_angle_diff_deg` applies to AC-OPF on
 | `flow <= (capacity + investment) * outage_factor` | DC-5a | Line/transformer capacity (positive direction) |
 | `flow >= -(capacity + investment) * outage_factor` | DC-5b | Line/transformer capacity (negative direction) |
 | `tf_inv_{i}_{j}` (variable bounds) | DC-5i | Development mode: `0 <= tf_inv <= min(transference_invest_max)` of the two end buses; one variable per corridor, on its first line, charged at the higher `transference_invest_cost` |
+| `line_flow_abs_l{l}_t{t}_pos`, `_neg` | OBJ-17 | Lines with a `flow_cost` (inter-system links): `line_flow_abs_l{l}_t{t} >= ±flow`, charged `flow_cost` per MWh |
 
 ### Devices
 
@@ -344,7 +345,7 @@ The Benders master also contains TECH, BUD, RET-2, CAP, TXN and RE-2/RE-3.
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `pp_max_supply_{f}_{n}_{p}` | PE-1 | Supply <= annual availability prorated to the period × disruption factor + excess slack |
-| `pp_transport_cap_{f}_r{r}_{p}` | PE-2 | Transport capacity |
+| `pp_transport_cap_{f}_r{r}_{p}` | PE-2 | Transport capacity × the period's mean `fuel_route` outage availability |
 | `pp_ne_max_{f}_{s}_{n}_{p}`, `pp_ne_satisfy_{f}_{s}_{n}_{p}` | PE-6 | Non-electric demand |
 
 A period's shipment `T[r, p]` leaves its origin evenly over the period's steps and reaches the destination tank `τ` steps later, times `(1 − losses_fraction * distance_km / 100)` (PE-3, PE-3b); these arrivals and departures enter the tank balance below. In rolling-horizon dispatch, fuel shipped in a window's committed steps that arrives after them is a fixed arrival of the next window (`scheduled_arrivals`). There are no periodic storage levels.
@@ -356,7 +357,8 @@ A period's shipment `T[r, p]` leaves its origin evenly over the period's steps a
 | `hr_storage_initial_{f}_{n}` | PE-H1 | Tank initial level |
 | `hr_storage_balance_{f}_{n}_{t}` | PE-4 | `V[t+1] = V[t] + eta * (local supply + arrivals [+ electrolyzer H2 for Hydrogen]) - drawn - departures` (no loss on V) |
 | `hr_storage_dispatch_rate_*` | PE-H3 | Drawn <= rate × Δt × capacity (rate per hour; only at nodes with a tank) |
-| `hr_storage_min_*`, `hr_storage_max_*`, `hr_storage_min_final_*` | PE-5 | Tank level bounds (after each step; minimum also at period ends) |
+| `hr_storage_min_*`, `hr_storage_max_*`, `hr_storage_min_final_*` | PE-5 | Tank level bounds (after each step; minimum also at period ends, and not during a tank outage). The maximum is 0 at a node without a tank |
+| `hr_storage_outage_lo_{f}_{n}_{t}`, `hr_storage_outage_hi_{f}_{n}_{t}` | PE-5d | `fuel_storage` outage: the locked share of the level at the outage start stays, only the available share of the capacity is used |
 | `hr_storage_min_last_{f}_{n}` | PE-5 | Development mode: the window ends with the tank >= 10 % of capacity (no cyclic storage) |
 | `hr_demand_coverage_{f}_{n}_{t}` | PE-5e | Drawn + shortfall >= fuel for power + non-electric use |
 | `hr_ne_limit_{f}_{s}_{n}_{t}` | PE-H6 | Hourly non-electric use limit |

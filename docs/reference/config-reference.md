@@ -1118,8 +1118,8 @@ Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `element_type` | `generator` \| `line` \| `battery` \| `transformer` \| `acdc_converter` \| `freq_converter` \| `electrolyzer` \| `fuel_source` \| `fuel_storage` \| `fuel_route` | required | Kind of element taken out |
-| `element_id` | str | required | Generator/battery/electrolyzer/fuel-source key, or list index as a string for lines, transformers, converters and fuel routes. A generator/battery id of the form `<unit key>_n<node>` (saved by earlier Studio versions) is read as that unit and node |
-| `node` | int (≥ 0) or null | `null` | Generators / batteries: cut only the unit's capacity at this node (`null` = every node). Battery windows apply to the whole battery |
+| `element_id` | str | required | Generator/battery/electrolyzer key, fuel name (`fuel_source`, `fuel_storage`), `line_id` or name (lines, transformers, converters), or `route_id` of a fuel route (`route_<i>` for a route without one). A generator/battery id of the form `<unit key>_n<node>` (saved by earlier Studio versions) is read as that unit and node |
+| `node` | int (≥ 0) or null | `null` | Generators: cut only the unit's capacity at this node; `fuel_storage`: only the fuel's tank at this node (`null` = every node). Battery and electrolyzer windows apply to the whole unit |
 | `start_hour` | int (≥ 0) | required | First hour (inclusive) of the window, in horizon hours: hour 0 = 1 January of `base_year`, 8760 h per simulated year |
 | `end_hour` | int (> 0) | required | End hour (exclusive); must be > `start_hour` |
 | `availability` | float (0.0–1.0) | `0` | Capacity fraction available during the window (0 = full outage) |

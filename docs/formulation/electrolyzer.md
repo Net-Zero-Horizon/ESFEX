@@ -76,11 +76,11 @@ Implemented in `add_electrolyzer_dispatch_constraints!()` (`power_system.jl`).
 ### ELZ-1: Rated Power
 
 \[
-P^{elz}_{b,t} \leq \bar{P}^{elz}_b \quad \forall b, t
+P^{elz}_{b,t} \leq \bar{P}^{elz}_b \, a_t \quad \forall b, t
 \tag{ELZ-1}
 \]
 
-where \(\bar{P}^{elz}_b\) is `rated_power` mapped to bus \(b\). A bus without rated power gets no electrolyzer load: there is no investment variable. Constraint `electrolyzer_max_b{b}_t{t}` for the first electrolyzer, `electrolyzer_max_e{e}_b{b}_t{t}` for the others.
+where \(\bar{P}^{elz}_b\) is `rated_power` mapped to bus \(b\) and \(a_t\) the availability of an `electrolyzer` [scheduled interruption](../user-guide/scheduled-interruptions.md) in step \(t\) (1 without one; it applies to the whole electrolyzer). A bus without rated power gets no electrolyzer load: there is no investment variable. Constraint `electrolyzer_max_b{b}_t{t}` for the first electrolyzer, `electrolyzer_max_e{e}_b{b}_t{t}` for the others.
 
 ### ELZ-2: Ramp Rates
 
