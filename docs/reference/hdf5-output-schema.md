@@ -254,9 +254,9 @@ Investment and retirement decisions of the master problem for this year are stor
 | `investment_bat_tech_investment_power_{bt}_{n}` | New power of battery technology `bt` at node `n` (MW) |
 | `investment_bat_tech_investment_capacity_{bt}_{n}` | New energy of battery technology `bt` at node `n` (MWh) |
 | `investment_transfer_investment_{i}_{j}` | New transmission capacity from node `i` to node `j` (MW) |
-| `retirement_gen_{g}` | Fraction (0-1) of existing generator `g` retired by this year |
+| `retirement_gen_{g}` | Share (0-1) of existing generator `g`'s capacity (`rated_power` summed over nodes) retired by this year |
 
-Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`.
+The node index `n` (and `i`, `j`) is always a node: when the master solves on buses (a one-node system with several buses, development zones), the buses of a node are summed onto it, and transmission built between two buses of the same node is not listed. Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`.
 
 ### Dataset Naming
 
@@ -769,7 +769,7 @@ When near-optimal alternative generation is enabled (`master_problem.mga.enabled
 | `cumulative_gen_capacity` | (years, generators, nodes) | float64 | MW | Cumulative capacity per generator (with degradation/retirement) |
 | `re_penetration` | (years,) | float64 | fraction | RE penetration ratio per year |
 
-The technology axes have length 1 (all zeros) when the system has no technologies of that kind.
+The technology axes have length 1 (all zeros) when the system has no technologies of that kind. The node axis and `i`, `j` are nodes: a bus-level master's buses are summed onto their node (transmission between two buses of one node is left out).
 
 ---
 
