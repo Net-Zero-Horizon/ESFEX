@@ -672,10 +672,7 @@ class ValidationDialog(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        from esfex.visualization.data.validation import (
-            SimplificationConfig,
-            apply_simplification_level,
-        )
+        from esfex.visualization.data.validation import apply_simplification_level
 
         # Save original state to restore after per-system processing
         original_state = self._model.state
