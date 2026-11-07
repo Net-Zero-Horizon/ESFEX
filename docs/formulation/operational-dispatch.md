@@ -125,13 +125,13 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). One-off terms (startup, development-mode investment, delayed retirement, forced replacement, reservoir investment) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual one-off terms (development-mode investment, delayed retirement, forced replacement, reservoir investment) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{start}} + Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
-Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
+Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
 
 ### 3.1 Operational Costs
 
@@ -185,6 +185,8 @@ Z^{\text{op,pwl}}_{g,n} = \sum_{t} \sum_{k=1}^{K} c_k \cdot p^{(k)}_{g,n,t} \tag
 \[
 Z^{\text{start}} = \sum_{g,n,t} c^{\text{su}}_{g,n} \, v_{g,n,t} \tag{OBJ-2}
 \]
+
+Each start costs its full `start_up_cost`, in the objective and in the `startup_cost` breakdown; it is not prorated like the annual one-off terms.
 
 ### 3.3 Battery Maintenance Cost
 
@@ -274,6 +276,8 @@ where \(c^{\text{tr}}\) is `transference_invest_cost` and \(\hat{F}^{\text{inv}}
 \[
 Z^{\text{conv}} = \sum_{k,t} c^{\text{var}}_k \left( p^{\text{rect}}_{k,t} + p^{\text{inv}}_{k,t} \right) + \sum_{f,t} c^{\text{var}}_f \left( p^{A \to B}_{f,t} + p^{B \to A}_{f,t} \right) \tag{OBJ-11}
 \]
+
+Added by `charge_converter_costs!()` after `add_converter_constraints!()` has created the converter variables (`build_objective!()` runs before them), and reported as `converter_cost`.
 
 ### 3.12 Electrolyzer Costs
 

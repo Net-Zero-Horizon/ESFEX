@@ -2544,6 +2544,59 @@ import Ipopt
             @test si.co2_budget_groups[1].budget == 10.0
         end
 
+        @testset "dispatch charges converter costs and full start-ups" begin
+            # Converter variable cost: build_objective! ran before the
+            # converter variables existed, so the term was always empty.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            conv = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, 40.0, 0.0,
+                1.0, 1.0, 0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0e-3, 0.0, 2.0e-6, 50.0,
+                30, 0, 0.0)
+            net2 = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [line], TransformerData[], [conv], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 0.0], [1.0e-5, 0.0],
+                        ones(H24, 2); nb = 2, H = H24)
+            input = PowerSystemInput(
+                name = "conv", year = 2025, network = net2, generators = [gas],
+                batteries = BatteryConfig[], demand = hcat(zeros(H24), fill(50.0, H24)),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                pwl_loss_segments = 0,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            rect = value.(vars.acdc_rectify[1, :])
+            @test sum(rect) ≈ 40.0 * H24 atol = 1e-6
+            res = extract_solution(model, vars, input)
+            @test res.cost_breakdown.converter_cost ≈ sum(rect) * 2.0e-6 rtol = 1e-6
+            @test coefficient(objective_function(model), vars.acdc_rectify[1, 1]) ≈ 2.0e-6
+
+            # Start-ups are events: one start costs start_up_cost, not
+            # start_up_cost × window/8760 (the objective prorated it).
+            gen = ESFEX.with_fields(
+                mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                      ones(H24, 1); nb = 1, H = H24);
+                min_power = [0.5], start_up_cost = [2.0e-3])
+            input = PowerSystemInput(
+                name = "uc", year = 2025, network = net1, generators = [gen],
+                batteries = BatteryConfig[],
+                demand = reshape(vcat(zeros(12), fill(100.0, 12)), H24, 1),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                mode = "unit_commitment", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test coefficient(objective_function(model), vars.gen_startup[1, 1, 13]) ≈ 2.0e-3
+            res = extract_solution(model, vars, input)
+            @test objective_value(model) ≈ res.cost_breakdown.fuel_cost +
+                res.cost_breakdown.fixed_om_cost + res.cost_breakdown.maintenance_cost +
+                res.cost_breakdown.startup_cost + res.cost_breakdown.co2_emission_cost +
+                res.cost_breakdown.load_shedding_cost + res.cost_breakdown.fre_penetration_cost +
+                res.cost_breakdown.reserve_static_cost + res.cost_breakdown.reserve_dynamic_cost +
+                res.cost_breakdown.inertia_cost rtol = 1e-6
+        end
+
         @testset "solve_dcopf benchmark" begin
             # Cheap gen at bus 1 supplies a bus-2 load across one line.
             r = solve_dcopf(num_buses = 2, demand = [0.0, 100.0],

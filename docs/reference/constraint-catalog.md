@@ -224,7 +224,7 @@ There is no DC angle-difference limit; `max_angle_diff_deg` applies to AC-OPF on
 | `flow <= (capacity + investment) * outage_factor` | DC-5a | Line/transformer capacity (positive direction) |
 | `flow >= -(capacity + investment) * outage_factor` | DC-5b | Line/transformer capacity (negative direction) |
 | `tf_inv_{i}_{j}` (variable bounds) | DC-5i | Development mode: `0 <= tf_inv <= min(transference_invest_max)` of the two end buses; one variable per corridor, on its first line, charged at the higher `transference_invest_cost` |
-| `line_flow_abs_l{l}_t{t}_pos`, `_neg` | OBJ-17 | Lines with a `flow_cost` (inter-system links): `line_flow_abs_l{l}_t{t} >= ±flow`, charged `flow_cost` per MWh |
+| `line_flow_abs_l{l}_t{t}_pos`, `_neg` | OBJ-17 | Lines with a `cost_per_mw_km` (inter-system links): `line_flow_abs_l{l}_t{t} >= ±flow`, charged length × `cost_per_mw_km` per MWh |
 
 ### Devices
 
