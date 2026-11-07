@@ -67,6 +67,99 @@ Per-release notes are also published on the
   `dc_power_flow.reactance_per_km`. The Studio line form's Reactance per km
   field, which was saved but dropped on load, now has this effect.
 
+- **The master problem holds the CO2 budget, models converters and link
+  flow costs, and starts units when the dispatch commits them.** The master
+  had none of these, so it planned for a cheaper system than the dispatch
+  then ran:
+  - **CO2 budget.** Each system's annual `co2_budget` now holds in every
+    planning year of the master, as in the dispatch: the emissions of the
+    representative days (or TSAM periods), scaled to the year like their
+    cost, may exceed the budget only at that system's
+    `penalties.co2_budget_violation` per tonne. A multi-system run keeps one
+    budget per system over its own nodes.
+  - **Converters.** AC/DC and frequency converters carry power in the
+    master's representative days as in the dispatch, at their
+    `variable_cost`. A converter with `invest_max_power` > 0 can be expanded
+    at its `invest_cost` ($/MW, plus `fixed_cost` $/MW/year); the MW built
+    are added to its `rated_power_mva` in the dispatch from the year they
+    are built (myopic years see earlier builds). In a merged run the
+    master's converters join nodes, not dispatch buses.
+  - **Inter-system link flow cost.** An electrical inter-system link with
+    `cost_per_mw_km` costs `distance_km` × `cost_per_mw_km` per MWh it
+    carries in the master (new `TransmissionLineGeo.cost_per_mw_km`, set on
+    the merged master's link). The field used to be ignored by the merged
+    run, so a link with a large placeholder value now carries that cost.
+  - **Start-ups.** With `master_problem.use_uc_in_dispatch: true` the master
+    gives each thermal or hydro unit with a start-up cost or minimum power a
+    continuous online capacity: output between `min_power` × online
+    capacity and online capacity, and one `start_up_cost` for bringing the
+    whole unit online. The master stays an LP; minimum up and down times
+    are left to the dispatch.
+
+- **Six more stochastic multipliers change the plan.** The Studio offers
+  again, and the model now applies, `penalty_co2_budget_violation`,
+  `bat_maintenance_cost` (batteries and battery technologies only, on top
+  of `maintenance_cost`), `gen_start_up_cost` (only acts with
+  `use_uc_in_dispatch`), `converter_invest_cost`, `converter_variable_cost`
+  and `transmission_cost_per_mw_km` (the flow cost of inter-system links;
+  shown as "Inter-system link flow cost (per MW·km)"). They were dropped
+  with a warning because the master had no term they could scale.
+
+- **The master plans the fuel chain and electrolyzers.** With primary energy
+  on, the master now runs the dispatch's fuel model on each representative
+  day (or TSAM period): the same fuel prices, import costs, supply limits,
+  tanks, routes, non-electric demand and penalties. On these days tanks are
+  cyclic and shipments arrive the same day. It builds fuel storage per node,
+  route capacity and electrolyzer power within the `fuel_infrastructure`
+  expansion limits and `invest_max_power`, charging overnight costs at the
+  build year. Electrolyzers draw power at their bus, with their fixed,
+  variable and water cost, and fill the node's `Hydrogen` tank. Benders cuts
+  carry the new capacities. The master had no fuel model, and electrolyzers
+  could not be built at all.
+
+- **Stochastic fuel and electrolyzer multipliers.** `fuel_import_cost`,
+  `penalty_loss_of_fuel_supply`, `fuel_storage_invest_cost`,
+  `fuel_transport_cost` (route transport cost and route investment), and
+  `electrolyzer_invest_cost`, `electrolyzer_fixed_cost`,
+  `electrolyzer_variable_cost` and `electrolyzer_water_cost` are back in the
+  Studio's scenario multiplier catalog. They now scale the master's fuel
+  block. Before, they were dropped with a warning. `fuel_cost` and
+  `fuel_price_growth` now also scale the fuel prices of the fuel balance.
+
+- **Cost of N-1 security.** `n1_security_cost` was always 0: the dispatch
+  never computed it. With the new option `n1_security.compute_security_cost`
+  (Studio: Global Settings → N-1 Security → *Compute N-1 Security Cost*),
+  each operational window that has N-1 constraints is solved a second time
+  without them, and the objective difference is reported as
+  `n1_security_cost` (YearResults, the HDF5 `n1_security_cost` dataset and
+  the `n1_security/security_cost` attribute). The re-solve copies the solved
+  model, primary-energy block and user constraints included, with the N-1
+  slacks free of charge. It roughly doubles the solve time, so it is off by
+  default, and the field stays 0 when it is off.
+
+- **Scheduled outages of electrolyzers, fuel tanks and fuel routes.**
+  Outage windows of type `electrolyzer`, `fuel_storage` and `fuel_route`
+  were accepted but had no effect. Now, in absolute horizon hours like the
+  other types: an `electrolyzer` window scales the unit's rated power; a
+  `fuel_storage` window (`element_id` = fuel, optional `node`) takes the
+  fuel's tank out of service, locking its contents in proportion to the
+  outage (frozen at availability 0, so the node's fuel only passes through)
+  with its minimum levels suspended; a `fuel_route` window (`element_id` =
+  the route's `route_id`) scales the route's capacity in each
+  primary-energy period by the period's mean availability. In a merged
+  multi-system run, electrolyzer ids follow the `{system}__{key}` renaming
+  and a tank window without a node covers only its own system's nodes.
+  Unknown electrolyzer or fuel ids are reported at load time, unknown route
+  ids when the run reaches the window.
+
+- **Fuel burnt per unit in the results (`fuel_for_power`).** With the
+  primary-energy model on, `YearResults.fuel_for_power` holds the fuel each
+  fuel-coupled unit burns per step and node (`{unit: [node x step]}`, fuel
+  units per step; committed steps of each rolling window), and the results
+  file stores it as `primary_energy/fuel_for_power/{unit}`. The field was
+  declared but never filled. `PrimaryEnergyAdapter.get_results()` returns it
+  as `fuel_for_power` (keyed by generator index).
+
 ### Changed
 
 - **The master problem has no fuel-infrastructure investment.** Its fuel
@@ -372,6 +465,44 @@ Per-release notes are also published on the
 - Per-node `demand_fraction` values are rescaled to sum to 1 (with a warning).
 - Grid Builder: the "Reconnect isolated" option is removed; island
   subsystems are kept as built from OpenStreetMap.
+
+- **Only the master builds fuel infrastructure.** Each dispatch window used
+  to build fuel storage and route capacity on its own, at an annuity × its
+  share of the year, in `development` and `economic_dispatch` modes (and
+  nothing with `use_uc_in_dispatch` or in `unit_commitment` mode). Now the
+  master builds them, and each dispatch year receives the capacity in
+  service that year as existing capacity. The master's built electrolyzer
+  power is added to each electrolyzer's `rated_power`. A myopic master
+  starts each year from what earlier years built. Runs without a master
+  (`economic_dispatch`, `unit_commitment`) build no fuel infrastructure.
+  The HDF5 file has a new per-year `master_fuel_capacity/` group, and
+  `primary_energy/storage_investments` and `transport_investments` are no
+  longer written. `pe_investment_cost` is always 0.
+
+- **Fuel-coupled units pay the fuel price in the master too.** With primary
+  energy on, the master's generators and candidate technologies that burn a
+  modelled fuel now pay for it through the fuel balance (price + node import
+  cost), as in the dispatch, and no longer pay their flat `fuel_cost`. Units
+  with a fuel-cost curve keep their curve. This changes the master's plan
+  wherever `fuel_cost` and the fuel prices disagree.
+
+- **`penalties.coupling_slack_penalty` is deprecated.** It has priced nothing
+  since the primary-energy model lost its periodic–hourly coupling slacks
+  (the `pe_coupling_slack_cost` result stays 0, kept for file
+  compatibility). A configuration that sets it still loads, now with a
+  warning; the Studio no longer shows it in the system form nor writes it.
+- **Unused SCOPF settings are reported.** `n1_security.scopf_max_iterations`
+  and `scopf_violation_tolerance` have no effect (the SCOPF constraints are
+  built in one pass). A value other than the default now logs a warning when
+  the configuration is loaded; the Studio tooltip says so.
+
+- The unused Grid Builder step class `GridMappingConnectStep` (the old
+  "Step 5: Simplify & Aggregate") and its translation keys were removed.
+  It was not reachable from the Studio.
+
+- `BatteryConfig` accepts both `availability_file` and `Availability`
+  (the docs said only the alias), and generators accept both names too
+  (the docs said `availability_file` was ignored for generators).
 
 ### Fixed
 
@@ -925,6 +1056,169 @@ Per-release notes are also published on the
   Load Heatmap, demand line and Commitment Heatmap); chart titles removed, long
   labels shortened to fit, and Hourly Dispatch uses the Overview's names and
   colours.
+
+- **Electrolyzer water cost is charged.** `water_cost` (\$/kg H2) was never
+  used. The dispatch and the master now charge it on the hydrogen produced.
+
+- **The master prices candidate technologies with their offer curve.** A
+  technology's `fuel_cost_curve` was converted for the master problem and
+  then never used: the master charged the technology its flat `fuel_cost`
+  on every MWh, while the dispatch priced the capacity built from it with
+  the curve, so the plan was made with a different marginal cost than the
+  one it was operated at. The master now splits the technology's output
+  into the curve's segments (segment *k* capped at its fraction of the
+  cumulative capacity, times the availability for renewables) and charges
+  each segment its own price, on every bus of the node. The Benders
+  subproblems do the same and include the segment caps in their cut
+  gradient, and stochastic scenarios scale the curve with the fuel-cost
+  multiplier like the generators' curves.
+
+- **Investments keep their bus with `network_reduction`.** The reduction
+  renumbers the buses it keeps, and the master's per-bus results came back
+  on the reduced numbering but were read as the system's own buses; the
+  dispatch, in turn, read the units built from master investments (laid out
+  on the system's buses) as reduced-bus arrays. New capacity could land on
+  the wrong bus or at another node (a two-node system with one pruned
+  connection bus put node 0's investment at node 1). The master's results
+  are now laid out on the original buses, and the dispatch maps built units
+  onto the reduced buses (capacity on an eliminated bus goes to the retained
+  bus of the same node with the largest `demand_fraction`). This affects
+  bus-level masters (a one-node system with several buses, or development
+  zones) and every dispatch with the reduction on.
+
+- **Myopic years keep earlier builds at their bus.** On a bus-level master,
+  capacity built in an earlier myopic year was added to the next year's
+  model as one unit per node, which the adapter placed at the node's first
+  bus; behind a weak internal line that capacity was stranded and the next
+  year built it again. Each bus with new capacity now gets its own unit
+  (`{technology}__built_y{n}__{bus_id}`) pinned to that bus.
+
+- **Unclassified shed demand is priced like the sectors around it.** Node
+  demand that no sector accounts for (sector shares that do not add up to
+  the node's demand) was shed at VOLL × 1, below every sector's criticality
+  multiplier, so the optimizer always shed it first. It is now priced at
+  the demand-weighted mean of the node's sector multipliers in that step
+  (1 where no sector has demand), in the dispatch and in the master's and
+  Benders' representative days.
+
+- **Inter-system links charge their operating cost in the dispatch.** In a
+  merged multi-system run each transmission link became a plain line and its
+  `cost_per_mw_km` was dropped, so energy crossed the link for free. The
+  merge now sets the link line's `cost_per_mw_km` (the field the master
+  already reads), network reduction carries the per-MWh cost to the merged
+  lines, and the dispatch charges `length_km × cost_per_mw_km` on |flow|
+  (DC power flow; reported as `line_flow_cost` in the cost breakdown and the
+  dashboard waterfall), as the master does. Configurations that used large
+  placeholder values for `cost_per_mw_km` (documented as "not used") now
+  pay them.
+
+- **The dispatch charges the converters' variable cost.** The objective was
+  built before the AC/DC and frequency converter variables existed, so their
+  `variable_cost` was never charged and `converter_cost` was always 0. It is
+  now added once the converters are built, in every power-flow mode.
+
+- **Start-ups cost their full price in the dispatch.** The objective
+  prorated each start-up by the window's share of the year (a 24 h window
+  charged 24/8760 of `start_up_cost`), while the cost breakdown reported the
+  full amount; unit commitment started units almost for free. Start-ups are
+  now charged in full, like the breakdown.
+
+- **A primary-energy node without a tank no longer stores fuel.** The level
+  of a node with no tank capacity had no upper bound, so it worked as a free
+  tank within each window (fuel bought or shipped early kept for later
+  hours). Its level is now bounded by 0: fuel there passes through within
+  the step.
+
+- **`pe_electrolyzer_cost` reports the electrolyzer cost again.** It was
+  always 0 after the primary-energy electrolyzer model was removed. When the
+  electrolyzers feed the `Hydrogen` tank it now shows their cost as charged
+  by the dispatch; it is the same money as `electrolyzer_cost` (reported
+  twice, charged once).
+
+- **Docs:** the constraint catalog no longer says the N-1 slacks are free
+  (they have been priced since the N-1 fix); the HDF5 `total` cost is
+  described as the objective value.
+
+- **Bus-level master results are summed onto nodes.** On a master that
+  solves on buses (a one-node system with several buses, or development
+  zones), the investment keys `tech_investment_power_{t}_{b}` (and the
+  battery and transmission ones) and the life-extension arrays are indexed
+  by bus. The results summary printed after the master, the MGA export and
+  the `investment_*` attributes of the results file (read by the results
+  map and dashboard) took that index as a node and dropped every bus index
+  past the node count, so those investments vanished. They are now mapped
+  to the bus's node (`buses[b].parent_node`) and summed; transmission built
+  between two buses of one node is left out of the node-level attributes.
+  The summary's investment columns are now labelled with the candidate
+  technologies (they used existing generators' names and dropped
+  technologies past the generator count). A unit's `retirement_gen_{g}` is
+  now the share of its capacity retired (it was the mean of the retired
+  flags over all buses or nodes, including those where the unit has no
+  capacity), and the Studio's retirement charts multiply it by the unit's
+  total `rated_power` (they used the mean over nodes).
+
+- **Rolling-horizon year totals count each window's committed steps.** A
+  window solves its kept steps plus an overlap tail that the next window
+  solves again; the year's objective, cost breakdown, generation, demand,
+  curtailment, load shedding and CO2 took each window's whole-window total
+  times `kept / window` steps, mixing the overlap hours in (on a load that
+  grows through the window the year's demand came out 8 % too high in a
+  test, while the dispatch arrays were right). Each window's values are now
+  taken over its committed steps only: a cost counts for the steps it
+  belongs to, a cost without a step (investment annuities, CO2-budget slack)
+  for the window's committed share, a primary-energy period for the share of
+  its steps that the window keeps, and fuel drawn from a tank is valued
+  from the window's start to the end of its kept steps. The primary-energy
+  cost totals (`total_fuel_cost`, `total_transport_cost`,
+  `total_loss_penalty`) follow the same rule. `PowerSystemAdapter.
+  get_solution_values(keep_steps=..., primary_energy=...)`,
+  `PrimaryEnergyAdapter.get_results(keep_steps=...)` and the Julia
+  `extract_solution(...; committed=committed_steps(...))` /
+  `extract_primary_energy_solution(...; keep=...)` take the committed steps.
+  `n1_security_cost` is still a whole-window figure counted for the window's
+  committed share.
+- **Dispatch profiles missing from the runner's cache are read like the
+  runner's.** When a unit's `availability_file` was not preloaded,
+  `PowerSystemAdapter` read the whole file without the data calendar
+  (`date_start`, Feb 29) and without slicing the window, so every window got
+  the first hours of the file whatever its year and start hour; a relative
+  path was resolved against the current directory. It now uses the runner's
+  reader (`esfex.io.demand.load_run_availability`) with the configuration's
+  directory (new `config_path` keyword, passed by the runner) and slices the
+  window as for a cached profile; technology units built by the master that
+  match no cached file are read the same way instead of running at
+  availability 1.
+- **Rooftop solar settings reach rooftex.** The runner passed only
+  `adoption_scenario`, `weather_variability` and `simulation_seed` to
+  rooftex; `performance_ratio`, `systems_per_node`, `avg_system_size`,
+  `initial_adoption`, `max_adoption` and `adoption_rates` were validated and
+  ignored. They are now passed (unset or empty fields, as the Studio writes
+  them, keep rooftex's defaults), so results change for configurations that
+  set them. The multi-system merge also re-keyed `max_adoption` and
+  `adoption_rates` by node index although they are keyed by scenario
+  (`low` / `medium` / `high`), which dropped every value; it now keeps the
+  first system's (warning when another system's differ), and a per-node list
+  that no system sets stays unset instead of becoming zeros. The cost fields
+  (`cost_per_kw`, `cost_reduction_rate`, `o_and_m_cost`) still have no
+  consumer: rooftop solar is behind the meter, with no investment decision
+  to price.
+
+- **The map no longer throws away your edits after a renderer crash.** When
+  the Studio's map page crashed (WebEngine render process), the reloaded map
+  repopulated the whole project from the file loaded at startup, so every
+  change made since loading was lost. The map is now redrawn from the
+  project as it is in memory; the file is only read again when the crash
+  happened before the project had been loaded at all.
+
+- **Flat `dc_*` power-flow keys are read in any case.** The legacy system
+  keys `dc_base_impedance`, `dc_reactance_per_km`, `dc_voltage_level_kv`,
+  `dc_max_angle_diff_deg` and `dc_slack_bus` were read only as written in
+  lower case or all upper case; a mixed spelling such as `DC_base_impedance`
+  was dropped without a warning (the unknown-key check accepted it). The
+  loader and the unknown-key check now share one table of the loader's
+  key translations (`esfex.config.legacy_keys`), and penalties are read
+  from every `PenaltiesConfig` field instead of a hand-kept list, so the
+  two cannot drift apart again.
 
 ## [0.3.0] — 2026-08-27
 
