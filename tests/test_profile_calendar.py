@@ -97,6 +97,37 @@ def test_dispatch_years_keep_their_data_block_and_base_year(tmp_path):
         orch.run(years=3, dispatch_years=[2030])
 
 
+def test_skipped_years_still_apply_their_master_builds(tmp_path):
+    """Transmission/converter builds are per-year increments: with
+    dispatch_years, the builds of the years before the dispatched one must
+    reach it."""
+    f = tmp_path / "demand.csv"
+    np.savetxt(f, np.ones((3 * H, 2)), delimiter=",")
+    orch = _orch(tmp_path, f, date_start="01/01/2025 00:00")
+    orch.config = orch.config.model_copy(update={"simulation_mode": "development"})
+    inv = {2025: {"transfer_investment_0_1": 10.0},
+           2026: {"converter_investment_acdc_0": 5.0},
+           2027: {"transfer_investment_0_1": 1.0}}
+    applied, seen = [], []
+
+    def fake_dispatch(**kw):
+        seen.append((kw["year"], list(applied)))
+        return YearResults(year=kw["year"], objective=0.0, solve_time=0.0,
+                           feasible=True, demand=kw["demand"])
+
+    with patch.object(orch, "_solve_master_problem", return_value=(inv, {}, {}, {})), \
+         patch.object(orch, "_apply_transfer_investments",
+                      side_effect=lambda d: applied.append(("t", dict(d)))), \
+         patch.object(orch, "_apply_converter_investments",
+                      side_effect=lambda d: applied.append(("c", dict(d)))), \
+         patch.object(orch, "_run_operational_dispatch", side_effect=fake_dispatch):
+        orch.run(years=3, dispatch_years=[2027])
+    assert len(seen) == 1 and seen[0][0] == 2027
+    got = seen[0][1]
+    assert ("t", inv[2025]) in got and ("c", inv[2026]) in got
+    assert ("t", inv[2027]) in got
+
+
 # ── master profiles: dispatch cache, data calendar, no inflow clipping ─────
 
 def _master(tmp_path, **kw):
