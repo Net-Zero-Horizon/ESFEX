@@ -1970,8 +1970,11 @@ Complete input for the Primary Energy optimization model.
 - `loss_of_fuel_supply_penalty::Float64`: Penalty for fuel shortfall (\$/unit)
 - `coupling_slack_penalty::Float64`: Unused (the periodic storage layer and its
     coupling slacks were removed); kept so existing call sites still construct
-- `mode::String`: Operation mode ("development", "economic_dispatch", "unit_commitment")
-- `cumulative_capacities::Dict`: Previously accumulated infrastructure investments
+- `mode::String`: Operation mode ("development", "economic_dispatch",
+    "unit_commitment"; "master" for a representative day of the master)
+- `cumulative_capacities::Dict`: Fuel storage/transport capacity built by the
+    master: {"storage"|"transport" => {fuel => {node or route => capacity}}}
+- `investment_from_master::Bool`: unused (only the master builds fuel infrastructure)
 - `initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}`: Initial storage levels
 - `h2_production_hourly`, `electrolyzer_config`: must be `nothing`. The
     dispatch electrolyzers feed the `Hydrogen` tank instead
@@ -2002,8 +2005,8 @@ struct PrimaryEnergyInput
     mode::String
     cumulative_capacities::Dict{String, Any}
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}
-    # Flag to skip investment variable creation when handled by MasterProblem
-    # Matches Python legacy investment_from_master (lines 50, 72, 361-379)
+    # Unused: the dispatch never builds fuel infrastructure; the master does
+    # (master_fuel.jl). Kept so existing call sites still construct.
     investment_from_master::Bool
     # Unused, must be nothing: the dispatch electrolyzers feed the Hydrogen tank
     h2_production_hourly::Union{Matrix{Float64}, Nothing}
@@ -2200,6 +2203,40 @@ end
 # =============================================================================
 # Master Problem Types
 # =============================================================================
+
+# ── M2 (#89): fuel block of the master ──────────────────────────────────────
+"""
+    MasterFuelInput
+
+Primary energy as the master problem sees it (`master_fuel.jl`).
+
+- `pe`: the system's `PrimaryEnergyInput` (fuels, tanks, routes, fuel
+  infrastructure, non-electric demand, penalties). Its `generator_fuel_map`
+  holds the master's generators under their index and candidate technology
+  `tc` under `length(generators) + tc`, like the dispatch's virtual
+  generators. `cumulative_capacities` is what earlier master years built
+  (myopic runs); `base_year` is the run's first year (fuel price growth,
+  disruption hours). The year, length and offset are set per day.
+- `electrolyzers`: per master bus, as the dispatch maps them.
+"""
+struct MasterFuelInput
+    pe::PrimaryEnergyInput
+    electrolyzers::Vector{ElectrolyzerConfig}
+end
+
+"""
+    MasterFuelVariables
+
+Fuel infrastructure the master builds, per investment-period start year:
+`storage[y][fuel][node]` (fuel units), `transport[y][fuel][route]` (units/day,
+indexed like `pe.transport_routes`) and `electrolyzer[y][e][bus]` (MW).
+"""
+struct MasterFuelVariables
+    storage::Dict{Int, Dict{String, Vector{VariableRef}}}
+    transport::Dict{Int, Dict{String, Vector{VariableRef}}}
+    electrolyzer::Dict{Int, Dict{Int, Vector{VariableRef}}}
+end
+# ── end M2 ───────────────────────────────────────────────────────────────────
 
 """
     MasterProblemInput
@@ -2402,6 +2439,9 @@ struct MasterProblemInput
     # operation then has LP-relaxed commitment and start-up costs.
     unit_commitment::Bool
     # --- end ---
+    # M2 (#89): fuel balance, fuel infrastructure and electrolyzers; nothing
+    # when primary energy is off (master_fuel.jl)
+    primary_energy::Union{Nothing, MasterFuelInput}
 end
 
 # Constructor with defaults
@@ -2478,7 +2518,8 @@ function MasterProblemInput(;
     re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
     co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[],
     line_flow_cost::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
-    unit_commitment::Bool = false
+    unit_commitment::Bool = false,
+    primary_energy::Union{Nothing, MasterFuelInput} = nothing
 )
     return MasterProblemInput(
         years, base_year,
@@ -2512,7 +2553,8 @@ function MasterProblemInput(;
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         benders_lol_penalty_cap,
         re_target_override,
-        co2_budget_groups, line_flow_cost, unit_commitment
+        co2_budget_groups, line_flow_cost, unit_commitment,
+        primary_energy
     )
 end
 
@@ -2589,6 +2631,9 @@ mutable struct MasterProblemVariables
     converter_investment::Dict{Int, Dict{Tuple{String,Int}, VariableRef}}
     # CO2 budget violation (t): (scenario idx, 0 = deterministic; year; group) => slack
     co2_budget_violation::Dict{Tuple{Int,Int,Int}, VariableRef}
+    # M2 (#89): fuel storage/transport and electrolyzer builds (nothing
+    # without primary energy)
+    fuel::Union{Nothing, MasterFuelVariables}
 end
 
 """
@@ -2654,7 +2699,14 @@ struct MasterProblemResult
 
     # Converter investment: year => ("acdc" | "freq", converter idx) => MW built that year
     converter_investment::Dict{Int, Dict{Tuple{String,Int}, Float64}}
+    # M2 (#89): fuel infrastructure and electrolyzers built by the master
+    # (extract_master_fuel_solution); empty without primary energy
+    fuel_investment::Dict{String, Any}
 end
+
+# Without the fuel builds (no primary energy)
+MasterProblemResult(args::Vararg{Any, 21}) =
+    MasterProblemResult(args..., Dict{String, Any}())
 
 """
     BendersResult
@@ -2856,7 +2908,8 @@ Cost and parameter multipliers for a stochastic scenario (all 1.0 by default).
 # Fields
 - `invest_cost_renewables::Float64`: Investment cost of renewable technologies
 - `invest_cost_conventional::Float64`: Investment cost of non-renewable technologies
-- `fuel_cost::Float64`: Fuel cost of generators (incl. PWL fuel curves) and technologies
+- `fuel_cost::Float64`: Fuel cost of generators (incl. PWL fuel curves) and technologies,
+  and the fuel prices of the master fuel balance
 - `maintenance_cost::Float64`: Maintenance cost of generators, batteries and technologies
 - `invest_cost_storage::Float64`: Battery technology investment (power and energy)
 - `invest_cost_transmission::Float64`: Transmission investment cost
@@ -2880,6 +2933,12 @@ Cost and parameter multipliers for a stochastic scenario (all 1.0 by default).
 - `converter_invest_cost::Float64`: AC/DC and frequency converter investment
 - `converter_variable_cost::Float64`: AC/DC and frequency converter variable cost
 - `penalty_co2_budget_violation::Float64`: CO2 budget violation penalty
+- `fuel_import_cost`: per-node fuel import cost
+- `penalty_loss_of_fuel_supply`: fuel shortfall and excess-supply penalty
+- `fuel_storage_invest_cost`: fuel storage investment cost
+- `fuel_transport_cost`: fuel route transport cost and route investment cost
+- `electrolyzer_invest_cost`, `electrolyzer_fixed_cost`,
+  `electrolyzer_variable_cost`, `electrolyzer_water_cost`: electrolyzer costs
 """
 Base.@kwdef struct ScenarioMultipliers
     invest_cost_renewables::Float64 = 1.0
@@ -2909,6 +2968,16 @@ Base.@kwdef struct ScenarioMultipliers
     converter_variable_cost::Float64 = 1.0
     penalty_co2_budget_violation::Float64 = 1.0
     # --- end ---
+    # ── M2 (#89): fuel chain and electrolyzers (master_fuel.jl) ──
+    fuel_import_cost::Float64 = 1.0
+    penalty_loss_of_fuel_supply::Float64 = 1.0
+    fuel_storage_invest_cost::Float64 = 1.0
+    fuel_transport_cost::Float64 = 1.0
+    electrolyzer_invest_cost::Float64 = 1.0
+    electrolyzer_fixed_cost::Float64 = 1.0
+    electrolyzer_variable_cost::Float64 = 1.0
+    electrolyzer_water_cost::Float64 = 1.0
+    # ── end M2 ──
 end
 
 # The original ten positional multipliers; the others stay at 1.0
