@@ -481,11 +481,8 @@ systems:
         storage_capacity: [5000.0, 1000.0]  # tonnes per node
         initial_storage_level: [0.5, 0.5]   # fraction of capacity
         min_storage_level: 0.1              # safety stock (fraction)
-        storage_investment_cost: 100.0
         transport_cost: 0.1
         transport_losses: 0.005
-        max_storage_investment_per_node: 10000.0
-        max_transport_investment_per_arc: 500.0
 
     fuel_infrastructure:
       storage_facilities:
@@ -523,7 +520,7 @@ systems:
         demand: [12000, 3000]               # tonnes/year per node
 ```
 
-Of the source fields, `storage_investment_cost`, `transport_cost`, `transport_losses`, `max_storage_investment_per_node` and `max_transport_investment_per_arc` are required by the schema; the model takes the investment costs and limits from `fuel_infrastructure` and the route costs and losses from `fuel_transport_routes`. The master problem uses the same `fuel_infrastructure` costs and limits when it builds fuel storage and route capacity (PE-5d).
+Of the source fields, `transport_cost` and `transport_losses` are required by the schema; the model takes the investment costs and limits from `fuel_infrastructure` and the route costs and losses from `fuel_transport_routes`. The master problem uses the same `fuel_infrastructure` costs and limits when it builds fuel storage and route capacity (PE-5d).
 
 ---
 

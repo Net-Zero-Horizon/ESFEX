@@ -1001,19 +1001,16 @@ class TestMergeCarriesSystemSettings:
             "acdc_converters": [ACDCConverterConfig(
                 name="hvdc", from_node=0, to_node=1, from_bus=0, to_bus=1)],
             "electrolyzers": {"pem": ElectrolyzerConfig(
-                name="PEM", life_time=two(20), initial_age=two(0),
-                degradation_rate=two(0.0), rated_power=[5.0, 0.0],
-                min_power=two(0.0), ramp_up=two(1.0), ramp_down=two(1.0),
+                name="PEM", life_time=two(20), rated_power=[5.0, 0.0],
+                ramp_up=two(1.0), ramp_down=two(1.0),
                 eff_at_rated=two(0.7), eff_at_min=two(0.6), fixed_cost=two(0.0),
                 variable_cost=two(0.0), invest_cost=two(0.0),
                 invest_max_power=two(0.0))},
             "primary_energy_sources": {"Gas": PrimaryEnergySourceConfig(
                 name="Gas", unit="MWh", max_availability=[100.0, 200.0],
                 import_cost=two(30.0), storage_capacity=two(0.0),
-                initial_storage_level=two(0.5), storage_investment_cost=0.0,
-                transport_cost=0.0, transport_losses=0.0,
-                max_storage_investment_per_node=0.0,
-                max_transport_investment_per_arc=0.0)},
+                initial_storage_level=two(0.5),
+                transport_cost=0.0, transport_losses=0.0)},
             "fuel_transport_distances": [[0.0, 40.0], [40.0, 0.0]],
             "custom_constraints": [CustomConstraintConfig(
                 name="cap", sense="<=", rhs=10.0, terms=[

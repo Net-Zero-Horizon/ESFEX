@@ -10,7 +10,7 @@ import numpy as np
 from pathlib import Path
 
 def _build_simple_network(jl, ESFEX, num_nodes, connections, distances,
-                          *, base_impedance=100.0, reactance_per_km=0.4,
+                          *, s_base=100.0, reactance_per_km=0.4,
                           voltage_kv=220.0, max_angle_diff_rad=0.524,
                           slack_bus=1):
     """One-bus-per-node NetworkConfig with no per-line/transformer/converter
@@ -26,7 +26,7 @@ def _build_simple_network(jl, ESFEX, num_nodes, connections, distances,
         num_nodes, num_nodes, buses, bus_to_node,
         py_to_julia_matrix(connections),
         py_to_julia_matrix(distances),
-        base_impedance, reactance_per_km, voltage_kv,
+        s_base, reactance_per_km, voltage_kv,
         max_angle_diff_rad, slack_bus,
         py_to_julia_vector([0.0] * num_nodes),
         py_to_julia_vector([0.0] * num_nodes),

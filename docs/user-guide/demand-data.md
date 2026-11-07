@@ -255,7 +255,6 @@ A YAML file that omits `criticality_penalties` gets the schema defaults. These a
 | `is_flexible` | bool | false | The sector can shift demand in time (see below) |
 | `flexibility_ratio` | float, 0 to 1 | 0.0 | Share of the sector's demand in a step that can be moved |
 | `delay_tolerance` | int, hours | 0 | How far demand can be moved, earlier or later; 0 = no shifting |
-| `price_sensitivity` | float, 0 to 1 | 0.0 | Not used by the model |
 
 !!! note "Demand shifting"
     A sector with `is_flexible: true`, `flexibility_ratio > 0` and `delay_tolerance > 0` can move up to `flexibility_ratio` of its demand in each time step to another step at most `delay_tolerance` hours earlier or later, at the same node and within the same rolling window. The energy is moved, not removed, and costs `demand_shift_cost_rate` per MWh and per hour moved. Flexible demand is never curtailed: cutting demand is load shedding, priced by criticality. See [Operational Dispatch -- Demand Shifting Constraints](../formulation/operational-dispatch.md#demand-shifting-constraints).

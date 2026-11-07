@@ -403,11 +403,6 @@ class NodeConfig(BaseModel):
 class DCPowerFlowConfig(BaseModel):
     """DC power flow model parameters."""
 
-    base_impedance: float = Field(
-        default=100.0,
-        description="Deprecated and ignored: per-unit values use S_base = "
-                    "ac_power_flow.base_mva and Z_base = V²/S_base per line",
-    )
     reactance_per_km: float = Field(default=0.4, description="Line reactance (Ohm/km)")
     voltage_level_kv: float = Field(
         default=220.0,
@@ -434,18 +429,6 @@ class DCPowerFlowConfig(BaseModel):
         default=2, ge=1, le=5,
         description="Number of PWL segments for master problem (fewer for performance)",
     )
-
-    @model_validator(mode="after")
-    def _warn_base_impedance(self) -> "DCPowerFlowConfig":
-        # It served as both Z_base (Ω) and S_base (MVA); both now follow
-        # ac_power_flow.base_mva and each line's voltage.
-        if self.base_impedance != 100.0:
-            import logging
-            logging.getLogger(__name__).warning(
-                "dc_power_flow.base_impedance=%s is ignored: per-unit values use "
-                "ac_power_flow.base_mva as S_base and V²/S_base per line as Z_base",
-                self.base_impedance)
-        return self
 
 
 class ACPowerFlowConfig(BaseModel):
@@ -663,7 +646,7 @@ class GeneratorConfig(BaseModel):
     )
     fixed_cost: list[float] = Field(description="Fixed O&M cost per node ($/MWh)")
     maintenance_cost: list[float] = Field(description="Maintenance cost per node ($/MWh)")
-    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW) [DEPRECATED: use technologies section]")
+    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW): prices life extension (× life_extension_cost_factor); 0 = taken from the technology with the same fuel and type")
     invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max investment per node (MW) [DEPRECATED: use technologies section]")
 
     # Electrical properties
@@ -775,7 +758,7 @@ class BatteryConfig(BaseModel):
         default=None,
         description="Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present.",
     )
-    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Power investment cost ($/MW) [DEPRECATED: use battery_technologies]")
+    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Power investment cost ($/MW): prices life extension; 0 = taken from the battery technology")
     invest_cost_energy: list[float] = Field(default_factory=lambda: [0.0], description="Energy investment cost ($/MWh) [DEPRECATED: use battery_technologies]")
     invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max power investment (MW) [DEPRECATED: use battery_technologies]")
     invest_max_capacity: list[float] = Field(default_factory=lambda: [0.0], description="Max capacity investment (MWh) [DEPRECATED: use battery_technologies]")
@@ -903,13 +886,9 @@ class ElectrolyzerConfig(BaseModel):
     name: str
     type: Literal["Electrolyzer"] = "Electrolyzer"
     fuel: str = "Hydrogen"
-    technology: Literal["PEM", "Alkaline", "SOE"] = "PEM"
 
     life_time: list[int]
-    initial_age: list[int]
-    degradation_rate: list[float]
     rated_power: list[float]
-    min_power: list[float]
     ramp_up: list[float]
     ramp_down: list[float]
     eff_at_rated: list[float]
@@ -937,7 +916,6 @@ class PrimaryEnergySourceConfig(BaseModel):
     storage_capacity: list[float] = Field(description="Storage capacity per node (units)")
     initial_storage_level: list[float] = Field(description="Initial storage fraction per node")
     min_storage_level: float = Field(default=0.1, ge=0, le=1)
-    storage_investment_cost: float = Field(description="$/unit storage capacity")
     transport_cost: float = Field(description="$/unit/km transport cost")
     transport_losses: float = Field(description="Loss fraction per 100km")
     transport_transit_days_per_100km: float = Field(
@@ -957,8 +935,6 @@ class PrimaryEnergySourceConfig(BaseModel):
         default=1.0, ge=0, le=1,
         description="Availability fraction during the disruption window "
         "(0 = full cut, 1 = none).")
-    max_storage_investment_per_node: float
-    max_transport_investment_per_arc: float
 
 
 class ConversionTechnologyConfig(BaseModel):
@@ -988,7 +964,6 @@ class DemandSectorConfig(BaseModel):
     flexibility_ratio: float = Field(default=0.0, ge=0, le=1)
     criticality: Literal["critical", "high", "medium", "low"] = "medium"
     delay_tolerance: int = Field(default=0, ge=0, description="Max delay hours")
-    price_sensitivity: float = Field(default=0.0, ge=0, le=1)
 
 
 class NonElectricDemandConfig(BaseModel):
@@ -1000,7 +975,6 @@ class NonElectricDemandConfig(BaseModel):
     flexibility_ratio: float = 0.0
     criticality: Literal["critical", "high", "medium", "low"] = "medium"
     delay_tolerance: int = 0
-    price_sensitivity: float = 0.0
     demand: list[int] = Field(description="Annual demand per node (units)")
 
 
@@ -1056,9 +1030,6 @@ class RooftopSolarConfig(BaseModel):
     avg_system_size: Optional[list[Optional[float]]] = Field(default=None, description="kW per system")
     performance_ratio: float = Field(default=0.75, ge=0, le=1)
     degradation_rate: float = Field(default=0.005, ge=0)
-    cost_per_kw: float = 1200
-    cost_reduction_rate: float = 0.08
-    o_and_m_cost: float = 20
     base_year: int = 2025
     target_year: int = 2050
     initial_adoption: Optional[list[Optional[float]]] = None
@@ -1153,20 +1124,14 @@ SCENARIO_MULTIPLIER_ALIASES: dict[str, tuple[str, ...]] = {
     "penalty_co2_cost": ("carbon_price",),
 }
 
-# Keys the Studio used to offer that cannot change the master's plan: it has
-# no term for them. Every key the Studio offered now scales a term of the
-# master (#89); the set stays for keys that may lose theirs.
-SCENARIO_MULTIPLIERS_WITHOUT_EFFECT: frozenset[str] = frozenset({
-})
-
 
 def normalize_scenario_multipliers(raw: dict[str, Any]) -> dict[str, Any]:
     """Map a scenario's multiplier keys onto :class:`ScenarioMultipliers` fields.
 
     Aliases are translated; when several keys scale the same field their values
     multiply (``gen_invest_cost: 1.1`` with ``invest_cost_renewables: 0.8``
-    gives renewables 0.88 and conventional 1.1). Keys with no effect on the
-    master problem are dropped, each with a warning.
+    gives renewables 0.88 and conventional 1.1). Unknown keys are dropped,
+    each with a warning.
     """
     import logging
 
@@ -1180,10 +1145,7 @@ def normalize_scenario_multipliers(raw: dict[str, Any]) -> dict[str, Any]:
         elif key in SCENARIO_MULTIPLIER_ALIASES:
             targets = SCENARIO_MULTIPLIER_ALIASES[key]
         else:
-            reason = ("the master problem has no cost term it scales"
-                      if key in SCENARIO_MULTIPLIERS_WITHOUT_EFFECT
-                      else "unknown key")
-            log.warning("Stochastic scenario multiplier '%s' ignored: %s", key, reason)
+            log.warning("Stochastic scenario multiplier '%s' ignored: unknown key", key)
             continue
         for field in targets:
             if field in out:
@@ -1300,56 +1262,6 @@ class ClimateScenarioConfig(BaseModel):
     )
 
 
-class FragilityCurveConfig(BaseModel):
-    """Lognormal fragility curve parameters for a single damage state.
-
-    The probability of reaching or exceeding the damage state given
-    intensity measure *im* is:  P = Φ( (ln(im) − ln(im_median)) / beta )
-    """
-
-    damage_state: Literal["slight", "moderate", "extensive", "complete"] = "complete"
-    im_median: float = Field(gt=0, description="Median intensity measure for this damage state")
-    beta: float = Field(gt=0, le=2.0, description="Log-standard deviation (aleatory)")
-    beta_epistemic: float = Field(
-        default=0.0, ge=0, le=2.0,
-        description="Epistemic uncertainty (β_u); total β = sqrt(β² + β_u²)",
-    )
-    source_quality: Literal[
-        "empirical", "analytical", "expert_judgment", "proxy_derived",
-    ] = Field(default="analytical", description="Quality classification of fragility source")
-    description: str = ""
-
-
-class ComponentFragilityConfig(BaseModel):
-    """Fragility assignment for a component type under a specific hazard."""
-
-    component_type: Literal[
-        "solar_pv",
-        "wind_turbine",
-        "diesel_gen",
-        "gas_turbine",
-        "substation",
-        "transmission_line",
-        "battery",
-        "transformer",
-        "hydroelectric",
-        "biomass",
-        "otec",
-        "electrolyzer",
-    ]
-    hazard_type: Literal[
-        "earthquake",
-        "cyclone",
-        "flood",
-        "tsunami",
-        "wildfire",
-        "volcanic",
-        "sea_level_rise",
-    ]
-    curves: list[FragilityCurveConfig]
-    source: str = Field(default="", description="Literature source, e.g. 'NHESS-2024'")
-
-
 class HazardScenarioConfig(BaseModel):
     """Discrete disaster scenario for stochastic optimisation.
 
@@ -1381,27 +1293,6 @@ class HazardScenarioConfig(BaseModel):
     description: str = ""
 
 
-class HazardDataSourceConfig(BaseModel):
-    """Configuration for a hazard data source / API endpoint."""
-
-    hazard_type: str = Field(description="earthquake, cyclone, flood, …")
-    source: str = Field(
-        description="Data provider key: usgs, gem, ibtracs, storm, "
-        "fathom, wri_aqueduct, noaa_tsunami, firms, gvp, nasa_slr, thinkhazard",
-    )
-    return_periods: list[int] = Field(
-        default=[100, 500],
-        description="Return periods of interest (years)",
-    )
-    enabled: bool = True
-    api_key: str = Field(default="", description="API key if required by the source")
-    cache_dir: str = Field(default="", description="Local cache directory override")
-    options: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Source-specific options (e.g. dataset version, resolution)",
-    )
-
-
 class VOLLConfig(BaseModel):
     """Value of Lost Load by demand sector (USD/MWh)."""
 
@@ -1409,32 +1300,6 @@ class VOLLConfig(BaseModel):
     commercial: float = Field(default=25_000.0, ge=0, description="$/MWh")
     industrial: float = Field(default=15_000.0, ge=0, description="$/MWh")
     critical: float = Field(default=100_000.0, ge=0, description="$/MWh")
-
-
-class RiskCriteriaConfig(BaseModel):
-    """Configurable risk acceptability thresholds per ISO 31000 §6.5.
-
-    Implements the ALARP (As Low As Reasonably Practicable) framework:
-      negligible  → no action needed
-      tolerable   → ALARP zone — monitor, apply cost-benefit reduction
-      intolerable → action required regardless of cost
-    """
-
-    eal_negligible: float = Field(
-        default=1_000.0, ge=0,
-        description="EAL below this ($/yr) is negligible risk",
-    )
-    eal_tolerable: float = Field(
-        default=50_000.0, ge=0,
-        description="EAL below this ($/yr) is tolerable (ALARP zone)",
-    )
-    eal_intolerable: float = Field(
-        default=500_000.0, ge=0,
-        description="EAL above this ($/yr) is intolerable — action required",
-    )
-    composite_risk_low: float = Field(default=0.01, ge=0, le=1)
-    composite_risk_medium: float = Field(default=0.05, ge=0, le=1)
-    composite_risk_high: float = Field(default=0.15, ge=0, le=1)
 
 
 class RiskConfig(BaseModel):
@@ -1469,20 +1334,11 @@ class RiskConfig(BaseModel):
     # ── Hazard scenarios ───────────────────────────────────────────────
     hazard_scenarios: list[HazardScenarioConfig] = Field(default_factory=list)
 
-    # ── Hazard data sources (for automated fetching) ───────────────────
-    hazard_data_sources: list[HazardDataSourceConfig] = Field(default_factory=list)
-
-    # ── Fragility library overrides ────────────────────────────────────
-    fragility_curves: list[ComponentFragilityConfig] = Field(default_factory=list)
-
     # ── Multi-hazard combination ───────────────────────────────────────
     combination_method: Literal["independent", "copula", "mcda"] = Field(
         default="independent",
         description="Method for combining multi-hazard failure probabilities",
     )
-
-    # ── Risk acceptability criteria (ISO 31000 §6.5, ALARP) ──────────
-    risk_criteria: RiskCriteriaConfig = Field(default_factory=RiskCriteriaConfig)
 
     # ── Value of Lost Load ─────────────────────────────────────────────
     voll: VOLLConfig = Field(default_factory=VOLLConfig)
@@ -1546,10 +1402,6 @@ class SolverConfig(BaseModel):
     time_limit: int = Field(default=10800, ge=0, description="Seconds (0 = unlimited)")
     gap: float = Field(default=0.01, ge=0, le=1, description="MIP optimality gap")
     verbose: bool = False
-    scale_constraints: bool = Field(
-        default=True,
-        description="No effect: not read by the model or the solvers (kept so "
-                    "existing files load)")
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="Solver-specific options (e.g. presolve, lp_method)",
@@ -2023,9 +1875,6 @@ class SystemConfig(BaseModel):
     demand_scale: float = Field(default=1.0, gt=0)
 
     # System parameters
-    # Deprecated and ignored: no model constraint ever used it. Still accepted
-    # so existing case files (Studio wrote LOSS_DEMAND_TRHESHOLD) load.
-    loss_demand_threshold: float = Field(default=0.05, ge=0, le=1, alias="LOSS_DEMAND_TRHESHOLD")
     life_extension_cost_factor: float = Field(default=0.20, ge=0)
     sim_rooftop: bool = Field(default=False, alias="SIM_ROOFTOP")
     target_re_penetration: float = Field(default=1.0, ge=0, le=1, alias="TARGET_RE_PENETRATION")
@@ -2050,7 +1899,6 @@ class SystemConfig(BaseModel):
     min_cycling_ratio: float = Field(default=0.8, ge=0, le=1, description="Min battery cycling as fraction of capacity")
     min_cycling_period_days: float = Field(default=7.0, gt=0, description="Period for min cycling calculation (days)")
     reserve_static_default_ratio: float = Field(default=0.15, ge=0, le=1, description="Default static reserve as fraction of demand")
-    flexible_demand_benefit_ratio: float = Field(default=0.5, ge=0, le=1, description="Fraction of price for flexible demand benefit")
     demand_shift_cost_rate: float = Field(default=0.1, ge=0, description="Cost rate per hour of demand shift distance")
     dynamic_reserve_contribution: float = Field(default=0.5, ge=0, le=1, description="Fraction of rated_power for dynamic reserve")
     reserve_margin: float = Field(default=1.15, ge=1.0, description="Capacity adequacy reserve margin (e.g. 1.15 = 15%)")
@@ -2398,7 +2246,6 @@ class SystemLinkConfig(BaseModel):
     voltage_kv: list[float] = Field(default_factory=list)
     line_type: list[str] = Field(default_factory=list)
     length_km: list[float] = Field(default_factory=list)
-    base_impedance: list[float] = Field(default_factory=list)
     reactance_per_km: list[float] = Field(default_factory=list)
     susceptance_pu: list[float] = Field(default_factory=list)
     num_circuits: list[int] = Field(default_factory=list)
@@ -2437,13 +2284,6 @@ class MetaNetworkConfig(BaseModel):
 
     systems: list[str] = Field(description="List of system names to include")
     systems_links: list[SystemLinkConfig] = []
-    dynamic_transfer_pricing: bool = True
-    inter_system_loss_segments: int = Field(
-        default=2,
-        ge=0,
-        le=5,
-        description="PWL segments for inter-system link losses (0=linear fallback)",
-    )
 
 
 # =============================================================================

@@ -1,8 +1,8 @@
 """Per-unit bases of the DC network (#109) and the master's node links (#110).
 
-``dc_power_flow.base_impedance`` served both as Z_base (Ω), to turn
-length × reactance_per_km into p.u., and as S_base (MVA), to turn p.u. into
-MW in the flow and loss terms. Line data from the Grid Builder is per unit on
+``dc_power_flow.base_impedance`` (since removed) served both as Z_base (Ω),
+to turn length × reactance_per_km into p.u., and as S_base (MVA), to turn
+p.u. into MW in the flow and loss terms. Line data from the Grid Builder is per unit on
 100 MVA and the line's own voltage, so a derived reactance used the wrong
 base at every voltage but 100 kV. S_base is now ``ac_power_flow.base_mva`` and
 Z_base = V² / S_base per line.
@@ -41,16 +41,6 @@ def test_derived_reactance_uses_line_voltage_and_power_base():
     # Doubling S_base doubles the p.u. value
     assert derived_reactance_pu(100.0, 34.5, dc, 200.0) == pytest.approx(2 * 40.0 / (34.5**2 / 100))
     assert derived_reactance_pu(0.0, 220.0, dc, 100.0) == 0.01
-
-
-def test_base_impedance_is_ignored_with_a_warning(caplog):
-    with caplog.at_level("WARNING"):
-        DCPowerFlowConfig(base_impedance=529.0)
-    assert "base_impedance" in caplog.text
-    caplog.clear()
-    with caplog.at_level("WARNING"):
-        DCPowerFlowConfig()
-    assert caplog.text == ""
 
 
 @pytest.mark.julia

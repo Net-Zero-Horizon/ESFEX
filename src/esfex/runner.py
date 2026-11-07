@@ -1324,7 +1324,7 @@ class Orchestrator:
             "load_damping", "reserve_margin", "reserve_static_default_ratio",
             "dynamic_reserve_contribution", "soc_end_tolerance",
             "min_cycling_ratio", "min_cycling_period_days",
-            "flexible_demand_benefit_ratio", "demand_shift_cost_rate",
+            "demand_shift_cost_rate",
             "npv_annual_return_rate",
         )}
 
@@ -6278,15 +6278,12 @@ class Orchestrator:
                 'storage_capacity': stor_cap[fuel],
                 'initial_storage_level': stor_init[fuel],
                 'min_storage_level': min_stor[fuel],
-                'storage_investment_cost': 0.0,
                 'transport_cost': 0.0,
                 'transport_losses': 0.0,
                 'transport_transit_days_per_100km': transit[fuel],
                 'disruption_start_hour': disrupt[fuel]["start"],
                 'disruption_end_hour': disrupt[fuel]["end"],
                 'disruption_availability': disrupt[fuel]["avail"],
-                'max_storage_investment_per_node': 0.0,
-                'max_transport_investment_per_arc': 0.0,
             }
             # Get unit from fuels definition
             fuel_def = system_config.fuels.get(fuel)

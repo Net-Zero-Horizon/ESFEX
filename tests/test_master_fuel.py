@@ -38,8 +38,8 @@ class _FakeMaster:
 
 def _electrolyzer(rated, invest_max, invest_cost=1000.0):
     return ElectrolyzerConfig(
-        name="elz", life_time=[20], initial_age=[0], degradation_rate=[0.0],
-        rated_power=[rated], min_power=[0.0], ramp_up=[0.0], ramp_down=[0.0],
+        name="elz", life_time=[20],
+        rated_power=[rated], ramp_up=[0.0], ramp_down=[0.0],
         eff_at_rated=[0.65], eff_at_min=[0.65], fixed_cost=[0.0],
         variable_cost=[1.0], invest_cost=[invest_cost], invest_max_power=[invest_max])
 
@@ -110,9 +110,8 @@ def _hydrogen_plan(tmp_path, tag, scenarios=None, myopic=False, years=1, elz=Non
                              degradation_rate=[0.0], fuel_cost=[80.0],
                              invest_max_power=[0.0])
     src = dict(unit="t", import_cost=[0.0], storage_capacity=[0.0],
-               initial_storage_level=[0.0], storage_investment_cost=0.0,
-               transport_cost=0.0, transport_losses=0.0,
-               max_storage_investment_per_node=0.0, max_transport_investment_per_arc=0.0)
+               initial_storage_level=[0.0],
+               transport_cost=0.0, transport_losses=0.0)
     sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],
                                generators={"diesel": diesel})
     sysc = sysc.model_copy(update={

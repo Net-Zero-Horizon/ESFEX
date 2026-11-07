@@ -76,7 +76,7 @@ def test_translated_and_free_form_keys_are_not_reported():
     raw = _raw()
     sysd = raw["systems"]["island"]
     # Legacy flat DC keys (any case), legacy unit_/bat_ units, aliases.
-    sysd.update({"dc_base_impedance": 100.0, "DC_SLACK_BUS": 0,
+    sysd.update({"dc_voltage_level_kv": 220.0, "DC_SLACK_BUS": 0,
                  "TARGET_RE_PENETRATION": 0.5, "EV_initial_soc": []})
     unit = copy.deepcopy(next(iter(sysd["generators"].values())))
     unit["Availability"] = "x.csv"
@@ -115,12 +115,12 @@ def test_flat_dc_keys_the_walker_accepts_are_read(tmp_path):
     raw = _raw()
     sysd = raw["systems"]["island"]
     sysd.pop("dc_power_flow", None)
-    sysd.update({"DC_base_impedance": 55.0, "Dc_Reactance_Per_Km": 0.7,
+    sysd.update({"DC_max_angle_diff_deg": 25.0, "Dc_Reactance_Per_Km": 0.7,
                  "DC_VOLTAGE_LEVEL_KV": 132.0, "dc_slack_bus": 2, "dc_reactance": 9.9})
     assert find_unknown_keys(raw) == ["systems.island.dc_reactance"]
     dc = load_config(_write(tmp_path, raw)).systems["island"].dc_power_flow
-    assert (dc.base_impedance, dc.reactance_per_km, dc.voltage_level_kv, dc.slack_bus) == (
-        55.0, 0.7, 132.0, 2)
+    assert (dc.max_angle_diff_deg, dc.reactance_per_km, dc.voltage_level_kv, dc.slack_bus) == (
+        25.0, 0.7, 132.0, 2)
 
 
 def test_nested_dc_power_flow_wins_over_flat_keys(tmp_path):
@@ -277,6 +277,110 @@ def test_old_studio_project_loads_and_resaves_without_removed_keys(tmp_path):
     assert again.unknown_keys == []
     assert again.systems["island"].penalties == cfg.systems["island"].penalties
     assert again.n1_security == cfg.n1_security
+
+
+# Round 8: settings that loaded but had no effect, as an older project or
+# Studio wrote them (system-level and global).
+_R8_SYSTEM = {
+    "LOSS_DEMAND_TRHESHOLD": 0.05, "flexible_demand_benefit_ratio": 0.5,
+    "DC_BASE_IMPEDANCE": 100.0,
+}
+_R8_PATHS = sorted([
+    "solver.scale_constraints",
+    "meta_network.dynamic_transfer_pricing", "meta_network.inter_system_loss_segments",
+    "risk.hazard_data_sources", "risk.fragility_curves", "risk.risk_criteria",
+    "systems.island.dc_power_flow.base_impedance",
+    "systems.island.rooftop_solar_config.cost_per_kw",
+    "systems.island.rooftop_solar_config.cost_reduction_rate",
+    "systems.island.rooftop_solar_config.o_and_m_cost",
+    "systems.island.electric_demand.residential.price_sensitivity",
+    "systems.island.non_electric_demand.diesel_ne.price_sensitivity",
+    "systems.island.electrolyzers.pem.technology",
+    "systems.island.electrolyzers.pem.min_power",
+    "systems.island.electrolyzers.pem.initial_age",
+    "systems.island.electrolyzers.pem.degradation_rate",
+    "systems.island.primary_energy_sources.Diesel.storage_investment_cost",
+    "systems.island.primary_energy_sources.Diesel.max_storage_investment_per_node",
+    "systems.island.primary_energy_sources.Diesel.max_transport_investment_per_arc",
+] + [f"systems.island.{k}" for k in _R8_SYSTEM])
+
+
+def _r8_old_project() -> dict:
+    raw = _raw()
+    raw["solver"]["scale_constraints"] = True
+    raw["meta_network"].update({"dynamic_transfer_pricing": True,
+                                "inter_system_loss_segments": 2})
+    raw["risk"].update({"hazard_data_sources": [], "fragility_curves": [],
+                        "risk_criteria": {"eal_negligible": 1000.0}})
+    sysd = raw["systems"]["island"]
+    sysd.update(_R8_SYSTEM)
+    sysd["dc_power_flow"]["base_impedance"] = 100.0
+    sysd["rooftop_solar_config"] = {"adoption_scenario": "high", "cost_per_kw": 1200,
+                                    "cost_reduction_rate": 0.08, "o_and_m_cost": 20}
+    sysd["electric_demand"] = {"residential": {"criticality": "high",
+                                               "price_sensitivity": 0.1}}
+    sysd["non_electric_demand"] = {"diesel_ne": {"fuel": "Diesel", "unit": "t",
+                                                 "demand": [5, 0], "price_sensitivity": 0.2}}
+    two = lambda v: [v, v]  # noqa: E731
+    sysd["electrolyzers"] = {"pem": {
+        "name": "PEM", "technology": "PEM", "life_time": two(20), "initial_age": two(0),
+        "degradation_rate": two(0.0), "rated_power": [5.0, 0.0], "min_power": two(0.1),
+        "ramp_up": two(1.0), "ramp_down": two(1.0), "eff_at_rated": two(0.7),
+        "eff_at_min": two(0.6), "fixed_cost": two(0.0), "variable_cost": two(1.0),
+        "invest_cost": two(0.0), "invest_max_power": two(0.0)}}
+    sysd["primary_energy_sources"] = {"Diesel": {
+        "unit": "t", "max_availability": two(100.0), "import_cost": two(5.0),
+        "storage_capacity": two(10.0), "initial_storage_level": two(0.5),
+        "storage_investment_cost": 50.0, "transport_cost": 0.0, "transport_losses": 0.0,
+        "max_storage_investment_per_node": 0.0, "max_transport_investment_per_arc": 0.0}}
+    return raw
+
+
+def test_round8_removed_keys_are_reported(tmp_path, caplog):
+    """Settings removed in round 8 (no effect) load with the generic
+    unknown-key warning, and no dedicated deprecation message."""
+    with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+        cfg = load_config(_write(tmp_path, _r8_old_project()))
+    assert sorted(cfg.unknown_keys) == _R8_PATHS
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "Unknown configuration key solver.scale_constraints" in logged
+    assert "deprecated" not in logged.lower()
+    sysc = cfg.systems["island"]
+    # What does have an effect is still read
+    assert sysc.rooftop_solar_config.adoption_scenario == "high"
+    assert sysc.electric_demand["residential"].criticality == "high"
+    assert sysc.electrolyzers["pem"].rated_power == [5.0, 0.0]
+    assert sysc.primary_energy_sources["Diesel"].import_cost == [5.0, 5.0]
+
+
+def test_round8_old_project_resaves_without_removed_keys(tmp_path):
+    """An older Studio project with those keys opens in the Studio (validation
+    lists them) and is saved without them, keeping the settings that work."""
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.serializer import (
+        config_to_global_settings, config_to_gui_states, gui_state_to_yaml,
+    )
+    from esfex.visualization.data.validation import validate_state
+
+    cfg = load_config(_write(tmp_path, _r8_old_project()))
+    states = config_to_gui_states(cfg, base_dir=FIXTURE.parent)
+    issues = validate_state(states["island"], categories={"configuration"})
+    assert sorted(i.message.split()[2] for i in issues) == _R8_PATHS
+
+    out = tmp_path / "resaved.yaml"
+    gui_state_to_yaml(states, cfg, out, global_settings=config_to_global_settings(cfg))
+    raw = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert find_unknown_keys(raw) == []
+    again = load_config(out)
+    assert again.unknown_keys == []
+    s0, s1 = cfg.systems["island"], again.systems["island"]
+    assert s1.rooftop_solar_config.adoption_scenario == "high"
+    assert s1.electric_demand == s0.electric_demand
+    assert s1.non_electric_demand == s0.non_electric_demand
+    assert s1.electrolyzers["pem"].rated_power == s0.electrolyzers["pem"].rated_power
+    assert again.risk == cfg.risk
+    assert again.solver == cfg.solver
+    assert again.meta_network == cfg.meta_network
 
 
 def test_studio_validation_lists_unknown_keys(tmp_path):

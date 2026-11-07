@@ -77,7 +77,7 @@ log = logging.getLogger(__name__)
 
 # ── Default parameters ──
 _DEFAULT_REACTANCE_PU = 0.01  # Fallback if no per-line reactance
-_DEFAULT_BASE_IMPEDANCE = 100.0  # MVA base
+_DEFAULT_BASE_MVA = 100.0  # MVA base
 
 
 @dataclass
@@ -191,7 +191,7 @@ class ContingencyAnalyzer:
         lines: list[LineInfo],
         generators: list[GeneratorInfo],
         num_nodes: int,
-        base_mva: float = _DEFAULT_BASE_IMPEDANCE,
+        base_mva: float = _DEFAULT_BASE_MVA,
         slack_node: int = 0,
         transformers: list[TransformerInfo] | None = None,
         batteries: list[BatteryInfo] | None = None,
@@ -1695,7 +1695,7 @@ def screen_all_contingencies(
 def build_contingency_from_state(
     state: Any,
     num_nodes: int,
-    base_mva: float = _DEFAULT_BASE_IMPEDANCE,
+    base_mva: float = _DEFAULT_BASE_MVA,
     slack_node: int = 0,
 ) -> ContingencyAnalyzer:
     """Build a ContingencyAnalyzer from GuiSystemState.

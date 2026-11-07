@@ -619,15 +619,11 @@ class GuiElectrolyzerInstance:
     unit_key: str
     name: str
     fuel: str = "Hydrogen"
-    technology: str = "PEM"  # PEM, Alkaline, SOE
     technology_id: Optional[str] = None  # references GuiTechnology.tech_id
     bus: str = "bus_0"     # bus_id this electrolyzer is connected to
     node: int = 0          # DEPRECATED
     life_time: int = 20
-    initial_age: int = 0
-    degradation_rate: float = 0.01
     rated_power: float = 0.0
-    min_power: float = 0.1
     ramp_up: float = 0.5
     ramp_down: float = 0.5
     eff_at_rated: float = 0.65
@@ -683,9 +679,6 @@ class GuiRooftopSolar:
     simulation_seed: int = 42
     performance_ratio: float = 0.75
     degradation_rate: float = 0.005
-    cost_per_kw: float = 1200.0
-    cost_reduction_rate: float = 0.08
-    o_and_m_cost: float = 20.0
     base_year: int = 2025
     target_year: int = 2050
     systems_per_node: list[int] = field(default_factory=list)      # per-node
@@ -707,7 +700,6 @@ class GuiDemandSector:
     flexibility_ratio: float = 0.0
     criticality: str = "medium"  # "critical", "high", "medium", "low"
     delay_tolerance: int = 0
-    price_sensitivity: float = 0.0
 
 
 @dataclass
@@ -721,7 +713,6 @@ class GuiNonElectricDemand:
     flexibility_ratio: float = 0.0
     criticality: str = "medium"  # "critical", "high", "medium", "low"
     delay_tolerance: int = 0
-    price_sensitivity: float = 0.0
     demand: list[int] = field(default_factory=list)  # per-node annual
 
 
@@ -825,7 +816,6 @@ class GuiGlobalSettings:
     solver_time_limit: int = 10800
     solver_gap: float = 0.01
     solver_verbose: bool = False
-    solver_scale_constraints: bool = True
     solver_specific_options: dict[str, Any] = field(default_factory=dict)
     # N1 Security
     n1_enabled: bool = False
@@ -929,8 +919,6 @@ class GuiGlobalSettings:
                 prefs, "solver", "mip_gap", self.solver_gap)
             self.solver_verbose = get_preference(
                 prefs, "solver", "verbose", self.solver_verbose)
-            self.solver_scale_constraints = get_preference(
-                prefs, "solver", "scale_constraints", self.solver_scale_constraints)
         except Exception:
             pass  # Preferences unavailable — keep dataclass defaults
 
@@ -979,7 +967,6 @@ class GuiInterSystemLink:
     voltage_kv: Optional[float] = None
     line_type: Optional[str] = None     # "overhead", "underground", "submarine"
     length_km: Optional[float] = None   # alias of distance_km when shown to user
-    base_impedance: Optional[float] = None
     reactance_per_km: Optional[float] = None
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1

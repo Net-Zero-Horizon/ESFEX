@@ -85,7 +85,7 @@ f_{l,t} = \frac{S_{base}}{x_l} \left( \theta_{i,t} - \theta_{j,t} \right) \quad 
 where \(x_l\) is the line reactance in p.u. and \(S_{base}\) converts the per-unit susceptance to MW per radian. \(S_{base}\) is the system power base `ac_power_flow.base_mva` (default 100 MVA), the base the Grid Builder uses for line per-unit values. Constraint name: `flow_angle_{l}_{t}`.
 
 - **Parallel circuits**: a line with `num_circuits` \(k\) uses reactance `reactance_pu / k` and capacity `capacity_mw × k`.
-- **Missing reactance**: a line without `reactance_pu` gets `length_km × reactance_per_km / Z_base`, with \(Z_{base} = V^2 / S_{base}\) and \(V\) the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. when it has no length. A reactance \(\leq 0\) is replaced by 0.01 p.u. `dc_power_flow.base_impedance` is ignored (a warning is logged when it is set to anything but 100).
+- **Missing reactance**: a line without `reactance_pu` gets `length_km × reactance_per_km / Z_base`, with \(Z_{base} = V^2 / S_{base}\) and \(V\) the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. when it has no length. A reactance \(\leq 0\) is replaced by 0.01 p.u.
 - **Negligible lines**: a branch with capacity below 0.1 MW has its flow fixed to zero (`flow_zero_{l}_{t}`) unless investment can expand it: a candidate corridor of 0 MW in the master problem, such as a development-zone link, or a corridor whose ends both allow transference investment in a development-mode dispatch.
 
 DC-2 replaced an earlier cycle-based KVL formulation; one equation per line handles parallel lines and disconnected networks directly.
@@ -287,7 +287,7 @@ When several systems are coupled by inter-system links (`meta_network.systems_li
 - length `distance_km`
 - `reactance_pu` and `resistance_pu` when given (otherwise the usual defaults for lines)
 
-The link then follows DC-1 to DC-3 and the configured loss model like any other line, inside one angle reference. Investment uses `max_investment_MW` and `investment_cost_per_MW`, which are written into `transference_invest_max` and `transference_invest_cost` at both endpoint nodes (the larger value where a node already has one). `loss_factor` and `meta_network.inter_system_loss_segments` are not used by this path. `cost_per_mw_km` is the link's flow cost: the master problem ([Capacity Expansion](capacity-expansion.md), §8.3.9) and the dispatch charge `distance_km` × `cost_per_mw_km` per MWh it carries, in either direction. In the dispatch it is the line's `flow_cost` \(c^{\text{flow}}_l\), charged as \(\Delta t \sum_t c^{\text{flow}}_l a_{l,t}\) with \(a_{l,t} \geq \pm f_{l,t}\) (`line_flow_abs_l*_t*_pos/neg`, `add_line_flow_costs!`) and reported as `line_flow_cost` in the cost breakdown.
+The link then follows DC-1 to DC-3 and the configured loss model like any other line, inside one angle reference. Investment uses `max_investment_MW` and `investment_cost_per_MW`, which are written into `transference_invest_max` and `transference_invest_cost` at both endpoint nodes (the larger value where a node already has one). `loss_factor` is not used by this path. `cost_per_mw_km` is the link's flow cost: the master problem ([Capacity Expansion](capacity-expansion.md), §8.3.9) and the dispatch charge `distance_km` × `cost_per_mw_km` per MWh it carries, in either direction. In the dispatch it is the line's `flow_cost` \(c^{\text{flow}}_l\), charged as \(\Delta t \sum_t c^{\text{flow}}_l a_{l,t}\) with \(a_{l,t} \geq \pm f_{l,t}\) (`line_flow_abs_l*_t*_pos/neg`, `add_line_flow_costs!`) and reported as `line_flow_cost` in the cost breakdown.
 
 A `link_type: fuel_route` link is not part of the electrical network: its connections become primary-energy fuel transport routes for its `fuel` (see [Inter-System Links](../gui/inter-system-links.md#how-links-enter-the-model) for the field mapping).
 
@@ -308,9 +308,6 @@ meta_network:
       distance_km: [100.0]
       cost_per_mw_km: [0.01]     # Flow cost, $ per MWh and km
 ```
-
-!!! note "Separate multi-system master"
-    `master_problem.jl` also contains `create_multi_system_master_problem()`, which keeps systems separate and couples them through HVDC-like link flows with their own PWL losses. The Python runner does not call it.
 
 ---
 

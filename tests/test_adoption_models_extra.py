@@ -278,7 +278,6 @@ def test_fit_basic_midpoint_slope_branch():
     assert out["max_adoption"]["medium"] == pytest.approx(0.7)
     assert out["max_adoption"]["low"] == pytest.approx(0.7 * 0.6)
     assert out["max_adoption"]["high"] == pytest.approx(min(0.95, 0.7 * 1.3))
-    assert out["cost_per_kw"] == m.pv_system_cost
     # rate from midpoint slope branch
     assert 0.01 <= out["adoption_rates"]["medium"] <= 0.25
 
