@@ -205,6 +205,9 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
     end
     t_power_flow = time() - t0
 
+    # Converter variables exist now (every power-flow path above creates them)
+    charge_converter_costs!(model, vars, input)
+
     # Add sectoral demand constraints (B8: sum sectoral LOL == total LOL, criticality ordering)
     t0 = time()
     add_sectoral_demand_constraints!(model, vars, input)
@@ -1139,10 +1142,9 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         end
     end
 
-    # ==========================================================================
-    # Converter Variable Costs (AC/DC + frequency converters)
-    # ==========================================================================
-    converter_cost = add_converter_objective_terms(vars, input)
+    # Converter variable costs are charged by charge_converter_costs! once
+    # add_converter_constraints! has created the converter variables (after
+    # this function); building them here gave an empty expression.
 
     # ==========================================================================
     # Electrolyzer Costs (A4 fix: was computed but not added to objective)
@@ -1301,7 +1303,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         soc_violation_cost + transfer_margin_cost +
         sectoral_load_shed_cost - flexible_demand_benefit +
         co2_budget_violation_cost + rooftop_curtailment_cost + spillage_cost +
-        converter_cost + electrolyzer_cost +
+        electrolyzer_cost +
         demand_shift_cost +
         reservoir_spillage_cost
     )
@@ -1317,13 +1319,16 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     non_energy_window_fraction = annual_hours > 0 ?
         window_real_hours / annual_hours : 1.0
     non_energy_costs = (
-        startup_cost + investment_cost +
+        investment_cost +
         delay_retirement_cost + npv_penalty_cost +
         reservoir_invest_cost
     )
+    # Start-ups are events inside the window: charged in full, neither per
+    # MWh nor prorated (they were prorated × window/year like the annual costs)
     @objective(model, Min,
         temporal_resolution_hours * energy_costs +
-        non_energy_window_fraction * non_energy_costs
+        non_energy_window_fraction * non_energy_costs +
+        startup_cost
     )
 
     # Store individual cost expressions for granular extraction after solve.
@@ -1348,7 +1353,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         :flexible_demand_benefit => flexible_demand_benefit,
         :investment_cost => investment_cost,
         :electrolyzer_cost => electrolyzer_cost,
-        :converter_cost => converter_cost,
+        :converter_cost => AffExpr(0.0),   # set by charge_converter_costs!
         :spillage_cost => spillage_cost,
         :delay_retirement_cost => delay_retirement_cost,
         :reservoir_spillage_cost => reservoir_spillage_cost,
@@ -2977,6 +2982,22 @@ function _add_line_n1_reserve!(model, vars::PowerSystemVariables, input::PowerSy
             add_to_expression!(n1_cost, input.loss_of_reserve_static, over)
         end
     end
+end
+
+"""
+    charge_converter_costs!(model, vars, input)
+
+Add the converters' variable cost (`add_converter_objective_terms`, an energy
+cost × step length) to the objective and to the `converter_cost` breakdown.
+Called after `add_converter_constraints!`: `build_objective!` runs before the
+converter variables exist.
+"""
+function charge_converter_costs!(model, vars::PowerSystemVariables, input::PowerSystemInput)
+    cost = add_converter_objective_terms(vars, input)
+    (isempty(cost.terms) && cost.constant == 0) && return
+    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    @objective(model, Min, objective_function(model) + tres * cost)
+    model.ext[:cost_expressions][:converter_cost] = cost
 end
 
 """
