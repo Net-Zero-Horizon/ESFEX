@@ -1070,8 +1070,11 @@ class RooftopSolarConfig(BaseModel):
     adoption_scenario: Literal["low", "medium", "high"] = "medium"
     weather_variability: Literal["low", "normal", "high"] = "normal"
     simulation_seed: int = 42
-    systems_per_node: Optional[list[int]] = None
-    avg_system_size: Optional[list[float]] = Field(default=None, description="kW per system")
+    # Per-node lists; a None entry takes rooftex's default at that node (a
+    # merged multi-system run sets it at the nodes of a system that leaves
+    # the list unset).
+    systems_per_node: Optional[list[Optional[int]]] = None
+    avg_system_size: Optional[list[Optional[float]]] = Field(default=None, description="kW per system")
     performance_ratio: float = Field(default=0.75, ge=0, le=1)
     degradation_rate: float = Field(default=0.005, ge=0)
     cost_per_kw: float = 1200
@@ -1079,7 +1082,7 @@ class RooftopSolarConfig(BaseModel):
     o_and_m_cost: float = 20
     base_year: int = 2025
     target_year: int = 2050
-    initial_adoption: Optional[list[float]] = None
+    initial_adoption: Optional[list[Optional[float]]] = None
     max_adoption: Optional[dict[str, float]] = None
     adoption_rates: Optional[dict[str, float]] = None
 
@@ -2153,7 +2156,8 @@ class SystemConfig(BaseModel):
 
     # Rooftop solar
     rooftop_solar_config: Optional[RooftopSolarConfig] = None
-    rooftop_max_potential: list[float] = []
+    # Per node (MW); None = rooftex's potential at that node
+    rooftop_max_potential: list[Optional[float]] = []
     rooftop_solar_emission_reduction: float = 0.7
 
     # Stochastic scenarios

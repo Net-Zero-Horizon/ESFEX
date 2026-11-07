@@ -527,6 +527,10 @@ def battery_technology_unit_fields(bat_tech, rep) -> dict:
     }
 
 
+# rooftex's initial adoption fraction of a node without one
+_ROOFTEX_DEFAULT_INITIAL_ADOPTION = 0.05
+
+
 def _per_node_list(arr, n: int, default=0.0) -> list:
     """A per-node list of length *n*: a single value is broadcast, a short
     list is padded with its last value."""
@@ -989,19 +993,28 @@ class Orchestrator:
                 if isinstance(v, (int, float)) and v > merged_penalties_d.get(k, 0):
                     merged_penalties_d[k] = v
 
-        # Merge EV / rooftop arrays (concat per-node)
+        # Merge EV / rooftop arrays (concat per-node). A rooftop potential
+        # a system leaves unset is None (rooftex's potential at that node);
+        # a system without rooftop solar gets 0 at its nodes.
         merged_ev_soc: list[float] = []
-        merged_rooftop_potential: list[float] = []
+        merged_rooftop_potential: list[Optional[float]] = []
         for si, (sys, nc) in enumerate(zip(systems, node_counts)):
             soc = sys.ev_initial_soc or []
             # Nodes without a value start at the dispatch default (80 %)
             merged_ev_soc.extend(soc[:nc] if len(soc) >= nc else soc + [0.8] * (nc - len(soc)))
-            rp = sys.rooftop_max_potential or []
-            merged_rooftop_potential.extend(rp[:nc] if len(rp) >= nc else rp + [0.0] * (nc - len(rp)))
+            if not (sys.sim_rooftop and sys.rooftop_solar_config is not None):
+                merged_rooftop_potential.extend([0.0] * nc)
+                continue
+            rp = list(sys.rooftop_max_potential or [])[:nc]
+            merged_rooftop_potential.extend(rp + [None] * (nc - len(rp)))
+        if all(v is None for v in merged_rooftop_potential):
+            merged_rooftop_potential = []
 
         # Merge rooftop_solar_config: take the first non-empty config as the
-        # template and concat per-node arrays across systems (zeros padding;
-        # a list no system sets stays unset).
+        # template and concat per-node arrays across systems. A system that
+        # leaves a list unset gets None at its nodes, which the rooftop
+        # generator resolves to rooftex's defaults; a list no system sets
+        # stays unset.
         merged_rooftop_solar_config = None
         rooftop_template = next((s.rooftop_solar_config for s in systems
                                  if s.rooftop_solar_config is not None), None)
@@ -1015,12 +1028,10 @@ class Orchestrator:
                 merged_list: list = []
                 for sys, nc in zip(systems, node_counts):
                     src_cfg = sys.rooftop_solar_config
-                    src_list = list(getattr(src_cfg, list_field, []) or []) if src_cfg else []
-                    if len(src_list) >= nc:
-                        merged_list.extend(src_list[:nc])
-                    else:
-                        zero = 0 if list_field == 'systems_per_node' else 0.0
-                        merged_list.extend(src_list + [zero] * (nc - len(src_list)))
+                    src_list = list(getattr(src_cfg, list_field, []) or [])[:nc] if src_cfg else []
+                    # A short list repeats its last value, as rooftex does
+                    pad = src_list[-1] if src_list else None
+                    merged_list.extend(src_list + [pad] * (nc - len(src_list)))
                 rsc_d[list_field] = merged_list
             # max_adoption / adoption_rates are keyed by adoption scenario
             # ("low", "medium", "high"), not by node: the merged run has one
@@ -3231,6 +3242,16 @@ class Orchestrator:
         sys = self.primary_system
         cfg = sys.rooftop_solar_config
 
+        # A None entry (a merged run's node of a system that leaves the list
+        # unset) takes rooftex's default there: initial adoption 0.05, and
+        # the potential rooftex draws when the systems/size lists are unset.
+        systems_pn = list(cfg.systems_per_node or [])
+        sizes = list(cfg.avg_system_size or [])
+        partial_size = None in systems_pn or None in sizes
+        init = cfg.initial_adoption or None
+        if init is not None:
+            init = [_ROOFTEX_DEFAULT_INITIAL_ADOPTION if v is None else v for v in init]
+
         # Generate base availability profile and adoption factors
         _rooftop_cfg = RooftopConfig(
             num_nodes=num_nodes,
@@ -3243,9 +3264,9 @@ class Orchestrator:
             performance_ratio=cfg.performance_ratio,
             # Unset (or empty, as the Studio writes them) → rooftex defaults:
             # potential drawn per node, default scenario rates and caps.
-            initial_adoption=cfg.initial_adoption or None,
-            systems_per_node=cfg.systems_per_node or None,
-            avg_system_size_kw=cfg.avg_system_size or None,
+            initial_adoption=init,
+            systems_per_node=None if partial_size else (systems_pn or None),
+            avg_system_size_kw=None if partial_size else (sizes or None),
             adoption_rates=cfg.adoption_rates or None,
             max_adoption=cfg.max_adoption or None,
         )
@@ -3257,10 +3278,18 @@ class Orchestrator:
             if hasattr(_rooftop_result.max_potential_mw, '__iter__')
             else [_rooftop_result.max_potential_mw] * num_nodes
         )
+        if partial_size:
+            # Nodes with both values keep systems × size; the rest keep the
+            # potential rooftex drew.
+            for n in range(min(num_nodes, len(systems_pn), len(sizes))):
+                if systems_pn[n] is not None and sizes[n] is not None:
+                    rooftop_potential[n] = systems_pn[n] * sizes[n] / 1000.0
 
-        # Use configured max potential if available
+        # Configured max potential where set (None: rooftex's)
         if sys.rooftop_max_potential:
-            rooftop_potential = list(sys.rooftop_max_potential)
+            for n, v in enumerate(sys.rooftop_max_potential[:num_nodes]):
+                if v is not None:
+                    rooftop_potential[n] = float(v)
 
         target_year = cfg.target_year
         base_year = cfg.base_year if hasattr(cfg, 'base_year') else start_year
