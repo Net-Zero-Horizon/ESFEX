@@ -16,7 +16,7 @@
 using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
-             coefficient, objective_function, all_variables, name
+             coefficient, objective_function, all_variables, name, fix
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -2986,6 +2986,20 @@ import Ipopt
             @test mono.transfer_investment[1][(1, 2)] ≈ 40.0 atol = 1e-6
             @test bend.transfer_investment[1][(1, 2)] ≈ 40.0 atol = 1e-4
 
+            # Converter fixed cost: at 10 per MW-year the 10 MW build no longer
+            # pays off (the Benders master did not charge it and built 10 MW)
+            c1_fixed = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, 30.0, 0.0,
+                1.0, 1.0, 0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0e-3, 10.0, 2.0e-6, 50.0,
+                30, 0, 0.0)
+            mono, bend = both(MasterProblemInput(
+                years = [2025], network = net2(conv = [c1_fixed]), generators = [gas_ab],
+                batteries = BatteryConfig[], base_demand = hcat(zeros(H24), fill(50.0, H24)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, verbose = false))
+            @test mono.converter_investment[1][("acdc", 1)] ≈ 0.0 atol = 1e-6
+            @test bend.converter_investment[1][("acdc", 1)] ≈ 0.0 atol = 1e-6
+
             # CO2 budget over two representative days (50 and 80 MW of load;
             # coal emits 1 t/MWh_e and has 60 MW): 2000 t for 2640 t of coal.
             # Dear overrun → gas; cheap overrun → violation.
@@ -3004,6 +3018,48 @@ import Ipopt
                     co2_budget_groups = [CO2BudgetGroup("A", [1], 2000.0, pen)],
                     verbose = false))
             end
+
+            # A binding CO2 budget over 6 and 12 days of different load: with
+            # one cut per year (not per day) Benders stopped at the iteration
+            # cap 0.16 % / 0.39 % above the optimum
+            for nd in (6, 12)
+                Hd = 24 * nd
+                dem = reshape(vcat([fill(40.0 + 5.0 * d, 24) for d in 1:nd]...), Hd, 1)
+                coal_d = mkgen("Coal", "Non-renewable", "Coal", [60.0], [1.0e-5],
+                               ones(Hd, 1); nb = 1, H = Hd)
+                gas_d = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                              ones(Hd, 1); nb = 1, H = Hd)
+                both(MasterProblemInput(
+                    years = [2025, 2026], network = net1, generators = [coal_d, gas_d],
+                    batteries = BatteryConfig[], base_demand = vcat(dem, dem),
+                    hours_per_year = [Hd, Hd], target_re_penetration = 0.0,
+                    initial_re_penetration = 0.0, discount_rate = 0.05,
+                    representative_days_per_year = nd, min_day_separation = 1,
+                    fuel_co2 = Dict("Coal" => 0.5),
+                    co2_budget_groups = [CO2BudgetGroup("A", [1], 0.6 * sum(min.(dem, 60.0)),
+                                                        5.0e-4)],
+                    verbose = false))
+            end
+
+            # Warm-start cuts at the degraded capacity of an existing unit:
+            # at the rated 100 MW of a wind farm that has lost 18 % the cut
+            # bounded the cost from above (LB 731.78 > UB 730.18, no convergence)
+            wind_old = ESFEX.with_fields(
+                mkgen("Wind", "Renewable", "Wind", [100.0], [0.0],
+                      reshape(vcat(ones(12), zeros(12)), H24, 1); nb = 1, H = H24);
+                degradation_rate = [0.02], initial_age = [10.0])
+            coal24 = mkgen("Coal", "Non-renewable", "Coal", [100.0], [1.0e-5],
+                           ones(H24, 1); nb = 1, H = H24)
+            gas24 = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                          ones(H24, 1); nb = 1, H = H24)
+            both(MasterProblemInput(
+                years = [2025], network = net1, generators = [wind_old, coal24, gas24],
+                batteries = BatteryConfig[], base_demand = fill(50.0, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                max_curtailment_ratio = 1.0, fuel_co2 = Dict("Coal" => 0.5),
+                co2_budget_groups = [CO2BudgetGroup("A", [1], 100000.0, 5.0e-4)],
+                verbose = false))
 
             # LP start-ups with unit commitment in the dispatch
             uc_gen = ESFEX.with_fields(
@@ -3075,6 +3131,75 @@ import Ipopt
                     curtailment_cost = curt, max_curtailment_ratio = 0.99, verbose = false))
                 @test mono.tech_investment[1][1][1] ≈ built rtol = 1e-6
                 @test bend.tech_investment[1][1][1] ≈ built rtol = 1e-4
+            end
+
+            # No Benders-only investment rules: with a 20 % RE target already
+            # met and dear PV and batteries, nothing is built (the Benders
+            # master forced 0.07 MW of PV and 0.35 MWh of battery)
+            pv_dear = ESFEX.with_fields(pv; invest_cost = [1.0])
+            li_dear = BatteryTechnologyConfig("LiNew", [1.0], [1.0], [100.0], [400.0], 1.0, 8.0,
+                [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false, "AC", o, [1.0])
+            for bts in (BatteryTechnologyConfig[], [li_dear])
+                mono, bend = both(MasterProblemInput(
+                    years = [2025], network = net1, generators = [gas1],
+                    batteries = BatteryConfig[], technologies = [pv_dear],
+                    battery_technologies = bts, base_demand = fill(50.0, H24, 1),
+                    target_re_penetration = 0.2, initial_re_penetration = 0.2,
+                    representative_days_per_year = 1, min_day_separation = 1, verbose = false))
+                @test bend.tech_investment[1][1][1] ≈ 0.0 atol = 1e-6
+                isempty(bts) || @test bend.bat_tech_capacity_investment[1][1][1] ≈ 0.0 atol = 1e-6
+            end
+
+            # Hard curtailment limit, as in the monolithic master: cheap PV
+            # stops at 700/13 MW, where 5 % of its output is curtailed (the
+            # soft Benders limit let it build 66.7 MW). The subproblems of
+            # larger builds cannot meet the limit and add feasibility cuts.
+            li_cheap = BatteryTechnologyConfig("LiNew", [0.05], [0.02], [100.0], [800.0],
+                1.0, 8.0, [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false,
+                "AC", o, [1.0])
+            pv_cheap = ESFEX.with_fields(pv; invest_cost = [0.001], invest_max = [1000.0])
+            gas_dear = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-3],
+                             ones(H24, 1); nb = 1, H = H24)
+            for (ratio, bts, target) in ((0.05, BatteryTechnologyConfig[], 0.0),
+                                         (0.2, [li_cheap], 0.3))
+                mono, bend = both(MasterProblemInput(
+                    years = [2025], network = net1, generators = [gas_dear],
+                    batteries = BatteryConfig[], technologies = [pv_cheap],
+                    battery_technologies = bts, base_demand = fill(50.0, H24, 1),
+                    target_re_penetration = target, initial_re_penetration = target,
+                    max_curtailment_ratio = ratio, curtailment_cost = 1.0e-5,
+                    representative_days_per_year = 1, min_day_separation = 1, verbose = false))
+                @test bend.tech_investment[1][1][1] ≈ mono.tech_investment[1][1][1] rtol = 1e-6
+                isempty(bts) && @test mono.tech_investment[1][1][1] ≈ 700 / 13 rtol = 1e-6
+            end
+
+            # Stopped at the iteration cap, Benders returns the plan of its
+            # best iteration with that iteration's cost: the plan costs
+            # exactly the reported objective (it returned the next master
+            # solution with the best iteration's cost)
+            li_ok = BatteryTechnologyConfig("LiNew", [0.01], [0.01], [100.0], [800.0], 1.0, 8.0,
+                [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false, "AC", o, [1.0])
+            pv_ok = ESFEX.with_fields(pv; invest_cost = [0.02], invest_max = [200.0])
+            inp = MasterProblemInput(
+                years = [2025], network = net1, generators = [gas1], batteries = BatteryConfig[],
+                technologies = [pv_ok], battery_technologies = [li_ok],
+                base_demand = fill(50.0, H24, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, max_curtailment_ratio = 0.99,
+                representative_days_per_year = 1, min_day_separation = 1, verbose = false)
+            for iters in (2, 3)
+                br = run_benders_decomposition(inp; max_iterations = iters, tolerance = 1e-9,
+                                               verbose_benders = false)
+                @test br.iterations == iters && br.gap > 1e-9
+                model, mvars, _ = create_master_problem(inp; use_representative_days = true)
+                fix(mvars.tech_investment[1][1][1], br.solution.tech_investment[1][1][1];
+                    force = true)
+                fix(mvars.bat_tech_power_investment[1][1][1],
+                    br.solution.bat_tech_power_investment[1][1][1]; force = true)
+                fix(mvars.bat_tech_capacity_investment[1][1][1],
+                    br.solution.bat_tech_capacity_investment[1][1][1]; force = true)
+                optimize!(model)
+                @test objective_value(model) ≈ br.objective rtol = 1e-6
+                @test br.solution.objective ≈ br.objective rtol = 1e-9
             end
         end
 

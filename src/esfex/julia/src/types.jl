@@ -2346,7 +2346,6 @@ struct MasterProblemInput
     fre_penetration_loss_penalty::Float64  # $/MWh RE shortfall (config: FRE_penetration_loss)
     max_curtailment_ratio::Float64      # Max curtailment as fraction of RE generation (0.05 = 5%)
     curtailment_cost::Float64           # $/MWh penalty for curtailed RE energy
-    curtailment_excess_penalty::Float64 # $/MWh penalty for curtailment exceeding ratio limit
     re_excess_penalty::Float64          # $/MWh penalty for RE generation exceeding target
 
     # Operational
@@ -2419,9 +2418,6 @@ struct MasterProblemInput
     tech_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}}
     bat_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}}
 
-    # Loss-of-load penalty cap ($/MW per timestep) applied inside Benders
-    # subproblems for numerical stability. Ignored by the monolithic solver.
-    benders_lol_penalty_cap::Float64
     # RE targets (system, year) that replace the RE-1 trajectory: a myopic
     # run solves one year at a time, so its year's target comes from the
     # whole horizon's trajectory. Empty = RE-1.
@@ -2464,7 +2460,6 @@ function MasterProblemInput(;
     fre_penetration_loss_penalty::Float64 = 1e-4,
     max_curtailment_ratio::Float64 = 0.05,
     curtailment_cost::Float64 = 2e-5,
-    curtailment_excess_penalty::Float64 = 5e-4,
     re_excess_penalty::Float64 = 1e-4,
     temporal_resolution_hours::Int = 1,
     representative_days_per_year::Int = 2,
@@ -2510,7 +2505,6 @@ function MasterProblemInput(;
     gen_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     tech_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     bat_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
-    benders_lol_penalty_cap::Float64 = 1000.0,
     re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
     co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[],
     unit_commitment::Bool = false,
@@ -2526,7 +2520,7 @@ function MasterProblemInput(;
         min_re_increment, max_re_increment,
         system_node_ranges,
         slack_penalty, loss_of_load_penalty, fre_penetration_loss_penalty,
-        max_curtailment_ratio, curtailment_cost, curtailment_excess_penalty, re_excess_penalty,
+        max_curtailment_ratio, curtailment_cost, re_excess_penalty,
         temporal_resolution_hours, representative_days_per_year, min_day_separation,
         investment_resolution_hours,
         use_tsam, tsam_period_start_hours, tsam_period_weights,
@@ -2546,7 +2540,6 @@ function MasterProblemInput(;
         transmission_resistances, transmission_loss_segments,
         solver_name, threads, time_limit, gap, verbose, solver_options,
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
-        benders_lol_penalty_cap,
         re_target_override,
         co2_budget_groups, unit_commitment,
         primary_energy
