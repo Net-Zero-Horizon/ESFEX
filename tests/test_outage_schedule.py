@@ -181,12 +181,11 @@ class TestBuildOutageMaskMatrix:
 # ---------------------------------------------------------------------------
 # Interruptions dialog (element collection + apply-to-model logic)
 # ---------------------------------------------------------------------------
+@pytest.mark.usefixtures("qapp")
 class TestInterruptionsDialog:
     def _dialog(self):
         import json
         pytest.importorskip("PySide6.QtWebEngineWidgets")
-        from PySide6.QtWidgets import QApplication
-        QApplication.instance() or QApplication([])
         from esfex.visualization.i18n import init_i18n
         init_i18n()
         from esfex.visualization.data.gui_model import (

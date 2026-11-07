@@ -50,6 +50,13 @@ from esfex.config.schema import (
     TransmissionLineGeo,
     canonical_unit_type,
 )
+from esfex.config.legacy_keys import (
+    SINGLE_ELECTROLYZER_KEY,
+    flat_dc_field,
+    is_flat_dc_key,
+    is_legacy_unit_key,
+    penalty_field,
+)
 from esfex.config.unknown_keys import find_unknown_keys, find_unknown_system_keys
 
 
@@ -111,26 +118,19 @@ def _convert_dc_power_flow(system_data: dict[str, Any]) -> DCPowerFlowConfig:
     """Extract DC power flow config from system data.
 
     Reads from nested ``dc_power_flow:`` dict first, then falls back to flat
-    ``dc_*`` keys for backward compatibility.
+    ``dc_*`` keys (any capitalisation) for backward compatibility.
     """
     nested = system_data.get("dc_power_flow", {})
     if not isinstance(nested, dict):
         nested = {}
-    return DCPowerFlowConfig(
-        base_impedance=nested.get("base_impedance",
-            system_data.get("dc_base_impedance", system_data.get("DC_BASE_IMPEDANCE", 100.0))),
-        reactance_per_km=nested.get("reactance_per_km",
-            system_data.get("dc_reactance_per_km", system_data.get("DC_REACTANCE_PER_KM", 0.4))),
-        voltage_level_kv=nested.get("voltage_level_kv",
-            system_data.get("dc_voltage_level_kv", system_data.get("DC_VOLTAGE_LEVEL_KV", 220.0))),
-        max_angle_diff_deg=nested.get("max_angle_diff_deg",
-            system_data.get("dc_max_angle_diff_deg", system_data.get("DC_MAX_ANGLE_DIFF_DEG", 30.0))),
-        slack_bus=nested.get("slack_bus",
-            system_data.get("dc_slack_bus", system_data.get("DC_SLACK_BUS", 0))),
-        loss_model=nested.get("loss_model", "pwl"),
-        pwl_loss_segments=nested.get("pwl_loss_segments", 3),
-        pwl_loss_segments_master=nested.get("pwl_loss_segments_master", 2),
-    )
+    kwargs: dict[str, Any] = {}
+    for key, value in system_data.items():
+        field = flat_dc_field(key)
+        # ``dc_<field>`` wins over other spellings of the same key.
+        if field is not None and (field not in kwargs or key == f"dc_{field}"):
+            kwargs[field] = value
+    kwargs.update({k: v for k, v in nested.items() if k in DCPowerFlowConfig.model_fields})
+    return DCPowerFlowConfig(**kwargs)
 
 
 def _convert_fuels(fuels_data: dict[str, dict]) -> dict[str, FuelConfig]:
@@ -310,7 +310,7 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
     # Look for unit_* and bat_* keys (legacy format)
     _valid_gen_types = {"Renewable", "Non-renewable", "Electrolyzer"}
     for key, value in list(system_data.items()):
-        if (key.startswith("unit_") or key.startswith("bat_")) and isinstance(value, dict):
+        if is_legacy_unit_key(key, value):
             unit_type = canonical_unit_type(value.get("type", "Unknown"))
             value["type"] = unit_type
             if unit_type == "Storage":
@@ -367,32 +367,14 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
 
     # Convert penalties
     if "penalties" in system_data and isinstance(system_data["penalties"], dict):
-        # Build case-insensitive lookup: normalize all keys to lowercase
-        pen_raw = system_data["penalties"]
-        pen_data = {k.lower(): v for k, v in pen_raw.items()}
-        system_data["penalties"] = PenaltiesConfig(
-            loss_of_load=pen_data.get("loss_of_load", 10e6),
-            loss_of_reserve_static=pen_data.get("loss_of_reserve_static", 100),
-            loss_of_reserve_dynamic=pen_data.get("loss_of_reserve_dynamic", 100),
-            loss_of_inertia=pen_data.get("loss_of_inertia", 200),
-            transfer_margin=pen_data.get("transfermargin", pen_data.get("transfer_margin", 100)),
-            curtailment=pen_data.get("curtailment", 100),
-            curtailment_cost=pen_data.get("curtailment_cost", 20.0),
-            curtailment_excess_penalty=pen_data.get("curtailment_excess_penalty", 500.0),
-            re_excess_penalty=pen_data.get("re_excess_penalty", 100.0),
-            max_curtailment_ratio=pen_data.get("max_curtailment_ratio", 0.05),
-            rooftop_curtailment=pen_data.get("rooftop_curtailment", 5),
-            co2_cost=pen_data.get("co2_cost", 10),
-            co2_budget_violation=pen_data.get("co2_budget_violation", 500),
-            fre_penetration_loss=pen_data.get("fre_penetration_loss", 100),
-            ev_loss=pen_data.get("ev_loss"),
-            loss_of_fuel_supply=pen_data.get("loss_of_fuel_supply", 100),
-            transport_congestion=pen_data.get("transport_congestion", 100),
-            storage_violation=pen_data.get("storage_violation", 100),
-            non_electric_demand_loss=pen_data.get("non_electric_demand_loss", 100),
-            **{k: pen_data[k] for k in ("soc_violation", "delay_retirement_per_mw",
-                                        "coupling_slack_penalty") if k in pen_data},
-        )
+        # Keys are case-insensitive; the field name wins over a legacy alias.
+        pen_data: dict[str, Any] = {}
+        for key, value in system_data["penalties"].items():
+            field = penalty_field(key)
+            if field in PenaltiesConfig.model_fields and (
+                    field not in pen_data or str(key).lower() == field):
+                pen_data[field] = value
+        system_data["penalties"] = PenaltiesConfig(**pen_data)
 
     # Convert CO2 budget
     if "co2_budget" in system_data and isinstance(system_data["co2_budget"], dict):
@@ -449,16 +431,15 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
 
     # Remove DC_ prefixed keys (already converted into dc_power_flow)
     # Keep dc_power_flow itself (now a DCPowerFlowConfig object)
-    keys_to_remove = [k for k in system_data.keys()
-                       if (k.startswith("DC_") or k.startswith("dc_")) and k != "dc_power_flow"]
+    keys_to_remove = [k for k in system_data.keys() if is_flat_dc_key(k)]
     for k in keys_to_remove:
         del system_data[k]
 
     # Convert electrolyzer(s) to dict format
     electrolyzers = {}
     # Handle singular "electrolyzer" key (legacy / GUI-generated)
-    if "electrolyzer" in system_data:
-        el_data = system_data.pop("electrolyzer")
+    if SINGLE_ELECTROLYZER_KEY in system_data:
+        el_data = system_data.pop(SINGLE_ELECTROLYZER_KEY)
         if isinstance(el_data, dict):
             electrolyzers["electrolyzer"] = ElectrolyzerConfig(**el_data)
     # Handle plural "electrolyzers" dict

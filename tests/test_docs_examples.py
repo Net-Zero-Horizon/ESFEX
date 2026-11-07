@@ -30,6 +30,7 @@ import yaml
 from pydantic import BaseModel
 
 from esfex.config import loader, schema
+from esfex.config.legacy_keys import PENALTY_ALIASES
 
 ROOT = Path(__file__).resolve().parent.parent
 SKIP_MARK = "docs-test: skip"
@@ -83,8 +84,10 @@ BATTERY_KEYS = (_keys_read(loader._convert_battery, {"data"})
 FUEL_KEYS = _keys_read(loader._convert_fuels, {"data"})
 PE_SOURCE_KEYS = (_keys_read(loader._convert_primary_energy_source, {"data"})
                   | _field_names(schema.PrimaryEnergySourceConfig))
-DC_FLOW_KEYS = _keys_read(loader._convert_dc_power_flow, {"nested"})
-PENALTY_KEYS = _keys_read(loader._convert_system, {"pen_data"})  # compared lower-case
+# The nested dc_power_flow mapping and the penalties take every schema field
+# (penalty keys in any case, plus the legacy aliases).
+DC_FLOW_KEYS = set(schema.DCPowerFlowConfig.model_fields)
+PENALTY_KEYS = set(schema.PenaltiesConfig.model_fields) | set(PENALTY_ALIASES)  # compared lower-case
 
 
 def _model_of(annotation) -> tuple[str, type[BaseModel]] | None:

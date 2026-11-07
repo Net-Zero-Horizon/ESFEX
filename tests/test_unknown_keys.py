@@ -107,6 +107,46 @@ def test_unit_type_routes_legacy_units():
     assert find_unknown_system_keys({"bat_1": bat}, "s") == ["s.bat_1.dorop"]
 
 
+# ── Walker and loader share the legacy translations ─────────────────────
+
+
+def test_flat_dc_keys_the_walker_accepts_are_read(tmp_path):
+    """Every flat ``dc_*`` spelling the walker treats as consumed must reach
+    ``dc_power_flow``; one it reports must not."""
+    raw = _raw()
+    sysd = raw["systems"]["island"]
+    sysd.pop("dc_power_flow", None)
+    sysd.update({"DC_base_impedance": 55.0, "Dc_Reactance_Per_Km": 0.7,
+                 "DC_VOLTAGE_LEVEL_KV": 132.0, "dc_slack_bus": 2, "dc_reactance": 9.9})
+    assert find_unknown_keys(raw) == ["systems.island.dc_reactance"]
+    dc = load_config(_write(tmp_path, raw)).systems["island"].dc_power_flow
+    assert (dc.base_impedance, dc.reactance_per_km, dc.voltage_level_kv, dc.slack_bus) == (
+        55.0, 0.7, 132.0, 2)
+
+
+def test_nested_dc_power_flow_wins_over_flat_keys(tmp_path):
+    raw = _raw()
+    sysd = raw["systems"]["island"]
+    sysd["dc_power_flow"] = {"slack_bus": 1}
+    sysd["DC_SLACK_BUS"] = 3
+    assert load_config(_write(tmp_path, raw)).systems["island"].dc_power_flow.slack_bus == 1
+
+
+def test_every_penalty_field_is_read_in_any_case(tmp_path):
+    """The walker accepts every ``PenaltiesConfig`` field (any case); the
+    loader must read each of them, not only a hand-kept list."""
+    from esfex.config.schema import PenaltiesConfig
+
+    raw = _raw()
+    pens = {name.upper(): 0.01 * (i + 1) for i, name in enumerate(PenaltiesConfig.model_fields)}
+    pens["TransferMargin"] = pens.pop("TRANSFER_MARGIN")
+    raw["systems"]["island"]["penalties"] = pens
+    assert find_unknown_keys(raw) == []
+    loaded = load_config(_write(tmp_path, raw)).systems["island"].penalties
+    for i, name in enumerate(PenaltiesConfig.model_fields):
+        assert getattr(loaded, name) == pytest.approx(0.01 * (i + 1)), name
+
+
 # ── load_config ─────────────────────────────────────────────────────────
 
 

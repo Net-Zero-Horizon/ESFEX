@@ -5,8 +5,9 @@ The Pydantic models ignore keys they do not declare, so a misspelt or
 obsolete key (``systems.Cuba.generators.gas_1.dorop``) would be dropped
 without a trace. :func:`find_unknown_keys` walks a raw YAML dict alongside
 the schema and returns the full path of every key that neither the schema
-nor the loader's legacy translations consume. The loader logs them; the
-Studio's validation lists them.
+nor the loader's legacy translations (:mod:`esfex.config.legacy_keys`, shared
+with the loader) consume. The loader logs them; the Studio's validation lists
+them.
 """
 
 from __future__ import annotations
@@ -17,6 +18,13 @@ from typing import Any, Union
 
 from pydantic import BaseModel
 
+from esfex.config.legacy_keys import (
+    SINGLE_ELECTROLYZER_KEY,
+    flat_dc_field,
+    is_flat_dc_key,
+    is_legacy_unit_key,
+    penalty_field,
+)
 from esfex.config.schema import (
     BatteryConfig,
     ElectrolyzerConfig,
@@ -27,17 +35,6 @@ from esfex.config.schema import (
     SystemConfig,
     canonical_unit_type,
 )
-
-# Flat system-level DC power-flow keys the loader folds into ``dc_power_flow``
-# (any capitalisation, ``dc_`` or ``DC_`` prefix).
-_LEGACY_DC_KEYS = frozenset({
-    "base_impedance", "reactance_per_km", "voltage_level_kv",
-    "max_angle_diff_deg", "slack_bus",
-})
-
-# Penalty keys are read case-insensitively; ``TransferMargin`` is the legacy
-# spelling of ``transfer_margin``.
-_PENALTY_ALIASES = {"transfermargin": "transfer_margin"}
 
 # Top-level keys only the Studio reads, from the raw YAML (they are not part
 # of the schema and the solver ignores them).
@@ -87,7 +84,7 @@ def _walk_model(data: Any, model: type[BaseModel], prefix: str, out: list[str]) 
             continue
         name = str(key)
         if model is PenaltiesConfig:
-            name = _PENALTY_ALIASES.get(name.lower(), name.lower())
+            name = penalty_field(name)
         field = _field_for(model, name)
         if field is None:
             out.append(path)
@@ -135,16 +132,16 @@ def _walk_system(data: dict[str, Any], prefix: str, out: list[str]) -> None:
     for key, value in data.items():
         path = _join(prefix, key)
         name = str(key)
-        if (name.startswith("unit_") or name.startswith("bat_")) and isinstance(value, dict):
+        if is_legacy_unit_key(name, value):
             unit_type = canonical_unit_type(value.get("type", "Unknown"))
             model = BatteryConfig if unit_type == "Storage" else GeneratorConfig
             _walk_model(value, model, path, out)
             continue
-        if name == "electrolyzer":
+        if name == SINGLE_ELECTROLYZER_KEY:
             _walk_model(value, ElectrolyzerConfig, path, out)
             continue
-        if name[:3].lower() == "dc_" and name != "dc_power_flow":
-            if name[3:].lower() not in _LEGACY_DC_KEYS:
+        if is_flat_dc_key(name):
+            if flat_dc_field(name) is None:
                 out.append(path)
             continue
         field = _field_for(SystemConfig, name)

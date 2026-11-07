@@ -509,6 +509,12 @@ class TestBatteryConfig:
         b = BatteryConfig(**data)
         assert b.availability_file == "bat_avail.csv"
 
+    def test_availability_field_name(self):
+        data = _bat_1()
+        data["availability_file"] = "bat_avail.csv"
+        b = BatteryConfig(**data)
+        assert b.availability_file == "bat_avail.csv"
+
 
 # ========================================================================
 # ElectrolyzerConfig
