@@ -562,19 +562,14 @@ class GuiPenalties:
     loss_of_reserve_dynamic: float = 100.0
     loss_of_inertia: float = 200.0
     transfer_margin: float = 100.0
-    curtailment: float = 100.0
     max_curtailment_ratio: float = 0.05
     curtailment_cost: float = 20.0
-    curtailment_excess_penalty: float = 500.0
-    re_excess_penalty: float = 100.0
     rooftop_curtailment: float = 5.0
     co2_cost: float = 10.0
     co2_budget_violation: float = 500.0
     fre_penetration_loss: float = 100.0
     ev_loss: float = 50_000.0  # $/MWh — same as loss_of_load
     loss_of_fuel_supply: float = 100.0
-    transport_congestion: float = 100.0
-    storage_violation: float = 100.0
     non_electric_demand_loss: float = 100.0
     # Load criticality penalties (multipliers on VOLL per sector).
     # Real LP code multiplies these by `loss_of_load_penalty` (VOLL,
@@ -844,8 +839,6 @@ class GuiGlobalSettings:
     n1_generation_reserve_type: str = "largest_unit"
     n1_generation_reserve_percentage: float = 0.15
     n1_scopf_enabled: bool = False
-    n1_scopf_max_iterations: int = 5
-    n1_scopf_violation_tolerance: float = 0.01
     n1_corrective_enabled: bool = False
     n1_compute_security_cost: bool = False
     n1_contingency_depth: str = "n1"

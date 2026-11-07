@@ -97,8 +97,6 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. |
 | `generation_reserve_percentage` | float (0–1) | `0.15` | Reserve fraction when `generation_reserve_type: percentage` |
 | `scopf_enabled` | bool | `false` | Use SCOPF instead of preventive N-1 reserves: post-contingency (LODF) flow limits for every pair of lines, in one solve, with priced overloads. |
-| `scopf_max_iterations` | int (1–20) | `5` | Not used (SCOPF is not iterative); another value logs a warning |
-| `scopf_violation_tolerance` | float (≥ 0) | `0.01` | Not used; another value logs a warning |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
 | `compute_security_cost` | bool | `false` | Re-solve each operational window without the N-1 constraints and report objective(with N-1) − objective(without) as `n1_security_cost`. Roughly doubles the solve time. Off: `n1_security_cost` stays 0. |
 | `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
@@ -904,7 +902,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 
 ## PenaltiesConfig
 
-Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Five keys load but price nothing in the current model: `curtailment`, `curtailment_excess_penalty`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`. The Studio writes all but `coupling_slack_penalty` and shows them disabled; `coupling_slack_penalty` is deprecated, no longer written by the Studio, and logs a warning when present.
+Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_load` are the same key). Any other key is reported as an unknown configuration key; this includes `curtailment`, `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`, `transport_congestion` and `storage_violation`, which older files may contain: they were removed because they priced nothing.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -913,20 +911,14 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_reserve_dynamic` | float | `100` | $/MW dynamic reserve deficit |
 | `loss_of_inertia` | float | `200` | $/MW-s inertia deficit |
 | `transfer_margin` | float | `100` | Transfer-margin violation ($/MW). YAML also accepts `TransferMargin` |
-| `curtailment` | float | `100` | No effect (the Studio writes it as `Curtailment`): curtailed RE is priced by `curtailment_cost`. |
 | `max_curtailment_ratio` | float (0–1) | `0.05` | Cap on RE curtailment as a fraction of RE generation. Hard constraint per representative day in the master problem (monolithic and Benders); not enforced in operational dispatch |
 | `curtailment_cost` | float (≥ 0) | `20` | Cost of curtailed RE in operational dispatch ($/MWh) |
-| `curtailment_excess_penalty` | float (≥ 0) | `500` | No effect: `max_curtailment_ratio` is a hard limit in the master problem, monolithic and Benders (kept so existing files load). |
-| `re_excess_penalty` | float (≥ 0) | `100` | $/MWh penalty for RE generation exceeding target |
 | `rooftop_curtailment` | float | `5` | $/MWh rooftop curtailed |
 | `co2_cost` | float | `10` | $/tCO2 |
 | `co2_budget_violation` | float | `500` | $/tCO2 over budget |
 | `fre_penetration_loss` | float | `100` | $/MWh RE shortfall |
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
-| `coupling_slack_penalty` | float | `1` | Deprecated, no effect: the primary-energy model has one tank per node and no periodic–hourly coupling slack. Existing files still load, with a warning. |
-| `transport_congestion` | float | `100` | No effect: fuel transport has no congestion slack (kept so existing files load). |
-| `storage_violation` | float | `100` | No effect: fuel storage has no violation slack (kept so existing files load). |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
 | `soc_violation` | float | `1000000` | $/MWh SOC limit violation. |
 | `delay_retirement_per_mw` | float | `50000` | $/MW delay retirement penalty. |

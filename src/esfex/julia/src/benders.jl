@@ -1079,9 +1079,6 @@ function create_benders_subproblem(
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
         tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium)
 
-    # NOTE: re_excess_penalty is not used: RE has a floor only, as in the
-    # monolithic master.
-
     # CO2 budgets: the day's emissions, scaled to the year, within the share
     # of the budget the master gives this day (a copy) plus a violation slack
     # at the group's penalty (add_benders_co2_allocation!)

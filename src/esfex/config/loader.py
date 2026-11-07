@@ -375,11 +375,6 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             if field in PenaltiesConfig.model_fields and (
                     field not in pen_data or str(key).lower() == field):
                 pen_data[field] = value
-        if "coupling_slack_penalty" in pen_data:
-            log.warning(
-                "penalties.coupling_slack_penalty is deprecated and has no effect "
-                "(the primary-energy model has no periodic-hourly coupling slack); "
-                "remove it from the configuration")
         system_data["penalties"] = PenaltiesConfig(**pen_data)
 
     # Convert CO2 budget
@@ -630,21 +625,6 @@ def _warn_unknown_keys(keys: list[str]) -> None:
                     len(keys) - _UNKNOWN_KEYS_LOGGED)
 
 
-def _warn_unused_scopf_settings(n1: N1SecurityConfig) -> None:
-    """Warn when a SCOPF setting the model does not use is changed.
-
-    The SCOPF constraints are built in a single pass, so
-    ``scopf_max_iterations`` and ``scopf_violation_tolerance`` have no
-    effect. The Studio writes their defaults, which stay silent.
-    """
-    for name in ("scopf_max_iterations", "scopf_violation_tolerance"):
-        value = getattr(n1, name)
-        if value != N1SecurityConfig.model_fields[name].default:
-            log.warning(
-                "n1_security.%s = %s has no effect: the SCOPF constraints are "
-                "built in a single pass, not iteratively", name, value)
-
-
 def _warn_ineffective_multipliers(config: ESFEXConfig) -> None:
     """Warn about stochastic multipliers this configuration gives no term
     to scale (see :func:`ineffective_scenario_multipliers`)."""
@@ -705,7 +685,6 @@ def load_config(path: Union[str, Path]) -> ESFEXConfig:
         # Convert N-1 security config
         if "n1_security" in raw_config and isinstance(raw_config["n1_security"], dict):
             raw_config["n1_security"] = N1SecurityConfig(**raw_config["n1_security"])
-            _warn_unused_scopf_settings(raw_config["n1_security"])
 
         # Convert master problem config
         if "master_problem" in raw_config and isinstance(raw_config["master_problem"], dict):
