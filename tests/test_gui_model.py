@@ -829,15 +829,11 @@ class TestGuiElectrolyzerInstance:
     def test_defaults(self):
         e = self._make()
         assert e.fuel == "Hydrogen"
-        assert e.technology == "PEM"
         assert e.technology_id is None
         assert e.bus == "bus_0"
         assert e.node == 0
         assert e.life_time == 20
-        assert e.initial_age == 0
-        assert e.degradation_rate == 0.01
         assert e.rated_power == 0.0
-        assert e.min_power == 0.1
         assert e.ramp_up == 0.5
         assert e.ramp_down == 0.5
         assert e.eff_at_rated == 0.65
@@ -848,9 +844,11 @@ class TestGuiElectrolyzerInstance:
         assert e.water_cost == 0.001
         assert isinstance(e.style, VisualStyle)
 
-    def test_alkaline_type(self):
-        e = self._make(technology="Alkaline")
-        assert e.technology == "Alkaline"
+    def test_removed_fields(self):
+        # technology, min_power, initial_age and degradation_rate had no effect
+        e = self._make()
+        for f in ("technology", "min_power", "initial_age", "degradation_rate"):
+            assert not hasattr(e, f)
 
 
 # ======================================================================

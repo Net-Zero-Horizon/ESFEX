@@ -246,7 +246,6 @@ def test_degradation_labels_are_fractions(lang):
                    .read_text(encoding="utf-8"))
     for sec, key in [("generator_form", "degradation"),
                      ("battery_form", "degradation"),
-                     ("electrolyzer_form", "degradation_rate"),
                      ("acdc_form", "degradation_rate")]:
         assert "%" not in d[sec][key], (lang, sec, d[sec][key])
 
