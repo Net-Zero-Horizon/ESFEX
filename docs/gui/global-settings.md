@@ -141,7 +141,7 @@ The depth, redistribution and threshold values preset the SLD Analysis panel eac
 
 ### Risk & Resilience
 
-Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there, and stores its climate and hazard scenarios, which are saved as `risk.climate_scenarios` and `risk.hazard_scenarios` (climate probabilities are rescaled to sum to 1 on save, as the schema requires; a scenario the schema rejects is not saved and a warning is logged). The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
+Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there, and stores its climate and hazard scenarios, which are saved as `risk.climate_scenarios` and `risk.hazard_scenarios` (climate probabilities are rescaled to sum to 1 on save, as the schema requires; a scenario the schema rejects is not saved and a warning is logged). When the workbench opens, it starts from these saved values (measure, CVaR, combination method and scenarios), so a second **Apply** keeps what was not changed. The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
 
 | Field | Default | Description |
 |-------|---------|-------------|

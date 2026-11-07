@@ -78,11 +78,8 @@ Each source is keyed by the fuel it supplies. All per-node values are lists with
         storage_capacity: [10000.0, 3000.0, 1000.0] # ton of tank capacity per node
         initial_storage_level: [0.5, 0.5, 0.5]      # fraction of capacity at the start
         min_storage_level: 0.1                      # safety stock, fraction of capacity
-        storage_investment_cost: 50.0
-        max_storage_investment_per_node: 0.0
         transport_cost: 0.0
         transport_losses: 0.0
-        max_transport_investment_per_arc: 0.0
 
       Gas:
         unit: ton
@@ -91,11 +88,8 @@ Each source is keyed by the fuel it supplies. All per-node values are lists with
         storage_capacity: [2000.0, 0.0, 0.0]
         initial_storage_level: [0.5, 0.0, 0.0]
         min_storage_level: 0.1
-        storage_investment_cost: 200.0
-        max_storage_investment_per_node: 0.0
         transport_cost: 0.0
         transport_losses: 0.0
-        max_transport_investment_per_arc: 0.0
 ```
 
 ### Source Properties Reference
@@ -108,8 +102,7 @@ Each source is keyed by the fuel it supplies. All per-node values are lists with
 | `storage_capacity` | units, per node | Fuel tank capacity |
 | `initial_storage_level` | fraction, per node | Starting inventory as a fraction of capacity |
 | `min_storage_level` | fraction | Safety stock that must be kept (default 0.1) |
-| `storage_investment_cost`, `max_storage_investment_per_node` | $/unit, units | Required by the loader but not used: the master takes storage costs and limits from `fuel_infrastructure` |
-| `transport_cost`, `max_transport_investment_per_arc` | $/unit/km, units | Required by the loader but not used: route costs come from `fuel_transport_routes`, route investment from `fuel_infrastructure` |
+| `transport_cost` | $/unit/km | Required by the loader but not used: route costs come from `fuel_transport_routes`, route investment from `fuel_infrastructure` |
 | `transport_losses` | fraction per 100 km | Required by the loader; the dispatch uses the per-route losses below |
 | `transport_transit_days_per_100km` | days | Optional delivery lead time along routes (default 0, instantaneous): a shipment reaches the destination tank that many days per 100 km after it leaves |
 | `disruption_start_hour`, `disruption_end_hour`, `disruption_availability` | hour, hour, fraction | Optional supply cut: availability is scaled to `disruption_availability` inside the window. Hours count from 1 January of the base year (8760 per year), like [scheduled interruptions](../user-guide/scheduled-interruptions.md) |
@@ -221,7 +214,7 @@ Non-electric demand captures fuel consumption outside the electricity sector: tr
         demand: [7200, 0, 0]          # only at the port node
 ```
 
-The demand grows by `non_electric_demand_growth[<fuel>]` per year from the first simulated year (no growth if not given) and is spread over the months by `seasonal_factors[<fuel>][<sector>]` (12 relative values; even if not given). Unmet demand costs `penalties.non_electric_demand_loss` per unit, per sector. The schema also accepts `criticality`, `is_flexible`, `flexibility_ratio`, `delay_tolerance` and `price_sensitivity` on these entries, but the primary-energy model does not use them.
+The demand grows by `non_electric_demand_growth[<fuel>]` per year from the first simulated year (no growth if not given) and is spread over the months by `seasonal_factors[<fuel>][<sector>]` (12 relative values; even if not given). Unmet demand costs `penalties.non_electric_demand_loss` per unit, per sector. The schema also accepts `criticality`, `is_flexible`, `flexibility_ratio` and `delay_tolerance` on these entries, but the primary-energy model does not use them.
 
 Fuel shipped to a node goes into its tank: a period's shipment leaves the origin evenly over the period's hours and arrives after the route's transit time, less transport losses. Generators and non-electric users at the destination draw from that tank like from locally supplied fuel. Use that the tank cannot cover is a fuel shortfall, priced at `penalties.loss_of_fuel_supply`.
 
@@ -291,11 +284,8 @@ systems:
         storage_capacity: [10000.0, 3000.0, 1000.0]
         initial_storage_level: [0.5, 0.5, 0.5]
         min_storage_level: 0.1
-        storage_investment_cost: 50.0
-        max_storage_investment_per_node: 0.0
         transport_cost: 0.0
         transport_losses: 0.0
-        max_transport_investment_per_arc: 0.0
       Gas:
         unit: ton
         max_availability: [20000.0, 0.0, 0.0]
@@ -303,11 +293,8 @@ systems:
         storage_capacity: [2000.0, 0.0, 0.0]
         initial_storage_level: [0.5, 0.0, 0.0]
         min_storage_level: 0.1
-        storage_investment_cost: 200.0
-        max_storage_investment_per_node: 0.0
         transport_cost: 0.0
         transport_losses: 0.0
-        max_transport_investment_per_arc: 0.0
 
     fuel_transport_routes:
       - route_id: port_to_hub

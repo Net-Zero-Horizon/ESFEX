@@ -920,9 +920,6 @@ class TestGuiRooftopSolar:
         assert rs.simulation_seed == 42
         assert rs.performance_ratio == 0.75
         assert rs.degradation_rate == 0.005
-        assert rs.cost_per_kw == 1200.0
-        assert rs.cost_reduction_rate == 0.08
-        assert rs.o_and_m_cost == 20.0
         assert rs.base_year == 2025
         assert rs.target_year == 2050
         assert rs.systems_per_node == []
@@ -953,7 +950,6 @@ class TestGuiDemandSector:
         assert ds.flexibility_ratio == 0.0
         assert ds.criticality == "medium"
         assert ds.delay_tolerance == 0
-        assert ds.price_sensitivity == 0.0
 
     def test_flexible_sector(self):
         ds = GuiDemandSector(
@@ -978,7 +974,6 @@ class TestGuiNonElectricDemand:
         assert ned.flexibility_ratio == 0.0
         assert ned.criticality == "medium"
         assert ned.delay_tolerance == 0
-        assert ned.price_sensitivity == 0.0
         assert ned.demand == []
 
     def test_with_demand(self):

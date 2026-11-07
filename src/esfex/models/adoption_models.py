@@ -518,7 +518,6 @@ def fit_adoption_to_rooftop_config(
         "initial_adoption": initial_adoption,
         "max_adoption": max_adoption,
         "adoption_rates": adoption_rates,
-        "cost_per_kw": macro.pv_system_cost,
         "performance_ratio": performance_ratio,
         "degradation_rate": degradation_rate,
     }

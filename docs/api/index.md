@@ -14,7 +14,7 @@
 | [`esfex.models.ev`](models-ev.md) | EV fleet modeling | `generate_ev_profiles()`, `generate_v2g_availability()`, `aggregate_ev_profiles()` |
 | [`esfex.models.ev_adoption`](models-ev-adoption.md) | EV adoption modeling | `run_ev_logistic_adoption()`, `run_ev_bass_diffusion()`, `run_ev_tco_parity()`, `run_ev_policy_driven()` |
 | [`esfex.models.ev_analysis`](models-ev-analysis.md) | V2G & grid impact analysis | `generate_charging_profiles()`, `compute_v2g_potential()`, `compute_battery_degradation()`, `assess_grid_impact()` |
-| [`esfex.models.solar_rooftop`](models-solar-rooftop.md) | Rooftop solar model | `generate_rooftop_solar_profiles()`, `integrate_rooftop_solar()`, `calculate_rooftop_potential()` |
+| [`esfex.models.solar_rooftop`](models-solar-rooftop.md) | Rooftop solar model | `generate_rooftop_solar_profiles()`, `calculate_rooftop_potential()` |
 | [`esfex.models.financial_analysis`](models-financial-analysis.md) | Post-optimization financial analysis | `compute_system_financials()`, `compute_technology_financials()`, `run_sensitivity_analysis()`, `run_monte_carlo()` |
 | [`esfex.utils`](utils.md) | Helpers and temporal utilities | `BoundaryConditions`, `calculate_rolling_horizon_windows()` |
 | [`esfex.sensitivity`](sensitivity.md) | Sobol sensitivity analysis | `SensitivityEngine`, `SensitivityParameter`, `SobolResult` |

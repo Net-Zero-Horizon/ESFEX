@@ -1193,8 +1193,20 @@ class RiskDashboardPanel(QWidget):
         self._worker: _RiskAssessmentWorker | None = None
         self._build_ui()
 
+    # Widget labels ↔ RiskConfig values.
+    _METHOD_LABELS = {"independent": "Independent", "copula": "Copula", "mcda": "MCDA"}
+    _MEASURE_LABELS = {"expected": "Expected", "cvar": "CVaR",
+                       "minimax_regret": "Minimax Regret"}
+
     def set_state(self, state: RiskWorkbenchState) -> None:
         self._state = state
+        # Show the state's settings (the project's saved risk.* values).
+        self._combo_method.setCurrentText(
+            self._METHOD_LABELS.get(state.combination_method, "Independent"))
+        self._combo_measure.setCurrentText(
+            self._MEASURE_LABELS.get(state.risk_measure, "Expected"))
+        self._spin_alpha.setValue(state.cvar_alpha)
+        self._spin_lambda.setValue(state.cvar_lambda)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)

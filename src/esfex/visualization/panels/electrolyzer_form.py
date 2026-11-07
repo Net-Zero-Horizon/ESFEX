@@ -54,11 +54,6 @@ class ElectrolyzerForm(QWidget):
         self._name.editingFinished.connect(self._on_changed)
         fl_id.addRow(tr("electrolyzer_form.name"), self._name)
 
-        self._technology = QComboBox()
-        self._technology.addItems(["PEM", "Alkaline", "SOE"])
-        self._technology.currentTextChanged.connect(self._on_changed)
-        fl_id.addRow(tr("electrolyzer_form.technology"), self._technology)
-
         self._fuel = QLineEdit()
         self._fuel.editingFinished.connect(self._on_changed)
         fl_id.addRow(tr("electrolyzer_form.fuel"), self._fuel)
@@ -81,12 +76,6 @@ class ElectrolyzerForm(QWidget):
         self._rated_power.setDecimals(2)
         self._rated_power.editingFinished.connect(self._on_changed)
         fl_cap.addRow(tr("electrolyzer_form.rated_power"), self._rated_power)
-
-        self._min_power = QDoubleSpinBox()
-        self._min_power.setRange(0, 1)
-        self._min_power.setDecimals(3)
-        self._min_power.editingFinished.connect(self._on_changed)
-        fl_cap.addRow(tr("electrolyzer_form.min_power"), self._min_power)
 
         self._ramp_up = QDoubleSpinBox()
         self._ramp_up.setRange(0, 1)
@@ -165,17 +154,6 @@ class ElectrolyzerForm(QWidget):
         self._life_time.editingFinished.connect(self._on_changed)
         fl_life.addRow(tr("electrolyzer_form.lifetime"), self._life_time)
 
-        self._initial_age = QSpinBox()
-        self._initial_age.setRange(0, 100)
-        self._initial_age.editingFinished.connect(self._on_changed)
-        fl_life.addRow(tr("electrolyzer_form.initial_age"), self._initial_age)
-
-        self._degradation = QDoubleSpinBox()
-        self._degradation.setRange(0, 1)
-        self._degradation.setDecimals(4)
-        self._degradation.editingFinished.connect(self._on_changed)
-        fl_life.addRow(tr("electrolyzer_form.degradation_rate"), self._degradation)
-
         outer.addWidget(grp_life)
 
         # -- Appearance --
@@ -215,9 +193,6 @@ class ElectrolyzerForm(QWidget):
         )
 
         self._name.setText(inst.name)
-        idx = self._technology.findText(inst.technology)
-        if idx >= 0:
-            self._technology.setCurrentIndex(idx)
         self._fuel.setText(inst.fuel)
 
         # Populate technology ref combo with Electrolyzer techs
@@ -232,7 +207,6 @@ class ElectrolyzerForm(QWidget):
             self._tech_ref_combo.setCurrentIndex(tech_idx)
         self._tech_ref_combo.blockSignals(False)
         self._rated_power.setValue(inst.rated_power)
-        self._min_power.setValue(inst.min_power)
         self._ramp_up.setValue(inst.ramp_up)
         self._ramp_down.setValue(inst.ramp_down)
         self._eff_rated.setValue(inst.eff_at_rated)
@@ -242,8 +216,6 @@ class ElectrolyzerForm(QWidget):
         self._variable_cost.setValue(inst.variable_cost)
         self._water_cost.setValue(inst.water_cost)
         self._life_time.setValue(inst.life_time)
-        self._initial_age.setValue(inst.initial_age)
-        self._degradation.setValue(inst.degradation_rate)
         from esfex.visualization.data.default_colors import ELECTROLYZER
         self._style_widget.set_default_color(ELECTROLYZER)
         self._style_widget.load_style(inst.style)
@@ -253,10 +225,8 @@ class ElectrolyzerForm(QWidget):
     def _field_map(self):
         return [
             ("name", self._name),
-            ("technology", self._technology),
             ("fuel", self._fuel),
             ("rated_power", self._rated_power),
-            ("min_power", self._min_power),
             ("ramp_up", self._ramp_up),
             ("ramp_down", self._ramp_down),
             ("eff_at_rated", self._eff_rated),
@@ -266,8 +236,6 @@ class ElectrolyzerForm(QWidget):
             ("variable_cost", self._variable_cost),
             ("water_cost", self._water_cost),
             ("life_time", self._life_time),
-            ("initial_age", self._initial_age),
-            ("degradation_rate", self._degradation),
         ]
 
     def load_elements(self, element_ids: list[str]):

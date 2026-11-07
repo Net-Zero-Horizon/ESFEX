@@ -526,10 +526,7 @@ class TestElectrolyzerConfig:
         return {
             "name": "PEM_1",
             "life_time": [20],
-            "initial_age": [0],
-            "degradation_rate": [0.01],
             "rated_power": [10.0],
-            "min_power": [0.1],
             "ramp_up": [0.5],
             "ramp_down": [0.5],
             "eff_at_rated": [0.65],
@@ -545,29 +542,12 @@ class TestElectrolyzerConfig:
         assert e.name == "PEM_1"
         assert e.type == "Electrolyzer"
         assert e.fuel == "Hydrogen"
-        assert e.technology == "PEM"
 
-    def test_technology_pem(self):
-        e = ElectrolyzerConfig(**self._elec_1())
-        assert e.technology == "PEM"
-
-    def test_technology_alkaline(self):
-        data = self._elec_1()
-        data["technology"] = "Alkaline"
-        e = ElectrolyzerConfig(**data)
-        assert e.technology == "Alkaline"
-
-    def test_technology_soe(self):
-        data = self._elec_1()
-        data["technology"] = "SOE"
-        e = ElectrolyzerConfig(**data)
-        assert e.technology == "SOE"
-
-    def test_invalid_technology_raises(self):
-        data = self._elec_1()
-        data["technology"] = "HTSE"
-        with pytest.raises(ValidationError):
-            ElectrolyzerConfig(**data)
+    def test_removed_fields_are_not_fields(self):
+        # technology, min_power, initial_age and degradation_rate had no
+        # effect and were removed; an old file gets the unknown-key warning.
+        for f in ("technology", "min_power", "initial_age", "degradation_rate"):
+            assert f not in ElectrolyzerConfig.model_fields
 
     def test_defaults(self):
         e = ElectrolyzerConfig(**self._elec_1())

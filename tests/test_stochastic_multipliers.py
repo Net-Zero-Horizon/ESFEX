@@ -18,7 +18,6 @@ sys.path.insert(0, "tests")
 
 from esfex.config.schema import (  # noqa: E402
     SCENARIO_MULTIPLIER_ALIASES,
-    SCENARIO_MULTIPLIERS_WITHOUT_EFFECT,
     ScenarioMultipliers,
     StochasticScenarioConfig,
 )
@@ -42,11 +41,10 @@ OLD_GUI_KEYS = [
 # Schema: legacy keys, dropped keys
 # ---------------------------------------------------------------------------
 
-def test_every_old_gui_key_is_a_field_an_alias_or_reported():
+def test_every_old_gui_key_is_a_field_or_an_alias():
     fields = set(ScenarioMultipliers.model_fields)
     for key in OLD_GUI_KEYS:
-        assert (key in fields) + (key in SCENARIO_MULTIPLIER_ALIASES) + \
-            (key in SCENARIO_MULTIPLIERS_WITHOUT_EFFECT) == 1, key
+        assert (key in fields) + (key in SCENARIO_MULTIPLIER_ALIASES) == 1, key
     for targets in SCENARIO_MULTIPLIER_ALIASES.values():
         assert set(targets) <= fields
 
@@ -74,8 +72,8 @@ def test_keys_on_the_same_field_multiply(caplog):
     assert "invest_cost_renewables" in caplog.text
 
 
-def test_keys_without_effect_are_dropped_with_a_warning(caplog):
-    dropped = sorted(SCENARIO_MULTIPLIERS_WITHOUT_EFFECT)[:1] + ["not_a_key"]
+def test_unknown_keys_are_dropped_with_a_warning(caplog):
+    dropped = ["not_a_key"]
     with caplog.at_level(logging.WARNING, logger="esfex.config.schema"):
         m = ScenarioMultipliers(**{k: 2.0 for k in dropped}, electrolyzer_invest_cost=2.0,
                                 penalty_loss_of_load=3.0)

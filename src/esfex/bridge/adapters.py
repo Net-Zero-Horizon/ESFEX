@@ -4259,7 +4259,6 @@ class PrimaryEnergyAdapter:
         mode: str = "development",
         cumulative_capacities: Optional[Dict] = None,
         initial_storage_levels: Optional[Dict] = None,
-        investment_from_master: bool = False,
         transport_routes: Optional[List[Dict]] = None,
         outage_schedule: Optional[list] = None,
         step_hours: int = 1,
@@ -4288,8 +4287,6 @@ class PrimaryEnergyAdapter:
             cumulative_capacities: Fuel storage/transport capacity built by the
                 master: {"storage"|"transport": {fuel: {node or route: capacity}}}
             initial_storage_levels: Initial storage levels for carry-over
-            investment_from_master: Unused; the dispatch never builds fuel
-                infrastructure (the master does)
             transport_routes: Route-based fuel transport list (preferred over distance matrix)
             step_hours: Length of a time step (h)
             year_hour_offset: First hour of the window within the year; with
@@ -4319,7 +4316,6 @@ class PrimaryEnergyAdapter:
         self.mode = mode
         self.cumulative_capacities = cumulative_capacities or {'storage': {}, 'transport': {}}
         self.initial_storage_levels = initial_storage_levels
-        self.investment_from_master = investment_from_master
         self.step_hours = step_hours
         self.year_hour_offset = year_hour_offset
         self.scheduled_arrivals = scheduled_arrivals or {}
@@ -4609,10 +4605,7 @@ class PrimaryEnergyAdapter:
             self.mode,
             jl_cumul,
             jl_initial_storage,
-            self.investment_from_master,
-            jl.seval("nothing"),  # h2_production_hourly (unused)
             jl_gen_rated,
-            jl.seval("nothing"),  # electrolyzer_config (unused)
             scale_cost(float(self.penalties_config.get('non_electric_demand_loss', 100.0))),
             int(self.step_hours),
             int(self.year_hour_offset),

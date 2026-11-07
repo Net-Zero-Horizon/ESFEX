@@ -17,8 +17,6 @@ from esfex.models.ev import (
 from rooftex import calculate_potential as calculate_rooftop_potential
 from rooftex import generate_profiles as generate_rooftop_solar_profiles
 
-from esfex.models.solar_rooftop import integrate_rooftop_solar
-
 # Climate profiles and risk assessment (lazy-load friendly — no heavy deps)
 from esfex.models.climate_profiles import (
     apply_climate_deltas,
@@ -51,7 +49,6 @@ __all__ = [
     # Solar rooftop models
     "calculate_rooftop_potential",
     "generate_rooftop_solar_profiles",
-    "integrate_rooftop_solar",
     # Climate profiles
     "quantile_mapping",
     "compute_solar_cf_climate",

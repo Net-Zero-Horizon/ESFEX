@@ -1964,12 +1964,7 @@ Complete input for the Primary Energy optimization model.
     "unit_commitment"; "master" for a representative day of the master)
 - `cumulative_capacities::Dict`: Fuel storage/transport capacity built by the
     master: {"storage"|"transport" => {fuel => {node or route => capacity}}}
-- `investment_from_master::Bool`: unused (only the master builds fuel infrastructure)
 - `initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}`: Initial storage levels
-- `h2_production_hourly`, `electrolyzer_config`: must be `nothing`. The
-    dispatch electrolyzers feed the `Hydrogen` tank instead
-    (`couple_primary_energy_to_power_system!`); kept so existing call sites
-    still construct
 - `generator_rated_power::Dict{Int, Vector{Float64}}`: Rated power per node for each gen in fuel map
     Used to skip zero-capacity nodes in PE coupling
 - `scheduled_arrivals::Union{Nothing, Dict{String, Matrix{Float64}}}`: fuel
@@ -1994,16 +1989,9 @@ struct PrimaryEnergyInput
     mode::String
     cumulative_capacities::Dict{String, Any}
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}
-    # Unused: the dispatch never builds fuel infrastructure; the master does
-    # (master_fuel.jl). Kept so existing call sites still construct.
-    investment_from_master::Bool
-    # Unused, must be nothing: the dispatch electrolyzers feed the Hydrogen tank
-    h2_production_hourly::Union{Matrix{Float64}, Nothing}
     # Rated power per node for generators in fuel map, used to skip zero-capacity
     # nodes in PE coupling
     generator_rated_power::Dict{Int, Vector{Float64}}
-    # Unused, must be nothing (see h2_production_hourly)
-    electrolyzer_config::Union{Nothing, ElectrolyzerConfig}
     # Penalty per unit of non-electric fuel demand left unmet (per sector)
     non_electric_demand_loss_penalty::Float64
     # Length of a time step (h) and the window's first hour within the year:
@@ -2015,7 +2003,7 @@ struct PrimaryEnergyInput
 end
 
 # Without scheduled arrivals: no fuel in transit at the window's start.
-PrimaryEnergyInput(args::Vararg{Any, 23}) = PrimaryEnergyInput(args..., nothing)
+PrimaryEnergyInput(args::Vararg{Any, 20}) = PrimaryEnergyInput(args..., nothing)
 
 # Without the last four fields: unmet non-electric demand at the fuel-supply
 # penalty, 1 h steps, window at the start of the year.
@@ -2031,18 +2019,14 @@ function PrimaryEnergyInput(
     mode::String,
     cumulative_capacities::Dict{String, Any},
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing},
-    investment_from_master::Bool,
-    h2_production_hourly::Union{Matrix{Float64}, Nothing},
-    generator_rated_power::Dict{Int, Vector{Float64}},
-    electrolyzer_config::Union{Nothing, ElectrolyzerConfig}
+    generator_rated_power::Dict{Int, Vector{Float64}}
 )
     return PrimaryEnergyInput(
         year, base_year, num_nodes, hours, fuels, infrastructure, non_electric_demand,
         transport_routes, generator_fuel_map, primary_energy_resolution,
         investment_resolution, discount_rate, loss_of_fuel_supply_penalty,
         mode, cumulative_capacities, initial_storage_levels,
-        investment_from_master, h2_production_hourly, generator_rated_power,
-        electrolyzer_config, loss_of_fuel_supply_penalty, 1, 0
+        generator_rated_power, loss_of_fuel_supply_penalty, 1, 0
     )
 end
 
@@ -2095,10 +2079,7 @@ function PrimaryEnergyInput(
     mode::String,
     cumulative_capacities::Dict{String, Any},
     initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing},
-    investment_from_master::Bool,
-    h2_production_hourly::Union{Matrix{Float64}, Nothing},
-    generator_rated_power::Dict{Int, Vector{Float64}},
-    electrolyzer_config::Union{Nothing, ElectrolyzerConfig}
+    generator_rated_power::Dict{Int, Vector{Float64}}
 )
     routes = _auto_routes_from_distances(transport_distances, num_nodes, fuels, infrastructure)
     return PrimaryEnergyInput(
@@ -2106,8 +2087,7 @@ function PrimaryEnergyInput(
         routes,
         generator_fuel_map, primary_energy_resolution, investment_resolution,
         discount_rate, loss_of_fuel_supply_penalty, mode,
-        cumulative_capacities, initial_storage_levels, investment_from_master,
-        h2_production_hourly, generator_rated_power, electrolyzer_config,
+        cumulative_capacities, initial_storage_levels, generator_rated_power,
         loss_of_fuel_supply_penalty, 1, 0
     )
 end
@@ -2625,8 +2605,11 @@ Solution output from the Master Problem.
 - `transfer_investment`: Transmission investments [year, (i,j)] (MW)
 
 ## Life Decisions
-- `gen_life_extension`: Generator life extension decisions [year, gen, node] (0/1)
-- `bat_life_extension`: Battery life extension decisions [year, bat, node] (0/1)
+- `gen_life_extension`: [year, gen, node] 1.0 while the generator is within
+    its original `life_time`, 0.0 once past it, whether or not the master
+    extends it (not MW: the capacity kept past the lifetime is in
+    `cumulative_gen_capacity`)
+- `bat_life_extension`: the same flag for batteries [year, bat, node]
 
 ## Summary Metrics
 - `total_investment_by_year`: Total investment per year (\$)

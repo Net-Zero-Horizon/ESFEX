@@ -89,7 +89,6 @@ rooftop_solar_config:
 | `max_adoption`, `adoption_rates` | `null` | Yes | Adoption ceiling and growth rate per scenario (`low`, `medium`, `high`); unset: rooftex defaults |
 | `initial_adoption` | `null` | Passed | Passed to rooftex, which (0.1.1) does not use it |
 | `performance_ratio` | 0.75 | Yes | Scales the rooftex profile |
-| `cost_per_kw`, `cost_reduction_rate`, `o_and_m_cost` | 1200, 0.08, 20 | No | Validated, not used (behind the meter, no investment decision) |
 
 ## Output
 

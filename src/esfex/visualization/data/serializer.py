@@ -1204,12 +1204,10 @@ def _system_to_gui_state(sys: SystemConfig,
                 unit_key=el_key,
                 name=getattr(el_cfg, 'name', el_key),
                 fuel=getattr(el_cfg, 'fuel', 'Hydrogen'),
-                technology=getattr(el_cfg, 'technology', 'PEM'),
                 node=node_idx,
             )
             for fld in (
-                'life_time', 'initial_age', 'degradation_rate',
-                'rated_power', 'min_power', 'ramp_up', 'ramp_down',
+                'life_time', 'rated_power', 'ramp_up', 'ramp_down',
                 'eff_at_rated', 'eff_at_min', 'energy_per_kg_h2',
                 'fixed_cost', 'variable_cost', 'water_cost',
             ):
@@ -1251,8 +1249,7 @@ def _system_to_gui_state(sys: SystemConfig,
         rooftop_solar = GuiRooftopSolar()
         for fld in (
             'adoption_scenario', 'weather_variability', 'simulation_seed',
-            'performance_ratio', 'degradation_rate', 'cost_per_kw',
-            'cost_reduction_rate', 'o_and_m_cost', 'base_year', 'target_year',
+            'performance_ratio', 'degradation_rate', 'base_year', 'target_year',
         ):
             if hasattr(rc, fld):
                 setattr(rooftop_solar, fld, getattr(rc, fld))
@@ -1274,7 +1271,6 @@ def _system_to_gui_state(sys: SystemConfig,
                 flexibility_ratio=getattr(sec_cfg, 'flexibility_ratio', 0.0),
                 criticality=str(getattr(sec_cfg, 'criticality', 'medium')),
                 delay_tolerance=getattr(sec_cfg, 'delay_tolerance', 0),
-                price_sensitivity=getattr(sec_cfg, 'price_sensitivity', 0.0),
             )
 
     # Non-electric demand
@@ -1289,7 +1285,6 @@ def _system_to_gui_state(sys: SystemConfig,
                 flexibility_ratio=getattr(dcfg, 'flexibility_ratio', 0.0),
                 criticality=str(getattr(dcfg, 'criticality', 'medium')),
                 delay_tolerance=getattr(dcfg, 'delay_tolerance', 0),
-                price_sensitivity=getattr(dcfg, 'price_sensitivity', 0.0),
                 demand=list(getattr(dcfg, 'demand', [])),
             )
 
@@ -3662,11 +3657,9 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             entry: dict[str, Any] = {
                 "name": rep.name,
                 "fuel": rep.fuel,
-                "technology": rep.technology,
             }
             for fld in (
-                'life_time', 'initial_age', 'degradation_rate',
-                'rated_power', 'min_power', 'ramp_up', 'ramp_down',
+                'life_time', 'rated_power', 'ramp_up', 'ramp_down',
                 'eff_at_rated', 'eff_at_min',
                 'fixed_cost', 'variable_cost',
             ):
@@ -3727,9 +3720,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             "simulation_seed": rt.simulation_seed,
             "performance_ratio": rt.performance_ratio,
             "degradation_rate": rt.degradation_rate,
-            "cost_per_kw": rt.cost_per_kw,
-            "cost_reduction_rate": rt.cost_reduction_rate,
-            "o_and_m_cost": rt.o_and_m_cost,
             "base_year": rt.base_year,
             "target_year": rt.target_year,
             "systems_per_node": rt.systems_per_node,
@@ -3747,7 +3737,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "flexibility_ratio": sec.flexibility_ratio,
                 "criticality": sec.criticality,
                 "delay_tolerance": sec.delay_tolerance,
-                "price_sensitivity": sec.price_sensitivity,
             }
             for sid, sec in state.demand_sectors.items()
         }
@@ -3768,7 +3757,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "flexibility_ratio": ned.flexibility_ratio,
                 "criticality": ned.criticality,
                 "delay_tolerance": ned.delay_tolerance,
-                "price_sensitivity": ned.price_sensitivity,
                 "demand": ned.demand,
             }
             for did, ned in state.non_electric_demand.items()

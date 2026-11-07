@@ -23,9 +23,7 @@ ESFEXConfig
  ├── MetaNetworkConfig
  │    └── SystemLinkConfig
  ├── RiskConfig
- │    ├── ClimateScenarioConfig, HazardScenarioConfig, HazardDataSourceConfig
- │    ├── ComponentFragilityConfig ── FragilityCurveConfig
- │    ├── RiskCriteriaConfig
+ │    ├── ClimateScenarioConfig, HazardScenarioConfig
  │    └── VOLLConfig
  ├── LoggingConfig
  └── systems: dict[str, SystemConfig]
@@ -561,8 +559,6 @@ class RooftopSolarConfig(BaseModel):
     systems_per_node: Optional[list[Optional[int]]] = None    # passed to rooftex; null entry = rooftex default
     avg_system_size: Optional[list[Optional[float]]] = None   # kW per system; passed to rooftex
     performance_ratio: float = 0.75                   # passed to rooftex
-    cost_per_kw: float = 1200                         # not used by the runner
-    cost_reduction_rate: float = 0.08                 # not used by the runner
     initial_adoption: Optional[list[Optional[float]]] = None  # passed to rooftex
     max_adoption: Optional[dict[str, float]] = None   # per scenario; passed to rooftex
     adoption_rates: Optional[dict[str, float]] = None # per scenario; passed to rooftex
@@ -576,7 +572,6 @@ class ElectrolyzerConfig(BaseModel):
     name: str
     type: Literal["Electrolyzer"] = "Electrolyzer"
     fuel: str = "Hydrogen"
-    technology: Literal["PEM", "Alkaline", "SOE"] = "PEM"
     energy_per_kg_h2: float = 50.0      # kWh/kg H2
     water_cost: float = 0.001           # $/kg H2
     ...                                 # per-node lists, all required

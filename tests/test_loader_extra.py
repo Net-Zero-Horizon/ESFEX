@@ -391,11 +391,8 @@ class TestConvertSystemSubBlocks:
                 "import_cost": [50, 50],
                 "storage_capacity": [500, 500],
                 "initial_storage_level": [0.5, 0.5],
-                "storage_investment_cost": 10000,
                 "transport_cost": 5,
                 "transport_losses": 0.01,
-                "max_storage_investment_per_node": 200,
-                "max_transport_investment_per_arc": 100,
             }
         }
         sc = _convert_system(data)
@@ -531,10 +528,7 @@ def _electrolyzer_data():
     return {
         "name": "EL1",
         "life_time": [20, 20],
-        "initial_age": [0, 0],
-        "degradation_rate": [0.01, 0.01],
         "rated_power": [50, 50],
-        "min_power": [5, 5],
         "ramp_up": [1.0, 1.0],
         "ramp_down": [1.0, 1.0],
         "eff_at_rated": [0.7, 0.7],
