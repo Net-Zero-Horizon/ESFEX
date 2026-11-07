@@ -225,3 +225,6 @@ committed_value(cs::CommittedSteps, v::VariableRef) =
     _committed_share(cs, v) * _committed_var_value(cs, v)
 
 committed_value(cs::CommittedSteps, x::Real) = Float64(x) * cs.keep / cs.hours
+
+# Any other expression (e.g. nonlinear): the window's share
+committed_value(cs::CommittedSteps, ex) = value(ex) * cs.keep / cs.hours
