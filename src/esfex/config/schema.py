@@ -1070,8 +1070,11 @@ class RooftopSolarConfig(BaseModel):
     adoption_scenario: Literal["low", "medium", "high"] = "medium"
     weather_variability: Literal["low", "normal", "high"] = "normal"
     simulation_seed: int = 42
-    systems_per_node: Optional[list[int]] = None
-    avg_system_size: Optional[list[float]] = Field(default=None, description="kW per system")
+    # Per-node lists; a None entry takes rooftex's default at that node (a
+    # merged multi-system run sets it at the nodes of a system that leaves
+    # the list unset).
+    systems_per_node: Optional[list[Optional[int]]] = None
+    avg_system_size: Optional[list[Optional[float]]] = Field(default=None, description="kW per system")
     performance_ratio: float = Field(default=0.75, ge=0, le=1)
     degradation_rate: float = Field(default=0.005, ge=0)
     cost_per_kw: float = 1200
@@ -1079,7 +1082,7 @@ class RooftopSolarConfig(BaseModel):
     o_and_m_cost: float = 20
     base_year: int = 2025
     target_year: int = 2050
-    initial_adoption: Optional[list[float]] = None
+    initial_adoption: Optional[list[Optional[float]]] = None
     max_adoption: Optional[dict[str, float]] = None
     adoption_rates: Optional[dict[str, float]] = None
 
@@ -1214,6 +1217,58 @@ def normalize_scenario_multipliers(raw: dict[str, Any]) -> dict[str, Any]:
             log.warning("Stochastic scenario multipliers %s all scale '%s'; "
                         "using their product %g", ", ".join(keys), field,
                         float(out[field]))
+    return out
+
+
+_FUEL_BLOCK_MULTIPLIERS: tuple[str, ...] = (
+    "fuel_import_cost", "penalty_loss_of_fuel_supply", "fuel_storage_invest_cost",
+    "fuel_transport_cost", "electrolyzer_invest_cost", "electrolyzer_fixed_cost",
+    "electrolyzer_variable_cost", "electrolyzer_water_cost",
+)
+
+
+def ineffective_scenario_multipliers(config: "ESFEXConfig") -> list[tuple[str, str, str]]:
+    """Scenario multipliers set (≠ 1) whose term this configuration lacks.
+
+    Only the first system's ``stochastic_scenarios`` reach the master, and
+    only with ``master_problem.stochastic``. A key whose term exists only in
+    some configurations has no effect without it: ``gen_start_up_cost``
+    without ``master_problem.use_uc_in_dispatch`` (no start-ups in the
+    master), the fuel-chain and electrolyzer keys with primary energy off,
+    and ``transmission_cost_per_mw_km`` with no line or electrical
+    inter-system link carrying a per-MW·km cost. Returns ``(scenario, key,
+    reason)`` for each one.
+    """
+    if config.simulation_mode != "development" or not config.master_problem.stochastic:
+        return []
+    scenarios = config.primary_system.stochastic_scenarios or []
+    if not scenarios:
+        return []
+    systems = [config.systems[n] for n in config.meta_network.systems if n in config.systems]
+    pe_on = config.enable_primary_energy and any(
+        s.primary_energy_sources or s.fuel_entry_points for s in systems)
+    flow_cost = any(
+        link.link_type == "transmission" and any(c > 0 for c in link.cost_per_mw_km)
+        for link in config.meta_network.systems_links
+    ) or any(
+        ln.cost_per_mw_km > 0 and (ln.length_km or 0) > 0
+        for s in systems for ln in (s.transmission_lines_geo or [])
+    )
+    missing: dict[str, str] = {}
+    if not config.master_problem.use_uc_in_dispatch:
+        missing["gen_start_up_cost"] = (
+            "the master models start-ups only with master_problem.use_uc_in_dispatch")
+    if not pe_on:
+        for key in _FUEL_BLOCK_MULTIPLIERS:
+            missing[key] = "primary energy is off (no fuel block in the master)"
+    if not flow_cost:
+        missing["transmission_cost_per_mw_km"] = (
+            "no line or electrical inter-system link has a cost_per_mw_km")
+    out = []
+    for sc in scenarios:
+        for key, reason in missing.items():
+            if getattr(sc.multipliers, key, 1.0) != 1.0:
+                out.append((sc.name, key, reason))
     return out
 
 
@@ -2101,7 +2156,8 @@ class SystemConfig(BaseModel):
 
     # Rooftop solar
     rooftop_solar_config: Optional[RooftopSolarConfig] = None
-    rooftop_max_potential: list[float] = []
+    # Per node (MW); None = rooftex's potential at that node
+    rooftop_max_potential: list[Optional[float]] = []
     rooftop_solar_emission_reduction: float = 0.7
 
     # Stochastic scenarios
@@ -2241,9 +2297,16 @@ class SystemConfig(BaseModel):
             return self
         import logging
         import re
+        # The fuel model's fuels: the primary-energy sources, or, without
+        # them, the fuels of the entry points (as the runner builds them).
+        if self.primary_energy_sources:
+            pe_fuels = set(self.primary_energy_sources)
+        else:
+            pe_fuels = {f for fe in (self.fuel_entry_points or [])
+                        for f in (fe.fuels or ([fe.fuel] if fe.fuel else []))}
         keys = {"generator": set(self.generators), "battery": set(self.batteries),
                 "electrolyzer": set(self.electrolyzers or {}),
-                "fuel_storage": set(self.primary_energy_sources or {})}
+                "fuel_storage": pe_fuels}
         unknown = []
         for i, ow in enumerate(self.outage_schedule):
             units = keys.get(ow.element_type)

@@ -6,10 +6,8 @@ Each step is a QWidget displayed in the wizard's QStackedWidget.
 from __future__ import annotations
 
 import heapq
-import json
 import logging
 import math
-import time
 from collections import deque
 from pathlib import Path
 
@@ -18,12 +16,10 @@ from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -1949,6 +1945,7 @@ def _bus_has_any_equipment(state, bus_id: str) -> bool:
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in km."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -3475,18 +3472,6 @@ def _estimate_bridge_capacity(voltage_kv: float) -> float:
 # =====================================================================
 
 
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Haversine distance in km."""
-    R = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1))
-         * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-
 def _build_road_graph(
     features: list,
 ) -> tuple[dict[tuple, list[tuple]], dict[tuple, tuple[float, float]]]:
@@ -4544,7 +4529,6 @@ class GridMappingDemandStep(QWidget):
         """Run ML demand forecast using collected data."""
         from esfex.visualization.workflows.demand_estimation_analysis import (
             DemandEstimationConfig,
-            DemandEstimationResult,
             DemandProfileBuilder,
             MacroData,
             MeteoData,

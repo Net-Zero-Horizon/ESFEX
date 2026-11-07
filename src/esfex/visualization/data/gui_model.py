@@ -397,7 +397,9 @@ class GuiOutageWindow:
     transformers: name; fuel sources: fuel name). ``availability`` is the
     capacity fraction during ``[start_hour, end_hour)`` (0 = full cut). Hours
     are absolute horizon hours (0 = Jan 1 of base_year); ``recurring`` repeats
-    the window every year.
+    the window every year. ``node`` restricts a window on an element that is
+    not a calendar instance (e.g. a fuel_storage tank) to one node; generator
+    and battery instances carry their node themselves.
     """
     element_type: str = "generator"
     element_id: str = ""
@@ -406,6 +408,7 @@ class GuiOutageWindow:
     availability: float = 0.0
     label: str = ""
     recurring: bool = False
+    node: Optional[int] = None
 
 
 @dataclass

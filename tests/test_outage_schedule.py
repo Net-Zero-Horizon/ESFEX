@@ -88,6 +88,27 @@ class TestOutageWindowSchema:
             SystemConfig(**sys.model_dump())
         assert "generator 'ghost_n0'" in caplog.text
 
+    def test_fuel_storage_of_an_entry_point_fuel_is_known(self, caplog):
+        """Without primary_energy_sources the fuels come from the entry
+        points; a tank window on one of them is not "ignored"."""
+        from esfex.config.schema import FuelEntryPointConfig, GeoCoordinate
+        entry = FuelEntryPointConfig(
+            name="Port", fuels=["Diesel"], node=0,
+            coordinate=GeoCoordinate(latitude=0.0, longitude=0.0))
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            SystemConfig(
+                name="S", nodes=NodeConfig(num_nodes=1, nodes_connections=[0.0]),
+                fuel_entry_points=[entry],
+                outage_schedule=[
+                    OutageWindow(element_type="fuel_storage", element_id="Diesel",
+                                 start_hour=0, end_hour=5),
+                    OutageWindow(element_type="fuel_storage", element_id="LNG",
+                                 start_hour=0, end_hour=5),
+                ],
+            )
+        assert "fuel_storage 'Diesel'" not in caplog.text
+        assert "fuel_storage 'LNG'" in caplog.text
+
     def test_schedule_defaults_empty(self):
         sys = SystemConfig(name="S", nodes=NodeConfig(num_nodes=1, nodes_connections=[0.0]))
         assert sys.outage_schedule == []
@@ -225,6 +246,28 @@ class TestInterruptionsDialog:
         assert len(got) == 1
         assert got[0].element_id == "line_3" and got[0].availability == 0.5
 
+    def test_ok_without_edits_keeps_the_schedule(self):
+        """The page commits only after an edit: OK straight away must not
+        wipe the model's windows."""
+        dlg, m, _json = self._dialog()
+        before = list(m.state.outage_schedule)
+        dlg._apply_to_model()
+        assert m.state.outage_schedule == before
+
+    def test_node_survives_the_dialog(self):
+        from esfex.visualization.data.gui_model import GuiOutageWindow
+        dlg, m, json = self._dialog()
+        m.state.outage_schedule.append(GuiOutageWindow(
+            element_type="fuel_storage", element_id="Gas", node=1,
+            start_hour=10, end_hour=20))
+        sched = json.loads(dlg._build_payload())["schedule"]
+        assert sched[-1]["node"] == 1
+        # The page hands the same window back (as commit() serialises it).
+        dlg._on_committed(json.dumps(sched))
+        dlg._apply_to_model()
+        assert m.state.outage_schedule[-1].node == 1
+        assert m.state.outage_schedule[0].node is None
+
 
 # ---------------------------------------------------------------------------
 # GUI round-trip (SystemConfig ↔ GuiSystemState ↔ config dict)
@@ -284,6 +327,29 @@ class TestGuiRoundTrip:
         _apply_gui_state_to_dict(state, sys_dict)
         (od,) = sys_dict["outage_schedule"]
         assert (od["element_id"], od["node"]) == ("unit_1", 2)
+
+    def test_fuel_storage_node_survives_round_trip(self):
+        """A one-node fuel_storage window must not widen to every node."""
+        from test_serializer import _make_esfex_config, _make_system_config
+        from esfex.visualization.data.serializer import (
+            _apply_gui_state_to_dict,
+            config_to_gui_states,
+        )
+
+        sc = _make_system_config()
+        sc.outage_schedule = [
+            OutageWindow(element_type="fuel_storage", element_id="Gas", node=1,
+                         start_hour=10, end_hour=20),
+            OutageWindow(element_type="fuel_storage", element_id="Coal",
+                         start_hour=10, end_hour=20),
+        ]
+        state = config_to_gui_states(_make_esfex_config(sc))["TestSystem"]
+        assert [o.node for o in state.outage_schedule] == [1, None]
+        sys_dict: dict = {}
+        _apply_gui_state_to_dict(state, sys_dict)
+        got = sys_dict["outage_schedule"]
+        assert got[0]["node"] == 1
+        assert "node" not in got[1]
 
     def test_empty_schedule_omitted(self):
         from esfex.visualization.data.gui_model import GuiSystemState
