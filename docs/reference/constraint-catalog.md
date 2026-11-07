@@ -323,9 +323,13 @@ In the stochastic master these names carry a scenario tag.
 | `re_cap_link_s{s}_y{y}` | BEN-RE | Master: existing + invested RE energy potential >= target × annual demand |
 | `storage_adequacy_s{s}_y{y}` | BEN-STO | Master: battery energy × efficiency >= (1 − max curtailment) × daily RE surplus |
 | `benders_cut_y{y}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}` |
-| `re_min_day_s*_y*_d*` | BEN-REDAY | Subproblem: RE share at least the master's RE ratio |
+| `co2_alloc_budget_y{y}_{group}` | BEN-CO2-1 | Master: the days' shares `co2_alloc_y{y}_{group}_d{d}` of a CO2 budget sum to at most 1 |
+| `re_min_day_s*_y*_d*` | BEN-REDAY | Subproblem: RE share at least the year's target |
+| `re_ratio_lb_s*_y*_d*` | BEN-REDAY | Subproblem: RE share at least the master's RE ratio (a copy variable) |
+| `co2_budget_y{y}_d{d}_{group}` | BEN-CO2-2 | Subproblem: the day's emissions, scaled to the year, within its share of the budget plus `co2_budget_violation_y{y}_d{d}_{group}` |
 | `max_curt_y{y}_d{d}` | BEN-CURT | Subproblem: soft curtailment cap with slack `curt_excess_y{y}_d{d}` |
 | `tech_cap_t{t}_b{b}_ts{ts}`, `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}` | BEN-CAP | Subproblem: technology output and offer-curve segments at the fixed capacity; their duals form the cut's technology gradient |
+| `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line or fuel capacity built, life extension, RE ratio, CO2 share) fixed to the master's value; the dual is its cut gradient |
 
 The Benders master also contains TECH, BUD, RET-2, CAP, TXN and RE-2/RE-3.
 
