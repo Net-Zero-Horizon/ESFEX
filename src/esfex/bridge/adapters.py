@@ -18,7 +18,6 @@ from esfex.config.schema import (
     GeneratorConfig,
     N1SecurityConfig,
     NodeConfig,
-    PenaltiesConfig,
     ESFEXConfig,
     SolverConfig,
     SystemConfig,
@@ -26,7 +25,7 @@ from esfex.config.schema import (
 )
 
 if TYPE_CHECKING:
-    from esfex.topology import ResultExpander
+    from esfex.topology import ReductionMap, ResultExpander
 from esfex.bridge.converters import (
     COST_SCALE,
     COST_UNSCALE,
@@ -43,7 +42,6 @@ from esfex.bridge.converters import (
     convert_battery_config,
     convert_battery_technology_config,
     convert_generator_config,
-    convert_index_py_to_julia,
     convert_network_config,
     convert_power_system_result,
     convert_technology_config,
@@ -1499,7 +1497,6 @@ class PowerSystemAdapter:
             if key in self.units_config:
                 updated_data = self.units_config[key]
                 if 'rated_power' in updated_data:
-                    from copy import deepcopy
                     gen_dict = gen.model_dump()
                     gen_dict['rated_power'] = updated_data['rated_power']
                     # Also propagate degradation_rate and initial_age overrides
@@ -4917,7 +4914,6 @@ class PrimaryEnergyAdapter:
             Dictionary with {fuel_id: {node_idx: level}}
         """
         jl = get_julia()
-        from juliacall import convert as jl_convert
 
         final_levels = {}
         # Tank levels (the model's only fuel storage)

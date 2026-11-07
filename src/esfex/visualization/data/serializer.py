@@ -5,14 +5,13 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import yaml
 
 from esfex.utils.temporal import HOURS_STD_YEAR
 from esfex.config.schema import (
-    GeoCoordinate,
     ESFEXConfig,
     RiskConfig,
     SystemConfig,
