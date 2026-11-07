@@ -157,16 +157,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Changed
 
-- **The master problem has no fuel-infrastructure investment.** Its fuel
-  storage and transport investment variables had a cost but no effect (no
-  constraint used them and the adapter passed no routes); fuel storage and
-  transport are built by the dispatch's primary-energy block. They are
+- **The old master fuel-infrastructure variables are replaced.** The
+  master's fuel storage and transport investment variables had a cost but no
+  effect (no constraint used them and the adapter passed no routes). They are
   removed with `PrimaryEnergyInvestmentConfig`, the `pe_configs` /
   `transport_routes` fields of `MasterProblemInput` and the
-  `add_primary_energy_investment_*` functions. The source fields
+  `add_primary_energy_investment_*` functions. Fuel storage, routes and
+  electrolyzers are now built by the master's fuel block (see "The master
+  plans the fuel chain and electrolyzers" under Added), which reads
   `storage_investment_cost`, `max_storage_investment_per_node` and
-  `max_transport_investment_per_arc` stay accepted but are documented as
-  unused.
+  `max_transport_investment_per_arc`.
 
 - **Each system keeps its own CO2 budget.** When several systems were
   simulated together, the merged system took the first system's
@@ -177,8 +177,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   dispatch now adds one CO2 budget constraint per system, over that
   system's nodes, with that system's `annual_budget`, `enabled` flag and
   `penalties.co2_budget_violation`. Single-system runs are unchanged. The
-  master problem and Benders have no CO2 budget (only the CO2 price), so
-  they are unaffected.
+  master problem applies the same per-system budgets (see "The master
+  problem holds the CO2 budget…" under Added).
 
 - **Primary energy: one fuel tank per node, balanced every hour.** The fuel
   model had two storage layers, a periodic balance and an hourly tank, tied
