@@ -2007,8 +2007,8 @@ class FragilityLibrary:
 
     Built-in curves come from NHESS-2024 (Nirandjan et al., 1,510+ curves)
     and PNNL-33587 (US DOE infrastructure fragility).  Users can override
-    or extend with custom curves via the YAML ``risk.fragility_curves``
-    configuration.
+    or extend them with custom curves (``load_from_config``) or in the
+    Studio's Risk Workbench.
     """
 
     def __init__(self) -> None:
@@ -2055,7 +2055,9 @@ class FragilityLibrary:
             )
 
     def load_from_config(self, configs: list[Any]) -> None:
-        """Load additional curves from YAML ComponentFragilityConfig objects.
+        """Load additional curves from objects with ``component_type``,
+        ``hazard_type``, ``source`` and ``curves`` (each with
+        ``damage_state``, ``im_median``, ``beta``).
 
         User-defined curves override built-in defaults for the same
         (component_type, hazard_type) combination.

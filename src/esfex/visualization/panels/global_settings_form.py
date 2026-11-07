@@ -311,14 +311,6 @@ class GlobalSettingsForm(QWidget):
         self._solver_verbose.toggled.connect(self._on_changed)
         svl.addRow("", self._solver_verbose)
 
-        # solver.scale_constraints is not read by the model or the solvers;
-        # shown disabled so the YAML value is still visible.
-        self._solver_scale = QCheckBox(tr("global_form.scale_constraints"))
-        self._solver_scale.toggled.connect(self._on_changed)
-        self._solver_scale.setEnabled(False)
-        self._solver_scale.setToolTip(tr("common.no_effect"))
-        svl.addRow("", self._solver_scale)
-
         # Solver-specific options live INSIDE the unified group as a
         # sub-section, so collapsing/showing them when the chosen solver
         # has no extra options still keeps everything visually in one
@@ -828,7 +820,6 @@ class GlobalSettingsForm(QWidget):
         self._solver_time.setValue(g.solver_time_limit)
         self._solver_gap.setValue(g.solver_gap)
         self._solver_verbose.setChecked(g.solver_verbose)
-        self._solver_scale.setChecked(g.solver_scale_constraints)
 
         # Solver-specific options
         self._rebuild_solver_options(solver_key)
@@ -1095,7 +1086,6 @@ class GlobalSettingsForm(QWidget):
         g.solver_time_limit = self._solver_time.value()
         g.solver_gap = self._solver_gap.value()
         g.solver_verbose = self._solver_verbose.isChecked()
-        g.solver_scale_constraints = self._solver_scale.isChecked()
 
         # Solver-specific options
         g.solver_specific_options = self._collect_solver_options()

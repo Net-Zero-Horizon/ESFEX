@@ -23,9 +23,7 @@ ESFEXConfig
  ├── MetaNetworkConfig
  │    └── SystemLinkConfig
  ├── RiskConfig
- │    ├── ClimateScenarioConfig, HazardScenarioConfig, HazardDataSourceConfig
- │    ├── ComponentFragilityConfig ── FragilityCurveConfig
- │    ├── RiskCriteriaConfig
+ │    ├── ClimateScenarioConfig, HazardScenarioConfig
  │    └── VOLLConfig
  ├── LoggingConfig
  └── systems: dict[str, SystemConfig]
@@ -126,7 +124,7 @@ class SystemConfig(BaseModel):
     ...
 ```
 
-Legacy uppercase aliases: `LOSS_DEMAND_TRHESHOLD`, `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `MAX_NPV_PENALTY_PER_MW`, `MAX_DECOMMISSION_COST_PER_MW`, `FORCE_REPLACEMENT`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
+Legacy uppercase aliases: `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `MAX_NPV_PENALTY_PER_MW`, `MAX_DECOMMISSION_COST_PER_MW`, `FORCE_REPLACEMENT`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
 
 **Properties:**
 
@@ -365,7 +363,6 @@ class SolverConfig(BaseModel):
     time_limit: int = 10800            # seconds, 0 = unlimited
     gap: float = 0.01                  # MIP optimality gap
     verbose: bool = False
-    scale_constraints: bool = True     # no effect (not read by the model or the solvers)
     options: dict[str, Any] = {}       # solver-specific options
 ```
 
@@ -497,7 +494,6 @@ class EVCategoryConfig(BaseModel):
 
 ```python
 class DCPowerFlowConfig(BaseModel):
-    base_impedance: float = 100.0       # Deprecated, ignored (S_base = ac_power_flow.base_mva)
     reactance_per_km: float = 0.4       # Ohm/km
     voltage_level_kv: float = 220.0     # kV
     max_angle_diff_deg: float = 30.0    # degrees (0-90), AC-OPF only
@@ -541,8 +537,6 @@ class N1SecurityConfig(BaseModel):
 class MetaNetworkConfig(BaseModel):
     systems: list[str]                          # system names, required
     systems_links: list[SystemLinkConfig] = []
-    dynamic_transfer_pricing: bool = True
-    inter_system_loss_segments: int = 2         # 0-5, 0 = linear fallback
 ```
 
 ### StochasticScenarioConfig
@@ -565,8 +559,6 @@ class RooftopSolarConfig(BaseModel):
     systems_per_node: Optional[list[Optional[int]]] = None    # passed to rooftex; null entry = rooftex default
     avg_system_size: Optional[list[Optional[float]]] = None   # kW per system; passed to rooftex
     performance_ratio: float = 0.75                   # passed to rooftex
-    cost_per_kw: float = 1200                         # not used by the runner
-    cost_reduction_rate: float = 0.08                 # not used by the runner
     initial_adoption: Optional[list[Optional[float]]] = None  # passed to rooftex
     max_adoption: Optional[dict[str, float]] = None   # per scenario; passed to rooftex
     adoption_rates: Optional[dict[str, float]] = None # per scenario; passed to rooftex
@@ -580,7 +572,6 @@ class ElectrolyzerConfig(BaseModel):
     name: str
     type: Literal["Electrolyzer"] = "Electrolyzer"
     fuel: str = "Hydrogen"
-    technology: Literal["PEM", "Alkaline", "SOE"] = "PEM"
     energy_per_kg_h2: float = 50.0      # kWh/kg H2
     water_cost: float = 0.001           # $/kg H2
     ...                                 # per-node lists, all required

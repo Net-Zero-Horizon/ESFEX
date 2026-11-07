@@ -588,7 +588,7 @@ class TestApplyPoints:
         r = apply_assignments(s, [a])
         assert r.electrolyzers_added == 1
         ez = next(iter(s.electrolyzers.values()))
-        assert ez.technology == "AEM"
+        assert (ez.name, ez.rated_power) == ("EZ", 5.0)
 
     def test_bus(self):
         s = _state_with_node(0)

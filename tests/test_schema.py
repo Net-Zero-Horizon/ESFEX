@@ -526,10 +526,7 @@ class TestElectrolyzerConfig:
         return {
             "name": "PEM_1",
             "life_time": [20],
-            "initial_age": [0],
-            "degradation_rate": [0.01],
             "rated_power": [10.0],
-            "min_power": [0.1],
             "ramp_up": [0.5],
             "ramp_down": [0.5],
             "eff_at_rated": [0.65],
@@ -545,29 +542,12 @@ class TestElectrolyzerConfig:
         assert e.name == "PEM_1"
         assert e.type == "Electrolyzer"
         assert e.fuel == "Hydrogen"
-        assert e.technology == "PEM"
 
-    def test_technology_pem(self):
-        e = ElectrolyzerConfig(**self._elec_1())
-        assert e.technology == "PEM"
-
-    def test_technology_alkaline(self):
-        data = self._elec_1()
-        data["technology"] = "Alkaline"
-        e = ElectrolyzerConfig(**data)
-        assert e.technology == "Alkaline"
-
-    def test_technology_soe(self):
-        data = self._elec_1()
-        data["technology"] = "SOE"
-        e = ElectrolyzerConfig(**data)
-        assert e.technology == "SOE"
-
-    def test_invalid_technology_raises(self):
-        data = self._elec_1()
-        data["technology"] = "HTSE"
-        with pytest.raises(ValidationError):
-            ElectrolyzerConfig(**data)
+    def test_removed_fields_are_not_fields(self):
+        # technology, min_power, initial_age and degradation_rate had no
+        # effect and were removed; an old file gets the unknown-key warning.
+        for f in ("technology", "min_power", "initial_age", "degradation_rate"):
+            assert f not in ElectrolyzerConfig.model_fields
 
     def test_defaults(self):
         e = ElectrolyzerConfig(**self._elec_1())
@@ -588,7 +568,6 @@ class TestSolverConfig:
         assert s.time_limit == 10800
         assert s.gap == 0.01
         assert s.verbose is False
-        assert s.scale_constraints is True
         assert s.options == {}
 
     @pytest.mark.parametrize("solver_name", [
@@ -1128,13 +1107,11 @@ class TestSystemConfig:
         assert sc.num_buses == 1
 
     def test_alias_fields(self):
-        """SystemConfig aliases (e.g., LOSS_DEMAND_TRHESHOLD) should work."""
+        """SystemConfig aliases (e.g., SIM_ROOFTOP) should work."""
         data = _system_minimal()
-        data["LOSS_DEMAND_TRHESHOLD"] = 0.1
         data["SIM_ROOFTOP"] = True
         data["TARGET_RE_PENETRATION"] = 0.8
         sc = SystemConfig(**data)
-        assert sc.loss_demand_threshold == 0.1
         assert sc.sim_rooftop is True
         assert sc.target_re_penetration == 0.8
 

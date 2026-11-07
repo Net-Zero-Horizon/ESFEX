@@ -1550,15 +1550,6 @@ function create_primary_energy_model(
     transport_extra = nothing,
     cyclic::Bool = false
 )
-    # The dispatch electrolyzers feed the Hydrogen tank
-    # (couple_primary_energy_to_power_system!); the old inputs are gone.
-    if input.h2_production_hourly !== nothing || input.electrolyzer_config !== nothing
-        throw(ArgumentError("PrimaryEnergyInput: h2_production_hourly and " *
-            "electrolyzer_config are no longer used and must be nothing; the " *
-            "dispatch electrolyzers feed the $(HYDROGEN_FUEL) tank through " *
-            "couple_primary_energy_to_power_system!(...; electrolyzers)"))
-    end
-
     # Create temporal mapping
     temporal = create_temporal_mapping(
         input.hours,

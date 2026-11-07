@@ -10,7 +10,7 @@ Two levels: **Global Settings** apply to the entire simulation; **System Setting
 
 Click **Global Settings** in the Element Tree. These parameters apply to all systems. The form has these groups, top to bottom: Systems to Simulate, Simulation, Temporal, Power Flow, Master Problem, N-1 Security, Risk & Resilience, Solver Options and Visual Scaling.
 
-**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s, gap 0.001, verbose off, Scale Constraints off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
+**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s, gap 0.001, verbose off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
 
 ### Systems to Simulate
 
@@ -141,7 +141,7 @@ The depth, redistribution and threshold values preset the SLD Analysis panel eac
 
 ### Risk & Resilience
 
-Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there, and stores its climate and hazard scenarios, which are saved as `risk.climate_scenarios` and `risk.hazard_scenarios` (climate probabilities are rescaled to sum to 1 on save, as the schema requires; a scenario the schema rejects is not saved and a warning is logged). The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
+Settings stored in the `risk:` block of the YAML. The fields are greyed out until **Enable Risk & Resilience Analysis** is checked. The **Risk and Resilience** workbench (toolbar) fills the measure, CVaR and combination fields when you click **Apply** there, and stores its climate and hazard scenarios, which are saved as `risk.climate_scenarios` and `risk.hazard_scenarios` (climate probabilities are rescaled to sum to 1 on save, as the schema requires; a scenario the schema rejects is not saved and a warning is logged). When the workbench opens, it starts from these saved values (measure, CVaR, combination method and scenarios), so a second **Apply** keeps what was not changed. The optimization run itself does not read the `risk:` block. See [Risk and Resilience](../formulation/risk-resilience.md).
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -166,7 +166,6 @@ Settings stored in the `risk:` block of the YAML. The fields are greyed out unti
 | Time Limit (s) | 10800 (YAML), 3600 (new project) | Maximum solve time per optimization problem |
 | Gap (frac) | 0.01 (YAML), 0.001 (new project) | Relative MIP optimality gap. Only relevant for MIP problems (unit commitment). |
 | Verbose | Off | Print the full solver log in the Run Output tab |
-| Scale Constraints | On (YAML), Off (new project) | No effect: written to the YAML (`solver.scale_constraints`) but read by neither the model nor the solvers, so the checkbox is disabled |
 
 Below these fields, the group shows the options specific to the selected solver (for example presolve or LP method). They are stored in `solver.options`.
 

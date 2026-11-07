@@ -28,9 +28,9 @@ A node is a geographic aggregation: it owns one or more buses and holds the dema
 | | Forecast | -- | Opens a demand-forecast dialog for this node only, without running the whole Grid Builder. |
 | | Hours / Peak / Total | h, MW, MWh | Read-only summary of the loaded demand. |
 | | View Demand... | -- | Plots the node's demand (enabled once demand is loaded or forecast). |
-| | Demand Sectors | table | Sectors defined for the system (added by Sector ID), with columns Flexible, Flex. Ratio, Criticality (critical / high / medium / low, which selects the system's VOLL multiplier), Delay Tol. and Price Sens. |
+| | Demand Sectors | table | Sectors defined for the system (added by Sector ID), with columns Flexible, Flex. Ratio, Criticality (critical / high / medium / low, which selects the system's VOLL multiplier) and Delay Tol. |
 | | Sector Distribution (this node) | frac | Share of this node's demand assigned to each sector. |
-| | Non-Electric Demand Types | table | Non-electric demand per fuel (pick a fuel, then **Add**), with columns Unit, Demand, Flexible, Flex. Ratio, Criticality, Delay Tol. and Price Sens. |
+| | Non-Electric Demand Types | table | Non-electric demand per fuel (pick a fuel, then **Add**), with columns Unit, Demand, Flexible, Flex. Ratio, Criticality and Delay Tol. |
 
 If no demand is loaded, the node has zero demand. Per-node, per-technology investment limits are set in the [Investment Portfolio](#investment-portfolio), not on the node.
 
@@ -331,19 +331,16 @@ Converts electricity to hydrogen, enabling power-to-gas coupling.
 | Section | Field | Unit | Description |
 |---------|-------|------|-------------|
 | **Identity** | Name | -- | Electrolyzer name |
-| | Technology | -- | `PEM`, `Alkaline` or `SOE` |
 | | Fuel | -- | Fuel produced (e.g., Hydrogen) |
 | | Technology Ref | -- | Optional reference to an entry under **Technologies** |
 | **Capacity** | Rated Power | MW | Maximum electrical input power |
-| | Min Power | pu | Minimum load as a fraction of rated power. Not applied in the operational dispatch. |
 | | Ramp Up / Ramp Down | pu/h | Maximum change in input power per hour as a fraction of rated power |
 | **Efficiency** | Eff. at Rated / Eff. at Min | frac | Conversion efficiency at full and at minimum load |
 | | Energy per kg H₂ | kWh/kg | Electricity needed per kg of hydrogen |
 | **Economics** | Fixed Cost | $/MW/yr | Annual fixed O&M |
 | | Variable Cost | $/MWh | Cost per MWh of electricity consumed |
 | | Water Cost | $/m³ | Cost of water |
-| **Lifecycle** | Lifetime / Initial Age | years | Expected life and current age |
-| | Degradation Rate | fraction/yr | Fraction per year (0.01 = 1 %/yr) |
+| **Lifecycle** | Lifetime | years | Life of an electrolyzer the master builds (existing ones do not age) |
 
 Investment in new electrolyzer capacity is configured in the [Investment Portfolio](#investment-portfolio). The **Delete Electrolyzer** button asks for confirmation.
 
@@ -422,9 +419,6 @@ Per-system distributed rooftop PV configuration.
 | | Simulation Seed | Random seed for the adoption simulation |
 | | Performance Ratio (frac) | System-level efficiency factor (typically 0.75-0.85) |
 | | Degradation Rate (frac/yr) | Annual panel degradation |
-| | Cost per kW ($/kW) | Installation cost per kW |
-| | Cost Reduction Rate (frac/yr) | Annual reduction of the installation cost |
-| | O&M Cost ($/kW/yr) | Annual maintenance cost |
 | | Base Year / Target Year | Start and end years of the adoption curve |
 | **Per-Node Parameters** | Systems/Node | Number of potential rooftop installations at the node |
 | | Avg Size (kW) | Average size per installation |

@@ -265,10 +265,8 @@ def _rich_system(name="Rich"):
         name="GasField", unit="MWh_th",
         max_availability=[10000.0, 0.0], import_cost=[3.0, 4.0],
         storage_capacity=[500.0, 0.0], initial_storage_level=[0.5, 0.0],
-        min_storage_level=0.1, storage_investment_cost=100.0,
+        min_storage_level=0.1,
         transport_cost=0.5, transport_losses=0.02,
-        max_storage_investment_per_node=1000.0,
-        max_transport_investment_per_arc=2000.0,
     )
 
     fuel_infra = FuelInfrastructureConfig(
@@ -319,7 +317,7 @@ def _rich_system(name="Rich"):
         fuel_infrastructure=fuel_infra,
         electric_demand={"residential": DemandSectorConfig(
             is_flexible=True, flexibility_ratio=0.2, criticality="high",
-            delay_tolerance=3, price_sensitivity=0.1)},
+            delay_tolerance=3)},
         sector_distribution={0: {"residential": 1.0}, 1: {"residential": 1.0}},
         non_electric_demand={"heat": NonElectricDemandConfig(
             fuel="Gas", unit="MWh_th", demand=[100, 200])},
@@ -665,7 +663,6 @@ def test_config_to_inter_system_links_rich_metadata():
         voltage_kv=[330.0],
         line_type=["overhead"],
         length_km=[210.0],
-        base_impedance=[100.0],
         reactance_per_km=[0.4],
         susceptance_pu=[0.001],
         num_circuits=[3],

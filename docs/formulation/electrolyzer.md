@@ -100,7 +100,7 @@ where \(r^{up}_b\), \(r^{down}_b\) are `ramp_up` and `ramp_down` in fractions of
 ### Not implemented
 
 - **Hydrogen balance without primary energy.** Without a `Hydrogen` primary-energy source the hydrogen produced is only reported (see [Results](#72-results)).
-- **Minimum operating point.** `min_power` is not used; the electrolyzer can run at any level between 0 and its rated power.
+- **Minimum operating point.** The electrolyzer can run at any level between 0 and its rated power (there is no `min_power`).
 - **Investment in the dispatch.** The dispatch builds no electrolyzers; the master does (`invest_cost`, `invest_max_power`, `life_time`), only with primary energy on. A built electrolyzer retires after its `life_time`; existing ones do not age.
 
 The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electrolyzer_constraints!`, ...) model investment and hydrogen output, but no run calls them; the master's electrolyzers are built in `master_fuel.jl`.
@@ -152,9 +152,7 @@ Electrolyzers are a system key. Lists are per node:
 electrolyzers:
   pem:
     name: PEM Electrolyzer
-    technology: PEM
     rated_power: [10.0]           # MW per node
-    min_power: [0.1]              # not used by the dispatch
     ramp_up: [0.5]                # fraction of rated power per hour (0 = no limit)
     ramp_down: [0.5]
     eff_at_rated: [0.70]          # hydrogen output (reported; fills a Hydrogen fuel tank)
@@ -166,8 +164,6 @@ electrolyzers:
     invest_cost: [1500000.0]      # $/MW, master problem (primary energy on)
     invest_max_power: [0.0]       # MW the master may build
     life_time: [20]
-    initial_age: [0]
-    degradation_rate: [0.0]
 ```
 
 ### 7.1 Parameter Reference
@@ -179,7 +175,6 @@ electrolyzers:
 | `ramp_up` / `ramp_down` | \(r^{up}\), \(r^{down}\) | 1/h | Yes | Ramp rates as fraction of rated power per hour (ELZ-2) |
 | `variable_cost` | \(c^{var}\) | \$/MWh | Yes | Variable cost |
 | `fixed_cost` | \(c^{fix}\) | \$/MW/h | Yes (constant) | Fixed cost per hour |
-| `min_power` | -- | fraction | No | Minimum operating point |
 | `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | \(\eta\), \(e^{H_2}\) | --, kWh/kg | With a `Hydrogen` primary-energy source | Hydrogen into the `Hydrogen` tank (PE-H2, in t); always reported in the results |
 | `water_cost` | \(c^{water}\) | \$/kg H2 | Yes | Water cost per kg of hydrogen |
 | `invest_cost`, `invest_max_power`, `life_time` | -- | \$/MW, MW, years | Master, with primary energy | Investment |

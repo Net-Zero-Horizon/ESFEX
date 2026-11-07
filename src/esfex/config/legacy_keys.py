@@ -14,10 +14,9 @@ from __future__ import annotations
 from typing import Any, Optional
 
 # ``DCPowerFlowConfig`` fields that may be given as flat system keys
-# ``dc_<field>`` (any capitalisation, e.g. ``DC_BASE_IMPEDANCE``).
+# ``dc_<field>`` (any capitalisation, e.g. ``DC_SLACK_BUS``).
 LEGACY_DC_FIELDS = (
-    "base_impedance", "reactance_per_km", "voltage_level_kv",
-    "max_angle_diff_deg", "slack_bus",
+    "reactance_per_km", "voltage_level_kv", "max_angle_diff_deg", "slack_bus",
 )
 
 # System keys holding one generator or storage unit each (legacy format).

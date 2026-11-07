@@ -742,8 +742,6 @@ def apply_assignments(
                     node=node_idx,
                     rated_power=_prop_float(p, "rated_power", "capacity_mw",
                                             "capacity", "MW"),
-                    technology=_prop_str(p, "technology", "tech",
-                                         default="PEM"),
                     latitude=lat,
                     longitude=lng,
                 )

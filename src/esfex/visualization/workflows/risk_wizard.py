@@ -162,8 +162,25 @@ class RiskWorkbench(QDialog):
         # Shared state
         self._state = RiskWorkbenchState(self)
         self._extract_system_info()
+        self._load_saved_settings()
 
         self._build_ui()
+
+    def _load_saved_settings(self):
+        """Start from the project's saved ``risk.*`` settings (what Apply
+        wrote), so reopening the workbench neither shows the defaults nor
+        overwrites the saved values on the next Apply."""
+        gs = getattr(self._model, "global_settings", None)
+        if gs is None:
+            return
+        import copy
+        s = self._state
+        s.risk_measure = gs.risk_measure
+        s.cvar_alpha = gs.risk_cvar_alpha
+        s.cvar_lambda = gs.risk_cvar_lambda
+        s.combination_method = gs.risk_combination_method
+        s.climate_scenarios = copy.deepcopy(list(gs.risk_climate_scenarios or []))
+        s.hazard_scenarios = copy.deepcopy(list(gs.risk_hazard_scenarios or []))
 
     # ------------------------------------------------------------------
     # System info extraction from all_states

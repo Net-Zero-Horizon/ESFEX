@@ -6,7 +6,7 @@ with S-curve adoption dynamics.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -189,137 +189,6 @@ def generate_rooftop_solar_profiles(
     adoption_factors = np.array(adoption_factors)
 
     return availability_matrix, adoption_factors, max_potential
-
-
-def integrate_rooftop_solar(
-    units_config: Dict[str, dict],
-    num_nodes: int,
-    year: int,
-    base_year: int,
-    availability_matrix: np.ndarray,
-    adoption_factors: np.ndarray,
-    max_potential: List[float],
-    co2_reduction: float = 0.7,
-    cost_reduction_rate: float = 0.08,
-    min_capacity_threshold: float = 1.0,
-    config: Optional[dict] = None,
-) -> Optional[dict]:
-    """
-    Integrate rooftop solar generation into the model.
-
-    Parameters
-    ----------
-    units_config : dict
-        Dictionary with unit configurations (modified in place)
-    num_nodes : int
-        Number of nodes
-    year : int
-        Current modeling year
-    base_year : int
-        Base year for projections
-    availability_matrix : np.ndarray
-        Hourly availability by node
-    adoption_factors : np.ndarray
-        Adoption factors by node
-    max_potential : list
-        Maximum potential by node in MW
-    co2_reduction : float
-        CO2 reduction factor vs conventional mix
-    cost_reduction_rate : float
-        Annual cost reduction rate
-    min_capacity_threshold : float
-        Minimum total capacity (MW) to add unit
-    config : dict, optional
-        Configuration dictionary
-
-    Returns
-    -------
-    dict or None
-        Rooftop solar unit configuration, or None if below threshold
-    """
-    config = config or {}
-
-    years_diff = year - base_year
-
-    # Configuration parameters
-    o_and_m_cost = config.get("o_and_m_cost", 20)
-    performance_ratio = config.get("performance_ratio", 0.75)
-    degradation_rate = config.get("degradation_rate", 0.005)
-    target_year = config.get("target_year", 2050)
-    base_cost_per_kw = config.get("cost_per_kw", 1200)
-
-    # S-curve progress factor
-    progress_factor = min(1.0, years_diff / (target_year - base_year))
-    s_curve_factor = 1 / (1 + np.exp(-10 * (progress_factor - 0.5)))
-
-    current_adoption = adoption_factors * s_curve_factor
-
-    # Calculate installed capacity
-    installed_capacity = np.array(max_potential) * current_adoption
-
-    # Apply degradation
-    degradation_factor = 1.0 - (degradation_rate * years_diff / 2)
-    installed_capacity = installed_capacity * degradation_factor
-
-    # Check minimum threshold
-    total_installed = np.sum(installed_capacity)
-    if total_installed < min_capacity_threshold:
-        logger.debug(f"Rooftop solar below threshold: {total_installed:.2f} MW")
-        return None
-
-    # Cost reduction (learning curve)
-    cost_factor = (1 - cost_reduction_rate) ** years_diff
-    investment_cost = base_cost_per_kw * cost_factor
-
-    # Calculate remaining investment potential
-    invest_max_power = [
-        max(0.0, max_potential[i] * (1 - current_adoption[i]))
-        for i in range(len(max_potential))
-    ]
-
-    # Create unit configuration
-    rooftop_unit = {
-        "name": "Rooftop_Solar",
-        "type": "Renewable",
-        "fuel": "Sun",
-        "rated_power": installed_capacity.tolist(),
-        "fuel_cost": [0.0] * num_nodes,
-        "fixed_cost": [o_and_m_cost * cost_factor] * num_nodes,
-        "maintenance_cost": [5 * cost_factor] * num_nodes,
-        "invest_cost": [investment_cost] * num_nodes,
-        "invest_max_power": invest_max_power,
-        "reservable": False,
-        "ramp_up": [1.0] * num_nodes,
-        "ramp_down": [1.0] * num_nodes,
-        "min_up": [1] * num_nodes,
-        "min_down": [1] * num_nodes,
-        "start_up_cost": [0.0] * num_nodes,
-        "inertia": [0.0] * num_nodes,
-        "Availability": availability_matrix,
-        "min_power": [0.0] * num_nodes,
-        "eff_at_rated": [performance_ratio] * num_nodes,
-        "eff_at_min": [performance_ratio] * num_nodes,
-    }
-
-    # Add unit to configuration
-    try:
-        existing_ids = [
-            int(k.split("_")[1])
-            for k in units_config.keys()
-            if k.startswith("unit_")
-        ]
-        unit_id = max(existing_ids) + 1 if existing_ids else 1
-    except (ValueError, IndexError):
-        unit_id = len(units_config) + 1
-
-    units_config[f"unit_{unit_id}"] = rooftop_unit
-
-    logger.info(
-        f"Added rooftop solar: {total_installed:.2f} MW installed, "
-        f"adoption {np.mean(current_adoption)*100:.1f}%"
-    )
-
-    return rooftop_unit
 
 
 def calculate_rooftop_potential(
