@@ -1,7 +1,21 @@
 # M2 design: fuel balance and electrolyzers in the master (#89 part 2)
 
-Status: design only. It needs choices only the user can make (section 6), so
-nothing is implemented yet. Base: `fix/bug-sweep` c2acacc.
+Status: implemented with the user's decisions (2026-11-07): D-1 (A) only the
+master builds fuel storage/transport/electrolyzers; D-2 Benders cuts extended;
+D-3/D-4 fuel block on whenever primary energy is, fuel-coupled units pay the
+fuel price; D-5 `fuel_transport_cost` scales route cost and route investment;
+water cost charged in the dispatch too. Base: `fix/bug-sweep` c2acacc.
+
+Deviations from the design below, found while implementing:
+- Tanks are cyclic per period also with TSAM inter-period linking (a chain
+  would need the drawdown valued across weighted periods).
+- Benders: a year's cut is added even when every gradient is zero once the
+  fuel block is on (otherwise θ never learns the flat fuel cost and the loop
+  does not converge).
+- Without primary energy the master has no electrolyzers (they enter with the
+  fuel block).
+- Myopic: electrolyzers built in earlier years become existing capacity
+  (`rated_power`) of later years and do not retire within the run.
 
 ## 1. Where things stand today
 

@@ -1131,24 +1131,8 @@ class TestMergeBusIdNamespacing:
         assert "bus_5" in ids and "Solo__bus_5" not in ids
 
 
-# ---------------------------------------------------------------------------
-# Tests: fuel infrastructure carried between windows
-# ---------------------------------------------------------------------------
-
-def test_built_fuel_capacity_carries_to_later_windows(tmp_path):
-    """Each window's fuel storage/transport investment adds to the capacity the
-    next windows start from (it was never recorded, so every window re-built)."""
-    from esfex.runner import SimulationState
-
-    orch = _create_orchestrator(tmp_path=tmp_path)
-    orch.state = SimulationState(year=2025, base_year=2025, units_config={})
-    pe = {"storage_investments": {"Gas": np.array([[0.0, 30.0]])},
-          "transport_investments": {"Gas": np.array([[5.0]])}}
-    orch._carry_pe_investments(pe)
-    orch._carry_pe_investments(pe)
-    caps = orch.state.primary_energy_capacities
-    assert caps["storage"] == {"Gas": {1: 60.0}}
-    assert caps["transport"] == {"Gas": {0: 10.0}}
+# Fuel infrastructure is built by the master and handed to each year's
+# dispatch: tests/test_master_fuel.py (#89).
 
 
 # ---------------------------------------------------------------------------

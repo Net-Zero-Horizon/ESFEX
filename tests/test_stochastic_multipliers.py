@@ -77,10 +77,14 @@ def test_keys_on_the_same_field_multiply(caplog):
 def test_keys_without_effect_are_dropped_with_a_warning(caplog):
     dropped = sorted(SCENARIO_MULTIPLIERS_WITHOUT_EFFECT)[:1] + ["not_a_key"]
     with caplog.at_level(logging.WARNING, logger="esfex.config.schema"):
-        m = ScenarioMultipliers(**{k: 2.0 for k in dropped}, penalty_loss_of_load=3.0)
-    assert m.model_fields_set == {"penalty_loss_of_load"}
+        m = ScenarioMultipliers(**{k: 2.0 for k in dropped}, electrolyzer_invest_cost=2.0,
+                                penalty_loss_of_load=3.0)
+    # electrolyzer_invest_cost scales the master's electrolyzer builds (#89)
+    assert m.model_fields_set == {"penalty_loss_of_load", "electrolyzer_invest_cost"}
+    assert m.electrolyzer_invest_cost == 2.0
     for key in dropped:
         assert key in caplog.text
+    assert "electrolyzer_invest_cost" not in caplog.text
 
 
 @pytest.mark.parametrize("key", [
@@ -185,7 +189,8 @@ def test_gui_round_trip_translates_and_keeps_only_set_keys():
 
     gui = config_to_stochastic_scenarios(cfg)
     assert gui[0].multipliers == {"fuel_cost": 1.5, "demand_growth": 1.03,
-                                  "penalty_loss_of_load": 2.0}
+                                  "penalty_loss_of_load": 2.0,
+                                  "electrolyzer_invest_cost": 0.5}
 
     out = {}
     stochastic_scenarios_to_config_dict(gui, out)

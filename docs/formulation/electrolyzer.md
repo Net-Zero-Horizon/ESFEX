@@ -16,11 +16,12 @@ Electrolyzers consume electricity to produce hydrogen via water electrolysis (sp
 What ESFEX models today:
 
 - The electrolyzer's power consumption in the operational dispatch, bounded by its rated power and ramp rates, as a load in the power balance
-- Its variable and fixed costs
+- Its variable, water and fixed costs
+- With primary energy: investment in new electrolyzer power, decided by the master problem on its representative days, and the electrolyzer in the master's day operation ([Capacity Expansion](capacity-expansion.md#fuel-block)). Each dispatch year receives the power built and in service that year on top of `rated_power`
 - Every entry under `electrolyzers`, each with its own power and hydrogen output in the results
 - With primary energy: the hydrogen enters the `Hydrogen` tank of the electrolyzer's node ([Primary Energy](primary-energy.md#power-system-coupling), PE-H2), where hydrogen-fuelled generators and non-electric hydrogen demand draw it (role 2)
 
-What it does not model: investment in new electrolyzers, minimum operating point, a market value for hydrogen, and the electrolyzer in the master problem. Without a `Hydrogen` primary-energy source the dispatch gives the hydrogen no value, and the electrolyzer plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`.
+What it does not model: minimum operating point, a market value for hydrogen, and, without primary energy, investment and the electrolyzer in the master problem. Without a `Hydrogen` primary-energy source the dispatch gives the hydrogen no value, and the electrolyzer plays only role 1: a load the optimizer runs when that lowers system cost, for example to absorb renewable output that would otherwise be curtailed at `curtailment_cost`.
 
 ---
 
@@ -100,9 +101,9 @@ where \(r^{up}_b\), \(r^{down}_b\) are `ramp_up` and `ramp_down` in fractions of
 
 - **Hydrogen balance without primary energy.** Without a `Hydrogen` primary-energy source the hydrogen produced is only reported (see [Results](#72-results)).
 - **Minimum operating point.** `min_power` is not used; the electrolyzer can run at any level between 0 and its rated power.
-- **Investment.** `invest_cost`, `invest_max_power` and `life_time` are not used by the dispatch, and the master problem has no electrolyzer.
+- **Investment in the dispatch.** The dispatch builds no electrolyzers; the master does (`invest_cost`, `invest_max_power`, `life_time`), only with primary energy on. A built electrolyzer retires after its `life_time`; existing ones do not age.
 
-The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electrolyzer_constraints!`, ...) model investment and hydrogen output, but no run calls them.
+The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electrolyzer_constraints!`, ...) model investment and hydrogen output, but no run calls them; the master's electrolyzers are built in `master_fuel.jl`.
 
 ---
 
@@ -113,18 +114,19 @@ The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electr
 Built in `build_objective!()` (`power_system.jl`) as `electrolyzer_cost`, part of the energy costs that are multiplied by the time step \(\Delta t\):
 
 \[
-C^{elz} = \Delta t \left[ \sum_{b,t} c^{var}_b \, P^{elz}_{b,t} + \sum_b \bar{P}^{elz}_b \, c^{fix}_b \, T \right]
+C^{elz} = \Delta t \left[ \sum_{b,t} \left(c^{var}_b + c^{water} h_b\right) P^{elz}_{b,t} + \sum_b \bar{P}^{elz}_b \, c^{fix}_b \, T \right]
 \tag{ELZ-OBJ}
 \]
 
-where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) is the window length in hours.
+where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) is the window length in hours, and \(h_b\) the hydrogen made per MWh (kg/MWh, \(1000 \cdot \bar{\eta}_b / e^{H_2}\)). The master charges the same variable and water cost on its representative days, and the fixed cost per year (`fixed_cost` × hours of the year × rated plus built power).
 
 | Term | Units | Description |
 |------|-------|-------------|
 | \(c^{var}_b\) (`variable_cost`) | \$/MWh | Variable cost of the electricity consumed |
 | \(c^{fix}_b\) (`fixed_cost`) | \$/MW per hour | Fixed cost on rated power. It is applied per hour of the window, so a yearly figure in \$/MW/year must be divided by 8760. It is a constant and does not affect the dispatch |
+| \(c^{water}\) (`water_cost`) | \$/kg H2 | Water cost of the hydrogen produced |
 
-`water_cost` is not used. The cost is reported as `electrolyzer_cost` and, when the electrolyzers feed the primary-energy `Hydrogen` tank, also as `pe_electrolyzer_cost` (the same amount, charged once).
+The cost is reported as `electrolyzer_cost` and, when the electrolyzers feed the primary-energy `Hydrogen` tank, also as `pe_electrolyzer_cost` (the same amount, charged once).
 
 ---
 
@@ -160,9 +162,9 @@ electrolyzers:
     energy_per_kg_h2: 55.0        # kWh per kg H2
     fixed_cost: [3.4]             # $/MW per hour (about 30000 $/MW/year)
     variable_cost: [2.0]          # $/MWh
-    water_cost: 0.05              # not used
-    invest_cost: [1500000.0]      # not used
-    invest_max_power: [0.0]       # not used
+    water_cost: 0.05              # $/kg H2
+    invest_cost: [1500000.0]      # $/MW, master problem (primary energy on)
+    invest_max_power: [0.0]       # MW the master may build
     life_time: [20]
     initial_age: [0]
     degradation_rate: [0.0]
@@ -179,8 +181,8 @@ electrolyzers:
 | `fixed_cost` | \(c^{fix}\) | \$/MW/h | Yes (constant) | Fixed cost per hour |
 | `min_power` | -- | fraction | No | Minimum operating point |
 | `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | \(\eta\), \(e^{H_2}\) | --, kWh/kg | With a `Hydrogen` primary-energy source | Hydrogen into the `Hydrogen` tank (PE-H2, in t); always reported in the results |
-| `water_cost` | -- | \$/kg H2 | No | Water cost |
-| `invest_cost`, `invest_max_power`, `life_time` | -- | -- | No | Investment |
+| `water_cost` | \(c^{water}\) | \$/kg H2 | Yes | Water cost per kg of hydrogen |
+| `invest_cost`, `invest_max_power`, `life_time` | -- | \$/MW, MW, years | Master, with primary energy | Investment |
 
 ### 7.2 Results
 

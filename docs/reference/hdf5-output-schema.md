@@ -46,6 +46,7 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │       ├── vallcoe/               # Generator VALLCOE
 │       ├── technology_selling_prices/ # Revenue analysis per generator
 │       ├── primary_energy/        # Fuel supply chain results (if enabled)
+│       ├── master_fuel_capacity/  # Fuel storage, routes and electrolyzers the master built (if any)
 │       ├── n1_security/           # N-1 security results (if enabled)
 │       └── [datasets]             # Per-node and system-level time series
 ├── global/
@@ -202,7 +203,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_loss_cost` | float | $ | Primary energy loss-of-supply penalty |
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
-| `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
+| `pe_investment_cost` | float | $ | Always 0: fuel storage and transport are built (and charged) by the master problem |
 | `pe_coupling_slack_cost` | float | $ | Deprecated, always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
 | `pe_electrolyzer_cost` | float | $ | The electrolyzers' cost (`electrolyzer_cost`) when their hydrogen fills the primary-energy `Hydrogen` tank, 0 otherwise. The same money as `electrolyzer_cost`, not an extra cost: do not add both |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
@@ -427,6 +428,16 @@ Written when the system has electrolyzers, one dataset per entry under `electrol
 | Type | float64 |
 | Units | kg/h |
 | Description | Hydrogen produced: power × 1000 × mean(`eff_at_rated`, `eff_at_min`) / `energy_per_kg_h2` |
+
+### Master-Built Fuel Infrastructure
+
+`master_fuel_capacity/` holds the capacity the master problem built and that is in service in the year, on top of the configured capacity: what the year's dispatch used. Written only when the master built any (primary energy on). The dispatch builds no fuel infrastructure, so `primary_energy/storage_investments` and `primary_energy/transport_investments` are no longer written.
+
+| Dataset | Shape | Units | Description |
+|---------|-------|-------|-------------|
+| `storage/{fuel}` | (num_nodes,) | fuel units | Fuel storage built, per node |
+| `transport/{fuel}` | (num_routes,) | units/day | Route capacity built, per `fuel_transport_routes` entry |
+| `electrolyzer/{electrolyzer key}` | (num_nodes,) | MW | Electrolyzer power built (added to `rated_power`) |
 
 ### Investment Data
 
