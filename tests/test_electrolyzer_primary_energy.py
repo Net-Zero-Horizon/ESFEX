@@ -320,10 +320,7 @@ def test_primary_energy_builds():
         "development",  # mode
         jl.seval("Dict{String, Any}()"),  # cumulative_capacities
         jl.seval("nothing"),  # initial_storage_levels
-        False,   # investment_from_master
-        jl.seval("nothing"),  # h2_production_hourly
         jl.seval("Dict{Int, Vector{Float64}}()"),  # generator_rated_power
-        jl.seval("nothing"),  # electrolyzer_config
     )
 
     # Create model
@@ -393,10 +390,7 @@ def test_primary_energy_solves():
         "development",
         jl.seval("Dict{String, Any}()"),
         jl.seval("nothing"),
-        False,  # investment_from_master
-        jl.seval("nothing"),  # h2_production_hourly
         jl.seval("Dict{Int, Vector{Float64}}()"),  # generator_rated_power
-        jl.seval("nothing"),  # electrolyzer_config
     )
 
     model = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
@@ -469,9 +463,8 @@ def test_transport_transit_delay_causes_supply_stress():
             2025, 2025, 2, 72, fuels, infra_dict, ne_demands, routes,
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
             24, 72, 0.05, 1000.0, "development",
-            jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
-            jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
-            jl.seval("nothing"), 2000.0, 1, 0)
+            jl.seval("Dict{String,Any}()"), jl.seval("nothing"),
+            jl.seval("Dict{Int,Vector{Float64}}()"), 2000.0, 1, 0)
         m = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
         jl._m = m
         jl._in = inp
@@ -533,9 +526,8 @@ def test_source_disruption_cuts_supply():
             py_to_julia_matrix(np.array([[0.0]])),
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
             24, 72, 0.05, 1000.0, "development",
-            jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
-            jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
-            jl.seval("nothing"))
+            jl.seval("Dict{String,Any}()"), jl.seval("nothing"),
+            jl.seval("Dict{Int,Vector{Float64}}()"))
         m = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
         jl._m = m
         jl._in = inp
@@ -593,9 +585,8 @@ def test_tank_min_storage_floor_binds():
             py_to_julia_matrix(np.array([[0.0]])),
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
             24, 24, 0.05, 1000.0, "development",
-            jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
-            jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
-            jl.seval("nothing"))
+            jl.seval("Dict{String,Any}()"), jl.seval("nothing"),
+            jl.seval("Dict{Int,Vector{Float64}}()"))
         m = jl.seval("using JuMP, HiGHS; Model(HiGHS.Optimizer)")
         jl._m = m
         jl._in = inp
@@ -738,10 +729,7 @@ def test_primary_energy_power_system_coupling():
         "economic_dispatch",
         jl.seval("Dict{String, Any}()"),
         jl.seval("nothing"),
-        False,  # investment_from_master
-        jl.seval("nothing"),  # h2_production_hourly
         gen_rated,  # generator_rated_power
-        jl.seval("nothing"),  # electrolyzer_config
     )
 
     jl._ps_model = ps_model

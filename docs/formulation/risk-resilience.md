@@ -928,12 +928,12 @@ Following ISO 31000:2018 §6.5, risk evaluation classifies each node's risk leve
 2. **Tolerable (ALARP) region** — Risk should be reduced if reasonably practicable. Split into "tolerable low" and "tolerable high" sub-bands.
 3. **Intolerable region** — Risk is unacceptable; mandatory risk treatment required.
 
-### 9.2 Risk Criteria Configuration
+### 9.2 Risk Criteria Thresholds
 
 
-Risk criteria are configured through `RiskCriteriaConfig` with the following thresholds:
+`evaluate_risk_criteria()` takes the thresholds as an optional `criteria` dict with the keys below; the Workbench uses the defaults (they are not part of the YAML configuration):
 
-| Criterion | Threshold Field | Default | Unit |
+| Criterion | Key | Default | Unit |
 |-----------|----------------|---------|------|
 | EAL negligible | `eal_negligible` | 1,000 | \$/year |
 | EAL tolerable | `eal_tolerable` | 50,000 | \$/year |
@@ -1068,14 +1068,6 @@ risk:
   risk_measure: cvar          # Options: expected, cvar, minimax_regret
   cvar_alpha: 0.95            # CVaR confidence level (worst 5%)
   cvar_lambda: 0.5            # Risk-aversion weight (0 = risk-neutral, 1 = pure CVaR)
-
-  risk_criteria:              # ALARP thresholds (ISO 31000 §6.5)
-    eal_negligible: 1000      # $/year — below this, risk is broadly acceptable
-    eal_tolerable: 50000      # $/year — above this, risk reduction needed
-    eal_intolerable: 500000   # $/year — above this, mandatory action
-    composite_risk_low: 0.01  # probability threshold for "low" band
-    composite_risk_medium: 0.05
-    composite_risk_high: 0.15
 
   climate_scenarios:
     - name: ssp245

@@ -581,11 +581,8 @@ class TestConvertPrimaryEnergySource:
             "import_cost": [50, 50],
             "storage_capacity": [500, 500],
             "initial_storage_level": [0.5, 0.5],
-            "storage_investment_cost": 10000,
             "transport_cost": 5,
             "transport_losses": 0.01,
-            "max_storage_investment_per_node": 200,
-            "max_transport_investment_per_arc": 100,
         }
         result = _convert_primary_energy_source("LNG", data)
         assert isinstance(result, PrimaryEnergySourceConfig)

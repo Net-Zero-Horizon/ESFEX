@@ -20,8 +20,8 @@ from esfex.config.schema import ElectrolyzerConfig, TemporalConfig  # noqa: E402
 def _elz(name, rated):
     # Negative variable cost: a paying offtake, so each runs at rated power.
     return ElectrolyzerConfig(
-        name=name, life_time=[20], initial_age=[0], degradation_rate=[0.0],
-        rated_power=[rated], min_power=[0.0], ramp_up=[0.0], ramp_down=[0.0],
+        name=name, life_time=[20],
+        rated_power=[rated], ramp_up=[0.0], ramp_down=[0.0],
         eff_at_rated=[0.7], eff_at_min=[0.7], energy_per_kg_h2=50.0,
         fixed_cost=[0.0], variable_cost=[-500.0], invest_cost=[0.0],
         invest_max_power=[0.0])

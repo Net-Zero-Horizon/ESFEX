@@ -804,12 +804,8 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `name` | str | required | Electrolyzer name |
 | `type` | `Electrolyzer` | `"Electrolyzer"` | Always `Electrolyzer` |
 | `fuel` | str | `"Hydrogen"` | Output fuel |
-| `technology` | `PEM` \| `Alkaline` \| `SOE` | `"PEM"` | `PEM`, `Alkaline` or `SOE` |
-| `life_time` | list[int] | required | Lifetime per node (years) |
-| `initial_age` | list[int] | required | Age per node (years) |
-| `degradation_rate` | list[float] | required | Degradation per node (fraction/year) |
-| `rated_power` | list[float] | required | Rated power per node (MW) |
-| `min_power` | list[float] | required | Minimum load per node (fraction). Not applied in the operational dispatch (the electrolyzer can run anywhere between 0 and its rated power) |
+| `life_time` | list[int] | required | Lifetime per node (years) of an electrolyzer the master builds; existing electrolyzers do not age |
+| `rated_power` | list[float] | required | Rated power per node (MW); the electrolyzer runs anywhere between 0 and this |
 | `ramp_up` | list[float] | required | Ramp-up per node (fraction of rated power per hour, scaled to `resolution_hours`; `0` = no limit). Applied in the operational dispatch along with the rated-power limit; not carried across rolling-horizon windows |
 | `ramp_down` | list[float] | required | Ramp-down per node (same units and scope as `ramp_up`) |
 | `eff_at_rated` | list[float] | required | Efficiency at rated load per node |
@@ -847,15 +843,12 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `storage_capacity` | list[float] | required | Storage capacity per node (units) |
 | `initial_storage_level` | list[float] | required | Initial storage fraction per node |
 | `min_storage_level` | float (0–1) | `0.1` | Minimum storage level (fraction) |
-| `storage_investment_cost` | float | required | $/unit storage capacity. Not used by any model: storage investment is set in `fuel_infrastructure` |
 | `transport_cost` | float | required | $/unit/km transport cost |
 | `transport_losses` | float | required | Loss fraction per 100 km |
 | `transport_transit_days_per_100km` | float (≥ 0) | `0` | Source->tank replenishment lead time, in days per 100 km of route distance. 0 = instantaneous transport. |
 | `disruption_start_hour` | int (≥ 0) | `0` | Supply-disruption window start, absolute horizon hour (hour 0 = 1 January of `base_year`, 8760 h per year), inclusive. |
 | `disruption_end_hour` | int (≥ 0) | `0` | Supply-disruption window end, absolute horizon hour (exclusive). end <= start disables the disruption. |
 | `disruption_availability` | float (0–1) | `1` | Availability fraction during the disruption window (0 = full cut, 1 = none). |
-| `max_storage_investment_per_node` | float | required | Maximum storage investment per node (units). Not used (see `fuel_infrastructure` expansion limits) |
-| `max_transport_investment_per_arc` | float | required | Maximum transport investment per arc (units). Not used (see `fuel_infrastructure` expansion limits) |
 
 ---
 
@@ -948,7 +941,6 @@ The budget covers the system's own power plants. The dispatch and the master pro
 | `flexibility_ratio` | float (0–1) | `0` | Share of the sector's demand per step that can be shifted |
 | `criticality` | `critical` \| `high` \| `medium` \| `low` | `"medium"` | Shedding priority; weighted by `criticality_penalties` |
 | `delay_tolerance` | int (≥ 0) | `0` | Maximum shift, earlier or later (hours); 0 = no shifting |
-| `price_sensitivity` | float (0–1) | `0` | Not used |
 
 ---
 
@@ -962,7 +954,6 @@ The budget covers the system's own power plants. The dispatch and the master pro
 | `flexibility_ratio` | float | `0` | Shiftable fraction |
 | `criticality` | `critical` \| `high` \| `medium` \| `low` | `"medium"` | Shedding priority |
 | `delay_tolerance` | int | `0` | Maximum delay (hours) |
-| `price_sensitivity` | float | `0` | Price response |
 | `demand` | list[int] | required | Annual demand per node (units of `unit`) |
 
 ---
@@ -996,9 +987,6 @@ The budget covers the system's own power plants. The dispatch and the master pro
 | `avg_system_size` | list[float \| null] \| null | `null` | Average system size per node, kW |
 | `performance_ratio` | float (0–1) | `0.75` | Performance ratio of the rooftex profile |
 | `degradation_rate` | float (≥ 0) | `0.005` | Degradation (fraction/year) |
-| `cost_per_kw` | float | `1200` | Installation cost, $/kW (not used by the runner) |
-| `cost_reduction_rate` | float | `0.08` | Annual cost reduction (not used by the runner) |
-| `o_and_m_cost` | float | `20` | O&M cost, $/kW/year (not used by the runner) |
 | `base_year` | int | `2025` | Reference year |
 | `target_year` | int | `2050` | Target year |
 | `initial_adoption` | list[float \| null] \| null | `null` | Current adoption per node (passed to rooftex, which 0.1.1 does not use; `null` = rooftex's 0.05) |
@@ -1145,10 +1133,7 @@ The block holds the settings of the Studio's Risk & Resilience Workbench (analys
 | `cvar_lambda` | float (0–1) | `0.5` | Risk-aversion weight (0 = risk-neutral, 1 = pure CVaR) |
 | `climate_scenarios` | list[[ClimateScenarioConfig](#climatescenarioconfig)] | `[]` | Climate scenarios; probabilities must sum to 1 (±0.01) |
 | `hazard_scenarios` | list[[HazardScenarioConfig](#hazardscenarioconfig)] | `[]` | Hazard events |
-| `hazard_data_sources` | list[[HazardDataSourceConfig](#hazarddatasourceconfig)] | `[]` | Hazard data providers |
-| `fragility_curves` | list[[ComponentFragilityConfig](#componentfragilityconfig)] | `[]` | Fragility curves per component and hazard |
 | `combination_method` | `independent` \| `copula` \| `mcda` | `"independent"` | Method for combining multi-hazard failure probabilities |
-| `risk_criteria` | [RiskCriteriaConfig](#riskcriteriaconfig) | see [RiskCriteriaConfig](#riskcriteriaconfig) | Classification thresholds |
 | `voll` | [VOLLConfig](#vollconfig) | see [VOLLConfig](#vollconfig) | Value of lost load by sector |
 | `demand_base_temperature` | float | `24` | Base temperature for HDD/CDD calculation (°C). Default 24°C is appropriate for tropical SIDS; use 18°C for temperate regions. |
 | `demand_heating_coefficient` | float (≥ 0) | `0.5` | Heating demand sensitivity (%/°C below base temperature). Refs: Sailor & Munoz (1997). Typical 0.5 for tropical SIDS. |
@@ -1194,76 +1179,22 @@ The block holds the settings of the Studio's Risk & Resilience Workbench (analys
 | `intensity_measure` | float | `0` | Event intensity (PGA in g, wind in m/s, flood depth in m, …) |
 | `description` | str | `""` | Free text |
 
-### HazardDataSourceConfig
+### Risk classification
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `hazard_type` | str | required | earthquake, cyclone, flood, … |
-| `source` | str | required | Data provider key: usgs, gem, ibtracs, storm, fathom, wri_aqueduct, noaa_tsunami, firms, gvp, nasa_slr, thinkhazard |
-| `return_periods` | list[int] | `[100, 500]` | Return periods of interest (years) |
-| `enabled` | bool | `true` | Use this source |
-| `api_key` | str | `""` | API key if required by the source |
-| `cache_dir` | str | `""` | Local cache directory override |
-| `options` | dict[str, any] | `{}` | Source-specific options (e.g. dataset version, resolution) |
+The Workbench classifies each node with `evaluate_risk_criteria()` and fixed thresholds; they are not part of the configuration. The expected annual loss (EAL) and the composite failure probability are classified separately:
 
-### ComponentFragilityConfig
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `component_type` | `solar_pv` \| `wind_turbine` \| `diesel_gen` \| `gas_turbine` \| `substation` \| `transmission_line` \| `battery` \| `transformer` \| `hydroelectric` \| `biomass` \| `otec` \| `electrolyzer` | required | Component class |
-| `hazard_type` | `earthquake` \| `cyclone` \| `flood` \| `tsunami` \| `wildfire` \| `volcanic` \| `sea_level_rise` | required | Hazard |
-| `curves` | list[[FragilityCurveConfig](#fragilitycurveconfig)] | required | One curve per damage state |
-| `source` | str | `""` | Literature source, e.g. 'NHESS-2024' |
-
-### FragilityCurveConfig
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `damage_state` | `slight` \| `moderate` \| `extensive` \| `complete` | `"complete"` | Damage state |
-| `im_median` | float (> 0) | required | Median intensity measure for this damage state |
-| `beta` | float (> 0, ≤ 2.0) | required | Log-standard deviation (aleatory) |
-| `beta_epistemic` | float (0–2.0) | `0` | Epistemic uncertainty (β_u); total β = sqrt(β² + β_u²) |
-| `source_quality` | `empirical` \| `analytical` \| `expert_judgment` \| `proxy_derived` | `"analytical"` | Quality classification of fragility source |
-| `description` | str | `""` | Free text |
-
-## RiskCriteriaConfig
-
-Thresholds used by `evaluate_risk_criteria()` to classify each node.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `eal_negligible` | float (≥ 0) | `1000` | EAL below this ($/yr) is negligible risk |
-| `eal_tolerable` | float (≥ 0) | `50000` | EAL below this ($/yr) is tolerable (ALARP zone) |
-| `eal_intolerable` | float (≥ 0) | `500000` | EAL above this ($/yr) is intolerable — action required |
-| `composite_risk_low` | float (0–1) | `0.01` | Upper bound of the `low` band |
-| `composite_risk_medium` | float (0–1) | `0.05` | Upper bound of the `medium` band |
-| `composite_risk_high` | float (0–1) | `0.15` | Upper bound of the `high` band |
-
-**Classification logic.** The expected annual loss (EAL) and the composite failure probability are classified separately:
-
-| EAL | Class |
+| EAL ($/yr) | Class |
 |---|---|
-| EAL < `eal_negligible` | `negligible` |
-| EAL < `eal_tolerable` | `tolerable_low` |
-| EAL < `eal_intolerable` | `tolerable_high` |
+| EAL < 1000 | `negligible` |
+| EAL < 50000 | `tolerable_low` |
+| EAL < 500000 | `tolerable_high` |
 | otherwise | `intolerable` |
 
 | Composite risk | Band |
 |---|---|
-| risk < `composite_risk_low` | `low` |
-| risk < `composite_risk_medium` | `medium` |
-| risk < `composite_risk_high` | `high` |
+| risk < 0.01 | `low` |
+| risk < 0.05 | `medium` |
+| risk < 0.15 | `high` |
 | otherwise | `very_high` |
 
 Action is required when the class is `intolerable` or the band is `very_high`.
-
-```yaml
-risk:
-  risk_criteria:
-    eal_negligible: 1000
-    eal_tolerable: 50000
-    eal_intolerable: 500000
-    composite_risk_low: 0.01
-    composite_risk_medium: 0.05
-    composite_risk_high: 0.15
-```

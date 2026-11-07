@@ -91,9 +91,8 @@ def test_runner_hands_fuel_in_transit_to_the_next_window(tmp_path):
     sys_cfg = _make_system_config().model_copy(update={"primary_energy_sources": {
         "Gas": PrimaryEnergySourceConfig(
             name="Gas", unit="t", max_availability=[100.0, 0.0], import_cost=two,
-            storage_capacity=two, initial_storage_level=two, storage_investment_cost=0.0,
-            transport_cost=0.0, transport_losses=0.0, max_storage_investment_per_node=0.0,
-            max_transport_investment_per_arc=0.0)}})
+            storage_capacity=two, initial_storage_level=two,
+            transport_cost=0.0, transport_losses=0.0)}})
     orch = Orchestrator(_make_esfex_config(sys_cfg), output_dir=tmp_path)
     orch._availability_cache, orch._inflow_cache = {}, {}
     orch.state = SimulationState(year=2025, base_year=2025, units_config={})

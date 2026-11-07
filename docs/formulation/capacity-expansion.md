@@ -604,7 +604,7 @@ Supply limits and disruption windows use the day's absolute horizon hours, as in
 
 | Cost | Charged as | Where |
 |---|---|---|
-| Fuel storage | `storage_investment_cost` × units, overnight at the build year | investment cost (§5.1) |
+| Fuel storage | `investment_cost` of the `fuel_infrastructure` storage facility × units, overnight at the build year | investment cost (§5.1) |
 | Route capacity | `transport_investment_cost` × km × units/day, overnight | investment cost (§5.1) |
 | Electrolyzer power | `invest_cost` × MW, overnight | investment cost (§5.1) |
 | Electrolyzer fixed cost | `fixed_cost` (\$/MW per hour) × hours of the year × (rated + built) MW | existing-asset cost (§5.1b) |
@@ -875,7 +875,7 @@ After optimization, the following quantities are extracted into a `MasterProblem
 | `tech_investment[y][k]` | Technology investment per period-start year and bus (MW) |
 | `bat_tech_power_investment[y][k]`, `bat_tech_capacity_investment[y][k]` | Battery-technology investment (MW, MWh) |
 | `transfer_investment[y][(i,j)]` | Transmission investment (MW) |
-| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Life-extended capacity of existing units (MW) |
+| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Per node, 1 while the existing unit is within its original `life_time` and 0 once past it, extended or not (a flag, not MW; the capacity kept past the lifetime is in the cumulative capacities below) |
 | `cumulative_gen_capacity`, `cumulative_bat_capacity`, `cumulative_bat_power` | Capacity of existing units per year (CUM-1, CUM-2) |
 | `cumulative_tech_capacity`, `cumulative_bat_tech_power`, `cumulative_bat_tech_capacity` | Cumulative technology capacity per year (CUM-1b, CUM-3) |
 | `re_penetration_by_year`, `re_penetration_by_system` | RE ratio \(\rho\) per year (and per system) |

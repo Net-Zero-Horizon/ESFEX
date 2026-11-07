@@ -1707,8 +1707,8 @@ import Ipopt
             pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [fuel],
                 Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
                 TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), 24, 8760, 0.05,
-                1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
-                nothing, Dict(1 => [100.0]), nothing)
+                1.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                Dict(1 => [100.0]))
             pe_vars, _, _ = ESFEX.create_primary_energy_model(model, pe_in)
             ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
                 generators = input.generators)
@@ -1729,8 +1729,8 @@ import Ipopt
                 inp = PrimaryEnergyInput(2025, 2025, 2, 72, [fuel],
                     Dict{String, FuelInfrastructureConfig}(), [ne], [route],
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 72, 0.05,
-                    1000.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
-                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, 0)
+                    1000.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                    Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
                 m = ESFEX.Model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
@@ -1770,8 +1770,8 @@ import Ipopt
                 inp = PrimaryEnergyInput(2025, 2025, n, 48, [fuel],
                     Dict{String, FuelInfrastructureConfig}(), [ned], routes,
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 48, 0.05,
-                    1000.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
-                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, 0)
+                    1000.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                    Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
                 m = ESFEX.Model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp;
@@ -1836,8 +1836,8 @@ import Ipopt
                     Dict{String, FuelInfrastructureConfig}(), [ne], [route],
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 48, 0.05,
                     1000.0, "economic_dispatch", Dict{String, Any}(),
-                    Dict("Gas" => [0.0, init2]), false,
-                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 1, offset,
+                    Dict("Gas" => [0.0, init2]),
+                    Dict{Int, Vector{Float64}}(), 300.0, 1, offset,
                     arrivals)
                 m = ESFEX.Model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
@@ -1888,8 +1888,8 @@ import Ipopt
             pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [fuel],
                 Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
                 TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), 24, 8760, 0.05,
-                1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
-                nothing, Dict(1 => [100.0]), nothing)
+                1.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                Dict(1 => [100.0]))
             pe_vars, temporal, prices = ESFEX.create_primary_energy_model(model, pe_in)
             ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
                 bus_to_node = [1, 1], generators = input.generators)
@@ -1934,8 +1934,8 @@ import Ipopt
             pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [h2],
                 Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
                 TransportRoute[], Dict(2 => ("Hydrogen", 16.65, 33.3, 0.5)), 24, 8760, 0.05,
-                1.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
-                nothing, Dict(2 => [10.0]), nothing)
+                1.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                Dict(2 => [10.0]))
             pe_vars, temporal, prices = ESFEX.create_primary_energy_model(model, pe_in)
             ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
                 generators = input.generators, electrolyzers = input.electrolyzers)
@@ -1957,14 +1957,10 @@ import Ipopt
             cb = extract_solution(model, vars, input).cost_breakdown
             @test cb.electrolyzer_cost > 0
             @test cb.pe_electrolyzer_cost ≈ cb.electrolyzer_cost rtol = 1e-9
-            # The old fixed-production inputs are rejected, not ignored
-            bad = PrimaryEnergyInput(2025, 2025, 1, H, [h2],
-                Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
-                TransportRoute[], Dict{Int, Tuple{String, Float64, Float64, Float64}}(),
-                24, 8760, 0.05, 1.0, "economic_dispatch", Dict{String, Any}(),
-                nothing, false, ones(H, 1), Dict{Int, Vector{Float64}}(), nothing)
-            @test_throws ArgumentError ESFEX.create_primary_energy_model(
-                ESFEX.Model(create_optimizer(solver_name = "highs")), bad)
+            # The unused fixed-production and investment inputs are gone
+            for f in (:h2_production_hourly, :electrolyzer_config, :investment_from_master)
+                @test !hasfield(PrimaryEnergyInput, f)
+            end
         end
 
         @testset "primary energy: tank dispatch rate per hour, only where a tank is" begin
@@ -1984,8 +1980,8 @@ import Ipopt
                                              [15.0, 5.0] .* (2 * 8760 / 4), 0.0, ones(12))
                 inp = PrimaryEnergyInput(2025, 2025, 2, 2, [fuel], infra, [ne], [route],
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 2, 2, 0.05,
-                    1000.0, "economic_dispatch", Dict{String, Any}(), nothing, false,
-                    nothing, Dict{Int, Vector{Float64}}(), nothing, 300.0, 2, 0)
+                    1000.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                    Dict{Int, Vector{Float64}}(), 300.0, 2, 0)
                 m = ESFEX.Model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
@@ -2014,8 +2010,8 @@ import Ipopt
                 pe = PrimaryEnergyInput(2025, 2025, 1, H, [gasf],
                     Dict{String, FuelInfrastructureConfig}(), [ne], TransportRoute[],
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), H, H, 0.05, 1.0,
-                    "economic_dispatch", Dict{String, Any}(), nothing, false, nothing,
-                    Dict{Int, Vector{Float64}}(), nothing, 1.0, tres, 0)
+                    "economic_dispatch", Dict{String, Any}(), nothing,
+                    Dict{Int, Vector{Float64}}(), 1.0, tres, 0)
                 tm = ESFEX.create_temporal_mapping(H, H, H)
                 _, ms, ned = ESFEX.prepare_fuel_data(pe, tm)
                 @test ms["Gas"][1][1] ≈ 24.0 rtol = 1e-12
@@ -2042,8 +2038,8 @@ import Ipopt
             ne_h2 = NonElectricDemandConfig("Industrial", "Hydrogen", [87.6], 0.0, ones(12))
             pe = PrimaryEnergyInput(2025, 2025, 1, H, [gasf, h2],
                 Dict{String, FuelInfrastructureConfig}(), [ne_gas, ne_h2],
-                TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), H, H, 0.05, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false, nothing,
-                Dict{Int, Vector{Float64}}(), nothing, 1.0, tres, 0)
+                TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), H, H, 0.05, 1.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                Dict{Int, Vector{Float64}}(), 1.0, tres, 0)
             return H, gas, elz, pe
         end
         single_bus() = NetworkConfig(1, 1, [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)],
@@ -2139,8 +2135,8 @@ import Ipopt
                 Dict("Gas" => FuelRouteParams(100.0, 1.0e-7, 0.0)))
             ne_h2 = NonElectricDemandConfig("Industrial", "Hydrogen", [87.6, 0.0], 0.0, ones(12))
             pe = PrimaryEnergyInput(2025, 2025, 2, H, [gasf, h2], infra, [ne_h2], [route],
-                Dict(1 => ("Gas", 5.0, 10.0, 0.5)), H, H, 0.05, 1.0, "economic_dispatch", Dict{String, Any}(), nothing, false, nothing,
-                Dict{Int, Vector{Float64}}(), nothing, 1.0, 1, 0)
+                Dict(1 => ("Gas", 5.0, 10.0, 0.5)), H, H, 0.05, 1.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                Dict{Int, Vector{Float64}}(), 1.0, 1, 0)
             return MasterProblemInput(years = [2025, 2026], network = single_bus(),
                 generators = [gas], batteries = BatteryConfig[],
                 base_demand = fill(50.0, 2H, 1), target_re_penetration = 0.0,

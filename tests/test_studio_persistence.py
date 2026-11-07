@@ -146,3 +146,58 @@ def test_demand_step_early_return_does_not_shadow_tr():
         _lbl_bld_status=SimpleNamespace(setText=shown.append))
     GridMappingDemandStep._distribute_by_spatial_demand(fake)
     assert shown and isinstance(shown[0], str)
+
+
+def test_risk_workbench_opens_with_saved_settings(tmp_path, qapp, monkeypatch):
+    """The workbench starts from the project's saved risk.* settings: they
+    show in its controls, and Apply then saves them unchanged (it used to
+    start from the defaults and overwrite them)."""
+    from esfex.visualization.data.gui_model import GuiModel
+    from esfex.visualization.workflows import risk_panels
+    from esfex.visualization.workflows.risk_wizard import RiskWorkbench
+
+    # Apply ends with a modal confirmation
+    monkeypatch.setattr(risk_panels.QMessageBox, "information",
+                        staticmethod(lambda *a, **k: None))
+
+    d = yaml.safe_load(FIXTURE.read_text())
+    d["risk"].update({
+        "risk_measure": "cvar", "cvar_alpha": 0.9, "cvar_lambda": 0.3,
+        "combination_method": "copula",
+        "climate_scenarios": [{"name": "SSP5-8.5", "probability": 1.0,
+                               "ssp_pathway": "SSP5-8.5"}],
+        "hazard_scenarios": [{"name": "quake", "probability": 0.01,
+                              "hazard_type": "earthquake", "recovery_hours": 720}],
+    })
+    src = tmp_path / "saved.yaml"
+    src.write_text(yaml.safe_dump(d, sort_keys=False))
+    cfg, states, gs = _load(src)
+
+    model = GuiModel()
+    model.global_settings = gs
+    wb = RiskWorkbench(model=model, all_states=states)
+    try:
+        st = wb._state
+        assert (st.risk_measure, st.cvar_alpha, st.cvar_lambda, st.combination_method) == (
+            "cvar", 0.9, 0.3, "copula")
+        assert [s["name"] for s in st.hazard_scenarios] == ["quake"]
+        assert [s["name"] for s in st.climate_scenarios] == ["SSP5-8.5"]
+        dash = wb._panels[0]._dashboard
+        assert dash._combo_measure.currentText() == "CVaR"
+        assert dash._combo_method.currentText() == "Copula"
+        assert dash._spin_alpha.value() == pytest.approx(0.9)
+        assert dash._spin_lambda.value() == pytest.approx(0.3)
+
+        wb._panels[2]._apply()
+    finally:
+        wb.close()
+        wb.deleteLater()
+
+    out = tmp_path / "resaved.yaml"
+    S.gui_state_to_yaml(states, cfg, out, global_settings=model.global_settings)
+    rk = load_config(out).risk
+    assert (rk.risk_measure, rk.cvar_alpha, rk.cvar_lambda, rk.combination_method) == (
+        "cvar", 0.9, 0.3, "copula")
+    assert [s.name for s in rk.hazard_scenarios] == ["quake"]
+    assert rk.hazard_scenarios[0].recovery_hours == 720
+    assert [s.name for s in rk.climate_scenarios] == ["SSP5-8.5"]
