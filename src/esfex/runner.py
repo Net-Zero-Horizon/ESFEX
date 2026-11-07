@@ -2017,6 +2017,9 @@ class Orchestrator:
 
             for year_idx, year in enumerate(years_range):
                 if ops_only is not None and year not in ops_only:
+                    # The master's builds are per-year increments: a
+                    # skipped year's must still reach the later years.
+                    self._apply_master_builds(master_investments.get(year, {}))
                     continue
                 logger.debug(f"Year {year} ({year_idx+1}/{num_years})")
                 self.state.year = year
@@ -2029,9 +2032,7 @@ class Orchestrator:
                     year_investments = master_investments.get(year, {})
 
                     # Apply transmission investments to network adjacency matrix
-                    if year_investments:
-                        self._apply_transfer_investments(year_investments)
-                        self._apply_converter_investments(year_investments)
+                    self._apply_master_builds(year_investments)
 
                     # Build cumulative_units_config from MasterProblem's cumulative
                     # capacities. This correctly handles:
@@ -6672,6 +6673,14 @@ class Orchestrator:
         )
 
         return results_summary
+
+    def _apply_master_builds(self, investments: dict[str, float]) -> None:
+        """Add one year's master builds (transmission, converters) to the
+        dispatch's network. The values are that year's increments, so every
+        year must pass here once, also the years the dispatch skips."""
+        if investments:
+            self._apply_transfer_investments(investments)
+            self._apply_converter_investments(investments)
 
     def _apply_converter_investments(self, investments: dict[str, float]) -> None:
         """Add the converter capacity the master built this year to the
