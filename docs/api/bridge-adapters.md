@@ -88,6 +88,7 @@ class PowerSystemAdapter:
 | Key | Type | Description |
 |-----|------|-------------|
 | `system_config` | `SystemConfig` | Overrides the system taken from `config`. The runner passes the merged (multi-system, zone-expanded) system here. |
+| `config_path` | `str` or `Path` | The configuration file. A profile missing from `availability_cache` is read relative to its directory (current directory when absent). |
 | `units_config` | `dict` | Updated unit capacities from MasterProblem investments. Keys are generator/battery config keys, values are dicts with `rated_power`, `capacity`, etc. Virtual generators/batteries created by `_build_config_from_cumulative()` are also included here. |
 | `boundary_conditions` | `dict` | State carried over from the previous rolling window, each a `(unit, bus)` array: `gen_status_init`, `gen_output_prev`, `reservoir_level`, `battery_soc` (MWh). On the year's last window also `battery_soc_end_min` (MWh floor) and `battery_soc_end_cyclic` (bool). |
 | `sectoral_demand` | `dict` | Sectoral demand arrays `{sector_name: np.ndarray(hours, nodes)}`. |
@@ -119,7 +120,7 @@ def _create_input(self) -> Any  # Julia PowerSystemInput
 Converts Python configuration into a Julia `PowerSystemInput` struct. Steps:
 
 1. Iterates over `sys.generators` and converts each to a Julia `GeneratorConfig` via `convert_generator_config()`.
-2. Resolves availability profiles from `availability_cache` (slicing to the current window using `start_hour`) or loads from file as fallback.
+2. Resolves availability profiles from `availability_cache` (slicing to the current window using `start_hour`). A unit missing from the cache is read from its file with the runner's reader (`esfex.io.demand.load_run_availability`: path relative to `config_path`, hourly, Feb 29 dropped by the calendar of `date_start`) and sliced the same way; a missing file is an error.
 3. Applies `units_config` overrides to update `rated_power` for generators whose capacity was modified by MasterProblem investments.
 4. Creates virtual generators for technology investments that do not exist in `sys.generators` (e.g., "Investment Solar PV"). Their arrays are per bus of the system (`_is_per_bus`); with network reduction they are laid out on the reduced buses, and capacity on an eliminated bus moves to the retained bus of the same node with the largest `demand_fraction`.
 5. Repeats the above for batteries and virtual batteries.
