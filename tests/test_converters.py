@@ -776,7 +776,6 @@ class TestConvertPowerSystemResult:
         cb.pe_excess_cost = 0.0
         cb.pe_transport_cost = 0.0
         cb.pe_investment_cost = 0.0
-        cb.pe_coupling_slack_cost = 0.0
         cb.pe_electrolyzer_cost = 0.0
         cb.n1_security_shortfall_cost = 0.0
         cb.line_flow_cost = 0.0
@@ -813,7 +812,7 @@ class TestConvertPowerSystemResult:
             "npv_penalty_cost", "reservoir_invest_cost",
             "pe_supply_cost", "pe_loss_cost", "pe_excess_cost",
             "pe_transport_cost", "pe_investment_cost",
-            "pe_coupling_slack_cost", "pe_electrolyzer_cost",
+            "pe_electrolyzer_cost",
             "n1_security_shortfall_cost", "line_flow_cost",
             "total",
         }

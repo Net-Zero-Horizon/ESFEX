@@ -31,8 +31,6 @@ n1_security:
   generation_reserve_type: largest_unit
   generation_reserve_percentage: 0.15
   scopf_enabled: false
-  scopf_max_iterations: 5
-  scopf_violation_tolerance: 0.01
   corrective_enabled: false
   contingency_depth: n1
   redistribution_mode: pro_rata
@@ -168,7 +166,6 @@ systems:
       LOSS_OF_RESERVE_DYNAMIC: 100.0
       LOSS_OF_INERTIA: 200.0
       TransferMargin: 100.0
-      Curtailment: 100.0
       max_curtailment_ratio: 0.05
       rooftop_curtailment: 5.0
       CO2_cost: 10.0
@@ -176,13 +173,8 @@ systems:
       FRE_penetration_loss: 100.0
       EV_loss: 10.0
       loss_of_fuel_supply: 100.0
-      coupling_slack_penalty: 1.0
-      transport_congestion: 100.0
-      storage_violation: 100.0
       non_electric_demand_loss: 100.0
       curtailment_cost: 20.0
-      curtailment_excess_penalty: 500.0
-      re_excess_penalty: 100.0
     co2_budget:
       enabled: true
       annual_budget: 1000000.0

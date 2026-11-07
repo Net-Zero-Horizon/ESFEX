@@ -204,7 +204,6 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
 | `pe_investment_cost` | float | $ | Always 0: fuel storage and transport are built (and charged) by the master problem |
-| `pe_coupling_slack_cost` | float | $ | Deprecated, always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
 | `pe_electrolyzer_cost` | float | $ | The electrolyzers' cost (`electrolyzer_cost`) when their hydrogen fills the primary-energy `Hydrogen` tank, 0 otherwise. The same money as `electrolyzer_cost`, not an extra cost: do not add both |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `line_flow_cost` | float | $ | Flow cost of lines with a `cost_per_mw_km` (inter-system links: length × `cost_per_mw_km` × MWh carried) |

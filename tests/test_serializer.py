@@ -199,7 +199,7 @@ def _make_system_config(sys_name: str = "TestSystem") -> SystemConfig:
             ),
         },
         penalties=PenaltiesConfig(
-            loss_of_load=10_000_000, curtailment=100.0, co2_cost=10.0,
+            loss_of_load=10_000_000, curtailment_cost=20.0, co2_cost=10.0,
         ),
         co2_budget=CO2BudgetConfig(enabled=True, annual_budget=100_000),
         generators={
@@ -289,7 +289,7 @@ def _build_minimal_gui_state() -> GuiSystemState:
         ),
         penalties=GuiPenalties(
             loss_of_load=10e6,
-            curtailment=100.0,
+            curtailment_cost=20.0,
         ),
     )
 
@@ -997,7 +997,7 @@ class TestConfigToGuiStates:
         states = config_to_gui_states(config)
         state = states["TestSystem"]
         assert state.penalties.loss_of_load == 10_000_000
-        assert state.penalties.curtailment == 100.0
+        assert state.penalties.curtailment_cost == 20.0
         assert state.penalties.co2_cost == 10.0
 
     def test_co2_budget_in_settings(self):
@@ -1301,9 +1301,11 @@ class TestGuiStateToYaml:
         sys_data = data["systems"]["MinimalSystem"]
         assert "penalties" in sys_data
         assert sys_data["penalties"]["LOSS_OF_LOAD"] == 10e6
-        assert sys_data["penalties"]["Curtailment"] == 100.0
-        # Deprecated (no effect, the loader warns): no longer written
-        assert "coupling_slack_penalty" not in sys_data["penalties"]
+        # Removed (they priced nothing): no longer written
+        for key in ("Curtailment", "coupling_slack_penalty", "transport_congestion",
+                    "storage_violation", "curtailment_excess_penalty",
+                    "re_excess_penalty"):
+            assert key not in sys_data["penalties"]
 
     def test_node_names_exported(self):
         state = _build_minimal_gui_state()
@@ -1655,7 +1657,7 @@ class TestRoundTrip:
         data = self._round_trip(config)
         pen = data["systems"]["TestSystem"]["penalties"]
         assert pen["LOSS_OF_LOAD"] == 10_000_000
-        assert pen["Curtailment"] == 100.0
+        assert pen["curtailment_cost"] == 20.0
         assert pen["CO2_cost"] == 10.0
 
     def test_round_trip_preserves_settings(self):
