@@ -151,4 +151,35 @@ def test_fuel_for_power_reaches_the_results_file(tmp_path):
     with h5py.File(path, "r") as h5:
         ffp = h5["detailed_results/year_2025_threshold_0/primary_energy/fuel_for_power"]
         assert ffp.attrs["units"] == "fuel units per step"
-        np.testing.assert_array_equal(ffp["Cuba_Gas"][()], burnt)
+        np.testing.assert_array_equal(ffp["Cuba - Gas"][()], burnt)
+
+
+def test_fuel_dataset_names_use_the_shared_hdf5_names(tmp_path):
+    """fuel_for_power replaced "/" with "_" (so "A/B" collided with a unit
+    "A_B") and master_fuel_capacity used raw fuel names (a "/" made nested
+    groups); both now use the names of the per-generator groups."""
+    import h5py
+
+    from esfex.runner import YearResults
+    from test_results_hdf5_fixes import _init_h5
+    from test_runner import _create_orchestrator
+
+    orch = _create_orchestrator(tmp_path=tmp_path)
+    orch._gen_names, orch._gen_fuels, orch._bat_names = ["Cuba/Gas", "Cuba_Gas"], ["Gas"] * 2, []
+    orch._bus_to_node = None
+    orch._master_fuel_by_year = {2025: {"storage": {"LNG/Gas": {0: 3.0}},
+                                        "electrolyzer": {"Cuba/elz": [1.0, 0.0]}}}
+    path = _init_h5(orch, tmp_path, num_nodes=2)
+    burnt = np.arange(6.0).reshape(2, 3)
+    ffp = {"Cuba/Gas": burnt, "Cuba_Gas": 2 * burnt}
+    orch._append_year_to_hdf5(path, YearResults(
+        year=2025, objective=1.0, solve_time=0.0, feasible=True,
+        primary_energy={"total_fuel_cost": 1.0, "fuel_for_power": ffp},
+        fuel_for_power=ffp))
+    with h5py.File(path, "r") as h5:
+        sc = h5["detailed_results/year_2025_threshold_0"]
+        grp = sc["primary_energy/fuel_for_power"]
+        np.testing.assert_array_equal(grp["Cuba - Gas"][()], burnt)
+        np.testing.assert_array_equal(grp["Cuba_Gas"][()], 2 * burnt)
+        assert list(sc["master_fuel_capacity/storage"]) == ["LNG - Gas"]
+        assert list(sc["master_fuel_capacity/electrolyzer"]) == ["Cuba - elz"]
