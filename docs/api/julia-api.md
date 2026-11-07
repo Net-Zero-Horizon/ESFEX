@@ -237,7 +237,6 @@ struct MasterProblemInput
     fuel_co2::Dict{String, Float64}
     co2_cost::Float64
     co2_budget_groups::Vector{CO2BudgetGroup}       # Annual CO2 budget per system (empty = none)
-    line_flow_cost::Dict{Tuple{Int,Int}, Float64}  # Cost per MWh of |flow| on a bus pair (low, high)
     unit_commitment::Bool                          # Dispatch commits units: LP start-ups in the master
     # Transmission (per physical line)
     transmission_lines::Vector{Tuple{Int,Int}}

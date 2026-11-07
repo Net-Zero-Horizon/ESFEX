@@ -37,7 +37,6 @@ from esfex.bridge.converters import (
     compile_outage_factor,
     absolute_start_hour,
     fuel_source_outage_windows,
-    line_flow_cost_per_mwh,
     outage_window_spans,
     outage_window_tuple,
     convert_battery_config,
@@ -2472,25 +2471,6 @@ def _master_co2_budget_groups(sys, ESFEX):
     return groups
 
 
-def _line_flow_costs(sys) -> dict[tuple[int, int], float]:
-    """Flow cost per MWh of the system's lines with a per-MW·km cost
-    (inter-system links): ``length_km × cost_per_mw_km``, keyed by the
-    1-indexed bus pair ``(low, high)``. Parallel lines on a pair share their
-    capacity-weighted mean.
-    """
-    acc: dict[tuple[int, int], list[float]] = {}
-    for line in sys.transmission_lines_geo or []:
-        cost = line_flow_cost_per_mwh(line)
-        if cost <= 0 or line.from_bus is None or line.to_bus is None:
-            continue
-        a, b = line.from_bus + 1, line.to_bus + 1
-        w = max(float(line.capacity_mw or 0.0), 1e-6)
-        entry = acc.setdefault((min(a, b), max(a, b)), [0.0, 0.0])
-        entry[0] += w
-        entry[1] += w * scale_cost(cost)
-    return {pair: wc / w for pair, (w, wc) in acc.items()}
-
-
 class MasterProblemAdapter:
     """
     Python adapter for the Julia MasterProblem optimization model.
@@ -3074,12 +3054,9 @@ class MasterProblemAdapter:
                 "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
                     f"({int(s)}, {int(y)}) => {float(v)!r}"
                     for (s, y), v in self.re_target_override.items()) + ")"),
-            # CO2 budgets, link flow costs and start-ups, as in the dispatch
+            # CO2 budgets and start-ups, as in the dispatch (link flow costs
+            # ride on the network's lines, `flow_cost`)
             co2_budget_groups=_master_co2_budget_groups(sys, ESFEX),
-            line_flow_cost=jl.seval(
-                "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
-                    f"({a}, {b}) => {c!r}"
-                    for (a, b), c in _line_flow_costs(sys).items()) + ")"),
             unit_commitment=self._dispatch_commits_units(),
             primary_energy=jl_fuel,
         )
@@ -3450,6 +3427,7 @@ class MasterProblemAdapter:
                 'bat_tech_capacity_investment': {'bat_tech_investment_capacity_bt_n': value, ...},
                 'transfer_investment': {'transfer_investment_i_j': value, ...},
                 'converter_investment': {'converter_investment_acdc_c': MW, ...},
+                'reservoir_investment': {'reservoir_investment_g_n': MWh, ...},
                 're_penetration_ratio': float,
             },
             ...
@@ -3473,6 +3451,7 @@ class MasterProblemAdapter:
                 'bat_tech_capacity_investment': {},
                 'transfer_investment': {},
                 'converter_investment': {},
+                'reservoir_investment': {},
                 're_penetration_ratio': 0.0,
             }
 
@@ -3521,6 +3500,16 @@ class MasterProblemAdapter:
                 if value > 1e-6:
                     conv_key = f"converter_investment_{key[0]}_{int(key[1]) - 1}"
                     solution[year]['converter_investment'][conv_key] = value
+
+            # Reservoir capacity built (MWh) per generator and location
+            res_inv = getattr(jl_result, 'reservoir_investment', None)
+            if res_inv is not None:
+                for g_jl in res_inv[y_idx].keys():
+                    loc_values = to_buses(res_inv[y_idx][g_jl])
+                    for n, value in enumerate(loc_values):
+                        if float(value) > 1e-6:
+                            key = f"reservoir_investment_{int(g_jl) - 1}_{n}"
+                            solution[year]['reservoir_investment'][key] = float(value)
 
             # RE penetration ratio
             re_by_year = np.array(jl_result.re_penetration_by_year)
@@ -3755,6 +3744,7 @@ class MasterProblemAdapter:
         year_investments.update(year_data.get('bat_tech_capacity_investment', {}))
         year_investments.update(year_data.get('transfer_investment', {}))
         year_investments.update(year_data.get('converter_investment', {}))
+        year_investments.update(year_data.get('reservoir_investment', {}))
 
         return year_investments
 

@@ -411,10 +411,12 @@ function build_master_variables!(
     # Fuel storage, route transport and electrolyzers: build_master_fuel_variables!
     # (master_fuel.jl), part of the returned variables below.
 
-    # Reservoir capacity investment variables
+    # Reservoir capacity investment variables (MWh), at the investment-period
+    # starts like the other builds; other years keep an empty dict
     reservoir_investment = Dict{Int, Dict{Int, Vector{VariableRef}}}()
     for y_idx in 1:num_years
         reservoir_investment[y_idx] = Dict{Int, Vector{VariableRef}}()
+        is_inv_period_start(y_idx, years_per_inv_period) || continue
         for g in 1:n_gen
             gen = input.generators[g]
             if any(gen.reservoir_invest_max .> 0)
@@ -473,6 +475,22 @@ keyed `("acdc", c)` / `("freq", c)` like `converter_investment`.
 master_converters(network::NetworkConfig) = vcat(
     [(("acdc", c), conv) for (c, conv) in enumerate(network.acdc_converters)],
     [(("freq", c), conv) for (c, conv) in enumerate(network.freq_converters)])
+
+"""
+    reservoir_capacity_built(vars, g, b, year_idx) -> AffExpr
+
+Reservoir capacity (MWh) of generator `g` at bus `b` built at the
+investment-period starts up to year `year_idx`. Reservoirs do not retire.
+"""
+function reservoir_capacity_built(vars::MasterProblemVariables, g::Int, b::Int,
+                                  year_idx::Int)
+    built = AffExpr(0.0)
+    for y in 1:vars.years_per_inv_period:year_idx
+        v = get(get(vars.reservoir_investment, y, Dict{Int, Vector{VariableRef}}()), g, nothing)
+        v === nothing || add_to_expression!(built, v[b])
+    end
+    return built
+end
 
 """
     converter_capacity(vars, conv, key, year_idx)
@@ -1322,7 +1340,7 @@ function build_investment_cost_expression(
     m_bat_p = mult === nothing ? m_sto : m_sto * mult.bat_invest_cost_power
     m_bat_e = mult === nothing ? m_sto : m_sto * mult.bat_invest_cost_capacity
     m_tx = mult === nothing ? 1.0 : mult.invest_cost_transmission
-    m_conv = mult === nothing ? 1.0 : mult.converter_invest_cost
+    m_cvt = mult === nothing ? 1.0 : mult.converter_invest_cost
 
     inv_cost = AffExpr(0.0)
 
@@ -1365,7 +1383,7 @@ function build_investment_cost_expression(
         # Converter investment
         for (key, conv) in master_converters(input.network)
             v = get(vars.converter_investment[y_idx], key, nothing)
-            v === nothing || add_to_expression!(investment_cost, v, conv.invest_cost * m_conv)
+            v === nothing || add_to_expression!(investment_cost, v, conv.invest_cost * m_cvt)
         end
 
         # Reservoir capacity investment
@@ -1703,7 +1721,7 @@ function create_day_ps_vars!(
     gen_seg_output = Dict{Tuple{Int,Int}, Any}()
     for (g, bus_curves) in input.gen_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1 && b in buses_of_gen[g]
+            if !isempty(segs) && b in buses_of_gen[g]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="$(prefix)_gseg_$(g)_$(b)")
@@ -2106,9 +2124,17 @@ function add_day_operational_constraints!(
     # the master (previously omitted, so hydro was over-credited as firm MW).
     # When TSAM seasonal linking is active the cyclic closure is replaced by a
     # chronological chain across periods (overrides below). No-op with no reservoir.
+    # The reservoirs' level bounds include the capacity built so far
+    res_cap = Dict{Tuple{Int,Int}, Any}()
+    for (g, gen) in enumerate(input.generators), b in 1:n_buses
+        gen.reservoir_capacity[b] > 0 && gen.reservoir_invest_max[b] > 0 || continue
+        res_cap[(g, b)] = gen.reservoir_capacity[b] +
+                          reservoir_capacity_built(vars, g, b, year_idx)
+    end
     add_reservoir_constraints!(model, ps_vars, day_input;
         initial_reservoir_overrides=initial_reservoir_overrides,
-        final_reservoir_targets=final_reservoir_targets)
+        final_reservoir_targets=final_reservoir_targets,
+        capacity_override=res_cap)
     add_reserve_constraints!(model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         demand_scale=1.0)  # demand already scaled in demand_slice
@@ -2399,18 +2425,17 @@ end
 """
     add_line_flow_cost!(model, transmission, ps_vars, input, hours) -> AffExpr
 
-Unscaled cost of the flow on the lines that charge one per MWh
-(`input.line_flow_cost`, e.g. distance × cost per MW·km of an inter-system
-link): `cost × |flow|` per step, with `|flow|` an auxiliary variable above
-`±flow` (the objective keeps it tight).
+Unscaled cost of the flow on the lines that charge one per MWh (their
+`flow_cost`, e.g. distance × cost per MW·km of an inter-system link):
+`flow_cost × |flow|` per line and step, with `|flow|` an auxiliary variable
+above `±flow` (the objective keeps it tight). Each line pays its own cost,
+as in the dispatch (`add_line_flow_costs!`); transformers pay none.
 """
 function add_line_flow_cost!(model::Model, transmission::TransmissionDC,
                              ps_vars::PowerSystemVariables,
                              input::MasterProblemInput, hours::Int)
     cost = AffExpr(0.0)
-    isempty(input.line_flow_cost) && return cost
-    for (l, (from, to)) in enumerate(transmission.lines)
-        c = get(input.line_flow_cost, (min(from, to), max(from, to)), 0.0)
+    for (l, c) in enumerate(line_flow_costs(transmission, input.network))
         c > 0 || continue
         for t in 1:hours
             pf = ps_vars.power_flow_by_line[l][t]
@@ -2421,6 +2446,26 @@ function add_line_flow_cost!(model::Model, transmission::TransmissionDC,
         end
     end
     return cost
+end
+
+"""
+    line_flow_costs(transmission, network) -> Vector{Float64}
+
+`flow_cost` of each branch of `transmission`, in its order: the network's
+transmission lines (self-loops dropped, as `TransmissionDC` does), then the
+transformers at 0.
+"""
+function line_flow_costs(transmission::TransmissionDC, network::NetworkConfig)
+    costs = zeros(length(transmission.lines))
+    isempty(network.transmission_lines) && return costs
+    l = 0
+    for tl in network.transmission_lines
+        tl.from_node == tl.to_node && continue
+        l += 1
+        l <= length(costs) || break
+        costs[l] = tl.flow_cost
+    end
+    return costs
 end
 
 """
@@ -2573,14 +2618,15 @@ co2_cost_per_mwh(input::MasterProblemInput, unit, b::Int) =
     tech_curve_segments(input, tc, b)
 
 Offer-curve segments of candidate technology `tc` at bus `b`, or `nothing`
-when it is priced at its flat `fuel_cost` (no curve, or a single segment),
-the same rule the generators follow.
+when it has no curve there and is priced at its flat `fuel_cost`, the same
+rule the generators follow. A single segment (a flat curve) prices the
+output at its own marginal cost.
 """
 function tech_curve_segments(input::MasterProblemInput, tc::Int, b::Int)
     bus_curves = get(input.tech_cost_curves, tc, nothing)
     bus_curves === nothing && return nothing
     segs = get(bus_curves, b, nothing)
-    return (segs === nothing || length(segs) <= 1) ? nothing : segs
+    return (segs === nothing || isempty(segs)) ? nothing : segs
 end
 
 """
@@ -2594,7 +2640,7 @@ and its marginal cost is added to `cost`. `cap` is the cumulative capacity
 (an expression in the master, a number in a Benders subproblem). With
 `store`, each segment cap is recorded as `(cref, fraction_k × avail, tc, b, ts)`
 under `tech_seg_cap_t<tc>_b<b>_k<k>_ts<ts>` for the Benders cut gradient.
-No-op without a multi-segment curve.
+No-op without a curve.
 """
 function add_tech_curve_segments!(model::Model, input::MasterProblemInput,
                                   tech_output, tc::Int, b::Int, cap, avails::Vector{Float64},
@@ -3457,6 +3503,18 @@ function extract_master_solution(
         end
     end
 
+    # Transmission corridors (charged once per corridor, as in the objective)
+    for (y_idx, inv) in vars.transfer_investment
+        for (var, cost) in corridor_cost_terms(inv, input.network.transference_invest_cost)
+            total_inv_by_year[y_idx] += value(var) * cost
+        end
+    end
+
+    # Fuel storage, route transport and electrolyzer builds (M2)
+    for (y_idx, var, cost) in master_fuel_investment_terms(vars, input)
+        total_inv_by_year[y_idx] += value(var) * cost
+    end
+
     return MasterProblemResult(
         termination_status(model),
         objective_value(model),
@@ -4060,6 +4118,9 @@ function scenario_master_input(
               for bt in input.battery_technologies]
     m_conv = mult.converter_variable_cost
     network = with_fields(input.network;
+        transmission_lines=TransmissionLineData[
+            with_fields(l; flow_cost=l.flow_cost * mult.transmission_cost_per_mw_km)
+            for l in input.network.transmission_lines],
         acdc_converters=ACDCConverterData[with_fields(c; variable_cost=c.variable_cost * m_conv)
                          for c in input.network.acdc_converters],
         freq_converters=FrequencyConverterData[with_fields(c; variable_cost=c.variable_cost * m_conv)
@@ -4067,8 +4128,6 @@ function scenario_master_input(
     co2_groups = [CO2BudgetGroup(grp.name, grp.nodes, grp.budget,
                                  grp.violation_penalty * mult.penalty_co2_budget_violation)
                   for grp in input.co2_budget_groups]
-    line_flow_cost = Dict{Tuple{Int,Int}, Float64}(k => v * mult.transmission_cost_per_mw_km
-                          for (k, v) in input.line_flow_cost)
     # A generator or technology with a fuel-cost curve is charged its
     # segments, not fuel_cost
     scale_curves(curves) = Dict{Int, Dict{Int, Vector{CostSegment}}}(
@@ -4084,7 +4143,7 @@ function scenario_master_input(
         technologies=techs, battery_technologies=btechs,
         gen_cost_curves=scale_curves(input.gen_cost_curves),
         tech_cost_curves=scale_curves(input.tech_cost_curves),
-        co2_budget_groups=co2_groups, line_flow_cost=line_flow_cost,
+        co2_budget_groups=co2_groups,
         base_demand=input.base_demand .* mult.demand_growth^(year_idx - 1),
         co2_cost=input.co2_cost * mult.carbon_price,
         loss_of_load_penalty=input.loss_of_load_penalty * mult.penalty_loss_of_load,
