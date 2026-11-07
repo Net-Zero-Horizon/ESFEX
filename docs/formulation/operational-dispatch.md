@@ -125,10 +125,10 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual one-off terms (development-mode investment, delayed retirement, forced replacement, reservoir investment) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (development-mode investment, delayed retirement, forced replacement, reservoir investment, the batteries' fixed cost) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} \right) + Z^{\text{start}} \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} + Z^{\text{bat,fix}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
 Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
@@ -167,7 +167,7 @@ Z^{\text{op,pwl}}_{g,n} = \sum_{t} \sum_{k=1}^{K} c_k \cdot p^{(k)}_{g,n,t} \tag
 
 **Convexity.** The marginal costs must be non-decreasing (\(c_1 \leq c_2 \leq \cdots \leq c_K\)). This ensures that the LP solver fills the cheaper segments first, which is necessary for the decomposition to correctly represent the cost curve without requiring explicit ordering constraints.
 
-**Flat curve special case.** When `curve_type = "flat"`, \(K = 1\), \(f_1 = 1\) and \(c_1\) is `flat_price`, so the unit's output is priced at `flat_price` instead of its fuel cost (one segment variable per step). Without a `flat_price` (or with `flat_price` equal to the fuel cost), or with no curve configured, \(c_1 = c^{\text{fuel}}_{g,n}\) and the formulation reduces exactly to the original Eq. (OBJ-1) with no additional variables or constraints. The master problem follows the same rule for generators and candidate technologies.
+**Flat curve special case.** When `curve_type = "flat"`, \(K = 1\), \(f_1 = 1\) and \(c_1\) is `flat_price`, so the unit's output is priced at `flat_price` instead of its fuel cost (one segment variable per step). Without a `flat_price` (or with `flat_price` equal to the fuel cost), or with no curve configured, \(c_1 = c^{\text{fuel}}_{g,n}\) and the formulation reduces exactly to the original Eq. (OBJ-1) with no additional variables or constraints. The master problem follows the same rule for generators, batteries and candidate technologies.
 
 **Stepwise curves.** Each block in the `blocks` list directly maps to a segment: \(f_k = \text{block}_k.\text{fraction}\), \(c_k = \text{block}_k.\text{price}\).
 
@@ -179,6 +179,8 @@ Z^{\text{op,pwl}}_{g,n} = \sum_{t} \sum_{k=1}^{K} c_k \cdot p^{(k)}_{g,n,t} \tag
     \[
     p^{\text{dis}}_{b,n,t} = \sum_{k=1}^{K} p^{\text{dis},(k)}_{b,n,t}, \quad Z^{\text{bat,pwl}}_{b,n} = \sum_{t} \sum_{k=1}^{K} c^{\text{dis}}_k \cdot p^{\text{dis},(k)}_{b,n,t}
     \]
+
+    A flat curve (one segment) prices the whole discharge at its `flat_price`, as for generators; a flat curve at the battery's `throughput_degradation_cost` changes nothing and is skipped.
 
 ### 3.2 Startup Costs (UC mode only)
 
@@ -204,6 +206,14 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 
 - \(c^{\text{thr}}_{b,n}\) — throughput degradation cost ($/MWh discharged), from `bat.throughput_degradation_cost[n]`
 - Defaults to 0 when not specified (backward-compatible)
+
+### 3.3c Battery Fixed Cost
+
+\[
+Z^{\text{bat,fix}} = \sum_{b,n} c^{\text{fix}}_{b,n} \, P^{\text{dis}}_{b,n} \tag{OBJ-3c}
+\]
+
+with \(c^{\text{fix}}_{b,n}\) the battery's `fixed_cost` ($ per MW per year) and \(P^{\text{dis}}_{b,n}\) its rated `MaxDischargePower` (not degraded; none when BAT-1's degraded rating is 0, past its `life_time`). An annual term, prorated to the window in (OBJ); it is reported with the generators' fixed O&M (`fixed_om_cost`). The master problem charges it each year on the discharge power in service.
 
 ### 3.4 Penalty Costs
 
@@ -433,7 +443,7 @@ p^{\text{ch}}_{b,n,t} \leq \left( \bar{P}^{\text{ch}}_{b,n} + \hat{P}^{\text{inv
 p^{\text{dis}}_{b,n,t} \leq \left( \bar{P}^{\text{dis}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \right) o_{b,t} \quad \forall b, n, t \tag{BAT-1b}
 \]
 
-where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the (degraded) maximum charge and discharge power ratings and \(o_{b,t} \in [0,1]\) is the scheduled-interruption factor (1 outside outage windows). Battery ramp rates and availability profiles are not used in the dispatch.
+where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the (degraded) maximum charge and discharge power ratings and \(o_{b,t} \in [0,1]\) is the scheduled-interruption factor (1 outside outage windows) times the battery's availability profile `Availability` (1 without one).
 
 #### BAT-2: SOC Dynamics
 
@@ -516,6 +526,14 @@ where \(\gamma^{\text{cycle}}\) is the `min_cycling_ratio` and \(T^{\text{cycle}
 
 Only applies to batteries with `spillage = true`.
 
+#### BAT-9: Ramp Limits
+
+\[
+-R^{\text{down}}_{b,n} \Delta t \, \bar{P}^{x}_{b,n} \leq p^{x}_{b,n,t} - p^{x}_{b,n,t-1} \leq R^{\text{up}}_{b,n} \Delta t \, \bar{P}^{x}_{b,n} \quad \forall b, n, t, \; x \in \{\text{ch}, \text{dis}\} \tag{BAT-9}
+\]
+
+Charge and discharge each rise by at most `ramp_up` and fall by at most `ramp_down` (fraction of their rated power per hour) per step. A ramp of 0, or \(R \Delta t \geq 1\), sets no limit. At \(t = 1\) the previous rolling window's last committed step is \(p^{x}_{b,n,0}\) (`battery_charge_prev`, `battery_discharge_prev`); the first window and a new year start free. The master problem applies the same limits within each representative day.
+
 ---
 
 
@@ -523,13 +541,13 @@ Only applies to batteries with `spillage = true`.
 
 Implemented in `add_reserve_constraints!()`.
 
-Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Both requirements are held in the free capacity of reservable generators (\(\mathcal{G}^{\text{res}}\), non-renewable with `reservable: true`) and batteries at the node:
+Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Both requirements are held in the free capacity of reservable generators (\(\mathcal{G}^{\text{res}}\), non-renewable with `reservable: true`) and reservable batteries (\(\mathcal{B}^{\text{res}}\), `reservable: true`) at the node:
 
 \[
-H_{n,t} = \sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} \cdot u_{g,n,t} - p_{g,n,t} \right) + \sum_{b} \left( \bar{P}^{\text{dis}}_{b,n} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right)
+H_{n,t} = \sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} \cdot u_{g,n,t} - p_{g,n,t} \right) + \sum_{b \in \mathcal{B}^{\text{res}}} \left( \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right)
 \]
 
-where \(u_{g,n,t}\) is the commitment status in unit commitment (an offline unit holds no spinning reserve) and 1 otherwise. A battery can raise its discharge to the limit and can stop charging.
+where \(u_{g,n,t}\) is the commitment status in unit commitment (an offline unit holds no spinning reserve) and 1 otherwise. A battery can raise its discharge to its limit (degraded rating × outage factor × availability, \(o_{b,t}\) as in BAT-1) and can stop charging. In the master problem the battery's rating is the power in service that year (0 once retired, unless its life is extended).
 
 #### RES-1: Static Reserve Requirement
 
@@ -542,7 +560,7 @@ r^{\text{sta}}_{n,t} + \lambda^{\text{sta}}_{n,t} \geq R^{\text{sta}}_n, \qquad 
 #### RES-2: Dynamic Reserve
 
 \[
-r^{\text{dyn}}_{n,t} \leq \sum_{g \in \mathcal{G}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}_{g,n} \cdot u_{g,n,t} + \sum_b \alpha^{\text{dyn}} \cdot \bar{P}^{\text{dis}}_{b,n} \quad \forall n, t \tag{RES-2a}
+r^{\text{dyn}}_{n,t} \leq \sum_{g \in \mathcal{G}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}_{g,n} \cdot u_{g,n,t} + \sum_{b \in \mathcal{B}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} \quad \forall n, t \tag{RES-2a}
 \]
 
 \[
@@ -863,7 +881,7 @@ Implemented in `add_n1_security_constraints!()` (preventive) or, with `scopf_ena
 H^{\text{N1}}_t + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t} \quad \forall t \tag{N1-1}
 \]
 
-where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable non-renewable units, counted only when online in unit commitment, plus battery headroom), summed over the whole system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_shortfall_t*`) keeps the problem feasible.
+where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable non-renewable units, counted only when online in unit commitment, plus the headroom of reservable batteries), summed over the whole system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_shortfall_t*`) keeps the problem feasible.
 
 #### N1-2: Transmission N-1 (preventive)
 
@@ -887,10 +905,10 @@ With `scopf_enabled`, post-contingency line limits replace N1-2. For every pair 
 -\bar{F}_l - o_{l,t} \leq f_{l,t} + \text{LODF}_{l,k} \, f_{k,t} \leq \bar{F}_l + o_{l,t} \quad \forall l, k, t \tag{N1-3}
 \]
 
-(`scopf_line*_outage*_t*_pos/neg`), where \(o_{l,t}\) is line \(l\)'s worst post-contingency overload (`scopf_over_l*_t*`). Generation N-1 is either N1-1 (`scopf_n1_gen_reserve_t*`) or, with `corrective_enabled`, a re-dispatch form: every non-renewable unit other than \((g^*, n^*)\), reservable or not, contributes its headroom \(h_{g,n,t}\) up to what it can ramp in one step, plus battery headroom (`n1_corrective_gen_t*`):
+(`scopf_line*_outage*_t*_pos/neg`), where \(o_{l,t}\) is line \(l\)'s worst post-contingency overload (`scopf_over_l*_t*`). Generation N-1 is either N1-1 (`scopf_n1_gen_reserve_t*`) or, with `corrective_enabled`, a re-dispatch form: every non-renewable unit other than \((g^*, n^*)\), reservable or not, contributes its headroom \(h_{g,n,t}\) up to what it can ramp in one step, plus the headroom of every battery, reservable or not (`n1_corrective_gen_t*`):
 
 \[
-\sum_{(g,n) \neq (g^*,n^*)} r_{g,n,t} + \sum_{b,n} \left( \bar{P}^{\text{dis}}_{b,n} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right) + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t}, \quad r_{g,n,t} \leq \min\left(h_{g,n,t}, \bar{P}_{g,n} R^{\text{up}}_{g,n} \Delta t\right) \tag{N1-4}
+\sum_{(g,n) \neq (g^*,n^*)} r_{g,n,t} + \sum_{b,n} \left( \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right) + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t}, \quad r_{g,n,t} \leq \min\left(h_{g,n,t}, \bar{P}_{g,n} R^{\text{up}}_{g,n} \Delta t\right) \tag{N1-4}
 \]
 
 All SCOPF slacks are priced like the preventive ones.
@@ -1034,7 +1052,7 @@ Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each
 | `build_variables!()` | All variable creation | `power_system.jl` |
 | `build_objective!()` | Objective function | `power_system.jl` |
 | `add_generator_constraints!()` | GEN-1 through GEN-5 | `power_system.jl` |
-| `add_battery_constraints!()` | BAT-1 through BAT-8 | `power_system.jl` |
+| `add_battery_constraints!()` | BAT-1 through BAT-9 | `power_system.jl` |
 | `add_reserve_constraints!()` | RES-1 to RES-3 | `power_system.jl` |
 | `add_reservoir_constraints!()` | Reservoir hydro (see [Reservoir Hydropower](reservoir-hydro.md)) | `power_system.jl` |
 | `add_electrolyzer_dispatch_constraints!()` | Electrolyzer rated power and ramps | `power_system.jl` |

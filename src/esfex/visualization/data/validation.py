@@ -2153,7 +2153,6 @@ def apply_infrastructure_simplification(
             ),
             "life_time": min(b.life_time for b in instances),
             "initial_age": max(b.initial_age for b in instances),
-            "fuel_cost": _weighted_avg([b.fuel_cost for b in instances], powers),
             "fixed_cost": _weighted_avg([b.fixed_cost for b in instances], powers),
             "maintenance_cost": _weighted_avg(
                 [b.maintenance_cost for b in instances], powers,
@@ -4674,7 +4673,7 @@ def _aggregate_equipment(state: GuiSystemState, model: "GuiModel") -> int:
                             (old_val * old_cap + src_val * src.capacity) / new_cap)
 
             if new_power > 0:
-                for attr in ("fuel_cost", "fixed_cost", "maintenance_cost"):
+                for attr in ("fixed_cost", "maintenance_cost"):
                     old_val = getattr(target, attr)
                     src_val = getattr(src, attr)
                     setattr(target, attr,

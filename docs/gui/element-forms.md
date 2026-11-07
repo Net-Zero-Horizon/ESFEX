@@ -103,7 +103,7 @@ All forms of energy storage: lithium-ion, flow batteries, pumped hydro, compress
 | | Fuel | -- | Normally `None`. |
 | | Technology | -- | Optional reference to an entry under **Technologies**. |
 | | Node | -- | Parent node. |
-| | Availability | path | Availability file. Kept in the configuration, but the dispatch does not apply an availability profile to existing batteries. |
+| | Availability | path | Availability file: each hour's factor (0-1) multiplies the charge and discharge power (see [Availability Profiles](../user-guide/availability-profiles.md)). |
 | | Current Type | -- | `AC` or `DC`. |
 | **Power & Capacity** | Rated Power | MW | Power rating. |
 | | Capacity | MWh | Energy storage capacity. |
@@ -115,17 +115,13 @@ All forms of energy storage: lithium-ion, flow batteries, pumped hydro, compress
 | **Lifetime** | Life Time / Initial Age | years | Expected life and age at the start of the horizon. |
 | | Degradation | fraction/yr | Annual capacity degradation, as a fraction per year (0.01 = 1 %/yr). |
 | | Risk Coefficient | 0-1 | Geographic risk derating factor. 1.0 = no derating. |
-| **Operating Parameters** | Min Power | pu | Minimum stable output (unit commitment). |
-| | Min Up / Min Down | h | Minimum on / off time (unit commitment). |
-| | Ramp Up / Ramp Down | pu/h | Kept in the configuration but not used by the dispatch: battery power is limited only by Max Charge / Max Discharge. |
-| | Eff. at Rated / Eff. at Min | frac | Efficiency at rated and minimum output. |
+| **Operating Parameters** | Ramp Up / Ramp Down | pu/h | How fast charge or discharge power may rise / fall, as a fraction of Max Charge / Max Discharge per hour. 0 = no limit. |
+| | Provides reserves | checkbox | Its headroom (unused discharge power plus the charging it can stop) counts towards the static and dynamic reserve. |
 | | Inertia H | s | Inertia constant. |
-| **Costs** | Fuel | $/MWh | Normally 0. |
-| | Fixed | $/MWh | Fixed O&M cost. |
+| **Costs** | Fixed | $/MW·yr | Fixed O&M per MW of Max Discharge per year. |
 | | Maintenance | $/MWh | Variable O&M cost. |
 | | Throughput Degr. | $/MWh | Cycling (wear) cost per MWh discharged. |
 | | Discharge Cost Curve | dropdown | flat (default), linear, stepwise or exponential. See [Cost Curve Widgets](#cost-curve-widgets). |
-| | Start-up | $ | Cost per start (unit commitment). |
 | | Decommissioning | $/MW | Cost of retiring capacity. |
 | **Appearance** | Color, Size | -, px | Marker colour and size (0 = auto). |
 
@@ -220,7 +216,7 @@ Interfaces between AC and DC buses for HVDC transmission and DC-coupled storage.
 | | AC bus / DC bus | -- | Connected buses |
 | | AC Voltage / DC Voltage | kV | Voltage on each side |
 | **Capacity** | Rated Power | MVA | Maximum power transfer |
-| | Min Power | MVA | Minimum operating power |
+| | Min Power | MVA | Minimum operating power in either direction. With unit commitment the converter is off or carries at least this much; ignored in economic dispatch and in the master problem. |
 | **Efficiency** | Rectifier Efficiency | frac | AC-to-DC conversion efficiency |
 | | Inverter Efficiency | frac | DC-to-AC conversion efficiency |
 | | Standby Losses | MW | No-load consumption when energized |
@@ -242,7 +238,7 @@ Interconnects systems operating at different frequencies (e.g., 50 Hz and 60 Hz)
 | **Topology** | Connected From / Connected To | -- | Read-only list of connected equipment |
 | | From bus / To bus | -- | Connected buses (sides A and B) |
 | | From Frequency / To Frequency | Hz | Frequency on each side |
-| **Capacity** | Rated Power / Min Power | MVA | Maximum and minimum transfer |
+| **Capacity** | Rated Power / Min Power | MVA | Maximum and minimum transfer. The minimum applies only with unit commitment (off or at least Min Power), not in economic dispatch or in the master problem. |
 | **Efficiency** | A→B Efficiency / B→A Efficiency | frac | Efficiency in each direction |
 | | Standby Losses | MW | No-load consumption |
 | **Reactive Power** | Q Min / Q Max | MVAr | Reactive power limits |

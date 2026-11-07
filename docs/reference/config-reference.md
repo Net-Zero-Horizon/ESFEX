@@ -446,7 +446,7 @@ A line enters the operational model only if both bus indices are known: `from_bu
 | `from_voltage_kv` | float (> 0) | `220` | AC-side voltage (kV) |
 | `dc_voltage_kv` | float (> 0) | `320` | DC-side voltage (kV) |
 | `rated_power_mva` | float (> 0) | `100` | Rating (MVA) |
-| `min_power_mva` | float (≥ 0) | `0` | Minimum operating power (MVA) |
+| `min_power_mva` | float (≥ 0) | `0` | Minimum operating power (MW) in either direction. With unit commitment in the dispatch (`unit_commitment` mode or `use_uc_in_dispatch`) the converter is off or carries at least this much each step; ignored in economic dispatch and in the master problem (LP) |
 | `efficiency_rectify` | float (> 0, ≤ 1) | `0.98` | AC→DC efficiency |
 | `efficiency_invert` | float (> 0, ≤ 1) | `0.98` | DC→AC efficiency |
 | `standby_losses_mw` | float (≥ 0) | `0.5` | Standby losses (MW) |
@@ -477,7 +477,7 @@ A line enters the operational model only if both bus indices are known: `from_bu
 | `from_frequency_hz` | float (> 0) | `50` | Frequency on side A (Hz) |
 | `to_frequency_hz` | float (> 0) | `60` | Frequency on side B (Hz) |
 | `rated_power_mva` | float (> 0) | `100` | Rating (MVA) |
-| `min_power_mva` | float (≥ 0) | `0` | Minimum operating power (MVA) |
+| `min_power_mva` | float (≥ 0) | `0` | Minimum operating power (MW) in either direction. With unit commitment in the dispatch (`unit_commitment` mode or `use_uc_in_dispatch`) the converter is off or carries at least this much each step; ignored in economic dispatch and in the master problem (LP) |
 | `efficiency_a_to_b` | float (> 0, ≤ 1) | `0.98` | Efficiency A → B |
 | `efficiency_b_to_a` | float (> 0, ≤ 1) | `0.98` | Efficiency B → A |
 | `standby_losses_mw` | float (≥ 0) | `0.5` | Standby losses (MW) |
@@ -619,8 +619,8 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `name` | str | required by schema; loader default: unit key | Display name. Defaults to the unit key |
 | `type` | `Storage` | `"Storage"` | Always `Storage`. Under a legacy `bat_*`/`unit_*` key the unit must say `type: Storage` |
 | `fuel` | str | `"None"` | Normally `None` |
-| `technology` | str \| null | `null` | Label only; not used by the model |
-| `reservable` | bool | `true` | Can provide reserves |
+| `technology` | str \| null | `null` | Battery technology (key or name). Where `invest_cost` is 0, its `invest_cost_power` prices life extension (no match: the system's first battery technology) |
+| `reservable` | bool | `true` | Its headroom counts towards the static and dynamic reserve (and the preventive N-1 cover) |
 | `spillage` | bool | `true` | Allow energy spillage |
 | `min_duration_hours` | int \| null | `null` | Minimum energy-to-power ratio (hours, integer) |
 | `max_duration_hours` | int \| null | `null` | Maximum energy-to-power ratio (hours, integer) |
@@ -629,17 +629,10 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `degradation_rate` | list[float] | required | Capacity degradation per node (fraction/year, `0.01` = 1 %) |
 | `decommissioning_cost` | list[float] | required | Decommissioning cost per node ($/MW) |
 | `rated_power` | list[float] | required | Power rating per node (MW) |
-| `min_power` | list[float] | required | Minimum stable output per node, fraction of rated power (applied with unit commitment) |
-| `min_up` | list[int] | required | Minimum up time per node (hours, unit commitment) |
-| `min_down` | list[int] | required | Minimum down time per node (hours, unit commitment) |
-| `ramp_up` | list[float] | required | Required by the schema but not used by the dispatch: battery power changes are limited only by `MaxChargePower` / `MaxDischargePower` |
-| `ramp_down` | list[float] | required | Required by the schema but not used by the dispatch: battery power changes are limited only by `MaxChargePower` / `MaxDischargePower` |
-| `eff_at_rated` | list[float] | required | Efficiency at rated output per node (0–1) |
-| `eff_at_min` | list[float] | required | Efficiency at minimum output per node (0–1) |
+| `ramp_up` | list[float] | `[0.0]` | How fast charge or discharge power may rise, per node: fraction of `MaxChargePower` / `MaxDischargePower` per hour (× `resolution_hours` per step). 0 = no limit |
+| `ramp_down` | list[float] | `[0.0]` | How fast charge or discharge power may fall, per node, as `ramp_up` |
 | `inertia` | list[float] | required | Inertia constant H per node (s) |
-| `start_up_cost` | list[float] | required | Start-up cost per node ($ per start) |
-| `fuel_cost` | list[float] | required | Required key (normally zeros) |
-| `fixed_cost` | list[float] | required | Fixed O&M per node, applied per MWh generated ($/MWh) |
+| `fixed_cost` | list[float] | `[0.0]` | Fixed O&M per node ($ per MW of `MaxDischargePower` per year) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh) |
 | `throughput_degradation_cost` | list[float] \| null | `null` | Cycling cost per MWh discharged, per node ($/MWh). `null` means 0 |
 | `discharge_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present. |
@@ -655,12 +648,12 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `MaxChargePower` | list[float] | required | Maximum charge power per node (MW) |
 | `MaxDischargePower` | list[float] | required | Maximum discharge power per node (MW) |
 | `current_type` | `AC` \| `DC` | `"DC"` | `AC` or `DC` |
-| `Availability` / `availability_file` | str \| null | `null` | Availability profile file. Kept in the configuration, but the dispatch does not apply an availability profile to existing batteries |
+| `Availability` / `availability_file` | str \| null | `null` | Availability profile file ([Availability Profiles](../user-guide/availability-profiles.md)): each hour's factor (0–1) multiplies the charge and discharge power, and the power the battery offers as reserve |
 | `bus_index` | int \| null | `null` | 0-based bus index; places this unit's capacity at the node that owns that bus |
 | `bus_id_per_node` | dict[int, str] \| null | `null` | `{node_index: bus_id}`: the bus that holds this unit's capacity at each node |
 | `risk_coefficient` | list[float] | `[1.0]` | Per-node geographic risk derating factor (0-1). Computed from hazard exposure and component fragility. 1.0 = no risk derating; 0.82 = 18% capacity derating. |
 
-Existing batteries have no availability profile in the dispatch, even when `Availability` is set.
+The ramp limits, fixed cost, `reservable` and availability profile apply in the operational dispatch and in the master problem alike. The fixed cost is charged on the discharge power in service each year in the master and, prorated to the window's share of the year, in each dispatch window. Projects saved by earlier versions may still hold the generator fields `min_power`, `min_up`, `min_down`, `eff_at_rated`, `eff_at_min`, `start_up_cost` and `fuel_cost` on batteries: they had no effect, and the loader now reports them as unknown keys.
 
 ---
 
@@ -697,7 +690,7 @@ One entry of `blocks`.
 - **linear**: `num_segments` equal blocks, each priced at the curve value at the block mid-point: `price_at_zero + (price_at_max − price_at_zero) × (k + 0.5) / n`.
 - **exponential**: `num_segments` equal blocks priced at `base_price × exp(scale_factor × (k + 0.5) / n)`.
 
-The Julia model creates one segment variable per block, bounded by `fraction × capacity`, and prices each segment at its block price. A curve that reduces to a single block is treated as a flat price.
+The Julia model creates one segment variable per block, bounded by `fraction × capacity`, and prices each segment at its block price. A curve that reduces to a single block prices the whole output (discharge) at that block's price; a flat curve at the unit's own `fuel_cost` / `throughput_degradation_cost` is skipped, since it changes nothing.
 
 **Example: linear curve on a candidate technology**
 
@@ -793,6 +786,11 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `current_type` | `AC` \| `DC` | `"DC"` | Current type |
 | `decommissioning_cost` | list[float] | `[0.0]` | Decommissioning cost ($/MW) |
 | `risk_coefficient` | list[float] | `[1.0]` | Per-node geographic risk derating (0-1). Reduces effective capacity credit to account for hazard exposure. |
+| `ramp_up` | list[float] | `[0.0]` | Ramp-up limit of the batteries it builds (fraction of the power built per hour; 0 = no limit), as [BatteryConfig](#batteryconfig) |
+| `ramp_down` | list[float] | `[0.0]` | Ramp-down limit, likewise |
+| `fixed_cost` | list[float] | `[0.0]` | Fixed O&M ($ per MW of power built per year), charged every year the build is in service |
+| `reservable` | bool | `true` | The batteries it builds hold reserve in the dispatch (the master's candidate technologies hold none) |
+| `Availability` / `availability_file` | str \| null | `null` | Availability profile: factor on the charge and discharge power of what it builds, in the master and in the dispatch |
 | `color` | str \| null | `null` | Display color hex code (e.g. '#FF0000') for results visualization |
 
 ---

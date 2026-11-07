@@ -537,6 +537,15 @@ Battery/storage configuration.
 - `spillage::Bool`: Whether spillage is allowed for this battery (release energy without grid injection)
 - `current_type::String`: Current type ("AC" or "DC")
 - `degradation_rate::Vector{Float64}`: Age-based capacity degradation rate per node
+- `throughput_degradation_cost::Vector{Float64}`: Cycling wear cost per MWh discharged
+- `risk_coefficient::Vector{Float64}`: Geographic risk derating per node (0-1)
+- `ramp_up::Vector{Float64}`: Fraction of the rated charge/discharge power by
+  which charging or discharging may rise per hour (× the step length; 0 = no limit)
+- `ramp_down::Vector{Float64}`: Same for a fall in charging or discharging power
+- `fixed_cost::Vector{Float64}`: Fixed O&M per MW of discharge power per year
+- `reservable::Bool`: Whether the battery's headroom counts towards reserves
+- `availability::Matrix{Float64}`: Factor on the charge and discharge power
+  limits, `[step × bus]`; a 0-row matrix means fully available
 """
 struct BatteryConfig
     name::String
@@ -565,6 +574,57 @@ struct BatteryConfig
     degradation_rate::Vector{Float64}  # Age-based capacity degradation rate per node
     throughput_degradation_cost::Vector{Float64}  # $/MWh discharged — cycling wear cost
     risk_coefficient::Vector{Float64}  # Geographic risk derating per node (0-1)
+    ramp_up::Vector{Float64}       # fraction of rated power per hour, 0 = no limit
+    ramp_down::Vector{Float64}
+    fixed_cost::Vector{Float64}    # per MW of discharge power per year
+    reservable::Bool
+    availability::Matrix{Float64}  # [step × bus]; 0 rows = always 1.0
+end
+
+# Without the operating fields added later: no ramp limit, no fixed cost,
+# reservable, fully available.
+function BatteryConfig(
+    name, capacity, max_charge_power, max_discharge_power, charge_efficiency,
+    discharge_efficiency, soc_min, soc_max, soc_initial, self_discharge,
+    invest_cost_power, invest_cost_capacity, invest_max_power, invest_max_capacity,
+    life_time, initial_age, decommissioning_cost, min_duration_hours,
+    max_duration_hours, maintenance_cost, inertia, spillage, current_type,
+    degradation_rate, throughput_degradation_cost, risk_coefficient,
+)
+    n = length(capacity)
+    return BatteryConfig(
+        name, capacity, max_charge_power, max_discharge_power, charge_efficiency,
+        discharge_efficiency, soc_min, soc_max, soc_initial, self_discharge,
+        invest_cost_power, invest_cost_capacity, invest_max_power, invest_max_capacity,
+        life_time, initial_age, decommissioning_cost, min_duration_hours,
+        max_duration_hours, maintenance_cost, inertia, spillage, current_type,
+        degradation_rate, throughput_degradation_cost, risk_coefficient,
+        zeros(Float64, n), zeros(Float64, n), zeros(Float64, n), true,
+        zeros(Float64, 0, n),
+    )
+end
+
+"""
+    storage_availability(availability, t, b) -> Float64
+
+Factor on a battery's (or battery technology's) charge and discharge power
+at step `t` and bus `b`: `availability[t, b]`, or 1.0 when the unit has no
+profile (0-row matrix).
+"""
+storage_availability(availability::AbstractMatrix, t::Int, b::Int) =
+    size(availability, 1) == 0 ? 1.0 : availability[t, b]
+
+"""
+    storage_ramp_limit(ramp, tres, power) -> Union{Nothing, Any}
+
+Largest change of a battery's charge or of its discharge power over one step
+of `tres` hours: `min(1, ramp × tres) × power`, or `nothing` (no limit) when
+`ramp ≤ 0` or `ramp × tres ≥ 1`, since charge and discharge each stay within
+`[0, power]` anyway.
+"""
+function storage_ramp_limit(ramp::Real, tres::Real, power)
+    (ramp <= 0 || ramp * tres >= 1) && return nothing
+    return ramp * tres * power
 end
 
 # =============================================================================
@@ -649,6 +709,34 @@ struct BatteryTechnologyConfig
     current_type::String
     decommissioning_cost::Vector{Float64}
     risk_coefficient::Vector{Float64}  # Geographic risk derating per node (0-1)
+    # Operating fields of the batteries it builds (see BatteryConfig)
+    ramp_up::Vector{Float64}
+    ramp_down::Vector{Float64}
+    fixed_cost::Vector{Float64}    # per MW of power built per year
+    reservable::Bool
+    availability::Matrix{Float64}  # [step × bus]; 0 rows = always 1.0
+end
+
+# Without the operating fields added later (see BatteryConfig)
+function BatteryTechnologyConfig(
+    name, invest_cost_power, invest_cost_capacity, invest_max_power,
+    invest_max_capacity, min_duration_hours, max_duration_hours,
+    charge_efficiency, discharge_efficiency, degradation_rate, life_time,
+    soc_initial, soc_min, soc_max, maintenance_cost, inertia,
+    throughput_degradation_cost, spillage, current_type, decommissioning_cost,
+    risk_coefficient,
+)
+    n = length(invest_cost_power)
+    return BatteryTechnologyConfig(
+        name, invest_cost_power, invest_cost_capacity, invest_max_power,
+        invest_max_capacity, min_duration_hours, max_duration_hours,
+        charge_efficiency, discharge_efficiency, degradation_rate, life_time,
+        soc_initial, soc_min, soc_max, maintenance_cost, inertia,
+        throughput_degradation_cost, spillage, current_type, decommissioning_cost,
+        risk_coefficient,
+        zeros(Float64, n), zeros(Float64, n), zeros(Float64, n), true,
+        zeros(Float64, 0, n),
+    )
 end
 
 """
@@ -1072,6 +1160,10 @@ struct PowerSystemInput
     # Empty = no boundary; batteries use soc_initial × capacity.
     # Dict{bat_idx => Dict{bus_idx => MWh}}.
     battery_soc_prev::Dict{Int, Dict{Int, Float64}}
+    # Battery discharge and charge power at the last step of the previous
+    # window (MW), for the ramp limits at t=1. Empty = no boundary.
+    battery_discharge_prev::Dict{Int, Dict{Int, Float64}}
+    battery_charge_prev::Dict{Int, Dict{Int, Float64}}
 
     # Pending retirements - units scheduled for retirement but can be delayed for feasibility
     # Matches Python legacy pending_retirements (lines 77-80, 1388-1447)
@@ -1230,6 +1322,9 @@ function PowerSystemInput(;
     reservoir_level_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
     # Battery SOC carried from the previous window (MWh). Empty = soc_initial.
     battery_soc_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
+    # Battery discharge / charge (MW) at the previous window's last step
+    battery_discharge_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
+    battery_charge_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
     # Pending retirements for delayed retirement mechanism
     pending_retirements::Dict{String, Dict{Int, Dict{Int, Float64}}} = Dict{String, Dict{Int, Dict{Int, Float64}}}(),
     # Electricity price vector (hourly) - matches Python legacy self.electricity_price
@@ -1325,6 +1420,8 @@ function PowerSystemInput(;
         generator_output_prev,
         reservoir_level_prev,
         battery_soc_prev,
+        battery_discharge_prev,
+        battery_charge_prev,
         pending_retirements,
         electricity_price,
         fre_penetration_penalty,

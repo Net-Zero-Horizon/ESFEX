@@ -190,7 +190,7 @@ Existing generators and batteries have no investment variable; their capacity is
 C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y \tag{OBJ-3b}
 \]
 
-Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\).
+Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\). So does the discharge power of the batteries in service: an existing battery's `MaxDischargePower` within its lifetime (its life-extended MW after it), and the power built from each battery technology and not yet retired, each at its `fixed_cost` (\$/MW/year). The dispatch charges the same cost prorated to each window (OBJ-3c of the [Operational Dispatch](operational-dispatch.md)).
 
 Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
 
@@ -480,8 +480,10 @@ where \(t' = \text{mod1}(\text{start\_hour} + t - 1,\; T_{avail})\) maps the rep
 For existing batteries (via `add_battery_constraints!` with capacity overrides):
 
 \[
-P^{ch,day}_{b,n,t},\; P^{dis,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n}, \qquad E^{day}_{b,n,t} \leq \bar{E}^{cum}_{y,b,n} \tag{BAT-1}
+P^{ch,day}_{b,n,t},\; P^{dis,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}, \qquad E^{day}_{b,n,t} \leq \bar{E}^{cum}_{y,b,n} \tag{BAT-1}
 \]
+
+with \(a^{bat}\) the battery's availability profile at the day's step \(t'\) (1 without one). Charge and discharge follow the dispatch's ramp limits (BAT-9) within the day, the battery's power \(\bar{P}^{bat,cum}_{y,b,n}\) standing for both ratings, and only `reservable` batteries hold reserve, up to \(\bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}\).
 
 \[
 E^{day}_{b,n,t+1} = E^{day}_{b,n,t} + \left( \eta^{ch}_{b,n} P^{ch,day}_{b,n,t} - \frac{P^{dis,day}_{b,n,t}}{\eta^{dis}_{b,n}} \right) \Delta t \tag{BAT-2}
@@ -493,7 +495,7 @@ E^{day}_{b,n,1} = E^{day}_{b,n,H+1} = \max(E^0_{b,n}, \underline{E}_{b,n}) \cdot
 
 The day starts and ends at the initial SOC (`bat_soc_initial_*`, `bat_soc_cyclic_*`); with TSAM inter-period linking the end is the next boundary value instead (`bat_soc_link_*`). There is no self-discharge, spillage, SOC minimum or charge/discharge exclusivity in the master.
 
-Battery technologies have the same structure (`bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*`, `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*`), with power bounded by \(\bar{P}^{bt}\), SOC by \(\bar{E}^{bt}\), and cyclic SOC at `soc_initial` × \(\bar{E}^{bt}\); their SOC dynamics are multiplied by \(\Delta t\) as in BAT-2.
+Battery technologies have the same structure (`add_battery_tech_day!`: `bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*`, `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*`), with power bounded by \(\bar{P}^{bt}\) × the technology's availability, the technology's ramp limits on charge and discharge (BAT-9 with \(\bar{P}^{bt}\)), SOC by \(\bar{E}^{bt}\), and cyclic SOC at `soc_initial` × \(\bar{E}^{bt}\); their SOC dynamics are multiplied by \(\Delta t\) as in BAT-2. Like the candidate generation technologies they hold no reserve in the master; the batteries they become in the dispatch do when the technology is `reservable`.
 
 #### 8.3.4 Transmission Constraints Linked to Investment
 
@@ -830,11 +832,11 @@ Instead of one LP with all representative days embedded, Benders solves an inves
 \min \; \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_y}{(1+r)^{y-1}} + \sum_{y} \frac{C^{asset}_y + \sum_d \theta_{y,d}}{(1+r)^{y-1}} + C^{slack} \tag{BEN-1}
 \]
 
-\(C^{asset}_y\) is the monolithic master's (`build_annual_asset_cost`): life extension, decommissioning, the fixed cost of the converter capacity built and the electrolyzers' fixed cost. The master has no constraint of its own linking investment to the RE ratio or to storage: the RE ratio is priced through its copy in the subproblems (`re_ratio_lb_*`), and the cuts carry the value of every capacity.
+\(C^{asset}_y\) is the monolithic master's (`build_annual_asset_cost`): life extension, decommissioning, the fixed cost of the converter capacity built and of the batteries in service, and the electrolyzers' fixed cost. The master has no constraint of its own linking investment to the RE ratio or to storage: the RE ratio is priced through its copy in the subproblems (`re_ratio_lb_*`), and the cuts carry the value of every capacity.
 
 **Subproblems** (`create_benders_subproblem`): the representative-day dispatch of §8.3 with the capacities fixed at the master's values, including the converters, the link flow cost, the LP start-ups, the candidates' curtailment cost, the full loss-of-load penalty (VOLL and the sectoral premiums) and the fuel block. Each day's RE share must be at least the year's target (`re_min_day_*`) and the master's RE ratio (`re_ratio_lb_*`), and its curtailment at most \(\bar{\kappa}\) times its renewable output (`max_curt_y*_d*`, a hard limit), as in the monolithic model.
 
-**Copy variables**: every master quantity a subproblem reads, other than the technology and battery-technology capacities, enters it as a copy variable fixed to the master's value (`copy_*`, `fuel_cap_*`): the converter MW built up to the year, the MW built on each line's corridor, the reservoir MWh built up to the year (the level bounds of §8.3 include it), a life-extended unit's capacity, each system's RE ratio, the fuel storage, route and electrolyzer capacity in service (§8.3.12) and the CO2 allocations below. The dual of the fixing constraint is that quantity's gradient in the cut.
+**Copy variables**: every master quantity a subproblem reads, other than the technology and battery-technology capacities (their gradient is the duals of the constraints holding them, each times its coefficient: availability on the power limits, ramp rate × \(\Delta t\) on the ramp limits), enters it as a copy variable fixed to the master's value (`copy_*`, `fuel_cap_*`): the converter MW built up to the year, the MW built on each line's corridor, the reservoir MWh built up to the year (the level bounds of §8.3 include it), a life-extended unit's capacity, each system's RE ratio, the fuel storage, route and electrolyzer capacity in service (§8.3.12) and the CO2 allocations below. The dual of the fixing constraint is that quantity's gradient in the cut.
 
 **CO2 budget** (§8.3.11): the annual budget of a group couples all representative days of a year, so the master shares it out. It has a variable \(a_{\sigma,y,d} \geq 0\) per system (budget group), year and day (`co2_alloc_y{y}_{group}_d{d}`), the share of the budget day \(d\) may use, with
 
