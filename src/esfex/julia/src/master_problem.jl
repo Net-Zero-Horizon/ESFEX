@@ -1414,8 +1414,11 @@ end
     build_annual_asset_cost(vars, input, y_idx; mult=nothing)
 
 Undiscounted per-year cost of existing assets: life extension of units past
-their lifetime, (incremental, LP-linear) decommissioning and the fixed cost
-(\$/MW/year) of the converter capacity built so far. A stochastic scenario's
+their lifetime, (incremental, LP-linear) decommissioning, the fixed cost
+(\$/MW/year) of the converter capacity built so far and the fixed cost
+(\$/MW/year) of the batteries in service: existing ones within their
+lifetime, life-extended MW, and battery-technology power built and not yet
+retired. A stochastic scenario's
 `mult` scales the generator and battery decommissioning costs.
 """
 function build_annual_asset_cost(
@@ -1450,6 +1453,30 @@ function build_annual_asset_cost(
                 ext_cost = bat.invest_cost_power[n] * input.life_extension_cost_factor
                 add_to_expression!(annual_cost, life_ext_var, ext_cost)
             end
+        end
+    end
+
+    # Battery fixed cost on the discharge power in service this year
+    for b in 1:n_bat
+        bat = input.batteries[b]
+        for n in 1:n_buses
+            fc = bat.fixed_cost[n]
+            (fc > 0 && bat.max_discharge_power[n] > 0) || continue
+            if bat.initial_age[n] + (y_idx - 1) < bat.life_time[n]
+                add_to_expression!(annual_cost, fc * bat.max_discharge_power[n])
+            else
+                lev = vars.bat_life_extension[y_idx][b][n]
+                lev === nothing || add_to_expression!(annual_cost, lev, fc)
+            end
+        end
+    end
+    for (bt, btech) in enumerate(input.battery_technologies), n in 1:n_buses
+        fc = btech.fixed_cost[n]
+        fc > 0 || continue
+        for y in 1:vars.years_per_inv_period:y_idx
+            haskey(vars.bat_tech_power_investment, y) || continue
+            y_idx - y < btech.life_time[n] || continue
+            add_to_expression!(annual_cost, vars.bat_tech_power_investment[y][bt][n], fc)
         end
     end
 
@@ -1737,7 +1764,7 @@ function create_day_ps_vars!(
     bat_seg_discharge = Dict{Tuple{Int,Int}, Any}()
     for (bi, bus_curves) in input.bat_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1 && b in buses_of_bat[bi]
+            if !isempty(segs) && b in buses_of_bat[bi]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="$(prefix)_bseg_$(bi)_$(b)")
@@ -1830,6 +1857,114 @@ function generators_for_day(generators::AbstractVector, start_hour::Int, hours::
             gen.reservoir_head_min_factor
         )
     end
+end
+
+"""
+    batteries_for_day(batteries, start_hour, hours)
+
+The batteries (or battery technologies) as a representative day starting at
+master step `start_hour` sees them: an availability profile is cut to rows
+`start_hour : start_hour + hours - 1` (wrapping around a shorter profile),
+as `generators_for_day` does. A unit without a profile is returned as is.
+"""
+function batteries_for_day(batteries::AbstractVector, start_hour::Int, hours::Int)
+    return map(batteries) do bat
+        m = bat.availability
+        size(m, 1) == 0 && return bat
+        with_fields(bat; availability =
+            m[[mod1(start_hour + t - 1, size(m, 1)) for t in 1:hours], :])
+    end
+end
+
+"""
+    add_battery_tech_day!(model, input, pow_cap, en_cap, start_hour, hours;
+                          suffix="", store=nothing) -> (discharge, charge, soc)
+
+The candidate battery technologies' operation on one representative day or
+TSAM period, as the dispatch runs the batteries they build: charge and
+discharge within the power built × availability, ramp limits (BatteryConfig),
+SOC within the energy built, cyclic at `soc_initial`. `pow_cap(bt, b)` and
+`en_cap(bt, b)` give the capacity built: an expression of the investment
+variables in the master, a number in a Benders subproblem. With `store`,
+each constraint whose right-hand side holds the power (energy: the SOC limit
+and the initial and cyclic SOC) is recorded in `store["bt_pow"]`
+(`store["bt_cap"]`) as `(constraint, coefficient, bt, b)`, for the cut. Constraint names end in `suffix`, variable names in `var_suffix`.
+"""
+function add_battery_tech_day!(model::Model, input::MasterProblemInput,
+                               pow_cap::Function, en_cap::Function,
+                               start_hour::Int, hours::Int;
+                               suffix::String = "", var_suffix::String = suffix,
+                               store = nothing)
+    n_bat_tech = length(input.battery_technologies)
+    n_buses = input.network.num_buses
+    tres = input.temporal_resolution_hours
+    vsfx = var_suffix
+    dis = @variable(model, [bt=1:n_bat_tech, b=1:n_buses, ts=1:hours],
+        lower_bound = 0, base_name = "bat_tech_dis$(vsfx)")
+    ch = @variable(model, [bt=1:n_bat_tech, b=1:n_buses, ts=1:hours],
+        lower_bound = 0, base_name = "bat_tech_ch$(vsfx)")
+    soc = @variable(model, [bt=1:n_bat_tech, b=1:n_buses, ts=0:hours],
+        lower_bound = 0, base_name = "bat_tech_soc$(vsfx)")
+    rec(kind, c, coef, bt, b) = store === nothing ||
+        push!(get!(store, kind, Tuple{Any, Float64, Int, Int}[]), (c, coef, bt, b))
+
+    day_techs = batteries_for_day(input.battery_technologies, start_hour, hours)
+    for (bt, btech) in enumerate(day_techs), b in 1:n_buses
+        P = pow_cap(bt, b)
+        E = en_cap(bt, b)
+        for ts in 1:hours
+            avail = storage_availability(btech.availability, ts, b)
+            c = @constraint(model, dis[bt, b, ts] <= P * avail,
+                base_name = "bt_dis_cap_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+            rec("bt_pow", c, avail, bt, b)
+            c = @constraint(model, ch[bt, b, ts] <= P * avail,
+                base_name = "bt_ch_cap_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+            rec("bt_pow", c, avail, bt, b)
+        end
+        for ts in 0:hours
+            c = @constraint(model, soc[bt, b, ts] <= E,
+                base_name = "bt_soc_cap_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+            rec("bt_cap", c, 1.0, bt, b)
+        end
+        for flow in (ch, dis)
+            for (c, coef) in add_storage_ramp_constraints!(model, ts -> flow[bt, b, ts],
+                    P, NaN, btech.ramp_up[b], btech.ramp_down[b], tres, hours)
+                rec("bt_pow", c, coef, bt, b)
+            end
+        end
+        ch_eff = btech.charge_efficiency[b]
+        dis_eff = btech.discharge_efficiency[b]
+        # Clamp to soc_min to avoid initial/end SOC vs soc_min conflict
+        initial_soc_frac = max(btech.soc_initial[b], btech.soc_min[b])
+        # Skip SOC dynamics if efficiency is zero (tech not at this node)
+        if dis_eff <= 0.0 || ch_eff <= 0.0
+            for ts in 0:hours
+                @constraint(model, soc[bt, b, ts] <= 0,
+                    base_name = "bt_soc_zero_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+            end
+            for ts in 1:hours
+                @constraint(model, dis[bt, b, ts] <= 0,
+                    base_name = "bt_dis_zero_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+                @constraint(model, ch[bt, b, ts] <= 0,
+                    base_name = "bt_ch_zero_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+            end
+        else
+            c = @constraint(model, soc[bt, b, 0] == E * initial_soc_frac,
+                base_name = "bt_soc_init_bt$(bt)_b$(b)$(suffix)")
+            rec("bt_cap", c, initial_soc_frac, bt, b)
+            # SOC in MWh; charge/discharge in MW over a step of tres hours
+            for ts in 1:hours
+                @constraint(model,
+                    soc[bt, b, ts] == soc[bt, b, ts-1]
+                        + tres * (ch_eff * ch[bt, b, ts] - (1.0/dis_eff) * dis[bt, b, ts]),
+                    base_name = "bt_soc_dyn_bt$(bt)_b$(b)_ts$(ts)$(suffix)")
+            end
+            c = @constraint(model, soc[bt, b, hours] == E * initial_soc_frac,
+                base_name = "bt_soc_cyc_bt$(bt)_b$(b)$(suffix)")
+            rec("bt_cap", c, initial_soc_frac, bt, b)
+        end
+    end
+    return dis, ch, soc
 end
 
 """
@@ -1994,76 +2129,20 @@ function add_day_operational_constraints!(
     bat_tech_charge = nothing
     bat_tech_soc = nothing
     if n_bat_tech > 0
-        bat_tech_discharge = @variable(model,
-            [bt=1:n_bat_tech, b=1:n_buses, ts=1:hours],
-            lower_bound = 0, base_name = "bat_tech_dis_y$(year_idx)_d$(day_idx)")
-        bat_tech_charge = @variable(model,
-            [bt=1:n_bat_tech, b=1:n_buses, ts=1:hours],
-            lower_bound = 0, base_name = "bat_tech_ch_y$(year_idx)_d$(day_idx)")
-        bat_tech_soc = @variable(model,
-            [bt=1:n_bat_tech, b=1:n_buses, ts=0:hours],
-            lower_bound = 0, base_name = "bat_tech_soc_y$(year_idx)_d$(day_idx)")
-
-        for bt in 1:n_bat_tech
-            btech = input.battery_technologies[bt]
-            for b in 1:n_buses
-                pow_cap = AffExpr(0.0)
-                en_cap = AffExpr(0.0)
-                bt_lifetime = btech.life_time[b]
-                for y in 1:vars.years_per_inv_period:year_idx
-                    inv_age = year_idx - y
-                    if inv_age < bt_lifetime
-                        add_to_expression!(pow_cap, vars.bat_tech_power_investment[y][bt][b])
-                        add_to_expression!(en_cap, vars.bat_tech_capacity_investment[y][bt][b])
-                    end
-                end
-                for ts in 1:hours
-                    @constraint(model, bat_tech_discharge[bt, b, ts] <= pow_cap,
-                        base_name = "bt_dis_cap_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                    @constraint(model, bat_tech_charge[bt, b, ts] <= pow_cap,
-                        base_name = "bt_ch_cap_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                end
-                for ts in 0:hours
-                    @constraint(model, bat_tech_soc[bt, b, ts] <= en_cap,
-                        base_name = "bt_soc_cap_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                end
-                ch_eff = btech.charge_efficiency[b]
-                dis_eff = btech.discharge_efficiency[b]
-                initial_soc_frac = btech.soc_initial[b]
-                # Clamp to soc_min to avoid initial/end SOC vs soc_min conflict
-                soc_min_b = btech.soc_min[b]
-                if initial_soc_frac < soc_min_b
-                    initial_soc_frac = soc_min_b
-                end
-                # Skip SOC dynamics if efficiency is zero (tech not at this node)
-                if dis_eff <= 0.0 || ch_eff <= 0.0
-                    for ts in 0:hours
-                        @constraint(model, bat_tech_soc[bt, b, ts] <= 0,
-                            base_name = "bt_soc_zero_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                    end
-                    for ts in 1:hours
-                        @constraint(model, bat_tech_discharge[bt, b, ts] <= 0,
-                            base_name = "bt_dis_zero_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                        @constraint(model, bat_tech_charge[bt, b, ts] <= 0,
-                            base_name = "bt_ch_zero_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                    end
-                else
-                    @constraint(model, bat_tech_soc[bt, b, 0] == en_cap * initial_soc_frac,
-                        base_name = "bt_soc_init_bt$(bt)_b$(b)_y$(year_idx)_d$(day_idx)")
-                    # SOC in MWh; charge/discharge in MW over a step of tres hours
-                    tres = input.temporal_resolution_hours
-                    for ts in 1:hours
-                        @constraint(model,
-                            bat_tech_soc[bt, b, ts] == bat_tech_soc[bt, b, ts-1]
-                                + tres * (ch_eff * bat_tech_charge[bt, b, ts]
-                                          - (1.0/dis_eff) * bat_tech_discharge[bt, b, ts]),
-                            base_name = "bt_soc_dyn_bt$(bt)_b$(b)_ts$(ts)_y$(year_idx)_d$(day_idx)")
-                    end
-                    @constraint(model, bat_tech_soc[bt, b, hours] == en_cap * initial_soc_frac,
-                        base_name = "bt_soc_cyc_bt$(bt)_b$(b)_y$(year_idx)_d$(day_idx)")
-                end
+        # Power and energy built and still in service this year
+        function bt_built(bt, b, pick)
+            cap = AffExpr(0.0)
+            for y in 1:vars.years_per_inv_period:year_idx
+                year_idx - y < input.battery_technologies[bt].life_time[b] || continue
+                add_to_expression!(cap, pick(y)[bt][b])
             end
+            return cap
         end
+        bat_tech_discharge, bat_tech_charge, bat_tech_soc = add_battery_tech_day!(
+            model, input,
+            (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_power_investment[y]),
+            (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_capacity_investment[y]),
+            start_hour, hours; suffix = "_y$(year_idx)_d$(day_idx)")
     end
 
     # =========================================================================
@@ -2080,7 +2159,7 @@ function add_day_operational_constraints!(
 
     day_input = (
         generators = day_generators,
-        batteries = input.batteries,
+        batteries = batteries_for_day(input.batteries, start_hour, hours),
         network = input.network,
         demand = demand_slice,
         temporal = (hours = hours, resolution_hours = input.temporal_resolution_hours),
@@ -2137,6 +2216,7 @@ function add_day_operational_constraints!(
         capacity_override=res_cap)
     add_reserve_constraints!(model, ps_vars, day_input;
         capacity_override=total_cap_gen,
+        battery_capacity_override=total_cap_bat_power,
         demand_scale=1.0)  # demand already scaled in demand_slice
     add_inertia_constraints!(model, ps_vars, day_input)
     # AC/DC and frequency converters as the dispatch models them, at their
@@ -3831,9 +3911,8 @@ function calculate_unit_npv(
         # Revenue from arbitrage (npv_annual_return_rate × invest_cost as proxy)
         annual_revenue = rated_power * invest_cost * input.npv_annual_return_rate
 
-        # Maintenance cost from fixed_cost field ($/MWh × hours)
-        hours_year = length(input.hours_per_year) > 0 ? Float64(input.hours_per_year[1]) : Float64(HOURS_STD_YEAR)
-        annual_cost = rated_power * bat.fixed_cost[node] * hours_year
+        # Fixed O&M ($/MW/year)
+        annual_cost = rated_power * bat.fixed_cost[node]
 
         # NPV with degradation
         degradation_rate = bat.degradation_rate[node]

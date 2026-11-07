@@ -35,6 +35,8 @@ from esfex.bridge.converters import (
     build_outage_mask_matrix,
     compile_outage_factor,
     absolute_start_hour,
+    battery_availability_key,
+    battery_technology_availability_key,
     fuel_source_outage_windows,
     outage_window_spans,
     outage_window_tuple,
@@ -46,6 +48,7 @@ from esfex.bridge.converters import (
     convert_technology_config,
     convert_temporal_config,
     expand_node_to_bus_array,
+    expand_node_to_bus_matrix,
     py_to_julia_matrix,
     py_to_julia_vector,
     py_to_julia_int_vector,
@@ -1273,6 +1276,22 @@ class PowerSystemAdapter:
                         cached[:wrapped_end - len(cached)]
                     ])
 
+    def _storage_availability(self, cache_key: str, availability_file: Optional[str],
+                              num_nodes: int, resolution_hours: int,
+                              owner: str) -> Optional[np.ndarray]:
+        """This window's availability profile of a battery (``[steps × nodes]``),
+        or None when it has none: the runner's preloaded profile
+        (``availability_cache[cache_key]``, else by file name), else read
+        from ``availability_file``."""
+        if not availability_file:
+            return None
+        cached = self.availability_cache.get(cache_key)
+        if cached is None:
+            cached = self.availability_cache.get(availability_file)
+        if cached is None:
+            cached = self._load_availability_file(availability_file, num_nodes, owner)
+        return self._slice_availability(cached, resolution_hours)
+
     def _load_availability_file(self, availability_file: str, num_nodes: int,
                                 owner: str) -> np.ndarray:
         """Hourly profile of a unit not in ``availability_cache``.
@@ -1682,8 +1701,12 @@ class PowerSystemAdapter:
 
 
             bat_bus_map = bat_bus_per_node.get(key)
+            bat_avail = self._storage_availability(
+                battery_availability_key(key), bat.availability_file, num_nodes,
+                resolution_hours, f"Battery {key!r}")
             jl_bat = convert_battery_config(bat_to_convert, bus_to_node=b2n_arg,
-                                             bus_per_node=bat_bus_map)
+                                             bus_per_node=bat_bus_map,
+                                             availability=bat_avail)
             jl.seval("push!")(jl_batteries, jl_bat)
             bat_order.append((key, bat_to_convert))
 
@@ -1704,11 +1727,13 @@ class PowerSystemAdapter:
 
             nn = len(cap)
             soc_init_default = vdata.get("soc_initial", [0.5] * nn)
+            # Operating fields of the battery technology it was built from
+            # (battery_technology_unit_fields)
             vbat = BatteryConfig(
                 name=vdata.get("name", key),
                 type="Storage",
                 fuel="None",
-                reservable=True,
+                reservable=vdata.get("reservable", True),
                 spillage=vdata.get("spillage", True),
                 capacity=cap,
                 MaxChargePower=charge_pow,
@@ -1718,17 +1743,10 @@ class PowerSystemAdapter:
                 soc_initial=soc_init_default,
                 max_DoD=vdata.get("max_DoD", [0.9] * nn),
                 rated_power=charge_pow,  # BatteryConfig requires rated_power
-                min_power=[0.0] * nn,
-                eff_at_rated=[1.0] * nn,
-                eff_at_min=[1.0] * nn,
-                ramp_up=[1.0] * nn,
-                ramp_down=[1.0] * nn,
-                min_up=[0] * nn,
-                min_down=[0] * nn,
-                fuel_cost=[0.0] * nn,
-                fixed_cost=[0.0] * nn,
+                ramp_up=vdata.get("ramp_up", [0.0] * nn),
+                ramp_down=vdata.get("ramp_down", [0.0] * nn),
+                fixed_cost=vdata.get("fixed_cost", [0.0] * nn),
                 maintenance_cost=vdata.get("maintenance_cost", [0.0] * nn),
-                start_up_cost=[0.0] * nn,
                 inertia=vdata.get("inertia", [0.0] * nn),
                 life_time=vdata.get("life_time", [999] * nn),
                 initial_age=vdata.get("initial_age", [0] * nn),
@@ -1740,14 +1758,24 @@ class PowerSystemAdapter:
                 invest_max_capacity=[0.0] * nn,
                 throughput_degradation_cost=vdata.get("throughput_degradation_cost", [0.0] * nn),
                 current_type=vdata.get("current_type", "DC"),
+                availability_file=vdata.get("availability_file") or vdata.get("Availability"),
             )
+            # Cached under the technology's file name by the runner
+            v_avail = self._storage_availability(
+                vbat.availability_file or "", vbat.availability_file, num_nodes,
+                resolution_hours, f"Battery technology unit {key!r}")
             is_per_bus = vdata.get('_is_per_bus', False)
             if is_per_bus and b2n_arg is not None:
-                jl_vbat = convert_battery_config(vbat, bus_to_node=None)
+                # Arrays already per bus: lay the per-node profile on the buses
+                if v_avail is not None:
+                    v_avail = expand_node_to_bus_matrix(v_avail, bus_to_node_0idx)
+                jl_vbat = convert_battery_config(vbat, bus_to_node=None,
+                                                 availability=v_avail)
             else:
                 # Virtual battery (master investment): per-node capacity
                 # falls back to the node's first (canonical) bus.
-                jl_vbat = convert_battery_config(vbat, bus_to_node=b2n_arg)
+                jl_vbat = convert_battery_config(vbat, bus_to_node=b2n_arg,
+                                                 availability=v_avail)
             jl.seval("push!")(jl_batteries, jl_vbat)
             bat_order.append((key, vbat))
             logger.info(f"Virtual bat: {vdata.get('name', key)}, "
@@ -1931,6 +1959,12 @@ class PowerSystemAdapter:
         # in Julia battery order (existing then virtual, as pushed above).
         jl_battery_soc_prev = _np2d_to_jl_gen_bus_dict(
             _to_model_buses(self.boundary_conditions.get('battery_soc')))
+        # Battery discharge / charge (MW) at the previous window's last step,
+        # for the batteries' ramp limits at t=1.
+        jl_battery_discharge_prev = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_discharge_prev')))
+        jl_battery_charge_prev = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_charge_prev')))
         # End-of-year SOC floor (battery × bus, MWh), set on the last window.
         jl_bat_soc_end_min = _np2d_to_jl_gen_bus_dict(
             _to_model_buses(self.boundary_conditions.get('battery_soc_end_min')))
@@ -2032,6 +2066,8 @@ class PowerSystemAdapter:
             generator_output_prev=jl_gen_output_prev,
             reservoir_level_prev=jl_reservoir_level,
             battery_soc_prev=jl_battery_soc_prev,
+            battery_discharge_prev=jl_battery_discharge_prev,
+            battery_charge_prev=jl_battery_charge_prev,
             # Penalty coefficients from config (B4)
             fre_penetration_penalty=scale_cost(float(getattr(sys.penalties, 'fre_penetration_loss', 100.0))),
             transfer_margin_penalty=scale_cost(float(getattr(sys.penalties, 'transfer_margin', 0.0))),
@@ -2879,8 +2915,12 @@ class MasterProblemAdapter:
             if key in ext_bat_costs:
                 bat = bat.model_copy(update={"invest_cost": ext_bat_costs[key]})
             bat_bus_map = bat_bus_per_node.get(key)
+            bat_avail = self._master_profile(
+                self._availability_cache, battery_availability_key(key),
+                bat.availability_file, num_nodes, load_availability_profile)
             jl_bat = convert_battery_config(bat, bus_to_node=b2n_arg,
-                                             bus_per_node=bat_bus_map)
+                                             bus_per_node=bat_bus_map,
+                                             availability=bat_avail)
             jl.seval("push!")(jl_batteries, jl_bat)
             bat_order.append((key, bat))
 
@@ -2901,7 +2941,11 @@ class MasterProblemAdapter:
         # Convert battery technologies (investment candidates)
         jl_battery_technologies = jl.seval("BatteryTechnologyConfig[]")
         for key, bat_tech in sys.battery_technologies.items():
-            jl_bat_tech = convert_battery_technology_config(bat_tech, bus_to_node=b2n_arg)
+            bt_avail = self._master_profile(
+                self._availability_cache, battery_technology_availability_key(key),
+                bat_tech.availability_file, num_nodes, load_availability_profile)
+            jl_bat_tech = convert_battery_technology_config(bat_tech, bus_to_node=b2n_arg,
+                                                            availability=bt_avail)
             jl.seval("push!")(jl_battery_technologies, jl_bat_tech)
 
         # Build cost curve dicts for generators, technologies, and batteries

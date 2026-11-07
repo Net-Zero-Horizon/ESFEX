@@ -40,8 +40,7 @@ _GEN_PER_NODE_FIELDS = [
 # Per-node array field names for batteries
 _BAT_PER_NODE_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
-    "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
-    "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
+    "rated_power", "ramp_up", "ramp_down", "inertia",
     "fixed_cost", "maintenance_cost", "invest_cost", "invest_cost_energy",
     "invest_max_power", "invest_max_capacity",
     "efficiency_charge", "efficiency_discharge", "soc_initial", "max_DoD",

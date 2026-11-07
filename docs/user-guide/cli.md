@@ -162,7 +162,7 @@ esfex validate -c CONFIG
 ### What Is Checked
 
 - The file exists and is valid YAML.
-- Every generator and battery under `generators:` / `batteries:` has all required fields (for example `min_power`, `ramp_up`, `fuel_cost`; see the [Configuration Guide](configuration.md)).
+- Every generator and battery under `generators:` / `batteries:` has all required fields (for example `min_power` and `fuel_cost` for a generator, `capacity` and `MaxChargePower` for a battery; see the [Configuration Guide](configuration.md)).
 - Pydantic types, ranges and allowed values (e.g. `solver.gap` between 0 and 1, `simulation_mode`, `power_flow_mode`).
 - Every system listed in `meta_network.systems` is defined under `systems`.
 - Unknown or misspelled keys are listed after `Configuration is valid!`, each with its full path (for example `systems.island.generators.diesel.min_up_time`). They are ignored, so they do not make the file invalid.

@@ -1303,8 +1303,6 @@ def _create_battery(
         capacity=energy,
         efficiency_charge=eff_chg,
         efficiency_discharge=eff_dis,
-        eff_at_rated=eff_dis,
-        eff_at_min=eff_dis,
         latitude=bat.latitude,
         longitude=bat.longitude,
     )

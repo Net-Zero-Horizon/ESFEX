@@ -140,7 +140,7 @@ P^{conv}_{\text{DC bus},t} = \eta^{rect}_c \, p^{rect}_{c,t} - p^{inv}_{c,t}
 \tag{CONV-2}
 \]
 
-where \(S^{conv}_c\) is `rated_power_mva` and \(o_{c,t}\) the scheduled-outage factor. Converter capacity is not an investment variable. `min_power_mva` is not enforced.
+where \(S^{conv}_c\) is `rated_power_mva` and \(o_{c,t}\) the scheduled-outage factor. Converter capacity is not an investment variable of the dispatch (the master problem can build it).
 
 ### Frequency Converters
 
@@ -151,7 +151,18 @@ p^{a \to b}_{c,t} + p^{b \to a}_{c,t} \leq S^{conv}_c \cdot o_{c,t}
 \tag{FREQ-1}
 \]
 
-Both converter types add `variable_cost` × throughput to the objective. Implemented in `add_converter_constraints!()`.
+Both converter types add `variable_cost` × throughput to the objective.
+
+**Minimum power.** When the dispatch runs unit commitment (`unit_commitment` mode, or `use_uc_in_dispatch`), a converter with `min_power_mva` \(\underline{S}_c > 0\) is either off or carries at least \(\underline{S}_c\) in one direction. Binaries \(u^{f}_{c,t}, u^{b}_{c,t} \in \{0, 1\}\) per direction (`acdc_on_rectify`/`acdc_on_invert`, `freq_on_a_to_b`/`freq_on_b_to_a`) give
+
+\[
+u^{f}_{c,t} + u^{b}_{c,t} \leq 1, \qquad
+\underline{S}_c \, u^{f}_{c,t} \leq p^{f}_{c,t} \leq S^{conv}_c \, o_{c,t} \, u^{f}_{c,t}, \qquad
+\underline{S}_c \, u^{b}_{c,t} \leq p^{b}_{c,t} \leq S^{conv}_c \, o_{c,t} \, u^{b}_{c,t}
+\tag{CONV-3}
+\]
+
+with \(p^{f}, p^{b}\) the two flows (rectify/invert, A→B/B→A). For the energy prices the binaries are fixed at their optimum with the generators' commitment and the LP re-solved. Economic dispatch and the master problem (LP) ignore `min_power_mva`. Implemented in `add_converter_constraints!()`.
 
 ## Transformer Modeling
 

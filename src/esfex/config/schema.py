@@ -723,8 +723,11 @@ class BatteryConfig(BaseModel):
     name: str
     type: Literal["Storage"] = "Storage"
     fuel: str = "None"
-    technology: Optional[str] = None
-    reservable: bool = True
+    technology: Optional[str] = Field(
+        default=None,
+        description="Battery technology (key or name) whose invest_cost_power prices life "
+        "extension where invest_cost is 0 (no match: the system's first battery technology)")
+    reservable: bool = Field(default=True, description="Headroom counts towards reserves")
     spillage: bool = True
     min_duration_hours: Optional[int] = None
     max_duration_hours: Optional[int] = None
@@ -735,17 +738,20 @@ class BatteryConfig(BaseModel):
     degradation_rate: list[float]
     decommissioning_cost: list[float]
     rated_power: list[float] = Field(description="Power rating per node (MW)")
-    min_power: list[float]
-    min_up: list[int]
-    min_down: list[int]
-    ramp_up: list[float]
-    ramp_down: list[float]
-    eff_at_rated: list[float]
-    eff_at_min: list[float]
+    ramp_up: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp up limit per node: how fast charge or discharge power may rise "
+        "(fraction of MaxChargePower / MaxDischargePower per hour, scaled to the time step; "
+        "0 = no limit)")
+    ramp_down: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp down limit per node: how fast charge or discharge power may fall "
+        "(fraction of MaxChargePower / MaxDischargePower per hour, scaled to the time step; "
+        "0 = no limit)")
     inertia: list[float]
-    start_up_cost: list[float]
-    fuel_cost: list[float]
-    fixed_cost: list[float]
+    fixed_cost: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Fixed O&M per node ($/MW of MaxDischargePower per year)")
     maintenance_cost: list[float]
     throughput_degradation_cost: Optional[list[float]] = Field(
         default=None,
@@ -775,7 +781,9 @@ class BatteryConfig(BaseModel):
     # Electrical properties
     current_type: Literal["AC", "DC"] = Field(default="DC", description="Current type")
 
-    availability_file: Optional[str] = Field(None, alias="Availability")
+    availability_file: Optional[str] = Field(
+        None, alias="Availability",
+        description="Availability profile: hourly factor (0-1) on the charge and discharge power")
 
     # Physical bus anchoring (see GeneratorConfig for semantics).
     bus_index: Optional[int] = Field(None, description="Global 0-based bus index (single-bus units)")
@@ -877,7 +885,25 @@ class BatteryTechnologyConfig(BaseModel):
         description="Per-node geographic risk derating (0-1). Reduces effective capacity "
         "credit to account for hazard exposure.",
     )
+    # Operating fields of the batteries it builds (as in BatteryConfig)
+    ramp_up: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp up limit per node: how fast charge or discharge power may rise "
+        "(fraction of the power built per hour, scaled to the time step; 0 = no limit)")
+    ramp_down: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp down limit per node: how fast charge or discharge power may fall "
+        "(fraction of the power built per hour, scaled to the time step; 0 = no limit)")
+    fixed_cost: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Fixed O&M per node ($/MW of power built per year)")
+    reservable: bool = Field(default=True, description="Headroom counts towards reserves")
+    availability_file: Optional[str] = Field(
+        None, alias="Availability",
+        description="Availability profile: hourly factor (0-1) on the charge and discharge power")
     color: Optional[str] = Field(default=None, description="Display color hex code (e.g. '#FF0000') for results visualization")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ElectrolyzerConfig(BaseModel):

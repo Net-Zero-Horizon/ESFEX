@@ -7,7 +7,7 @@ Pydantic v2 models for the ESFEX configuration. YAML files are normally loaded w
 General behaviour:
 
 - **Extra keys are ignored.** No model sets `extra="forbid"`, so unknown keys are dropped without an error. [`load_config()`](config-loader.md) reports them: it logs each one and keeps the list in `ESFEXConfig.unknown_keys`.
-- **Aliases.** `SystemConfig`, `GeneratorConfig`, `BatteryConfig`, `TechnologyConfig` and `SystemLinkConfig` set `populate_by_name=True` and accept both the field name and its alias (for example `target_re_penetration` and `TARGET_RE_PENETRATION`, `availability_file` and `Availability`).
+- **Aliases.** `SystemConfig`, `GeneratorConfig`, `BatteryConfig`, `TechnologyConfig`, `BatteryTechnologyConfig` and `SystemLinkConfig` set `populate_by_name=True` and accept both the field name and its alias (for example `target_re_penetration` and `TARGET_RE_PENETRATION`, `availability_file` and `Availability`).
 - **Per-node lists.** Fields typed `list[...]` on equipment hold one value per node. Their length is not validated.
 
 ## Model Hierarchy
@@ -238,6 +238,8 @@ class BatteryConfig(BaseModel):
     name: str
     type: Literal["Storage"] = "Storage"
     fuel: str = "None"
+    technology: Optional[str] = None       # battery technology pricing life extension
+    reservable: bool = True
     spillage: bool = True
     min_duration_hours: Optional[int] = None
     max_duration_hours: Optional[int] = None
@@ -252,14 +254,15 @@ class BatteryConfig(BaseModel):
     invest_max_capacity: list[float] = [0.0]
     throughput_degradation_cost: Optional[list[float]] = None
     discharge_cost_curve: Optional[list[CostCurveConfig]] = None
+    ramp_up: list[float] = [0.0]           # fraction of rated power per hour, 0 = no limit
+    ramp_down: list[float] = [0.0]
+    fixed_cost: list[float] = [0.0]        # $/MW of MaxDischargePower per year
     availability_file: Optional[str] = None   # alias "Availability"
     bus_index: Optional[int] = None
     bus_id_per_node: Optional[dict[int, str]] = None
-    # plus the generator-style per-node lists: life_time, initial_age,
-    # degradation_rate, decommissioning_cost, rated_power, min_power, min_up,
-    # min_down, ramp_up, ramp_down, eff_at_rated, eff_at_min, inertia,
-    # start_up_cost, fuel_cost, fixed_cost, maintenance_cost, invest_cost,
-    # invest_max_power
+    # plus the per-node lists life_time, initial_age, degradation_rate,
+    # decommissioning_cost, rated_power, inertia, maintenance_cost,
+    # invest_cost, invest_max_power
 ```
 
 ---
@@ -310,6 +313,11 @@ class BatteryTechnologyConfig(BaseModel):
     soc_initial: list[float] = [0.5]
     max_DoD: list[float] = [0.9]
     throughput_degradation_cost: list[float] = [1.0]   # $/MWh discharged
+    ramp_up: list[float] = [0.0]           # of the batteries it builds, as BatteryConfig
+    ramp_down: list[float] = [0.0]
+    fixed_cost: list[float] = [0.0]        # $/MW built per year
+    reservable: bool = True
+    availability_file: Optional[str] = None   # alias "Availability"
     ...
 ```
 

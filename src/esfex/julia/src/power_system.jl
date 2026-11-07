@@ -646,9 +646,9 @@ function build_variables!(model, input::PowerSystemInput)
 
     # =========================================================================
     # Segment variables for PWL (bidding curve) cost decomposition
-    # Created for generators with a cost curve (a single segment prices the
-    # output at its own marginal cost, not fuel_cost) and batteries with >1
-    # cost segment.
+    # Created for every generator and battery with a cost curve: a single
+    # segment prices the output (discharge) at its own marginal cost, not at
+    # fuel_cost (throughput_degradation_cost).
     # =========================================================================
     gen_seg_output = Dict{Tuple{Int,Int}, Any}()
     # A curve at a bus where the unit has no output variable (no capacity
@@ -672,7 +672,7 @@ function build_variables!(model, input::PowerSystemInput)
     bat_seg_discharge = Dict{Tuple{Int,Int}, Any}()
     for (bi, bus_curves) in input.bat_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1 && b in buses_of_bat[bi]
+            if !isempty(segs) && b in buses_of_bat[bi]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="bseg_$(bi)_$(b)")
@@ -817,7 +817,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Cost = discharge * throughput_degradation_cost for each battery
     # ==========================================================================
     # Battery throughput degradation cost — sparse iteration
-    # When a battery has a multi-segment discharge cost curve, apply per-segment.
+    # When a battery has a discharge cost curve, apply it per segment.
     battery_throughput_degradation_cost = AffExpr(0.0)
     for bi in 1:n_bat
         for b in vars.buses_of_bat[bi]
@@ -1287,6 +1287,19 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         end
     end
 
+    # Battery fixed O&M ($/MW/year × discharge power): an annual cost,
+    # prorated to the window below like the other non-energy costs
+    battery_fixed_cost = AffExpr(0.0)
+    for bi in 1:n_bat
+        bat = input.batteries[bi]
+        for b in vars.buses_of_bat[bi]
+            fc = bat.fixed_cost[b]
+            # Rated (not degraded) power; nothing once past its life_time
+            (fc > 0 && battery_power_limits(bat, b, input)[3] > 0) || continue
+            add_to_expression!(battery_fixed_cost, fc * bat.max_discharge_power[b])
+        end
+    end
+
     # ==========================================================================
     # Total Objective
     # Each timestep represents temporal_resolution_hours hours of energy.
@@ -1321,7 +1334,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     non_energy_costs = (
         investment_cost +
         delay_retirement_cost + npv_penalty_cost +
-        reservoir_invest_cost
+        reservoir_invest_cost + battery_fixed_cost
     )
     # Start-ups are events inside the window: charged in full, neither per
     # MWh nor prorated (they were prorated × window/year like the annual costs)
@@ -1335,7 +1348,10 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Energy-based costs will be scaled by temporal_resolution_hours at extraction time.
     model.ext[:cost_expressions] = Dict{Symbol, Any}(
         :fuel_cost => fuel_cost,
-        :fixed_om_cost => fixed_cost,
+        # Battery fixed O&M joins the generators' fixed O&M; it is prorated,
+        # not per step, so ÷ tres undoes the × tres applied at extraction
+        :fixed_om_cost => fixed_cost +
+            (non_energy_window_fraction / temporal_resolution_hours) * battery_fixed_cost,
         :maintenance_cost => maintenance_cost,
         :startup_cost => startup_cost,
         :battery_maintenance_cost => battery_maintenance_cost,
@@ -1745,9 +1761,68 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
 end
 
 """
+    battery_power_limits(bat, b, input) -> (capacity, max_charge, max_discharge)
+
+Energy capacity (MWh) and charge / discharge power (MW) of battery `bat` at
+bus `b` in the dispatch's year: with a degradation rate they shrink by
+`(1 − degradation_rate)^age` and are zero once the battery is past its
+`life_time` (age = `initial_age` + years since the base year).
+"""
+function battery_power_limits(bat, b::Int, input)
+    capacity = bat.capacity[b]
+    max_charge = bat.max_charge_power[b]
+    max_discharge = bat.max_discharge_power[b]
+    if length(bat.degradation_rate) >= b && bat.degradation_rate[b] > 0 && capacity > 0
+        deg = bat.degradation_rate[b]
+        base_age = length(bat.initial_age) >= b ? bat.initial_age[b] : 0.0
+        age = base_age + max(0.0, Float64(input.year - input.base_year))
+        life = length(bat.life_time) >= b ? bat.life_time[b] : Inf
+        if life - age <= 0
+            return 0.0, 0.0, 0.0
+        end
+        f = (1 - deg)^age
+        return capacity * f, max_charge * f, max_discharge * f
+    end
+    return capacity, max_charge, max_discharge
+end
+
+"""
+    add_storage_ramp_constraints!(model, power, rated, prev, ramp_up, ramp_down,
+                                  tres, hours; seam_name="") -> Vector
+
+Ramp limits of one power flow of a battery (its charge or its discharge) at
+one bus: from one step to the next it may rise by at most
+`storage_ramp_limit(ramp_up, tres, rated)` and fall by at most
+`storage_ramp_limit(ramp_down, tres, rated)`. `power(t)` is the flow at step
+`t`; `prev` its value at the previous window's last step (NaN: no limit at
+t = 1); `rated` its rated power (a number, or an expression of the master's
+capacities). Returns `(constraint, coefficient of rated)` per constraint.
+"""
+function add_storage_ramp_constraints!(model, power::Function, rated, prev::Float64,
+                                       ramp_up::Real, ramp_down::Real, tres::Real,
+                                       hours::Int; seam_name::String = "")
+    out = Tuple{Any, Float64}[]
+    for (ramp, sgn, dir) in ((ramp_up, 1.0, "up"), (ramp_down, -1.0, "down"))
+        coef = storage_ramp_limit(ramp, tres, 1.0)
+        coef === nothing && continue
+        if !isnan(prev)
+            c = @constraint(model, sgn * (power(1) - prev) <= coef * rated,
+                            base_name = "$(seam_name)_ramp_$(dir)_seam")
+            push!(out, (c, coef))
+        end
+        for t in 2:hours
+            c = @constraint(model, sgn * (power(t) - power(t-1)) <= coef * rated)
+            push!(out, (c, coef))
+        end
+    end
+    return out
+end
+
+"""
     add_battery_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
-Add battery storage constraints: SOC dynamics, charge/discharge limits, investment limits.
+Add battery storage constraints: SOC dynamics, charge/discharge limits
+(× availability and scheduled outages), ramp limits, investment limits.
 """
 function add_battery_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override_power::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
@@ -1816,8 +1891,9 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                     base_name = "bat_soc_initial_$(bi)_$(b)")
 
                 for t in 1:hours
-                    @constraint(model, vars.bat_charge[bi, b, t] <= effective_max_charge)
-                    @constraint(model, vars.bat_discharge[bi, b, t] <= effective_max_discharge)
+                    avail = storage_availability(bat.availability, t, b)
+                    @constraint(model, vars.bat_charge[bi, b, t] <= effective_max_charge * avail)
+                    @constraint(model, vars.bat_discharge[bi, b, t] <= effective_max_discharge * avail)
                     @constraint(model, vars.bat_soc[bi, b, t+1] <= effective_capacity)
 
                     # SOC dynamics (simplified: no self-discharge, no spillage in master LP)
@@ -1827,6 +1903,11 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                         η_charge * vars.bat_charge[bi, b, t] * tres -
                         vars.bat_discharge[bi, b, t] * tres / η_discharge)
                 end
+                # Ramp limits, as in the dispatch (each day starts fresh)
+                add_storage_ramp_constraints!(model, t -> vars.bat_charge[bi, b, t],
+                    effective_max_charge, NaN, bat.ramp_up[b], bat.ramp_down[b], tres, hours)
+                add_storage_ramp_constraints!(model, t -> vars.bat_discharge[bi, b, t],
+                    effective_max_discharge, NaN, bat.ramp_up[b], bat.ramp_down[b], tres, hours)
 
                 # Segment upper bounds for PWL discharge cost decomposition
                 if haskey(vars.bat_seg_discharge, (bi, b))
@@ -1850,28 +1931,8 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                 end
             else
                 # === Standard operational dispatch path ===
-                capacity = bat.capacity[b]
-                max_charge = bat.max_charge_power[b]
-                max_discharge = bat.max_discharge_power[b]
-
-                # Age-based degradation for batteries: age advances with simulation year
-                if length(bat.degradation_rate) >= b && bat.degradation_rate[b] > 0 && capacity > 0
-                    deg = bat.degradation_rate[b]
-                    base_age = length(bat.initial_age) >= b ? bat.initial_age[b] : 0.0
-                    age = base_age + max(0.0, Float64(input.year - input.base_year))
-                    life = length(bat.life_time) >= b ? bat.life_time[b] : Inf
-                    remaining = life - age
-                    if remaining <= 0
-                        capacity = 0.0
-                        max_charge = 0.0
-                        max_discharge = 0.0
-                    else
-                        degrade_factor = (1 - deg)^age
-                        capacity = capacity * degrade_factor
-                        max_charge = max_charge * degrade_factor
-                        max_discharge = max_discharge * degrade_factor
-                    end
-                end
+                # Age-based degradation: age advances with simulation year
+                capacity, max_charge, max_discharge = battery_power_limits(bat, b, input)
 
                 # Investment constraints (development mode)
                 if is_dev
@@ -1936,7 +1997,9 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                 )
 
                 for t in 1:hours
-                    omask = bat_outage === nothing ? 1.0 : bat_outage[bi, t]
+                    # Scheduled outage × availability profile
+                    omask = (bat_outage === nothing ? 1.0 : bat_outage[bi, t]) *
+                            storage_availability(bat.availability, t, b)
                     if is_dev && bat.invest_max_power[b] > 0
                         @constraint(model, vars.bat_charge[bi, b, t] <=
                             (max_charge + vars.bat_investment_power[bi, b]) * omask)
@@ -1994,6 +2057,19 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                         end
                     end
                 end
+
+                # Ramp limits on charge and discharge; at t=1 from the
+                # previous window's last step (rolling-horizon seam)
+                prev_of(d) = hasproperty(input, d) ?
+                    get(get(getproperty(input, d), bi, Dict{Int,Float64}()), b, NaN) : NaN
+                add_storage_ramp_constraints!(model, t -> vars.bat_charge[bi, b, t],
+                    effective_max_charge, prev_of(:battery_charge_prev),
+                    bat.ramp_up[b], bat.ramp_down[b], tres, hours;
+                    seam_name = "bat_charge_bi$(bi)_b$(b)")
+                add_storage_ramp_constraints!(model, t -> vars.bat_discharge[bi, b, t],
+                    effective_max_discharge, prev_of(:battery_discharge_prev),
+                    bat.ramp_up[b], bat.ramp_down[b], tres, hours;
+                    seam_name = "bat_discharge_bi$(bi)_b$(b)")
 
                 # Segment upper bounds for PWL discharge cost decomposition
                 if haskey(vars.bat_seg_discharge, (bi, b))
@@ -2334,6 +2410,7 @@ headroom. Dynamic reserve is further limited to
 """
 function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
+    battery_capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
     demand_scale::Float64 = 1.0)
     n_gen = length(input.generators)
     n_bus = input.network.num_buses
@@ -2347,13 +2424,16 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
         push!(node_buses[b2n[b]], b)
     end
 
+    # Reservable batteries and their discharge power (see battery_reserve_power)
     n_bat = length(input.batteries)
     bats_at_bus = [Int[] for _ in 1:n_bus]
     for bi in 1:n_bat
+        input.batteries[bi].reservable || continue
         for b in vars.buses_of_bat[bi]
             push!(bats_at_bus[b], bi)
         end
     end
+    bat_power = battery_reserve_power(vars, input, battery_capacity_override)
 
     # Spinning reserve: in unit commitment an offline unit holds no headroom.
     spinning = capacity_override === nothing && vars.gen_status !== nothing &&
@@ -2387,12 +2467,11 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                 # A battery currently dispatching P_d has (P_d_max - P_d) more to
                 # give; one currently charging P_c can release P_c by stopping.
                 for bi in bats_at_bus[b]
-                    bat = input.batteries[bi]
-                    if bat.max_discharge_power[b] > 0
-                        add_to_expression!(available_reserve, bat.max_discharge_power[b])
-                        add_to_expression!(available_reserve, -1.0, vars.bat_discharge[bi, b, t])
-                        add_to_expression!(available_reserve, 1.0, vars.bat_charge[bi, b, t])
-                    end
+                    p = bat_power(bi, b, t)
+                    p === nothing && continue
+                    add_to_expression!(available_reserve, p)
+                    add_to_expression!(available_reserve, -1.0, vars.bat_discharge[bi, b, t])
+                    add_to_expression!(available_reserve, 1.0, vars.bat_charge[bi, b, t])
                 end
             end
 
@@ -2439,13 +2518,12 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                             end
                         end
                     end
-                    # Batteries contribute their nameplate discharge to dynamic reserve
+                    # Batteries contribute their discharge power to dynamic reserve
                     for bi in bats_at_bus[b]
-                        bat = input.batteries[bi]
-                        if bat.max_discharge_power[b] > 0
-                            add_to_expression!(available_dynamic,
-                                input.dynamic_reserve_contribution, bat.max_discharge_power[b])
-                        end
+                        p = bat_power(bi, b, t)
+                        p === nothing && continue
+                        add_to_expression!(available_dynamic,
+                            input.dynamic_reserve_contribution, p)
                     end
                 end
 
@@ -2464,6 +2542,36 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                     base_name = "reserve_dynamic_zero_$(ni)_$(t)")
             end
         end
+    end
+end
+
+"""
+    battery_reserve_power(vars, input, capacity_override=nothing) -> Function
+
+`(bi, b, t) -> discharge power` that battery `bi` at bus `b` can offer as
+headroom at step `t` (`nothing` when it has none): its discharge power
+(`battery_power_limits`, or `capacity_override[(bi, b)]` in the master) ×
+its availability × its scheduled-outage factor.
+"""
+function battery_reserve_power(vars, input,
+                               capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing)
+    outage = hasproperty(input, :outage_masks) ?
+        get(input.outage_masks, "battery", nothing) : nothing
+    base = Dict{Tuple{Int,Int}, Any}()
+    for (bi, bat) in enumerate(input.batteries), b in vars.buses_of_bat[bi]
+        if capacity_override !== nothing && haskey(capacity_override, (bi, b))
+            base[(bi, b)] = capacity_override[(bi, b)]
+        else
+            p = battery_power_limits(bat, b, input)[3]
+            p > 0 && (base[(bi, b)] = p)
+        end
+    end
+    return (bi, b, t) -> begin
+        p = get(base, (bi, b), nothing)
+        p === nothing && return nothing
+        f = storage_availability(input.batteries[bi].availability, t, b) *
+            (outage === nothing ? 1.0 : outage[bi, t])
+        return p * f
     end
 end
 
@@ -2876,7 +2984,8 @@ With `n1_generation_reserve_type = "percentage"` the requirement is instead
 `n1_generation_reserve_percentage × Σ_n demand[t, n]` and no unit is excluded
 from the cover.
 
-with cover_t the batteries' headroom (max discharge − discharge + charge) plus,
+with cover_t the batteries' headroom (discharge power × availability −
+discharge + charge; reservable batteries only when preventive) plus,
 per non-renewable unit other than (g*, b*), its headroom
 (available capacity, × status in unit commitment, − output):
 - preventive (`corrective = false`): reservable units only, full headroom
@@ -2898,6 +3007,7 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
     end
     spinning = vars.gen_status !== nothing && vars.gen_startup !== nothing
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
+    bat_power = battery_reserve_power(vars, input)
     for t in 1:input.temporal.hours
         cover = AffExpr(0.0)
         for (g, gen) in enumerate(input.generators)
@@ -2926,12 +3036,12 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
             end
         end
         for bi in eachindex(input.batteries), b in vars.buses_of_bat[bi]
-            bat = input.batteries[bi]
-            if bat.max_discharge_power[b] > 0
-                add_to_expression!(cover, bat.max_discharge_power[b])
-                add_to_expression!(cover, -1.0, vars.bat_discharge[bi, b, t])
-                add_to_expression!(cover, 1.0, vars.bat_charge[bi, b, t])
-            end
+            corrective || input.batteries[bi].reservable || continue
+            p = bat_power(bi, b, t)
+            p === nothing && continue
+            add_to_expression!(cover, p)
+            add_to_expression!(cover, -1.0, vars.bat_discharge[bi, b, t])
+            add_to_expression!(cover, 1.0, vars.bat_charge[bi, b, t])
         end
         short = @variable(model, lower_bound = 0, base_name = "$(cname)_shortfall_t$(t)")
         need = pct ?
@@ -3641,6 +3751,10 @@ function recover_uc_duals!(model, vars::PowerSystemVariables, input::PowerSystem
     n_gen = length(input.generators)
     hours = input.temporal.hours
 
+    # Converter on/off binaries (min_power_mva): read before any change
+    conv_on = get(model.ext, :converter_commitment, VariableRef[])
+    conv_vals = [round(value(v)) for v in conv_on]
+
     # Relax the binary commitment variables to continuous and pin them to
     # the MIP optimum. ``round`` removes any tiny solver floating-point
     # noise that would otherwise make the fix infeasible.
@@ -3655,6 +3769,13 @@ function recover_uc_duals!(model, vars::PowerSystemVariables, input::PowerSystem
             fix(v, val; force=true)
             n_fixed += 1
         end
+    end
+
+    # ... and the converters' likewise
+    for (v, val) in zip(conv_on, conv_vals)
+        is_binary(v) && unset_binary(v)
+        fix(v, val; force=true)
+        n_fixed += 1
     end
 
     # gen_startup is Continuous [0,1] in UC mode (see build_variables!),
@@ -3825,9 +3946,17 @@ function recover_uc_duals_via_copy(
     # variable / constraint handles into their copies — both ``gen_status``
     # (for fix) and ``balance_constraints`` (for dual lookup) live on the
     # original.
+    conv_on = get(model.ext, :converter_commitment, VariableRef[])
+    conv_vals = [round(value(v)) for v in conv_on]
+
     copied = _copy_with_optimizer(model, input, "UC dual recovery (copy)")
     copied === nothing && return nothing
     new_model, reference_map = copied
+    for (v, val) in zip(conv_on, conv_vals)
+        new_v = reference_map[v]
+        is_binary(new_v) && unset_binary(new_v)
+        fix(new_v, val; force=true)
+    end
 
     # On the copy: relax ``gen_status`` to continuous and pin to MIP
     # incumbent values. The original model is untouched.

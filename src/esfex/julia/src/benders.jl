@@ -666,76 +666,18 @@ function create_benders_subproblem(
         end
     end
 
-    # Battery technology dispatch with FIXED capacity
+    # Battery technology dispatch with FIXED capacity, as in the master; the
+    # constraints holding that capacity go to the store for the cut
     bat_tech_discharge = nothing
     bat_tech_charge = nothing
     bat_tech_soc = nothing
     if n_bat_tech > 0
-        bat_tech_discharge = @variable(sp_model,
-            [bt=1:n_bat_tech, b=1:n_buses, ts=1:hours],
-            lower_bound = 0, base_name = "bat_tech_dis_y$(year_idx)_d$(day_idx)")
-        bat_tech_charge = @variable(sp_model,
-            [bt=1:n_bat_tech, b=1:n_buses, ts=1:hours],
-            lower_bound = 0, base_name = "bat_tech_ch_y$(year_idx)_d$(day_idx)")
-        bat_tech_soc = @variable(sp_model,
-            [bt=1:n_bat_tech, b=1:n_buses, ts=0:hours],
-            lower_bound = 0, base_name = "bat_tech_soc_y$(year_idx)_d$(day_idx)")
-
-        for bt in 1:n_bat_tech
-            btech = input.battery_technologies[bt]
-            for b in 1:n_buses
-                pow_cap = get(fixed_caps.bat_tech_power, (bt, b), 0.0)
-                en_cap = get(fixed_caps.bat_tech_energy, (bt, b), 0.0)
-
-                for ts in 1:hours
-                    cname_dis = "bt_dis_cap_bt$(bt)_b$(b)_ts$(ts)"
-                    cref_dis = @constraint(sp_model, bat_tech_discharge[bt, b, ts] <= pow_cap,
-                        base_name = cname_dis)
-                    constraint_store[cname_dis] = (cref_dis, 1.0, bt, b, ts)
-
-                    cname_ch = "bt_ch_cap_bt$(bt)_b$(b)_ts$(ts)"
-                    cref_ch = @constraint(sp_model, bat_tech_charge[bt, b, ts] <= pow_cap,
-                        base_name = cname_ch)
-                    constraint_store[cname_ch] = (cref_ch, 1.0, bt, b, ts)
-                end
-                for ts in 0:hours
-                    cname_soc = "bt_soc_cap_bt$(bt)_b$(b)_ts$(ts)"
-                    cref_soc = @constraint(sp_model, bat_tech_soc[bt, b, ts] <= en_cap,
-                        base_name = cname_soc)
-                    constraint_store[cname_soc] = (cref_soc, 1.0, bt, b, ts)
-                end
-
-                ch_eff = btech.charge_efficiency[b]
-                dis_eff = btech.discharge_efficiency[b]
-                initial_soc_frac = btech.soc_initial[b]
-                # Clamp to soc_min to avoid initial/end SOC vs soc_min conflict
-                soc_min_b = btech.soc_min[b]
-                if initial_soc_frac < soc_min_b
-                    initial_soc_frac = soc_min_b
-                end
-                # Skip SOC dynamics if efficiency is zero (tech not at this node)
-                if dis_eff <= 0.0 || ch_eff <= 0.0
-                    for ts in 0:hours
-                        @constraint(sp_model, bat_tech_soc[bt, b, ts] <= 0)
-                    end
-                    for ts in 1:hours
-                        @constraint(sp_model, bat_tech_discharge[bt, b, ts] <= 0)
-                        @constraint(sp_model, bat_tech_charge[bt, b, ts] <= 0)
-                    end
-                else
-                    @constraint(sp_model, bat_tech_soc[bt, b, 0] == en_cap * initial_soc_frac)
-                    # SOC in MWh; charge/discharge in MW over a step of tres hours
-                    tres = input.temporal_resolution_hours
-                    for ts in 1:hours
-                        @constraint(sp_model,
-                            bat_tech_soc[bt, b, ts] == bat_tech_soc[bt, b, ts-1]
-                                + tres * (ch_eff * bat_tech_charge[bt, b, ts]
-                                          - (1.0/dis_eff) * bat_tech_discharge[bt, b, ts]))
-                    end
-                    @constraint(sp_model, bat_tech_soc[bt, b, hours] == en_cap * initial_soc_frac)
-                end
-            end
-        end
+        bat_tech_discharge, bat_tech_charge, bat_tech_soc = add_battery_tech_day!(
+            sp_model, input,
+            (bt, b) -> get(fixed_caps.bat_tech_power, (bt, b), 0.0),
+            (bt, b) -> get(fixed_caps.bat_tech_energy, (bt, b), 0.0),
+            start_hour, hours;
+            var_suffix = "_y$(year_idx)_d$(day_idx)", store = constraint_store)
     end
 
     # =========================================================================
@@ -751,7 +693,7 @@ function create_benders_subproblem(
 
     day_input = (
         generators = day_generators,
-        batteries = input.batteries,
+        batteries = batteries_for_day(input.batteries, start_hour, hours),
         network = input.network,
         demand = demand_slice,
         temporal = (hours = hours, resolution_hours = input.temporal_resolution_hours),
@@ -799,6 +741,7 @@ function create_benders_subproblem(
     add_reservoir_constraints!(sp_model, ps_vars, day_input; capacity_override=res_cap)
     add_reserve_constraints!(sp_model, ps_vars, day_input;
         capacity_override=total_cap_gen,
+        battery_capacity_override=total_cap_bat_power,
         demand_scale=1.0)
     add_inertia_constraints!(sp_model, ps_vars, day_input)
     # Converters at their rated power plus a copy of the MW the master built
@@ -1165,46 +1108,18 @@ function extract_subproblem_duals(
         end
     end
 
-    # Battery tech power duals (discharge)
-    bt_pow_duals = Dict{Tuple{Int,Int}, Float64}()
-    for bt in 1:n_bat_tech
-        for b in 1:n_buses
-            total_dual = 0.0
-            for ts in 1:sp.hours
-                cname_dis = "bt_dis_cap_bt$(bt)_b$(b)_ts$(ts)"
-                cname_ch = "bt_ch_cap_bt$(bt)_b$(b)_ts$(ts)"
-                if haskey(sp.constraint_store, cname_dis)
-                    cref_dis, _, _, _, _ = sp.constraint_store[cname_dis]
-                    total_dual += dual(cref_dis)
-                end
-                if haskey(sp.constraint_store, cname_ch)
-                    cref_ch, _, _, _, _ = sp.constraint_store[cname_ch]
-                    total_dual += dual(cref_ch)
-                end
-            end
-            if abs(total_dual) > 1e-10
-                bt_pow_duals[(bt, b)] = total_dual
-            end
+    # Battery tech power and energy duals: Σ dual × coefficient of the
+    # capacity over the constraints holding it (charge and discharge limits
+    # × availability, ramp limits; SOC limits), see add_battery_tech_day!
+    function bt_duals(kind)
+        out = Dict{Tuple{Int,Int}, Float64}()
+        for (cref, coef, bt, b) in get(sp.constraint_store, kind, ())
+            out[(bt, b)] = get(out, (bt, b), 0.0) + dual(cref) * coef
         end
+        return filter(kv -> abs(kv[2]) > 1e-10, out)
     end
-
-    # Battery tech energy duals (SOC)
-    bt_cap_duals = Dict{Tuple{Int,Int}, Float64}()
-    for bt in 1:n_bat_tech
-        for b in 1:n_buses
-            total_dual = 0.0
-            for ts in 0:sp.hours
-                cname_soc = "bt_soc_cap_bt$(bt)_b$(b)_ts$(ts)"
-                if haskey(sp.constraint_store, cname_soc)
-                    cref_soc, _, _, _, _ = sp.constraint_store[cname_soc]
-                    total_dual += dual(cref_soc)
-                end
-            end
-            if abs(total_dual) > 1e-10
-                bt_cap_duals[(bt, b)] = total_dual
-            end
-        end
-    end
+    bt_pow_duals = bt_duals("bt_pow")
+    bt_cap_duals = bt_duals("bt_cap")
 
     # Curtailment constraint dual contribution to technology gradient.
     # The curtailment constraint includes technology curtailment:
