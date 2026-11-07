@@ -24,10 +24,7 @@ JS = (Path(__file__).resolve().parents[1] / "src" / "esfex" / "visualization"
 
 
 @pytest.fixture(scope="module")
-def engine():
-    from PySide6.QtCore import QCoreApplication
-
-    QCoreApplication.instance() or QCoreApplication([])
+def engine(qapp):
     src = JS.read_text(encoding="utf-8")
     # Header vars + date helpers only (the rest needs a DOM and d3).
     head = src[:src.index("// ── Bootstrap")]

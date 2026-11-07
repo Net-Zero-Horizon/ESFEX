@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from esfex.paths import MODELS_DIR as _CACHE_DIR, DEMAND_DATASET_DIR
 

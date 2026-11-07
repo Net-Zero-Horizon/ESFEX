@@ -179,8 +179,7 @@ systems:
         # ... other fields ...
 ```
 
-- **Generators** read only `Availability`. The key `availability_file` is ignored for generators.
-- **Technologies** accept `Availability` or `availability_file`.
+- **Generators** and **technologies** accept `Availability` or `availability_file`.
 - **Batteries** do not use availability profiles.
 
 In the master problem, renewable technologies use their profile; non-renewable technologies are taken as always available.

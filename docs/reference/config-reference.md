@@ -267,7 +267,7 @@ There is no `demand_growth` or `initial_re_penetration` key; both are ignored if
 | `acdc_converters` | list[[ACDCConverterConfig](#acdcconverterconfig)] | `[]` | AC/DC converters |
 | `freq_converters` | list[[FrequencyConverterConfig](#frequencyconverterconfig)] | `[]` | Frequency converters |
 
-The legacy flat keys `DC_BASE_IMPEDANCE`, `DC_REACTANCE_PER_KM`, `DC_VOLTAGE_LEVEL_KV`, `DC_MAX_ANGLE_DIFF_DEG`, `DC_SLACK_BUS` (or lowercase `dc_*`) are still read as fallbacks for the matching `dc_power_flow` fields.
+The legacy flat keys `DC_BASE_IMPEDANCE`, `DC_REACTANCE_PER_KM`, `DC_VOLTAGE_LEVEL_KV`, `DC_MAX_ANGLE_DIFF_DEG`, `DC_SLACK_BUS` (in any case, for example `dc_slack_bus`) are still read as fallbacks for the matching `dc_power_flow` fields.
 
 ### Equipment
 
