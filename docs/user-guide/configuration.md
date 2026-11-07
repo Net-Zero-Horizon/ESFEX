@@ -104,7 +104,7 @@ solver:
     ipm_optimality_tolerance: 1.0e-8
 ```
 
-The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them: `acopf_soc`, `acopf_qc` and `acopf_sdp` need a conic solver (HiGHS has no second-order cones), `acopf_polar` and `acopf_rect` need Ipopt. `scale_constraints` has no effect: it loads, but neither the model nor the solvers read it. See the [Solver Guide](solver-guide.md) for tuning.
+The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them: `acopf_soc`, `acopf_qc` and `acopf_sdp` need a conic solver (HiGHS has no second-order cones), `acopf_polar` and `acopf_rect` need Ipopt. See the [Solver Guide](solver-guide.md) for tuning.
 
 ---
 
@@ -578,8 +578,6 @@ Each node's shares should sum to 1; this is not validated. Shedding priority fol
 ```yaml
 meta_network:
   systems: [mainland, island]
-  dynamic_transfer_pricing: true          # not used
-  inter_system_loss_segments: 2           # not used
 
   systems_links:
     - systems: [mainland, island]

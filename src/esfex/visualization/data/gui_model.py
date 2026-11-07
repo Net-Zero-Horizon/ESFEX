@@ -825,7 +825,6 @@ class GuiGlobalSettings:
     solver_time_limit: int = 10800
     solver_gap: float = 0.01
     solver_verbose: bool = False
-    solver_scale_constraints: bool = True
     solver_specific_options: dict[str, Any] = field(default_factory=dict)
     # N1 Security
     n1_enabled: bool = False
@@ -929,8 +928,6 @@ class GuiGlobalSettings:
                 prefs, "solver", "mip_gap", self.solver_gap)
             self.solver_verbose = get_preference(
                 prefs, "solver", "verbose", self.solver_verbose)
-            self.solver_scale_constraints = get_preference(
-                prefs, "solver", "scale_constraints", self.solver_scale_constraints)
         except Exception:
             pass  # Preferences unavailable — keep dataclass defaults
 
@@ -979,7 +976,6 @@ class GuiInterSystemLink:
     voltage_kv: Optional[float] = None
     line_type: Optional[str] = None     # "overhead", "underground", "submarine"
     length_km: Optional[float] = None   # alias of distance_km when shown to user
-    base_impedance: Optional[float] = None
     reactance_per_km: Optional[float] = None
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1

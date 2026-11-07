@@ -188,7 +188,6 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `soc_violation_cost` | float | $ | Battery SOC violation penalty |
 | `transfer_margin_cost` | float | $ | Transfer margin deficit penalty |
 | `v2g_compensation` | float | $ | V2G compensation (negative = credit) |
-| `flexible_demand_benefit` | float | $ | Always 0 (flexible demand is shifted, not curtailed) |
 | `investment_cost` | float | $ | Capital investment cost |
 | `electrolyzer_cost` | float | $ | Electrolyzer operation cost |
 | `converter_cost` | float | $ | AC/DC converter cost |

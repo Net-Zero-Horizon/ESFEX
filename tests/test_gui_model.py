@@ -1068,7 +1068,6 @@ class TestGuiGlobalSettings:
         assert gs.solver_time_limit == 3600
         assert gs.solver_gap == 0.001
         assert gs.solver_verbose is False
-        assert gs.solver_scale_constraints is False
         assert gs.solver_specific_options == {}
         # N1
         assert gs.n1_enabled is False

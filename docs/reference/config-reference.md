@@ -58,7 +58,6 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 | `time_limit` | int (≥ 0) | `10800` | Time limit per solve (seconds, `0` = unlimited) |
 | `gap` | float (0–1) | `0.01` | Relative MIP gap |
 | `verbose` | bool | `false` | Print solver output |
-| `scale_constraints` | bool | `true` | No effect: read by neither the model nor the solvers |
 | `options` | dict[str, any] | `{}` | Solver-specific options passed to JuMP. See [Solver Guide](../user-guide/solver-guide.md) |
 
 HiGHS options that apply to one LP method only (for example `primal_feasibility_tolerance` or `simplex_scale_strategy` for simplex, `ipm_optimality_tolerance` for IPM) are dropped with a warning unless `options.solver_method` is set explicitly to a matching method. See the [Solver Guide](../user-guide/solver-guide.md).
@@ -166,8 +165,6 @@ String enum of the SPORES objective menu. Each value names an LP objective insta
 |---|---|---|---|
 | `systems` | list[str] | required | Names of the systems to simulate; each must exist under `systems`. The first is the primary system |
 | `systems_links` | list[[SystemLinkConfig](#systemlinkconfig)] | `[]` | Inter-system links |
-| `dynamic_transfer_pricing` | bool | `true` | Not used by the current run |
-| `inter_system_loss_segments` | int (0–5) | `2` | Not used: link losses follow `dc_power_flow.loss_model` and `resistance_pu` like any line |
 
 ---
 
@@ -194,7 +191,6 @@ One entry of `meta_network.systems_links`. Each list holds one value per link; a
 | `voltage_kv` | list[float] | `[]` | Voltage per link (kV) |
 | `line_type` | list[str] | `[]` | Construction type per link |
 | `length_km` | list[float] | `[]` | Length per link (km) |
-| `base_impedance` | list[float] | `[]` | GUI-only, not used by the solver |
 | `reactance_per_km` | list[float] | `[]` | Reactance per link (Ω/km) |
 | `susceptance_pu` | list[float] | `[]` | Susceptance per link (p.u.) |
 | `num_circuits` | list[int] | `[]` | Parallel circuits per link |
@@ -219,7 +215,6 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `demand_scale` | float (> 0) | `1` | Multiplier applied to all demand |
 | `discount_rate` | float (0–1) | `0.05` | Discount rate |
 | `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in NPV calculations ($/MWh) |
-| `loss_demand_threshold` / `LOSS_DEMAND_TRHESHOLD` | float (0–1) | `0.05` | Deprecated and ignored: accepted so older case files load, but not passed to the model (no constraint ever used it). The Studio no longer shows or writes it |
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target. See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |
@@ -247,7 +242,6 @@ There is no `demand_growth` or `initial_re_penetration` key; both are ignored if
 | `min_cycling_ratio` | float (0–1) | `0.8` | Min battery cycling as fraction of capacity |
 | `min_cycling_period_days` | float (> 0) | `7` | Period for min cycling calculation (days) |
 | `reserve_static_default_ratio` | float (0–1) | `0.15` | Default static reserve as fraction of demand |
-| `flexible_demand_benefit_ratio` | float (0–1) | `0.5` | Not used (flexible demand is shifted, not curtailed) |
 | `demand_shift_cost_rate` | float (≥ 0) | `0.1` | Cost of shifting demand, $/MWh per hour moved |
 | `dynamic_reserve_contribution` | float (0–1) | `0.5` | Fraction of rated_power for dynamic reserve |
 
@@ -265,7 +259,7 @@ There is no `demand_growth` or `initial_re_penetration` key; both are ignored if
 | `acdc_converters` | list[[ACDCConverterConfig](#acdcconverterconfig)] | `[]` | AC/DC converters |
 | `freq_converters` | list[[FrequencyConverterConfig](#frequencyconverterconfig)] | `[]` | Frequency converters |
 
-The legacy flat keys `DC_BASE_IMPEDANCE`, `DC_REACTANCE_PER_KM`, `DC_VOLTAGE_LEVEL_KV`, `DC_MAX_ANGLE_DIFF_DEG`, `DC_SLACK_BUS` (in any case, for example `dc_slack_bus`) are still read as fallbacks for the matching `dc_power_flow` fields.
+The legacy flat keys `DC_REACTANCE_PER_KM`, `DC_VOLTAGE_LEVEL_KV`, `DC_MAX_ANGLE_DIFF_DEG`, `DC_SLACK_BUS` (in any case, for example `dc_slack_bus`) are still read as fallbacks for the matching `dc_power_flow` fields.
 
 ### Equipment
 
@@ -507,7 +501,6 @@ Nested under `dc_power_flow`. There is no `enabled` switch; the network formulat
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `base_impedance` | float | `100` | Deprecated and ignored; a warning is logged when set to another value. Per-unit values use `ac_power_flow.base_mva` and V²/`base_mva` per line |
 | `reactance_per_km` | float | `0.4` | Line reactance (Ω/km) used when a line has no `reactance_pu` |
 | `voltage_level_kv` | float | `220` | Voltage (kV) used to derive the reactance of lines without `voltage_kv` |
 | `max_angle_diff_deg` | float (0–90) | `30` | Maximum angle difference (degrees). Used by the AC-OPF formulations only |

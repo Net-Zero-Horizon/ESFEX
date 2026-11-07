@@ -10,7 +10,7 @@ extracting results (M$ → $). This improves numerical conditioning of the
 optimization model. Physical units (MW, MWh, tonnes, etc.) are unchanged.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 
@@ -50,7 +50,6 @@ from esfex.config.schema import (
     NodeConfig,
     ScenarioMultipliers,
     SolverConfig,
-    SystemConfig,
     TechnologyConfig,
     TemporalConfig,
     TransformerConfig,
@@ -1936,7 +1935,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "soc_violation_cost": float(cb.soc_violation_cost) * COST_UNSCALE,
             "transfer_margin_cost": float(cb.transfer_margin_cost) * COST_UNSCALE,
             "v2g_compensation": float(cb.v2g_compensation) * COST_UNSCALE,
-            "flexible_demand_benefit": float(cb.flexible_demand_benefit) * COST_UNSCALE,
             "investment_cost": float(cb.investment_cost) * COST_UNSCALE,
             "electrolyzer_cost": float(cb.electrolyzer_cost) * COST_UNSCALE,
             "converter_cost": float(cb.converter_cost) * COST_UNSCALE,
@@ -1961,103 +1959,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
         }
 
     return result
-
-
-# =============================================================================
-# Multi-System Converters
-# =============================================================================
-
-
-def convert_inter_system_link(link: dict) -> Any:
-    """
-    Convert a Python inter-system link dict to Julia InterSystemLink struct.
-
-    Args:
-        link: Dictionary with link configuration
-
-    Returns:
-        Julia InterSystemLink struct
-    """
-    from esfex.bridge.julia_setup import get_esfex_module
-
-    ESFEX = get_esfex_module()
-
-    from_idx = link.get("from_bus", link["from_node"])
-    to_idx = link.get("to_bus", link["to_node"])
-
-    return ESFEX.InterSystemLink(
-        link["from_system"],
-        link["to_system"],
-        convert_index_py_to_julia(from_idx),
-        convert_index_py_to_julia(to_idx),
-        float(link.get("existing_capacity_mw", 0.0)),
-        float(link.get("max_investment_mw", 0.0)),
-        scale_cost(float(link.get("investment_cost_per_mw", 1e6))),
-        float(link.get("loss_factor", 0.02)),
-        float(link.get("distance_km", 100.0)),
-        scale_cost(float(link.get("cost_per_mw_km", 1.0))),
-        float(link.get("reactance_pu", 0.01)),
-        float(link.get("resistance_pu", 0.001)),
-    )
-
-
-def convert_system_config(
-    name: str,
-    sys_config: "SystemConfig",
-    availability_profiles: Optional[Dict[str, np.ndarray]] = None,
-) -> Any:
-    """
-    Convert a Python SystemConfig to Julia SystemConfig struct.
-
-    Args:
-        name: System name
-        sys_config: Python SystemConfig
-        availability_profiles: Optional dict of availability profiles per generator
-
-    Returns:
-        Julia SystemConfig struct
-    """
-    from esfex.bridge.julia_setup import get_esfex_module, get_julia
-
-    ESFEX = get_esfex_module()
-    jl = get_julia()
-
-    # Convert generators
-    jl_generators = jl.seval("GeneratorConfig[]")
-    for gen_key, gen in sys_config.generators.items():
-        avail = availability_profiles.get(gen_key) if availability_profiles else None
-        jl_gen = convert_generator_config(gen, avail)
-        jl.seval("push!")(jl_generators, jl_gen)
-
-    # Convert batteries
-    jl_batteries = jl.seval("BatteryConfig[]")
-    for bat_key, bat in sys_config.batteries.items():
-        jl_bat = convert_battery_config(bat)
-        jl.seval("push!")(jl_batteries, jl_bat)
-
-    # Convert network (pass per-line data + transformers + buses)
-    from esfex.utils.per_unit import system_s_base
-
-    jl_network = convert_network_config(
-        sys_config.nodes, sys_config.dc_power_flow,
-        transmission_lines_geo=sys_config.transmission_lines_geo or None,
-        transformers=sys_config.transformers or None,
-        buses=sys_config.buses or None,
-        s_base_mva=system_s_base(sys_config),
-    )
-
-    # Get demand matrix
-    demand = sys_config.demand if hasattr(sys_config, 'demand') else np.zeros((HOURS_STD_YEAR, sys_config.nodes.num_nodes))
-
-    return ESFEX.SystemConfig(
-        name,
-        jl_network,
-        jl_generators,
-        jl_batteries,
-        py_to_julia_matrix(demand),
-        float(getattr(sys_config, 'target_re_penetration', 1.0)),
-        float(getattr(sys_config, 'initial_re_penetration', 0.0)),
-    )
 
 
 def convert_scenario(scenario: dict) -> Any:

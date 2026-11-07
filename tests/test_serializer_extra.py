@@ -665,7 +665,6 @@ def test_config_to_inter_system_links_rich_metadata():
         voltage_kv=[330.0],
         line_type=["overhead"],
         length_km=[210.0],
-        base_impedance=[100.0],
         reactance_per_km=[0.4],
         susceptance_pu=[0.001],
         num_circuits=[3],

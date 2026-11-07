@@ -1209,9 +1209,9 @@ class TestGuiStateToYaml:
         assert "systems" in data
         assert "MinimalSystem" in data["systems"]
 
-    def test_deprecated_loss_demand_threshold_not_written(self):
-        """No constraint ever used LOSS_DEMAND_TRHESHOLD; the Studio no
-        longer offers or writes it."""
+    def test_removed_loss_demand_threshold_not_written(self):
+        """No constraint ever used LOSS_DEMAND_TRHESHOLD; it was removed
+        and the Studio does not write it."""
         state = _build_minimal_gui_state()
         config = _make_esfex_config()
         data = self._export_and_parse({"MinimalSystem": state}, config)
@@ -1407,12 +1407,6 @@ class TestGlobalSettingsToConfigDict:
         d: dict[str, Any] = {}
         global_settings_to_config_dict(gs, d)
         assert d["solver"]["verbose"] is True
-
-    def test_solver_scale_constraints(self):
-        gs = GuiGlobalSettings(solver_scale_constraints=False)
-        d: dict[str, Any] = {}
-        global_settings_to_config_dict(gs, d)
-        assert d["solver"]["scale_constraints"] is False
 
     def test_solver_specific_options(self):
         gs = GuiGlobalSettings(solver_specific_options={"mip_gap": 0.005})

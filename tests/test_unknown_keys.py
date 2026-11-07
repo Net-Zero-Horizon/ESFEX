@@ -76,7 +76,7 @@ def test_translated_and_free_form_keys_are_not_reported():
     raw = _raw()
     sysd = raw["systems"]["island"]
     # Legacy flat DC keys (any case), legacy unit_/bat_ units, aliases.
-    sysd.update({"dc_base_impedance": 100.0, "DC_SLACK_BUS": 0,
+    sysd.update({"dc_voltage_level_kv": 220.0, "DC_SLACK_BUS": 0,
                  "TARGET_RE_PENETRATION": 0.5, "EV_initial_soc": []})
     unit = copy.deepcopy(next(iter(sysd["generators"].values())))
     unit["Availability"] = "x.csv"
@@ -115,12 +115,12 @@ def test_flat_dc_keys_the_walker_accepts_are_read(tmp_path):
     raw = _raw()
     sysd = raw["systems"]["island"]
     sysd.pop("dc_power_flow", None)
-    sysd.update({"DC_base_impedance": 55.0, "Dc_Reactance_Per_Km": 0.7,
+    sysd.update({"DC_max_angle_diff_deg": 25.0, "Dc_Reactance_Per_Km": 0.7,
                  "DC_VOLTAGE_LEVEL_KV": 132.0, "dc_slack_bus": 2, "dc_reactance": 9.9})
     assert find_unknown_keys(raw) == ["systems.island.dc_reactance"]
     dc = load_config(_write(tmp_path, raw)).systems["island"].dc_power_flow
-    assert (dc.base_impedance, dc.reactance_per_km, dc.voltage_level_kv, dc.slack_bus) == (
-        55.0, 0.7, 132.0, 2)
+    assert (dc.max_angle_diff_deg, dc.reactance_per_km, dc.voltage_level_kv, dc.slack_bus) == (
+        25.0, 0.7, 132.0, 2)
 
 
 def test_nested_dc_power_flow_wins_over_flat_keys(tmp_path):

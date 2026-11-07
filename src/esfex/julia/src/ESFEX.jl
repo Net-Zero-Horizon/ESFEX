@@ -200,12 +200,6 @@ export build_cumulative_capacity_expressions
 export create_day_ps_vars!, add_day_operational_constraints!
 export calculate_day_operational_cost, add_representative_days_validation!
 
-# Multi-System Master Problem types and functions
-export InterSystemLink, SystemConfig, MultiSystemMasterInput
-export ExtendedMasterVariables, ExtendedMasterResult
-export create_multi_system_master_problem
-export add_inter_system_constraints!, build_multi_system_objective!
-
 # Stochastic Programming types and functions
 export ScenarioMultipliers, Scenario, StochasticMasterInput
 export create_stochastic_master_problem

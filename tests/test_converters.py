@@ -25,7 +25,6 @@ from esfex.bridge.converters import (
     convert_transformer_data,
     convert_acdc_converter_data,
     convert_freq_converter_data,
-    convert_inter_system_link,
     convert_generator_config,
     convert_battery_config,
     julia_to_py_array,
@@ -760,7 +759,6 @@ class TestConvertPowerSystemResult:
         cb.soc_violation_cost = 0.0
         cb.transfer_margin_cost = 0.0
         cb.v2g_compensation = -500.0
-        cb.flexible_demand_benefit = -200.0
         cb.investment_cost = 100000.0
         cb.electrolyzer_cost = 0.0
         cb.converter_cost = 0.0
@@ -805,7 +803,7 @@ class TestConvertPowerSystemResult:
             "load_shedding_cost", "curtailment_cost", "reserve_static_cost",
             "reserve_dynamic_cost", "co2_emission_cost", "fre_penetration_cost",
             "inertia_cost", "soc_violation_cost", "transfer_margin_cost",
-            "v2g_compensation", "flexible_demand_benefit", "investment_cost",
+            "v2g_compensation", "investment_cost",
             "electrolyzer_cost", "converter_cost", "spillage_cost",
             "delay_retirement_cost", "reservoir_spillage_cost",
             "demand_shift_cost", "rooftop_curtailment_cost",
@@ -836,12 +834,11 @@ class TestConvertPowerSystemResult:
         assert cb["total"] == 179450.0 * COST_UNSCALE
 
     def test_cost_breakdown_negative_values_preserved(self):
-        """Negative values (credits like V2G, flexible demand) must be kept."""
+        """Negative values (credits like V2G) must be kept."""
         r = self._make_mock_result()
         r.cost_breakdown = self._make_mock_cost_breakdown()
         result = convert_power_system_result(r)
         assert result["cost_breakdown"]["v2g_compensation"] < 0
-        assert result["cost_breakdown"]["flexible_demand_benefit"] < 0
 
 
 # ---------------------------------------------------------------------------
@@ -1335,92 +1332,6 @@ class TestConvertTransformerData:
 
         call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[0] == "HV_trafo"
-
-
-# ---------------------------------------------------------------------------
-# convert_inter_system_link
-# ---------------------------------------------------------------------------
-
-
-class TestConvertInterSystemLink:
-    """Tests for convert_inter_system_link()."""
-
-    def test_creates_julia_struct(self, mock_esfex):
-        link = {
-            "from_system": "sys_a",
-            "to_system": "sys_b",
-            "from_node": 0,
-            "to_node": 1,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        mock_esfex.InterSystemLink.assert_called_once()
-
-    def test_system_names_passed(self, mock_esfex):
-        link = {
-            "from_system": "alpha",
-            "to_system": "beta",
-            "from_node": 0,
-            "to_node": 0,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[0] == "alpha"
-        assert call_args[1] == "beta"
-
-    def test_index_conversion_from_node(self, mock_esfex):
-        link = {
-            "from_system": "a",
-            "to_system": "b",
-            "from_node": 2,
-            "to_node": 5,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[2] == 3  # 2+1
-        assert call_args[3] == 6  # 5+1
-
-    def test_uses_from_bus_over_from_node(self, mock_esfex):
-        link = {
-            "from_system": "a",
-            "to_system": "b",
-            "from_node": 0,
-            "to_node": 0,
-            "from_bus": 3,
-            "to_bus": 7,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[2] == 4  # 3+1
-        assert call_args[3] == 8  # 7+1
-
-    def test_default_values(self, mock_esfex):
-        link = {
-            "from_system": "a",
-            "to_system": "b",
-            "from_node": 0,
-            "to_node": 0,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[4] == 0.0                  # existing_capacity_mw
-        assert call_args[5] == 0.0                  # max_investment_mw
-        # investment_cost_per_mw default is $1e6, scaled to M$ before Julia.
-        assert call_args[6] == 1e6 * COST_SCALE
 
 
 # ---------------------------------------------------------------------------

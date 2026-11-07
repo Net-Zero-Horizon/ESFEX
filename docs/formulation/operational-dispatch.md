@@ -245,7 +245,7 @@ where \(e_f\) is the emission factor of the fuel of generator \(g\) in tonnes CO
 
 ### 3.7 Flexible Demand
 
-Flexible demand is shifted in time (SHIFT-1, OBJ-13), not curtailed: reducing a sector's demand is load shedding, priced by its criticality (OBJ-5). There is no flexible-curtailment benefit term; `flexible_demand_benefit_ratio` is not used, and the `flexible_demand_benefit` entry of the cost breakdown is 0.
+Flexible demand is shifted in time (SHIFT-1, OBJ-13), not curtailed: reducing a sector's demand is load shedding, priced by its criticality (OBJ-5). There is no flexible-curtailment benefit term.
 
 ### 3.8 V2G Compensation (reported, not in the objective)
 

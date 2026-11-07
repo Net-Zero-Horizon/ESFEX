@@ -1641,7 +1641,6 @@ struct CostBreakdown
     soc_violation_cost::Float64
     transfer_margin_cost::Float64
     v2g_compensation::Float64
-    flexible_demand_benefit::Float64
     investment_cost::Float64
     electrolyzer_cost::Float64
     converter_cost::Float64
@@ -2706,170 +2705,6 @@ struct BendersResult
 end
 
 # =============================================================================
-# Multi-System Types
-# =============================================================================
-
-"""
-    InterSystemLink
-
-Configuration for a transmission link between two systems.
-
-# Fields
-- `from_system::String`: Source system name
-- `to_system::String`: Destination system name
-- `from_node::Int`: Source node (1-indexed)
-- `to_node::Int`: Destination node (1-indexed)
-- `existing_capacity_mw::Float64`: Existing transfer capacity (MW)
-- `max_investment_mw::Float64`: Maximum additional investment (MW)
-- `investment_cost_per_mw::Float64`: Investment cost (\$/MW)
-- `loss_factor::Float64`: Transmission loss factor (0-1)
-- `distance_km::Float64`: Distance for loss calculation (km)
-"""
-struct InterSystemLink
-    from_system::String
-    to_system::String
-    from_node::Int
-    to_node::Int
-    existing_capacity_mw::Float64
-    max_investment_mw::Float64
-    investment_cost_per_mw::Float64
-    loss_factor::Float64           # Fallback for linear loss model
-    distance_km::Float64
-    cost_per_mw_km::Float64        # M4: operational flow cost ($/MW/km)
-    reactance_pu::Float64          # Series reactance (p.u.) for PWL loss g_l = R/(R²+X²)
-    resistance_pu::Float64         # Series resistance (p.u.) for PWL loss
-end
-
-# Backward-compatible constructor (without cost_per_mw_km, reactance_pu, resistance_pu)
-function InterSystemLink(
-    from_system::String, to_system::String,
-    from_node::Int, to_node::Int,
-    existing_capacity_mw::Float64, max_investment_mw::Float64,
-    investment_cost_per_mw::Float64, loss_factor::Float64,
-    distance_km::Float64
-)
-    return InterSystemLink(
-        from_system, to_system, from_node, to_node,
-        existing_capacity_mw, max_investment_mw,
-        investment_cost_per_mw, loss_factor,
-        distance_km, 1.0, 0.01, 0.001
-    )
-end
-
-# Backward-compatible constructor (without reactance_pu, resistance_pu)
-function InterSystemLink(
-    from_system::String, to_system::String,
-    from_node::Int, to_node::Int,
-    existing_capacity_mw::Float64, max_investment_mw::Float64,
-    investment_cost_per_mw::Float64, loss_factor::Float64,
-    distance_km::Float64, cost_per_mw_km::Float64
-)
-    return InterSystemLink(
-        from_system, to_system, from_node, to_node,
-        existing_capacity_mw, max_investment_mw,
-        investment_cost_per_mw, loss_factor,
-        distance_km, cost_per_mw_km, 0.01, 0.001
-    )
-end
-
-"""
-    SystemConfig
-
-Configuration for a single system in multi-system optimization.
-
-# Fields
-- `name::String`: System identifier
-- `network::NetworkConfig`: Network configuration
-- `generators::Vector{GeneratorConfig}`: Generator configurations
-- `batteries::Vector{BatteryConfig}`: Battery configurations
-- `base_demand::Matrix{Float64}`: Base demand [hour, node]
-- `target_re_penetration::Float64`: System-specific RE target
-- `initial_re_penetration::Float64`: Initial RE penetration
-"""
-struct SystemConfig
-    name::String
-    network::NetworkConfig
-    generators::Vector{GeneratorConfig}
-    batteries::Vector{BatteryConfig}
-    technologies::Vector{TechnologyConfig}
-    battery_technologies::Vector{BatteryTechnologyConfig}
-    base_demand::Matrix{Float64}
-    target_re_penetration::Float64
-    initial_re_penetration::Float64
-end
-
-"""
-    MultiSystemMasterInput
-
-Input configuration for multi-system Master Problem.
-
-# Fields
-- `systems::Vector{SystemConfig}`: All system configurations
-- `inter_system_links::Vector{InterSystemLink}`: Inter-system connections
-- `years::Vector{Int}`: Planning horizon years
-- `base_year::Int`: Base year for NPV
-- `demand_growth::Float64`: Annual demand growth rate
-- `discount_rate::Float64`: NPV discount rate
-- `max_annual_investment::Float64`: Annual investment budget
-- `slack_penalty::Float64`: Constraint violation penalty
-- `temporal_resolution_hours::Int`: Temporal aggregation
-- `representative_days_per_year::Int`: Representative days count
-- `min_day_separation::Int`: Minimum day separation
-- `life_extension_cost_factor::Float64`: Life extension cost factor
-- `decommissioning_cost_factor::Float64`: Decommissioning cost factor
-- `threads::Int`: Solver threads
-- `time_limit::Float64`: Solver time limit
-- `gap::Float64`: MIP gap
-- `verbose::Bool`: Verbose output
-- `hours_per_year::Vector{Int}`: Hours per year (always 8760, leap years included)
-"""
-struct MultiSystemMasterInput
-    systems::Vector{SystemConfig}
-    inter_system_links::Vector{InterSystemLink}
-    years::Vector{Int}
-    base_year::Int
-    demand_growth::Float64
-    discount_rate::Float64
-    max_annual_investment::Float64
-    slack_penalty::Float64
-    loss_of_load_penalty::Float64
-    fre_penetration_loss_penalty::Float64
-    max_curtailment_ratio::Float64
-    temporal_resolution_hours::Int
-    representative_days_per_year::Int
-    min_day_separation::Int
-    life_extension_cost_factor::Float64
-    decommissioning_cost_factor::Float64
-    solver_name::String
-    threads::Int
-    time_limit::Float64
-    gap::Float64
-    verbose::Bool
-    hours_per_year::Vector{Int}
-    inter_system_loss_segments::Int  # PWL segments for inter-system links (0=linear, N>0=PWL)
-end
-
-# Backward-compatible constructor (without solver_name and inter_system_loss_segments)
-function MultiSystemMasterInput(
-    systems, inter_system_links, years, base_year,
-    demand_growth, discount_rate, max_annual_investment, slack_penalty,
-    loss_of_load_penalty, fre_penetration_loss_penalty,
-    max_curtailment_ratio, temporal_resolution_hours, representative_days_per_year,
-    min_day_separation, life_extension_cost_factor, decommissioning_cost_factor,
-    threads, time_limit, gap, verbose, hours_per_year
-)
-    return MultiSystemMasterInput(
-        systems, inter_system_links, years, base_year,
-        demand_growth, discount_rate, max_annual_investment, slack_penalty,
-        loss_of_load_penalty, fre_penetration_loss_penalty,
-        max_curtailment_ratio, temporal_resolution_hours, representative_days_per_year,
-        min_day_separation, life_extension_cost_factor, decommissioning_cost_factor,
-        "highs", threads, time_limit, gap, verbose, hours_per_year,
-        2  # default inter_system_loss_segments
-    )
-end
-
-# =============================================================================
 # Stochastic Programming Types
 # =============================================================================
 
@@ -2991,76 +2826,6 @@ struct StochasticMasterInput
 end
 
 # =============================================================================
-# Extended Master Problem Variables (Multi-System + Stochastic)
-# =============================================================================
-
-"""
-    ExtendedMasterVariables
-
-Extended variable container for multi-system and stochastic Master Problem.
-
-Includes all base MasterProblemVariables plus:
-- Inter-system investment and flow variables
-- Per-scenario operational costs
-"""
-mutable struct ExtendedMasterVariables
-    # Base variables (per system for multi-system)
-    # system_name => base variables
-    system_vars::Dict{String, MasterProblemVariables}
-
-    # Inter-system investment: year => link_idx => VariableRef
-    inter_system_investment::Dict{Int, Dict{Int, VariableRef}}
-
-    # Stochastic: scenario_name => year => operational_costs
-    scenario_operational_costs::Dict{String, Dict{Int, Vector{AffExpr}}}
-
-    # Annual renewable generation tracking per system
-    # system_name => year => total_renewable_gen expression
-    annual_renewable_gen::Dict{String, Dict{Int, AffExpr}}
-    annual_total_demand::Dict{String, Dict{Int, Float64}}
-
-    # DC-OPF inter-system flow variables (replaces NTC fwd/rev model)
-    # (year_idx, day_idx, link_idx, hour) => bidirectional flow (positive = from→to)
-    inter_system_pf::Dict{Tuple{Int,Int,Int,Int}, VariableRef}
-    # (year_idx, day_idx, link_idx, hour) => PWL loss variable
-    inter_system_loss::Dict{Tuple{Int,Int,Int,Int}, VariableRef}
-    # (year_idx, day_idx, link_idx, hour) => |flow| = fp + fn (for objective cost)
-    inter_system_abs_flow::Dict{Tuple{Int,Int,Int,Int}, AffExpr}
-
-    # Per-system representative day variable store for coupling
-    # system_name => (year_idx, day_idx) => PowerSystemVariables reference
-    system_day_vars::Dict{String, Dict{Tuple{Int,Int}, Any}}
-end
-
-"""
-    ExtendedMasterResult
-
-Extended result container for multi-system Master Problem.
-"""
-struct ExtendedMasterResult
-    # Base result
-    status::MOI.TerminationStatusCode
-    objective::Float64
-    solve_time::Float64
-
-    # Per-system investment results
-    system_results::Dict{String, MasterProblemResult}
-
-    # Inter-system investments: year => link_idx => MW
-    inter_system_investment::Dict{Int, Dict{Int, Float64}}
-
-    # Inter-system DC-OPF flows: (year, day, link, hour) => MW
-    inter_system_flows::Dict{Tuple{Int,Int,Int,Int}, Float64}
-
-    # Scenario-weighted costs
-    expected_operational_cost_by_year::Vector{Float64}
-
-    # NPV breakdown
-    total_investment_npv::Float64
-    total_operational_npv::Float64
-end
-
-# =============================================================================
 # NPV Calculation Types
 # =============================================================================
 
@@ -3103,7 +2868,7 @@ Result from NPV-based iterative retirement analysis.
 struct NPVIterationResult
     iterations::Int
     converged::Bool
-    final_result::Union{MasterProblemResult, ExtendedMasterResult}
+    final_result::MasterProblemResult
     forced_retirements::Vector{UnitNPV}
     npv_history::Vector{Dict{String, Float64}}
 end

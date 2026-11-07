@@ -77,7 +77,6 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "time_limit": 3600,
         "mip_gap": 0.001,
         "verbose": False,
-        "scale_constraints": False,
         "presolve": "choose",
         "memory_limit": 0,
         "log_file": "",

@@ -368,12 +368,10 @@ Internal helpers shared by the monolithic master and Benders (not exported):
 | `corridor_investment(inv, from, to)` | Investment variable of the corridor between two buses, in either key order; `nothing` if the corridor cannot be expanded. |
 | `corridor_cost_terms(inv, costs)` | `(variable, cost per MW)` once per corridor. When both directions exist only the low→high one is charged; the cost is the higher of the two ends' `costs`. |
 
-### Multi-System and Stochastic Extensions
+### Stochastic Extensions
 
 | Function | Description |
 |----------|-------------|
-| `create_multi_system_master_problem(input::MultiSystemMasterInput)` | Multi-system coordination with inter-system links (shared transmission, coordinated investment). |
-| `add_inter_system_constraints!(model, ext_vars, input::MultiSystemMasterInput)` | Inter-system transfer and coordination constraints. |
 | `create_stochastic_master_problem(input::StochasticMasterInput; custom_constraints=nothing) -> (model, vars, targets, scenarios)` | Two-stage stochastic master. Investment is first-stage and shared; each scenario gets its own representative-day (or TSAM) operation built on `scenario_master_input`. If `use_stochastic` is false or there are no scenarios, it builds the deterministic master. |
 | `scenario_master_input(input, mult::ScenarioMultipliers, year_idx) -> MasterProblemInput` | The input one scenario operates on in year `year_idx`: demand × `demand_growth^(year_idx-1)`, fuel cost (and generator and technology fuel-cost curves) × `fuel_cost × fuel_price_growth^(year_idx-1)`, fixed O&M × `gen_fixed_cost`, maintenance cost × `maintenance_cost` (batteries also × `bat_maintenance_cost`), start-up cost × `gen_start_up_cost`, converter variable cost × `converter_variable_cost`, link flow cost × `transmission_cost_per_mw_km`, CO2 cost × `carbon_price`, and the loss-of-load, reserve-shortfall, curtailment, RE-shortfall and CO2-budget penalties × their `penalty_*` multipliers. |
 | `build_stochastic_objective!(model, vars, input, scenarios, scenario_costs)` | Probability-weighted sum over scenarios of discounted investment cost (with the scenario's investment-cost multipliers and discount rate), existing-asset costs (`build_annual_asset_cost(vars, input, y_idx; mult)`, decommissioning scaled by the scenario) and the scenario's operating cost, plus the slack penalties. |

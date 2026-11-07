@@ -261,10 +261,6 @@ class _SolverSimulationPage(QWidget):
         self.verbose.setChecked(s.get("verbose", False))
         sform.addRow(self.verbose)
 
-        self.scale_constraints = QCheckBox(tr("preferences.scale_constraints"))
-        self.scale_constraints.setChecked(s.get("scale_constraints", False))
-        sform.addRow(self.scale_constraints)
-
         layout.addWidget(solver_group)
 
         # ── Simulation Defaults ──
@@ -325,7 +321,6 @@ class _SolverSimulationPage(QWidget):
             "time_limit": self.time_limit_spin.value(),
             "mip_gap": self.mip_gap.value(),
             "verbose": self.verbose.isChecked(),
-            "scale_constraints": self.scale_constraints.isChecked(),
         }
 
     def collect_simulation(self) -> dict[str, Any]:
