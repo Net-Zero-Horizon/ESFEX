@@ -3480,7 +3480,10 @@ class Orchestrator:
           the nodes where it was built, one unit per technology and build
           year, aged from the build year with the technology's degradation
           and retired at its lifetime, as perfect foresight counts its
-          investments;
+          investments. On a bus-level master (a system with buses: one node,
+          or development zones) each bus with capacity gets its own unit,
+          pinned to that bus (``bus_id_per_node``); the adapter would place a
+          node-level unit at the node's first bus;
         * each technology's ``invest_max`` is reduced by what was built (the
           limit holds for the whole horizon, as in perfect foresight).
 
@@ -3506,32 +3509,62 @@ class Orchestrator:
         def _reduce(limits, used):
             return [max(0.0, lim - float(used[i])) for i, lim in enumerate(rep(limits))]
 
+        # *built* arrays are per master bus: one per node on a node-level
+        # master, the system's buses otherwise
+        from esfex.bridge.converters import node_bus_mapping_required
+        buses = base.buses if node_bus_mapping_required(base.buses, n) else []
+
+        def per_node(arr):
+            if not buses:
+                return arr
+            out = np.zeros(n)
+            for b, bus in enumerate(buses[:len(arr)]):
+                out[bus.parent_node] += arr[b]
+            return out
+
+        def pieces(*arrays):
+            """``(key suffix, bus_id_per_node, per-node arrays)`` of each unit
+            to build from per-master-bus *arrays*."""
+            if not buses:
+                yield "", None, arrays
+                return
+            for b, bus in enumerate(buses):
+                if any(b < len(a) and a[b] > 0 for a in arrays):
+                    node_arrays = []
+                    for a in arrays:
+                        na = np.zeros(n)
+                        na[bus.parent_node] = a[b] if b < len(a) else 0.0
+                        node_arrays.append(na)
+                    yield f"__{bus.bus_id}", {bus.parent_node: bus.bus_id}, node_arrays
+
         built_gens: list[tuple[str, str]] = []
         used: dict[str, np.ndarray] = {}
         for (tech_key, build_y), power in sorted(built["tech"].items(), key=lambda kv: kv[0][1]):
             tech = base.technologies.get(tech_key)
             if tech is None:
                 continue
-            used[tech_key] = used.get(tech_key, np.zeros(n)) + power
+            used[tech_key] = used.get(tech_key, np.zeros(n)) + per_node(power)
             age = y_idx - build_y
             if age >= tech.lifetime or not np.any(power > 0):
                 continue
-            unit_key = f"{tech_key}__built_y{build_y + 1}"
-            fields = technology_unit_fields(tech, rep)
-            fields.update(
-                name=f"{tech.name} (built in year {build_y + 1})",
-                technology=tech_key,
-                rated_power=[float(p) for p in power],
-                life_time=[tech.lifetime] * n,
-                initial_age=[age] * n,
-                degradation_rate=rep(tech.degradation_rate),
-                # Life extension is priced like a new build
-                invest_cost=rep(tech.invest_cost),
-                invest_max_power=[0.0] * n,
-                decommissioning_cost=rep(tech.decommissioning_cost),
-            )
-            sys.generators[unit_key] = GeneratorConfig(**fields)
-            built_gens.append((unit_key, tech_key))
+            for suffix, bus_ids, (node_power,) in pieces(power):
+                unit_key = f"{tech_key}__built_y{build_y + 1}{suffix}"
+                fields = technology_unit_fields(tech, rep)
+                fields.update(
+                    name=f"{tech.name} (built in year {build_y + 1})",
+                    technology=tech_key,
+                    rated_power=[float(p) for p in node_power],
+                    life_time=[tech.lifetime] * n,
+                    initial_age=[age] * n,
+                    degradation_rate=rep(tech.degradation_rate),
+                    # Life extension is priced like a new build
+                    invest_cost=rep(tech.invest_cost),
+                    invest_max_power=[0.0] * n,
+                    decommissioning_cost=rep(tech.decommissioning_cost),
+                    bus_id_per_node=bus_ids,
+                )
+                sys.generators[unit_key] = GeneratorConfig(**fields)
+                built_gens.append((unit_key, tech_key))
         for tech_key, total in used.items():
             tech = sys.technologies[tech_key]
             tech.invest_max_power = _reduce(tech.invest_max_power, total)
@@ -3545,39 +3578,42 @@ class Orchestrator:
             bat_tech = base.battery_technologies.get(bt_key)
             if bat_tech is None:
                 continue
-            power = built["bat_tech_power"].get((bt_key, build_y), np.zeros(n))
-            energy = built["bat_tech_capacity"].get((bt_key, build_y), np.zeros(n))
-            used_pow[bt_key] = used_pow.get(bt_key, np.zeros(n)) + power
-            used_cap[bt_key] = used_cap.get(bt_key, np.zeros(n)) + energy
+            n_master = len(buses) or n
+            power = built["bat_tech_power"].get((bt_key, build_y), np.zeros(n_master))
+            energy = built["bat_tech_capacity"].get((bt_key, build_y), np.zeros(n_master))
+            used_pow[bt_key] = used_pow.get(bt_key, np.zeros(n)) + per_node(power)
+            used_cap[bt_key] = used_cap.get(bt_key, np.zeros(n)) + per_node(energy)
             age = y_idx - build_y
             if age >= bat_tech.lifetime or not (np.any(power > 0) or np.any(energy > 0)):
                 continue
-            unit_key = f"{bt_key}__built_y{build_y + 1}"
-            fields = battery_technology_unit_fields(bat_tech, rep)
-            fields.pop("_type")
-            pow_list = [float(p) for p in power]
-            zeros = [0.0] * n
-            fields.update(
-                name=f"{bat_tech.name} (built in year {build_y + 1})",
-                technology=bt_key,
-                capacity=[float(e) for e in energy],
-                MaxChargePower=pow_list,
-                MaxDischargePower=pow_list,
-                rated_power=pow_list,
-                min_power=zeros, eff_at_rated=[1.0] * n, eff_at_min=[1.0] * n,
-                ramp_up=[1.0] * n, ramp_down=[1.0] * n, min_up=[0] * n, min_down=[0] * n,
-                fuel_cost=zeros, fixed_cost=zeros, start_up_cost=zeros,
-                life_time=[bat_tech.lifetime] * n,
-                initial_age=[age] * n,
-                degradation_rate=rep(bat_tech.degradation_rate),
-                # Life extension is priced like a new build
-                invest_cost=rep(bat_tech.invest_cost_power),
-                invest_cost_energy=rep(bat_tech.invest_cost_energy),
-                invest_max_power=zeros, invest_max_capacity=zeros,
-                decommissioning_cost=rep(bat_tech.decommissioning_cost),
-            )
-            sys.batteries[unit_key] = BatteryConfig(**fields)
-            built_bats.append((unit_key, bt_key))
+            for suffix, bus_ids, (node_power, node_energy) in pieces(power, energy):
+                unit_key = f"{bt_key}__built_y{build_y + 1}{suffix}"
+                fields = battery_technology_unit_fields(bat_tech, rep)
+                fields.pop("_type")
+                pow_list = [float(p) for p in node_power]
+                zeros = [0.0] * n
+                fields.update(
+                    name=f"{bat_tech.name} (built in year {build_y + 1})",
+                    technology=bt_key,
+                    capacity=[float(e) for e in node_energy],
+                    MaxChargePower=pow_list,
+                    MaxDischargePower=pow_list,
+                    rated_power=pow_list,
+                    min_power=zeros, eff_at_rated=[1.0] * n, eff_at_min=[1.0] * n,
+                    ramp_up=[1.0] * n, ramp_down=[1.0] * n, min_up=[0] * n, min_down=[0] * n,
+                    fuel_cost=zeros, fixed_cost=zeros, start_up_cost=zeros,
+                    life_time=[bat_tech.lifetime] * n,
+                    initial_age=[age] * n,
+                    degradation_rate=rep(bat_tech.degradation_rate),
+                    # Life extension is priced like a new build
+                    invest_cost=rep(bat_tech.invest_cost_power),
+                    invest_cost_energy=rep(bat_tech.invest_cost_energy),
+                    invest_max_power=zeros, invest_max_capacity=zeros,
+                    decommissioning_cost=rep(bat_tech.decommissioning_cost),
+                    bus_id_per_node=bus_ids,
+                )
+                sys.batteries[unit_key] = BatteryConfig(**fields)
+                built_bats.append((unit_key, bt_key))
         for bt_key in used_pow:
             bat_tech = sys.battery_technologies[bt_key]
             bat_tech.invest_max_power = _reduce(bat_tech.invest_max_power, used_pow[bt_key])
@@ -3644,13 +3680,15 @@ class Orchestrator:
         """Record a myopic year's technology investments in *built*.
 
         Keys of *year_inv* index the master's technologies and its network
-        buses (one per node in the merged master system; a bus-level master
-        maps each bus to its parent node). Entries go to
-        ``built[kind][(technology key, y_idx)]`` as per-node arrays.
+        buses: one per node in the merged master system, the system's own
+        buses on a bus-level master (one node, or development zones; the
+        adapter lays a reduced network's results out on them). Entries go to
+        ``built[kind][(technology key, y_idx)]`` as per-master-bus arrays, so
+        :meth:`_prepare_system_for_myopic_year` can keep each build at its bus.
         """
         sys = self.master_system
-        n = sys.num_nodes
         buses = sys.buses or []
+        n = len(buses) or sys.num_nodes
         prefixes = (
             ("tech_investment_power_", "tech", list(sys.technologies)),
             ("bat_tech_investment_power_", "bat_tech_power", list(sys.battery_technologies)),
@@ -3661,10 +3699,9 @@ class Orchestrator:
                 if not inv_key.startswith(prefix):
                     continue
                 t_idx, bus_idx = (int(p) for p in inv_key[len(prefix):].split("_")[:2])
-                node = buses[bus_idx].parent_node if bus_idx < len(buses) else bus_idx
-                if t_idx < len(keys) and 0 <= node < n:
+                if t_idx < len(keys) and 0 <= bus_idx < n:
                     arr = built[kind].setdefault((keys[t_idx], y_idx), np.zeros(n))
-                    arr[node] += capacity
+                    arr[bus_idx] += capacity
                 break
 
     def _solve_master_problem_foresight(

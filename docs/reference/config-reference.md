@@ -72,7 +72,7 @@ HiGHS options that apply to one LP method only (for example `primal_feasibility_
 | `enabled` | bool | `false` | Reduce the internal bus network before solving (results are expanded back) |
 | `kron_deg3` | bool | `false` | Also eliminate degree-3 junction buses by Kron (star-mesh) reduction |
 
-The reduction removes only passive buses: buses with role `connection` that have no demand and host no equipment. A bus is always kept if it has a load or mixed role, if it is a terminal of an AC/DC or frequency converter, or if a generator or battery sits on it. A unit sits on a bus when that bus is named in its `bus_id_per_node` or `bus_index`, or joined to it in `transmission_lines_geo`. A unit's `bus_index` is renumbered to match the reduced bus list.
+The reduction removes only passive buses: buses with role `connection` that have no demand and host no equipment. A bus is always kept if it has a load or mixed role, if it is a terminal of an AC/DC or frequency converter, or if a generator or battery sits on it. A unit sits on a bus when that bus is named in its `bus_id_per_node` or `bus_index`, or joined to it in `transmission_lines_geo`. A unit's `bus_index` is renumbered to match the reduced bus list. The master problem reduces its network the same way when it is bus-level (a one-node system with several buses, or development zones); its investments are reported on the original buses, and the dispatch places the capacity built from them on the same buses.
 
 ---
 

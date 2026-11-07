@@ -495,6 +495,68 @@ def _pwl_segments_from_config_master(dc_config) -> int:
         return 0
 
 
+# Per-bus fields of a virtual unit that hold capacity: summed when buses merge
+_PER_BUS_CAPACITY_FIELDS = ("rated_power", "MaxChargePower", "MaxDischargePower", "capacity")
+
+
+def _per_bus_unit_on_model_buses(
+    vdata: Dict[str, Any],
+    reduction_map: Optional["ReductionMap"],
+    original_buses: list,
+) -> Dict[str, Any]:
+    """Lay a per-bus virtual unit out on a reduced dispatch network's buses.
+
+    Units built from master investments (``_is_per_bus``) carry arrays over
+    the system's own buses; with ``network_reduction`` the dispatch is built
+    on the reduced network, whose bus ``k`` is original bus
+    ``retained_original_indices[k]``, so the arrays are re-indexed (they were
+    read as reduced-bus arrays, which put capacity on the wrong buses, even
+    at another node). Capacity on an eliminated bus moves to the retained bus
+    of the same node with the largest ``demand_fraction``; the other per-bus
+    fields take the retained buses' values. Other units pass through.
+    """
+    rm = reduction_map
+    n_orig = len(original_buses)
+    rp = vdata.get("rated_power") or vdata.get("capacity") or []
+    if (rm is None or not vdata.get("_is_per_bus") or not rm.n_original_buses
+            or rm.n_original_buses != n_orig or len(rp) != n_orig):
+        return vdata
+    retained = list(rm.retained_original_indices)
+    reduced_of = {o: r for r, o in enumerate(retained)}
+    # Eliminated bus → reduced bus that takes its capacity
+    target: Dict[int, Optional[int]] = {}
+    for o in range(n_orig):
+        if o in reduced_of:
+            continue
+        node = original_buses[o].parent_node
+        same_node = [r for r, ob in enumerate(retained)
+                     if original_buses[ob].parent_node == node]
+        target[o] = max(same_node, default=None, key=lambda r: float(
+            getattr(original_buses[retained[r]], "demand_fraction", 0.0) or 0.0))
+
+    out = dict(vdata)
+    for field_name, values in vdata.items():
+        if not isinstance(values, list) or len(values) != n_orig:
+            continue
+        if field_name in _PER_BUS_CAPACITY_FIELDS:
+            reduced = [float(values[o]) for o in retained]
+            for o, r in target.items():
+                v = float(values[o] or 0.0)
+                if v == 0.0:
+                    continue
+                if r is None:
+                    logger.warning(
+                        "%s: %.3g of %s on eliminated bus %s has no retained bus "
+                        "in its node; dropped from the reduced dispatch",
+                        vdata.get("name"), v, field_name, original_buses[o].bus_id)
+                else:
+                    reduced[r] += v
+            out[field_name] = reduced
+        else:
+            out[field_name] = [values[o] for o in retained]
+    return out
+
+
 def _expand_powersystem_result(
     result: Dict[str, Any],
     expander: "ResultExpander",
@@ -1497,6 +1559,8 @@ class PowerSystemAdapter:
                 continue  # Batteries handled below
             if "rated_power" not in vdata:
                 continue
+            vdata = _per_bus_unit_on_model_buses(vdata, self._reduction_map,
+                                                 self.system_config.buses or [])
             rp = vdata["rated_power"]
             if not rp or max(rp) < 0.01:
                 continue
@@ -1621,6 +1685,8 @@ class PowerSystemAdapter:
                 continue  # Already handled above
             if vdata.get("_type") != "battery" and vdata.get("type") != "Storage":
                 continue  # Not a battery
+            vdata = _per_bus_unit_on_model_buses(vdata, self._reduction_map,
+                                                 self.system_config.buses or [])
             cap = vdata.get("capacity", [])
             charge_pow = vdata.get("MaxChargePower", [])
             if not cap or (max(cap) < 0.01 and max(charge_pow) < 0.01):
@@ -3172,6 +3238,7 @@ class MasterProblemAdapter:
         """
         num_years = len(self.years)
         num_nodes = self.system_config.num_nodes
+        to_buses, bus_of = self._original_bus_layout()
 
         # Build legacy-compatible solution structure keyed by actual year
         solution = {}
@@ -3190,7 +3257,7 @@ class MasterProblemAdapter:
             # Technology investments: Julia 1-indexed → Python 0-indexed keys
             for t_jl in jl_result.tech_investment[y_idx].keys():
                 t_py = int(t_jl) - 1  # Convert to 0-indexed
-                node_values = np.array(jl_result.tech_investment[y_idx][t_jl])
+                node_values = to_buses(jl_result.tech_investment[y_idx][t_jl])
                 for n in range(len(node_values)):
                     value = float(node_values[n])
                     if value > 1e-6:
@@ -3200,7 +3267,7 @@ class MasterProblemAdapter:
             # Battery technology power investments
             for bt_jl in jl_result.bat_tech_power_investment[y_idx].keys():
                 bt_py = int(bt_jl) - 1  # Convert to 0-indexed
-                node_values = np.array(jl_result.bat_tech_power_investment[y_idx][bt_jl])
+                node_values = to_buses(jl_result.bat_tech_power_investment[y_idx][bt_jl])
                 for n in range(len(node_values)):
                     value = float(node_values[n])
                     if value > 1e-6:
@@ -3210,7 +3277,7 @@ class MasterProblemAdapter:
             # Battery technology capacity investments
             for bt_jl in jl_result.bat_tech_capacity_investment[y_idx].keys():
                 bt_py = int(bt_jl) - 1  # Convert to 0-indexed
-                node_values = np.array(jl_result.bat_tech_capacity_investment[y_idx][bt_jl])
+                node_values = to_buses(jl_result.bat_tech_capacity_investment[y_idx][bt_jl])
                 for n in range(len(node_values)):
                     value = float(node_values[n])
                     if value > 1e-6:
@@ -3219,8 +3286,8 @@ class MasterProblemAdapter:
 
             # Transmission investments: Julia 1-indexed → Python 0-indexed keys
             for key, val in jl_result.transfer_investment[y_idx].items():
-                i_py = int(key[0]) - 1  # Convert to 0-indexed
-                j_py = int(key[1]) - 1
+                i_py = bus_of(int(key[0]) - 1)  # Convert to 0-indexed
+                j_py = bus_of(int(key[1]) - 1)
                 value = float(val)
                 if value > 1e-6:
                     trans_key = f"transfer_investment_{i_py}_{j_py}"
@@ -3258,55 +3325,55 @@ class MasterProblemAdapter:
             cumulative_bat_tech_capacity[y_idx] = {}
 
             for t_jl in jl_result.tech_investment[y_idx].keys():
-                tech_investment[y_idx][int(t_jl)] = np.array(
+                tech_investment[y_idx][int(t_jl)] = to_buses(
                     jl_result.tech_investment[y_idx][t_jl]
                 )
 
             for bt_jl in jl_result.bat_tech_power_investment[y_idx].keys():
-                bat_tech_power_investment[y_idx][int(bt_jl)] = np.array(
+                bat_tech_power_investment[y_idx][int(bt_jl)] = to_buses(
                     jl_result.bat_tech_power_investment[y_idx][bt_jl]
                 )
-                bat_tech_capacity_investment[y_idx][int(bt_jl)] = np.array(
+                bat_tech_capacity_investment[y_idx][int(bt_jl)] = to_buses(
                     jl_result.bat_tech_capacity_investment[y_idx][bt_jl]
                 )
 
             for g_jl in jl_result.gen_life_extension[y_idx].keys():
-                gen_life_extension[y_idx][int(g_jl)] = np.array(
-                    jl_result.gen_life_extension[y_idx][g_jl]
+                gen_life_extension[y_idx][int(g_jl)] = to_buses(
+                    jl_result.gen_life_extension[y_idx][g_jl], flags=True
                 )
 
             for b_jl in jl_result.bat_life_extension[y_idx].keys():
-                bat_life_extension[y_idx][int(b_jl)] = np.array(
-                    jl_result.bat_life_extension[y_idx][b_jl]
+                bat_life_extension[y_idx][int(b_jl)] = to_buses(
+                    jl_result.bat_life_extension[y_idx][b_jl], flags=True
                 )
 
             for g_jl in jl_result.cumulative_gen_capacity[y_idx].keys():
-                cumulative_gen_capacity[y_idx][int(g_jl)] = np.array(
+                cumulative_gen_capacity[y_idx][int(g_jl)] = to_buses(
                     jl_result.cumulative_gen_capacity[y_idx][g_jl]
                 )
 
             for b_jl in jl_result.cumulative_bat_capacity[y_idx].keys():
-                cumulative_bat_capacity[y_idx][int(b_jl)] = np.array(
+                cumulative_bat_capacity[y_idx][int(b_jl)] = to_buses(
                     jl_result.cumulative_bat_capacity[y_idx][b_jl]
                 )
 
             for b_jl in jl_result.cumulative_bat_power[y_idx].keys():
-                cumulative_bat_power[y_idx][int(b_jl)] = np.array(
+                cumulative_bat_power[y_idx][int(b_jl)] = to_buses(
                     jl_result.cumulative_bat_power[y_idx][b_jl]
                 )
 
             for t_jl in jl_result.cumulative_tech_capacity[y_idx].keys():
-                cumulative_tech_capacity[y_idx][int(t_jl)] = np.array(
+                cumulative_tech_capacity[y_idx][int(t_jl)] = to_buses(
                     jl_result.cumulative_tech_capacity[y_idx][t_jl]
                 )
 
             for bt_jl in jl_result.cumulative_bat_tech_power[y_idx].keys():
-                cumulative_bat_tech_power[y_idx][int(bt_jl)] = np.array(
+                cumulative_bat_tech_power[y_idx][int(bt_jl)] = to_buses(
                     jl_result.cumulative_bat_tech_power[y_idx][bt_jl]
                 )
 
             for bt_jl in jl_result.cumulative_bat_tech_capacity[y_idx].keys():
-                cumulative_bat_tech_capacity[y_idx][int(bt_jl)] = np.array(
+                cumulative_bat_tech_capacity[y_idx][int(bt_jl)] = to_buses(
                     jl_result.cumulative_bat_tech_capacity[y_idx][bt_jl]
                 )
 
@@ -3336,6 +3403,45 @@ class MasterProblemAdapter:
             'cumulative_bat_tech_power': cumulative_bat_tech_power,
             'cumulative_bat_tech_capacity': cumulative_bat_tech_capacity,
         }
+
+    def _original_bus_layout(self):
+        """``(to_buses, bus_of)``: lay master results out on the system's own
+        buses.
+
+        With ``network_reduction`` the master solves on the reduced network,
+        whose bus ``k`` is original bus ``retained_original_indices[k]``; the
+        runner, the myopic history and the dispatch index master results by
+        the original buses. ``to_buses(values, flags=False)`` returns a
+        per-bus array on the original buses: eliminated buses hold no
+        capacity (0), and a per-unit status flag (``flags``, e.g. life
+        extension) takes the value of a retained bus of the same node.
+        ``bus_of(k)`` maps a reduced bus index. Both are identities without
+        reduction.
+        """
+        rm = getattr(self, "_reduction_map", None)
+        if rm is None or not rm.n_original_buses or not rm.n_reduced_buses:
+            return (lambda values, flags=False: np.array(values, dtype=float)), (lambda k: k)
+        retained = list(rm.retained_original_indices)
+        parent = [b.parent_node for b in (self.system_config.buses or [])]
+
+        def to_buses(values, flags=False):
+            arr = np.array(values, dtype=float)
+            if arr.ndim != 1 or len(arr) != len(retained):
+                return arr
+            out = np.zeros(rm.n_original_buses)
+            if flags:
+                node_value = {}
+                for r, o in enumerate(retained):
+                    node_value.setdefault(parent[o], arr[r])
+                out[:] = [node_value.get(parent[o], 1.0) if o < len(parent) else 1.0
+                          for o in range(rm.n_original_buses)]
+            out[retained] = arr
+            return out
+
+        def bus_of(k):
+            return retained[k] if 0 <= k < len(retained) else k
+
+        return to_buses, bus_of
 
     def get_investment_decisions(self) -> Dict[str, Any]:
         """
