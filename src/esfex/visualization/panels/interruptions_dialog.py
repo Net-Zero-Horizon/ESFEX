@@ -56,6 +56,23 @@ def horizon_hours(schedule, years: int = STUDIO_RUN_YEARS) -> int:
     n_years = max(years, -(-latest // HOURS_STD_YEAR))
     return n_years * HOURS_STD_YEAR
 
+def schedule_dicts(schedule) -> list[dict]:
+    """An outage schedule (GuiOutageWindow list) in the bridge's JSON shape."""
+    return [
+        {
+            "element_type": ow.element_type,
+            "element_id": ow.element_id,
+            "start_hour": int(ow.start_hour),
+            "end_hour": int(ow.end_hour),
+            "availability": float(ow.availability),
+            "label": ow.label,
+            "recurring": bool(getattr(ow, "recurring", False)),
+            "node": getattr(ow, "node", None),
+        }
+        for ow in schedule
+    ]
+
+
 # Element categories exposed in the calendar (order = display order). Each maps
 # a schedule element_type to a translated group label and a state collector.
 _ELECTRICAL_CATEGORIES = (
@@ -89,7 +106,8 @@ class InterruptionsDialog(QDialog):
         super().__init__(parent)
         self.model = model
         # Starts as the model's schedule: the page commits only after an edit.
-        self._schedule: list[dict] = self._schedule_dicts()
+        self._schedule: list[dict] = schedule_dicts(
+            getattr(model.state, "outage_schedule", []))
         self._focus = focus  # (element_type, element_id) to preselect, or None
 
         self.setWindowTitle(tr("interruptions.title"))
@@ -148,25 +166,9 @@ class InterruptionsDialog(QDialog):
         ]
         return [g for g in raw if g]
 
-    def _schedule_dicts(self) -> list[dict]:
-        """The model's outage schedule in the bridge's JSON shape."""
-        return [
-            {
-                "element_type": ow.element_type,
-                "element_id": ow.element_id,
-                "start_hour": int(ow.start_hour),
-                "end_hour": int(ow.end_hour),
-                "availability": float(ow.availability),
-                "label": ow.label,
-                "recurring": bool(getattr(ow, "recurring", False)),
-                "node": getattr(ow, "node", None),
-            }
-            for ow in getattr(self.model.state, "outage_schedule", [])
-        ]
-
     def _build_payload(self) -> str:
         s = self.model.state
-        schedule = self._schedule_dicts()
+        schedule = schedule_dicts(getattr(s, "outage_schedule", []))
         focus = None
         if self._focus:
             focus = {"element_type": self._focus[0], "element_id": self._focus[1]}
