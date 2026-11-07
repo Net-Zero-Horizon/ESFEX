@@ -35,8 +35,8 @@ def _write(tmp_path: Path, raw: dict) -> Path:
 
 
 def test_studio_export_has_no_unknown_keys():
-    """A file saved by the Studio (it writes ``Curtailment``, upper-case
-    penalties, alias settings, ``_gui_layout``/``_technologies``, ...)."""
+    """A file saved by the Studio (it writes upper-case penalties, alias
+    settings, ``_gui_layout``/``_technologies``, ...)."""
     assert find_unknown_keys(_raw()) == []
 
 
@@ -85,8 +85,7 @@ def test_translated_and_free_form_keys_are_not_reported():
     bat["type"] = "storage"
     sysd["bat_9"] = bat
     sysd["electrolyzer"] = {}
-    sysd["penalties"].update({"TransferMargin": 1.0, "CO2_COST": 5.0,
-                              "coupling_slack_penalty": 1.0, "Curtailment": 1.0})
+    sysd["penalties"].update({"TransferMargin": 1.0, "CO2_COST": 5.0, "Loss_Of_Load": 1.0})
     # Multipliers warn about their own unknown / no-effect keys.
     sysd["stochastic_scenarios"] = [{"name": "a", "probability": 1.0, "multipliers": {
         "gen_invest_cost": 1.1, "gen_start_up_cost": 1.2, "made_up": 1.0}}]
@@ -184,6 +183,38 @@ def test_removed_benders_lol_penalty_cap_is_reported(tmp_path, caplog):
                for r in caplog.records)
 
 
+# Keys removed because they had no effect, as an older Studio wrote them.
+_REMOVED_PENALTIES = {"Curtailment": 100.0, "coupling_slack_penalty": 1.0,
+                      "transport_congestion": 100.0, "storage_violation": 100.0,
+                      "curtailment_excess_penalty": 500.0, "re_excess_penalty": 100.0}
+_REMOVED_N1 = {"scopf_max_iterations": 5, "scopf_violation_tolerance": 0.01}
+
+
+def _old_studio_project() -> dict:
+    raw = _raw()
+    raw["systems"]["island"]["penalties"].update(_REMOVED_PENALTIES)
+    raw["n1_security"].update(_REMOVED_N1)
+    return raw
+
+
+def _removed_key_paths() -> list[str]:
+    return sorted([f"systems.island.penalties.{k}" for k in _REMOVED_PENALTIES]
+                  + [f"n1_security.{k}" for k in _REMOVED_N1])
+
+
+def test_removed_no_effect_keys_are_reported(tmp_path, caplog):
+    """Penalties and SCOPF settings that had no effect were removed; a file
+    that still sets them (nested under penalties / n1_security) loads with
+    the generic unknown-key warning for each."""
+    with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+        cfg = load_config(_write(tmp_path, _old_studio_project()))
+    assert sorted(cfg.unknown_keys) == _removed_key_paths()
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "Unknown configuration key systems.island.penalties.coupling_slack_penalty" in logged
+    assert "Unknown configuration key n1_security.scopf_max_iterations" in logged
+    assert "deprecated" not in logged
+
+
 def test_system_files_are_checked(tmp_path):
     raw = _raw()
     sysd = raw["systems"]["island"]
@@ -219,6 +250,33 @@ def test_studio_export_roundtrip_writes_no_unknown_keys(tmp_path):
                       geo_assets={"a1": type("A", (), {"name": "a", "geojson_data": {}})()})
     raw = yaml.safe_load(out.read_text(encoding="utf-8"))
     assert find_unknown_keys(raw) == []
+
+
+def test_old_studio_project_loads_and_resaves_without_removed_keys(tmp_path):
+    """A project saved before the no-effect keys were removed opens in the
+    Studio (validation lists them as unknown) and is saved without them."""
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.serializer import (
+        config_to_global_settings, config_to_gui_states, gui_state_to_yaml,
+    )
+    from esfex.visualization.data.validation import validate_state
+
+    cfg = load_config(_write(tmp_path, _old_studio_project()))
+    states = config_to_gui_states(cfg, base_dir=FIXTURE.parent)
+    issues = validate_state(states["island"], categories={"configuration"})
+    assert sorted(i.message.split()[2] for i in issues) == _removed_key_paths()
+
+    out = tmp_path / "resaved.yaml"
+    gui_state_to_yaml(states, cfg, out, global_settings=config_to_global_settings(cfg))
+    raw = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert find_unknown_keys(raw) == []
+    assert not set(_REMOVED_PENALTIES) & set(raw["systems"]["island"]["penalties"])
+    assert not set(_REMOVED_N1) & set(raw["n1_security"])
+    # The values that do have an effect survive the round trip
+    again = load_config(out)
+    assert again.unknown_keys == []
+    assert again.systems["island"].penalties == cfg.systems["island"].penalties
+    assert again.n1_security == cfg.n1_security
 
 
 def test_studio_validation_lists_unknown_keys(tmp_path):

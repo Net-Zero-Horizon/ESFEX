@@ -1141,13 +1141,11 @@ def _system_to_gui_state(sys: SystemConfig,
         pen = sys.penalties
         for fld in (
             'loss_of_load', 'loss_of_reserve_static', 'loss_of_reserve_dynamic',
-            'loss_of_inertia', 'transfer_margin', 'curtailment',
+            'loss_of_inertia', 'transfer_margin',
             'max_curtailment_ratio', 'curtailment_cost',
-            'curtailment_excess_penalty', 're_excess_penalty',
             'rooftop_curtailment', 'co2_cost',
             'co2_budget_violation', 'fre_penetration_loss', 'ev_loss',
             'loss_of_fuel_supply',
-            'transport_congestion', 'storage_violation',
             'non_electric_demand_loss',
         ):
             if hasattr(pen, fld):
@@ -2203,8 +2201,6 @@ def config_to_global_settings(
         g.n1_generation_reserve_type = getattr(n1, 'generation_reserve_type', 'largest_unit')
         g.n1_generation_reserve_percentage = getattr(n1, 'generation_reserve_percentage', 0.15)
         g.n1_scopf_enabled = getattr(n1, 'scopf_enabled', False)
-        g.n1_scopf_max_iterations = getattr(n1, 'scopf_max_iterations', 5)
-        g.n1_scopf_violation_tolerance = getattr(n1, 'scopf_violation_tolerance', 0.01)
         g.n1_corrective_enabled = getattr(n1, 'corrective_enabled', False)
         g.n1_compute_security_cost = getattr(n1, 'compute_security_cost', False)
         g.n1_contingency_depth = getattr(n1, 'contingency_depth', 'n1')
@@ -2352,8 +2348,6 @@ def global_settings_to_config_dict(
     config_dict["n1_security"]["generation_reserve_type"] = g.n1_generation_reserve_type
     config_dict["n1_security"]["generation_reserve_percentage"] = g.n1_generation_reserve_percentage
     config_dict["n1_security"]["scopf_enabled"] = g.n1_scopf_enabled
-    config_dict["n1_security"]["scopf_max_iterations"] = g.n1_scopf_max_iterations
-    config_dict["n1_security"]["scopf_violation_tolerance"] = g.n1_scopf_violation_tolerance
     config_dict["n1_security"]["corrective_enabled"] = g.n1_corrective_enabled
     config_dict["n1_security"]["compute_security_cost"] = g.n1_compute_security_cost
     config_dict["n1_security"]["contingency_depth"] = g.n1_contingency_depth
@@ -3608,7 +3602,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         "LOSS_OF_RESERVE_DYNAMIC": p.loss_of_reserve_dynamic,
         "LOSS_OF_INERTIA": p.loss_of_inertia,
         "TransferMargin": p.transfer_margin,
-        "Curtailment": p.curtailment,
         "max_curtailment_ratio": p.max_curtailment_ratio,
         "rooftop_curtailment": p.rooftop_curtailment,
         "CO2_cost": p.co2_cost,
@@ -3616,12 +3609,8 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         "FRE_penetration_loss": p.fre_penetration_loss,
         "EV_loss": p.ev_loss,
         "loss_of_fuel_supply": p.loss_of_fuel_supply,
-        "transport_congestion": p.transport_congestion,
-        "storage_violation": p.storage_violation,
         "non_electric_demand_loss": p.non_electric_demand_loss,
         "curtailment_cost": p.curtailment_cost,
-        "curtailment_excess_penalty": p.curtailment_excess_penalty,
-        "re_excess_penalty": p.re_excess_penalty,
     }
 
     # CO2 Budget (from settings)

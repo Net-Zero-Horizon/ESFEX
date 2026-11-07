@@ -1953,7 +1953,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "pe_excess_cost": float(cb.pe_excess_cost) * COST_UNSCALE,
             "pe_transport_cost": float(cb.pe_transport_cost) * COST_UNSCALE,
             "pe_investment_cost": float(cb.pe_investment_cost) * COST_UNSCALE,
-            "pe_coupling_slack_cost": float(cb.pe_coupling_slack_cost) * COST_UNSCALE,
             "pe_electrolyzer_cost": float(cb.pe_electrolyzer_cost) * COST_UNSCALE,
             # N-1 SCOPF reliability shortfall.
             "n1_security_shortfall_cost": float(cb.n1_security_shortfall_cost) * COST_UNSCALE,

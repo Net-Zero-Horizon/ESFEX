@@ -46,17 +46,8 @@ class PenaltiesConfig(BaseModel):
     loss_of_reserve_dynamic: float = Field(default=100, description="$/MW dynamic reserve deficit")
     loss_of_inertia: float = Field(default=200, description="$/MW-s inertia deficit")
     transfer_margin: float = Field(default=100, description="$/MW transfer margin violation")
-    curtailment: float = Field(
-        default=100,
-        description="No effect: curtailed RE is priced by curtailment_cost "
-                    "(the Studio writes it as 'Curtailment')")
     max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Max curtailment as fraction of RE generation (0.05 = 5%)")
     curtailment_cost: float = Field(default=20.0, ge=0, description="$/MWh penalty for curtailed RE energy")
-    curtailment_excess_penalty: float = Field(
-        default=500.0, ge=0,
-        description="No effect: max_curtailment_ratio is a hard limit in the master "
-                    "problem, monolithic and Benders (kept so existing files load)")
-    re_excess_penalty: float = Field(default=100.0, ge=0, description="$/MWh penalty for RE generation exceeding target")
     rooftop_curtailment: float = Field(default=5, description="$/MWh rooftop curtailed")
     co2_cost: float = Field(default=10, description="$/tCO2")
     co2_budget_violation: float = Field(default=500, description="$/tCO2 over budget")
@@ -66,14 +57,6 @@ class PenaltiesConfig(BaseModel):
         description="$/MWh EV driving energy not supplied (default: loss_of_load)",
     )
     loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
-    coupling_slack_penalty: float = Field(
-        default=1.0,
-        description="No effect: the primary-energy model has no periodic-hourly "
-                    "coupling slack any more (kept so existing files load)")
-    transport_congestion: float = Field(
-        default=100, description="No effect: fuel transport has no congestion slack")
-    storage_violation: float = Field(
-        default=100, description="No effect: fuel storage has no violation slack")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
     delay_retirement_per_mw: float = Field(default=50000, description="$/MW delay retirement penalty")
@@ -85,14 +68,6 @@ class PenaltiesConfig(BaseModel):
         if self.ev_loss is None:
             self.ev_loss = self.loss_of_load
         return self
-
-
-# Penalty keys that load (the Studio writes them) but price nothing in the
-# model.
-PENALTIES_WITHOUT_EFFECT: frozenset[str] = frozenset({
-    "curtailment", "coupling_slack_penalty", "transport_congestion", "storage_violation",
-    "curtailment_excess_penalty",
-})
 
 
 class CO2BudgetConfig(BaseModel):
@@ -1660,17 +1635,15 @@ class N1SecurityConfig(BaseModel):
     generation_reserve_type: Literal["largest_unit", "percentage"] = "largest_unit"
     generation_reserve_percentage: float = Field(default=0.15, ge=0, le=1)
 
-    # SCOPF (Security-Constrained OPF) — iterative approach
+    # SCOPF (Security-Constrained OPF), built in a single pass
     scopf_enabled: bool = Field(
         default=False,
         description=(
-            "Use iterative SCOPF instead of preventive N-1 reserves. "
-            "SCOPF adds post-contingency flow constraints using LODF "
-            "factors, only for contingencies that cause violations."
+            "Use SCOPF instead of preventive N-1 reserves: post-contingency "
+            "flow limits (LODF factors) for every single-line outage, built "
+            "in one pass (soft, priced at loss_of_reserve_static)."
         ),
     )
-    scopf_max_iterations: int = Field(default=5, ge=1, le=20)
-    scopf_violation_tolerance: float = Field(default=0.01, ge=0)
 
     # Corrective actions
     corrective_enabled: bool = Field(

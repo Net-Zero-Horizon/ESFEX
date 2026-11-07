@@ -317,7 +317,6 @@ def test_primary_energy_builds():
         num_hours,  # investment_resolution
         0.05,    # discount_rate
         1000.0,  # loss_of_fuel_supply_penalty
-        1.0,     # coupling_slack_penalty
         "development",  # mode
         jl.seval("Dict{String, Any}()"),  # cumulative_capacities
         jl.seval("nothing"),  # initial_storage_levels
@@ -391,7 +390,6 @@ def test_primary_energy_solves():
         py_to_julia_matrix(distances),
         jl.seval("Dict{Int, Tuple{String, Float64, Float64, Float64}}()"),
         24, num_hours, 0.05, 1000.0,
-        1.0,  # coupling_slack_penalty
         "development",
         jl.seval("Dict{String, Any}()"),
         jl.seval("nothing"),
@@ -470,7 +468,7 @@ def test_transport_transit_delay_causes_supply_stress():
         inp = ESFEX.PrimaryEnergyInput(
             2025, 2025, 2, 72, fuels, infra_dict, ne_demands, routes,
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
-            24, 72, 0.05, 1000.0, 1.0, "development",
+            24, 72, 0.05, 1000.0, "development",
             jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
             jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
             jl.seval("nothing"), 2000.0, 1, 0)
@@ -534,7 +532,7 @@ def test_source_disruption_cuts_supply():
             2025, 2025, 1, 72, fuels, infra_dict, ne_demands,
             py_to_julia_matrix(np.array([[0.0]])),
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
-            24, 72, 0.05, 1000.0, 1.0, "development",
+            24, 72, 0.05, 1000.0, "development",
             jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
             jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
             jl.seval("nothing"))
@@ -594,7 +592,7 @@ def test_tank_min_storage_floor_binds():
             2025, 2025, 1, 24, fuels, infra_dict, ne_demands,
             py_to_julia_matrix(np.array([[0.0]])),
             jl.seval("Dict{Int,Tuple{String,Float64,Float64,Float64}}()"),
-            24, 24, 0.05, 1000.0, 1.0, "development",
+            24, 24, 0.05, 1000.0, "development",
             jl.seval("Dict{String,Any}()"), jl.seval("nothing"), False,
             jl.seval("nothing"), jl.seval("Dict{Int,Vector{Float64}}()"),
             jl.seval("nothing"))
@@ -737,7 +735,6 @@ def test_primary_energy_power_system_coupling():
         py_to_julia_matrix(np.array([[0.0]])),
         gen_map,
         24, num_hours, 0.05, 1000.0,
-        1.0,  # coupling_slack_penalty
         "economic_dispatch",
         jl.seval("Dict{String, Any}()"),
         jl.seval("nothing"),

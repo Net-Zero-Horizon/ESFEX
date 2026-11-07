@@ -457,7 +457,6 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
       transfer_margin: 100.0            # $/MW
       curtailment_cost: 20.0            # $/MWh curtailed RE in dispatch
       max_curtailment_ratio: 0.05       # cap on curtailment / RE generation (master)
-      re_excess_penalty: 100.0          # $/MWh
       fre_penetration_loss: 100.0       # $/MWh RE shortfall
       co2_cost: 10.0                    # $/t CO2
       co2_budget_violation: 500.0       # $/t CO2 over budget
@@ -469,7 +468,7 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
 
 The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the master problem, monolithic or Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`soc_violation` and `delay_retirement_per_mw` can also be set here. `curtailment`, `curtailment_excess_penalty`, `transport_congestion` and `storage_violation` load without a warning (the Studio writes them) but have no effect: the model has no such slacks, curtailed RE is priced by `curtailment_cost`, and the curtailment limit is hard. `coupling_slack_penalty` is deprecated: it has no effect, the Studio no longer writes it, and a configuration that sets it logs a warning.
+`soc_violation` and `delay_retirement_per_mw` can also be set here. Any other key under `penalties` is reported as an unknown key when the configuration loads. Older files may contain `curtailment`, `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`, `transport_congestion` or `storage_violation`: these were removed because they priced nothing (curtailed RE is priced by `curtailment_cost`, the curtailment limit is hard, and the fuel model has no congestion, storage-violation or coupling slacks), and can be deleted.
 
 `loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
 

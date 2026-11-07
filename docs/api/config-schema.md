@@ -399,23 +399,18 @@ class PenaltiesConfig(BaseModel):
     transfer_margin: float = 100
     max_curtailment_ratio: float = 0.05        # 0-1
     curtailment_cost: float = 20.0             # $/MWh, operational dispatch
-    curtailment_excess_penalty: float = 500.0  # no effect (curtailment limit is hard)
-    re_excess_penalty: float = 100.0
     rooftop_curtailment: float = 5
     co2_cost: float = 10                       # $/tCO2
     co2_budget_violation: float = 500
     fre_penetration_loss: float = 100
     ev_loss: Optional[float] = None          # None -> loss_of_load
     loss_of_fuel_supply: float = 100
-    coupling_slack_penalty: float = 1.0
-    transport_congestion: float = 100
-    storage_violation: float = 100
     non_electric_demand_loss: float = 100
     soc_violation: float = 1e6
     delay_retirement_per_mw: float = 50000
 ```
 
-There is no `curtailment` field. The loader builds this model from a fixed key list that omits `coupling_slack_penalty`, `soc_violation` and `delay_retirement_per_mw`, so those always keep their defaults when loading YAML.
+The loader reads every field, with keys matched case-insensitively; any other key under `penalties` is reported as an unknown configuration key.
 
 ---
 
@@ -531,8 +526,6 @@ class N1SecurityConfig(BaseModel):
     generation_reserve_type: Literal["largest_unit", "percentage"] = "largest_unit"
     generation_reserve_percentage: float = 0.15
     scopf_enabled: bool = False
-    scopf_max_iterations: int = 5
-    scopf_violation_tolerance: float = 0.01
     corrective_enabled: bool = False
     compute_security_cost: bool = False
     contingency_depth: Literal["n1", "n1_1"] = "n1"

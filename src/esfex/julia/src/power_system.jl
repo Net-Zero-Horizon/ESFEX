@@ -4319,7 +4319,6 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             _v(:pe_excess_cost, false),
             _v(:pe_transport_cost, false),
             _v(:pe_investment_cost, false),
-            _v(:pe_coupling_slack_cost, false),
             _v(:pe_electrolyzer_cost, false),
             # N-1 reliability-shortfall: same $/MWh scale as load shed (× tres).
             _v(:n1_security_shortfall_cost),

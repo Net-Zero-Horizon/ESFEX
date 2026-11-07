@@ -388,22 +388,8 @@ class GlobalSettingsForm(QWidget):
         self._n1_scopf_enabled = QCheckBox(tr("global_form.n1_scopf"))
         self._n1_scopf_enabled.setToolTip(
             tr("global_form.n1_scopf_tip"))
-        self._n1_scopf_enabled.toggled.connect(self._on_n1_scopf_toggled)
+        self._n1_scopf_enabled.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_scopf_enabled)
-
-        self._n1_scopf_max_iter = QSpinBox()
-        self._n1_scopf_max_iter.setRange(1, 20)
-        self._n1_scopf_max_iter.setToolTip(tr("global_form.n1_scopf_unused_tip"))
-        self._n1_scopf_max_iter.editingFinished.connect(self._on_changed)
-        n1l.addRow(tr("global_form.n1_scopf_max_iter"), self._n1_scopf_max_iter)
-
-        self._n1_scopf_tol = QDoubleSpinBox()
-        self._n1_scopf_tol.setRange(0, 1)
-        self._n1_scopf_tol.setDecimals(4)
-        self._n1_scopf_tol.setSingleStep(0.001)
-        self._n1_scopf_tol.setToolTip(tr("global_form.n1_scopf_unused_tip"))
-        self._n1_scopf_tol.editingFinished.connect(self._on_changed)
-        n1l.addRow(tr("global_form.n1_scopf_tol"), self._n1_scopf_tol)
 
         self._n1_corrective = QCheckBox(tr("global_form.n1_corrective"))
         self._n1_corrective.setToolTip(
@@ -463,10 +449,6 @@ class GlobalSettingsForm(QWidget):
             tr("global_form.n1_battery_ctg_tip"))
         self._n1_battery_ctg.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_battery_ctg)
-
-        # Initial visibility
-        self._n1_scopf_max_iter.setEnabled(False)
-        self._n1_scopf_tol.setEnabled(False)
 
         # group_n1 added in the canonical ordering block at end of __init__.
 
@@ -865,12 +847,8 @@ class GlobalSettingsForm(QWidget):
             self._n1_gen_type.setCurrentIndex(idx)
         self._n1_gen_pct.setValue(g.n1_generation_reserve_percentage)
         self._n1_scopf_enabled.setChecked(g.n1_scopf_enabled)
-        self._n1_scopf_max_iter.setValue(g.n1_scopf_max_iterations)
-        self._n1_scopf_tol.setValue(g.n1_scopf_violation_tolerance)
         self._n1_corrective.setChecked(g.n1_corrective_enabled)
         self._n1_security_cost.setChecked(g.n1_compute_security_cost)
-        self._n1_scopf_max_iter.setEnabled(g.n1_scopf_enabled)
-        self._n1_scopf_tol.setEnabled(g.n1_scopf_enabled)
         idx = self._n1_depth.findData(g.n1_contingency_depth)
         if idx >= 0:
             self._n1_depth.setCurrentIndex(idx)
@@ -966,12 +944,6 @@ class GlobalSettingsForm(QWidget):
         self._updating = False
         self._update_ac_visibility()
         self._refresh_solver_compat()
-
-    def _on_n1_scopf_toggled(self, checked: bool):
-        """Enable/disable SCOPF iteration fields and trigger change."""
-        self._n1_scopf_max_iter.setEnabled(checked)
-        self._n1_scopf_tol.setEnabled(checked)
-        self._on_changed()
 
     def _on_tsam_toggled(self, checked: bool):
         """Enable/disable TSAM-specific fields and trigger change."""
@@ -1145,8 +1117,6 @@ class GlobalSettingsForm(QWidget):
         g.n1_generation_reserve_type = self._n1_gen_type.currentData() or "largest_unit"
         g.n1_generation_reserve_percentage = self._n1_gen_pct.value()
         g.n1_scopf_enabled = self._n1_scopf_enabled.isChecked()
-        g.n1_scopf_max_iterations = self._n1_scopf_max_iter.value()
-        g.n1_scopf_violation_tolerance = self._n1_scopf_tol.value()
         g.n1_corrective_enabled = self._n1_corrective.isChecked()
         g.n1_compute_security_cost = self._n1_security_cost.isChecked()
         g.n1_contingency_depth = self._n1_depth.currentData() or "n1"

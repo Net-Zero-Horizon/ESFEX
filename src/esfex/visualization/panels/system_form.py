@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from esfex.config.schema import PENALTIES_WITHOUT_EFFECT
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scaled
@@ -184,19 +183,14 @@ class SystemForm(QWidget):
             ("loss_of_reserve_dynamic", tr("system_form.penalty_reserve_dynamic"), 0, 1e9),
             ("loss_of_inertia", tr("system_form.penalty_inertia"), 0, 1e9),
             ("transfer_margin", tr("system_form.penalty_transfer"), 0, 1e9),
-            ("curtailment", tr("system_form.penalty_curtailment"), 0, 1e9),
             ("max_curtailment_ratio", tr("system_form.penalty_curtailment_ratio"), 0, 1),
             ("curtailment_cost", tr("system_form.penalty_curtailment_cost"), 0, 1e9),
-            ("curtailment_excess_penalty", tr("system_form.penalty_curtailment_excess"), 0, 1e9),
-            ("re_excess_penalty", tr("system_form.penalty_re_excess"), 0, 1e9),
             ("rooftop_curtailment", tr("system_form.penalty_rooftop_curt"), 0, 1e9),
             ("co2_cost", tr("system_form.penalty_co2_cost"), 0, 1e9),
             ("co2_budget_violation", tr("system_form.penalty_co2_budget"), 0, 1e9),
             ("fre_penetration_loss", tr("system_form.penalty_fre"), 0, 1e9),
             ("ev_loss", tr("system_form.penalty_ev"), 0, 1e9),
             ("loss_of_fuel_supply", tr("system_form.penalty_fuel_supply"), 0, 1e9),
-            ("transport_congestion", tr("system_form.penalty_transport"), 0, 1e9),
-            ("storage_violation", tr("system_form.penalty_storage"), 0, 1e9),
             ("non_electric_demand_loss", tr("system_form.penalty_non_elec"), 0, 1e9),
         ]
         for field_name, label, lo, hi in penalty_fields:
@@ -204,9 +198,6 @@ class SystemForm(QWidget):
             spin.setRange(lo, hi)
             spin.setDecimals(2 if hi > 1 else 4)
             spin.editingFinished.connect(self._on_changed)
-            if field_name in PENALTIES_WITHOUT_EFFECT:
-                spin.setEnabled(False)
-                spin.setToolTip(tr("common.no_effect"))
             pl.addRow(label, spin)
             self._penalty_widgets[field_name] = spin
 

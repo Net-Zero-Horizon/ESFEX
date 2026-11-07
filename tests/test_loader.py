@@ -640,42 +640,19 @@ class TestConvertSystem:
     def test_all_penalties_are_read(self, minimal_system_data):
         minimal_system_data["penalties"] = {
             "SOC_violation": 5.0e5, "delay_retirement_per_mw": 1.0e4,
-            "coupling_slack_penalty": 3.0,
         }
         pen = _convert_system(minimal_system_data).penalties
         assert pen.soc_violation == 5.0e5
         assert pen.delay_retirement_per_mw == 1.0e4
-        assert pen.coupling_slack_penalty == 3.0
 
-    def test_coupling_slack_penalty_is_deprecated(self, minimal_system_data, caplog):
-        """It has priced nothing since the PE coupling slacks were removed:
-        a configuration that sets it is told so (and still loads)."""
-        minimal_system_data["penalties"] = {"loss_of_load": 1e4}
-        with caplog.at_level("WARNING", logger="esfex.config.loader"):
-            _convert_system(minimal_system_data)
-        assert "coupling_slack_penalty" not in caplog.text
-        minimal_system_data["penalties"] = {"Coupling_Slack_Penalty": 1.0}
-        with caplog.at_level("WARNING", logger="esfex.config.loader"):
-            _convert_system(minimal_system_data)
-        assert "coupling_slack_penalty is deprecated and has no effect" in caplog.text
-
-    def test_unused_scopf_settings_are_reported(self, tmp_path, minimal_system_data, caplog):
-        def load(n1):
-            config = {"meta_network": {"systems": ["test_sys"]},
-                      "systems": {"test_sys": minimal_system_data}, "n1_security": n1}
-            p = tmp_path / "scopf.yaml"
-            p.write_text(yaml.dump(config), encoding="utf-8")
-            caplog.clear()
-            with caplog.at_level("WARNING", logger="esfex.config.loader"):
-                load_config(p)
-            return caplog.text
-
-        # The defaults (what the Studio writes) stay silent
-        assert "no effect" not in load({"scopf_max_iterations": 5,
-                                        "scopf_violation_tolerance": 0.01})
-        text = load({"scopf_max_iterations": 10, "scopf_violation_tolerance": 0.05})
-        assert "n1_security.scopf_max_iterations = 10 has no effect" in text
-        assert "n1_security.scopf_violation_tolerance = 0.05 has no effect" in text
+    def test_removed_penalty_keys_are_dropped(self, minimal_system_data):
+        """Penalties that priced nothing were removed from the schema: an old
+        file that still sets one loads, and the key is not kept."""
+        minimal_system_data["penalties"] = {"Coupling_Slack_Penalty": 3.0,
+                                            "curtailment_excess_penalty": 1.0}
+        pen = _convert_system(minimal_system_data).penalties
+        assert "coupling_slack_penalty" not in pen.model_dump()
+        assert "curtailment_excess_penalty" not in pen.model_dump()
 
 
 # ---------------------------------------------------------------------------
