@@ -87,6 +87,18 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
     return result
 
 
+def _reservoir_investment_key(key: str) -> Optional[tuple[int, int]]:
+    """``(generator, master location)`` (0-based) of a
+    ``reservoir_investment_{g}_{n}`` investment key; ``None`` for any other key."""
+    prefix = "reservoir_investment_"
+    if not key.startswith(prefix):
+        return None
+    g, _, n = key[len(prefix):].partition("_")
+    if not (g.isdigit() and n.isdigit()):
+        return None
+    return int(g), int(n)
+
+
 def _converter_investment_key(key: str) -> tuple[Optional[str], int]:
     """``("acdc" | "freq", index)`` of a ``converter_investment_{kind}_{c}``
     investment key; ``(None, -1)`` for any other key."""
@@ -525,6 +537,13 @@ def battery_technology_unit_fields(bat_tech, rep) -> dict:
         "spillage": bat_tech.spillage,
         "current_type": bat_tech.current_type,
     }
+
+
+def _pad_zeros(arr, n: int) -> list:
+    """*arr* as a list of at least *n* floats, padded with zeros (a per-node
+    quantity a unit does not have at the missing nodes)."""
+    out = [float(v) for v in (arr or [])]
+    return out + [0.0] * (n - len(out))
 
 
 def _per_node_list(arr, n: int, default=0.0) -> list:
@@ -3341,16 +3360,29 @@ class Orchestrator:
         master_cfg = getattr(self.config, 'master_problem', None)
         planning_mode = getattr(master_cfg, 'planning_mode', 'perfect_foresight')
 
-        if planning_mode == "myopic":
-            return self._solve_master_problem_myopic(
-                years_range, demand, hours, num_nodes,
-                ev_demand=ev_demand, total_demand=total_demand,
-            )
+        solve = (self._solve_master_problem_myopic if planning_mode == "myopic"
+                 else self._solve_master_problem_foresight)
+        result = solve(years_range, demand, hours, num_nodes,
+                       ev_demand=ev_demand, total_demand=total_demand)
+        if result is not None and len(result) > 2 and result[0] is not None and result[2] is not None:
+            self._add_reservoir_caps(result[0], result[2])
+        return result
 
-        return self._solve_master_problem_foresight(
-            years_range, demand, hours, num_nodes,
-            ev_demand=ev_demand, total_demand=total_demand,
-        )
+    def _add_reservoir_caps(self, investments_by_year: dict, caps_by_year: dict) -> None:
+        """Add the reservoir capacity built up to each year (MWh, summed over
+        the ``reservoir_investment_{g}_{n}`` keys of that year and the earlier
+        ones) to ``caps_by_year[year]["reservoir"]`` as ``{(g, node): MWh}``,
+        for :meth:`_build_config_from_cumulative`. Reservoirs do not retire.
+        """
+        built: dict[tuple[int, int], float] = {}
+        for year in sorted(caps_by_year):
+            for key, value in (investments_by_year.get(year) or {}).items():
+                gn = _reservoir_investment_key(key)
+                if gn is not None:
+                    at = (gn[0], self._master_index_node(gn[1]))
+                    built[at] = built.get(at, 0.0) + float(value)
+            if built and caps_by_year.get(year) is not None:
+                caps_by_year[year]["reservoir"] = dict(built)
 
     def _solve_master_problem_myopic(
         self,
@@ -3617,7 +3649,7 @@ class Orchestrator:
                 year_inv: dict[str, float] = {}
                 for category in ['tech_investment', 'bat_tech_power_investment',
                                  'bat_tech_capacity_investment', 'transfer_investment',
-                                 'converter_investment']:
+                                 'converter_investment', 'reservoir_investment']:
                     for key, value in year_data.get(category, {}).items():
                         if value > 0.1:
                             year_inv[key] = float(value)
@@ -3861,6 +3893,18 @@ class Orchestrator:
                 convs[idx].rated_power_mva += mw
                 convs[idx].invest_max_power = max(0.0, convs[idx].invest_max_power - mw)
 
+        # Reservoir capacity built so far, likewise (MWh, at its node)
+        gens = list(sys.generators.values())
+        for (g, loc), mwh in built.get("reservoir", {}).items():
+            node = self._master_index_node(loc)
+            if g < len(gens) and 0 <= node < n:
+                gen = gens[g]
+                cap = _pad_zeros(gen.reservoir_capacity, n)
+                lim = _pad_zeros(gen.reservoir_invest_max, n)
+                cap[node] += mwh
+                lim[node] = max(0.0, lim[node] - mwh)
+                gen.reservoir_capacity, gen.reservoir_invest_max = cap, lim
+
         return sys, built_gens, built_bats
 
     def _myopic_year_caps(
@@ -3941,6 +3985,11 @@ class Orchestrator:
             if conv_kind is not None:
                 conv = built.setdefault("converter", {})
                 conv[(conv_kind, conv_idx)] = conv.get((conv_kind, conv_idx), 0.0) + capacity
+                continue
+            res_at = _reservoir_investment_key(inv_key)
+            if res_at is not None:
+                res = built.setdefault("reservoir", {})
+                res[res_at] = res.get(res_at, 0.0) + capacity
                 continue
             for prefix, kind, keys in prefixes:
                 if not inv_key.startswith(prefix):
@@ -4300,6 +4349,12 @@ class Orchestrator:
                 # Collect converter investments
                 # key format: 'converter_investment_{acdc|freq}_{c}'
                 for key, value in year_data.get('converter_investment', {}).items():
+                    if value > 0.1:
+                        year_inv[key] = float(value)
+
+                # Collect reservoir investments (MWh)
+                # key format: 'reservoir_investment_{g}_{n}'
+                for key, value in year_data.get('reservoir_investment', {}).items():
                     if value > 0.1:
                         year_inv[key] = float(value)
 
@@ -4663,7 +4718,8 @@ class Orchestrator:
                     if i == j:
                         continue
                     key = f"transfer_investment_{i}_{j}"
-                elif key.startswith(("tech_investment_", "bat_tech_investment_")):
+                elif key.startswith(("tech_investment_", "bat_tech_investment_",
+                                     "reservoir_investment_")):
                     parts[-1] = str(self._master_index_node(int(parts[-1])))
                     key = "_".join(parts)
             except ValueError:
@@ -7053,6 +7109,15 @@ class Orchestrator:
                 # Prevent double degradation/retirement in power_system.jl
                 updated[unit_key]["degradation_rate"] = [0.0] * num_nodes
                 updated[unit_key]["initial_age"] = [0] * num_nodes
+
+        # Reservoir capacity the master built up to this year (MWh per node,
+        # see _add_reservoir_caps) is existing capacity for the dispatch
+        for (g, node), mwh in year_caps.get('reservoir', {}).items():
+            unit_key = gen_idx_to_key.get(int(g))
+            if unit_key in updated and 0 <= node < num_nodes:
+                cap = _pad_zeros(updated[unit_key].get("reservoir_capacity"), num_nodes)
+                cap[node] += float(mwh)
+                updated[unit_key]["reservoir_capacity"] = cap
 
         # Note: battery cumulative from MasterProblem is ENERGY capacity (MWh),
         # not power (MW). Battery power/capacity in config is handled separately

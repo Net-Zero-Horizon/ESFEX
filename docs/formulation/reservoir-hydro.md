@@ -57,7 +57,7 @@ $$
 \ell^{\min} C \le L_{g,b,t+1} \le \ell^{\max} C
 $$
 
-Pumping is bounded by the pump capacity, and spillage is forced to zero when `reservoir_spillage_allowed` is false. Constraints `res_min_level_*`, `res_max_level_*`, `res_pump_limit_*` / `res_no_pump_*`, `res_no_spill_*`. In the dispatch's `development` mode the capacity \(C\) in the level band includes a reservoir investment variable bounded by `reservoir_invest_max` (`res_invest_limit_*`).
+Pumping is bounded by the pump capacity, and spillage is forced to zero when `reservoir_spillage_allowed` is false. Constraints `res_min_level_*`, `res_max_level_*`, `res_pump_limit_*` / `res_no_pump_*`, `res_no_spill_*`. In the dispatch's `development` mode the capacity \(C\) in the level band includes a reservoir investment variable bounded by `reservoir_invest_max` (`res_invest_limit_*`). In the master, \(C\) includes the reservoir capacity built up to that year (§4).
 
 ### RES-3: Boundary condition
 
@@ -107,6 +107,8 @@ Constraint `res_head_limit_g{g}_b{b}_t{t}`. Evaluated at the start-of-step level
 ## 4. Master-Problem Integration
 
 In the capacity-expansion master problem the same balance (RES-1–RES-6) is enforced inside every representative-day subproblem, so investment decisions see hydro as an energy-limited resource rather than firm MW. Each representative day (TSAM period, Benders subproblem) uses the inflow \(W_t\) of its own hours, like the availability profiles.
+
+**Reservoir investment.** Where a unit has a reservoir and `reservoir_invest_max` > 0, the master may enlarge it (`reservoir_investment`, at `reservoir_invest_cost` per MWh, cumulative cap `cumul_res_*`). The level band of each representative day uses the existing capacity plus what was built up to that year (the head-dependence span and the TSAM boundary levels keep the existing capacity). The capacity built reaches the dispatch as existing reservoir capacity from its build year on, in perfect-foresight and myopic runs; a myopic year's master also counts what earlier years built and has that much less left to build. Benders subproblems still use the existing capacity only.
 
 **Seasonal storage.** When `tsam_inter_period_linking` is enabled (TSAM time aggregation), the master builds a chronological chain of reservoir-level boundary variables — one per reservoir node, year-cyclic — mirroring the battery state-of-charge chain. Each representative period starts at the previous boundary level and ends at the next, so a reservoir can be filled in a wet period and drawn down in a later dry one. This captures genuinely seasonal hydro storage that a per-period cyclic model cannot represent.
 

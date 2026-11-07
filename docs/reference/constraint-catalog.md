@@ -22,7 +22,7 @@ Generator and battery variables exist only for (unit, bus) pairs with capacity, 
 
 ### PWL Cost Curve Constraints (Generators)
 
-Generators with multi-segment (PWL) cost curves have their output decomposed into segment variables linked to the aggregate output.
+Generators with a PWL cost curve (several segments, or a flat curve whose `flat_price` differs from the fuel cost) have their output decomposed into segment variables linked to the aggregate output.
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|

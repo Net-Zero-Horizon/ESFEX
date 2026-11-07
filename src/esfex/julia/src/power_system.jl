@@ -646,14 +646,16 @@ function build_variables!(model, input::PowerSystemInput)
 
     # =========================================================================
     # Segment variables for PWL (bidding curve) cost decomposition
-    # Only created for generators/batteries with >1 cost segment.
+    # Created for generators with a cost curve (a single segment prices the
+    # output at its own marginal cost, not fuel_cost) and batteries with >1
+    # cost segment.
     # =========================================================================
     gen_seg_output = Dict{Tuple{Int,Int}, Any}()
     # A curve at a bus where the unit has no output variable (no capacity
     # there) is skipped, as in the master.
     for (g, bus_curves) in input.gen_cost_curves
         for (b, segs) in bus_curves
-            if length(segs) > 1 && b in buses_of_gen[g]
+            if !isempty(segs) && b in buses_of_gen[g]
                 n_seg = length(segs)
                 sv = @variable(model, [k=1:n_seg, t=1:hours],
                                lower_bound=0, base_name="gseg_$(g)_$(b)")
@@ -755,13 +757,13 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # ==========================================================================
 
     # Fuel costs ($/MWh × MWh) — sparse iteration over active (gen, bus) pairs
-    # When a generator has a multi-segment bidding curve, the cost is applied
-    # per-segment (PWL) instead of flat. Flat generators use the original path.
+    # When a generator has a bidding curve, the cost is applied per segment
+    # (PWL) instead of fuel_cost. Generators without one use the original path.
     fuel_cost = AffExpr(0.0)
     for g in 1:n_gen
         for b in vars.buses_of_gen[g]
             if haskey(vars.gen_seg_output, (g, b))
-                # Multi-segment (PWL) cost
+                # Bidding-curve (PWL) cost
                 segs = input.gen_cost_curves[g][b]
                 seg_vars = vars.gen_seg_output[(g, b)]
                 for k in 1:length(segs), t in 1:hours
@@ -2094,7 +2096,11 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
     # forming a chronological chain across representative periods instead of
     # being cyclic within the period.
     initial_reservoir_overrides::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
-    final_reservoir_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing)
+    final_reservoir_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
+    # Total reservoir capacity (MWh) per (g, b) where the caller adds its own
+    # builds (the master's reservoir investment); replaces the dispatch's
+    # `reservoir_invest_capacity` there.
+    capacity_override::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing)
     if vars.reservoir_level === nothing
         return  # No reservoir generators
     end
@@ -2179,7 +2185,9 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
             head_span = (max_level_frac - min_level_frac) * res_cap
 
             # Total reservoir capacity (existing + investment)
-            total_res_cap = if is_dev && gen.reservoir_invest_max[b] > 0
+            total_res_cap = if capacity_override !== nothing && haskey(capacity_override, (g, b))
+                capacity_override[(g, b)]
+            elseif is_dev && gen.reservoir_invest_max[b] > 0
                 @constraint(model, vars.reservoir_invest_capacity[g, b] <= gen.reservoir_invest_max[b],
                     base_name = "res_invest_limit_g$(g)_b$(b)")
                 res_cap + vars.reservoir_invest_capacity[g, b]
