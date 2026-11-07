@@ -820,14 +820,13 @@
     "penalty_fre": "Pérdida de Penetración FRE:",
     "penalty_ev": "Pérdida de VE:",
     "penalty_fuel_supply": "Pérdida de Suministro de Combustible:",
-    "penalty_coupling_slack": "Holgura de Acoplamiento PE:",
     "penalty_transport": "Congestión de Transporte:",
     "penalty_storage": "Violación de Almacenamiento:",
     "penalty_non_elec": "Pérdida de Demanda No Eléctrica:",
     "criticality_level": "Criticidad {level} ($/MWh):"
   },
   "global_form": {
-    "n1_scopf_unused_tip": "Se guarda en la configuración pero no se usa: las restricciones SCOPF se construyen en una sola pasada.",
+    "n1_scopf_unused_tip": "Se guarda en la configuración pero no se usa: las restricciones SCOPF se construyen en una sola pasada. Un valor distinto del predeterminado genera una advertencia al cargar la configuración.",
     "n1_crit_line_tip": "N-1 Completo y Screening sólo disparan líneas y transformadores cargados al menos a esta fracción de su capacidad. 0 = todos.",
     "n1_sld_header_tip": "Los ajustes siguientes son los valores por defecto del panel de Análisis del SLD (Ejecutar N-1 Completo y Ejecutar Screening). No modifican la optimización.",
     "n1_sld_header": "Análisis de contingencias del SLD (N-1 completo / Screening):",

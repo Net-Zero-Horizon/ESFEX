@@ -85,8 +85,11 @@ rooftop_solar_config:
 | `simulation_seed` | `42` | Yes | Random seed |
 | `base_year`, `target_year` | 2025, 2050 | Yes | Span of the S-curve (ROOF-2) |
 | `degradation_rate` | `0.005` | Yes | Annual degradation (ROOF-1) |
-| `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption`, `adoption_rates` | `null` | No | Optional; not passed to rooftex |
-| `performance_ratio`, `cost_per_kw`, `cost_reduction_rate`, `o_and_m_cost` | 0.75, 1200, 0.08, 20 | No | Validated, not used |
+| `systems_per_node`, `avg_system_size` | `null` | Yes | Per-node rooftop systems and their size (kW); with both set, rooftex's potential is systems × size (the system's `rooftop_max_potential` still takes precedence) |
+| `max_adoption`, `adoption_rates` | `null` | Yes | Adoption ceiling and growth rate per scenario (`low`, `medium`, `high`); unset: rooftex defaults |
+| `initial_adoption` | `null` | Passed | Passed to rooftex, which (0.1.1) does not use it |
+| `performance_ratio` | 0.75 | Yes | Scales the rooftex profile |
+| `cost_per_kw`, `cost_reduction_rate`, `o_and_m_cost` | 1200, 0.08, 20 | No | Validated, not used (behind the meter, no investment decision) |
 
 ## Output
 

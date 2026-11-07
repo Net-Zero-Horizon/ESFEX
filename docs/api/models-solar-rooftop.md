@@ -258,19 +258,19 @@ potential = calculate_rooftop_potential(populations)
 
 When a system sets `SIM_ROOFTOP: true` and has a `rooftop_solar_config` block, the runner (`Orchestrator._generate_rooftop_solar`):
 
-1. Calls `rooftex.generate_profiles` once with `num_nodes`, one year of hours, the simulation start year as base year, the last simulated year as target year, `adoption_scenario`, `weather_variability` and `simulation_seed`. No other `rooftop_solar_config` field is passed to rooftex.
+1. Calls `rooftex.generate_profiles` once with `num_nodes`, one year of hours, the simulation start year as base year, the last simulated year as target year, and `adoption_scenario`, `weather_variability`, `simulation_seed`, `performance_ratio`, `systems_per_node`, `avg_system_size` (as `avg_system_size_kw`), `initial_adoption`, `max_adoption` and `adoption_rates` from `rooftop_solar_config` (an unset or empty field leaves rooftex's default: potential drawn per node, default scenario rates and caps).
 2. Takes the per-node maximum potential from the system's `rooftop_max_potential` if set, otherwise from the rooftex result.
 3. For each simulated year, computes installed capacity with the S-curve and degradation formulas shown under `integrate_rooftop_solar` (using `base_year`, `target_year` and `degradation_rate` from `rooftop_solar_config`) and multiplies it by the availability profile. If peak rooftop output stays below 1 MW, rooftop solar is dropped.
 4. Treats rooftop output as behind-the-meter: in each operational window it is subtracted from demand before the Julia call, `max(demand - rooftop, 0)`, so output above demand is self-curtailed. Sectoral demands are scaled by the same ratio. The adapter receives `rooftop_generation=None`, so no rooftop variables are created in the dispatch model.
 5. Stores the yearly series in `YearResults.rooftop_generation` and writes it to the HDF5 scenario group as `rooftop_generation` (hours × nodes).
 
-`systems_per_node`, `avg_system_size`, `performance_ratio`, `initial_adoption`, `max_adoption`, `adoption_rates`, `cost_per_kw`, `cost_reduction_rate` and `o_and_m_cost` are validated by the schema but not used by the runner.
+`cost_per_kw`, `cost_reduction_rate` and `o_and_m_cost` are validated by the schema but not used by the runner: rooftop solar is behind the meter, with no investment decision in the model to price. rooftex 0.1.1 reads `initial_adoption` but does not use it in its adoption curve. In a multi-system run the per-node lists are joined across systems (zeros for a system without them); `max_adoption` and `adoption_rates` are per scenario, so the first system that sets them is used and a different value in another system is ignored with a warning.
 
 ---
 
 ## YAML Configuration
 
-`rooftop_solar_config` is validated by `RooftopSolarConfig`. `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption` and `adoption_rates` are optional (default `null`); the runner does not use them.
+`rooftop_solar_config` is validated by `RooftopSolarConfig`. `systems_per_node`, `avg_system_size`, `initial_adoption`, `max_adoption` and `adoption_rates` are optional (default `null`, rooftex's defaults); `max_adoption` and `adoption_rates` are keyed by adoption scenario.
 
 ```yaml
 systems:

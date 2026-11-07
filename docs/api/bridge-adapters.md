@@ -88,6 +88,7 @@ class PowerSystemAdapter:
 | Key | Type | Description |
 |-----|------|-------------|
 | `system_config` | `SystemConfig` | Overrides the system taken from `config`. The runner passes the merged (multi-system, zone-expanded) system here. |
+| `config_path` | `str` or `Path` | The configuration file. A profile missing from `availability_cache` is read relative to its directory (current directory when absent). |
 | `units_config` | `dict` | Updated unit capacities from MasterProblem investments. Keys are generator/battery config keys, values are dicts with `rated_power`, `capacity`, etc. Virtual generators/batteries created by `_build_config_from_cumulative()` are also included here. |
 | `boundary_conditions` | `dict` | State carried over from the previous rolling window, each a `(unit, bus)` array: `gen_status_init`, `gen_output_prev`, `reservoir_level`, `battery_soc` (MWh). On the year's last window also `battery_soc_end_min` (MWh floor) and `battery_soc_end_cyclic` (bool). |
 | `sectoral_demand` | `dict` | Sectoral demand arrays `{sector_name: np.ndarray(hours, nodes)}`. |
@@ -119,7 +120,7 @@ def _create_input(self) -> Any  # Julia PowerSystemInput
 Converts Python configuration into a Julia `PowerSystemInput` struct. Steps:
 
 1. Iterates over `sys.generators` and converts each to a Julia `GeneratorConfig` via `convert_generator_config()`.
-2. Resolves availability profiles from `availability_cache` (slicing to the current window using `start_hour`) or loads from file as fallback.
+2. Resolves availability profiles from `availability_cache` (slicing to the current window using `start_hour`). A unit missing from the cache is read from its file with the runner's reader (`esfex.io.demand.load_run_availability`: path relative to `config_path`, hourly, Feb 29 dropped by the calendar of `date_start`) and sliced the same way; a missing file is an error.
 3. Applies `units_config` overrides to update `rated_power` for generators whose capacity was modified by MasterProblem investments.
 4. Creates virtual generators for technology investments that do not exist in `sys.generators` (e.g., "Investment Solar PV"). Their arrays are per bus of the system (`_is_per_bus`); with network reduction they are laid out on the reduced buses, and capacity on an eliminated bus moves to the retained bus of the same node with the largest `demand_fraction`.
 5. Repeats the above for batteries and virtual batteries.
@@ -145,10 +146,13 @@ Solve the optimization model. Returns a PuLP-compatible status code:
 ### get_solution_values
 
 ```python
-def get_solution_values(self) -> dict
+def get_solution_values(self, keep_steps: int | None = None,
+                        primary_energy: PrimaryEnergyAdapter | None = None) -> dict
 ```
 
-Extract all variable values from the solved model. Calls `ESFEX.extract_solution()` on the Julia side and converts the result with `esfex.bridge.converters.convert_power_system_result()` to a Python dictionary with NumPy arrays, indexed by bus. Costs are converted back from M$ to $. Main keys:
+Extract all variable values from the solved model. Calls `ESFEX.extract_solution()` on the Julia side and converts the result with `esfex.bridge.converters.convert_power_system_result()` to a Python dictionary with NumPy arrays, indexed by bus. Costs are converted back from M$ to $.
+
+`keep_steps` (rolling horizon) restricts `objective`, the scalar totals and `cost_breakdown` to the window's first `keep_steps` steps, the ones the runner keeps; the arrays still span the whole window. Pass the window's `primary_energy` adapter so its costs are split by step too (see [Rolling Horizon — Result Stitching](../formulation/operational-dispatch.md#104-result-stitching)). Main keys:
 
 | Key | Content |
 |-----|---------|
@@ -544,7 +548,7 @@ Wraps the electrolyzer model (`electrolyzer.jl`). Handles hydrogen production op
 
 Wraps the primary energy model (`primary_energy.jl`). Optimizes fuel supply chains including storage, transport, and procurement.
 
-`integrate_with_power_system(ps)` adds the block to the dispatch model: the fuel coupling of the generators and the hydrogen of the dispatch's electrolyzers into the `Hydrogen` tank. For rolling horizons, `get_final_storage_levels(step=k)` and `get_in_transit_arrivals(step=k)` give the tank levels and the fuel still in transit after the `k` committed steps; the runner passes them to the next window's adapter as `initial_storage_levels` and `scheduled_arrivals` (`{fuel: array [node, step]}`).
+`integrate_with_power_system(ps)` adds the block to the dispatch model: the fuel coupling of the generators and the hydrogen of the dispatch's electrolyzers into the `Hydrogen` tank. `get_results(keep_steps=None)` returns the per-period series, the investments, the cost totals in $ (`total_fuel_cost`, `total_transport_cost`, `total_loss_penalty`, over the first `keep_steps` steps when given) and `fuel_for_power` (`{generator index: [node, step]}`, fuel burnt per step by each coupled unit). For rolling horizons, `get_final_storage_levels(step=k)` and `get_in_transit_arrivals(step=k)` give the tank levels and the fuel still in transit after the `k` committed steps; the runner passes them to the next window's adapter as `initial_storage_levels` and `scheduled_arrivals` (`{fuel: array [node, step]}`).
 
 ---
 

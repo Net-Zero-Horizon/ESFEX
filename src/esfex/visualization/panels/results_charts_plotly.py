@@ -46,6 +46,7 @@ from esfex.visualization.panels.results_charts import (
     _load_investment_data,
     _load_decommissioning_data,
     _parse_invest_cost,
+    _parse_total_mw,
     _demand_node_hours,
     _sum_nodes,
     _aggregate,
@@ -323,7 +324,7 @@ class GenerationMixChart(PlotlyChart):
                         if isinstance(name, bytes):
                             name = name.decode()
                         rated = gc.get("rated_power", 0)
-                        rated_mw = _parse_invest_cost(rated)
+                        rated_mw = _parse_total_mw(rated)
                         inc_mw = delta * rated_mw
                         canon, _ = _canonical_tech_name(name)
                         if canon not in ret_by_tech:

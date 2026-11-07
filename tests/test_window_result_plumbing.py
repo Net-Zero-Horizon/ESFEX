@@ -113,7 +113,7 @@ class TestPrimaryEnergyWindowMerge:
         windows = []
 
         def fake_solve(**kw):
-            n = kw["hours"]
+            n, keep = kw["hours"], kw["keep_hours"]
             windows.append((kw["start_hour"], n))
             # One unit of fuel per step, reported per 24-step period.
             per_period = np.array([min(24, n - s) for s in range(0, n, 24)], dtype=float)
@@ -125,8 +125,12 @@ class TestPrimaryEnergyWindowMerge:
                     "total_loss_of_supply": {"gas": per_period * 0},
                     "transport_flows": {"gas": np.vstack([per_period, per_period * 3])},
                     "final_storage_levels": {"gas": np.array([float(len(windows))])},
-                    "total_fuel_cost": float(n), "total_transport_cost": 2.0 * n,
+                    # The window's costs cover its committed steps only
+                    "total_fuel_cost": float(keep), "total_transport_cost": 2.0 * keep,
                     "total_loss_penalty": 0.0,
+                    # Fuel burnt per step: the window's start step + step
+                    "fuel_for_power": {"Gas plant": np.vstack(
+                        [kw["start_hour"] + np.arange(n, dtype=float)] * 2)},
                 },
             }
 
@@ -147,8 +151,11 @@ class TestPrimaryEnergyWindowMerge:
         np.testing.assert_allclose(pe["total_ne_demand_satisfied"]["gas"], expected * 2)
         np.testing.assert_allclose(pe["transport_flows"]["gas"],
                                    np.vstack([expected, expected * 3]))
-        # Costs: the committed share of each window (48 + 48 + 34 steps)
+        # Costs: summed over the windows (48 + 48 + 34 committed steps)
         assert pe["total_fuel_cost"] == pytest.approx(130.0)
         assert pe["total_transport_cost"] == pytest.approx(260.0)
+        # Fuel for power: the committed steps of each window, joined
+        np.testing.assert_allclose(pe["fuel_for_power"]["Gas plant"],
+                                   np.vstack([np.arange(130.0)] * 2))
         # End-of-year tank levels from the last window
         assert pe["final_storage_levels"]["gas"].tolist() == [3.0]

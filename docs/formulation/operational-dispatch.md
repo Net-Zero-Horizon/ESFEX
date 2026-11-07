@@ -855,7 +855,7 @@ Both slacks are priced at `loss_of_reserve_static` per MW and time step (reporte
 
 With `generation_reserve_type: percentage` the right-hand side of N1-1 is `generation_reserve_percentage` × the total demand of step \(t\) instead of the largest unit's output, and no unit is excluded from \(H^{\text{N1}}_t\) (same constraint and shortfall names).
 
-`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` configure the post-hoc contingency analysis of the Studio's single-line diagram, not the optimisation. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint.
+`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` configure the post-hoc contingency analysis of the Studio's single-line diagram, not the optimisation. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint; a value other than the default logs a warning when the configuration is loaded.
 
 #### SCOPF variant
 
@@ -1079,6 +1079,8 @@ Results from all windows are concatenated to form the full-year dispatch, keepin
 \]
 
 where the last window may have fewer than \(K\) kept hours (remainder of the year).
+
+The year's totals are stitched the same way: the objective, the cost breakdown, generation, demand, curtailment, load shedding and CO2 add up each window's first \(K\) hours only (the overlap tail is solved again by the next window). A cost term counts for the hours it belongs to; a term without an hour (investment annuities, the CO2-budget slack) counts for the window's share \(K / H_w\); a primary-energy period counts for the share of its hours among the first \(K\); and fuel drawn from a tank is valued from the window's start to the end of hour \(K\). `n1_security_cost` is the exception: it is a whole-window figure and counts for \(K / H_w\).
 
 ### 10.5 Time Resolution
 

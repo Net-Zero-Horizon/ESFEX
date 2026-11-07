@@ -1302,6 +1302,8 @@ class TestGuiStateToYaml:
         assert "penalties" in sys_data
         assert sys_data["penalties"]["LOSS_OF_LOAD"] == 10e6
         assert sys_data["penalties"]["Curtailment"] == 100.0
+        # Deprecated (no effect, the loader warns): no longer written
+        assert "coupling_slack_penalty" not in sys_data["penalties"]
 
     def test_node_names_exported(self):
         state = _build_minimal_gui_state()

@@ -354,7 +354,7 @@ Both slacks are priced at `penalties.loss_of_reserve_static` per MW and time ste
 
 With `generation_reserve_type: percentage` the requirement of N1-1 is `generation_reserve_percentage` × the total demand of the step instead of the largest unit's output, and no unit is excluded from the headroom.
 
-`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` only configure the post-hoc contingency analysis of the Studio's single-line diagram. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint.
+`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` only configure the post-hoc contingency analysis of the Studio's single-line diagram. `scopf_max_iterations` and `scopf_violation_tolerance` are read from the configuration but not used by any constraint; a value other than the default logs a warning when the configuration is loaded.
 
 ### PTDF Matrix Construction
 
