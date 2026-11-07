@@ -287,7 +287,7 @@ When several systems are coupled by inter-system links (`meta_network.systems_li
 - length `distance_km`
 - `reactance_pu` and `resistance_pu` when given (otherwise the usual defaults for lines)
 
-The link then follows DC-1 to DC-3 and the configured loss model like any other line, inside one angle reference. Investment uses `max_investment_MW` and `investment_cost_per_MW`, which are written into `transference_invest_max` and `transference_invest_cost` at both endpoint nodes (the larger value where a node already has one). `loss_factor`, `cost_per_mw_km` and `meta_network.inter_system_loss_segments` are not used by this path.
+The link then follows DC-1 to DC-3 and the configured loss model like any other line, inside one angle reference. Investment uses `max_investment_MW` and `investment_cost_per_MW`, which are written into `transference_invest_max` and `transference_invest_cost` at both endpoint nodes (the larger value where a node already has one). `loss_factor` and `meta_network.inter_system_loss_segments` are not used by this path. `cost_per_mw_km` is the link's flow cost: the master problem charges `distance_km` × `cost_per_mw_km` per MWh it carries ([Capacity Expansion](capacity-expansion.md), §8.3.9).
 
 A `link_type: fuel_route` link is not part of the electrical network: its connections become primary-energy fuel transport routes for its `fuel` (see [Inter-System Links](../gui/inter-system-links.md#how-links-enter-the-model) for the field mapping).
 
@@ -306,7 +306,7 @@ meta_network:
       reactance_pu: [0.01]
       resistance_pu: [0.001]
       distance_km: [100.0]
-      cost_per_mw_km: [10000.0]  # Not used by the merged-network path
+      cost_per_mw_km: [0.01]     # Flow cost, $ per MWh and km
 ```
 
 !!! note "Separate multi-system master"

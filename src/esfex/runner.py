@@ -87,6 +87,52 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
     return result
 
 
+def _converter_investment_key(key: str) -> tuple[Optional[str], int]:
+    """``("acdc" | "freq", index)`` of a ``converter_investment_{kind}_{c}``
+    investment key; ``(None, -1)`` for any other key."""
+    prefix = "converter_investment_"
+    if not key.startswith(prefix):
+        return None, -1
+    kind, _, idx = key[len(prefix):].partition("_")
+    if kind not in ("acdc", "freq") or not idx.isdigit():
+        return None, -1
+    return kind, int(idx)
+
+
+def _link_flow_costs(links, offsets: dict[str, int]) -> dict[tuple[int, int], dict]:
+    """Flow cost of the master's node links that stand for inter-system links.
+
+    An electrical inter-system link costs ``distance_km × cost_per_mw_km``
+    per MWh it carries. The master joins each pair of merged nodes
+    ``(i, j)``, ``i < j``, with one link: it gets the links' mean length and
+    a cost per MW·km that gives their mean cost per MWh (weighted by their
+    existing capacity), as ``{"length_km": …, "cost_per_mw_km": …}``.
+    """
+    def _at(seq, idx):
+        return float(seq[idx]) if idx < len(seq) and seq[idx] is not None else 0.0
+
+    acc: dict[tuple[int, int], list[float]] = {}
+    for link in links:
+        if len(link.systems) < 2:
+            continue
+        sa, sb = link.systems[0], link.systems[1]
+        if sa not in offsets or sb not in offsets:
+            continue
+        for idx, (na, nb) in enumerate(link.connections):
+            ga, gb = offsets[sa] + na, offsets[sb] + nb
+            dist, cost = _at(link.distance_km, idx), _at(link.cost_per_mw_km, idx)
+            w = max(_at(link.existing_capacity_mw, idx), 1e-6)
+            a = acc.setdefault((min(ga, gb), max(ga, gb)), [0.0, 0.0, 0.0])
+            a[0] += w
+            a[1] += w * dist
+            a[2] += w * dist * cost
+    out: dict[tuple[int, int], dict] = {}
+    for pair, (w, wd, wdc) in acc.items():
+        if wd > 0 and wdc > 0:
+            out[pair] = {"length_km": wd / w, "cost_per_mw_km": wdc / wd}
+    return out
+
+
 def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
     """Primary-energy transport routes for the ``fuel_route`` inter-system links.
 
@@ -1453,6 +1499,7 @@ class Orchestrator:
         master_lines: list[TransmissionLineGeo] = []
         link_z = _node_link_impedances(merged_lines_geo, merged_buses, base.dc_power_flow,
                                        system_s_base(base))
+        link_flow_cost = _link_flow_costs(electrical_links, offsets)
         line_idx = 0
         for i in range(total_nodes):
             for j in range(i + 1, total_nodes):
@@ -1472,10 +1519,19 @@ class Orchestrator:
                         capacity_mw=cap,
                         resistance_pu=link_z[(i, j)][0] if (i, j) in link_z else None,
                         reactance_pu=link_z[(i, j)][1] if (i, j) in link_z else None,
+                        # Inter-system link: its flow cost per MWh
+                        **link_flow_cost.get((i, j), {}),
                     ))
                     line_idx += 1
 
-        merged_master = SystemConfig(**common_kwargs,
+        # The master has one bus per node: a converter joins its nodes, not
+        # the dispatch-network buses
+        def _node_ends(convs):
+            return [c.model_copy(update={"from_bus": None, "to_bus": None}) for c in convs]
+
+        merged_master = SystemConfig(**{**common_kwargs,
+            "acdc_converters": _node_ends(merged_acdc),
+            "freq_converters": _node_ends(merged_freq)},
             transmission_lines_geo=master_lines,
         )
 
@@ -1944,6 +2000,7 @@ class Orchestrator:
                     # Apply transmission investments to network adjacency matrix
                     if year_investments:
                         self._apply_transfer_investments(year_investments)
+                        self._apply_converter_investments(year_investments)
 
                     # Build cumulative_units_config from MasterProblem's cumulative
                     # capacities. This correctly handles:
@@ -3382,7 +3439,8 @@ class Orchestrator:
                 # 8. Extract investments
                 year_inv: dict[str, float] = {}
                 for category in ['tech_investment', 'bat_tech_power_investment',
-                                 'bat_tech_capacity_investment', 'transfer_investment']:
+                                 'bat_tech_capacity_investment', 'transfer_investment',
+                                 'converter_investment']:
                     for key, value in year_data.get(category, {}).items():
                         if value > 0.1:
                             year_inv[key] = float(value)
@@ -3619,6 +3677,14 @@ class Orchestrator:
             bat_tech.invest_max_power = _reduce(bat_tech.invest_max_power, used_pow[bt_key])
             bat_tech.invest_max_capacity = _reduce(bat_tech.invest_max_capacity, used_cap[bt_key])
 
+        # Converter capacity built so far is existing capacity; the limit
+        # holds for the whole horizon
+        for (kind, idx), mw in built.get("converter", {}).items():
+            convs = getattr(sys, f"{kind}_converters", None) or []
+            if idx < len(convs):
+                convs[idx].rated_power_mva += mw
+                convs[idx].invest_max_power = max(0.0, convs[idx].invest_max_power - mw)
+
         return sys, built_gens, built_bats
 
     def _myopic_year_caps(
@@ -3695,6 +3761,11 @@ class Orchestrator:
             ("bat_tech_investment_capacity_", "bat_tech_capacity", list(sys.battery_technologies)),
         )
         for inv_key, capacity in year_inv.items():
+            conv_kind, conv_idx = _converter_investment_key(inv_key)
+            if conv_kind is not None:
+                conv = built.setdefault("converter", {})
+                conv[(conv_kind, conv_idx)] = conv.get((conv_kind, conv_idx), 0.0) + capacity
+                continue
             for prefix, kind, keys in prefixes:
                 if not inv_key.startswith(prefix):
                     continue
@@ -4043,6 +4114,12 @@ class Orchestrator:
                 # Keys already in format: 'transfer_investment_{i}_{j}'
                 trans_inv_data = year_data.get('transfer_investment', {})
                 for key, value in trans_inv_data.items():
+                    if value > 0.1:
+                        year_inv[key] = float(value)
+
+                # Collect converter investments
+                # key format: 'converter_investment_{acdc|freq}_{c}'
+                for key, value in year_data.get('converter_investment', {}).items():
                     if value > 0.1:
                         year_inv[key] = float(value)
 
@@ -6399,6 +6476,21 @@ class Orchestrator:
         )
 
         return results_summary
+
+    def _apply_converter_investments(self, investments: dict[str, float]) -> None:
+        """Add the converter capacity the master built this year to the
+        dispatch's converters (``converter_investment_{acdc|freq}_{c}`` keys,
+        MW). Converters do not age, so the capacity stays for later years.
+        The master and the dispatch list the converters in the same order.
+        """
+        for key, value in investments.items():
+            kind, idx = _converter_investment_key(key)
+            if kind is None:
+                continue
+            convs = getattr(self.primary_system, f"{kind}_converters", None) or []
+            if idx < len(convs):
+                convs[idx].rated_power_mva += float(value)
+                logger.debug(f"Converter {convs[idx].name}: +{value:.1f} MW built")
 
     def _apply_transfer_investments(
         self,

@@ -72,7 +72,7 @@ The link form mirrors the transmission line form. A read-only header shows the t
 | | Current Type | -- | AC or DC |
 | **Economic** | Investment cost | $/MW | Cost per MW of new transfer capacity |
 | | Max investment | MW | Maximum new capacity the optimizer may build. 0 means no expansion. |
-| | Operational cost | $/MW·km | Transmission links: stored in the configuration, not used by the current solver. Fuel routes: transport cost in $ per fuel unit per km. |
+| | Operational cost | $/MW·km | Transmission links: flow cost; each MWh the link carries costs length × this value in the master problem. Fuel routes: transport cost in $ per fuel unit per km. |
 | | Loss factor | fraction | Must be between 0 and 1. Transmission links: stored in the configuration, not used by the current solver. Fuel routes: fuel lost per 100 km. |
 | **Appearance** | Color, width, opacity | -- | Map style |
 
