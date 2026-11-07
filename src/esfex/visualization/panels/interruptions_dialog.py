@@ -14,7 +14,8 @@ The Python↔JS contract is a tiny QWebChannel bridge:
 
 * ``get_data()``  → JSON ``{base_year, horizon_hours, groups, schedule}``
 * ``commit(json)`` → the page hands back the full edited schedule; the dialog
-  applies it to the model on accept.
+  applies it to the model on accept. Until the page commits, the dialog holds
+  the model's own schedule, so OK without edits keeps every window.
 """
 from __future__ import annotations
 
@@ -87,7 +88,8 @@ class InterruptionsDialog(QDialog):
     def __init__(self, model: GuiModel, parent=None, focus: "tuple | None" = None):
         super().__init__(parent)
         self.model = model
-        self._schedule: list[dict] = []
+        # Starts as the model's schedule: the page commits only after an edit.
+        self._schedule: list[dict] = self._schedule_dicts()
         self._focus = focus  # (element_type, element_id) to preselect, or None
 
         self.setWindowTitle(tr("interruptions.title"))
@@ -146,9 +148,9 @@ class InterruptionsDialog(QDialog):
         ]
         return [g for g in raw if g]
 
-    def _build_payload(self) -> str:
-        s = self.model.state
-        schedule = [
+    def _schedule_dicts(self) -> list[dict]:
+        """The model's outage schedule in the bridge's JSON shape."""
+        return [
             {
                 "element_type": ow.element_type,
                 "element_id": ow.element_id,
@@ -157,9 +159,14 @@ class InterruptionsDialog(QDialog):
                 "availability": float(ow.availability),
                 "label": ow.label,
                 "recurring": bool(getattr(ow, "recurring", False)),
+                "node": getattr(ow, "node", None),
             }
-            for ow in getattr(s, "outage_schedule", [])
+            for ow in getattr(self.model.state, "outage_schedule", [])
         ]
+
+    def _build_payload(self) -> str:
+        s = self.model.state
+        schedule = self._schedule_dicts()
         focus = None
         if self._focus:
             focus = {"element_type": self._focus[0], "element_id": self._focus[1]}
@@ -218,6 +225,7 @@ class InterruptionsDialog(QDialog):
                 end = int(d["end_hour"])
                 if end <= start:
                     continue
+                node = d.get("node")
                 windows.append(GuiOutageWindow(
                     element_type=str(d["element_type"]),
                     element_id=str(d["element_id"]),
@@ -226,6 +234,7 @@ class InterruptionsDialog(QDialog):
                     availability=max(0.0, min(1.0, float(d.get("availability", 0.0)))),
                     label=str(d.get("label", "")),
                     recurring=bool(d.get("recurring", False)),
+                    node=None if node is None else int(node),
                 ))
             except (KeyError, ValueError, TypeError):
                 continue
