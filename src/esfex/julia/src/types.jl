@@ -1666,6 +1666,8 @@ struct CostBreakdown
     # Always 0: the periodic storage layer and its coupling slacks were
     # removed; the field stays so result files keep their layout.
     pe_coupling_slack_cost::Float64
+    # The electrolyzers' cost (electrolyzer_cost) when their hydrogen fills the
+    # primary-energy Hydrogen tank; a view of it, not an extra cost.
     pe_electrolyzer_cost::Float64
     # N-1 SCOPF reliability-shortfall penalty.
     n1_security_shortfall_cost::Float64

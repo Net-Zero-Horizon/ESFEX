@@ -204,10 +204,10 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_transport_cost` | float | $ | Primary energy transport cost |
 | `pe_investment_cost` | float | $ | Primary energy storage/transport investment cost |
 | `pe_coupling_slack_cost` | float | $ | Deprecated, always 0 (the primary-energy model no longer has a periodic–hourly coupling slack; kept for file compatibility) |
-| `pe_electrolyzer_cost` | float | $ | Electrolyzer cost in the primary energy model |
+| `pe_electrolyzer_cost` | float | $ | The electrolyzers' cost (`electrolyzer_cost`) when their hydrogen fills the primary-energy `Hydrogen` tank, 0 otherwise. The same money as `electrolyzer_cost`, not an extra cost: do not add both |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `line_flow_cost` | float | $ | Flow cost of lines with a `cost_per_mw_km` (inter-system links: length × `cost_per_mw_km` × MWh carried) |
-| `total` | float | $ | Sum of all cost components |
+| `total` | float | $ | Objective value of the dispatch. Reporting-only entries such as `pe_electrolyzer_cost` (a view of `electrolyzer_cost`) are not part of it |
 
 ### Reading Cost Breakdown
 

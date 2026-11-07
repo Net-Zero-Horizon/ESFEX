@@ -1304,6 +1304,9 @@ tank at its node (the balance built by `add_primary_energy_constraints!`,
 scaled by the tank's storage efficiency like every inflow). Without a
 `Hydrogen` fuel in the primary-energy model the electrolyzers stay a plain
 load, as in a run without primary energy.
+
+The electrolyzers' cost charged by the dispatch (`electrolyzer_cost`) is then
+also reported as `pe_electrolyzer_cost` (the same money, not charged again).
 """
 function couple_electrolyzers_to_hydrogen_tank!(model::Model, ps_vars::PowerSystemVariables,
                                                 input::PrimaryEnergyInput, electrolyzers;
@@ -1317,6 +1320,12 @@ function couple_electrolyzers_to_hydrogen_tank!(model::Model, ps_vars::PowerSyst
         return
     end
     balance, eff = h2
+    ce = get(model.ext, :cost_expressions, nothing)
+    if ce !== nothing && haskey(ce, :electrolyzer_cost)
+        # Breakdown only: :electrolyzer_cost is an energy term (× step length
+        # at extraction), the PE entries are not.
+        ce[:pe_electrolyzer_cost] = resolution_hours * ce[:electrolyzer_cost]
+    end
     n_hours = min(input.hours, size(ps_vars.electrolyzer_power, 3))
     for (e, ec) in enumerate(electrolyzers), b in 1:size(ps_vars.electrolyzer_power, 2)
         node = node_of(b)

@@ -1956,6 +1956,10 @@ import Ipopt
             @test p1 * 13.0 / 1000 * 0.8 ≥ 5.0 / 16.65 - 1e-6
             @test value(pe_vars.fuel_storage_level_hourly["Hydrogen"][1, 2]) ≥
                   5.0 / 16.65 - 1e-6
+            # pe_electrolyzer_cost reports the electrolyzer cost charged (was 0)
+            cb = extract_solution(model, vars, input).cost_breakdown
+            @test cb.electrolyzer_cost > 0
+            @test cb.pe_electrolyzer_cost ≈ cb.electrolyzer_cost rtol = 1e-9
             # The old fixed-production inputs are rejected, not ignored
             bad = PrimaryEnergyInput(2025, 2025, 1, H, [h2],
                 Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
