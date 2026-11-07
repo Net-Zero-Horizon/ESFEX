@@ -1217,6 +1217,58 @@ def normalize_scenario_multipliers(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_FUEL_BLOCK_MULTIPLIERS: tuple[str, ...] = (
+    "fuel_import_cost", "penalty_loss_of_fuel_supply", "fuel_storage_invest_cost",
+    "fuel_transport_cost", "electrolyzer_invest_cost", "electrolyzer_fixed_cost",
+    "electrolyzer_variable_cost", "electrolyzer_water_cost",
+)
+
+
+def ineffective_scenario_multipliers(config: "ESFEXConfig") -> list[tuple[str, str, str]]:
+    """Scenario multipliers set (≠ 1) whose term this configuration lacks.
+
+    Only the first system's ``stochastic_scenarios`` reach the master, and
+    only with ``master_problem.stochastic``. A key whose term exists only in
+    some configurations has no effect without it: ``gen_start_up_cost``
+    without ``master_problem.use_uc_in_dispatch`` (no start-ups in the
+    master), the fuel-chain and electrolyzer keys with primary energy off,
+    and ``transmission_cost_per_mw_km`` with no line or electrical
+    inter-system link carrying a per-MW·km cost. Returns ``(scenario, key,
+    reason)`` for each one.
+    """
+    if config.simulation_mode != "development" or not config.master_problem.stochastic:
+        return []
+    scenarios = config.primary_system.stochastic_scenarios or []
+    if not scenarios:
+        return []
+    systems = [config.systems[n] for n in config.meta_network.systems if n in config.systems]
+    pe_on = config.enable_primary_energy and any(
+        s.primary_energy_sources or s.fuel_entry_points for s in systems)
+    flow_cost = any(
+        link.link_type == "transmission" and any(c > 0 for c in link.cost_per_mw_km)
+        for link in config.meta_network.systems_links
+    ) or any(
+        ln.cost_per_mw_km > 0 and (ln.length_km or 0) > 0
+        for s in systems for ln in (s.transmission_lines_geo or [])
+    )
+    missing: dict[str, str] = {}
+    if not config.master_problem.use_uc_in_dispatch:
+        missing["gen_start_up_cost"] = (
+            "the master models start-ups only with master_problem.use_uc_in_dispatch")
+    if not pe_on:
+        for key in _FUEL_BLOCK_MULTIPLIERS:
+            missing[key] = "primary energy is off (no fuel block in the master)"
+    if not flow_cost:
+        missing["transmission_cost_per_mw_km"] = (
+            "no line or electrical inter-system link has a cost_per_mw_km")
+    out = []
+    for sc in scenarios:
+        for key, reason in missing.items():
+            if getattr(sc.multipliers, key, 1.0) != 1.0:
+                out.append((sc.name, key, reason))
+    return out
+
+
 class StochasticScenarioConfig(BaseModel):
     """Stochastic programming scenario definition."""
 

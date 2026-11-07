@@ -77,7 +77,7 @@ The operation multipliers are applied by `scenario_master_input()`, which builds
 
 The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning.
 
-`gen_start_up_cost` only has an effect when the dispatch commits units (`master_problem.use_uc_in_dispatch`): only then does the master model start-ups (see [Capacity Expansion](capacity-expansion.md)). `transmission_cost_per_mw_km` scales the operating cost of the flow on inter-system links; their investment per MW is scaled by `invest_cost_transmission`.
+`gen_start_up_cost` only has an effect when the dispatch commits units (`master_problem.use_uc_in_dispatch`): only then does the master model start-ups (see [Capacity Expansion](capacity-expansion.md)). `transmission_cost_per_mw_km` scales the operating cost of the flow on inter-system links; their investment per MW is scaled by `invest_cost_transmission`. When a scenario sets one of these keys, or a fuel-chain or electrolyzer key with primary energy off, to a value other than 1 in a configuration that lacks its term, loading the configuration logs a warning naming the scenario and the key.
 
 ### 2.3 Scenario Construction
 

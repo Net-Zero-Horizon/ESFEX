@@ -38,6 +38,7 @@ from esfex.config.schema import (
     PenaltiesConfig,
     PrimaryEnergySourceConfig,
     ESFEXConfig,
+    ineffective_scenario_multipliers,
     RooftopSolarConfig,
     ScenarioMultipliers,
     SolverConfig,
@@ -644,6 +645,14 @@ def _warn_unused_scopf_settings(n1: N1SecurityConfig) -> None:
                 "built in a single pass, not iteratively", name, value)
 
 
+def _warn_ineffective_multipliers(config: ESFEXConfig) -> None:
+    """Warn about stochastic multipliers this configuration gives no term
+    to scale (see :func:`ineffective_scenario_multipliers`)."""
+    for scenario, key, reason in ineffective_scenario_multipliers(config):
+        log.warning("Stochastic scenario %r: multiplier %s has no effect: %s",
+                    scenario, key, reason)
+
+
 def load_config(path: Union[str, Path]) -> ESFEXConfig:
     """
     Load and validate a ESFEX configuration file.
@@ -716,6 +725,7 @@ def load_config(path: Union[str, Path]) -> ESFEXConfig:
         # Validate with Pydantic
         config = ESFEXConfig(**raw_config)
         config._unknown_keys = unknown
+        _warn_ineffective_multipliers(config)
         return config
 
     except ValidationError as e:

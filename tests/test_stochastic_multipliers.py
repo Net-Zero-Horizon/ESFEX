@@ -117,6 +117,55 @@ def test_loader_translates_legacy_keys():
     assert (m.fuel_cost, m.carbon_price, m.penalty_curtailment) == (1.2, 3.0, 0.5)
 
 
+def _stochastic_config(multipliers, **master):
+    from esfex.config.schema import MasterProblemConfig
+    cfg = _config_with_scenarios([
+        StochasticScenarioConfig(name="hi", probability=1.0, multipliers=multipliers)])
+    return cfg.model_copy(update={
+        "enable_primary_energy": False,
+        "master_problem": MasterProblemConfig(stochastic=True, **master)})
+
+
+def test_multipliers_without_a_term_in_this_configuration_are_reported():
+    """Start-ups need use_uc_in_dispatch, the fuel keys primary energy and
+    the MW·km key a line with a per-MW·km cost."""
+    from esfex.config.schema import ineffective_scenario_multipliers
+
+    keys = {"gen_start_up_cost": 2.0, "fuel_import_cost": 2.0,
+            "electrolyzer_invest_cost": 2.0, "transmission_cost_per_mw_km": 2.0,
+            "fuel_cost": 2.0}
+    got = {k for _, k, _ in ineffective_scenario_multipliers(_stochastic_config(keys))}
+    assert got == {"gen_start_up_cost", "fuel_import_cost",
+                   "electrolyzer_invest_cost", "transmission_cost_per_mw_km"}
+
+    from esfex.config.schema import TransmissionLineGeo
+    cfg = _stochastic_config(keys, use_uc_in_dispatch=True)
+    sysc = cfg.primary_system
+    link = TransmissionLineGeo(from_node=0, to_node=0, cost_per_mw_km=1.0, length_km=10.0)
+    cfg.systems[sysc.name] = sysc.model_copy(update={"transmission_lines_geo": [link]})
+    got = {k for _, k, _ in ineffective_scenario_multipliers(cfg)}
+    assert got == {"fuel_import_cost", "electrolyzer_invest_cost"}
+    # Keys left at 1 and deterministic masters stay silent.
+    assert ineffective_scenario_multipliers(_stochastic_config({})) == []
+    off = _stochastic_config(keys).model_copy(update={
+        "master_problem": _stochastic_config(keys).master_problem.model_copy(
+            update={"stochastic": False})})
+    assert ineffective_scenario_multipliers(off) == []
+
+
+def test_loader_warns_on_multipliers_without_effect(tmp_path, caplog):
+    import yaml
+
+    from esfex.config.loader import load_config
+
+    cfg = _stochastic_config({"gen_start_up_cost": 3.0})
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(cfg.model_dump(mode="json", by_alias=True)))
+    with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+        load_config(path)
+    assert "multiplier gen_start_up_cost has no effect" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Bridge: every field reaches Julia by name
 # ---------------------------------------------------------------------------
