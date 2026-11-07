@@ -59,8 +59,10 @@ struct FixedCapacities
     line_capacity::Dict{Int, Float64}
     # RE ratios for this year (per system, from master target)
     re_ratios::Vector{Float64}
-    # M2 (#89): fuel storage/transport and electrolyzer capacity built by the
-    # master and in service this year (master_fuel_extra_values)
+    # Values of the copy variables (BendersCopyKey => value): fuel
+    # storage/transport and electrolyzer capacity in service this year (M2,
+    # #89), converter and line capacity built, CO2 allocations. Keys not
+    # listed take `copy_value`'s default.
     fuel_extra::Dict{Tuple{Symbol, String, Int}, Float64}
 end
 
@@ -81,8 +83,8 @@ struct BendersCut
     bat_life_ext_gradients::Dict{Tuple{Int,Int}, Float64}
     # line_idx => marginal value of line capacity
     line_gradients::Dict{Int, Float64}
-    # M2 (#89): fuel capacity key => marginal value of the capacity in
-    # service in the cut's year (master_fuel_extra_expr maps it to the builds)
+    # Copy-variable key => marginal value of that quantity in the cut's year
+    # (benders_copy_expr maps it to the master's variables)
     fuel_gradients::Dict{Tuple{Symbol, String, Int}, Float64}
 end
 
@@ -105,6 +107,171 @@ struct SubproblemData
     hours::Int
     start_hour::Int
     scaling_factor::Float64             # for cost annualization (tres * days_in_year / num_rep_days)
+end
+
+# =============================================================================
+# Copy variables
+# =============================================================================
+#
+# A master quantity that a subproblem reads (a built capacity, the RE ratio, a
+# CO2 allocation) enters the subproblem as a copy variable fixed to the
+# master's value. The dual of the fixing constraint is the day's marginal cost
+# of that quantity, and the cut multiplies it by the master expression the
+# key stands for (`benders_copy_expr`). Keys are `(kind, name, index)`:
+#
+#   (:storage | :transport | :electrolyzer, …)  fuel block (M2, master_fuel.jl)
+#   (:converter, "acdc" | "freq", c)  converter MW built up to the year
+#   (:line, "", l)                    MW built on line l's corridor up to the year
+#   (:gen_life, "g", b), (:bat_life, "bi", b)  life-extended MW this year
+#   (:re_ratio, "s", 0)               system s's RE ratio this year
+#   (:co2, "k", d)                    share of group k's CO2 budget given to day d
+
+const BendersCopyKey = Tuple{Symbol, String, Int}
+
+"""
+Master-side data the copy keys refer to: the CO2 allocation variables
+`(year, group, day) => budget share` and the bus pair of each line (`TransmissionDC`
+order, which `(:line, "", l)` indexes).
+"""
+struct BendersCopyContext
+    co2_alloc::Dict{Tuple{Int,Int,Int}, VariableRef}
+    line_ends::Vector{Tuple{Int,Int}}
+end
+
+BendersCopyContext() = BendersCopyContext(Dict{Tuple{Int,Int,Int}, VariableRef}(),
+                                          Tuple{Int,Int}[])
+
+"""
+    benders_line_ends(input) -> Vector{Tuple{Int,Int}}
+
+Bus pair of each line of the subproblems' DC network (empty when they use
+the copper-plate balance).
+"""
+function benders_line_ends(input::MasterProblemInput)
+    (input.network.num_buses > 1 && !isempty(input.network.transmission_lines)) ||
+        return Tuple{Int,Int}[]
+    return TransmissionDC(input.network).lines
+end
+
+"""
+    add_benders_co2_allocation!(model, input, rep_days_by_year) -> Dict
+
+CO2 budget decomposition. The annual budget of a group couples every
+representative day of the year, so the master shares it out: a variable
+`a[y,k,d] ≥ 0` per year, budget group and day, the share of the budget the
+day may use, with
+
+    Σ_d a[y,k,d] ≤ 1.
+
+Subproblem d then holds its emissions, scaled to the year like its cost, to
+`a[y,k,d] × budget_k + v` and pays the group's violation penalty on `v`.
+Summed over the days this is the monolithic constraint
+`Σ_d emissions ≤ budget + viol` with `viol = Σ_d v` at the same price, so
+both have the same optimum; the cuts carry ∂cost/∂a to the master, which
+moves allowance to the days where it saves the most. (A share rather than
+tonnes keeps the cut coefficient in range: per tonne it would be ~1e-10 in
+the master's scaled θ units, below the solver's coefficient tolerance.)
+"""
+function add_benders_co2_allocation!(model::Model, input::MasterProblemInput,
+                                     rep_days_by_year::Dict{Int, Vector{Int}})
+    alloc = Dict{Tuple{Int,Int,Int}, VariableRef}()
+    for (k, grp) in enumerate(input.co2_budget_groups)
+        has_co2_budget(grp) || continue
+        for (y_idx, days) in rep_days_by_year
+            isempty(days) && continue
+            for d in eachindex(days)
+                alloc[(y_idx, k, d)] = @variable(model, lower_bound = 0,
+                    base_name = "co2_alloc_y$(y_idx)_$(grp.name)_d$(d)")
+            end
+            @constraint(model, sum(alloc[(y_idx, k, d)] for d in eachindex(days)) <= 1.0,
+                base_name = "co2_alloc_budget_y$(y_idx)_$(grp.name)")
+        end
+    end
+    return alloc
+end
+
+"""
+    benders_copy_expr(vars, input, year_idx, key, ctx) -> AffExpr
+
+The master expression copy key `key` stands for in year `year_idx`.
+"""
+function benders_copy_expr(vars::MasterProblemVariables, input::MasterProblemInput,
+                           year_idx::Int, key::BendersCopyKey, ctx::BendersCopyContext)
+    kind, name, i = key
+    expr = AffExpr(0.0)
+    ypp = vars.years_per_inv_period
+    if kind === :converter
+        for y in 1:ypp:year_idx
+            v = get(get(vars.converter_investment, y, Dict{Tuple{String,Int}, VariableRef}()),
+                    (name, i), nothing)
+            v === nothing || add_to_expression!(expr, v)
+        end
+    elseif kind === :line
+        from, to = ctx.line_ends[i]
+        for y in 1:ypp:year_idx
+            haskey(vars.transfer_investment, y) || continue
+            v = corridor_investment(vars.transfer_investment[y], from, to)
+            v === nothing || add_to_expression!(expr, v)
+        end
+    elseif kind === :gen_life
+        add_to_expression!(expr, vars.gen_life_extension[year_idx][parse(Int, name)][i])
+    elseif kind === :bat_life
+        add_to_expression!(expr, vars.bat_life_extension[year_idx][parse(Int, name)][i])
+    elseif kind === :re_ratio
+        add_to_expression!(expr, vars.re_penetration_ratio[(parse(Int, name), year_idx)])
+    elseif kind === :co2
+        add_to_expression!(expr, ctx.co2_alloc[(year_idx, parse(Int, name), i)])
+    else
+        add_to_expression!(expr, master_fuel_extra_expr(vars.fuel, input, year_idx, key))
+    end
+    return expr
+end
+
+"""
+    copy_value(fc, input, key) -> Float64
+
+The value a subproblem fixes copy `key` to: `fc.fuel_extra[key]` when the
+master set it, otherwise the capacity in `fc` it stands for (life
+extension, RE ratio), an even share of the CO2 budget, or nothing built.
+"""
+function copy_value(fc::FixedCapacities, input::MasterProblemInput, key::BendersCopyKey)
+    haskey(fc.fuel_extra, key) && return fc.fuel_extra[key]
+    kind, name, i = key
+    kind === :gen_life && return get(fc.gen_capacity, (parse(Int, name), i), 0.0)
+    kind === :bat_life && return get(fc.bat_power, (parse(Int, name), i), 0.0)
+    if kind === :re_ratio
+        s = parse(Int, name)
+        return length(fc.re_ratios) >= s ? fc.re_ratios[s] : fc.re_ratios[1]
+    end
+    kind === :co2 && return 1.0 / input.representative_days_per_year
+    return 0.0
+end
+
+"""
+    add_copy!(sp, fix, fc, input, key) -> VariableRef
+
+A copy variable for `key` fixed to `copy_value`; the fixing constraint goes
+into `fix` for the cut.
+"""
+function add_copy!(sp::Model, fix::AbstractDict, fc::FixedCapacities,
+                   input::MasterProblemInput, key::BendersCopyKey)
+    c = @variable(sp, base_name = "copy_$(key[1])_$(key[2])_$(key[3])")
+    fix[key] = @constraint(sp, c == copy_value(fc, input, key))
+    return c
+end
+
+"""
+    extract_copy_duals(sp) -> Dict{BendersCopyKey, Float64}
+
+∂(day cost)/∂(copied quantity) for each copy variable of a solved subproblem.
+"""
+function extract_copy_duals(sp)
+    out = Dict{BendersCopyKey, Float64}()
+    for (k, cref) in get(sp.constraint_store, "copy_fix", Dict{BendersCopyKey, Any}())
+        d = dual(cref)
+        abs(d) > 1e-10 && (out[k] = d)
+    end
+    return out
 end
 
 # =============================================================================
@@ -610,15 +777,18 @@ end
 # =============================================================================
 
 """
-    evaluate_fixed_capacities(vars, input, year_idx)
+    evaluate_fixed_capacities(vars, input, year_idx; ctx=BendersCopyContext())
 
 Compute fixed capacity values from master solution for a given year.
 Same logic as build_cumulative_capacity_expressions but with value() on variables.
+The copy values (fuel, converter and line builds, CO2 allocations) are the
+solved `benders_copy_expr` of each key.
 """
 function evaluate_fixed_capacities(
     vars::MasterProblemVariables,
     input::MasterProblemInput,
-    year_idx::Int
+    year_idx::Int;
+    ctx::BendersCopyContext = BendersCopyContext()
 )::FixedCapacities
     n_gen = length(input.generators)
     n_bat = length(input.batteries)
@@ -741,11 +911,23 @@ function evaluate_fixed_capacities(
     n_sys = max(1, length(input.system_node_ranges))
     re_ratios = [value(vars.re_penetration_ratio[(s, year_idx)]) for s in 1:n_sys]
 
+    copies = master_fuel_extra_values(vars.fuel, input, year_idx)  # M2 (#89)
+    for (key, _) in master_converters(input.network)
+        k = (:converter, key[1], key[2])
+        copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
+    end
+    for l in eachindex(ctx.line_ends)
+        k = (:line, "", l)
+        copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
+    end
+    for ((y, grp, d), v) in ctx.co2_alloc
+        y == year_idx && (copies[(:co2, string(grp), d)] = value(v))
+    end
+
     return FixedCapacities(
         gen_cap, bat_pow, bat_en,
         tech_cap, bt_pow, bt_en,
-        line_cap, re_ratios,
-        master_fuel_extra_values(vars.fuel, input, year_idx)  # M2 (#89)
+        line_cap, re_ratios, copies
     )
 end
 
@@ -799,25 +981,45 @@ function create_benders_subproblem(
     # Apply demand growth
     growth_factor = (1.0 + input.demand_growth)^(year_idx - 1)
 
+    # Copy variables of master quantities, with their fixing constraints
+    copy_fix = Dict{BendersCopyKey, Any}()
+    copy_of(key) = add_copy!(sp_model, copy_fix, fixed_caps, input, key)
+
     # =========================================================================
-    # Capacity overrides using FIXED values (Float64, not AffExpr)
+    # Capacity overrides using FIXED values; a life-extended unit's capacity
+    # is a copy of the master's life extension
     # =========================================================================
     total_cap_gen = Dict{Tuple{Int,Int}, Any}()
     for g in 1:n_gen
+        gen = input.generators[g]
         for b in ps_vars.buses_of_gen[g]
-            cap = get(fixed_caps.gen_capacity, (g, b), 0.0)
-            total_cap_gen[(g, b)] = cap
-            # Store constraint name pattern for dual extraction
-            # (actual constraints created by add_generator_constraints!)
+            expired = gen.initial_age[b] + (year_idx - 1) >= gen.life_time[b]
+            if expired && gen.rated_power[b] > 0 &&
+               master_vars.gen_life_extension[year_idx][g][b] !== nothing
+                total_cap_gen[(g, b)] = AffExpr(0.0, copy_of((:gen_life, string(g), b)) => 1.0)
+            else
+                total_cap_gen[(g, b)] = get(fixed_caps.gen_capacity, (g, b), 0.0)
+            end
         end
     end
 
     total_cap_bat_power = Dict{Tuple{Int,Int}, Any}()
     total_cap_bat_energy = Dict{Tuple{Int,Int}, Any}()
     for bi in 1:n_bat
+        bat = input.batteries[bi]
         for b in ps_vars.buses_of_bat[bi]
-            total_cap_bat_power[(bi, b)] = get(fixed_caps.bat_power, (bi, b), 0.0)
-            total_cap_bat_energy[(bi, b)] = get(fixed_caps.bat_energy, (bi, b), 0.0)
+            expired = bat.initial_age[b] + (year_idx - 1) >= bat.life_time[b]
+            base_power = bat.max_discharge_power[b]
+            if expired && base_power > 0 &&
+               master_vars.bat_life_extension[year_idx][bi][b] !== nothing
+                c = copy_of((:bat_life, string(bi), b))
+                total_cap_bat_power[(bi, b)] = AffExpr(0.0, c => 1.0)
+                ratio = bat.capacity[b] > 0 ? bat.capacity[b] / base_power : 0.0
+                total_cap_bat_energy[(bi, b)] = AffExpr(0.0, c => ratio)
+            else
+                total_cap_bat_power[(bi, b)] = get(fixed_caps.bat_power, (bi, b), 0.0)
+                total_cap_bat_energy[(bi, b)] = get(fixed_caps.bat_energy, (bi, b), 0.0)
+            end
         end
     end
 
@@ -988,6 +1190,16 @@ function create_benders_subproblem(
         capacity_override=total_cap_gen,
         demand_scale=1.0)
     add_inertia_constraints!(sp_model, ps_vars, day_input)
+    # Converters at their rated power plus a copy of the MW the master built
+    conv_cap = Dict{Tuple{String,Int}, Any}()
+    for (key, conv) in master_converters(input.network)
+        buildable = any(haskey(get(master_vars.converter_investment, y,
+                                   Dict{Tuple{String,Int}, VariableRef}()), key)
+                        for y in 1:ypp:year_idx)
+        conv_cap[key] = buildable ?
+            conv.rated_power_mva + copy_of((:converter, key[1], key[2])) : conv.rated_power_mva
+    end
+    add_converter_constraints!(sp_model, ps_vars, day_input; capacity_override=conv_cap)
 
     # =========================================================================
     # Extra injections for power balance (tech + bat_tech output)
@@ -1013,36 +1225,32 @@ function create_benders_subproblem(
     # =========================================================================
     network_lines = input.network.transmission_lines
     n_lines = length(network_lines)
+    line_flow_cost = AffExpr(0.0)
     if n_buses > 1 && n_lines > 0
         transmission = with_loss_model(TransmissionDC(input.network),
             input.transmission_loss_segments, input.network.s_base)
 
-        # Line capacity with FIXED cumulative investment
+        # Line capacity: base plus a copy of the MW the master built on the
+        # line's corridor. As in the master, a line is expandable when its
+        # corridor has an investment variable up to this year.
+        inv_years = [y for y in 1:ypp:year_idx if haskey(master_vars.transfer_investment, y)]
         line_cap_override = Dict{Int, Any}()
+        expandable = Set{Int}()
         for (l, (from, to)) in enumerate(transmission.lines)
             base_cap = transmission.line_capacities[l]
-            inv_cap = 0.0
-            for y in 1:ypp:year_idx
-                v = corridor_investment(master_vars.transfer_investment[y], from, to)
-                v === nothing && continue
-                inv_cap += try
-                    value(v)
-                catch
-                    0.0  # Master not yet solved (e.g., warm-start phase)
-                end
+            if any(corridor_investment(master_vars.transfer_investment[y], from, to) !== nothing
+                   for y in inv_years)
+                push!(expandable, l)
+                line_cap_override[l] = base_cap + copy_of((:line, "", l))
+            else
+                line_cap_override[l] = base_cap
             end
-            total = base_cap + inv_cap
-            line_cap_override[l] = total
-            # Store for dual extraction
-            constraint_store["line_cap_$(l)"] = (from, to, total)
         end
-        # A candidate corridor (0 MW base) carries flow once capacity is built.
-        expandable = Set{Int}(l for (l, total) in line_cap_override
-                              if total > transmission.line_capacities[l])
         add_dc_constraints!(sp_model, transmission, ps_vars, day_input;
             extra_injections_fn=extra_fn, expandable_lines=expandable)
         add_line_capacity_constraints!(sp_model, transmission, ps_vars, day_input;
             capacity_override=line_cap_override)
+        line_flow_cost = add_line_flow_cost!(sp_model, transmission, ps_vars, input, hours)
     else
         add_demand_constraints!(sp_model, ps_vars, day_input;
             extra_injections_fn=extra_fn)
@@ -1152,17 +1360,22 @@ function create_benders_subproblem(
         end
     end
 
-    # Per-system RE floor at the master's ratio, as in the monolithic master
-    # (re_min_day / re_ratio_lb). There is no upper bound: renewable output
-    # above the target on a good day is valid. (An equality here used to stop
-    # the subproblems from using renewables beyond the ratio, e.g. any at all
-    # with a 0 % target.)
+    # Per-system RE floors as in the monolithic master: at the year's target
+    # (re_min_day) and at the master's RE ratio (re_ratio_lb, a copy, so the
+    # cut prices the ratio). There is no upper bound: renewable output above
+    # the target on a good day is valid.
+    targets = calculate_target_ratios(input)
     for s_idx in 1:n_sys
-        target_ratio = length(fixed_caps.re_ratios) >= s_idx ? fixed_caps.re_ratios[s_idx] : fixed_caps.re_ratios[1]
-
         @constraint(sp_model,
-            sys_renewable[s_idx] + sys_fre_loss[s_idx] >= target_ratio * sys_demand_day[s_idx],
+            sys_renewable[s_idx] + sys_fre_loss[s_idx] >=
+                targets[(s_idx, year_idx)] * sys_demand_day[s_idx],
             base_name = "re_min_day_s$(s_idx)_y$(year_idx)_d$(day_idx)")
+        if sys_demand_day[s_idx] > 0
+            @constraint(sp_model,
+                copy_of((:re_ratio, string(s_idx), 0)) * sys_demand_day[s_idx] <=
+                    sys_renewable[s_idx] + sys_fre_loss[s_idx],
+                base_name = "re_ratio_lb_s$(s_idx)_y$(year_idx)_d$(day_idx)")
+        end
     end
 
     # Max curtailment — includes BOTH generator and technology RE curtailment.
@@ -1181,6 +1394,12 @@ function create_benders_subproblem(
     # Add technology RE curtailment: available capacity - dispatched output
     # tech_avail_sum tracks Σ(fixed_cap × avail) per (tech, bus) for dual extraction
     tech_avail_sum = Dict{Tuple{Int,Int}, Float64}()
+    # The monolithic master also charges curtailment_cost on it (with a
+    # curtailment limit). Its cap × avail part is a constant here, so its
+    # gradient, curtailment_cost × Σ avail per MW (scaled to the year, see
+    # extract_subproblem_duals), goes into the cut separately.
+    charge_tech_curt = input.max_curtailment_ratio < 1.0 && input.curtailment_cost > 0
+    tech_curt_grad = Dict{Tuple{Int,Int}, Float64}()
     if tech_output !== nothing
         for tc in 1:n_tech
             tech = input.technologies[tc]
@@ -1189,21 +1408,29 @@ function create_benders_subproblem(
             end
             for b in 1:n_buses
                 cumul_cap = get(fixed_caps.tech_capacity, (tc, b), 0.0)
-                if cumul_cap <= 0
-                    continue
-                end
                 avail_total = 0.0
                 for ts in 1:hours
                     actual_hour = start_hour + ts - 1
                     avail_hours = size(tech.availability, 1)
                     avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
                     avail = tech.availability[avail_hour, b]
+                    avail_total += avail
+                    # Also at zero capacity: the output's −curtailment_cost is
+                    # part of the capacity constraint's dual
+                    if charge_tech_curt
+                        add_to_expression!(tech_curve_cost, cumul_cap * avail * input.curtailment_cost)
+                        add_to_expression!(tech_curve_cost, -input.curtailment_cost,
+                                           tech_output[tc, b, ts])
+                    end
+                    cumul_cap > 0 || continue
                     # tech curtailment = cap × avail - tech_output
                     add_to_expression!(total_curtailment, cumul_cap * avail)
                     add_to_expression!(total_curtailment, -1.0, tech_output[tc, b, ts])
-                    avail_total += avail
                 end
-                tech_avail_sum[(tc, b)] = avail_total
+                cumul_cap > 0 && (tech_avail_sum[(tc, b)] = avail_total)
+                if charge_tech_curt && avail_total > 0
+                    tech_curt_grad[(tc, b)] = input.curtailment_cost * avail_total
+                end
             end
         end
     end
@@ -1228,10 +1455,17 @@ function create_benders_subproblem(
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
     scaling_factor = tres * days_in_year / input.representative_days_per_year
 
-    # Technologies' offer-curve fuel cost and battery technologies'
-    # maintenance and throughput, as in the monolithic master
+    # Technologies' offer-curve fuel cost, battery technologies' maintenance
+    # and throughput, converter variable cost, the flow cost of lines with a
+    # per-MW·km cost and LP-relaxed start-ups, as in the monolithic master
     add_to_expression!(tech_curve_cost,
         battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
+    add_to_expression!(tech_curve_cost, add_converter_objective_terms(ps_vars, day_input))
+    add_to_expression!(tech_curve_cost, line_flow_cost)
+    add_to_expression!(tech_curve_cost,
+        add_day_commitment!(sp_model, ps_vars, input, total_cap_gen, year_idx, hours))
+    isempty(tech_curt_grad) || (constraint_store["tech_curt_cost"] =
+        Dict(k => g * scaling_factor for (k, g) in tech_curt_grad))
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
         tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium)
 
@@ -1274,12 +1508,27 @@ function create_benders_subproblem(
     # NOTE: re_excess_penalty is not used: RE has a floor only, as in the
     # monolithic master.
 
+    # CO2 budgets: the day's emissions, scaled to the year, within the share
+    # of the budget the master gives this day (a copy) plus a violation slack
+    # at the group's penalty (add_benders_co2_allocation!)
+    for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
+        grp = input.co2_budget_groups[k]
+        has_co2_budget(grp) || continue
+        viol = @variable(sp_model, lower_bound = 0,
+            base_name = "co2_budget_violation_y$(year_idx)_d$(day_idx)_$(grp.name)")
+        @constraint(sp_model,
+            rep_day_scaling(input) * e <= grp.budget * copy_of((:co2, string(k), day_idx)) + viol,
+            base_name = "co2_budget_y$(year_idx)_d$(day_idx)_$(grp.name)")
+        add_to_expression!(day_cost, grp.violation_penalty, viol)
+    end
+
     # M2 (#89): fuel block with the master's fuel capacities fixed by copy
-    # constraints, whose duals feed the cut (extract_fuel_duals)
+    # constraints, whose duals feed the cut like the other copies
     fuel_cost, fuel_fix = benders_fuel_day!(sp_model, ps_vars, input, year_idx,
         start_hour, hours, tech_output, fixed_caps.fuel_extra)
     add_to_expression!(day_cost, fuel_cost, master_fuel_day_scale(input))
-    isempty(fuel_fix) || (constraint_store["fuel_fix"] = fuel_fix)
+    merge!(copy_fix, fuel_fix)
+    isempty(copy_fix) || (constraint_store["copy_fix"] = copy_fix)
 
     @objective(sp_model, Min, day_cost)
 
@@ -1406,6 +1655,12 @@ function extract_subproblem_duals(
         end
     end
 
+    # curtailment_cost × (cap × avail − output): cap × avail is a constant of
+    # the subproblem, so its cost per MW of capacity is added explicitly
+    for ((tc, b), g) in get(sp.constraint_store, "tech_curt_cost", Dict{Tuple{Int,Int}, Float64}())
+        tech_duals[(tc, b)] = get(tech_duals, (tc, b), 0.0) + g
+    end
+
     return tech_duals, bt_pow_duals, bt_cap_duals
 end
 
@@ -1450,9 +1705,10 @@ function build_optimality_cut(
         cap_star = get(fixed_caps.bat_tech_energy, (bt, b), 0.0)
         intercept -= pi * cap_star
     end
-    # M2 (#89): fuel capacities
+    # Copy variables (fuel, converter and line builds, life extension, RE
+    # ratio, CO2 allocations), at the value the subproblems were fixed to
     for (k, pi) in fuel_duals
-        intercept -= pi * get(fixed_caps.fuel_extra, k, 0.0)
+        intercept -= pi * copy_value(fixed_caps, input, k)
     end
 
     # Technology gradients: π[(t,b)] maps to investment variables via cumulative sum
@@ -1518,7 +1774,8 @@ function build_optimality_cut(
 end
 
 """
-    add_optimality_cut!(model, theta, cut, year_idx, vars, input, iteration)
+    add_optimality_cut!(model, theta, cut, year_idx, vars, input, iteration;
+                        ctx=BendersCopyContext())
 
 Add a single Benders optimality cut to the master problem.
 θ[y] ≥ intercept + Σ gradient × investment_variable
@@ -1530,7 +1787,8 @@ function add_optimality_cut!(
     year_idx::Int,
     vars::MasterProblemVariables,
     input::MasterProblemInput,
-    iteration::Int
+    iteration::Int;
+    ctx::BendersCopyContext = BendersCopyContext()
 )
     n_buses = input.network.num_buses
     ypp = vars.years_per_inv_period
@@ -1567,9 +1825,9 @@ function add_optimality_cut!(
         end
     end
 
-    # M2 (#89): fuel capacity in service this year, as built by the master
+    # Copy variables: the master expression each one stands for this year
     for (k, grad) in cut.fuel_gradients
-        add_to_expression!(rhs, master_fuel_extra_expr(vars.fuel, input, year_idx, k),
+        add_to_expression!(rhs, benders_copy_expr(vars, input, year_idx, k, ctx),
                            grad * inv_scale)
     end
 
@@ -1631,6 +1889,10 @@ function run_benders_decomposition(
         )
         rep_days_by_year[y_idx] = rep_days
     end
+
+    # Master side of the copy variables: CO2 allocations per day, line ends
+    ctx = BendersCopyContext(add_benders_co2_allocation!(master_model, input, rep_days_by_year),
+                             benders_line_ends(input))
 
     # =========================================================================
     # Step 1.5: Warm-start — Compute minimum operational costs as theta lower bounds
@@ -1728,7 +1990,7 @@ function run_benders_decomposition(
                     for (k, v) in bcd
                         year_bt_cap_duals[k] = get(year_bt_cap_duals, k, 0.0) + v
                     end
-                    for (k, v) in extract_fuel_duals(sp)
+                    for (k, v) in extract_copy_duals(sp)
                         year_fuel_duals[k] = get(year_fuel_duals, k, 0.0) + v
                     end
                 end
@@ -1750,7 +2012,7 @@ function run_benders_decomposition(
                 warm_caps, input, y_idx, vars.years_per_inv_period;
                 fuel_duals = year_fuel_duals
             )
-            add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, 0)
+            add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, 0; ctx)
         end
 
         # Second warm-start: moderate battery capacity to reveal battery value.
@@ -1826,7 +2088,7 @@ function run_benders_decomposition(
                         for (k, v) in td2; mod_td[k] = get(mod_td, k, 0.0) + v; end
                         for (k, v) in bpd2; mod_bpd[k] = get(mod_bpd, k, 0.0) + v; end
                         for (k, v) in bcd2; mod_bcd[k] = get(mod_bcd, k, 0.0) + v; end
-                        for (k, v) in extract_fuel_duals(sp2); mod_fd[k] = get(mod_fd, k, 0.0) + v; end
+                        for (k, v) in extract_copy_duals(sp2); mod_fd[k] = get(mod_fd, k, 0.0) + v; end
                     end
                 end
             end
@@ -1837,7 +2099,7 @@ function run_benders_decomposition(
                     mod_caps, input, y_idx, vars.years_per_inv_period;
                     fuel_duals = mod_fd
                 )
-                add_optimality_cut!(master_model, theta, mod_cut, y_idx, vars, input, 0)
+                add_optimality_cut!(master_model, theta, mod_cut, y_idx, vars, input, 0; ctx)
             end
         end
 
@@ -1877,10 +2139,13 @@ function run_benders_decomposition(
         master_status = termination_status(master_model)
         if master_status != MOI.OPTIMAL && master_status != MOI.LOCALLY_SOLVED
             @warn "Benders: Master solve failed at iteration $(iter): $(master_status)"
-            try
-                write_to_file(master_model, "/tmp/benders_master_failed_iter$(iter).lp")
-                @info "  Debug LP written to /tmp/benders_master_failed_iter$(iter).lp"
-            catch; end
+            if verbose_benders
+                lp = joinpath(tempdir(), "benders_master_failed_iter$(iter).lp")
+                try
+                    write_to_file(master_model, lp)
+                    @info "  Debug LP written to $(lp)"
+                catch; end
+            end
             break
         end
 
@@ -1909,7 +2174,7 @@ function run_benders_decomposition(
 
         for y_idx in 1:num_years
             # Evaluate fixed capacities from master solution
-            fixed_caps = evaluate_fixed_capacities(vars, input, y_idx)
+            fixed_caps = evaluate_fixed_capacities(vars, input, y_idx; ctx)
 
             rep_days = rep_days_by_year[y_idx]
             if isempty(rep_days)
@@ -1951,10 +2216,13 @@ function run_benders_decomposition(
                     if sp_status != MOI.OPTIMAL && sp_status != MOI.LOCALLY_SOLVED
                         @warn "Benders: Subproblem (y=$(y_idx), d=$(day_idx)) failed after retry: $(sp_status)"
                         all_subproblems_solved = false
-                        # Save first failing LP for diagnosis
-                        if iter <= 5
+                        # Save the first failing LPs for diagnosis (verbose runs)
+                        if verbose_benders && iter <= 5
+                            lp = joinpath(tempdir(),
+                                "benders_sp_failed_y$(y_idx)_d$(day_idx)_iter$(iter).lp")
                             try
-                                write_to_file(sp.model, "/tmp/benders_sp_failed_y$(y_idx)_d$(day_idx)_iter$(iter).lp")
+                                write_to_file(sp.model, lp)
+                                @info "  Debug LP written to $(lp)"
                             catch; end
                         end
                         continue
@@ -1976,7 +2244,7 @@ function run_benders_decomposition(
                     for (k, v) in bcd
                         year_bt_cap_duals[k] = get(year_bt_cap_duals, k, 0.0) + v
                     end
-                    for (k, v) in extract_fuel_duals(sp)
+                    for (k, v) in extract_copy_duals(sp)
                         year_fuel_duals[k] = get(year_fuel_duals, k, 0.0) + v
                     end
                 end
@@ -1986,21 +2254,16 @@ function run_benders_decomposition(
             year_operational_costs[y_idx] = year_cost
             total_operational_cost += discount_factor * year_cost
 
-            # Build aggregated cut for this year
-            # With the fuel block a cut is added even when every gradient is
-            # zero: θ ≥ Q is then what tells the master the year's fuel cost
-            # (M2, #89).
-            if !isempty(year_tech_duals) || !isempty(year_bt_pow_duals) ||
-               !isempty(year_bt_cap_duals) || !isempty(year_fuel_duals) ||
-               has_master_fuel(input)
-                cut = build_optimality_cut(
-                    year_cost,
-                    year_tech_duals, year_bt_pow_duals, year_bt_cap_duals,
-                    fixed_caps, input, y_idx, vars.years_per_inv_period;
-                    fuel_duals = year_fuel_duals
-                )
-                year_cuts[y_idx] = cut
-            end
+            # Build aggregated cut for this year. It is added even when every
+            # gradient is zero: θ ≥ Q is then what tells the master the year's
+            # operating cost (every master quantity a subproblem reads is a
+            # capacity constraint or a copy with a gradient, so the cut is valid).
+            year_cuts[y_idx] = build_optimality_cut(
+                year_cost,
+                year_tech_duals, year_bt_pow_duals, year_bt_cap_duals,
+                fixed_caps, input, y_idx, vars.years_per_inv_period;
+                fuel_duals = year_fuel_duals
+            )
         end
 
         # ----- Compute upper bound -----
@@ -2057,7 +2320,7 @@ function run_benders_decomposition(
         # ----- Add cuts -----
         cuts_added = 0
         for (y_idx, cut) in sort(collect(year_cuts), by=first)
-            add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, iter)
+            add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, iter; ctx)
             cuts_added += 1
 
             if verbose_benders && iter <= 3
@@ -2083,8 +2346,8 @@ function run_benders_decomposition(
             "iteration; no lower bound was established. This usually means the " *
             "investment master is over-constrained — e.g. an RE-penetration " *
             "target the candidate technologies cannot meet, or too tight an " *
-            "investment budget. A debug LP was written to " *
-            "/tmp/benders_master_failed_iter*.lp."
+            "investment budget. Run with verbose output to write the master " *
+            "LP to $(joinpath(tempdir(), "benders_master_failed_iter1.lp"))."
         )
     end
 

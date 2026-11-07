@@ -2933,6 +2933,128 @@ import Ipopt
             @test si.co2_budget_groups[1].budget == 10.0
         end
 
+        @testset "Benders reaches the monolithic optimum" begin
+            # The Benders subproblems used to miss converters (no power, no
+            # build), the CO2 budget, the line flow cost, LP start-ups and the
+            # candidates' curtailment cost, and the cuts had no gradient for
+            # line builds, life extension or the RE ratio.
+            function both(inp)
+                model, mvars = master1(inp)
+                br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.gap < 1e-6
+                @test br.objective ≈ objective_value(model) rtol = 1e-6
+                return extract_master_solution(model, mvars, inp), br.solution
+            end
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            net2(; conv = ACDCConverterData[], tcost = [0.0, 0.0], tmax = [0.0, 0.0]) =
+                NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                    100.0, 0.4, 220.0, 0.6, 1, tcost, tmax, [line], TransformerData[],
+                    conv, FrequencyConverterData[], 0.1)
+
+            # Converter: 30 MW + 10 MW built carry the 40 MW the line cannot
+            c1 = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, 30.0, 0.0,
+                1.0, 1.0, 0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0e-3, 0.0, 2.0e-6, 50.0,
+                30, 0, 0.0)
+            gas2 = mkgen("Gas", "Non-renewable", "Gas", [100.0, 0.0], [1.0e-5, 0.0],
+                         ones(H24, 2); nb = 2, H = H24)
+            mono, bend = both(MasterProblemInput(
+                years = [2025], network = net2(conv = [c1]), generators = [gas2],
+                batteries = BatteryConfig[], base_demand = hcat(zeros(H24), fill(50.0, H24)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, verbose = false))
+            @test mono.converter_investment[1][("acdc", 1)] ≈ 10.0 atol = 1e-6
+            @test bend.converter_investment[1][("acdc", 1)] ≈ 10.0 atol = 1e-6
+
+            # Line build and flow cost: 40 MW more on the corridor beat the
+            # dear unit at bus 2, net of the 3e-6 per MWh the line charges
+            gas_ab = mkgen("Gas", "Non-renewable", "Gas", [100.0, 100.0], [1.0e-5, 1.0e-3],
+                           ones(H24, 2); nb = 2, H = H24)
+            mono, bend = both(MasterProblemInput(
+                years = [2025], network = net2(tcost = [0.05, 0.05], tmax = [100.0, 100.0]),
+                generators = [gas_ab], batteries = BatteryConfig[],
+                base_demand = hcat(zeros(H24), fill(50.0, H24)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, line_flow_cost = Dict((1, 2) => 3.0e-6),
+                verbose = false))
+            @test mono.transfer_investment[1][(1, 2)] ≈ 40.0 atol = 1e-6
+            @test bend.transfer_investment[1][(1, 2)] ≈ 40.0 atol = 1e-4
+
+            # CO2 budget over two representative days (50 and 80 MW of load;
+            # coal emits 1 t/MWh_e and has 60 MW): 2000 t for 2640 t of coal.
+            # Dear overrun → gas; cheap overrun → violation.
+            coal = mkgen("Coal", "Non-renewable", "Coal", [60.0], [1.0e-5],
+                         ones(48, 1); nb = 1, H = 48)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                        ones(48, 1); nb = 1, H = 48)
+            for pen in (5.0e-4, 1.0e-5)
+                both(MasterProblemInput(
+                    years = [2025], network = net1, generators = [coal, gas],
+                    batteries = BatteryConfig[],
+                    base_demand = reshape(vcat(fill(50.0, 24), fill(80.0, 24)), 48, 1),
+                    hours_per_year = [48], target_re_penetration = 0.0,
+                    initial_re_penetration = 0.0, representative_days_per_year = 2,
+                    min_day_separation = 1, fuel_co2 = Dict("Coal" => 0.5),
+                    co2_budget_groups = [CO2BudgetGroup("A", [1], 2000.0, pen)],
+                    verbose = false))
+            end
+
+            # LP start-ups with unit commitment in the dispatch
+            uc_gen = ESFEX.with_fields(
+                mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                      ones(H24, 1); nb = 1, H = H24);
+                min_power = [0.5], start_up_cost = [2.0e-3])
+            both(MasterProblemInput(
+                years = [2025], network = net1, generators = [uc_gen],
+                batteries = BatteryConfig[],
+                base_demand = reshape(vcat(zeros(12), fill(100.0, 12)), H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                unit_commitment = true, verbose = false))
+
+            # Life extension: an expired cheap unit is kept for 50 MW of load
+            old = ESFEX.with_fields(
+                mkgen("Coal", "Non-renewable", "Coal", [100.0], [1.0e-5],
+                      ones(H24, 1); nb = 1, H = H24);
+                life_time = [25.0], initial_age = [30.0], invest_cost = [1.0])
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                           ones(H24, 1); nb = 1, H = H24)
+            mono, bend = both(MasterProblemInput(
+                years = [2025], network = net1, generators = [old, diesel],
+                batteries = BatteryConfig[], base_demand = fill(50.0, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1, verbose = false))
+            @test mono.cumulative_gen_capacity[1][1][1] ≈ 50.0 atol = 1e-6
+            @test bend.cumulative_gen_capacity[1][1][1] ≈ 50.0 atol = 1e-4
+
+            # Curtailment cost on candidate PV: at 2e-5 per MWh curtailed the
+            # 16.7 MW that would saturate the peak hours no longer pay off
+            o = [0.0]
+            sun = reshape(vcat(zeros(6), [0.25, 0.5, 0.75], ones(6), [0.75, 0.5, 0.25],
+                               zeros(6)), H24, 1)
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [0.08], [100.0], sun,
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            gas1 = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                         ones(H24, 1); nb = 1, H = H24)
+            for (curt, built) in ((0.0, 200 / 3), (2.0e-5, 50.0))
+                mono, bend = both(MasterProblemInput(
+                    years = [2025], network = net1, generators = [gas1],
+                    batteries = BatteryConfig[], technologies = [pv],
+                    base_demand = fill(50.0, H24, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    curtailment_cost = curt, max_curtailment_ratio = 0.99, verbose = false))
+                @test mono.tech_investment[1][1][1] ≈ built rtol = 1e-6
+                @test bend.tech_investment[1][1][1] ≈ built rtol = 1e-4
+            end
+        end
+
         @testset "dispatch charges converter costs and full start-ups" begin
             # Converter variable cost: build_objective! ran before the
             # converter variables existed, so the term was always empty.
