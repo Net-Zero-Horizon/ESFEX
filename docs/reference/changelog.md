@@ -517,6 +517,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   `_haversine_km` and unused imports in the Grid Builder steps, the
   adapters and the Studio serializer were removed.
 
+- **Benders solves the monolithic problem exactly.** With
+  `master_problem.solver_method: benders`, several differences from the
+  monolithic master remained, so Benders could stop at a different plan or
+  not converge:
+  - **Converter fixed cost.** The Benders master rebuilt the yearly cost of
+    existing assets by hand and left out the fixed cost (per MW and year) of
+    converter capacity built, so it built converters the monolithic master
+    finds too dear. It now uses the monolithic master's yearly asset cost.
+  - **Benders-only investment rules removed.** The Benders master required
+    renewable capacity to cover the RE target from average availability and
+    battery energy to cover an estimated daily renewable surplus. The
+    monolithic master has neither rule, so Benders built renewables and
+    batteries it did not need (or found no plan at all). The RE ratio is
+    already priced through the subproblems, and the cuts carry the value of
+    every capacity.
+  - **Curtailment limit is hard.** `max_curtailment_ratio` is a hard limit
+    in the monolithic master but was soft under Benders (priced at
+    `curtailment_excess_penalty`), so Benders overbuilt cheap renewables.
+    It is now hard in the subproblems too. A plan whose renewable output a
+    day cannot use within the limit gets a feasibility cut, and only plans
+    that meet the limit count towards the upper bound.
+    `penalties.curtailment_excess_penalty` therefore has no effect any more:
+    it still loads (the Studio writes it, and shows it disabled), like
+    `curtailment`.
+  - **One cut per representative day.** Benders added one aggregated cut
+    per year, so with a binding CO2 budget shared out among the days it
+    stopped at `benders_max_iterations` above the optimum (0.16 % with 6
+    days, 0.39 % with 12). Each representative day now has its own recourse
+    variable and cut, and the same cases converge in 7 and 13 iterations.
+  - **Warm-start cuts at the real capacity.** The warm-start cuts ran
+    existing generators at their rated power, ignoring degradation and
+    retirement, so a cut could bound the operating cost from above and the
+    lower bound passed the upper bound (no convergence). They now use the
+    capacity the subproblems give each unit.
+  - **The result is one iteration's plan.** When Benders stopped at
+    `benders_max_iterations`, it returned the investments of one more master
+    solve together with the operating cost of the best iteration, so the
+    reported objective was not what the reported plan costs. It now returns
+    the best iteration's plan with that iteration's costs, also when it
+    converges.
+
+- **Benders falls back to the monolithic master for TSAM and user
+  constraints.** The Benders master models neither TSAM periods nor
+  investment-target custom constraints; it used representative days instead
+  of `use_tsam` and dropped the user constraints without a word. With
+  either, the run now solves the monolithic master and logs a warning that
+  says why.
+
+- **`master_problem.benders_lol_penalty_cap`.** Benders capped the
+  loss-of-load penalty in its subproblems (default 1000 $/MW per step), so
+  its objective and plan differed from the monolithic master whenever load
+  was shed. The subproblems now charge the full `loss_of_load` penalty,
+  like the monolithic master. A configuration that still sets the key gets
+  the usual unknown-key warning.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -1284,7 +1339,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   left to build. Master results report it per year as
   `reservoir_investment_{g}_{n}` (MWh; HDF5 scenario attribute
   `investment_reservoir_investment_{g}_{n}`, per node). Benders subproblems
-  still use the existing reservoir capacity only.
+  see the built capacity too.
 
 - **Benders reaches the monolithic master's plan.** With
   `master_problem.solver_method: benders`, the subproblems left out several
