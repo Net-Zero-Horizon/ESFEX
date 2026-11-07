@@ -2948,12 +2948,13 @@ import Ipopt
             end
             buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
                      BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
-            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
-                                        1, 50.0, "AC")
-            net2(; conv = ACDCConverterData[], tcost = [0.0, 0.0], tmax = [0.0, 0.0]) =
+            link_line(fc) = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                                 1, 50.0, "AC", fc)
+            net2(; conv = ACDCConverterData[], tcost = [0.0, 0.0], tmax = [0.0, 0.0],
+                 flow_cost = 0.0) =
                 NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
-                    100.0, 0.4, 220.0, 0.6, 1, tcost, tmax, [line], TransformerData[],
-                    conv, FrequencyConverterData[], 0.1)
+                    100.0, 0.4, 220.0, 0.6, 1, tcost, tmax, [link_line(flow_cost)],
+                    TransformerData[], conv, FrequencyConverterData[], 0.1)
 
             # Converter: 30 MW + 10 MW built carry the 40 MW the line cannot
             c1 = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, 30.0, 0.0,
@@ -2975,13 +2976,13 @@ import Ipopt
             gas_ab = mkgen("Gas", "Non-renewable", "Gas", [100.0, 100.0], [1.0e-5, 1.0e-3],
                            ones(H24, 2); nb = 2, H = H24)
             mono, bend = both(MasterProblemInput(
-                years = [2025], network = net2(tcost = [0.05, 0.05], tmax = [100.0, 100.0]),
+                years = [2025],
+                network = net2(tcost = [0.05, 0.05], tmax = [100.0, 100.0], flow_cost = 3.0e-6),
                 generators = [gas_ab], batteries = BatteryConfig[],
                 base_demand = hcat(zeros(H24), fill(50.0, H24)),
                 target_re_penetration = 0.0, initial_re_penetration = 0.0,
                 representative_days_per_year = 1, min_day_separation = 1,
-                transmission_loss_segments = 0, line_flow_cost = Dict((1, 2) => 3.0e-6),
-                verbose = false))
+                transmission_loss_segments = 0, verbose = false))
             @test mono.transfer_investment[1][(1, 2)] ≈ 40.0 atol = 1e-6
             @test bend.transfer_investment[1][(1, 2)] ≈ 40.0 atol = 1e-4
 
@@ -3031,6 +3032,28 @@ import Ipopt
                 representative_days_per_year = 1, min_day_separation = 1, verbose = false))
             @test mono.cumulative_gen_capacity[1][1][1] ≈ 50.0 atol = 1e-6
             @test bend.cumulative_gen_capacity[1][1][1] ≈ 50.0 atol = 1e-4
+
+            # Reservoir build: storing the dry half-day's 300 MWh of inflow
+            # needs 350 MWh of reservoir, 250 more than the 100 it has (see
+            # "master reservoir builds raise the reservoir's level bounds")
+            hydro = ESFEX.with_fields(
+                mkgen("Hydro", "Renewable", "Water", [50.0], [0.0], ones(H24, 1);
+                      nb = 1, H = H24);
+                reservoir_capacity = [100.0], reservoir_initial_level = [0.5],
+                reservoir_min_level = [0.0], reservoir_max_level = [1.0],
+                reservoir_inflow = fill(25.0, H24, 1), reservoir_turbine_efficiency = [1.0],
+                reservoir_evaporation_rate = [0.0], reservoir_pump_capacity = [0.0],
+                reservoir_pump_efficiency = [1.0], reservoir_spillage_allowed = true,
+                reservoir_invest_cost = [1.0e-6], reservoir_invest_max = [1000.0])
+            dem = reshape(vcat(zeros(12), fill(50.0, 12)), H24, 1)
+            mono, bend = both(MasterProblemInput(
+                years = [2025, 2026], network = net1, generators = [hydro, diesel],
+                batteries = BatteryConfig[], base_demand = vcat(dem, dem),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                hours_per_year = [24, 24], verbose = false))
+            @test mono.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-6
+            @test bend.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-4
 
             # Curtailment cost on candidate PV: at 2e-5 per MWh curtailed the
             # 16.7 MW that would saturate the peak hours no longer pay off
