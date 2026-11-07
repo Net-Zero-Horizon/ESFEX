@@ -2986,6 +2986,11 @@ class MasterProblemAdapter:
             for sector_name, crit_val in sectoral_criticality.items():
                 jl_sectoral_criticality[sector_name] = float(crit_val)
 
+        # Fuel balance, fuel infrastructure and electrolyzers (#89)
+        jl_fuel = self._create_fuel_input(
+            jl, ESFEX, sys, gen_order, tech_order, num_nodes,
+            b2n_arg, bus_to_node_0idx)
+
         # Create input struct using keyword constructor
         jl_input = ESFEX.MasterProblemInput(
             years=jl_years,
@@ -3076,6 +3081,7 @@ class MasterProblemAdapter:
                     f"({a}, {b}) => {c!r}"
                     for (a, b), c in _line_flow_costs(sys).items()) + ")"),
             unit_commitment=self._dispatch_commits_units(),
+            primary_energy=jl_fuel,
         )
 
         return jl_input
@@ -3164,6 +3170,100 @@ class MasterProblemAdapter:
                 )
 
         logger.debug("MasterProblem model built successfully")
+
+    # ── Fuel block of the master (#89) ──────────────────────────────────────
+
+    def _create_fuel_input(self, jl, ESFEX, sys, gen_order, tech_order, num_nodes,
+                           b2n_arg, bus_to_node_0idx):
+        """Julia ``MasterFuelInput`` from the ``primary_energy`` keyword
+        (``Orchestrator._master_fuel_kwargs``), or ``nothing`` without it.
+
+        The fuel data go through ``PrimaryEnergyAdapter`` exactly as for a
+        dispatch window. Its generator list is the master's generators and
+        then its candidate technologies, so technology ``tc`` is fuel-map key
+        ``len(generators) + tc`` (as the dispatch's virtual generators).
+        The window spans the horizon, so scheduled fuel-source outages are
+        placed by their absolute hours."""
+        self._fuel_elz_keys = []
+        self._fuel_bus_to_node = None
+        pe_kw = self.kwargs.get('primary_energy')
+        if not pe_kw:
+            return jl.seval("nothing")
+        pe_kw = dict(pe_kw)
+        base_year = int(pe_kw.pop('base_year', self.base_year))
+        last_year = int(pe_kw.pop('last_year', self.years[-1]))
+        res_h = max(1, int(self.temporal_resolution_hours))
+        gen_list = []
+        for key, unit in list(gen_order) + list(tech_order):
+            d = unit.model_dump() if hasattr(unit, 'model_dump') else dict(unit.__dict__)
+            d['name'] = key
+            gen_list.append(d)
+        pe = PrimaryEnergyAdapter(
+            year=base_year, base_year=base_year,
+            hours=(last_year - base_year + 1) * HOURS_STD_YEAR // res_h,
+            num_nodes=num_nodes, generators=gen_list,
+            primary_energy_resolution=max(1, 24 // res_h),
+            mode="master", step_hours=res_h, year_hour_offset=0,
+            **pe_kw)
+        jl_pe = pe._create_julia_input()
+
+        # Electrolyzers per bus, mapped like the dispatch's (capacity at the
+        # node's first bus, properties copied to its buses)
+        def _elz(values, mode="property"):
+            values = [float(v) for v in values]
+            if b2n_arg is None:
+                return values
+            return expand_node_to_bus_array(values, b2n_arg, mode=mode)
+
+        jl_elz = jl.seval("ElectrolyzerConfig[]")
+        for key, e in (getattr(sys, 'electrolyzers', None) or {}).items():
+            jl.seval("push!")(jl_elz, ESFEX.ElectrolyzerConfig(
+                py_to_julia_vector(_elz(e.rated_power, "capacity")),
+                py_to_julia_vector(_elz(e.eff_at_rated)),
+                py_to_julia_vector(_elz(e.eff_at_min)),
+                float(e.energy_per_kg_h2),
+                py_to_julia_vector(_elz(e.ramp_up)),
+                py_to_julia_vector(_elz(e.ramp_down)),
+                py_to_julia_vector(_elz(scale_cost_list(e.invest_cost))),
+                py_to_julia_vector(_elz(e.invest_max_power, "capacity")),
+                py_to_julia_vector(_elz(scale_cost_list(e.fixed_cost))),
+                py_to_julia_vector(_elz(scale_cost_list(e.variable_cost))),
+                scale_cost(float(e.water_cost)),
+                py_to_julia_vector(_elz(e.life_time)),
+            ))
+            self._fuel_elz_keys.append(key)
+        self._fuel_bus_to_node = bus_to_node_0idx if b2n_arg is not None else None
+        self._fuel_num_nodes = num_nodes
+        return ESFEX.MasterFuelInput(jl_pe, jl_elz)
+
+    def fuel_capacities_by_year(self, result: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+        """Fuel capacity the master built and that is in service in each
+        year, for the dispatch: {year index (1-based): {"storage": {fuel:
+        {node: capacity}}, "transport": {fuel: {route: capacity}},
+        "electrolyzer": {key: [MW per node]}}}, 0-based nodes and routes."""
+        fi = (result or {}).get('fuel_investment') or {}
+        out: Dict[int, Dict[str, Any]] = {}
+        for kind, src in (("storage", "storage_capacity"), ("transport", "transport_capacity")):
+            for y_idx, by_fuel in (fi.get(src) or {}).items():
+                tgt = out.setdefault(int(y_idx), {}).setdefault(kind, {})
+                for fuel, arr in by_fuel.items():
+                    vals = {i: float(v) for i, v in enumerate(arr) if v > 1e-9}
+                    if vals:
+                        tgt[str(fuel)] = vals
+        b2n = getattr(self, '_fuel_bus_to_node', None)
+        keys = getattr(self, '_fuel_elz_keys', [])
+        n_nodes = getattr(self, '_fuel_num_nodes', 0)
+        for y_idx, by_elz in (fi.get('electrolyzer_capacity') or {}).items():
+            tgt = out.setdefault(int(y_idx), {}).setdefault('electrolyzer', {})
+            for e, per_bus in by_elz.items():
+                if not 1 <= int(e) <= len(keys) or not any(v > 1e-9 for v in per_bus):
+                    continue
+                per_node = [0.0] * max(n_nodes, len(per_bus) if b2n is None else 0)
+                for b, v in enumerate(per_bus):
+                    n = b if b2n is None else b2n[b]
+                    per_node[n] += float(v)
+                tgt[keys[int(e) - 1]] = per_node
+        return out
 
     def _build_julia_scenarios(self):
         """Convert Python scenario dicts to Julia Vector{Scenario}."""
@@ -3506,9 +3606,22 @@ class MasterProblemAdapter:
                     jl_result.cumulative_bat_tech_capacity[y_idx][bt_jl]
                 )
 
+        # Fuel storage, routes and electrolyzers (#89): {kind: {year index:
+        # {fuel or electrolyzer index: values per node/route/bus}}}, 1-based
+        fuel_investment = {}
+        jl_fi = getattr(jl_result, 'fuel_investment', None)
+        if jl_fi is not None:
+            for kind in jl_fi.keys():
+                fuel_investment[str(kind)] = {
+                    int(y): {(k if isinstance(k, (int, str)) else str(k)):
+                             np.asarray(v, dtype=float)
+                             for k, v in by.items()}
+                    for y, by in jl_fi[kind].items()}
+
         return {
             # Legacy-compatible solution keyed by year
             'solution': solution,
+            'fuel_investment': fuel_investment,
             # Metadata (unscale M$ → $)
             'status': str(jl_result.status),
             'objective': float(jl_result.objective) * COST_UNSCALE,
@@ -4178,9 +4291,11 @@ class PrimaryEnergyAdapter:
             investment_resolution: Resolution for investment decisions (hours)
             discount_rate: Discount rate for annualization
             mode: Operation mode
-            cumulative_capacities: Previously accumulated investments
+            cumulative_capacities: Fuel storage/transport capacity built by the
+                master: {"storage"|"transport": {fuel: {node or route: capacity}}}
             initial_storage_levels: Initial storage levels for carry-over
-            investment_from_master: Skip investment vars when MasterProblem handles them
+            investment_from_master: Unused; the dispatch never builds fuel
+                infrastructure (the master does)
             transport_routes: Route-based fuel transport list (preferred over distance matrix)
             step_hours: Length of a time step (h)
             year_hour_offset: First hour of the window within the year; with

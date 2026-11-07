@@ -333,6 +333,8 @@ class SimulationState:
     boundary_conditions: dict[str, Any] = field(default_factory=dict)
     cumulative_investments: dict[str, Any] = field(default_factory=dict)
     cumulative_retirements: dict[str, Any] = field(default_factory=dict)
+    # Fuel storage/transport capacity the master built that the current
+    # year's dispatch sees: {kind: {fuel: {node or route index: capacity}}}
     primary_energy_capacities: dict[str, Any] = field(default_factory=lambda: {"storage": {}, "transport": {}})
 
 
@@ -2486,21 +2488,162 @@ class Orchestrator:
 
         return sectoral_demand
 
-    def _carry_pe_investments(self, pe_results: dict) -> None:
-        """Add a window's fuel storage/transport investment to the built capacity
-        later windows start from (``state.primary_energy_capacities``:
-        {kind: {fuel: {node or route index: capacity}}})."""
-        caps = self.state.primary_energy_capacities
-        for kind, key in (("storage", "storage_investments"), ("transport", "transport_investments")):
-            for fuel, inv in (pe_results.get(key) or {}).items():
-                arr = np.asarray(inv, dtype=float)
-                if arr.ndim != 2 or arr.size == 0:
-                    continue
-                built = arr.sum(axis=0)   # [inv_period, index] -> per index
-                by_idx = caps.setdefault(kind, {}).setdefault(fuel, {})
-                for idx, v in enumerate(built):
-                    if v > 1e-9:
-                        by_idx[idx] = by_idx.get(idx, 0.0) + float(v)
+    # ── Fuel infrastructure and electrolyzers built by the master (#89) ──
+
+    def _pe_enabled(self, system_config) -> bool:
+        """Primary energy is on and the system has fuel sources or entry points.
+
+        The same switch turns on the dispatch's fuel model and the master's
+        fuel block."""
+        return bool(self.config.enable_primary_energy and (
+            system_config.primary_energy_sources
+            or getattr(system_config, 'fuel_entry_points', None)))
+
+    def _pe_inputs(self, system_config, num_nodes: int) -> dict:
+        """Fuel data of ``system_config`` as ``PrimaryEnergyAdapter`` keyword
+        arguments: fuel sources (annual availability × step length, since the
+        fuel model prorates it per step), non-electric demand, fuel
+        infrastructure, routes, penalties, outages. Shared by the dispatch
+        windows and the master's fuel block, so both see the same fuel data."""
+        import copy
+
+        fuels_def = {}
+        for fk, fc in system_config.fuels.items():
+            fuels_def[fk] = fc.model_dump() if hasattr(fc, 'model_dump') else fc.__dict__.copy()
+
+        if system_config.primary_energy_sources:
+            pe_sources = {
+                pk: (pc.model_dump() if hasattr(pc, 'model_dump') else pc.__dict__.copy())
+                for pk, pc in system_config.primary_energy_sources.items()}
+        else:
+            # Auto-build PE sources from fuel_entry_points + storage
+            pe_sources = self._build_pe_sources_from_entries(system_config, num_nodes)
+
+        # Growth per fuel (non_electric_demand_growth, none if absent) and
+        # monthly factors seasonal_factors[fuel][sector]; the sector is the
+        # key's part before the first underscore.
+        ne_demand = {}
+        ne_growth = system_config.non_electric_demand_growth or {}
+        ne_seasonal = system_config.seasonal_factors or {}
+        for nk, nc in system_config.non_electric_demand.items():
+            ne_demand[nk] = nc.model_dump() if hasattr(nc, 'model_dump') else nc.__dict__.copy()
+            fuel_nk = ne_demand[nk].get('fuel')
+            ne_demand[nk]['growth_rate'] = float(ne_growth.get(fuel_nk, 0.0))
+            ne_demand[nk]['seasonal_factors'] = (
+                ne_seasonal.get(fuel_nk, {}).get(nk.split('_')[0]))
+
+        infra = system_config.fuel_infrastructure
+        infra_dict = infra.model_dump() if hasattr(infra, 'model_dump') else infra.__dict__.copy()
+        penalties = system_config.penalties
+        penalties_dict = (penalties.model_dump() if hasattr(penalties, 'model_dump')
+                          else penalties.__dict__.copy())
+
+        # The fuel model prorates annual availability by steps / 8760; with
+        # res_h-hour steps it must be by hours, hence × res_h.
+        res_h = getattr(self.config.temporal, 'resolution_hours', 1)
+        if res_h > 1:
+            pe_sources = copy.deepcopy(pe_sources)
+            for fuel_data in pe_sources.values():
+                avail_list = fuel_data.get('max_availability', [])
+                fuel_data['max_availability'] = [a * res_h for a in avail_list]
+
+        return dict(
+            fuels_config=pe_sources,
+            non_electric_demand=ne_demand,
+            infrastructure_config=infra_dict,
+            transport_distances=system_config.fuel_transport_distances,
+            fuels_definition=fuels_def,
+            penalties_config=penalties_dict,
+            discount_rate=system_config.discount_rate,
+            transport_routes=system_config.fuel_transport_routes,
+            outage_schedule=getattr(system_config, "outage_schedule", None),
+        )
+
+    def _master_fuel_kwargs(self, system_config, last_year: int,
+                            cumulative: Optional[dict] = None) -> Optional[dict]:
+        """``primary_energy`` argument of ``MasterProblemAdapter``: the fuel
+        data, the run's base year (fuel price growth and disruption hours
+        count from it), the last modelled year and the fuel capacity built
+        before the master's first year. None when primary energy is off."""
+        if not self._pe_enabled(system_config):
+            return None
+        return dict(
+            self._pe_inputs(system_config, self._num_nodes),
+            base_year=self.state.base_year,
+            last_year=last_year,
+            cumulative_capacities=deepcopy(cumulative) if cumulative else None,
+        )
+
+    def _store_master_fuel(self, master, result: dict, years: list[int],
+                           carried: Optional[dict] = None) -> None:
+        """Record the fuel storage, route and electrolyzer capacity the
+        master built and that is in service in each of ``years``, on top of
+        ``carried`` (what earlier myopic years built), for the dispatch.
+
+        ``self._master_fuel_by_year[year]`` = {"storage": {fuel: {node: cap}},
+        "transport": {fuel: {route: cap}}, "electrolyzer": {key: [MW per
+        node]}}, 0-based like ``state.primary_energy_capacities``."""
+        to_caps = getattr(master, "fuel_capacities_by_year", None)
+        by_year = to_caps(result) if to_caps is not None else {}
+        store = getattr(self, "_master_fuel_by_year", None)
+        if store is None:
+            store = self._master_fuel_by_year = {}
+        for y_idx, year in enumerate(years, start=1):
+            caps = deepcopy(carried) if carried else {"storage": {}, "transport": {}, "electrolyzer": {}}
+            for kind in ("storage", "transport"):
+                for fuel, by_idx in by_year.get(y_idx, {}).get(kind, {}).items():
+                    tgt = caps.setdefault(kind, {}).setdefault(fuel, {})
+                    for idx, v in by_idx.items():
+                        tgt[idx] = tgt.get(idx, 0.0) + v
+            for key, per_node in by_year.get(y_idx, {}).get("electrolyzer", {}).items():
+                tgt = caps.setdefault("electrolyzer", {}).setdefault(key, [0.0] * len(per_node))
+                for n, v in enumerate(per_node):
+                    tgt[n] += v
+            store[year] = caps
+
+    def _dispatch_pe_capacities(self, year: int) -> dict:
+        """Fuel storage and route capacity built by the master and in service
+        in ``year`` ({kind: {fuel: {index: capacity}}}); empty without a master."""
+        caps = (getattr(self, "_master_fuel_by_year", None) or {}).get(year) or {}
+        current = {"storage": caps.get("storage", {}), "transport": caps.get("transport", {})}
+        self.state.primary_energy_capacities = current
+        return current
+
+    @staticmethod
+    def _system_with_electrolyzers(system_config, added: dict, reduce_invest: bool = False):
+        """``system_config`` with ``added`` ({electrolyzer key: MW per node})
+        added to the electrolyzers' ``rated_power``; with ``reduce_invest``
+        also taken off their ``invest_max_power`` (a myopic year's room)."""
+        added = {k: v for k, v in (added or {}).items() if any(x > 1e-9 for x in v)}
+        if not added:
+            return system_config
+        elz = dict(system_config.electrolyzers or {})
+        for key, add in added.items():
+            if key not in elz:
+                continue
+            e = elz[key]
+            upd = {"rated_power": [float(r) + (add[n] if n < len(add) else 0.0)
+                                   for n, r in enumerate(e.rated_power)]}
+            if reduce_invest:
+                upd["invest_max_power"] = [max(0.0, float(m) - (add[n] if n < len(add) else 0.0))
+                                           for n, m in enumerate(e.invest_max_power)]
+            elz[key] = e.model_copy(update=upd)
+        return system_config.model_copy(update={"electrolyzers": elz})
+
+    def _dispatch_system(self, year: int):
+        """The operational system of ``year``: ``primary_system`` with the
+        electrolyzer power the master built added to each electrolyzer's
+        ``rated_power`` (per node)."""
+        caps = (getattr(self, "_master_fuel_by_year", None) or {}).get(year) or {}
+        if not caps.get("electrolyzer"):
+            return self.primary_system
+        cache = getattr(self, "_dispatch_system_cache", None)
+        if cache is None:
+            cache = self._dispatch_system_cache = {}
+        if year not in cache:
+            cache[year] = self._system_with_electrolyzers(
+                self.primary_system, caps["electrolyzer"])
+        return cache[year]
 
     def _build_ev_config(
         self,
@@ -3314,6 +3457,13 @@ class Orchestrator:
                 # earlier years' builds as existing units, limits reduced
                 year_system, built_gens, built_bats = self._prepare_system_for_myopic_year(
                     y_idx, built)
+                # Fuel storage, routes and electrolyzers earlier years built
+                # (#89): existing capacity now, less room to build
+                fuel_carried = ((getattr(self, "_master_fuel_by_year", None) or {})
+                                .get(years_range[y_idx - 1]) if y_idx > 0 else None)
+                if fuel_carried:
+                    year_system = self._system_with_electrolyzers(
+                        year_system, fuel_carried.get("electrolyzer") or {}, reduce_invest=True)
                 # Built units read their technology's profile
                 year_avail_cache = dict(self._availability_cache or {})
                 for unit_key, tech_key in built_gens:
@@ -3439,6 +3589,10 @@ class Orchestrator:
                     # y_idx × 8760, wrapping around), as in the dispatch
                     profile_start_hour=y_idx * hours_per_year_raw,
                     system_config=year_system,
+                    primary_energy=self._master_fuel_kwargs(
+                        year_system, year,
+                        cumulative=fuel_carried and {k: fuel_carried.get(k, {})
+                                                     for k in ("storage", "transport")}),
                 )
 
                 # 7. Solve
@@ -3450,9 +3604,12 @@ class Orchestrator:
                     # Continue with empty investments for this year
                     investments_by_year[year] = {}
                     retirements_by_year[year] = {}
+                    if fuel_carried:
+                        self._master_fuel_by_year[year] = deepcopy(fuel_carried)
                     continue
 
                 result = master.get_solution_values()
+                self._store_master_fuel(master, result, [year], carried=fuel_carried)
                 solution = result.get('solution', {})
                 year_data = solution.get(year, {})
 
@@ -4052,6 +4209,8 @@ class Orchestrator:
                 inflow_cache=getattr(self, "_inflow_cache", None),
                 date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                 system_config=self.master_system,
+                # Fuel balance, fuel infrastructure and electrolyzers (#89)
+                primary_energy=self._master_fuel_kwargs(self.master_system, years_range[-1]),
             )
 
             # --- MGA mode ---
@@ -4097,6 +4256,8 @@ class Orchestrator:
 
             # Use the legacy-compatible solution structure keyed by actual year
             solution = result.get('solution', {})
+            # Fuel storage, routes and electrolyzers, for the dispatch (#89)
+            self._store_master_fuel(master, result, list(years_range))
 
             investments_by_year = {}
             retirements_by_year = {}
@@ -6097,7 +6258,8 @@ class Orchestrator:
                 ev_config_data=ev_config_data,
                 rooftop_generation=rooftop_generation,
                 re_penetration_target=re_penetration_target,
-                system_config=self.primary_system,
+                # With the electrolyzers the master built up to this year
+                system_config=self._dispatch_system(year),
                 config_path=self.config_path,
             )
 
@@ -6106,10 +6268,7 @@ class Orchestrator:
 
             # Integrate primary energy (fuel supply chain) if enabled and configured
             pe = None
-            has_pe_sources = bool(system_config.primary_energy_sources)
-            has_fuel_entries = bool(getattr(system_config, 'fuel_entry_points', None))
-            if (self.config.enable_primary_energy
-                    and (has_pe_sources or has_fuel_entries)):
+            if self._pe_enabled(system_config):
                 try:
                     # Build generator list as dicts for PE adapter.
                     # MUST match the PowerSystemAdapter ordering: original gens
@@ -6135,60 +6294,7 @@ class Orchestrator:
                             gen_dict['name'] = vdata.get('name', vk)
                             gen_list.append(gen_dict)
 
-                    # Build fuels definition dict
-                    fuels_def = {}
-                    for fk, fc in system_config.fuels.items():
-                        fuels_def[fk] = fc.model_dump() if hasattr(fc, 'model_dump') else fc.__dict__.copy()
-
-                    # Build PE sources config
-                    pe_sources = {}
-                    if has_pe_sources:
-                        for pk, pc in system_config.primary_energy_sources.items():
-                            pe_sources[pk] = pc.model_dump() if hasattr(pc, 'model_dump') else pc.__dict__.copy()
-                    elif has_fuel_entries:
-                        # Auto-build PE sources from fuel_entry_points + storage
-                        pe_sources = self._build_pe_sources_from_entries(
-                            system_config, num_nodes,
-                        )
-
-                    # Build non-electric demand config
-                    # Growth per fuel (non_electric_demand_growth, none if absent)
-                    # and monthly factors seasonal_factors[fuel][sector]; the
-                    # sector is the key's part before the first underscore.
-                    ne_demand = {}
-                    ne_growth = system_config.non_electric_demand_growth or {}
-                    ne_seasonal = system_config.seasonal_factors or {}
-                    for nk, nc in system_config.non_electric_demand.items():
-                        ne_demand[nk] = nc.model_dump() if hasattr(nc, 'model_dump') else nc.__dict__.copy()
-                        fuel_nk = ne_demand[nk].get('fuel')
-                        ne_demand[nk]['growth_rate'] = float(ne_growth.get(fuel_nk, 0.0))
-                        ne_demand[nk]['seasonal_factors'] = (
-                            ne_seasonal.get(fuel_nk, {}).get(nk.split('_')[0]))
-
-                    # Build infrastructure config
-                    infra = system_config.fuel_infrastructure
-                    infra_dict = infra.model_dump() if hasattr(infra, 'model_dump') else infra.__dict__.copy()
-
-                    # Penalties dict
-                    penalties_dict = system_config.penalties.model_dump() if hasattr(system_config.penalties, 'model_dump') else system_config.penalties.__dict__.copy()
-
-                    # Convert PE resolution from real hours to timestep units
                     res_h = getattr(self.config.temporal, 'resolution_hours', 1)
-                    pe_res_timesteps = self._pe_period_steps()
-
-                    # Scale max_availability for temporal resolution: PE model treats
-                    # each timestep as 1h, but each is res_h real hours. The PE model
-                    # computes max_supply_per_period = annual_avail * (timesteps/8760).
-                    # Correct fraction should use real hours, so scale by res_h.
-                    if res_h > 1:
-                        import copy
-                        pe_sources_scaled = copy.deepcopy(pe_sources)
-                        for fuel_data in pe_sources_scaled.values():
-                            avail_list = fuel_data.get('max_availability', [])
-                            fuel_data['max_availability'] = [a * res_h for a in avail_list]
-                    else:
-                        pe_sources_scaled = pe_sources
-
                     pe_init_storage = boundary_conditions.get('pe_storage_levels')
                     if pe_init_storage and window <= 3:
                         logger.debug(f"Window {window}: PE initial_storage_levels = {pe_init_storage}")
@@ -6198,28 +6304,18 @@ class Orchestrator:
                         base_year=self.state.base_year,
                         hours=hours,
                         num_nodes=num_nodes,
-                        fuels_config=pe_sources_scaled,
-                        non_electric_demand=ne_demand,
-                        infrastructure_config=infra_dict,
-                        transport_distances=system_config.fuel_transport_distances,
                         generators=gen_list,
-                        fuels_definition=fuels_def,
-                        penalties_config=penalties_dict,
-                        primary_energy_resolution=pe_res_timesteps,
-                        discount_rate=system_config.discount_rate,
+                        primary_energy_resolution=self._pe_period_steps(),
                         mode=ps_mode,
-                        cumulative_capacities=self.state.primary_energy_capacities,
+                        # Fuel storage and routes the master built up to this
+                        # year (the dispatch builds none)
+                        cumulative_capacities=self._dispatch_pe_capacities(year),
                         initial_storage_levels=pe_init_storage,
-                        # The master has no fuel model, so fuel storage and
-                        # transport are built here in every mode that invests;
-                        # built capacity carries over (primary_energy_capacities).
-                        investment_from_master=False,
-                        transport_routes=system_config.fuel_transport_routes,
-                        outage_schedule=getattr(system_config, "outage_schedule", None),
                         step_hours=res_h,
                         year_hour_offset=start_hour,
                         # Fuel the previous window shipped that is still in transit
                         scheduled_arrivals=boundary_conditions.get('pe_in_transit'),
+                        **self._pe_inputs(system_config, num_nodes),
                     )
 
                     # Create PE variables in the same JuMP model
@@ -6228,8 +6324,7 @@ class Orchestrator:
                     # Couple PE to PowerSystem (adds coupling constraints + PE objective)
                     pe.integrate_with_power_system(ps)
 
-                    logger.debug(f"Window {window}: Primary energy integrated "
-                                f"({len(pe_sources)} fuel sources)")
+                    logger.debug(f"Window {window}: Primary energy integrated")
                 except Exception as e:
                     logger.warning(f"Window {window}: Primary energy integration failed: {e}")
                     pe = None
@@ -6267,7 +6362,6 @@ class Orchestrator:
                 except Exception as e:
                     logger.warning(f"Window {window}: PE result extraction failed: {e}")
                 if pe_results:
-                    self._carry_pe_investments(pe_results)
                     # Fuel burnt per coupled unit, keyed by the unit's name
                     unit_names = unique_unit_names([g["name"] for g in gen_list])
                     pe_results["fuel_for_power"] = {
@@ -8169,6 +8263,25 @@ class Orchestrator:
                             str(unit).replace("/", "_"),
                             data=np.array(arr, dtype=np.float64),
                             chunks=True, compression="gzip")
+            # --- Fuel infrastructure and electrolyzers the master built (#89) ---
+            # In service this year, on top of the configured capacity
+            fuel_caps = (getattr(self, "_master_fuel_by_year", None) or {}).get(result.year) or {}
+            if any(fuel_caps.get(k) for k in ("storage", "transport", "electrolyzer")):
+                mf_grp = scenario.create_group("master_fuel_capacity")
+                n_routes = len(self.primary_system.fuel_transport_routes or [])
+                for kind, size in (("storage", self._num_nodes), ("transport", n_routes)):
+                    if not fuel_caps.get(kind):
+                        continue
+                    kgrp = mf_grp.create_group(kind)
+                    for fuel_name, by_idx in fuel_caps[kind].items():
+                        arr = np.zeros(max([size] + [i + 1 for i in by_idx]))
+                        for i, v in by_idx.items():
+                            arr[i] = v
+                        kgrp.create_dataset(fuel_name, data=arr)
+                if fuel_caps.get("electrolyzer"):
+                    egrp = mf_grp.create_group("electrolyzer")
+                    for key, per_node in fuel_caps["electrolyzer"].items():
+                        egrp.create_dataset(self._h5safe(key), data=np.array(per_node, dtype=np.float64))
 
             # --- N-1 Security Results ---
             if (result.n1_gen_reserve_duals is not None
