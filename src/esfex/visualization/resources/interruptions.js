@@ -320,6 +320,7 @@ function commit() {
             start_hour: d.start_hour, end_hour: d.end_hour,
             availability: d.availability, label: d.label || "",
             recurring: !!d.recurring,
+            node: (d.node === undefined) ? null : d.node,
         };
     });
     window._bridge.commit(JSON.stringify(out));

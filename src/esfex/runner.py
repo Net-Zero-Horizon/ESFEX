@@ -546,6 +546,10 @@ def _pad_zeros(arr, n: int) -> list:
     return out + [0.0] * (n - len(out))
 
 
+# rooftex's initial adoption fraction of a node without one
+_ROOFTEX_DEFAULT_INITIAL_ADOPTION = 0.05
+
+
 def _per_node_list(arr, n: int, default=0.0) -> list:
     """A per-node list of length *n*: a single value is broadcast, a short
     list is padded with its last value."""
@@ -1008,19 +1012,28 @@ class Orchestrator:
                 if isinstance(v, (int, float)) and v > merged_penalties_d.get(k, 0):
                     merged_penalties_d[k] = v
 
-        # Merge EV / rooftop arrays (concat per-node)
+        # Merge EV / rooftop arrays (concat per-node). A rooftop potential
+        # a system leaves unset is None (rooftex's potential at that node);
+        # a system without rooftop solar gets 0 at its nodes.
         merged_ev_soc: list[float] = []
-        merged_rooftop_potential: list[float] = []
+        merged_rooftop_potential: list[Optional[float]] = []
         for si, (sys, nc) in enumerate(zip(systems, node_counts)):
             soc = sys.ev_initial_soc or []
             # Nodes without a value start at the dispatch default (80 %)
             merged_ev_soc.extend(soc[:nc] if len(soc) >= nc else soc + [0.8] * (nc - len(soc)))
-            rp = sys.rooftop_max_potential or []
-            merged_rooftop_potential.extend(rp[:nc] if len(rp) >= nc else rp + [0.0] * (nc - len(rp)))
+            if not (sys.sim_rooftop and sys.rooftop_solar_config is not None):
+                merged_rooftop_potential.extend([0.0] * nc)
+                continue
+            rp = list(sys.rooftop_max_potential or [])[:nc]
+            merged_rooftop_potential.extend(rp + [None] * (nc - len(rp)))
+        if all(v is None for v in merged_rooftop_potential):
+            merged_rooftop_potential = []
 
         # Merge rooftop_solar_config: take the first non-empty config as the
-        # template and concat per-node arrays across systems (zeros padding;
-        # a list no system sets stays unset).
+        # template and concat per-node arrays across systems. A system that
+        # leaves a list unset gets None at its nodes, which the rooftop
+        # generator resolves to rooftex's defaults; a list no system sets
+        # stays unset.
         merged_rooftop_solar_config = None
         rooftop_template = next((s.rooftop_solar_config for s in systems
                                  if s.rooftop_solar_config is not None), None)
@@ -1034,12 +1047,10 @@ class Orchestrator:
                 merged_list: list = []
                 for sys, nc in zip(systems, node_counts):
                     src_cfg = sys.rooftop_solar_config
-                    src_list = list(getattr(src_cfg, list_field, []) or []) if src_cfg else []
-                    if len(src_list) >= nc:
-                        merged_list.extend(src_list[:nc])
-                    else:
-                        zero = 0 if list_field == 'systems_per_node' else 0.0
-                        merged_list.extend(src_list + [zero] * (nc - len(src_list)))
+                    src_list = list(getattr(src_cfg, list_field, []) or [])[:nc] if src_cfg else []
+                    # A short list repeats its last value, as rooftex does
+                    pad = src_list[-1] if src_list else None
+                    merged_list.extend(src_list + [pad] * (nc - len(src_list)))
                 rsc_d[list_field] = merged_list
             # max_adoption / adoption_rates are keyed by adoption scenario
             # ("low", "medium", "high"), not by node: the merged run has one
@@ -2036,6 +2047,9 @@ class Orchestrator:
 
             for year_idx, year in enumerate(years_range):
                 if ops_only is not None and year not in ops_only:
+                    # The master's builds are per-year increments: a
+                    # skipped year's must still reach the later years.
+                    self._apply_master_builds(master_investments.get(year, {}))
                     continue
                 logger.debug(f"Year {year} ({year_idx+1}/{num_years})")
                 self.state.year = year
@@ -2048,9 +2062,7 @@ class Orchestrator:
                     year_investments = master_investments.get(year, {})
 
                     # Apply transmission investments to network adjacency matrix
-                    if year_investments:
-                        self._apply_transfer_investments(year_investments)
-                        self._apply_converter_investments(year_investments)
+                    self._apply_master_builds(year_investments)
 
                     # Build cumulative_units_config from MasterProblem's cumulative
                     # capacities. This correctly handles:
@@ -2629,25 +2641,55 @@ class Orchestrator:
         return current
 
     @staticmethod
-    def _system_with_electrolyzers(system_config, added: dict, reduce_invest: bool = False):
+    def _system_with_electrolyzers(system_config, added: dict, used: Optional[dict] = None):
         """``system_config`` with ``added`` ({electrolyzer key: MW per node})
-        added to the electrolyzers' ``rated_power``; with ``reduce_invest``
-        also taken off their ``invest_max_power`` (a myopic year's room)."""
-        added = {k: v for k, v in (added or {}).items() if any(x > 1e-9 for x in v)}
-        if not added:
+        added to the electrolyzers' ``rated_power`` and ``used`` (same
+        shape) taken off their ``invest_max_power`` (a myopic year: the
+        builds still in service, and everything built so far, retired or
+        not, since the build limit counts every build)."""
+        def _nz(d):
+            return {k: v for k, v in (d or {}).items() if any(x > 1e-9 for x in v)}
+        added, used = _nz(added), _nz(used)
+        if not added and not used:
             return system_config
         elz = dict(system_config.electrolyzers or {})
-        for key, add in added.items():
+
+        def _at(lst, n):
+            return lst[n] if n < len(lst) else 0.0
+        for key in set(added) | set(used):
             if key not in elz:
                 continue
             e = elz[key]
-            upd = {"rated_power": [float(r) + (add[n] if n < len(add) else 0.0)
-                                   for n, r in enumerate(e.rated_power)]}
-            if reduce_invest:
-                upd["invest_max_power"] = [max(0.0, float(m) - (add[n] if n < len(add) else 0.0))
+            upd = {}
+            if key in added:
+                upd["rated_power"] = [float(r) + _at(added[key], n)
+                                      for n, r in enumerate(e.rated_power)]
+            if key in used:
+                upd["invest_max_power"] = [max(0.0, float(m) - _at(used[key], n))
                                            for n, m in enumerate(e.invest_max_power)]
             elz[key] = e.model_copy(update=upd)
         return system_config.model_copy(update={"electrolyzers": elz})
+
+    @staticmethod
+    def _myopic_electrolyzers(builds: dict, system_config, y_idx: int) -> tuple[dict, dict]:
+        """Electrolyzer power earlier myopic years built ({key: {build year
+        index: MW per node}}): ``(in service in year y_idx, built in all)``,
+        {key: MW per node} each. A build retires after the electrolyzer's
+        ``life_time`` at its node (0 = never), as in perfect foresight."""
+        in_service: dict[str, list[float]] = {}
+        total: dict[str, list[float]] = {}
+        elz = system_config.electrolyzers or {}
+        for key, by_year in builds.items():
+            life = list(getattr(elz.get(key), "life_time", None) or [])
+            for b_idx, per_node in by_year.items():
+                tot = total.setdefault(key, [0.0] * len(per_node))
+                cur = in_service.setdefault(key, [0.0] * len(per_node))
+                for n, v in enumerate(per_node):
+                    tot[n] += v
+                    lt = life[n] if n < len(life) else 0
+                    if lt <= 0 or y_idx - b_idx < lt:
+                        cur[n] += v
+        return in_service, total
 
     def _dispatch_system(self, year: int):
         """The operational system of ``year``: ``primary_system`` with the
@@ -3249,6 +3291,16 @@ class Orchestrator:
         sys = self.primary_system
         cfg = sys.rooftop_solar_config
 
+        # A None entry (a merged run's node of a system that leaves the list
+        # unset) takes rooftex's default there: initial adoption 0.05, and
+        # the potential rooftex draws when the systems/size lists are unset.
+        systems_pn = list(cfg.systems_per_node or [])
+        sizes = list(cfg.avg_system_size or [])
+        partial_size = None in systems_pn or None in sizes
+        init = cfg.initial_adoption or None
+        if init is not None:
+            init = [_ROOFTEX_DEFAULT_INITIAL_ADOPTION if v is None else v for v in init]
+
         # Generate base availability profile and adoption factors
         _rooftop_cfg = RooftopConfig(
             num_nodes=num_nodes,
@@ -3261,9 +3313,9 @@ class Orchestrator:
             performance_ratio=cfg.performance_ratio,
             # Unset (or empty, as the Studio writes them) → rooftex defaults:
             # potential drawn per node, default scenario rates and caps.
-            initial_adoption=cfg.initial_adoption or None,
-            systems_per_node=cfg.systems_per_node or None,
-            avg_system_size_kw=cfg.avg_system_size or None,
+            initial_adoption=init,
+            systems_per_node=None if partial_size else (systems_pn or None),
+            avg_system_size_kw=None if partial_size else (sizes or None),
             adoption_rates=cfg.adoption_rates or None,
             max_adoption=cfg.max_adoption or None,
         )
@@ -3275,10 +3327,18 @@ class Orchestrator:
             if hasattr(_rooftop_result.max_potential_mw, '__iter__')
             else [_rooftop_result.max_potential_mw] * num_nodes
         )
+        if partial_size:
+            # Nodes with both values keep systems × size; the rest keep the
+            # potential rooftex drew.
+            for n in range(min(num_nodes, len(systems_pn), len(sizes))):
+                if systems_pn[n] is not None and sizes[n] is not None:
+                    rooftop_potential[n] = systems_pn[n] * sizes[n] / 1000.0
 
-        # Use configured max potential if available
+        # Configured max potential where set (None: rooftex's)
         if sys.rooftop_max_potential:
-            rooftop_potential = list(sys.rooftop_max_potential)
+            for n, v in enumerate(sys.rooftop_max_potential[:num_nodes]):
+                if v is not None:
+                    rooftop_potential[n] = float(v)
 
         target_year = cfg.target_year
         base_year = cfg.base_year if hasattr(cfg, 'base_year') else start_year
@@ -3475,6 +3535,8 @@ class Orchestrator:
             # "bat_tech_capacity": {(technology key, build year index): per-node array}}
             built: dict[str, dict[tuple[str, int], np.ndarray]] = {
                 "tech": {}, "bat_tech_power": {}, "bat_tech_capacity": {}}
+            # Electrolyzer power the master built: {key: {year index: MW per node}}
+            elz_builds: dict[str, dict[int, list[float]]] = {}
             current_re = overall_initial_re
 
             for y_idx, year in enumerate(years_range):
@@ -3490,12 +3552,15 @@ class Orchestrator:
                 year_system, built_gens, built_bats = self._prepare_system_for_myopic_year(
                     y_idx, built)
                 # Fuel storage, routes and electrolyzers earlier years built
-                # (#89): existing capacity now, less room to build
+                # (#89): existing capacity now, less room to build. Storage
+                # and routes never retire; an electrolyzer build retires
+                # after its life_time, as in perfect foresight.
                 fuel_carried = ((getattr(self, "_master_fuel_by_year", None) or {})
                                 .get(years_range[y_idx - 1]) if y_idx > 0 else None)
+                elz_live, elz_used = self._myopic_electrolyzers(elz_builds, year_system, y_idx)
                 if fuel_carried:
-                    year_system = self._system_with_electrolyzers(
-                        year_system, fuel_carried.get("electrolyzer") or {}, reduce_invest=True)
+                    fuel_carried = dict(fuel_carried, electrolyzer=elz_live)
+                year_system = self._system_with_electrolyzers(year_system, elz_live, elz_used)
                 # Built units read their technology's profile
                 year_avail_cache = dict(self._availability_cache or {})
                 for unit_key, tech_key in built_gens:
@@ -3642,6 +3707,11 @@ class Orchestrator:
 
                 result = master.get_solution_values()
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
+                to_caps = getattr(master, "fuel_capacities_by_year", None)
+                year_elz = ((to_caps(result) if to_caps is not None else {})
+                            .get(1, {}).get("electrolyzer", {}))
+                for key, per_node in year_elz.items():
+                    elz_builds.setdefault(key, {})[y_idx] = list(per_node)
                 solution = result.get('solution', {})
                 year_data = solution.get(year, {})
 
@@ -6729,6 +6799,14 @@ class Orchestrator:
 
         return results_summary
 
+    def _apply_master_builds(self, investments: dict[str, float]) -> None:
+        """Add one year's master builds (transmission, converters) to the
+        dispatch's network. The values are that year's increments, so every
+        year must pass here once, also the years the dispatch skips."""
+        if investments:
+            self._apply_transfer_investments(investments)
+            self._apply_converter_investments(investments)
+
     def _apply_converter_investments(self, investments: dict[str, float]) -> None:
         """Add the converter capacity the master built this year to the
         dispatch's converters (``converter_investment_{acdc|freq}_{c}`` keys,
@@ -8319,14 +8397,18 @@ class Orchestrator:
                         tf_grp.create_dataset(
                             fuel_name, data=np.array(arr, dtype=np.float64))
 
-                # Fuel burnt by each coupled unit: {unit: [nodes × steps]}
+                # Fuel burnt by each coupled unit: {unit: [nodes × steps]},
+                # under the unit's dataset name of the per-generator groups
                 if result.fuel_for_power:
                     ffp_grp = pe_grp.create_group("fuel_for_power")
                     ffp_grp.attrs["units"] = "fuel units per step"
-                    for unit, arr in result.fuel_for_power.items():
+                    ds_of = dict(zip(unique_unit_names(self._gen_names), gen_ds))
+                    units = list(result.fuel_for_power)
+                    names = unique_unit_names([ds_of.get(str(u)) or self._h5safe(str(u))
+                                               for u in units])
+                    for unit, name in zip(units, names):
                         ffp_grp.create_dataset(
-                            str(unit).replace("/", "_"),
-                            data=np.array(arr, dtype=np.float64),
+                            name, data=np.array(result.fuel_for_power[unit], dtype=np.float64),
                             chunks=True, compression="gzip")
             # --- Fuel infrastructure and electrolyzers the master built (#89) ---
             # In service this year, on top of the configured capacity
@@ -8338,15 +8420,19 @@ class Orchestrator:
                     if not fuel_caps.get(kind):
                         continue
                     kgrp = mf_grp.create_group(kind)
-                    for fuel_name, by_idx in fuel_caps[kind].items():
+                    fuels = list(fuel_caps[kind])
+                    for fuel_name, ds_name in zip(fuels, self._h5_unit_names(fuels)):
+                        by_idx = fuel_caps[kind][fuel_name]
                         arr = np.zeros(max([size] + [i + 1 for i in by_idx]))
                         for i, v in by_idx.items():
                             arr[i] = v
-                        kgrp.create_dataset(fuel_name, data=arr)
+                        kgrp.create_dataset(ds_name, data=arr)
                 if fuel_caps.get("electrolyzer"):
                     egrp = mf_grp.create_group("electrolyzer")
-                    for key, per_node in fuel_caps["electrolyzer"].items():
-                        egrp.create_dataset(self._h5safe(key), data=np.array(per_node, dtype=np.float64))
+                    keys = list(fuel_caps["electrolyzer"])
+                    for key, ds_name in zip(keys, self._h5_unit_names(keys)):
+                        egrp.create_dataset(ds_name, data=np.array(
+                            fuel_caps["electrolyzer"][key], dtype=np.float64))
 
             # --- N-1 Security Results ---
             if (result.n1_gen_reserve_duals is not None

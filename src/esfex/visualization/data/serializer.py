@@ -5,14 +5,13 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import yaml
 
 from esfex.utils.temporal import HOURS_STD_YEAR
 from esfex.config.schema import (
-    GeoCoordinate,
     ESFEXConfig,
     RiskConfig,
     SystemConfig,
@@ -1982,19 +1981,24 @@ def _system_to_gui_state(sys: SystemConfig,
     outage_schedule = []
     for ow in (getattr(sys, "outage_schedule", None) or []):
         ids = [ow.element_id]
+        node = getattr(ow, "node", None)
+        # Elements without calendar instances keep the node on the window
+        # (e.g. a fuel_storage outage at one node only).
+        keep_node = node
         insts = _instances.get(ow.element_type)
         if insts is not None:
-            node = getattr(ow, "node", None)
             matched = [iid for iid, inst in insts.items()
                        if inst.unit_key == ow.element_id
                        and (node is None or inst.node == node)]
             ids = matched or ids
+            keep_node = None if matched else node
         outage_schedule.extend(
             GuiOutageWindow(
                 element_type=ow.element_type, element_id=iid,
                 start_hour=ow.start_hour, end_hour=ow.end_hour,
                 availability=ow.availability, label=ow.label,
                 recurring=bool(getattr(ow, "recurring", False)),
+                node=keep_node,
             )
             for iid in ids
         )
@@ -3391,6 +3395,8 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             if inst is not None:
                 od["element_id"] = inst.unit_key
                 od["node"] = int(inst.node)
+            elif getattr(ow, "node", None) is not None:
+                od["node"] = int(ow.node)
             sys_dict["outage_schedule"].append(od)
 
     # Development zones

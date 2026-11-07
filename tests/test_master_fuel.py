@@ -74,12 +74,32 @@ def test_master_builds_reach_the_dispatch(tmp_path):
     assert orch._master_fuel_by_year[2027]["electrolyzer"] == {"elz": [11.0]}
     # ... and the next year's master sees them as existing, with less room
     sys_y = orch._system_with_electrolyzers(orch.primary_system, {"elz": [11.0]},
-                                            reduce_invest=True)
+                                            {"elz": [11.0]})
     assert sys_y.electrolyzers["elz"].rated_power == [16.0]
     assert sys_y.electrolyzers["elz"].invest_max_power == [39.0]
 
 
-def _hydrogen_plan(tmp_path, tag, scenarios=None, myopic=False):
+def test_myopic_electrolyzer_builds_retire_after_their_life_time():
+    """Perfect foresight retires an electrolyzer build after life_time;
+    myopic carried it for ever. The build limit still counts it."""
+    from esfex.runner import Orchestrator
+
+    sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)]).model_copy(update={
+        "electrolyzers": {"elz": _electrolyzer(5.0, 50.0).model_copy(
+            update={"life_time": [2]})}})
+    builds = {"elz": {0: [10.0], 1: [4.0]}}
+    live, used = Orchestrator._myopic_electrolyzers(builds, sysc, 1)
+    assert live == {"elz": [14.0]} and used == {"elz": [14.0]}
+    live, used = Orchestrator._myopic_electrolyzers(builds, sysc, 2)
+    assert live == {"elz": [4.0]} and used == {"elz": [14.0]}       # year-0 build retired
+    live, _ = Orchestrator._myopic_electrolyzers(builds, sysc, 3)
+    assert live == {"elz": [0.0]}
+    sys_y = Orchestrator._system_with_electrolyzers(sysc, {"elz": [4.0]}, {"elz": [14.0]})
+    assert sys_y.electrolyzers["elz"].rated_power == [9.0]
+    assert sys_y.electrolyzers["elz"].invest_max_power == [36.0]
+
+
+def _hydrogen_plan(tmp_path, tag, scenarios=None, myopic=False, years=1, elz=None):
     """One node: 60 MW of load on diesel, 876 t/yr of hydrogen demand that
     only an electrolyzer (none installed, up to 50 MW) can make."""
     from esfex.runner import Orchestrator
@@ -111,7 +131,7 @@ def _hydrogen_plan(tmp_path, tag, scenarios=None, myopic=False):
             "Industrial_Hydrogen": NonElectricDemandConfig(fuel="Hydrogen", unit="t",
                                                            demand=[876]),
         },
-        "electrolyzers": {"elz": _electrolyzer(0.0, 50.0)},
+        "electrolyzers": {"elz": elz or _electrolyzer(0.0, 50.0)},
         "penalties": PenaltiesConfig(loss_of_load=10000.0, loss_of_fuel_supply=1e5,
                                      non_electric_demand_loss=1e5),
         "stochastic_scenarios": scenarios or []})
@@ -123,7 +143,7 @@ def _hydrogen_plan(tmp_path, tag, scenarios=None, myopic=False):
             planning_mode="myopic" if myopic else "perfect_foresight"))
     cfg = cfg.model_copy(update={"enable_primary_energy": True})
     orch = Orchestrator(cfg, output_dir=tmp_path / tag)
-    results = orch.run(years=1)
+    results = orch.run(years=years)
     return orch, results
 
 
@@ -152,6 +172,20 @@ def test_myopic_master_builds_the_electrolyzer(tmp_path):
     orch, results = _hydrogen_plan(tmp_path, "myopic", myopic=True)
     built = orch._master_fuel_by_year[results[0].year]["electrolyzer"]["elz"][0]
     assert built == pytest.approx(0.1 / (13.0 / 1000 * 0.8), rel=1e-3)
+
+
+@pytest.mark.julia
+def test_myopic_electrolyzer_retires_like_perfect_foresight(tmp_path):
+    """A one-year electrolyzer built in year 1 is gone in year 2: the
+    myopic master must rebuild, within what the build limit has left."""
+    need = 0.1 / (13.0 / 1000 * 0.8)
+    elz = _electrolyzer(0.0, 15.0).model_copy(update={"life_time": [1]})
+    orch, results = _hydrogen_plan(tmp_path, "myopic_life", myopic=True, years=2, elz=elz)
+    y1, y2 = (r.year for r in results)
+    caps = orch._master_fuel_by_year
+    assert caps[y1]["electrolyzer"]["elz"][0] == pytest.approx(need, rel=1e-3)
+    # Year 2 runs only what it could rebuild: 15 MW limit − the year-1 build
+    assert caps[y2]["electrolyzer"]["elz"][0] == pytest.approx(15.0 - need, rel=1e-3)
 
 
 @pytest.mark.julia

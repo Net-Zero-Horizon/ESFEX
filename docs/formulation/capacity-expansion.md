@@ -613,7 +613,7 @@ Supply limits and disruption windows use the day's absolute horizon hours, as in
 
 The day's fuel cost is already in \$ (fuel amounts per step), so it is scaled to the year by \((H_{year}/24)/|\mathcal{D}_y|\), or by the TSAM period weight, without the \(\Delta t\) of SCALE-1.
 
-**Hand-off to the dispatch.** The master is the only model that builds fuel infrastructure and electrolyzers. Each dispatch year receives the storage and route capacity in service that year as existing capacity (`cumulative_capacities` of the fuel model), and the built electrolyzer power is added to each electrolyzer's `rated_power`. A myopic master starts each year from what earlier years built, with that much less room to build. A run without a master (`economic_dispatch` or `unit_commitment` mode) builds no fuel infrastructure.
+**Hand-off to the dispatch.** The master is the only model that builds fuel infrastructure and electrolyzers. Each dispatch year receives the storage and route capacity in service that year as existing capacity (`cumulative_capacities` of the fuel model), and the built electrolyzer power is added to each electrolyzer's `rated_power`. A myopic master starts each year from what earlier years built and is still in service (storage and routes never retire; an electrolyzer build retires after its `life_time`, as in perfect foresight), with less room to build by everything built so far. A run without a master (`economic_dispatch` or `unit_commitment` mode) builds no fuel infrastructure.
 
 ### 8.4 Cost Scaling
 

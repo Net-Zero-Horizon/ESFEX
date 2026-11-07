@@ -309,7 +309,7 @@ Units may also be written as top-level system keys named `unit_<n>` or `bat_<n>`
 | `ev_initial_soc` / `EV_initial_soc` | list[float] | `[]` | Fleet SOC at the start of each dispatch window, per node (fraction; 0.8 if missing) |
 | `base_patterns` | dict[str, list[float]] | `{}` | `{category: [24 hourly plug-in values]}` |
 | `rooftop_solar_config` | [RooftopSolarConfig](#rooftopsolarconfig) \| null | `null` | Rooftop PV model settings |
-| `rooftop_max_potential` | list[float] | `[]` | Rooftop PV potential per node |
+| `rooftop_max_potential` | list[float \| null] | `[]` | Rooftop PV potential per node (MW); a `null` entry keeps rooftex's potential at that node |
 | `rooftop_solar_emission_reduction` | float | `0.7` | Emission reduction credited to rooftop PV |
 
 ### Policy, scenarios and studies
@@ -1008,8 +1008,8 @@ The budget covers the system's own power plants. The dispatch and the master pro
 | `adoption_scenario` | `low` \| `medium` \| `high` | `"medium"` | Adoption scenario |
 | `weather_variability` | `low` \| `normal` \| `high` | `"normal"` | Weather variability |
 | `simulation_seed` | int | `42` | Random seed |
-| `systems_per_node` | list[int] \| null | `null` | Rooftop systems per node; with `avg_system_size`, sets rooftex's potential |
-| `avg_system_size` | list[float] \| null | `null` | Average system size per node, kW |
+| `systems_per_node` | list[int \| null] \| null | `null` | Rooftop systems per node; with `avg_system_size`, sets rooftex's potential (a node with a `null` in either list keeps the potential rooftex draws) |
+| `avg_system_size` | list[float \| null] \| null | `null` | Average system size per node, kW |
 | `performance_ratio` | float (0–1) | `0.75` | Performance ratio of the rooftex profile |
 | `degradation_rate` | float (≥ 0) | `0.005` | Degradation (fraction/year) |
 | `cost_per_kw` | float | `1200` | Installation cost, $/kW (not used by the runner) |
@@ -1017,7 +1017,7 @@ The budget covers the system's own power plants. The dispatch and the master pro
 | `o_and_m_cost` | float | `20` | O&M cost, $/kW/year (not used by the runner) |
 | `base_year` | int | `2025` | Reference year |
 | `target_year` | int | `2050` | Target year |
-| `initial_adoption` | list[float] \| null | `null` | Current adoption per node (passed to rooftex, which 0.1.1 does not use) |
+| `initial_adoption` | list[float \| null] \| null | `null` | Current adoption per node (passed to rooftex, which 0.1.1 does not use; `null` = rooftex's 0.05) |
 | `max_adoption` | dict[str, float] \| null | `null` | Maximum adoption per scenario (`low`, `medium`, `high`) |
 | `adoption_rates` | dict[str, float] \| null | `null` | Adoption growth rate per scenario |
 
