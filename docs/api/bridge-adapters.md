@@ -121,7 +121,7 @@ Converts Python configuration into a Julia `PowerSystemInput` struct. Steps:
 1. Iterates over `sys.generators` and converts each to a Julia `GeneratorConfig` via `convert_generator_config()`.
 2. Resolves availability profiles from `availability_cache` (slicing to the current window using `start_hour`) or loads from file as fallback.
 3. Applies `units_config` overrides to update `rated_power` for generators whose capacity was modified by MasterProblem investments.
-4. Creates virtual generators for technology investments that do not exist in `sys.generators` (e.g., "Investment Solar PV").
+4. Creates virtual generators for technology investments that do not exist in `sys.generators` (e.g., "Investment Solar PV"). Their arrays are per bus of the system (`_is_per_bus`); with network reduction they are laid out on the reduced buses, and capacity on an eliminated bus moves to the retained bus of the same node with the largest `demand_fraction`.
 5. Repeats the above for batteries and virtual batteries.
 6. Applies geographic fuel transport cost adjustments based on generator-to-fuel-storage distance.
 7. Builds network, temporal, penalty, and solver configuration Julia structs.
@@ -300,6 +300,8 @@ Extract investment and retirement decisions keyed by year. Returns a dictionary 
 - Total NPV cost
 
 The top-level keys include `status`, `objective`, `solve_time`, `solution` (per-year dicts of `tech_investment_power_{t}_{n}`, `bat_tech_investment_power_{bt}_{n}`, `bat_tech_investment_capacity_{bt}_{n}` and `transfer_investment_{i}_{j}` values), `tech_investment`, `bat_tech_power_investment`, `bat_tech_capacity_investment`, `cumulative_*` capacities, `total_investment_by_year`, `total_operational_by_year` and `re_penetration_by_year`.
+
+The `{n}`, `{i}`, `{j}` indices and the per-bus arrays refer to the system's own buses (one per node in the merged multi-node master). When network reduction is enabled the master solves on the reduced network, and its results are laid out on the original buses before they are returned: eliminated buses hold no capacity.
 
 ### Other methods
 
