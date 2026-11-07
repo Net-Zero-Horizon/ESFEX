@@ -215,8 +215,9 @@ Per-release notes are also published on the
   no longer rounded to whole periods), less transport losses. Fuel arriving
   in an hour can be used in that hour, so a shortfall now means fuel is
   really missing. The periodic storage levels, their linking slacks and the
-  periodic shortfall are gone: `penalties.coupling_slack_penalty` has no
-  effect, the `pe_coupling_slack_cost` result is always 0, and
+  periodic shortfall are gone (so are `penalties.coupling_slack_penalty`
+  and the `pe_coupling_slack_cost` result, see "Penalties that priced nothing
+  were removed" under Changed), and
   `total_loss_of_supply` is the hourly shortfall. Route capacity per period
   now uses the period's real length when `resolution_hours` > 1.
 - **Scheduled interruptions happen once, in absolute horizon hours.**
@@ -499,16 +500,6 @@ Per-release notes are also published on the
   with a fuel-cost curve keep their curve. This changes the master's plan
   wherever `fuel_cost` and the fuel prices disagree.
 
-- **`penalties.coupling_slack_penalty` is deprecated.** It has priced nothing
-  since the primary-energy model lost its periodic–hourly coupling slacks
-  (the `pe_coupling_slack_cost` result stays 0, kept for file
-  compatibility). A configuration that sets it still loads, now with a
-  warning; the Studio no longer shows it in the system form nor writes it.
-- **Unused SCOPF settings are reported.** `n1_security.scopf_max_iterations`
-  and `scopf_violation_tolerance` have no effect (the SCOPF constraints are
-  built in one pass). A value other than the default now logs a warning when
-  the configuration is loaded; the Studio tooltip says so.
-
 - The unused Grid Builder step class `GridMappingConnectStep` (the old
   "Step 5: Simplify & Aggregate") and its translation keys were removed.
   It was not reachable from the Studio.
@@ -543,9 +534,7 @@ Per-release notes are also published on the
     It is now hard in the subproblems too. A plan whose renewable output a
     day cannot use within the limit gets a feasibility cut, and only plans
     that meet the limit count towards the upper bound.
-    `penalties.curtailment_excess_penalty` therefore has no effect any more:
-    it still loads (the Studio writes it, and shows it disabled), like
-    `curtailment`.
+    `penalties.curtailment_excess_penalty` is therefore removed.
   - **One cut per representative day.** Benders added one aggregated cut
     per year, so with a binding CO2 budget shared out among the days it
     stopped at `benders_max_iterations` above the optimum (0.16 % with 6
@@ -576,6 +565,29 @@ Per-release notes are also published on the
   was shed. The subproblems now charge the full `loss_of_load` penalty,
   like the monolithic master. A configuration that still sets the key gets
   the usual unknown-key warning.
+
+- **Penalties that priced nothing were removed.** `penalties.curtailment`,
+  `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`,
+  `transport_congestion` and `storage_violation` loaded but had no term in any
+  model (curtailed RE is priced by `curtailment_cost`, `max_curtailment_ratio`
+  is a hard limit, and the fuel model has no congestion, storage-violation or
+  coupling slacks). They are gone from the schema, the Julia inputs
+  (`MasterProblemInput.re_excess_penalty`,
+  `PrimaryEnergyInput.coupling_slack_penalty`, one positional argument
+  fewer), the Studio's system form and the saved files, along with the
+  `coupling_slack_penalty` deprecation warning and the always-zero
+  `pe_coupling_slack_cost` entry of the cost breakdown (HDF5
+  `cost_breakdown`). A configuration that still sets one of them gets the
+  usual unknown-key warning; Studio projects saved earlier still open and are
+  saved without them.
+
+- **Unused SCOPF settings were removed.** `n1_security.scopf_max_iterations`
+  and `scopf_violation_tolerance` were saved but never used (the SCOPF
+  constraints are built in one pass). They are gone from the schema, the
+  Julia `PowerSystemInput` and the Studio's Global Settings, together with
+  their load-time warning; a configuration that still sets them gets the
+  usual unknown-key warning. The Studio's checkbox is now labelled "Use
+  SCOPF" (it was "Use Iterative SCOPF").
 
 ### Fixed
 
@@ -957,12 +969,8 @@ Per-release notes are also published on the
   `AttributeError`; a `str` path now works like a `Path`.
 - **`environment.yml` pinned Python below 3.13** although ESFEX supports
   3.13; it now allows the same versions as pip (3.10–3.13).
-- **No-effect settings are marked as such.** The `Curtailment` penalty the
-  Studio writes was dropped on load; it now loads, like
-  `coupling_slack_penalty`, `transport_congestion` and `storage_violation`,
-  and all four are documented as having no effect and shown disabled in the
-  Studio. `solver.scale_constraints` is read by nothing; it is documented as
-  such and shown disabled.
+- `solver.scale_constraints` is read by nothing; it is documented as such
+  and shown disabled in the Studio.
 - The loader names each generator that receives the non-fuel O&M adder in
   the log (INFO), with the resulting `maintenance_cost`.
 
