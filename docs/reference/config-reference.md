@@ -1046,11 +1046,11 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `invest_cost_storage` | float | `1` | Multiplier on battery technology investment cost (power and energy) |
 | `invest_cost_conventional` | float | `1` | Multiplier on the investment cost of non-renewable technologies |
 | `invest_cost_transmission` | float | `1` | Multiplier on transmission investment cost |
-| `fuel_cost` | float | `1` | Multiplier on the fuel cost of generators (fuel-cost curves included) and technologies in the scenario's operation |
+| `fuel_cost` | float | `1` | Multiplier on the fuel cost of generators (fuel-cost curves included) and technologies, and on the fuel prices of the master's fuel balance, in the scenario's operation |
 | `maintenance_cost` | float | `1` | Multiplier on the maintenance cost of generators, batteries, technologies and battery technologies in the scenario's operation |
 | `discount_rate` | float | `1` | Multiplier on the discount rate used for the scenario's costs |
 | `demand_growth` | float | `1` | Annual demand factor: the scenario's demand in year *y* is the base demand × `demand_growth`^(y−1). 1.02 = +2 %/year relative to the base case |
-| `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost × `fuel_price_growth`^(y−1) |
+| `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost and fuel prices × `fuel_price_growth`^(y−1) |
 | `carbon_price` | float | `1` | Multiplier on `co2_cost` in the scenario's operation |
 | `gen_fixed_cost` | float | `1` | Multiplier on the fixed O&M ($/MWh) of generators and technologies in the scenario's operation |
 | `gen_decommissioning_cost` | float | `1` | Multiplier on the decommissioning cost of existing generators |
@@ -1067,6 +1067,14 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `converter_invest_cost` | float | `1` | Multiplier on the `invest_cost` of AC/DC and frequency converters |
 | `converter_variable_cost` | float | `1` | Multiplier on the `variable_cost` of AC/DC and frequency converters |
 | `transmission_cost_per_mw_km` | float | `1` | Multiplier on the flow cost of inter-system links (`cost_per_mw_km`) |
+| `fuel_import_cost` | float | `1` | Multiplier on the per-node `import_cost` of the master's fuel balance |
+| `penalty_loss_of_fuel_supply` | float | `1` | Multiplier on `penalties.loss_of_fuel_supply` (fuel shortfall and excess supply) in the master |
+| `fuel_storage_invest_cost` | float | `1` | Multiplier on the fuel storage investment cost (`fuel_infrastructure`) |
+| `fuel_transport_cost` | float | `1` | Multiplier on the route transport cost and on the route investment cost |
+| `electrolyzer_invest_cost` | float | `1` | Multiplier on electrolyzer `invest_cost` |
+| `electrolyzer_fixed_cost` | float | `1` | Multiplier on electrolyzer `fixed_cost` |
+| `electrolyzer_variable_cost` | float | `1` | Multiplier on electrolyzer `variable_cost` |
+| `electrolyzer_water_cost` | float | `1` | Multiplier on electrolyzer `water_cost` |
 
 Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. Keys that end up on the same field multiply, with a warning. Any other key is ignored with a warning, among them the electrolyzer, fuel import, fuel storage and transport investment and loss-of-fuel-supply keys of earlier Studio versions.
 

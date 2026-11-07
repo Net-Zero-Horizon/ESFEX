@@ -2005,6 +2005,207 @@ import Ipopt
             @test rate_short(0.05) ≈ 2 * 5.0 atol = 1e-6  # 10 per step: 5 short per step
         end
 
+        # ── M2 (#89): fuel block of the master ──────────────────────────────
+        # Gas at 3e-5 per unit (+ 0.5e-5 import), 5 MWh_e per unit; an
+        # existing 30 MW electrolyzer (variable 2e-5 per MWh, water 1e-7 per
+        # kg, 13 kg/MWh) must make the 0.01 t/h of hydrogen demand, since a
+        # fuel shortfall costs 1.0 per unit.
+        function fuel_case(tres; elz_rated = 30.0, elz_max = 0.0)
+            H = 24 ÷ tres
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0], [5.0e-5], ones(H, 1);
+                        nb = 1, H = H)
+            elz = ElectrolyzerConfig([elz_rated], [0.65], [0.65], 50.0, [0.0], [0.0],
+                                     [1.0e-3], [elz_max], [1.0e-6], [2.0e-5], 1.0e-7, [20.0])
+            gasf = FuelConfig("Gas", 3.0e-5, 0.0, 10.0, 0.0, [1.0e6 * tres], [0.0], [0.0],
+                              0.0, [0.5e-5], 0.0, 0.0, 0.0)
+            h2 = FuelConfig("Hydrogen", 0.0, 0.0, 33.3, 0.0, [0.0], [0.0], [0.0], 0.0,
+                            [0.0], 0.0, 0.0, 0.0)
+            ne_gas = NonElectricDemandConfig("Industrial", "Gas", [8760.0], 0.0, ones(12))
+            ne_h2 = NonElectricDemandConfig("Industrial", "Hydrogen", [87.6], 0.0, ones(12))
+            pe = PrimaryEnergyInput(2025, 2025, 1, H, [gasf, h2],
+                Dict{String, FuelInfrastructureConfig}(), [ne_gas, ne_h2],
+                TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), H, H, 0.05, 1.0, 1.0,
+                "economic_dispatch", Dict{String, Any}(), nothing, false, nothing,
+                Dict{Int, Vector{Float64}}(), nothing, 1.0, tres, 0)
+            return H, gas, elz, pe
+        end
+        single_bus() = NetworkConfig(1, 1, [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)],
+            [1], zeros(1, 1), zeros(1, 1), 100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+            TransmissionLineData[], TransformerData[], ACDCConverterData[],
+            FrequencyConverterData[], 0.1)
+
+        @testset "master fuel block charges what the dispatch charges" begin
+            # One representative day of the master and a 24 h dispatch window
+            # of the same system: the same fuel bought, the same penalties,
+            # the same electrolyzer cost (water included), at 1 h and 2 h steps.
+            # The master used to charge the unit its flat fuel_cost and had no
+            # electrolyzer; the dispatch had no water cost.
+            for tres in (1, 2)
+                H, gas, elz, pe = fuel_case(tres)
+                net = single_bus()
+                inp = MasterProblemInput(years = [2025], network = net, generators = [gas],
+                    batteries = BatteryConfig[], base_demand = fill(50.0, H, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    temporal_resolution_hours = tres, verbose = false,
+                    primary_energy = MasterFuelInput(pe, [elz]))
+                model, mv, _ = create_master_problem(inp; use_representative_days = false)
+                ps = create_day_ps_vars!(model, inp, 1, 1, H)
+                tech_out, _ = add_day_operational_constraints!(model, ps, mv, inp, 1, 1,
+                    inp.base_demand[1:H, :], 1)
+                fc = add_master_fuel_day!(model, ps, inp, 1, 1, H, tech_out; extra = k -> 0.0)
+                _, mterms = model.ext[:master_fuel_last_day]
+                ESFEX.@objective(model, Min,
+                    tres * ESFEX.day_operational_cost(ps, inp, H; tech_output = tech_out) + fc)
+                ESFEX.set_silent(model)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+
+                input = PowerSystemInput(name = "d", year = 2025, network = net,
+                    generators = [gas], batteries = BatteryConfig[],
+                    demand = fill(50.0, H, 1),
+                    temporal = TemporalConfig(H, tres, H, 0, H, H, 1, 1, 1),
+                    electrolyzers = [elz], mode = "economic_dispatch",
+                    solver_name = "highs", verbose = false)
+                dmodel, dv = create_power_system(input)
+                pvd, temporal, prices = ESFEX.create_primary_energy_model(dmodel, pe)
+                ESFEX.couple_primary_energy_to_power_system!(dmodel, pvd, dv, pe;
+                    generators = input.generators, electrolyzers = input.electrolyzers,
+                    resolution_hours = Float64(tres))
+                dterms = ESFEX.get_primary_energy_objective_terms(pvd, pe, temporal, prices)
+                ESFEX.@objective(dmodel, Min, objective_function(dmodel) + sum(values(dterms)))
+                ESFEX.set_silent(dmodel)
+                optimize!(dmodel)
+                @test string(termination_status(dmodel)) == "OPTIMAL"
+
+                for k in (:pe_supply_cost, :pe_loss_cost, :pe_excess_cost, :pe_transport_cost)
+                    @test value(mterms[k]) ≈ value(dterms[k]) atol = 1e-9
+                end
+                @test value(mterms[:pe_supply_cost]) > 0
+                Pm = sum(value.(ps.electrolyzer_power))
+                Pd = sum(value.(dv.electrolyzer_power))
+                @test Pm ≈ Pd rtol = 1e-6
+                @test Pm * tres * 13.0 / 1000 * 0.8 ≈ 0.01 * 24 rtol = 1e-6
+                elz_m = tres * (2.0e-5 + 1.0e-7 * 13.0) * Pm
+                # The dispatch's bucket also holds the fixed cost of the 30 MW
+                # for the window's 24 h; the master charges it per year
+                fixed_day = 30.0 * 1.0e-6 * 24
+                @test elz_m + fixed_day ≈
+                      tres * value(dmodel.ext[:cost_expressions][:electrolyzer_cost]) rtol = 1e-6
+                @test value(ESFEX.master_fuel_annual_cost(mv, inp, 1)) ≈ fixed_day * 365 rtol = 1e-9
+                # The day's fuel cost replaces the unit's flat fuel_cost
+                gm = sum(value(ps.gen_output[1, 1, t]) for t in 1:H)
+                @test value(fc) ≈ sum(value(v) for v in values(mterms)) + elz_m -
+                                  tres * 5.0e-5 * gm rtol = 1e-9
+                @test value(dmodel.ext[:cost_expressions][:fuel_cost]) ≈ 0.0 atol = 1e-12
+            end
+        end
+
+        # Node 1: the power system, a gas tank of 10 (may grow by 20) drawn at
+        # most 0.5 of its capacity per hour. Node 2: gas with no electricity,
+        # a 100 km route to node 1 of 100 units/day that may grow 3-fold.
+        # Hydrogen demand at node 1, and an electrolyzer that must be built.
+        # Two years of one 24 h day each.
+        function fuel_invest_input()
+            H = 24
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0], [5.0e-5], ones(H, 1);
+                        nb = 1, H = H)
+            elz = ElectrolyzerConfig([0.0], [0.65], [0.65], 50.0, [0.0], [0.0],
+                                     [1.0e-3], [50.0], [1.0e-6], [2.0e-5], 1.0e-7, [20.0])
+            gasf = FuelConfig("Gas", 3.0e-5, 0.0, 10.0, 0.0, [0.0, 1.0e6], [10.0, 0.0],
+                              [1.0, 0.0], 0.0, [5.0e-4, 1.0e-5], 0.0, 0.0, 0.0)
+            h2 = FuelConfig("Hydrogen", 0.0, 0.0, 33.3, 0.0, [0.0, 0.0], [0.0, 0.0],
+                            [0.0, 0.0], 0.0, [0.0, 0.0], 0.0, 0.0, 0.0)
+            infra = Dict("Gas" => FuelInfrastructureConfig(100.0, 1.0e-6, 3.0, 1.0e-4, 2.0,
+                                                          1.0, 20.0, 30.0, 0.5))
+            route = TransportRoute("r21", 2, 1, 100.0,
+                Dict("Gas" => FuelRouteParams(100.0, 1.0e-7, 0.0)))
+            ne_h2 = NonElectricDemandConfig("Industrial", "Hydrogen", [87.6, 0.0], 0.0, ones(12))
+            pe = PrimaryEnergyInput(2025, 2025, 2, H, [gasf, h2], infra, [ne_h2], [route],
+                Dict(1 => ("Gas", 5.0, 10.0, 0.5)), H, H, 0.05, 1.0, 1.0,
+                "economic_dispatch", Dict{String, Any}(), nothing, false, nothing,
+                Dict{Int, Vector{Float64}}(), nothing, 1.0, 1, 0)
+            return MasterProblemInput(years = [2025, 2026], network = single_bus(),
+                generators = [gas], batteries = BatteryConfig[],
+                base_demand = fill(50.0, 2H, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, hours_per_year = [24, 24], slack_penalty = 0.0,
+                verbose = false, primary_energy = MasterFuelInput(pe, [elz]))
+        end
+
+        @testset "master builds fuel storage, transport and electrolyzers" begin
+            inp = fuel_invest_input()
+            model, mv, _ = create_master_problem(inp; use_representative_days = true)
+            ESFEX.set_silent(model)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            fi = extract_master_solution(model, mv, inp).fuel_investment
+            # 50 MW + the electrolyzer burn gas shipped from node 2: the
+            # route grows from 100 units/day to what is burnt
+            elz_mw = 0.01 / (13.0 / 1000 * 0.8)          # hydrogen demand / output
+            gas_day = (50.0 + elz_mw) * 24 / 5.0
+            @test fi["electrolyzer"][1][1][1] ≈ elz_mw rtol = 1e-6
+            @test fi["transport"][1]["Gas"][1] ≈ gas_day - 100.0 rtol = 1e-6
+            # Tank draw ≤ 0.5 × capacity per hour: the hourly burn needs 2×
+            @test fi["storage"][1]["Gas"][1] ≈ 2 * gas_day / 24 - 10.0 rtol = 1e-6
+            # Built once, in service both years
+            @test fi["storage_capacity"][2]["Gas"][1] ≈ fi["storage"][1]["Gas"][1]
+            @test fi["electrolyzer_capacity"][2][1][1] ≈ elz_mw rtol = 1e-6
+
+            # Benders reaches the same plan (the cuts carry the fuel capacities)
+            br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-6,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(model) rtol = 1e-6
+            bf = br.solution.fuel_investment
+            @test bf["storage_capacity"][1]["Gas"][1] ≈ fi["storage_capacity"][1]["Gas"][1] rtol = 1e-4
+            @test bf["transport_capacity"][1]["Gas"][1] ≈ fi["transport_capacity"][1]["Gas"][1] rtol = 1e-4
+            @test bf["electrolyzer_capacity"][1][1][1] ≈ elz_mw rtol = 1e-4
+        end
+
+        @testset "stochastic fuel and electrolyzer multipliers" begin
+            function solve_with(m::ScenarioMultipliers)
+                inp = fuel_invest_input()
+                sin = StochasticMasterInput(inp, [Scenario("s", 1.0, m)], true)
+                model, mv, _, _ = ESFEX.create_stochastic_master_problem(sin)
+                ESFEX.set_silent(model)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return objective_value(model), extract_master_solution(model, mv, inp).fuel_investment
+            end
+            obj0, fi0 = solve_with(ScenarioMultipliers())
+            @test fi0["storage"][1]["Gas"][1] > 1.0
+            # Dearer builds are not made (a shortfall costs less)
+            _, fi = solve_with(ScenarioMultipliers(fuel_storage_invest_cost = 1.0e5,
+                fuel_transport_cost = 1.0e5, electrolyzer_invest_cost = 1.0e5))
+            @test fi["storage"][1]["Gas"][1] ≈ 0.0 atol = 1e-6
+            @test fi["transport"][1]["Gas"][1] ≈ 0.0 atol = 1e-6
+            @test fi["electrolyzer"][1][1][1] ≈ 0.0 atol = 1e-6
+            # Operating multipliers raise the cost of the same plan
+            for kw in ((fuel_cost = 2.0,), (fuel_import_cost = 2.0,), (fuel_price_growth = 2.0,),
+                       (electrolyzer_variable_cost = 2.0,), (electrolyzer_water_cost = 2.0,),
+                       (electrolyzer_fixed_cost = 2.0,))
+                obj, _ = solve_with(ScenarioMultipliers(; kw...))
+                @test obj > obj0 + 1e-9
+            end
+            # A cheaper fuel shortfall replaces the route expansion
+            _, fi = solve_with(ScenarioMultipliers(penalty_loss_of_fuel_supply = 1.0e-6))
+            @test fi["transport"][1]["Gas"][1] ≈ 0.0 atol = 1e-6
+        end
+
+        @testset "the dispatch builds no fuel infrastructure" begin
+            # Fuel storage and routes used to be built in every window that
+            # invested; now only the master builds them.
+            _, _, _, pe = fuel_case(1)
+            infra = Dict("Gas" => FuelInfrastructureConfig(100.0, 1.0e-9, 3.0, 1.0e-9, 2.0,
+                                                          1.0, 20.0, 30.0, 0.5))
+            pe2 = ESFEX.with_fields(pe; infrastructure = infra)
+            m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+            vars, _, _ = ESFEX.create_primary_energy_model(m, pe2)
+            @test isempty(vars.storage_capacity_investment)
+            @test isempty(vars.transport_capacity_investment)
+        end
+        # ── end M2 ────────────────────────────────────────────────────────────
+
         @testset "master charges battery maintenance and scales candidate costs" begin
             # One representative day stands for 365: every operating cost of
             # the day enters the objective × 365. The battery maintenance was

@@ -1135,6 +1135,21 @@ class ScenarioMultipliers(BaseModel):
     # Penalty per tonne over each system's CO2 budget
     penalty_co2_budget_violation: float = 1.0
     # --- end ---
+    # ── Fuel chain and electrolyzers of the master's fuel block (#89) ──
+    # Per-node fuel import cost
+    fuel_import_cost: float = 1.0
+    # Fuel shortfall and excess-supply penalty (loss_of_fuel_supply)
+    penalty_loss_of_fuel_supply: float = 1.0
+    # Fuel storage investment
+    fuel_storage_invest_cost: float = 1.0
+    # Route transport cost per unit·km and route investment
+    fuel_transport_cost: float = 1.0
+    # Electrolyzer investment, fixed, variable (per MWh) and water (per kg H2) cost
+    electrolyzer_invest_cost: float = 1.0
+    electrolyzer_fixed_cost: float = 1.0
+    electrolyzer_variable_cost: float = 1.0
+    electrolyzer_water_cost: float = 1.0
+    # ── end fuel block ──
 
     @model_validator(mode="before")
     @classmethod
@@ -1157,17 +1172,9 @@ SCENARIO_MULTIPLIER_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # Keys the Studio used to offer that cannot change the master's plan: it has
-# no electrolyzer, fuel import or fuel shortfall term and no fuel
-# storage/transport investment.
+# no term for them. Every key the Studio offered now scales a term of the
+# master (#89); the set stays for keys that may lose theirs.
 SCENARIO_MULTIPLIERS_WITHOUT_EFFECT: frozenset[str] = frozenset({
-    "electrolyzer_invest_cost",
-    "electrolyzer_fixed_cost",
-    "electrolyzer_variable_cost",
-    "electrolyzer_water_cost",
-    "fuel_import_cost",
-    "fuel_storage_invest_cost",
-    "fuel_transport_cost",
-    "penalty_loss_of_fuel_supply",
 })
 
 

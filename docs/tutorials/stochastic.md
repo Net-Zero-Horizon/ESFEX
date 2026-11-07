@@ -110,6 +110,14 @@ Each multiplier scales the corresponding base-case parameter (1.0 = no change). 
 | `gen_start_up_cost` | 1.0 | Generator start-up cost (only when the dispatch uses unit commitment, `use_uc_in_dispatch`) |
 | `converter_variable_cost` | 1.0 | Variable cost of AC/DC and frequency converters |
 | `transmission_cost_per_mw_km` | 1.0 | Flow cost of inter-system links (per MWh and km) |
+| `penalty_loss_of_fuel_supply` | 1.0 | Fuel shortfall and excess-supply penalty (with primary energy) |
+| `fuel_import_cost` | 1.0 | Per-node fuel import cost (with primary energy) |
+| `fuel_transport_cost` | 1.0 | Route transport cost and route investment (with primary energy) |
+| `fuel_storage_invest_cost` | 1.0 | Fuel storage investment (with primary energy) |
+| `electrolyzer_invest_cost` | 1.0 | Electrolyzer investment (with primary energy) |
+| `electrolyzer_fixed_cost` | 1.0 | Electrolyzer fixed cost (with primary energy) |
+| `electrolyzer_variable_cost` | 1.0 | Electrolyzer variable cost (with primary energy) |
+| `electrolyzer_water_cost` | 1.0 | Electrolyzer water cost (with primary energy) |
 | `invest_cost_renewables` | 1.0 | Investment cost of renewable technologies ($/MW) |
 | `invest_cost_conventional` | 1.0 | Investment cost of non-renewable technologies ($/MW) |
 | `invest_cost_storage` | 1.0 | Battery technology investment cost ($/MW and $/MWh) |

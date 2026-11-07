@@ -7,11 +7,13 @@ The primary energy model optimizes the fuel supply chain at multiple temporal sc
 The primary energy module models:
 
 - **Fuel supply** at import/production nodes with cost and availability limits
-- **Fuel transport** between nodes with capacity, losses, and investment
+- **Fuel transport** between nodes with capacity and losses
 - **Fuel storage** with dynamic inventory management
 - **Non-electric demand** for fuels outside the electricity sector
 - **Coupling** with generator fuel consumption in the power system
 - **Environmental emissions** from fuel combustion and non-electric consumption
+
+Fuel storage and route capacity are built by the master problem, not here: the master runs this same model on its representative days and decides the builds, and each dispatch year receives them as existing capacity (see [Capacity Expansion](capacity-expansion.md#fuel-block)).
 
 ## Multi-Temporal Structure
 
@@ -21,7 +23,7 @@ The primary energy model operates at a coarser temporal resolution than the hour
 |-------|-----------|-----------|
 | Hourly (time step) | 1 step of the dispatch | Tank levels, local supply into the tanks, fuel drawn for generators and non-electric use, shortfall |
 | Primary period | `primary_energy_resolution` (24 h default) | Supply limits, route shipments, non-electric demand per sector |
-| Investment period | 1 year | Infrastructure investment |
+| Investment period | 1 year | Not used: the dispatch builds no fuel infrastructure |
 
 The temporal mapping is built by `create_temporal_mapping()`:
 
@@ -49,8 +51,8 @@ Fuel is stored in one tank per fuel and node, balanced every time step; there is
 | \(T_{f,r,p}\) | fuel, route, period | units/period | Fuel shipped on route \(r\) |
 | \(V^{hr}_{f,n,t}\) | fuel, node, hour | units | Tank level at the start of step \(t\) (`hr_storage_*`, steps 1 … H+1) |
 | \(s^{out}_{f,n,t}\) | fuel, node, hour | units/step | Fuel drawn from the tank (`hr_storage_out_*`) |
-| \(I^{stor}_{f,n,ip}\) | fuel, node, inv. period | units | Storage capacity investment |
-| \(I^{trans}_{f,r,ip}\) | fuel, route, inv. period | units/day | Transport capacity investment |
+| \(I^{stor}_{f,n}\) | fuel, node | units | Storage capacity the master builds (master only, see [Capacity Expansion](capacity-expansion.md#fuel-block)) |
+| \(I^{trans}_{f,r}\) | fuel, route | units/day | Route capacity the master builds (master only) |
 | \(W^{ne}_{f,s,n,p}\) | fuel, sector, node, period | units/period | Non-electric fuel consumption |
 | \(W^{elec}_{g,n,t}\) | generator, node, hour | units/step | Fuel drawn for generator \(g\) (`hr_fuel_power_gen{g}`) |
 | \(L^{hr}_{f,n,t}\) | fuel, node, hour | units/step | Fuel shortfall: use the tank cannot cover (penalized) |
@@ -107,14 +109,14 @@ Fuel transport is modeled through explicit routes connecting pairs of nodes. In 
 - A **distance** \(d_r\) (km)
 - Per-fuel parameters: capacity, transport losses, and cost
 
-Transport flow is bounded by existing capacity plus investment:
+Transport flow is bounded by the route's capacity:
 
 \[
-T_{f,r,p} \leq \left(\bar{T}^{base}_{f,r} + C^{cumul}_{f,r} + I^{trans}_{f,r,ip}\right) \cdot \Delta_p^{days}
+T_{f,r,p} \leq \left(\bar{T}^{base}_{f,r} + C^{cumul}_{f,r} + I^{trans}_{f,r}\right) \cdot \Delta_p^{days}
 \tag{PE-2}
 \]
 
-where \(\bar{T}^{base}_{f,r}\) is the base daily capacity, \(C^{cumul}_{f,r}\) is cumulative capacity from prior investments, \(I^{trans}_{f,r,ip}\) is new investment in the current investment period, and \(\Delta_p^{days}\) is the number of days in primary period \(p\) (its steps times the step length). Constraint `pp_transport_cap_{fuel}_r{r}_{p}`. A `fuel_route` [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies the right-hand side by the mean availability of the period's steps (shipments are decided per period).
+where \(\bar{T}^{base}_{f,r}\) is the base daily capacity, \(C^{cumul}_{f,r}\) is the capacity the master built and that is in service in the year (a constant in the dispatch), \(I^{trans}_{f,r}\) is the master's own build variable (only in the master's day model; 0 in the dispatch), and \(\Delta_p^{days}\) is the number of days in primary period \(p\) (its steps times the step length). Constraint `pp_transport_cap_{fuel}_r{r}_{p}`. A `fuel_route` [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies the right-hand side by the mean availability of the period's steps (shipments are decided per period).
 
 ### Transport Losses
 
@@ -175,10 +177,10 @@ with \(V^{init}_{f,n}\) = `initial_storage_level[n]` and \(\bar{V}_{f,n}\) = `st
 
 ### Storage Bounds
 
-Tank levels are bounded by capacity (existing plus investment):
+Tank levels are bounded by capacity (configured plus what the master built):
 
 \[
-V^{hr}_{f,n,t+1} \leq \bar{V}^{tot}_{f,n} = \bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip} \quad \forall f, n, t
+V^{hr}_{f,n,t+1} \leq \bar{V}^{tot}_{f,n} = \bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n} \quad \forall f, n, t
 \tag{PE-5a}
 \]
 
@@ -203,14 +205,14 @@ V^{hr}_{f,n,\text{end}(p)+1} \ge \underline{v}_f \cdot \bar{V}^{tot}_{f,n}
 
 With \(\underline{v}_f = 0\) the tank may be emptied. A positive floor reserves fuel even under stress: combined with a source disruption (PE-1b) and a transport lead time (PE-3b), the reserve cannot be tapped to cover the gap, so the penalised shortfall — and any consequent generation curtailment — appears sooner.
 
-**Storage and transport investment limits** (in `development` and `economic_dispatch` modes, where investment variables exist):
+**Storage and transport expansion limits** (master problem; the dispatch builds nothing):
 
 \[
-I^{stor}_{f,n,ip} \leq \bar{V}_{f,n} \cdot \xi^{stor}_f - C^{cumul}_{f,n}, \qquad I^{trans}_{f,r,ip} \leq \bar{T}^{base}_{f,r} \cdot \xi^{trans}_f - C^{cumul}_{f,r} \quad \forall f, n, r, ip
+\sum_y I^{stor}_{f,n,y} \leq \bar{V}_{f,n} \cdot \xi^{stor}_f - C^{cumul}_{f,n}, \qquad \sum_y I^{trans}_{f,r,y} \leq \bar{T}^{base}_{f,r} \cdot \xi^{trans}_f - C^{cumul}_{f,r} \quad \forall f, n, r
 \tag{PE-5d}
 \]
 
-where \(\xi^{stor}_f\) and \(\xi^{trans}_f\) are the `expansion_limit` of the fuel's storage facility and pipeline entries in `fuel_infrastructure` (defaults 1.0 and 0.5), and \(C^{cumul}\) the capacity built in earlier windows (the limit is on the total expansion, not per window). What a window builds is added to \(C^{cumul}\) for the windows after it. The master problem has no fuel model, so fuel infrastructure is built here in `development` mode as well. Constraints `inv_storage_limit_{fuel}_{ip}_{n}` and `inv_transport_limit_{fuel}_{ip}_r{r}`.
+where \(\xi^{stor}_f\) and \(\xi^{trans}_f\) are the `expansion_limit` of the fuel's storage facility and pipeline entries in `fuel_infrastructure` (defaults 1.0 and 0.5), and \(C^{cumul}\) the capacity built before the master's first year (earlier years of a myopic run). The limit is on the total expansion over the horizon. In a run without a master (`economic_dispatch` or `unit_commitment` mode) no fuel infrastructure is built. Bounds of `fuel_storage_inv_y{y}_{fuel}` and `fuel_transport_inv_y{y}_{fuel}`, constraints `fuel_storage_inv_total_{fuel}_{n}` and `fuel_transport_inv_total_{fuel}_{r}`.
 
 ### Hourly Fuel Use
 
@@ -302,15 +304,15 @@ C^{transport} = \sum_{f,r,p} c^{trans}_{f,r} \cdot d_r \cdot T_{f,r,p}
 
 where \(c^{trans}_{f,r}\) is the transport cost per unit per km (`transport_cost` in the route's `fuel_params`).
 
-### Fixed / Investment Costs
+### Investment Costs
 
-Investment in storage and transport infrastructure (in `development` and `economic_dispatch` modes) is annualized with the capital recovery factor \(\text{CRF}(r, L) = r(1+r)^L / ((1+r)^L - 1)\) at the system discount rate and the facility lifetime (`lifetime`, defaults 30 years for storage, 20 for pipelines):
+The dispatch has no investment cost: the master builds the fuel infrastructure and charges it, like its other assets, as an overnight cost discounted to the build year:
 
 \[
-C^{invest} = \phi^{win} \left( \sum_{f,n,ip} c^{stor,inv}_f \, \text{CRF}^{stor}_f \, I^{stor}_{f,n,ip} + \sum_{f,r,ip} c^{trans,inv}_f \, d_r \, \text{CRF}^{trans}_f \, I^{trans}_{f,r,ip} \right)
+C^{invest} = \sum_{y} \delta_y \left( \sum_{f,n} c^{stor,inv}_f \, I^{stor}_{f,n,y} + \sum_{f,r} c^{trans,inv}_f \, d_r \, I^{trans}_{f,r,y} \right)
 \]
 
-with \(c^{stor,inv}_f\) and \(c^{trans,inv}_f\) the `investment_cost` of the fuel's `fuel_infrastructure` entries and \(\phi^{win}\) the window's share of the year (the annuity is annual; the dispatch's own investment costs are scaled the same way).
+with \(c^{stor,inv}_f\) and \(c^{trans,inv}_f\) the `investment_cost` of the fuel's `fuel_infrastructure` entries and \(\delta_y\) the master's discount factor. Built fuel capacity does not retire within the horizon.
 
 ### Penalty Costs
 
@@ -427,8 +429,8 @@ with the terms defined above. The PE terms are added to the operational dispatch
 |------|-------------|
 | Supply cost | Fuel procurement at import nodes |
 | Transport cost | Operating cost proportional to distance |
-| Storage investment | Annualized infrastructure cost |
-| Transport investment | Annualized route capacity cost |
+| Storage investment | Master only: overnight cost of the tanks it builds |
+| Transport investment | Master only: overnight cost of the route capacity it builds |
 | Shortfall penalties | Fuel shortfall, unmet non-electric demand, excess supply |
 
 ## Power System Coupling
@@ -521,7 +523,7 @@ systems:
         demand: [12000, 3000]               # tonnes/year per node
 ```
 
-Of the source fields, `storage_investment_cost`, `transport_cost`, `transport_losses`, `max_storage_investment_per_node` and `max_transport_investment_per_arc` are required by the schema; the model takes the investment costs and limits from `fuel_infrastructure` and the route costs and losses from `fuel_transport_routes`. The master problem does not use them either: it has no fuel model, and fuel storage and transport are built by the dispatch's primary-energy block (PE-5d).
+Of the source fields, `storage_investment_cost`, `transport_cost`, `transport_losses`, `max_storage_investment_per_node` and `max_transport_investment_per_arc` are required by the schema; the model takes the investment costs and limits from `fuel_infrastructure` and the route costs and losses from `fuel_transport_routes`. The master problem uses the same `fuel_infrastructure` costs and limits when it builds fuel storage and route capacity (PE-5d).
 
 ---
 

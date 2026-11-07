@@ -59,7 +59,14 @@ struct FixedCapacities
     line_capacity::Dict{Int, Float64}
     # RE ratios for this year (per system, from master target)
     re_ratios::Vector{Float64}
+    # M2 (#89): fuel storage/transport and electrolyzer capacity built by the
+    # master and in service this year (master_fuel_extra_values)
+    fuel_extra::Dict{Tuple{Symbol, String, Int}, Float64}
 end
+
+# Without fuel builds (warm starts, no primary energy)
+FixedCapacities(args::Vararg{Any, 8}) =
+    FixedCapacities(args..., Dict{Tuple{Symbol, String, Int}, Float64}())
 
 """A single Benders optimality cut."""
 struct BendersCut
@@ -74,7 +81,13 @@ struct BendersCut
     bat_life_ext_gradients::Dict{Tuple{Int,Int}, Float64}
     # line_idx => marginal value of line capacity
     line_gradients::Dict{Int, Float64}
+    # M2 (#89): fuel capacity key => marginal value of the capacity in
+    # service in the cut's year (master_fuel_extra_expr maps it to the builds)
+    fuel_gradients::Dict{Tuple{Symbol, String, Int}, Float64}
 end
+
+BendersCut(args::Vararg{Any, 7}) =
+    BendersCut(args..., Dict{Tuple{Symbol, String, Int}, Float64}())
 
 """Subproblem data container for a single representative day."""
 struct SubproblemData
@@ -570,6 +583,9 @@ function create_benders_master(
             end
         end
 
+        # M2 (#89): electrolyzer fixed cost
+        add_to_expression!(annual_cost, master_fuel_annual_cost(vars, input, y_idx))
+
         add_to_expression!(total_cost, annual_cost, discount_factor)
 
         # Add discounted theta (operational cost approximation)
@@ -728,7 +744,8 @@ function evaluate_fixed_capacities(
     return FixedCapacities(
         gen_cap, bat_pow, bat_en,
         tech_cap, bt_pow, bt_en,
-        line_cap, re_ratios
+        line_cap, re_ratios,
+        master_fuel_extra_values(vars.fuel, input, year_idx)  # M2 (#89)
     )
 end
 
@@ -1257,6 +1274,13 @@ function create_benders_subproblem(
     # NOTE: re_excess_penalty is not used: RE has a floor only, as in the
     # monolithic master.
 
+    # M2 (#89): fuel block with the master's fuel capacities fixed by copy
+    # constraints, whose duals feed the cut (extract_fuel_duals)
+    fuel_cost, fuel_fix = benders_fuel_day!(sp_model, ps_vars, input, year_idx,
+        start_hour, hours, tech_output, fixed_caps.fuel_extra)
+    add_to_expression!(day_cost, fuel_cost, master_fuel_day_scale(input))
+    isempty(fuel_fix) || (constraint_store["fuel_fix"] = fuel_fix)
+
     @objective(sp_model, Min, day_cost)
 
     return SubproblemData(
@@ -1403,7 +1427,8 @@ function build_optimality_cut(
     fixed_caps::FixedCapacities,
     input::MasterProblemInput,
     year_idx::Int,
-    ypp::Int
+    ypp::Int;
+    fuel_duals::AbstractDict = Dict{Tuple{Symbol, String, Int}, Float64}()
 )::BendersCut
     # The dual π[(t,b)] is w.r.t. cumulative capacity at (t,b) for this year
     # Chain rule: d(cumul_cap[y][t][b]) / d(inv[y'][t][b]) = deg_factor if age < lifetime
@@ -1424,6 +1449,10 @@ function build_optimality_cut(
     for ((bt, b), pi) in bt_cap_duals
         cap_star = get(fixed_caps.bat_tech_energy, (bt, b), 0.0)
         intercept -= pi * cap_star
+    end
+    # M2 (#89): fuel capacities
+    for (k, pi) in fuel_duals
+        intercept -= pi * get(fixed_caps.fuel_extra, k, 0.0)
     end
 
     # Technology gradients: π[(t,b)] maps to investment variables via cumulative sum
@@ -1483,7 +1512,8 @@ function build_optimality_cut(
         bt_cap_grads,
         Dict{Tuple{Int,Int}, Float64}(),  # gen_life_ext (not yet extracted)
         Dict{Tuple{Int,Int}, Float64}(),  # bat_life_ext (not yet extracted)
-        Dict{Int, Float64}()              # line gradients (not yet extracted)
+        Dict{Int, Float64}(),             # line gradients (not yet extracted)
+        Dict{Tuple{Symbol, String, Int}, Float64}(fuel_duals)  # M2 (#89)
     )
 end
 
@@ -1535,6 +1565,12 @@ function add_optimality_cut!(
         if haskey(vars.bat_tech_capacity_investment, y) && haskey(vars.bat_tech_capacity_investment[y], bt)
             add_to_expression!(rhs, vars.bat_tech_capacity_investment[y][bt][b], grad * inv_scale)
         end
+    end
+
+    # M2 (#89): fuel capacity in service this year, as built by the master
+    for (k, grad) in cut.fuel_gradients
+        add_to_expression!(rhs, master_fuel_extra_expr(vars.fuel, input, year_idx, k),
+                           grad * inv_scale)
     end
 
     @constraint(model,
@@ -1666,6 +1702,7 @@ function run_benders_decomposition(
         year_tech_duals = Dict{Tuple{Int,Int}, Float64}()
         year_bt_pow_duals = Dict{Tuple{Int,Int}, Float64}()
         year_bt_cap_duals = Dict{Tuple{Int,Int}, Float64}()
+        year_fuel_duals = Dict{Tuple{Symbol, String, Int}, Float64}()  # M2 (#89)
 
         for (day_idx, start_hour) in enumerate(rep_days_by_year[y_idx])
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
@@ -1691,6 +1728,9 @@ function run_benders_decomposition(
                     for (k, v) in bcd
                         year_bt_cap_duals[k] = get(year_bt_cap_duals, k, 0.0) + v
                     end
+                    for (k, v) in extract_fuel_duals(sp)
+                        year_fuel_duals[k] = get(year_fuel_duals, k, 0.0) + v
+                    end
                 end
             end
         end
@@ -1702,11 +1742,13 @@ function run_benders_decomposition(
         # The theta variable already has lower_bound=0 from its declaration.
 
         # Add warm-start cut from high-investment point
-        if !isempty(year_tech_duals) || !isempty(year_bt_pow_duals) || !isempty(year_bt_cap_duals)
+        if !isempty(year_tech_duals) || !isempty(year_bt_pow_duals) ||
+           !isempty(year_bt_cap_duals) || !isempty(year_fuel_duals)
             cut = build_optimality_cut(
                 year_min_cost,
                 year_tech_duals, year_bt_pow_duals, year_bt_cap_duals,
-                warm_caps, input, y_idx, vars.years_per_inv_period
+                warm_caps, input, y_idx, vars.years_per_inv_period;
+                fuel_duals = year_fuel_duals
             )
             add_optimality_cut!(master_model, theta, cut, y_idx, vars, input, 0)
         end
@@ -1765,6 +1807,7 @@ function run_benders_decomposition(
             mod_td = Dict{Tuple{Int,Int}, Float64}()
             mod_bpd = Dict{Tuple{Int,Int}, Float64}()
             mod_bcd = Dict{Tuple{Int,Int}, Float64}()
+            mod_fd = Dict{Tuple{Symbol, String, Int}, Float64}()  # M2 (#89)
 
             for (day_idx2, start_hour2) in enumerate(rep_days_by_year[y_idx])
                 end_hour2 = min(start_hour2 + timesteps_per_day - 1, size(input.base_demand, 1))
@@ -1783,14 +1826,16 @@ function run_benders_decomposition(
                         for (k, v) in td2; mod_td[k] = get(mod_td, k, 0.0) + v; end
                         for (k, v) in bpd2; mod_bpd[k] = get(mod_bpd, k, 0.0) + v; end
                         for (k, v) in bcd2; mod_bcd[k] = get(mod_bcd, k, 0.0) + v; end
+                        for (k, v) in extract_fuel_duals(sp2); mod_fd[k] = get(mod_fd, k, 0.0) + v; end
                     end
                 end
             end
 
-            if !isempty(mod_td) || !isempty(mod_bpd) || !isempty(mod_bcd)
+            if !isempty(mod_td) || !isempty(mod_bpd) || !isempty(mod_bcd) || !isempty(mod_fd)
                 mod_cut = build_optimality_cut(
                     mod_cost, mod_td, mod_bpd, mod_bcd,
-                    mod_caps, input, y_idx, vars.years_per_inv_period
+                    mod_caps, input, y_idx, vars.years_per_inv_period;
+                    fuel_duals = mod_fd
                 )
                 add_optimality_cut!(master_model, theta, mod_cut, y_idx, vars, input, 0)
             end
@@ -1875,6 +1920,7 @@ function run_benders_decomposition(
             year_tech_duals = Dict{Tuple{Int,Int}, Float64}()
             year_bt_pow_duals = Dict{Tuple{Int,Int}, Float64}()
             year_bt_cap_duals = Dict{Tuple{Int,Int}, Float64}()
+            year_fuel_duals = Dict{Tuple{Symbol, String, Int}, Float64}()  # M2 (#89)
 
             for (day_idx, start_hour) in enumerate(rep_days)
                 end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
@@ -1930,6 +1976,9 @@ function run_benders_decomposition(
                     for (k, v) in bcd
                         year_bt_cap_duals[k] = get(year_bt_cap_duals, k, 0.0) + v
                     end
+                    for (k, v) in extract_fuel_duals(sp)
+                        year_fuel_duals[k] = get(year_fuel_duals, k, 0.0) + v
+                    end
                 end
             end
 
@@ -1938,11 +1987,17 @@ function run_benders_decomposition(
             total_operational_cost += discount_factor * year_cost
 
             # Build aggregated cut for this year
-            if !isempty(year_tech_duals) || !isempty(year_bt_pow_duals) || !isempty(year_bt_cap_duals)
+            # With the fuel block a cut is added even when every gradient is
+            # zero: θ ≥ Q is then what tells the master the year's fuel cost
+            # (M2, #89).
+            if !isempty(year_tech_duals) || !isempty(year_bt_pow_duals) ||
+               !isempty(year_bt_cap_duals) || !isempty(year_fuel_duals) ||
+               has_master_fuel(input)
                 cut = build_optimality_cut(
                     year_cost,
                     year_tech_duals, year_bt_pow_duals, year_bt_cap_duals,
-                    fixed_caps, input, y_idx, vars.years_per_inv_period
+                    fixed_caps, input, y_idx, vars.years_per_inv_period;
+                    fuel_duals = year_fuel_duals
                 )
                 year_cuts[y_idx] = cut
             end
@@ -2096,6 +2151,7 @@ function extract_master_solution_from_benders(
         result.cumulative_bat_tech_power,
         result.cumulative_bat_tech_capacity,
         result.reservoir_investment,
-        result.converter_investment
+        result.converter_investment,
+        result.fuel_investment  # M2 (#89)
     )
 end
