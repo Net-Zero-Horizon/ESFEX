@@ -1208,6 +1208,8 @@ class PowerSystemAdapter:
         # Accept explicit system_config override (used by runner to pass
         # the merged system instead of config.primary_system).
         system_config_override = kwargs.pop("system_config", None)
+        # The configuration file: relative profile paths resolve next to it
+        self._config_path = kwargs.pop("config_path", None)
         if isinstance(config, ESFEXConfig):
             self.esfex_config = config
             self.system_config = system_config_override or config.primary_system
@@ -1272,6 +1274,28 @@ class PowerSystemAdapter:
                         cached[wrapped_start:],
                         cached[:wrapped_end - len(cached)]
                     ])
+
+    def _load_availability_file(self, availability_file: str, num_nodes: int,
+                                owner: str) -> np.ndarray:
+        """Hourly profile of a unit not in ``availability_cache``.
+
+        Read with the runner's reader (:func:`esfex.io.demand.
+        load_run_availability`): path under the configuration's directory
+        (``config_path``), Feb 29 dropped by the calendar of ``date_start``.
+        Pass the result through :meth:`_slice_availability` like a cached one.
+        """
+        from pathlib import Path
+
+        from esfex.io.demand import load_run_availability
+        from esfex.utils.temporal import parse_date_start
+
+        config_path = getattr(self, "_config_path", None)
+        config_dir = Path(config_path).parent if config_path else Path(".")
+        date_start = None
+        if self.esfex_config is not None:
+            date_start = parse_date_start(self.esfex_config.date_start).strftime("%d/%m/%Y %H:%M")
+        return load_run_availability(config_dir, availability_file, num_nodes, date_start,
+                                     owner=owner)
 
     def build_model(self, external_model=None):
         """
@@ -1459,33 +1483,13 @@ class PowerSystemAdapter:
                     self.availability_cache[key], resolution_hours
                 )
             elif hasattr(gen, 'availability_file') and gen.availability_file:
-                # Fallback: load from file if not cached. Resolve like demand
-                # paths: absolute paths (GUI-written, run from a /tmp config)
-                # are trusted as-is; relative paths resolve under config_dir,
-                # refusing `../../...` traversal from untrusted yaml files
-                # (see utils/paths.resolve_project_data_file).
-                from pathlib import Path
-                from esfex.utils.paths import resolve_project_data_file
-                config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
-                # A profile that cannot be read is an error: skipping here
-                # dropped the whole generator from the dispatch.
-                try:
-                    avail_path = resolve_project_data_file(config_dir, gen.availability_file)
-                except ValueError as e:
-                    raise ValueError(
-                        f"Generator {key!r}: availability_file "
-                        f"{gen.availability_file!r} resolves outside config "
-                        f"directory {config_dir} (refusing path traversal)"
-                    ) from e
-                if not avail_path.exists():
-                    raise FileNotFoundError(
-                        f"Generator {key!r}: availability_file "
-                        f"{gen.availability_file!r} not found under {config_dir}"
-                    )
-                availability = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=resolution_hours,
-                    num_nodes=num_nodes
+                # Not preloaded: read it as the runner does and slice this
+                # window. A profile that cannot be read is an error: skipping
+                # here dropped the whole generator from the dispatch.
+                availability = self._slice_availability(
+                    self._load_availability_file(
+                        gen.availability_file, num_nodes, f"Generator {key!r}"),
+                    resolution_hours,
                 )
 
             # Apply updated capacities from units_config if available
@@ -1620,6 +1624,12 @@ class PowerSystemAdapter:
                         ):
                             v_avail = self._slice_availability(cached_arr, resolution_hours)
                             break
+                    else:
+                        v_avail = self._slice_availability(
+                            self._load_availability_file(
+                                avail_file, num_nodes, f"Technology unit {key!r}"),
+                            resolution_hours,
+                        )
 
             if v_avail is None:
                 logger.warning(f"Virtual gen {key}: NO availability matched for file={avail_file}")

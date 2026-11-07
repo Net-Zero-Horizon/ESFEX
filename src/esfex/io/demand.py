@@ -499,6 +499,41 @@ def load_availability_profile(
         return np.ones((hours, nodes))
 
 
+def load_run_availability(
+    config_dir: Union[str, Path],
+    availability_file: Union[str, Path],
+    num_nodes: int,
+    date_start: Optional[str],
+    owner: str = "Unit",
+) -> np.ndarray:
+    """Read a unit's ``availability_file`` the way a run does.
+
+    The path resolves like demand paths (an absolute path as is, a relative
+    one under *config_dir*, refusing ``../`` traversal); a path that escapes
+    or a missing file is an error naming *owner* (``"Generator 'pv'"``). The
+    profile is read hourly, Feb 29 dropped by the calendar of *date_start*
+    (the run's ``date_start``, "DD/MM/YYYY HH:MM"): the runner's preloaded
+    profiles and the dispatch's fallback both come from here, and the
+    dispatch slices the window and averages to its resolution afterwards.
+    """
+    from esfex.utils.paths import resolve_project_data_file
+
+    try:
+        path = resolve_project_data_file(config_dir, availability_file)
+    except ValueError as e:
+        raise ValueError(
+            f"{owner}: availability_file {str(availability_file)!r} resolves "
+            f"outside config directory {config_dir} (refusing path traversal)"
+        ) from e
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{owner}: availability_file {str(availability_file)!r} not found "
+            f"under {config_dir}"
+        )
+    return load_availability_profile(
+        path, temporal_resolution_hours=1, num_nodes=num_nodes, date_start=date_start)
+
+
 def load_inflow_profile(
     file_path: Union[str, Path],
     temporal_resolution_hours: int = 1,

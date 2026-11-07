@@ -2898,8 +2898,7 @@ class Orchestrator:
         Returns:
             Dictionary mapping gen_key -> availability array
         """
-        from esfex.io.demand import load_availability_profile
-        from esfex.utils.paths import resolve_project_data_file
+        from esfex.io.demand import load_run_availability
         from pathlib import Path
 
         cache = {}
@@ -2910,30 +2909,14 @@ class Orchestrator:
         file_cache = {}
 
         def _load(kind: str, key: str, avail_file: str):
-            # Resolve consistently with demand paths: an absolute path (the
-            # GUI writes availability profiles at absolute locations, and runs
-            # from a temp config in /tmp) is trusted as-is; a relative path is
-            # resolved under config_dir, still refusing `../` traversal from a
-            # yaml authored elsewhere. See utils/paths.resolve_project_data_file.
-            try:
-                avail_path = resolve_project_data_file(config_dir, avail_file)
-            except ValueError as e:
-                raise ValueError(
-                    f"{kind} {key!r}: availability_file {avail_file!r} resolves "
-                    f"outside config directory {config_dir} (refusing path traversal)"
-                ) from e
-            if not avail_path.exists():
-                raise FileNotFoundError(
-                    f"{kind} {key!r}: availability_file {avail_file!r} not found "
-                    f"under {config_dir}"
-                )
-            file_key = str(avail_path)
+            # Same reader as the dispatch's fallback (load_run_availability):
+            # path resolved like demand paths, hourly, data calendar.
+            file_key = str(avail_file)
             if file_key not in file_cache:
-                file_cache[file_key] = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=1,  # Load at full resolution
-                    num_nodes=num_nodes,
-                    date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
+                file_cache[file_key] = load_run_availability(
+                    config_dir, avail_file, num_nodes,
+                    self._data_start().strftime("%d/%m/%Y %H:%M"),
+                    owner=f"{kind} {key!r}",
                 )
             cache[key] = file_cache[file_key]
             # Also index by the original availability_file string so that
@@ -5943,6 +5926,7 @@ class Orchestrator:
                 rooftop_generation=rooftop_generation,
                 re_penetration_target=re_penetration_target,
                 system_config=self.primary_system,
+                config_path=self.config_path,
             )
 
             # Build power system model

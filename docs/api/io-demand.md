@@ -163,6 +163,20 @@ Load a generator availability profile from an Excel or CSV file.
 - Values are clipped to [0, 1] after loading.
 - If `temporal_resolution_hours > 1`, applies `aggregate_to_resolution()` using MEAN aggregation.
 
+### load_run_availability
+
+```python
+def load_run_availability(
+    config_dir: str | Path,
+    availability_file: str | Path,
+    num_nodes: int,
+    date_start: str | None,
+    owner: str = "Unit",
+) -> np.ndarray
+```
+
+Read a unit's `availability_file` as a run does: the path resolves like demand paths (absolute as is, relative under `config_dir`, `../` traversal refused with `ValueError`), a missing file raises `FileNotFoundError` (both name `owner`), and the profile is loaded hourly with `load_availability_profile(..., date_start=date_start)`. The runner's preloaded profiles and `PowerSystemAdapter`'s fallback for a unit missing from its cache both use it; the dispatch then slices the window and averages to its resolution.
+
 ### load_inflow_profile
 
 ```python
