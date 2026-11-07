@@ -40,9 +40,14 @@ _COST_MULTIPLIER_CATALOG: list[tuple[str, str, str]] = [
     ("invest_cost_transmission", "stochastic_form.mult_invest_cost_transmission", "stochastic_form.group_investment"),
     ("gen_decommissioning_cost", "stochastic_form.mult_gen_decommissioning_cost", "stochastic_form.group_investment"),
     ("bat_decommissioning_cost", "stochastic_form.mult_bat_decommissioning_cost", "stochastic_form.group_investment"),
+    ("converter_invest_cost", "stochastic_form.mult_converter_invest_cost", "stochastic_form.group_investment"),
     # --- Operational ---
     ("gen_fixed_cost", "stochastic_form.mult_gen_fixed_cost", "stochastic_form.group_operational"),
     ("maintenance_cost", "stochastic_form.mult_maintenance_cost", "stochastic_form.group_operational"),
+    ("bat_maintenance_cost", "stochastic_form.mult_bat_maintenance_cost", "stochastic_form.group_operational"),
+    ("gen_start_up_cost", "stochastic_form.mult_gen_start_up_cost", "stochastic_form.group_operational"),
+    ("converter_variable_cost", "stochastic_form.mult_converter_variable_cost", "stochastic_form.group_operational"),
+    ("transmission_cost_per_mw_km", "stochastic_form.mult_transmission_cost_per_mw_km", "stochastic_form.group_operational"),
     # --- Fuel ---
     ("fuel_cost", "stochastic_form.mult_fuel_cost", "stochastic_form.group_fuel"),
     ("fuel_price_growth", "stochastic_form.mult_fuel_price_growth", "stochastic_form.group_fuel"),
@@ -52,6 +57,7 @@ _COST_MULTIPLIER_CATALOG: list[tuple[str, str, str]] = [
     ("penalty_loss_of_reserve", "stochastic_form.mult_penalty_loss_of_reserve", "stochastic_form.group_penalty"),
     ("penalty_curtailment", "stochastic_form.mult_penalty_curtailment", "stochastic_form.group_penalty"),
     ("penalty_fre_penetration", "stochastic_form.mult_penalty_fre_penetration", "stochastic_form.group_penalty"),
+    ("penalty_co2_budget_violation", "stochastic_form.mult_penalty_co2_budget_violation", "stochastic_form.group_penalty"),
     # --- Demand ---
     ("demand_growth", "stochastic_form.mult_demand_growth", "stochastic_form.group_demand"),
     # --- Financial ---

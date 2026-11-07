@@ -64,7 +64,7 @@ meta_network:
       distance_km: [80.0]
       resistance_pu: [0.03]
       loss_factor: [0.03]         # required, see the note below
-      cost_per_mw_km: [0.0]       # required, see the note below
+      cost_per_mw_km: [0.0]       # flow cost $/MWh/km, see the note below
 
 systems:
   # --- System A: Main Island (3 nodes) ---
@@ -381,7 +381,7 @@ meta_network:
 ```
 
 !!! note "Fields without effect"
-    On a transmission link, `loss_factor` and `cost_per_mw_km` are required by the schema, and `meta_network.dynamic_transfer_pricing` and `inter_system_loss_segments` are accepted, but the current run does not use them. Losses on the link come from `resistance_pu` like on any other line.
+    On a transmission link, `loss_factor` is required by the schema, and `meta_network.dynamic_transfer_pricing` and `inter_system_loss_segments` are accepted, but the current run does not use them. Losses on the link come from `resistance_pu` like on any other line. `cost_per_mw_km` is the link's flow cost: the master problem charges `distance_km` × `cost_per_mw_km` per MWh the link carries (0 = free).
 
 !!! note "Subsystems without lines"
     In the merged dispatch network, the link is a `transmission_lines_geo` entry, and the dispatch builds its network from lines. A subsystem with no `transmission_lines_geo` keeps its `nodes_connections`: each connected node pair becomes a line between the first buses of the two nodes, with the connection's capacity, the `fuel_transport_distances` entry as length (reactance from that length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`, else 0.01) and R = 0.1 × X. A subsystem with lines uses only its lines.

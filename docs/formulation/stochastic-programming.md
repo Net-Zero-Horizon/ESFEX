@@ -49,19 +49,27 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | `penalty_loss_of_reserve` | Static and dynamic reserve shortfall penalties | Scenario operation |
 | `penalty_curtailment` | Curtailment cost (existing renewables and candidate technologies) | Scenario operation |
 | `penalty_fre_penetration` | RE-penetration shortfall penalty | Scenario operation |
+| `penalty_co2_budget_violation` | Penalty per tonne over each system's annual CO2 budget | Scenario operation |
+| `bat_maintenance_cost` | Maintenance cost of batteries and battery technologies only, on top of `maintenance_cost` | Scenario operation |
+| `gen_start_up_cost` | Start-up cost of generators (LP start-ups of the master, when the dispatch commits units: `use_uc_in_dispatch`) | Scenario operation |
+| `converter_variable_cost` | Variable cost of AC/DC and frequency converters | Scenario operation |
+| `transmission_cost_per_mw_km` | Flow cost of inter-system links (`distance_km` × `cost_per_mw_km` per MWh carried) | Scenario operation |
 | `invest_cost_renewables` | Investment cost of renewable technologies | Scenario investment cost |
 | `invest_cost_conventional` | Investment cost of non-renewable technologies | Scenario investment cost |
 | `invest_cost_storage` | Battery technology investment cost (power and energy) | Scenario investment cost |
 | `bat_invest_cost_power` | Battery technology power cost (\$/MW), on top of `invest_cost_storage` | Scenario investment cost |
 | `bat_invest_cost_capacity` | Battery technology energy cost (\$/MWh), on top of `invest_cost_storage` | Scenario investment cost |
-| `invest_cost_transmission` | Transmission investment cost | Scenario investment cost |
+| `invest_cost_transmission` | Transmission investment cost (inter-system links included) | Scenario investment cost |
+| `converter_invest_cost` | Investment cost of AC/DC and frequency converters | Scenario investment cost |
 | `gen_decommissioning_cost` | Decommissioning cost of existing generators | Scenario asset cost |
 | `bat_decommissioning_cost` | Decommissioning cost of existing batteries | Scenario asset cost |
 | `discount_rate` | Discount rate: \(r_s = r \cdot m^{disc}_s\) | Scenario discounting |
 
 The operation multipliers are applied by `scenario_master_input()`, which builds a copy of the master input for each scenario and year; the investment, asset and discount multipliers act on the scenario's terms of the objective (§4).
 
-The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning. That includes the keys for costs the master does not have: start-up, electrolyzer, converter, fuel import, fuel storage and transport investment, a separate battery-maintenance multiplier (`bat_maintenance_cost`; `maintenance_cost` scales battery maintenance too), inter-system cost per MW·km, and the loss-of-fuel-supply and CO2-budget penalties.
+The loader also accepts the keys earlier Studio versions wrote, and translates them: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. When several keys scale the same multiplier, their values multiply (`gen_invest_cost: 1.1` with `invest_cost_renewables: 0.8` gives 0.88 for renewables and 1.1 for conventional technologies), with a warning. Any other key is ignored with a warning. That includes the keys for costs the master does not have: electrolyzer, fuel import, fuel storage and transport investment, and the loss-of-fuel-supply penalty.
+
+`gen_start_up_cost` only has an effect when the dispatch commits units (`master_problem.use_uc_in_dispatch`): only then does the master model start-ups (see [Capacity Expansion](capacity-expansion.md)). `transmission_cost_per_mw_km` scales the operating cost of the flow on inter-system links; their investment per MW is scaled by `invest_cost_transmission`.
 
 ### 2.3 Scenario Construction
 

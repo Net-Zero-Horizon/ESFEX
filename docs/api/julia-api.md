@@ -236,6 +236,9 @@ struct MasterProblemInput
     inertia_limit::Float64
     fuel_co2::Dict{String, Float64}
     co2_cost::Float64
+    co2_budget_groups::Vector{CO2BudgetGroup}       # Annual CO2 budget per system (empty = none)
+    line_flow_cost::Dict{Tuple{Int,Int}, Float64}  # Cost per MWh of |flow| on a bus pair (low, high)
+    unit_commitment::Bool                          # Dispatch commits units: LP start-ups in the master
     # Transmission (per physical line)
     transmission_lines::Vector{Tuple{Int,Int}}
     transmission_reactances::Vector{Float64}
@@ -372,10 +375,10 @@ Internal helpers shared by the monolithic master and Benders (not exported):
 | `create_multi_system_master_problem(input::MultiSystemMasterInput)` | Multi-system coordination with inter-system links (shared transmission, coordinated investment). |
 | `add_inter_system_constraints!(model, ext_vars, input::MultiSystemMasterInput)` | Inter-system transfer and coordination constraints. |
 | `create_stochastic_master_problem(input::StochasticMasterInput; custom_constraints=nothing) -> (model, vars, targets, scenarios)` | Two-stage stochastic master. Investment is first-stage and shared; each scenario gets its own representative-day (or TSAM) operation built on `scenario_master_input`. If `use_stochastic` is false or there are no scenarios, it builds the deterministic master. |
-| `scenario_master_input(input, mult::ScenarioMultipliers, year_idx) -> MasterProblemInput` | The input one scenario operates on in year `year_idx`: demand × `demand_growth^(year_idx-1)`, fuel cost (and generator fuel-cost curves) × `fuel_cost × fuel_price_growth^(year_idx-1)`, fixed O&M × `gen_fixed_cost`, maintenance cost × `maintenance_cost`, CO2 cost × `carbon_price`, and the loss-of-load, reserve-shortfall, curtailment and RE-shortfall penalties × their `penalty_*` multipliers. |
+| `scenario_master_input(input, mult::ScenarioMultipliers, year_idx) -> MasterProblemInput` | The input one scenario operates on in year `year_idx`: demand × `demand_growth^(year_idx-1)`, fuel cost (and generator fuel-cost curves) × `fuel_cost × fuel_price_growth^(year_idx-1)`, fixed O&M × `gen_fixed_cost`, maintenance cost × `maintenance_cost` (batteries also × `bat_maintenance_cost`), start-up cost × `gen_start_up_cost`, converter variable cost × `converter_variable_cost`, link flow cost × `transmission_cost_per_mw_km`, CO2 cost × `carbon_price`, and the loss-of-load, reserve-shortfall, curtailment, RE-shortfall and CO2-budget penalties × their `penalty_*` multipliers. |
 | `build_stochastic_objective!(model, vars, input, scenarios, scenario_costs)` | Probability-weighted sum over scenarios of discounted investment cost (with the scenario's investment-cost multipliers and discount rate), existing-asset costs (`build_annual_asset_cost(vars, input, y_idx; mult)`, decommissioning scaled by the scenario) and the scenario's operating cost, plus the slack penalties. |
 
-`StochasticMasterInput(base_input, scenarios::Vector{Scenario}, use_stochastic)` wraps the base input. `Scenario(name, probability, multipliers)` holds a `ScenarioMultipliers` with fields `invest_cost_renewables`, `invest_cost_conventional`, `fuel_cost`, `maintenance_cost`, `invest_cost_storage`, `invest_cost_transmission`, `discount_rate`, `demand_growth`, `fuel_price_growth`, `carbon_price`, `gen_fixed_cost`, `gen_decommissioning_cost`, `bat_decommissioning_cost`, `bat_invest_cost_power`, `bat_invest_cost_capacity`, `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration` (all 1.0 by default). Build it by keyword (`ScenarioMultipliers(fuel_cost=1.2)`) or with the first ten positional values in that order.
+`StochasticMasterInput(base_input, scenarios::Vector{Scenario}, use_stochastic)` wraps the base input. `Scenario(name, probability, multipliers)` holds a `ScenarioMultipliers` with fields `invest_cost_renewables`, `invest_cost_conventional`, `fuel_cost`, `maintenance_cost`, `invest_cost_storage`, `invest_cost_transmission`, `discount_rate`, `demand_growth`, `fuel_price_growth`, `carbon_price`, `gen_fixed_cost`, `gen_decommissioning_cost`, `bat_decommissioning_cost`, `bat_invest_cost_power`, `bat_invest_cost_capacity`, `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration`, `gen_start_up_cost`, `bat_maintenance_cost`, `transmission_cost_per_mw_km`, `converter_invest_cost`, `converter_variable_cost`, `penalty_co2_budget_violation` (all 1.0 by default). Build it by keyword (`ScenarioMultipliers(fuel_cost=1.2)`) or with the first ten positional values in that order.
 
 ### Benders Decomposition
 
@@ -392,7 +395,7 @@ Internal helpers shared by the monolithic master and Benders (not exported):
 | `build_incidence_matrix(num_buses::Int, lines::Vector{Tuple{Int,Int}})` | Bus-line incidence matrix K where K[i,ℓ] = +1 if line ℓ leaves bus i and −1 if it enters. |
 | `add_dc_constraints!(model, transmission, vars, input; extra_injections_fn=nothing, expandable_lines=Set{Int}())` | Per-line flow variables, KCL at each bus, and flow-angle coupling `pf_ℓ = S_base/x_ℓ · (θ_i − θ_j)` with one angle reference per connected component. Lines below 0.1 MW have their flow fixed to 0 unless their index is in `expandable_lines` (candidate corridors that investment can expand). |
 | `add_line_capacity_constraints!(model, transmission, vars, input; capacity_override=nothing)` | Thermal line limits (both directions), scaled by scheduled outages. |
-| `add_converter_constraints!(model, vars, input)` | AC/DC and frequency converter power transfer with directional efficiencies. |
+| `add_converter_constraints!(model, vars, input; capacity_override=nothing)` | AC/DC and frequency converter power transfer with directional efficiencies. The master passes each converter's capacity with its investment (`("acdc" \| "freq", c) => expression`). |
 | `add_converter_objective_terms(vars, ...)` | Converter operating cost terms for the objective. |
 
 ### ACOPF and AC Power Flow

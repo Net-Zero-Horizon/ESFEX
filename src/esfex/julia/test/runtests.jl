@@ -2014,6 +2014,238 @@ import Ipopt
             @test constraint_by_name(model, "CO2_budget_constraint[B]") === nothing
         end
 
+        # ── Master terms behind the stochastic multipliers (#89) ──────────────
+        # One representative day stands for 365. Each master term below is
+        # checked against the dispatch over the same 24 h: same operation,
+        # same cost per day (the master's year cost / 365).
+        H24 = 24
+        bus1 = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+        net1 = NetworkConfig(1, 1, [bus1], [1], zeros(1, 1), zeros(1, 1),
+                             100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                             TransmissionLineData[], TransformerData[],
+                             ACDCConverterData[], FrequencyConverterData[], 0.1)
+        # One master over one representative day; `mult` runs it as a single
+        # stochastic scenario with those multipliers.
+        function master1(inp; mult = nothing)
+            if mult === nothing
+                model, mvars, _ = create_master_problem(inp; use_representative_days = true)
+            else
+                model, mvars, _, _ = create_stochastic_master_problem(
+                    StochasticMasterInput(inp, [Scenario("s", 1.0, mult)], true))
+            end
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            return model, mvars
+        end
+        mvals(model, pfx) = [value(v) for v in all_variables(model) if startswith(name(v), pfx)]
+
+        @testset "master: CO2 budget per year, as the dispatch" begin
+            # Coal (1 t/MWh_e) is cheaper than gas; the budget allows 600 t a
+            # day. The master had no CO2 budget at all.
+            coal = mkgen("Coal", "Non-renewable", "Coal", [100.0], [1.0e-5],
+                         ones(H24, 1); nb = 1, H = H24)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                        ones(H24, 1); nb = 1, H = H24)
+            budget = 600.0 * 365
+            function co2_master(pen; mult = nothing, use_tsam = false)
+                inp = MasterProblemInput(
+                    years = [2025], network = net1, generators = [coal, gas],
+                    batteries = BatteryConfig[], base_demand = fill(50.0, H24, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    use_tsam = use_tsam,
+                    tsam_period_start_hours = use_tsam ? [[1]] : Vector{Int}[],
+                    tsam_period_weights = use_tsam ? [[365.0]] : Vector{Float64}[],
+                    tsam_chronological_order = use_tsam ? [[1]] : Vector{Int}[],
+                    fuel_co2 = Dict("Coal" => 0.5),   # / η 0.5 = 1 t/MWh_e
+                    co2_budget_groups = [CO2BudgetGroup("A", [1], budget, pen)],
+                    verbose = false)
+                model, mvars = master1(inp; mult = mult)
+                coal_mwh = sum(value(v) for v in all_variables(model)
+                               if occursin(r"^op_y1_d\d+_gen\[1,1,", name(v)))
+                viol = only(v for (k, v) in mvars.co2_budget_violation)
+                return model, coal_mwh, value(viol)
+            end
+            function co2_dispatch(pen)
+                input = PowerSystemInput(
+                    name = "co2", year = 2025, network = net1, generators = [coal, gas],
+                    batteries = BatteryConfig[], demand = fill(50.0, H24, 1),
+                    temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                    fuel_co2 = Dict("Coal" => 0.5),
+                    co2_budget = budget, co2_budget_violation_penalty = pen,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                res = extract_solution(model, vars, input)
+                return sum(res.gen_output[1, 1, :]), value(vars.co2_budget_violation[1]),
+                       res.cost_breakdown.co2_emission_cost
+            end
+            for tsam in (false, true)
+                _, coal_mwh, viol = co2_master(5e-4; use_tsam = tsam)
+                @test coal_mwh ≈ 600.0 atol = 1e-6
+                @test viol ≈ 0.0 atol = 1e-6
+            end
+            @test co2_dispatch(5e-4)[1] ≈ 600.0 atol = 1e-6
+            # Overrun nearly free: coal serves all 1200 MWh a day; the master
+            # pays 365 × the dispatch day's violation, at the same penalty.
+            model, coal_mwh, viol = co2_master(1e-9)
+            d_coal, d_viol, d_cost = co2_dispatch(1e-9)
+            @test coal_mwh ≈ d_coal ≈ 1200.0
+            @test viol ≈ 365 * d_viol rtol = 1e-9
+            @test d_cost ≈ 600.0 * 1e-9 rtol = 1e-6
+            @test coefficient(objective_function(model),
+                only(v for v in all_variables(model)
+                     if startswith(name(v), "co2_budget_violation"))) ≈ 1e-9
+            # penalty_co2_budget_violation scales the penalty
+            _, coal_mwh, _ = co2_master(5e-4; mult = ScenarioMultipliers(
+                penalty_co2_budget_violation = 1e-6))
+            @test coal_mwh ≈ 1200.0 atol = 1e-6
+        end
+
+        @testset "master: LP start-ups when the dispatch commits units" begin
+            # A 100 MW unit (min 50 %) runs 12 h a day at full power: one
+            # start a day in the dispatch's unit commitment. The master had
+            # no start-up cost.
+            gen = ESFEX.with_fields(
+                mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                      ones(H24, 1); nb = 1, H = H24);
+                min_power = [0.5], start_up_cost = [2.0e-3])
+            dem = reshape(vcat(zeros(12), fill(100.0, 12)), H24, 1)
+            mk(uc) = MasterProblemInput(
+                years = [2025], network = net1, generators = [gen],
+                batteries = BatteryConfig[], base_demand = dem,
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                unit_commitment = uc, verbose = false)
+            m0, _ = master1(mk(false))
+            m1, _ = master1(mk(true))
+            m3, _ = master1(mk(true); mult = ScenarioMultipliers(gen_start_up_cost = 3.0))
+            @test objective_value(m1) - objective_value(m0) ≈ 365 * 2.0e-3 rtol = 1e-6
+            @test objective_value(m3) - objective_value(m0) ≈ 3 * 365 * 2.0e-3 rtol = 1e-6
+            input = PowerSystemInput(
+                name = "uc", year = 2025, network = net1, generators = [gen],
+                batteries = BatteryConfig[], demand = dem,
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                mode = "unit_commitment", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test sum(value.(vars.gen_startup)) ≈ 1.0 atol = 1e-6
+            res = extract_solution(model, vars, input)
+            @test res.cost_breakdown.startup_cost ≈ 2.0e-3 rtol = 1e-6
+        end
+
+        @testset "master: converters operate and can be built" begin
+            # Gas at bus 1, 50 MW of load at bus 2: a 10 MW line and an AC/DC
+            # converter (30 MW, up to 50 MW more) join them. The master had
+            # no converter: the 40 MW it carries in the dispatch were missing.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            conv(rated) = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, rated, 0.0,
+                1.0, 1.0, 0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0e-3, 0.0, 2.0e-6, 50.0,
+                30, 0, 0.0)
+            net(c) = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [line], TransformerData[], c, FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 0.0], [1.0e-5, 0.0],
+                        ones(H24, 2); nb = 2, H = H24)
+            dem = hcat(zeros(H24), fill(50.0, H24))
+            inp = MasterProblemInput(
+                years = [2025], network = net([conv(30.0)]), generators = [gas],
+                batteries = BatteryConfig[], base_demand = dem,
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, verbose = false)
+            model, mvars = master1(inp)
+            res = extract_master_solution(model, mvars, inp)
+            @test res.converter_investment[1][("acdc", 1)] ≈ 10.0 atol = 1e-6
+            @test sum(mvals(model, "op_y1_d1_ll")) ≈ 0.0 atol = 1e-6
+            @test export_solution_to_dict(res, inp)["converter_investment"]["2025"]["c1"] ≈ 10.0
+            rect = mvals(model, "acdc_rectify")
+            # Same flow and variable cost as the dispatch with the built 40 MW
+            input = PowerSystemInput(
+                name = "conv", year = 2025, network = net([conv(40.0)]), generators = [gas],
+                batteries = BatteryConfig[], demand = dem,
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                pwl_loss_segments = 0,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            dmodel, dvars = create_power_system(input)
+            optimize!(dmodel)
+            @test value.(dvars.acdc_rectify[1, :]) ≈ rect atol = 1e-6
+            # (the dispatch's converter cost term, per step)
+            @test value(ESFEX.add_converter_objective_terms(dvars, input)) ≈
+                  sum(rect) * 2.0e-6 rtol = 1e-6
+            obj = objective_function(model)
+            @test coefficient(obj, only(v for v in all_variables(model)
+                                        if name(v) == "acdc_rectify[1,1]")) ≈ 365 * 2.0e-6
+            @test coefficient(obj, mvars.converter_investment[1][("acdc", 1)]) ≈ 1.0e-3
+            # converter_invest_cost: a dear converter is not built (load is shed)
+            model, mvars = master1(inp; mult = ScenarioMultipliers(converter_invest_cost = 1.0e9))
+            @test value(mvars.converter_investment[1][("acdc", 1)]) ≈ 0.0 atol = 1e-6
+        end
+
+        @testset "master: flow cost of inter-system links" begin
+            # 10 MW flow every hour on a line charging 3e-6 per MWh: the plan
+            # costs 10 × 24 × 365 × 3e-6 more; the multiplier doubles it.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            net2 = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [line], TransformerData[], ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 100.0], [1.0e-5, 1.0e-3],
+                        ones(H24, 2); nb = 2, H = H24)
+            mk(cost) = MasterProblemInput(
+                years = [2025], network = net2, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(50.0, H24, 2),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, line_flow_cost = cost, verbose = false)
+            m0, _ = master1(mk(Dict{Tuple{Int,Int},Float64}()))
+            m1, _ = master1(mk(Dict((1, 2) => 3.0e-6)))
+            m2, _ = master1(mk(Dict((1, 2) => 3.0e-6));
+                            mult = ScenarioMultipliers(transmission_cost_per_mw_km = 2.0))
+            @test objective_value(m1) - objective_value(m0) ≈ 10 * 24 * 365 * 3.0e-6 rtol = 1e-6
+            @test objective_value(m2) - objective_value(m0) ≈ 2 * 10 * 24 * 365 * 3.0e-6 rtol = 1e-6
+        end
+
+        @testset "scenario_master_input: start-up, battery maintenance, converter, link, CO2 multipliers" begin
+            gen = ESFEX.with_fields(
+                mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                      ones(H24, 1); nb = 1, H = H24);
+                start_up_cost = [2.0], maintenance_cost = [1.0])
+            bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
+                                [0.0], [10.0], [0.0], [0.0], 0.0, 100.0, [2.0],
+                                [0.0], false, "AC", [0.0], [0.0], [0.0])
+            o = [0.0]
+            li = BatteryTechnologyConfig("LiNew", [1.0], [1.0], [10.0], [40.0], 1.0, 8.0,
+                                         [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0],
+                                         [3.0], o, [4.0], false, "AC", o, [1.0])
+            c = ACDCConverterData("c1", "VSC", 1, 1, 220.0, 320.0, 10.0, 0.0, 1.0, 1.0,
+                                  0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0, 0.0, 5.0, 0.0, 30, 0, 0.0)
+            net = ESFEX.with_fields(net1; acdc_converters = [c])
+            inp = MasterProblemInput(
+                years = [2025], network = net, generators = [gen], batteries = [bat],
+                battery_technologies = [li], base_demand = fill(50.0, H24, 1),
+                co2_budget_groups = [CO2BudgetGroup("A", [1], 10.0, 7.0)],
+                line_flow_cost = Dict((1, 2) => 4.0), verbose = false)
+            si = ESFEX.scenario_master_input(inp, ScenarioMultipliers(
+                maintenance_cost = 2.0, bat_maintenance_cost = 3.0, gen_start_up_cost = 5.0,
+                converter_variable_cost = 6.0, transmission_cost_per_mw_km = 7.0,
+                penalty_co2_budget_violation = 8.0), 1)
+            @test si.generators[1].maintenance_cost == [2.0]
+            @test si.generators[1].start_up_cost == [10.0]
+            @test si.batteries[1].maintenance_cost == [12.0]
+            @test si.battery_technologies[1].maintenance_cost == [18.0]
+            @test si.network.acdc_converters[1].variable_cost == 30.0
+            @test si.line_flow_cost[(1, 2)] == 28.0
+            @test si.co2_budget_groups[1].violation_penalty == 56.0
+            @test si.co2_budget_groups[1].budget == 10.0
+        end
+
         @testset "solve_dcopf benchmark" begin
             # Cheap gen at bus 1 supplies a bus-2 load across one line.
             r = solve_dcopf(num_buses = 2, demand = [0.0, 100.0],

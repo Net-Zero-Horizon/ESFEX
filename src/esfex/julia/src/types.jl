@@ -2225,6 +2225,15 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `life_extension_cost_factor::Float64`: Fraction of investment cost for annual extension
 - `decommissioning_cost_factor::Float64`: Fraction of investment cost for decommissioning
 
+## CO2 budget, line flow costs, start-ups
+- `co2_budget_groups::Vector{CO2BudgetGroup}`: Annual CO2 budget per system
+  with its own violation penalty (empty = none)
+- `line_flow_cost::Dict{Tuple{Int,Int}, Float64}`: Cost per MWh of |flow| on a
+  corridor (from_bus < to_bus), e.g. distance × cost per MW·km of an
+  inter-system link
+- `unit_commitment::Bool`: The dispatch commits units; the master then has
+  LP-relaxed commitment and start-up costs
+
 ## Solver
 - `threads::Int`: Solver threads
 - `time_limit::Float64`: Solver time limit
@@ -2365,6 +2374,18 @@ struct MasterProblemInput
     # run solves one year at a time, so its year's target comes from the
     # whole horizon's trajectory. Empty = RE-1.
     re_target_override::Dict{Tuple{Int,Int}, Float64}
+
+    # --- CO2 budget, line flow costs, start-ups (as in the dispatch) ---
+    # Annual CO2 budgets, one per system (empty = no budget). Each pays its
+    # own violation penalty, as the dispatch's `co2_budget_groups`.
+    co2_budget_groups::Vector{CO2BudgetGroup}
+    # Cost per MWh of |flow| on a corridor (from_bus, to_bus), from < to,
+    # 1-indexed: distance × cost per MW·km of an inter-system link.
+    line_flow_cost::Dict{Tuple{Int,Int}, Float64}
+    # The dispatch commits units (unit commitment): the master's day
+    # operation then has LP-relaxed commitment and start-up costs.
+    unit_commitment::Bool
+    # --- end ---
 end
 
 # Constructor with defaults
@@ -2438,7 +2459,10 @@ function MasterProblemInput(;
     tech_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     bat_cost_curves::Dict{Int, Dict{Int, Vector{CostSegment}}} = Dict{Int, Dict{Int, Vector{CostSegment}}}(),
     benders_lol_penalty_cap::Float64 = 1000.0,
-    re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}()
+    re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
+    co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[],
+    line_flow_cost::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
+    unit_commitment::Bool = false
 )
     return MasterProblemInput(
         years, base_year,
@@ -2471,7 +2495,8 @@ function MasterProblemInput(;
         solver_name, threads, time_limit, gap, verbose, solver_options,
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         benders_lol_penalty_cap,
-        re_target_override
+        re_target_override,
+        co2_budget_groups, line_flow_cost, unit_commitment
     )
 end
 
@@ -2543,6 +2568,11 @@ mutable struct MasterProblemVariables
     # Investment period grouping: how many years per investment period
     # (derived from investment_resolution_hours ÷ 8760)
     years_per_inv_period::Int
+
+    # Converter investment: period-start year => ("acdc" | "freq", converter idx) => MW
+    converter_investment::Dict{Int, Dict{Tuple{String,Int}, VariableRef}}
+    # CO2 budget violation (t): (scenario idx, 0 = deterministic; year; group) => slack
+    co2_budget_violation::Dict{Tuple{Int,Int,Int}, VariableRef}
 end
 
 """
@@ -2605,6 +2635,9 @@ struct MasterProblemResult
 
     # Reservoir capacity investment: year => gen => nodes (MWh)
     reservoir_investment::Dict{Int, Dict{Int, Vector{Float64}}}
+
+    # Converter investment: year => ("acdc" | "freq", converter idx) => MW built that year
+    converter_investment::Dict{Int, Dict{Tuple{String,Int}, Float64}}
 end
 
 """
@@ -2824,6 +2857,13 @@ Cost and parameter multipliers for a stochastic scenario (all 1.0 by default).
 - `penalty_loss_of_reserve::Float64`: Static and dynamic reserve shortfall penalties
 - `penalty_curtailment::Float64`: Curtailment cost
 - `penalty_fre_penetration::Float64`: RE-penetration shortfall penalty
+- `gen_start_up_cost::Float64`: Generator start-up cost (LP start-ups of the master)
+- `bat_maintenance_cost::Float64`: Battery maintenance only (× `maintenance_cost`)
+- `transmission_cost_per_mw_km::Float64`: Flow cost of lines with a per-MW·km
+  cost (inter-system links, `line_flow_cost`)
+- `converter_invest_cost::Float64`: AC/DC and frequency converter investment
+- `converter_variable_cost::Float64`: AC/DC and frequency converter variable cost
+- `penalty_co2_budget_violation::Float64`: CO2 budget violation penalty
 """
 Base.@kwdef struct ScenarioMultipliers
     invest_cost_renewables::Float64 = 1.0
@@ -2845,6 +2885,14 @@ Base.@kwdef struct ScenarioMultipliers
     penalty_loss_of_reserve::Float64 = 1.0
     penalty_curtailment::Float64 = 1.0
     penalty_fre_penetration::Float64 = 1.0
+    # --- Start-ups, battery maintenance, MW·km flows, converters, CO2 budget ---
+    gen_start_up_cost::Float64 = 1.0
+    bat_maintenance_cost::Float64 = 1.0
+    transmission_cost_per_mw_km::Float64 = 1.0
+    converter_invest_cost::Float64 = 1.0
+    converter_variable_cost::Float64 = 1.0
+    penalty_co2_budget_violation::Float64 = 1.0
+    # --- end ---
 end
 
 # The original ten positional multipliers; the others stay at 1.0

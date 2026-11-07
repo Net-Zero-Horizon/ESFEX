@@ -842,11 +842,18 @@ Constraints:
 - Capacity: flow_a_to_b + flow_b_to_a ≤ rated_power (per converter)
 
 KCL injection is handled in add_dc_constraints! (reads these variables).
+
+`capacity_override` (master problem) maps `("acdc", c)` / `("freq", c)` to
+the converter's capacity (an expression with the master's investment) in
+place of `rated_power_mva`.
 """
 function add_converter_constraints!(model, vars::PowerSystemVariables,
-                                     input)
+                                     input;
+                                     capacity_override::Union{Nothing, AbstractDict} = nothing)
     hours = input.temporal.hours
     network = input.network
+    rated(kind, c, conv) = capacity_override === nothing ? conv.rated_power_mva :
+        get(capacity_override, (kind, c), conv.rated_power_mva)
 
     # Deterministic scheduled outages: converters are id-addressed by name
     # (name → hourly capacity factor in [0,1]; 1.0 = none).
@@ -870,7 +877,7 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
                 # Mutual capacity: total through-power ≤ rated (× outage factor)
                 @constraint(model,
                     acdc_rect[c, t] + acdc_inv[c, t] <=
-                        conv.rated_power_mva * conv_om(acdc_masks, conv.name, t))
+                        rated("acdc", c, conv) * conv_om(acdc_masks, conv.name, t))
                 # Minimum power (if applicable)
                 if conv.min_power_mva > 0
                     # Only enforce when active — skip for now (would need binary)
@@ -893,7 +900,7 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
             for t in 1:hours
                 @constraint(model,
                     freq_ab[c, t] + freq_ba[c, t] <=
-                        conv.rated_power_mva * conv_om(freq_masks, conv.name, t))
+                        rated("freq", c, conv) * conv_om(freq_masks, conv.name, t))
             end
         end
     end
@@ -905,8 +912,7 @@ end
 Return objective cost expression for converter operations.
 Cost = Σ variable_cost × (rectify + invert) for each converter and hour.
 """
-function add_converter_objective_terms(vars::PowerSystemVariables,
-                                       input::PowerSystemInput)
+function add_converter_objective_terms(vars::PowerSystemVariables, input)
     cost = AffExpr(0.0)
     hours = input.temporal.hours
     network = input.network

@@ -75,12 +75,22 @@ def test_keys_on_the_same_field_multiply(caplog):
 
 
 def test_keys_without_effect_are_dropped_with_a_warning(caplog):
+    dropped = sorted(SCENARIO_MULTIPLIERS_WITHOUT_EFFECT)[:1] + ["not_a_key"]
     with caplog.at_level(logging.WARNING, logger="esfex.config.schema"):
-        m = ScenarioMultipliers(gen_start_up_cost=2.0, electrolyzer_invest_cost=2.0,
-                                not_a_key=2.0, penalty_loss_of_load=3.0)
+        m = ScenarioMultipliers(**{k: 2.0 for k in dropped}, penalty_loss_of_load=3.0)
     assert m.model_fields_set == {"penalty_loss_of_load"}
-    for key in ("gen_start_up_cost", "electrolyzer_invest_cost", "not_a_key"):
+    for key in dropped:
         assert key in caplog.text
+
+
+@pytest.mark.parametrize("key", [
+    "gen_start_up_cost", "bat_maintenance_cost", "transmission_cost_per_mw_km",
+    "converter_invest_cost", "converter_variable_cost", "penalty_co2_budget_violation"])
+def test_master_terms_keys_are_fields(key):
+    # Dropped before the master had start-ups, a battery-only maintenance
+    # multiplier, link flow costs, converters and a CO2 budget
+    m = ScenarioMultipliers(**{key: 2.5})
+    assert m.model_fields_set == {key} and getattr(m, key) == 2.5
 
 
 def test_existing_names_still_load():
@@ -116,12 +126,13 @@ def test_convert_scenario_passes_every_field_by_name():
     with patch("esfex.bridge.julia_setup.get_esfex_module", return_value=esfex):
         convert_scenario({"name": "s", "probability": 1.0,
                           "multipliers": {"gen_fuel_cost": 2.0, "penalty_curtailment": 3.0,
-                                          "gen_start_up_cost": 9.0}})
+                                          "gen_start_up_cost": 9.0, "not_a_key": 7.0}})
     kwargs = esfex.ScenarioMultipliers.call_args.kwargs
     assert set(kwargs) == set(ScenarioMultipliers.model_fields)
     assert kwargs["fuel_cost"] == 2.0 and kwargs["penalty_curtailment"] == 3.0
+    assert kwargs["gen_start_up_cost"] == 9.0
     assert all(v == 1.0 for k, v in kwargs.items()
-               if k not in ("fuel_cost", "penalty_curtailment"))
+               if k not in ("fuel_cost", "penalty_curtailment", "gen_start_up_cost"))
 
 
 # ---------------------------------------------------------------------------
@@ -187,13 +198,14 @@ def test_gui_save_translates_legacy_keys_and_warns_on_dropped(caplog):
     from esfex.visualization.data.serializer import stochastic_scenarios_to_config_dict
 
     sc = GuiStochasticScenario(name="s", probability=1.0, multipliers={
-        "fuel_price": 1.2, "gen_start_up_cost": 2.0, "bat_invest_cost_power": 0.7})
+        "fuel_price": 1.2, "gen_start_up_cost": 2.0, "bat_invest_cost_power": 0.7,
+        "not_a_key": 3.0})
     out = {}
     with caplog.at_level(logging.WARNING, logger="esfex.config.schema"):
         stochastic_scenarios_to_config_dict([sc], out)
     assert out["stochastic_scenarios"][0]["multipliers"] == {
-        "fuel_cost": 1.2, "bat_invest_cost_power": 0.7}
-    assert "gen_start_up_cost" in caplog.text
+        "fuel_cost": 1.2, "gen_start_up_cost": 2.0, "bat_invest_cost_power": 0.7}
+    assert "not_a_key" in caplog.text
 
 
 # ---------------------------------------------------------------------------

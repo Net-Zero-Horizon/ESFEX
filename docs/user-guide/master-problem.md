@@ -261,7 +261,15 @@ For each node and year, firm capacity must cover the year's peak demand × `rese
 
 The representative-day operating cost charges `co2_cost` ($/t) times the emission factor of each unit's fuel (`fuels.<name>.emission_factor`, t per MWh of fuel) divided by the unit's `eff_at_rated`, on generator and technology output, as the dispatch does. A carbon price therefore steers investment towards lower-emission units.
 
-The master has no CO₂ budget constraint: `co2_budget` and `CO2_budget_violation` act in operational dispatch only.
+When `co2_budget` is enabled, the master also holds each year's emissions within the annual budget, as the dispatch does: the emissions of the representative days, scaled to the year like their cost, may exceed it only at `penalties.co2_budget_violation` per tonne. In a multi-system run each system has its own budget and penalty over its own nodes.
+
+### Converters, link flow costs and start-ups
+
+AC/DC and frequency converters carry power between their nodes in the representative days, within their rated power plus what the master builds. A converter with `invest_max_power` > 0 can be expanded at `invest_cost` ($/MW, plus `fixed_cost` $/MW/year); the MW built are added to its `rated_power_mva` in the dispatch from the year they are built. The converters' `variable_cost` is charged on the power they carry.
+
+An inter-system link with `cost_per_mw_km` charges `distance_km` × `cost_per_mw_km` per MWh it carries in the master's representative days.
+
+With `use_uc_in_dispatch: true` the master also models start-ups, as a linear relaxation: each thermal or hydro unit with a start-up cost or a minimum power has an online capacity between 0 and its capacity, its output stays between `min_power` × that capacity and the capacity, and bringing the whole unit online costs one `start_up_cost`. Minimum up and down times are left to the dispatch. With economic dispatch (the default) neither the dispatch nor the master charges start-ups.
 
 
 ---
@@ -307,7 +315,7 @@ temporal:
 | `tsam_num_periods` | 10 | Number of clustered representative days per year (2 to 365) |
 | `tsam_method` | `kmedoids` | `kmedoids` or `kmeans` |
 | `tsam_inter_period_linking` | true | Chain storage state of charge across clustered days |
-| `use_uc_in_dispatch` | false | Run the operational windows of a development run as unit commitment (binary on/off, start-up costs, minimum up/down times) instead of economic dispatch. Slower, more realistic operating cost |
+| `use_uc_in_dispatch` | false | Run the operational windows of a development run as unit commitment (binary on/off, start-up costs, minimum up/down times) instead of economic dispatch. Slower, more realistic operating cost. The master then models start-ups too, as a linear relaxation |
 | `stochastic` | false | Scenario-weighted objective (see [Stochastic Mode](#stochastic-mode)) |
 | `benders_max_iterations` | 50 | Benders only |
 | `benders_tolerance` | 1e-4 | Benders only: relative gap for convergence |
@@ -392,7 +400,7 @@ For the LP formulation see [Capacity Expansion § 15](../formulation/capacity-ex
 
 ## Stochastic Mode
 
-`stochastic: true` takes effect only when the first system defines `stochastic_scenarios`. Their probabilities must sum to 1 (the loader rejects a sum that is off by more than 0.01). With no scenarios, the run logs a warning and falls back to the deterministic master. Each scenario is a set of scalar multipliers on investment costs (`invest_cost_renewables`, `invest_cost_conventional`, `invest_cost_storage`, `bat_invest_cost_power`, `bat_invest_cost_capacity`, `invest_cost_transmission`), decommissioning costs (`gen_decommissioning_cost`, `bat_decommissioning_cost`), operating costs (`fuel_cost`, `fuel_price_growth`, `gen_fixed_cost`, `maintenance_cost`, `carbon_price`), penalties (`penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration`), `demand_growth` and `discount_rate`; see the [ScenarioMultipliers reference](../reference/config-reference.md#scenariomultipliers).
+`stochastic: true` takes effect only when the first system defines `stochastic_scenarios`. Their probabilities must sum to 1 (the loader rejects a sum that is off by more than 0.01). With no scenarios, the run logs a warning and falls back to the deterministic master. Each scenario is a set of scalar multipliers on investment costs (`invest_cost_renewables`, `invest_cost_conventional`, `invest_cost_storage`, `bat_invest_cost_power`, `bat_invest_cost_capacity`, `invest_cost_transmission`), decommissioning costs (`gen_decommissioning_cost`, `bat_decommissioning_cost`), operating costs (`fuel_cost`, `fuel_price_growth`, `gen_fixed_cost`, `maintenance_cost`, `carbon_price`), penalties (`penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration`, `penalty_co2_budget_violation`), battery maintenance alone (`bat_maintenance_cost`), start-ups (`gen_start_up_cost`), converters (`converter_invest_cost`, `converter_variable_cost`), the flow cost of inter-system links (`transmission_cost_per_mw_km`), `demand_growth` and `discount_rate`; see the [ScenarioMultipliers reference](../reference/config-reference.md#scenariomultipliers).
 
 It is a two-stage problem. The investment plan is common to all scenarios. Each scenario has its own representative-day dispatch, built on its own demand (`demand_growth` is an annual factor: 1.02 = +2 %/year) and operating costs. The objective is the probability-weighted cost over the scenarios, each with its own investment-cost multipliers and discount rate. The master grows roughly in proportion to the number of scenarios. The operational dispatch that follows runs on the base case. Stochastic mode needs `solver_method: monolithic`. See [Stochastic Programming](../formulation/stochastic-programming.md) and the [Stochastic Tutorial](../tutorials/stochastic.md).
 
