@@ -1958,7 +1958,7 @@ def _load_decommissioning_data(
                     name = name.decode()
                 # Compute MW retired from fraction × rated_power
                 rated = gc.get("rated_power", 0)
-                rated_mw = _parse_invest_cost(rated)  # handles str/list/scalar
+                rated_mw = _parse_total_mw(rated)  # handles str/list/scalar
                 ret_mw = fraction * rated_mw
                 out[name] = out.get(name, 0.0) + ret_mw
 
@@ -1982,23 +1982,32 @@ def _load_decommissioning_data(
     return out, raw_fractions
 
 
-def _parse_invest_cost(val) -> float:
-    """Parse invest_cost from HDF5 attrs (can be scalar, array, or string)."""
+def _parse_invest_cost(val, reduce=np.mean) -> float:
+    """Parse invest_cost from HDF5 attrs (can be scalar, array, or string).
+
+    A per-node value is reduced with *reduce* (mean for a cost; see
+    :func:`_parse_total_mw` for a capacity)."""
     if isinstance(val, (int, float, np.integer, np.floating)):
         return float(val)
     if isinstance(val, np.ndarray):
-        return float(np.mean(val))
+        return float(reduce(val))
     if isinstance(val, (bytes, str)):
         s = val.decode() if isinstance(val, bytes) else val
         import ast
         try:
             parsed = ast.literal_eval(s)
             if isinstance(parsed, (list, tuple)):
-                return float(np.mean(parsed))
+                return float(reduce(parsed))
             return float(parsed)
         except Exception:
             return 0.0
     return 0.0
+
+
+def _parse_total_mw(val) -> float:
+    """A unit's total capacity from its per-node ``rated_power`` attr (the
+    sum over nodes: ``retirement_gen_{g}`` is a share of the whole unit)."""
+    return _parse_invest_cost(val, reduce=np.sum)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2440,7 +2449,7 @@ class GenerationMixChart(QWidget):
                         if _sys_filter and not name.startswith(_sys_filter + "/"):
                             continue
                         rated = gc.get("rated_power", 0)
-                        rated_mw = _parse_invest_cost(rated)
+                        rated_mw = _parse_total_mw(rated)
                         inc_mw = delta * rated_mw
                         info = _resolve_gen_tech(name, gen_tech_map)
                         if info is None:
