@@ -2241,9 +2241,16 @@ class SystemConfig(BaseModel):
             return self
         import logging
         import re
+        # The fuel model's fuels: the primary-energy sources, or, without
+        # them, the fuels of the entry points (as the runner builds them).
+        if self.primary_energy_sources:
+            pe_fuels = set(self.primary_energy_sources)
+        else:
+            pe_fuels = {f for fe in (self.fuel_entry_points or [])
+                        for f in (fe.fuels or ([fe.fuel] if fe.fuel else []))}
         keys = {"generator": set(self.generators), "battery": set(self.batteries),
                 "electrolyzer": set(self.electrolyzers or {}),
-                "fuel_storage": set(self.primary_energy_sources or {})}
+                "fuel_storage": pe_fuels}
         unknown = []
         for i, ow in enumerate(self.outage_schedule):
             units = keys.get(ow.element_type)
