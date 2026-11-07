@@ -2931,6 +2931,189 @@ import Ipopt
             @test si.co2_budget_groups[1].budget == 10.0
         end
 
+        # ── Battery operating fields (round 8, A8) ───────────────────────────
+        # BatteryConfig with the operating fields; 20 MW / `cap` MWh, 95 %.
+        function mkbat(; cap = 100.0, ramp = 0.0, avail = zeros(0, 1), reservable = true,
+                       fixed = 0.0, maint = 0.0)
+            z = [0.0]
+            BatteryConfig("Li1", [cap], [20.0], [20.0], [0.95], [0.95], z, [1.0], [0.5], z,
+                          z, z, z, z, [10.0], z, z, 0.0, 100.0, [maint], z, false, "AC",
+                          z, z, [1.0], [ramp], [ramp], [fixed], reservable, avail)
+        end
+        function bat_dispatch(bats, demand; H = size(demand, 1), tres = 1, gas_mw = 40.0,
+                              curves = Dict{Int, Dict{Int, Vector{CostSegment}}}(), kw...)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [gas_mw], [3.0e-5],
+                        ones(H, 1); nb = 1, H = H)
+            input = PowerSystemInput(;
+                name = "bat", year = 2025, network = net1, generators = [gas],
+                batteries = bats, demand = reshape(demand, H, 1),
+                temporal = TemporalConfig(H, tres, H, 0, H, H, 1, 1, 1),
+                min_cycling_ratio = 0.0, soc_end_tolerance = 0.0,
+                loss_of_load_penalty = 0.01, bat_cost_curves = curves,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false, kw...)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            return model, vars, input
+        end
+        # The same day as a master (one representative day = 365 days)
+        function bat_master(bats, demand; btechs = BatteryTechnologyConfig[], kw...)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [40.0], [3.0e-5],
+                        ones(H24, 1); nb = 1, H = H24)
+            return MasterProblemInput(;
+                years = [2025], network = net1, generators = [gas], batteries = bats,
+                battery_technologies = btechs, base_demand = reshape(demand, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 0.01, reserve_margin = 0.0, verbose = false, kw...)
+        end
+        # 30 MW of load and a 60 MW hour: the battery covers the spike
+        spike = vcat(fill(30.0, 12), [60.0], fill(30.0, 11))
+
+        @testset "battery ramp limits, with the rolling-horizon seam" begin
+            # 5 MW/h: from 0 MW at the previous window's last step the battery
+            # gives 5 then 10 MW, so 10 of the second step's 20 MW are shed.
+            for (ramp, tres, shed) in ((0.0, 1, 0.0), (0.25, 1, 10.0), (0.25, 2, 0.0))
+                bat = mkbat(cap = 400.0, ramp = ramp)
+                model, vars, input = bat_dispatch([bat], [40.0, 60.0]; tres = tres,
+                    cyclic_end_soc = false, reserve_static_default_ratio = 0.0,
+                    battery_discharge_prev = Dict(1 => Dict(1 => 0.0)))
+                res = extract_solution(model, vars, input)
+                @test res.load_shed_total ≈ shed * tres atol = 1e-6
+            end
+            # Charging 20 MW at the seam, it can only fall to 15 MW (it had
+            # no limit: the charge stopped at once)
+            bat = mkbat(cap = 400.0, ramp = 0.25, maint = 1.0e-6)
+            model, vars, _ = bat_dispatch([bat], [30.0, 30.0]; cyclic_end_soc = false,
+                reserve_static_default_ratio = 0.0, gas_mw = 100.0,
+                battery_charge_prev = Dict(1 => Dict(1 => 20.0)))
+            @test value(vars.bat_charge[1, 1, 1]) ≈ 15.0 atol = 1e-6
+            @test value(vars.bat_charge[1, 1, 2]) ≈ 10.0 atol = 1e-6
+        end
+
+        @testset "battery availability scales its charge and discharge power" begin
+            avail = reshape([0.5, 1.0], 2, 1)
+            model, vars, input = bat_dispatch([mkbat(avail = avail)], [60.0, 30.0];
+                cyclic_end_soc = false, reserve_static_default_ratio = 0.0)
+            res = extract_solution(model, vars, input)
+            @test res.load_shed_total ≈ 10.0 atol = 1e-6
+            @test value(vars.bat_discharge[1, 1, 1]) ≈ 10.0 atol = 1e-6
+        end
+
+        @testset "only reservable batteries hold reserve" begin
+            # 5 MW of static reserve; the gas unit is not reservable. Every
+            # battery used to count.
+            for (reservable, loss) in ((true, 0.0), (false, 10.0))
+                model, vars, _ = bat_dispatch([mkbat(reservable = reservable)], [30.0, 30.0];
+                    cyclic_end_soc = false, reserve_static_requirement = Dict(1 => 5.0))
+                @test sum(value.(vars.reserve_static_loss)) ≈ loss atol = 1e-6
+            end
+        end
+
+        @testset "battery fixed cost per MW-year, prorated to the window" begin
+            m0, _, _ = bat_dispatch([mkbat()], fill(30.0, H24))
+            m1, v1, i1 = bat_dispatch([mkbat(fixed = 1.0e-3)], fill(30.0, H24))
+            @test objective_value(m1) - objective_value(m0) ≈ 1.0e-3 * 20 * 24 / 8760 rtol = 1e-6
+            res = extract_solution(m1, v1, i1)
+            @test res.cost_breakdown.fixed_om_cost ≈ 1.0e-3 * 20 * 24 / 8760 rtol = 1e-6
+        end
+
+        @testset "flat battery discharge curve prices the discharge" begin
+            # A single segment at 1e-3 (above gas): the battery's stored energy
+            # is not spent. Single-segment curves were skipped (discharge free).
+            flat = Dict(1 => Dict(1 => [CostSegment(1.0, 1.0e-3)]))
+            for (curves, used) in ((Dict{Int, Dict{Int, Vector{CostSegment}}}(), true),
+                                   (flat, false))
+                model, vars, _ = bat_dispatch([mkbat()], [30.0, 30.0]; curves = curves,
+                    cyclic_end_soc = false, reserve_static_default_ratio = 0.0)
+                d = value(vars.bat_discharge[1, 1, 1]) + value(vars.bat_discharge[1, 1, 2])
+                @test (d > 1.0) == used
+            end
+            # The master prices it the same way
+            inp = bat_master([mkbat()], spike; bat_cost_curves = flat)
+            model, _, _ = create_master_problem(inp; use_representative_days = true)
+            seg = only(v for v in all_variables(model) if name(v) == "op_y1_d1_bseg_1_1[1,1]")
+            @test coefficient(objective_function(model), seg) ≈ 365 * 1.0e-3 rtol = 1e-9
+        end
+
+        @testset "master battery ramp, availability, reservable and fixed cost as the dispatch" begin
+            # Each field changes the master's year cost by 365 × what it
+            # changes the dispatch's cost over the same day.
+            avail = reshape([t == 13 ? 0.5 : 1.0 for t in 1:H24], H24, 1)
+            cases = [
+                (mkbat(ramp = 0.25), (;)),
+                (mkbat(avail = avail), (;)),
+                (mkbat(reservable = false), (; reserve_static_requirement = Dict(1 => 5.0))),
+                (mkbat(fixed = 1.0e-3), (;)),
+            ]
+            for (bat, kw) in cases
+                req = get(kw, :reserve_static_requirement, Dict{Int, Float64}())
+                base = mkbat()
+                d0, _, _ = bat_dispatch([base], spike; reserve_static_default_ratio = 0.0,
+                                        reserve_static_requirement = req)
+                d1, _, _ = bat_dispatch([bat], spike; reserve_static_default_ratio = 0.0,
+                                        reserve_static_requirement = req)
+                m0, _ = master1(bat_master([base], spike; reserve_static_default_ratio = 0.0,
+                                           reserve_static_requirement = req))
+                m1, _ = master1(bat_master([bat], spike; reserve_static_default_ratio = 0.0,
+                                           reserve_static_requirement = req))
+                dd = objective_value(d1) - objective_value(d0)
+                @test dd > 1e-9
+                @test objective_value(m1) - objective_value(m0) ≈ 365 * dd rtol = 1e-6
+            end
+
+            # A retired battery (no life extension) holds no reserve in the
+            # master: it used to be credited its nameplate discharge power.
+            # (Life extension at 1 per MW costs more than the reserve shortfall.)
+            old = ESFEX.with_fields(mkbat(); life_time = [5.0], initial_age = [10.0],
+                                    invest_cost_power = [1.0])
+            m, _ = master1(bat_master([old], fill(30.0, H24); reserve_static_default_ratio = 0.0,
+                                      reserve_static_requirement = Dict(1 => 5.0),
+                                      loss_of_reserve_static = 1.0e-6))
+            @test sum(mvals(m, "bat_life_ext")) ≈ 0.0 atol = 1e-9
+            @test sum(mvals(m, "op_y1_d1_rs_loss")) ≈ 5.0 * H24 atol = 1e-6
+        end
+
+        @testset "battery technologies: fixed cost, ramp and availability (master, Benders)" begin
+            o = [0.0]
+            function li(; fixed = 0.0, ramp = 0.0, avail = zeros(0, 1))
+                BatteryTechnologyConfig("LiNew", [1.0e-4], [1.0e-5], [50.0], [200.0], 1.0, 8.0,
+                    [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, [1.0e-7], false,
+                    "AC", o, [1.0], [ramp], [ramp], [fixed], true, avail)
+            end
+            built(m) = sum(mvals(m, "bat_tech_pow_inv"))
+            # The fixed cost enters each year's cost of the power built
+            inp0 = bat_master(BatteryConfig[], spike; btechs = [li()],
+                              reserve_static_default_ratio = 0.0)
+            inp1 = bat_master(BatteryConfig[], spike; btechs = [li(fixed = 1.0e-3)],
+                              reserve_static_default_ratio = 0.0)
+            m0, _, _ = create_master_problem(inp0; use_representative_days = true)
+            m1, _, _ = create_master_problem(inp1; use_representative_days = true)
+            pv(m) = only(v for v in all_variables(m) if name(v) == "bat_tech_pow_inv_y1_bt1[1]")
+            @test coefficient(objective_function(m1), pv(m1)) -
+                  coefficient(objective_function(m0), pv(m0)) ≈ 1.0e-3 rtol = 1e-9
+
+            # Availability bounds the battery the master builds as the
+            # dispatch bounds it: the 20 MW spike takes 40 MW at 50 %.
+            avail = reshape([t == 13 ? 0.5 : 1.0 for t in 1:H24], H24, 1)
+            for (tech, mw) in ((li(), 20.0), (li(avail = avail), 40.0))
+                m, _ = master1(bat_master(BatteryConfig[], spike; btechs = [tech],
+                                          reserve_static_default_ratio = 0.0))
+                @test built(m) ≈ mw rtol = 1e-6
+            end
+            # Benders reaches the monolithic optimum with every field set
+            for tech in (li(fixed = 1.0e-4), li(avail = avail), li(ramp = 0.25)),
+                    bats in (BatteryConfig[], [mkbat(ramp = 0.25, avail = avail)])
+                inp = bat_master(bats, spike; btechs = [tech],
+                                 reserve_static_requirement = Dict(1 => 5.0))
+                model, _ = master1(inp)
+                br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.gap < 1e-6
+                @test br.objective ≈ objective_value(model) rtol = 1e-6
+            end
+        end
+
         @testset "Benders reaches the monolithic optimum" begin
             # The Benders subproblems used to miss converters (no power, no
             # build), the CO2 budget, the line flow cost, LP start-ups and the
@@ -3252,6 +3435,56 @@ import Ipopt
                 res.cost_breakdown.load_shedding_cost + res.cost_breakdown.fre_penetration_cost +
                 res.cost_breakdown.reserve_static_cost + res.cost_breakdown.reserve_dynamic_cost +
                 res.cost_breakdown.inertia_cost rtol = 1e-6
+        end
+
+        @testset "converter min_power_mva: on/off in unit commitment, ignored in ED" begin
+            # 15 MW of load at bus 2 behind a 10 MW line; the 40 MW converter
+            # has a 30 MW minimum. Economic dispatch sends the missing 5 MW
+            # through it; with unit commitment it either carries ≥ 30 MW
+            # (more than bus 2 can take) or nothing, so dear diesel at bus 2
+            # covers the 5 MW. min_power_mva was never read.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            H = 4
+            dem2 = [15.0, 15.0, 50.0, 15.0]
+            function conv_dispatch(mode; freq = false)
+                acdc = ACDCConverterData("c1", "VSC", 1, 2, 220.0, 320.0, 40.0, 30.0,
+                    1.0, 1.0, 0.0, -50.0, 50.0, 1.0, 0.05, 0.01, 1.0e-3, 0.0, 1.0e-6, 50.0,
+                    30, 0, 0.0)
+                fc = FrequencyConverterData("f1", 1, 2, 50.0, 60.0, 40.0, 30.0, 1.0, 1.0,
+                    0.0, -50.0, 50.0, 0.05, 0.01, 1.0e-3, 0.0, 1.0e-6, 50.0, 30, 0, 0.0)
+                net = NetworkConfig(2, 2, buses, [1, 2], [0 10.0; 10.0 0], zeros(2, 2),
+                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0], [line],
+                    TransformerData[], freq ? ACDCConverterData[] : [acdc],
+                    freq ? [fc] : FrequencyConverterData[], 0.1)
+                gas = mkgen("Gas", "Non-renewable", "Gas", [100.0, 0.0], [1.0e-5, 0.0],
+                            ones(H, 2); nb = 2, H = H)
+                diesel = mkgen("Diesel", "Non-renewable", "Diesel", [0.0, 100.0],
+                               [0.0, 1.0e-3], ones(H, 2); nb = 2, H = H)
+                input = PowerSystemInput(
+                    name = "convmin", year = 2025, network = net, generators = [gas, diesel],
+                    batteries = BatteryConfig[], demand = hcat(zeros(H), dem2),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    pwl_loss_segments = 0, reserve_static_default_ratio = 0.0,
+                    mode = mode, solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                flow = freq ? value.(vars.freq_flow_a_to_b[1, :]) : value.(vars.acdc_rectify[1, :])
+                return model, vars, input, flow
+            end
+            for freq in (false, true)
+                _, _, _, ed = conv_dispatch("economic_dispatch"; freq = freq)
+                @test ed ≈ [5.0, 5.0, 40.0, 5.0] atol = 1e-6
+                model, vars, input, uc = conv_dispatch("unit_commitment"; freq = freq)
+                @test uc ≈ [0.0, 0.0, 40.0, 0.0] atol = 1e-6
+                @test length(model.ext[:converter_commitment]) == 2 * H
+                # The UC dual recovery fixes the converter binaries too (the
+                # LP re-solve had binaries left and returned no prices)
+                @test recover_uc_duals_via_copy(model, vars, input) !== nothing
+            end
         end
 
         @testset "solve_dcopf benchmark" begin

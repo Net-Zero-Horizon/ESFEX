@@ -39,6 +39,26 @@ def line_flow_cost_per_mwh(line) -> float:
 def scale_cost_list(arr: list) -> list:
     """Scale a list of monetary values from $ to M$."""
     return [x * COST_SCALE for x in arr]
+
+
+def battery_availability_key(key: str) -> str:
+    """Key of battery *key*'s profile in the runner's availability cache
+    (apart from the generators', which use the bare unit key)."""
+    return f"battery:{key}"
+
+
+def battery_technology_availability_key(key: str) -> str:
+    """Key of battery technology *key*'s profile in the availability cache."""
+    return f"battery_technology:{key}"
+
+
+def _per_node(arr, n: int) -> list:
+    """A per-node list of length *n* from an optional field: a single value
+    applies to every node, missing nodes get 0."""
+    vals = [float(v) for v in (arr or [])]
+    if len(vals) == 1:
+        return vals * n
+    return (vals + [0.0] * n)[:n]
 from esfex.config.schema import (
     BatteryConfig,
     BatteryTechnologyConfig,
@@ -288,7 +308,10 @@ def build_bat_cost_curves_dict(
 ) -> Any:
     """Build Julia ``Dict{Int, Dict{Int, Vector{CostSegment}}}`` for batteries.
 
-    Only batteries with multi-segment (>1) discharge curves are included.
+    Every discharge curve that changes the battery's price is included:
+    multi-segment curves, and single-segment (flat) curves whose price
+    differs from the battery's ``throughput_degradation_cost`` (the solver
+    then charges that price instead), as for generators.
 
     Parameters
     ----------
@@ -326,7 +349,7 @@ def build_bat_cost_curves_dict(
         for node_idx, curve in enumerate(curves):
             fb = fallback_costs[node_idx] if node_idx < len(fallback_costs) else 0.0
             blocks = normalize_cost_curve(curve, fallback_price=fb)
-            if len(blocks) <= 1:
+            if not blocks or (len(blocks) == 1 and blocks[0].price == fb):
                 continue
 
             if bus_to_node is not None:
@@ -1369,13 +1392,31 @@ def convert_generator_config(
     )
 
 
+def _storage_availability_matrix(availability: Optional[np.ndarray], num_nodes: int,
+                                 bus_to_node: Optional[list]) -> np.ndarray:
+    """Availability of a battery or battery technology for Julia: the
+    ``[steps × nodes]`` profile laid out on the buses, or a 0-row matrix
+    (fully available) when there is none."""
+    if availability is None:
+        n = len(bus_to_node) if bus_to_node is not None else num_nodes
+        return np.zeros((0, n))
+    availability = np.asarray(availability, dtype=float)
+    if bus_to_node is not None:
+        availability = expand_node_to_bus_matrix(availability, bus_to_node, default_value=1.0)
+    return availability
+
+
 def convert_battery_config(
     bat: BatteryConfig,
     bus_to_node: Optional[list] = None,
     bus_per_node: Optional[dict] = None,
     replicate_capacity_across_node: bool = False,
+    availability: Optional[np.ndarray] = None,
 ) -> Any:
     """Convert Python BatteryConfig to Julia BatteryConfig struct.
+
+    ``availability`` is the battery's profile ``[steps × nodes]`` (factor on
+    charge and discharge power), None when it has none.
 
     Capacity placement mirrors :func:`convert_generator_config`:
 
@@ -1467,6 +1508,9 @@ def convert_battery_config(
         maint_cost = prop(maintenance_cost)
         degrad = prop(degradation_rate)
         tp_degrad_cost = prop(throughput_degradation_cost)
+        ramp_up = prop(_per_node(bat.ramp_up, num_nodes))
+        ramp_down = prop(_per_node(bat.ramp_down, num_nodes))
+        fixed_cost = prop(_per_node(bat.fixed_cost, num_nodes))
     else:
         num_buses = num_nodes
         capacity = bat.capacity
@@ -1489,6 +1533,9 @@ def convert_battery_config(
         maint_cost = maintenance_cost
         degrad = degradation_rate
         tp_degrad_cost = throughput_degradation_cost
+        ramp_up = _per_node(bat.ramp_up, num_nodes)
+        ramp_down = _per_node(bat.ramp_down, num_nodes)
+        fixed_cost = _per_node(bat.fixed_cost, num_nodes)
 
     # --- Cost scaling: $ → M$ ---
     inv_cost = scale_cost_list(inv_cost)
@@ -1496,6 +1543,7 @@ def convert_battery_config(
     maint_cost = scale_cost_list(maint_cost)
     decomm_cost = scale_cost_list(decomm_cost)
     tp_degrad_cost = scale_cost_list(tp_degrad_cost)
+    fixed_cost = scale_cost_list(fixed_cost)
 
     return ESFEX.BatteryConfig(
         bat.name,
@@ -1527,6 +1575,11 @@ def convert_battery_config(
             prop(getattr(bat, 'risk_coefficient', [1.0]))
             if bus_to_node else getattr(bat, 'risk_coefficient', [1.0])
         ),
+        py_to_julia_vector(ramp_up),
+        py_to_julia_vector(ramp_down),
+        py_to_julia_vector(fixed_cost),
+        bool(bat.reservable),
+        py_to_julia_matrix(_storage_availability_matrix(availability, num_nodes, bus_to_node)),
     )
 
 
@@ -1648,6 +1701,7 @@ def convert_technology_config(
 def convert_battery_technology_config(
     bat_tech: BatteryTechnologyConfig,
     bus_to_node: Optional[list] = None,
+    availability: Optional[np.ndarray] = None,
 ) -> Any:
     """
     Convert Python BatteryTechnologyConfig to Julia BatteryTechnologyConfig struct.
@@ -1655,6 +1709,7 @@ def convert_battery_technology_config(
     Args:
         bat_tech: Python BatteryTechnologyConfig
         bus_to_node: Optional bus-to-node mapping (0-indexed).
+        availability: The technology's profile ``[steps × nodes]``, or None.
 
     Returns:
         Julia BatteryTechnologyConfig struct
@@ -1688,6 +1743,9 @@ def convert_battery_technology_config(
         inertia_arr = prop(bat_tech.inertia)
         tp_degrad_cost = prop(bat_tech.throughput_degradation_cost)
         decomm_cost = prop(bat_tech.decommissioning_cost)
+        ramp_up = prop(_per_node(bat_tech.ramp_up, num_nodes))
+        ramp_down = prop(_per_node(bat_tech.ramp_down, num_nodes))
+        fixed_cost = prop(_per_node(bat_tech.fixed_cost, num_nodes))
     else:
         inv_cost_power = bat_tech.invest_cost_power
         inv_cost_capacity = bat_tech.invest_cost_energy
@@ -1704,6 +1762,9 @@ def convert_battery_technology_config(
         inertia_arr = bat_tech.inertia
         tp_degrad_cost = bat_tech.throughput_degradation_cost
         decomm_cost = bat_tech.decommissioning_cost
+        ramp_up = _per_node(bat_tech.ramp_up, num_nodes)
+        ramp_down = _per_node(bat_tech.ramp_down, num_nodes)
+        fixed_cost = _per_node(bat_tech.fixed_cost, num_nodes)
 
     # --- Cost scaling: $ → M$ ---
     inv_cost_power = scale_cost_list(inv_cost_power)
@@ -1711,6 +1772,7 @@ def convert_battery_technology_config(
     maint_cost = scale_cost_list(maint_cost)
     tp_degrad_cost = scale_cost_list(tp_degrad_cost)
     decomm_cost = scale_cost_list(decomm_cost)
+    fixed_cost = scale_cost_list(fixed_cost)
 
     return ESFEX.BatteryTechnologyConfig(
         bat_tech.name,
@@ -1737,6 +1799,11 @@ def convert_battery_technology_config(
             prop(getattr(bat_tech, 'risk_coefficient', [1.0]))
             if bus_to_node else getattr(bat_tech, 'risk_coefficient', [1.0])
         ),
+        py_to_julia_vector(ramp_up),
+        py_to_julia_vector(ramp_down),
+        py_to_julia_vector(fixed_cost),
+        bool(bat_tech.reservable),
+        py_to_julia_matrix(_storage_availability_matrix(availability, num_nodes, bus_to_node)),
     )
 
 

@@ -8,7 +8,7 @@ An availability profile is a time series of **capacity factors** (0.0 to 1.0): t
 - **1.0**: the unit can run at full capacity
 - Values in between reflect partial availability (clouds, moderate wind)
 
-A generator or technology without a profile has a constant availability of 1.0. That is right for dispatchable units, but not for solar or wind: a `Renewable` unit without a profile (other than a reservoir hydro unit) is therefore logged once at the start of the run (`... is Renewable but has no availability_file: it is modelled as available at full capacity in every hour (capacity factor 1.0) ...`). A profile is not limited to renewables: in operational dispatch, the profile caps the output of **any** generator that has one (for example a seasonal derating of a biomass plant).
+A generator or technology without a profile has a constant availability of 1.0. That is right for dispatchable units, but not for solar or wind: a `Renewable` unit without a profile (other than a reservoir hydro unit) is therefore logged once at the start of the run (`... is Renewable but has no availability_file: it is modelled as available at full capacity in every hour (capacity factor 1.0) ...`). A profile is not limited to renewables: in operational dispatch, the profile caps the output of **any** generator that has one (for example a seasonal derating of a biomass plant). A battery or battery technology with a profile has its charge and discharge power (and the power it can offer as reserve) multiplied by it each hour, in the dispatch and in the master problem; without one it is always fully available.
 
 
 ---

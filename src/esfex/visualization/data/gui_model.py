@@ -233,17 +233,10 @@ class GuiBatteryInstance:
     life_time: int = 20
     initial_age: int = 0
     degradation_rate: float = 0.0
-    min_power: float = 0.0
-    min_up: int = 0
-    min_down: int = 0
-    ramp_up: float = 1.0
+    ramp_up: float = 1.0           # fraction of charge/discharge power per hour
     ramp_down: float = 1.0
-    eff_at_rated: float = 0.9
-    eff_at_min: float = 0.9
     inertia: float = 0.0
-    start_up_cost: float = 0.0
-    fuel_cost: float = 0.0
-    fixed_cost: float = 0.0
+    fixed_cost: float = 0.0        # $/MW of discharge power per year
     maintenance_cost: float = 0.0
     throughput_degradation_cost: float = 0.0
     # Bidding/offer curve for discharge cost
