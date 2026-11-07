@@ -530,7 +530,7 @@ When `max_curtailment_ratio < 1.0`, curtailment of existing renewables and of ca
 \sum_{n,t} CU^{day}_{n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} \left( \bar{P}^{tech}_{y,k,n} \alpha_{k,t',n} - P^{tech}_{k,n,t} \right) \leq \bar{\kappa} \left( \sum_{g \in \mathcal{G}_{RE},n,t} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} P^{tech}_{k,n,t} \right) \tag{CURT-1}
 \]
 
-This is a hard constraint. It pushes investment towards storage rather than relying on curtailment to manage surplus RE. The operational dispatch has no such cap; it prices curtailment at `curtailment_cost`.
+This is a hard constraint. It pushes investment towards storage rather than relying on curtailment to manage surplus RE. The operational dispatch has no such cap; it prices curtailment at `curtailment_cost`. With the cap on, the candidates' curtailment \(\bar{P}^{tech}_{y,k,n} \alpha_{k,t',n} - P^{tech}_{k,n,t}\) is also charged at \(c^{CU}\) in the day's cost, like \(CU^{day}\) in OBJ-5.
 
 #### 8.3.7 Sectoral Loss-of-Load Bounds
 
@@ -826,10 +826,10 @@ where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discou
 
 Instead of one LP with all representative days embedded, Benders solves an investment-only master and one dispatch subproblem per year and representative day, linked by optimality cuts.
 
-**Master** (`create_benders_master`): the variables and constraints of §3 and §7 (TECH, BUD, RET, CAP, TXN, RE-2, RE-3) without representative days, plus one recourse variable \(\theta_y \geq 0\) per year (`theta_y{y}`, in M\$) that estimates the year's operating cost:
+**Master** (`create_benders_master`): the variables and constraints of §3 and §7 (TECH, BUD, RET, CAP, TXN, RE-2, RE-3) without representative days, plus one recourse variable \(\theta_y \geq 0\) per year (`theta_y{y}`, in the cost units of the input, M\$ from the bridge) that estimates the year's operating cost:
 
 \[
-\min \; \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_y}{(1+r)^{y-1}} + \sum_{y} \frac{C^{asset}_y + 10^6 \theta_y}{(1+r)^{y-1}} + C^{slack} \tag{BEN-1}
+\min \; \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_y}{(1+r)^{y-1}} + \sum_{y} \frac{C^{asset}_y + \theta_y}{(1+r)^{y-1}} + C^{slack} \tag{BEN-1}
 \]
 
 Because the master has no dispatch, two approximations replace it:
@@ -837,14 +837,28 @@ Because the master has no dispatch, two approximations replace it:
 - `re_cap_link_s{σ}_y{y}`: existing plus invested renewable capacity, times its mean availability and the year's steps, must cover the RE target times annual demand.
 - `storage_adequacy_s{σ}_y{y}`: when battery technologies exist, battery energy capacity times the mean round-trip efficiency must cover \((1 - \bar{\kappa})\) of the daily renewable surplus estimated from the availability profiles.
 
-**Subproblems** (`create_benders_subproblem`): the representative-day dispatch of §8.3 with the capacities fixed at the master's values. Each day's RE share must be at least the master's RE ratio (`re_min_day_*`), as in the monolithic model. Two things differ from it:
+**Subproblems** (`create_benders_subproblem`): the representative-day dispatch of §8.3 with the capacities fixed at the master's values, including the converters, the link flow cost, the LP start-ups, the candidates' curtailment cost and the fuel block. Each day's RE share must be at least the year's target (`re_min_day_*`) and the master's RE ratio (`re_ratio_lb_*`), as in the monolithic model. Two things differ from it:
 
 - The curtailment cap is soft (`max_curt_y*_d*` with slack `curt_excess_y*_d*`, priced at `penalties.curtailment_excess_penalty`, default 500 \$/MWh).
 - The load-shedding penalty, including the sectoral ones, is capped at `benders_lol_penalty_cap` (default 1000 \$/MW per step; 0 disables the cap) to keep the cuts numerically usable. Subproblem costs therefore differ from the monolithic objective whenever load is shed.
 
-**Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints give one cut per year and iteration (`benders_cut_y{y}_iter{k}`): \(\theta_y \geq\) intercept + gradient × (technology, battery-technology, life-extension and line capacity). With the fuel block (§8.3.12) each subproblem fixes the fuel storage, route and electrolyzer capacity in service that year through a copy variable (`fuel_cap_*`), and the dual of its fixing constraint is that capacity's gradient. The cut then also holds when every gradient is zero, so a year's flat fuel cost reaches \(\theta_y\). The lower bound is the master objective, the upper bound the investment cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50).
+**Copy variables**: every master quantity a subproblem reads, other than the technology and battery-technology capacities, enters it as a copy variable fixed to the master's value (`copy_*`, `fuel_cap_*`): the converter MW built up to the year, the MW built on each line's corridor, the reservoir MWh built up to the year (the level bounds of §8.3 include it), a life-extended unit's capacity, each system's RE ratio, the fuel storage, route and electrolyzer capacity in service (§8.3.12) and the CO2 allocations below. The dual of the fixing constraint is that quantity's gradient in the cut.
 
-The subproblems do not have the converters, the link flow cost, the LP start-ups or the CO2 budget of §8.3.8–8.3.11 (the CO2 budget couples all days of a year, so it does not split per day), and the Benders master builds no converter capacity.
+**CO2 budget** (§8.3.11): the annual budget of a group couples all representative days of a year, so the master shares it out. It has a variable \(a_{\sigma,y,d} \geq 0\) per system (budget group), year and day (`co2_alloc_y{y}_{group}_d{d}`), the share of the budget day \(d\) may use, with
+
+\[
+\sum_{d} a_{\sigma,y,d} \leq 1 \tag{BEN-CO2-1}
+\]
+
+(`co2_alloc_budget_y{y}_{group}`). Subproblem \(d\) holds its emissions (the left-hand side of CO2-1 for that day alone, scaled to the year like its cost) to its share of the budget plus a violation slack priced at the system's penalty:
+
+\[
+\frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{t} \Big( \sum_{g,n \in \sigma} e_{g,n} P^{day}_{g,n,t} + \sum_{k,n \in \sigma} e_{k,n} P^{tech}_{k,n,t} \Big) \leq a_{\sigma,y,d} \, B_\sigma + v_{\sigma,y,d} \tag{BEN-CO2-2}
+\]
+
+(`co2_budget_y{y}_d{d}_{group}`, slack `co2_budget_violation_y{y}_d{d}_{group}`). Summed over the days this is CO2-1 with \(V_{\sigma,y} = \sum_d v_{\sigma,y,d}\) at the same price, so both have the same optimum. The cuts carry each day's marginal cost of allowance to the master, which moves the budget to the days where it saves the most.
+
+**Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints and copy variables give one cut per year and iteration (`benders_cut_y{y}_iter{k}`): \(\theta_y \geq\) intercept + gradient × (technology and battery-technology capacities, copied quantities). A renewable technology's gradient also includes \(c^{CU}\) times its availability over the day: the curtailment cost its capacity adds. Every master quantity a subproblem reads has a gradient, so the cut is added for every year and iteration, also when all gradients are zero (\(\theta_y\) is then at least the year's operating cost). The lower bound is the master objective, the upper bound the investment cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50). With verbose output, a master or subproblem that fails to solve is written as an LP file to the system's temporary folder.
 
 Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the peak-based representative days of §8.1; `use_tsam` has no effect on it.
 

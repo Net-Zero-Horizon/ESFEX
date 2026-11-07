@@ -528,7 +528,8 @@ end
 The fuel block of a Benders subproblem day. Each buildable capacity is a
 copy variable fixed to the master's value (`fixed`, from
 `master_fuel_extra_values`); the dual of its fixing constraint is the
-day's marginal cost of that capacity, which the optimality cut uses.
+day's marginal cost of that capacity, which the optimality cut uses
+(`extract_copy_duals`, benders.jl).
 """
 function benders_fuel_day!(sp::Model, ps_vars::PowerSystemVariables,
                            input::MasterProblemInput, year_idx::Int,
@@ -545,20 +546,4 @@ function benders_fuel_day!(sp::Model, ps_vars::PowerSystemVariables,
     cost = add_master_fuel_day!(sp, ps_vars, input, year_idx, start_hour, hours,
         tech_output; extra = k -> get(copies, k, 0.0))
     return cost, fix
-end
-
-"""
-    extract_fuel_duals(sp) -> Dict{MasterFuelKey, Float64}
-
-∂(day cost)/∂(built capacity) for each fuel capacity of a solved subproblem.
-"""
-function extract_fuel_duals(sp)
-    fix = get(sp.constraint_store, "fuel_fix", nothing)
-    out = Dict{MasterFuelKey, Float64}()
-    fix === nothing && return out
-    for (k, cref) in fix
-        d = dual(cref)
-        abs(d) > 1e-10 && (out[k] = d)
-    end
-    return out
 end
