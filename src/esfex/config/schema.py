@@ -48,11 +48,14 @@ class PenaltiesConfig(BaseModel):
     transfer_margin: float = Field(default=100, description="$/MW transfer margin violation")
     curtailment: float = Field(
         default=100,
-        description="No effect: curtailed RE is priced by curtailment_cost and "
-                    "curtailment_excess_penalty (the Studio writes it as 'Curtailment')")
+        description="No effect: curtailed RE is priced by curtailment_cost "
+                    "(the Studio writes it as 'Curtailment')")
     max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Max curtailment as fraction of RE generation (0.05 = 5%)")
     curtailment_cost: float = Field(default=20.0, ge=0, description="$/MWh penalty for curtailed RE energy")
-    curtailment_excess_penalty: float = Field(default=500.0, ge=0, description="$/MWh penalty for curtailment exceeding ratio limit")
+    curtailment_excess_penalty: float = Field(
+        default=500.0, ge=0,
+        description="No effect: max_curtailment_ratio is a hard limit in the master "
+                    "problem, monolithic and Benders (kept so existing files load)")
     re_excess_penalty: float = Field(default=100.0, ge=0, description="$/MWh penalty for RE generation exceeding target")
     rooftop_curtailment: float = Field(default=5, description="$/MWh rooftop curtailed")
     co2_cost: float = Field(default=10, description="$/tCO2")
@@ -88,6 +91,7 @@ class PenaltiesConfig(BaseModel):
 # model.
 PENALTIES_WITHOUT_EFFECT: frozenset[str] = frozenset({
     "curtailment", "coupling_slack_penalty", "transport_congestion", "storage_violation",
+    "curtailment_excess_penalty",
 })
 
 
@@ -1856,7 +1860,7 @@ class MasterProblemConfig(BaseModel):
     # Master-problem solver method.
     #   "monolithic" — single model coupling investment + representative-day
     #                  operations (default).
-    #   "benders"    — Benders decomposition: investment-only master with theta[y]
+    #   "benders"    — Benders decomposition: investment-only master with theta[y,d]
     #                  recourse and per-representative-day dispatch subproblems.
     #                  Beneficial for very large problems.
     solver_method: Literal["monolithic", "benders"] = Field(
@@ -1870,11 +1874,6 @@ class MasterProblemConfig(BaseModel):
     benders_tolerance: float = Field(
         default=1e-4, gt=0.0,
         description="Relative optimality-gap tolerance for Benders convergence.",
-    )
-    benders_lol_penalty_cap: float = Field(
-        default=1000.0, ge=0.0,
-        description="Cap on the loss-of-load penalty ($/MW per timestep) inside "
-        "Benders subproblems for numerical stability (0 disables the cap).",
     )
 
     # TSAM (Time-Series Aggregation Method)

@@ -70,13 +70,13 @@ MGA/SPORES runs only in `perfect_foresight` mode.
 | Method | Description |
 |--------|-------------|
 | `monolithic` (default) | One LP that holds the investment variables and all representative-day dispatch |
-| `benders` | Benders decomposition: an investment-only master with one recourse variable per year, and one dispatch subproblem per year and representative day. Iterates until the relative gap is below `benders_tolerance` or `benders_max_iterations` is reached |
+| `benders` | Benders decomposition: an investment-only master with one recourse variable per year and representative day, and one dispatch subproblem per year and representative day. Iterates until the relative gap is below `benders_tolerance` or `benders_max_iterations` is reached |
 
-With `benders`, the loss-of-load penalty inside the subproblems is capped at `benders_lol_penalty_cap` ($/MW per timestep, default 1000; `0` disables the cap) to keep the cuts numerically stable. The objective is therefore not identical to the monolithic one when the subproblems shed load.
+Benders solves the same problem as the monolithic master and reaches the same optimum: the same investment constraints and costs, the same representative-day dispatch with the full loss-of-load penalty, and the same hard curtailment limit (`max_curtailment_ratio`). If it stops at `benders_max_iterations`, it returns the plan of its best iteration together with that plan's operating cost, and logs the remaining gap.
 
-!!! note "Benders: current limitations"
-    - With `planning_mode: perfect_foresight`, a Benders run currently stops before solving. After building the master, the run writes the master LP to the log folder, and under Benders there is no single LP to write. The run logs `Master problem failed: Model not built. Call build_model() first.` and aborts. Benders currently runs only with `planning_mode: myopic`.
-    - The Benders path always selects representative days by peak demand (TSAM is not used). It also ignores `stochastic: true` and investment-target custom constraints.
+!!! note "Benders: limitations"
+    - Benders always selects representative days by peak demand. With `use_tsam: true`, or with investment-target custom constraints, the run solves the monolithic master instead and logs a warning saying why.
+    - Benders ignores `stochastic: true` (with a warning) and solves the master deterministically.
 
 
 ### Representative Days
@@ -291,7 +291,6 @@ master_problem:
   stochastic: false
   benders_max_iterations: 50
   benders_tolerance: 0.0001
-  benders_lol_penalty_cap: 1000.0
   mga:
     enabled: false
     method: mga                      # mga | spores
@@ -319,7 +318,6 @@ temporal:
 | `stochastic` | false | Scenario-weighted objective (see [Stochastic Mode](#stochastic-mode)) |
 | `benders_max_iterations` | 50 | Benders only |
 | `benders_tolerance` | 1e-4 | Benders only: relative gap for convergence |
-| `benders_lol_penalty_cap` | 1000.0 | Benders only: cap on the loss-of-load penalty in subproblems; `0` disables |
 | `mga.enabled` | false | Generate near-optimal alternatives |
 | `mga.method` | `mga` | `mga` runs the HSJ loop \(K\) times; `spores` solves one alternative per declared objective |
 | `mga.slack_fraction` | 0.05 | Accept alternatives up to 5 % more expensive than the optimum (0 to 0.5) |

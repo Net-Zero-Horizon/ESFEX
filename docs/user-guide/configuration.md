@@ -457,7 +457,6 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
       transfer_margin: 100.0            # $/MW
       curtailment_cost: 20.0            # $/MWh curtailed RE in dispatch
       max_curtailment_ratio: 0.05       # cap on curtailment / RE generation (master)
-      curtailment_excess_penalty: 500.0 # $/MWh above the cap (Benders master)
       re_excess_penalty: 100.0          # $/MWh
       fre_penetration_loss: 100.0       # $/MWh RE shortfall
       co2_cost: 10.0                    # $/t CO2
@@ -468,9 +467,9 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
       non_electric_demand_loss: 100.0   # $/unit non-electric fuel demand not served
 ```
 
-The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the monolithic master problem and a soft one (priced with `curtailment_excess_penalty`) under Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
+The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the master problem, monolithic or Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`soc_violation` and `delay_retirement_per_mw` can also be set here. `curtailment`, `transport_congestion` and `storage_violation` load without a warning (the Studio writes them) but have no effect: the model has no such slacks, and curtailed RE is priced by `curtailment_cost`. `coupling_slack_penalty` is deprecated: it has no effect, the Studio no longer writes it, and a configuration that sets it logs a warning.
+`soc_violation` and `delay_retirement_per_mw` can also be set here. `curtailment`, `curtailment_excess_penalty`, `transport_congestion` and `storage_violation` load without a warning (the Studio writes them) but have no effect: the model has no such slacks, curtailed RE is priced by `curtailment_cost`, and the curtailment limit is hard. `coupling_slack_penalty` is deprecated: it has no effect, the Studio no longer writes it, and a configuration that sets it logs a warning.
 
 `loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
 

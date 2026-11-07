@@ -11,7 +11,7 @@ Both are added *after* the native formulation, so a model without custom constra
 
 !!! note "Current limitations (0.3.0)"
     - **Single-node systems only.** Custom constraints are applied only when the run consists of one system with one node. For two or more nodes, or several systems, the run merges the systems into one network, and the merged configuration does not carry `custom_constraints`. They are then ignored without a warning.
-    - **Investment constraints** (`target: investment`) are applied only by the deterministic monolithic master. They are ignored with `solver_method: benders`, with `stochastic: true` (when scenarios are defined), and by MGA/SPORES.
+    - **Investment constraints** (`target: investment`) are applied only by the deterministic monolithic master. With `solver_method: benders`, the run solves the monolithic master instead (with a warning in the log) so that they apply. They are ignored with `stochastic: true` (when scenarios are defined) and by MGA/SPORES.
 
 ---
 
