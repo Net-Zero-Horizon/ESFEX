@@ -2320,6 +2320,46 @@ class PowerSystemAdapter:
         return float(jl.seval("objective_value(_ps_model)")) * COST_UNSCALE
 
 
+def _master_co2_budget_groups(sys, ESFEX):
+    """The master's annual CO2 budgets as ``CO2BudgetGroup``s, as the dispatch
+    sets them: one per system of a merged run (``co2_budget_by_system``), or
+    one over all nodes from ``co2_budget`` and
+    ``penalties.co2_budget_violation``. Empty when no budget is enabled.
+    """
+    jl = get_julia()
+    if getattr(sys, "co2_budget_by_system", None):
+        return PowerSystemAdapter._co2_budget_groups(sys, ESFEX)
+    groups = jl.seval("CO2BudgetGroup[]")
+    budget = getattr(sys, "co2_budget", None)
+    if budget is not None and budget.enabled:
+        jl.seval("push!")(groups, ESFEX.CO2BudgetGroup(
+            str(sys.name),
+            py_to_julia_int_vector(list(range(1, sys.num_nodes + 1))),
+            float(budget.annual_budget),
+            scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
+        ))
+    return groups
+
+
+def _line_flow_costs(sys) -> dict[tuple[int, int], float]:
+    """Flow cost per MWh of the system's lines with a per-MW·km cost
+    (inter-system links): ``length_km × cost_per_mw_km``, keyed by the
+    1-indexed bus pair ``(low, high)``. Parallel lines on a pair share their
+    capacity-weighted mean.
+    """
+    acc: dict[tuple[int, int], list[float]] = {}
+    for line in sys.transmission_lines_geo or []:
+        cost = float(getattr(line, 'cost_per_mw_km', 0.0) or 0.0) * float(line.length_km or 0.0)
+        if cost <= 0 or line.from_bus is None or line.to_bus is None:
+            continue
+        a, b = line.from_bus + 1, line.to_bus + 1
+        w = max(float(line.capacity_mw or 0.0), 1e-6)
+        entry = acc.setdefault((min(a, b), max(a, b)), [0.0, 0.0])
+        entry[0] += w
+        entry[1] += w * scale_cost(cost)
+    return {pair: wc / w for pair, (w, wc) in acc.items()}
+
+
 class MasterProblemAdapter:
     """
     Python adapter for the Julia MasterProblem optimization model.
@@ -2897,9 +2937,24 @@ class MasterProblemAdapter:
                 "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
                     f"({int(s)}, {int(y)}) => {float(v)!r}"
                     for (s, y), v in self.re_target_override.items()) + ")"),
+            # CO2 budgets, link flow costs and start-ups, as in the dispatch
+            co2_budget_groups=_master_co2_budget_groups(sys, ESFEX),
+            line_flow_cost=jl.seval(
+                "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
+                    f"({a}, {b}) => {c!r}"
+                    for (a, b), c in _line_flow_costs(sys).items()) + ")"),
+            unit_commitment=self._dispatch_commits_units(),
         )
 
         return jl_input
+
+    def _dispatch_commits_units(self) -> bool:
+        """Whether the dispatch of this development run commits units
+        (``master_problem.use_uc_in_dispatch``): the master then models
+        start-ups."""
+        cfg = self.esfex_config
+        mp = getattr(cfg, 'master_problem', None) if cfg is not None else None
+        return bool(getattr(mp, 'use_uc_in_dispatch', False))
 
     def build_model(self, use_representative_days: bool = True):
         """
@@ -3162,6 +3217,7 @@ class MasterProblemAdapter:
                 'bat_tech_power_investment': {'bat_tech_investment_power_bt_n': value, ...},
                 'bat_tech_capacity_investment': {'bat_tech_investment_capacity_bt_n': value, ...},
                 'transfer_investment': {'transfer_investment_i_j': value, ...},
+                'converter_investment': {'converter_investment_acdc_c': MW, ...},
                 're_penetration_ratio': float,
             },
             ...
@@ -3183,6 +3239,7 @@ class MasterProblemAdapter:
                 'bat_tech_power_investment': {},
                 'bat_tech_capacity_investment': {},
                 'transfer_investment': {},
+                'converter_investment': {},
                 're_penetration_ratio': 0.0,
             }
 
@@ -3224,6 +3281,13 @@ class MasterProblemAdapter:
                 if value > 1e-6:
                     trans_key = f"transfer_investment_{i_py}_{j_py}"
                     solution[year]['transfer_investment'][trans_key] = value
+
+            # Converter investments: ("acdc" | "freq", 1-indexed) → 0-indexed keys
+            for key, val in jl_result.converter_investment[y_idx].items():
+                value = float(val)
+                if value > 1e-6:
+                    conv_key = f"converter_investment_{key[0]}_{int(key[1]) - 1}"
+                    solution[year]['converter_investment'][conv_key] = value
 
             # RE penetration ratio
             re_by_year = np.array(jl_result.re_penetration_by_year)
@@ -3405,6 +3469,7 @@ class MasterProblemAdapter:
         year_investments.update(year_data.get('bat_tech_power_investment', {}))
         year_investments.update(year_data.get('bat_tech_capacity_investment', {}))
         year_investments.update(year_data.get('transfer_investment', {}))
+        year_investments.update(year_data.get('converter_investment', {}))
 
         return year_investments
 

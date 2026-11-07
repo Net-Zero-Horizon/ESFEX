@@ -175,6 +175,12 @@ C^{inv}_y = \underbrace{\sum_{k,n} c^{inv}_{k,n} I^{tech}_{y,k,n}}_{\text{Techno
 \quad + \underbrace{\sum_{g,n} c^{res}_{g,n} I^{res}_{y,g,n}}_{\text{Reservoir}} \tag{OBJ-3}
 \]
 
+\[
+\quad + \underbrace{\sum_{c} c^{inv}_{c} I^{conv}_{y,c}}_{\text{Converters}} \tag{OBJ-3a}
+\]
+
+\(I^{conv}_{y,c}\) is the MW added to AC/DC or frequency converter \(c\) (`converter_investment`), up to its `invest_max_power` over the horizon, at its `invest_cost` (\$/MW). Like the dispatch, a converter does not age: its capacity is `rated_power_mva` plus everything built so far, and the built MW reach the dispatch as added rated power from the year they are built.
+
 Existing generators and batteries have no investment variable; their capacity is fixed (§6). The master has no fuel model and no fuel infrastructure investment: fuel storage and transport are built by the primary-energy block of the operational dispatch ([Primary Energy](primary-energy.md), PE-5d).
 
 ### 5.1b Existing-Asset Costs
@@ -183,6 +189,8 @@ Existing generators and batteries have no investment variable; their capacity is
 \[
 C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y \tag{OBJ-3b}
 \]
+
+Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\).
 
 Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
 
@@ -211,6 +219,12 @@ C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}
 \[
 \quad + \sum_{t=1}^{H} \sum_{s \in \mathcal{S}} \sum_{n} c^{VOLL} \cdot (\kappa_s - 1) \cdot L^{sec,day}_{s,n,t} \tag{OBJ-6}
 \]
+
+\[
+\quad + \sum_{t=1}^{H} \Big[ \sum_{c} c^{var}_c \left(P^{c,1}_{c,t} + P^{c,2}_{c,t}\right) + \sum_{\ell} c^{flow}_\ell \, |f^{day}_{\ell,t}| \Big] + \frac{1}{\Delta t} \sum_{g,n,t} \frac{c^{su}_{g,n}}{\bar{P}_{g,n}} \, SU_{g,n,t} \tag{OBJ-6a}
+\]
+
+OBJ-6a is the converters' variable cost on the power they carry in either direction (plus the constant standby term of the dispatch), the flow cost of inter-system links (§8.3.9) and the start-ups of §8.3.10 (an event, not energy: the \(1/\Delta t\) cancels the step length of OBJ-4). The CO2 budget violation of §8.3.11 is added to \(C^{op}_y\) once per year at each system's penalty.
 
 where \(\kappa_s\) is the criticality weight for sector \(s\). The sectoral shed \(L^{sec,day}\) is part of \(L^{day}\) (SEC-2), which OBJ-5 already charges at VOLL; OBJ-6 adds the criticality premium, so a sector's shed MWh costs \(c^{VOLL} \kappa_s\) and the unclassified remainder \(c^{VOLL}\), as in the dispatch. The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. Batteries pay their `maintenance_cost` on every MWh charged and discharged and their throughput cost on discharge, as in the dispatch; for battery technologies (\(k\)) these are the technology's `maintenance_cost` and `throughput_degradation_cost`. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well. All of \(C^{day}\) is scaled to the year the same way (OBJ-4, or \(\Delta t \cdot w_p\) for a TSAM period of weight \(w_p\)), in the monolithic, TSAM, multi-system and stochastic masters; the Benders subproblems charge the same day cost except the candidates' curtailment, which they price only above the cap ([§11b](#11b-benders-decomposition)).
 
@@ -534,6 +548,40 @@ The bus's load shed splits into the sectors' shed plus a remainder bounded by th
 
 Sectoral demand is scaled by the year's demand growth like \(D^{day}\). The Benders subproblems use the same constraints.
 
+#### 8.3.8 Converters
+
+AC/DC and frequency converters enter the day's bus balances as in the dispatch (`add_converter_constraints!`): converter \(c\) carries \(P^{c,1}_{c,t} \geq 0\) from its first to its second end and \(P^{c,2}_{c,t} \geq 0\) back, each delivered with its efficiency, within its capacity this year:
+
+\[
+P^{c,1}_{c,t} + P^{c,2}_{c,t} \leq \bar{P}^{conv}_{c} + \sum_{y' \leq y} I^{conv}_{y',c} \tag{CONV-1}
+\]
+
+The master network has one bus per node, so a converter joins its `from_node` and `to_node`.
+
+#### 8.3.9 Flow Cost of Inter-System Links
+
+An electrical inter-system link charges `distance_km` × `cost_per_mw_km` per MWh it carries. In a merged run its node link gets that cost (`line_flow_cost`; several links between the same two nodes share their capacity-weighted mean), and the day's cost includes \(c^{flow}_\ell |f^{day}_{\ell,t}|\), with \(|f|\) an auxiliary variable above \(\pm f\).
+
+#### 8.3.10 Start-ups (LP)
+
+When the dispatch commits units (`master_problem.use_uc_in_dispatch`), each thermal or reservoir generator with a start-up cost or a minimum power gets an online capacity \(U_{g,n,t}\) (MW), a continuous relaxation of the dispatch's on/off status:
+
+\[
+U_{g,n,t} \leq \bar{P}^{cum}_{y,g,n}, \qquad \underline{p}_{g,n} U_{g,n,t} \leq P^{day}_{g,n,t} \leq U_{g,n,t}, \qquad SU_{g,n,t} \geq U_{g,n,t} - U_{g,n,t-1} \tag{SU-1}
+\]
+
+with \(U_{g,n,0} = U_{g,n,H}\) (the day repeats). Starting the whole unit (\(SU = \bar{P}_{g,n}\), its degraded rated power this year) costs one `start_up_cost`, as one start in the dispatch. Minimum up and down times are not modelled, and candidate technologies have no start-ups in the master. With economic dispatch (the default) the dispatch has no start-up cost and neither has the master.
+
+#### 8.3.11 CO2 Budget
+
+Each system's annual CO2 budget holds in the master as in the dispatch (one budget per system in a merged run, `co2_budget_groups`; one over all nodes otherwise). The emissions of the generators and candidate technologies at the system's nodes, over the representative days scaled to the year like their cost, stay within the budget plus a violation slack:
+
+\[
+\frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{d} \sum_{t} \Big( \sum_{g,n \in \sigma} e_{g,n} P^{day}_{g,n,t} + \sum_{k,n \in \sigma} e_{k,n} P^{tech}_{k,n,t} \Big) \leq B_\sigma + V_{\sigma,y} \tag{CO2-1}
+\]
+
+(\(\Delta t \cdot w_p\) for a TSAM period), with \(e\) the emission factor per MWh of electricity (`co2_per_mwh`). \(V_{\sigma,y}\) is charged at the system's `co2_budget_violation` penalty in \(C^{op}_y\). A budget that is disabled or not finite adds nothing.
+
 ### 8.4 Cost Scaling
 
 
@@ -707,6 +755,11 @@ Each scenario \(\omega\) has:
 | `maintenance_cost` | Scales maintenance costs in the scenario's operation |
 | `carbon_price` | Scales the CO2 cost in the scenario's operation |
 | `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration` | Scale the loss-of-load (incl. sectoral), reserve-shortfall, curtailment and RE-shortfall penalties in the scenario's operation |
+| `penalty_co2_budget_violation` | Scales the CO2 budget violation penalty (§8.3.11) |
+| `bat_maintenance_cost` | Scales battery and battery-technology maintenance, on top of `maintenance_cost` |
+| `gen_start_up_cost` | Scales generator start-up costs (§8.3.10) |
+| `converter_invest_cost`, `converter_variable_cost` | Scale the converter investment (OBJ-3a) and variable (OBJ-6a) costs |
+| `transmission_cost_per_mw_km` | Scales the flow cost of inter-system links (§8.3.9) |
 | `demand_growth` | Annual demand factor of the scenario's operation (demand × factor^(y−1)) |
 | `discount_rate` | Scenario-specific discount rate adjustment |
 
@@ -757,6 +810,8 @@ Because the master has no dispatch, two approximations replace it:
 - The load-shedding penalty, including the sectoral ones, is capped at `benders_lol_penalty_cap` (default 1000 \$/MW per step; 0 disables the cap) to keep the cuts numerically usable. Subproblem costs therefore differ from the monolithic objective whenever load is shed.
 
 **Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints give one cut per year and iteration (`benders_cut_y{y}_iter{k}`): \(\theta_y \geq\) intercept + gradient × (technology, battery-technology, life-extension and line capacity). The lower bound is the master objective, the upper bound the investment cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50).
+
+The subproblems do not have the converters, the link flow cost, the LP start-ups or the CO2 budget of §8.3.8–8.3.11 (the CO2 budget couples all days of a year, so it does not split per day), and the Benders master builds no converter capacity.
 
 Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the peak-based representative days of §8.1; `use_tsam` has no effect on it.
 

@@ -428,6 +428,19 @@ function build_master_variables!(
         end
     end
 
+    # Converter investment (MW) at period starts, for AC/DC and frequency
+    # converters that allow it (invest_max_power > 0)
+    converter_investment = Dict{Int, Dict{Tuple{String,Int}, VariableRef}}()
+    for y_idx in 1:years_per_inv_period:num_years
+        converter_investment[y_idx] = Dict{Tuple{String,Int}, VariableRef}()
+        for (key, conv) in master_converters(input.network)
+            conv.invest_max_power > 0 || continue
+            converter_investment[y_idx][key] = @variable(model,
+                lower_bound = 0, upper_bound = conv.invest_max_power,
+                base_name = "conv_inv_y$(y_idx)_$(key[1])$(key[2])")
+        end
+    end
+
     return MasterProblemVariables(
         tech_investment,
         bat_tech_power_investment,
@@ -444,8 +457,38 @@ function build_master_variables!(
         Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}(),  # inter_period_soc (TSAM)
         Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}(),  # inter_period_reservoir (TSAM seasonal hydro)
         reservoir_investment,
-        years_per_inv_period
+        years_per_inv_period,
+        converter_investment,
+        Dict{Tuple{Int,Int,Int}, VariableRef}()  # co2_budget_violation
     )
+end
+
+"""
+    master_converters(network)
+
+The AC/DC and frequency converters of `network` as `(key, converter)` pairs,
+keyed `("acdc", c)` / `("freq", c)` like `converter_investment`.
+"""
+master_converters(network::NetworkConfig) = vcat(
+    [(("acdc", c), conv) for (c, conv) in enumerate(network.acdc_converters)],
+    [(("freq", c), conv) for (c, conv) in enumerate(network.freq_converters)])
+
+"""
+    converter_capacity(vars, conv, key, year_idx)
+
+Converter capacity in year `year_idx`: its rated power plus the MW built at
+the investment-period starts up to that year. As in the dispatch, a
+converter does not age or retire.
+"""
+function converter_capacity(vars::MasterProblemVariables, conv, key::Tuple{String,Int},
+                            year_idx::Int)
+    cap = AffExpr(conv.rated_power_mva)
+    for y in 1:vars.years_per_inv_period:year_idx
+        v = get(get(vars.converter_investment, y, Dict{Tuple{String,Int}, VariableRef}()),
+                key, nothing)
+        v === nothing || add_to_expression!(cap, v)
+    end
+    return cap
 end
 
 # =============================================================================
@@ -550,6 +593,15 @@ function add_investment_constraints!(
                 )
             end
         end
+    end
+
+    # Converter cumulative investment limit
+    for (key, conv) in master_converters(input.network)
+        conv.invest_max_power > 0 || continue
+        @constraint(model,
+            sum(vars.converter_investment[y][key] for y in 1:ypp:num_years) <=
+                conv.invest_max_power,
+            base_name = "cumul_conv_$(key[1])$(key[2])")
     end
 
     # Per-node aggregate cumulative investment constraint
@@ -1250,7 +1302,8 @@ Returns an AffExpr containing discounted investment costs at period starts.
 A stochastic scenario's `mult` scales the technology investment costs
 (`invest_cost_renewables` / `invest_cost_conventional`), battery technology
 power and energy costs (`invest_cost_storage` × `bat_invest_cost_power` /
-`bat_invest_cost_capacity`) and transmission (`invest_cost_transmission`).
+`bat_invest_cost_capacity`), transmission (`invest_cost_transmission`) and
+converters (`converter_invest_cost`).
 """
 function build_investment_cost_expression(
     vars::MasterProblemVariables,
@@ -1268,6 +1321,7 @@ function build_investment_cost_expression(
     m_bat_p = mult === nothing ? m_sto : m_sto * mult.bat_invest_cost_power
     m_bat_e = mult === nothing ? m_sto : m_sto * mult.bat_invest_cost_capacity
     m_tx = mult === nothing ? 1.0 : mult.invest_cost_transmission
+    m_conv = mult === nothing ? 1.0 : mult.converter_invest_cost
 
     inv_cost = AffExpr(0.0)
 
@@ -1307,6 +1361,12 @@ function build_investment_cost_expression(
             add_to_expression!(investment_cost, var, trans_cost * m_tx)
         end
 
+        # Converter investment
+        for (key, conv) in master_converters(input.network)
+            v = get(vars.converter_investment[y_idx], key, nothing)
+            v === nothing || add_to_expression!(investment_cost, v, conv.invest_cost * m_conv)
+        end
+
         # Reservoir capacity investment
         for g in 1:n_gen
             gen = input.generators[g]
@@ -1331,8 +1391,9 @@ end
     build_annual_asset_cost(vars, input, y_idx; mult=nothing)
 
 Undiscounted per-year cost of existing assets: life extension of units past
-their lifetime and (incremental, LP-linear) decommissioning. A stochastic
-scenario's `mult` scales the generator and battery decommissioning costs.
+their lifetime, (incremental, LP-linear) decommissioning and the fixed cost
+(\$/MW/year) of the converter capacity built so far. A stochastic scenario's
+`mult` scales the generator and battery decommissioning costs.
 """
 function build_annual_asset_cost(
     vars::MasterProblemVariables,
@@ -1367,6 +1428,14 @@ function build_annual_asset_cost(
                 add_to_expression!(annual_cost, life_ext_var, ext_cost)
             end
         end
+    end
+
+    # Fixed cost of the converter capacity built up to this year
+    for (key, conv) in master_converters(input.network)
+        conv.fixed_cost > 0 || continue
+        built = converter_capacity(vars, conv, key, y_idx)
+        add_to_expression!(built, -conv.rated_power_mva)
+        add_to_expression!(annual_cost, conv.fixed_cost, built)
     end
 
     # Decommissioning costs (incremental, LP-linear)
@@ -2025,6 +2094,12 @@ function add_day_operational_constraints!(
         capacity_override=total_cap_gen,
         demand_scale=1.0)  # demand already scaled in demand_slice
     add_inertia_constraints!(model, ps_vars, day_input)
+    # AC/DC and frequency converters as the dispatch models them, at their
+    # rated power plus the converter capacity the master builds
+    conv_cap = Dict{Tuple{String,Int}, AffExpr}(
+        key => converter_capacity(vars, conv, key, year_idx)
+        for (key, conv) in master_converters(input.network))
+    add_converter_constraints!(model, ps_vars, day_input; capacity_override=conv_cap)
 
     # =========================================================================
     # Build extra injection function for balance (master-specific terms)
@@ -2058,6 +2133,7 @@ function add_day_operational_constraints!(
     # NOT input.transmission_lines (MasterProblemInput field, may be empty)
     network_lines = input.network.transmission_lines
     n_lines = length(network_lines)
+    line_flow_cost = AffExpr(0.0)
     if n_buses > 1 && n_lines > 0
         transmission = with_loss_model(TransmissionDC(input.network),
             input.transmission_loss_segments, input.network.s_base)
@@ -2083,6 +2159,7 @@ function add_day_operational_constraints!(
         end
         add_line_capacity_constraints!(model, transmission, ps_vars, day_input;
             capacity_override=line_cap_override)
+        line_flow_cost = add_line_flow_cost!(model, transmission, ps_vars, input, hours)
     else
         add_demand_constraints!(model, ps_vars, day_input;
             extra_injections_fn=extra_fn)
@@ -2286,9 +2363,92 @@ function add_day_operational_constraints!(
 
     add_to_expression!(tech_day_cost,
         battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
+    # Converter variable cost, flow cost of lines with a per-MW·km cost and
+    # (LP-relaxed) start-ups, as the dispatch charges them
+    add_to_expression!(tech_day_cost, add_converter_objective_terms(ps_vars, day_input))
+    add_to_expression!(tech_day_cost, line_flow_cost)
+    add_to_expression!(tech_day_cost,
+        add_day_commitment!(model, ps_vars, input, total_cap_gen, year_idx, hours))
 
     # The caller scales tech_day_cost with the day cost (calculate_day_operational_cost)
     return tech_output, tech_day_cost
+end
+
+"""
+    add_line_flow_cost!(model, transmission, ps_vars, input, hours) -> AffExpr
+
+Unscaled cost of the flow on the lines that charge one per MWh
+(`input.line_flow_cost`, e.g. distance × cost per MW·km of an inter-system
+link): `cost × |flow|` per step, with `|flow|` an auxiliary variable above
+`±flow` (the objective keeps it tight).
+"""
+function add_line_flow_cost!(model::Model, transmission::TransmissionDC,
+                             ps_vars::PowerSystemVariables,
+                             input::MasterProblemInput, hours::Int)
+    cost = AffExpr(0.0)
+    isempty(input.line_flow_cost) && return cost
+    for (l, (from, to)) in enumerate(transmission.lines)
+        c = get(input.line_flow_cost, (min(from, to), max(from, to)), 0.0)
+        c > 0 || continue
+        for t in 1:hours
+            pf = ps_vars.power_flow_by_line[l][t]
+            a = @variable(model, lower_bound = 0)
+            @constraint(model, a >= pf)
+            @constraint(model, a >= -pf)
+            add_to_expression!(cost, c, a)
+        end
+    end
+    return cost
+end
+
+"""
+    add_day_commitment!(model, ps_vars, input, total_cap_gen, year_idx, hours) -> AffExpr
+
+LP-relaxed unit commitment of a representative day, when the dispatch
+commits units (`input.unit_commitment`). Each thermal (or reservoir) unit
+with a start-up cost or a minimum power gets an online capacity `u[t]`
+(MW, at most the unit's capacity this year):
+
+    gen_output[t] ≤ u[t],   gen_output[t] ≥ min_power × u[t],
+    startup[t] ≥ u[t] − u[t−1]   (cyclic over the day)
+
+A start of the whole unit (startup = its rated power) costs `start_up_cost`,
+so a MW started costs `start_up_cost / rated`, with `rated` the unit's
+degraded rated power this year as the dispatch sees it. Minimum up and down
+times are not modelled.
+
+Returns the start-up cost divided by the step length: the caller scales
+the day cost by the step length and the day's weight, and a start-up is an
+event, not energy.
+"""
+function add_day_commitment!(model::Model, ps_vars::PowerSystemVariables,
+                             input::MasterProblemInput, total_cap_gen::AbstractDict,
+                             year_idx::Int, hours::Int)
+    cost = AffExpr(0.0)
+    input.unit_commitment || return cost
+    tres = max(1.0, input.temporal_resolution_hours)
+    for (g, gen) in enumerate(input.generators)
+        (gen.type == "Renewable" && !any(gen.reservoir_capacity .> 0)) && continue
+        for b in ps_vars.buses_of_gen[g]
+            suc = gen.start_up_cost[b]
+            pmin = gen.min_power[b]
+            rated = gen.rated_power[b] *
+                (1.0 - gen.degradation_rate[b])^(gen.initial_age[b] + year_idx - 1)
+            (rated > 0 && (suc > 0 || pmin > 0)) || continue
+            cap = total_cap_gen[(g, b)]
+            u = @variable(model, [1:hours], lower_bound = 0)
+            su = @variable(model, [1:hours], lower_bound = 0)
+            for t in 1:hours
+                out = ps_vars.gen_output[g, b, t]
+                @constraint(model, u[t] <= cap)
+                @constraint(model, out <= u[t])
+                pmin > 0 && @constraint(model, out >= pmin * u[t])
+                @constraint(model, su[t] >= u[t] - u[t == 1 ? hours : t - 1])
+                suc > 0 && add_to_expression!(cost, suc / rated / tres, su[t])
+            end
+        end
+    end
+    return cost
 end
 
 """
@@ -2526,13 +2686,84 @@ function calculate_day_operational_cost(
     tech_output::Union{Nothing, Any} = nothing,
     tech_day_cost::Union{Nothing, AffExpr} = nothing
 )::AffExpr
-    tres = max(1.0, input.temporal_resolution_hours)
-    days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
-    scaling_factor = tres * days_in_year / input.representative_days_per_year
+    scaling_factor = rep_day_scaling(input)
 
     cost = day_operational_cost(ps_vars, input, hours; tech_output)
     tech_day_cost === nothing || add_to_expression!(cost, tech_day_cost)
     return cost * scaling_factor
+end
+
+"""
+    rep_day_scaling(input)
+
+Factor from one representative day's per-step quantities to the year: the
+step length times the days each representative day stands for.
+"""
+function rep_day_scaling(input::MasterProblemInput)
+    tres = max(1.0, input.temporal_resolution_hours)
+    days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
+    return tres * days_in_year / input.representative_days_per_year
+end
+
+"""
+    day_co2_by_group(ps_vars, tech_output, input, hours) -> Vector{AffExpr}
+
+CO2 of a representative day or TSAM period per budget group of
+`input.co2_budget_groups`: Σ over steps of output (MW) × `co2_per_mwh`
+(t/MWh) of the generators and candidate technologies at the group's nodes.
+Per step: the caller scales it by the step length and the day's weight.
+"""
+function day_co2_by_group(ps_vars::PowerSystemVariables, tech_output,
+                          input::MasterProblemInput, hours::Int)
+    b2n = input.network.bus_to_node
+    out = [AffExpr(0.0) for _ in input.co2_budget_groups]
+    for (k, grp) in enumerate(input.co2_budget_groups)
+        has_co2_budget(grp) || continue
+        in_group = Set(grp.nodes)
+        for (g, gen) in enumerate(input.generators), b in ps_vars.buses_of_gen[g]
+            b2n[b] in in_group || continue
+            f = co2_per_mwh(input.fuel_co2, gen, b)
+            f == 0.0 && continue
+            for t in 1:hours
+                add_to_expression!(out[k], f, ps_vars.gen_output[g, b, t])
+            end
+        end
+        tech_output === nothing && continue
+        for (tc, tech) in enumerate(input.technologies), b in 1:input.network.num_buses
+            b2n[b] in in_group || continue
+            f = co2_per_mwh(input.fuel_co2, tech, b)
+            f == 0.0 && continue
+            for t in 1:hours
+                add_to_expression!(out[k], f, tech_output[tc, b, t])
+            end
+        end
+    end
+    return out
+end
+
+"""
+    add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2; scenario_idx=0) -> AffExpr
+
+One annual CO2 budget constraint per budget group (one per system), as in
+the dispatch: the year's emissions `annual_co2[k]` (t) stay within the
+group's budget plus a violation slack. Returns the cost of the slacks at
+each group's own violation penalty, to add to the year's operating cost.
+"""
+function add_co2_budget_constraints!(model::Model, vars::MasterProblemVariables,
+                                     input::MasterProblemInput, y_idx::Int,
+                                     annual_co2::Vector{AffExpr}; scenario_idx::Int = 0)
+    cost = AffExpr(0.0)
+    for (k, grp) in enumerate(input.co2_budget_groups)
+        has_co2_budget(grp) || continue
+        tag = scenario_idx > 0 ? "_s$(scenario_idx)" : ""
+        viol = @variable(model, lower_bound = 0,
+            base_name = "co2_budget_violation$(tag)_y$(y_idx)_$(grp.name)")
+        vars.co2_budget_violation[(scenario_idx, y_idx, k)] = viol
+        @constraint(model, annual_co2[k] <= grp.budget + viol,
+            base_name = "co2_budget$(tag)_y$(y_idx)_$(grp.name)")
+        add_to_expression!(cost, grp.violation_penalty, viol)
+    end
+    return cost
 end
 
 """
@@ -2576,6 +2807,7 @@ function add_representative_days_validation!(
         end
 
         vars.operational_costs[y_idx] = AffExpr[]
+        annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
 
         for (day_idx, start_hour) in enumerate(rep_days)
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
@@ -2599,7 +2831,16 @@ function add_representative_days_validation!(
             day_cost = calculate_day_operational_cost(ps_vars, input, y_idx, hours;
                 tech_output=tech_output, tech_day_cost=tech_day_cost)
             push!(vars.operational_costs[y_idx], day_cost)
+
+            # The day's CO2, scaled to the year like its cost
+            for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
+                add_to_expression!(annual_co2[k], e, rep_day_scaling(input))
+            end
         end
+
+        push!(vars.operational_costs[y_idx],
+            add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
+                scenario_idx=scenario_idx))
     end
 end
 
@@ -2673,6 +2914,7 @@ function add_tsam_periods_validation!(
         end
 
         vars.operational_costs[y_idx] = AffExpr[]
+        annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
 
         # --- Create inter-period SOC boundary variables ---
         if input.tsam_inter_period_linking && n_bat > 0
@@ -2808,7 +3050,17 @@ function add_tsam_periods_validation!(
                 tech_output=tech_output, tech_day_cost=tech_day_cost
             )
             push!(vars.operational_costs[y_idx], day_cost)
+
+            # The period's CO2, weighted to the year like its cost
+            tres = max(1.0, input.temporal_resolution_hours)
+            for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
+                add_to_expression!(annual_co2[k], e, tres * weight)
+            end
         end
+
+        push!(vars.operational_costs[y_idx],
+            add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
+                scenario_idx=scenario_idx))
     end
 end
 
@@ -3091,6 +3343,18 @@ function extract_master_solution(
         end
     end
 
+    # Converter investment: MW built in each period-start year
+    conv_inv = Dict{Int, Dict{Tuple{String,Int}, Float64}}()
+    for y_idx in 1:num_years
+        conv_inv[y_idx] = Dict{Tuple{String,Int}, Float64}()
+        for (key, var) in get(vars.converter_investment, y_idx, Dict{Tuple{String,Int}, VariableRef}())
+            conv_inv[y_idx][key] = value(var)
+        end
+        for (key, conv) in master_converters(input.network)
+            total_inv_by_year[y_idx] += get(conv_inv[y_idx], key, 0.0) * conv.invest_cost
+        end
+    end
+
     return MasterProblemResult(
         termination_status(model),
         objective_value(model),
@@ -3111,7 +3375,8 @@ function extract_master_solution(
         cumul_tech,
         cumul_bat_tech_pow,
         cumul_bat_tech_cap,
-        res_inv
+        res_inv,
+        conv_inv
     )
 end
 
@@ -3514,6 +3779,12 @@ function build_multi_system_objective!(
                 add_to_expression!(investment_cost, var, trans_cost)
             end
 
+            # Converter investment
+            for (key, conv) in master_converters(sys.network)
+                v = get(vars.converter_investment[y_idx], key, nothing)
+                v === nothing || add_to_expression!(investment_cost, v, conv.invest_cost)
+            end
+
             # (Life extension / decommissioning costs removed - unified retirement)
 
             add_to_expression!(total_cost, investment_cost, discount_factor)
@@ -3648,12 +3919,17 @@ The master input a stochastic scenario operates on in year `year_idx`:
 - fuel cost × `fuel_cost` × `fuel_price_growth`^(year_idx − 1), for generators
   (piecewise fuel-cost curves included) and candidate technologies
 - fixed O&M × `gen_fixed_cost` (generators, technologies)
-- maintenance cost × `maintenance_cost` (generators, batteries, technologies)
+- maintenance cost × `maintenance_cost` (generators, batteries, technologies);
+  batteries and battery technologies also × `bat_maintenance_cost`
+- start-up cost × `gen_start_up_cost` (generators)
 - CO2 cost × `carbon_price`
+- flow cost of lines with a per-MW·km cost × `transmission_cost_per_mw_km`
+- converter variable cost × `converter_variable_cost`
 - penalties: loss of load (and the sectoral penalties derived from it) ×
   `penalty_loss_of_load`, static and dynamic reserve shortfall ×
   `penalty_loss_of_reserve`, curtailment × `penalty_curtailment`, RE
-  penetration shortfall × `penalty_fre_penetration`
+  penetration shortfall × `penalty_fre_penetration`, CO2 budget violation ×
+  `penalty_co2_budget_violation`
 Investment-cost, decommissioning and discount multipliers act on the
 objective instead.
 """
@@ -3665,18 +3941,31 @@ function scenario_master_input(
     fuel = mult.fuel_cost * mult.fuel_price_growth^(year_idx - 1)
     maint = mult.maintenance_cost
     fixed = mult.gen_fixed_cost
+    bat_maint = maint * mult.bat_maintenance_cost
     gens = [with_fields(g; fuel_cost=g.fuel_cost .* fuel,
                         fixed_cost=g.fixed_cost .* fixed,
-                        maintenance_cost=g.maintenance_cost .* maint)
+                        maintenance_cost=g.maintenance_cost .* maint,
+                        start_up_cost=g.start_up_cost .* mult.gen_start_up_cost)
             for g in input.generators]
-    bats = [with_fields(b; maintenance_cost=b.maintenance_cost .* maint)
+    bats = [with_fields(b; maintenance_cost=b.maintenance_cost .* bat_maint)
             for b in input.batteries]
     techs = [with_fields(t; fuel_cost=t.fuel_cost .* fuel,
                          fixed_cost=t.fixed_cost .* fixed,
                          maintenance_cost=t.maintenance_cost .* maint)
              for t in input.technologies]
-    btechs = [with_fields(bt; maintenance_cost=bt.maintenance_cost .* maint)
+    btechs = [with_fields(bt; maintenance_cost=bt.maintenance_cost .* bat_maint)
               for bt in input.battery_technologies]
+    m_conv = mult.converter_variable_cost
+    network = with_fields(input.network;
+        acdc_converters=ACDCConverterData[with_fields(c; variable_cost=c.variable_cost * m_conv)
+                         for c in input.network.acdc_converters],
+        freq_converters=FrequencyConverterData[with_fields(c; variable_cost=c.variable_cost * m_conv)
+                         for c in input.network.freq_converters])
+    co2_groups = [CO2BudgetGroup(grp.name, grp.nodes, grp.budget,
+                                 grp.violation_penalty * mult.penalty_co2_budget_violation)
+                  for grp in input.co2_budget_groups]
+    line_flow_cost = Dict{Tuple{Int,Int}, Float64}(k => v * mult.transmission_cost_per_mw_km
+                          for (k, v) in input.line_flow_cost)
     # A generator with a fuel-cost curve is charged its segments, not fuel_cost
     gen_curves = Dict{Int, Dict{Int, Vector{CostSegment}}}(
         g => Dict{Int, Vector{CostSegment}}(
@@ -3684,9 +3973,11 @@ function scenario_master_input(
             for (n, segs) in bus_curves)
         for (g, bus_curves) in input.gen_cost_curves)
     return with_fields(input;
+        network=network,
         generators=gens, batteries=bats,
         technologies=techs, battery_technologies=btechs,
         gen_cost_curves=gen_curves,
+        co2_budget_groups=co2_groups, line_flow_cost=line_flow_cost,
         base_demand=input.base_demand .* mult.demand_growth^(year_idx - 1),
         co2_cost=input.co2_cost * mult.carbon_price,
         loss_of_load_penalty=input.loss_of_load_penalty * mult.penalty_loss_of_load,
@@ -4650,6 +4941,13 @@ function export_solution_to_dict(
         end
     end
     export_dict["retirement_status"] = gen_life_export
+
+    # Converter investment decisions (MW built that year, by converter name)
+    convs = Dict(master_converters(input.network))
+    export_dict["converter_investment"] = Dict{String, Any}(
+        string(input.years[y_idx]) => Dict{String, Float64}(
+            convs[key].name => v for (key, v) in conv_dict)
+        for (y_idx, conv_dict) in result.converter_investment)
 
     # Summary metrics
     export_dict["total_investment_by_year"] = result.total_investment_by_year

@@ -123,7 +123,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `tsam_num_periods` | int (2–365) | `10` | Number of representative periods for TSAM clustering. |
 | `tsam_method` | `kmedoids` \| `kmeans` | `"kmedoids"` | Clustering method for TSAM. |
 | `tsam_inter_period_linking` | bool | `true` | Enable inter-period SOC linking for seasonal storage representation. |
-| `use_uc_in_dispatch` | bool | `false` | Use unit commitment (binary gen_status, startup costs, min up/down times) in operational dispatch windows during development mode. Slower but more realistic operational costs. |
+| `use_uc_in_dispatch` | bool | `false` | Use unit commitment (binary gen_status, startup costs, min up/down times) in operational dispatch windows during development mode. Slower but more realistic operational costs. The master problem then models start-ups too (LP relaxation, see [Capacity Expansion](../formulation/capacity-expansion.md)). |
 | `planning_mode` | `perfect_foresight` \| `myopic` | `"perfect_foresight"` | Investment planning mode. 'perfect_foresight' solves all years simultaneously (knows future costs, demand, and targets). 'myopic' solves year by year sequentially (only uses information available at decision time). |
 | `mga` | [MGAConfig](#mgaconfig) | see [MGAConfig](#mgaconfig) | MGA near-optimal alternative generation settings |
 
@@ -188,7 +188,7 @@ One entry of `meta_network.systems_links`. Each list holds one value per link; a
 | `investment_cost_per_mw` / `investment_cost_per_MW` | list[float] | required | Investment cost per link ($/MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
 | `loss_factor` | list[float] | required | Transmission: not used (losses come from `resistance_pu`). Fuel route: route `losses_fraction` (fraction per 100 km) |
 | `distance_km` | list[float] | required | Length per link (km) |
-| `cost_per_mw_km` | list[float] | required | Transmission: not used (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
+| `cost_per_mw_km` | list[float] | required | Transmission: operating cost of the flow, `distance_km` × `cost_per_mw_km` per MWh carried, charged by the master (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
 | `reactance_pu` | list[float] | `[]` | Series reactance per link (p.u.). Empty: derived from length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`; 0.01 without a length |
 | `resistance_pu` | list[float] | `[]` | Series resistance per link (p.u.). Empty: 0 |
 | `waypoints` | list[list[dict]] | `[]` | GUI-only: per-link waypoints (list of {lat, lng}) for map polyline |
@@ -411,6 +411,7 @@ See [Nodes and buses](../user-guide/configuration.md#nodes-and-buses) in the gui
 | `resistance_pu` | float \| null | `null` | Resistance (p.u.). Missing → 0 |
 | `susceptance_pu` | float \| null | `null` | Susceptance (p.u.). Missing → 0 |
 | `num_circuits` | int | `1` | Parallel circuits |
+| `cost_per_mw_km` | float (≥ 0) | `0` | Operating cost of the flow ($ per MWh and km): the master charges `length_km` × `cost_per_mw_km` × \|flow\|. Set by a multi-system run on its inter-system links |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` | `"AC"` | Current type |
 | `from_endpoint_type` | str \| null | `null` | Studio endpoint reference (`bus`, `generator`, `battery`, `transformer`, ...) |
@@ -939,7 +940,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `enabled` | bool | `true` | Enforce the budget |
 | `annual_budget` | float (≥ 0) | `1000000` | Annual budget (t CO₂/year) |
 
-The budget covers the system's own power plants. In a multi-system run each system keeps its own budget, enabled flag and `penalties.co2_budget_violation`: the dispatch adds one budget constraint per system over that system's nodes, including the nodes of development zones connected to its buses.
+The budget covers the system's own power plants. The dispatch and the master problem both hold it (the master over each planning year's representative days scaled to the year). In a multi-system run each system keeps its own budget, enabled flag and `penalties.co2_budget_violation`: both add one budget constraint per system over that system's nodes, including the nodes of development zones connected to its buses.
 
 ---
 
@@ -1059,8 +1060,14 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `penalty_loss_of_reserve` | float | `1` | Multiplier on `penalties.loss_of_reserve_static` and `loss_of_reserve_dynamic` |
 | `penalty_curtailment` | float | `1` | Multiplier on `penalties.curtailment_cost` |
 | `penalty_fre_penetration` | float | `1` | Multiplier on `penalties.fre_penetration_loss` |
+| `penalty_co2_budget_violation` | float | `1` | Multiplier on `penalties.co2_budget_violation` (each system's) |
+| `bat_maintenance_cost` | float | `1` | Multiplier on the maintenance cost of batteries and battery technologies, applied on top of `maintenance_cost` |
+| `gen_start_up_cost` | float | `1` | Multiplier on generator `start_up_cost`. Only acts when the dispatch commits units (`master_problem.use_uc_in_dispatch`), the case in which the master models start-ups |
+| `converter_invest_cost` | float | `1` | Multiplier on the `invest_cost` of AC/DC and frequency converters |
+| `converter_variable_cost` | float | `1` | Multiplier on the `variable_cost` of AC/DC and frequency converters |
+| `transmission_cost_per_mw_km` | float | `1` | Multiplier on the flow cost of inter-system links (`cost_per_mw_km`) |
 
-Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. Keys that end up on the same field multiply, with a warning. Any other key is ignored with a warning.
+Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. Keys that end up on the same field multiply, with a warning. Any other key is ignored with a warning, among them the electrolyzer, fuel import, fuel storage and transport investment and loss-of-fuel-supply keys of earlier Studio versions.
 
 ---
 

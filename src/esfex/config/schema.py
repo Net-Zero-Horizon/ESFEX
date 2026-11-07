@@ -214,6 +214,9 @@ class TransmissionLineGeo(BaseModel):
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1
+    # Operating cost of the flow ($ per MWh per km), set on inter-system
+    # links: the master charges length_km × cost_per_mw_km × |flow|
+    cost_per_mw_km: float = Field(default=0.0, ge=0)
 
     # Electrical properties
     frequency_hz: float = Field(default=50.0, gt=0, description="Operating frequency (Hz)")
@@ -1115,6 +1118,20 @@ class ScenarioMultipliers(BaseModel):
     penalty_loss_of_reserve: float = 1.0
     penalty_curtailment: float = 1.0
     penalty_fre_penetration: float = 1.0
+    # --- Start-ups, battery maintenance, MW·km flows, converters, CO2 budget ---
+    # Start-up cost of generators (LP start-ups of the master; only when the
+    # dispatch commits units, master_problem.use_uc_in_dispatch)
+    gen_start_up_cost: float = 1.0
+    # Maintenance of batteries and battery technologies, × maintenance_cost
+    bat_maintenance_cost: float = 1.0
+    # Flow cost of inter-system links (distance × cost_per_mw_km × |flow|)
+    transmission_cost_per_mw_km: float = 1.0
+    # AC/DC and frequency converters: investment / variable cost
+    converter_invest_cost: float = 1.0
+    converter_variable_cost: float = 1.0
+    # Penalty per tonne over each system's CO2 budget
+    penalty_co2_budget_violation: float = 1.0
+    # --- end ---
 
     @model_validator(mode="before")
     @classmethod
@@ -1137,25 +1154,17 @@ SCENARIO_MULTIPLIER_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # Keys the Studio used to offer that cannot change the master's plan: it has
-# no start-up, electrolyzer, converter, fuel import, fuel shortfall or CO2
-# budget term, no fuel storage/transport investment, does not charge
-# inter-system per-MW·km flows, and battery maintenance has no multiplier of
-# its own (``maintenance_cost`` scales it with the other maintenance costs).
+# no electrolyzer, fuel import or fuel shortfall term and no fuel
+# storage/transport investment.
 SCENARIO_MULTIPLIERS_WITHOUT_EFFECT: frozenset[str] = frozenset({
-    "gen_start_up_cost",
-    "bat_maintenance_cost",
-    "transmission_cost_per_mw_km",
     "electrolyzer_invest_cost",
     "electrolyzer_fixed_cost",
     "electrolyzer_variable_cost",
     "electrolyzer_water_cost",
-    "converter_invest_cost",
-    "converter_variable_cost",
     "fuel_import_cost",
     "fuel_storage_invest_cost",
     "fuel_transport_cost",
     "penalty_loss_of_fuel_supply",
-    "penalty_co2_budget_violation",
 })
 
 
@@ -1816,7 +1825,8 @@ class MasterProblemConfig(BaseModel):
         default=False,
         description="Use unit commitment (binary gen_status, startup costs, "
         "min up/down times) in operational dispatch windows during "
-        "development mode. Slower but more realistic operational costs.",
+        "development mode. Slower but more realistic operational costs. "
+        "The master problem then models start-ups too (LP relaxation).",
     )
 
     # Planning mode

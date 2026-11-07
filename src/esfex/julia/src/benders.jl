@@ -2075,6 +2075,7 @@ function extract_master_solution_from_benders(
         result.cumulative_tech_capacity,
         result.cumulative_bat_tech_power,
         result.cumulative_bat_tech_capacity,
-        result.reservoir_investment
+        result.reservoir_investment,
+        result.converter_investment
     )
 end

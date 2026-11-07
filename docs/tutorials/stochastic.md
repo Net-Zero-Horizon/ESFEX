@@ -99,18 +99,24 @@ Each multiplier scales the corresponding base-case parameter (1.0 = no change). 
 | `fuel_cost` | 1.0 | Fuel cost of generators and candidate technologies |
 | `fuel_price_growth` | 1.0 | Extra annual fuel price escalation: fuel cost × `fuel_price_growth`^(year − 1) |
 | `gen_fixed_cost` | 1.0 | Fixed O&M of generators and technologies ($/MWh) |
-| `maintenance_cost` | 1.0 | Maintenance cost of generators and technologies |
+| `maintenance_cost` | 1.0 | Maintenance cost of generators, batteries and technologies |
 | `carbon_price` | 1.0 | CO2 cost (`co2_cost`) in the scenario's operation |
 | `penalty_loss_of_load` | 1.0 | Loss-of-load penalty (VOLL), sectoral penalties included |
 | `penalty_loss_of_reserve` | 1.0 | Static and dynamic reserve shortfall penalties |
 | `penalty_curtailment` | 1.0 | Curtailment cost |
 | `penalty_fre_penetration` | 1.0 | RE-penetration shortfall penalty |
+| `penalty_co2_budget_violation` | 1.0 | Penalty per tonne over each system's CO2 budget |
+| `bat_maintenance_cost` | 1.0 | Maintenance of batteries and battery technologies, on top of `maintenance_cost` |
+| `gen_start_up_cost` | 1.0 | Generator start-up cost (only when the dispatch uses unit commitment, `use_uc_in_dispatch`) |
+| `converter_variable_cost` | 1.0 | Variable cost of AC/DC and frequency converters |
+| `transmission_cost_per_mw_km` | 1.0 | Flow cost of inter-system links (per MWh and km) |
 | `invest_cost_renewables` | 1.0 | Investment cost of renewable technologies ($/MW) |
 | `invest_cost_conventional` | 1.0 | Investment cost of non-renewable technologies ($/MW) |
 | `invest_cost_storage` | 1.0 | Battery technology investment cost ($/MW and $/MWh) |
 | `bat_invest_cost_power` | 1.0 | Battery technology power cost ($/MW), on top of `invest_cost_storage` |
 | `bat_invest_cost_capacity` | 1.0 | Battery technology energy cost ($/MWh), on top of `invest_cost_storage` |
 | `invest_cost_transmission` | 1.0 | Transmission investment cost ($/MW) |
+| `converter_invest_cost` | 1.0 | Investment cost of AC/DC and frequency converters ($/MW) |
 | `gen_decommissioning_cost` | 1.0 | Decommissioning cost of existing generators |
 | `bat_decommissioning_cost` | 1.0 | Decommissioning cost of existing batteries |
 | `discount_rate` | 1.0 | Discount rate used for the scenario's costs |

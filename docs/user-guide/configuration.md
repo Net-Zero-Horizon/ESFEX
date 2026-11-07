@@ -591,7 +591,7 @@ meta_network:
       investment_cost_per_MW: [500000.0]
       loss_factor: [0.02]                 # required, not used
       distance_km: [90.0]
-      cost_per_mw_km: [1500.0]            # required, not used
+      cost_per_mw_km: [0.0]               # flow cost, $ per MWh and km
 ```
 
 `systems_links` is a list. Each list field holds one value per entry of `connections`. All listed systems are merged into a single network, and each link becomes a transmission line in both the master problem and the operational dispatch. The first system in `meta_network.systems` is the primary system; some features (for example development zones) read only the primary system. See [Inter-System Links](../gui/inter-system-links.md).
