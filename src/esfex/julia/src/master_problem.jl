@@ -408,8 +408,8 @@ function build_master_variables!(
         end
     end
 
-    # The master has no fuel model: fuel storage and transport are built by
-    # the dispatch's primary-energy model (fuel_infrastructure).
+    # Fuel storage, route transport and electrolyzers: build_master_fuel_variables!
+    # (master_fuel.jl), part of the returned variables below.
 
     # Reservoir capacity investment variables
     reservoir_investment = Dict{Int, Dict{Int, Vector{VariableRef}}}()
@@ -459,7 +459,8 @@ function build_master_variables!(
         reservoir_investment,
         years_per_inv_period,
         converter_investment,
-        Dict{Tuple{Int,Int,Int}, VariableRef}()  # co2_budget_violation
+        Dict{Tuple{Int,Int,Int}, VariableRef}(),  # co2_budget_violation
+        build_master_fuel_variables!(model, input, years_per_inv_period)  # M2 (#89)
     )
 end
 
@@ -1384,6 +1385,10 @@ function build_investment_cost_expression(
         add_to_expression!(inv_cost, investment_cost, discount_factor)
     end
 
+    # M2 (#89): fuel storage, route transport and electrolyzer builds
+    add_to_expression!(inv_cost, master_fuel_investment_cost(vars, input;
+        mult = mult, discount_rate = discount_rate))
+
     return inv_cost
 end
 
@@ -1506,6 +1511,9 @@ function build_annual_asset_cost(
             end
         end
     end
+
+    # M2 (#89): electrolyzer fixed cost (existing + built)
+    add_to_expression!(annual_cost, master_fuel_annual_cost(vars, input, y_idx; mult = mult))
 
     return annual_cost
 end
@@ -1759,7 +1767,9 @@ function create_day_ps_vars!(
         bat_seg_discharge = bat_seg_discharge,
         reservoir_level = reservoir_level,
         reservoir_spillage = reservoir_spillage,
-        reservoir_pump = reservoir_pump
+        reservoir_pump = reservoir_pump,
+        # M2 (#89): electrolyzers of the fuel block (load in the bus balance)
+        electrolyzer_power = master_electrolyzer_power_vars(model, input, prefix, hours)
     )
 end
 
@@ -2911,6 +2921,11 @@ function add_representative_days_validation!(
             # Operational cost scaled to the year (candidate technologies' too)
             day_cost = calculate_day_operational_cost(ps_vars, input, y_idx, hours;
                 tech_output=tech_output, tech_day_cost=tech_day_cost)
+            # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
+            add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
+                start_hour, hours, tech_output;
+                extra = k -> master_fuel_extra_expr(vars.fuel, input, y_idx, k)),
+                master_fuel_day_scale(input))
             push!(vars.operational_costs[y_idx], day_cost)
 
             # The day's CO2, scaled to the year like its cost
@@ -3130,6 +3145,12 @@ function add_tsam_periods_validation!(
                 ps_vars, input, y_idx, hours, weight;
                 tech_output=tech_output, tech_day_cost=tech_day_cost
             )
+            # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
+            # (cyclic tanks per period; the day's cost is in $, × weight)
+            add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
+                start_hour, hours, tech_output;
+                extra = k -> master_fuel_extra_expr(vars.fuel, input, y_idx, k)),
+                weight)
             push!(vars.operational_costs[y_idx], day_cost)
 
             # The period's CO2, weighted to the year like its cost
@@ -3457,7 +3478,8 @@ function extract_master_solution(
         cumul_bat_tech_pow,
         cumul_bat_tech_cap,
         res_inv,
-        conv_inv
+        conv_inv,
+        extract_master_fuel_solution(vars, input)  # M2 (#89)
     )
 end
 
@@ -4056,6 +4078,8 @@ function scenario_master_input(
         for (u, bus_curves) in curves)
     return with_fields(input;
         network=network,
+        # M2 (#89): fuel prices × the same factor as the units' fuel_cost
+        primary_energy=scale_master_fuel(input.primary_energy, mult, fuel),
         generators=gens, batteries=bats,
         technologies=techs, battery_technologies=btechs,
         gen_cost_curves=scale_curves(input.gen_cost_curves),

@@ -5,7 +5,6 @@ Models primary energy flows (fuels) with multi-scale temporal resolution
 and integration with the electrical system, considering non-electric demands.
 
 Temporal Scales:
-- Investment: Capacity decisions (typically annual)
 - Primary Period: supply limits and fuel shipments (configurable, 24 h default)
 - Hourly (time step): the fuel tanks and every use of fuel
 
@@ -19,6 +18,10 @@ transport losses; fuel still in transit when a rolling-horizon window's
 committed steps end arrives in the next window (`in_transit_arrivals`).
 Local supply per step is free within the period's limit. The `Hydrogen` tank
 also receives the hydrogen of the dispatch electrolyzers at its node.
+
+Fuel storage and transport capacity are not decided here: the master problem
+builds them (`master_fuel.jl`, which reuses these builders for each
+representative day) and the dispatch sees them as existing capacity.
 
 Constants:
 - KG_PER_TONNE: electrolyzer output (kg) → hydrogen tank units (t)
@@ -320,39 +323,12 @@ function build_primary_energy_variables!(
         push!(sectors, ne.sector)
     end
 
-    # =========================================================================
-    # Investment Variables
-    # Skip creation if investment_from_master flag is true (handled by MasterProblem)
-    # Matches Python legacy lines 361-379
-    # =========================================================================
-
+    # Fuel storage and transport are built by the master problem only
+    # (master_fuel.jl); a window sees them as existing capacity
+    # (cumulative_capacities) or, in the master's own day model, as capacity
+    # expressions (add_primary_energy_constraints!). The dispatch builds none.
     transport_inv = Dict{String, Matrix{VariableRef}}()
     storage_inv = Dict{String, Matrix{VariableRef}}()
-
-    # Only create investment variables if NOT handled by MasterProblem
-    if input.mode in ["development", "economic_dispatch"] && !input.investment_from_master
-        for fuel_name in fuel_names
-            if haskey(input.infrastructure, fuel_name)
-                infra = input.infrastructure[fuel_name]
-
-                # Transport investment [inv_period, route]
-                if n_routes > 0
-                    transport_inv[fuel_name] = @variable(model,
-                        [inv_p=1:n_invest, r=1:n_routes],
-                        lower_bound = 0,
-                        base_name = "inv_transport_$(fuel_name)"
-                    )
-                end
-
-                # Storage investment [inv_period, node]
-                storage_inv[fuel_name] = @variable(model,
-                    [inv_p=1:n_invest, n=1:n_nodes],
-                    lower_bound = 0,
-                    base_name = "inv_storage_$(fuel_name)"
-                )
-            end
-        end
-    end
 
     # =========================================================================
     # Primary Period Variables
@@ -505,7 +481,9 @@ end
 
 """
     add_primary_energy_constraints!(model, vars, input, temporal, adjusted_prices,
-                                    max_supply, ne_demand; outage_masks)
+                                    max_supply, ne_demand; outage_masks,
+                                    storage_extra=nothing, transport_extra=nothing,
+                                    cyclic=false)
 
 Add all primary energy constraints to the model.
 
@@ -516,6 +494,13 @@ availability factors in [0, 1] per step (1 = no outage):
   only passes through), and its minimum levels do not apply;
 - `"fuel_route"` => route_id => [step]: the route's capacity in a period is
   scaled by the period's mean factor (shipments are per period).
+
+Tank and route capacities are the configured ones plus what earlier windows
+or years built (`input.cumulative_capacities`). The master's day model adds
+its own builds through `storage_extra(fuel, node)` and
+`transport_extra(fuel, route)`, which return expressions of its investment
+variables (`master_fuel.jl`). `cyclic=true` ends each tank at its starting
+level instead of fixing the starting level (a representative day).
 """
 function add_primary_energy_constraints!(
     model::Model,
@@ -525,7 +510,10 @@ function add_primary_energy_constraints!(
     adjusted_prices::Dict{String, Float64},
     max_supply::Dict{String, Dict{Int, Dict{Int, Float64}}},
     ne_demand::Dict{Tuple{String, String}, Dict{Int, Dict{Int, Float64}}};
-    outage_masks::Dict{String, Any} = Dict{String, Any}()
+    outage_masks::Dict{String, Any} = Dict{String, Any}(),
+    storage_extra = nothing,
+    transport_extra = nothing,
+    cyclic::Bool = false
 )
     n_nodes = input.num_nodes
     n_hours = input.hours
@@ -545,50 +533,6 @@ function add_primary_energy_constraints!(
     sectors = Set{String}()
     for ne in input.non_electric_demand
         push!(sectors, ne.sector)
-    end
-
-    # =========================================================================
-    # I. Investment Constraints
-    # =========================================================================
-
-    if input.mode in ["development", "economic_dispatch"]
-        for inv_p in temporal.investment_period_indices
-            for fuel_name in fuel_names
-                if haskey(input.infrastructure, fuel_name)
-                    infra = input.infrastructure[fuel_name]
-                    fuel = fuel_by_name[fuel_name]
-
-                    # Transport investment limits (route-based)
-                    if haskey(vars.transport_capacity_investment, fuel_name)
-                        for (r, route) in enumerate(input.transport_routes)
-                            if haskey(route.fuel_params, fuel_name)
-                                fparams = route.fuel_params[fuel_name]
-                                # Expansion limit net of what earlier windows built
-                                built = _cumulative_capacity(input, "transport", fuel_name, r)
-                                @constraint(model,
-                                    vars.transport_capacity_investment[fuel_name][inv_p, r] <=
-                                    max(0.0, fparams.capacity * infra.transport_expansion_limit - built),
-                                    base_name = "inv_transport_limit_$(fuel_name)_$(inv_p)_r$(r)"
-                                )
-                            end
-                        end
-                    end
-
-                    # Storage investment limits
-                    if haskey(vars.storage_capacity_investment, fuel_name)
-                        for n in 1:n_nodes
-                            base_cap = fuel.storage_capacity[n]
-                            built = _cumulative_capacity(input, "storage", fuel_name, n)
-                            @constraint(model,
-                                vars.storage_capacity_investment[fuel_name][inv_p, n] <=
-                                max(0.0, base_cap * infra.storage_expansion_limit - built),
-                                base_name = "inv_storage_limit_$(fuel_name)_$(inv_p)_$(n)"
-                            )
-                        end
-                    end
-                end
-            end
-        end
     end
 
     # =========================================================================
@@ -642,11 +586,7 @@ function add_primary_energy_constraints!(
 
                 # Look up cumulative capacity using route index
                 cumul_cap = _cumulative_capacity(input, "transport", fuel_name, r)
-                inv_cap = if haskey(vars.transport_capacity_investment, fuel_name)
-                    vars.transport_capacity_investment[fuel_name][inv_p, r]
-                else
-                    0.0
-                end
+                inv_cap = transport_extra === nothing ? 0.0 : transport_extra(fuel_name, r)
 
                 total_daily_cap = base_daily_cap + cumul_cap + inv_cap
 
@@ -722,21 +662,23 @@ function add_primary_energy_constraints!(
     # IV. Hourly Operational Constraints (the tanks)
     # =========================================================================
 
-    # (configured, built earlier, total) tank capacity at node n in investment period inv_p
+    # (configured, built earlier, total) tank capacity at node n
     function tank_capacity(fuel, fuel_name, n, inv_p)
         base_cap = fuel.storage_capacity[n]
         cumul_cap = _cumulative_capacity(input, "storage", fuel_name, n)
-        inv_cap = if haskey(vars.storage_capacity_investment, fuel_name)
-            vars.storage_capacity_investment[fuel_name][inv_p, n]
-        else
-            0.0
-        end
+        inv_cap = storage_extra === nothing ? 0.0 : storage_extra(fuel_name, n)
         return base_cap, cumul_cap, base_cap + cumul_cap + inv_cap
     end
 
     for fuel_name in fuel_names
         fuel = fuel_by_name[fuel_name]
         for n in 1:n_nodes
+            if cyclic
+                lvl = vars.fuel_storage_level_hourly[fuel_name]
+                @constraint(model, lvl[n, 1] == lvl[n, n_hours + 1],
+                    base_name = "hr_storage_cyclic_$(fuel_name)_$(n)")
+                continue
+            end
             initial_level = if input.initial_storage_levels !== nothing &&
                                haskey(input.initial_storage_levels, fuel_name) &&
                                n <= length(input.initial_storage_levels[fuel_name])
@@ -1024,7 +966,7 @@ the dict's values into the PowerSystem objective AND merges the dict into
 `model.ext[:cost_expressions]` so each sub-cost lands in CostBreakdown.
 
 Buckets:
-  :pe_investment_cost     — transport + storage infrastructure annualised CAPEX
+  :pe_investment_cost     — always 0: fuel storage and transport are built by the master (master_fuel.jl)
   :pe_supply_cost         — base_price + import_cost × periodic supply, plus the tank drawdown (start − end level) at base_price
   :pe_loss_cost           — fuel shortfall (hourly) and unmet non-electric demand penalties
   :pe_excess_cost         — excess-supply penalty
@@ -1047,59 +989,6 @@ function get_primary_energy_objective_terms(
     n_nodes = input.num_nodes
 
     loss_penalty = input.loss_of_fuel_supply_penalty
-
-    # =========================================================================
-    # Investment Costs
-    # =========================================================================
-
-    # Annuities are annual: charge the window's share of the year, like the
-    # dispatch's own investment costs (the capacity carries over to later windows).
-    window_fraction = input.hours * input.step_hours / Float64(hours_in_year(input.year))
-    if input.mode in ["development", "economic_dispatch"]
-        for inv_p in temporal.investment_period_indices
-            for fuel_name in fuel_names
-                if haskey(input.infrastructure, fuel_name)
-                    infra = input.infrastructure[fuel_name]
-
-                    # Capital recovery factor for transport
-                    crf_transport = if infra.lifetime_transport > 0 && input.discount_rate > 0
-                        r = input.discount_rate
-                        n = infra.lifetime_transport
-                        (r * (1 + r)^n) / ((1 + r)^n - 1)
-                    else
-                        1.0 / max(infra.lifetime_transport, 1.0)
-                    end
-
-                    # Capital recovery factor for storage
-                    crf_storage = if infra.lifetime_storage > 0 && input.discount_rate > 0
-                        r = input.discount_rate
-                        n = infra.lifetime_storage
-                        (r * (1 + r)^n) / ((1 + r)^n - 1)
-                    else
-                        1.0 / max(infra.lifetime_storage, 1.0)
-                    end
-
-                    # Transport investment cost (route-based)
-                    if haskey(vars.transport_capacity_investment, fuel_name)
-                        for (r, route) in enumerate(input.transport_routes)
-                            add_to_expression!(pe_investment_cost,
-                                vars.transport_capacity_investment[fuel_name][inv_p, r],
-                                infra.transport_investment_cost * route.distance_km * crf_transport * window_fraction)
-                        end
-                    end
-
-                    # Storage investment cost
-                    if haskey(vars.storage_capacity_investment, fuel_name)
-                        for n in 1:n_nodes
-                            add_to_expression!(pe_investment_cost,
-                                vars.storage_capacity_investment[fuel_name][inv_p, n],
-                                infra.storage_investment_cost * crf_storage * window_fraction)
-                        end
-                    end
-                end
-            end
-        end
-    end
 
     # =========================================================================
     # Operational Costs (Primary Period)
@@ -1636,7 +1525,8 @@ end
 # =============================================================================
 
 """
-    create_primary_energy_model(model, input; outage_masks)
+    create_primary_energy_model(model, input; outage_masks, storage_extra=nothing,
+        transport_extra=nothing, cyclic=false)
 
 Create the primary energy optimization model components.
 
@@ -1645,6 +1535,7 @@ Create the primary energy optimization model components.
 - `input::PrimaryEnergyInput`: Primary energy configuration
 - `outage_masks`: scheduled tank and route outages of the window (see
   `add_primary_energy_constraints!`); empty = none
+- `storage_extra`, `transport_extra`, `cyclic`: see `add_primary_energy_constraints!`
 
 # Returns
 - `vars::PrimaryEnergyVariables`: Variable container
@@ -1653,7 +1544,10 @@ Create the primary energy optimization model components.
 function create_primary_energy_model(
     model::Model,
     input::PrimaryEnergyInput;
-    outage_masks::Dict{String, Any} = Dict{String, Any}()
+    outage_masks::Dict{String, Any} = Dict{String, Any}(),
+    storage_extra = nothing,
+    transport_extra = nothing,
+    cyclic::Bool = false
 )
     # The dispatch electrolyzers feed the Hydrogen tank
     # (couple_primary_energy_to_power_system!); the old inputs are gone.
@@ -1679,7 +1573,8 @@ function create_primary_energy_model(
 
     # Add constraints
     add_primary_energy_constraints!(model, vars, input, temporal,
-        adjusted_prices, max_supply, ne_demand; outage_masks)
+        adjusted_prices, max_supply, ne_demand;
+        outage_masks, storage_extra, transport_extra, cyclic)
 
     return vars, temporal, adjusted_prices
 end

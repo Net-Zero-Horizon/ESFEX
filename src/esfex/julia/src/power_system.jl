@@ -1158,6 +1158,12 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
                     add_to_expression!(electrolyzer_cost, config.variable_cost[b],
                                        vars.electrolyzer_power[e, b, t])
                 end
+                # Water cost ($/kg H2) on the hydrogen produced (#89)
+                if config.water_cost != 0 && length(config.eff_at_rated) >= b
+                    add_to_expression!(electrolyzer_cost,
+                        config.water_cost * electrolyzer_h2_per_mwh(config, b),
+                        vars.electrolyzer_power[e, b, t])
+                end
             end
             # Fixed cost on rated power (annualized per hour × hours)
             for b in 1:n_bus
