@@ -67,7 +67,6 @@ solver:
 | `time_limit` | int | `10800` | Maximum solve time per model, in seconds. Ignored by SCS. |
 | `gap` | float | `0.01` | MIP relative optimality gap (0.01 = 1%). Ignored for pure LP. Not passed to GLPK (set `mip_gap` in `options`). For Ipopt, the value is passed as its convergence tolerance `tol`. |
 | `verbose` | bool | `false` | Print the solver log. Overridden by `logging.console_level` (`basic` turns it off, `debug` turns it on) and by `esfex run -v`. |
-| `scale_constraints` | bool | `true` | No effect: accepted for compatibility with the Studio (which shows it disabled), but not used by the model or the solvers. |
 | `options` | dict | `{}` | Solver-specific options (see [Advanced Solver Options](#advanced-solver-options)) |
 
 ### CLI Override

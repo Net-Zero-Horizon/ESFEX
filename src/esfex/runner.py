@@ -1324,7 +1324,7 @@ class Orchestrator:
             "load_damping", "reserve_margin", "reserve_static_default_ratio",
             "dynamic_reserve_contribution", "soc_end_tolerance",
             "min_cycling_ratio", "min_cycling_period_days",
-            "flexible_demand_benefit_ratio", "demand_shift_cost_rate",
+            "demand_shift_cost_rate",
             "npv_annual_return_rate",
         )}
 

@@ -1083,14 +1083,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     end
 
     # ==========================================================================
-    # Flexible Demand Benefit
-    # Benefit from demand reduction - SUBTRACTED as it reduces cost
-    # Valued at 50% of electricity price (price response benefit)
-    # ==========================================================================
-    # No flexible curtailment (demand is shifted instead): kept at 0 for the breakdown.
-    flexible_demand_benefit = AffExpr(0.0)
-
-    # ==========================================================================
     # CO2 Budget Violation Penalty
     # Penalty for exceeding CO2 budget - default 500 per tonne
     # ==========================================================================
@@ -1309,7 +1301,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         co2_cost_expr +
         inertia_cost + ev_loss_cost + fre_penetration_cost +
         soc_violation_cost + transfer_margin_cost +
-        sectoral_load_shed_cost - flexible_demand_benefit +
+        sectoral_load_shed_cost +
         co2_budget_violation_cost + rooftop_curtailment_cost + spillage_cost +
         electrolyzer_cost +
         demand_shift_cost +
@@ -1358,7 +1350,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         :soc_violation_cost => soc_violation_cost,
         :transfer_margin_cost => transfer_margin_cost,
         :v2g_compensation => v2g_compensation,
-        :flexible_demand_benefit => flexible_demand_benefit,
         :investment_cost => investment_cost,
         :electrolyzer_cost => electrolyzer_cost,
         :converter_cost => AffExpr(0.0),   # set by charge_converter_costs!
@@ -4301,7 +4292,6 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             _v(:soc_violation_cost),
             _v(:transfer_margin_cost),
             _v(:v2g_compensation),
-            _v(:flexible_demand_benefit),
             _v(:investment_cost, false),
             _v(:electrolyzer_cost),
             _v(:converter_cost),

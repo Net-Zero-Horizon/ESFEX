@@ -754,8 +754,6 @@ The function returns an `NPVIterationResult` containing:
 
 For planning across several interconnected systems (e.g. countries or regions), the runner merges all systems listed in `meta_network.systems` into one system before building the master (`Orchestrator._merge_systems` in `runner.py`). Per-node arrays are padded so that each system's units sit on its own nodes, and the inter-system links (`meta_network.systems_links`) are added to the merged network as ordinary transmission lines. The merged system is then solved by the single master described above: one set of investment variables, one objective and one discount rate, with the RE targets of §7.5 set per system (`system_node_ranges`). The operational dispatch runs on the merged bus-level network in the same way.
 
-Julia also contains a separate multi-system formulation (`create_multi_system_master_problem`, with per-system variables, inter-system investment variables `inter_inv_y*_l*` and flow variables `inter_pf_*`), but the Python runner does not call it.
-
 ---
 
 

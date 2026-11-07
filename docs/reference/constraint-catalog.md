@@ -310,11 +310,6 @@ The days reuse the dispatch constraints above (generators with capacity override
 
 In the stochastic master these names carry a scenario tag.
 
-### Multi-System Master (not used by the runner)
-
-`create_multi_system_master_problem` defines inter-system links with `inter_pf_*`, `inter_cap_pos/neg_*`, `inter_decomp_*`, losses and `cumul_inter_link{l}`, `inter_sym_{i}_{j}_y{y}`, with the injection `+pf + 0.5·ploss` (FROM) and `−pf + 0.5·ploss` (TO) added to the supply side. The Python runner does not call it: it merges the systems and treats inter-system links as ordinary lines.
-
----
 
 ## benders.jl --- Benders Decomposition
 

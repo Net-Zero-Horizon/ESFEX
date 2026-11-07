@@ -78,7 +78,6 @@ def minimal_system_data():
         "name": "TestSys",
         "demand_path": None,
         "demand_scale": 1.0,
-        "loss_demand_threshold": 0.05,
         "life_extension_cost_factor": 0.2,
         "sim_rooftop": False,
         "target_re_penetration": 0.5,
@@ -544,22 +543,21 @@ class TestConvertDCPowerFlow:
 
     def test_returns_dc_power_flow_config(self):
         """_convert_dc_power_flow returns DCPowerFlowConfig instance."""
-        data = {"dc_base_impedance": 100.0, "dc_reactance_per_km": 0.4}
+        data = {"dc_slack_bus": 1, "dc_reactance_per_km": 0.4}
         result = _convert_dc_power_flow(data)
         assert isinstance(result, DCPowerFlowConfig)
-        assert result.base_impedance == 100.0
+        assert result.slack_bus == 1
 
     def test_uppercase_keys(self):
         """Accepts uppercase DC_ keys (legacy format)."""
-        data = {"DC_BASE_IMPEDANCE": 200.0, "DC_VOLTAGE_LEVEL_KV": 345.0}
+        data = {"DC_REACTANCE_PER_KM": 0.5, "DC_VOLTAGE_LEVEL_KV": 345.0}
         result = _convert_dc_power_flow(data)
-        assert result.base_impedance == 200.0
+        assert result.reactance_per_km == 0.5
         assert result.voltage_level_kv == 345.0
 
     def test_defaults_when_no_keys(self):
         """Returns defaults when no DC keys are present."""
         result = _convert_dc_power_flow({})
-        assert result.base_impedance == 100.0
         assert result.reactance_per_km == 0.4
         assert result.voltage_level_kv == 220.0
         # enable_angle_limits removed — kept only ACOPF-meaningful fields.

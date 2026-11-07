@@ -14,7 +14,6 @@ solver:
   time_limit: 10800
   gap: 0.01
   verbose: false
-  scale_constraints: true
   options: {}
 network_reduction:
   enabled: false
@@ -62,13 +61,10 @@ meta_network:
   systems:
   - island
   systems_links: []
-  dynamic_transfer_pricing: true
-  inter_system_loss_segments: 2
 systems:
   island:
     name: island
     demand_scale: 1.0
-    LOSS_DEMAND_TRHESHOLD: 0.05
     life_extension_cost_factor: 0.2
     SIM_ROOFTOP: false
     TARGET_RE_PENETRATION: 1.0
@@ -89,7 +85,6 @@ systems:
     min_cycling_ratio: 0.8
     min_cycling_period_days: 7.0
     reserve_static_default_ratio: 0.15
-    flexible_demand_benefit_ratio: 0.5
     demand_shift_cost_rate: 0.1
     dynamic_reserve_contribution: 0.5
     reserve_margin: 1.15

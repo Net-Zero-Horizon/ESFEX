@@ -359,18 +359,15 @@ import Ipopt
             @test sc.multipliers === m
         end
 
-        @testset "InterSystemLink back-compat constructors" begin
-            # 9-arg form fills cost_per_mw_km=1.0, reactance=0.01, resistance=0.001.
-            l9 = InterSystemLink("A", "B", 1, 2, 100.0, 500.0, 50.0, 0.05, 300.0)
-            @test l9.from_system == "A" && l9.to_system == "B"
-            @test l9.cost_per_mw_km == 1.0
-            @test l9.reactance_pu == 0.01
-            @test l9.resistance_pu == 0.001
-            # 10-arg form takes cost_per_mw_km explicitly, keeps the impedance defaults.
-            l10 = InterSystemLink("A", "B", 1, 2, 100.0, 500.0, 50.0, 0.05, 300.0, 0.02)
-            @test l10.cost_per_mw_km == 0.02
-            @test l10.reactance_pu == 0.01
-            @test l10.resistance_pu == 0.001
+        @testset "Dead multi-system master removed" begin
+            # Python merges the systems into one MasterProblemInput; the
+            # separate multi-system master was never built and is gone.
+            for name in (:MultiSystemMasterInput, :InterSystemLink, :SystemConfig,
+                         :ExtendedMasterVariables, :ExtendedMasterResult,
+                         :create_multi_system_master_problem,
+                         :add_inter_system_constraints!, :build_multi_system_objective!)
+                @test !isdefined(ESFEX, name)
+            end
         end
 
         @testset "MGAResult back-compat constructor" begin
@@ -1645,7 +1642,7 @@ import Ipopt
                 res = extract_solution(model, vars, input)
                 @test res.total_generation ≈ 320.0 atol = 1e-6   # energy is moved, not removed
                 @test res.load_shed_total ≈ 0.0 atol = 1e-6
-                @test res.cost_breakdown.flexible_demand_benefit ≈ 0.0 atol = 1e-12
+                @test !hasfield(ESFEX.CostBreakdown, :flexible_demand_benefit)
                 return sum(res.gen_output[2, :, :])
             end
             # 20 MW leave each of the first two steps for the last two: flat 80 MW

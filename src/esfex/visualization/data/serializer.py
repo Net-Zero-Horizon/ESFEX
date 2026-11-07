@@ -241,7 +241,6 @@ def config_to_inter_system_links(
         vk_list  = getattr(sl, "voltage_kv", []) or []
         lt_list  = getattr(sl, "line_type", []) or []
         lkm_list = getattr(sl, "length_km", []) or []
-        bi_list  = getattr(sl, "base_impedance", []) or []
         rpk_list = getattr(sl, "reactance_per_km", []) or []
         sus_list = getattr(sl, "susceptance_pu", []) or []
         nc_list  = getattr(sl, "num_circuits", []) or []
@@ -318,7 +317,6 @@ def config_to_inter_system_links(
                 voltage_kv=_pick(vk_list, i, None),
                 line_type=_pick(lt_list, i, None),
                 length_km=_pick(lkm_list, i, None),
-                base_impedance=_pick(bi_list, i, None),
                 reactance_per_km=_pick(rpk_list, i, None),
                 susceptance_pu=_pick(sus_list, i, None),
                 num_circuits=int(_pick(nc_list, i, 1)),
@@ -408,7 +406,6 @@ def inter_system_links_to_config_dict(
             "voltage_kv":       [lk.voltage_kv or 0.0      for lk in group],
             "line_type":        [lk.line_type or ""        for lk in group],
             "length_km":        [lk.length_km or 0.0       for lk in group],
-            "base_impedance":   [lk.base_impedance or 0.0  for lk in group],
             "reactance_per_km": [lk.reactance_per_km or 0.0 for lk in group],
             "susceptance_pu":   [lk.susceptance_pu or 0.0  for lk in group],
             "num_circuits":     [int(lk.num_circuits or 1) for lk in group],
@@ -2187,7 +2184,6 @@ def config_to_global_settings(
         g.solver_time_limit = getattr(sv, 'time_limit', 10800)
         g.solver_gap = getattr(sv, 'gap', 0.01)
         g.solver_verbose = getattr(sv, 'verbose', False)
-        g.solver_scale_constraints = getattr(sv, 'scale_constraints', True)
         g.solver_specific_options = dict(getattr(sv, 'options', {}))
 
     if hasattr(config, 'n1_security') and config.n1_security:
@@ -2334,7 +2330,6 @@ def global_settings_to_config_dict(
     config_dict["solver"]["time_limit"] = g.solver_time_limit
     config_dict["solver"]["gap"] = g.solver_gap
     config_dict["solver"]["verbose"] = g.solver_verbose
-    config_dict["solver"]["scale_constraints"] = g.solver_scale_constraints
     if g.solver_specific_options:
         config_dict["solver"]["options"] = dict(g.solver_specific_options)
 

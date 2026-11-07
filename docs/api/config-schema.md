@@ -126,7 +126,7 @@ class SystemConfig(BaseModel):
     ...
 ```
 
-Legacy uppercase aliases: `LOSS_DEMAND_TRHESHOLD`, `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `MAX_NPV_PENALTY_PER_MW`, `MAX_DECOMMISSION_COST_PER_MW`, `FORCE_REPLACEMENT`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
+Legacy uppercase aliases: `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `MAX_NPV_PENALTY_PER_MW`, `MAX_DECOMMISSION_COST_PER_MW`, `FORCE_REPLACEMENT`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
 
 **Properties:**
 
@@ -365,7 +365,6 @@ class SolverConfig(BaseModel):
     time_limit: int = 10800            # seconds, 0 = unlimited
     gap: float = 0.01                  # MIP optimality gap
     verbose: bool = False
-    scale_constraints: bool = True     # no effect (not read by the model or the solvers)
     options: dict[str, Any] = {}       # solver-specific options
 ```
 
@@ -497,7 +496,6 @@ class EVCategoryConfig(BaseModel):
 
 ```python
 class DCPowerFlowConfig(BaseModel):
-    base_impedance: float = 100.0       # Deprecated, ignored (S_base = ac_power_flow.base_mva)
     reactance_per_km: float = 0.4       # Ohm/km
     voltage_level_kv: float = 220.0     # kV
     max_angle_diff_deg: float = 30.0    # degrees (0-90), AC-OPF only
@@ -541,8 +539,6 @@ class N1SecurityConfig(BaseModel):
 class MetaNetworkConfig(BaseModel):
     systems: list[str]                          # system names, required
     systems_links: list[SystemLinkConfig] = []
-    dynamic_transfer_pricing: bool = True
-    inter_system_loss_segments: int = 2         # 0-5, 0 = linear fallback
 ```
 
 ### StochasticScenarioConfig

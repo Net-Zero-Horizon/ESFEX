@@ -52,7 +52,6 @@ def _minimal_system():
         "name": "TestSys",
         "demand_path": None,
         "demand_scale": 1.0,
-        "loss_demand_threshold": 0.05,
         "life_extension_cost_factor": 0.2,
         "sim_rooftop": False,
         "target_re_penetration": 0.5,
@@ -192,7 +191,6 @@ class TestConvertDCPowerFlowExtra:
     def test_nested_dict_takes_priority(self):
         data = {
             "dc_power_flow": {
-                "base_impedance": 250.0,
                 "reactance_per_km": 0.7,
                 "voltage_level_kv": 500.0,
                 "max_angle_diff_deg": 45.0,
@@ -201,10 +199,10 @@ class TestConvertDCPowerFlowExtra:
                 "pwl_loss_segments": 5,
                 "pwl_loss_segments_master": 4,
             },
-            "dc_base_impedance": 100.0,  # should be ignored
+            "dc_reactance_per_km": 0.2,  # should be ignored
         }
         result = _convert_dc_power_flow(data)
-        assert result.base_impedance == 250.0
+        assert result.reactance_per_km == 0.7
         assert result.slack_bus == 3
         assert result.loss_model == "linear"
         assert result.pwl_loss_segments == 5
@@ -212,9 +210,9 @@ class TestConvertDCPowerFlowExtra:
 
     def test_non_dict_nested_falls_back_to_flat(self):
         # nested is not a dict -> reset to {} then fall back to flat keys
-        data = {"dc_power_flow": "not_a_dict", "dc_base_impedance": 333.0}
+        data = {"dc_power_flow": "not_a_dict", "dc_voltage_level_kv": 333.0}
         result = _convert_dc_power_flow(data)
-        assert result.base_impedance == 333.0
+        assert result.voltage_level_kv == 333.0
 
     def test_loss_model_defaults(self):
         result = _convert_dc_power_flow({})
@@ -513,14 +511,14 @@ class TestConvertSystemSubBlocks:
 class TestConvertSystemDCStripping:
     def test_dc_prefixed_keys_removed(self):
         data = _minimal_system()
-        data["DC_BASE_IMPEDANCE"] = 200.0
+        data["DC_SLACK_BUS"] = 2
         data["dc_reactance_per_km"] = 0.9
         sc = _convert_system(data)
         # DC config built from the flat keys
-        assert sc.dc_power_flow.base_impedance == 200.0
+        assert sc.dc_power_flow.slack_bus == 2
         assert sc.dc_power_flow.reactance_per_km == 0.9
         # The raw DC_/dc_ keys must not survive as attributes
-        assert not hasattr(sc, "DC_BASE_IMPEDANCE")
+        assert not hasattr(sc, "DC_SLACK_BUS")
         assert not hasattr(sc, "dc_reactance_per_km")
 
 

@@ -55,7 +55,7 @@ def simple_network(julia_setup):
         bus_to_node,
         py_to_julia_matrix(connections),
         py_to_julia_matrix(distances),
-        100.0,  # base_impedance
+        100.0,  # s_base
         0.4,    # reactance_per_km
         220.0,  # voltage_level_kv
         np.deg2rad(30.0),  # max_angle_diff_rad

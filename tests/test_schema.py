@@ -588,7 +588,6 @@ class TestSolverConfig:
         assert s.time_limit == 10800
         assert s.gap == 0.01
         assert s.verbose is False
-        assert s.scale_constraints is True
         assert s.options == {}
 
     @pytest.mark.parametrize("solver_name", [
@@ -1128,13 +1127,11 @@ class TestSystemConfig:
         assert sc.num_buses == 1
 
     def test_alias_fields(self):
-        """SystemConfig aliases (e.g., LOSS_DEMAND_TRHESHOLD) should work."""
+        """SystemConfig aliases (e.g., SIM_ROOFTOP) should work."""
         data = _system_minimal()
-        data["LOSS_DEMAND_TRHESHOLD"] = 0.1
         data["SIM_ROOFTOP"] = True
         data["TARGET_RE_PENETRATION"] = 0.8
         sc = SystemConfig(**data)
-        assert sc.loss_demand_threshold == 0.1
         assert sc.sim_rooftop is True
         assert sc.target_re_penetration == 0.8
 

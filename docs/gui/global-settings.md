@@ -10,7 +10,7 @@ Two levels: **Global Settings** apply to the entire simulation; **System Setting
 
 Click **Global Settings** in the Element Tree. These parameters apply to all systems. The form has these groups, top to bottom: Systems to Simulate, Simulation, Temporal, Power Flow, Master Problem, N-1 Security, Risk & Resilience, Solver Options and Visual Scaling.
 
-**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s, gap 0.001, verbose off, Scale Constraints off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
+**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s, gap 0.001, verbose off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
 
 ### Systems to Simulate
 
@@ -166,7 +166,6 @@ Settings stored in the `risk:` block of the YAML. The fields are greyed out unti
 | Time Limit (s) | 10800 (YAML), 3600 (new project) | Maximum solve time per optimization problem |
 | Gap (frac) | 0.01 (YAML), 0.001 (new project) | Relative MIP optimality gap. Only relevant for MIP problems (unit commitment). |
 | Verbose | Off | Print the full solver log in the Run Output tab |
-| Scale Constraints | On (YAML), Off (new project) | No effect: written to the YAML (`solver.scale_constraints`) but read by neither the model nor the solvers, so the checkbox is disabled |
 
 Below these fields, the group shows the options specific to the selected solver (for example presolve or LP method). They are stored in `solver.options`.
 

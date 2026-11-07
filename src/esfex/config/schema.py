@@ -403,11 +403,6 @@ class NodeConfig(BaseModel):
 class DCPowerFlowConfig(BaseModel):
     """DC power flow model parameters."""
 
-    base_impedance: float = Field(
-        default=100.0,
-        description="Deprecated and ignored: per-unit values use S_base = "
-                    "ac_power_flow.base_mva and Z_base = V²/S_base per line",
-    )
     reactance_per_km: float = Field(default=0.4, description="Line reactance (Ohm/km)")
     voltage_level_kv: float = Field(
         default=220.0,
@@ -434,18 +429,6 @@ class DCPowerFlowConfig(BaseModel):
         default=2, ge=1, le=5,
         description="Number of PWL segments for master problem (fewer for performance)",
     )
-
-    @model_validator(mode="after")
-    def _warn_base_impedance(self) -> "DCPowerFlowConfig":
-        # It served as both Z_base (Ω) and S_base (MVA); both now follow
-        # ac_power_flow.base_mva and each line's voltage.
-        if self.base_impedance != 100.0:
-            import logging
-            logging.getLogger(__name__).warning(
-                "dc_power_flow.base_impedance=%s is ignored: per-unit values use "
-                "ac_power_flow.base_mva as S_base and V²/S_base per line as Z_base",
-                self.base_impedance)
-        return self
 
 
 class ACPowerFlowConfig(BaseModel):
@@ -1546,10 +1529,6 @@ class SolverConfig(BaseModel):
     time_limit: int = Field(default=10800, ge=0, description="Seconds (0 = unlimited)")
     gap: float = Field(default=0.01, ge=0, le=1, description="MIP optimality gap")
     verbose: bool = False
-    scale_constraints: bool = Field(
-        default=True,
-        description="No effect: not read by the model or the solvers (kept so "
-                    "existing files load)")
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="Solver-specific options (e.g. presolve, lp_method)",
@@ -2023,9 +2002,6 @@ class SystemConfig(BaseModel):
     demand_scale: float = Field(default=1.0, gt=0)
 
     # System parameters
-    # Deprecated and ignored: no model constraint ever used it. Still accepted
-    # so existing case files (Studio wrote LOSS_DEMAND_TRHESHOLD) load.
-    loss_demand_threshold: float = Field(default=0.05, ge=0, le=1, alias="LOSS_DEMAND_TRHESHOLD")
     life_extension_cost_factor: float = Field(default=0.20, ge=0)
     sim_rooftop: bool = Field(default=False, alias="SIM_ROOFTOP")
     target_re_penetration: float = Field(default=1.0, ge=0, le=1, alias="TARGET_RE_PENETRATION")
@@ -2050,7 +2026,6 @@ class SystemConfig(BaseModel):
     min_cycling_ratio: float = Field(default=0.8, ge=0, le=1, description="Min battery cycling as fraction of capacity")
     min_cycling_period_days: float = Field(default=7.0, gt=0, description="Period for min cycling calculation (days)")
     reserve_static_default_ratio: float = Field(default=0.15, ge=0, le=1, description="Default static reserve as fraction of demand")
-    flexible_demand_benefit_ratio: float = Field(default=0.5, ge=0, le=1, description="Fraction of price for flexible demand benefit")
     demand_shift_cost_rate: float = Field(default=0.1, ge=0, description="Cost rate per hour of demand shift distance")
     dynamic_reserve_contribution: float = Field(default=0.5, ge=0, le=1, description="Fraction of rated_power for dynamic reserve")
     reserve_margin: float = Field(default=1.15, ge=1.0, description="Capacity adequacy reserve margin (e.g. 1.15 = 15%)")
@@ -2398,7 +2373,6 @@ class SystemLinkConfig(BaseModel):
     voltage_kv: list[float] = Field(default_factory=list)
     line_type: list[str] = Field(default_factory=list)
     length_km: list[float] = Field(default_factory=list)
-    base_impedance: list[float] = Field(default_factory=list)
     reactance_per_km: list[float] = Field(default_factory=list)
     susceptance_pu: list[float] = Field(default_factory=list)
     num_circuits: list[int] = Field(default_factory=list)
@@ -2437,13 +2411,6 @@ class MetaNetworkConfig(BaseModel):
 
     systems: list[str] = Field(description="List of system names to include")
     systems_links: list[SystemLinkConfig] = []
-    dynamic_transfer_pricing: bool = True
-    inter_system_loss_segments: int = Field(
-        default=2,
-        ge=0,
-        le=5,
-        description="PWL segments for inter-system link losses (0=linear fallback)",
-    )
 
 
 # =============================================================================
