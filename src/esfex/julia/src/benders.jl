@@ -808,6 +808,7 @@ function create_benders_subproblem(
     # Technology dispatch variables with FIXED capacity constraints
     # =========================================================================
     tech_output = nothing
+    tech_curve_cost = AffExpr(0.0)
     if n_tech > 0
         tech_output = @variable(sp_model,
             [t=1:n_tech, b=1:n_buses, ts=1:hours],
@@ -819,11 +820,13 @@ function create_benders_subproblem(
             is_renewable = tech.type == "Renewable"
             for b in 1:n_buses
                 cumul_cap = get(fixed_caps.tech_capacity, (t, b), 0.0)
+                avails = Vector{Float64}(undef, hours)
                 for ts in 1:hours
                     actual_hour = start_hour + ts - 1
                     avail_hours = size(tech.availability, 1)
                     avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
                     avail = is_renewable ? tech.availability[avail_hour, b] : 1.0
+                    avails[ts] = avail
                     rhs = cumul_cap * avail
                     cname = "tech_cap_t$(t)_b$(b)_ts$(ts)"
                     cref = @constraint(sp_model,
@@ -831,6 +834,9 @@ function create_benders_subproblem(
                         base_name = cname)
                     constraint_store[cname] = (cref, avail, t, b, ts)
                 end
+                # Offer-curve fuel cost, as in the monolithic master
+                add_tech_curve_segments!(sp_model, input, tech_output, t, b,
+                    cumul_cap, avails, tech_curve_cost; store = constraint_store)
             end
         end
     end
@@ -1202,11 +1208,12 @@ function create_benders_subproblem(
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
     scaling_factor = tres * days_in_year / input.representative_days_per_year
 
-    # Battery technologies' maintenance and throughput, as in the monolithic master
+    # Technologies' offer-curve fuel cost and battery technologies'
+    # maintenance and throughput, as in the monolithic master
+    add_to_expression!(tech_curve_cost,
+        battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
-        tech_output=tech_output,
-        tech_day_cost=battery_tech_operating_cost(input, bat_tech_charge,
-                                                  bat_tech_discharge, hours))
+        tech_output=tech_output, tech_day_cost=tech_curve_cost)
 
     # Cap load-shedding penalties for Benders numerical stability.
     # calculate_day_operational_cost already includes scaling_factor internally,
@@ -1289,6 +1296,16 @@ function extract_subproblem_duals(
                     cref, avail, _, _, _ = sp.constraint_store[cname]
                     d = dual(cref)
                     total_dual += d * avail
+                end
+                # Offer-curve segment caps: seg_k <= fraction_k × avail × cap
+                segs = tech_curve_segments(input, t, b)
+                segs === nothing && continue
+                for k in eachindex(segs)
+                    sname = "tech_seg_cap_t$(t)_b$(b)_k$(k)_ts$(ts)"
+                    if haskey(sp.constraint_store, sname)
+                        sref, coef, _, _, _ = sp.constraint_store[sname]
+                        total_dual += dual(sref) * coef
+                    end
                 end
             end
             if abs(total_dual) > 1e-10

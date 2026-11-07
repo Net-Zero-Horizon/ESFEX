@@ -72,7 +72,7 @@ HiGHS options that apply to one LP method only (for example `primal_feasibility_
 | `enabled` | bool | `false` | Reduce the internal bus network before solving (results are expanded back) |
 | `kron_deg3` | bool | `false` | Also eliminate degree-3 junction buses by Kron (star-mesh) reduction |
 
-The reduction removes only passive buses: buses with role `connection` that have no demand and host no equipment. A bus is always kept if it has a load or mixed role, if it is a terminal of an AC/DC or frequency converter, or if a generator or battery sits on it. A unit sits on a bus when that bus is named in its `bus_id_per_node` or `bus_index`, or joined to it in `transmission_lines_geo`. A unit's `bus_index` is renumbered to match the reduced bus list.
+The reduction removes only passive buses: buses with role `connection` that have no demand and host no equipment. A bus is always kept if it has a load or mixed role, if it is a terminal of an AC/DC or frequency converter, or if a generator or battery sits on it. A unit sits on a bus when that bus is named in its `bus_id_per_node` or `bus_index`, or joined to it in `transmission_lines_geo`. A unit's `bus_index` is renumbered to match the reduced bus list. The master problem reduces its network the same way when it is bus-level (a one-node system with several buses, or development zones); its investments are reported on the original buses, and the dispatch places the capacity built from them on the same buses.
 
 ---
 
@@ -676,7 +676,7 @@ Existing batteries have no availability profile in the dispatch, even when `Avai
 
 Offer curve for one node; a curve list has one entry per node.
 
-A generator `fuel_cost_curve` or battery `discharge_cost_curve` replaces the flat `fuel_cost` / `throughput_degradation_cost` of that unit in both the operational dispatch and the master problem. On candidate technologies (`technologies.<key>.fuel_cost_curve`) the curve prices the technology's output in the master problem; capacity built from a technology is dispatched in the operational model at its flat `fuel_cost`.
+A generator `fuel_cost_curve` or battery `discharge_cost_curve` replaces the flat `fuel_cost` / `throughput_degradation_cost` of that unit in both the operational dispatch and the master problem. On candidate technologies (`technologies.<key>.fuel_cost_curve`) the curve prices the technology's output in the master problem, and the capacity built from the technology keeps it in the operational dispatch.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -756,7 +756,7 @@ Candidate generation technology for the master problem, under `technologies: {<k
 | `ramp_up` | list[float] | `[1.0]` | Ramp-up limit per node (fraction of capacity per hour, scaled to `resolution_hours`; `0` = no limit) |
 | `ramp_down` | list[float] | `[1.0]` | Ramp-down limit per node (fraction of capacity per hour, scaled to `resolution_hours`; `0` = no limit) |
 | `fuel_cost` | list[float] | `[0.0]` | Fuel cost per node ($/MWh) |
-| `fuel_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node offer curve; replaces `fuel_cost` in the master problem. See [CostCurveConfig](#costcurveconfig) |
+| `fuel_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node offer curve; replaces `fuel_cost` in the master problem and in the dispatch of the built capacity. See [CostCurveConfig](#costcurveconfig) |
 | `fixed_cost` | list[float] | `[0.0]` | Fixed O&M cost per node ($/MWh) |
 | `maintenance_cost` | list[float] | `[0.0]` | Maintenance cost per node ($/MWh) |
 | `inertia` | list[float] | `[0.0]` | Inertia constant H per node (s) |
