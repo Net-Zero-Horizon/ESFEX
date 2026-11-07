@@ -29,6 +29,10 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 
 from esfex.config.schema import CostCurveConfig, ESFEXConfig, SystemConfig
 from esfex.bridge.adapters import PowerSystemAdapter, MasterProblemAdapter, PrimaryEnergyAdapter
+from esfex.bridge.converters import (
+    battery_availability_key,
+    battery_technology_availability_key,
+)
 from esfex.models.ev import (
     aggregate_ev_profiles,
     fleet_growth_factor,
@@ -534,6 +538,11 @@ def battery_technology_unit_fields(bat_tech, rep) -> dict:
         "inertia": rep(bat_tech.inertia, 0.0),
         "throughput_degradation_cost": rep(bat_tech.throughput_degradation_cost, 0.0),
         "risk_coefficient": rep(bat_tech.risk_coefficient, 1.0),
+        "ramp_up": rep(bat_tech.ramp_up, 0.0),
+        "ramp_down": rep(bat_tech.ramp_down, 0.0),
+        "fixed_cost": rep(bat_tech.fixed_cost, 0.0),
+        "reservable": bat_tech.reservable,
+        "availability_file": bat_tech.availability_file,
         "spillage": bat_tech.spillage,
         "current_type": bat_tech.current_type,
     }
@@ -3219,7 +3228,17 @@ class Orchestrator:
             elif tech.type == "Renewable" and any(p > 0 for p in tech.invest_max_power):
                 _warn_flat_renewable("Technology", tech_key)
 
-        logger.debug(f"Loaded {len(file_cache)} unique availability files for {len(cache)} generators/technologies")
+        # Batteries and battery technologies (factor on charge/discharge
+        # power), under their own keys so they cannot shadow a generator's
+        for bat_key, bat in sys.batteries.items():
+            if bat.availability_file:
+                _load("Battery", battery_availability_key(bat_key), bat.availability_file)
+        for bt_key, bat_tech in sys.battery_technologies.items():
+            if bat_tech.availability_file:
+                _load("Battery technology", battery_technology_availability_key(bt_key),
+                      bat_tech.availability_file)
+
+        logger.debug(f"Loaded {len(file_cache)} unique availability files for {len(cache)} units/technologies")
         return cache
 
     def _preload_inflow_profiles(self, num_nodes: int) -> dict:
@@ -3566,6 +3585,11 @@ class Orchestrator:
                 for unit_key, tech_key in built_gens:
                     if tech_key in year_avail_cache:
                         year_avail_cache[unit_key] = year_avail_cache[tech_key]
+                for unit_key, bt_key in built_bats:
+                    bt_cache_key = battery_technology_availability_key(bt_key)
+                    if bt_cache_key in year_avail_cache:
+                        year_avail_cache[battery_availability_key(unit_key)] = \
+                            year_avail_cache[bt_cache_key]
 
                 # 3. Extract this year's demand
                 yr_start_raw = y_idx * hours_per_year_raw
@@ -3934,9 +3958,6 @@ class Orchestrator:
                     MaxChargePower=pow_list,
                     MaxDischargePower=pow_list,
                     rated_power=pow_list,
-                    min_power=zeros, eff_at_rated=[1.0] * n, eff_at_min=[1.0] * n,
-                    ramp_up=[1.0] * n, ramp_down=[1.0] * n, min_up=[0] * n, min_down=[0] * n,
-                    fuel_cost=zeros, fixed_cost=zeros, start_up_cost=zeros,
                     life_time=[bat_tech.lifetime] * n,
                     initial_age=[age] * n,
                     degradation_rate=rep(bat_tech.degradation_rate),
@@ -5333,6 +5354,8 @@ class Orchestrator:
         boundary_conditions.pop('battery_soc', None)
         boundary_conditions.pop('gen_status_init', None)
         boundary_conditions.pop('gen_output_prev', None)
+        boundary_conditions.pop('battery_discharge_prev', None)
+        boundary_conditions.pop('battery_charge_prev', None)
         boundary_conditions.pop('reservoir_level', None)
         # Battery SOC at the start of the year (battery × bus, MWh), from window 1.
         year_start_soc = None
@@ -6521,6 +6544,14 @@ class Orchestrator:
             gen_output = solution.get('gen_output')
             if gen_output is not None and hasattr(gen_output, 'ndim') and gen_output.ndim == 3:
                 new_boundary['gen_output_prev'] = _state_at(gen_output)
+
+            # Battery ramp continuity: charge and discharge of the last
+            # committed step (battery × bus)
+            for _src, _dst in (('bat_discharge', 'battery_discharge_prev'),
+                               ('bat_charge', 'battery_charge_prev')):
+                _arr = solution.get(_src)
+                if _arr is not None and hasattr(_arr, 'ndim') and _arr.ndim == 3:
+                    new_boundary[_dst] = _state_at(_arr)
 
             # Reservoir continuity: water level (overrides the configured
             # initial fraction on the next window).

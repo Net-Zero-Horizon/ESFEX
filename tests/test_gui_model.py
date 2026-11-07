@@ -360,17 +360,14 @@ class TestGuiBatteryInstance:
         assert b.life_time == 20
         assert b.initial_age == 0
         assert b.degradation_rate == 0.0
-        assert b.min_power == 0.0
-        assert b.min_up == 0
-        assert b.min_down == 0
         assert b.ramp_up == 1.0
         assert b.ramp_down == 1.0
-        assert b.eff_at_rated == 0.9
-        assert b.eff_at_min == 0.9
         assert b.inertia == 0.0
-        assert b.start_up_cost == 0.0
-        assert b.fuel_cost == 0.0
         assert b.fixed_cost == 0.0
+        # Generator fields with no meaning for storage are gone
+        for gone in ("min_power", "min_up", "min_down", "eff_at_rated",
+                     "eff_at_min", "start_up_cost", "fuel_cost"):
+            assert not hasattr(b, gone)
         assert b.maintenance_cost == 0.0
         assert b.throughput_degradation_cost == 0.0
         assert b.decommissioning_cost == 0.0

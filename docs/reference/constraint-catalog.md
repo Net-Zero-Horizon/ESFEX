@@ -52,8 +52,8 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `charge <= MaxChargePower * outage_factor` | BAT-1a | Maximum charge rate (degraded rating + investment) |
-| `discharge <= MaxDischargePower * outage_factor` | BAT-1b | Maximum discharge rate |
+| `charge <= MaxChargePower * outage_factor * availability` | BAT-1a | Maximum charge rate (degraded rating + investment) |
+| `discharge <= MaxDischargePower * outage_factor * availability` | BAT-1b | Maximum discharge rate |
 | `soc[t+1] = soc[t]*(1-self_discharge) + (eta_c*charge - discharge/eta_d - spillage)*Δt` | BAT-2 | SOC dynamics |
 | `soc >= soc_min * capacity` | BAT-4a | Minimum SOC |
 | `soc <= soc_max * capacity + soc_violation` | BAT-4b | Soft maximum SOC |
@@ -64,12 +64,13 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 | `charge <= M_bat*cs`, `discharge <= M_bat*(1-cs)` | BAT-6 | Relaxed charge/discharge exclusivity, `M_bat = 2·(max(P_ch, P_dis) + invest_max_power)`, `cs ∈ [0,1]` |
 | `bat_min_cycling_{bi}_{b}` | BAT-7 | Minimum cycling requirement over period |
 | `spillage <= MaxDischargePower` | BAT-8 | Spillage power limit (batteries with `spillage = true`) |
+| `±(charge[t] - charge[t-1]) <= ramp × Δt × MaxChargePower`, likewise discharge | BAT-9 | Ramp limits (`ramp_up` rising, `ramp_down` falling; none when 0 or ramp × Δt ≥ 1); at t = 1 from the previous window, `bat_charge_bi{bi}_b{b}_ramp_{up,down}_seam`, `bat_discharge_bi{bi}_b{b}_ramp_{up,down}_seam` |
 | `bat_soc_link_{bi}_{b}` | BAT-M1 | Master/TSAM: end SOC equals the next inter-period boundary |
 | `bat_soc_cyclic_{bi}_{b}` | BAT-M2 | Master: end SOC equals initial SOC on each representative day |
 
 ### PWL Cost Curve Constraints (Batteries)
 
-Batteries with multi-segment discharge cost curves have discharge power decomposed into segment variables analogously to generators.
+Batteries with a discharge cost curve (also a single segment whose price differs from `throughput_degradation_cost`) have discharge power decomposed into segment variables analogously to generators.
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
@@ -232,6 +233,7 @@ There is no DC angle-difference limit; `max_angle_diff_deg` applies to AC-OPF on
 |---------------|--------|-------------|
 | `rectify + invert <= rated_power * outage_factor` | DC-6a | AC/DC converter power limit |
 | `freq_ab + freq_ba <= rated_power * outage_factor` | DC-6b | Frequency converter power limit |
+| `on_f + on_b <= 1`, `min_power_mva * on <= flow <= rated_power * outage_factor * on` | DC-6c | Unit commitment dispatch only, converters with `min_power_mva > 0`: binaries `acdc_on_rectify_c{c}`/`acdc_on_invert_c{c}`, `freq_on_a_to_b_c{c}`/`freq_on_b_to_a_c{c}` per step |
 
 ---
 
@@ -290,7 +292,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 |---------------|--------|-------------|
 | `tech_cap_t{t}_b{b}_ts{ts}_y{y}_d{d}` | OP-1 | Technology output <= cumulative capacity (× availability for renewables) |
 | `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}_y{y}_d{d}` | OP-1b | Technology with a `fuel_cost_curve`: segment `k` <= `fraction_k` × cumulative capacity (× availability); the segments sum to the output and are charged their marginal costs instead of `fuel_cost` |
-| `bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*` | OP-2a | Battery-technology power and energy limits |
+| `bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*` | OP-2a | Battery-technology power (× availability) and energy limits; unnamed BAT-9 ramp limits on the power built |
 | `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*` | OP-2b | Battery-technology SOC: initial, dynamics (`× Δt`), cyclic |
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |

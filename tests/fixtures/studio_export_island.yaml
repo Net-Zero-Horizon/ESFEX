@@ -468,38 +468,17 @@ systems:
         rated_power:
         - 10.0
         - 0.0
-        min_power:
-        - 0.0
-        - 0.0
-        min_up:
-        - 0
-        - 0
-        min_down:
-        - 0
-        - 0
         ramp_up:
         - 1.0
         - 0.0
         ramp_down:
         - 1.0
         - 0.0
-        eff_at_rated:
-        - 0.9
-        - 0.0
-        eff_at_min:
-        - 0.9
-        - 0.0
         inertia:
         - 0.0
         - 0.0
         risk_coefficient:
         - 1.0
-        - 0.0
-        start_up_cost:
-        - 0.0
-        - 0.0
-        fuel_cost:
-        - 0.0
         - 0.0
         fixed_cost:
         - 0.0

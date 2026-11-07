@@ -749,11 +749,10 @@ class TestFieldNameConstants:
             assert expected in _BAT_PER_NODE_FIELDS
 
     def test_bat_fields_superset_of_gen_common(self):
-        """Battery fields include all the fields in gen fields that are common."""
+        """Battery fields include the generator fields batteries share."""
         common = [
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
-            "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
-            "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
+            "rated_power", "ramp_up", "ramp_down", "inertia",
             "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
         ]
         for f in common:

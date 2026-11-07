@@ -79,6 +79,8 @@ struct PowerSystemInput
     generator_output_prev::Dict{Int, Dict{Int, Float64}}
     reservoir_level_prev::Dict{Int, Dict{Int, Float64}}
     battery_soc_prev::Dict{Int, Dict{Int, Float64}}   # MWh
+    battery_discharge_prev::Dict{Int, Dict{Int, Float64}}   # MW, for the battery ramp limits
+    battery_charge_prev::Dict{Int, Dict{Int, Float64}}      # MW
     hours_per_year::Int
     power_flow_mode::String                    # "dcopf" (default) or "acopf_soc|qc|sdp|polar|rect"
     # Per-system CO2 budgets of a merged multi-system run; empty = one budget
@@ -162,8 +164,15 @@ struct BatteryConfig
     degradation_rate::Vector{Float64}
     throughput_degradation_cost::Vector{Float64}  # Per MWh discharged
     risk_coefficient::Vector{Float64}
+    ramp_up::Vector{Float64}            # Fraction of rated power per hour (0 = no limit)
+    ramp_down::Vector{Float64}
+    fixed_cost::Vector{Float64}         # Per MW of discharge power per year
+    reservable::Bool                    # Headroom counts towards reserves
+    availability::Matrix{Float64}       # (steps x buses) factor on charge/discharge; 0 rows = 1.0
 end
 ```
+
+A 26-argument constructor (without the last five fields) gives no ramp limit, no fixed cost, `reservable = true` and no availability profile. `BatteryTechnologyConfig` has the same five fields at its end, with the same short constructor.
 
 ### NetworkConfig
 

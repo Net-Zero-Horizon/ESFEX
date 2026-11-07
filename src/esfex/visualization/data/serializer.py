@@ -104,7 +104,7 @@ def _normalize_voltage_kv(value: float) -> float:
     return value
 
 
-# Fields shared between generators and batteries (common scalars)
+# Generator scalar fields (batteries use a subset, _BAT_SCALAR_FIELDS)
 _COMMON_SCALAR_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
     "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
@@ -135,7 +135,12 @@ _GEN_SCALAR_FIELDS = _GEN_SCALAR_FIELDS_BASE + _GEN_RESERVOIR_FIELDS
 _GEN_INVEST_FIELDS = ["invest_cost", "invest_max_power"]
 _BAT_INVEST_FIELDS = ["invest_cost", "invest_max_power", "invest_cost_energy", "invest_max_capacity"]
 
-_BAT_SCALAR_FIELDS = _COMMON_SCALAR_FIELDS + [
+# Batteries share only these generator fields (no commitment, efficiency
+# curve, start-up or fuel cost)
+_BAT_SCALAR_FIELDS = [
+    "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
+    "rated_power", "ramp_up", "ramp_down", "inertia", "risk_coefficient",
+    "fixed_cost", "maintenance_cost",
     "efficiency_charge", "efficiency_discharge", "soc_initial",
     "max_DoD", "capacity", "MaxChargePower", "MaxDischargePower",
     "throughput_degradation_cost",

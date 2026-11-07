@@ -840,6 +840,11 @@ Variables:
 Constraints:
 - Capacity: rectify + invert ≤ rated_power (per converter)
 - Capacity: flow_a_to_b + flow_b_to_a ≤ rated_power (per converter)
+- Minimum power (`min_power_mva` > 0, unit commitment dispatch only): binary
+  `on` per direction and step (`acdc_on_rectify`/`acdc_on_invert`,
+  `freq_on_a_to_b`/`freq_on_b_to_a`), at most one direction on, and
+  `min_power_mva × on ≤ flow ≤ rated × on` in each direction. Economic
+  dispatch and the master (LP) ignore `min_power_mva`.
 
 KCL injection is handled in add_dc_constraints! (reads these variables).
 
@@ -861,6 +866,8 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
     acdc_masks = get(_om, "acdc_converter", nothing)
     freq_masks = get(_om, "freq_converter", nothing)
     conv_om(masks, nm, t) = (masks === nothing || !haskey(masks, nm)) ? 1.0 : masks[nm][t]
+    # Unit commitment dispatch: converters with a minimum power are on/off
+    uc = capacity_override === nothing && vars.gen_startup !== nothing
 
     # --- AC/DC Converters ---
     n_acdc = length(network.acdc_converters)
@@ -878,11 +885,11 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
                 @constraint(model,
                     acdc_rect[c, t] + acdc_inv[c, t] <=
                         rated("acdc", c, conv) * conv_om(acdc_masks, conv.name, t))
-                # Minimum power (if applicable)
-                if conv.min_power_mva > 0
-                    # Only enforce when active — skip for now (would need binary)
-                end
             end
+            uc && conv.min_power_mva > 0 && add_converter_commitment!(model,
+                acdc_rect, acdc_inv, c, conv, hours,
+                t -> rated("acdc", c, conv) * conv_om(acdc_masks, conv.name, t),
+                "acdc_on_rectify", "acdc_on_invert")
         end
     end
 
@@ -902,8 +909,37 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
                     freq_ab[c, t] + freq_ba[c, t] <=
                         rated("freq", c, conv) * conv_om(freq_masks, conv.name, t))
             end
+            uc && conv.min_power_mva > 0 && add_converter_commitment!(model,
+                freq_ab, freq_ba, c, conv, hours,
+                t -> rated("freq", c, conv) * conv_om(freq_masks, conv.name, t),
+                "freq_on_a_to_b", "freq_on_b_to_a")
         end
     end
+end
+
+"""
+    add_converter_commitment!(model, fwd, bwd, c, conv, hours, cap, fwd_name, bwd_name)
+
+On/off commitment of converter `c` (`min_power_mva` > 0, unit commitment
+dispatch): a binary per direction and step, at most one of them on, and each
+direction's flow either 0 or between `min_power_mva` and `cap(t)` (rated
+power × outage factor). The binaries are listed in
+`model.ext[:converter_commitment]`, so the UC dual recovery fixes them with
+the generators' commitment.
+"""
+function add_converter_commitment!(model, fwd, bwd, c::Int, conv, hours::Int,
+                                   cap::Function, fwd_name::String, bwd_name::String)
+    on_f = @variable(model, [1:hours], Bin, base_name = "$(fwd_name)_c$(c)")
+    on_b = @variable(model, [1:hours], Bin, base_name = "$(bwd_name)_c$(c)")
+    for t in 1:hours
+        @constraint(model, on_f[t] + on_b[t] <= 1)
+        @constraint(model, fwd[c, t] <= cap(t) * on_f[t])
+        @constraint(model, bwd[c, t] <= cap(t) * on_b[t])
+        @constraint(model, fwd[c, t] >= conv.min_power_mva * on_f[t])
+        @constraint(model, bwd[c, t] >= conv.min_power_mva * on_b[t])
+    end
+    append!(get!(model.ext, :converter_commitment, VariableRef[]), on_f, on_b)
+    return nothing
 end
 
 """

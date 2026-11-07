@@ -407,26 +407,19 @@ Every [BatteryTechnologyConfig](../reference/config-reference.md#batterytechnolo
         initial_age: [0, 0]
         degradation_rate: [0.01, 0.0]
         decommissioning_cost: [0.0, 0.0]
-        min_power: [0.0, 0.0]
-        min_up: [0, 0]
-        min_down: [0, 0]
-        ramp_up: [1.0, 0.0]
-        ramp_down: [1.0, 0.0]
-        eff_at_rated: [0.9, 0.0]
-        eff_at_min: [0.9, 0.0]
+        ramp_up: [0.0, 0.0]              # optional: 0 = no ramp limit
+        ramp_down: [0.0, 0.0]
         inertia: [0.0, 0.0]
-        start_up_cost: [0.0, 0.0]
-        fuel_cost: [0.0, 0.0]
-        fixed_cost: [0.0, 0.0]
+        fixed_cost: [0.0, 0.0]           # optional: $/MW/year
         maintenance_cost: [0.0, 0.0]
         invest_cost: [0.0, 0.0]
         invest_max_power: [0.0, 0.0]
         bus_id_per_node: {0: bus_0}
 ```
 
-All keys above except `name`, `type` and `bus_id_per_node` are required by the loader (it reads the generator-style keys as well). Optional: `invest_cost_energy` (defaults to `invest_cost`), `invest_max_capacity`, `min_duration_hours`/`max_duration_hours` (integers), `spillage`, `reservable`, `current_type`, `bus_index`, `throughput_degradation_cost` (cycling cost per MWh discharged, default 0), `discharge_cost_curve`, `risk_coefficient`. As a legacy alternative, a unit can be written as a system-level `bat_<n>` key with `type: Storage`.
+All keys above except `name`, `type`, `bus_id_per_node`, `ramp_up`, `ramp_down` and `fixed_cost` are required by the loader. Optional: `ramp_up`/`ramp_down` (how fast charge or discharge power may rise or fall, as a fraction of `MaxChargePower`/`MaxDischargePower` per hour; default 0 = no limit), `fixed_cost` ($ per MW of `MaxDischargePower` per year, default 0), `invest_cost_energy` (defaults to `invest_cost`), `invest_max_capacity`, `min_duration_hours`/`max_duration_hours` (integers), `spillage`, `reservable` (whether the battery holds reserve, default true), `current_type`, `bus_index`, `throughput_degradation_cost` (cycling cost per MWh discharged, default 0), `discharge_cost_curve`, `risk_coefficient`, `Availability`. As a legacy alternative, a unit can be written as a system-level `bat_<n>` key with `type: Storage`. Generator keys that batteries do not use (`min_power`, `min_up`, `min_down`, `eff_at_rated`, `eff_at_min`, `start_up_cost`, `fuel_cost`) are reported as unknown keys.
 
-**Availability.** An `Availability` file is kept in the configuration, but the dispatch does not apply availability profiles to existing batteries.
+**Availability.** An `Availability` file ([Availability Profiles](availability-profiles.md)) multiplies the battery's charge and discharge power each hour, and the power it can offer as reserve, in the dispatch and in the master problem.
 
 **State of charge.** In operational dispatch the SOC is carried from one window to the next, and no end-of-window or end-of-year SOC target is imposed on batteries (`soc_end_tolerance` is applied to reservoir end levels, not to batteries). In the master problem's representative periods, SOC is cyclic within each period, or linked across periods when TSAM inter-period linking is on.
 
@@ -775,17 +768,7 @@ systems:
         initial_age: [0, 0]
         degradation_rate: [0.01, 0.0]
         decommissioning_cost: [0.0, 0.0]
-        min_power: [0.0, 0.0]
-        min_up: [0, 0]
-        min_down: [0, 0]
-        ramp_up: [1.0, 0.0]
-        ramp_down: [1.0, 0.0]
-        eff_at_rated: [0.9, 0.0]
-        eff_at_min: [0.9, 0.0]
         inertia: [0.0, 0.0]
-        start_up_cost: [0.0, 0.0]
-        fuel_cost: [0.0, 0.0]
-        fixed_cost: [0.0, 0.0]
         maintenance_cost: [0.0, 0.0]
         invest_cost: [0.0, 0.0]
         invest_max_power: [0.0, 0.0]

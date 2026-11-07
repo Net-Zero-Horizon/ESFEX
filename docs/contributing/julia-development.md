@@ -255,7 +255,7 @@ Check the existing conventions before adding a storage element:
 
 #### Linking Constraints Across Time Steps
 
-Ramp constraints link consecutive time steps. In `add_generator_constraints!` the ramp rate is a fraction of capacity per hour, scaled by the step length and capped at full capacity; a rate <= 0 means no limit. The first step is linked to the previous window's output (`gen_output_prev`):
+Ramp constraints link consecutive time steps. In `add_generator_constraints!` the ramp rate is a fraction of capacity per hour, scaled by the step length and capped at full capacity; a rate <= 0 means no limit. The first step is linked to the previous window's output (`gen_output_prev`). Batteries do the same for their charge and their discharge (`add_storage_ramp_constraints!`, from `battery_charge_prev` / `battery_discharge_prev`), without the cap: a rate × step of 1 or more sets no limit.
 
 ```julia
 tres = input.temporal.resolution_hours
