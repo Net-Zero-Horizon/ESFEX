@@ -439,6 +439,8 @@ Written when the system has electrolyzers, one dataset per entry under `electrol
 | `transport/{fuel}` | (num_routes,) | units/day | Route capacity built, per `fuel_transport_routes` entry |
 | `electrolyzer/{electrolyzer key}` | (num_nodes,) | MW | Electrolyzer power built (added to `rated_power`) |
 
+Fuel names and electrolyzer keys are written as HDF5-safe names (`/` becomes ` - `, a clash gets a ` (1)` suffix), like the unit names of the per-generator groups.
+
 ### Investment Data
 
 #### gen_investment_power/{generator_name}
@@ -589,7 +591,7 @@ Written when the primary energy model is active.
 | `transport_investments/{fuel}` | dataset | Transport capacity investments |
 | `storage_investments/{fuel}` | dataset | Storage capacity investments |
 | `transport_flows/{fuel}` | dataset | Flows per route and period `[routes x periods]` |
-| `fuel_for_power/{unit}` | dataset | Fuel burnt by each fuel-coupled unit `[nodes x steps]`, in fuel units per step (attribute `units`) |
+| `fuel_for_power/{unit}` | dataset | Fuel burnt by each fuel-coupled unit `[nodes x steps]`, in fuel units per step (attribute `units`); `{unit}` is the unit's dataset name in the per-generator groups |
 | `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | attributes | Cost totals ($) |
 
 Rolling-horizon windows contribute only their committed steps (the overlap with the next window is dropped, as for the dispatch arrays). The cost totals add up each window's committed steps: a period's supply and flows count for the share of its steps that the window keeps.

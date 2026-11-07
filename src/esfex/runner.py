@@ -8332,14 +8332,18 @@ class Orchestrator:
                         tf_grp.create_dataset(
                             fuel_name, data=np.array(arr, dtype=np.float64))
 
-                # Fuel burnt by each coupled unit: {unit: [nodes × steps]}
+                # Fuel burnt by each coupled unit: {unit: [nodes × steps]},
+                # under the unit's dataset name of the per-generator groups
                 if result.fuel_for_power:
                     ffp_grp = pe_grp.create_group("fuel_for_power")
                     ffp_grp.attrs["units"] = "fuel units per step"
-                    for unit, arr in result.fuel_for_power.items():
+                    ds_of = dict(zip(unique_unit_names(self._gen_names), gen_ds))
+                    units = list(result.fuel_for_power)
+                    names = unique_unit_names([ds_of.get(str(u)) or self._h5safe(str(u))
+                                               for u in units])
+                    for unit, name in zip(units, names):
                         ffp_grp.create_dataset(
-                            str(unit).replace("/", "_"),
-                            data=np.array(arr, dtype=np.float64),
+                            name, data=np.array(result.fuel_for_power[unit], dtype=np.float64),
                             chunks=True, compression="gzip")
             # --- Fuel infrastructure and electrolyzers the master built (#89) ---
             # In service this year, on top of the configured capacity
@@ -8351,15 +8355,19 @@ class Orchestrator:
                     if not fuel_caps.get(kind):
                         continue
                     kgrp = mf_grp.create_group(kind)
-                    for fuel_name, by_idx in fuel_caps[kind].items():
+                    fuels = list(fuel_caps[kind])
+                    for fuel_name, ds_name in zip(fuels, self._h5_unit_names(fuels)):
+                        by_idx = fuel_caps[kind][fuel_name]
                         arr = np.zeros(max([size] + [i + 1 for i in by_idx]))
                         for i, v in by_idx.items():
                             arr[i] = v
-                        kgrp.create_dataset(fuel_name, data=arr)
+                        kgrp.create_dataset(ds_name, data=arr)
                 if fuel_caps.get("electrolyzer"):
                     egrp = mf_grp.create_group("electrolyzer")
-                    for key, per_node in fuel_caps["electrolyzer"].items():
-                        egrp.create_dataset(self._h5safe(key), data=np.array(per_node, dtype=np.float64))
+                    keys = list(fuel_caps["electrolyzer"])
+                    for key, ds_name in zip(keys, self._h5_unit_names(keys)):
+                        egrp.create_dataset(ds_name, data=np.array(
+                            fuel_caps["electrolyzer"][key], dtype=np.float64))
 
             # --- N-1 Security Results ---
             if (result.n1_gen_reserve_duals is not None
