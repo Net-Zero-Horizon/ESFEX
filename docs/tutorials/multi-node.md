@@ -125,7 +125,7 @@ systems:
         inertia: [0.0, 0.0, 0.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
-        fixed_cost: [5.0, 5.0, 5.0]
+        fixed_cost: [20000.0, 20000.0, 20000.0]  # $/MW per year
         maintenance_cost: [2.0, 2.0, 2.0]
         life_time: [25, 25, 25]
         initial_age: [3, 2, 5]
@@ -150,7 +150,7 @@ systems:
         inertia: [0.0, 0.0, 0.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
-        fixed_cost: [8.0, 8.0, 8.0]
+        fixed_cost: [40000.0, 40000.0, 40000.0]  # $/MW per year
         maintenance_cost: [5.0, 5.0, 5.0]
         life_time: [20, 20, 20]
         initial_age: [0, 0, 0]
@@ -174,7 +174,7 @@ systems:
         inertia: [5.0, 5.0, 5.0]
         start_up_cost: [5000.0, 5000.0, 5000.0]
         fuel_cost: [85.0, 85.0, 85.0]
-        fixed_cost: [3.0, 3.0, 3.0]
+        fixed_cost: [25000.0, 25000.0, 25000.0]  # $/MW per year
         maintenance_cost: [5.0, 5.0, 5.0]
         life_time: [30, 30, 30]
         initial_age: [15, 10, 12]
@@ -194,7 +194,7 @@ systems:
         eff_at_rated: [1.0, 1.0, 1.0]
         degradation_rate: [0.005, 0.005, 0.005]
         lifetime: 25
-        fixed_cost: [5.0, 5.0, 5.0]
+        fixed_cost: [20000.0, 20000.0, 20000.0]  # $/MW per year
         maintenance_cost: [2.0, 2.0, 2.0]
 
       wind_new:
@@ -207,7 +207,7 @@ systems:
         eff_at_rated: [1.0, 1.0, 1.0]
         degradation_rate: [0.005, 0.005, 0.005]
         lifetime: 20
-        fixed_cost: [8.0, 8.0, 8.0]
+        fixed_cost: [40000.0, 40000.0, 40000.0]  # $/MW per year
         maintenance_cost: [5.0, 5.0, 5.0]
 
     battery_technologies:

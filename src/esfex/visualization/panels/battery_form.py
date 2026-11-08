@@ -148,6 +148,7 @@ class BatteryForm(QWidget):
         grp_cost = QGroupBox(tr("battery_form.group_costs"))
         fl_cost = QFormLayout(grp_cost)
         self._fixed_cost = self._dbl_spin(0, 1e9, 2)
+        self._fixed_cost.setToolTip(tr("battery_form.fixed_cost_tooltip"))
         fl_cost.addRow(tr("battery_form.fixed_cost"), self._fixed_cost)
         self._maintenance_cost = self._dbl_spin(0, 1e6, 2)
         fl_cost.addRow(tr("battery_form.maintenance_cost"), self._maintenance_cost)

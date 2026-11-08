@@ -559,7 +559,7 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `inertia` | list[float] | required | Inertia constant H per node (s) |
 | `start_up_cost` | list[float] | required | Start-up cost per node ($ per start) |
 | `fuel_cost` | list[float] | required | Fuel cost per node ($/MWh). Required key; if all zero and `fuel` is in `fuels`, the loader computes it (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
-| `fixed_cost` | list[float] | required | Fixed O&M per node, applied per MWh generated ($/MWh) |
+| `fixed_cost` | list[float] | required | Fixed O&M per node ($ per MW of power in service per year), charged whether or not the unit runs: degraded rated power while within `life_time`, prorated to each dispatch window; the master charges it per year on the same MW (life-extended MW after `life_time`) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`). Where it is 0, the technology with the same `fuel` and `type` supplies it |
 | `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader (legacy per-unit investment; use `technologies`) |
@@ -742,7 +742,7 @@ Candidate generation technology for the master problem, under `technologies: {<k
 | `ramp_down` | list[float] | `[1.0]` | Ramp-down limit per node (fraction of capacity per hour, scaled to `resolution_hours`; `0` = no limit) |
 | `fuel_cost` | list[float] | `[0.0]` | Fuel cost per node ($/MWh) |
 | `fuel_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node offer curve; replaces `fuel_cost` in the master problem and in the dispatch of the built capacity. See [CostCurveConfig](#costcurveconfig) |
-| `fixed_cost` | list[float] | `[0.0]` | Fixed O&M cost per node ($/MWh) |
+| `fixed_cost` | list[float] | `[0.0]` | Fixed O&M per node ($ per MW of power built per year), charged every year the build is in service, at its degraded power |
 | `maintenance_cost` | list[float] | `[0.0]` | Maintenance cost per node ($/MWh) |
 | `inertia` | list[float] | `[0.0]` | Inertia constant H per node (s) |
 | `droop` | list[float] | `[0.05]` | Governor droop characteristic per node (pu), e.g. 0.05 = 5% |
@@ -1022,7 +1022,7 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `demand_growth` | float | `1` | Annual demand factor: the scenario's demand in year *y* is the base demand × `demand_growth`^(y−1). 1.02 = +2 %/year relative to the base case |
 | `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost and fuel prices × `fuel_price_growth`^(y−1) |
 | `carbon_price` | float | `1` | Multiplier on `co2_cost` in the scenario's operation |
-| `gen_fixed_cost` | float | `1` | Multiplier on the fixed O&M ($/MWh) of generators and technologies in the scenario's operation |
+| `gen_fixed_cost` | float | `1` | Multiplier on the fixed O&M ($/MW/year) of generators, technologies, batteries and battery technologies |
 | `gen_decommissioning_cost` | float | `1` | Multiplier on the decommissioning cost of existing generators |
 | `bat_decommissioning_cost` | float | `1` | Multiplier on the decommissioning cost of existing batteries |
 | `bat_invest_cost_power` | float | `1` | Multiplier on battery technology power cost ($/MW), applied on top of `invest_cost_storage` |

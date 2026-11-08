@@ -109,8 +109,8 @@ struct GeneratorConfig
     min_down_time::Vector{Float64}  # Hours
     start_up_cost::Vector{Float64}  # Per start
     fuel_cost::Vector{Float64}      # Per MWh
-    fixed_cost::Vector{Float64}
-    maintenance_cost::Vector{Float64}
+    fixed_cost::Vector{Float64}     # Per MW of power in service per year
+    maintenance_cost::Vector{Float64}  # Per MWh
     inertia::Vector{Float64}        # Inertia constant H (s)
     invest_cost::Vector{Float64}    # Per MW
     invest_max::Vector{Float64}     # Maximum investment MW per bus
@@ -271,7 +271,7 @@ struct TechnologyConfig
     invest_max::Vector{Float64}         # Max cumulative MW per bus
     availability::Matrix{Float64}       # (hours x buses)
     fuel_cost::Vector{Float64}
-    fixed_cost::Vector{Float64}
+    fixed_cost::Vector{Float64}         # Per MW built and in service per year
     maintenance_cost::Vector{Float64}
     life_time::Vector{Float64}
     # ... operational fields mirroring GeneratorConfig
@@ -322,7 +322,7 @@ end
 |----------|-----------|-------------|
 | `create_power_system` | `(input::PowerSystemInput; custom_constraints=nothing) -> (Model, PowerSystemVariables)` | Build complete operational dispatch JuMP model with all variables, constraints, and objective. `custom_constraints` are user constraint specs applied at the end of the build. With `power_flow_mode` starting with `acopf_` it calls `setup_acopf!` instead of the DC flow. |
 | `build_variables!` | `(model, input) -> PowerSystemVariables` | Create all decision variables: `gen_output[g,b,t]` and `bat_charge/bat_discharge/bat_soc[bi,b,t]` (sparse, only for unit-bus pairs with capacity or investment potential), `curtailment[n,t]`, `load_shed[n,t]`, reserves, etc. |
-| `build_objective!` | `(model, vars, input)` | Build cost minimization objective: fuel costs + fixed costs + start-up costs + penalty terms. |
+| `build_objective!` | `(model, vars, input)` | Build cost minimization objective: fuel and maintenance costs per MWh + the window's share of the annual fixed O&M of the capacity in service (`fixed_om_annual_cost`) + start-up costs + penalty terms. |
 | `add_generator_constraints!` | `(model, vars, input)` | Generator capacity limits, ramp rates, minimum up/down times. For units with `rated_power[b]=0` and no investment potential, constrains `gen_output[g,b,t] <= 0` to prevent free generation. |
 | `add_battery_constraints!` | `(model, vars, input)` | SOC dynamics, charge/discharge limits, end-of-horizon SOC: two-sided cyclic band when `cyclic_end_soc` is true, otherwise the soft floor `bat_soc_end_min` / `bat_soc_end_min_cyclic` used on the year's last window. For zero-capacity batteries, constrains all variables to zero. |
 | `add_demand_constraints!` | `(model, vars, input; extra_injections_fn=nothing)` | Copper-plate power balance per bus and timestep: `gen + discharge + V2G + load_shed == demand + charge + EV charging + electrolyzer` (plus rooftop terms when given). `load_shed` is capped by the bus demand. With more than one bus, `create_power_system` uses the KCL of `add_dc_constraints!` (or ACOPF) instead. |
@@ -382,7 +382,7 @@ Internal helpers shared by the monolithic master and Benders (not exported):
 | Function | Description |
 |----------|-------------|
 | `create_stochastic_master_problem(input::StochasticMasterInput; custom_constraints=nothing) -> (model, vars, targets, scenarios)` | Two-stage stochastic master. Investment is first-stage and shared; each scenario gets its own representative-day (or TSAM) operation built on `scenario_master_input`. If `use_stochastic` is false or there are no scenarios, it builds the deterministic master. |
-| `scenario_master_input(input, mult::ScenarioMultipliers, year_idx) -> MasterProblemInput` | The input one scenario operates on in year `year_idx`: demand × `demand_growth^(year_idx-1)`, fuel cost (and generator and technology fuel-cost curves) × `fuel_cost × fuel_price_growth^(year_idx-1)`, fixed O&M × `gen_fixed_cost`, maintenance cost × `maintenance_cost` (batteries also × `bat_maintenance_cost`), start-up cost × `gen_start_up_cost`, converter variable cost × `converter_variable_cost`, link flow cost × `transmission_cost_per_mw_km`, CO2 cost × `carbon_price`, and the loss-of-load, reserve-shortfall, curtailment, RE-shortfall and CO2-budget penalties × their `penalty_*` multipliers. |
+| `scenario_master_input(input, mult::ScenarioMultipliers, year_idx) -> MasterProblemInput` | The input one scenario operates on in year `year_idx`: demand × `demand_growth^(year_idx-1)`, fuel cost (and generator and technology fuel-cost curves) × `fuel_cost × fuel_price_growth^(year_idx-1)`, maintenance cost × `maintenance_cost` (batteries also × `bat_maintenance_cost`), start-up cost × `gen_start_up_cost`, converter variable cost × `converter_variable_cost`, link flow cost × `transmission_cost_per_mw_km`, CO2 cost × `carbon_price`, and the loss-of-load, reserve-shortfall, curtailment, RE-shortfall and CO2-budget penalties × their `penalty_*` multipliers. |
 | `build_stochastic_objective!(model, vars, input, scenarios, scenario_costs)` | Probability-weighted sum over scenarios of discounted investment cost (with the scenario's investment-cost multipliers and discount rate), existing-asset costs (`build_annual_asset_cost(vars, input, y_idx; mult)`, decommissioning scaled by the scenario) and the scenario's operating cost, plus the slack penalties. |
 
 `StochasticMasterInput(base_input, scenarios::Vector{Scenario}, use_stochastic)` wraps the base input. `Scenario(name, probability, multipliers)` holds a `ScenarioMultipliers` with fields `invest_cost_renewables`, `invest_cost_conventional`, `fuel_cost`, `maintenance_cost`, `invest_cost_storage`, `invest_cost_transmission`, `discount_rate`, `demand_growth`, `fuel_price_growth`, `carbon_price`, `gen_fixed_cost`, `gen_decommissioning_cost`, `bat_decommissioning_cost`, `bat_invest_cost_power`, `bat_invest_cost_capacity`, `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration`, `gen_start_up_cost`, `bat_maintenance_cost`, `transmission_cost_per_mw_km`, `converter_invest_cost`, `converter_variable_cost`, `penalty_co2_budget_violation`, `fuel_import_cost`, `penalty_loss_of_fuel_supply`, `fuel_storage_invest_cost`, `fuel_transport_cost`, `electrolyzer_invest_cost`, `electrolyzer_fixed_cost`, `electrolyzer_variable_cost`, `electrolyzer_water_cost` (all 1.0 by default). Build it by keyword (`ScenarioMultipliers(fuel_cost=1.2)`) or with the first ten positional values in that order.

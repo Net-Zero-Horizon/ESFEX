@@ -461,7 +461,11 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
     # Lazard 2024 LCOE 17.0 midpoints minus typical fuel cost — the non-fuel
     # portion (capex amortized + fixed + var O&M). Without this thermals look
     # artificially cheap (fuel only ~$16-32/MWh) compared to renewable LCOE
-    # ($34+) and the LP never dispatches/invests in renewables.
+    # ($34+) and the LP never dispatches/invests in renewables. It is a
+    # variable adder ($/MWh, into maintenance_cost) that stands in for O&M
+    # data the generator lacks: a generator with its own fixed_cost
+    # ($/MW·yr) or a substantial maintenance_cost keeps its values, so the
+    # fixed O&M is never charged twice.
     _NON_FUEL_LCOE = {
         "Gas": 60.0,        # CCGT $76 − $16 fuel
         "Fuel_oil": 55.0,   # Steam HFO $80 − $27
@@ -535,6 +539,9 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             _existing_maint = list(getattr(_g, "maintenance_cost", None) or [])
             if _existing_maint and max(_existing_maint) >= _adder * 0.5:
                 continue  # Already has substantial maintenance — don't double up
+            _fixed = list(getattr(_g, "fixed_cost", None) or [])
+            if _fixed and max(_fixed) > 0:
+                continue  # Own fixed O&M ($/MW·yr): the adder would count it again
             _fc_now = list(getattr(_g, "fuel_cost", None) or [])
             _n_m = max(len(_existing_maint), len(_fc_now), 1)
             _new_maint = []
@@ -547,8 +554,8 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
                 _linked_maint += 1
                 log.info(
                     "Generator %s (fuel %s): added the non-fuel O&M adder of %g $/MWh "
-                    "to maintenance_cost (now %s). Set maintenance_cost to at least "
-                    "%g $/MWh to keep your own value.",
+                    "to maintenance_cost (now %s). Set a fixed_cost ($/MW·yr) or a "
+                    "maintenance_cost of at least %g $/MWh to keep your own values.",
                     _gk, _fuel_name, _adder, _new_maint, _adder * 0.5,
                 )
             except Exception as _exc:
