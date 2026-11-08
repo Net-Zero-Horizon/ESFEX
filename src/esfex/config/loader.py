@@ -243,8 +243,6 @@ def _convert_primary_energy_source(name: str, data: dict[str, Any]) -> PrimaryEn
         storage_capacity=data["storage_capacity"],
         initial_storage_level=data["initial_storage_level"],
         min_storage_level=data.get("min_storage_level", 0.1),
-        transport_cost=data["transport_cost"],
-        transport_losses=data["transport_losses"],
     )
     _pass_through(PrimaryEnergySourceConfig, data, kwargs)
     return PrimaryEnergySourceConfig(**kwargs)

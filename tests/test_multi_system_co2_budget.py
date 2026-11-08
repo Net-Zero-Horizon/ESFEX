@@ -32,7 +32,7 @@ def _system(name, penalty, tmp_path=None, enabled=True):
     def gen(label, fuel, cost):
         return _make_generator(label, "Non-renewable", fuel, [100.0], degradation_rate=[0.0],
                                min_power=[0.0], eff_at_rated=[0.5], fuel_cost=[cost],
-                               fixed_cost=[0.0], maintenance_cost=[0.0], invest_max_power=[0.0])
+                               fixed_cost=[0.0], maintenance_cost=[0.0])
     s = _make_system_config(num_nodes=1, name=name,
                             generators={"coal": gen("Coal", "Coal", 60.0),
                                         "gas": gen("Gas", "Gas", 150.0)})

@@ -590,8 +590,9 @@ class GlobalSettingsForm(QWidget):
         rl.addRow(tr("global_form.risk_measure"), self._risk_measure)
 
         self._risk_cvar_alpha = QDoubleSpinBox()
-        self._risk_cvar_alpha.setRange(0.01, 0.99)
-        self._risk_cvar_alpha.setDecimals(2)
+        # risk.cvar_alpha is in (0, 1), as in the Risk Workbench
+        self._risk_cvar_alpha.setDecimals(3)
+        self._risk_cvar_alpha.setRange(0.001, 0.999)
         self._risk_cvar_alpha.setSingleStep(0.05)
         self._risk_cvar_alpha.editingFinished.connect(self._on_changed)
         rl.addRow(tr("global_form.risk_cvar_alpha"), self._risk_cvar_alpha)

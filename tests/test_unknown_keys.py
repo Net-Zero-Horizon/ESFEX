@@ -331,7 +331,7 @@ def _r8_old_project() -> dict:
     sysd["primary_energy_sources"] = {"Diesel": {
         "unit": "t", "max_availability": two(100.0), "import_cost": two(5.0),
         "storage_capacity": two(10.0), "initial_storage_level": two(0.5),
-        "storage_investment_cost": 50.0, "transport_cost": 0.0, "transport_losses": 0.0,
+        "storage_investment_cost": 50.0,
         "max_storage_investment_per_node": 0.0, "max_transport_investment_per_arc": 0.0}}
     return raw
 
@@ -407,6 +407,12 @@ _R9_PATHS = sorted([
     "systems.island.generators.diesel.invest_max_power",
     "systems.island.batteries.bess.invest_cost_energy",
     "systems.island.batteries.bess.invest_max_capacity",
+    "systems.island.primary_energy_sources.Diesel.transport_cost",
+    "systems.island.primary_energy_sources.Diesel.transport_losses",
+    "systems.island.non_electric_demand.diesel_ne.is_flexible",
+    "systems.island.non_electric_demand.diesel_ne.flexibility_ratio",
+    "systems.island.non_electric_demand.diesel_ne.criticality",
+    "systems.island.non_electric_demand.diesel_ne.delay_tolerance",
 ])
 
 
@@ -417,6 +423,22 @@ def _r9_old_project() -> dict:
         sysd["generators"][g]["invest_max_power"] = [10.0, 0.0]
     sysd["batteries"]["bess"]["invest_cost_energy"] = [100.0, 0.0]
     sysd["batteries"]["bess"]["invest_max_capacity"] = [40.0, 0.0]
+    two = lambda v: [v, v]  # noqa: E731
+    # Route costs and losses are per route; the source fields had no effect
+    sysd["primary_energy_sources"] = {"Diesel": {
+        "unit": "t", "max_availability": two(100.0), "import_cost": two(5.0),
+        "storage_capacity": two(10.0), "initial_storage_level": two(0.5),
+        "transport_cost": 0.1, "transport_losses": 0.01}}
+    # The primary-energy model never read flexibility or criticality
+    sysd["non_electric_demand"] = {"diesel_ne": {
+        "fuel": "Diesel", "unit": "t", "demand": [5, 0], "is_flexible": True,
+        "flexibility_ratio": 0.2, "criticality": "high", "delay_tolerance": 3}}
+    # A transmission link without loss_factor (it is for fuel routes)
+    raw["meta_network"]["systems_links"] = [{
+        "systems": ["island", "island"], "connections": [[0, 1]],
+        "existing_capacity_MW": [10.0], "max_investment_MW": [0.0],
+        "investment_cost_per_MW": [0.0], "distance_km": [10.0],
+        "cost_per_mw_km": [0.0]}]
     return raw
 
 
@@ -432,6 +454,10 @@ def test_round9_removed_investment_keys_are_reported(tmp_path, caplog):
     bess = cfg.systems["island"].batteries["bess"]
     # The battery's power placement in the master is still read
     assert bess.invest_max_power == [0.0, 0.0]
+    sysc = cfg.systems["island"]
+    assert sysc.primary_energy_sources["Diesel"].import_cost == [5.0, 5.0]
+    assert sysc.non_electric_demand["diesel_ne"].demand == [5, 0]
+    assert cfg.meta_network.systems_links[0].loss_factor == []
     assert not hasattr(cfg.systems["island"].generators["solar"], "invest_max_power")
 
 

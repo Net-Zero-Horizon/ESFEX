@@ -702,10 +702,6 @@ class GuiNonElectricDemand:
     demand_id: str
     fuel: str
     unit: str
-    is_flexible: bool = False
-    flexibility_ratio: float = 0.0
-    criticality: str = "medium"  # "critical", "high", "medium", "low"
-    delay_tolerance: int = 0
     demand: list[int] = field(default_factory=list)  # per-node annual
 
 

@@ -251,7 +251,7 @@ Investment and retirement decisions of the master problem for this year are stor
 | `investment_reservoir_investment_{g}_{n}` | Reservoir capacity added to generator `g` at node `n` (MWh) |
 | `investment_converter_investment_acdc_{c}` | Capacity added to AC/DC converter `c` (MW) |
 | `investment_converter_investment_freq_{c}` | Capacity added to frequency converter `c` (MW) |
-| `retirement_gen_{g}` | Share (0-1) of existing generator `g`'s capacity (`rated_power` summed over nodes) retired by this year |
+| `retirement_gen_{g}` | Share (0-1) of existing generator `g`'s capacity (`rated_power` summed over nodes) retired by this year (capacity the master keeps by life extension counts as in service) |
 
 The node index `n` (and `i`, `j`) is always a node: when the master solves on buses (a one-node system with several buses, development zones), the buses of a node are summed onto it, and transmission built between two buses of the same node is not listed. Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`; converter indices follow the system's `acdc_converters` and `freq_converters` lists.
 

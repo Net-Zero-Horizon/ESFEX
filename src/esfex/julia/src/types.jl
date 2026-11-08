@@ -1855,8 +1855,10 @@ Configuration for a primary energy fuel/source.
 - `initial_storage_level::Vector{Float64}`: Initial storage as fraction (0-1)
 - `min_storage_level::Float64`: Minimum storage level fraction
 - `import_cost::Vector{Float64}`: Import cost per node (\$/unit)
-- `transport_cost::Float64`: Transport cost (\$/unit/km)
-- `transport_losses::Float64`: Transport losses (%/100km)
+- `transport_cost::Float64`, `transport_losses::Float64`: Transport cost
+  (\$/unit/km) and losses (%/100km) for the routes the legacy
+  distance-matrix `PrimaryEnergyInput` constructor creates. Runs pass routes
+  (`TransportRoute`), whose own `FuelRouteParams` carry cost and losses.
 """
 struct FuelConfig
     name::String
@@ -2585,8 +2587,8 @@ Container for Master Problem decision variables.
 - `transfer_investment`: Transmission line investment (MW)
 
 # Life Extension Variables (indexed by [year, unit, node])
-- `gen_life_extension`: Binary - extend generator life (1) or retire (0)
-- `bat_life_extension`: Binary - extend battery life (1) or retire (0)
+- `gen_life_extension`: MW of a generator kept past its lifetime (continuous, `nothing` within it)
+- `bat_life_extension`: MW of discharge power of a battery kept past its lifetime (same)
 
 # RE Tracking (indexed by [year])
 - `re_penetration_ratio`: Achieved RE penetration per year
@@ -2668,11 +2670,12 @@ Solution output from the Master Problem.
 - `transfer_investment`: Transmission investments [year, (i,j)] (MW)
 
 ## Life Decisions
-- `gen_life_extension`: [year, gen, node] 1.0 while the generator is within
-    its original `life_time`, 0.0 once past it, whether or not the master
-    extends it (not MW: the capacity kept past the lifetime is in
-    `cumulative_gen_capacity`)
-- `bat_life_extension`: the same flag for batteries [year, bat, node]
+- `gen_life_extension`: [year, gen, node] share of the generator in service:
+    1.0 within its original `life_time`; past it, the life-extended MW over
+    the (degraded) capacity the master could keep (0.0 = retired). Not MW: the
+    capacity is in `cumulative_gen_capacity`
+- `bat_life_extension`: the same share for batteries [year, bat, node]
+    (life-extended MW over the discharge power)
 
 ## Summary Metrics
 - `total_investment_by_year`: Total investment per year (\$)

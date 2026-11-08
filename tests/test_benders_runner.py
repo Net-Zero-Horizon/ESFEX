@@ -33,7 +33,7 @@ def _solar_built(tmp_path, method, *, cap=None, use_tsam=False):
     demand = tmp_path / f"demand_{method}.csv"
     np.savetxt(demand, np.full(8760, 60.0))
     diesel = _make_generator("Diesel", "Non-renewable", "Diesel", [100.0], degradation_rate=[0.0],
-                             fuel_cost=[200.0], invest_max_power=[0.0], min_power=[0.0])
+                             fuel_cost=[200.0], min_power=[0.0])
     solar = _make_technology("solar_new", "Sun", 1, tech_type="Renewable",
                              invest_cost=20000.0, invest_max_power=50.0)
     sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],

@@ -1282,10 +1282,6 @@ def _system_to_gui_state(sys: SystemConfig,
                 demand_id=did,
                 fuel=getattr(dcfg, 'fuel', ''),
                 unit=getattr(dcfg, 'unit', ''),
-                is_flexible=getattr(dcfg, 'is_flexible', False),
-                flexibility_ratio=getattr(dcfg, 'flexibility_ratio', 0.0),
-                criticality=str(getattr(dcfg, 'criticality', 'medium')),
-                delay_tolerance=getattr(dcfg, 'delay_tolerance', 0),
                 demand=list(getattr(dcfg, 'demand', [])),
             )
 
@@ -3722,10 +3718,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             did: {
                 "fuel": ned.fuel,
                 "unit": ned.unit,
-                "is_flexible": ned.is_flexible,
-                "flexibility_ratio": ned.flexibility_ratio,
-                "criticality": ned.criticality,
-                "delay_tolerance": ned.delay_tolerance,
                 "demand": ned.demand,
             }
             for did, ned in state.non_electric_demand.items()

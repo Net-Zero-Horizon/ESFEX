@@ -357,7 +357,7 @@ V2G compensation is reported but is not part of the objective. Primary-energy an
 
 ## Solution Extraction
 
-`extract_solution(model, vars, input)` returns a `PowerSystemResult` with dense arrays (`gen_output::Array{Float64,3}`, `bat_soc`, `load_shed`, `power_flow`, …), totals (`objective`, `total_generation`, `re_penetration`, `total_co2`) and `energy_prices`. Prices are the duals of `vars.balance_constraints[(b, t)]` divided by the step length. In UC mode the MIP has no duals; `recover_uc_duals!` re-solves the LP with commitment fixed to obtain them.
+`extract_solution(model, vars, input)` returns a `PowerSystemResult` with dense arrays (`gen_output::Array{Float64,3}`, `bat_soc`, `load_shed`, `power_flow`, …), totals (`objective`, `total_generation`, `re_penetration`, `total_co2`) and `energy_prices`. Prices are the duals of `vars.balance_constraints[(b, t)]` divided by the step length. In UC mode the MIP has no duals; `recover_uc_duals_via_copy` re-solves a copy as an LP with the commitment fixed to obtain them.
 
 ```julia
 model, vars = create_power_system(input)

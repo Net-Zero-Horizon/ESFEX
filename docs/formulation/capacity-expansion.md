@@ -881,7 +881,7 @@ After optimization, the following quantities are extracted into a `MasterProblem
 | `tech_investment[y][k]` | Technology investment per period-start year and bus (MW) |
 | `bat_tech_power_investment[y][k]`, `bat_tech_capacity_investment[y][k]` | Battery-technology investment (MW, MWh) |
 | `transfer_investment[y][(i,j)]` | Transmission investment (MW) |
-| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Per node, 1 while the existing unit is within its original `life_time` and 0 once past it, extended or not (a flag, not MW; the capacity kept past the lifetime is in the cumulative capacities below) |
+| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Per node, the share of the existing unit in service: 1 within its original `life_time`; past it, the MW kept by life extension over the most it could keep (the degraded rated power; the discharge power for a battery), 0 when it retires. A share, not MW: the capacity is in the cumulative capacities below. The retirement reports (`retirement_gen_{g}` in the HDF5 file, the log tables) are 1 − this share |
 | `cumulative_gen_capacity`, `cumulative_bat_capacity`, `cumulative_bat_power` | Capacity of existing units per year (CUM-1, CUM-2) |
 | `cumulative_tech_capacity`, `cumulative_bat_tech_power`, `cumulative_bat_tech_capacity` | Cumulative technology capacity per year (CUM-1b, CUM-3) |
 | `re_penetration_by_year`, `re_penetration_by_system` | RE ratio \(\rho\) per year (and per system) |

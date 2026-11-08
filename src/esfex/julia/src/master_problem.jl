@@ -3452,10 +3452,20 @@ function extract_master_solution(
                     end
                 end
             end
+            # Share in service: 1 within the lifetime; past it, the share of
+            # the (degraded) capacity the master keeps by life extension
             gen_life[y_idx][g] = zeros(n_buses)
             for n in 1:n_buses
                 age_at_year = gen.initial_age[n] + (y_idx - 1)
-                gen_life[y_idx][g][n] = age_at_year < gen.life_time[n] ? 1.0 : 0.0
+                ext = vars.gen_life_extension[y_idx][g][n]
+                gen_life[y_idx][g][n] = if age_at_year < gen.life_time[n]
+                    1.0
+                elseif ext === nothing
+                    0.0
+                else
+                    ub = gen.rated_power[n] * (1.0 - gen.degradation_rate[n]) ^ age_at_year
+                    ub > 0 ? clamp(value(ext) / ub, 0.0, 1.0) : 0.0
+                end
             end
         end
 
@@ -3488,7 +3498,14 @@ function extract_master_solution(
             bat_life[y_idx][b] = zeros(n_buses)
             for n in 1:n_buses
                 age_at_year = bat.initial_age[n] + (y_idx - 1)
-                bat_life[y_idx][b][n] = age_at_year < bat.life_time[n] ? 1.0 : 0.0
+                ext = vars.bat_life_extension[y_idx][b][n]
+                bat_life[y_idx][b][n] = if age_at_year < bat.life_time[n]
+                    1.0
+                elseif ext === nothing || bat.max_discharge_power[n] <= 0
+                    0.0
+                else
+                    clamp(value(ext) / bat.max_discharge_power[n], 0.0, 1.0)
+                end
             end
         end
 
@@ -4732,7 +4749,7 @@ function export_solution_to_dict(
     export_dict["bat_tech_power_investment"] = bat_tech_pow_export
     export_dict["bat_tech_capacity_investment"] = bat_tech_cap_export
 
-    # Retirement status (1.0 = active, 0.0 = retired at lifetime)
+    # Share in service (1.0 = active or fully life-extended, 0.0 = retired)
     gen_life_export = Dict{String, Any}()
     for (y_idx, gen_dict) in result.gen_life_extension
         year_str = string(input.years[y_idx])

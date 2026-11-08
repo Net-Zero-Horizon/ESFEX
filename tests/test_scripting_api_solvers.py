@@ -30,10 +30,10 @@ def cfg(tmp_path_factory):
     np.savetxt(demand, np.tile(np.r_[np.full(12, 40.0), np.full(12, 80.0)], 365))
     gens = {
         "base": _make_generator("Base", "Non-renewable", "Gas", [60.0], degradation_rate=[0.0],
-                                fuel_cost=[50.0], invest_max_power=[0.0], min_power=[0.0]),
+                                fuel_cost=[50.0], min_power=[0.0]),
         "peak": _make_generator("Peak", "Non-renewable", "Diesel", [100.0],
                                 degradation_rate=[0.0], fuel_cost=[500.0],
-                                invest_max_power=[0.0], min_power=[0.0]),
+                                min_power=[0.0]),
     }
     tech = _make_technology("New Gas", "Gas", 1, tech_type="Non-renewable",
                             invest_cost=1000.0, invest_max_power=100.0)

@@ -38,8 +38,7 @@ def _gas_tech(invest_max=500.0):
 def _system(name, tmp_path=None, load=60.0):
     """One node: 50 MW of dear diesel, a gas candidate and a battery candidate."""
     diesel = _make_generator("Diesel", "Non-renewable", "Diesel", [50.0],
-                             initial_age=[3], degradation_rate=[0.0], fuel_cost=[300.0],
-                             invest_max_power=[0.0])
+                             initial_age=[3], degradation_rate=[0.0], fuel_cost=[300.0])
     s = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],
                             generators={"diesel": diesel},
                             technologies={"gas_new": _gas_tech()},
