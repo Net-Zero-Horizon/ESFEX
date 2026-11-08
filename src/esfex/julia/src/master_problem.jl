@@ -3630,6 +3630,15 @@ function extract_master_solution(
         total_inv_by_year[y_idx] += value(var) * cost
     end
 
+    # Operating cost of each year's representative days (or TSAM periods),
+    # scaled to the year and undiscounted; the expected cost over the
+    # scenarios in a stochastic master. Benders replaces it with its
+    # subproblems' costs.
+    for (y_idx, costs) in vars.operational_costs
+        1 <= y_idx <= num_years || continue
+        total_op_by_year[y_idx] = sum(value(c) for c in costs; init = 0.0)
+    end
+
     return MasterProblemResult(
         termination_status(model),
         objective_value(model),
@@ -4684,17 +4693,16 @@ function log_solution_summary(
     push!(lines, "  Total Operational (undiscounted): \$$(round(total_operational, digits=2)) M")
     push!(lines, "  NPV Objective: \$$(round(result.objective, digits=2)) M")
 
-    # Verify NPV calculation
+    # Discounted investment + operating cost; the rest of the objective is
+    # the annual cost of the assets in service (fixed O&M, life extension,
+    # decommissioning) and the slack penalties
     calculated_npv = 0.0
     for y_idx in 1:num_years
         df = 1.0 / ((1.0 + input.discount_rate) ^ (y_idx - 1))
         calculated_npv += (result.total_investment_by_year[y_idx] + result.total_operational_cost_by_year[y_idx]) * df
     end
-    push!(lines, "  Calculated NPV (verification): \$$(round(calculated_npv, digits=2)) M")
-    npv_diff = abs(calculated_npv - result.objective) / max(1.0, result.objective) * 100
-    if npv_diff > 1.0
-        push!(lines, "  [WARNING] NPV discrepancy: $(round(npv_diff, digits=2))%")
-    end
+    push!(lines, "  NPV of investment + operation: \$$(round(calculated_npv, digits=2)) M")
+    push!(lines, "  Asset costs and slack penalties (NPV): \$$(round(result.objective - calculated_npv, digits=2)) M")
 
     push!(lines, "\n" * "=" ^ 100)
     push!(lines, "END OF SOLUTION SUMMARY FOR SYSTEM: $(uppercase(system_name))")

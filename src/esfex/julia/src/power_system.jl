@@ -254,20 +254,14 @@ function build_variables!(model, input::PowerSystemInput)
 
     # =========================================================================
     # Pre-compute sparse lookup maps: which (gen, bus) and (bat, bus) pairs
-    # have capacity (existing or delayed retirement).
+    # have capacity.
     # =========================================================================
-    pending_gen = get(input.pending_retirements, "gen", Dict{Int, Dict{Int, Float64}}())
-    pending_bat_ret = get(input.pending_retirements, "bat", Dict{Int, Dict{Int, Float64}}())
-
     buses_of_gen = [Int[] for _ in 1:n_gen]
     gens_at_bus = [Int[] for _ in 1:n_bus]
     for g in 1:n_gen
         gen = input.generators[g]
         for b in 1:n_bus
-            rated = gen.rated_power[b]
-            has_cap = rated > 0
-            has_delay = haskey(pending_gen, g) && haskey(pending_gen[g], b) && pending_gen[g][b] > 0
-            if has_cap || has_delay
+            if gen.rated_power[b] > 0
                 push!(buses_of_gen[g], b)
                 push!(gens_at_bus[b], g)
             end
@@ -282,8 +276,7 @@ function build_variables!(model, input::PowerSystemInput)
             has_cap = bat.max_charge_power[b] > 0 ||
                       bat.max_discharge_power[b] > 0 ||
                       bat.capacity[b] > 0
-            has_delay = haskey(pending_bat_ret, bi) && haskey(pending_bat_ret[bi], b) && pending_bat_ret[bi][b] > 0
-            if has_cap || has_delay
+            if has_cap
                 push!(buses_of_bat[bi], b)
                 push!(bats_at_bus[b], bi)
             end
@@ -489,42 +482,6 @@ function build_variables!(model, input::PowerSystemInput)
     # Constraint references for dual extraction (populated by add_demand_constraints!)
     balance_constraints = Dict{Tuple{Int,Int}, Any}()
 
-    # Delay retirement variables
-    # Binary: 1 = delay retirement (keep operating), 0 = proceed with retirement
-    gen_delay_retirement = nothing
-    bat_delay_retirement = nothing
-    gen_delay_retirement_capacity = Dict{Tuple{Int,Int}, Float64}()
-    bat_delay_retirement_capacity = Dict{Tuple{Int,Int}, Float64}()
-
-    # pending_gen and pending_bat_ret already computed above for lookup maps
-    if !isempty(pending_gen)
-        gen_delay_retirement = Dict{Tuple{Int,Int}, VariableRef}()
-        for (g, bus_caps) in pending_gen
-            for (b, orig_cap) in bus_caps
-                if orig_cap > 0
-                    var = @variable(model, binary = true,
-                                   base_name = "gen_delay_ret_$(g)_$(b)")
-                    gen_delay_retirement[(g, b)] = var
-                    gen_delay_retirement_capacity[(g, b)] = orig_cap
-                end
-            end
-        end
-    end
-
-    if !isempty(pending_bat_ret)
-        bat_delay_retirement = Dict{Tuple{Int,Int}, VariableRef}()
-        for (bi, bus_caps) in pending_bat_ret
-            for (b, orig_cap) in bus_caps
-                if orig_cap > 0
-                    var = @variable(model, binary = true,
-                                   base_name = "bat_delay_ret_$(bi)_$(b)")
-                    bat_delay_retirement[(bi, b)] = var
-                    bat_delay_retirement_capacity[(bi, b)] = orig_cap
-                end
-            end
-        end
-    end
-
     # Reservoir hydroelectric variables (only for generators with reservoir_capacity > 0)
     # Use buses_of_gen for sparse indexing (reservoirs are generator-associated)
     reservoir_level = nothing
@@ -628,10 +585,6 @@ function build_variables!(model, input::PowerSystemInput)
         loss_of_load_sectoral = loss_of_load_sectoral,
         co2_budget_violation = co2_budget_violation,
         rooftop_curtailment = rooftop_curtailment,
-        gen_delay_retirement = gen_delay_retirement,
-        bat_delay_retirement = bat_delay_retirement,
-        gen_delay_retirement_capacity = gen_delay_retirement_capacity,
-        bat_delay_retirement_capacity = bat_delay_retirement_capacity,
         ev_charge_status = ev_charge_status,
         demand_shift = demand_shift,
         gen_forced_replacement = gen_forced_replacement,
@@ -1053,29 +1006,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     end
 
     # ==========================================================================
-    # Delayed Retirement Penalty (A5 fix: penalty for delaying retirement)
-    # Matches Python legacy: delay_var * penalty_per_mw * original_capacity
-    # ==========================================================================
-    delay_retirement_cost = AffExpr(0.0)
-    penalty_per_mw = input.delay_retirement_penalty_per_mw
-    if vars.gen_delay_retirement !== nothing
-        for ((g, b), var) in vars.gen_delay_retirement
-            cap = get(vars.gen_delay_retirement_capacity, (g, b), 0.0)
-            if cap > 0
-                add_to_expression!(delay_retirement_cost, penalty_per_mw * cap, var)
-            end
-        end
-    end
-    if vars.bat_delay_retirement !== nothing
-        for ((bi, b), var) in vars.bat_delay_retirement
-            cap = get(vars.bat_delay_retirement_capacity, (bi, b), 0.0)
-            if cap > 0
-                add_to_expression!(delay_retirement_cost, penalty_per_mw * cap, var)
-            end
-        end
-    end
-
-    # ==========================================================================
     # Demand Shifting Cost: demand_shift_cost_rate per MWh and per hour moved
     # (an energy cost, so the MW variable is multiplied by Δt with the others)
     # ==========================================================================
@@ -1196,7 +1126,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     non_energy_window_fraction = annual_hours > 0 ?
         window_real_hours / annual_hours : 1.0
     non_energy_costs = (
-        delay_retirement_cost + npv_penalty_cost + fixed_om_cost +
+        npv_penalty_cost + fixed_om_cost +
         electrolyzer_fixed_cost
     )
     # Start-ups are events inside the window: charged in full, neither per
@@ -1233,7 +1163,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
             (non_energy_window_fraction / temporal_resolution_hours) * electrolyzer_fixed_cost,
         :converter_cost => AffExpr(0.0),   # set by charge_converter_costs!
         :spillage_cost => spillage_cost,
-        :delay_retirement_cost => delay_retirement_cost,
         :reservoir_spillage_cost => reservoir_spillage_cost,
         :demand_shift_cost => demand_shift_cost,
         :rooftop_curtailment_cost => rooftop_curtailment_cost,
@@ -1444,25 +1373,13 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
             rated = gen.rated_power[b]
 
             # When capacity_override provided (master problem), use precomputed capacity
-            # and skip degradation and delayed retirement
+            # and skip degradation
             if capacity_override !== nothing && haskey(capacity_override, (g, b))
                 total_capacity = capacity_override[(g, b)]
             else
                 # Age-based degradation and end of life
                 rated = generator_power_in_service(gen, b, input)
-
-                # Delayed retirement capacity restoration (A5)
-                # If this generator has pending retirement and delay_var=1, restore original capacity
-                delay_cap_restore = AffExpr(0.0)
-                if vars.gen_delay_retirement !== nothing && haskey(vars.gen_delay_retirement, (g, b))
-                    orig_cap = get(vars.gen_delay_retirement_capacity, (g, b), 0.0)
-                    if orig_cap > 0
-                        add_to_expression!(delay_cap_restore, orig_cap, vars.gen_delay_retirement[(g, b)])
-                    end
-                end
-
-                # Total capacity = existing + delayed retirement restoration
-                total_capacity = rated + delay_cap_restore
+                total_capacity = rated
             end
 
             # Reservoir generators: output limited by turbine capacity, not availability
@@ -1637,9 +1554,8 @@ end
 
 Fixed O&M (\$/year) of the capacity in service in the dispatch's year:
 `fixed_cost` (\$/MW·year) × the generators' power in service
-([`generator_power_in_service`](@ref), plus the capacity a delayed retirement
-keeps) and × the batteries' rated discharge power while within their
-lifetime. Charged whether or not the units run; the objective prorates it
+([`generator_power_in_service`](@ref)) and × the batteries' rated discharge
+power while within their lifetime. Charged whether or not the units run; the objective prorates it
 to the window.
 """
 function fixed_om_annual_cost(vars, input)
@@ -1648,10 +1564,6 @@ function fixed_om_annual_cost(vars, input)
         fc = gen.fixed_cost[b]
         fc > 0 || continue
         add_to_expression!(cost, fc * generator_power_in_service(gen, b, input))
-        if vars.gen_delay_retirement !== nothing && haskey(vars.gen_delay_retirement, (g, b))
-            cap = get(vars.gen_delay_retirement_capacity, (g, b), 0.0)
-            add_to_expression!(cost, fc * cap, vars.gen_delay_retirement[(g, b)])
-        end
     end
     for (bi, bat) in enumerate(input.batteries), b in vars.buses_of_bat[bi]
         fc = bat.fixed_cost[b]
@@ -4076,7 +3988,6 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             _v(:electrolyzer_cost),
             _v(:converter_cost),
             _v(:spillage_cost),
-            _v(:delay_retirement_cost, false),
             _v(:reservoir_spillage_cost),
             _v(:demand_shift_cost),
             _v(:rooftop_curtailment_cost),

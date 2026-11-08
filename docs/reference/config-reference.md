@@ -900,7 +900,6 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
 | `soc_violation` | float | `1000000` | $/MWh SOC limit violation. |
-| `delay_retirement_per_mw` | float | `50000` | $/MW delay retirement penalty. |
 
 ---
 

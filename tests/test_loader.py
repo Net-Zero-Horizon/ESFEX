@@ -629,20 +629,22 @@ class TestConvertSystem:
 
     def test_all_penalties_are_read(self, minimal_system_data):
         minimal_system_data["penalties"] = {
-            "SOC_violation": 5.0e5, "delay_retirement_per_mw": 1.0e4,
+            "SOC_violation": 5.0e5, "non_electric_demand_loss": 1.0e4,
         }
         pen = _convert_system(minimal_system_data).penalties
         assert pen.soc_violation == 5.0e5
-        assert pen.delay_retirement_per_mw == 1.0e4
+        assert pen.non_electric_demand_loss == 1.0e4
 
     def test_removed_penalty_keys_are_dropped(self, minimal_system_data):
         """Penalties that priced nothing were removed from the schema: an old
         file that still sets one loads, and the key is not kept."""
         minimal_system_data["penalties"] = {"Coupling_Slack_Penalty": 3.0,
-                                            "curtailment_excess_penalty": 1.0}
+                                            "curtailment_excess_penalty": 1.0,
+                                            "delay_retirement_per_mw": 1.0e4}
         pen = _convert_system(minimal_system_data).penalties
         assert "coupling_slack_penalty" not in pen.model_dump()
         assert "curtailment_excess_penalty" not in pen.model_dump()
+        assert "delay_retirement_per_mw" not in pen.model_dump()
 
 
 # ---------------------------------------------------------------------------

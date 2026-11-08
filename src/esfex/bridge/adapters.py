@@ -2072,7 +2072,6 @@ class PowerSystemAdapter:
             transfer_margin_penalty=scale_cost(float(getattr(sys.penalties, 'transfer_margin', 0.0))),
             rooftop_curtailment_penalty=scale_cost(float(getattr(sys.penalties, 'rooftop_curtailment', 5.0))),
             co2_budget_violation_penalty=scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
-            delay_retirement_penalty_per_mw=scale_cost(float(getattr(sys.penalties, 'delay_retirement_per_mw', 50000.0))),
             # Demand constraints — load shedding bounded to fraction of demand
             max_annual_system_cost=scale_cost(float(getattr(sys, 'max_annual_system_cost', float('inf')))),
             # Electricity price for time-varying V2G compensation and flex demand benefit

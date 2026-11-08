@@ -292,66 +292,6 @@ def extract_boundary_conditions(
     )
 
 
-def adjust_investment_limits(
-    unit_data: dict,
-    year: int,
-    base_year: int,
-    growth_rate: float = 0.5,
-) -> None:
-    """
-    Adjust investment limits for units based on year progression.
-
-    Args:
-        unit_data: Unit configuration dictionary (modified in place)
-        year: Current simulation year
-        base_year: Base year for calculations
-        growth_rate: Annual growth rate (default 50%)
-    """
-    years_diff = year - base_year
-    growth_factor = (1 + growth_rate) ** years_diff
-
-    if unit_data.get("type") in ("Renewable", "Storage"):
-        if "invest_max_power" in unit_data:
-            unit_data["invest_max_power"] = [
-                x * growth_factor for x in unit_data["invest_max_power"]
-            ]
-        if unit_data.get("type") == "Storage" and "invest_max_capacity" in unit_data:
-            unit_data["invest_max_capacity"] = [
-                x * growth_factor for x in unit_data["invest_max_capacity"]
-            ]
-
-
-def adjust_transmission_parameters(
-    nodes: dict,
-    year: int,
-    base_year: int,
-    cost_reduction_rate: float = 0.03,
-    capacity_growth_rate: float = 0.5,
-) -> None:
-    """
-    Adjust transmission parameters based on year progression.
-
-    Args:
-        nodes: Node configuration dictionary (modified in place)
-        year: Current simulation year
-        base_year: Base year for calculations
-        cost_reduction_rate: Annual cost reduction rate (default 3%)
-        capacity_growth_rate: Annual capacity growth rate (default 50%)
-    """
-    years_diff = year - base_year
-    cost_reduction = (1 - cost_reduction_rate) ** years_diff
-    capacity_growth = (1 + capacity_growth_rate) ** years_diff
-
-    if "transference_invest_cost" in nodes:
-        nodes["transference_invest_cost"] = [
-            x * cost_reduction for x in nodes["transference_invest_cost"]
-        ]
-    if "transference_invest_max" in nodes:
-        nodes["transference_invest_max"] = [
-            x * capacity_growth for x in nodes["transference_invest_max"]
-        ]
-
-
 def calculate_renewable_penetration(
     gen_output: np.ndarray,
     generators: List[dict],

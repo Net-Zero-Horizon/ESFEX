@@ -10,8 +10,6 @@ import pytest
 
 from esfex.utils.helpers import (
     BoundaryConditions,
-    adjust_investment_limits,
-    adjust_transmission_parameters,
     calculate_co2_emissions,
     calculate_renewable_penetration,
     extract_boundary_conditions,
@@ -446,116 +444,6 @@ class TestExtractBoundaryConditions:
         assert bc.battery_soc == {}
         assert bc.generator_status == {}
         assert bc.ev_soc == {}
-
-
-# ──────────────────────────────────────────────────────────────────────
-# adjust_investment_limits
-# ──────────────────────────────────────────────────────────────────────
-
-
-class TestAdjustInvestmentLimits:
-    """Tests for adjust_investment_limits()."""
-
-    def test_renewable_type_scales_invest_max_power(self):
-        """Renewable invest_max_power grows by (1+rate)^years."""
-        unit = {"type": "Renewable", "invest_max_power": [100.0, 200.0]}
-        adjust_investment_limits(unit, year=2027, base_year=2025, growth_rate=0.5)
-        factor = 1.5 ** 2
-        assert unit["invest_max_power"] == pytest.approx([100 * factor, 200 * factor])
-
-    def test_storage_type_scales_both_power_and_capacity(self):
-        """Storage scales invest_max_power AND invest_max_capacity."""
-        unit = {
-            "type": "Storage",
-            "invest_max_power": [50.0],
-            "invest_max_capacity": [400.0],
-        }
-        adjust_investment_limits(unit, year=2026, base_year=2025, growth_rate=0.5)
-        factor = 1.5
-        assert unit["invest_max_power"] == pytest.approx([50 * factor])
-        assert unit["invest_max_capacity"] == pytest.approx([400 * factor])
-
-    def test_other_type_unchanged(self):
-        """Non-Renewable/Storage types are not modified."""
-        unit = {"type": "Thermal", "invest_max_power": [100.0]}
-        original = unit["invest_max_power"].copy()
-        adjust_investment_limits(unit, year=2030, base_year=2025)
-        assert unit["invest_max_power"] == original
-
-    def test_base_year_equals_current_year(self):
-        """No change when year == base_year (growth factor = 1)."""
-        unit = {"type": "Renewable", "invest_max_power": [100.0]}
-        adjust_investment_limits(unit, year=2025, base_year=2025)
-        assert unit["invest_max_power"] == [100.0]
-
-    def test_missing_invest_max_power_key(self):
-        """No error if invest_max_power key is absent."""
-        unit = {"type": "Renewable"}
-        adjust_investment_limits(unit, year=2030, base_year=2025)
-        assert "invest_max_power" not in unit
-
-    def test_storage_without_invest_max_capacity(self):
-        """Storage without invest_max_capacity only scales power."""
-        unit = {"type": "Storage", "invest_max_power": [10.0]}
-        adjust_investment_limits(unit, year=2026, base_year=2025, growth_rate=1.0)
-        assert unit["invest_max_power"] == pytest.approx([20.0])
-        assert "invest_max_capacity" not in unit
-
-
-# ──────────────────────────────────────────────────────────────────────
-# adjust_transmission_parameters
-# ──────────────────────────────────────────────────────────────────────
-
-
-class TestAdjustTransmissionParameters:
-    """Tests for adjust_transmission_parameters()."""
-
-    def test_cost_reduction(self):
-        """Investment cost decreases by (1 - rate)^years."""
-        nodes = {"transference_invest_cost": [1000.0, 2000.0]}
-        adjust_transmission_parameters(
-            nodes, year=2027, base_year=2025, cost_reduction_rate=0.03
-        )
-        factor = 0.97 ** 2
-        assert nodes["transference_invest_cost"] == pytest.approx(
-            [1000 * factor, 2000 * factor]
-        )
-
-    def test_capacity_growth(self):
-        """Max investment capacity grows by (1 + rate)^years."""
-        nodes = {"transference_invest_max": [500.0]}
-        adjust_transmission_parameters(
-            nodes, year=2026, base_year=2025, capacity_growth_rate=0.5
-        )
-        assert nodes["transference_invest_max"] == pytest.approx([750.0])
-
-    def test_both_keys_present(self):
-        """Both cost and capacity keys are adjusted simultaneously."""
-        nodes = {
-            "transference_invest_cost": [100.0],
-            "transference_invest_max": [100.0],
-        }
-        adjust_transmission_parameters(nodes, year=2030, base_year=2025)
-        # cost: 100 * 0.97^5
-        # capacity: 100 * 1.5^5
-        assert nodes["transference_invest_cost"][0] < 100.0
-        assert nodes["transference_invest_max"][0] > 100.0
-
-    def test_no_matching_keys(self):
-        """No error when neither key is present."""
-        nodes = {"some_other_key": 42}
-        adjust_transmission_parameters(nodes, year=2030, base_year=2025)
-        assert nodes == {"some_other_key": 42}
-
-    def test_same_year_no_change(self):
-        """No change when year == base_year."""
-        nodes = {
-            "transference_invest_cost": [100.0],
-            "transference_invest_max": [200.0],
-        }
-        adjust_transmission_parameters(nodes, year=2025, base_year=2025)
-        assert nodes["transference_invest_cost"] == [100.0]
-        assert nodes["transference_invest_max"] == [200.0]
 
 
 # ──────────────────────────────────────────────────────────────────────

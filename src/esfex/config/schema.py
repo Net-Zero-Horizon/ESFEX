@@ -59,7 +59,6 @@ class PenaltiesConfig(BaseModel):
     loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
-    delay_retirement_per_mw: float = Field(default=50000, description="$/MW delay retirement penalty")
 
     @model_validator(mode="after")
     def _default_ev_loss(self) -> "PenaltiesConfig":

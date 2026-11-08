@@ -2227,6 +2227,19 @@ import Ipopt
             @test res.total_investment_by_year[1] > 0
             @test sum(res.total_investment_by_year) ≈
                   value(ESFEX.master_fuel_investment_cost(mv, inp; discount_rate = 0.0)) rtol = 1e-9
+            # Each year's operating cost is reported (it was always 0):
+            # with the investment and the annual asset costs it makes up
+            # the objective (no slack here)
+            ops = res.total_operational_cost_by_year
+            @test all(ops .> 0)
+            npv = value(ESFEX.build_investment_cost_expression(mv, inp))
+            for y in 1:2
+                df = 1.0 / (1.0 + inp.discount_rate)^(y - 1)
+                npv += df * (value(ESFEX.build_annual_asset_cost(mv, inp, y)) + ops[y])
+            end
+            @test npv ≈ objective_value(model) rtol = 1e-9
+            # Benders reports its subproblems' cost for the same plan
+            @test br.solution.total_operational_cost_by_year ≈ ops rtol = 1e-4
 
             # A route transit delay changes nothing in the cyclic day: the
             # shipments of the day's last steps used to arrive after its end
@@ -2254,7 +2267,10 @@ import Ipopt
                 ESFEX.set_silent(model)
                 optimize!(model)
                 @test string(termination_status(model)) == "OPTIMAL"
-                return objective_value(model), extract_master_solution(model, mv, inp).fuel_investment
+                res = extract_master_solution(model, mv, inp)
+                # The expected operating cost per year (one scenario here)
+                @test all(res.total_operational_cost_by_year .> 0)
+                return objective_value(model), res.fuel_investment
             end
             obj0, fi0 = solve_with(ScenarioMultipliers())
             @test fi0["storage"][1]["Gas"][1] > 1.0

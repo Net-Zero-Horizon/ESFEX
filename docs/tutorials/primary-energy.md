@@ -101,7 +101,7 @@ Each source is keyed by the fuel it supplies. All per-node values are lists with
 | `transport_transit_days_per_100km` | days | Optional delivery lead time along routes (default 0, instantaneous): a shipment reaches the destination tank that many days per 100 km after it leaves |
 | `disruption_start_hour`, `disruption_end_hour`, `disruption_availability` | hour, hour, fraction | Optional supply cut: availability is scaled to `disruption_availability` inside the window. Hours count from 1 January of the base year (8760 per year), like [scheduled interruptions](../user-guide/scheduled-interruptions.md) |
 
-The master problem does not build fuel storage or transport capacity in practice (its fuel-infrastructure variables only carry cost), so the existing `storage_capacity` and route capacities are what the dispatch works with in `development` mode.
+In `development` mode the master problem can add tank capacity on top of `storage_capacity`, and route capacity, within the limits of `fuel_infrastructure` (Step 5); each dispatch year works with the configured capacity plus what the master built. A run without a master (`economic_dispatch`, `unit_commitment`) uses the configured capacities only.
 
 !!! note "Fuel entry points"
     The Studio writes `fuel_entry_points` (a list of `{name, node, coordinate, fuels, max_import_rate, import_cost}`) plus storage facilities under `fuel_infrastructure` instead of `primary_energy_sources`. When a system has no `primary_energy_sources`, the run builds them from these entries (`max_import_rate` is in units/hour). When both are present, `fuel_entry_points` is ignored.

@@ -136,7 +136,8 @@ The master only invests through **candidate technologies**. Existing `generators
 | Generation capacity | `technologies` | MW | `invest_max_power` |
 | Storage power / energy | `battery_technologies` | MW / MWh | `invest_max_power` / `invest_max_capacity`, and E/P ratio between `min_duration_hours` and `max_duration_hours` |
 | Transmission | `nodes.transference_invest_cost` / `transference_invest_max` | MW | `transference_invest_max` (same expansion in both directions) |
-| Fuel storage / transport | `primary_energy_sources` | units | primary-energy investment limits |
+| Fuel storage / transport | `fuel_infrastructure` storage facilities / pipelines (`investment_cost` per fuel), with primary energy on | units, units/day | their `expansion_limit` × the configured capacity |
+| Electrolyzers | `electrolyzers` (`invest_cost`), with primary energy on | MW | `invest_max_power` |
 | Reservoir capacity | generator `reservoir_invest_cost` / `reservoir_invest_max` | MWh | `reservoir_invest_max` |
 
 `invest_max_power` and `invest_max_capacity` are per-node lists. Each value is a **cumulative** cap on what can be built at that node over the whole horizon. When a node has several buses, investment can go to any of them, but the node total stays within the cap. A value of `0.0` disables investment at that node. Total investment cost per investment period is limited to the system's `MAX_ANNUAL_SYSTEM_COST`, with a penalised slack.
