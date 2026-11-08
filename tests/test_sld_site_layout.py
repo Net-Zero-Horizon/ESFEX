@@ -452,3 +452,138 @@ def test_without_coordinates_the_node_grid_is_kept():
     out = gb.build_elk_graph(st)
     assert {g["nodeId"] for g in out["nodeGroups"]} == {0, 1}
     assert all("siteId" not in g for g in out["nodeGroups"])
+
+
+# ── Inside a substation block ─────────────────────────────────────
+
+
+def _xf(name, a, b, mva=100.0):
+    return GuiTransformer(name=name, from_bus=a, to_bus=b, rated_power_mva=mva)
+
+
+def _gens(bus, n, tag):
+    return {f"{tag}{i}": GuiGeneratorInstance(
+        instance_id=f"{tag}{i}", unit_key="u", name=f"{tag}{i}", gen_type="Non-renewable",
+        fuel="Gas", bus=bus, rated_power=50.0) for i in range(n)}
+
+
+def _one_site(buses, transformers, generators=()):
+    """One substation (all buses within ~100 m) plus a far bus so the
+    site layout runs."""
+    st = GuiSystemState()
+    st.nodes = [GuiNode(index=0, name="S"), GuiNode(index=1, name="Far")]
+    st.buses = {bid: _bus(bid, 0, kv, 22.0 + i * 1e-4, -81.0)
+                for i, (bid, kv) in enumerate(buses)}
+    st.buses["far"] = _bus("far", 1, 220, 22.0, -79.0)
+    st.transformers = list(transformers)
+    st.transmission_lines = [GuiTransmissionLine(
+        line_id="L", from_bus=buses[0][0], to_bus="far", capacity_mw=300.0,
+        voltage_kv=220.0)]
+    st.generators = {}
+    for g in generators:
+        st.generators.update(g)
+    out = gb.build_elk_graph(st)
+    by_id = {c["id"]: c for c in out["elkGraph"]["children"]}
+    return out, by_id
+
+
+def _pts(e):
+    sec = e["sections"][0]
+    return [(p["x"], p["y"]) for p in [sec["startPoint"]] + sec["bendPoints"] + [sec["endPoint"]]]
+
+
+def _seg_hits_bar(pts, c):
+    bar = (c["x"], c["y"], c["x"] + c["width"], c["y"] + gb._BUS_H)
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        seg = (min(x0, x1), min(y0, y1), max(x0, x1) + 1e-9, max(y0, y1) + 1e-9)
+        if _overlap(seg, bar):
+            return True
+    return False
+
+
+def _proper_crossings(a, b):
+    """Interior crossings between the orthogonal polylines ``a`` and ``b``."""
+    n = 0
+    for (p0, p1) in zip(a, a[1:]):
+        for (q0, q1) in zip(b, b[1:]):
+            for (h0, h1), (v0, v1) in (((p0, p1), (q0, q1)), ((q0, q1), (p0, p1))):
+                if abs(h0[1] - h1[1]) > 1e-6 or abs(v0[0] - v1[0]) > 1e-6:
+                    continue
+                if (min(h0[0], h1[0]) < v0[0] < max(h0[0], h1[0])
+                        and min(v0[1], v1[1]) < h0[1] < max(v0[1], v1[1])):
+                    n += 1
+    return n
+
+
+def test_bars_in_a_row_never_overlap():
+    # A 220 kV bar made long by its generators feeds one short 110 kV bar;
+    # the tree layout centres it over that child, so it used to stick out
+    # over the next 220 kV bar of the substation.
+    out, by_id = _one_site(
+        [("a220", 220), ("a110", 110), ("b220", 220), ("b110", 110)],
+        [_xf("T1", "a220", "a110"), _xf("T2", "b220", "b110")],
+        [_gens("a220", 8, "ga"), _gens("b220", 1, "gb")])
+    bars = [by_id[f"bus_{b}"] for b in ("a220", "a110", "b220", "b110")]
+    for i, p in enumerate(bars):
+        for q in bars[i + 1:]:
+            if p["y"] != q["y"]:
+                continue
+            lo, hi = sorted((p, q), key=lambda c: c["x"])
+            assert hi["x"] - (lo["x"] + lo["width"]) >= gb._INTRA_NODE_GAP_X - 1e-6
+
+
+def test_transformer_skipping_a_row_goes_around_the_bar_between():
+    # 220 / 187 / 110 kV, all three coupled: the 110 kV bar sits below the
+    # 187 kV one, so the three 220/110 units skip a row. They take a
+    # corridor past the 187 kV bar instead of cutting through it (with
+    # their windings on it), and do not cross one another.
+    out, by_id = _one_site(
+        [("h", 220), ("m", 187), ("l", 110)],
+        [_xf("HM", "h", "m"), _xf("ML", "m", "l")]
+        + [_xf(f"HL{i}", "h", "l") for i in range(3)])
+    mid = by_id["bus_m"]
+    assert by_id["bus_h"]["y"] < mid["y"] < by_id["bus_l"]["y"]
+    skips = [e for e in out["elkGraph"]["edges"]
+             if {e["sources"][0], e["targets"][0]} == {"bus_h", "bus_l"}]
+    assert len(skips) == 3
+    routes = [_pts(e) for e in skips]
+    for e, pts in zip(skips, routes):
+        assert not e["properties"].get("transformerVertical")
+        assert not _seg_hits_bar(pts, mid)
+        for p, q in zip(pts, pts[1:]):
+            assert abs(p[0] - q[0]) < 1e-6 or abs(p[1] - q[1]) < 1e-6
+    others = [_pts(e) for e in out["elkGraph"]["edges"]
+              if e["properties"]["edgeType"] == "transformer" and e not in skips]
+    for i, a in enumerate(routes):
+        for b in routes[i + 1:] + others:
+            assert _proper_crossings(a, b) == 0
+
+
+def test_parallel_transformers_get_their_own_x():
+    # Three units to a short 110 kV bar beside a long one: their slots on
+    # the 220 kV bar fall past the short bar's end, and used to be clamped
+    # onto that end, one on top of another.
+    out, by_id = _one_site(
+        [("h", 220), ("l1", 110), ("l2", 110)],
+        [_xf(f"A{i}", "h", "l1") for i in range(3)] + [_xf("B", "h", "l2")],
+        [_gens("l2", 10, "g")])
+    xs = sorted(e["sections"][0]["startPoint"]["x"] for e in out["elkGraph"]["edges"]
+                if e["targets"][0] == "bus_l1" or e["sources"][0] == "bus_l1")
+    assert len(xs) == 3
+    assert all(b - a >= 2 * gb._TERM_CLEAR for a, b in zip(xs, xs[1:]))
+
+
+def test_equipment_hangs_clear_of_transformer_drops():
+    # A 110 kV bar with five generators feeding three 34.5 kV bars: the
+    # generators take a stretch of the bar with no transformer below it.
+    out, by_id = _one_site(
+        [("h", 110), ("a", 34.5), ("b", 34.5), ("c", 34.5)],
+        [_xf("A", "h", "a"), _xf("B", "h", "b"), _xf("C", "h", "c")],
+        [_gens("h", 5, "g")])
+    h = by_id["bus_h"]
+    eq = gb._equip_stub_xs(h, 5)
+    lo, hi = min(eq) - gb._EQUIP_SIZE / 2, max(eq) + gb._EQUIP_SIZE / 2
+    for e in out["elkGraph"]["edges"]:
+        if e["properties"]["edgeType"] == "transformer":
+            x = e["sections"][0]["startPoint"]["x"]
+            assert not lo < x < hi
