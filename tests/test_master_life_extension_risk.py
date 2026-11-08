@@ -27,7 +27,7 @@ def _new_capacity_built(tmp_path, risk):
     # Past its lifetime and cheap to extend; derated by its hazard exposure
     old = _make_generator("Old", "Non-renewable", "Diesel", [100.0], life_time=[25],
                           initial_age=[30], degradation_rate=[0.0], invest_cost=[10000.0],
-                          invest_max_power=[0.0], risk_coefficient=[risk])
+                          risk_coefficient=[risk])
     gas = _make_technology("gas_new", "Gas", 1, tech_type="Non-renewable",
                            invest_cost=50000.0, invest_max_power=500.0)
     # Dear to run: built only to meet the adequacy requirement

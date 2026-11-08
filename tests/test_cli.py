@@ -108,7 +108,6 @@ def minimal_config_path(tmp_path):
                         "fixed_cost": [6.6, 6.6],
                         "maintenance_cost": [28.8, 28.8],
                         "invest_cost": [3900000, 3900000],
-                        "invest_max_power": [0, 0],
                     },
                 },
                 "batteries": {},

@@ -1232,10 +1232,12 @@ class RiskDashboardPanel(QWidget):
 
         controls.addWidget(QLabel("CVaR \u03b1:"))
         self._spin_alpha = QDoubleSpinBox()
-        self._spin_alpha.setRange(0.80, 0.99)
+        # risk.cvar_alpha is in (0, 1): a saved 0.5 or 0.995 used to be
+        # clamped to 0.80–0.99 here and saved back changed
+        self._spin_alpha.setDecimals(3)
+        self._spin_alpha.setRange(0.001, 0.999)
         self._spin_alpha.setValue(0.95)
         self._spin_alpha.setSingleStep(0.01)
-        self._spin_alpha.setDecimals(2)
         controls.addWidget(self._spin_alpha)
 
         controls.addWidget(QLabel("CVaR \u03bb:"))

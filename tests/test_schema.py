@@ -79,7 +79,6 @@ def _gen_1(name: str = "Solar", fuel: str = "Solar") -> dict:
         "fixed_cost": [5.0],
         "maintenance_cost": [2.0],
         "invest_cost": [800000],
-        "invest_max_power": [500.0],
     }
 
 
@@ -105,9 +104,7 @@ def _bat_1(name: str = "LiIon") -> dict:
         "fixed_cost": [3.0],
         "maintenance_cost": [1.0],
         "invest_cost": [300000],
-        "invest_cost_energy": [150000],
         "invest_max_power": [200.0],
-        "invest_max_capacity": [800.0],
         "efficiency_charge": [0.95],
         "efficiency_discharge": [0.95],
         "soc_initial": [0.5],
@@ -452,7 +449,7 @@ class TestGeneratorConfig:
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
             "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
             "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-            "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+            "fixed_cost", "maintenance_cost", "invest_cost",
         ]:
             val = data[key][0]
             data[key] = [val, val]
@@ -488,10 +485,6 @@ class TestBatteryConfig:
     def test_soc_initial(self):
         b = BatteryConfig(**_bat_1())
         assert b.soc_initial == [0.5]
-
-    def test_invest_cost_energy(self):
-        b = BatteryConfig(**_bat_1())
-        assert b.invest_cost_energy == [150000]
 
     def test_throughput_degradation_cost_default_none(self):
         b = BatteryConfig(**_bat_1())
@@ -1425,7 +1418,7 @@ class TestGeneratorConfigReservoir:
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
             "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
             "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-            "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+            "fixed_cost", "maintenance_cost", "invest_cost",
         ]:
             val = data[key][0]
             data[key] = [val, val]
@@ -1769,7 +1762,7 @@ class TestGeneratorConfigCostCurve:
             "min_up", "min_down", "ramp_up", "ramp_down",
             "eff_at_rated", "eff_at_min", "inertia", "start_up_cost",
             "fuel_cost", "fixed_cost", "maintenance_cost",
-            "invest_cost", "invest_max_power",
+            "invest_cost",
         ]:
             val = data[key][0]
             data[key] = [val, val]

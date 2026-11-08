@@ -155,7 +155,6 @@ export add_battery_constraints!, add_reserve_constraints!
 export add_inertia_constraints!
 export add_curtailment_constraints!, add_renewable_constraint!, add_co2_constraint!
 export extract_solution
-export recover_uc_duals!
 export recover_uc_duals_via_copy
 export compute_n1_security_cost!
 

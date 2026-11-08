@@ -730,92 +730,22 @@ function branch_outage_factor(input, id::AbstractString, t::Int)
 end
 
 """
-    dev_corridor_investment!(model, vars, input, i, j, transfer_cost) -> Union{VariableRef, Nothing}
-
-Development-mode transmission investment of corridor (i, j), created once per
-corridor: bounded by the smaller of its ends' `transference_invest_max`, its
-cost (the dearer `transference_invest_cost`, as in the master) added to
-`transfer_cost`. Returns `nothing` when the corridor already has one (only its
-first line gets the capacity) or cannot be expanded.
-"""
-function dev_corridor_investment!(model, vars::PowerSystemVariables, input, i::Int, j::Int,
-                                  transfer_cost::AffExpr)
-    vars.transfer_investment === nothing && return nothing
-    key = i < j ? (i, j) : (j, i)
-    haskey(vars.transfer_investment, key) && return nothing
-    net = input.network
-    max_inv = min(get(net.transference_invest_max, i, 0.0), get(net.transference_invest_max, j, 0.0))
-    max_inv > 0 || return nothing
-    inv = @variable(model, lower_bound=0, upper_bound=max_inv, base_name="tf_inv_$(key[1])_$(key[2])")
-    vars.transfer_investment[key] = inv
-    add_to_expression!(transfer_cost,
-        max(get(net.transference_invest_cost, i, 0.0), get(net.transference_invest_cost, j, 0.0)), inv)
-    return inv
-end
-
-"""
-    dev_expandable_lines(transmission, network) -> Set{Int}
-
-Lines that development-mode investment can expand: the first line of each
-corridor whose ends both allow transference investment, the line
-`dev_corridor_investment!` gives the capacity to.
-"""
-function dev_expandable_lines(transmission::TransmissionDC, network)
-    out = Set{Int}()
-    seen = Set{Tuple{Int,Int}}()
-    for (ℓ, (i, j)) in enumerate(transmission.lines)
-        key = i < j ? (i, j) : (j, i)
-        key in seen && continue
-        push!(seen, key)
-        max_inv = min(get(network.transference_invest_max, i, 0.0),
-                      get(network.transference_invest_max, j, 0.0))
-        max_inv > 0 && push!(out, ℓ)
-    end
-    return out
-end
-
-"""
-    charge_transfer_investment!(model, input, transfer_cost)
-
-The objective is built before the network: add the corridor investment cost
-to it, scaled by the window's fraction of the year like the other investment
-costs in build_objective!, and to the cost breakdown.
-"""
-function charge_transfer_investment!(model, input, transfer_cost::AffExpr)
-    iszero(transfer_cost) && return
-    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
-    year_hours = Float64(input.hours_per_year)
-    window_fraction = year_hours > 0 ? input.temporal.hours * tres / year_hours : 1.0
-    @objective(model, Min, objective_function(model) + window_fraction * transfer_cost)
-    ce = get(model.ext, :cost_expressions, nothing)
-    ce === nothing || add_to_expression!(ce[:investment_cost], transfer_cost)
-end
-
-"""
     add_line_capacity_constraints!(model, transmission::TransmissionDC, vars, input)
 
 Add thermal capacity limits for transmission lines (per physical line), scaled
-by scheduled outages. In development mode a corridor can be expanded
-(dev_corridor_investment!; it used to be unbounded and free).
+by scheduled outages. The master passes its investment-augmented capacities in
+`capacity_override`; the dispatch never builds lines.
 """
 function add_line_capacity_constraints!(model, transmission::TransmissionDC,
                                         vars::PowerSystemVariables, input;
                                         capacity_override::Union{Dict{Int, Any}, Nothing} = nothing)
     hours = input.temporal.hours
-    is_dev = hasproperty(input, :mode) ? input.mode == "development" : false
     pf_by_line = vars.power_flow_by_line
-    transfer_cost = AffExpr(0.0)
 
-    for (ℓ, (i, j)) in enumerate(transmission.lines)
-        base_capacity = transmission.line_capacities[ℓ]
-
-        if capacity_override !== nothing && haskey(capacity_override, ℓ)
-            # Master: use investment-augmented line capacity (AffExpr)
-            total_cap = capacity_override[ℓ]
-        else
-            inv = is_dev ? dev_corridor_investment!(model, vars, input, i, j, transfer_cost) : nothing
-            total_cap = inv === nothing ? base_capacity : base_capacity + inv
-        end
+    for ℓ in eachindex(transmission.lines)
+        # Master: investment-augmented line capacity (AffExpr)
+        total_cap = capacity_override !== nothing && haskey(capacity_override, ℓ) ?
+            capacity_override[ℓ] : transmission.line_capacities[ℓ]
         for t in 1:hours
             # Bidirectional flow limits per physical line (× outage factor)
             om = branch_outage_factor(input, transmission.line_ids[ℓ], t)
@@ -823,8 +753,6 @@ function add_line_capacity_constraints!(model, transmission::TransmissionDC,
             @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
         end
     end
-
-    charge_transfer_investment!(model, input, transfer_cost)
 end
 
 """

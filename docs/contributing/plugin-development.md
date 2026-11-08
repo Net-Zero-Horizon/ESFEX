@@ -234,8 +234,9 @@ def post_master_problem(
 ) -> None:
     """Called after master problem solution.
 
-    The investments dict contains keys like 'gen_investment_power_G_N'
-    with MW values. The retirements dict contains retirement flags.
+    investments maps each year to {'tech_investment_power_T_N': MW, ...};
+    retirements maps each year to {'gen_G': share of existing generator G
+    retired (0-1)}.
     """
 ```
 

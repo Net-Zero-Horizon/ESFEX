@@ -34,15 +34,14 @@ _GEN_PER_NODE_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
     "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
     "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-    "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+    "fixed_cost", "maintenance_cost", "invest_cost",
 ]
 
 # Per-node array field names for batteries
 _BAT_PER_NODE_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
     "rated_power", "ramp_up", "ramp_down", "inertia",
-    "fixed_cost", "maintenance_cost", "invest_cost", "invest_cost_energy",
-    "invest_max_power", "invest_max_capacity",
+    "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
     "efficiency_charge", "efficiency_discharge", "soc_initial", "max_DoD",
     "capacity", "MaxChargePower", "MaxDischargePower",
 ]
@@ -407,10 +406,7 @@ def expand_config_with_zones(
                 arr = getattr(gen, field_name)
                 ref_val = arr[ref] if ref < len(arr) else 0
 
-                if field_name == "invest_max_power":
-                    zone = zones[mappings.index(m)]
-                    val = (zone.max_capacity_mw or 0.0) if is_matched else 0.0
-                elif field_name == "rated_power":
+                if field_name == "rated_power":
                     val = 0.0  # nothing built yet
                 elif field_name == "invest_cost":
                     val = ref_val if is_matched else 0.0
@@ -442,10 +438,6 @@ def expand_config_with_zones(
                                      "MaxDischargePower", "capacity"):
                     val = 0.0
                 elif field_name == "invest_cost":
-                    val = ref_val if is_matched else 0.0
-                elif field_name == "invest_cost_energy":
-                    val = ref_val if is_matched else 0.0
-                elif field_name == "invest_max_capacity":
                     val = ref_val if is_matched else 0.0
                 elif is_matched:
                     val = ref_val

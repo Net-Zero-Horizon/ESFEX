@@ -188,7 +188,6 @@ def _convert_generator(unit_key: str, data: dict[str, Any]) -> GeneratorConfig:
         fixed_cost=data["fixed_cost"],
         maintenance_cost=data["maintenance_cost"],
         invest_cost=data["invest_cost"],
-        invest_max_power=data["invest_max_power"],
         availability_file=data.get("Availability", data.get("availability_file")),
         frequency_hz=data.get("frequency_hz", 50.0),
         current_type=data.get("current_type", "AC"),
@@ -219,9 +218,7 @@ def _convert_battery(unit_key: str, data: dict[str, Any]) -> BatteryConfig:
         inertia=data["inertia"],
         maintenance_cost=data["maintenance_cost"],
         invest_cost=data["invest_cost"],
-        invest_cost_energy=data.get("invest_cost_energy", data["invest_cost"]),
         invest_max_power=data["invest_max_power"],
-        invest_max_capacity=data.get("invest_max_capacity", [0] * len(data["rated_power"])),
         efficiency_charge=data["efficiency_charge"],
         efficiency_discharge=data["efficiency_discharge"],
         soc_initial=data["soc_initial"],
@@ -246,8 +243,6 @@ def _convert_primary_energy_source(name: str, data: dict[str, Any]) -> PrimaryEn
         storage_capacity=data["storage_capacity"],
         initial_storage_level=data["initial_storage_level"],
         min_storage_level=data.get("min_storage_level", 0.1),
-        transport_cost=data["transport_cost"],
-        transport_losses=data["transport_losses"],
     )
     _pass_through(PrimaryEnergySourceConfig, data, kwargs)
     return PrimaryEnergySourceConfig(**kwargs)

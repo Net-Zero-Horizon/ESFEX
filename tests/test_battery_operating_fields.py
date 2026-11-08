@@ -250,7 +250,7 @@ def _bess(**kw) -> BatteryConfig:
     return _make_battery("BESS", 1).model_copy(update=dict(
         capacity=[400.0], MaxChargePower=[20.0], MaxDischargePower=[20.0],
         rated_power=[20.0], max_DoD=[1.0], soc_initial=[0.5], degradation_rate=[0.0],
-        invest_max_power=[0.0], invest_max_capacity=[0.0], **kw))
+        invest_max_power=[0.0], **kw))
 
 
 @pytest.mark.julia

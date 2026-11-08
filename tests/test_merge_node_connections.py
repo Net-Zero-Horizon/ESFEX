@@ -39,7 +39,7 @@ def _two_systems(tmp_path=None, **cfg_kw):
         "fuel_transport_distances": [[0.0, 40.0], [40.0, 0.0]],
         "penalties": PenaltiesConfig(loss_of_load=10000.0)})
     gen = _make_generator("Gas", "Non-renewable", "Gas", [300.0], degradation_rate=[0.0],
-                          min_power=[0.0], invest_max_power=[0.0])
+                          min_power=[0.0])
     b = _make_system_config(num_nodes=1, generators={"gas": gen}, name="B")
     b = b.model_copy(update={"penalties": PenaltiesConfig(loss_of_load=10000.0)})
     if tmp_path is not None:

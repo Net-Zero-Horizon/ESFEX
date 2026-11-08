@@ -105,13 +105,9 @@ def generate_availability_profiles(
             node_cfs: list[np.ndarray] = []
 
             for node_idx in range(num_nodes):
-                # Skip nodes without capacity or investment potential
-                has_capacity = gen.rated_power[node_idx] > 0
-                has_invest = (
-                    node_idx < len(gen.invest_max_power)
-                    and gen.invest_max_power[node_idx] > 0
-                )
-                if not has_capacity and not has_invest:
+                # Skip nodes without capacity (new capacity is built from
+                # technologies, which have their own profiles)
+                if gen.rated_power[node_idx] <= 0:
                     node_cfs.append(np.ones(_HOURS_PER_YEAR))
                     continue
 

@@ -216,8 +216,7 @@ class GeneratorConfig(BaseModel):
     fuel_cost: list[float]                 # $/MWh
     fixed_cost: list[float]                # $/MW per year (fixed O&M)
     maintenance_cost: list[float]          # $/MWh
-    invest_cost: list[float] = [0.0]       # $/MW
-    invest_max_power: list[float] = [0.0]  # MW
+    invest_cost: list[float] = [0.0]       # $/MW, prices life extension
     availability_file: Optional[str] = None   # alias "Availability"
     bus_index: Optional[int] = None
     bus_id_per_node: Optional[dict[int, str]] = None
@@ -250,8 +249,6 @@ class BatteryConfig(BaseModel):
     efficiency_discharge: list[float]
     soc_initial: list[float]               # fraction
     max_DoD: list[float]                   # fraction
-    invest_cost_energy: list[float] = [0.0]
-    invest_max_capacity: list[float] = [0.0]
     throughput_degradation_cost: Optional[list[float]] = None
     discharge_cost_curve: Optional[list[CostCurveConfig]] = None
     ramp_up: list[float] = [0.0]           # fraction of rated power per hour, 0 = no limit
@@ -262,7 +259,8 @@ class BatteryConfig(BaseModel):
     bus_id_per_node: Optional[dict[int, str]] = None
     # plus the per-node lists life_time, initial_age, degradation_rate,
     # decommissioning_cost, rated_power, inertia, maintenance_cost,
-    # invest_cost, invest_max_power
+    # invest_cost (prices life extension), invest_max_power (> 0 places the
+    # battery at the node in the master's representative days)
 ```
 
 ---

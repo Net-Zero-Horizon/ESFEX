@@ -181,7 +181,7 @@ One entry of `meta_network.systems_links`. Each list holds one value per link; a
 | `existing_capacity_mw` / `existing_capacity_MW` | list[float] | required | Existing capacity per link (MW). Fuel route: route capacity (fuel units/day) |
 | `max_investment_mw` / `max_investment_MW` | list[float] | required | Maximum new capacity per link (MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
 | `investment_cost_per_mw` / `investment_cost_per_MW` | list[float] | required | Investment cost per link ($/MW). Fuel route: not used (route investment follows `fuel_infrastructure`) |
-| `loss_factor` | list[float] | required | Transmission: not used (losses come from `resistance_pu`). Fuel route: route `losses_fraction` (fraction per 100 km) |
+| `loss_factor` | list[float] | `[]` | Fuel route: route `losses_fraction` (fraction per 100 km) per connection; a missing entry is 0. Transmission: not used, may be left out (losses come from `resistance_pu`) |
 | `distance_km` | list[float] | required | Length per link (km) |
 | `cost_per_mw_km` | list[float] | required | Transmission: operating cost of the flow, `distance_km` × `cost_per_mw_km` per MWh carried in either direction, charged by the master and the dispatch (expansion is costed with `investment_cost_per_MW`). Fuel route: route `transport_cost` ($/unit/km) |
 | `reactance_pu` | list[float] | `[]` | Series reactance per link (p.u.). Empty: derived from length × `reactance_per_km` / Z_base, Z_base = `voltage_level_kv`² / `ac_power_flow.base_mva`; 0.01 without a length |
@@ -562,7 +562,6 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `fixed_cost` | list[float] | required | Fixed O&M per node ($ per MW of power in service per year), charged whether or not the unit runs: degraded rated power while within `life_time`, prorated to each dispatch window; the master charges it per year on the same MW (life-extended MW after `life_time`) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`). Where it is 0, the technology with the same `fuel` and `type` supplies it |
-| `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader (legacy per-unit investment; use `technologies`) |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` \| `AC_DC` | `"AC"` | `AC`, `DC` or `AC_DC` |
 | `Availability` | str \| null | `null` | YAML key `Availability`: availability profile (CSV/Excel). See [Availability Profiles](../user-guide/availability-profiles.md) |
@@ -637,9 +636,7 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `throughput_degradation_cost` | list[float] \| null | `null` | Cycling cost per MWh discharged, per node ($/MWh). `null` means 0 |
 | `discharge_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present. |
 | `invest_cost` | list[float] | required by loader | Power investment cost per node ($/MW). Required by the loader; prices life extension. Where it is 0, the battery technology named by `technology` (else the first one) supplies `invest_cost_power` |
-| `invest_cost_energy` | list[float] | `[0.0]` | Energy investment cost per node ($/MWh). Missing → copy of `invest_cost` |
-| `invest_max_power` | list[float] | required by loader | Maximum power investment per node (MW). Required by the loader |
-| `invest_max_capacity` | list[float] | `[0.0]` | Maximum energy investment per node (MWh). Missing → zeros |
+| `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader. A value > 0 places the battery at the node in the master's representative days even where it has no power yet; new storage is built from `battery_technologies` |
 | `efficiency_charge` | list[float] | required | Charge efficiency per node (0–1) |
 | `efficiency_discharge` | list[float] | required | Discharge efficiency per node (0–1) |
 | `soc_initial` | list[float] | required | Initial state of charge per node (fraction) |
@@ -841,8 +838,6 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `storage_capacity` | list[float] | required | Storage capacity per node (units) |
 | `initial_storage_level` | list[float] | required | Initial storage fraction per node |
 | `min_storage_level` | float (0–1) | `0.1` | Minimum storage level (fraction) |
-| `transport_cost` | float | required | $/unit/km transport cost |
-| `transport_losses` | float | required | Loss fraction per 100 km |
 | `transport_transit_days_per_100km` | float (≥ 0) | `0` | Source->tank replenishment lead time, in days per 100 km of route distance. 0 = instantaneous transport. |
 | `disruption_start_hour` | int (≥ 0) | `0` | Supply-disruption window start, absolute horizon hour (hour 0 = 1 January of `base_year`, 8760 h per year), inclusive. |
 | `disruption_end_hour` | int (≥ 0) | `0` | Supply-disruption window end, absolute horizon hour (exclusive). end <= start disables the disruption. |
@@ -948,11 +943,9 @@ The budget covers the system's own power plants. The dispatch and the master pro
 |---|---|---|---|
 | `fuel` | str | required | Fuel consumed |
 | `unit` | str | required | Physical unit |
-| `is_flexible` | bool | `false` | Demand can shift |
-| `flexibility_ratio` | float | `0` | Shiftable fraction |
-| `criticality` | `critical` \| `high` \| `medium` \| `low` | `"medium"` | Shedding priority |
-| `delay_tolerance` | int | `0` | Maximum delay (hours) |
 | `demand` | list[int] | required | Annual demand per node (units of `unit`) |
+
+The demand is fixed: unmet demand costs `penalties.non_electric_demand_loss` per unit. Route transport costs and losses are set per route (`fuel_transport_routes`), not on the source.
 
 ---
 

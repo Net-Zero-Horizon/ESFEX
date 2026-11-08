@@ -95,8 +95,7 @@ struct GeneratorConfig
     fixed_cost::Vector{Float64}       # $/MW of power in service per year
     maintenance_cost::Vector{Float64}
     inertia::Vector{Float64}
-    invest_cost::Vector{Float64}
-    invest_max::Vector{Float64}
+    invest_cost::Vector{Float64}      # prices the master's life extension
     availability::Matrix{Float64}    # (hours x buses)
     reservable::Bool
     life_time::Vector{Float64}
@@ -212,7 +211,7 @@ Use descriptive base names that include indices:
 
 ### Handling Inactive Units
 
-Generation and battery variables are `SparseAxisArray`s that exist only for active unit-bus pairs (capacity at the bus, or investment allowed in development mode). Iterate over those pairs instead of over every bus:
+Generation and battery variables are `SparseAxisArray`s that exist only for active unit-bus pairs (capacity at the bus, or a pending retirement). Iterate over those pairs instead of over every bus:
 
 ```julia
 for g in 1:length(input.generators), b in vars.buses_of_gen[g], t in 1:hours
@@ -343,10 +342,11 @@ Check the variable's construction in `build_variables!` before indexing: some ar
 5. Curtailment penalty
 6. Static and dynamic reserve shortage penalties
 7. CO2 cost (fuel emission factor × output × `co2_cost`)
-8. Investment costs (development mode)
-9. Inertia shortfall, EV unmet-driving (`ev_loss`) and RE-target slack penalties
-10. SOC-violation and transfer-margin penalties
-11. Fixed O&M of the generators and batteries in service (`fixed_om_annual_cost`, $/MW·yr), prorated to the window with the other annual terms
+8. Inertia shortfall, EV unmet-driving (`ev_loss`) and RE-target slack penalties
+9. SOC-violation and transfer-margin penalties
+10. Fixed O&M of the generators and batteries in service (`fixed_om_annual_cost`, $/MW·yr), prorated to the window with the other annual terms
+
+The dispatch has no investment costs: it builds nothing (the master's builds reach it as existing capacity).
 
 V2G compensation is reported but is not part of the objective. Primary-energy and electrolyzer terms are added when those models are coupled in.
 
@@ -356,7 +356,7 @@ V2G compensation is reported but is not part of the objective. Primary-energy an
 
 ## Solution Extraction
 
-`extract_solution(model, vars, input)` returns a `PowerSystemResult` with dense arrays (`gen_output::Array{Float64,3}`, `bat_soc`, `load_shed`, `power_flow`, …), totals (`objective`, `total_generation`, `re_penetration`, `total_co2`) and `energy_prices`. Prices are the duals of `vars.balance_constraints[(b, t)]` divided by the step length. In UC mode the MIP has no duals; `recover_uc_duals!` re-solves the LP with commitment fixed to obtain them.
+`extract_solution(model, vars, input)` returns a `PowerSystemResult` with dense arrays (`gen_output::Array{Float64,3}`, `bat_soc`, `load_shed`, `power_flow`, …), totals (`objective`, `total_generation`, `re_penetration`, `total_co2`) and `energy_prices`. Prices are the duals of `vars.balance_constraints[(b, t)]` divided by the step length. In UC mode the MIP has no duals; `recover_uc_duals_via_copy` re-solves a copy as an LP with the commitment fixed to obtain them.
 
 ```julia
 model, vars = create_power_system(input)

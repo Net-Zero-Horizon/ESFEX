@@ -131,10 +131,6 @@ _GEN_RESERVOIR_FIELDS = [
 
 _GEN_SCALAR_FIELDS = _GEN_SCALAR_FIELDS_BASE + _GEN_RESERVOIR_FIELDS
 
-# Investment fields read from YAML per-node arrays → investment portfolio
-_GEN_INVEST_FIELDS = ["invest_cost", "invest_max_power"]
-_BAT_INVEST_FIELDS = ["invest_cost", "invest_max_power", "invest_cost_energy", "invest_max_capacity"]
-
 # Batteries share only these generator fields (no commitment, efficiency
 # curve, start-up or fuel cost)
 _BAT_SCALAR_FIELDS = [
@@ -147,8 +143,8 @@ _BAT_SCALAR_FIELDS = [
 ]
 
 # Fields that indicate a generator has presence at a node
-_GEN_PRESENCE_FIELDS = ["rated_power", "invest_max_power"]
-_BAT_PRESENCE_FIELDS = ["rated_power", "capacity", "invest_max_power", "invest_max_capacity"]
+_GEN_PRESENCE_FIELDS = ["rated_power"]
+_BAT_PRESENCE_FIELDS = ["rated_power", "capacity", "invest_max_power"]
 
 
 def _cost_curve_to_gui_data(curve) -> dict | None:
@@ -1286,10 +1282,6 @@ def _system_to_gui_state(sys: SystemConfig,
                 demand_id=did,
                 fuel=getattr(dcfg, 'fuel', ''),
                 unit=getattr(dcfg, 'unit', ''),
-                is_flexible=getattr(dcfg, 'is_flexible', False),
-                flexibility_ratio=getattr(dcfg, 'flexibility_ratio', 0.0),
-                criticality=str(getattr(dcfg, 'criticality', 'medium')),
-                delay_tolerance=getattr(dcfg, 'delay_tolerance', 0),
                 demand=list(getattr(dcfg, 'demand', [])),
             )
 
@@ -1484,10 +1476,28 @@ def _system_to_gui_state(sys: SystemConfig,
     investment_portfolio: dict[str, GuiInvestmentEntry] = {}
     inv_counter = 0
 
-    # Generators
+    # Generators: invest_cost only (it prices the master's life extension;
+    # new capacity is built from technologies)
     for key, gen in sys.generators.items():
         ic = getattr(gen, 'invest_cost', [])
-        im = getattr(gen, 'invest_max_power', [])
+        if any(i < len(ic) and ic[i] > 0 for i in range(n)):
+            entry_id = f"inv_{inv_counter}"
+            inv_counter += 1
+            nd_list = [
+                GuiInvestmentNodeData(node_index=i, invest_cost=ic[i])
+                for i in range(min(n, len(ic))) if ic[i] > 0
+            ]
+            investment_portfolio[entry_id] = GuiInvestmentEntry(
+                entry_id=entry_id, name=gen.name,
+                technology_type="generator", target_key=key,
+                node_data=nd_list,
+            )
+
+    # Batteries: invest_cost (life extension) and invest_max_power (places
+    # the battery at the node in the master)
+    for key, bat in sys.batteries.items():
+        ic = getattr(bat, 'invest_cost', [])
+        im = getattr(bat, 'invest_max_power', [])
         has_invest = any(
             (i < len(ic) and ic[i] > 0) or (i < len(im) and im[i] > 0)
             for i in range(n)
@@ -1504,47 +1514,9 @@ def _system_to_gui_state(sys: SystemConfig,
                         node_index=i, invest_cost=cost_val, invest_max=max_val,
                     ))
             investment_portfolio[entry_id] = GuiInvestmentEntry(
-                entry_id=entry_id, name=gen.name,
-                technology_type="generator", target_key=key,
-                node_data=nd_list,
-            )
-
-    # Batteries
-    for key, bat in sys.batteries.items():
-        ic = getattr(bat, 'invest_cost', [])
-        im = getattr(bat, 'invest_max_power', [])
-        ice = getattr(bat, 'invest_cost_energy', [])
-        imc = getattr(bat, 'invest_max_capacity', [])
-        has_invest = any(
-            (i < len(ic) and ic[i] > 0) or (i < len(im) and im[i] > 0)
-            or (i < len(ice) and ice[i] > 0) or (i < len(imc) and imc[i] > 0)
-            for i in range(n)
-        )
-        if has_invest:
-            entry_id = f"inv_{inv_counter}"
-            inv_counter += 1
-            nd_list = []
-            cost_energy: dict[int, float] = {}
-            max_capacity: dict[int, float] = {}
-            for i in range(n):
-                cost_val = ic[i] if i < len(ic) else 0.0
-                max_val = im[i] if i < len(im) else 0.0
-                ce = ice[i] if i < len(ice) else 0.0
-                mc = imc[i] if i < len(imc) else 0.0
-                if cost_val > 0 or max_val > 0 or ce > 0 or mc > 0:
-                    nd_list.append(GuiInvestmentNodeData(
-                        node_index=i, invest_cost=cost_val, invest_max=max_val,
-                    ))
-                    if ce > 0:
-                        cost_energy[i] = ce
-                    if mc > 0:
-                        max_capacity[i] = mc
-            investment_portfolio[entry_id] = GuiInvestmentEntry(
                 entry_id=entry_id, name=bat.name,
                 technology_type="battery", target_key=key,
                 node_data=nd_list,
-                invest_cost_energy=cost_energy,
-                invest_max_capacity=max_capacity,
             )
 
     # Electrolyzers
@@ -2985,24 +2957,22 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             for node_idx, inst in node_instances.items():
                 arr[node_idx] = getattr(inst, field_name)
             gen_dict[field_name] = arr
-        # Add invest fields from portfolio
+        # Add invest cost from portfolio
         inv_cost_arr = [0.0] * n
-        inv_max_arr = [0.0] * n
         for entry in state.investment_portfolio.values():
             if entry.technology_type == "generator" and entry.target_key == unit_key:
                 for nd in entry.node_data:
                     if 0 <= nd.node_index < n:
                         inv_cost_arr[nd.node_index] = nd.invest_cost
-                        inv_max_arr[nd.node_index] = nd.invest_max
         gen_dict["invest_cost"] = inv_cost_arr
-        gen_dict["invest_max_power"] = inv_max_arr
         # Export fuel cost curve if any instance uses non-flat
         _has_curve = any(
             getattr(inst, 'fuel_cost_curve_type', 'flat') != 'flat'
             for inst in node_instances.values()
         )
         if _has_curve:
-            _curve_arr = [None] * n
+            # Nodes without an instance get a flat curve (None does not load)
+            _curve_arr = [{"curve_type": "flat"} for _ in range(n)]
             for _ni, _inst in node_instances.items():
                 _ct = getattr(_inst, 'fuel_cost_curve_type', 'flat')
                 _cd = getattr(_inst, 'fuel_cost_curve_data', None)
@@ -3050,31 +3020,21 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         # Add invest fields from portfolio
         inv_cost_arr = [0.0] * n
         inv_max_arr = [0.0] * n
-        inv_cost_energy_arr = [0.0] * n
-        inv_max_cap_arr = [0.0] * n
         for entry in state.investment_portfolio.values():
             if entry.technology_type == "battery" and entry.target_key == unit_key:
                 for nd in entry.node_data:
                     if 0 <= nd.node_index < n:
                         inv_cost_arr[nd.node_index] = nd.invest_cost
                         inv_max_arr[nd.node_index] = nd.invest_max
-                for ni, val in entry.invest_cost_energy.items():
-                    if 0 <= ni < n:
-                        inv_cost_energy_arr[ni] = val
-                for ni, val in entry.invest_max_capacity.items():
-                    if 0 <= ni < n:
-                        inv_max_cap_arr[ni] = val
         bat_dict["invest_cost"] = inv_cost_arr
         bat_dict["invest_max_power"] = inv_max_arr
-        bat_dict["invest_cost_energy"] = inv_cost_energy_arr
-        bat_dict["invest_max_capacity"] = inv_max_cap_arr
         # Export discharge cost curve if any instance uses non-flat
         _has_dc_curve = any(
             getattr(inst, 'discharge_cost_curve_type', 'flat') != 'flat'
             for inst in node_instances.values()
         )
         if _has_dc_curve:
-            _dc_arr = [None] * n
+            _dc_arr = [{"curve_type": "flat"} for _ in range(n)]
             for _ni, _inst in node_instances.items():
                 _ct = getattr(_inst, 'discharge_cost_curve_type', 'flat')
                 _cd = getattr(_inst, 'discharge_cost_curve_data', None)
@@ -3758,10 +3718,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             did: {
                 "fuel": ned.fuel,
                 "unit": ned.unit,
-                "is_flexible": ned.is_flexible,
-                "flexibility_ratio": ned.flexibility_ratio,
-                "criticality": ned.criticality,
-                "delay_tolerance": ned.delay_tolerance,
                 "demand": ned.demand,
             }
             for did, ned in state.non_electric_demand.items()

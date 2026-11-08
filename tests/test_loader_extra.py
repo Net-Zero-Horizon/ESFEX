@@ -268,12 +268,6 @@ class TestConvertBatteryExtra:
         assert bat.bus_id_per_node == {0: "bus_b"}
         assert bat.bus_index == 7
 
-    def test_invest_cost_energy_explicit(self):
-        data = _battery()
-        data["invest_cost_energy"] = [123, 123]
-        bat = _convert_battery("bat_0", data)
-        assert bat.invest_cost_energy == [123, 123]
-
     def test_default_current_type_dc(self):
         bat = _convert_battery("bat_0", _battery())
         assert bat.current_type == "DC"
