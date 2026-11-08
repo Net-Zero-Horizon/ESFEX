@@ -2437,6 +2437,8 @@
     "no_domain_bounds_available": "Não há limites de domínio disponíveis.",
     "no_buildings_loaded": "Nenhum edifício carregado.",
     "run_the_demand_forecast_auto_xgboost": "Execute primeiro a previsão de procura (motor Auto/XGBoost) — não há células de procura espacial disponíveis.",
+    "forecast_without_density_model": "A previsão usou o método {source} porque não foi possível carregar o modelo de densidade de procura de {path}: sem o padrão horário do modelo nem células de procura espacial. O modelo vem com o ESFEX; reinstale-o (pip install --force-reinstall esfex).",
+    "forecast_data_download_failed": "Não foi possível transferir alguns dados de população ou PIB ({files}); as células sem eles ficam sem procura. Verifique a ligação à internet e execute a previsão novamente.",
     "no_nodes_in_the_active_system": "Nenhum nó no sistema ativo.",
     "distribution_method": "Método",
     "method_spatial_demand": "Procura espacial",

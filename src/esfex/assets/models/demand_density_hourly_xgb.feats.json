@@ -1,0 +1,103 @@
+{
+  "features": [
+    "log_pop_density",
+    "log_gdp_density",
+    "log_gdp_per_cap",
+    "temperature",
+    "hdd",
+    "cdd",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos",
+    "is_weekend",
+    "is_holiday",
+    "days_to_next_holiday",
+    "days_from_prev_holiday",
+    "latitude",
+    "longitude"
+  ],
+  "target": "log10(demand_mw/area_km2)",
+  "r2_log_density": 0.969910366791868,
+  "r2_mw": 0.9787290070474005,
+  "r2_national_hourly": 0.978619941389395,
+  "n_rows": 8260063,
+  "n_series": 943,
+  "n_countries": 84,
+  "train_ranges": {
+    "log_pop_density": [
+      0.3208867807012499,
+      3.848660059797854
+    ],
+    "log_gdp_density": [
+      4.57985830391665,
+      8.772588531644518
+    ],
+    "log_gdp_per_cap": [
+      3.323727611269392,
+      4.923928471846664
+    ],
+    "temperature": [
+      -38.0,
+      45.8
+    ],
+    "hdd": [
+      0.0,
+      56.0
+    ],
+    "cdd": [
+      0.0,
+      21.799999999999997
+    ],
+    "hour_sin": [
+      -1.0,
+      1.0
+    ],
+    "hour_cos": [
+      -1.0,
+      1.0
+    ],
+    "dow_sin": [
+      -0.9749279121818236,
+      0.9749279121818236
+    ],
+    "dow_cos": [
+      -0.9009688679024191,
+      1.0
+    ],
+    "month_sin": [
+      -1.0,
+      1.0
+    ],
+    "month_cos": [
+      -1.0,
+      1.0
+    ],
+    "is_weekend": [
+      0.0,
+      1.0
+    ],
+    "is_holiday": [
+      0.0,
+      1.0
+    ],
+    "days_to_next_holiday": [
+      0.0,
+      7.0
+    ],
+    "days_from_prev_holiday": [
+      0.0,
+      7.0
+    ],
+    "latitude": [
+      -41.765291289620066,
+      64.37860475102221
+    ],
+    "longitude": [
+      -100.141218020528,
+      174.24595183550747
+    ]
+  }
+}

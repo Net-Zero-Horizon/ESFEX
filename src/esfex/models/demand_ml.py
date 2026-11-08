@@ -18,11 +18,12 @@ from typing import Optional
 
 import numpy as np
 
-from esfex.paths import MODELS_DIR as _CACHE_DIR
+from esfex.paths import model_path
 
 logger = logging.getLogger(__name__)
 
 _XGB_FILENAME = "demand_model.xgb"
+_XGB_BUNDLED = "demand_model.ubj"          # the shipped copy (same booster)
 
 # TFT is intentionally disabled for ESFEX demand estimation: the use case is
 # FORWARD per-node hourly generation over a multi-year horizon with no observed
@@ -185,7 +186,7 @@ class DemandMLModel:
             except ImportError:
                 pass
         if engine in ("auto", "xgboost"):
-            if (_CACHE_DIR / _XGB_FILENAME).exists():
+            if model_path(_XGB_FILENAME, _XGB_BUNDLED).exists():
                 return True
         return False
 
@@ -210,10 +211,10 @@ class DemandMLModel:
                 logger.debug("TFT not available: %s", exc)
 
         if engine in ("auto", "xgboost"):
-            model_path = _CACHE_DIR / _XGB_FILENAME
-            if not model_path.exists():
+            mpath = model_path(_XGB_FILENAME, _XGB_BUNDLED)
+            if not mpath.exists():
                 raise FileNotFoundError(
-                    f"No trained model at {model_path}. "
+                    f"No trained model at {mpath}. "
                     "Run 'esfex train-demand-model' to train one."
                 )
             try:
@@ -225,8 +226,8 @@ class DemandMLModel:
                 )
             instance = cls(engine="xgboost")
             instance._model = xgb.Booster()
-            instance._model.load_model(str(model_path))
-            logger.info("Loaded XGBoost demand model from %s", model_path)
+            instance._model.load_model(str(mpath))
+            logger.info("Loaded XGBoost demand model from %s", mpath)
             return instance
 
         raise FileNotFoundError(f"No model available for engine '{engine}'.")

@@ -424,8 +424,9 @@ class TestSSPGdpTrajectory:
 
 
 @pytest.mark.skipif(
-    not DemandDensityModel.is_available(),
-    reason="demand_density_hourly_xgb.json not present in MODELS_DIR",
+    not (DemandDensityModel.is_available() and _pop_raster_available()
+         and _gdp_ssp_available()),
+    reason="needs the population and SSP GDP rasters on disk (the model ships)",
 )
 class TestDensityModelEndToEnd:
     def test_model_predicts_positive_density(self):
@@ -512,3 +513,35 @@ class TestDensityModelEndToEnd:
         # Hourly profiles differ between nodes.
         d = res.demand
         assert np.any(np.abs(d[:, 0] - d[:, 1]) > 1e-6)
+
+
+def test_missing_density_model_is_reported(monkeypatch):
+    # Without its density model the forecast used to degrade silently to a
+    # trend with no spatial cells; it now says why, and the Grid Builder
+    # shows it in the forecast and in step 3.
+    from esfex.visualization.workflows.demand_estimation_analysis import (
+        DemandEstimationConfig, DemandProfileBuilder, MacroData, MeteoData, ProxyData,
+    )
+    monkeypatch.setattr(DemandDensityModel, "is_available", staticmethod(lambda: False))
+    cfg = DemandEstimationConfig(base_year=2025, simulation_years=1, num_nodes=2,
+                                 national_demand_gwh=20000.0, ml_engine="auto")
+    proxy = ProxyData(node_lats=[21.0, 22.5], node_lons=[-82.0, -80.0],
+                      node_names=["A", "B"], bounds=(19.8, -85.0, 23.3, -74.0))
+    macro = MacroData(country_iso="CU", gdp_per_capita=9500.0, population=11_000_000.0)
+    meteo = MeteoData(temperature_hourly=list(np.full(8760, 27.0)))
+    res = DemandProfileBuilder(cfg).build(proxy, macro, meteo)
+    assert res.demand_source != "ml_density"
+    assert not res.cell_annual_mwh
+    assert any(w.startswith("Density model not found") for w in res.warnings)
+
+    pytest.importorskip("PySide6.QtWidgets")
+    from esfex.paths import BUNDLED_MODELS_DIR
+    from esfex.visualization.i18n import get_language, init_i18n
+    from esfex.visualization.workflows.grid_mapping_steps import GridMappingDemandStep
+    lang = get_language()
+    init_i18n("en")
+    try:
+        text = GridMappingDemandStep._density_model_missing_text(res)
+    finally:
+        init_i18n(lang)
+    assert "reinstall" in text and str(BUNDLED_MODELS_DIR) in text

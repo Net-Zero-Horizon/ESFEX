@@ -244,7 +244,9 @@ ESFEX/
 │   ├── cli.py                   # CLI (Typer)
 │   ├── runner.py                # Simulation orchestrator, HDF5 output
 │   ├── zones.py                 # Development zones
-│   ├── paths.py                 # Dataset paths (ESFEX_DATA_ROOT)
+│   ├── paths.py                 # Dataset paths (ESFEX_DATA_ROOT), shipped models
+│   ├── data_assets.py           # Rasters downloaded on first use (data release)
+│   ├── assets/                  # Shipped demand models, data-release manifest
 │   ├── logging_config.py
 │   ├── config/                  # schema.py (Pydantic), loader.py (YAML), solver.py
 │   ├── bridge/                  # adapters.py (Python→Julia), converters.py,
@@ -411,7 +413,8 @@ ESFEX's own variables:
 | `ESFEX_DUMP_IIS` | `1` = write the IIS of the first infeasible model (Gurobi only) | unset |
 | `ESFEX_IIS_DIR` | Directory for the IIS / infeasible LP file | `/tmp` |
 | `ESFEX_OPS_ONLY_YEARS` | Debug: run operational dispatch only for these years (comma- or space-separated); same as `Orchestrator.run(dispatch_years=...)`, which takes precedence | unset |
-| `ESFEX_DATA_ROOT` | Dataset root (`esfex.paths`): demand-model training data and the caches the Studio writes (Geofabrik extracts, OSM tiles, CMIP6 subsets); `~` is expanded | `~/.esfex/data` |
+| `ESFEX_DATA_ROOT` | Dataset root (`esfex.paths`): demand-model training data and the caches the Studio writes (Geofabrik extracts, OSM tiles, CMIP6 subsets, the forecast's population and GDP rasters); `~` is expanded. A model in its `data/models` folder replaces the one shipped in `esfex/assets/models` | `~/.esfex/data` |
+| `ESFEX_ASSETS_URL` | Base URL of the demand-forecast rasters (`esfex.data_assets`); the test suite points it at a missing local folder so tests never download | ESFEX `data-v1` release |
 | `ESFEX_XGB_DEVICE` | XGBoost device for demand models: `auto`, `cpu`, `cuda` | `auto` |
 | `ESFEX_CMIP6_MODEL` | CMIP6 model used for climate projections | `MPI-ESM1-2-HR` |
 | `ESFEX_OSM_BACKEND` | Grid Builder OSM source: `auto`, `geofabrik`, `overpass` | `auto` |

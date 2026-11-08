@@ -2437,6 +2437,8 @@
     "no_domain_bounds_available": "ドメイン境界が利用できません。",
     "no_buildings_loaded": "建物が読み込まれていません。",
     "run_the_demand_forecast_auto_xgboost": "先に需要予測（Auto/XGBoost エンジン）を実行してください — 空間需要セルが利用できません。",
+    "forecast_without_density_model": "需要密度モデルを {path} から読み込めなかったため、予測は {source} 手法を使用しました。モデルによる時間別パターンと空間需要セルはありません。モデルは ESFEX に同梱されています。再インストールしてください (pip install --force-reinstall esfex)。",
+    "forecast_data_download_failed": "一部の人口または GDP データをダウンロードできませんでした ({files})。データのないセルには需要が割り当てられません。インターネット接続を確認し、予測を再実行してください。",
     "no_nodes_in_the_active_system": "アクティブなシステムにノードがありません。",
     "distribution_method": "方法",
     "method_spatial_demand": "空間需要",

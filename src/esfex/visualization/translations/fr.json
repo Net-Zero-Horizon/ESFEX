@@ -2437,6 +2437,8 @@
     "no_domain_bounds_available": "Aucune limite de domaine disponible.",
     "no_buildings_loaded": "Aucun bâtiment chargé.",
     "run_the_demand_forecast_auto_xgboost": "Exécutez d'abord la prévision de la demande (moteur Auto/XGBoost) — aucune cellule de demande spatiale disponible.",
+    "forecast_without_density_model": "La prévision a utilisé la méthode {source} car le modèle de densité de demande n'a pas pu être chargé depuis {path} : ni profil horaire du modèle, ni cellules de demande spatiale. Le modèle est fourni avec ESFEX ; réinstallez-le (pip install --force-reinstall esfex).",
+    "forecast_data_download_failed": "Certaines données de population ou de PIB n'ont pas pu être téléchargées ({files}) ; les cellules qui en manquent n'ont pas de demande. Vérifiez la connexion internet et relancez la prévision.",
     "no_nodes_in_the_active_system": "Aucun nœud dans le système actif.",
     "distribution_method": "Méthode",
     "method_spatial_demand": "Demande spatiale",

@@ -66,9 +66,10 @@ def _sample_point(ds, lat: float, lon: float) -> Optional[float]:
 
 
 def sample_gdp_total(lat: float, lon: float, year: int) -> Optional[float]:
+    from esfex.data_assets import ensure
     for yr_try in [year, year - 1, year + 1, year - 2, year + 2]:
         path = GDP_DIR / f"GDP{yr_try}.tif"
-        if path.exists():
+        if ensure(path):
             ds = _open_raster(str(path))
             val = _sample_point(ds, lat, lon)
             if val is not None and val > 0:
@@ -82,13 +83,27 @@ def sample_pop_density(lat: float, lon: float, year: int) -> Optional[float]:
             continue
         for epoch in [2000, 2005, 2010, 2015, 2020]:
             if abs(epoch - yr_try) <= 2:
-                path = POP_DENSITY_HIST_DIR / f"gpw_v4_population_density_rev11_{epoch}_30_sec_{epoch}.tif"
-                if path.exists():
+                path = _gpw_path(epoch, lat, lon)
+                if path is not None:
                     ds = _open_raster(str(path))
                     val = _sample_point(ds, lat, lon)
                     if val is not None and val > 0:
                         return val
     return None
+
+
+def _gpw_path(epoch: int, lat: float, lon: float):
+    """GPW v4 density raster holding (lat, lon) for ``epoch``: the global
+    file of a local dataset when there is one, else its 30° tile, downloaded
+    on first use (see esfex.data_assets). None when neither is available
+    (no tile is published for open ocean)."""
+    from esfex.data_assets import ensure, gpw_tile_name
+    full = POP_DENSITY_HIST_DIR / f"gpw_v4_population_density_rev11_{epoch}_30_sec_{epoch}.tif"
+    if full.exists():
+        return full
+    name = gpw_tile_name(epoch, lat, lon)
+    tile = POP_DENSITY_HIST_DIR / "tiles" / name
+    return tile if ensure(tile) else None
 
 
 def sample_ghsl_smod(lat: float, lon: float, year: int) -> Optional[float]:

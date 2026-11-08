@@ -125,6 +125,7 @@ esfex = [
     "visualization/translations/**/*.json",
     "icons/**/*",
     "plugins/**/*.json",
+    "assets/**/*",
 ]
 
 [tool.pytest.ini_options]
