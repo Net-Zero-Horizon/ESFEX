@@ -92,7 +92,7 @@ struct GeneratorConfig
     min_down_time::Vector{Float64}
     start_up_cost::Vector{Float64}
     fuel_cost::Vector{Float64}
-    fixed_cost::Vector{Float64}
+    fixed_cost::Vector{Float64}       # $/MW of power in service per year
     maintenance_cost::Vector{Float64}
     inertia::Vector{Float64}
     invest_cost::Vector{Float64}
@@ -336,7 +336,7 @@ Check the variable's construction in `build_variables!` before indexing: some ar
 
 `build_objective!` in `power_system.jl` minimizes total cost. Energy terms are scaled by `resolution_hours`. Components, in code order:
 
-1. Fuel costs (flat or piecewise-linear cost curve), fixed O&M and maintenance
+1. Fuel costs (flat or piecewise-linear cost curve) and maintenance, per MWh
 2. Battery maintenance and throughput degradation costs
 3. Start-up costs (UC mode)
 4. Load-shedding penalty (VOLL, with sectoral multipliers when sectoral demand is used)
@@ -346,6 +346,7 @@ Check the variable's construction in `build_variables!` before indexing: some ar
 8. Investment costs (development mode)
 9. Inertia shortfall, EV unmet-driving (`ev_loss`) and RE-target slack penalties
 10. SOC-violation and transfer-margin penalties
+11. Fixed O&M of the generators and batteries in service (`fixed_om_annual_cost`, $/MW·yr), prorated to the window with the other annual terms
 
 V2G compensation is reported but is not part of the objective. Primary-energy and electrolyzer terms are added when those models are coupled in.
 

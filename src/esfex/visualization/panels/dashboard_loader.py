@@ -21,6 +21,8 @@ from typing import Any, Optional
 import h5py
 import numpy as np
 
+from esfex.utils.temporal import HOURS_STD_YEAR
+
 from esfex.visualization.panels.results_charts import (
     _open_scenario,
     _open_summary_results,
@@ -1177,12 +1179,16 @@ class DashboardLoader:
             else:
                 energy_by_node = np.nansum(sliced, axis=1) * tres
                 lo = rng[0] if rng is not None else 0
+            # Share of the year these steps cover (fixed O&M is $/MW·yr)
+            year_share = sliced.shape[-1] * tres / HOURS_STD_YEAR
             for k, e in enumerate(energy_by_node):
+                n = lo + k
+                # Fixed O&M on the rated power, whether or not it ran
+                fix_c += (self._attr_at_node(cfg, "fixed_cost", n)
+                          * self._attr_at_node(cfg, "rated_power", n) * year_share)
                 if e == 0:
                     continue
-                n = lo + k
                 fuel_c  += float(e) * self._attr_at_node(cfg, "fuel_cost", n)
-                fix_c   += float(e) * self._attr_at_node(cfg, "fixed_cost", n)
                 maint_c += float(e) * self._attr_at_node(cfg, "maintenance_cost", n)
 
         # Startup: ESFEX writes gen_status (binary on/off) but the
@@ -1220,6 +1226,15 @@ class DashboardLoader:
             c_arr = gen_charge.get(bname, np.zeros(0))
             d_arr = gen_discharge.get(bname, np.zeros(0))
             cfg = bat_cfgs[bi] if bi < len(bat_cfgs) else {}
+            # Fixed O&M ($/MW·yr) on the rated discharge power
+            d_sl = _slice_nodes(d_arr) if d_arr.size else d_arr
+            if d_sl.ndim == 2:
+                lo = rng[0] if rng is not None else 0
+                share = d_sl.shape[-1] * tres / HOURS_STD_YEAR
+                for k in range(d_sl.shape[0]):
+                    fix_c += (self._attr_at_node(cfg, "fixed_cost", lo + k)
+                              * self._attr_at_node(cfg, "MaxDischargePower", lo + k)
+                              * share)
             for arr in (c_arr, d_arr):
                 if arr.size == 0:
                     continue

@@ -734,7 +734,8 @@ end
 Build the objective function: minimize total system cost.
 
 Cost components:
-1. Operational costs: fuel, fixed O&M, maintenance
+1. Operational costs: fuel and maintenance per MWh; fixed O&M per MW·year
+   of the capacity in service, prorated to the window
 2. Startup costs (unit commitment mode)
 3. Penalty costs: load shedding, curtailment, reserve shortage
 4. CO2 costs
@@ -777,15 +778,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
                         input.generators[g].fuel_cost[b], vars.gen_output[g, b, t])
                 end
             end
-        end
-    end
-
-    # Fixed O&M costs ($/MWh × MWh) — sparse iteration
-    fixed_cost = AffExpr(0.0)
-    for g in 1:n_gen
-        for b in vars.buses_of_gen[g], t in 1:hours
-            add_to_expression!(fixed_cost,
-                input.generators[g].fixed_cost[b], vars.gen_output[g, b, t])
         end
     end
 
@@ -1287,18 +1279,10 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         end
     end
 
-    # Battery fixed O&M ($/MW/year × discharge power): an annual cost,
-    # prorated to the window below like the other non-energy costs
-    battery_fixed_cost = AffExpr(0.0)
-    for bi in 1:n_bat
-        bat = input.batteries[bi]
-        for b in vars.buses_of_bat[bi]
-            fc = bat.fixed_cost[b]
-            # Rated (not degraded) power; nothing once past its life_time
-            (fc > 0 && battery_power_limits(bat, b, input)[3] > 0) || continue
-            add_to_expression!(battery_fixed_cost, fc * bat.max_discharge_power[b])
-        end
-    end
+    # Fixed O&M of generators and batteries ($/MW/year × power in service):
+    # an annual cost, prorated to the window below like the other
+    # non-energy costs
+    fixed_om_cost = fixed_om_annual_cost(vars, input)
 
     # ==========================================================================
     # Total Objective
@@ -1307,7 +1291,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Non-energy costs (investment $/MW, startup events, retirement) are NOT scaled.
     # ==========================================================================
     energy_costs = (
-        fuel_cost + fixed_cost + maintenance_cost +
+        fuel_cost + maintenance_cost +
         battery_maintenance_cost + battery_throughput_degradation_cost +
         load_shed_cost + curtailment_cost +
         reserve_static_cost + reserve_dynamic_cost +
@@ -1334,7 +1318,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     non_energy_costs = (
         investment_cost +
         delay_retirement_cost + npv_penalty_cost +
-        reservoir_invest_cost + battery_fixed_cost
+        reservoir_invest_cost + fixed_om_cost
     )
     # Start-ups are events inside the window: charged in full, neither per
     # MWh nor prorated (they were prorated × window/year like the annual costs)
@@ -1348,10 +1332,8 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Energy-based costs will be scaled by temporal_resolution_hours at extraction time.
     model.ext[:cost_expressions] = Dict{Symbol, Any}(
         :fuel_cost => fuel_cost,
-        # Battery fixed O&M joins the generators' fixed O&M; it is prorated,
-        # not per step, so ÷ tres undoes the × tres applied at extraction
-        :fixed_om_cost => fixed_cost +
-            (non_energy_window_fraction / temporal_resolution_hours) * battery_fixed_cost,
+        # Window share of the annual fixed O&M (not per step: not × tres)
+        :fixed_om_cost => non_energy_window_fraction * fixed_om_cost,
         :maintenance_cost => maintenance_cost,
         :startup_cost => startup_cost,
         :battery_maintenance_cost => battery_maintenance_cost,
@@ -1587,20 +1569,8 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
             if capacity_override !== nothing && haskey(capacity_override, (g, b))
                 total_capacity = capacity_override[(g, b)]
             else
-                # Age-based degradation: age advances with simulation year
-                # age = initial_age + (current_year - base_year)
-                if length(gen.degradation_rate) >= b && gen.degradation_rate[b] > 0 && rated > 0
-                    deg = gen.degradation_rate[b]
-                    base_age = length(gen.initial_age) >= b ? gen.initial_age[b] : 0.0
-                    age = base_age + max(0.0, Float64(input.year - input.base_year))
-                    life = length(gen.life_time) >= b ? gen.life_time[b] : Inf
-                    remaining = life - age
-                    if remaining <= 0
-                        rated = 0.0
-                    else
-                        rated = rated * (1 - deg)^age
-                    end
-                end
+                # Age-based degradation and end of life
+                rated = generator_power_in_service(gen, b, input)
 
                 # Delayed retirement capacity restoration (A5)
                 # If this generator has pending retirement and delay_var=1, restore original capacity
@@ -1758,6 +1728,58 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
         end
     end
 
+end
+
+"""
+    generator_power_in_service(gen, b, input) -> Float64
+
+Power (MW) of existing generator `gen` at bus `b` in the dispatch's year:
+with a degradation rate it shrinks by `(1 − degradation_rate)^age` and is
+zero once the unit is past its `life_time` (age = `initial_age` + years
+since the base year). After a master run the dispatch receives the master's
+capacity as `rated_power` with no degradation, so it is used as is.
+"""
+function generator_power_in_service(gen, b::Int, input)
+    rated = gen.rated_power[b]
+    if length(gen.degradation_rate) >= b && gen.degradation_rate[b] > 0 && rated > 0
+        deg = gen.degradation_rate[b]
+        base_age = length(gen.initial_age) >= b ? gen.initial_age[b] : 0.0
+        age = base_age + max(0.0, Float64(input.year - input.base_year))
+        life = length(gen.life_time) >= b ? gen.life_time[b] : Inf
+        life - age <= 0 && return 0.0
+        return rated * (1 - deg)^age
+    end
+    return rated
+end
+
+"""
+    fixed_om_annual_cost(vars, input) -> AffExpr
+
+Fixed O&M (\$/year) of the capacity in service in the dispatch's year:
+`fixed_cost` (\$/MW·year) × the generators' power in service
+([`generator_power_in_service`](@ref), plus the capacity a delayed retirement
+keeps) and × the batteries' rated discharge power while within their
+lifetime. Charged whether or not the units run; the objective prorates it
+to the window.
+"""
+function fixed_om_annual_cost(vars, input)
+    cost = AffExpr(0.0)
+    for (g, gen) in enumerate(input.generators), b in vars.buses_of_gen[g]
+        fc = gen.fixed_cost[b]
+        fc > 0 || continue
+        add_to_expression!(cost, fc * generator_power_in_service(gen, b, input))
+        if vars.gen_delay_retirement !== nothing && haskey(vars.gen_delay_retirement, (g, b))
+            cap = get(vars.gen_delay_retirement_capacity, (g, b), 0.0)
+            add_to_expression!(cost, fc * cap, vars.gen_delay_retirement[(g, b)])
+        end
+    end
+    for (bi, bat) in enumerate(input.batteries), b in vars.buses_of_bat[bi]
+        fc = bat.fixed_cost[b]
+        # Rated (not degraded) power; nothing once past its life_time
+        (fc > 0 && battery_power_limits(bat, b, input)[3] > 0) || continue
+        add_to_expression!(cost, fc * bat.max_discharge_power[b])
+    end
+    return cost
 end
 
 """
@@ -3529,16 +3551,18 @@ function add_max_annual_system_cost!(model, vars::PowerSystemVariables, input::P
     window_fraction = annual_hours > 0 ? window_hours / annual_hours : 1.0
     scaled_cost_limit = input.max_annual_system_cost * window_fraction
 
-    # Compute operating cost terms (fuel + fixed + maintenance) — sparse iteration
-    # Costs are per-MWh × MW (power), scale by tres to get energy-based cost
+    # Operating cost: fuel + maintenance per MWh — sparse iteration; costs
+    # are per-MWh × MW (power), scale by tres to get energy-based cost —
+    # plus the window's share of the annual fixed O&M
     operating_cost = AffExpr(0.0)
     for g in 1:n_gen
         gen = input.generators[g]
         for b in vars.buses_of_gen[g], t in 1:hours
-            total_var_cost = gen.fuel_cost[b] + gen.fixed_cost[b] + gen.maintenance_cost[b]
+            total_var_cost = gen.fuel_cost[b] + gen.maintenance_cost[b]
             add_to_expression!(operating_cost, total_var_cost * tres, vars.gen_output[g, b, t])
         end
     end
+    add_to_expression!(operating_cost, fixed_om_annual_cost(vars, input), window_fraction)
 
     # Add slack variable to guarantee feasibility; penalize violation in objective
     cost_violation = @variable(model, base_name = "cost_violation", lower_bound = 0.0)
@@ -3550,7 +3574,7 @@ function add_max_annual_system_cost!(model, vars::PowerSystemVariables, input::P
     for g in 1:n_gen
         gen = input.generators[g]
         for b in vars.buses_of_gen[g]
-            total_var_cost = gen.fuel_cost[b] + gen.fixed_cost[b] + gen.maintenance_cost[b]
+            total_var_cost = gen.fuel_cost[b] + gen.maintenance_cost[b]
             max_var_cost = max(max_var_cost, total_var_cost)
         end
     end
@@ -4406,7 +4430,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         end
         cost_bd = CostBreakdown(
             _v(:fuel_cost),
-            _v(:fixed_om_cost),
+            _v(:fixed_om_cost, false),
             _v(:maintenance_cost),
             _v(:startup_cost, false),
             _v(:battery_maintenance_cost),
@@ -4493,7 +4517,7 @@ end
 
 """
     calculate_unit_npv(
-        rated_capacity, fuel_cost_mwh, fixed_cost_mwh, maintenance_cost_mwh,
+        rated_capacity, fuel_cost_mwh, fixed_cost_mw_yr, maintenance_cost_mwh,
         remaining_life, degradation_rate, decommissioning_cost,
         discount_rate, actual_cf, system_lcoe
     ) -> Float64
@@ -4504,7 +4528,7 @@ Matches Python legacy `_calculate_unit_npv` (power_system.py lines 622-806).
 # Arguments
 - `rated_capacity`: Unit capacity (MW)
 - `fuel_cost_mwh`: Fuel cost per MWh
-- `fixed_cost_mwh`: Fixed cost per MWh
+- `fixed_cost_mw_yr`: Fixed O&M per MW of capacity per year
 - `maintenance_cost_mwh`: Maintenance cost per MWh
 - `remaining_life`: Years remaining
 - `degradation_rate`: Annual degradation rate
@@ -4515,7 +4539,7 @@ Matches Python legacy `_calculate_unit_npv` (power_system.py lines 622-806).
 """
 function calculate_unit_npv(
     rated_capacity::Float64, fuel_cost_mwh::Float64,
-    fixed_cost_mwh::Float64, maintenance_cost_mwh::Float64,
+    fixed_cost_mw_yr::Float64, maintenance_cost_mwh::Float64,
     remaining_life::Float64, degradation_rate::Float64,
     decommissioning_cost::Float64, discount_rate::Float64,
     actual_cf::Float64, system_lcoe::Float64
@@ -4529,7 +4553,8 @@ function calculate_unit_npv(
 
     # Annual generation and costs
     annual_generation = rated_capacity * actual_cf * Float64(HOURS_STD_YEAR)  # MWh/year
-    annual_capacity_costs = (maintenance_cost_mwh + fixed_cost_mwh) * annual_generation
+    annual_capacity_costs = maintenance_cost_mwh * annual_generation +
+                            fixed_cost_mw_yr * rated_capacity
     annual_fuel_costs = annual_generation * fuel_cost_mwh
     total_annual_costs = annual_capacity_costs + annual_fuel_costs
 
@@ -4630,9 +4655,8 @@ function update_npv_from_results!(
             # Ensure minimum reasonable price
             if system_lcoe < 50.0
                 fuel_cost = length(gen.fuel_cost) >= b ? gen.fuel_cost[b] : 0.0
-                fixed_cost = length(gen.fixed_cost) >= b ? gen.fixed_cost[b] : 0.0
                 maint_cost = length(gen.maintenance_cost) >= b ? gen.maintenance_cost[b] : 0.0
-                system_lcoe = max(50.0, (fuel_cost + fixed_cost + maint_cost) * 1.2)
+                system_lcoe = max(50.0, (fuel_cost + maint_cost) * 1.2)
             end
 
             decom_cost = get(input.decommissioning_cost_gen, (g, b), 0.0)
@@ -4691,8 +4715,10 @@ function update_npv_from_results!(
             decom_cost = get(input.decommissioning_cost_bat, (bi, b), 0.0)
             maint_cost = length(bat.maintenance_cost) >= b ? bat.maintenance_cost[b] : 0.0
 
+            fixed_cost = length(bat.fixed_cost) >= b ? bat.fixed_cost[b] : 0.0
+
             npv = calculate_unit_npv(
-                rated, 0.0, 0.0, maint_cost,
+                rated, 0.0, fixed_cost, maint_cost,
                 remaining_life, degradation_rate, decom_cost,
                 discount_rate, actual_cf, system_lcoe
             )

@@ -173,7 +173,7 @@ This group is present when the optimizer exports per-component cost data. The [F
 | Attribute | Type | Units | Description |
 |-----------|------|-------|-------------|
 | `fuel_cost` | float | $ | Fuel consumption cost |
-| `fixed_om_cost` | float | $ | Fixed O&M cost |
+| `fixed_om_cost` | float | $ | Fixed O&M of the generators and batteries in service ($/MW·yr × MW, prorated to the simulated hours), whether or not they run |
 | `maintenance_cost` | float | $ | Variable maintenance cost |
 | `startup_cost` | float | $ | Generator startup cost |
 | `battery_maintenance_cost` | float | $ | Battery O&M cost |
@@ -694,9 +694,9 @@ For batteries, the rated discharge power replaces $P^{rated}$ and discharge repl
 
 ### LCOE
 
-$$LCOE_{g,n,t} = \frac{(c^{fuel}_{g,n} + c^{fixed}_{g,n} + c^{maint}_{g,n}) \, P_{g,n,t} + c^{start}_{g,n} \, SU_{g,n,t}}{P_{g,n,t}}$$
+$$LCOE_{g,n,t} = \frac{(c^{fuel}_{g,n} + \tilde{c}^{fixed}_{g,n} + c^{maint}_{g,n}) \, P_{g,n,t} + c^{start}_{g,n} \, SU_{g,n,t}}{P_{g,n,t}}, \qquad \tilde{c}^{fixed}_{g,n} = \frac{c^{fixed}_{g,n} \, \bar{P}_{g,n} \, T / 8760}{\sum_t P_{g,n,t}}$$
 
-for hours with output, and 0 otherwise. $c^{fuel}$, $c^{fixed}$, $c^{maint}$ and $c^{start}$ are the generator's `fuel_cost`, `fixed_cost`, `maintenance_cost` and `start_up_cost`; $SU$ is the startup variable (UC mode). When `fuel_cost` is 0, the fuel cost is taken from the fuel registry as price / energy content / efficiency. No capital cost is included.
+for hours with output, and 0 otherwise. $c^{fuel}$, $c^{fixed}$ ($/MW·yr), $c^{maint}$ and $c^{start}$ are the generator's `fuel_cost`, `fixed_cost`, `maintenance_cost` and `start_up_cost`, $\bar{P}$ its `rated_power` and $T$ the hours of the result; the fixed O&M of those hours is spread over the energy produced in them; $SU$ is the startup variable (UC mode). When `fuel_cost` is 0, the fuel cost is taken from the fuel registry as price / energy content / efficiency. No capital cost is included.
 
 Battery LCOE: (charging energy × nodal price / round-trip efficiency + (charge + discharge) × maintenance cost) / discharge, for hours with discharge, clipped to [0, 10000] $/MWh.
 

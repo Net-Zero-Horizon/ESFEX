@@ -217,6 +217,26 @@ class TestSellingPriceNames:
         assert tsp["Cuba - Gas (1)"]["total_generation"] == 6.0
 
 
+class TestLcoeFixedOM:
+    def test_fixed_om_spread_over_the_energy(self, tmp_path):
+        """fixed_cost is $/MW·yr: the LCOE spreads the result hours' share of
+        it over the energy produced. It was added as if it were $/MWh."""
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        orch._num_nodes = 1
+        orch._gen_names = ["Gas"]
+        gen = SimpleNamespace(
+            name="Gas", type="Non-renewable", rated_power=[10.0], fuel_cost=[1.0],
+            fixed_cost=[8760.0], maintenance_cost=[0.5], start_up_cost=[0.0], ramp_up=[1.0])
+        orch.primary_system = SimpleNamespace(generators={"g": gen}, batteries={})
+        orch._current_units_config = {}
+        res = YearResults(year=2025, objective=0.0, solve_time=0.0, feasible=True,
+                          gen_output=np.array([[[5.0, 5.0]]]),
+                          prices=np.array([[10.0, 20.0]]))
+        orch._compute_derived_metrics(res)
+        # 8760 $/MW·yr × 10 MW × 2 h / 8760 h = 20 $ over 10 MWh = 2 $/MWh
+        np.testing.assert_allclose(res.lcoe[0, 0], [1.0 + 2.0 + 0.5] * 2)
+
+
 class TestDemandReaders:
     """Old files kept demand [step, node] when steps <= nodes; new files are
     always [node, step] with a ``dimensions`` attribute."""

@@ -235,7 +235,8 @@ class GeneratorForm(QWidget):
         self._fuel_curve_stack.setVisible(False)  # Hidden for "flat"
         fl_cost.addRow(self._fuel_curve_stack)
 
-        self._fixed_cost = self._dbl_spin(0, 1e6, 2)
+        self._fixed_cost = self._dbl_spin(0, 1e7, 2)
+        self._fixed_cost.setToolTip(tr("generator_form.fixed_cost_tooltip"))
         fl_cost.addRow(tr("generator_form.fixed_cost"), self._fixed_cost)
         self._maintenance_cost = self._dbl_spin(0, 1e6, 2)
         fl_cost.addRow(tr("generator_form.maintenance_cost"), self._maintenance_cost)

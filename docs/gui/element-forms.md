@@ -57,7 +57,7 @@ All forms of electricity production: solar PV, wind turbines, diesel engines, ga
 | | Eff. at Rated / Eff. at Min | frac | Conversion efficiency at full load and at minimum output (0.0 to 1.0). |
 | **Costs** | Fuel | $/MWh | Variable fuel cost per MWh of electrical output. Typically 0 for renewables. |
 | | Cost Curve | dropdown | Fuel cost model: flat (default), linear, stepwise or exponential. See [Cost Curve Widgets](#cost-curve-widgets). |
-| | Fixed | $/MWh | Fixed O&M cost, charged per MWh generated. |
+| | Fixed | $/MW·yr | Fixed O&M per MW of rated power per year, charged while the unit is in service whether or not it runs (prorated to the simulated hours). |
 | | Maintenance | $/MWh | Variable O&M cost per MWh generated. |
 | | Start-up | $ | Cost per start. Unit commitment only. |
 | | Decommissioning | $/MW | Cost of retiring capacity. |
@@ -118,7 +118,7 @@ All forms of energy storage: lithium-ion, flow batteries, pumped hydro, compress
 | **Operating Parameters** | Ramp Up / Ramp Down | pu/h | How fast charge or discharge power may rise / fall, as a fraction of Max Charge / Max Discharge per hour. 0 = no limit. |
 | | Provides reserves | checkbox | Its headroom (unused discharge power plus the charging it can stop) counts towards the static and dynamic reserve. |
 | | Inertia H | s | Inertia constant. |
-| **Costs** | Fixed | $/MW·yr | Fixed O&M per MW of Max Discharge per year. |
+| **Costs** | Fixed | $/MW·yr | Fixed O&M per MW of Max Discharge per year, charged while the battery is in service whether or not it is used. |
 | | Maintenance | $/MWh | Variable O&M cost. |
 | | Throughput Degr. | $/MWh | Cycling (wear) cost per MWh discharged. |
 | | Discharge Cost Curve | dropdown | flat (default), linear, stepwise or exponential. See [Cost Curve Widgets](#cost-curve-widgets). |

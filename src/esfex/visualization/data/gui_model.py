@@ -163,7 +163,7 @@ class GuiGeneratorInstance:
     initial_age: int = 0
     degradation_rate: float = 0.0
     fuel_cost: float = 0.0
-    fixed_cost: float = 0.0
+    fixed_cost: float = 0.0          # $/MW/year of rated power
     maintenance_cost: float = 0.0
     eff_at_rated: float = 0.35
     eff_at_min: float = 0.25

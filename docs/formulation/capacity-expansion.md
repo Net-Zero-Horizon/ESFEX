@@ -112,7 +112,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | \(\delta_{g,n}\), \(\delta_{k,n}\) | [0,1] | Annual degradation rate | `degradation_rate[n]` |
 | \(\alpha_{g,t,n}\) | [0,1] | Availability factor | `availability[t,n]` |
 | \(c^{fuel}_{g,n}\) | \$/MWh | Fuel cost; with primary energy on, fuel-coupled units pay the fuel price through the fuel balance instead (§8.3.12) | `gen.fuel_cost[n]` |
-| \(c^{fix}_{g,n}\) | \$/MWh | Fixed O&M cost | `gen.fixed_cost[n]` |
+| \(c^{fix}_{g,n}\), \(c^{fix}_{k,n}\) | \$/MW/year | Fixed O&M cost, on the power in service (OBJ-3b) | `fixed_cost[n]` |
 | \(c^{maint}_{g,n}\) | \$/MWh | Maintenance cost | `gen.maintenance_cost[n]` |
 | \(c^{CO_2}_g\) | \$/MWh | Carbon cost: `co2_cost` × the emission factor of the unit's fuel (per MWh of fuel) / the unit's rated efficiency | `co2_cost_per_mwh(input, gen, n)` |
 | \(c^{dec}_{g,n}\) | \$/MW | Decommissioning cost | `gen.decommissioning_cost[n]` |
@@ -187,10 +187,14 @@ Existing generators and batteries have no investment variable; their capacity is
 
 
 \[
-C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y \tag{OBJ-3b}
+C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{ext} c^{inv,P}_{b,n} X^{bat}_{y,b,n} + C^{dec}_y + C^{fix}_y \tag{OBJ-3b}
 \]
 
-Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\). So does the discharge power of the batteries in service: an existing battery's `MaxDischargePower` within its lifetime (its life-extended MW after it), and the power built from each battery technology and not yet retired, each at its `fixed_cost` (\$/MW/year). The dispatch charges the same cost prorated to each window (OBJ-3c of the [Operational Dispatch](operational-dispatch.md)).
+\[
+C^{fix}_y = \sum_{g,n} c^{fix}_{g,n} \bar{P}^{cum}_{y,g,n} + \sum_{k,n} c^{fix}_{k,n} \bar{P}^{tech}_{y,k,n} + \sum_{b,n} c^{fix}_{b,n} \bar{P}^{bat,cum}_{y,b,n} + \sum_{k,n} c^{fix}_{k,n} \bar{P}^{bt}_{y,k,n} \tag{OBJ-3c}
+\]
+
+\(C^{fix}_y\) is the fixed O&M of the capacity in service in year \(y\), each unit at its `fixed_cost` (\$/MW/year), whether or not it runs: existing generators within their lifetime at their degraded power, their life-extended MW after it (CUM-1), the technology MW built, degraded and not yet retired (CUM-1b), an existing battery's `MaxDischargePower` within its lifetime (its life-extended MW after it, CUM-2), and the power built from each battery technology and not yet retired (CUM-3). These are the MW the dispatch receives as rated power, and the dispatch charges the same cost prorated to each window (OBJ-1a and OBJ-3c of the [Operational Dispatch](operational-dispatch.md)): the master's yearly fixed O&M is \(H_{year}/(T\Delta t)\) times a window's. Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\). The Benders master has the same \(C^{asset}_y\). Fixed O&M was charged per MWh generated in \(C^{day}\) in earlier versions.
 
 Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
 
@@ -209,7 +213,7 @@ where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of 
 
 \[
 \begin{aligned}
-C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{fix}_{g,n} + c^{maint}_{g,n} + c^{CO_2}_g\right) P^{day}_{g,n,t} + \sum_{k,n} \left(c^{fuel}_{k,n} + c^{fix}_{k,n} + c^{maint}_{k,n} + c^{CO_2}_k\right) P^{tech}_{k,n,t} \\
+C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{maint}_{g,n} + c^{CO_2}_g\right) P^{day}_{g,n,t} + \sum_{k,n} \left(c^{fuel}_{k,n} + c^{maint}_{k,n} + c^{CO_2}_k\right) P^{tech}_{k,n,t} \\
 & + c^{VOLL} \sum_{n} L^{day}_{n,t} + c^{fre} \sum_{n} \lambda^{fre}_{n,t} + c^{CU} \sum_n CU^{day}_{n,t} + \sum_{b,n} \left( c^{maint}_{b,n} (P^{ch,day}_{b,n,t} + P^{dis,day}_{b,n,t}) + c^{\text{thr}}_{b,n} P^{dis,day}_{b,n,t} \right) \\
 & + \sum_{k,n} \left( c^{maint}_{k,n} (P^{bt,ch}_{k,n,t} + P^{bt,dis}_{k,n,t}) + c^{\text{thr}}_{k,n} P^{bt,dis}_{k,n,t} \right) \\
 & + c^{r,sta} \sum_n \lambda^{sta}_{n,t} + c^{r,dyn} \sum_n \lambda^{dyn}_{n,t} + c^{ine} H^{day}_t \Big]
@@ -731,9 +735,9 @@ For a generator with remaining life \(L_{rem} = \max(0, \tau_{g,n} - a^0_{g,n})\
 where, with annual generation \(G = \bar{P}_{g,n} \cdot \overline{\alpha}_{g,n} \cdot \eta^{rated}_{g,n} \cdot H_{year}\) (mean availability times rated efficiency):
 
 - **Revenue**: \(R = G \cdot\) `base_lcoe`
-- **Cost**: \(C = G \cdot (c^{fuel}_{g,n} + c^{fix}_{g,n} + c^{maint}_{g,n})\)
+- **Cost**: \(C = G \cdot (c^{fuel}_{g,n} + c^{maint}_{g,n}) + \bar{P}_{g,n} \cdot c^{fix}_{g,n}\) (fixed O&M per MW-year)
 
-For batteries the revenue is \(\bar{P}^{bat} \cdot c^{inv,P} \cdot\) `npv_annual_return_rate` and the cost \(\bar{P}^{bat} \cdot c^{fix} \cdot H_{year}\).
+For batteries the revenue is \(\bar{P}^{bat} \cdot c^{inv,P} \cdot\) `npv_annual_return_rate` and the cost \(\bar{P}^{bat} \cdot c^{fix}\).
 
 Units with \(\text{NPV}_g < 0\) are flagged for retirement.
 
@@ -784,7 +788,7 @@ Each scenario \(\omega\) has:
 | `gen_decommissioning_cost`, `bat_decommissioning_cost` | Scale the decommissioning costs of existing generators and batteries |
 | `fuel_cost` | Scales fuel costs in the scenario's operation |
 | `fuel_price_growth` | Extra annual fuel price escalation in the scenario's operation |
-| `gen_fixed_cost` | Scales the fixed O&M of generators and technologies in the scenario's operation |
+| `gen_fixed_cost` | Scales the fixed O&M (\$/MW/year, OBJ-3c) of generators, technologies, batteries and battery technologies |
 | `maintenance_cost` | Scales maintenance costs in the scenario's operation |
 | `carbon_price` | Scales the CO2 cost in the scenario's operation |
 | `penalty_loss_of_load`, `penalty_loss_of_reserve`, `penalty_curtailment`, `penalty_fre_penetration` | Scale the loss-of-load (incl. sectoral), reserve-shortfall, curtailment and RE-shortfall penalties in the scenario's operation |
@@ -1237,7 +1241,7 @@ technologies:
     eff_at_rated: [1.0]
     degradation_rate: [0.005]
     lifetime: 25
-    fixed_cost: [0.0]             # $/MWh
+    fixed_cost: [18000.0]         # $/MW per year (fixed O&M)
     maintenance_cost: [2.0]       # $/MWh
 
 battery_technologies:

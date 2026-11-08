@@ -300,7 +300,7 @@ systems:
         inertia: [2.0, 2.0, 2.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [85.0, 85.0, 85.0]
-        fixed_cost: [5.0, 5.0, 5.0]
+        fixed_cost: [25000.0, 25000.0, 25000.0]  # $/MW per year
         maintenance_cost: [3.0, 3.0, 3.0]
         invest_cost: [0.0, 0.0, 0.0]
         invest_max_power: [0.0, 0.0, 0.0]

@@ -153,7 +153,7 @@ Computed after each year's dispatch by `Orchestrator._compute_derived_metrics()`
 | Metric | Formula | Units | Notes |
 |--------|---------|-------|-------|
 | **Capacity Factor** | output[g,n,t] / rated_power[g,n] | [0, 1] | Per hour |
-| **LCOE** | ((fuel_cost + fixed_cost + maintenance_cost) × output + start_up_cost × startup) / output | $/MWh | Hours with output only (0 otherwise). No capital cost. When `fuel_cost` is 0, uses fuel price / energy content / efficiency from the fuel registry |
+| **LCOE** | ((fuel_cost + fixed + maintenance_cost) × output + start_up_cost × startup) / output, with fixed = fixed_cost ($/MW·yr) × rated_power × the simulated share of the year / energy produced | $/MWh | Hours with output only (0 otherwise). No capital cost. When `fuel_cost` is 0, uses fuel price / energy content / efficiency from the fuel registry |
 | **VALLCOE** | LCOE × (1 + energy_adj + capacity_adj + flexibility_adj) | $/MWh | energy_adj = 1 − capture rate (unit's output-weighted price / system average price); capacity_adj = 0.15 × (0.85 − output share in the top-10 % demand hours); flexibility_adj = −0.1 × ramp_up / rated power (non-renewables only) |
 | **Battery CF** | discharge[b,n,t] / rated discharge power | [0, 1] | Per hour |
 | **Battery LCOE** | (charge × price / round-trip efficiency + (charge + discharge) × maintenance_cost) / discharge | $/MWh | Hours with discharge only, clipped to [0, 10000] |

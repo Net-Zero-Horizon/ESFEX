@@ -1415,11 +1415,16 @@ end
 
 Undiscounted per-year cost of existing assets: life extension of units past
 their lifetime, (incremental, LP-linear) decommissioning, the fixed cost
-(\$/MW/year) of the converter capacity built so far and the fixed cost
-(\$/MW/year) of the batteries in service: existing ones within their
-lifetime, life-extended MW, and battery-technology power built and not yet
-retired. A stochastic scenario's
-`mult` scales the generator and battery decommissioning costs.
+(\$/MW/year) of the converter capacity built so far and the fixed O&M
+(\$/MW/year) of the capacity in service:
+- generators and technologies: the power `build_cumulative_capacity_expressions`
+  gives (existing units within their lifetime, degraded; life-extended MW;
+  technology MW built, degraded and not yet retired), the capacity the
+  dispatch receives;
+- batteries: rated discharge power of existing ones within their lifetime,
+  life-extended MW, and battery-technology power built and not yet retired.
+A stochastic scenario's `mult` scales the generator and battery
+decommissioning costs, and `gen_fixed_cost` scales every fixed O&M.
 """
 function build_annual_asset_cost(
     vars::MasterProblemVariables,
@@ -1432,6 +1437,7 @@ function build_annual_asset_cost(
     n_bat = length(input.batteries)
     m_gen_decomm = mult === nothing ? 1.0 : mult.gen_decommissioning_cost
     m_bat_decomm = mult === nothing ? 1.0 : mult.bat_decommissioning_cost
+    m_fixed = mult === nothing ? 1.0 : mult.gen_fixed_cost
     annual_cost = AffExpr(0.0)
 
     # Life extension costs (annual): cost to keep units past lifetime
@@ -1456,11 +1462,23 @@ function build_annual_asset_cost(
         end
     end
 
+    # Generator and technology fixed O&M on the power in service this year
+    if any(any(>(0), u.fixed_cost) for u in input.generators) ||
+       any(any(>(0), u.fixed_cost) for u in input.technologies)
+        caps = build_cumulative_capacity_expressions(vars, input, y_idx)
+        for (key, units) in (("gen", input.generators), ("tech", input.technologies))
+            for (i, u) in enumerate(units), n in 1:n_buses
+                fc = u.fixed_cost[n] * m_fixed
+                fc > 0 && add_to_expression!(annual_cost, caps[key][i][n], fc)
+            end
+        end
+    end
+
     # Battery fixed cost on the discharge power in service this year
     for b in 1:n_bat
         bat = input.batteries[b]
         for n in 1:n_buses
-            fc = bat.fixed_cost[n]
+            fc = bat.fixed_cost[n] * m_fixed
             (fc > 0 && bat.max_discharge_power[n] > 0) || continue
             if bat.initial_age[n] + (y_idx - 1) < bat.life_time[n]
                 add_to_expression!(annual_cost, fc * bat.max_discharge_power[n])
@@ -1471,7 +1489,7 @@ function build_annual_asset_cost(
         end
     end
     for (bt, btech) in enumerate(input.battery_technologies), n in 1:n_buses
-        fc = btech.fixed_cost[n]
+        fc = btech.fixed_cost[n] * m_fixed
         fc > 0 || continue
         for y in 1:vars.years_per_inv_period:y_idx
             haskey(vars.bat_tech_power_investment, y) || continue
@@ -2747,10 +2765,12 @@ end
 """
     day_operational_cost(ps_vars, input, hours; tech_output=nothing)
 
-Unscaled operating cost of one representative day or TSAM period: fuel, O&M
-and CO2, load shedding, curtailment, battery maintenance (on charge and
-discharge) and throughput, and the reserve and inertia shortfalls. The callers
-scale it to a year.
+Unscaled operating cost of one representative day or TSAM period: fuel,
+maintenance and CO2, load shedding, curtailment, battery maintenance (on
+charge and discharge) and throughput, and the reserve and inertia
+shortfalls. The callers scale it to a year. Fixed O&M is not an operating
+cost: it is charged per year on the capacity in service
+(`build_annual_asset_cost`).
 """
 function day_operational_cost(
     ps_vars::PowerSystemVariables,
@@ -2769,7 +2789,6 @@ function day_operational_cost(
             gen = input.generators[g]
             for n in ps_vars.buses_of_gen[g]
                 co2 = co2_cost_per_mwh(input, gen, n)
-                fixed_cost = gen.fixed_cost[n]
                 maint_cost = gen.maintenance_cost[n]
                 if haskey(ps_vars.gen_seg_output, (g, n))
                     # PWL fuel cost via segments
@@ -2779,11 +2798,11 @@ function day_operational_cost(
                         add_to_expression!(cost, segs[k].marginal_cost, seg_vars[k, t])
                     end
                     add_to_expression!(cost, ps_vars.gen_output[g, n, t],
-                                      fixed_cost + maint_cost + co2)
+                                      maint_cost + co2)
                 else
                     fuel_cost = gen.fuel_cost[n]
                     add_to_expression!(cost, ps_vars.gen_output[g, n, t],
-                                      fuel_cost + fixed_cost + maint_cost + co2)
+                                      fuel_cost + maint_cost + co2)
                 end
             end
         end
@@ -2797,7 +2816,7 @@ function day_operational_cost(
                     # With an offer curve the fuel is priced per segment
                     # (add_tech_curve_segments!, in tech_day_cost)
                     fuel = tech_curve_segments(input, tc, b) === nothing ? tech.fuel_cost[b] : 0.0
-                    total_cost = fuel + tech.fixed_cost[b] + tech.maintenance_cost[b] + co2
+                    total_cost = fuel + tech.maintenance_cost[b] + co2
                     if total_cost > 0
                         add_to_expression!(cost, tech_output[tc, b, t], total_cost)
                     end
@@ -3700,7 +3719,6 @@ The master input a stochastic scenario operates on in year `year_idx`:
 - demand × `demand_growth`^(year_idx − 1) (an annual factor: 1.02 = +2 %/year)
 - fuel cost × `fuel_cost` × `fuel_price_growth`^(year_idx − 1), for generators
   (piecewise fuel-cost curves included) and candidate technologies
-- fixed O&M × `gen_fixed_cost` (generators, technologies)
 - maintenance cost × `maintenance_cost` (generators, batteries, technologies);
   batteries and battery technologies also × `bat_maintenance_cost`
 - start-up cost × `gen_start_up_cost` (generators)
@@ -3712,8 +3730,9 @@ The master input a stochastic scenario operates on in year `year_idx`:
   `penalty_loss_of_reserve`, curtailment × `penalty_curtailment`, RE
   penetration shortfall × `penalty_fre_penetration`, CO2 budget violation ×
   `penalty_co2_budget_violation`
-Investment-cost, decommissioning and discount multipliers act on the
-objective instead.
+Investment-cost, decommissioning, fixed O&M (`gen_fixed_cost`, a per-year
+cost of the capacity in service, `build_annual_asset_cost`) and discount
+multipliers act on the objective instead.
 """
 function scenario_master_input(
     input::MasterProblemInput,
@@ -3722,17 +3741,14 @@ function scenario_master_input(
 )::MasterProblemInput
     fuel = mult.fuel_cost * mult.fuel_price_growth^(year_idx - 1)
     maint = mult.maintenance_cost
-    fixed = mult.gen_fixed_cost
     bat_maint = maint * mult.bat_maintenance_cost
     gens = [with_fields(g; fuel_cost=g.fuel_cost .* fuel,
-                        fixed_cost=g.fixed_cost .* fixed,
                         maintenance_cost=g.maintenance_cost .* maint,
                         start_up_cost=g.start_up_cost .* mult.gen_start_up_cost)
             for g in input.generators]
     bats = [with_fields(b; maintenance_cost=b.maintenance_cost .* bat_maint)
             for b in input.batteries]
     techs = [with_fields(t; fuel_cost=t.fuel_cost .* fuel,
-                         fixed_cost=t.fixed_cost .* fixed,
                          maintenance_cost=t.maintenance_cost .* maint)
              for t in input.technologies]
     btechs = [with_fields(bt; maintenance_cost=bt.maintenance_cost .* bat_maint)
@@ -3871,9 +3887,9 @@ function calculate_unit_npv(
         hours_year = length(input.hours_per_year) > 0 ? Float64(input.hours_per_year[1]) : Float64(HOURS_STD_YEAR)
         annual_generation = rated_power * cf * hours_year
 
-        # Annual costs ($/year) — fixed_cost and maintenance_cost are in $/MWh
+        # Annual costs ($/year): fuel and maintenance per MWh, fixed O&M per MW·year
         annual_fuel = annual_generation * gen.fuel_cost[node]
-        annual_fixed = annual_generation * gen.fixed_cost[node]
+        annual_fixed = rated_power * gen.fixed_cost[node]
         annual_maintenance = annual_generation * gen.maintenance_cost[node]
         total_annual_cost = annual_fuel + annual_fixed + annual_maintenance
 

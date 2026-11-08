@@ -331,7 +331,7 @@ Generator/technology configuration.
 - `min_down_time::Vector{Float64}`: Minimum down time per node (hours)
 - `start_up_cost::Vector{Float64}`: Startup cost per node (\$/start)
 - `fuel_cost::Vector{Float64}`: Variable fuel cost per node (\$/MWh)
-- `fixed_cost::Vector{Float64}`: Fixed O&M cost per node (\$/MWh)
+- `fixed_cost::Vector{Float64}`: Fixed O&M cost per node (\$/MW/year of power in service)
 - `maintenance_cost::Vector{Float64}`: Maintenance cost per node (\$/MWh)
 - `inertia::Vector{Float64}`: Inertia constant H per node (seconds)
 - `invest_cost::Vector{Float64}`: Investment cost per node (\$/MW)
@@ -663,7 +663,7 @@ struct TechnologyConfig
     min_down_time::Vector{Float64}
     min_power::Vector{Float64}
     fuel_cost::Vector{Float64}
-    fixed_cost::Vector{Float64}
+    fixed_cost::Vector{Float64}    # per MW of power in service per year
     maintenance_cost::Vector{Float64}
     start_up_cost::Vector{Float64}
     inertia::Vector{Float64}
@@ -2805,7 +2805,8 @@ Cost and parameter multipliers for a stochastic scenario (all 1.0 by default).
 - `demand_growth::Float64`: Annual demand factor, demand × m^(year_idx − 1)
 - `fuel_price_growth::Float64`: Annual fuel price factor, fuel × m^(year_idx − 1)
 - `carbon_price::Float64`: CO2 cost
-- `gen_fixed_cost::Float64`: Fixed O&M of generators and technologies
+- `gen_fixed_cost::Float64`: Fixed O&M (\$/MW/year) of generators, technologies,
+  batteries and battery technologies
 - `gen_decommissioning_cost::Float64`: Decommissioning cost of existing generators
 - `bat_decommissioning_cost::Float64`: Decommissioning cost of existing batteries
 - `bat_invest_cost_power::Float64`: Battery technology power investment (× `invest_cost_storage`)
