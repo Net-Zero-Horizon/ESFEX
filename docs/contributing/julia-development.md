@@ -95,8 +95,7 @@ struct GeneratorConfig
     fixed_cost::Vector{Float64}       # $/MW of power in service per year
     maintenance_cost::Vector{Float64}
     inertia::Vector{Float64}
-    invest_cost::Vector{Float64}
-    invest_max::Vector{Float64}
+    invest_cost::Vector{Float64}      # prices the master's life extension
     availability::Matrix{Float64}    # (hours x buses)
     reservable::Bool
     life_time::Vector{Float64}

@@ -566,6 +566,54 @@ def _per_node_list(arr, n: int, default=0.0) -> list:
     return list(arr) + [arr[-1]] * (n - len(arr))
 
 
+def _unit_node_span(offsets: dict, unit_key: str, num_nodes: int) -> tuple[str, int, int]:
+    """``(system, first node, node count)`` of a merged unit key.
+
+    Merged keys are ``{system}__{key}``: the unit's per-node data are its
+    own system's, at that system's offset in the merged node set. A key
+    of no listed system (or no *offsets*) spans all nodes.
+    """
+    names = list(offsets)
+    offs = list(offsets.values())
+    for i, sname in enumerate(names):
+        if str(unit_key).startswith(f"{sname}__"):
+            end = offs[i + 1] if i + 1 < len(offs) else num_nodes
+            return sname, offs[i], end - offs[i]
+    return "", 0, num_nodes
+
+
+def _system_profile_loader(offsets: dict, num_nodes: int, read, fill: float):
+    """``load(key, file) -> [hours x num_nodes]`` for per-node unit profiles.
+
+    A profile file holds one column per node of the unit's own system
+    (*read(node count)*); it was read as if it covered the merged
+    node set, so a second system's units got the first system's columns.
+    Each system's read is placed at its own nodes. Units of different
+    systems sharing a file get one array with each system's columns at
+    its nodes (a unit has capacity only at its own system's nodes);
+    columns no system has read hold *fill*.
+    """
+    merged: dict[str, np.ndarray] = {}
+    placed: set = set()
+
+    def load(unit_key: str, file_key: str) -> np.ndarray:
+        sname, off, cnt = _unit_node_span(offsets, unit_key, num_nodes)
+        arr = merged.get(file_key)
+        if (file_key, sname) not in placed:
+            prof = np.asarray(read(cnt), dtype=float)
+            if prof.ndim == 1:
+                prof = prof[:, None]
+            if arr is None:
+                arr = np.full((prof.shape[0], num_nodes), fill, dtype=float)
+                merged[file_key] = arr
+            rows = np.arange(arr.shape[0]) % prof.shape[0]
+            arr[:, off:off + cnt] = prof[rows, :cnt]
+            placed.add((file_key, sname))
+        return arr
+
+    return load
+
+
 class Orchestrator:
     """
     Main orchestrator for ESFEX simulations.
@@ -3149,52 +3197,6 @@ class Orchestrator:
 
         return result
 
-    def _unit_node_span(self, unit_key: str, num_nodes: int) -> tuple[str, int, int]:
-        """``(system, first node, node count)`` of a merged unit key.
-
-        Merged keys are ``{system}__{key}``: the unit's per-node data are its
-        own system's, at that system's offset in the merged node set. A key
-        of no listed system spans all nodes.
-        """
-        names = list(self._system_node_offsets)
-        offs = list(self._system_node_offsets.values())
-        for i, sname in enumerate(names):
-            if str(unit_key).startswith(f"{sname}__"):
-                end = offs[i + 1] if i + 1 < len(offs) else num_nodes
-                return sname, offs[i], end - offs[i]
-        return "", 0, num_nodes
-
-    def _system_profile_loader(self, num_nodes: int, read, fill: float):
-        """``load(key, file) -> [hours x num_nodes]`` for per-node unit profiles.
-
-        A profile file holds one column per node of the unit's own system
-        (*read(file, node count)*); it was read as if it covered the merged
-        node set, so a second system's units got the first system's columns.
-        Each system's read is placed at its own nodes. Units of different
-        systems sharing a file get one array with each system's columns at
-        its nodes (a unit has capacity only at its own system's nodes);
-        columns no system has read hold *fill*.
-        """
-        merged: dict[str, np.ndarray] = {}
-        placed: set = set()
-
-        def load(unit_key: str, file_key: str) -> np.ndarray:
-            sname, off, cnt = self._unit_node_span(unit_key, num_nodes)
-            arr = merged.get(file_key)
-            if (file_key, sname) not in placed:
-                prof = np.asarray(read(cnt), dtype=float)
-                if prof.ndim == 1:
-                    prof = prof[:, None]
-                if arr is None:
-                    arr = np.full((prof.shape[0], num_nodes), fill, dtype=float)
-                    merged[file_key] = arr
-                rows = np.arange(arr.shape[0]) % prof.shape[0]
-                arr[:, off:off + cnt] = prof[rows, :cnt]
-                placed.add((file_key, sname))
-            return arr
-
-        return load
-
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
@@ -3219,6 +3221,7 @@ class Orchestrator:
         sys = self.primary_system
         config_dir = Path(self.config_path).parent if self.config_path else Path('.')
         date_start = self._data_start().strftime("%d/%m/%Y %H:%M")
+        offsets = getattr(self, "_system_node_offsets", None) or {}
         loaders: dict = {}
 
         def _load(kind: str, key: str, avail_file: str, unit_key: Optional[str] = None):
@@ -3227,8 +3230,8 @@ class Orchestrator:
             # columns are the unit's own system's nodes (_system_profile_loader)
             file_key = str(avail_file)
             if file_key not in loaders:
-                loaders[file_key] = self._system_profile_loader(
-                    num_nodes, lambda cnt: load_run_availability(
+                loaders[file_key] = _system_profile_loader(
+                    offsets, num_nodes, lambda cnt: load_run_availability(
                         config_dir, avail_file, cnt, date_start,
                         owner=f"{kind} {key!r}"), fill=1.0)
             cache[key] = loaders[file_key](unit_key or key, file_key)
@@ -3283,6 +3286,7 @@ class Orchestrator:
         sys = self.primary_system
         config_dir = Path(self.config_path).parent if self.config_path else Path('.')
         date_start = self._data_start().strftime("%d/%m/%Y %H:%M")
+        offsets = getattr(self, "_system_node_offsets", None) or {}
         loaders: dict = {}
 
         for gen_key, gen in sys.generators.items():
@@ -3297,8 +3301,8 @@ class Orchestrator:
             file_key = str(inflow_path.resolve())
             if file_key not in loaders:
                 # Columns are the unit's own system's nodes; no inflow elsewhere
-                loaders[file_key] = self._system_profile_loader(
-                    num_nodes, lambda cnt, path=inflow_path: load_inflow_profile(
+                loaders[file_key] = _system_profile_loader(
+                    offsets, num_nodes, lambda cnt, path=inflow_path: load_inflow_profile(
                         path, temporal_resolution_hours=1, num_nodes=cnt,
                         date_start=date_start), fill=0.0)
             try:
