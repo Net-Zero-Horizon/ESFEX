@@ -410,7 +410,6 @@ class PenaltiesConfig(BaseModel):
     loss_of_fuel_supply: float = 100
     non_electric_demand_loss: float = 100
     soc_violation: float = 1e6
-    delay_retirement_per_mw: float = 50000
 ```
 
 The loader reads every field, with keys matched case-insensitively; any other key under `penalties` is reported as an unknown configuration key.

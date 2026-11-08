@@ -181,7 +181,7 @@ C^{inv}_y = \underbrace{\sum_{k,n} c^{inv}_{k,n} I^{tech}_{y,k,n}}_{\text{Techno
 
 \(I^{conv}_{y,c}\) is the MW added to AC/DC or frequency converter \(c\) (`converter_investment`), up to its `invest_max_power` over the horizon, at its `invest_cost` (\$/MW). Like the dispatch, a converter does not age: its capacity is `rated_power_mva` plus everything built so far, and the built MW reach the dispatch as added rated power from the year they are built.
 
-Existing generators and batteries have no investment variable; their capacity is fixed (§6). The master has no fuel model and no fuel infrastructure investment: fuel storage and transport are built by the primary-energy block of the operational dispatch ([Primary Energy](primary-energy.md), PE-5d).
+Existing generators and batteries have no investment variable; their capacity is fixed (§6). With primary energy on, the master also builds fuel storage, route transport capacity and electrolyzers (§8.3.12, within the limits of [Primary Energy](primary-energy.md) PE-5d); the operational dispatch builds none and uses the master's builds as existing capacity.
 
 ### 5.1b Existing-Asset Costs
 
@@ -885,7 +885,7 @@ After optimization, the following quantities are extracted into a `MasterProblem
 | `cumulative_gen_capacity`, `cumulative_bat_capacity`, `cumulative_bat_power` | Capacity of existing units per year (CUM-1, CUM-2) |
 | `cumulative_tech_capacity`, `cumulative_bat_tech_power`, `cumulative_bat_tech_capacity` | Cumulative technology capacity per year (CUM-1b, CUM-3) |
 | `re_penetration_by_year`, `re_penetration_by_system` | RE ratio \(\rho\) per year (and per system) |
-| `total_investment_by_year`, `total_operational_cost_by_year` | Investment (undiscounted overnight cost of every build of the year: technologies, battery technologies, transmission, converters, reservoirs, fuel storage, routes and electrolyzers) and representative-day operating cost per year (\$) |
+| `total_investment_by_year`, `total_operational_cost_by_year` | Investment (undiscounted overnight cost of every build of the year: technologies, battery technologies, transmission, converters, reservoirs, fuel storage, routes and electrolyzers) and operating cost per year (\$, undiscounted: the representative days or TSAM periods scaled to the year, CO2-budget violations included; the expected value over the scenarios in a stochastic master; the subproblems' cost in Benders). The annual cost of the assets in service (fixed O&M, life extension, decommissioning) is in neither |
 | `reservoir_investment` | Reservoir storage investment |
 
 The runner turns the cumulative technology capacity into virtual generators and batteries for the operational dispatch (§16.3).

@@ -1159,12 +1159,6 @@ struct PowerSystemInput
     battery_discharge_prev::Dict{Int, Dict{Int, Float64}}
     battery_charge_prev::Dict{Int, Dict{Int, Float64}}
 
-    # Pending retirements - units scheduled for retirement but can be delayed for feasibility
-    # Matches Python legacy pending_retirements (lines 77-80, 1388-1447)
-    # Format: Dict{"gen" => Dict{gen_idx => Dict{node => original_capacity}},
-    #              "bat" => Dict{bat_idx => Dict{node => original_capacity}}}
-    pending_retirements::Dict{String, Dict{Int, Dict{Int, Float64}}}
-
     # Electricity price vector (hourly) - for spillage cost calculation
     # Matches Python legacy self.electricity_price[t] (line 1763)
     electricity_price::Vector{Float64}
@@ -1174,7 +1168,6 @@ struct PowerSystemInput
     transfer_margin_penalty::Float64
     rooftop_curtailment_penalty::Float64
     co2_budget_violation_penalty::Float64
-    delay_retirement_penalty_per_mw::Float64
 
     # Reserve requirements per bus from config
     reserve_static_requirement::Dict{Int, Float64}
@@ -1318,8 +1311,6 @@ function PowerSystemInput(;
     # Battery discharge / charge (MW) at the previous window's last step
     battery_discharge_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
     battery_charge_prev::Dict{Int, Dict{Int, Float64}} = Dict{Int, Dict{Int, Float64}}(),
-    # Pending retirements for delayed retirement mechanism
-    pending_retirements::Dict{String, Dict{Int, Dict{Int, Float64}}} = Dict{String, Dict{Int, Dict{Int, Float64}}}(),
     # Electricity price vector (hourly) - matches Python legacy self.electricity_price
     electricity_price::Vector{Float64} = Float64[],
     # Penalty coefficients from config (instead of deriving from VOLL)
@@ -1327,7 +1318,6 @@ function PowerSystemInput(;
     transfer_margin_penalty::Float64 = 0.0,        # 0 = fallback to loss_of_load * 0.1
     rooftop_curtailment_penalty::Float64 = 5e-6,
     co2_budget_violation_penalty::Float64 = 5e-4,
-    delay_retirement_penalty_per_mw::Float64 = 0.05,
     # Reserve requirements per bus from config
     reserve_static_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     reserve_dynamic_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
@@ -1414,13 +1404,11 @@ function PowerSystemInput(;
         battery_soc_prev,
         battery_discharge_prev,
         battery_charge_prev,
-        pending_retirements,
         electricity_price,
         fre_penetration_penalty,
         transfer_margin_penalty,
         rooftop_curtailment_penalty,
         co2_budget_violation_penalty,
-        delay_retirement_penalty_per_mw,
         reserve_static_requirement,
         reserve_dynamic_requirement,
         max_annual_system_cost,
@@ -1552,14 +1540,6 @@ mutable struct PowerSystemVariables
     # Rooftop solar curtailment (node × hour)
     rooftop_curtailment::Union{Array{VariableRef, 2}, Nothing}
 
-    # Delay retirement variables
-    # Binary: 1 = delay retirement (keep operating), 0 = proceed with retirement
-    gen_delay_retirement::Union{Dict{Tuple{Int,Int}, VariableRef}, Nothing}
-    bat_delay_retirement::Union{Dict{Tuple{Int,Int}, VariableRef}, Nothing}
-    # Original capacities for delayed units
-    gen_delay_retirement_capacity::Dict{Tuple{Int,Int}, Float64}
-    bat_delay_retirement_capacity::Dict{Tuple{Int,Int}, Float64}
-
     # EV charge/discharge mutual exclusivity status (node × hour)
     ev_charge_status::Union{Array{VariableRef, 2}, Nothing}
 
@@ -1628,10 +1608,6 @@ function PowerSystemVariables(
     loss_of_load_sectoral = nothing,
     co2_budget_violation = nothing,
     rooftop_curtailment = nothing,
-    gen_delay_retirement = nothing,
-    bat_delay_retirement = nothing,
-    gen_delay_retirement_capacity = Dict{Tuple{Int,Int}, Float64}(),
-    bat_delay_retirement_capacity = Dict{Tuple{Int,Int}, Float64}(),
     ev_charge_status = nothing,
     demand_shift = nothing,
     acdc_rectify = nothing,
@@ -1661,10 +1637,6 @@ function PowerSystemVariables(
         loss_of_load_sectoral,
         co2_budget_violation,
         rooftop_curtailment,
-        gen_delay_retirement,
-        bat_delay_retirement,
-        gen_delay_retirement_capacity,
-        bat_delay_retirement_capacity,
         ev_charge_status,
         demand_shift,
         acdc_rectify,
@@ -1716,7 +1688,6 @@ struct CostBreakdown
     electrolyzer_cost::Float64
     converter_cost::Float64
     spillage_cost::Float64
-    delay_retirement_cost::Float64
     reservoir_spillage_cost::Float64
     demand_shift_cost::Float64
     rooftop_curtailment_cost::Float64
@@ -2681,7 +2652,11 @@ Solution output from the Master Problem.
 
 ## Summary Metrics
 - `total_investment_by_year`: Total investment per year (\$)
-- `total_operational_cost_by_year`: Total operational cost per year (\$)
+- `total_operational_cost_by_year`: Operating cost per year (\$, undiscounted):
+    the representative days' (or TSAM periods') cost scaled to the year,
+    CO2-budget violations included; the expected value over the scenarios in
+    a stochastic master; the subproblems' cost in Benders. The annual asset
+    costs (fixed O&M, life extension, decommissioning) are not included
 - `re_penetration_by_year`: Achieved RE penetration per year
 - `cumulative_capacity_by_year`: Cumulative capacity by technology and year
 """
