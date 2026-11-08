@@ -50,7 +50,7 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 | `electrolyzer_fixed_cost` | Electrolyzer fixed cost (existing and built power) | Scenario asset cost |
 | `fuel_storage_invest_cost` | Fuel storage investment | Scenario investment cost |
 | `electrolyzer_invest_cost` | Electrolyzer investment | Scenario investment cost |
-| `gen_fixed_cost` | Fixed O&M (\$/MWh) of generators and candidate technologies | Scenario operation |
+| `gen_fixed_cost` | Fixed O&M (\$/MW/year) of generators, candidate technologies, batteries and battery technologies | Existing-asset cost (per year) |
 | `maintenance_cost` | Maintenance cost of generators, batteries, technologies and battery technologies | Scenario operation |
 | `carbon_price` | CO2 cost (`co2_cost`) | Scenario operation |
 | `penalty_loss_of_load` | Loss-of-load penalty, and the sectoral penalties derived from it | Scenario operation |
@@ -174,7 +174,7 @@ For each scenario \(s\) the operational cost comes from that scenario's own repr
 C^{op}_{y,s} = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d,s}
 \]
 
-where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, fixed O&M, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment, RE-penetration shortfall), as scaled by the multipliers of §2.2 (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
+where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment, RE-penetration shortfall), as scaled by the multipliers of §2.2 (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
 
 ### 4.4 Scenario-Adjusted Discount Rate
 

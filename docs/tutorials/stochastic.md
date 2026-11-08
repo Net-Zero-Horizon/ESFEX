@@ -98,7 +98,7 @@ Each multiplier scales the corresponding base-case parameter (1.0 = no change). 
 | `demand_growth` | 1.0 | Demand, as an annual factor: base demand × `demand_growth`^(year − 1) |
 | `fuel_cost` | 1.0 | Fuel cost of generators and candidate technologies |
 | `fuel_price_growth` | 1.0 | Extra annual fuel price escalation: fuel cost × `fuel_price_growth`^(year − 1) |
-| `gen_fixed_cost` | 1.0 | Fixed O&M of generators and technologies ($/MWh) |
+| `gen_fixed_cost` | 1.0 | Fixed O&M ($/MW·yr) of generators, technologies, batteries and battery technologies |
 | `maintenance_cost` | 1.0 | Maintenance cost of generators, batteries and technologies |
 | `carbon_price` | 1.0 | CO2 cost (`co2_cost`) in the scenario's operation |
 | `penalty_loss_of_load` | 1.0 | Loss-of-load penalty (VOLL), sectoral penalties included |

@@ -285,7 +285,6 @@ _probe_ops(si) = Dict(
 # multiplier -> probes it must scale (all others must stay put)
 _OPERATING = {
     "fuel_cost": {"gen_fuel", "gen_curve", "tech_fuel"},
-    "gen_fixed_cost": {"gen_fixed", "tech_fixed"},
     "maintenance_cost": {"gen_maint"},
     "carbon_price": {"co2"},
     "penalty_loss_of_load": {"lol"},
@@ -392,7 +391,8 @@ end
 
 def _objective(jl, ESFEX, master_input, **mult):
     """Stochastic objective of one scenario (no operation): coefficients of the
-    year-1 investments at bus 1 and the constant (decommissioning) term."""
+    year-1 investments at bus 1 and the constant (decommissioning and fixed
+    O&M) term."""
     jl.seval("using JuMP")
     jl.seval(_OBJECTIVE)
     out = jl.seval("_probe_objective")(master_input, ESFEX.ScenarioMultipliers(**mult))
@@ -414,12 +414,18 @@ def test_investment_and_decommissioning_multipliers(julia_setup, master_input):
     assert e["bat_energy"] == pytest.approx(0.5 * base["bat_energy"])
     assert e["bat_power"] == pytest.approx(base["bat_power"])
 
-    # Constant = generator part G + battery part B, each scaled by its own key
+    # Constant = generator decommissioning G + battery decommissioning B +
+    # fixed O&M F of the existing units ($/MW·yr), each scaled by its own key
     g = _objective(jl, ESFEX, master_input, gen_decommissioning_cost=2.0)["decomm"]
     b = _objective(jl, ESFEX, master_input, bat_decommissioning_cost=2.0)["decomm"]
-    G, B = g - base["decomm"], b - base["decomm"]
-    assert G > 0 and B > 0
-    assert G + B == pytest.approx(base["decomm"])
+    f = _objective(jl, ESFEX, master_input, gen_fixed_cost=2.0)["decomm"]
+    G, B, F = g - base["decomm"], b - base["decomm"], f - base["decomm"]
+    assert G > 0 and B > 0 and F > 0
+    assert G + B + F == pytest.approx(base["decomm"])
+
+    # gen_fixed_cost also scales the fixed O&M of the technology MW built
+    t = _objective(jl, ESFEX, master_input, gen_fixed_cost=2.0)["tech"]
+    assert t > base["tech"]
 
 
 # ---------------------------------------------------------------------------

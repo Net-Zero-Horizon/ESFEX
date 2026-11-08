@@ -5951,8 +5951,12 @@ class Orchestrator:
                     fc = gen.fuel_cost[n]
                     if fc <= 0:
                         fc = _fuel_based_cost(gen, n)
-                    fxc = gen.fixed_cost[n]
                     mc = gen.maintenance_cost[n]
+                    # Fixed O&M ($/MW·yr) of the rated power over these
+                    # hours, spread over the energy produced in them
+                    rated = gen.rated_power[n] if n < len(gen.rated_power) else 0.0
+                    fxc = (gen.fixed_cost[n] * rated * hours
+                           / HOURS_STD_YEAR / float(output.sum()))
                     total_cost = (fc + fxc + mc) * output
                     # Add startup cost if available
                     if result.gen_startup is not None and g < result.gen_startup.shape[0]:

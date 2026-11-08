@@ -644,7 +644,7 @@ class GeneratorConfig(BaseModel):
         default=None,
         description="Per-node bidding/offer curve for fuel cost. Overrides flat fuel_cost when present.",
     )
-    fixed_cost: list[float] = Field(description="Fixed O&M cost per node ($/MWh)")
+    fixed_cost: list[float] = Field(description="Fixed O&M per node ($/MW of power in service per year, charged whether or not the unit runs)")
     maintenance_cost: list[float] = Field(description="Maintenance cost per node ($/MWh)")
     invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW): prices life extension (× life_extension_cost_factor); 0 = taken from the technology with the same fuel and type")
     invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max investment per node (MW) [DEPRECATED: use technologies section]")
@@ -831,7 +831,7 @@ class TechnologyConfig(BaseModel):
         default=None,
         description="Per-node bidding/offer curve for fuel cost. Overrides flat fuel_cost when present.",
     )
-    fixed_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fixed O&M cost per node ($/MWh)")
+    fixed_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fixed O&M per node ($/MW of power built and in service per year)")
     maintenance_cost: list[float] = Field(default_factory=lambda: [0.0], description="Maintenance cost per node ($/MWh)")
     inertia: list[float] = Field(default_factory=lambda: [0.0], description="Inertia constant H per node (s)")
     droop: list[float] = Field(default_factory=lambda: [0.05], description="Governor droop characteristic per node (pu), e.g. 0.05 = 5%")
@@ -1087,7 +1087,8 @@ class ScenarioMultipliers(BaseModel):
     demand_growth: float = 1.0
     fuel_price_growth: float = 1.0
     carbon_price: float = 1.0
-    # Fixed O&M ($/MWh) of generators and candidate technologies
+    # Fixed O&M ($/MW/year) of generators, candidate technologies, batteries
+    # and battery technologies
     gen_fixed_cost: float = 1.0
     # Decommissioning of existing generators / batteries
     gen_decommissioning_cost: float = 1.0

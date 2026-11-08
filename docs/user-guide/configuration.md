@@ -270,7 +270,7 @@ Existing units go under `generators`, keyed by a unit id. Every list has one ent
         inertia: [0.0, 2.0]          # H (s)
         start_up_cost: [0.0, 500.0]  # $ per start
         fuel_cost: [0.0, 0.0]        # $/MWh; zero -> computed from fuels (see below)
-        fixed_cost: [0.0, 0.0]       # $/MWh
+        fixed_cost: [0.0, 0.0]       # $/MW per year
         maintenance_cost: [0.0, 5.0] # $/MWh
         decommissioning_cost: [0.0, 20000.0]  # $/MW
         invest_cost: [0.0, 900000.0] # $/MW, prices life extension
@@ -283,16 +283,16 @@ Existing units go under `generators`, keyed by a unit id. Every list has one ent
 
 **Required keys.** `type`, `life_time`, `initial_age`, `degradation_rate`, `decommissioning_cost`, `rated_power`, `min_power`, `min_up`, `min_down`, `ramp_up`, `ramp_down`, `eff_at_rated`, `eff_at_min`, `inertia`, `start_up_cost`, `fuel_cost`, `fixed_cost`, `maintenance_cost`, `invest_cost` and `invest_max_power`. A missing one aborts loading with `Failed to load configuration: '<key>'`. `fuel` defaults to `"None"`, `name` to the unit key. Optional keys: `technology`, `reservable`, `Availability` (profile file, see [Availability Profiles](availability-profiles.md)), `frequency_hz`, `current_type`, `bus_id_per_node`, `bus_index` and the reservoir fields below.
 
-**Units.** `fixed_cost` and `maintenance_cost` are charged per MWh generated. Ramp limits are fractions of capacity per hour; with `resolution_hours` > 1 the allowed change per step is `ramp × resolution_hours` (at most the full capacity). `decommissioning_cost` and `invest_cost` are per MW. Investment in new capacity is modelled with `technologies`; a generator's `invest_cost` is used to price life extension.
+**Units.** `fixed_cost` is fixed O&M in $ per MW per year, charged on the power in service (rated power, degraded with age; none past `life_time` unless the master extends the unit's life) whether or not the unit runs; each dispatch window pays its share of the year. `maintenance_cost` (variable O&M) is charged per MWh generated. Ramp limits are fractions of capacity per hour; with `resolution_hours` > 1 the allowed change per step is `ramp × resolution_hours` (at most the full capacity). `decommissioning_cost` and `invest_cost` are per MW. Investment in new capacity is modelled with `technologies`; a generator's `invest_cost` is used to price life extension.
 
 **Type.** Use `Renewable`, `Non-renewable` or `Electrolyzer`. Case and surrounding spaces are ignored (`renewable`, `non-renewable`), and the labels saved by a translated Studio (`Renovable`, `No renovable`, `Renouvelable`, ...) are read as their English value. Any other value, such as `Thermal`, is logged as a warning and treated as `Non-renewable`.
 
 **Fuel cost and the non-fuel O&M adder.** When the system has a `fuels` block, the loader adjusts every non-renewable generator whose `fuel` names an entry of that block:
 
 1. If `fuel_cost` is missing or all zero, it is computed per node as `price_base / energy_content / eff_at_rated` (the linked technology's `eff_at_rated` is used where the unit's is 0). Nodes with zero efficiency get 0.
-2. For fuels named exactly `Gas`, `Diesel` (60 $/MWh), `Oil`, `Fuel_oil` (55 $/MWh) or `Biomass` (20 $/MWh), a fixed non-fuel cost is **added to `maintenance_cost`** at every node with a positive fuel cost. It is skipped when the unit's largest `maintenance_cost` is already at least half the adder.
+2. For fuels named exactly `Gas`, `Diesel` (60 $/MWh), `Oil`, `Fuel_oil` (55 $/MWh) or `Biomass` (20 $/MWh), a fixed non-fuel cost is **added to `maintenance_cost`** at every node with a positive fuel cost. It is a per-MWh stand-in for the capital, fixed and variable O&M the unit's data lack, so it is skipped when the unit has its own fixed O&M (`fixed_cost` > 0, in $/MW per year: the adder would charge it a second time) or its largest `maintenance_cost` is already at least half the adder.
 
-In the example above, with `Diesel: {energy_content: 10.0, price_base: 800.0}`, node 1 gets `fuel_cost` ≈ 228.6 $/MWh and `maintenance_cost` 5 + 60 = 65 $/MWh. To keep your own O&M figure, set `maintenance_cost` to at least half the adder (30 $/MWh for diesel). Each unit that receives the adder is named in the run log (INFO level, so in the log file and in the `verbose` console). A non-renewable unit whose fuel is missing from `fuels` and whose fuel cost is zero is reported in a warning, because it would be dispatched for free with zero emissions.
+In the example above, with `Diesel: {energy_content: 10.0, price_base: 800.0}`, node 1 gets `fuel_cost` ≈ 228.6 $/MWh and `maintenance_cost` 5 + 60 = 65 $/MWh. To keep your own O&M figures, give the unit a `fixed_cost` or set `maintenance_cost` to at least half the adder (30 $/MWh for diesel). Each unit that receives the adder is named in the run log (INFO level, so in the log file and in the `verbose` console). A non-renewable unit whose fuel is missing from `fuels` and whose fuel cost is zero is reported in a warning, because it would be dispatched for free with zero emissions.
 
 **Optional fields.** Other generator schema fields, such as `fuel_cost_curve`, `droop`, `governor_time_const`, `q_max_mvar`, `q_min_mvar`, `power_factor` and `risk_coefficient`, are read when present and take their schema defaults otherwise.
 
@@ -334,7 +334,7 @@ Technologies are what the master problem can build. Each is passed to the schema
         eff_at_rated: [1.0, 1.0]
         degradation_rate: [0.005, 0.005]
         lifetime: 25                       # years, a single integer
-        fixed_cost: [0.0, 0.0]             # $/MWh
+        fixed_cost: [20000.0, 20000.0]     # $/MW per year
         maintenance_cost: [2.0, 2.0]       # $/MWh
 ```
 
