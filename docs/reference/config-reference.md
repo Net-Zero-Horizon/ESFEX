@@ -562,7 +562,6 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `fixed_cost` | list[float] | required | Fixed O&M per node ($ per MW of power in service per year), charged whether or not the unit runs: degraded rated power while within `life_time`, prorated to each dispatch window; the master charges it per year on the same MW (life-extended MW after `life_time`) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`). Where it is 0, the technology with the same `fuel` and `type` supplies it |
-| `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader (legacy per-unit investment; use `technologies`) |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` \| `AC_DC` | `"AC"` | `AC`, `DC` or `AC_DC` |
 | `Availability` | str \| null | `null` | YAML key `Availability`: availability profile (CSV/Excel). See [Availability Profiles](../user-guide/availability-profiles.md) |
@@ -637,9 +636,7 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `throughput_degradation_cost` | list[float] \| null | `null` | Cycling cost per MWh discharged, per node ($/MWh). `null` means 0 |
 | `discharge_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present. |
 | `invest_cost` | list[float] | required by loader | Power investment cost per node ($/MW). Required by the loader; prices life extension. Where it is 0, the battery technology named by `technology` (else the first one) supplies `invest_cost_power` |
-| `invest_cost_energy` | list[float] | `[0.0]` | Energy investment cost per node ($/MWh). Missing → copy of `invest_cost` |
-| `invest_max_power` | list[float] | required by loader | Maximum power investment per node (MW). Required by the loader |
-| `invest_max_capacity` | list[float] | `[0.0]` | Maximum energy investment per node (MWh). Missing → zeros |
+| `invest_max_power` | list[float] | required by loader | Per-node MW. Required by the loader. A value > 0 places the battery at the node in the master's representative days even where it has no power yet; new storage is built from `battery_technologies` |
 | `efficiency_charge` | list[float] | required | Charge efficiency per node (0–1) |
 | `efficiency_discharge` | list[float] | required | Discharge efficiency per node (0–1) |
 | `soc_initial` | list[float] | required | Initial state of charge per node (fraction) |

@@ -1072,20 +1072,14 @@ function add_acopf_line_limits!(model::Model, net::ACOPFNetwork,
     hours = size(input.demand, 1)
     base_mva = net.base_mva
     is_nlp = formulation isa PolarNLPFormulation || formulation isa RectNLPFormulation
-    is_dev = input.mode == "development"
-    transfer_cost = AffExpr(0.0)
 
     for (l, br) in enumerate(net.branches)
         br.capacity_mva <= 0 && continue  # no limit
-        # Development-mode corridor investment, as in the DC path
-        inv = is_dev ? dev_corridor_investment!(model, vars, input,
-                                                br.from_bus, br.to_bus, transfer_cost) : nothing
 
         for t in 1:hours
             # Thermal limit (p.u.) × scheduled-outage factor
             om = branch_outage_factor(input, br.id, t)
-            cap_pu = inv === nothing ? br.capacity_mva * om / base_mva :
-                     (br.capacity_mva + inv) * (om / base_mva)
+            cap_pu = br.capacity_mva * om / base_mva
             p_from, q_from, p_to, q_to = _branch_flow_expressions(
                 net, av, l, t, formulation)
 
@@ -1108,7 +1102,6 @@ function add_acopf_line_limits!(model::Model, net::ACOPFNetwork,
             end
         end
     end
-    charge_transfer_investment!(model, input, transfer_cost)
 end
 
 # =============================================================================

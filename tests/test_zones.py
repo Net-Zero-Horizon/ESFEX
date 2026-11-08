@@ -76,7 +76,6 @@ def _make_generator(
     technology: str | None = None,
     gen_type: str = "Renewable",
     rated_power: float = 100.0,
-    invest_max_power: float = 0.0,
 ) -> GeneratorConfig:
     """Build a minimal GeneratorConfig for testing."""
     return GeneratorConfig(
@@ -102,7 +101,6 @@ def _make_generator(
         fixed_cost=[10.0] * num_nodes,
         maintenance_cost=[5.0] * num_nodes,
         invest_cost=[1500.0] * num_nodes,
-        invest_max_power=[invest_max_power] * num_nodes,
     )
 
 
@@ -128,9 +126,7 @@ def _make_battery(name: str, num_nodes: int) -> BatteryConfig:
         fixed_cost=[5.0] * num_nodes,
         maintenance_cost=[2.0] * num_nodes,
         invest_cost=[800.0] * num_nodes,
-        invest_cost_energy=[200.0] * num_nodes,
         invest_max_power=[100.0] * num_nodes,
-        invest_max_capacity=[400.0] * num_nodes,
         efficiency_charge=[0.95] * num_nodes,
         efficiency_discharge=[0.95] * num_nodes,
         soc_initial=[0.5] * num_nodes,
@@ -734,14 +730,15 @@ class TestFieldNameConstants:
 
     def test_gen_fields_contain_key_entries(self):
         """Generator fields include critical per-node array names."""
-        for expected in ("rated_power", "invest_cost", "invest_max_power", "life_time"):
+        for expected in ("rated_power", "invest_cost", "life_time"):
             assert expected in _GEN_PER_NODE_FIELDS
+        # Existing generators have no build limit (dispatch-only field, removed)
+        assert "invest_max_power" not in _GEN_PER_NODE_FIELDS
 
     def test_bat_fields_contain_key_entries(self):
         """Battery fields include storage-specific per-node array names."""
         for expected in (
-            "rated_power", "invest_cost", "invest_cost_energy",
-            "invest_max_power", "invest_max_capacity",
+            "rated_power", "invest_cost", "invest_max_power",
             "efficiency_charge", "efficiency_discharge",
             "soc_initial", "max_DoD", "capacity",
             "MaxChargePower", "MaxDischargePower",
@@ -753,7 +750,7 @@ class TestFieldNameConstants:
         common = [
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
             "rated_power", "ramp_up", "ramp_down", "inertia",
-            "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+            "fixed_cost", "maintenance_cost", "invest_cost",
         ]
         for f in common:
             assert f in _GEN_PER_NODE_FIELDS, f"{f} missing from gen fields"
@@ -888,8 +885,8 @@ class TestExpandConfigWithZonesSingleZone:
             arr = getattr(gen_out, field_name)
             assert len(arr) == 3, f"Field {field_name} has length {len(arr)}, expected 3"
 
-    def test_matched_generator_invest_max_power(self):
-        """Matched generator gets zone max_capacity_mw as invest_max_power."""
+    def test_matched_generator_copies_invest_cost(self):
+        """Matched generator copies the reference node's invest_cost."""
         zone = _make_zone(technology="Solar", max_capacity_mw=500.0)
         gen = _make_generator("Solar", "Sun", 2)
         cfg = _make_system_config(
@@ -900,7 +897,8 @@ class TestExpandConfigWithZonesSingleZone:
         result_cfg, mappings = expand_config_with_zones(cfg)
         gen_out = result_cfg.generators["solar_1"]
         # Virtual node is index 2 (0-based)
-        assert gen_out.invest_max_power[2] == 500.0
+        ref = mappings[0].nearest_bus_parent_node
+        assert gen_out.invest_cost[2] == gen_out.invest_cost[ref]
 
     def test_matched_generator_rated_power_zero(self):
         """Matched generator has zero rated_power on virtual node (nothing built yet)."""
@@ -915,8 +913,8 @@ class TestExpandConfigWithZonesSingleZone:
         gen_out = result_cfg.generators["solar_1"]
         assert gen_out.rated_power[2] == 0.0
 
-    def test_unmatched_generator_invest_max_zero(self):
-        """Unmatched generator gets zero invest_max_power on virtual node."""
+    def test_unmatched_generator_invest_cost_zero(self):
+        """Unmatched generator gets zero invest_cost on virtual node."""
         zone = _make_zone(technology="Solar")
         gas_gen = _make_generator("Gas", "NaturalGas", 2, gen_type="Non-renewable")
         cfg = _make_system_config(
@@ -926,7 +924,7 @@ class TestExpandConfigWithZonesSingleZone:
         )
         result_cfg, _ = expand_config_with_zones(cfg)
         gen_out = result_cfg.generators["gas_1"]
-        assert gen_out.invest_max_power[2] == 0.0
+        assert gen_out.invest_cost[2] == 0.0
 
     def test_battery_arrays_expanded(self):
         """Battery per-node arrays grow by 1 per zone."""

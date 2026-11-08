@@ -595,16 +595,6 @@ def _expand_powersystem_result(
         if a.ndim == 3 and a.shape[1] == rm.n_reduced_buses:
             result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
 
-    # ── Per-unit investments [unit x bus]: bus axis = 1 ──
-    for key in ("gen_investment", "bat_investment_power", "bat_investment_capacity",
-                "reservoir_invest_capacity"):
-        arr = result.get(key)
-        if arr is None:
-            continue
-        a = _np.asarray(arr)
-        if a.ndim == 2 and a.shape[1] == rm.n_reduced_buses:
-            result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
-
     # ── Per-bus 2-D arrays: bus axis = 0 ──
     for key in ("voltage_angle", "energy_prices"):
         arr = result.get(key)
@@ -1613,7 +1603,6 @@ class PowerSystemAdapter:
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
                 invest_cost=[0.0] * nn,
-                invest_max_power=[0.0] * nn,
                 frequency_hz=vdata.get("frequency_hz", 50.0),
                 current_type=vdata.get("current_type", "AC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),
@@ -1753,9 +1742,7 @@ class PowerSystemAdapter:
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
                 invest_cost=[0.0] * nn,
-                invest_cost_energy=[0.0] * nn,
                 invest_max_power=[0.0] * nn,
-                invest_max_capacity=[0.0] * nn,
                 throughput_degradation_cost=vdata.get("throughput_degradation_cost", [0.0] * nn),
                 current_type=vdata.get("current_type", "DC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),

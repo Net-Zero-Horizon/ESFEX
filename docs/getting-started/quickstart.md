@@ -88,7 +88,6 @@ systems:
         fixed_cost: [0.0]             # $/MW per year
         maintenance_cost: [10.0]   # $/MWh
         invest_cost: [1000000.0]   # $/MW; prices life extension past life_time
-        invest_max_power: [0.0]
 
     technologies:                  # candidates the master problem may build
       solar_pv:

@@ -398,3 +398,52 @@ def test_studio_validation_lists_unknown_keys(tmp_path):
     issues = validate_state(state, categories={"configuration"})
     assert sorted(i.message.split()[2] for i in issues) == sorted(cfg.unknown_keys)
     assert all(i.severity == "warning" for i in issues)
+
+
+# ── Round 9: keys only the dispatch's own (unreachable) investment read ──
+
+_R9_PATHS = sorted([
+    "systems.island.generators.solar.invest_max_power",
+    "systems.island.generators.diesel.invest_max_power",
+    "systems.island.batteries.bess.invest_cost_energy",
+    "systems.island.batteries.bess.invest_max_capacity",
+])
+
+
+def _r9_old_project() -> dict:
+    raw = _raw()
+    sysd = raw["systems"]["island"]
+    for g in ("solar", "diesel"):
+        sysd["generators"][g]["invest_max_power"] = [10.0, 0.0]
+    sysd["batteries"]["bess"]["invest_cost_energy"] = [100.0, 0.0]
+    sysd["batteries"]["bess"]["invest_max_capacity"] = [40.0, 0.0]
+    return raw
+
+
+def test_round9_removed_investment_keys_are_reported(tmp_path, caplog):
+    """The dispatch never builds (development runs dispatch the master's
+    builds), so the generator build limit and the battery energy investment
+    fields only it read are gone: old files load with the generic warning."""
+    with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+        cfg = load_config(_write(tmp_path, _r9_old_project()))
+    assert sorted(cfg.unknown_keys) == _R9_PATHS
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "deprecated" not in logged.lower()
+    bess = cfg.systems["island"].batteries["bess"]
+    # The battery's power placement in the master is still read
+    assert bess.invest_max_power == [0.0, 0.0]
+    assert not hasattr(cfg.systems["island"].generators["solar"], "invest_max_power")
+
+
+def test_round9_old_project_resaves_without_removed_keys(tmp_path):
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.serializer import (
+        config_to_global_settings, config_to_gui_states, gui_state_to_yaml,
+    )
+
+    cfg = load_config(_write(tmp_path, _r9_old_project()))
+    states = config_to_gui_states(cfg, base_dir=FIXTURE.parent)
+    out = tmp_path / "resaved.yaml"
+    gui_state_to_yaml(states, cfg, out, global_settings=config_to_global_settings(cfg))
+    raw = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert find_unknown_keys(raw) == []

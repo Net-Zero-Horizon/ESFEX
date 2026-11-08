@@ -516,11 +516,6 @@ class TestConvertBattery:
         bat = _convert_battery("bat_0", sample_battery_data)
         assert bat.type == "Storage"
 
-    def test_invest_cost_energy_defaults_to_invest_cost(self, sample_battery_data):
-        """If invest_cost_energy missing, it defaults to invest_cost."""
-        bat = _convert_battery("bat_0", sample_battery_data)
-        assert bat.invest_cost_energy == sample_battery_data["invest_cost"]
-
     def test_studio_fields_are_kept(self, sample_battery_data):
         sample_battery_data.update(
             throughput_degradation_cost=[1.5, 0.0], risk_coefficient=[0.9, 0.0],

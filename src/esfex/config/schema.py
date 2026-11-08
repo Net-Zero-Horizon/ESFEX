@@ -647,7 +647,6 @@ class GeneratorConfig(BaseModel):
     fixed_cost: list[float] = Field(description="Fixed O&M per node ($/MW of power in service per year, charged whether or not the unit runs)")
     maintenance_cost: list[float] = Field(description="Maintenance cost per node ($/MWh)")
     invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW): prices life extension (× life_extension_cost_factor); 0 = taken from the technology with the same fuel and type")
-    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max investment per node (MW) [DEPRECATED: use technologies section]")
 
     # Electrical properties
     frequency_hz: float = Field(default=50.0, gt=0, description="Operating frequency (Hz)")
@@ -765,9 +764,7 @@ class BatteryConfig(BaseModel):
         description="Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present.",
     )
     invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Power investment cost ($/MW): prices life extension; 0 = taken from the battery technology")
-    invest_cost_energy: list[float] = Field(default_factory=lambda: [0.0], description="Energy investment cost ($/MWh) [DEPRECATED: use battery_technologies]")
-    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max power investment (MW) [DEPRECATED: use battery_technologies]")
-    invest_max_capacity: list[float] = Field(default_factory=lambda: [0.0], description="Max capacity investment (MWh) [DEPRECATED: use battery_technologies]")
+    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Power (MW) per node; > 0 places the battery at the node in the master's representative days even without existing power there. New storage is built from battery_technologies")
 
     # Storage-specific parameters
     efficiency_charge: list[float]

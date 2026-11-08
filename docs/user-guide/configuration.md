@@ -274,14 +274,13 @@ Existing units go under `generators`, keyed by a unit id. Every list has one ent
         maintenance_cost: [0.0, 5.0] # $/MWh
         decommissioning_cost: [0.0, 20000.0]  # $/MW
         invest_cost: [0.0, 900000.0] # $/MW, prices life extension
-        invest_max_power: [0.0, 0.0]
         life_time: [0, 25]           # years
         initial_age: [0, 10]         # years
         degradation_rate: [0.0, 0.005]  # fraction/year
         bus_id_per_node: {1: bus_3}  # bus of the South node in the example above
 ```
 
-**Required keys.** `type`, `life_time`, `initial_age`, `degradation_rate`, `decommissioning_cost`, `rated_power`, `min_power`, `min_up`, `min_down`, `ramp_up`, `ramp_down`, `eff_at_rated`, `eff_at_min`, `inertia`, `start_up_cost`, `fuel_cost`, `fixed_cost`, `maintenance_cost`, `invest_cost` and `invest_max_power`. A missing one aborts loading with `Failed to load configuration: '<key>'`. `fuel` defaults to `"None"`, `name` to the unit key. Optional keys: `technology`, `reservable`, `Availability` (profile file, see [Availability Profiles](availability-profiles.md)), `frequency_hz`, `current_type`, `bus_id_per_node`, `bus_index` and the reservoir fields below.
+**Required keys.** `type`, `life_time`, `initial_age`, `degradation_rate`, `decommissioning_cost`, `rated_power`, `min_power`, `min_up`, `min_down`, `ramp_up`, `ramp_down`, `eff_at_rated`, `eff_at_min`, `inertia`, `start_up_cost`, `fuel_cost`, `fixed_cost`, `maintenance_cost` and `invest_cost`. A missing one aborts loading with `Failed to load configuration: '<key>'`. `fuel` defaults to `"None"`, `name` to the unit key. Optional keys: `technology`, `reservable`, `Availability` (profile file, see [Availability Profiles](availability-profiles.md)), `frequency_hz`, `current_type`, `bus_id_per_node`, `bus_index` and the reservoir fields below.
 
 **Units.** `fixed_cost` is fixed O&M in $ per MW per year, charged on the power in service (rated power, degraded with age; none past `life_time` unless the master extends the unit's life) whether or not the unit runs; each dispatch window pays its share of the year. `maintenance_cost` (variable O&M) is charged per MWh generated. Ramp limits are fractions of capacity per hour; with `resolution_hours` > 1 the allowed change per step is `ramp × resolution_hours` (at most the full capacity). `decommissioning_cost` and `invest_cost` are per MW. Investment in new capacity is modelled with `technologies`; a generator's `invest_cost` is used to price life extension.
 
@@ -417,7 +416,7 @@ Every [BatteryTechnologyConfig](../reference/config-reference.md#batterytechnolo
         bus_id_per_node: {0: bus_0}
 ```
 
-All keys above except `name`, `type`, `bus_id_per_node`, `ramp_up`, `ramp_down` and `fixed_cost` are required by the loader. Optional: `ramp_up`/`ramp_down` (how fast charge or discharge power may rise or fall, as a fraction of `MaxChargePower`/`MaxDischargePower` per hour; default 0 = no limit), `fixed_cost` ($ per MW of `MaxDischargePower` per year, default 0), `invest_cost_energy` (defaults to `invest_cost`), `invest_max_capacity`, `min_duration_hours`/`max_duration_hours` (integers), `spillage`, `reservable` (whether the battery holds reserve, default true), `current_type`, `bus_index`, `throughput_degradation_cost` (cycling cost per MWh discharged, default 0), `discharge_cost_curve`, `risk_coefficient`, `Availability`. As a legacy alternative, a unit can be written as a system-level `bat_<n>` key with `type: Storage`. Generator keys that batteries do not use (`min_power`, `min_up`, `min_down`, `eff_at_rated`, `eff_at_min`, `start_up_cost`, `fuel_cost`) are reported as unknown keys.
+All keys above except `name`, `type`, `bus_id_per_node`, `ramp_up`, `ramp_down` and `fixed_cost` are required by the loader. Optional: `ramp_up`/`ramp_down` (how fast charge or discharge power may rise or fall, as a fraction of `MaxChargePower`/`MaxDischargePower` per hour; default 0 = no limit), `fixed_cost` ($ per MW of `MaxDischargePower` per year, default 0), `min_duration_hours`/`max_duration_hours` (integers), `spillage`, `reservable` (whether the battery holds reserve, default true), `current_type`, `bus_index`, `throughput_degradation_cost` (cycling cost per MWh discharged, default 0), `discharge_cost_curve`, `risk_coefficient`, `Availability`. As a legacy alternative, a unit can be written as a system-level `bat_<n>` key with `type: Storage`. Generator keys that batteries do not use (`min_power`, `min_up`, `min_down`, `eff_at_rated`, `eff_at_min`, `start_up_cost`, `fuel_cost`) are reported as unknown keys.
 
 **Availability.** An `Availability` file ([Availability Profiles](availability-profiles.md)) multiplies the battery's charge and discharge power each hour, and the power it can offer as reserve, in the dispatch and in the master problem.
 
@@ -720,7 +719,6 @@ systems:
         maintenance_cost: [2.0, 0.0]
         decommissioning_cost: [0.0, 0.0]
         invest_cost: [700000.0, 0.0]
-        invest_max_power: [0.0, 0.0]
         life_time: [25, 0]
         initial_age: [0, 0]
         degradation_rate: [0.005, 0.0]
@@ -744,7 +742,6 @@ systems:
         maintenance_cost: [0.0, 5.0]   # loader adds 60 $/MWh (diesel non-fuel adder) -> 65
         decommissioning_cost: [0.0, 20000.0]
         invest_cost: [0.0, 900000.0]
-        invest_max_power: [0.0, 0.0]
         life_time: [0, 25]
         initial_age: [0, 10]
         degradation_rate: [0.0, 0.005]

@@ -387,7 +387,6 @@ class YearResults:
     # AC-specific outputs — populated only when power_flow_mode is acopf_*.
     voltage_magnitude: Optional[np.ndarray] = None        # [bus x hour] in p.u.
     reactive_generation: Optional[np.ndarray] = None      # [gen x bus x hour] in MVAr
-    transfer_investment: Optional[dict] = None     # {(from,to): value}
     # Prices [node x hour]
     prices: Optional[np.ndarray] = None
     # Demand [hour x node]
@@ -395,9 +394,6 @@ class YearResults:
     # Investment/retirement decisions
     investments: dict[str, float] = field(default_factory=dict)
     retirements: dict[str, float] = field(default_factory=dict)
-    gen_investment_array: Optional[np.ndarray] = None   # [gen x node]
-    bat_investment_power: Optional[np.ndarray] = None   # [bat x node]
-    bat_investment_capacity: Optional[np.ndarray] = None  # [bat x node]
     # Battery spillage [bat x node x hour]
     bat_spillage: Optional[np.ndarray] = None
     # EV variables [node x hour]
@@ -416,7 +412,6 @@ class YearResults:
     reservoir_level: Optional[np.ndarray] = None
     reservoir_spillage: Optional[np.ndarray] = None
     reservoir_pump: Optional[np.ndarray] = None
-    reservoir_invest_capacity: Optional[np.ndarray] = None  # [gen x node]
     # Electrolyzers [electrolyzer x node x hour], in config order
     electrolyzer_power: Optional[np.ndarray] = None       # MW drawn
     electrolyzer_h2: Optional[np.ndarray] = None          # kg/h of hydrogen
@@ -3154,20 +3149,6 @@ class Orchestrator:
 
         return result
 
-    def _aggregate_unit_buses_to_nodes(self, arr):
-        """Sum a ``[unit x bus]`` array (e.g. investments) into ``[unit x node]``."""
-        if arr is None or self._bus_to_node is None:
-            return arr
-        arr = np.asarray(arr)
-        b2n = self._bus_to_node
-        if arr.ndim != 2 or arr.shape[1] != len(b2n):
-            return arr
-        out = np.zeros((arr.shape[0], self._num_nodes), dtype=float)
-        for b, n in enumerate(b2n):
-            if 0 <= n < self._num_nodes:
-                out[:, n] += arr[:, b]
-        return out
-
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
@@ -3216,8 +3197,7 @@ class Orchestrator:
                 _load("Generator", gen_key, avail_file)
             elif (gen.type == "Renewable"
                   and not any(c > 0 for c in (gen.reservoir_capacity or []))
-                  and (any(p > 0 for p in gen.rated_power)
-                       or any(p > 0 for p in gen.invest_max_power))):
+                  and any(p > 0 for p in gen.rated_power)):
                 _warn_flat_renewable("Generator", gen_key)
 
         # Also preload technology availability profiles
@@ -3918,7 +3898,6 @@ class Orchestrator:
                     degradation_rate=rep(tech.degradation_rate),
                     # Life extension is priced like a new build
                     invest_cost=rep(tech.invest_cost),
-                    invest_max_power=[0.0] * n,
                     decommissioning_cost=rep(tech.decommissioning_cost),
                     bus_id_per_node=bus_ids,
                 )
@@ -3963,8 +3942,7 @@ class Orchestrator:
                     degradation_rate=rep(bat_tech.degradation_rate),
                     # Life extension is priced like a new build
                     invest_cost=rep(bat_tech.invest_cost_power),
-                    invest_cost_energy=rep(bat_tech.invest_cost_energy),
-                    invest_max_power=zeros, invest_max_capacity=zeros,
+                    invest_max_power=zeros,
                     decommissioning_cost=rep(bat_tech.decommissioning_cost),
                     bus_id_per_node=bus_ids,
                 )
@@ -5327,12 +5305,6 @@ class Orchestrator:
         all_n1_binding: list[str] = []
         all_n1_trans_duals: list[dict] = []
         total_n1_security_cost = 0.0
-        # Investment arrays (from last window only, not time-dependent)
-        last_reservoir_invest = None
-        last_gen_investment = None
-        last_bat_inv_power = None
-        last_bat_inv_capacity = None
-        last_transfer_investment = None
         total_objective = 0.0
         total_solve_time = 0.0
         total_load_shed = 0.0
@@ -5629,17 +5601,6 @@ class Orchestrator:
             if window_result.get("electrolyzer_power") is not None:
                 all_electrolyzer_power.append(_trim(window_result["electrolyzer_power"], keep_hours))
                 all_electrolyzer_h2.append(_trim(window_result["electrolyzer_h2"], keep_hours))
-            if window_result.get("reservoir_invest_capacity") is not None:
-                last_reservoir_invest = window_result["reservoir_invest_capacity"]
-            # Investment arrays: keep from last window (not time-varying)
-            if window_result.get("gen_investment") is not None:
-                last_gen_investment = window_result["gen_investment"]
-            if window_result.get("bat_investment_power") is not None:
-                last_bat_inv_power = window_result["bat_investment_power"]
-            if window_result.get("bat_investment_capacity") is not None:
-                last_bat_inv_capacity = window_result["bat_investment_capacity"]
-            if window_result.get("transfer_investment") is not None:
-                last_transfer_investment = window_result["transfer_investment"]
             if window_result.get("primary_energy") is not None:
                 all_pe_results.append(
                     (window_result["primary_energy"], end_hour - start_hour, keep_hours))
@@ -5751,11 +5712,6 @@ class Orchestrator:
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
             electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
             electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
-            # Investments [unit x bus]: SUM across buses in same node
-            last_gen_investment = self._aggregate_unit_buses_to_nodes(last_gen_investment)
-            last_bat_inv_power = self._aggregate_unit_buses_to_nodes(last_bat_inv_power)
-            last_bat_inv_capacity = self._aggregate_unit_buses_to_nodes(last_bat_inv_capacity)
-            last_reservoir_invest = self._aggregate_unit_buses_to_nodes(last_reservoir_invest)
             # Status variables: MAX across buses (1 if active at any bus)
             gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
             # Prices: MAX across buses (highest marginal price)
@@ -5787,12 +5743,8 @@ class Orchestrator:
             voltage_angle=voltage_angle,
             voltage_magnitude=voltage_magnitude,
             reactive_generation=reactive_generation,
-            transfer_investment=last_transfer_investment,
             prices=prices,
             demand=demand,
-            gen_investment_array=last_gen_investment,
-            bat_investment_power=last_bat_inv_power,
-            bat_investment_capacity=last_bat_inv_capacity,
             bat_spillage=bat_spillage,
             ev_charging=ev_charging,
             ev_v2g=ev_v2g,
@@ -5808,7 +5760,6 @@ class Orchestrator:
             reservoir_level=reservoir_level,
             reservoir_spillage=reservoir_spillage,
             reservoir_pump=reservoir_pump,
-            reservoir_invest_capacity=last_reservoir_invest,
             electrolyzer_power=electrolyzer_power,
             electrolyzer_h2=electrolyzer_h2,
             primary_energy=pe_merged,
@@ -6600,7 +6551,6 @@ class Orchestrator:
                 "voltage_angle": solution.get('voltage_angle'),
                 "voltage_magnitude": solution.get('voltage_magnitude'),
                 "reactive_generation": solution.get('reactive_generation'),
-                "transfer_investment": solution.get('transfer_investment'),
                 # EV / V2G dispatch [node x hour] — produced by Julia when
                 # ev_config is set; must be propagated here or the year-level
                 # aggregation drops them and they never reach the H5.
@@ -6620,16 +6570,11 @@ class Orchestrator:
                 "reservoir_level": solution.get('reservoir_level'),
                 "reservoir_spillage": solution.get('reservoir_spillage'),
                 "reservoir_pump": solution.get('reservoir_pump'),
-                "reservoir_invest_capacity": solution.get('reservoir_invest_capacity'),
                 # N-1 security: duals, binding contingencies, security cost
                 "n1_gen_reserve_duals": solution.get('n1_gen_reserve_duals'),
                 "n1_trans_reserve_duals": solution.get('n1_trans_reserve_duals'),
                 "n1_binding_contingencies": solution.get('n1_binding_contingencies'),
                 "n1_security_cost": solution.get('n1_security_cost', 0.0),
-                # Investment arrays
-                "gen_investment": solution.get('gen_investment'),
-                "bat_investment_power": solution.get('bat_investment_power'),
-                "bat_investment_capacity": solution.get('bat_investment_capacity'),
                 # Scalars
                 "load_shed_total": solution.get('load_shed_total', 0.0),
                 "total_curtailment": solution.get('total_curtailment', 0.0),
@@ -7358,7 +7303,6 @@ class Orchestrator:
                     "initial_age": [0] * num_buses,
                     "life_time": [999] * num_buses,
                     "invest_cost": [0.0] * num_buses,
-                    "invest_max_power": [0.0] * num_buses,
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }
@@ -7464,9 +7408,7 @@ class Orchestrator:
                     "initial_age": [0] * num_buses,
                     "life_time": [999] * num_buses,
                     "invest_cost": [0.0] * num_buses,
-                    "invest_cost_energy": [0.0] * num_buses,
                     "invest_max_power": [0.0] * num_buses,
-                    "invest_max_capacity": [0.0] * num_buses,
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }
@@ -8064,58 +8006,6 @@ class Orchestrator:
                         "bus-pair flows aggregated to node-pair via bus_to_node"
                     )
 
-            # --- Transfer investment [from x to] ---
-            if result.transfer_investment and isinstance(result.transfer_investment, dict):
-                trans_inv_array = np.zeros((num_nodes, num_nodes))
-                for (i, j), val in result.transfer_investment.items():
-                    if i < num_nodes and j < num_nodes:
-                        trans_inv_array[i, j] = val
-                ds = scenario.create_dataset(
-                    "transfer_investment", data=trans_inv_array,
-                    chunks=True, compression="gzip",
-                )
-                ds.attrs["shape"] = f"[{num_nodes} from_nodes x {num_nodes} to_nodes]"
-                ds.attrs["units"] = "MW"
-                ds.attrs["description"] = "Transmission capacity investment"
-
-            # --- Generator investment [gen x node] ---
-            if result.gen_investment_array is not None:
-                inv_group = scenario.create_group("gen_investment_power")
-                inv_group.attrs["description"] = "Generator capacity investment [nodes] for each generator"
-                inv_group.attrs["units"] = "MW"
-                for g, name in enumerate(self._gen_names):
-                    if g < result.gen_investment_array.shape[0]:
-                        ds = inv_group.create_dataset(
-                            gen_ds[g], data=result.gen_investment_array[g],
-                            chunks=True, compression="gzip",
-                        )
-                        ds.attrs["shape"] = f"[{num_nodes} nodes]"
-
-            # --- Battery investment [bat x node] ---
-            if result.bat_investment_power is not None:
-                inv_group = scenario.create_group("bat_investment_power")
-                inv_group.attrs["description"] = "Battery power capacity investment [nodes] for each battery"
-                inv_group.attrs["units"] = "MW"
-                for b, name in enumerate(self._bat_names):
-                    if b < result.bat_investment_power.shape[0]:
-                        ds = inv_group.create_dataset(
-                            bat_ds[b], data=result.bat_investment_power[b],
-                            chunks=True, compression="gzip",
-                        )
-                        ds.attrs["shape"] = f"[{num_nodes} nodes]"
-
-            if result.bat_investment_capacity is not None:
-                inv_group = scenario.create_group("bat_investment_capacity")
-                inv_group.attrs["description"] = "Battery energy capacity investment [nodes] for each battery"
-                inv_group.attrs["units"] = "MWh"
-                for b, name in enumerate(self._bat_names):
-                    if b < result.bat_investment_capacity.shape[0]:
-                        ds = inv_group.create_dataset(
-                            bat_ds[b], data=result.bat_investment_capacity[b],
-                            chunks=True, compression="gzip",
-                        )
-                        ds.attrs["shape"] = f"[{num_nodes} nodes]"
-
             # --- Capacity Factor (per generator) ---
             if result.capacity_factor is not None:
                 cf_group = scenario.create_group("capacity_factor")
@@ -8335,16 +8225,6 @@ class Orchestrator:
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW-eq"
-
-            if result.reservoir_invest_capacity is not None:
-                rinv_group = scenario.create_group("reservoir_invest_capacity")
-                rinv_group.attrs["description"] = "Reservoir capacity investment [nodes] per gen"
-                for g, name in enumerate(self._gen_names):
-                    if g < result.reservoir_invest_capacity.shape[0]:
-                        ds = rinv_group.create_dataset(
-                            gen_ds[g], data=result.reservoir_invest_capacity[g],
-                        )
-                        ds.attrs["units"] = "MWh"
 
             if result.reservoir_pump is not None:
                 pump_group = scenario.create_group("reservoir_pump")

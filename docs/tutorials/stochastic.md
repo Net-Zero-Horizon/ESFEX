@@ -202,7 +202,6 @@ systems:
         fixed_cost: [0.0]
         maintenance_cost: [10.0]
         invest_cost: [1000000.0]
-        invest_max_power: [0.0]
 
     technologies:
       solar_pv:

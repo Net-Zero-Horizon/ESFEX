@@ -132,7 +132,7 @@ def test_electrolyzer_hydrogen_feeds_the_hydrogen_tank():
         let H = 2, z = [0.0]
             gen(name, type, fuel, rated, avail) = GeneratorConfig(
                 name, type, fuel, [rated], z, [0.5], [0.4], [1.0], [1.0], z, z, z,
-                z, z, z, z, z, z, avail, false, [30.0], z, z, z, 50.0, "AC",
+                z, z, z, z, z, avail, false, [30.0], z, z, z, 50.0, "AC",
                 z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z)
             bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
             net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),

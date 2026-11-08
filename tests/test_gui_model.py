@@ -1240,8 +1240,8 @@ class TestGuiInvestmentEntry:
         assert ie.target_key == ""
         assert ie.technology_id == ""
         assert ie.node_data == []
-        assert ie.invest_cost_energy == {}
-        assert ie.invest_max_capacity == {}
+        # The battery energy columns went with the dispatch's own investment
+        assert not hasattr(ie, "invest_cost_energy")
 
     def test_with_node_data(self):
         nd = [
