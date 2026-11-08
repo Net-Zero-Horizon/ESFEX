@@ -906,7 +906,7 @@ Configuration for electrolyzer/hydrogen production system.
 - `ramp_down::Vector{Float64}`: Ramp down rate (fraction/hour)
 - `invest_cost::Vector{Float64}`: Investment cost (\$/MW)
 - `invest_max_power::Vector{Float64}`: Maximum investment per node (MW)
-- `fixed_cost::Vector{Float64}`: Fixed O&M cost (\$/MW/h)
+- `fixed_cost::Vector{Float64}`: Fixed O&M cost (\$/MW·year of rated power)
 - `variable_cost::Vector{Float64}`: Variable cost (\$/MWh)
 - `water_cost::Float64`: Water cost (\$/kg H2)
 - `life_time::Vector{Float64}`: Economic lifetime per node (years)

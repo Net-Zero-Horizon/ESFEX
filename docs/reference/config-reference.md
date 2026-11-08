@@ -806,7 +806,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `eff_at_rated` | list[float] | required | Efficiency at rated load per node |
 | `eff_at_min` | list[float] | required | Efficiency at minimum load per node |
 | `energy_per_kg_h2` | float | `50` | Specific energy (kWh/kg H₂) |
-| `fixed_cost` | list[float] | required | Fixed cost per node ($/MW·h of rated power) |
+| `fixed_cost` | list[float] | required | Fixed O&M per node ($/MW of rated power per year) |
 | `variable_cost` | list[float] | required | Variable cost per node |
 | `water_cost` | float | `0.001` | Water cost ($/kg H₂) |
 | `invest_cost` | list[float] | required | Investment cost per node ($/MW) |
