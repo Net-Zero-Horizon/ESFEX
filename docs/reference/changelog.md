@@ -676,6 +676,72 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   arguments fewer; the 20- and 17-argument short forms replace the 23- and
   20-argument ones).
 
+- **`fixed_cost` of generators and candidate technologies is fixed O&M in
+  $/MW·yr.** It was added to the per-MWh operating cost (dispatch objective,
+  master representative days, Benders subproblems, the cost-ceiling
+  constraint), so a unit that did not run paid no fixed O&M and the value
+  acted as a variable cost. It is now charged, like the batteries'
+  `fixed_cost`, on the capacity in service whether or not the unit runs:
+  each dispatch window pays its share of the year (degraded rated power, 0
+  past `life_time`, plus capacity a delayed retirement keeps), and the master
+  and the Benders master charge it once per year, discounted like the other
+  annual costs, on the same MW the dispatch then receives: existing units
+  within their lifetime at their degraded power, life-extended MW, and the
+  technology MW built, degraded and not yet retired. The master's yearly
+  fixed O&M is therefore 8760 / window hours times a window's. Fixed O&M no
+  longer changes the merit order. **Existing configurations must convert
+  their values** (a former 5 $/MWh at a 50 % capacity factor is about
+  22 000 $/MW·yr); typical values are 15 000–45 000 $/MW·yr. The Studio's
+  generator form shows Fixed ($/MW·yr) with a tooltip, and the documentation
+  examples use realistic values.
+- **`gen_fixed_cost` scales every fixed O&M.** The stochastic multiplier now
+  scales the fixed O&M of generators, technologies, batteries and battery
+  technologies (it did not reach batteries) as a per-year cost of each
+  scenario, instead of a per-MWh operating cost.
+- **The loader's non-fuel O&M adder skips units with their own fixed O&M.**
+  The adder (Lazard non-fuel LCOE, 20–60 $/MWh added to `maintenance_cost`)
+  includes fixed O&M, so a generator with `fixed_cost` > 0 paid it twice. The
+  adder stays a per-MWh cost, but is no longer applied to a unit with a
+  `fixed_cost`, as it already was not to one with a substantial
+  `maintenance_cost`; the log message says so.
+
+- **Settings with no effect removed.** `primary_energy_sources.<fuel>.
+  transport_cost` and `transport_losses` (route costs and losses come from
+  `fuel_transport_routes`) and `non_electric_demand.<name>.is_flexible`,
+  `flexibility_ratio`, `criticality` and `delay_tolerance` (the
+  primary-energy model takes non-electric demand as a fixed annual demand)
+  are gone; old files load with the unknown-key warning. The Studio's
+  non-electric demand table keeps only Unit and Demand. The unused Julia
+  function `recover_uc_duals!` (it read the commitment values after
+  changing the model, so it could not work; runs use
+  `recover_uc_duals_via_copy`) is removed.
+- **`systems_links.loss_factor` is optional.** Only fuel-route links use it
+  (route losses per 100 km, a missing entry is 0); a transmission link no
+  longer has to carry it.
+
+- **The dispatch's own investment code is gone.** A `development` run
+  dispatches each year as `economic_dispatch` (or `unit_commitment` with
+  `use_uc_in_dispatch`) on the master's builds, so the dispatch's
+  development-mode investment (generator, battery power and energy,
+  reservoir and corridor investment variables, their limits and costs, the
+  per-node investment limits) could never run. It is removed, together with
+  what only it read or wrote: the generator field `invest_max_power`, the
+  battery fields `invest_cost_energy` and `invest_max_capacity` (new storage
+  energy is built from `battery_technologies`), the result fields
+  `gen_investment`, `bat_investment_power`, `bat_investment_capacity`,
+  `transfer_investment` and `reservoir_invest_capacity`, the cost-breakdown
+  entries `investment_cost` and `reservoir_invest_cost` of the dispatch, and
+  the HDF5 groups `gen_investment_power/`, `bat_investment_power/`,
+  `bat_investment_capacity/`, `reservoir_invest_capacity/` and the
+  `transfer_investment` dataset of each year (they were always empty). A
+  YAML file that still has these keys loads with the generic unknown-key
+  warning. A battery's `invest_max_power` stays: it places the battery at a
+  node in the master's representative days. In the Studio's Investment
+  Portfolio a Generator entry now has only an Invest Cost column (it prices
+  the unit's life extension), and a Battery entry no longer has the Energy
+  Cost and Energy Max columns. A generator with only an investment limit at
+  a node no longer gets a Studio instance there.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -1574,6 +1640,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   unit is within its original `life_time`), not MW. Generator and battery
   `invest_cost` are no longer labelled deprecated: they price life
   extension, and a 0 is filled from the matching technology.
+
+- **Reports value fixed O&M per MW·yr.** The per-hour LCOE now spreads the
+  result hours' share of the fixed O&M over the energy produced (it added
+  `fixed_cost` as if it were $/MWh); the financial analysis (cost
+  reconstruction, per-technology and new-investment O&M) and the dashboard's
+  per-system cost breakdown charge it on rated power for the simulated share
+  of the year, including idle units, and the dashboard now includes the
+  batteries' fixed O&M. The unit NPV helpers (`calculate_unit_npv` of the
+  dispatch and the master) charge it per MW·yr too, and the battery NPV of
+  the dispatch now includes its fixed cost.
+
+- **Units past their lifetime retire in the dispatch, degraded or not.** The
+  dispatch zeroed a generator or battery at the end of its `life_time` only
+  when it had a degradation rate, so an undegraded unit the master retired
+  ran on at full capacity in `economic_dispatch` and `unit_commitment` runs
+  (and was charged fixed O&M on it). It now retires at the end of its
+  lifetime as in the master; the reserves, curtailment and N-1 terms use the
+  same power in service. In a `development` run the master's decisions stand:
+  the capacity the master keeps (life extension included) reaches the
+  dispatch with no end of life, and an existing battery past its lifetime
+  gets the power and energy the master keeps (it was zeroed with a
+  degradation rate, or kept in full without one).
+- **Life-extended units are no longer reported as retired.** The master's
+  retirement output (`gen_life_extension` / `bat_life_extension`, the HDF5
+  `retirement_gen_{g}` attributes, `YearResults.retirements` and the log
+  tables) read a flag that was 0 for every unit past its original lifetime,
+  extended or not. It is now the share in service: 1 within the lifetime,
+  and past it the share of the capacity the master keeps.
+- **Multi-system runs: availability and inflow profiles at the right
+  nodes.** A unit's availability file (generators, technologies, batteries,
+  battery technologies) and reservoir inflow file has one column per node of
+  its own system, but it was read as if it covered the merged node set: the
+  second system's units got their profile at the first system's nodes and
+  their last column repeated at their own. Each system's profile is now
+  placed at that system's nodes.
+- **CVaR α accepts the whole schema range.** The Risk Workbench's CVaR α box
+  took only 0.80–0.99 and Global Settings' 0.01–0.99 in steps of 0.01, while
+  `risk.cvar_alpha` may be any value in (0, 1): a saved 0.5 or 0.995 was
+  shown and saved back changed. Both now take 0.001–0.999.
+
+- **Studio save of a cost curve on a unit missing at some nodes.** A
+  generator's fuel cost curve (or a battery's discharge curve) was written
+  with `null` at the nodes where the unit has no instance, and the saved
+  file then failed to load. Those nodes now get a flat curve.
 
 ## [0.3.0] — 2026-08-27
 
