@@ -481,6 +481,11 @@ _TERM_CLEAR = 12         # ... and this far from other stubs on the same face
 _EQ_PITCH_JS = 72.0      # equipment pitch used by the JS renderer
 _EQ_CLEAR = 30           # lines leaving downwards keep this far from equipment
 _FACE_ROOM = 14          # bar length needed per line terminal on one face
+_BYPASS_PAD = 30         # a transformer skipping a row passes the bars this far out
+_BYPASS_STEP = 20        # ... parallel ones this far apart
+_BYPASS_MARGIN_Y = 24    # ... turning this far from the bars it joins
+_XFMR_SPACING = 64       # transformers on one bar face at least this far apart
+_ROUTED_XFMR_PAD = 50    # frame room beside a routed transformer (windings, rating)
 
 
 def _bus_positions_for_layout(state, group_meta, edge_records):
@@ -501,10 +506,13 @@ def _bus_positions_for_layout(state, group_meta, edge_records):
 
 
 def _equip_stub_xs(child: dict, n_eq: int) -> list[float]:
-    """X of each equipment stub below a horizontal bar (as the JS draws)."""
+    """X of each equipment stub below a horizontal bar (as the JS draws):
+    a row centred on the bar, or on ``equipCenter`` (from the bar's left
+    end) when the layout set one."""
     if n_eq <= 0:
         return []
-    start = child["x"] + (child["width"] - n_eq * _EQ_PITCH_JS) / 2.0 + _EQ_PITCH_JS / 2.0
+    centre = child["x"] + child["properties"].get("equipCenter", child["width"] / 2.0)
+    start = centre - n_eq * _EQ_PITCH_JS / 2.0 + _EQ_PITCH_JS / 2.0
     return [start + i * _EQ_PITCH_JS for i in range(n_eq)]
 
 
@@ -520,10 +528,13 @@ def _block_bbox(children, edges, bus_equipment, framed: bool):
         y0 = min(y0, c["y"] - 18)
         y1 = max(y1, c["y"] + below)
     for e in edges:
+        # A routed transformer carries its windings and rating on a bend.
+        pad = (_ROUTED_XFMR_PAD if e["properties"].get("edgeType") == "transformer"
+               and not e["properties"].get("transformerVertical") else 10)
         for sec in e.get("sections", []):
             for p in [sec["startPoint"], sec["endPoint"]] + sec.get("bendPoints", []):
-                x0 = min(x0, p["x"] - 10)
-                x1 = max(x1, p["x"] + 10)
+                x0 = min(x0, p["x"] - pad)
+                x1 = max(x1, p["x"] + pad)
                 y0 = min(y0, p["y"] - 10)
                 y1 = max(y1, p["y"] + 10)
     if framed:
@@ -832,6 +843,26 @@ def _apply_site_layout(
     return groups
 
 
+def _vertical_x(edge, bus_index, term_x, fixed=None):
+    """``(x, upper gid, lower gid)`` of a transformer drawn as a vertical:
+    its place in ``fixed`` if it has one, else its terminal slot on the upper
+    bar clamped to the overlap of the two bars, or, when they don't overlap,
+    the upper bar's centre clamped to the lower bar."""
+    s0, t0 = edge["sources"][0], edge["targets"][0]
+    src, tgt = bus_index[s0], bus_index[t0]
+    ug, lg = (s0, t0) if src["y"] < tgt["y"] else (t0, s0)
+    if fixed and edge["id"] in fixed:
+        return fixed[edge["id"]], ug, lg
+    upper, lower = bus_index[ug], bus_index[lg]
+    ox0 = max(upper["x"], lower["x"])
+    ox1 = min(upper["x"] + upper["width"], lower["x"] + lower["width"])
+    if ox1 > ox0:
+        cx = (term_x or {}).get((ug, edge["id"]), (ox0 + ox1) / 2.0)
+        return min(max(cx, ox0), ox1), ug, lg
+    uc = upper["x"] + upper["width"] / 2.0
+    return min(max(uc, lower["x"]), lower["x"] + lower["width"]), ug, lg
+
+
 def _apply_grid_layout(
     elk_children: list[dict],
     elk_edges: list[dict],
@@ -932,6 +963,7 @@ def _apply_grid_layout(
                for c in elk_children}
     bus_left: dict[str, float] = {}
     bus_wide: dict[str, float] = {}
+    eq_left: dict[str, tuple[float, float]] = {}     # equipment stretch (left, width)
 
     node_x_left: dict[int, float] = {}
     node_col_w: dict[int, float] = {}
@@ -943,9 +975,14 @@ def _apply_grid_layout(
         nset = set(nlist)
         leaf_cursor = [cursor_x]
         placed: set[str] = set()
+        order: list[str] = []
 
-        def _place(gid: str, nset=nset, placed=placed, leaf_cursor=leaf_cursor):
+        def _place(gid: str, nset=nset, placed=placed, leaf_cursor=leaf_cursor,
+                   order=order):
             placed.add(gid)
+            start = leaf_cursor[0]
+            first = len(order)
+            order.append(gid)
             kids = [k for k in children_of.get(gid, [])
                     if k in nset and k not in placed]
             if not kids:
@@ -954,14 +991,36 @@ def _apply_grid_layout(
                 bus_wide[gid] = bus_w0[gid]
                 leaf_cursor[0] += bus_w0[gid] + _INTRA_NODE_GAP_X
                 return xl, xl + bus_w0[gid]
-            spans = [_place(k) for k in kids]
+            # The bar's own equipment takes a stretch between its children,
+            # so it hangs where no transformer drops to them.
+            n_eq = len((bus_equipment or {}).get(gid, []))
+            half = len(kids) // 2
+            spans = [_place(k) for k in kids[:half]]
+            if n_eq:
+                eq_w = n_eq * _EQ_PITCH_JS + 2 * _EQ_CLEAR
+                eq_left[gid] = (leaf_cursor[0], eq_w)
+                spans.append((leaf_cursor[0], leaf_cursor[0] + eq_w))
+                leaf_cursor[0] += eq_w + _INTRA_NODE_GAP_X
+            spans += [_place(k) for k in kids[half:]]
             left = min(s[0] for s in spans)
             right = max(s[1] for s in spans)
             w = max(bus_w0[gid], right - left)
             cx = (left + right) / 2.0
             xl = cx - w / 2.0
+            # A bar longer than its children's span sticks out on both
+            # sides: move the subtree right so it clears the bars placed
+            # before it, and the next subtree starts after its right end.
+            d = max(0.0, start - xl)
+            if d:
+                for g in order[first + 1:]:
+                    bus_left[g] += d
+                for g in order[first:]:
+                    if g in eq_left:
+                        eq_left[g] = (eq_left[g][0] + d, eq_left[g][1])
+                xl += d
             bus_left[gid] = xl
             bus_wide[gid] = w
+            leaf_cursor[0] = max(leaf_cursor[0] + d, xl + w + _INTRA_NODE_GAP_X)
             return xl, xl + w
 
         roots = [g for g in nlist
@@ -997,6 +1056,10 @@ def _apply_grid_layout(
         c["x"] = bus_left.get(g, 0.0)
         c["width"] = bus_wide.get(g, c["width"])
         c["y"] = row_y[row_of[g]]
+        if g in eq_left:
+            c["properties"]["equipCenter"] = eq_left[g][0] + eq_left[g][1] / 2.0 - c["x"]
+        else:
+            c["properties"].pop("equipCenter", None)
 
     # ── 7. Edge routing with per-edge lane assignment.
     #      Each inter-row edge gets its own horizontal lane Y in the
@@ -1158,14 +1221,51 @@ def _apply_grid_layout(
     edge_kind = {_e["id"]: _e["properties"].get("edgeType", "transmission")
                  for _e in elk_edges}
     bus_center_x = {gid: c["x"] + c["width"] / 2 for gid, c in bus_index.items()}
+
+    # ── 7b. Transformers that skip a row (a 220/110 kV unit with a 187 kV bar
+    #       between its two bars) cannot drop straight down: the vertical would
+    #       cut the bar in between and its windings would sit on it. They take
+    #       a corridor past those bars instead (see 7b' below). ──
+    bypass: dict[str, dict] = {}
+    skip_cuts: dict[str, list[tuple[float, float]]] = {}
+    for _e in elk_edges:
+        if edge_kind.get(_e["id"]) != "transformer":
+            continue
+        _s = bus_index.get(_e["sources"][0])
+        _t = bus_index.get(_e["targets"][0])
+        if not _s or not _t:
+            continue
+        _ru, _rl = row_of[_s["id"]], row_of[_t["id"]]
+        if abs(_ru - _rl) < 2:
+            continue
+        _up, _lo = (_s, _t) if _ru < _rl else (_t, _s)
+        _ru, _rl = min(_ru, _rl), max(_ru, _rl)
+        between = [c for c in elk_children if _ru < row_of[c["id"]] < _rl]
+        cuts = [(c["x"] - _BYPASS_PAD, c["x"] + c["width"] + _BYPASS_PAD) for c in between]
+        o0 = max(_up["x"], _lo["x"]) + _TERM_EDGE_PAD
+        o1 = min(_up["x"] + _up["width"], _lo["x"] + _lo["width"]) - _TERM_EDGE_PAD
+        if o1 > o0:
+            straight = bool(_free_stretches(o0, o1, [], cuts))
+            if straight:
+                skip_cuts[_e["id"]] = cuts   # 7a' keeps it to the clear way down
+        else:
+            x = _vertical_x(_e, bus_index, None)[0]
+            straight = not any(a < x < b for a, b in cuts)
+        if not straight:
+            bypass[_e["id"]] = {"upper": _up["id"], "lower": _lo["id"],
+                                "between": between}
+
     bus_edge_list: dict[str, list[tuple[str, str]]] = {gid: [] for gid in bus_index}
     for _e in elk_edges:
+        if _e["id"] in bypass:
+            continue                    # their terminals are placed in 7b'
         s0, t0 = _e["sources"][0], _e["targets"][0]
         if s0 in bus_edge_list:
             bus_edge_list[s0].append((_e["id"], t0))
         if t0 in bus_edge_list:
             bus_edge_list[t0].append((_e["id"], s0))
     term_x: dict[tuple[str, str], float] = {}
+    eq_span: dict[str, tuple[float, float]] = {}
     for gid, lst in bus_edge_list.items():
         c = bus_index[gid]
         lst.sort(key=lambda e: bus_center_x.get(e[1], c["x"]))
@@ -1178,12 +1278,214 @@ def _apply_grid_layout(
         x1 = c["x"] + c["width"] - _TERM_PAD
         if x1 <= x0:
             x0, x1 = c["x"], c["x"] + c["width"]
-        span = x1 - x0
+        # The equipment hanging below the bar keeps its stretch: a line or
+        # transformer leaving there would run through the symbols.
+        eq_xs = _equip_stub_xs(c, len((bus_equipment or {}).get(gid, [])))
+        if eq_xs:
+            eq_span[gid] = (min(eq_xs) - _EQ_CLEAR, max(eq_xs) + _EQ_CLEAR)
+        free = _free_stretches(x0, x1, [], [eq_span[gid]] if eq_xs else [])
+        room = sum(f1 - f0 for f0, f1 in free)
+        if room < 0.5 * (x1 - x0) or not free:
+            free, room = [(x0, x1)], x1 - x0
         cum = 0.0
         for (eid, _other), w in zip(lst, weights):
-            centre = cum + w / 2.0
-            term_x[(gid, eid)] = x0 + (centre / total) * span if total else (x0 + x1) / 2
+            d = (cum + w / 2.0) / total * room if total else room / 2.0
+            for f0, f1 in free:
+                if d <= f1 - f0:
+                    term_x[(gid, eid)] = f0 + d
+                    break
+                d -= f1 - f0
+            else:
+                term_x[(gid, eid)] = free[-1][1]
             cum += w
+
+    # ── 7a'. The X of each transformer drawn as a vertical: inside the
+    #        overlap of its two bars, as near its slot on the upper bar as
+    #        the room allows, clear of the upper bar's equipment and far
+    #        enough from the other transformers on either bar for the
+    #        windings and the rating beside them. ──
+    vert_x: dict[str, float] = {}
+    line_face: dict[tuple[str, str], list[float]] = {}
+    for _e in elk_edges:
+        if edge_kind.get(_e["id"]) == "transformer":
+            continue
+        s0, t0 = _e["sources"][0], _e["targets"][0]
+        if s0 not in bus_index or t0 not in bus_index:
+            continue
+        ys, yt = bus_index[s0]["y"], bus_index[t0]["y"]
+        if ys == yt:
+            fs = ft = "t" if _e["id"] in same_row_above else "b"
+        else:
+            fs, ft = ("b", "t") if ys < yt else ("t", "b")
+        for g, f in ((s0, fs), (t0, ft)):
+            if (g, _e["id"]) in term_x:
+                line_face.setdefault((g, f), []).append(term_x[(g, _e["id"])])
+    xf_face: dict[tuple[str, str], list[float]] = {}
+    verts = []
+    for _e in elk_edges:
+        if (edge_kind.get(_e["id"]) == "transformer" and _e["id"] not in bypass
+                and _e["sources"][0] in bus_index and _e["targets"][0] in bus_index):
+            cx, ug, lg = _vertical_x(_e, bus_index, term_x)
+            verts.append((ug, term_x.get((ug, _e["id"]), cx), _e, lg))
+    for ug, slot, _e, lg in sorted(verts, key=lambda v: (v[0], v[1], v[2]["id"])):
+        up_c, lo_c = bus_index[ug], bus_index[lg]
+        o0 = max(up_c["x"], lo_c["x"]) + _TERM_EDGE_PAD
+        o1 = min(up_c["x"] + up_c["width"], lo_c["x"] + lo_c["width"]) - _TERM_EDGE_PAD
+        if o1 <= o0:
+            continue                         # keeps the plain rule
+        hard = ([eq_span[ug]] if ug in eq_span else []) + skip_cuts.get(_e["id"], [])
+        cuts = list(hard)
+        cuts += [(x - _XFMR_SPACING, x + _XFMR_SPACING)
+                 for x in xf_face.get((ug, "b"), []) + xf_face.get((lg, "t"), [])]
+        cuts += [(x - 2 * _TERM_CLEAR, x + 2 * _TERM_CLEAR)
+                 for x in line_face.get((ug, "b"), []) + line_face.get((lg, "t"), [])]
+        free = _free_stretches(o0, o1, [], cuts)
+        if not free:   # crowded: at least stay off the other transformers
+            free = _free_stretches(o0, o1, [], skip_cuts.get(_e["id"], []) + [
+                (x - 2 * _TERM_CLEAR, x + 2 * _TERM_CLEAR)
+                for x in xf_face.get((ug, "b"), []) + xf_face.get((lg, "t"), [])])
+        want = min(max(slot, o0), o1)
+        x = (min((min(max(want, f0), f1) for f0, f1 in free), key=lambda v: abs(v - want))
+             if free else want)
+        vert_x[_e["id"]] = x
+        xf_face.setdefault((ug, "b"), []).append(x)
+        xf_face.setdefault((lg, "t"), []).append(x)
+
+    # ── 7b'. Bypass routes: down from the upper bar into the gap below it,
+    #        across to a corridor clear of the bars in between, down it, and
+    #        across to the lower bar. The corridor is the clear stretch that
+    #        crosses the fewest legs (other transformers, equipment stubs) on
+    #        the two runs across, then the shortest; the terminals take the
+    #        free spot of each bar nearest to it. ──
+    face_occ = {k: list(v) for k, v in line_face.items()}   # terminal Xs per face
+    legs: list[tuple[float, float, float]] = []             # vertical (x, y0, y1)
+    for _ug, _slot, _e, _lg in verts:
+        cx, ug, lg = _vertical_x(_e, bus_index, term_x, vert_x)
+        face_occ.setdefault((ug, "b"), []).append(cx)
+        face_occ.setdefault((lg, "t"), []).append(cx)
+        legs.append((cx, bus_index[ug]["y"] + _BUS_H, bus_index[lg]["y"]))
+    eq_rows: list[tuple[float, float, float, float]] = []    # (x0, x1, y0, y1)
+    for gid, (a, b) in eq_span.items():
+        yt = bus_index[gid]["y"] + _BUS_H
+        eq_rows.append((a, b, yt, yt + _STUB_LEN + _EQUIP_SIZE))
+
+    def _face_spot(gid, face, want):
+        """Free X on a bar face nearest ``want``."""
+        c = bus_index[gid]
+        lo, hi = c["x"] + _TERM_PAD, c["x"] + c["width"] - _TERM_PAD
+        blocked = [eq_span[gid]] if face == "b" and gid in eq_span else []
+        free = _free_stretches(lo, hi, [], blocked + [
+            (x - 2 * _TERM_CLEAR, x + 2 * _TERM_CLEAR) for x in face_occ.get((gid, face), [])])
+        if not free:
+            return min(max(want, lo), hi)
+        return min((min(max(want, f0), f1) for f0, f1 in free), key=lambda x: abs(x - want))
+
+    def _crossings(x0, x1, y):
+        a, b = min(x0, x1), max(x0, x1)
+        return sum(1 for (x, y0, y1) in legs if a < x < b and y0 < y < y1)
+
+    xs_all = [c["x"] for c in elk_children] + [c["x"] + c["width"] for c in elk_children]
+    used_cx: list[float] = []
+    for eid in sorted(bypass):
+        b = bypass[eid]
+        up_c, lo_c = bus_index[b["upper"]], bus_index[b["lower"]]
+        y_up = up_c["y"] + _BUS_H + _BYPASS_MARGIN_Y
+        y_lo = lo_c["y"] - _BYPASS_MARGIN_Y
+        cuts = sorted((c["x"] - _BYPASS_PAD, c["x"] + c["width"] + _BYPASS_PAD)
+                      for c in b["between"])
+        clear = _free_stretches(min(xs_all) - 4 * _BYPASS_PAD,
+                                max(xs_all) + 4 * _BYPASS_PAD, [], cuts)
+        o0 = max(up_c["x"], lo_c["x"])
+        o1 = min(up_c["x"] + up_c["width"], lo_c["x"] + lo_c["width"])
+        if o1 < o0:
+            o0 = o1 = (bus_center_x[up_c["id"]] + bus_center_x[lo_c["id"]]) / 2.0
+        best = None
+        for f0, f1 in clear:
+            t = min(max((o0 + o1) / 2.0, f0), f1)
+            tries = [t] + [t + s * k * _BYPASS_STEP for k in range(1, 8) for s in (1, -1)]
+            for x in tries:
+                if not f0 <= x <= f1 or any(abs(x - u) < _BYPASS_STEP - 0.5 for u in used_cx):
+                    continue
+                ux = _face_spot(up_c["id"], "b", x)
+                lx = _face_spot(lo_c["id"], "t", x)
+                cost = (500 * (_crossings(ux, x, y_up) + _crossings(x, lx, y_lo))
+                        + abs(ux - x) + abs(lx - x) + (100 if f1 - f0 < 20 else 0))
+                if best is None or cost < best[0]:
+                    best = (cost, x, ux, lx)
+                break
+        if best is None:
+            best = (0, max(xs_all) + 2 * _BYPASS_PAD + _BYPASS_STEP * len(used_cx),
+                    _face_spot(up_c["id"], "b", max(xs_all)),
+                    _face_spot(lo_c["id"], "t", max(xs_all)))
+        _cost, cx, ux, lx = best
+        # A run across under a row of equipment passes below the symbols.
+        lo_x, hi_x = min(ux, cx), max(ux, cx)
+        under = [y1 for (a, b2, y0, y1) in eq_rows
+                 if a < hi_x and b2 > lo_x and y0 < y_up < y1]
+        b["base_up"] = max(under) + _BYPASS_MARGIN_Y if under else y_up
+        used_cx.append(cx)
+        face_occ.setdefault((up_c["id"], "b"), []).append(ux)
+        face_occ.setdefault((lo_c["id"], "t"), []).append(lx)
+        b.update(cx=cx, ux=ux, lx=lx)
+        term_x[(b["upper"], eid)] = ux
+        term_x[(b["lower"], eid)] = lx
+        legs.append((cx, y_up, y_lo))
+
+    # Parallel units between the same two bars with their corridors on the
+    # same side nest: the one whose terminals sit nearest the corridor side
+    # takes the outermost corridor.
+    nests: dict[tuple, list[str]] = {}
+    for eid, b in bypass.items():
+        nests.setdefault((b["upper"], b["lower"], b["cx"] > b["ux"]), []).append(eid)
+    for eids in nests.values():
+        if len(eids) < 2:
+            continue
+        for key in ("ux", "cx", "lx"):
+            vals = sorted(bypass[e][key] for e in eids)
+            for e, v in zip(sorted(eids, key=lambda e: bypass[e]["ux"]), vals):
+                bypass[e][key] = v
+        for e in eids:
+            term_x[(bypass[e]["upper"], e)] = bypass[e]["ux"]
+            term_x[(bypass[e]["lower"], e)] = bypass[e]["lx"]
+
+    # Lanes: on one bar face, a run across that passes another unit's
+    # terminal must turn farther from the bar than it, and one that passes
+    # another's corridor nearer, or the two would cross.
+    for end, key in (("upper", "ux"), ("lower", "lx")):
+        groups: dict[str, list[str]] = {}
+        for eid, b in bypass.items():
+            groups.setdefault(b[end], []).append(eid)
+        for gid, eids in groups.items():
+            nearer: dict[str, set[str]] = {e: set() for e in eids}   # e -> units nearer the bar
+            for a in eids:
+                pa, ca = bypass[a][key], bypass[a]["cx"]
+                lo_a, hi_a = min(pa, ca), max(pa, ca)
+                for o in eids:
+                    if o == a:
+                        continue
+                    if lo_a < bypass[o][key] < hi_a:
+                        nearer[a].add(o)
+                    elif lo_a < bypass[o]["cx"] < hi_a:
+                        nearer[o].add(a)
+            level: dict[str, int] = {}
+
+            def _lvl(e, seen=(), nearer=nearer, level=level):
+                if e in level:
+                    return level[e]
+                if e in seen:
+                    return 0
+                v = max((_lvl(o, seen + (e,)) + 1 for o in nearer[e]), default=0)
+                level[e] = v
+                return v
+
+            c = bus_index[gid]
+            base_up = max(bypass[e]["base_up"] for e in eids)
+            for e in sorted(eids):
+                k = _lvl(e)
+                if end == "upper":
+                    bypass[e]["y_up"] = base_up + k * _LANE_STEP_Y
+                else:
+                    bypass[e]["y_lo"] = c["y"] - _BYPASS_MARGIN_Y - k * _LANE_STEP_Y
 
     # ── 7c. Spanning circuits.  A line whose two buses sit in different node
     #       columns with a THIRD substation column between them cannot dip into
@@ -1260,36 +1562,28 @@ def _apply_grid_layout(
     for _e in elk_edges:
         if _e["properties"].get("edgeType") != "transformer":
             continue
-        _s = bus_index.get(_e["sources"][0])
-        _t = bus_index.get(_e["targets"][0])
-        if not _s or not _t:
+        _b = bypass.get(_e["id"])
+        if _b:
+            obstacle_vlegs.append((_b["cx"], _b["y_up"], _b["y_lo"]))
             continue
-        _up, _lo = (_s, _t) if _s["y"] < _t["y"] else (_t, _s)
-        _up_gid = _e["sources"][0] if _up is _s else _e["targets"][0]
-        _ox0 = max(_up["x"], _lo["x"])
-        _ox1 = min(_up["x"] + _up["width"], _lo["x"] + _lo["width"])
-        if _ox1 > _ox0:
-            _cx = term_x.get((_up_gid, _e["id"]), (_ox0 + _ox1) / 2.0)
-            _cx = min(max(_cx, _ox0), _ox1)
-        else:
-            _uc = _up["x"] + _up["width"] / 2.0
-            _cx = min(max(_uc, _lo["x"]), _lo["x"] + _lo["width"])
+        if (_e["sources"][0] not in bus_index
+                or _e["targets"][0] not in bus_index):
+            continue
+        _cx, _ug, _lg = _vertical_x(_e, bus_index, term_x, vert_x)
+        _up, _lo = bus_index[_ug], bus_index[_lg]
         _seg = (_cx, _up["y"] + _BUS_H, _lo["y"])
         xfmr_vert[_e["id"]] = _seg
         obstacle_vlegs.append(_seg)
     # Equipment stubs (vertical) below each bar — positions replicate the JS
     # ``_getEquipStubPositions`` layout (evenly spaced, 72 px pitch, centred).
-    _EQ_PITCH = 72.0
     for _gid, _eqs in (bus_equipment or {}).items():
         _c = bus_index.get(_gid)
         if not _c or not _eqs:
             continue
-        _n = len(_eqs)
-        _start = _c["x"] + (_c["width"] - _n * _EQ_PITCH) / 2.0 + _EQ_PITCH / 2.0
         _yt = _c["y"] + _BUS_H
         _yb = _yt + _STUB_LEN + _EQUIP_SIZE
-        for _i in range(_n):
-            obstacle_vlegs.append((_start + _i * _EQ_PITCH, _yt, _yb))
+        for _x in _equip_stub_xs(_c, len(_eqs)):
+            obstacle_vlegs.append((_x, _yt, _yb))
 
     # Horizontal lane tracks: clear lanes inside every inter-row channel, plus
     # generous bands above the top row and below the bottom-most element.
@@ -1383,6 +1677,21 @@ def _apply_grid_layout(
         edge["properties"]["precomputedRoute"] = True
 
         is_xfmr = edge["properties"].get("edgeType") == "transformer"
+        b = bypass.get(edge["id"])
+        if b:
+            # Skips a row: the corridor route of 7b. The JS puts the windings
+            # on its longest inner leg, the run down the corridor.
+            ux = term_x[(b["upper"], edge["id"])]
+            lx = term_x[(b["lower"], edge["id"])]
+            up_c, lo_c = bus_index[b["upper"]], bus_index[b["lower"]]
+            pts = [(ux, up_c["y"] + _BUS_H), (ux, b["y_up"]), (b["cx"], b["y_up"]),
+                   (b["cx"], b["y_lo"]), (lx, b["y_lo"]), (lx, lo_c["y"])]
+            edge["sections"] = [{
+                "startPoint": {"x": pts[0][0], "y": pts[0][1]},
+                "endPoint": {"x": pts[-1][0], "y": pts[-1][1]},
+                "bendPoints": [{"x": p[0], "y": p[1]} for p in pts[1:-1]],
+            }]
+            continue
         if is_xfmr:
             # A transformer is ALWAYS drawn as a clean vertical between its two
             # bars whenever they share an X span: one shared X inside the bars'
@@ -1391,21 +1700,8 @@ def _apply_grid_layout(
             # the symbol (never crosses it) and every transformer looks the
             # same. Only the rare transformer whose bars don't overlap in X at
             # all falls through to the channel route.
-            upper, lower = (src, tgt) if src["y"] < tgt["y"] else (tgt, src)
-            upper_gid = (edge["sources"][0] if upper is src
-                         else edge["targets"][0])
-            ox0 = max(upper["x"], lower["x"])
-            ox1 = min(upper["x"] + upper["width"], lower["x"] + lower["width"])
-            if ox1 > ox0:
-                # Bars overlap: use this transformer's own terminal slot
-                # (distinct per parallel transformer), clamped to the overlap.
-                cx = term_x.get((upper_gid, edge["id"]), (ox0 + ox1) / 2.0)
-                cx = min(max(cx, ox0), ox1)
-            else:
-                # No X overlap: drop from the upper bar centre, landing on the
-                # lower bar's nearest point — still a consistent vertical symbol.
-                uc = upper["x"] + upper["width"] / 2.0
-                cx = min(max(uc, lower["x"]), lower["x"] + lower["width"])
+            cx, ug, lg = _vertical_x(edge, bus_index, term_x, vert_x)
+            upper, lower = bus_index[ug], bus_index[lg]
             edge["properties"]["transformerVertical"] = True
             edge["sections"] = [{
                 "startPoint": {"x": cx, "y": upper["y"] + _BUS_H},

@@ -100,6 +100,8 @@ class GridRouter:
         self._use_v: dict[tuple, int] = {}
 
     # -- congestion helpers ------------------------------------------------
+    # A step another route already uses costs three times its length, so a
+    # route moves to a free lane rather than run on top of another.
     def _hkey(self, xa, xb, y):
         return (round(min(xa, xb)), round(max(xa, xb)), round(y))
 
@@ -107,13 +109,21 @@ class GridRouter:
         return (round(x), round(min(ya, yb)), round(max(ya, yb)))
 
     def commit(self, pts):
+        # The search costs one grid step at a time, so a route's long
+        # segments are counted step by step along the tracks they pass.
         for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
             if abs(y0 - y1) < _EPS:
-                self._use_h[self._hkey(x0, x1, y0)] = \
-                    self._use_h.get(self._hkey(x0, x1, y0), 0) + 1
+                a, b = min(x0, x1), max(x0, x1)
+                stops = sorted({a, b} | {x for x in self.x_tracks if a < x < b})
+                for p, q in zip(stops, stops[1:]):
+                    k = self._hkey(p, q, y0)
+                    self._use_h[k] = self._use_h.get(k, 0) + 1
             else:
-                self._use_v[self._vkey(x0, y0, y1)] = \
-                    self._use_v.get(self._vkey(x0, y0, y1), 0) + 1
+                a, b = min(y0, y1), max(y0, y1)
+                stops = sorted({a, b} | {y for y in self.lane_ys if a < y < b})
+                for p, q in zip(stops, stops[1:]):
+                    k = self._vkey(x0, p, q)
+                    self._use_v[k] = self._use_v.get(k, 0) + 1
 
     # -- the search --------------------------------------------------------
     def route(self, sx, sy_face, src_gid, tx, ty_face, tgt_gid,
@@ -161,14 +171,16 @@ class GridRouter:
                     nx = xs[nxi]
                     if not ob.h_blocked(x, nx, y):
                         cong = self._use_h.get(self._hkey(x, nx, y), 0)
-                        out.append(((nx, y), abs(nx - x) + cong * self.lane_step, False))
+                        out.append(((nx, y), abs(nx - x) * (1 + 2 * cong)
+                                    + cong * self.lane_step, False))
             # vertical moves to adjacent lanes
             for nyi in (yi - 1, yi + 1):
                 if 0 <= nyi < len(ys):
                     ny = ys[nyi]
                     if not ob.v_blocked(x, y, ny):
                         cong = self._use_v.get(self._vkey(x, y, ny), 0)
-                        out.append(((x, ny), abs(ny - y) + cong * self.lane_step, True))
+                        out.append(((x, ny), abs(ny - y) * (1 + 2 * cong)
+                                    + cong * self.lane_step, True))
             # allow stepping onto the goal face when aligned in x
             if abs(x - tx) < _EPS:
                 if not ob.v_blocked(tx, y, ty_face, ignore_bars={tgt_gid}):

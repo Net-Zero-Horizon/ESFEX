@@ -65,3 +65,17 @@ class TestGridRouter:
                 lo, hi = sorted((x0, x1))
                 if lo < 120.0 < hi:
                     assert not (0.0 <= y0 <= 40.0), f"crosses leg at {y0}"
+
+    def test_second_route_takes_a_free_lane(self):
+        """Committed routes count along every grid step they cover, so a
+        route between the same bars moves to a free lane instead of running
+        on top of the first."""
+        bars = [_bar(0.0, 40.0, 0.0, "a"), _bar(400.0, 440.0, 0.0, "b")]
+        r = GridRouter(Obstacles(bars, []), lane_ys=[36.0, 64.0, 92.0],
+                       x_tracks=[-50.0, 100.0, 200.0, 300.0, 490.0], lane_step=28.0)
+        p1 = r.route(10.0, 6.0, "a", 410.0, 6.0, "b")
+        r.commit(p1)
+        p2 = r.route(30.0, 6.0, "a", 430.0, 6.0, "b")
+        lanes1 = {y for (_x, y) in p1[1:-1]}
+        lanes2 = {y for (_x, y) in p2[1:-1]}
+        assert lanes1 and lanes2 and not lanes1 & lanes2

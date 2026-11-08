@@ -276,6 +276,7 @@ function render(data, layouted) {
                 voltageKv: props.voltageKv || 0,
                 label: props.label || bid,
                 junction: !!props.junction,
+                equipCenter: props.equipCenter,
                 parentNode: props.parentNode,
                 equips: equips,
                 orientation: pyOrient,
@@ -297,6 +298,8 @@ function render(data, layouted) {
         _fixEdgeEndpoints(layouted, busH);
     }
 
+    _frameEdges = layouted.edges || [];
+
     // ── Open substation: lines to other substations end in short stubs ──
     if (data.siteView && layouted.edges) {
         _cutStubs(layouted.edges, (data.nodeGroups || [])[0], busH, stubLen, eqSize);
@@ -306,6 +309,12 @@ function render(data, layouted) {
     var nodeGroups = data.nodeGroups || [];
     nodeGroups.forEach(function(ng) {
         _drawNodeGroup(gGroups, ng, busH, stubLen, eqSize, eqSpace);
+    });
+
+    // ── Bars and their labels are obstacles before any edge is drawn, so the
+    //    transformer windings and edge labels placed below keep off them. ──
+    Object.keys(busLayout).forEach(function(bid) {
+        _addBusObstacle(busLayout[bid], busH);
     });
 
     // ── Draw inter-bus edges ──
@@ -555,6 +564,13 @@ function _fixEdgeEndpoints(layouted, busH) {
     });
 }
 
+/** X of the first equipment stub below a horizontal bar: the row is
+ *  centred on the bar, or on ``equipCenter`` when the layout set one. */
+function _equipStartX(bl, rowW, eqSpace) {
+    var c = (bl.equipCenter != null) ? bl.equipCenter : bl.barLen / 2;
+    return bl.x + c - rowW / 2 + eqSpace / 2;
+}
+
 /** Get equipment stub positions along the bar axis for a bus. */
 function _getEquipStubPositions(bl, isVert) {
     var equips = bl.equips || [];
@@ -573,7 +589,7 @@ function _getEquipStubPositions(bl, isVert) {
         }
     } else {
         var rowW = nEq * eqSpace;
-        var startX = bl.x + (barLen - rowW) / 2 + eqSpace / 2;
+        var startX = _equipStartX(bl, rowW, eqSpace);
         for (var i = 0; i < nEq; i++) {
             positions.push(startX + i * eqSpace);
         }
@@ -698,6 +714,8 @@ function _buildOrthogonalRoute(start, end, laneY) {
 // ══════════════════════════════════════════════════════════════════
 
 /** Frame of a substation group in diagram space, { x, y, w, h }, or null. */
+var _frameEdges = null;   // the edges being drawn (set by render)
+
 function _frameRect(ng, busH, stubLen, eqSize) {
     var busIds = ng.busIds || [];
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -725,6 +743,24 @@ function _frameRect(ng, busH, stubLen, eqSize) {
         }
     });
     if (minX === Infinity) return null;
+
+    // Routes inside the substation (lines between its bars, transformers
+    // taken past a bar in between) stay inside the frame, with room for a
+    // routed transformer's windings and rating, as the Python layout
+    // reserved for the block.
+    var inside = {};
+    busIds.forEach(function(b) { inside[b] = true; });
+    (_frameEdges || []).forEach(function(e) {
+        if (!inside[e.sources[0]] || !inside[e.targets[0]]) return;
+        var p = e.properties || {};
+        var px = (p.edgeType === 'transformer' && !p.transformerVertical) ? 50 : 10;
+        (e.sections || []).forEach(function(sec) {
+            [sec.startPoint, sec.endPoint].concat(sec.bendPoints || []).forEach(function(q) {
+                minX = Math.min(minX, q.x - px); maxX = Math.max(maxX, q.x + px);
+                minY = Math.min(minY, q.y - 10); maxY = Math.max(maxY, q.y + 10);
+            });
+        });
+    });
 
     var pad = 30, titleH = 28;
     return { x: minX - pad, y: minY - pad - titleH,
@@ -785,9 +821,6 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
     var nEq = equips.length;
     var isVert = bl.orientation === 90;
     var barLen = bl.barLen;
-
-    // Register bus bar as obstacle for label collision avoidance
-    _addBusObstacle(bl, busH);
 
     // ── Bus bar group ──
     var busG = gBuses.append('g')
@@ -938,6 +971,8 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
             .attr('fill', 'transparent');
 
         if (labelsVisible) {
+            // Both labels carry a halo of the background colour, so a line
+            // reaching the bar from above breaks under the text.
             // Voltage label — ABOVE bus bar, tight to bar
             if (bl.voltageKv) {
                 busG.append('text').attr('class', 'data-label')
@@ -946,23 +981,29 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
                     .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                     .attr('font-size', '10px').attr('font-weight', '700')
                     .attr('fill', bl.color)
+                    .attr('paint-order', 'stroke').attr('stroke', T.bg)
+                    .attr('stroke-width', 3).attr('stroke-linejoin', 'round')
                     .text(bl.voltageKv + ' kV');
             }
             // Bus name — ABOVE, right-aligned. A line junction's bar is
             // too short for both labels: its name stays in the tooltip.
-            if (!bl.junction) busG.append('text').attr('class', 'data-label')
+            // A name longer than the room beside the voltage is shortened.
+            var name = bl.junction ? '' : _fitBusName(bl);
+            if (name) busG.append('text').attr('class', 'data-label')
                 .attr('x', barLen - 4).attr('y', -5)
                 .attr('text-anchor', 'end').attr('dominant-baseline', 'auto')
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                 .attr('font-size', '9px')
-                .attr('fill', T.labelText).attr('opacity', 0.75)
-                .text(bl.label);
+                .attr('fill', T.labelText).attr('fill-opacity', 0.75)
+                .attr('paint-order', 'stroke').attr('stroke', T.bg)
+                .attr('stroke-width', 3).attr('stroke-linejoin', 'round')
+                .text(name);
         }
 
         // ── Equipment row BELOW bus ──
         if (nEq > 0) {
             var rowW = nEq * eqSpace;
-            var startX = bl.x + (barLen - rowW) / 2 + eqSpace / 2;
+            var startX = _equipStartX(bl, rowW, eqSpace);
             var stubTop = bl.y + busH;
             var eqCenterY = stubTop + stubLen + eqSize / 2;
 
@@ -1341,8 +1382,10 @@ function _drawEdge(layer, edge, busH) {
             .attr('stroke-linejoin', 'round');
     }
 
-    // Midpoint for symbols and labels
+    // Midpoint for symbols and labels. The symbol is an obstacle of its own,
+    // so the element's label (which ignores its own line) keeps off it.
     var mid = _edgeMidpoint(sections);
+    var symOwner = edgeOwner + '#symbol';
 
     // Transformer: two coupled windings sitting BETWEEN the two bars, always
     // vertical, with short stubs from each bar to a winding. The Python side
@@ -1369,7 +1412,7 @@ function _drawEdge(layer, edge, busH) {
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
         g.append('circle').attr('cx', txx).attr('cy', cBot).attr('r', r)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2, edgeOwner);
+        _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2, symOwner);
         mid = { x: txx, y: tmid };   // label sits beside the symbol
     } else if (edgeType === 'transformer') {
         // Transformer routed along channels (between two blocks, or around
@@ -1386,12 +1429,15 @@ function _drawEdge(layer, edge, busH) {
         g.append('circle').attr('cx', mid.x + ox).attr('cy', mid.y + oy).attr('r', r2)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
         var hx = r2 + 2 + ox, hy = r2 + 2 + oy;
-        _addObstacle(mid.x - hx, mid.y - hy, mid.x + hx, mid.y + hy, edgeOwner);
+        _addObstacle(mid.x - hx, mid.y - hy, mid.x + hx, mid.y + hy, symOwner);
     }
 
-    // Converter IEC symbol (square with ~/= or ~/Hz)
+    // Converter IEC symbol (square with ~/= or ~/Hz), on a free spot of an
+    // inner segment (the route's midpoint can fall on a bar).
     if (edgeType === 'converter') {
         var cs = 20;
+        var cspot = stub ? null : _placeOnRoute(sections, cs + 2, cs + 2, edgeOwner);
+        if (cspot) mid = { x: cspot.x, y: cspot.y };
         g.append('rect').attr('x', mid.x - cs).attr('y', mid.y - cs)
             .attr('width', cs * 2).attr('height', cs * 2).attr('rx', 3)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2);
@@ -1408,7 +1454,7 @@ function _drawEdge(layer, edge, busH) {
             .attr('font-size', isAcdc ? '12px' : '10px').attr('font-weight', '700')
             .attr('fill', color).text(isAcdc ? '=' : 'Hz');
         // Register converter symbol as obstacle
-        _addObstacle(mid.x - cs - 2, mid.y - cs - 2, mid.x + cs + 2, mid.y + cs + 2, edgeOwner);
+        _addObstacle(mid.x - cs - 2, mid.y - cs - 2, mid.x + cs + 2, mid.y + cs + 2, symOwner);
     }
 
     // Defer the label to the final pass (after every bar/equipment/edge is a
@@ -2641,7 +2687,8 @@ function _addEdgeObstacles(sections, owner) {
     });
 }
 
-/** Register a bus bar (both orientations) as obstacle. */
+/** Register a bus bar (both orientations) as obstacle, with the voltage
+ *  and name labels above a horizontal bar. */
 function _addBusObstacle(bl, busH) {
     var isVert = bl.orientation === 90;
     var barLen = bl.barLen;
@@ -2649,7 +2696,38 @@ function _addBusObstacle(bl, busH) {
         _addObstacle(bl.x - 2, bl.y - 2, bl.x + busH + 2, bl.y + barLen + 2);
     } else {
         _addObstacle(bl.x - 2, bl.y - 2, bl.x + barLen + 2, bl.y + busH + 2);
+        if (!labelsVisible) return;
+        if (bl.voltageKv) {
+            _addObstacle(bl.x + 4, bl.y - 16,
+                         bl.x + 4 + _textWidth(bl.voltageKv + ' kV', 10, true), bl.y - 3);
+        }
+        var name = bl.junction ? '' : _fitBusName(bl);
+        if (name) {
+            _addObstacle(bl.x + barLen - 4 - _textWidth(name, 9), bl.y - 15,
+                         bl.x + barLen - 4, bl.y - 3);
+        }
     }
+}
+
+/** Rough on-screen width of a label (wide glyphs for CJK). Text hidden by
+ *  the level of detail has no measurable length, so this is estimated. */
+function _textWidth(str, px, bold) {
+    var w = 0;
+    for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        w += c >= 0x2E80 ? 1.0 : (c === 32 ? 0.3 : 0.56);
+    }
+    return w * px * (bold ? 1.08 : 1);
+}
+
+/** The bus name shortened with an ellipsis to fit beside its voltage label
+ *  above the bar (the full name stays in the tooltip). */
+function _fitBusName(bl) {
+    var name = String(bl.label || '');
+    var room = bl.barLen - 8 - (bl.voltageKv ? _textWidth(bl.voltageKv + ' kV', 10, true) + 10 : 0);
+    if (_textWidth(name, 9) <= room) return name;
+    while (name.length > 1 && _textWidth(name + '\u2026', 9) > room) name = name.slice(0, -1);
+    return name.length > 1 ? name.replace(/\s+$/, '') + '\u2026' : '';
 }
 
 /** Check whether a rectangle overlaps ANY registered obstacle (spatial grid).
