@@ -965,11 +965,9 @@ class TestGuiNonElectricDemand:
         assert ned.demand_id == "heat_gas"
         assert ned.fuel == "Gas"
         assert ned.unit == "MMBTU"
-        assert ned.is_flexible is False
-        assert ned.flexibility_ratio == 0.0
-        assert ned.criticality == "medium"
-        assert ned.delay_tolerance == 0
         assert ned.demand == []
+        # A fixed annual demand: the primary-energy model has no flexibility
+        assert not hasattr(ned, "is_flexible")
 
     def test_with_demand(self):
         ned = GuiNonElectricDemand(
