@@ -1269,11 +1269,6 @@ def convert_generator_config(
         fixed_cost = prop(gen.fixed_cost)
         maint_cost = prop(gen.maintenance_cost)
         invest_cost = prop(gen.invest_cost)
-        # invest_max_power is a CAPACITY field: total MW available for
-        # investment at the node.  Use "capacity" mode so it goes to
-        # the first bus only; the per-node aggregate constraint in
-        # power_system.jl already caps total investment across buses.
-        invest_max = cap(gen.invest_max_power)
         life_time = prop(life_time_float)
         initial_age = prop(initial_age_float)
         degradation = prop(gen.degradation_rate)
@@ -1307,7 +1302,6 @@ def convert_generator_config(
         fixed_cost = gen.fixed_cost
         maint_cost = gen.maintenance_cost
         invest_cost = gen.invest_cost
-        invest_max = gen.invest_max_power
         life_time = life_time_float
         initial_age = initial_age_float
         degradation = gen.degradation_rate
@@ -1346,7 +1340,6 @@ def convert_generator_config(
         py_to_julia_vector(maint_cost),
         py_to_julia_vector(inertia_arr),
         py_to_julia_vector(invest_cost),
-        py_to_julia_vector(invest_max),
         py_to_julia_matrix(availability),
         gen.reservable,
         py_to_julia_vector(life_time),
@@ -1497,11 +1490,9 @@ def convert_battery_config(
         soc_max_out = prop([1.0] * num_nodes)
         self_discharge = prop([0.0001] * num_nodes)
         inv_cost = prop(bat.invest_cost)
-        inv_cost_energy = prop(bat.invest_cost_energy)
-        # invest_max fields are CAPACITY: total MW/MWh budget at the node.
-        # Use "capacity" mode (first bus only) — same reasoning as generators.
+        # invest_max_power only places the battery at a bus in the master:
+        # "capacity" mode (first bus of the node only)
         inv_max_power = cap(bat.invest_max_power)
-        inv_max_capacity = cap(bat.invest_max_capacity)
         life_time = prop(life_time_float)
         initial_age = prop(initial_age_float)
         maint_cost = prop(maintenance_cost)
@@ -1524,9 +1515,7 @@ def convert_battery_config(
         soc_max_out = [1.0] * num_nodes
         self_discharge = [0.0001] * num_nodes
         inv_cost = bat.invest_cost
-        inv_cost_energy = bat.invest_cost_energy
         inv_max_power = bat.invest_max_power
-        inv_max_capacity = bat.invest_max_capacity
         life_time = life_time_float
         initial_age = initial_age_float
         maint_cost = maintenance_cost
@@ -1538,7 +1527,6 @@ def convert_battery_config(
 
     # --- Cost scaling: $ → M$ ---
     inv_cost = scale_cost_list(inv_cost)
-    inv_cost_energy = scale_cost_list(inv_cost_energy)
     maint_cost = scale_cost_list(maint_cost)
     decomm_cost = scale_cost_list(decomm_cost)
     tp_degrad_cost = scale_cost_list(tp_degrad_cost)
@@ -1556,9 +1544,7 @@ def convert_battery_config(
         py_to_julia_vector(soc_initial),
         py_to_julia_vector(self_discharge),
         py_to_julia_vector(inv_cost),
-        py_to_julia_vector(inv_cost_energy),
         py_to_julia_vector(inv_max_power),
-        py_to_julia_vector(inv_max_capacity),
         py_to_julia_vector(life_time),
         py_to_julia_vector(initial_age),
         py_to_julia_vector(decomm_cost),
@@ -1896,16 +1882,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
     if jl_result.gen_startup is not None:
         result["gen_startup"] = julia_to_py_array(jl_result.gen_startup)
 
-    # Handle optional investment fields
-    if jl_result.gen_investment is not None:
-        result["gen_investment"] = julia_to_py_array(jl_result.gen_investment)
-
-    if jl_result.bat_investment_power is not None:
-        result["bat_investment_power"] = julia_to_py_array(jl_result.bat_investment_power)
-
-    if jl_result.bat_investment_capacity is not None:
-        result["bat_investment_capacity"] = julia_to_py_array(jl_result.bat_investment_capacity)
-
     # Convert power flow dict (legacy node-pair aggregated flows)
     power_flow = {}
     for key, value in jl_result.power_flow.items():
@@ -1919,14 +1895,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
         for line_pf in jl_result.power_flow_by_line:
             pf_by_line.append(julia_to_py_array(line_pf))
         result["power_flow_by_line"] = pf_by_line
-
-    # Convert transfer investment dict
-    if jl_result.transfer_investment is not None:
-        transfer_inv = {}
-        for key, value in jl_result.transfer_investment.items():
-            py_key = (convert_index_julia_to_py(key[0]), convert_index_julia_to_py(key[1]))
-            transfer_inv[py_key] = float(value)
-        result["transfer_investment"] = transfer_inv
 
     # Battery spillage [bat x node x hour]
     if jl_result.bat_spillage is not None:
@@ -1961,8 +1929,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
         result["reservoir_spillage"] = julia_to_py_array(jl_result.reservoir_spillage)
     if jl_result.reservoir_pump is not None:
         result["reservoir_pump"] = julia_to_py_array(jl_result.reservoir_pump)
-    if jl_result.reservoir_invest_capacity is not None:
-        result["reservoir_invest_capacity"] = julia_to_py_array(jl_result.reservoir_invest_capacity)
 
     # Electrolyzers [electrolyzer x bus x hour]: power (MW), hydrogen (kg/h)
     if jl_result.electrolyzer_power is not None:
@@ -2002,7 +1968,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "soc_violation_cost": float(cb.soc_violation_cost) * COST_UNSCALE,
             "transfer_margin_cost": float(cb.transfer_margin_cost) * COST_UNSCALE,
             "v2g_compensation": float(cb.v2g_compensation) * COST_UNSCALE,
-            "investment_cost": float(cb.investment_cost) * COST_UNSCALE,
             "electrolyzer_cost": float(cb.electrolyzer_cost) * COST_UNSCALE,
             "converter_cost": float(cb.converter_cost) * COST_UNSCALE,
             "spillage_cost": float(cb.spillage_cost) * COST_UNSCALE,
@@ -2011,7 +1976,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "demand_shift_cost": float(cb.demand_shift_cost) * COST_UNSCALE,
             "rooftop_curtailment_cost": float(cb.rooftop_curtailment_cost) * COST_UNSCALE,
             "npv_penalty_cost": float(cb.npv_penalty_cost) * COST_UNSCALE,
-            "reservoir_invest_cost": float(cb.reservoir_invest_cost) * COST_UNSCALE,
             # PrimaryEnergy sub-costs.
             "pe_supply_cost": float(cb.pe_supply_cost) * COST_UNSCALE,
             "pe_loss_cost": float(cb.pe_loss_cost) * COST_UNSCALE,

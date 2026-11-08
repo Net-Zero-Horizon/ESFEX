@@ -547,11 +547,7 @@ class TestConvertPowerSystemResult:
 
         r.gen_status = None
         r.gen_startup = None
-        r.gen_investment = None
-        r.bat_investment_power = None
-        r.bat_investment_capacity = None
         r.power_flow_by_line = None
-        r.transfer_investment = None
         r.bat_spillage = None
         r.ev_charging = None
         r.ev_v2g = None
@@ -564,7 +560,6 @@ class TestConvertPowerSystemResult:
         r.reservoir_level = None
         r.reservoir_spillage = None
         r.reservoir_pump = None
-        r.reservoir_invest_capacity = None
 
         # N-1 security
         r.n1_gen_reserve_duals = None
@@ -661,19 +656,15 @@ class TestConvertPowerSystemResult:
         result = convert_power_system_result(r)
         assert "gen_startup" in result
 
-    def test_optional_gen_investment_included(self):
+    def test_dispatch_investment_fields_are_not_read(self):
+        # The dispatch builds nothing (development runs give it the master's
+        # builds as existing capacity): its result has no investment fields
         r = self._make_mock_result()
-        r.gen_investment = np.array([[50.0]])
         result = convert_power_system_result(r)
-        assert "gen_investment" in result
-
-    def test_optional_bat_investment_fields(self):
-        r = self._make_mock_result()
-        r.bat_investment_power = np.array([[10.0]])
-        r.bat_investment_capacity = np.array([[100.0]])
-        result = convert_power_system_result(r)
-        assert "bat_investment_power" in result
-        assert "bat_investment_capacity" in result
+        for key in ("gen_investment", "bat_investment_power",
+                    "bat_investment_capacity", "transfer_investment",
+                    "reservoir_invest_capacity"):
+            assert key not in result
 
     def test_optional_power_flow_by_line(self):
         r = self._make_mock_result()
@@ -681,15 +672,6 @@ class TestConvertPowerSystemResult:
         result = convert_power_system_result(r)
         assert "power_flow_by_line" in result
         assert len(result["power_flow_by_line"]) == 1
-
-    def test_optional_transfer_investment(self):
-        r = self._make_mock_result()
-        mock_ti = MagicMock()
-        mock_ti.items.return_value = [((1, 2), 500.0)]
-        r.transfer_investment = mock_ti
-        result = convert_power_system_result(r)
-        assert (0, 1) in result["transfer_investment"]
-        assert result["transfer_investment"][(0, 1)] == 500.0
 
     def test_optional_bat_spillage(self):
         r = self._make_mock_result()
@@ -759,7 +741,6 @@ class TestConvertPowerSystemResult:
         cb.soc_violation_cost = 0.0
         cb.transfer_margin_cost = 0.0
         cb.v2g_compensation = -500.0
-        cb.investment_cost = 100000.0
         cb.electrolyzer_cost = 0.0
         cb.converter_cost = 0.0
         cb.spillage_cost = 50.0
@@ -768,7 +749,6 @@ class TestConvertPowerSystemResult:
         cb.demand_shift_cost = 0.0
         cb.rooftop_curtailment_cost = 0.0
         cb.npv_penalty_cost = 0.0
-        cb.reservoir_invest_cost = 0.0
         cb.pe_supply_cost = 0.0
         cb.pe_loss_cost = 0.0
         cb.pe_excess_cost = 0.0
@@ -803,11 +783,11 @@ class TestConvertPowerSystemResult:
             "load_shedding_cost", "curtailment_cost", "reserve_static_cost",
             "reserve_dynamic_cost", "co2_emission_cost", "fre_penetration_cost",
             "inertia_cost", "soc_violation_cost", "transfer_margin_cost",
-            "v2g_compensation", "investment_cost",
+            "v2g_compensation",
             "electrolyzer_cost", "converter_cost", "spillage_cost",
             "delay_retirement_cost", "reservoir_spillage_cost",
             "demand_shift_cost", "rooftop_curtailment_cost",
-            "npv_penalty_cost", "reservoir_invest_cost",
+            "npv_penalty_cost",
             "pe_supply_cost", "pe_loss_cost", "pe_excess_cost",
             "pe_transport_cost", "pe_investment_cost",
             "pe_electrolyzer_cost",

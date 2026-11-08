@@ -93,7 +93,6 @@ systems:
         degradation_rate: [0.005]
         decommissioning_cost: [0.0]
         invest_cost: [750000.0]         # prices life extension only
-        invest_max_power: [0.0]
 
       diesel:
         name: Diesel Generator
@@ -117,7 +116,6 @@ systems:
         degradation_rate: [0.01]
         decommissioning_cost: [100000.0]
         invest_cost: [500000.0]
-        invest_max_power: [0.0]
 
     technologies:                       # candidates the master problem may build
       solar_pv_new:

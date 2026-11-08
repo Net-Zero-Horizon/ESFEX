@@ -666,8 +666,6 @@
     "type": "Tipo:",
     "invest_cost_col": "Custo invest.\n($/MW)",
     "invest_max_col": "Invest. máx.\n(MW)",
-    "energy_cost_col": "Custo energia\n($/MWh)",
-    "energy_max_col": "Energia máx.\n(MWh)",
     "n_selected": "{n} entradas de investimento selecionadas",
     "tech_generator": "Gerador",
     "tech_battery": "Bateria / Armazenamento",

@@ -78,7 +78,6 @@ def simple_generator_config():
         "maintenance_cost": [1.0, 1.0],
         "inertia": [5.0, 5.0],
         "invest_cost": [1000.0, 1000.0],
-        "invest_max_power": [0.0, 0.0],  # No investment
         "reservable": True,
         "life_time": [25, 25],
         "initial_age": [0, 0],
@@ -107,7 +106,6 @@ def simple_solar_config():
         "maintenance_cost": [0.5, 0.5],
         "inertia": [0.0, 0.0],
         "invest_cost": [800.0, 800.0],
-        "invest_max_power": [100.0, 100.0],
         "reservable": False,
         "life_time": [25, 25],
         "initial_age": [0, 0],
@@ -128,9 +126,7 @@ def simple_battery_config():
         "max_DoD": [0.8, 0.8],  # 80% depth of discharge
         "soc_initial": [0.5, 0.5],
         "invest_cost": [150.0, 150.0],  # $/MW
-        "invest_cost_energy": [100.0, 100.0],  # $/MWh
         "invest_max_power": [0.0, 0.0],
-        "invest_max_capacity": [0.0, 0.0],
         "life_time": [15, 15],
     }
 
@@ -195,7 +191,6 @@ def test_julia_power_system_builds():
         py_to_julia_vector([1.0, 1.0]),  # maint_cost
         py_to_julia_vector([5.0, 5.0]),  # inertia
         py_to_julia_vector([1000.0, 1000.0]),  # invest_cost
-        py_to_julia_vector([0.0, 0.0]),  # invest_max
         py_to_julia_matrix(availability),
         True,  # reservable
         py_to_julia_vector([25.0, 25.0]),  # life_time
@@ -281,7 +276,6 @@ def test_julia_power_system_solves():
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),  # no startup cost
         py_to_julia_vector([50.0]),  # fuel cost
-        py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
@@ -374,7 +368,6 @@ def test_julia_renewable_dispatch():
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
-        py_to_julia_vector([0.0]),
         py_to_julia_matrix(solar_avail),
         False,
         py_to_julia_vector([25.0]),
@@ -398,7 +391,6 @@ def test_julia_renewable_dispatch():
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
         py_to_julia_vector([50.0]),  # $50/MWh
-        py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),
         py_to_julia_vector([0.0]),

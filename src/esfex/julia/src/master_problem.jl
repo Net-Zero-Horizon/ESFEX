@@ -1653,14 +1653,14 @@ function create_day_ps_vars!(
     prefix = "op_y$(year_idx)_d$(day_idx)"
 
     # Pre-compute lookup maps: which buses each generator/battery is active at
+    # (existing generators only have their rated power; what the master
+    # builds is candidate technologies, see add_day_operational_constraints!)
     buses_of_gen = [Int[] for _ in 1:n_gen]
     gens_at_bus = [Int[] for _ in 1:n_buses]
     for g in 1:n_gen
         gen = input.generators[g]
         for b in 1:n_buses
-            has_cap = gen.rated_power[b] > 0
-            has_invest = length(gen.invest_max) >= b && gen.invest_max[b] > 0
-            if has_cap || has_invest
+            if gen.rated_power[b] > 0
                 push!(buses_of_gen[g], b)
                 push!(gens_at_bus[b], g)
             end
@@ -1822,7 +1822,6 @@ function create_day_ps_vars!(
         power_flow, voltage_angle,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
-        nothing, nothing, nothing, nothing,  # no investment vars
         buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;
         loss_of_inertia = loss_of_inertia_var,
         loss_of_load_sectoral = loss_of_load_sectoral,
@@ -1858,7 +1857,7 @@ function generators_for_day(generators::AbstractVector, start_hour::Int, hours::
             gen.min_up_time, gen.min_down_time,
             gen.start_up_cost, gen.fuel_cost,
             gen.fixed_cost, gen.maintenance_cost,
-            gen.inertia, gen.invest_cost, gen.invest_max,
+            gen.inertia, gen.invest_cost,
             rows(gen.availability), gen.reservable,
             gen.life_time, gen.initial_age,
             gen.degradation_rate, gen.decommissioning_cost,

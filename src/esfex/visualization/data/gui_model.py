@@ -1012,9 +1012,6 @@ class GuiInvestmentEntry:
     technology_id: str = ""         # References GuiTechnology.tech_id
     # Per-node investment data
     node_data: list[GuiInvestmentNodeData] = field(default_factory=list)
-    # Battery-specific extra columns
-    invest_cost_energy: dict[int, float] = field(default_factory=dict)  # node_idx → $/MWh
-    invest_max_capacity: dict[int, float] = field(default_factory=dict)  # node_idx → MWh
 
 
 # ── System state ─────────────────────────────────────────────────

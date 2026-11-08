@@ -129,7 +129,7 @@ $$
 
 ## Investment Decisions
 
-The master only invests through **candidate technologies**. Existing `generators` and `batteries` are not investment candidates. Their `invest_cost` is used only to price life extension, and their `invest_max_power` does not add buildable capacity in the master.
+The master only invests through **candidate technologies**. Existing `generators` and `batteries` are not investment candidates. Their `invest_cost` is used only to price life extension; a battery's `invest_max_power` only places it at a node in the representative days.
 
 | Investment | Defined by | Units | Bounded by |
 |------------|------------|-------|------------|

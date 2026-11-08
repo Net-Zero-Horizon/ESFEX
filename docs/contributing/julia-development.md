@@ -212,7 +212,7 @@ Use descriptive base names that include indices:
 
 ### Handling Inactive Units
 
-Generation and battery variables are `SparseAxisArray`s that exist only for active unit-bus pairs (capacity at the bus, or investment allowed in development mode). Iterate over those pairs instead of over every bus:
+Generation and battery variables are `SparseAxisArray`s that exist only for active unit-bus pairs (capacity at the bus, or a pending retirement). Iterate over those pairs instead of over every bus:
 
 ```julia
 for g in 1:length(input.generators), b in vars.buses_of_gen[g], t in 1:hours
@@ -343,10 +343,11 @@ Check the variable's construction in `build_variables!` before indexing: some ar
 5. Curtailment penalty
 6. Static and dynamic reserve shortage penalties
 7. CO2 cost (fuel emission factor × output × `co2_cost`)
-8. Investment costs (development mode)
-9. Inertia shortfall, EV unmet-driving (`ev_loss`) and RE-target slack penalties
-10. SOC-violation and transfer-margin penalties
-11. Fixed O&M of the generators and batteries in service (`fixed_om_annual_cost`, $/MW·yr), prorated to the window with the other annual terms
+8. Inertia shortfall, EV unmet-driving (`ev_loss`) and RE-target slack penalties
+9. SOC-violation and transfer-margin penalties
+10. Fixed O&M of the generators and batteries in service (`fixed_om_annual_cost`, $/MW·yr), prorated to the window with the other annual terms
+
+The dispatch has no investment costs: it builds nothing (the master's builds reach it as existing capacity).
 
 V2G compensation is reported but is not part of the objective. Primary-energy and electrolyzer terms are added when those models are coupled in.
 

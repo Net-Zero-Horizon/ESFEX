@@ -35,12 +35,8 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │       ├── reservoir_level/       # Reservoir water level
 │       ├── reservoir_spillage/    # Reservoir overflow
 │       ├── reservoir_pump/        # Pump-back power
-│       ├── reservoir_invest_capacity/ # Reservoir capacity built (if any)
 │       ├── electrolyzer_power/    # Electrolyzer power (if any electrolyzer)
 │       ├── electrolyzer_h2/       # Hydrogen produced (if any electrolyzer)
-│       ├── gen_investment_power/  # Generator investments
-│       ├── bat_investment_power/  # Battery power investments
-│       ├── bat_investment_capacity/ # Battery energy investments
 │       ├── capacity_factor/       # Generator CF
 │       ├── lcoe/                  # Generator LCOE
 │       ├── vallcoe/               # Generator VALLCOE
@@ -188,7 +184,6 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `soc_violation_cost` | float | $ | Battery SOC violation penalty |
 | `transfer_margin_cost` | float | $ | Transfer margin deficit penalty |
 | `v2g_compensation` | float | $ | V2G compensation (negative = credit) |
-| `investment_cost` | float | $ | Capital investment cost |
 | `electrolyzer_cost` | float | $ | Electrolyzer operation cost |
 | `converter_cost` | float | $ | AC/DC converter cost |
 | `spillage_cost` | float | $ | Battery spillage penalty |
@@ -197,7 +192,6 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `demand_shift_cost` | float | $ | Demand shifting cost |
 | `rooftop_curtailment_cost` | float | $ | Rooftop solar curtailment penalty |
 | `npv_penalty_cost` | float | $ | NPV lifecycle penalty |
-| `reservoir_invest_cost` | float | $ | Reservoir capacity investment cost |
 | `pe_supply_cost` | float | $ | Primary energy supply cost |
 | `pe_loss_cost` | float | $ | Primary energy loss-of-supply penalty |
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |
@@ -399,15 +393,6 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 | Units | MW |
 | Description | Pump-back power consumed (demand-side load) |
 
-#### reservoir_invest_capacity/{generator_name}
-
-| Property | Value |
-|----------|-------|
-| Shape | (num_nodes,) |
-| Type | float64 |
-| Units | MWh |
-| Description | Reservoir capacity built by the dispatch model (only when it can invest) |
-
 ### Electrolyzer Data
 
 Written when the system has electrolyzers, one dataset per entry under `electrolyzers`, named by its `name` (or key).
@@ -444,32 +429,7 @@ Fuel names and electrolyzer keys are written as HDF5-safe names (`/` becomes ` -
 
 ### Investment Data
 
-#### gen_investment_power/{generator_name}
-
-| Property | Value |
-|----------|-------|
-| Shape | (num_nodes,) |
-| Type | float64 |
-| Units | MW |
-| Description | New generation capacity installed |
-
-#### bat_investment_power/{battery_name}
-
-| Property | Value |
-|----------|-------|
-| Shape | (num_nodes,) |
-| Type | float64 |
-| Units | MW |
-| Description | New battery power capacity |
-
-#### bat_investment_capacity/{battery_name}
-
-| Property | Value |
-|----------|-------|
-| Shape | (num_nodes,) |
-| Type | float64 |
-| Units | MWh |
-| Description | New battery energy capacity |
+The dispatch builds nothing: in a `development` run the master's builds reach each year's dispatch as existing capacity, and the investments are the `investment_*` attributes of the scenario group (see [Attributes](#attributes-per-year-metadata) above). Files written by earlier versions may still hold the empty dispatch groups `gen_investment_power/`, `bat_investment_power/`, `bat_investment_capacity/`, `reservoir_invest_capacity/` and the `transfer_investment` dataset; current versions no longer write them.
 
 ### Performance Metrics
 
@@ -532,7 +492,6 @@ The detailed `demand` is always `(num_nodes, hours)` and carries `dimensions = "
 | Dataset | Shape | Units | Description |
 |---------|-------|-------|-------------|
 | `power_flow` | (num_nodes, num_nodes, hours) | MW | Flow from node i to node j, aggregated from bus-pair flows; lines inside one node are dropped |
-| `transfer_investment` | (num_nodes, num_nodes) | MW | Transmission investment |
 | `transfer_margin` | (num_nodes, num_nodes, hours) | MW | Transfer margin slack, aggregated from bus pairs like `power_flow` |
 
 With a rolling horizon, each window contributes only its committed steps (the overlap tail is dropped), as for every other time series.
@@ -664,9 +623,6 @@ Virtual unit names start with `"Investment "`. They do not appear in `system_con
 | Reservoir pump | `reservoir_pump/{name}` | (N, H) | float64 | MW |
 | Electrolyzer power | `electrolyzer_power/{name}` | (N, H) | float64 | MW |
 | Electrolyzer H2 | `electrolyzer_h2/{name}` | (N, H) | float64 | kg/h |
-| Gen. investment | `gen_investment_power/{name}` | (N,) | float64 | MW |
-| Bat. invest. power | `bat_investment_power/{name}` | (N,) | float64 | MW |
-| Bat. invest. energy | `bat_investment_capacity/{name}` | (N,) | float64 | MWh |
 | Capacity factor | `capacity_factor/{name}` | (N, H) | float64 | 0-1 |
 | LCOE | `lcoe/{name}` | (N, H) | float64 | $/MWh |
 | VALLCOE | `vallcoe/{name}` | (N, H) | float64 | $/MWh |
@@ -832,14 +788,6 @@ with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
             t, n = map(int, attr_name.rsplit("_", 2)[-2:])
             tech_name = techs[f"technology_{t}"].attrs["name"]
             print(f"  {tech_name} at node {n}: {value:.1f} MW")
-
-    # Per-unit investment arrays
-    inv_grp = year_grp["gen_investment_power"]
-    for gen_name in inv_grp:
-        inv_data = inv_grp[gen_name][:]  # shape: (num_nodes,)
-        total = inv_data.sum()
-        if total > 0:
-            print(f"  {gen_name}: {total:.1f} MW total investment")
 ```
 
 ### Reading Battery SOC Profiles

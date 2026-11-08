@@ -348,7 +348,6 @@ systems:
         fixed_cost: [25000.0, 25000.0, 25000.0]  # $/MW per year
         maintenance_cost: [3.0, 3.0, 3.0]
         invest_cost: [0.0, 0.0, 0.0]
-        invest_max_power: [0.0, 0.0, 0.0]
         life_time: [30, 30, 30]
         initial_age: [10, 10, 10]
         degradation_rate: [0.0, 0.0, 0.0]
@@ -372,7 +371,6 @@ systems:
         fixed_cost: [22000.0, 22000.0, 22000.0]  # $/MW per year
         maintenance_cost: [2.5, 2.5, 2.5]
         invest_cost: [0.0, 0.0, 0.0]
-        invest_max_power: [0.0, 0.0, 0.0]
         life_time: [25, 25, 25]
         initial_age: [5, 5, 5]
         degradation_rate: [0.0, 0.0, 0.0]

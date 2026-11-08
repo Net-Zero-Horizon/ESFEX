@@ -125,7 +125,7 @@ All forms of energy storage: lithium-ion, flow batteries, pumped hydro, compress
 | | Decommissioning | $/MW | Cost of retiring capacity. |
 | **Appearance** | Color, Size | -, px | Marker colour and size (0 = auto). |
 
-Battery investment (power and energy) is configured in the [Investment Portfolio](#investment-portfolio).
+A battery's `invest_cost` and `invest_max_power` are set in the [Investment Portfolio](#investment-portfolio); new storage is built from battery technologies.
 
 #### Cost Curve Widgets
 
@@ -452,7 +452,7 @@ Each entry defines where and how much new capacity of one technology the optimiz
 | **Identity** | Name | Entry name (e.g., "Solar PV") |
 | | Type | Generator, Battery / Storage, Electrolyzer, AC/DC Converter, Freq. Converter, Transmission, Fuel Storage or Fuel Transport |
 | | Technology | Optional reference to a Technologies entry |
-| **Investment per Node** | Node / Invest Cost ($/MW) / Invest Max (MW) | One row per node. Batteries add Energy Cost ($/MWh) and Energy Max (MWh). |
+| **Investment per Node** | Node / Invest Cost ($/MW) / Invest Max (MW) | One row per node. A Generator entry has only Invest Cost: it is the existing generator's `invest_cost`, which prices its life extension (new generation is built from technologies). For a Battery entry, Invest Cost and Invest Max are the battery's `invest_cost` (life extension) and `invest_max_power`. |
 | | Populate from Nodes | Adds a row, with default values, for every node of the system not yet in the table |
 | | Delete Entry | Deletes the entry after a confirmation |
 

@@ -345,7 +345,7 @@ where \(S^{max}_l\) is the branch thermal capacity in MVA. Unlike the DC formula
 - **SOC, QC, SDP**: a second-order cone, \(\left(S^{max}_l/S_{base},\, P,\, Q\right) \in \mathcal{Q}\).
 - **Polar, Rectangular**: the quadratic inequality \(P^2 + Q^2 \leq (S^{max}_l/S_{base})^2\), since Ipopt does not take cone constraints on nonlinear expressions.
 
-Constraint names `sline_from_{l}_{t}` and `sline_to_{l}_{t}`. A branch with capacity \(\leq 0\) has no limit. \(S^{max}_l\) is multiplied by the scheduled-outage factor of the line or transformer, and in development mode it includes the corridor's transmission investment, as in the DC formulation. N-1 transmission constraints act on DC flow variables and are therefore skipped in ACOPF.
+Constraint names `sline_from_{l}_{t}` and `sline_to_{l}_{t}`. A branch with capacity \(\leq 0\) has no limit. \(S^{max}_l\) is multiplied by the scheduled-outage factor of the line or transformer. Lines the master built are part of \(S^{max}_l\) in the following years' dispatch. N-1 transmission constraints act on DC flow variables and are therefore skipped in ACOPF.
 
 Implemented in `add_acopf_line_limits!()`.
 

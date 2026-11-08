@@ -217,7 +217,6 @@ class TestGenerator:
             fuel=fuel,
             type=gen_type,
             rated_power=[100.0] * num_nodes,
-            invest_max_power=[0.0] * num_nodes,
         )
         nodes = SimpleNamespace(node_coordinates=coords)
         system = SimpleNamespace(

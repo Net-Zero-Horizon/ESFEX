@@ -323,9 +323,6 @@ systems:
         invest_cost:
         - 0.0
         - 0.0
-        invest_max_power:
-        - 0.0
-        - 0.0
       diesel:
         name: Diesel
         type: Non-renewable
@@ -435,9 +432,6 @@ systems:
         invest_cost:
         - 0.0
         - 0.0
-        invest_max_power:
-        - 0.0
-        - 0.0
     batteries:
       bess:
         name: BESS
@@ -509,12 +503,6 @@ systems:
         - 0.0
         - 0.0
         invest_max_power:
-        - 0.0
-        - 0.0
-        invest_cost_energy:
-        - 0.0
-        - 0.0
-        invest_max_capacity:
         - 0.0
         - 0.0
     transmission_lines_geo:

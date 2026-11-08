@@ -53,7 +53,6 @@ def make_generator(name="g", fuel="Solar", technology=None, n=2):
         fixed_cost=[1.0] * n,
         maintenance_cost=[2.0] * n,
         invest_cost=[1000.0] * n,
-        invest_max_power=[500.0] * n,
     )
 
 
@@ -78,9 +77,7 @@ def make_battery(name="b", n=2):
         fixed_cost=[1.0] * n,
         maintenance_cost=[1.0] * n,
         invest_cost=[800.0] * n,
-        invest_cost_energy=[200.0] * n,
         invest_max_power=[300.0] * n,
-        invest_max_capacity=[600.0] * n,
         efficiency_charge=[0.95] * n,
         efficiency_discharge=[0.95] * n,
         soc_initial=[0.5] * n,
@@ -481,10 +478,6 @@ def test_expand_generator_arrays_grow_and_matched_invest():
     # arrays grew from 2 -> 3
     assert len(g_solar.rated_power) == 3
     assert len(g_coal.rated_power) == 3
-    # matched generator: invest_max_power at zone = max_capacity_mw
-    assert g_solar.invest_max_power[2] == pytest.approx(400.0)
-    # non-matched: invest_max_power zero
-    assert g_coal.invest_max_power[2] == pytest.approx(0.0)
     # rated_power forced to 0 (nothing built)
     assert g_solar.rated_power[2] == pytest.approx(0.0)
     # matched invest_cost copied from reference node
@@ -508,8 +501,8 @@ def test_expand_battery_arrays_for_storage_zone():
     assert b.capacity[2] == pytest.approx(0.0)
     assert b.MaxChargePower[2] == pytest.approx(0.0)
     assert b.MaxDischargePower[2] == pytest.approx(0.0)
-    # matched invest_cost_energy copied from reference
-    assert b.invest_cost_energy[2] == pytest.approx(200.0)
+    # matched invest_cost copied from reference
+    assert b.invest_cost[2] == pytest.approx(800.0)
 
 
 def test_expand_technology_arrays_and_max_from_allowed_dict():

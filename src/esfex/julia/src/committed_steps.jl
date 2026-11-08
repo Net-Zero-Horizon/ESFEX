@@ -45,7 +45,7 @@ const _STEP_INDEXED_PS_FIELDS = (
     :reserve_static, :reserve_dynamic, :reserve_static_loss, :reserve_dynamic_loss,
     :load_shed, :ev_charging, :ev_v2g, :ev_soc, :ev_loss, :ev_charge_status,
     :electrolyzer_power, :loss_of_inertia,
-    :loss_of_load_sectoral, :flexible_demand_curtailed, :rooftop_curtailment,
+    :loss_of_load_sectoral, :rooftop_curtailment,
     :acdc_rectify, :acdc_invert, :freq_flow_a_to_b, :freq_flow_b_to_a,
     :reservoir_level, :reservoir_spillage, :reservoir_pump,
     :gen_seg_output, :bat_seg_discharge,

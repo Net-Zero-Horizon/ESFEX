@@ -91,7 +91,7 @@ def test_year_system_holds_aged_units_builds_and_reduced_limits(tmp_path):
     assert unit.fuel_cost[1] == 40.0
     assert unit.min_power[1] == 0.3               # a fraction, not MW
     assert unit.degradation_rate == base.technologies["B__gas_new"].degradation_rate
-    assert unit.invest_max_power == [0.0, 0.0]
+    assert unit.invest_cost == base.technologies["B__gas_new"].invest_cost
     assert year_sys.generators["A__gas_new__built_y2"].initial_age == [1, 1]
 
     # What is left to build, per node (each system's candidate is 0 elsewhere)

@@ -44,8 +44,7 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 | `res_end_seasonal_g{g}_b{b}` | RES-9 | End level equals the next TSAM boundary (seasonal linking) |
 | `res_min_release_g{g}_b{b}_t{t}` | RES-7 | Minimum environmental flow: `output/eta_t + spillage >= min_release` |
 | `res_head_limit_g{g}_b{b}_t{t}` | RES-8 | Head-dependent power limit |
-| `res_invest_limit_g{g}_b{b}` | RES-INV | Reservoir investment limit (development mode) |
-| `res_zero_spill_*`, `res_zero_pump_*`, `res_zero_level_*`, `res_zero_invest_*` | RES-0 | Reservoir variables fixed to 0 where the unit has no reservoir |
+| `res_zero_spill_*`, `res_zero_pump_*`, `res_zero_level_*` | RES-0 | Reservoir variables fixed to 0 where the unit has no reservoir |
 | `reservoir_pump` subtracted from power balance | RES-PB | Pump as demand-side load |
 
 ### Battery Constraints
@@ -61,7 +60,7 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 | `bat_soc_end_lower_{bi}_{b}` | BAT-5a | End-of-horizon SOC lower bound (only with `cyclic_end_soc = true`, the Julia default; the Python runner turns it off) |
 | `bat_soc_end_upper_{bi}_{b}` | BAT-5b | End-of-horizon SOC upper bound (same) |
 | `bat_soc_end_floor_{bi}_{b}` | BAT-5c | Soft floor at the year-start SOC on the year's last window; shortfall `bat_soc_end_short_{bi}_{b}` priced at 10 % of VOLL per time step |
-| `charge <= M_bat*cs`, `discharge <= M_bat*(1-cs)` | BAT-6 | Relaxed charge/discharge exclusivity, `M_bat = 2·(max(P_ch, P_dis) + invest_max_power)`, `cs ∈ [0,1]` |
+| `charge <= M_bat*cs`, `discharge <= M_bat*(1-cs)` | BAT-6 | Relaxed charge/discharge exclusivity, `M_bat = 2·max(P_ch, P_dis)`, `cs ∈ [0,1]` |
 | `bat_min_cycling_{bi}_{b}` | BAT-7 | Minimum cycling requirement over period |
 | `spillage <= MaxDischargePower` | BAT-8 | Spillage power limit (batteries with `spillage = true`) |
 | `±(charge[t] - charge[t-1]) <= ramp × Δt × MaxChargePower`, likewise discharge | BAT-9 | Ramp limits (`ramp_up` rising, `ramp_down` falling; none when 0 or ramp × Δt ≥ 1); at t = 1 from the previous window, `bat_charge_bi{bi}_b{b}_ramp_{up,down}_seam`, `bat_discharge_bi{bi}_b{b}_ramp_{up,down}_seam` |
@@ -170,12 +169,12 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 | `sectoral_lol_sum_{ni}_{t}`, `sectoral_lol_residual_{ni}_{t}` | SEC-2 | Load shed on the node's buses minus the sectoral LOL is in [0, node demand not covered by any sector]; that remainder is priced at VOLL × the demand-weighted mean of the node's sector criticalities (1 without sector demand) |
 | `demand_shift_out_cap_{sector}_{ni}_{t}` | SHIFT-1 | Demand shifted out of a step at most `flexibility_ratio` × sector demand (flexible sectors with `delay_tolerance > 0`); the net shift enters the power balance |
 
-### Investment & Cost Limits
+### Cost Limits
+
+The dispatch builds nothing, so it has no investment limits (the master's are under [Investment Limits](#investment-limits)).
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `max_node_inv_{ni}` | INV-1 | Development mode: generator + battery power investment per node <= `max_node_investment` |
-| `invest_node_gen_g{g}_n{ni}`, `invest_node_bat_pow_bi{bi}_n{ni}`, `invest_node_bat_cap_bi{bi}_n{ni}` | INV-2 | Development mode: one unit's investment across a node's buses <= its per-node `invest_max` |
 | `max_annual_system_cost` | COST-1 | `Δt·operating_cost + window fraction * fixed O&M - cost_violation <= MAX_ANNUAL_SYSTEM_COST * window fraction` (operating cost: fuel and maintenance per MWh; fixed O&M: $/MW·yr of the generators and batteries in service); `cost_violation` priced at 10× the largest variable cost |
 
 `transfer_margin_{i}_{j}` is a slack variable created only when the network has no transmission lines; it appears in no constraint and is always 0.
@@ -224,7 +223,6 @@ There is no DC angle-difference limit; `max_angle_diff_deg` applies to AC-OPF on
 |---------------|--------|-------------|
 | `flow <= (capacity + investment) * outage_factor` | DC-5a | Line/transformer capacity (positive direction) |
 | `flow >= -(capacity + investment) * outage_factor` | DC-5b | Line/transformer capacity (negative direction) |
-| `tf_inv_{i}_{j}` (variable bounds) | DC-5i | Development mode: `0 <= tf_inv <= min(transference_invest_max)` of the two end buses; one variable per corridor, on its first line, charged at the higher `transference_invest_cost` |
 | `line_flow_abs_l{l}_t{t}_pos`, `_neg` | OBJ-17 | Lines with a `cost_per_mw_km` (inter-system links): `line_flow_abs_l{l}_t{t} >= ±flow`, charged length × `cost_per_mw_km` per MWh |
 
 ### Devices
