@@ -171,11 +171,11 @@ function get_electrolyzer_objective_terms(
             add_to_expression!(cost_expr, vars.investment[b], hourly_inv_cost * num_hours)
         end
 
-        # Fixed O&M cost
-        # Total capacity = existing + investment
-        # Fixed cost = total_capacity * fixed_cost * num_hours
-        add_to_expression!(cost_expr, config.rated_power[b] * config.fixed_cost[b] * num_hours)
-        add_to_expression!(cost_expr, vars.investment[b], config.fixed_cost[b] * num_hours)
+        # Fixed O&M ($/MW·year) on existing + invested power, for the
+        # period's share of the year
+        hourly_fixed = config.fixed_cost[b] / Float64(HOURS_STD_YEAR)
+        add_to_expression!(cost_expr, config.rated_power[b] * hourly_fixed * num_hours)
+        add_to_expression!(cost_expr, vars.investment[b], hourly_fixed * num_hours)
 
         # Variable costs (hourly)
         for t in 1:num_hours

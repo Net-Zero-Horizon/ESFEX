@@ -6393,6 +6393,8 @@ class Orchestrator:
                 year=year,
                 base_year=self.state.base_year,
                 mode=ps_mode,
+                # N-1 apply_to_modes lists simulation modes, not ps_mode
+                run_mode=self.config.simulation_mode,
                 availability_cache=self._availability_cache,
                 inflow_cache=getattr(self, "_inflow_cache", None),
                 start_hour=start_hour,
@@ -6450,7 +6452,9 @@ class Orchestrator:
                         num_nodes=num_nodes,
                         generators=gen_list,
                         primary_energy_resolution=self._pe_period_steps(),
-                        mode=ps_mode,
+                        # The run's mode: a development run ends each window
+                        # with its tanks at least 10 % full
+                        mode=self.config.simulation_mode,
                         # Fuel storage and routes the master built up to this
                         # year (the dispatch builds none)
                         cumulative_capacities=self._dispatch_pe_capacities(year),
@@ -7549,56 +7553,6 @@ class Orchestrator:
                 unit.update(fields)
                 unit["initial_age"] = ages
                 unit["life_time"] = lives
-
-    def _apply_retirements_to_config(
-        self,
-        units_config: dict[str, Any],
-        retirements: dict[str, float],
-    ) -> dict[str, Any]:
-        """
-        Apply retirement decisions to the units configuration.
-
-        Reduces or removes capacity from generators/batteries based on
-        MasterProblem retirement decisions.
-
-        Args:
-            units_config: Current units configuration
-            retirements: Retirement decisions {key: fraction_retired}
-
-        Returns:
-            Updated units configuration (new copy)
-        """
-        if not retirements:
-            return units_config
-
-        updated = deepcopy(units_config)
-
-        # Build index-to-key mapping
-        gen_idx_to_key = {}
-        gen_idx = 0
-        for unit_key, unit_data in updated.items():
-            if unit_data.get("_type") != "battery" and unit_data.get("type") != "Storage":
-                gen_idx_to_key[gen_idx] = unit_key
-                gen_idx += 1
-
-        for ret_key, ret_fraction in retirements.items():
-            if ret_fraction <= 0:
-                continue
-
-            if ret_key.startswith("gen_"):
-                idx = int(ret_key.split("_")[1])
-                unit_key = gen_idx_to_key.get(idx)
-                if unit_key and unit_key in updated:
-                    rated = updated[unit_key].get("rated_power", [])
-                    if rated:
-                        # Reduce capacity by retirement fraction
-                        updated[unit_key]["rated_power"] = [
-                            max(0, r * (1 - ret_fraction)) for r in rated
-                        ]
-                        name = updated[unit_key].get("name", unit_key)
-                        logger.debug(f"Retirement: {name} reduced by {ret_fraction*100:.0f}%")
-
-        return updated
 
     def _initialize_hdf5(self, path: Path, num_nodes: int, num_years: int,
                          start_year: int, end_year: int):

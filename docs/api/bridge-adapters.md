@@ -64,6 +64,7 @@ class PowerSystemAdapter:
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
         inflow_cache: Optional[Dict[str, np.ndarray]] = None,
         start_hour: int = 0,
+        run_mode: Optional[str] = None,
         **kwargs
     ) -> None
 ```
@@ -78,10 +79,11 @@ class PowerSystemAdapter:
 | `num_nodes` | `int` | Number of geographic nodes. |
 | `year` | `int` | Current simulation year (used for age-based retirement). |
 | `base_year` | `int` | Base year for investment age calculations. |
-| `mode` | `str` | `"development"` (LP relaxation), `"economic_dispatch"` (LP, no investment), or `"unit_commitment"` (MIP with binary commitment variables). |
+| `mode` | `str` | Dispatch formulation: `"economic_dispatch"` (LP) or `"unit_commitment"` (MIP with binary commitment variables); anything else is solved as economic dispatch. A development run passes one of the two (`master_problem.use_uc_in_dispatch`). |
 | `availability_cache` | `dict` | Pre-loaded availability profiles keyed by generator config key. Each value is a full-year NumPy array of shape `(8760, nodes)` with values in [0, 1]. Avoids repeated file I/O when solving multiple windows. |
 | `inflow_cache` | `dict` | Pre-loaded reservoir inflow profiles keyed by generator config key. Same format as `availability_cache`. |
 | `start_hour` | `int` | Start hour within the year for slicing availability and inflow profiles to the current window. |
+| `run_mode` | `str` | The run's `simulation_mode` (`"development"`, `"unit_commitment"`, `"economic_dispatch"`), checked against `n1_security.apply_to_modes`. Defaults to `config.simulation_mode` (to `mode` with a `SystemConfig`). |
 
 **Keyword Arguments (via `**kwargs`):**
 

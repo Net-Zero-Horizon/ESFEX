@@ -415,17 +415,16 @@ end
     master_fuel_annual_cost(vars, input, y_idx; mult=nothing) -> AffExpr
 
 Undiscounted fixed cost of the electrolyzers in service in year `y_idx`:
-`fixed_cost` (\$/MW per hour, as in the dispatch) × hours of the year ×
-(rated + built) power, × `electrolyzer_fixed_cost` per scenario.
+`fixed_cost` (fixed O&M, \$/MW·year, as in the dispatch) × (rated + built and
+not yet retired) power, × `electrolyzer_fixed_cost` per scenario.
 """
 function master_fuel_annual_cost(vars::MasterProblemVariables, input::MasterProblemInput,
                                  y_idx::Int; mult::Union{Nothing, ScenarioMultipliers} = nothing)
     cost = AffExpr(0.0)
     has_master_fuel(input) || return cost
     m = mult === nothing ? 1.0 : mult.electrolyzer_fixed_cost
-    hrs = Float64(input.hours_per_year[y_idx])
     for (e, ec) in enumerate(input.primary_energy.electrolyzers), b in eachindex(ec.fixed_cost)
-        fc = ec.fixed_cost[b] * m * hrs
+        fc = ec.fixed_cost[b] * m
         fc != 0 || continue
         add_to_expression!(cost, fc * _elz_value(ec.rated_power, b))
         _elz_value(ec.invest_max_power, b) > 0 || continue

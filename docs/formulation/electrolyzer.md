@@ -111,19 +111,19 @@ The functions in `electrolyzer.jl` (`build_electrolyzer_variables!`, `add_electr
 ## 5. Objective Terms
 
 
-Built in `build_objective!()` (`power_system.jl`) as `electrolyzer_cost`, part of the energy costs that are multiplied by the time step \(\Delta t\):
+Built in `build_objective!()` (`power_system.jl`) as `electrolyzer_cost`: the variable and water cost are energy costs, multiplied by the time step \(\Delta t\); the fixed O&M is an annual cost, of which the window pays its share of the year, like the generators' fixed O&M:
 
 \[
-C^{elz} = \Delta t \left[ \sum_{b,t} \left(c^{var}_b + c^{water} h_b\right) P^{elz}_{b,t} + \sum_b \bar{P}^{elz}_b \, c^{fix}_b \, T \right]
+C^{elz} = \Delta t \sum_{b,t} \left(c^{var}_b + c^{water} h_b\right) P^{elz}_{b,t} + \frac{\Delta t \cdot T}{H^{yr}} \sum_b \bar{P}^{elz}_b \, c^{fix}_b
 \tag{ELZ-OBJ}
 \]
 
-where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) is the window length in hours, and \(h_b\) the hydrogen made per MWh (kg/MWh, \(1000 \cdot \bar{\eta}_b / e^{H_2}\)). The master charges the same variable and water cost on its representative days, and the fixed cost per year (`fixed_cost` × hours of the year × rated plus built power).
+where \(T\) is the number of time steps in the window, so \(\Delta t \cdot T\) is the window length in hours, \(H^{yr}\) the hours of the year (8760), and \(h_b\) the hydrogen made per MWh (kg/MWh, \(1000 \cdot \bar{\eta}_b / e^{H_2}\)). \(\bar{P}^{elz}_b\) includes the power the master built that is in service in the window's year. The master charges the same variable and water cost on its representative days, and the fixed O&M once per year (`fixed_cost` × the rated power plus the built power not yet past its `life_time`, × `electrolyzer_fixed_cost` in a stochastic scenario), as Benders does.
 
 | Term | Units | Description |
 |------|-------|-------------|
 | \(c^{var}_b\) (`variable_cost`) | \$/MWh | Variable cost of the electricity consumed |
-| \(c^{fix}_b\) (`fixed_cost`) | \$/MW per hour | Fixed cost on rated power. It is applied per hour of the window, so a yearly figure in \$/MW/year must be divided by 8760. It is a constant and does not affect the dispatch |
+| \(c^{fix}_b\) (`fixed_cost`) | \$/MW·yr | Fixed O&M on the rated power, charged whether or not the electrolyzer runs. It is a constant in the dispatch and does not affect it; in the master it is part of the cost of building |
 | \(c^{water}\) (`water_cost`) | \$/kg H2 | Water cost of the hydrogen produced |
 
 The cost is reported as `electrolyzer_cost` and, when the electrolyzers feed the primary-energy `Hydrogen` tank, also as `pe_electrolyzer_cost` (the same amount, charged once).
@@ -158,7 +158,7 @@ electrolyzers:
     eff_at_rated: [0.70]          # hydrogen output (reported; fills a Hydrogen fuel tank)
     eff_at_min: [0.65]
     energy_per_kg_h2: 55.0        # kWh per kg H2
-    fixed_cost: [3.4]             # $/MW per hour (about 30000 $/MW/year)
+    fixed_cost: [30000.0]         # $/MW per year (fixed O&M)
     variable_cost: [2.0]          # $/MWh
     water_cost: 0.05              # $/kg H2
     invest_cost: [1500000.0]      # $/MW, master problem (primary energy on)
@@ -174,7 +174,7 @@ electrolyzers:
 | `rated_power` | \(\bar{P}^{elz}\) | MW | Yes | Installed capacity per node (ELZ-1) |
 | `ramp_up` / `ramp_down` | \(r^{up}\), \(r^{down}\) | 1/h | Yes | Ramp rates as fraction of rated power per hour (ELZ-2) |
 | `variable_cost` | \(c^{var}\) | \$/MWh | Yes | Variable cost |
-| `fixed_cost` | \(c^{fix}\) | \$/MW/h | Yes (constant) | Fixed cost per hour |
+| `fixed_cost` | \(c^{fix}\) | \$/MW·yr | Yes | Fixed O&M per MW of rated power per year |
 | `eff_at_rated`, `eff_at_min`, `energy_per_kg_h2` | \(\eta\), \(e^{H_2}\) | --, kWh/kg | With a `Hydrogen` primary-energy source | Hydrogen into the `Hydrogen` tank (PE-H2, in t); always reported in the results |
 | `water_cost` | \(c^{water}\) | \$/kg H2 | Yes | Water cost per kg of hydrogen |
 | `invest_cost`, `invest_max_power`, `life_time` | -- | \$/MW, MW, years | Master, with primary energy | Investment |

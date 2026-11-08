@@ -1756,6 +1756,41 @@ import Ipopt
             @test loss ≈ 0.0 atol = 1e-6
         end
 
+        @testset "primary energy: development windows end with tanks 10 % full" begin
+            # A 100-unit tank at the only node (configured, or built by the
+            # master), no fuel supply and 30/day of non-electric demand over
+            # 48 h: without an end condition the window drains the tank. A
+            # development run's windows end it at least 10 % full; a tank the
+            # master built used to be left out.
+            function end_level(mode; built = false)
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0, [0.0], [built ? 0.0 : 100.0],
+                                  [0.5], 0.0, [0.0], 0.0, 0.0, 0.0)
+                infra = Dict("Gas" => FuelInfrastructureConfig(0.0, 0.0, 0.0, 0.0, 0.0,
+                                                               1.0, 30.0, 30.0, -1.0))
+                ned = NonElectricDemandConfig("Industrial", "Gas", [10950.0], 0.0, ones(12))
+                cumul = built ? Dict{String, Any}("storage" => Dict("Gas" => Dict(1 => 100.0))) :
+                                Dict{String, Any}()
+                init = built ? Dict("Gas" => [50.0]) : nothing
+                inp = PrimaryEnergyInput(2025, 2025, 1, 48, [fuel], infra, [ned],
+                    TransportRoute[], Dict{Int, Tuple{String, Float64, Float64, Float64}}(),
+                    24, 48, 0.05, 1000.0, mode, cumul, init,
+                    Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                return value(vars.fuel_storage_level_hourly["Gas"][1, 49])
+            end
+            @test end_level("economic_dispatch") ≈ 0.0 atol = 1e-6
+            @test end_level("unit_commitment") ≈ 0.0 atol = 1e-6
+            @test end_level("development") ≈ 10.0 atol = 1e-6
+            @test end_level("development"; built = true) ≈ 10.0 atol = 1e-6
+            @test end_level("economic_dispatch"; built = true) ≈ 0.0 atol = 1e-6
+        end
+
         @testset "primary energy: scheduled tank and route outages, no-tank nodes" begin
             # One day per period, 48 hourly steps, a 10/day (or 30/day)
             # non-electric demand. Returns the fuel shortfall of the window.
@@ -2106,12 +2141,14 @@ import Ipopt
                 @test Pm ≈ Pd rtol = 1e-6
                 @test Pm * tres * 13.0 / 1000 * 0.8 ≈ 0.01 * 24 rtol = 1e-6
                 elz_m = tres * (2.0e-5 + 1.0e-7 * 13.0) * Pm
-                # The dispatch's bucket also holds the fixed cost of the 30 MW
-                # for the window's 24 h; the master charges it per year
-                fixed_day = 30.0 * 1.0e-6 * 24
+                # Fixed O&M is $/MW·yr: the dispatch's bucket also holds the
+                # window's share (24 h of 8760) of the 30 MW's, the master
+                # charges the full year (both charged it per hour, × 8760)
+                fixed_year = 30.0 * 1.0e-6
+                fixed_day = fixed_year * 24 / 8760
                 @test elz_m + fixed_day ≈
                       tres * value(dmodel.ext[:cost_expressions][:electrolyzer_cost]) rtol = 1e-6
-                @test value(ESFEX.master_fuel_annual_cost(mv, inp, 1)) ≈ fixed_day * 365 rtol = 1e-9
+                @test value(ESFEX.master_fuel_annual_cost(mv, inp, 1)) ≈ fixed_year rtol = 1e-9
                 # The day's fuel cost replaces the unit's flat fuel_cost
                 gm = sum(value(ps.gen_output[1, 1, t]) for t in 1:H)
                 @test value(fc) ≈ sum(value(v) for v in values(mterms)) + elz_m -
@@ -2169,6 +2206,12 @@ import Ipopt
             # Built once, in service both years
             @test fi["storage_capacity"][2]["Gas"][1] ≈ fi["storage"][1]["Gas"][1]
             @test fi["electrolyzer_capacity"][2][1][1] ≈ elz_mw rtol = 1e-6
+            # Fixed O&M ($/MW·yr) on the power in service, once per year
+            # (it was charged per hour, × hours_per_year)
+            for y in 1:2
+                @test value(ESFEX.master_fuel_annual_cost(mv, inp, y)) ≈
+                      1.0e-6 * fi["electrolyzer_capacity"][y][1][1] rtol = 1e-6
+            end
 
             # Benders reaches the same plan (the cuts carry the fuel capacities)
             br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-6,
@@ -2184,6 +2227,19 @@ import Ipopt
             @test res.total_investment_by_year[1] > 0
             @test sum(res.total_investment_by_year) ≈
                   value(ESFEX.master_fuel_investment_cost(mv, inp; discount_rate = 0.0)) rtol = 1e-9
+            # Each year's operating cost is reported (it was always 0):
+            # with the investment and the annual asset costs it makes up
+            # the objective (no slack here)
+            ops = res.total_operational_cost_by_year
+            @test all(ops .> 0)
+            npv = value(ESFEX.build_investment_cost_expression(mv, inp))
+            for y in 1:2
+                df = 1.0 / (1.0 + inp.discount_rate)^(y - 1)
+                npv += df * (value(ESFEX.build_annual_asset_cost(mv, inp, y)) + ops[y])
+            end
+            @test npv ≈ objective_value(model) rtol = 1e-9
+            # Benders reports its subproblems' cost for the same plan
+            @test br.solution.total_operational_cost_by_year ≈ ops rtol = 1e-4
 
             # A route transit delay changes nothing in the cyclic day: the
             # shipments of the day's last steps used to arrive after its end
@@ -2211,7 +2267,10 @@ import Ipopt
                 ESFEX.set_silent(model)
                 optimize!(model)
                 @test string(termination_status(model)) == "OPTIMAL"
-                return objective_value(model), extract_master_solution(model, mv, inp).fuel_investment
+                res = extract_master_solution(model, mv, inp)
+                # The expected operating cost per year (one scenario here)
+                @test all(res.total_operational_cost_by_year .> 0)
+                return objective_value(model), res.fuel_investment
             end
             obj0, fi0 = solve_with(ScenarioMultipliers())
             @test fi0["storage"][1]["Gas"][1] > 1.0

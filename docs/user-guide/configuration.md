@@ -113,7 +113,7 @@ The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes o
 ```yaml
 n1_security:
   enabled: false                          # master switch
-  apply_to_modes: [development, unit_commitment]
+  apply_to_modes: [development, unit_commitment]   # simulation modes (simulation_mode)
   transmission_enabled: true              # line contingencies
   transmission_reserve_factor: 0.70       # pre-contingency loading limit (fraction of rating)
   generation_enabled: true                # generator contingencies
@@ -460,7 +460,7 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
 
 The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the master problem, monolithic or Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`soc_violation` and `delay_retirement_per_mw` can also be set here. Any other key under `penalties` is reported as an unknown key when the configuration loads. Older files may contain `curtailment`, `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`, `transport_congestion` or `storage_violation`: these were removed because they priced nothing (curtailed RE is priced by `curtailment_cost`, the curtailment limit is hard, and the fuel model has no congestion, storage-violation or coupling slacks), and can be deleted.
+`soc_violation` can also be set here. Any other key under `penalties` is reported as an unknown key when the configuration loads. Older files may contain `curtailment`, `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`, `transport_congestion`, `storage_violation` or `delay_retirement_per_mw`: these were removed because they priced nothing (curtailed RE is priced by `curtailment_cost`, the curtailment limit is hard, the fuel model has no congestion, storage-violation or coupling slacks, and no run schedules a delayed retirement), and can be deleted.
 
 `loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
 

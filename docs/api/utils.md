@@ -253,44 +253,6 @@ Calculate total CO2 emissions from generation output. Only non-renewable generat
 
 **Returns:** Total CO2 emissions in tonnes.
 
-### Adjustment Functions
-
-#### adjust_investment_limits
-
-```python
-def adjust_investment_limits(
-    unit_data: dict,
-    year: int,
-    base_year: int,
-    growth_rate: float = 0.5,
-) -> None
-```
-
-Adjust investment limits for renewable and storage units based on year progression. Modifies `unit_data` in place.
-
-
-Growth formula: `invest_max *= (1 + growth_rate) ^ (year - base_year)`.
-
-Only applies to units with `type` in `("Renewable", "Storage")`.
-
-#### adjust_transmission_parameters
-
-```python
-def adjust_transmission_parameters(
-    nodes: dict,
-    year: int,
-    base_year: int,
-    cost_reduction_rate: float = 0.03,
-    capacity_growth_rate: float = 0.5,
-) -> None
-```
-
-Adjust transmission investment costs and capacity limits based on year progression. Modifies `nodes` in place.
-
-
-- Investment costs decrease: `cost *= (1 - cost_reduction_rate) ^ years_diff`.
-- Capacity limits increase: `max *= (1 + capacity_growth_rate) ^ years_diff`.
-
 ---
 
 ## Module: esfex.utils.temporal
@@ -530,8 +492,6 @@ Resolve a project data-file reference. Absolute paths are returned unchanged; re
 from esfex.utils import (
     # Helpers
     BoundaryConditions,
-    adjust_investment_limits,
-    adjust_transmission_parameters,
     calculate_co2_emissions,
     calculate_renewable_penetration,
     extract_boundary_conditions,

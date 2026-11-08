@@ -17,7 +17,6 @@ from esfex.bridge.converters import (
     COST_UNSCALE,
     convert_index_julia_to_py,
     convert_index_py_to_julia,
-    convert_master_problem_result,
     convert_power_system_result,
     convert_scenario,
     convert_temporal_config,
@@ -744,7 +743,6 @@ class TestConvertPowerSystemResult:
         cb.electrolyzer_cost = 0.0
         cb.converter_cost = 0.0
         cb.spillage_cost = 50.0
-        cb.delay_retirement_cost = 3000.0
         cb.reservoir_spillage_cost = 0.0
         cb.demand_shift_cost = 0.0
         cb.rooftop_curtailment_cost = 0.0
@@ -785,7 +783,7 @@ class TestConvertPowerSystemResult:
             "inertia_cost", "soc_violation_cost", "transfer_margin_cost",
             "v2g_compensation",
             "electrolyzer_cost", "converter_cost", "spillage_cost",
-            "delay_retirement_cost", "reservoir_spillage_cost",
+            "reservoir_spillage_cost",
             "demand_shift_cost", "rooftop_curtailment_cost",
             "npv_penalty_cost",
             "pe_supply_cost", "pe_loss_cost", "pe_excess_cost",
@@ -819,179 +817,6 @@ class TestConvertPowerSystemResult:
         r.cost_breakdown = self._make_mock_cost_breakdown()
         result = convert_power_system_result(r)
         assert result["cost_breakdown"]["v2g_compensation"] < 0
-
-
-# ---------------------------------------------------------------------------
-# convert_master_problem_result
-# ---------------------------------------------------------------------------
-
-
-class TestConvertMasterProblemResult:
-    """Tests for convert_master_problem_result()."""
-
-    def _make_mock_result(self, years):
-        """Create a mock Julia MasterProblemResult."""
-        r = MagicMock()
-        r.status = "OPTIMAL"
-        r.objective = 9876543.21
-        r.solve_time = 120.0
-
-        num_years = len(years)
-
-        gen_inv = {}
-        for y_idx in range(1, num_years + 1):
-            year_dict = MagicMock()
-            year_dict.keys.return_value = [1]
-            year_dict.__getitem__ = lambda self, k: np.array([50.0, 100.0])
-            gen_inv[y_idx] = year_dict
-        r.gen_investment = gen_inv
-
-        bat_pow = {}
-        bat_cap = {}
-        for y_idx in range(1, num_years + 1):
-            pow_dict = MagicMock()
-            pow_dict.keys.return_value = [1]
-            pow_dict.__getitem__ = lambda self, k: np.array([10.0])
-            bat_pow[y_idx] = pow_dict
-
-            cap_dict = MagicMock()
-            cap_dict.keys.return_value = [1]
-            cap_dict.__getitem__ = lambda self, k: np.array([100.0])
-            bat_cap[y_idx] = cap_dict
-        r.bat_power_investment = bat_pow
-        r.bat_capacity_investment = bat_cap
-
-        trans = {}
-        for y_idx in range(1, num_years + 1):
-            trans_dict = MagicMock()
-            trans_dict.items.return_value = [((1, 2), 200.0)]
-            trans[y_idx] = trans_dict
-        r.transfer_investment = trans
-
-        gen_life = {}
-        for y_idx in range(1, num_years + 1):
-            life_dict = MagicMock()
-            life_dict.keys.return_value = [1]
-            life_dict.__getitem__ = lambda self, k: np.array([1.0])
-            gen_life[y_idx] = life_dict
-        r.gen_life_extension = gen_life
-
-        bat_life = {}
-        for y_idx in range(1, num_years + 1):
-            blife_dict = MagicMock()
-            blife_dict.keys.return_value = [1]
-            blife_dict.__getitem__ = lambda self, k: np.array([0.0])
-            bat_life[y_idx] = blife_dict
-        r.bat_life_extension = bat_life
-
-        r.total_investment_by_year = np.array([1e6] * num_years)
-        r.total_operational_cost_by_year = np.array([5e5] * num_years)
-        r.re_penetration_by_year = np.array([0.3] * num_years)
-
-        cumul_gen = {}
-        for y_idx in range(1, num_years + 1):
-            cg = MagicMock()
-            cg.keys.return_value = [1]
-            cg.__getitem__ = lambda self, k: np.array([500.0])
-            cumul_gen[y_idx] = cg
-        r.cumulative_gen_capacity = cumul_gen
-
-        cumul_bat = {}
-        for y_idx in range(1, num_years + 1):
-            cb = MagicMock()
-            cb.keys.return_value = [1]
-            cb.__getitem__ = lambda self, k: np.array([200.0])
-            cumul_bat[y_idx] = cb
-        r.cumulative_bat_capacity = cumul_bat
-
-        return r
-
-    def test_status_field(self):
-        years = [2025, 2030]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert result["status"] == "OPTIMAL"
-
-    def test_objective_field(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        # Julia stores costs in M$; converter unscales to $.
-        assert result["objective"] == 9876543.21 * COST_UNSCALE
-
-    def test_solve_time_field(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert result["solve_time"] == 120.0
-
-    def test_years_field(self):
-        years = [2025, 2030, 2035]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert result["years"] == [2025, 2030, 2035]
-
-    def test_gen_investment_structure(self):
-        years = [2025, 2030]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert 2025 in result["gen_investment"]
-        assert 2030 in result["gen_investment"]
-        assert 1 in result["gen_investment"][2025]
-
-    def test_bat_investment_structure(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert "bat_power_investment" in result
-        assert "bat_capacity_investment" in result
-        assert 2025 in result["bat_power_investment"]
-
-    def test_transfer_investment_index_conversion(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        ti = result["transfer_investment"][2025]
-        assert (0, 1) in ti
-        assert ti[(0, 1)] == 200.0
-
-    def test_life_extension_fields(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert "gen_life_extension" in result
-        assert "bat_life_extension" in result
-
-    def test_summary_metrics(self):
-        years = [2025, 2030]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert isinstance(result["total_investment_by_year"], np.ndarray)
-        assert isinstance(result["total_operational_cost_by_year"], np.ndarray)
-        assert isinstance(result["re_penetration_by_year"], np.ndarray)
-
-    def test_cumulative_capacity_fields(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert "cumulative_gen_capacity" in result
-        assert "cumulative_bat_capacity" in result
-        assert 2025 in result["cumulative_gen_capacity"]
-
-    def test_all_expected_keys(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        expected = [
-            "status", "objective", "solve_time", "years",
-            "gen_investment", "bat_power_investment", "bat_capacity_investment",
-            "transfer_investment", "gen_life_extension", "bat_life_extension",
-            "total_investment_by_year", "total_operational_cost_by_year",
-            "re_penetration_by_year", "cumulative_gen_capacity",
-            "cumulative_bat_capacity",
-        ]
-        for key in expected:
-            assert key in result, f"Missing key: {key}"
 
 
 # ---------------------------------------------------------------------------
