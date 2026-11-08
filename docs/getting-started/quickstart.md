@@ -85,7 +85,7 @@ systems:
         inertia: [2.0]             # s
         start_up_cost: [0.0]
         fuel_cost: [80.0]          # $/MWh
-        fixed_cost: [0.0]
+        fixed_cost: [0.0]             # $/MW per year
         maintenance_cost: [10.0]   # $/MWh
         invest_cost: [1000000.0]   # $/MW; prices life extension past life_time
         invest_max_power: [0.0]

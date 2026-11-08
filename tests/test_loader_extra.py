@@ -74,7 +74,8 @@ def _minimal_system():
 
 
 def _thermal_gen(name="Gas_plant", fuel="Gas", technology=None,
-                 fuel_cost=None, maintenance_cost=None, eff_at_rated=None):
+                 fuel_cost=None, maintenance_cost=None, eff_at_rated=None,
+                 fixed_cost=None):
     return {
         "name": name,
         "type": "Non-renewable",
@@ -96,7 +97,7 @@ def _thermal_gen(name="Gas_plant", fuel="Gas", technology=None,
         "inertia": [4, 4],
         "start_up_cost": [1000, 1000],
         "fuel_cost": fuel_cost if fuel_cost is not None else [0, 0],
-        "fixed_cost": [5.0, 5.0],
+        "fixed_cost": fixed_cost if fixed_cost is not None else [0.0, 0.0],
         "maintenance_cost": maintenance_cost if maintenance_cost is not None else [0.0, 0.0],
         "invest_cost": [800000, 800000],
         "invest_max_power": [200, 200],
@@ -658,6 +659,21 @@ class TestFuelLinking:
         sc = _convert_system(data)
         # 40 >= 60*0.5=30 -> unchanged
         assert sc.generators["unit_0"].maintenance_cost == [40.0, 40.0]
+
+    def test_own_fixed_cost_gets_no_adder(self, caplog):
+        """The adder (non-fuel LCOE, fixed O&M included) is not added to a
+        generator with its own fixed O&M in $/MW·yr: it was, so the fixed
+        O&M was charged twice (per MW·yr and inside the $/MWh adder)."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _thermal_gen(
+            name="GP", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[2.0, 2.0],
+            fixed_cost=[25000.0, 25000.0])
+        with caplog.at_level(logging.INFO, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].maintenance_cost == [2.0, 2.0]
+        assert sc.generators["unit_0"].fixed_cost == [25000.0, 25000.0]
+        assert not any("non-fuel O&M adder" in r.getMessage() for r in caplog.records)
 
     def test_renewable_generators_skipped(self):
         """Renewable gens are not modified by the linking pass."""

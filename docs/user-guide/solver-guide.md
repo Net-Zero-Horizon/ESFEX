@@ -369,7 +369,8 @@ Optimization models can have wide coefficient ranges due to mixing different phy
 | Quantity | Typical Range | Units |
 |----------|--------------|-------|
 | Generator fuel costs | 3-100 | $/MWh |
-| Fixed/maintenance costs | 1-50 | $/MWh |
+| Maintenance (variable O&M) costs | 1-50 | $/MWh |
+| Fixed O&M costs | 10,000-150,000 | $/MW·yr |
 | Investment costs | 100,000-2,000,000 | $/MW |
 | Penalty coefficients | 100-10,000,000 | $/MWh or $/MW |
 | Power outputs | 0-1,000 | MW |

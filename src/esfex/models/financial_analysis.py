@@ -29,6 +29,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from esfex.utils.temporal import HOURS_STD_YEAR
+
 logger = logging.getLogger(__name__)
 
 
@@ -346,10 +348,10 @@ def _vintage_debt_service(
 def _fuel_opex_map(
     gen_configs: list[dict], n_nodes: int,
 ) -> dict[str, tuple[float, float, float]]:
-    """Map fuel -> (fuel_cost, fixed_cost, maintenance_cost) in $/MWh.
+    """Map fuel -> (fuel_cost $/MWh, fixed_cost $/MW·yr, maintenance_cost $/MWh).
 
     Investment-technology configs in HDF5 carry no operating costs, so the
-    per-MWh opex of a new "Investment <tech>" unit is borrowed from the first
+    opex of a new "Investment <tech>" unit is borrowed from the first
     existing generator of the same fuel (the representative unit value is the
     max across the per-node array, since unused nodes are zero-filled).
     """
@@ -651,6 +653,7 @@ def _recalculate_costs(
         # Get per-node cost arrays (stored as scalar or list in HDF5 attrs)
         fuel_cost = _as_array(cfg.get("fuel_cost", 0.0), gen_output.shape[0])
         fixed_cost = _as_array(cfg.get("fixed_cost", 0.0), gen_output.shape[0])
+        rated = _as_array(cfg.get("rated_power", 0.0), gen_output.shape[0])
         maint_cost = _as_array(cfg.get("maintenance_cost", 0.0), gen_output.shape[0])
         su_cost = _as_array(cfg.get("start_up_cost", 0.0), gen_output.shape[0])
 
@@ -659,9 +662,10 @@ def _recalculate_costs(
             energy_mwh = output_n * temporal_res
 
             costs["fuel_cost"] += float(np.sum(energy_mwh * fuel_cost[n]))
-            costs["om_cost"] += float(np.sum(
-                energy_mwh * (fixed_cost[n] + maint_cost[n])
-            ))
+            # Maintenance per MWh; fixed O&M per MW·yr of rated power, for
+            # the simulated share of the year, whether or not the unit ran
+            costs["om_cost"] += float(np.sum(energy_mwh * maint_cost[n])) + (
+                fixed_cost[n] * rated[n] * _year_share(gen_output, temporal_res))
 
             # Startup costs
             if "gen_startup" in year_data and gen_name in year_data["gen_startup"]:
@@ -700,6 +704,11 @@ def _recalculate_costs(
             costs["battery_cost"] += float(np.sum(throughput * maint[n]))
 
     return costs
+
+
+def _year_share(series: np.ndarray, temporal_res: float) -> float:
+    """Share of a year covered by ``series`` (steps on its last axis)."""
+    return series.shape[-1] * temporal_res / HOURS_STD_YEAR
 
 
 def _as_array(val, size: int) -> np.ndarray:
@@ -989,7 +998,9 @@ def compute_system_financials(
                 str(tcfg.get("fuel", "")).strip(), (0.0, 0.0, 0.0)
             )
             inv_fuel[y_idx] += energy_tot * fc_rate
-            inv_om[y_idx] += energy_tot * (fx_rate + mc_rate)
+            # Fixed O&M ($/MW·yr) on the installed MW over the simulated hours
+            inv_om[y_idx] += energy_tot * mc_rate + fx_rate * float(np.sum(
+                invest_installed_mw[ds_name])) * _year_share(gen_arr, info["temporal_res"])
             inv_prices_n = year_data.get("nodal_prices")
             inv_sys_p = year_data.get("system_prices")
             for n in range(n_g):
@@ -1349,7 +1360,9 @@ def compute_technology_financials(
                 fxc = float(_as_array(cfg.get("fixed_cost", 0.0), 1)[0])
                 mc = float(_as_array(cfg.get("maintenance_cost", 0.0), 1)[0])
                 acc["fuel_cost"][y_idx] += float(np.sum(energy)) * fc
-                acc["om_cost"][y_idx] += float(np.sum(energy)) * (fxc + mc)
+                # Fixed O&M per MW·yr of the node's rated power
+                acc["om_cost"][y_idx] += float(np.sum(energy)) * mc + fxc * float(
+                    rated[n]) * _year_share(gen_arr, info["temporal_res"])
 
                 if assumptions.ppa_price > 0:
                     price = assumptions.ppa_price * (

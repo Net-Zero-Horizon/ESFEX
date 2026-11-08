@@ -345,7 +345,7 @@ systems:
         inertia: [2.0, 2.0, 2.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]        # computed from price_base by the loader
-        fixed_cost: [5.0, 5.0, 5.0]
+        fixed_cost: [25000.0, 25000.0, 25000.0]  # $/MW per year
         maintenance_cost: [3.0, 3.0, 3.0]
         invest_cost: [0.0, 0.0, 0.0]
         invest_max_power: [0.0, 0.0, 0.0]
@@ -369,7 +369,7 @@ systems:
         inertia: [3.0, 3.0, 3.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
-        fixed_cost: [4.0, 4.0, 4.0]
+        fixed_cost: [22000.0, 22000.0, 22000.0]  # $/MW per year
         maintenance_cost: [2.5, 2.5, 2.5]
         invest_cost: [0.0, 0.0, 0.0]
         invest_max_power: [0.0, 0.0, 0.0]

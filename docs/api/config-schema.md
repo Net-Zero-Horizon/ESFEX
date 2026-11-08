@@ -214,7 +214,7 @@ class GeneratorConfig(BaseModel):
     inertia: list[float]                   # H (s)
     start_up_cost: list[float]             # $ per start
     fuel_cost: list[float]                 # $/MWh
-    fixed_cost: list[float]                # $/MWh
+    fixed_cost: list[float]                # $/MW per year (fixed O&M)
     maintenance_cost: list[float]          # $/MWh
     invest_cost: list[float] = [0.0]       # $/MW
     invest_max_power: list[float] = [0.0]  # MW
@@ -286,7 +286,7 @@ class TechnologyConfig(BaseModel):
     availability_file: Optional[str] = None   # alias "Availability"
     fuel_cost: list[float] = [0.0]
     fuel_cost_curve: Optional[list[CostCurveConfig]] = None
-    fixed_cost: list[float] = [0.0]
+    fixed_cost: list[float] = [0.0]        # $/MW built per year
     maintenance_cost: list[float] = [0.0]
     ...
 ```

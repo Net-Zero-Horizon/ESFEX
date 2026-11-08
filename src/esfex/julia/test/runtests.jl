@@ -16,7 +16,7 @@
 using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
-             coefficient, objective_function, all_variables, name, fix
+             coefficient, objective_function, all_variables, name, fix, constant
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -239,9 +239,10 @@ import Ipopt
                                  0.05, 0.6, 100.0) == 0.0
 
         # One year, no degradation/discount/decommissioning: NPV equals the
-        # single-year net cash flow = generation * (lcoe - total_unit_cost).
+        # single-year net cash flow = generation * (lcoe - fuel - maintenance)
+        # - fixed O&M per MW-year * capacity.
         gen = 100.0 * 0.5 * Float64(ESFEX.HOURS_STD_YEAR)  # MWh
-        expected = gen * (100.0 - (20.0 + 5.0 + 5.0))
+        expected = gen * (100.0 - (20.0 + 5.0)) - 5.0 * 100.0
         @test calculate_unit_npv(100.0, 20.0, 5.0, 5.0, 1.0, 0.0, 0.0,
                                  0.0, 0.5, 100.0) ≈ expected
 
@@ -3099,6 +3100,132 @@ import Ipopt
                     bats in (BatteryConfig[], [mkbat(ramp = 0.25, avail = avail)])
                 inp = bat_master(bats, spike; btechs = [tech],
                                  reserve_static_requirement = Dict(1 => 5.0))
+                model, _ = master1(inp)
+                br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.gap < 1e-6
+                @test br.objective ≈ objective_value(model) rtol = 1e-6
+            end
+        end
+
+        # ── Fixed O&M per MW-year (round 9, F9) ─────────────────────────────
+        # Coal (100 MW, cheap) and gas (40 MW, dear) on one bus; gas pays
+        # `fixed` per MW of power in service per year. It was charged per
+        # MWh produced, so a unit that did not run paid nothing.
+        fo_gas(fixed; kw...) = ESFEX.with_fields(
+            mkgen("Gas", "Non-renewable", "Gas", [40.0], [3.0e-5], ones(H24, 1);
+                  nb = 1, H = H24); fixed_cost = [fixed], kw...)
+        fo_coal() = mkgen("Coal", "Non-renewable", "Coal", [100.0], [1.0e-5],
+                          ones(H24, 1); nb = 1, H = H24)
+        function fo_dispatch(gas, demand)
+            input = PowerSystemInput(;
+                name = "fo", year = 2025, network = net1, generators = [fo_coal(), gas],
+                batteries = BatteryConfig[], demand = fill(demand, H24, 1),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                loss_of_load_penalty = 0.01, reserve_static_default_ratio = 0.0,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            return model, vars, input
+        end
+        function fo_master(gas; techs = TechnologyConfig[], bats = BatteryConfig[],
+                           demand = 30.0, kw...)
+            return MasterProblemInput(;
+                years = [2025], network = net1, generators = [fo_coal(), gas],
+                batteries = bats, technologies = techs,
+                base_demand = fill(demand, H24, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, loss_of_load_penalty = 0.01,
+                reserve_static_default_ratio = 0.0, reserve_margin = 0.0,
+                verbose = false, kw...)
+        end
+        fo_tech(fixed) = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0e-3], [50.0],
+            ones(H24, 1), [1.0], [1.0], [1.0], [1.0], [0.0], [0.0], [0.0], [2.0e-5],
+            [fixed], [0.0], [0.0], [0.0], [25.0], [0.1], [0.0], 50.0, "AC", false, [1.0])
+
+        @testset "generator fixed O&M per MW-year, whether or not it runs" begin
+            fc = 1.0e-3
+            window = fc * 40.0 * 24 / 8760
+            for demand in (30.0, 120.0)        # gas idle, gas running
+                m0, v0, i0 = fo_dispatch(fo_gas(0.0), demand)
+                m1, v1, i1 = fo_dispatch(fo_gas(fc), demand)
+                ran = sum(value.(v1.gen_output[2, 1, :]))
+                @test (ran > 1.0) == (demand > 100.0)
+                @test objective_value(m1) - objective_value(m0) ≈ window rtol = 1e-6
+                res = extract_solution(m1, v1, i1)
+                @test res.cost_breakdown.fixed_om_cost ≈ window rtol = 1e-6
+                # Same dispatch: a constant does not change the operation
+                out(v) = [value(v.gen_output[g, 1, t]) for g in 1:2, t in 1:H24]
+                @test out(v1) ≈ out(v0) atol = 1e-6
+            end
+            # Degraded power in service (age 2 at 10 %/year), none past life
+            for (age, life, mw) in ((2.0, 30.0, 40.0 * 0.9^2), (2.0, 1.0, 0.0))
+                g = fo_gas(fc; degradation_rate = [0.1], initial_age = [age],
+                           life_time = [life])
+                m0, _, _ = fo_dispatch(ESFEX.with_fields(g; fixed_cost = [0.0]), 30.0)
+                m1, _, _ = fo_dispatch(g, 30.0)
+                @test objective_value(m1) - objective_value(m0) ≈ fc * mw * 24 / 8760 atol = 1e-10
+            end
+        end
+
+        @testset "master fixed O&M per year = 8760/window × the dispatch's" begin
+            fc = 1.0e-3
+            # Existing unit, degraded unit: the year costs 365 × the day
+            for kw in ((;), (; degradation_rate = [0.1], initial_age = [2.0]))
+                d0, _, _ = fo_dispatch(fo_gas(0.0; kw...), 30.0)
+                d1, _, _ = fo_dispatch(fo_gas(fc; kw...), 30.0)
+                m0, _ = master1(fo_master(fo_gas(0.0; kw...)))
+                m1, _ = master1(fo_master(fo_gas(fc; kw...)))
+                dd = objective_value(d1) - objective_value(d0)
+                @test dd > 0
+                @test objective_value(m1) - objective_value(m0) ≈ 8760 / 24 * dd rtol = 1e-6
+            end
+            # Life-extended MW and technology MW built (degraded with age)
+            # pay it per year; nothing in the day cost
+            old = fo_gas(fc; life_time = [5.0], initial_age = [10.0], invest_cost = [1.0])
+            inp = fo_master(old; techs = [fo_tech(fc)], years = [2025, 2026])
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp)
+            for y in 1:2
+                cost = ESFEX.build_annual_asset_cost(vars, inp, y)
+                lev = vars.gen_life_extension[y][2][1]
+                @test coefficient(cost, lev) ≈ 1.0 * inp.life_extension_cost_factor + fc rtol = 1e-9
+                @test coefficient(cost, vars.tech_investment[1][1][1]) ≈ fc * 0.9^(y - 1) rtol = 1e-9
+            end
+        end
+
+        @testset "gen_fixed_cost scales generator, technology and battery fixed O&M" begin
+            fc = 1.0e-3
+            bat = mkbat(fixed = 2.0e-3)
+            inp = fo_master(fo_gas(fc); techs = [fo_tech(fc)], bats = [bat])
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp)
+            base = ESFEX.build_annual_asset_cost(vars, inp, 1)
+            twice = ESFEX.build_annual_asset_cost(vars, inp, 1;
+                                                  mult = ScenarioMultipliers(gen_fixed_cost = 2.0))
+            @test constant(base) ≈ fc * 40.0 + 2.0e-3 * 20.0 rtol = 1e-9
+            @test constant(twice) ≈ 2 * constant(base) rtol = 1e-9
+            vt = vars.tech_investment[1][1][1]
+            @test coefficient(twice, vt) ≈ 2 * coefficient(base, vt) rtol = 1e-9
+            # The scenario's operating input no longer carries it
+            si = ESFEX.scenario_master_input(inp, ScenarioMultipliers(gen_fixed_cost = 2.0), 1)
+            @test si.generators[2].fixed_cost == [fc]
+            # End to end: the stochastic master pays twice the fixed O&M
+            m1, _ = master1(fo_master(fo_gas(fc)))
+            m0, _ = master1(fo_master(fo_gas(0.0)))
+            m2, _ = master1(fo_master(fo_gas(fc)); mult = ScenarioMultipliers(gen_fixed_cost = 2.0))
+            m2b, _ = master1(fo_master(fo_gas(0.0)); mult = ScenarioMultipliers(gen_fixed_cost = 2.0))
+            @test objective_value(m2) - objective_value(m2b) ≈
+                  2 * (objective_value(m1) - objective_value(m0)) rtol = 1e-6
+        end
+
+        @testset "Benders = monolithic with generator and technology fixed O&M" begin
+            fc = 1.0e-3
+            for (gas, techs, demand) in ((fo_gas(fc), [fo_tech(fc)], 160.0),
+                                         (fo_gas(fc; life_time = [5.0], initial_age = [10.0],
+                                                 invest_cost = [1.0e-3]), [fo_tech(fc)], 120.0))
+                inp = fo_master(gas; techs = techs, demand = demand)
                 model, _ = master1(inp)
                 br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
                                                verbose_benders = false)

@@ -125,10 +125,10 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (development-mode investment, delayed retirement, forced replacement, reservoir investment, the batteries' fixed cost) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (development-mode investment, delayed retirement, forced replacement, reservoir investment, the fixed O&M of generators and batteries) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} + Z^{\text{bat,fix}} \right) + Z^{\text{start}} \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} + Z^{\text{fix}} + Z^{\text{bat,fix}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
 Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
@@ -136,10 +136,18 @@ Implemented in `build_objective!()`. A few terms are added to the objective by t
 ### 3.1 Operational Costs
 
 \[
-Z^{\text{op}} = \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{fixed}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} \tag{OBJ-1}
+Z^{\text{op}} = \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} \tag{OBJ-1}
 \]
 
-where \(c^{\text{fuel}}_{g,n}\), \(c^{\text{fixed}}_{g,n}\), and \(c^{\text{maint}}_{g,n}\) are per-MWh fuel, fixed O&M, and maintenance costs respectively. The sums are restricted to buses where \(\bar{P}_{g,n} > 0\).
+where \(c^{\text{fuel}}_{g,n}\) and \(c^{\text{maint}}_{g,n}\) are the per-MWh fuel and maintenance (variable O&M) costs. The sums are restricted to buses where \(\bar{P}_{g,n} > 0\).
+
+#### 3.1a Generator Fixed O&M
+
+\[
+Z^{\text{fix}} = \sum_{g,n} c^{\text{fix}}_{g,n} \left( \bar{P}^{\text{eff}}_{g,n} + \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \right) \tag{OBJ-1a}
+\]
+
+with \(c^{\text{fix}}_{g,n}\) the generator's `fixed_cost` ($ per MW per year), \(\bar{P}^{\text{eff}}_{g,n}\) its power in service (DEG-1: degraded, 0 past its `life_time`) and \(\bar{P}^{\text{orig}}_{g,n} d_{g,n}\) the capacity a delayed retirement keeps (OBJ-14). It is charged whether or not the unit runs: an annual term, prorated to the window in (OBJ), and reported as `fixed_om_cost` with the batteries' (OBJ-3c). After a master run the dispatch receives the master's capacity (degraded, life-extended, built) as rated power, so the dispatch and the master charge the same MW. Earlier versions charged `fixed_cost` per MWh generated.
 
 #### 3.1.1 Piecewise-Linear (PWL) Fuel Cost Decomposition
 
@@ -213,7 +221,7 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 Z^{\text{bat,fix}} = \sum_{b,n} c^{\text{fix}}_{b,n} \, P^{\text{dis}}_{b,n} \tag{OBJ-3c}
 \]
 
-with \(c^{\text{fix}}_{b,n}\) the battery's `fixed_cost` ($ per MW per year) and \(P^{\text{dis}}_{b,n}\) its rated `MaxDischargePower` (not degraded; none when BAT-1's degraded rating is 0, past its `life_time`). An annual term, prorated to the window in (OBJ); it is reported with the generators' fixed O&M (`fixed_om_cost`). The master problem charges it each year on the discharge power in service.
+with \(c^{\text{fix}}_{b,n}\) the battery's `fixed_cost` ($ per MW per year) and \(P^{\text{dis}}_{b,n}\) its rated `MaxDischargePower` (not degraded; none when BAT-1's degraded rating is 0, past its `life_time`). An annual term, prorated to the window in (OBJ); it is reported with the generators' fixed O&M (OBJ-1a, `fixed_om_cost`). The master problem charges it each year on the discharge power in service.
 
 ### 3.4 Penalty Costs
 
@@ -948,10 +956,10 @@ Implemented in `add_max_annual_system_cost!()`.
 #### COST-1: Operating Cost Ceiling
 
 \[
-\Delta t \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{fixed}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} - s^{\text{cost}} \leq \frac{T \Delta t}{H_{\text{year}}} \, C^{\max}_{\text{annual}} \tag{COST-1}
+\Delta t \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} + \frac{T \Delta t}{H_{\text{year}}} \left( Z^{\text{fix}} + Z^{\text{bat,fix}} \right) - s^{\text{cost}} \leq \frac{T \Delta t}{H_{\text{year}}} \, C^{\max}_{\text{annual}} \tag{COST-1}
 \]
 
-The annual ceiling `MAX_ANNUAL_SYSTEM_COST` (default 20·10⁹) is scaled to the window. The constraint is soft: the violation \(s^{\text{cost}} \geq 0\) (`cost_violation`) costs 10 × the largest generator variable cost per unit in the objective.
+The annual ceiling `MAX_ANNUAL_SYSTEM_COST` (default 20·10⁹) is scaled to the window, and so is the fixed O&M (OBJ-1a, OBJ-3c). The constraint is soft: the violation \(s^{\text{cost}} \geq 0\) (`cost_violation`) costs 10 × the largest generator variable cost per unit in the objective.
 
 ---
 

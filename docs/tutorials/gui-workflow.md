@@ -129,7 +129,7 @@ Draw three lines to connect the nodes:
 | **Ramp Up / Ramp Down (pu/h)** | Ramp limit as a fraction of rated power per hour (1.0 = no practical limit) | 1.0 |
 | **Eff. at Rated (frac)** | Efficiency at full load | 1.0 |
 | **Fuel ($/MWh)** | Fuel cost (0 for renewables) | 0.0 |
-| **Fixed ($/MWh)** | Fixed O&M cost | 5.0 |
+| **Fixed ($/MW·yr)** | Fixed O&M per MW of rated power per year, paid whether or not the unit runs | 20000.0 |
 | **Maintenance ($/MWh)** | Variable O&M cost | 2.0 |
 
 The generator form has no investment fields. New capacity is defined in the Investment Portfolio (Step 8). See [Element Forms](../gui/element-forms.md#generator) for all fields, including the cost curve options.

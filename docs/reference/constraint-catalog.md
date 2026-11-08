@@ -176,7 +176,7 @@ The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_
 |---------------|--------|-------------|
 | `max_node_inv_{ni}` | INV-1 | Development mode: generator + battery power investment per node <= `max_node_investment` |
 | `invest_node_gen_g{g}_n{ni}`, `invest_node_bat_pow_bi{bi}_n{ni}`, `invest_node_bat_cap_bi{bi}_n{ni}` | INV-2 | Development mode: one unit's investment across a node's buses <= its per-node `invest_max` |
-| `max_annual_system_cost` | COST-1 | `Δt·operating_cost - cost_violation <= MAX_ANNUAL_SYSTEM_COST * window fraction`; `cost_violation` priced at 10× the largest variable cost |
+| `max_annual_system_cost` | COST-1 | `Δt·operating_cost + window fraction * fixed O&M - cost_violation <= MAX_ANNUAL_SYSTEM_COST * window fraction` (operating cost: fuel and maintenance per MWh; fixed O&M: $/MW·yr of the generators and batteries in service); `cost_violation` priced at 10× the largest variable cost |
 
 `transfer_margin_{i}_{j}` is a slack variable created only when the network has no transmission lines; it appears in no constraint and is always 0.
 

@@ -110,7 +110,7 @@ systems:
         inertia: [0.0, 0.0, 0.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
-        fixed_cost: [5.0, 5.0, 5.0]
+        fixed_cost: [20000.0, 20000.0, 20000.0]  # $/MW per year
         maintenance_cost: [2.0, 2.0, 2.0]
         life_time: [25, 25, 25]
         initial_age: [3, 2, 4]
@@ -135,7 +135,7 @@ systems:
         inertia: [0.0, 0.0, 0.0]
         start_up_cost: [0.0, 0.0, 0.0]
         fuel_cost: [0.0, 0.0, 0.0]
-        fixed_cost: [8.0, 8.0, 8.0]
+        fixed_cost: [40000.0, 40000.0, 40000.0]  # $/MW per year
         maintenance_cost: [5.0, 5.0, 5.0]
         life_time: [20, 20, 20]
         initial_age: [0, 0, 0]
@@ -159,7 +159,7 @@ systems:
         inertia: [5.0, 5.0, 5.0]
         start_up_cost: [5000.0, 5000.0, 5000.0]
         fuel_cost: [80.0, 80.0, 80.0]
-        fixed_cost: [3.0, 3.0, 3.0]
+        fixed_cost: [25000.0, 25000.0, 25000.0]  # $/MW per year
         maintenance_cost: [5.0, 5.0, 5.0]
         life_time: [30, 30, 30]
         initial_age: [12, 8, 10]
@@ -251,7 +251,7 @@ systems:
         inertia: [0.0]
         start_up_cost: [0.0]
         fuel_cost: [0.0]
-        fixed_cost: [6.0]
+        fixed_cost: [20000.0]  # $/MW per year
         maintenance_cost: [3.0]
         life_time: [25]
         initial_age: [2]
@@ -275,7 +275,7 @@ systems:
         inertia: [4.0]
         start_up_cost: [3000.0]
         fuel_cost: [120.0]        # higher fuel cost (shipping premium)
-        fixed_cost: [5.0]
+        fixed_cost: [25000.0]  # $/MW per year
         maintenance_cost: [8.0]
         life_time: [25]
         initial_age: [18]
