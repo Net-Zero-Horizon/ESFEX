@@ -2141,12 +2141,14 @@ import Ipopt
                 @test Pm ≈ Pd rtol = 1e-6
                 @test Pm * tres * 13.0 / 1000 * 0.8 ≈ 0.01 * 24 rtol = 1e-6
                 elz_m = tres * (2.0e-5 + 1.0e-7 * 13.0) * Pm
-                # The dispatch's bucket also holds the fixed cost of the 30 MW
-                # for the window's 24 h; the master charges it per year
-                fixed_day = 30.0 * 1.0e-6 * 24
+                # Fixed O&M is $/MW·yr: the dispatch's bucket also holds the
+                # window's share (24 h of 8760) of the 30 MW's, the master
+                # charges the full year (both charged it per hour, × 8760)
+                fixed_year = 30.0 * 1.0e-6
+                fixed_day = fixed_year * 24 / 8760
                 @test elz_m + fixed_day ≈
                       tres * value(dmodel.ext[:cost_expressions][:electrolyzer_cost]) rtol = 1e-6
-                @test value(ESFEX.master_fuel_annual_cost(mv, inp, 1)) ≈ fixed_day * 365 rtol = 1e-9
+                @test value(ESFEX.master_fuel_annual_cost(mv, inp, 1)) ≈ fixed_year rtol = 1e-9
                 # The day's fuel cost replaces the unit's flat fuel_cost
                 gm = sum(value(ps.gen_output[1, 1, t]) for t in 1:H)
                 @test value(fc) ≈ sum(value(v) for v in values(mterms)) + elz_m -
@@ -2204,6 +2206,12 @@ import Ipopt
             # Built once, in service both years
             @test fi["storage_capacity"][2]["Gas"][1] ≈ fi["storage"][1]["Gas"][1]
             @test fi["electrolyzer_capacity"][2][1][1] ≈ elz_mw rtol = 1e-6
+            # Fixed O&M ($/MW·yr) on the power in service, once per year
+            # (it was charged per hour, × hours_per_year)
+            for y in 1:2
+                @test value(ESFEX.master_fuel_annual_cost(mv, inp, y)) ≈
+                      1.0e-6 * fi["electrolyzer_capacity"][y][1][1] rtol = 1e-6
+            end
 
             # Benders reaches the same plan (the cuts carry the fuel capacities)
             br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-6,

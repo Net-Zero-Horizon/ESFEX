@@ -1026,6 +1026,9 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     # Variable cost on power consumption
     # ==========================================================================
     electrolyzer_cost = AffExpr(0.0)
+    # Fixed O&M ($/MW·year × rated power, the master's builds included): an
+    # annual cost, prorated to the window below like the generators'
+    electrolyzer_fixed_cost = AffExpr(0.0)
     if vars.electrolyzer_power !== nothing
         for (e, config) in enumerate(input.electrolyzers)
             for b in 1:n_bus, t in 1:hours
@@ -1040,10 +1043,10 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
                         vars.electrolyzer_power[e, b, t])
                 end
             end
-            # Fixed cost on rated power (annualized per hour × hours)
             for b in 1:n_bus
                 if length(config.rated_power) >= b && length(config.fixed_cost) >= b
-                    add_to_expression!(electrolyzer_cost, config.rated_power[b] * config.fixed_cost[b] * hours)
+                    add_to_expression!(electrolyzer_fixed_cost,
+                                       config.rated_power[b] * config.fixed_cost[b])
                 end
             end
         end
@@ -1193,7 +1196,8 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     non_energy_window_fraction = annual_hours > 0 ?
         window_real_hours / annual_hours : 1.0
     non_energy_costs = (
-        delay_retirement_cost + npv_penalty_cost + fixed_om_cost
+        delay_retirement_cost + npv_penalty_cost + fixed_om_cost +
+        electrolyzer_fixed_cost
     )
     # Start-ups are events inside the window: charged in full, neither per
     # MWh nor prorated (they were prorated × window/year like the annual costs)
@@ -1223,7 +1227,10 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         :soc_violation_cost => soc_violation_cost,
         :transfer_margin_cost => transfer_margin_cost,
         :v2g_compensation => v2g_compensation,
-        :electrolyzer_cost => electrolyzer_cost,
+        # An energy term (× step length at extraction): the window's share of
+        # the annual fixed cost is divided by it to come out unscaled
+        :electrolyzer_cost => electrolyzer_cost +
+            (non_energy_window_fraction / temporal_resolution_hours) * electrolyzer_fixed_cost,
         :converter_cost => AffExpr(0.0),   # set by charge_converter_costs!
         :spillage_cost => spillage_cost,
         :delay_retirement_cost => delay_retirement_cost,

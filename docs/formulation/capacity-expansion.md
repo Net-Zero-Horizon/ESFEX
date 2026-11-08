@@ -613,7 +613,7 @@ Supply limits and disruption windows use the day's absolute horizon hours, as in
 | Fuel storage | `investment_cost` of the `fuel_infrastructure` storage facility × units, overnight at the build year | investment cost (§5.1) |
 | Route capacity | `transport_investment_cost` × km × units/day, overnight | investment cost (§5.1) |
 | Electrolyzer power | `invest_cost` × MW, overnight | investment cost (§5.1) |
-| Electrolyzer fixed cost | `fixed_cost` (\$/MW per hour) × hours of the year × (rated + built) MW | existing-asset cost (§5.1b) |
+| Electrolyzer fixed cost | `fixed_cost` (\$/MW·yr) × (rated + built and not yet retired) MW, once per year | existing-asset cost (§5.1b) |
 | Fuel bought, route transport, fuel shortfall and excess, unmet non-electric demand | as in the dispatch | day cost |
 | Electrolyzer variable and water cost | \(\Delta t\,(c^{var}_b + c^{water}\,h_b)\,P^{elz}_{b,t}\), with \(h_b\) the kg of hydrogen per MWh | day cost |
 
