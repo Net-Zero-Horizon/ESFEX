@@ -88,7 +88,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Master switch |
-| `apply_to_modes` | list[str] | `["development", "unit_commitment"]` | Simulation modes in which N-1 is applied |
+| `apply_to_modes` | list[str] | `["development", "unit_commitment"]` | Simulation modes (`simulation_mode`) in which N-1 is applied to the dispatch. A development run counts as `development` whatever formulation its windows use (`use_uc_in_dispatch`) |
 | `transmission_enabled` | bool | `true` | Include line contingencies |
 | `transmission_reserve_factor` | float (0–1) | `0.7` | Pre-contingency loading limit as a fraction of line rating |
 | `critical_line_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: minimum loading (fraction of capacity) for a line or transformer to be tripped by Run All N-1 / Screening. Not used by the optimisation. |

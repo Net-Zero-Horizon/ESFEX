@@ -113,7 +113,7 @@ The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes o
 ```yaml
 n1_security:
   enabled: false                          # master switch
-  apply_to_modes: [development, unit_commitment]
+  apply_to_modes: [development, unit_commitment]   # simulation modes (simulation_mode)
   transmission_enabled: true              # line contingencies
   transmission_reserve_factor: 0.70       # pre-contingency loading limit (fraction of rating)
   generation_enabled: true                # generator contingencies

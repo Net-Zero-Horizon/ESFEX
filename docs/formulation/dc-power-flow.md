@@ -325,7 +325,7 @@ meta_network:
 
 ## N-1 Security-Constrained DC Power Flow
 
-When `n1_security.enabled: true` and the run mode is in `n1_security.apply_to_modes` (default: `development` and `unit_commitment`), the operational dispatch adds N-1 security constraints. They are not applied in the master problem or in Benders. They act on the DC flow variables, so with an `acopf_*` mode only the generation part applies.
+When `n1_security.enabled: true` and the run's `simulation_mode` is in `n1_security.apply_to_modes` (default: `development` and `unit_commitment`), the operational dispatch adds N-1 security constraints. The list holds simulation modes, not the dispatch formulation: the windows of a development run get N-1 when `development` is listed, whether they are solved as economic dispatch or, with `master_problem.use_uc_in_dispatch`, as unit commitment. They are not applied in the master problem or in Benders. They act on the DC flow variables, so with an `acopf_*` mode only the generation part applies.
 
 With `scopf_enabled: false` (default) the constraints are preventive; with `scopf_enabled: true` they are replaced by the SCOPF constraints below. Both are soft: every shortfall or overload is a slack priced at `penalties.loss_of_reserve_static`.
 

@@ -2025,8 +2025,10 @@ Complete input for the Primary Energy optimization model.
 - `investment_resolution::Int`: Resolution for investment decisions (hours)
 - `discount_rate::Float64`: Discount rate for annualization
 - `loss_of_fuel_supply_penalty::Float64`: Penalty for fuel shortfall (\$/unit)
-- `mode::String`: Operation mode ("development", "economic_dispatch",
-    "unit_commitment"; "master" for a representative day of the master)
+- `mode::String`: The run's simulation mode ("development", "economic_dispatch",
+    "unit_commitment"; "master" for a representative day of the master), not
+    the dispatch formulation: a development run's windows get "development",
+    which ends each window with its tanks at least 10 % full
 - `cumulative_capacities::Dict`: Fuel storage/transport capacity built by the
     master: {"storage"|"transport" => {fuel => {node or route => capacity}}}
 - `initial_storage_levels::Union{Dict{String, Vector{Float64}}, Nothing}`: Initial storage levels

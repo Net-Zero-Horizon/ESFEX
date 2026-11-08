@@ -6393,6 +6393,8 @@ class Orchestrator:
                 year=year,
                 base_year=self.state.base_year,
                 mode=ps_mode,
+                # N-1 apply_to_modes lists simulation modes, not ps_mode
+                run_mode=self.config.simulation_mode,
                 availability_cache=self._availability_cache,
                 inflow_cache=getattr(self, "_inflow_cache", None),
                 start_hour=start_hour,
@@ -6450,7 +6452,9 @@ class Orchestrator:
                         num_nodes=num_nodes,
                         generators=gen_list,
                         primary_energy_resolution=self._pe_period_steps(),
-                        mode=ps_mode,
+                        # The run's mode: a development run ends each window
+                        # with its tanks at least 10 % full
+                        mode=self.config.simulation_mode,
                         # Fuel storage and routes the master built up to this
                         # year (the dispatch builds none)
                         cumulative_capacities=self._dispatch_pe_capacities(year),

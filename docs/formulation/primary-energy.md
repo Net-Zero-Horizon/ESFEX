@@ -173,7 +173,7 @@ The tank starts from the configured initial level or, in rolling-horizon dispatc
 V^{hr}_{f,n,1} = V^{init}_{f,n} \cdot \bar{V}_{f,n}
 \]
 
-with \(V^{init}_{f,n}\) = `initial_storage_level[n]` and \(\bar{V}_{f,n}\) = `storage_capacity[n]` (`hr_storage_initial_{fuel}_{n}`). There is no cyclic (end = start) storage condition. In `development` mode, for fuels with a `fuel_infrastructure` entry, the window must end with each tank at least 10 % full, \(V^{hr}_{f,n,H+1} \ge 0.1\,(\bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip})\) (`hr_storage_min_last_*`, fixed fraction).
+with \(V^{init}_{f,n}\) = `initial_storage_level[n]` and \(\bar{V}_{f,n}\) = `storage_capacity[n]` (`hr_storage_initial_{fuel}_{n}`). There is no cyclic (end = start) storage condition. In a development run (`simulation_mode: development`, whatever formulation its dispatch windows use), for fuels with a `fuel_infrastructure` entry, each window must end with each tank (configured or built by the master) at least 10 % full, \(V^{hr}_{f,n,H+1} \ge 0.1\,(\bar{V}_{f,n} + C^{cumul,stor}_{f,n} + I^{stor}_{f,n,ip})\) (`hr_storage_min_last_*`, fixed fraction). Fuel bought beyond the source's availability to meet it goes through the penalised excess-supply slack. Operations runs (`economic_dispatch`, `unit_commitment`) have no end condition.
 
 ### Storage Bounds
 

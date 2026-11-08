@@ -1178,6 +1178,7 @@ class PowerSystemAdapter:
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
         inflow_cache: Optional[Dict[str, np.ndarray]] = None,
         start_hour: int = 0,
+        run_mode: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1190,10 +1191,15 @@ class PowerSystemAdapter:
             num_nodes: Number of nodes
             year: Current simulation year
             base_year: Base year for calculations
-            mode: Optimization mode
+            mode: Dispatch formulation ("economic_dispatch" or
+                "unit_commitment"; a development run's dispatch is one of them)
             availability_cache: Pre-loaded availability profiles {gen_key: array}
             inflow_cache: Pre-loaded inflow profiles {gen_key: array} for reservoir hydro
             start_hour: Start hour within the year for slicing availability/inflow profiles
+            run_mode: The run's ``simulation_mode`` ("development",
+                "unit_commitment", "economic_dispatch"), which
+                ``n1_security.apply_to_modes`` lists. Defaults to the
+                configuration's ``simulation_mode`` (``mode`` without one).
             **kwargs: Additional parameters (system_config: explicit SystemConfig override)
         """
         # Accept explicit system_config override (used by runner to pass
@@ -1214,6 +1220,9 @@ class PowerSystemAdapter:
         self.year = year
         self.base_year = base_year
         self.mode = mode
+        if run_mode is None:
+            run_mode = self.esfex_config.simulation_mode if self.esfex_config else mode
+        self.run_mode = run_mode
         self.availability_cache = availability_cache or {}
         self.inflow_cache = inflow_cache or {}
         self.start_hour = start_hour
@@ -1904,9 +1913,10 @@ class PowerSystemAdapter:
             )
             jl.seval("push!")(jl_electrolyzers, jl_elz)
 
-        # Get N-1 security settings — only enable for applicable modes
+        # N-1 security: apply_to_modes lists simulation modes, so a
+        # development run is "development" whatever its dispatch formulation
         n1 = self.esfex_config.n1_security if self.esfex_config else N1SecurityConfig()
-        n1_enabled = n1.enabled and self.mode in n1.apply_to_modes
+        n1_enabled = n1.enabled and self.run_mode in n1.apply_to_modes
 
         # Rolling-horizon boundary conditions for the seam with the previous
         # window. Each boundary entry has shape (gen × bus) at the last
@@ -2247,10 +2257,10 @@ class PowerSystemAdapter:
         return status_code
 
     def _n1_security_cost_requested(self) -> bool:
-        """``n1_security.compute_security_cost`` is on and N-1 applies to this mode."""
+        """``n1_security.compute_security_cost`` is on and N-1 applies to this run's mode."""
         n1 = getattr(self.esfex_config, "n1_security", None) if self.esfex_config else None
         return bool(n1 is not None and n1.enabled and n1.compute_security_cost
-                    and self.mode in n1.apply_to_modes)
+                    and self.run_mode in n1.apply_to_modes)
 
     def _map_termination_status(self, jl) -> int:
         """Map JuMP termination status to PuLP-compatible code.
@@ -4316,7 +4326,10 @@ class PrimaryEnergyAdapter:
             primary_energy_resolution: Resolution for fuel planning (hours)
             investment_resolution: Resolution for investment decisions (hours)
             discount_rate: Discount rate for annualization
-            mode: Operation mode
+            mode: The run's ``simulation_mode`` ("development",
+                "unit_commitment", "economic_dispatch"), not the dispatch
+                formulation; "master" for the master's day model. In
+                "development" each window ends with its tanks at least 10 % full.
             cumulative_capacities: Fuel storage/transport capacity built by the
                 master: {"storage"|"transport": {fuel: {node or route: capacity}}}
             initial_storage_levels: Initial storage levels for carry-over
