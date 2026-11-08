@@ -1756,6 +1756,41 @@ import Ipopt
             @test loss ≈ 0.0 atol = 1e-6
         end
 
+        @testset "primary energy: development windows end with tanks 10 % full" begin
+            # A 100-unit tank at the only node (configured, or built by the
+            # master), no fuel supply and 30/day of non-electric demand over
+            # 48 h: without an end condition the window drains the tank. A
+            # development run's windows end it at least 10 % full; a tank the
+            # master built used to be left out.
+            function end_level(mode; built = false)
+                fuel = FuelConfig("Gas", 1.0, 0.0, 10.0, 0.0, [0.0], [built ? 0.0 : 100.0],
+                                  [0.5], 0.0, [0.0], 0.0, 0.0, 0.0)
+                infra = Dict("Gas" => FuelInfrastructureConfig(0.0, 0.0, 0.0, 0.0, 0.0,
+                                                               1.0, 30.0, 30.0, -1.0))
+                ned = NonElectricDemandConfig("Industrial", "Gas", [10950.0], 0.0, ones(12))
+                cumul = built ? Dict{String, Any}("storage" => Dict("Gas" => Dict(1 => 100.0))) :
+                                Dict{String, Any}()
+                init = built ? Dict("Gas" => [50.0]) : nothing
+                inp = PrimaryEnergyInput(2025, 2025, 1, 48, [fuel], infra, [ned],
+                    TransportRoute[], Dict{Int, Tuple{String, Float64, Float64, Float64}}(),
+                    24, 48, 0.05, 1000.0, mode, cumul, init,
+                    Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
+                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                ESFEX.set_silent(m)
+                vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
+                terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
+                ESFEX.@objective(m, Min, sum(values(terms)))
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                return value(vars.fuel_storage_level_hourly["Gas"][1, 49])
+            end
+            @test end_level("economic_dispatch") ≈ 0.0 atol = 1e-6
+            @test end_level("unit_commitment") ≈ 0.0 atol = 1e-6
+            @test end_level("development") ≈ 10.0 atol = 1e-6
+            @test end_level("development"; built = true) ≈ 10.0 atol = 1e-6
+            @test end_level("economic_dispatch"; built = true) ≈ 0.0 atol = 1e-6
+        end
+
         @testset "primary energy: scheduled tank and route outages, no-tank nodes" begin
             # One day per period, 48 hourly steps, a 10/day (or 30/day)
             # non-electric demand. Returns the fuel shortfall of the window.

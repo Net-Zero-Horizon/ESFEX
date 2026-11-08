@@ -896,15 +896,17 @@ function add_primary_energy_constraints!(
             end
         end
 
-        # Development mode: the window ends with every tank at least 10 % full
-        # (no cyclic storage condition).
-        if p == temporal.primary_period_indices[end] && input.mode == "development"
+        # Development run (input.mode is the run's simulation_mode, not the
+        # dispatch formulation): the window ends with every tank at least
+        # 10 % full (no cyclic storage condition).
+        if p == temporal.primary_period_indices[end] && input.mode == "development" && !cyclic
             for fuel_name in fuel_names
                 haskey(input.infrastructure, fuel_name) || continue
                 fuel = fuel_by_name[fuel_name]
                 for n in 1:n_nodes
-                    base_cap, _, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
-                    if base_cap > 0 && tank_avail(fuel_name, n, last_hour) >= 1.0
+                    # Configured tanks and those the master built
+                    base_cap, cumul_cap, total_cap = tank_capacity(fuel, fuel_name, n, inv_p)
+                    if (base_cap > 0 || cumul_cap > 0) && tank_avail(fuel_name, n, last_hour) >= 1.0
                         min_fill = 0.1
                         @constraint(model,
                             vars.fuel_storage_level_hourly[fuel_name][n, last_hour + 1] >=
