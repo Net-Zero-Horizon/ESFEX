@@ -19,11 +19,12 @@ The Master Problem answers questions such as:
    INPUTS ─────────►│                          ├──────► OUTPUTS
    • technologies   │ Minimize discounted:     │        • MW / MWh built per
    • demand file    │   investment cost        │          technology, node, year
-   • RE target path │   + life-extension and   │        • life extension of
-   • fuel and O&M   │     decommissioning cost │          ageing units
-     costs          │   + representative-day   │        • transmission expansion
-   • availability   │     operating cost       │        • RE share per year
-     profiles       │   + slack penalties      │
+   • RE target path │   + life-extension,      │        • life extension of
+   • fuel and O&M   │     decommissioning and  │          ageing units
+     costs          │     fixed O&M cost       │        • transmission expansion
+   • availability   │   + representative-day   │        • RE share per year
+     profiles       │     operating cost       │
+                    │   + slack penalties      │
                     └──────────────────────────┘
                               │
                               │ capacity per year
