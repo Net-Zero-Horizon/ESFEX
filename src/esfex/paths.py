@@ -39,6 +39,10 @@ GRIDDED_POP_SSP2_DIR = GRIDDED_DIR / "population_ssp2"
 GRIDDED_NIGHTLIGHTS_DIR = GRIDDED_DIR / "nightlights"
 
 MODELS_DIR = PROJECT_DATA / "models"
+# The trained models the Studio runs on ship inside the package (XGBoost
+# binary format). A model of the same name in MODELS_DIR (a retrained one)
+# takes precedence; see model_path().
+BUNDLED_MODELS_DIR = Path(__file__).resolve().parent / "assets" / "models"
 CMIP6_DIR = PROJECT_DATA / "cmip6"
 # Regional subsets of the public Google Cloud (Pangeo) CMIP6 Zarr store, cached
 # as NetCDF so country-scale climate reads are offline after the first fetch and
@@ -66,3 +70,13 @@ OUTPUT_DIR = DATA_ROOT / "output"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = REPO_ROOT / "results"
 DEMAND_ESTIMATION_RESULTS = RESULTS_DIR / "demand_estimation"
+
+
+def model_path(name: str, bundled: str | None = None) -> Path:
+    """Path of the trained model ``name``: the copy in MODELS_DIR when there
+    is one (a model retrained locally), else the one shipped with ESFEX,
+    stored as ``bundled`` (default: the same name)."""
+    local = MODELS_DIR / name
+    if local.exists():
+        return local
+    return BUNDLED_MODELS_DIR / (bundled or name)

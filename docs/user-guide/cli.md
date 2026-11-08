@@ -639,7 +639,8 @@ esfex build-demand-dataset [OPTIONS]
 | `ESFEX_PLUGIN_PATH` | Extra plugin directories (`:`-separated on Linux/macOS, `;` on Windows) |
 | `JULIA_DEPOT_PATH` | Julia depot; its first entry also decides where the `esfex_solvers` environment lives |
 | `JULIA_NUM_THREADS` | Julia threads; ESFEX sets it to `4` if unset. ESFEX's Julia code is not threaded; solver threads come from `solver.threads` |
-| `ESFEX_DATA_ROOT` | Dataset and cache root (Geofabrik extracts, OSM tiles, CMIP6 subsets); default `~/.esfex/data` |
+| `ESFEX_DATA_ROOT` | Dataset and cache root (Geofabrik extracts, OSM tiles, CMIP6 subsets, the population and GDP rasters of the demand forecast); default `~/.esfex/data` |
+| `ESFEX_ASSETS_URL` | Where the demand forecast downloads its population and GDP rasters; default the ESFEX data release on GitHub. Any URL Python's `urllib` opens, `file://` included |
 | `GUROBI_HOME`, `GRB_LICENSE_FILE` | Gurobi installation and licence, needed when running `esfex add-solver gurobi` and when solving |
 | `CPLEX_STUDIO_BINARIES` | CPLEX installation, needed when running `esfex add-solver cplex` |
 

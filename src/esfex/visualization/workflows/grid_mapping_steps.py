@@ -4696,6 +4696,31 @@ class GridMappingDemandStep(QWidget):
         self._lbl_forecast_summary.setStyleSheet("color: #27ae60; padding: 4px;")
         self._forecast_progress.setValue(100)
         self._lbl_forecast_status.setText(tr("grid_builder.forecast_complete"))
+        missing = self._density_model_missing_text(result)
+        if missing:
+            self._lbl_forecast_summary.setText(
+                self._lbl_forecast_summary.text() + "<br>" + missing)
+            self._lbl_forecast_summary.setStyleSheet("color: #d35400; padding: 4px;")
+
+    @staticmethod
+    def _density_model_missing_text(result):
+        """What the forecast lacks for want of data, else '': the density
+        model (no spatial cells, a trend instead of the model's pattern) or
+        population / GDP rasters that could not be downloaded."""
+        if result is None:
+            return ""
+        warnings = [str(w) for w in getattr(result, "warnings", []) or []]
+        if not getattr(result, "cell_annual_mwh", None) and any(
+                w.startswith("Density model not found") for w in warnings):
+            from esfex.paths import BUNDLED_MODELS_DIR
+            return tr("grid_builder.forecast_without_density_model",
+                      source=getattr(result, "demand_source", "?"),
+                      path=str(BUNDLED_MODELS_DIR))
+        failed = [w.split(": ", 1)[1] for w in warnings
+                  if w.startswith("Data download failed: ")]
+        if failed:
+            return tr("grid_builder.forecast_data_download_failed", files=failed[0])
+        return ""
 
         # Remember the forecast nodes so the demand visualizer can read the
         # per-node hourly series straight from the result.
@@ -5238,7 +5263,8 @@ class GridMappingDemandStep(QWidget):
         cells = getattr(res, "cell_annual_mwh", None) if res is not None else None
         if not cells:
             self._lbl_bld_status.setText(
-                tr("grid_builder.run_the_demand_forecast_auto_xgboost"))
+                self._density_model_missing_text(res)
+                or tr("grid_builder.run_the_demand_forecast_auto_xgboost"))
             return
         state = self._model.state if self._model else None
         nodes = self._nodes_in_scope() if state else []

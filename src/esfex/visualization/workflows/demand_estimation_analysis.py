@@ -701,17 +701,26 @@ class DemandProfileBuilder:
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> DemandEstimationResult:
         """Dispatch to density → shape-ML → archetype engines (in that order)."""
+        from esfex.data_assets import clear_failures
+        clear_failures()        # retry downloads that failed in an earlier run
         if not self._cfg.force_archetype:
             # Preferred: spatial demand-density model (per-node MW/km²).
-            if (getattr(self._cfg, "use_density_model", True)
-                    and self._cfg.ml_engine in ("auto", "xgboost", "density", "ml")
-                    and self._density_available()):
+            wants_density = (getattr(self._cfg, "use_density_model", True)
+                             and self._cfg.ml_engine in ("auto", "xgboost", "density", "ml"))
+            if wants_density and self._density_available():
                 try:
                     return self._build_density(proxy, macro, meteo, progress_callback)
                 except Exception as exc:
                     logger.warning(
                         "Density engine failed, falling back to shape-ML: %s", exc)
                     self._warnings.append(f"Density fallback: {exc}")
+            elif wants_density:
+                # The model ships with ESFEX, so this is a broken install (or
+                # xgboost missing): say so instead of degrading to a trend.
+                from esfex.paths import BUNDLED_MODELS_DIR
+                logger.warning("Demand-density model not usable from %s; "
+                               "using a fallback engine.", BUNDLED_MODELS_DIR)
+                self._warnings.append(f"Density model not found in {BUNDLED_MODELS_DIR}")
             # Fallback: national-shape ML model.
             if self._ml_available():
                 try:
@@ -1046,6 +1055,13 @@ class DemandProfileBuilder:
         result.resolution_hours = self._cfg.resolution_hours
         self._demand_source = "ml_density"
         result.demand_source = self._demand_source
+        from esfex.data_assets import failures
+        failed = failures()
+        if failed:
+            # Cells without population or GDP get no demand: the forecast is
+            # still produced, but the user must know it is incomplete.
+            self._warnings.append(
+                "Data download failed: " + ", ".join(sorted(failed)))
         result.warnings = list(self._warnings)
         result.level0_annual_mwh_by_year = [
             float(hourly_all[y].sum()) for y in range(years)

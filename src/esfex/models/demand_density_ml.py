@@ -7,8 +7,9 @@ the predicted density by each node's area gives a genuinely spatially-resolved
 hourly demand — replacing the old "national total split by ~uniform weights"
 behaviour that collapsed to total/num_nodes.
 
-Files (in ``MODELS_DIR``):
-    demand_density_hourly_xgb.json        — the XGBoost booster
+Files (shipped in ``esfex/assets/models``; a retrained copy in ``MODELS_DIR``
+takes precedence):
+    demand_density_hourly_xgb.json        — the XGBoost booster (shipped as .ubj)
     demand_density_hourly_xgb.feats.json  — feature order, target, train ranges
 
 Pipeline usage lives in
@@ -25,11 +26,12 @@ from typing import Optional
 
 import numpy as np
 
-from esfex.paths import MODELS_DIR
+from esfex.paths import model_path
 
 logger = logging.getLogger(__name__)
 
 _MODEL_FILENAME = "demand_density_hourly_xgb.json"
+_MODEL_BUNDLED = "demand_density_hourly_xgb.ubj"      # same booster, binary
 _FEATS_FILENAME = "demand_density_hourly_xgb.feats.json"
 
 # Local equirectangular metric constants (match grid_mapping_builder).
@@ -54,7 +56,7 @@ class DemandDensityModel:
     @classmethod
     def is_available(cls) -> bool:
         """True if the model file is present and xgboost importable."""
-        if not (MODELS_DIR / _MODEL_FILENAME).exists():
+        if not model_path(_MODEL_FILENAME, _MODEL_BUNDLED).exists():
             return False
         try:
             import xgboost  # noqa: F401
@@ -64,13 +66,17 @@ class DemandDensityModel:
 
     @classmethod
     def load_bundled(cls) -> "DemandDensityModel":
-        """Load the density model and its feature sidecar from MODELS_DIR."""
-        model_path = MODELS_DIR / _MODEL_FILENAME
-        feats_path = MODELS_DIR / _FEATS_FILENAME
-        if not model_path.exists():
+        """Load the density model and its feature sidecar: a retrained copy
+        in MODELS_DIR if there is one, else the model shipped with ESFEX."""
+        mpath = model_path(_MODEL_FILENAME, _MODEL_BUNDLED)
+        feats_path = model_path(_FEATS_FILENAME)
+        if mpath.parent != feats_path.parent:
+            # A retrained model must not be read with the shipped sidecar.
+            feats_path = mpath.parent / _FEATS_FILENAME
+        if not mpath.exists():
             raise FileNotFoundError(
-                f"No demand-density model at {model_path}. "
-                "Copy demand_density_hourly_xgb.json into MODELS_DIR."
+                f"No demand-density model at {mpath}: the ESFEX installation "
+                "is missing its bundled models; reinstall ESFEX."
             )
         try:
             import xgboost as xgb
@@ -81,7 +87,7 @@ class DemandDensityModel:
 
         inst = cls()
         inst._model = xgb.Booster()
-        inst._model.load_model(str(model_path))
+        inst._model.load_model(str(mpath))
 
         # Feature order: prefer the sidecar; fall back to the booster's own
         # embedded feature_names so we never mis-align columns.
@@ -96,7 +102,7 @@ class DemandDensityModel:
         inst.train_ranges = meta.get("train_ranges", {}) or {}
         logger.info(
             "Loaded demand-density model from %s (%d features)",
-            model_path, len(inst.feature_names),
+            mpath, len(inst.feature_names),
         )
         return inst
 
@@ -633,9 +639,11 @@ def gdp_density_point(lat: float, lon: float, year: int, ssp: str = "ssp2") -> O
 
     sn = _normalize_ssp(ssp)
 
+    from esfex.data_assets import ensure
+
     def _at_step(step_year: int) -> Optional[float]:
         path = GDP_DIR / f"GDP{step_year}_ssp{sn}.tif"
-        if not path.exists():
+        if not ensure(path):
             return None
         v = _sample_point(_open_raster(str(path)), lat, lon)
         if v is None or v <= 0:
@@ -1007,7 +1015,8 @@ def _ssp_gdp_total_nearest(lat: float, lon: float, year: int, ssp: str) -> Optio
     step = min(max(step, _SSP_GDP_MIN), _SSP_GDP_MAX)
     sn = _normalize_ssp(ssp)
     path = GDP_DIR / f"GDP{step}_ssp{sn}.tif"
-    if not path.exists():
+    from esfex.data_assets import ensure
+    if not ensure(path):
         return None
     v = _sample_point(_open_raster(str(path)), lat, lon)
     return float(v) if (v is not None and v > 0) else None

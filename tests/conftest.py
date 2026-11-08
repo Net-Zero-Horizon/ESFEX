@@ -5,7 +5,11 @@ import pytest
 
 
 def pytest_configure(config):
-    """Register custom markers."""
+    """Register custom markers; keep tests off the network."""
+    import os
+    # Tests never download datasets from the data release (esfex.data_assets):
+    # a missing raster stays missing unless a test points this at a mirror.
+    os.environ.setdefault("ESFEX_ASSETS_URL", "file:///nonexistent/esfex-test-assets")
     config.addinivalue_line(
         "markers", "julia: marks tests as requiring Julia (skip if Julia unavailable)"
     )

@@ -2437,6 +2437,8 @@
     "no_domain_bounds_available": "No domain bounds available.",
     "no_buildings_loaded": "No buildings loaded.",
     "run_the_demand_forecast_auto_xgboost": "Run the demand forecast (Auto/XGBoost engine) first — no spatial-demand cells available.",
+    "forecast_without_density_model": "The forecast used the {source} method because the demand-density model could not be loaded from {path}: no hourly pattern from the model and no spatial-demand cells. The model ships with ESFEX; reinstall it (pip install --force-reinstall esfex).",
+    "forecast_data_download_failed": "Some population or GDP data could not be downloaded ({files}); cells without it get no demand. Check the internet connection and run the forecast again.",
     "no_nodes_in_the_active_system": "No nodes in the active system.",
     "distribution_method": "Method",
     "method_spatial_demand": "Spatial demand",
