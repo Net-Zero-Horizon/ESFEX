@@ -394,7 +394,7 @@ import Ipopt
     # =======================================================================
     @testset "integration" begin
 
-        # GeneratorConfig has 39 positional fields; this keeps the boilerplate
+        # GeneratorConfig has 38 positional fields; this keeps the boilerplate
         # in one place. Per-bus vectors are sized to `nb`; `avail` is the
         # [hours x buses] availability matrix. All reservoir fields are zeroed
         # (no hydro), reservable=false.
@@ -403,7 +403,7 @@ import Ipopt
             GeneratorConfig(
                 name, type, fuel, rated, zeros(nb),
                 fill(0.5, nb), fill(0.4, nb), ones(nb), ones(nb), z, z, z,
-                fcost, z, z, z, z, z, avail, false,
+                fcost, z, z, z, z, avail, false,
                 fill(30.0, nb), z, z, z, 50.0, "AC",
                 z, z, z, z, zeros(H, nb), z, z, z, z, false, z, z, z,
             )
@@ -433,6 +433,59 @@ import Ipopt
             @test res.load_shed_total ≈ 0.0 atol = 1e-6      # nothing shed
             @test isfinite(res.objective) && res.objective > 0
             @test size(res.gen_output) == (1, 1, H)
+        end
+
+        @testset "units retire at the end of life_time, degraded or not" begin
+            # Only degraded units were retired: with degradation 0 a unit past
+            # its life_time kept its full capacity in the dispatch (the master
+            # retires it), and was charged fixed O&M on it.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function run_old(age; deg = 0.0, year = 2025)
+                old = ESFEX.with_fields(
+                    mkgen("Old", "Non-renewable", "Gas", [100.0], [3.0e-5],
+                          ones(H, 1); nb = 1, H = H);
+                    initial_age = [age], degradation_rate = [deg], fixed_cost = [1.0e-3])
+                input = PowerSystemInput(
+                    name = "eol", year = year, base_year = 2025, network = net,
+                    generators = [old], batteries = BatteryConfig[],
+                    demand = reshape([50.0, 50.0], H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                res = extract_solution(model, vars, input)
+                return res.total_generation, res.load_shed_total,
+                       res.cost_breakdown.fixed_om_cost
+            end
+            # life_time 30 (mkgen): within it the unit serves the load
+            gen, shed, fom = run_old(29.0)
+            @test gen ≈ 100.0 atol = 1e-6
+            @test shed ≈ 0.0 atol = 1e-6
+            @test fom > 0
+            # past it, without degradation: retired, no fixed O&M
+            gen, shed, fom = run_old(31.0)
+            @test gen ≈ 0.0 atol = 1e-6
+            @test shed ≈ 100.0 atol = 1e-6
+            @test fom ≈ 0.0 atol = 1e-12
+            # it ages with the simulation year: 29 + 2 years
+            gen, _, _ = run_old(29.0; year = 2027)
+            @test gen ≈ 0.0 atol = 1e-6
+            # with degradation (as before)
+            gen, _, _ = run_old(31.0; deg = 0.01)
+            @test gen ≈ 0.0 atol = 1e-6
+            # Batteries alike
+            yr = (year = 2025, base_year = 2025)
+            bat(age) = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                     [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                     [10.0], [age], [0.0], 0.0, 100.0, [0.0],
+                                     [0.0], false, "AC", [0.0], [0.0], [0.0])
+            @test ESFEX.battery_power_limits(bat(9.0), 1, yr) == (40.0, 20.0, 20.0)
+            @test ESFEX.battery_power_limits(bat(10.0), 1, yr) == (0.0, 0.0, 0.0)
         end
 
         @testset "committed steps of a rolling window" begin
@@ -605,7 +658,7 @@ import Ipopt
             hydro = GeneratorConfig(
                 "Hydro", "Renewable", "Water", [100.0], [0.0],
                 [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
-                [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
                 [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
                 [500.0], [0.0], [0.0], [1.0], inflow,
                 [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [1.0],
@@ -683,7 +736,7 @@ import Ipopt
             mkhydro(minrel) = GeneratorConfig(
                 "Hydro", "Renewable", "Water", [100.0], [0.0],
                 [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
-                [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
                 [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
                 [500.0], [200.0], [0.0], [500.0], zeros(H, 1),
                 [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [0.0],
@@ -746,7 +799,7 @@ import Ipopt
                 GeneratorConfig(
                     name, "Renewable", "Water", [rated], [0.0],
                     [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
-                    [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                    [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
                     [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
                     [1000.0], [init_frac], [0.0], [1.0], fill(inflow_mw, H, 1),
                     [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [0.0],
@@ -804,7 +857,7 @@ import Ipopt
             mkhead(factor) = GeneratorConfig(
                 "Hydro", "Renewable", "Water", [100.0], [0.0],
                 [1.0], [1.0], [100.0], [100.0], [0.0], [0.0], [0.0],
-                [0.0], [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
+                [0.0], [0.0], [0.0], [0.0], [0.0], ones(H, 1), true,
                 [60.0], [0.0], [0.0], [0.0], 50.0, "AC",
                 [1000.0], [0.1], [0.0], [1.0], fill(80.0, H, 1),
                 [1.0], [0.0], [0.0], [1.0], true, [0.0], [0.0], [0.0],
@@ -860,7 +913,7 @@ import Ipopt
                 "PumpedHydro", "Renewable", "Water", [0.0, 100.0], [0.0, 0.0],
                 [1.0, 1.0], [1.0, 1.0], [100.0, 100.0], [100.0, 100.0], [0.0, 0.0],
                 [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
-                [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], ones(H, 2), true,
+                [0.0, 0.0], [0.0, 0.0], ones(H, 2), true,
                 [60.0, 60.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 50.0, "AC",
                 [0.0, 500.0], [0.0, 0.0], [0.0, 0.0], [0.0, 1.0], zeros(H, 2),
                 [1.0, 1.0], [0.0, 0.0], [0.0, 50.0], [0.8, 0.8], true,
@@ -904,8 +957,8 @@ import Ipopt
                                 FrequencyConverterData[], 0.1)
             bat = BatteryConfig("Li1", [0.0, 40.0], [0.0, 20.0], [0.0, 20.0],
                                 [0.95, 0.95], [0.95, 0.95], [0.0, 0.1], [1.0, 1.0],
-                                [0.5, 0.5], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0],
-                                [0.0, 0.0], [0.0, 0.0], [10.0, 10.0], [0.0, 0.0],
+                                [0.5, 0.5], [0.0, 0.0], [0.0, 0.0],
+                                [0.0, 0.0], [10.0, 10.0], [0.0, 0.0],
                                 [0.0, 0.0], 0.0, 100.0, [0.0, 0.0], [0.0, 0.0],
                                 false, "AC", [0.0, 0.0], [0.0, 0.0], [0.0, 0.0])
             input = PowerSystemInput(
@@ -1035,8 +1088,8 @@ import Ipopt
                                 TransmissionLineData[], TransformerData[],
                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
             bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
-                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
-                                [0.0], [10.0], [0.0], [0.0], 0.0, 100.0, [0.0],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                [10.0], [0.0], [0.0], 0.0, 100.0, [0.0],
                                 [0.0], false, "AC", [0.0], [0.0], [0.0])
             function solve_floor(gas_mw; kw...)
                 gen = mkgen("GasCC", "Non-renewable", "Gas", [gas_mw],
@@ -1078,8 +1131,8 @@ import Ipopt
                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
             # 2 %/yr degradation, 10 years old: capacity 40 × 0.98^10 ≈ 32.7 MWh.
             bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
-                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
-                                [0.0], [30.0], [10.0], [0.0], 0.0, 100.0, [0.0],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                [30.0], [10.0], [0.0], 0.0, 100.0, [0.0],
                                 [0.0], false, "AC", [0.02], [0.0], [0.0])
             gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
                         [3.0e-5], ones(H, 1); nb = 1, H = H)
@@ -1225,54 +1278,6 @@ import Ipopt
             @test res.total_generation ≈ 2 * (10.0 + 8.0) atol = 1e-6
         end
 
-        @testset "development-mode transmission is bounded and charged" begin
-            # tf_inv had no upper bound and no cost: the dispatch built any line for free.
-            function dev_line(inv_max, inv_cost; base_cap = 10.0)
-                H = 1; N = 2
-                gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [3.0e-5, 3.0e-5],
-                            ones(H, N); nb = N, H = H)
-                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
-                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
-                line = TransmissionLineData("L12", 1, 2, base_cap, 0.1, 0.0, 0.0,
-                                            100.0, 220.0, 1, 50.0, "AC")
-                net = NetworkConfig(N, N, buses, [1, 2], [0.0 10.0; 10.0 0.0],
-                                    [0.0 100.0; 100.0 0.0], 100.0, 0.4, 220.0, 0.6, 1,
-                                    inv_cost, inv_max, [line], TransformerData[],
-                                    ACDCConverterData[], FrequencyConverterData[], 0.1)
-                input = PowerSystemInput(
-                    name = "dev", year = 2025, network = net, generators = [gas],
-                    batteries = BatteryConfig[], demand = [0.0 50.0],
-                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
-                    mode = "development", solver_name = "highs", verbose = false,
-                    pwl_loss_segments = 0)
-                model, vars = create_power_system(input)
-                optimize!(model)
-                @test string(termination_status(model)) == "OPTIMAL"
-                res = extract_solution(model, vars, input)
-                inv = sum(values(res.transfer_investment); init = 0.0)
-                return inv, res.load_shed_total, res.cost_breakdown.investment_cost,
-                       objective_value(model)
-            end
-            inv, shed, _, _ = dev_line([0.0, 0.0], [0.0, 0.0])
-            @test inv ≈ 0.0 atol = 1e-6
-            @test shed ≈ 40.0 atol = 1e-6
-            # Bounded by the smaller end (25 MW), charged at the dearer one (2e-4 M$/MW)
-            inv, shed, cost, obj = dev_line([25.0, 30.0], [1.0e-4, 2.0e-4])
-            @test inv ≈ 25.0 atol = 1e-6
-            @test shed ≈ 15.0 atol = 1e-6
-            @test cost ≈ 25.0 * 2.0e-4 atol = 1e-9
-            # In the objective it is scaled by the window's share of the year,
-            # like generator investment (1 h of 8760 here)
-            _, _, _, obj2 = dev_line([25.0, 30.0], [1.0e-4, 4.0e-4])
-            @test obj2 - obj ≈ 25.0 * 2.0e-4 / 8760 atol = 1e-10
-            # A 0-MW candidate line (e.g. a development-zone link) carries what
-            # is built on it; its flow used to be fixed to 0 as "negligible"
-            # while the investment was still bought.
-            inv, shed, _, _ = dev_line([25.0, 30.0], [1.0e-4, 2.0e-4]; base_cap = 0.0)
-            @test inv ≈ 25.0 atol = 1e-6
-            @test shed ≈ 25.0 atol = 1e-6
-        end
-
         @testset "transmission corridor charged once, at its dearer end" begin
             # Both directions of a corridor are held equal; each used to be
             # charged its own end's cost, so a MW of line cost c_i + c_j.
@@ -1291,7 +1296,7 @@ import Ipopt
                 GeneratorConfig(
                     name, "Non-renewable", "Gas", [rated], [minp],
                     [0.5], [0.4], ones(1), ones(1), z, z, [start],
-                    [fcost], z, z, z, z, z, ones(H, 1), true,
+                    [fcost], z, z, z, z, ones(H, 1), true,
                     [30.0], z, z, z, 50.0, "AC",
                     z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z,
                 )
@@ -1354,7 +1359,7 @@ import Ipopt
                 GeneratorConfig(
                     name, "Non-renewable", "Gas", [rated], [0.0],
                     [0.5], [0.4], [ramp], [ramp], z, z, [start],
-                    [fcost], z, z, z, z, z, ones(H, 1), true,
+                    [fcost], z, z, z, z, ones(H, 1), true,
                     [30.0], z, z, z, 50.0, "AC",
                     z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z,
                 )
@@ -2257,8 +2262,8 @@ import Ipopt
             gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5],
                         ones(H, 1); nb = 1, H = H)
             bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
-                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
-                                [0.0], [10.0], [0.0], [0.0], 0.0, 100.0, [2.0e-6],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                [10.0], [0.0], [0.0], 0.0, 100.0, [2.0e-6],
                                 [0.0], false, "AC", [0.0], [0.0], [0.0])
             o = [0.0]
             pv = TechnologyConfig("PV", "Renewable", "Sun", [1.0], [50.0], ones(H, 1),
@@ -2894,8 +2899,8 @@ import Ipopt
                       ones(H24, 1); nb = 1, H = H24);
                 start_up_cost = [2.0], maintenance_cost = [1.0])
             bat = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
-                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0], [0.0],
-                                [0.0], [10.0], [0.0], [0.0], 0.0, 100.0, [2.0],
+                                [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                [10.0], [0.0], [0.0], 0.0, 100.0, [2.0],
                                 [0.0], false, "AC", [0.0], [0.0], [0.0])
             o = [0.0]
             li = BatteryTechnologyConfig("LiNew", [1.0], [1.0], [10.0], [40.0], 1.0, 8.0,
@@ -2931,7 +2936,7 @@ import Ipopt
                        fixed = 0.0, maint = 0.0)
             z = [0.0]
             BatteryConfig("Li1", [cap], [20.0], [20.0], [0.95], [0.95], z, [1.0], [0.5], z,
-                          z, z, z, z, [10.0], z, z, 0.0, 100.0, [maint], z, false, "AC",
+                          z, z, [10.0], z, z, 0.0, 100.0, [maint], z, false, "AC",
                           z, z, [1.0], [ramp], [ramp], [fixed], reservable, avail)
         end
         function bat_dispatch(bats, demand; H = size(demand, 1), tres = 1, gas_mw = 40.0,
@@ -3604,6 +3609,10 @@ import Ipopt
                 # The UC dual recovery fixes the converter binaries too (the
                 # LP re-solve had binaries left and returned no prices)
                 @test recover_uc_duals_via_copy(model, vars, input) !== nothing
+                # ... and leaves the solved model as it was. The in-place
+                # variant (which read values after changing the model) is gone.
+                @test ESFEX.JuMP.has_values(model)
+                @test !isdefined(ESFEX, :recover_uc_duals!)
             end
         end
 

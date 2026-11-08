@@ -91,7 +91,6 @@ _2N = 2  # number of nodes for test fixtures
 def _make_generator(
     name: str, gen_type: str, fuel: str,
     rated_power: list[float] | None = None,
-    invest_max_power: list[float] | None = None,
     technology: str | None = None,
 ) -> GeneratorConfig:
     n = _2N
@@ -120,7 +119,6 @@ def _make_generator(
         fixed_cost=[6.6] * n,
         maintenance_cost=[28.8] * n,
         invest_cost=[3_900_000.0] * n,
-        invest_max_power=invest_max_power or [0.0] * n,
     )
 
 
@@ -129,7 +127,6 @@ def _make_battery(
     rated_power: list[float] | None = None,
     capacity: list[float] | None = None,
     invest_max_power: list[float] | None = None,
-    invest_max_capacity: list[float] | None = None,
 ) -> BatteryConfig:
     n = _2N
     rp = rated_power or [25.0, 40.0]
@@ -155,9 +152,7 @@ def _make_battery(
         fixed_cost=[5.0] * n,
         maintenance_cost=[5.0] * n,
         invest_cost=[200_000.0] * n,
-        invest_cost_energy=[150_000.0] * n,
         invest_max_power=invest_max_power or [50.0] * n,
-        invest_max_capacity=invest_max_capacity or [100.0] * n,
         efficiency_charge=[0.95] * n,
         efficiency_discharge=[0.95] * n,
         soc_initial=[0.5] * n,
@@ -210,13 +205,11 @@ def _make_system_config(sys_name: str = "TestSystem") -> SystemConfig:
             "solar": _make_generator(
                 "Solar", "Renewable", "Sun",
                 rated_power=[50.0, 80.0],
-                invest_max_power=[200.0, 200.0],
                 technology="Solar PV",
             ),
             "wind": _make_generator(
                 "Wind", "Renewable", "Wind",
                 rated_power=[30.0, 60.0],
-                invest_max_power=[100.0, 100.0],
                 technology="Wind turbine",
             ),
         },
@@ -1015,7 +1008,7 @@ class TestConfigToGuiStates:
             e for e in state.investment_portfolio.values()
             if e.technology_type == "generator"
         ]
-        # solar and wind have invest_max_power > 0
+        # every generator has an invest_cost (it prices life extension)
         assert len(gen_investments) >= 2
 
     def test_battery_investment_in_portfolio(self):
@@ -1675,12 +1668,17 @@ class TestRoundTrip:
         assert co2["enabled"] is True
         assert co2["annual_budget"] == 100_000
 
-    def test_round_trip_preserves_investment_max(self):
+    def test_round_trip_preserves_investment_fields(self):
         config = _make_esfex_config()
         data = self._round_trip(config)
         solar = data["systems"]["TestSystem"]["generators"]["solar"]
-        assert solar["invest_max_power"][0] == 200.0
-        assert solar["invest_max_power"][1] == 200.0
+        assert solar["invest_cost"] == [3_900_000.0, 3_900_000.0]
+        # Existing generators have no build limit (new capacity comes from
+        # technologies): nothing the dispatch alone used to read is written
+        assert "invest_max_power" not in solar
+        bat = data["systems"]["TestSystem"]["batteries"]["li_ion"]
+        assert bat["invest_max_power"] == [50.0, 50.0]
+        assert "invest_cost_energy" not in bat and "invest_max_capacity" not in bat
 
     def test_round_trip_with_global_settings(self):
         config = _make_esfex_config()

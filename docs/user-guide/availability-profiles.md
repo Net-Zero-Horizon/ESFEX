@@ -65,11 +65,11 @@ Each row is one hour; each column is one **node**.
 
 - **Values**: 0.0 to 1.0. Values outside this range are clipped.
 - **Rows**: one per hour; 8,760 rows for one year. A header row is optional and skipped. Leap-year data lose their Feb 29 rows when read (see [Demand Data](demand-data.md#leap-years)), so a year is always 8,760 rows.
-- **Columns**: one per node. A bus uses the column of its parent node.
+- **Columns**: one per node of the unit's own system. A bus uses the column of its parent node. In a multi-system run the columns stay with that system's nodes: the file of a unit in the second system still starts with that system's first node. Reservoir inflow files (`reservoir_inflow_file`) follow the same rule.
 
 ### Column Handling
 
-The file does not need exactly one column per node:
+The file does not need exactly one column per node (of the unit's system):
 
 | Columns in the file | Result |
 |---------------------|--------|

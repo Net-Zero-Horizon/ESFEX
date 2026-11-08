@@ -1653,14 +1653,14 @@ function create_day_ps_vars!(
     prefix = "op_y$(year_idx)_d$(day_idx)"
 
     # Pre-compute lookup maps: which buses each generator/battery is active at
+    # (existing generators only have their rated power; what the master
+    # builds is candidate technologies, see add_day_operational_constraints!)
     buses_of_gen = [Int[] for _ in 1:n_gen]
     gens_at_bus = [Int[] for _ in 1:n_buses]
     for g in 1:n_gen
         gen = input.generators[g]
         for b in 1:n_buses
-            has_cap = gen.rated_power[b] > 0
-            has_invest = length(gen.invest_max) >= b && gen.invest_max[b] > 0
-            if has_cap || has_invest
+            if gen.rated_power[b] > 0
                 push!(buses_of_gen[g], b)
                 push!(gens_at_bus[b], g)
             end
@@ -1822,7 +1822,6 @@ function create_day_ps_vars!(
         power_flow, voltage_angle,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
-        nothing, nothing, nothing, nothing,  # no investment vars
         buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;
         loss_of_inertia = loss_of_inertia_var,
         loss_of_load_sectoral = loss_of_load_sectoral,
@@ -1858,7 +1857,7 @@ function generators_for_day(generators::AbstractVector, start_hour::Int, hours::
             gen.min_up_time, gen.min_down_time,
             gen.start_up_cost, gen.fuel_cost,
             gen.fixed_cost, gen.maintenance_cost,
-            gen.inertia, gen.invest_cost, gen.invest_max,
+            gen.inertia, gen.invest_cost,
             rows(gen.availability), gen.reservable,
             gen.life_time, gen.initial_age,
             gen.degradation_rate, gen.decommissioning_cost,
@@ -3453,10 +3452,20 @@ function extract_master_solution(
                     end
                 end
             end
+            # Share in service: 1 within the lifetime; past it, the share of
+            # the (degraded) capacity the master keeps by life extension
             gen_life[y_idx][g] = zeros(n_buses)
             for n in 1:n_buses
                 age_at_year = gen.initial_age[n] + (y_idx - 1)
-                gen_life[y_idx][g][n] = age_at_year < gen.life_time[n] ? 1.0 : 0.0
+                ext = vars.gen_life_extension[y_idx][g][n]
+                gen_life[y_idx][g][n] = if age_at_year < gen.life_time[n]
+                    1.0
+                elseif ext === nothing
+                    0.0
+                else
+                    ub = gen.rated_power[n] * (1.0 - gen.degradation_rate[n]) ^ age_at_year
+                    ub > 0 ? clamp(value(ext) / ub, 0.0, 1.0) : 0.0
+                end
             end
         end
 
@@ -3489,7 +3498,14 @@ function extract_master_solution(
             bat_life[y_idx][b] = zeros(n_buses)
             for n in 1:n_buses
                 age_at_year = bat.initial_age[n] + (y_idx - 1)
-                bat_life[y_idx][b][n] = age_at_year < bat.life_time[n] ? 1.0 : 0.0
+                ext = vars.bat_life_extension[y_idx][b][n]
+                bat_life[y_idx][b][n] = if age_at_year < bat.life_time[n]
+                    1.0
+                elseif ext === nothing || bat.max_discharge_power[n] <= 0
+                    0.0
+                else
+                    clamp(value(ext) / bat.max_discharge_power[n], 0.0, 1.0)
+                end
             end
         end
 
@@ -4733,7 +4749,7 @@ function export_solution_to_dict(
     export_dict["bat_tech_power_investment"] = bat_tech_pow_export
     export_dict["bat_tech_capacity_investment"] = bat_tech_cap_export
 
-    # Retirement status (1.0 = active, 0.0 = retired at lifetime)
+    # Share in service (1.0 = active or fully life-extended, 0.0 = retired)
     gen_life_export = Dict{String, Any}()
     for (y_idx, gen_dict) in result.gen_life_extension
         year_str = string(input.years[y_idx])

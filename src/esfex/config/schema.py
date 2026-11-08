@@ -647,7 +647,6 @@ class GeneratorConfig(BaseModel):
     fixed_cost: list[float] = Field(description="Fixed O&M per node ($/MW of power in service per year, charged whether or not the unit runs)")
     maintenance_cost: list[float] = Field(description="Maintenance cost per node ($/MWh)")
     invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW): prices life extension (× life_extension_cost_factor); 0 = taken from the technology with the same fuel and type")
-    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max investment per node (MW) [DEPRECATED: use technologies section]")
 
     # Electrical properties
     frequency_hz: float = Field(default=50.0, gt=0, description="Operating frequency (Hz)")
@@ -765,9 +764,7 @@ class BatteryConfig(BaseModel):
         description="Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present.",
     )
     invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Power investment cost ($/MW): prices life extension; 0 = taken from the battery technology")
-    invest_cost_energy: list[float] = Field(default_factory=lambda: [0.0], description="Energy investment cost ($/MWh) [DEPRECATED: use battery_technologies]")
-    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max power investment (MW) [DEPRECATED: use battery_technologies]")
-    invest_max_capacity: list[float] = Field(default_factory=lambda: [0.0], description="Max capacity investment (MWh) [DEPRECATED: use battery_technologies]")
+    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Power (MW) per node; > 0 places the battery at the node in the master's representative days even without existing power there. New storage is built from battery_technologies")
 
     # Storage-specific parameters
     efficiency_charge: list[float]
@@ -942,8 +939,6 @@ class PrimaryEnergySourceConfig(BaseModel):
     storage_capacity: list[float] = Field(description="Storage capacity per node (units)")
     initial_storage_level: list[float] = Field(description="Initial storage fraction per node")
     min_storage_level: float = Field(default=0.1, ge=0, le=1)
-    transport_cost: float = Field(description="$/unit/km transport cost")
-    transport_losses: float = Field(description="Loss fraction per 100km")
     transport_transit_days_per_100km: float = Field(
         default=0.0, ge=0,
         description="Source->tank replenishment lead time, in days per 100 km "
@@ -997,10 +992,6 @@ class NonElectricDemandConfig(BaseModel):
 
     fuel: str
     unit: str
-    is_flexible: bool = False
-    flexibility_ratio: float = 0.0
-    criticality: Literal["critical", "high", "medium", "low"] = "medium"
-    delay_tolerance: int = 0
     demand: list[int] = Field(description="Annual demand per node (units)")
 
 
@@ -2239,7 +2230,11 @@ class SystemLinkConfig(BaseModel):
     existing_capacity_mw: list[float] = Field(alias="existing_capacity_MW")
     max_investment_mw: list[float] = Field(alias="max_investment_MW")
     investment_cost_per_mw: list[float] = Field(alias="investment_cost_per_MW")
-    loss_factor: list[float]
+    loss_factor: list[float] = Field(
+        default_factory=list,
+        description="fuel_route links: losses per 100 km per connection (missing = 0). "
+                    "Not used by transmission links (their losses come from resistance_pu)",
+    )
     distance_km: list[float]
     cost_per_mw_km: list[float]
     reactance_pu: list[float] = Field(

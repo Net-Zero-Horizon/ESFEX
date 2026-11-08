@@ -666,8 +666,6 @@
     "type": "種類:",
     "invest_cost_col": "投資コスト\n($/MW)",
     "invest_max_col": "投資最大\n(MW)",
-    "energy_cost_col": "エネルギーコスト\n($/MWh)",
-    "energy_max_col": "エネルギー最大\n(MWh)",
     "n_selected": "{n} 件の投資エントリを選択中",
     "tech_generator": "発電機",
     "tech_battery": "蓄電池 / 蓄電",
@@ -1369,8 +1367,7 @@
     "error": "エラー",
     "warning": "警告",
     "info": "情報",
-    "enable": "有効化",
-    "no_effect": "現在のモデルでは効果がありません。既存のファイルを読み込めるように残しています。"
+    "enable": "有効化"
   },
   "custom_constraints": {
     "title": "カスタム制約",

@@ -666,8 +666,6 @@
     "type": "Type :",
     "invest_cost_col": "Coût d'invest.\n($/MW)",
     "invest_max_col": "Invest. max\n(MW)",
-    "energy_cost_col": "Coût énergie\n($/MWh)",
-    "energy_max_col": "Énergie max\n(MWh)",
     "n_selected": "{n} entrées d'investissement sélectionnées",
     "tech_generator": "Générateur",
     "tech_battery": "Batterie / Stockage",
@@ -1369,8 +1367,7 @@
     "error": "Erreur",
     "warning": "Avertissement",
     "info": "Info",
-    "enable": "Activer",
-    "no_effect": "Sans effet dans le modèle actuel ; conservé pour que les fichiers existants se chargent."
+    "enable": "Activer"
   },
   "custom_constraints": {
     "title": "Contraintes personnalisées",

@@ -595,16 +595,6 @@ def _expand_powersystem_result(
         if a.ndim == 3 and a.shape[1] == rm.n_reduced_buses:
             result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
 
-    # ── Per-unit investments [unit x bus]: bus axis = 1 ──
-    for key in ("gen_investment", "bat_investment_power", "bat_investment_capacity",
-                "reservoir_invest_capacity"):
-        arr = result.get(key)
-        if arr is None:
-            continue
-        a = _np.asarray(arr)
-        if a.ndim == 2 and a.shape[1] == rm.n_reduced_buses:
-            result[key] = expander.expand_bus_array(a, axis=1, copy_from_neighbour=False)
-
     # ── Per-bus 2-D arrays: bus axis = 0 ──
     for key in ("voltage_angle", "energy_prices"):
         arr = result.get(key)
@@ -1517,13 +1507,12 @@ class PowerSystemAdapter:
                 if 'rated_power' in updated_data:
                     gen_dict = gen.model_dump()
                     gen_dict['rated_power'] = updated_data['rated_power']
-                    # Also propagate degradation_rate and initial_age overrides
-                    # (set to 0 when using MasterProblem cumulative capacities
-                    # to prevent double degradation/retirement)
-                    if 'degradation_rate' in updated_data:
-                        gen_dict['degradation_rate'] = updated_data['degradation_rate']
-                    if 'initial_age' in updated_data:
-                        gen_dict['initial_age'] = updated_data['initial_age']
+                    # Also propagate the ageing overrides (no degradation and
+                    # no end of life for MasterProblem cumulative capacities,
+                    # which already hold the retirements and life extension)
+                    for f in ('degradation_rate', 'initial_age', 'life_time'):
+                        if f in updated_data:
+                            gen_dict[f] = updated_data[f]
                     gen_to_convert = GeneratorConfig(**gen_dict)
 
             # Apply geographic fuel transport cost adjustment
@@ -1613,7 +1602,6 @@ class PowerSystemAdapter:
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
                 invest_cost=[0.0] * nn,
-                invest_max_power=[0.0] * nn,
                 frequency_hz=vdata.get("frequency_hz", 50.0),
                 current_type=vdata.get("current_type", "AC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),
@@ -1695,10 +1683,13 @@ class PowerSystemAdapter:
                         bat_dict['capacity'] = updated_data['capacity']
                     if 'MaxChargePower' in updated_data:
                         bat_dict['MaxChargePower'] = updated_data['MaxChargePower']
-                    if 'MaxDischargePower' in updated_data:
-                        bat_dict['MaxDischargePower'] = updated_data['MaxDischargePower']
+                    # Power, energy and ageing of a battery the master keeps
+                    # past its lifetime (_apply_master_battery_life)
+                    for f in ('MaxDischargePower', 'rated_power', 'degradation_rate',
+                              'initial_age', 'life_time'):
+                        if f in updated_data:
+                            bat_dict[f] = updated_data[f]
                     bat_to_convert = BatteryConfig(**bat_dict)
-
 
             bat_bus_map = bat_bus_per_node.get(key)
             bat_avail = self._storage_availability(
@@ -1753,9 +1744,7 @@ class PowerSystemAdapter:
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
                 invest_cost=[0.0] * nn,
-                invest_cost_energy=[0.0] * nn,
                 invest_max_power=[0.0] * nn,
-                invest_max_capacity=[0.0] * nn,
                 throughput_degradation_cost=vdata.get("throughput_degradation_cost", [0.0] * nn),
                 current_type=vdata.get("current_type", "DC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),
@@ -4471,8 +4460,11 @@ class PrimaryEnergyAdapter:
                 py_to_julia_vector(fuel_cfg.get('initial_storage_level', [0.5] * n)),
                 float(fuel_cfg.get('min_storage_level', 0.0)),
                 py_to_julia_vector(scale_cost_list(fuel_cfg.get('import_cost', [0.0] * n))),
-                scale_cost(float(fuel_cfg.get('transport_cost', 0.0))),
-                float(fuel_cfg.get('transport_losses', 0.0)),
+                # Transport cost and losses are per route (fuel_transport_
+                # routes); these fallbacks only feed Julia's distance-matrix
+                # constructor, which the runner does not use
+                0.0,
+                0.0,
                 float(fuel_cfg.get('transport_transit_days_per_100km', 0.0)),
                 d_start,
                 d_end,

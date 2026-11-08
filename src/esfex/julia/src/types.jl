@@ -334,8 +334,7 @@ Generator/technology configuration.
 - `fixed_cost::Vector{Float64}`: Fixed O&M cost per node (\$/MW/year of power in service)
 - `maintenance_cost::Vector{Float64}`: Maintenance cost per node (\$/MWh)
 - `inertia::Vector{Float64}`: Inertia constant H per node (seconds)
-- `invest_cost::Vector{Float64}`: Investment cost per node (\$/MW)
-- `invest_max::Vector{Float64}`: Maximum investment per node (MW)
+- `invest_cost::Vector{Float64}`: Investment cost per node (\$/MW); prices the master's life extension
 - `availability::Matrix{Float64}`: Availability matrix [hours × nodes]
 - `reservable::Bool`: Whether this generator can provide reserves
 - `life_time::Vector{Float64}`: Economic lifetime per node (years)
@@ -375,7 +374,6 @@ struct GeneratorConfig
     maintenance_cost::Vector{Float64}
     inertia::Vector{Float64}
     invest_cost::Vector{Float64}
-    invest_max::Vector{Float64}
     availability::Matrix{Float64}
     reservable::Bool
     life_time::Vector{Float64}
@@ -421,13 +419,13 @@ end
 # sites pass fewer positional arguments and the newer fields take neutral
 # defaults: reservoir_min_release = zeros, cascade_downstream = "" (terminal),
 # cascade_delay_hours = 0, reservoir_head_min_factor = ones (no head effect).
-# Dispatch is by argument count (39 / 40 / 42 / full 43).
+# Dispatch is by argument count (38 / 39 / 41 / full 42).
 
-# 39-arg: through risk_coefficient.
+# 38-arg: through risk_coefficient.
 function GeneratorConfig(
     name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
     ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
-    fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+    fixed_cost, maintenance_cost, inertia, invest_cost, availability,
     reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
     frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
     reservoir_min_level, reservoir_max_level, reservoir_inflow,
@@ -439,7 +437,7 @@ function GeneratorConfig(
     return GeneratorConfig(
         name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
         ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
-        fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+        fixed_cost, maintenance_cost, inertia, invest_cost, availability,
         reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
         frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
         reservoir_min_level, reservoir_max_level, reservoir_inflow,
@@ -450,11 +448,11 @@ function GeneratorConfig(
     )
 end
 
-# 40-arg: through reservoir_min_release (cascade + head default to none).
+# 39-arg: through reservoir_min_release (cascade + head default to none).
 function GeneratorConfig(
     name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
     ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
-    fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+    fixed_cost, maintenance_cost, inertia, invest_cost, availability,
     reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
     frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
     reservoir_min_level, reservoir_max_level, reservoir_inflow,
@@ -467,7 +465,7 @@ function GeneratorConfig(
     return GeneratorConfig(
         name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
         ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
-        fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+        fixed_cost, maintenance_cost, inertia, invest_cost, availability,
         reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
         frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
         reservoir_min_level, reservoir_max_level, reservoir_inflow,
@@ -478,11 +476,11 @@ function GeneratorConfig(
     )
 end
 
-# 42-arg: through cascade_delay_hours (head defaults to no effect).
+# 41-arg: through cascade_delay_hours (head defaults to no effect).
 function GeneratorConfig(
     name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
     ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
-    fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+    fixed_cost, maintenance_cost, inertia, invest_cost, availability,
     reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
     frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
     reservoir_min_level, reservoir_max_level, reservoir_inflow,
@@ -495,7 +493,7 @@ function GeneratorConfig(
     return GeneratorConfig(
         name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
         ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
-        fixed_cost, maintenance_cost, inertia, invest_cost, invest_max, availability,
+        fixed_cost, maintenance_cost, inertia, invest_cost, availability,
         reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
         frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
         reservoir_min_level, reservoir_max_level, reservoir_inflow,
@@ -523,10 +521,8 @@ Battery/storage configuration.
 - `soc_max::Vector{Float64}`: Maximum SOC as fraction (0-1)
 - `soc_initial::Vector{Float64}`: Initial SOC as fraction (0-1)
 - `self_discharge::Vector{Float64}`: Self-discharge rate per hour
-- `invest_cost_power::Vector{Float64}`: Power investment cost (\$/MW)
-- `invest_cost_capacity::Vector{Float64}`: Energy investment cost (\$/MWh)
-- `invest_max_power::Vector{Float64}`: Max power investment (MW)
-- `invest_max_capacity::Vector{Float64}`: Max energy investment (MWh)
+- `invest_cost_power::Vector{Float64}`: Power investment cost (\$/MW); prices the master's life extension
+- `invest_max_power::Vector{Float64}`: Power (MW) > 0 places the battery at a bus in the master's representative days
 - `life_time::Vector{Float64}`: Economic lifetime per node (years)
 - `initial_age::Vector{Float64}`: Initial age per node (years)
 - `decommissioning_cost::Vector{Float64}`: Decommissioning cost per node (\$/MW)
@@ -559,9 +555,7 @@ struct BatteryConfig
     soc_initial::Vector{Float64}
     self_discharge::Vector{Float64}
     invest_cost_power::Vector{Float64}
-    invest_cost_capacity::Vector{Float64}
     invest_max_power::Vector{Float64}
-    invest_max_capacity::Vector{Float64}
     life_time::Vector{Float64}
     initial_age::Vector{Float64}
     decommissioning_cost::Vector{Float64}
@@ -586,7 +580,7 @@ end
 function BatteryConfig(
     name, capacity, max_charge_power, max_discharge_power, charge_efficiency,
     discharge_efficiency, soc_min, soc_max, soc_initial, self_discharge,
-    invest_cost_power, invest_cost_capacity, invest_max_power, invest_max_capacity,
+    invest_cost_power, invest_max_power,
     life_time, initial_age, decommissioning_cost, min_duration_hours,
     max_duration_hours, maintenance_cost, inertia, spillage, current_type,
     degradation_rate, throughput_degradation_cost, risk_coefficient,
@@ -595,7 +589,7 @@ function BatteryConfig(
     return BatteryConfig(
         name, capacity, max_charge_power, max_discharge_power, charge_efficiency,
         discharge_efficiency, soc_min, soc_max, soc_initial, self_discharge,
-        invest_cost_power, invest_cost_capacity, invest_max_power, invest_max_capacity,
+        invest_cost_power, invest_max_power,
         life_time, initial_age, decommissioning_cost, min_duration_hours,
         max_duration_hours, maintenance_cost, inertia, spillage, current_type,
         degradation_rate, throughput_degradation_cost, risk_coefficient,
@@ -1188,7 +1182,6 @@ struct PowerSystemInput
 
     # Demand constraints
     max_annual_system_cost::Float64
-    max_node_investment::Vector{Float64}
 
     # NPV/lifecycle tracking (P2: matches Python legacy power_system.py lines 528-938)
     # unit_npv: (gen_idx, node) → NPV value (or ("bat_N", node) → NPV)
@@ -1340,7 +1333,6 @@ function PowerSystemInput(;
     reserve_dynamic_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     # Demand constraints
     max_annual_system_cost::Float64 = Inf,
-    max_node_investment::Vector{Float64} = Float64[],
     # NPV/lifecycle tracking (P2)
     unit_npv::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
     replacement_needed::Dict{Tuple{Int,Int}, Bool} = Dict{Tuple{Int,Int}, Bool}(),
@@ -1432,7 +1424,6 @@ function PowerSystemInput(;
         reserve_static_requirement,
         reserve_dynamic_requirement,
         max_annual_system_cost,
-        max_node_investment,
         unit_npv,
         replacement_needed,
         bat_unit_npv,
@@ -1486,13 +1477,13 @@ end
 Container for all JuMP decision variables in the PowerSystem model.
 
 Variables are organized by category. Optional variables (unit commitment,
-investment) are `nothing` when not applicable.
+EVs, reservoirs, ...) are `nothing` when not applicable. The dispatch has no
+investment variables: the master's builds reach it as existing capacity.
 
 # Variable Dimensions
 - Generation: [generator, node, hour]
 - Storage: [battery, node, hour]
 - Network: [node, hour] or Dict{(from, to), Vector}
-- Investment: [unit, node]
 """
 mutable struct PowerSystemVariables
     # Generation (gen × bus × hour) — SparseAxisArray (only active gen-bus pairs)
@@ -1536,12 +1527,6 @@ mutable struct PowerSystemVariables
     # Load shedding (node × hour)
     load_shed::Array{VariableRef, 2}
 
-    # Investment (development mode only) — SparseAxisArray (only active gen/bat-bus pairs)
-    gen_investment::Any       # Nothing or SparseAxisArray [g, b]
-    bat_investment_power::Any # Nothing or SparseAxisArray [bi, b]
-    bat_investment_capacity::Any  # Nothing or SparseAxisArray [bi, b]
-    transfer_investment::Union{Dict{Tuple{Int,Int}, VariableRef}, Nothing}
-
     # EV variables (node × hour) - optional
     ev_charging::Union{Array{VariableRef, 2}, Nothing}
     ev_v2g::Union{Array{VariableRef, 2}, Nothing}
@@ -1559,9 +1544,6 @@ mutable struct PowerSystemVariables
 
     # Sectoral load shedding (sector -> node × hour)
     loss_of_load_sectoral::Union{Dict{String, Matrix{VariableRef}}, Nothing}
-
-    # Flexible demand variables (sector -> node × hour)
-    flexible_demand_curtailed::Union{Dict{String, Matrix{VariableRef}}, Nothing}
 
     # CO2 budget violation slack (t), one per budget group with a budget
     # (group index => variable; see `co2_budget_groups`)
@@ -1603,7 +1585,6 @@ mutable struct PowerSystemVariables
     reservoir_level::Any         # Water level (MWh-eq), dim3 = hours+1
     reservoir_spillage::Any      # Overflow (MW-eq)
     reservoir_pump::Any          # Pump-back power consumed (MW)
-    reservoir_invest_capacity::Union{Array{VariableRef, 2}, Nothing}  # Reservoir expansion (gen × node)
 
     # Sparse lookup maps for gen/bat active bus pairs
     buses_of_gen::Vector{Vector{Int}}   # gen_idx → [active bus indices]
@@ -1630,7 +1611,6 @@ function PowerSystemVariables(
     power_flow, voltage_angle,
     reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
     load_shed,
-    gen_investment, bat_investment_power, bat_investment_capacity, transfer_investment,
     buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;
     power_flow_by_line = nothing,
     co2_emissions = nothing,
@@ -1646,7 +1626,6 @@ function PowerSystemVariables(
     loss_of_inertia = nothing,
     balance_constraints = nothing,
     loss_of_load_sectoral = nothing,
-    flexible_demand_curtailed = nothing,
     co2_budget_violation = nothing,
     rooftop_curtailment = nothing,
     gen_delay_retirement = nothing,
@@ -1664,7 +1643,6 @@ function PowerSystemVariables(
     reservoir_level = nothing,
     reservoir_spillage = nothing,
     reservoir_pump = nothing,
-    reservoir_invest_capacity = nothing,
     gen_seg_output = Dict{Tuple{Int,Int}, Any}(),
     bat_seg_discharge = Dict{Tuple{Int,Int}, Any}(),
     acopf_vars = nothing
@@ -1676,13 +1654,11 @@ function PowerSystemVariables(
         power_flow, power_flow_by_line, voltage_angle, transfer_margin,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
-        gen_investment, bat_investment_power, bat_investment_capacity, transfer_investment,
         ev_charging, ev_v2g, ev_soc, ev_loss,
         electrolyzer_power,
         loss_of_inertia,
         balance_constraints,
         loss_of_load_sectoral,
-        flexible_demand_curtailed,
         co2_budget_violation,
         rooftop_curtailment,
         gen_delay_retirement,
@@ -1700,7 +1676,6 @@ function PowerSystemVariables(
         reservoir_level,
         reservoir_spillage,
         reservoir_pump,
-        reservoir_invest_capacity,
         buses_of_gen,
         gens_at_bus,
         buses_of_bat,
@@ -1738,7 +1713,6 @@ struct CostBreakdown
     soc_violation_cost::Float64
     transfer_margin_cost::Float64
     v2g_compensation::Float64
-    investment_cost::Float64
     electrolyzer_cost::Float64
     converter_cost::Float64
     spillage_cost::Float64
@@ -1747,7 +1721,6 @@ struct CostBreakdown
     demand_shift_cost::Float64
     rooftop_curtailment_cost::Float64
     npv_penalty_cost::Float64
-    reservoir_invest_cost::Float64
     # PrimaryEnergy sub-costs (merged into cost_expressions by
     # PrimaryEnergyAdapter.integrate_with_power_system).
     pe_supply_cost::Float64
@@ -1769,8 +1742,8 @@ end
 """
     PowerSystemResult
 
-Solution output from the PowerSystem optimization model.
-Contains all solution values, metrics, and optional investment decisions.
+Solution output from the PowerSystem optimization model: all solution values
+and metrics (the dispatch makes no investment decisions).
 """
 struct PowerSystemResult
     # Solve status
@@ -1801,7 +1774,6 @@ struct PowerSystemResult
     # Default to nothing for DC runs.
     voltage_magnitude::Union{Matrix{Float64}, Nothing}              # [bus × hour] in p.u.
     reactive_generation::Union{Array{Float64, 3}, Nothing}          # [gen × bus × hour] in MVAr
-    transfer_investment::Union{Dict{Tuple{Int,Int}, Float64}, Nothing}
 
     # Reserves (node × hour)
     reserve_static::Matrix{Float64}
@@ -1827,11 +1799,6 @@ struct PowerSystemResult
     total_co2::Float64
     load_shed_total::Float64
 
-    # Investment decisions (development mode)
-    gen_investment::Union{Matrix{Float64}, Nothing}
-    bat_investment_power::Union{Matrix{Float64}, Nothing}
-    bat_investment_capacity::Union{Matrix{Float64}, Nothing}
-
     # Battery spillage (bat × node × hour)
     bat_spillage::Union{Array{Float64, 3}, Nothing}
 
@@ -1851,7 +1818,6 @@ struct PowerSystemResult
     reservoir_level::Union{Array{Float64, 3}, Nothing}
     reservoir_spillage::Union{Array{Float64, 3}, Nothing}
     reservoir_pump::Union{Array{Float64, 3}, Nothing}
-    reservoir_invest_capacity::Union{Matrix{Float64}, Nothing}
 
     # N-1 security results
     n1_gen_reserve_duals::Union{Vector{Float64}, Nothing}       # [hour] — dual of gen N-1 reserve
@@ -1889,8 +1855,10 @@ Configuration for a primary energy fuel/source.
 - `initial_storage_level::Vector{Float64}`: Initial storage as fraction (0-1)
 - `min_storage_level::Float64`: Minimum storage level fraction
 - `import_cost::Vector{Float64}`: Import cost per node (\$/unit)
-- `transport_cost::Float64`: Transport cost (\$/unit/km)
-- `transport_losses::Float64`: Transport losses (%/100km)
+- `transport_cost::Float64`, `transport_losses::Float64`: Transport cost
+  (\$/unit/km) and losses (%/100km) for the routes the legacy
+  distance-matrix `PrimaryEnergyInput` constructor creates. Runs pass routes
+  (`TransportRoute`), whose own `FuelRouteParams` carry cost and losses.
 """
 struct FuelConfig
     name::String
@@ -2619,8 +2587,8 @@ Container for Master Problem decision variables.
 - `transfer_investment`: Transmission line investment (MW)
 
 # Life Extension Variables (indexed by [year, unit, node])
-- `gen_life_extension`: Binary - extend generator life (1) or retire (0)
-- `bat_life_extension`: Binary - extend battery life (1) or retire (0)
+- `gen_life_extension`: MW of a generator kept past its lifetime (continuous, `nothing` within it)
+- `bat_life_extension`: MW of discharge power of a battery kept past its lifetime (same)
 
 # RE Tracking (indexed by [year])
 - `re_penetration_ratio`: Achieved RE penetration per year
@@ -2702,11 +2670,12 @@ Solution output from the Master Problem.
 - `transfer_investment`: Transmission investments [year, (i,j)] (MW)
 
 ## Life Decisions
-- `gen_life_extension`: [year, gen, node] 1.0 while the generator is within
-    its original `life_time`, 0.0 once past it, whether or not the master
-    extends it (not MW: the capacity kept past the lifetime is in
-    `cumulative_gen_capacity`)
-- `bat_life_extension`: the same flag for batteries [year, bat, node]
+- `gen_life_extension`: [year, gen, node] share of the generator in service:
+    1.0 within its original `life_time`; past it, the life-extended MW over
+    the (degraded) capacity the master could keep (0.0 = retired). Not MW: the
+    capacity is in `cumulative_gen_capacity`
+- `bat_life_extension`: the same share for batteries [year, bat, node]
+    (life-extended MW over the discharge power)
 
 ## Summary Metrics
 - `total_investment_by_year`: Total investment per year (\$)

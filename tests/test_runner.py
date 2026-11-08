@@ -56,7 +56,6 @@ def _make_generator(name, gen_type, fuel, rated_power, **overrides):
         fixed_cost=[5.0] * n,
         maintenance_cost=[10.0] * n,
         invest_cost=[1e6] * n,
-        invest_max_power=[200.0] * n,
     )
     defaults.update(overrides)
     return GeneratorConfig(**defaults)

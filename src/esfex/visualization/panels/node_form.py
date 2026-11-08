@@ -260,12 +260,12 @@ class NodeForm(QWidget):
         ned_btn_row.addWidget(self._ned_remove_btn)
         ntl.addLayout(ned_btn_row)
 
-        self._ned_type_table = QTableWidget(0, 6)
+        # Non-electric demand is a fixed annual fuel demand: the primary-energy
+        # model has no flexibility or criticality for it
+        self._ned_type_table = QTableWidget(0, 2)
         self._ned_type_table.setHorizontalHeader(WordWrapHeaderView(self._ned_type_table))
         self._ned_type_table.setHorizontalHeaderLabels([
-            tr("node_form.unit"), tr("node_form.demand"), tr("node_form.flexible"),
-            tr("node_form.flex_ratio"), tr("node_form.criticality"),
-            tr("node_form.delay_tol"),
+            tr("node_form.unit"), tr("node_form.demand"),
         ])
         self._ned_type_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows,
@@ -571,18 +571,6 @@ class NodeForm(QWidget):
             self._ned_type_table.setItem(
                 row, 1, QTableWidgetItem(str(demand_val)),
             )
-            self._ned_type_table.setItem(
-                row, 2, QTableWidgetItem("1" if ned.is_flexible else "0"),
-            )
-            self._ned_type_table.setItem(
-                row, 3, QTableWidgetItem(f"{ned.flexibility_ratio:.2f}"),
-            )
-            self._ned_type_table.setItem(
-                row, 4, QTableWidgetItem(ned.criticality),
-            )
-            self._ned_type_table.setItem(
-                row, 5, QTableWidgetItem(str(ned.delay_tolerance)),
-            )
         self._ned_type_table.blockSignals(False)
 
     def _on_add_ned_type(self):
@@ -639,24 +627,6 @@ class NodeForm(QWidget):
                 while len(ned.demand) <= self._current_node:
                     ned.demand.append(0)
                 ned.demand[self._current_node] = val
-        elif col == 2:
-            ned.is_flexible = text.lower() in ("1", "true", "yes")
-        elif col == 3:
-            try:
-                ned.flexibility_ratio = float(text)
-            except ValueError:
-                pass
-        elif col == 4:
-            try:
-                if text in ("critical", "high", "medium", "low"):
-                    ned.criticality = text
-            except Exception:
-                pass
-        elif col == 5:
-            try:
-                ned.delay_tolerance = int(text)
-            except ValueError:
-                pass
 
     # ==============================================================
     # Centroid pick-on-map

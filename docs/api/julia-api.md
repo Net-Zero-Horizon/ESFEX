@@ -113,7 +113,6 @@ struct GeneratorConfig
     maintenance_cost::Vector{Float64}  # Per MWh
     inertia::Vector{Float64}        # Inertia constant H (s)
     invest_cost::Vector{Float64}    # Per MW
-    invest_max::Vector{Float64}     # Maximum investment MW per bus
     availability::Matrix{Float64}   # (hours x buses) capacity factor [0,1]
     reservable::Bool                # Can provide reserve services
     life_time::Vector{Float64}      # Years
@@ -148,10 +147,8 @@ struct BatteryConfig
     soc_max::Vector{Float64}            # Maximum SOC (fraction)
     soc_initial::Vector{Float64}        # Initial SOC (fraction)
     self_discharge::Vector{Float64}     # Hourly self-discharge rate
-    invest_cost_power::Vector{Float64}  # $/MW per bus
-    invest_cost_capacity::Vector{Float64} # $/MWh per bus
-    invest_max_power::Vector{Float64}   # Max investment MW per bus
-    invest_max_capacity::Vector{Float64} # Max investment MWh per bus
+    invest_cost_power::Vector{Float64}  # $/MW per bus, prices life extension
+    invest_max_power::Vector{Float64}   # MW > 0: battery placed at the bus in the master
     life_time::Vector{Float64}
     initial_age::Vector{Float64}
     decommissioning_cost::Vector{Float64}
@@ -336,8 +333,7 @@ end
 | `add_n1_security_constraints!` | `(model, vars, input)` | N-1 contingency constraints for transmission and generation. |
 | `extract_solution` | `(model, vars, input; committed=nothing) -> PowerSystemResult` | Extract all variable values into a structured result. With `committed` (from `committed_steps`), the objective, scalar totals and cost breakdown cover only a rolling window's kept steps. |
 | `committed_steps` | `(ps_vars, hours, keep; pe_vars, pe_temporal) -> CommittedSteps` | Share of each variable in a window's first `keep` steps (1 / 0 per step, period share for primary-energy periods, `keep / hours` for variables without a step). `committed_value(cs, expr)` values a solved expression over those steps. |
-| `recover_uc_duals!` | `(model, vars, input) -> Bool` | UC only: fix the commitment binaries to their rounded values on the model itself and re-solve as an LP so balance duals (prices) exist. Mutates the model. |
-| `recover_uc_duals_via_copy` | `(model, vars, input) -> Union{Matrix, Nothing}` | Same on a copy of the model; returns the `[bus x hour]` price matrix in M$/MWh, or `nothing`. Used by `PowerSystemAdapter`. |
+| `recover_uc_duals_via_copy` | `(model, vars, input) -> Union{Matrix, Nothing}` | UC only: on a copy of the solved model, fix the commitment binaries to their rounded values and re-solve as an LP so balance duals (prices) exist; returns the `[bus x hour]` price matrix in M$/MWh, or `nothing`. The model itself is not changed. Used by `PowerSystemAdapter`. |
 | `compute_n1_security_cost!` | `(model, input) -> Float64` | Re-solve a copy of the solved model with the N-1 slacks free of charge and store objective(with) − objective(without) in `model.ext[:n1_security_cost]`, which `extract_solution` reports as `n1_security_cost` (solver cost units). Used by `PowerSystemAdapter` when `n1_security.compute_security_cost` is on. |
 
 ### Master Problem (Capacity Expansion)
@@ -503,7 +499,7 @@ Pure LP formulation: life extension of a unit past its lifetime is a continuous 
 
 ### Free Generation Prevention
 
-`build_variables!` creates `gen_output` and the battery variables only for unit-bus pairs that have capacity, investment potential (development mode) or a pending retirement. A generator with `rated_power[bus] = 0` and no investment potential therefore has no output variable at that bus, so it cannot inject free energy into the power balance.
+`build_variables!` creates `gen_output` and the battery variables only for unit-bus pairs that have capacity or a pending retirement. A generator with `rated_power[bus] = 0` therefore has no output variable at that bus, so it cannot inject free energy into the power balance. The dispatch has no investment variables: in a `development` run the master's builds reach it as existing capacity.
 
 ### PWL Transmission Losses
 

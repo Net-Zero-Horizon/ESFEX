@@ -167,7 +167,6 @@ Extract all variable values from the solved model. Calls `ESFEX.extract_solution
 | `voltage_magnitude`, `reactive_generation` | ACOPF modes only, otherwise `None` |
 | `energy_prices` | Balance-constraint duals, `(bus, hour)` USD/MWh (recovered by a fixed-commitment LP re-solve in UC mode) |
 | `power_flow`, `power_flow_by_line` | Flow per bus pair `{(i, j): array}` and per physical line |
-| `gen_investment`, `bat_investment_power`, `bat_investment_capacity`, `transfer_investment` | Development mode only |
 | `bat_spillage`, `ev_*`, `loss_of_inertia`, `transfer_margin`, `reservoir_*` | Present when the feature is active |
 | `n1_gen_reserve_duals`, `n1_trans_reserve_duals`, `n1_binding_contingencies`, `n1_security_cost` | N-1 security outputs |
 | `total_generation`, `total_demand`, `total_losses`, `re_penetration`, `total_co2`, `load_shed_total`, `total_curtailment` | Scalars |

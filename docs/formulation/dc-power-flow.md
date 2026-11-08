@@ -313,7 +313,7 @@ meta_network:
       existing_capacity_MW: [500.0]
       max_investment_MW: [500.0]
       investment_cost_per_MW: [1000000.0]
-      loss_factor: [0.02]     # Not used by the merged-network path
+      # loss_factor is for fuel_route links only (optional here)
       reactance_pu: [0.01]
       resistance_pu: [0.001]
       distance_km: [100.0]

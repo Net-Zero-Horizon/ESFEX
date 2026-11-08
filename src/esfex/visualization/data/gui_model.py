@@ -702,10 +702,6 @@ class GuiNonElectricDemand:
     demand_id: str
     fuel: str
     unit: str
-    is_flexible: bool = False
-    flexibility_ratio: float = 0.0
-    criticality: str = "medium"  # "critical", "high", "medium", "low"
-    delay_tolerance: int = 0
     demand: list[int] = field(default_factory=list)  # per-node annual
 
 
@@ -1012,9 +1008,6 @@ class GuiInvestmentEntry:
     technology_id: str = ""         # References GuiTechnology.tech_id
     # Per-node investment data
     node_data: list[GuiInvestmentNodeData] = field(default_factory=list)
-    # Battery-specific extra columns
-    invest_cost_energy: dict[int, float] = field(default_factory=dict)  # node_idx → $/MWh
-    invest_max_capacity: dict[int, float] = field(default_factory=dict)  # node_idx → MWh
 
 
 # ── System state ─────────────────────────────────────────────────

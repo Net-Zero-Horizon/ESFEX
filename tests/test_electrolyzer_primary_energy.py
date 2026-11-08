@@ -640,7 +640,6 @@ def test_primary_energy_power_system_coupling():
         py_to_julia_vector([0.0]),    # maintenance_cost
         py_to_julia_vector([0.0]),    # inertia
         py_to_julia_vector([0.0]),    # invest_cost
-        py_to_julia_vector([0.0]),    # invest_max
         py_to_julia_matrix(np.ones((num_hours, num_nodes))),  # availability
         True,   # reservable
         py_to_julia_vector([25.0]),   # life_time

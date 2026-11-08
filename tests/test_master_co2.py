@@ -31,7 +31,7 @@ def _gas_built(tmp_path, tag, co2_cost, scenarios=None):
     demand = tmp_path / "demand.csv"
     np.savetxt(demand, np.full(8760, 60.0))
     diesel = _make_generator("Diesel", "Non-renewable", "Diesel", [150.0],
-                             degradation_rate=[0.0], fuel_cost=[80.0], invest_max_power=[0.0])
+                             degradation_rate=[0.0], fuel_cost=[80.0])
     gas = _make_technology("gas_new", "Gas", 1, tech_type="Non-renewable",
                            invest_cost=200000.0, invest_max_power=500.0)
     gas = gas.model_copy(update={"fuel_cost": [150.0]})

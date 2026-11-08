@@ -201,3 +201,35 @@ def test_risk_workbench_opens_with_saved_settings(tmp_path, qapp, monkeypatch):
     assert [s.name for s in rk.hazard_scenarios] == ["quake"]
     assert rk.hazard_scenarios[0].recovery_hours == 720
     assert [s.name for s in rk.climate_scenarios] == ["SSP5-8.5"]
+
+
+def test_risk_dashboard_cvar_alpha_takes_the_schema_range(qapp):
+    """risk.cvar_alpha may be any value in (0, 1); the CVaR α spin box only
+    took 0.80-0.99, so a saved 0.5 showed (and was saved back) as 0.80."""
+    from esfex.visualization.workflows.risk_panels import RiskDashboardPanel
+    from esfex.visualization.workflows.risk_wizard import RiskWorkbenchState
+
+    panel = RiskDashboardPanel()
+    try:
+        for alpha in (0.5, 0.995, 0.05):
+            state = RiskWorkbenchState()
+            state.cvar_alpha = alpha
+            panel.set_state(state)
+            assert panel._spin_alpha.value() == pytest.approx(alpha)
+        lo, hi = panel._spin_alpha.minimum(), panel._spin_alpha.maximum()
+        assert 0.0 < lo and hi < 1.0
+    finally:
+        panel.deleteLater()
+
+    # Global Settings' α alike (it took 0.01-0.99 in steps of 0.01)
+    from esfex.visualization.data.gui_model import GuiModel
+    from esfex.visualization.panels.global_settings_form import GlobalSettingsForm
+
+    model = GuiModel()
+    model.global_settings.risk_cvar_alpha = 0.995
+    form = GlobalSettingsForm(model)
+    try:
+        form.load_element()
+        assert form._risk_cvar_alpha.value() == pytest.approx(0.995)
+    finally:
+        form.deleteLater()

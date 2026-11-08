@@ -30,7 +30,7 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 
 Generators, batteries, load shedding, voltage angles and electrolyzer power are indexed by bus. Curtailment, the RE-target slack, CO2 emissions, reserves, sectoral load shedding, flexible demand, EV fleet and rooftop curtailment are indexed by node; where a node-level quantity enters a bus balance it is multiplied by \(\alpha_n\). Per-node configuration arrays (capacities, costs, `invest_max`) are mapped onto the buses before the model is built.
 
-Generator and battery variables exist only for the (unit, bus) pairs with installed capacity, investment potential (development mode) or a pending delayed retirement; the model has no variables, and so no zero-capacity constraints, for the other pairs.
+Generator and battery variables exist only for the (unit, bus) pairs with installed capacity or a pending delayed retirement; the model has no variables, and so no zero-capacity constraints, for the other pairs.
 
 ---
 
@@ -45,7 +45,6 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 | \(p_{g,n,t}\) | \(g,n,t\) | \(\geq 0\) | MW | Generator output (`gen_output`) |
 | \(u_{g,n,t}\) | \(g,n,t\) | \(\{0,1\}\) (UC) or \(=1\) (ED) | -- | Generator status (`gen_status`) |
 | \(v_{g,n,t}\) | \(g,n,t\) | \([0,1]\) | -- | Startup indicator (`gen_startup`); UC mode only |
-| \(\hat{P}^{\text{inv}}_{g,n}\) | \(g,n\) | \(\geq 0\) | MW | Generator investment (`gen_investment`); development mode only |
 
 ### 2.2 Battery Variables
 
@@ -125,10 +124,10 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (development-mode investment, delayed retirement, forced replacement, reservoir investment, the fixed O&M of generators and batteries) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (delayed retirement, forced replacement, the fixed O&M of generators and batteries) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{inv}} + Z^{\text{ret}} + Z^{\text{npv}} + Z^{\text{fix}} + Z^{\text{bat,fix}} \right) + Z^{\text{start}} \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{ret}} + Z^{\text{npv}} + Z^{\text{fix}} + Z^{\text{bat,fix}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
 Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
@@ -281,13 +280,9 @@ Z^{\text{spill}} = \sum_{b,n,t} \pi_t \cdot \text{spill}_{b,n,t} \tag{OBJ-9}
 
 Opportunity cost of energy discharged from batteries without grid injection, at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given).
 
-### 3.10 Investment Costs (development mode only)
+### 3.10 Investment Costs
 
-\[
-Z^{\text{inv}} = \sum_{g,n} c^{\text{inv}}_g \hat{P}^{\text{inv}}_{g,n} + \sum_{b,n} \left( c^{\text{inv,P}}_b \hat{P}^{\text{inv,P}}_{b,n} + c^{\text{inv,E}}_b \hat{E}^{\text{inv}}_{b,n} \right) + \sum_{(i,j)} \max(c^{\text{tr}}_i, c^{\text{tr}}_j) \, \hat{F}^{\text{inv}}_{ij} \tag{OBJ-10}
-\]
-
-where \(c^{\text{tr}}\) is `transference_invest_cost` and \(\hat{F}^{\text{inv}}_{ij}\) the corridor's transmission investment (`tf_inv_*`, DC-5).
+The dispatch has no investment costs: it builds nothing. In a `development` run each year's dispatch runs as `economic_dispatch` (or `unit_commitment` with `use_uc_in_dispatch`) on the capacity the master problem keeps and builds, which arrives as existing capacity.
 
 ### 3.11 Converter Costs
 
@@ -331,7 +326,7 @@ where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are 
 
 ### 3.16 Reservoir Costs
 
-Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). In development mode, reservoir capacity investment is charged at `reservoir_invest_cost` per MWh. See [Reservoir Hydropower](reservoir-hydro.md).
+Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). See [Reservoir Hydropower](reservoir-hydro.md).
 
 ### 3.17 Line Flow Cost
 
@@ -361,24 +356,23 @@ Implemented in `add_generator_constraints!()`.
 Every generator is limited by its capacity times its availability factor \(a_{g,n,t} \in [0,1]\):
 
 \[
-p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} + \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \right) \cdot a_{g,n,t} \quad \forall g, n, t \tag{GEN-1a}
+p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \right) \cdot a_{g,n,t} \quad \forall g, n, t \tag{GEN-1a}
 \]
 
-For renewables \(a\) is the capacity-factor profile; for other units it is 1 by default. A [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies \(a\) by the outage factor of its window (0 for a full outage), for any unit type. \(\bar{P}^{\text{eff}}\) is the degraded rated power (§5), \(\hat{P}^{\text{inv}}\) the development-mode investment and \(d_{g,n}\) the delayed-retirement decision (OBJ-14).
+For renewables \(a\) is the capacity-factor profile; for other units it is 1 by default. A [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies \(a\) by the outage factor of its window (0 for a full outage), for any unit type. \(\bar{P}^{\text{eff}}\) is the rated power in service (§5: degraded, 0 past the lifetime) and \(d_{g,n}\) the delayed-retirement decision (OBJ-14).
 
 In unit commitment, non-renewable units and reservoir hydro are also tied to their commitment status:
 
 \[
-p_{g,n,t} \leq M_{g,n} \cdot u_{g,n,t}, \qquad M_{g,n} = \max\left(1.1 \cdot \max(\mathbf{D}),\; 10^4,\; 1.1 \left(\bar{P}_{g,n} + \bar{I}_{g,n}\right)\right) \tag{GEN-1b}
+p_{g,n,t} \leq M_{g,n} \cdot u_{g,n,t}, \qquad M_{g,n} = \max\left(1.1 \cdot \max(\mathbf{D}),\; 10^4,\; 1.1 \, \bar{P}_{g,n}\right) \tag{GEN-1b}
 \]
 
-where \(\bar{I}_{g,n}\) is `invest_max` in development mode (0 otherwise). The big-M is per generator so that it never caps a large unit below its own capacity. In economic dispatch and development mode \(u = 1\) and GEN-1b is not added.
+The big-M is per generator so that it never caps a large unit below its own capacity. In economic dispatch \(u = 1\) and GEN-1b is not added.
 
 **Configuration parameters:**
 
 - `generators[g].rated_power[n]` -- installed capacity (MW)
 - `generators[g].availability[t,n]` -- time-varying availability profile
-- `generators[g].invest_max[n]` -- maximum investment (MW); development mode only
 
 #### GEN-2: Minimum Generation (UC mode only)
 
@@ -391,11 +385,11 @@ where \(\underline{P}_{g,n}\) is the minimum stable generation fraction (`min_po
 #### GEN-3: Ramp Rate Constraints
 
 \[
-p_{g,n,t} - p_{g,n,t-1} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} \right) \cdot \min\left(1, R^{\text{up}}_{g,n} \Delta t\right) \quad \forall g, n, t \geq 2 \tag{GEN-3a}
+p_{g,n,t} - p_{g,n,t-1} \leq \bar{P}^{\text{eff}}_{g,n} \cdot \min\left(1, R^{\text{up}}_{g,n} \Delta t\right) \quad \forall g, n, t \geq 2 \tag{GEN-3a}
 \]
 
 \[
-p_{g,n,t-1} - p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n} \right) \cdot \min\left(1, R^{\text{down}}_{g,n} \Delta t\right) \quad \forall g, n, t \geq 2 \tag{GEN-3b}
+p_{g,n,t-1} - p_{g,n,t} \leq \bar{P}^{\text{eff}}_{g,n} \cdot \min\left(1, R^{\text{down}}_{g,n} \Delta t\right) \quad \forall g, n, t \geq 2 \tag{GEN-3b}
 \]
 
 where \(R^{\text{up}}_{g,n}\) and \(R^{\text{down}}_{g,n}\) are ramp rates in fractions of capacity per hour (`ramp_up[n]`, `ramp_down[n]`) and \(\Delta t\) is the time step (`resolution_hours`): with 6-hour steps a unit with `ramp_up: 0.1` may rise 60 % of its capacity from one step to the next. A rate of 0 means no ramp limit: the constraint is omitted (a literal zero would freeze the unit at its initial output). In rolling-horizon dispatch the same limits also apply between the last committed hour of one window and the first hour of the next.
@@ -444,14 +438,14 @@ Implemented in `add_battery_constraints!()`.
 #### BAT-1: Charge/Discharge Power Limits
 
 \[
-p^{\text{ch}}_{b,n,t} \leq \left( \bar{P}^{\text{ch}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \right) o_{b,t} \quad \forall b, n, t \tag{BAT-1a}
+p^{\text{ch}}_{b,n,t} \leq \bar{P}^{\text{ch}}_{b,n} \, o_{b,t} \quad \forall b, n, t \tag{BAT-1a}
 \]
 
 \[
-p^{\text{dis}}_{b,n,t} \leq \left( \bar{P}^{\text{dis}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \right) o_{b,t} \quad \forall b, n, t \tag{BAT-1b}
+p^{\text{dis}}_{b,n,t} \leq \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} \quad \forall b, n, t \tag{BAT-1b}
 \]
 
-where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the (degraded) maximum charge and discharge power ratings and \(o_{b,t} \in [0,1]\) is the scheduled-interruption factor (1 outside outage windows) times the battery's availability profile `Availability` (1 without one).
+where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the maximum charge and discharge power ratings in service (degraded, 0 past the lifetime, DEG-2) and \(o_{b,t} \in [0,1]\) is the scheduled-interruption factor (1 outside outage windows) times the battery's availability profile `Availability` (1 without one).
 
 #### BAT-2: SOC Dynamics
 
@@ -516,7 +510,7 @@ p^{\text{ch}}_{b,n,t} \leq M_{\text{bat}} \cdot \delta^{\text{ch}}_{b,n,t} \quad
 p^{\text{dis}}_{b,n,t} \leq M_{\text{bat}} \cdot (1 - \delta^{\text{ch}}_{b,n,t}) \quad \forall b, n, t \tag{BAT-6b}
 \]
 
-where \(M_{\text{bat}} = 2 \left( \max(\bar{P}^{\text{ch}}_{b,n}, \bar{P}^{\text{dis}}_{b,n}) + \bar{I}^{\text{P}}_{b,n} \right)\), with \(\bar{I}^{\text{P}}\) the power investment limit in development mode. \(\delta^{\text{ch}}\) is continuous in \([0,1]\), so this is a relaxation: it discourages, but does not strictly forbid, simultaneous charging and discharging.
+where \(M_{\text{bat}} = 2 \max(\bar{P}^{\text{ch}}_{b,n}, \bar{P}^{\text{dis}}_{b,n})\). \(\delta^{\text{ch}}\) is continuous in \([0,1]\), so this is a relaxation: it discourages, but does not strictly forbid, simultaneous charging and discharging.
 
 #### BAT-7: Minimum Cycling Requirement
 
@@ -529,7 +523,7 @@ where \(\gamma^{\text{cycle}}\) is the `min_cycling_ratio` and \(T^{\text{cycle}
 #### BAT-8: Spillage Power Limit
 
 \[
-\text{spill}_{b,n,t} \leq \bar{P}^{\text{dis}}_{b,n} + \hat{P}^{\text{inv,P}}_{b,n} \quad \forall b, n, t \tag{BAT-8}
+\text{spill}_{b,n,t} \leq \bar{P}^{\text{dis}}_{b,n} \quad \forall b, n, t \tag{BAT-8}
 \]
 
 Only applies to batteries with `spillage = true`.
@@ -653,10 +647,10 @@ Each connected component of the network gets its own reference bus. Angles are o
 Implemented in `add_line_capacity_constraints!()`:
 
 \[
--\left(\bar{F}_\ell + \hat{F}^{\text{inv}}_\ell\right) o_{\ell,t} \leq f_{\ell,t} \leq \left(\bar{F}_\ell + \hat{F}^{\text{inv}}_\ell\right) o_{\ell,t} \quad \forall \ell, t \tag{DC-5}
+-\bar{F}_\ell \, o_{\ell,t} \leq f_{\ell,t} \leq \bar{F}_\ell \, o_{\ell,t} \quad \forall \ell, t \tag{DC-5}
 \]
 
-where \(\bar{F}_\ell\) is the thermal capacity, \(\hat{F}^{\text{inv}}_\ell\) is the transmission investment variable (development mode only, `tf_inv_*`: one per corridor, added to its first line, at most the smaller `transference_invest_max` of the two end buses, charged at the higher `transference_invest_cost`, as in the master) and \(o_{\ell,t}\) is the scheduled-interruption factor of the line or transformer.
+where \(\bar{F}_\ell\) is the thermal capacity (in a `development` run, including what the master built in earlier years) and \(o_{\ell,t}\) is the scheduled-interruption factor of the line or transformer.
 
 #### DC-6: Converter Capacity Limits
 
@@ -682,7 +676,7 @@ Implemented in `add_curtailment_constraints!()`.
 #### CUR-1: Curtailment Definition
 
 \[
-\text{CU}_{i,t} = \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \left( \left(\bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n}\right) a_{g,n,t} - p_{g,n,t} \right) \quad \forall i, t \tag{CUR-1}
+\text{CU}_{i,t} = \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \left( \bar{P}^{\text{eff}}_{g,n} \, a_{g,n,t} - p_{g,n,t} \right) \quad \forall i, t \tag{CUR-1}
 \]
 
 Curtailment is defined per node as the difference between available and dispatched variable renewable generation over the node's buses. \(\mathcal{G}^{\text{RE}}_{\text{var}}\) are the renewable units without a reservoir: reservoir hydro is dispatchable within its water budget and is not counted.
@@ -690,7 +684,7 @@ Curtailment is defined per node as the difference between available and dispatch
 #### CUR-2: Curtailment Upper Bound
 
 \[
-\text{CU}_{i,t} \leq \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \left(\bar{P}^{\text{eff}}_{g,n} + \hat{P}^{\text{inv}}_{g,n}\right) a_{g,n,t} \quad \forall i, t \tag{CUR-2}
+\text{CU}_{i,t} \leq \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \bar{P}^{\text{eff}}_{g,n} \, a_{g,n,t} \quad \forall i, t \tag{CUR-2}
 \]
 
 Curtailment cannot exceed available renewable generation. In the dispatch, curtailment is priced at `curtailment_cost` (OBJ-4a) and not capped; the `max_curtailment_ratio` cap applies only in the master problem's representative days (see [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)).
@@ -932,23 +926,6 @@ All SCOPF slacks are priced like the preventive ones.
 ---
 
 
-### Node Investment Limits (Development Mode)
-
-Implemented in `add_node_investment_limits!()`.
-
-#### INV-1: Per-Node Investment Cap
-
-\[
-\sum_g \hat{P}^{\text{inv}}_{g,n} + \sum_b \hat{P}^{\text{inv,P}}_{b,n} \leq \bar{I}_n \quad \forall n \tag{INV-1}
-\]
-
-where \(\bar{I}_n\) is `max_node_investment[n]` (MW), summed over the node's buses (`max_node_inv_*`).
-
-Because per-node `invest_max` values are copied to every bus of the node, the investment of one unit across the buses of a node is also capped at its `invest_max` (`invest_node_gen_*`, `invest_node_bat_pow_*`, `invest_node_bat_cap_*`).
-
----
-
-
 ### Maximum Annual System Cost
 
 Implemented in `add_max_annual_system_cost!()`.
@@ -980,7 +957,7 @@ where \(d_g\) is the annual degradation rate (`degradation_rate[n]`) and:
 | Existing unit | \(\text{age} = \text{initial\_age} + (\text{year\_idx} - 1)\) |
 | New investment | \(\text{age} = \text{year\_idx} - \text{investment\_year}\) |
 
-If the remaining lifetime (\(\text{lifetime} - \text{age}\)) is zero or negative, the effective capacity is set to zero and the unit is effectively retired.
+If the remaining lifetime (\(\text{lifetime} - \text{age}\)) is zero or negative, the effective capacity is zero: the unit is retired at the end of its `life_time`, with or without degradation, as in the master problem (`generator_power_in_service`, `battery_power_limits`). The reserves, curtailment (CUR-1) and N-1 terms use the same power in service. In a `development` run the dispatch receives the master's capacity instead (retirements and life extension already applied), with no degradation and no end of life; a battery within its lifetime keeps the dispatch's own degradation, and past it gets the power and energy the master keeps.
 
 The same degradation logic applies to batteries, where capacity, maximum charge power, and maximum discharge power are all degraded by the same factor:
 
@@ -1077,7 +1054,6 @@ Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each
 | `add_sectoral_demand_constraints!()` | SEC-1, SEC-2, SHIFT-1 | `power_system.jl` |
 | `add_n1_security_constraints!()` | N1-1, N1-2 | `power_system.jl` |
 | `add_scopf_constraints!()` | N1-3, N1-4 | `power_system.jl` |
-| `add_node_investment_limits!()` | INV-1 | `power_system.jl` |
 | `add_max_annual_system_cost!()` | COST-1 | `power_system.jl` |
 | `extract_solution()` | Solution extraction and metrics | `power_system.jl` |
 
