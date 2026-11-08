@@ -884,7 +884,6 @@ class DashboardLoader:
         ("transfer_margin_cost",     "Transfer margin"),
         ("fre_penetration_cost",     "RE-penetration penalty"),
         ("npv_penalty_cost",         "NPV penalty"),
-        ("delay_retirement_cost",    "Delayed retirement"),
         ("demand_shift_cost",        "Demand shift"),
     ]
 
@@ -1138,6 +1137,9 @@ class DashboardLoader:
         rng = self._system_node_range(f, bp)
         tres = int(f.attrs.get("temporal_resolution_hours", 1))
 
+        from esfex.models.financial_analysis import (
+            _index_configs_by_name, _lookup_config,
+        )
         from esfex.visualization.panels.results_charts import (
             _load_gen_configs, _load_bat_configs, _load_tech_configs,
             _load_bat_tech_configs, _load_gen_data, _load_bat_data,
@@ -1147,10 +1149,17 @@ class DashboardLoader:
         tech_cfgs = _load_tech_configs(f, bp)
         bat_tech_cfgs = _load_bat_tech_configs(f, bp)
 
-        # Stable mapping ``dataset name → index in gen_cfgs`` so we can
-        # look up the right ``fuel_cost`` per generator. Datasets are
-        # iterated in the same insertion order the runner wrote them,
-        # so a positional zip is correct.
+        # Each dataset finds its unit's config by name: h5py lists the
+        # datasets alphabetically, not in config order, and the investment
+        # units have datasets but no config here. Position is only the
+        # fallback for files whose configs carry no name.
+        gen_by_name = _index_configs_by_name(gen_cfgs)
+        bat_by_name = _index_configs_by_name(bat_cfgs)
+
+        def _unit_cfg(name, by_name, cfgs, idx):
+            if by_name:
+                return _lookup_config(name, by_name, cfgs)
+            return cfgs[idx] if idx < len(cfgs) else {}
         gen_data = _load_gen_data(sc)
         gen_charge = _load_bat_data(sc, "battery_charge")
         gen_discharge = _load_bat_data(sc, "battery_discharge")
@@ -1170,7 +1179,7 @@ class DashboardLoader:
         gen_names_in_order = list(gen_data.keys())
         for gi, gname in enumerate(gen_names_in_order):
             arr = gen_data[gname]
-            cfg = gen_cfgs[gi] if gi < len(gen_cfgs) else {}
+            cfg = _unit_cfg(gname, gen_by_name, gen_cfgs, gi)
             sliced = _slice_nodes(arr)
             if sliced.ndim < 2:
                 # Treat as node-0 series.
@@ -1204,7 +1213,7 @@ class DashboardLoader:
             )
             for gi, gname in enumerate(gs_data):
                 arr = gs_data[gname]
-                cfg = gen_cfgs[gi] if gi < len(gen_cfgs) else {}
+                cfg = _unit_cfg(gname, gen_by_name, gen_cfgs, gi)
                 sliced = _slice_nodes(arr)
                 if sliced.ndim < 2:
                     continue
@@ -1221,11 +1230,12 @@ class DashboardLoader:
                     )
 
         # Battery maintenance: (charge + discharge) × per-node coeff.
-        bat_names = list(set(gen_charge.keys()) | set(gen_discharge.keys()))
+        # (A set gave an arbitrary order, paired with bat_cfgs by position.)
+        bat_names = list(dict.fromkeys([*gen_discharge, *gen_charge]))
         for bi, bname in enumerate(bat_names):
             c_arr = gen_charge.get(bname, np.zeros(0))
             d_arr = gen_discharge.get(bname, np.zeros(0))
-            cfg = bat_cfgs[bi] if bi < len(bat_cfgs) else {}
+            cfg = _unit_cfg(bname, bat_by_name, bat_cfgs, bi)
             # Fixed O&M ($/MW·yr) on the rated discharge power
             d_sl = _slice_nodes(d_arr) if d_arr.size else d_arr
             if d_sl.ndim == 2:

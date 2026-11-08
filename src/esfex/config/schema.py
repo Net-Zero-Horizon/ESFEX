@@ -59,7 +59,6 @@ class PenaltiesConfig(BaseModel):
     loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
-    delay_retirement_per_mw: float = Field(default=50000, description="$/MW delay retirement penalty")
 
     @model_validator(mode="after")
     def _default_ev_loss(self) -> "PenaltiesConfig":
@@ -917,7 +916,8 @@ class ElectrolyzerConfig(BaseModel):
     eff_at_rated: list[float]
     eff_at_min: list[float]
     energy_per_kg_h2: float = Field(default=50.0, description="kWh/kg H2")
-    fixed_cost: list[float]
+    fixed_cost: list[float] = Field(
+        description="Fixed O&M per node ($/MW of rated power per year)")
     variable_cost: list[float]
     water_cost: float = Field(default=0.001, description="$/kg H2")
     invest_cost: list[float]

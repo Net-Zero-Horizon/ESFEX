@@ -88,7 +88,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Master switch |
-| `apply_to_modes` | list[str] | `["development", "unit_commitment"]` | Simulation modes in which N-1 is applied |
+| `apply_to_modes` | list[str] | `["development", "unit_commitment"]` | Simulation modes (`simulation_mode`) in which N-1 is applied to the dispatch. A development run counts as `development` whatever formulation its windows use (`use_uc_in_dispatch`) |
 | `transmission_enabled` | bool | `true` | Include line contingencies |
 | `transmission_reserve_factor` | float (0–1) | `0.7` | Pre-contingency loading limit as a fraction of line rating |
 | `critical_line_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: minimum loading (fraction of capacity) for a line or transformer to be tripped by Run All N-1 / Screening. Not used by the optimisation. |
@@ -806,7 +806,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `eff_at_rated` | list[float] | required | Efficiency at rated load per node |
 | `eff_at_min` | list[float] | required | Efficiency at minimum load per node |
 | `energy_per_kg_h2` | float | `50` | Specific energy (kWh/kg H₂) |
-| `fixed_cost` | list[float] | required | Fixed cost per node ($/MW·h of rated power) |
+| `fixed_cost` | list[float] | required | Fixed O&M per node ($/MW of rated power per year) |
 | `variable_cost` | list[float] | required | Variable cost per node |
 | `water_cost` | float | `0.001` | Water cost ($/kg H₂) |
 | `invest_cost` | list[float] | required | Investment cost per node ($/MW) |
@@ -900,7 +900,6 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
 | `soc_violation` | float | `1000000` | $/MWh SOC limit violation. |
-| `delay_retirement_per_mw` | float | `50000` | $/MW delay retirement penalty. |
 
 ---
 

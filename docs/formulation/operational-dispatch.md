@@ -30,7 +30,7 @@ The mapping from bus to geographic node is given by `bus_to_node[n]`, written as
 
 Generators, batteries, load shedding, voltage angles and electrolyzer power are indexed by bus. Curtailment, the RE-target slack, CO2 emissions, reserves, sectoral load shedding, flexible demand, EV fleet and rooftop curtailment are indexed by node; where a node-level quantity enters a bus balance it is multiplied by \(\alpha_n\). Per-node configuration arrays (capacities, costs, `invest_max`) are mapped onto the buses before the model is built.
 
-Generator and battery variables exist only for the (unit, bus) pairs with installed capacity or a pending delayed retirement; the model has no variables, and so no zero-capacity constraints, for the other pairs.
+Generator and battery variables exist only for the (unit, bus) pairs with installed capacity; the model has no variables, and so no zero-capacity constraints, for the other pairs.
 
 ---
 
@@ -124,10 +124,10 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (delayed retirement, forced replacement, the fixed O&M of generators and batteries) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (forced replacement, the fixed O&M of generators, batteries and electrolyzers) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{ret}} + Z^{\text{npv}} + Z^{\text{fix}} + Z^{\text{bat,fix}} \right) + Z^{\text{start}} \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{npv}} + Z^{\text{fix}} + Z^{\text{bat,fix}} + Z^{\text{elz,fix}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
 Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
@@ -143,10 +143,10 @@ where \(c^{\text{fuel}}_{g,n}\) and \(c^{\text{maint}}_{g,n}\) are the per-MWh f
 #### 3.1a Generator Fixed O&M
 
 \[
-Z^{\text{fix}} = \sum_{g,n} c^{\text{fix}}_{g,n} \left( \bar{P}^{\text{eff}}_{g,n} + \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \right) \tag{OBJ-1a}
+Z^{\text{fix}} = \sum_{g,n} c^{\text{fix}}_{g,n} \, \bar{P}^{\text{eff}}_{g,n} \tag{OBJ-1a}
 \]
 
-with \(c^{\text{fix}}_{g,n}\) the generator's `fixed_cost` ($ per MW per year), \(\bar{P}^{\text{eff}}_{g,n}\) its power in service (DEG-1: degraded, 0 past its `life_time`) and \(\bar{P}^{\text{orig}}_{g,n} d_{g,n}\) the capacity a delayed retirement keeps (OBJ-14). It is charged whether or not the unit runs: an annual term, prorated to the window in (OBJ), and reported as `fixed_om_cost` with the batteries' (OBJ-3c). After a master run the dispatch receives the master's capacity (degraded, life-extended, built) as rated power, so the dispatch and the master charge the same MW. Earlier versions charged `fixed_cost` per MWh generated.
+with \(c^{\text{fix}}_{g,n}\) the generator's `fixed_cost` ($ per MW per year), \(\bar{P}^{\text{eff}}_{g,n}\) its power in service (DEG-1: degraded, 0 past its `life_time`). It is charged whether or not the unit runs: an annual term, prorated to the window in (OBJ), and reported as `fixed_om_cost` with the batteries' (OBJ-3c). After a master run the dispatch receives the master's capacity (degraded, life-extended, built) as rated power, so the dispatch and the master charge the same MW. Earlier versions charged `fixed_cost` per MWh generated.
 
 #### 3.1.1 Piecewise-Linear (PWL) Fuel Cost Decomposition
 
@@ -282,7 +282,7 @@ Opportunity cost of energy discharged from batteries without grid injection, at 
 
 ### 3.10 Investment Costs
 
-The dispatch has no investment costs: it builds nothing. In a `development` run each year's dispatch runs as `economic_dispatch` (or `unit_commitment` with `use_uc_in_dispatch`) on the capacity the master problem keeps and builds, which arrives as existing capacity.
+The dispatch has no investment costs: it builds nothing. In a `development` run each year's dispatch runs as `economic_dispatch` (or `unit_commitment` with `use_uc_in_dispatch`) on the capacity the master problem keeps and builds, which arrives as existing capacity. It still counts as a `development` run for `n1_security.apply_to_modes` and for the fuel model's end-of-window tank fill ([Primary Energy](primary-energy.md), PE-5).
 
 ### 3.11 Converter Costs
 
@@ -295,10 +295,14 @@ Added by `charge_converter_costs!()` after `add_converter_constraints!()` has cr
 ### 3.12 Electrolyzer Costs
 
 \[
-Z^{\text{elz}} = \sum_{n,t} \left(c^{\text{elz,var}}_n + c^{\text{water}} h_n\right) p^{\text{elz}}_{n,t} + \sum_n \bar{P}^{\text{elz}}_n \, c^{\text{elz,fix}}_n \cdot T \tag{OBJ-12}
+Z^{\text{elz}} = \sum_{n,t} \left(c^{\text{elz,var}}_n + c^{\text{water}} h_n\right) p^{\text{elz}}_{n,t} \tag{OBJ-12}
 \]
 
-with \(c^{\text{water}}\) the `water_cost` (\$/kg) and \(h_n\) the kg of hydrogen per MWh drawn ([Electrolyzer](electrolyzer.md#5-objective-terms)). \(\bar{P}^{\text{elz}}_n\) includes the electrolyzer power the master built.
+\[
+Z^{\text{elz,fix}} = \sum_n \bar{P}^{\text{elz}}_n \, c^{\text{elz,fix}}_n \tag{OBJ-12b}
+\]
+
+with \(c^{\text{water}}\) the `water_cost` (\$/kg), \(h_n\) the kg of hydrogen per MWh drawn ([Electrolyzer](electrolyzer.md#5-objective-terms)) and \(c^{\text{elz,fix}}_n\) the `fixed_cost` (\$ per MW per year), an annual term prorated to the window in (OBJ). \(\bar{P}^{\text{elz}}_n\) includes the electrolyzer power the master built. Both are reported as `electrolyzer_cost`. Earlier versions charged `fixed_cost` per MW and per hour.
 
 ### 3.13 Demand Shifting Cost
 
@@ -308,15 +312,7 @@ Z^{\text{shift}} = \sum_{s,n,t,t'} |t - t'| \, \Delta t \cdot \gamma^{\text{shif
 
 where \(\gamma^{\text{shift}}\) is the `demand_shift_cost_rate` (\$ per MWh and per hour moved) and \(|t - t'| \, \Delta t\) the shift distance in hours.
 
-### 3.14 Delayed Retirement Penalty
-
-\[
-Z^{\text{ret}} = C^{\text{delay}} \sum_{g,n} \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \tag{OBJ-14}
-\]
-
-where \(d_{g,n} \in \{0,1\}\) is the delay retirement binary variable (`gen_delay_ret_*`, and `bat_delay_ret_*` for batteries, with the same form), \(\bar{P}^{\text{orig}}_{g,n}\) is the original rated capacity and \(C^{\text{delay}}\) is `penalties.delay_retirement_per_mw`. A delayed unit keeps its original capacity in GEN-1.
-
-### 3.15 NPV-Based Forced Replacement Penalty
+### 3.14 NPV-Based Forced Replacement Penalty
 
 \[
 Z^{\text{npv}} = \sum_{g,n} \left( C^{\text{decom}}_{g,n} \cdot \bar{P}_{g,n} + C^{\text{npv}}_{g,n} \cdot \bar{P}_{g,n} \cdot 0.1 \right) \cdot r_{g,n} \tag{OBJ-15}
@@ -324,11 +320,11 @@ Z^{\text{npv}} = \sum_{g,n} \left( C^{\text{decom}}_{g,n} \cdot \bar{P}_{g,n} + 
 
 where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are capped at `max_decommission_cost_per_mw` and `max_npv_penalty_per_mw`. Batteries flagged for replacement get the analogous term: decommissioning cost × discharge power plus 10 % of the absolute negative NPV.
 
-### 3.16 Reservoir Costs
+### 3.15 Reservoir Costs
 
 Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). See [Reservoir Hydropower](reservoir-hydro.md).
 
-### 3.17 Line Flow Cost
+### 3.16 Line Flow Cost
 
 Lines with a `cost_per_mw_km` (the inter-system links of a merged multi-system run) pay \(c^{\text{flow}}_l\) = `length_km × cost_per_mw_km` (\$/MWh, the `flow_cost` of `TransmissionLineData`) for the energy they carry in either direction, as the master does:
 
@@ -356,10 +352,10 @@ Implemented in `add_generator_constraints!()`.
 Every generator is limited by its capacity times its availability factor \(a_{g,n,t} \in [0,1]\):
 
 \[
-p_{g,n,t} \leq \left( \bar{P}^{\text{eff}}_{g,n} + \bar{P}^{\text{orig}}_{g,n} \, d_{g,n} \right) \cdot a_{g,n,t} \quad \forall g, n, t \tag{GEN-1a}
+p_{g,n,t} \leq \bar{P}^{\text{eff}}_{g,n} \cdot a_{g,n,t} \quad \forall g, n, t \tag{GEN-1a}
 \]
 
-For renewables \(a\) is the capacity-factor profile; for other units it is 1 by default. A [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies \(a\) by the outage factor of its window (0 for a full outage), for any unit type. \(\bar{P}^{\text{eff}}\) is the rated power in service (§5: degraded, 0 past the lifetime) and \(d_{g,n}\) the delayed-retirement decision (OBJ-14).
+For renewables \(a\) is the capacity-factor profile; for other units it is 1 by default. A [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies \(a\) by the outage factor of its window (0 for a full outage), for any unit type. \(\bar{P}^{\text{eff}}\) is the rated power in service (§5: degraded, 0 past the lifetime).
 
 In unit commitment, non-renewable units and reservoir hydro are also tied to their commitment status:
 
@@ -1020,7 +1016,6 @@ Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each
 | \(C^{\text{CO2}}\) | `penalties.co2_cost` | 10 | Carbon price (\$/t) |
 | \(C^{\text{CO2,bud}}\) | `penalties.co2_budget_violation` | 500 | CO2 budget excess (\$/t) |
 | \(C^{\text{RC}}\) | `penalties.rooftop_curtailment` | 5 | Rooftop solar curtailment (\$/MWh) |
-| \(C^{\text{delay}}\) | `penalties.delay_retirement_per_mw` | 50 000 | Delayed retirement (\$/MW) |
 | \(\gamma^{\text{shift}}\) | `demand_shift_cost_rate` | 0.1 | Shift cost per MWh and per hour moved (\$/MWh/h) |
 
 !!! note "Penalty tuning"

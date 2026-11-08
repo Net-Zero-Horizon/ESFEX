@@ -296,7 +296,7 @@ Flows are stored as `vars.power_flow::Dict{(from, to), Vector{VariableRef}}`, ke
 
 #### Age-Based Retirement
 
-The master problem retires units by age without binary variables: an existing unit is active while `initial_age + (year_idx - 1) < life_time`, and an investment made in year `y` is active for `life_time` years after it. Delayed retirement and forced replacement have their own variables (`gen_delay_retirement`, `gen_forced_replacement`).
+The master problem retires units by age without binary variables: an existing unit is active while `initial_age + (year_idx - 1) < life_time`, and an investment made in year `y` is active for `life_time` years after it. Forced replacement has its own variables in the dispatch (`gen_forced_replacement`).
 
 
 ---

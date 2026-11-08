@@ -184,10 +184,9 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `soc_violation_cost` | float | $ | Battery SOC violation penalty |
 | `transfer_margin_cost` | float | $ | Transfer margin deficit penalty |
 | `v2g_compensation` | float | $ | V2G compensation (negative = credit) |
-| `electrolyzer_cost` | float | $ | Electrolyzer operation cost |
+| `electrolyzer_cost` | float | $ | Electrolyzer variable and water cost, and the window's share of its fixed O&M |
 | `converter_cost` | float | $ | AC/DC converter cost |
 | `spillage_cost` | float | $ | Battery spillage penalty |
-| `delay_retirement_cost` | float | $ | Delayed retirement cost |
 | `reservoir_spillage_cost` | float | $ | Reservoir overflow penalty |
 | `demand_shift_cost` | float | $ | Demand shifting cost |
 | `rooftop_curtailment_cost` | float | $ | Rooftop solar curtailment penalty |

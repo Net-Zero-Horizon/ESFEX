@@ -186,7 +186,8 @@ def test_removed_benders_lol_penalty_cap_is_reported(tmp_path, caplog):
 # Keys removed because they had no effect, as an older Studio wrote them.
 _REMOVED_PENALTIES = {"Curtailment": 100.0, "coupling_slack_penalty": 1.0,
                       "transport_congestion": 100.0, "storage_violation": 100.0,
-                      "curtailment_excess_penalty": 500.0, "re_excess_penalty": 100.0}
+                      "curtailment_excess_penalty": 500.0, "re_excess_penalty": 100.0,
+                      "delay_retirement_per_mw": 50000.0}
 _REMOVED_N1 = {"scopf_max_iterations": 5, "scopf_violation_tolerance": 0.01}
 
 
