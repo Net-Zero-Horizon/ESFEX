@@ -1590,23 +1590,37 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
 end
 
 """
+    unit_age_in_year(unit, b, input) -> (age, life)
+
+Age of an existing generator or battery at bus `b` in the dispatch's year
+(`initial_age` + years since the base year) and its `life_time` (Inf when
+the unit has none at that bus).
+"""
+function unit_age_in_year(unit, b::Int, input)
+    base_age = length(unit.initial_age) >= b ? unit.initial_age[b] : 0.0
+    age = base_age + max(0.0, Float64(input.year - input.base_year))
+    life = length(unit.life_time) >= b ? unit.life_time[b] : Inf
+    return age, life
+end
+
+"""
     generator_power_in_service(gen, b, input) -> Float64
 
 Power (MW) of existing generator `gen` at bus `b` in the dispatch's year:
-with a degradation rate it shrinks by `(1 − degradation_rate)^age` and is
 zero once the unit is past its `life_time` (age = `initial_age` + years
-since the base year). After a master run the dispatch receives the master's
-capacity as `rated_power` with no degradation, so it is used as is.
+since the base year, with or without degradation, as in the master), and
+otherwise shrunk by `(1 − degradation_rate)^age`. After a master run the
+dispatch receives the master's capacity (retirement and life extension
+included) as `rated_power` with no degradation and no end of life, so it is
+used as is.
 """
 function generator_power_in_service(gen, b::Int, input)
     rated = gen.rated_power[b]
-    if length(gen.degradation_rate) >= b && gen.degradation_rate[b] > 0 && rated > 0
-        deg = gen.degradation_rate[b]
-        base_age = length(gen.initial_age) >= b ? gen.initial_age[b] : 0.0
-        age = base_age + max(0.0, Float64(input.year - input.base_year))
-        life = length(gen.life_time) >= b ? gen.life_time[b] : Inf
-        life - age <= 0 && return 0.0
-        return rated * (1 - deg)^age
+    rated > 0 || return rated
+    age, life = unit_age_in_year(gen, b, input)
+    life - age <= 0 && return 0.0
+    if length(gen.degradation_rate) >= b && gen.degradation_rate[b] > 0
+        return rated * (1 - gen.degradation_rate[b])^age
     end
     return rated
 end
@@ -1645,24 +1659,23 @@ end
     battery_power_limits(bat, b, input) -> (capacity, max_charge, max_discharge)
 
 Energy capacity (MWh) and charge / discharge power (MW) of battery `bat` at
-bus `b` in the dispatch's year: with a degradation rate they shrink by
-`(1 − degradation_rate)^age` and are zero once the battery is past its
-`life_time` (age = `initial_age` + years since the base year).
+bus `b` in the dispatch's year: zero once the battery is past its
+`life_time` (age = `initial_age` + years since the base year, with or
+without degradation, as in the master), and otherwise shrunk by
+`(1 − degradation_rate)^age`. After a master run a battery the master keeps
+past its lifetime arrives with the kept capacity and no end of life.
 """
 function battery_power_limits(bat, b::Int, input)
     capacity = bat.capacity[b]
     max_charge = bat.max_charge_power[b]
     max_discharge = bat.max_discharge_power[b]
-    if length(bat.degradation_rate) >= b && bat.degradation_rate[b] > 0 && capacity > 0
-        deg = bat.degradation_rate[b]
-        base_age = length(bat.initial_age) >= b ? bat.initial_age[b] : 0.0
-        age = base_age + max(0.0, Float64(input.year - input.base_year))
-        life = length(bat.life_time) >= b ? bat.life_time[b] : Inf
-        if life - age <= 0
-            return 0.0, 0.0, 0.0
+    if capacity > 0 || max_charge > 0 || max_discharge > 0
+        age, life = unit_age_in_year(bat, b, input)
+        life - age <= 0 && return 0.0, 0.0, 0.0
+        if length(bat.degradation_rate) >= b && bat.degradation_rate[b] > 0
+            f = (1 - bat.degradation_rate[b])^age
+            return capacity * f, max_charge * f, max_discharge * f
         end
-        f = (1 - deg)^age
-        return capacity * f, max_charge * f, max_discharge * f
     end
     return capacity, max_charge, max_discharge
 end
@@ -2266,8 +2279,8 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                         cap_g_b = capacity_override[(g, b)]
                         add_to_expression!(available_reserve, cap_g_b)
                         add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
-                    elseif gen.rated_power[b] > 0
-                        cap_t = gen.rated_power[b] * gen.availability[t, b]
+                    elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
+                        cap_t = p_gb * gen.availability[t, b]
                         if spinning
                             add_to_expression!(available_reserve, cap_t, vars.gen_status[g, b, t])
                         else
@@ -2320,13 +2333,13 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                             if capacity_override !== nothing && haskey(capacity_override, (g, b))
                                 add_to_expression!(available_dynamic,
                                     capacity_override[(g, b)], input.dynamic_reserve_contribution)
-                            elseif gen.rated_power[b] > 0
+                            elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
                                 if spinning
                                     add_to_expression!(available_dynamic,
-                                        input.dynamic_reserve_contribution * gen.rated_power[b],
+                                        input.dynamic_reserve_contribution * p_gb,
                                         vars.gen_status[g, b, t])
                                 else
-                                    add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, gen.rated_power[b])
+                                    add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, p_gb)
                                 end
                             end
                         end
@@ -2654,8 +2667,10 @@ function add_curtailment_constraints!(model, vars::PowerSystemVariables, input;
                             add_to_expression!(available_renewable,
                                 capacity_override[(g, b)] * avail)
                         else
+                            # Power in service: a unit past its lifetime
+                            # has nothing to curtail
                             add_to_expression!(available_renewable,
-                                gen.rated_power[b] * avail)
+                                generator_power_in_service(gen, b, input) * avail)
                         end
                         add_to_expression!(used_renewable, 1.0, vars.gen_output[g, b, t])
                     end
@@ -2769,8 +2784,9 @@ function _n1_largest_unit(input::PowerSystemInput)
     best = (0, 0)
     best_cap = 0.0
     for (g, gen) in enumerate(input.generators), b in eachindex(gen.rated_power)
-        if gen.rated_power[b] > best_cap
-            best_cap = gen.rated_power[b]
+        p_gb = generator_power_in_service(gen, b, input)
+        if p_gb > best_cap
+            best_cap = p_gb
             best = (g, b)
         end
     end
@@ -2819,9 +2835,10 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
             gen.type == "Renewable" && continue
             corrective || gen.reservable || continue
             for b in vars.buses_of_gen[g]
-                ((g, b) == (g_star, b_star) || gen.rated_power[b] <= 0) && continue
+                p_gb = generator_power_in_service(gen, b, input)
+                ((g, b) == (g_star, b_star) || p_gb <= 0) && continue
                 headroom = AffExpr(0.0)
-                cap_t = gen.rated_power[b] * gen.availability[t, b]
+                cap_t = p_gb * gen.availability[t, b]
                 if spinning
                     add_to_expression!(headroom, cap_t, vars.gen_status[g, b, t])
                 else
@@ -2831,7 +2848,7 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
                 ramp = corrective && gen.ramp_up[b] > 0 ? gen.ramp_up[b] * tres : Inf
                 if ramp < 1
                     response = @variable(model, lower_bound = 0,
-                        upper_bound = gen.rated_power[b] * ramp,
+                        upper_bound = p_gb * ramp,
                         base_name = "$(cname)_response_g$(g)_b$(b)_t$(t)")
                     @constraint(model, response <= headroom)
                     add_to_expression!(cover, response)
@@ -3469,97 +3486,6 @@ function add_ev_constraints!(model, vars::PowerSystemVariables, input::PowerSyst
 end
 
 """
-    recover_uc_duals!(model, vars::PowerSystemVariables, input::PowerSystemInput) -> Bool
-
-Re-extract dual prices from a UC (MIP) solution via fix-and-resolve.
-
-Background: MIPs have no duals by definition, so when a Unit Commitment
-model converges, ``has_duals(model) == false`` and the balance-constraint
-duals — the locational marginal prices the electricity market cares about
-— are unavailable. The standard industry technique is:
-
-1. Round the optimal ``gen_status`` values to ``{0, 1}``.
-2. Relax the binary variables to continuous (``unset_binary``) and
-   ``fix`` them to those rounded values.
-3. Re-solve. The model is now an LP whose objective matches the MIP's
-   incumbent, and balance-constraint duals are well-defined.
-
-The function mutates ``model`` in place (the binaries stay unset and
-fixed afterwards); call this only after the MIP solve has converged
-and right before ``extract_solution``.
-
-Returns ``true`` if duals are now available, ``false`` otherwise (e.g.
-the LP re-solve failed, the model wasn't UC, or there were no values
-to fix). On ``false``, ``extract_solution`` will produce ``prices = 0``
-as before — no silent corruption.
-"""
-function recover_uc_duals!(model, vars::PowerSystemVariables, input::PowerSystemInput)
-    # Not UC → nothing to do; the LP path already exports duals.
-    if vars.gen_status === nothing
-        return has_duals(model)
-    end
-    if !has_values(model)
-        return false
-    end
-    # Already have duals (rare in MIP, but skip the work just in case).
-    if has_duals(model)
-        return true
-    end
-
-    n_gen = length(input.generators)
-    hours = input.temporal.hours
-
-    # Converter on/off binaries (min_power_mva): read before any change
-    conv_on = get(model.ext, :converter_commitment, VariableRef[])
-    conv_vals = [round(value(v)) for v in conv_on]
-
-    # Relax the binary commitment variables to continuous and pin them to
-    # the MIP optimum. ``round`` removes any tiny solver floating-point
-    # noise that would otherwise make the fix infeasible.
-    n_fixed = 0
-    for g in 1:n_gen
-        for b in vars.buses_of_gen[g], t in 1:hours
-            v = vars.gen_status[g, b, t]
-            if is_binary(v)
-                unset_binary(v)
-            end
-            val = round(value(v))
-            fix(v, val; force=true)
-            n_fixed += 1
-        end
-    end
-
-    # ... and the converters' likewise
-    for (v, val) in zip(conv_on, conv_vals)
-        is_binary(v) && unset_binary(v)
-        fix(v, val; force=true)
-        n_fixed += 1
-    end
-
-    # gen_startup is Continuous [0,1] in UC mode (see build_variables!),
-    # so its dual is well-defined once gen_status is fixed — no need to
-    # fix it.
-
-    # Re-solve as LP. If the solver refuses (rare; can happen when the
-    # configured solver doesn't support warm-starts from a MIP basis),
-    # the caller sees ``false`` and prices stay zero.
-    try
-        optimize!(model)
-    catch e
-        @warn "UC dual recovery: LP re-solve threw an exception" exception=e
-        return false
-    end
-
-    if !has_duals(model)
-        @warn "UC dual recovery: LP re-solve completed but duals are still missing"
-        return false
-    end
-
-    @info "UC dual recovery: fixed $n_fixed commitment vars and recovered LP duals"
-    return true
-end
-
-"""
     _copy_with_optimizer(model, input, what) -> Union{Tuple{Model, ReferenceMap}, Nothing}
 
 `copy_model` of a built model with a fresh optimizer configured like the
@@ -3656,10 +3582,10 @@ end
 Recover locational marginal prices from a UC (MIP) solution without
 mutating the original model.
 
-The in-place ``recover_uc_duals!`` variant left JuMP in an inconsistent
-state when downstream callers ran ``extract_solution`` on the same
-model (``OptimizeNotCalled`` from MOI's solve_time attribute). This
-variant takes a fresh ``copy_model`` of the MIP, attaches a clean
+Modifying the solved model itself (unsetting the binaries) discards its
+solution, so the rounded commitment could not be read back and
+``extract_solution`` failed afterwards (``OptimizeNotCalled``). This
+takes a fresh ``copy_model`` of the MIP, attaches a clean
 optimizer, fixes ``gen_status`` to the rounded MIP values on the copy,
 solves it as an LP, and reads the balance-constraint duals there.
 

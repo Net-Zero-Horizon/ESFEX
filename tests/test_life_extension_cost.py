@@ -121,7 +121,7 @@ def test_master_no_longer_extends_a_zero_cost_unit_for_free(tmp_path):
     np.savetxt(demand, np.full(8760, 80.0))
     old = _make_generator("Old", "Non-renewable", "Diesel", [100.0], life_time=[25],
                           initial_age=[30], degradation_rate=[0.0], invest_cost=[0.0],
-                          invest_max_power=[0.0], fuel_cost=[50.0])
+                          fuel_cost=[50.0])
     gas = _make_technology("gas_new", "Gas", 1, tech_type="Non-renewable",
                            invest_cost=50000.0, invest_max_power=500.0)
     gas = gas.model_copy(update={"fuel_cost": [50.0]})

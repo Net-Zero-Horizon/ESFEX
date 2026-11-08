@@ -394,7 +394,7 @@ import Ipopt
     # =======================================================================
     @testset "integration" begin
 
-        # GeneratorConfig has 39 positional fields; this keeps the boilerplate
+        # GeneratorConfig has 38 positional fields; this keeps the boilerplate
         # in one place. Per-bus vectors are sized to `nb`; `avail` is the
         # [hours x buses] availability matrix. All reservoir fields are zeroed
         # (no hydro), reservable=false.
@@ -433,6 +433,59 @@ import Ipopt
             @test res.load_shed_total ≈ 0.0 atol = 1e-6      # nothing shed
             @test isfinite(res.objective) && res.objective > 0
             @test size(res.gen_output) == (1, 1, H)
+        end
+
+        @testset "units retire at the end of life_time, degraded or not" begin
+            # Only degraded units were retired: with degradation 0 a unit past
+            # its life_time kept its full capacity in the dispatch (the master
+            # retires it), and was charged fixed O&M on it.
+            H = 2
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function run_old(age; deg = 0.0, year = 2025)
+                old = ESFEX.with_fields(
+                    mkgen("Old", "Non-renewable", "Gas", [100.0], [3.0e-5],
+                          ones(H, 1); nb = 1, H = H);
+                    initial_age = [age], degradation_rate = [deg], fixed_cost = [1.0e-3])
+                input = PowerSystemInput(
+                    name = "eol", year = year, base_year = 2025, network = net,
+                    generators = [old], batteries = BatteryConfig[],
+                    demand = reshape([50.0, 50.0], H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                res = extract_solution(model, vars, input)
+                return res.total_generation, res.load_shed_total,
+                       res.cost_breakdown.fixed_om_cost
+            end
+            # life_time 30 (mkgen): within it the unit serves the load
+            gen, shed, fom = run_old(29.0)
+            @test gen ≈ 100.0 atol = 1e-6
+            @test shed ≈ 0.0 atol = 1e-6
+            @test fom > 0
+            # past it, without degradation: retired, no fixed O&M
+            gen, shed, fom = run_old(31.0)
+            @test gen ≈ 0.0 atol = 1e-6
+            @test shed ≈ 100.0 atol = 1e-6
+            @test fom ≈ 0.0 atol = 1e-12
+            # it ages with the simulation year: 29 + 2 years
+            gen, _, _ = run_old(29.0; year = 2027)
+            @test gen ≈ 0.0 atol = 1e-6
+            # with degradation (as before)
+            gen, _, _ = run_old(31.0; deg = 0.01)
+            @test gen ≈ 0.0 atol = 1e-6
+            # Batteries alike
+            yr = (year = 2025, base_year = 2025)
+            bat(age) = BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                     [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                     [10.0], [age], [0.0], 0.0, 100.0, [0.0],
+                                     [0.0], false, "AC", [0.0], [0.0], [0.0])
+            @test ESFEX.battery_power_limits(bat(9.0), 1, yr) == (40.0, 20.0, 20.0)
+            @test ESFEX.battery_power_limits(bat(10.0), 1, yr) == (0.0, 0.0, 0.0)
         end
 
         @testset "committed steps of a rolling window" begin
@@ -3556,6 +3609,10 @@ import Ipopt
                 # The UC dual recovery fixes the converter binaries too (the
                 # LP re-solve had binaries left and returned no prices)
                 @test recover_uc_duals_via_copy(model, vars, input) !== nothing
+                # ... and leaves the solved model as it was. The in-place
+                # variant (which read values after changing the model) is gone.
+                @test ESFEX.JuMP.has_values(model)
+                @test !isdefined(ESFEX, :recover_uc_duals!)
             end
         end
 

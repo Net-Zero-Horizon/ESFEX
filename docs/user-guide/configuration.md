@@ -420,7 +420,7 @@ All keys above except `name`, `type`, `bus_id_per_node`, `ramp_up`, `ramp_down` 
 
 **Availability.** An `Availability` file ([Availability Profiles](availability-profiles.md)) multiplies the battery's charge and discharge power each hour, and the power it can offer as reserve, in the dispatch and in the master problem.
 
-**State of charge.** In operational dispatch the SOC is carried from one window to the next, and no end-of-window or end-of-year SOC target is imposed on batteries (`soc_end_tolerance` is applied to reservoir end levels, not to batteries). In the master problem's representative periods, SOC is cyclic within each period, or linked across periods when TSAM inter-period linking is on.
+**State of charge.** In operational dispatch the SOC is carried from one window to the next, and a window's own end SOC is free. The year's last window (or the single window of a year without rolling horizon) has a soft floor: each battery must end the year with at least (1 − `soc_end_tolerance`) × its year-start SOC; a shortfall is allowed but priced below load shedding (10 % of VOLL, BAT-5c, `bat_soc_end_floor_*`), so it is refilled from generation, never by shedding load. In the master problem's representative periods, SOC is cyclic within each period, or linked across periods when TSAM inter-period linking is on.
 
 ### Fuels
 
@@ -577,7 +577,7 @@ meta_network:
       existing_capacity_MW: [50.0]
       max_investment_MW: [200.0]
       investment_cost_per_MW: [500000.0]
-      loss_factor: [0.02]                 # required, not used
+      # loss_factor: only for fuel_route links (losses per 100 km)
       distance_km: [90.0]
       cost_per_mw_km: [0.0]               # flow cost, $ per MWh and km
 ```

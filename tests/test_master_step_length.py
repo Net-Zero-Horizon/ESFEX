@@ -25,9 +25,9 @@ def _battery_built(tmp_path, resolution_hours):
     np.savetxt(demand, np.tile(np.r_[np.full(12, 40.0), np.full(12, 80.0)], 365))
     gens = {
         "base": _make_generator("Base", "Non-renewable", "Gas", [60.0], degradation_rate=[0.0],
-                                fuel_cost=[50.0], invest_max_power=[0.0], min_power=[0.0]),
+                                fuel_cost=[50.0], min_power=[0.0]),
         "peak": _make_generator("Peak", "Non-renewable", "Diesel", [100.0], degradation_rate=[0.0],
-                                fuel_cost=[500.0], invest_max_power=[0.0], min_power=[0.0]),
+                                fuel_cost=[500.0], min_power=[0.0]),
     }
     bt = _make_battery_technology("li", 1, invest_max_power=100.0, invest_max_capacity=2000.0)
     bt = bt.model_copy(update={

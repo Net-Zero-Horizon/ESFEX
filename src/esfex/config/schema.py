@@ -939,8 +939,6 @@ class PrimaryEnergySourceConfig(BaseModel):
     storage_capacity: list[float] = Field(description="Storage capacity per node (units)")
     initial_storage_level: list[float] = Field(description="Initial storage fraction per node")
     min_storage_level: float = Field(default=0.1, ge=0, le=1)
-    transport_cost: float = Field(description="$/unit/km transport cost")
-    transport_losses: float = Field(description="Loss fraction per 100km")
     transport_transit_days_per_100km: float = Field(
         default=0.0, ge=0,
         description="Source->tank replenishment lead time, in days per 100 km "
@@ -994,10 +992,6 @@ class NonElectricDemandConfig(BaseModel):
 
     fuel: str
     unit: str
-    is_flexible: bool = False
-    flexibility_ratio: float = 0.0
-    criticality: Literal["critical", "high", "medium", "low"] = "medium"
-    delay_tolerance: int = 0
     demand: list[int] = Field(description="Annual demand per node (units)")
 
 
@@ -2236,7 +2230,11 @@ class SystemLinkConfig(BaseModel):
     existing_capacity_mw: list[float] = Field(alias="existing_capacity_MW")
     max_investment_mw: list[float] = Field(alias="max_investment_MW")
     investment_cost_per_mw: list[float] = Field(alias="investment_cost_per_MW")
-    loss_factor: list[float]
+    loss_factor: list[float] = Field(
+        default_factory=list,
+        description="fuel_route links: losses per 100 km per connection (missing = 0). "
+                    "Not used by transmission links (their losses come from resistance_pu)",
+    )
     distance_km: list[float]
     cost_per_mw_km: list[float]
     reactance_pu: list[float] = Field(

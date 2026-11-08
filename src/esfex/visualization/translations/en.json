@@ -1367,8 +1367,7 @@
     "error": "Error",
     "warning": "Warning",
     "info": "Info",
-    "enable": "Enable",
-    "no_effect": "No effect in the current model; kept so existing files load."
+    "enable": "Enable"
   },
   "custom_constraints": {
     "title": "Custom Constraints",

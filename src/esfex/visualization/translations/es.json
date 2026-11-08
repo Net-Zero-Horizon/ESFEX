@@ -1367,8 +1367,7 @@
     "error": "Error",
     "warning": "Advertencia",
     "info": "Info",
-    "enable": "Habilitar",
-    "no_effect": "Sin efecto en el modelo actual; se conserva para que los archivos existentes carguen."
+    "enable": "Habilitar"
   },
   "custom_constraints": {
     "title": "Restricciones Personalizadas",

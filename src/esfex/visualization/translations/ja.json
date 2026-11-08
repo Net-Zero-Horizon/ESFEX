@@ -1367,8 +1367,7 @@
     "error": "エラー",
     "warning": "警告",
     "info": "情報",
-    "enable": "有効化",
-    "no_effect": "現在のモデルでは効果がありません。既存のファイルを読み込めるように残しています。"
+    "enable": "有効化"
   },
   "custom_constraints": {
     "title": "カスタム制約",
