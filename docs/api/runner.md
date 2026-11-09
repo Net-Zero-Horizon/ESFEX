@@ -260,7 +260,7 @@ class YearResults:
 
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
-| `power_flow` | `Optional[dict]` | `{(from_bus, to_bus): array}` | Line power flows (MW), keyed by operational bus pair (not aggregated to nodes) |
+| `power_flow` | `Optional[dict]` | `{(from_bus, to_bus): array}` | Line power flows (MW), keyed by operational bus pair (not aggregated to nodes); parallel lines and transformers between the same two buses are summed |
 | `voltage_angle` | `Optional[np.ndarray]` | `(node, hour)` | Voltage angles (rad) |
 | `voltage_magnitude` | `Optional[np.ndarray]` | `(bus, hour)` | Voltage magnitude (p.u.), ACOPF modes only |
 | `reactive_generation` | `Optional[np.ndarray]` | `(gen, bus, hour)` | Reactive power (MVAr), ACOPF modes only |

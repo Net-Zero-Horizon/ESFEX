@@ -358,7 +358,7 @@ Each corridor is charged once, at the higher of its two ends' `transference_inve
 Firm generation and storage capacity, plus net imports at the peak, must meet peak demand with a reserve margin at each node:
 
 \[
-\sum_{n' \in n} \Big[ \sum_g \alpha^{cc}_{g,n'} \kappa^{risk}_{g,n'} \bar{P}^{cum}_{y,g,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{tech}_{y,k,n'} + \sum_b \kappa^{risk}_{b,n'} \bar{P}^{bat,cum}_{y,b,n'} + \sum_k \kappa^{risk}_{k,n'} \bar{P}^{bt}_{y,k,n'} \Big] + \sum_{m} \left( f^{cap}_{y,m \to n} - f^{cap}_{y,n \to m} \right) + s^{cap}_{y,n} \geq D^{peak}_{y,n} \cdot M_{res} \qquad \forall\, y,\; \text{node } n \tag{CAP-1}
+\sum_{n' \in n} \Big[ \sum_g \alpha^{cc}_{g,n'} \kappa^{risk}_{g,n'} \bar{P}^{cum}_{y,g,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{tech}_{y,k,n'} + \sum_b \alpha^{cc}_{b,n'} \kappa^{risk}_{b,n'} \bar{P}^{bat,cum}_{y,b,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{bt}_{y,k,n'} \Big] + \sum_{m} \left( f^{cap}_{y,m \to n} - f^{cap}_{y,n \to m} \right) + s^{cap}_{y,n} \geq D^{peak}_{y,n} \cdot M_{res} \qquad \forall\, y,\; \text{node } n \tag{CAP-1}
 \]
 
 \[
@@ -373,7 +373,16 @@ where the peak demand at node \(n\) in year \(y\) is:
 D^{peak}_{y,n} = \max_{t \in y} \left[ D_{t,n} \right] \tag{CAP-2}
 \]
 
-The constraint (`cap_adequacy_y{y}_node{n}`) is per node and sums over the node's buses. Renewables count at their capacity credit \(\alpha^{cc}\), the minimum of their availability profile (so solar counts as 0); other units count fully. \(\kappa^{risk}\) is the `risk_coefficient` (default 1; see [Risk & Resilience](risk-resilience.md)); life-extended capacity counts at its capacity credit and risk coefficient, like the unit it extends. \(D^{peak}_{y,n}\) is the maximum of the node's demand over the year's time steps.
+The constraint (`cap_adequacy_y{y}_node{n}`) is per node and sums over the node's buses. Each unit counts at its firm share \(\alpha^{cc}\) (`firm_capacity_credit`), which depends on its kind:
+
+- **Variable renewables** (`is_variable_renewable`: a `Renewable` unit on sun, wind, an ocean resource, no fuel, or water without a reservoir): their capacity credit, the minimum of their availability profile, so solar counts as 0.
+- **Every other generator, technology and storage unit** (thermal, biomass, geothermal, reservoir hydro, batteries): their mean availability \(a\) over the node's peak period \(T^{peak}_{y,n}\), the year's time steps in the top 10 % of the node's demand (at or above its 90th percentile), so the derates, outages and seasons in the profile count: a sugar mill idle in the peak season counts as 0, a unit derated to 80 % at the peak as 0.8.
+
+\[
+\alpha^{cc}_{g,n'} = \frac{1}{|T^{peak}_{y,n}|} \sum_{t \in T^{peak}_{y,n}} a_{g,n',t} \qquad \text{(dispatchable units and storage)} \tag{CAP-4}
+\]
+
+A unit without an availability profile counts fully. Earlier versions counted every non-`Renewable` unit and all storage fully whatever their availability, and `Renewable` dispatchable units (biomass, reservoir hydro) at the minimum of their profile (0 for a seasonal mill). \(\kappa^{risk}\) is the `risk_coefficient` (default 1; see [Risk & Resilience](risk-resilience.md)); life-extended capacity counts at its firm share and risk coefficient, like the unit it extends. \(D^{peak}_{y,n}\) is the maximum of the node's demand over the year's time steps.
 
 ### 7.5 RE Target Constraints (RE)
 

@@ -577,12 +577,12 @@ C^{eff}_{g,n,y} = C_{g,n,y} \cdot \rho_{g,n} \cdot \alpha^{cc}_{g,n} \cdot (1 - 
 \tag{RISK-18a}
 \]
 
-for existing generators and candidate technologies; batteries and battery technologies count their power capacity times \(\rho\). Capacity kept past its lifetime through life extension counts with \(\alpha^{cc}\) and \(\rho\), like the unit it extends. The coefficient is the `risk_coefficient` list (per node) of each generator, battery, technology and battery technology, default 1.0. It does not affect the dispatch or the investment cost.
+for existing generators and candidate technologies; batteries and battery technologies count their power capacity times \(\rho\) and \(\alpha^{cc}\). Capacity kept past its lifetime through life extension counts with \(\alpha^{cc}\) and \(\rho\), like the unit it extends. The coefficient is the `risk_coefficient` list (per node) of each generator, battery, technology and battery technology, default 1.0. It does not affect the dispatch or the investment cost.
 
 | Symbol | Units | Description |
 |--------|-------|-------------|
 | \(\rho_{g}\) | \([0, 1]\) | Risk coefficient: geographic hazard derating for element \(g\) at its location |
-| \(\alpha^{cc}_{g,n}\) | \([0, 1]\) | Capacity credit (minimum availability for renewables, 1.0 for dispatchable) |
+| \(\alpha^{cc}_{g,n}\) | \([0, 1]\) | Firm share (CAP-4): minimum availability for variable renewables, mean availability over the node's peak period for dispatchable units and storage (1.0 without a profile) |
 
 This applies identically to existing units and new investment technologies. A coastal solar PV with \(\rho = 0.82\) contributes only 82% of its rated power to system adequacy, incentivizing the optimizer to either invest more at risky locations or prefer safer ones.
 
