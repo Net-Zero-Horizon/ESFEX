@@ -3987,16 +3987,29 @@ function add_unit_day_operation!(op::UnitOperation, ps_vars::PowerSystemVariable
             add_gen_step_cost!(cost, ps_vars, input, g, n, t)
         end
         c = value(cost)
+        # The fuel part (flat fuel_cost or offer curve; tank fuel below) and
+        # its yearly growth: a scenario's fuel_price_growth, the tank
+        # fuel's price_growth_rate
+        fpg = op.multipliers === nothing ? 1.0 : op.multipliers.fuel_price_growth
+        has_curve = haskey(ps_vars.gen_seg_output, (g, n))
+        fuel = has_curve ? c - (gen.maintenance_cost[n] + co2_cost_per_mwh(input, gen, n)) * out :
+                           gen.fuel_cost[n] * out
         fuel_price = master_fuel_unit_price(input, g, n, year_idx)
         if fuel_price !== nothing
-            haskey(ps_vars.gen_seg_output, (g, n)) || (c -= gen.fuel_cost[n] * out)
+            has_curve || (c -= gen.fuel_cost[n] * out; fuel = 0.0)
             c += fuel_price * out
         end
+        tank = fuel_price === nothing ? 0.0 : fuel_price * out
         if startup !== nothing && haskey(startup, (g, n))
             c += value(startup[(g, n)])
         end
         op.energy[key] = get(op.energy, key, 0.0) + scale * out
         op.operating_cost[key] = get(op.operating_cost, key, 0.0) + scale * c
+        op.fuel_cost[key] = get(op.fuel_cost, key, 0.0) + scale * (fuel + tank)
+        if fuel + tank > 0
+            growth = tank > 0 ? master_fuel_unit_growth(input, g, n) * fpg : fpg
+            op.fuel_growth[key] = (fuel * fpg + tank * growth) / (fuel + tank)
+        end
     end
     for b in eachindex(input.batteries), n in ps_vars.buses_of_bat[b]
         key = (:bat, b, n, year_idx)
@@ -4048,7 +4061,7 @@ function extract_unit_operation(model::Model, vars::MasterProblemVariables,
     ops = UnitOperation[]
     for (k, prob, mult) in cases
         rate = mult === nothing ? input.discount_rate : input.discount_rate * mult.discount_rate
-        op = UnitOperation(prob, rate)
+        op = UnitOperation(prob, rate; multipliers = mult)
         for d in days
             d.scenario_idx == k || continue
             add_unit_day_operation!(op, d.ps_vars, d.input, d.year_idx, d.hours, d.scale,
@@ -4087,8 +4100,20 @@ scaled to the year), `C_y` the operating cost the master charges for them,
 `r = npv_annual_return_rate`. Degradation and the end of life are in the
 plan's capacity and dispatch. A stochastic master's NPV is the
 probability-weighted mean over its scenarios (each with its discount rate).
+
+With `extra_years > 0` (a myopic year's master, whose horizon is that year)
+the NPV also covers the next `extra_years` years while the unit is still in
+service: the last modelled year's operation held at its level, scaled by
+the unit's capacity degradation, its fuel part also by the fuel's yearly
+growth (`UnitOperation.fuel_growth`); fixed O&M on the degraded capacity
+(battery: on its power, with the same yearly revenue); no life extension, so
+it retires at the end of its `life_time` and pays its decommissioning then;
+discounted on from the last modelled year (`extra_unit_npv`). An
+approximation: the later years' dispatch is not modelled.
+
 `recommend_retirement` when the NPV is below `npv_threshold`;
-`remaining_lifetime` is the number of modelled years it is in service.
+`remaining_lifetime` is the number of years it is in service (modelled and
+extra).
 """
 function calculate_unit_npv(
     result::MasterProblemResult,
@@ -4096,7 +4121,8 @@ function calculate_unit_npv(
     unit_type::String,
     unit_idx::Int,
     node::Int;
-    npv_threshold::Float64 = 0.0
+    npv_threshold::Float64 = 0.0,
+    extra_years::Int = 0
 )::UnitNPV
     unit_type in ("generator", "battery") || error("Unknown unit type: $unit_type")
     isempty(result.unit_operation) && error(
@@ -4116,50 +4142,114 @@ function calculate_unit_npv(
             v += (revenue - get(op.operating_cost, key, 0.0) - get(op.asset_cost, key, 0.0)) /
                  (1.0 + op.discount_rate)^(y - 1)
         end
+        extra_years > 0 &&
+            (v += extra_unit_npv(op, input, kind, unit_idx, node, caps[end], extra_years)[1])
         npv += op.probability * v
     end
     in_service = Float64(count(>(1e-6), caps))
+    extra_years > 0 && (in_service += extra_unit_npv(result.unit_operation[1], input, kind,
+        unit_idx, node, caps[end], extra_years)[2])
     return UnitNPV(unit_type, unit_idx, node, input.system_name, npv, in_service,
                    npv < npv_threshold)
 end
 
 """
-    unit_npvs(result, input; npv_threshold=0.0) -> Vector{UnitNPV}
+    extra_unit_npv(op, input, kind, i, n, cap_last, extra_years) -> (npv, years)
+
+The NPV (discounted like the master, from its first year) of existing unit
+`(kind, i, n)` over the `extra_years` years after the last modelled one,
+and how many of them it is in service, for `calculate_unit_npv`. The last
+modelled year's operation (`op`) is held at its level and scaled by the
+capacity degradation (and its fuel part by `op.fuel_growth` per year); fixed
+O&M on the capacity in service; no life extension: in its first year past
+`life_time` (or the first extra year, for a unit the master life-extended)
+it retires and pays its decommissioning on the capacity it had.
+`cap_last` is its capacity in service in the last modelled year.
+"""
+function extra_unit_npv(op::UnitOperation, input::MasterProblemInput, kind::Symbol,
+                        i::Int, n::Int, cap_last::Float64, extra_years::Int)
+    Y = length(input.years)
+    cap_last > 1e-6 || return 0.0, 0
+    mult = op.multipliers
+    m_fixed = mult === nothing ? 1.0 : mult.gen_fixed_cost
+    df(y) = 1.0 / (1.0 + op.discount_rate)^(y - 1)
+    key = (kind, i, n, Y)
+    unit = kind === :gen ? input.generators[i] : input.batteries[i]
+    deg = kind === :gen ? unit.degradation_rate[n] : 0.0
+    age_last = unit.initial_age[n] + (Y - 1)
+    within = age_last < unit.life_time[n]
+    E = get(op.energy, key, 0.0)
+    C = get(op.operating_cost, key, 0.0)
+    F = get(op.fuel_cost, key, 0.0)
+    growth = get(op.fuel_growth, key, 1.0)
+    v, years = 0.0, 0
+    for k in 1:extra_years
+        age = age_last + k
+        if within && age < unit.life_time[n]
+            ratio = (1.0 - deg)^k
+            if kind === :gen
+                cap = unit.rated_power[n] * (1.0 - deg)^age
+                revenue = E * ratio * input.base_lcoe
+                cost = (C - F) * ratio + F * ratio * growth^k
+            else
+                cap = cap_last
+                revenue = input.npv_annual_return_rate * unit.invest_cost_power[n] * cap
+                cost = C
+            end
+            v += (revenue - cost - unit.fixed_cost[n] * m_fixed * cap) * df(Y + k)
+            years += 1
+        else
+            # End of life: decommissioned on the capacity it had
+            m_dec = mult === nothing ? 1.0 :
+                (kind === :gen ? mult.gen_decommissioning_cost : mult.bat_decommissioning_cost)
+            cap = !within ? cap_last :
+                kind === :gen ? unit.rated_power[n] * (1.0 - deg)^age : cap_last
+            v -= unit.decommissioning_cost[n] * m_dec * cap * df(Y + k)
+            break
+        end
+    end
+    return v, years
+end
+
+"""
+    unit_npvs(result, input; npv_threshold=0.0, extra_years=0) -> Vector{UnitNPV}
 
 `calculate_unit_npv` of every existing generator and battery location in
 service in some year of the plan.
 """
 function unit_npvs(result::MasterProblemResult, input::MasterProblemInput;
-                   npv_threshold::Float64 = 0.0)::Vector{UnitNPV}
+                   npv_threshold::Float64 = 0.0, extra_years::Int = 0)::Vector{UnitNPV}
     out = UnitNPV[]
     num_years = length(input.years)
     for (g, gen) in enumerate(input.generators), n in eachindex(gen.rated_power)
         gen.rated_power[n] > 0 || continue
         any(>(1e-6), unit_capacity_by_year(result, :gen, g, n, num_years)) || continue
         push!(out, calculate_unit_npv(result, input, "generator", g, n;
-                                      npv_threshold = npv_threshold))
+                                      npv_threshold = npv_threshold, extra_years = extra_years))
     end
     for (b, bat) in enumerate(input.batteries), n in eachindex(bat.max_discharge_power)
         bat.max_discharge_power[n] > 0 || continue
         any(>(1e-6), unit_capacity_by_year(result, :bat, b, n, num_years)) || continue
         push!(out, calculate_unit_npv(result, input, "battery", b, n;
-                                      npv_threshold = npv_threshold))
+                                      npv_threshold = npv_threshold, extra_years = extra_years))
     end
     return out
 end
 
 """
-    get_units_with_negative_npv(result, input; npv_threshold=0.0) -> Vector{UnitNPV}
+    get_units_with_negative_npv(result, input; npv_threshold=0.0, extra_years=0) -> Vector{UnitNPV}
 
 The units of `unit_npvs` whose NPV is below `npv_threshold`.
 """
 function get_units_with_negative_npv(
     result::MasterProblemResult,
     input::MasterProblemInput;
-    npv_threshold::Float64 = 0.0
+    npv_threshold::Float64 = 0.0,
+    extra_years::Int = 0
 )::Vector{UnitNPV}
     return filter(u -> u.recommend_retirement,
-                  unit_npvs(result, input; npv_threshold = npv_threshold))
+                  unit_npvs(result, input; npv_threshold = npv_threshold,
+                            extra_years = extra_years))
 end
 
 # Copy of `v` with entry `n` set to 0
@@ -4209,7 +4299,7 @@ end
 """
     solve_with_npv_iteration(input; max_iterations=5, npv_threshold=0.0,
                              use_representative_days=true, solver=:monolithic,
-                             benders_kwargs...) -> NPVIterationResult
+                             extra_years=0, benders_kwargs...) -> NPVIterationResult
 
 Solve the master and retire the existing units that do not pay for
 themselves: compute each unit's NPV in the solved plan
@@ -4217,13 +4307,17 @@ themselves: compute each unit's NPV in the solved plan
 horizon (`retire_units`), re-solve, and repeat until no new unit falls below
 it or after `max_iterations` rounds of retirements. A retired unit stays
 retired. `solver = :benders` solves each master by Benders decomposition
-(`run_benders_decomposition` with `benders_kwargs`).
+(`run_benders_decomposition` with `benders_kwargs`); `extra_years` is
+passed to `calculate_unit_npv` (a myopic year's master).
+
+When a re-solve is not optimal, the round that led to it is undone: the
+result is the last optimal plan with the retirements made up to it, and a
+warning names the units of the undone round and the solver status.
 
 `iterations` counts the master solves; `npv_history` holds, per solve, the
 NPV of every unit evaluated (`"generator_g_bus"` / `"battery_b_bus"`);
 `forced_retirements` the units retired, in order; `final_result` the last
-optimal plan (when a re-solve fails, the previous plan, without the units
-of its last round). Errors when the first solve is not optimal.
+optimal plan. Errors when the first solve is not optimal.
 """
 function solve_with_npv_iteration(
     input::MasterProblemInput;
@@ -4231,21 +4325,26 @@ function solve_with_npv_iteration(
     npv_threshold::Float64 = 0.0,
     use_representative_days::Bool = true,
     solver::Symbol = :monolithic,
+    extra_years::Int = 0,
     benders_kwargs...
 )::NPVIterationResult
     optimal(st) = st in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
+    # (plan or nothing when not optimal, termination status)
     function solve_once(inp)
         if solver === :benders
             sol = run_benders_decomposition(inp; use_representative_days = use_representative_days,
                                             record_unit_operation = true,
                                             benders_kwargs...).solution
-            return optimal(sol.status) ? sol : nothing
+            return (optimal(sol.status) ? sol : nothing), sol.status
         end
         model, vars, _ = create_master_problem(inp; use_representative_days = use_representative_days)
         optimize!(model)
-        optimal(termination_status(model)) || return nothing
-        return extract_master_solution(model, vars, inp; unit_operation = true)
+        st = termination_status(model)
+        optimal(st) || return nothing, st
+        return extract_master_solution(model, vars, inp; unit_operation = true), st
     end
+    describe(units) = join(["$(u.unit_type) $(u.unit_idx) at bus $(u.node) " *
+                            "(NPV $(round(u.npv, sigdigits = 4)))" for u in units], ", ")
 
     retired = UnitNPV[]
     history = Dict{String, Float64}[]
@@ -4255,15 +4354,20 @@ function solve_with_npv_iteration(
     iter = 0
     while true
         iter += 1
-        result = solve_once(current)
+        result, status = solve_once(current)
         if result === nothing
-            previous === nothing && error("NPV retirement: the first master solve is not optimal")
-            # The previous plan still has the units of the last round
-            @warn "NPV retirement: master solve $(iter) is not optimal; keeping the previous plan"
+            previous === nothing &&
+                error("NPV retirement: the first master solve is not optimal ($(status))")
+            # Undo the last round: the previous plan still has its units
+            undone = retired[end - last_round + 1:end]
+            @warn "NPV retirement: the master re-solve after retiring " * describe(undone) *
+                  " is not optimal ($(status)); keeping these units and the last " *
+                  "optimal plan"
             return NPVIterationResult(iter, false, previous,
                                       retired[1:end - last_round], history)
         end
-        npvs = unit_npvs(result, current; npv_threshold = npv_threshold)
+        npvs = unit_npvs(result, current; npv_threshold = npv_threshold,
+                         extra_years = extra_years)
         push!(history, Dict("$(u.unit_type)_$(u.unit_idx)_$(u.node)" => u.npv for u in npvs))
         flagged = filter(u -> u.recommend_retirement, npvs)
         if isempty(flagged)
@@ -4276,8 +4380,7 @@ function solve_with_npv_iteration(
             return NPVIterationResult(iter, false, result, retired, history)
         end
         @info "NPV retirement round $(iter): retiring $(length(flagged)) unit(s): " *
-              join(["$(u.unit_type) $(u.unit_idx) at bus $(u.node) " *
-                    "(NPV $(round(u.npv, sigdigits = 4)))" for u in flagged], ", ")
+              describe(flagged)
         append!(retired, flagged)
         last_round = length(flagged)
         current = retire_units(current, flagged)

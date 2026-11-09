@@ -718,9 +718,11 @@ With `npv_retirement` on, a `development` run checks after the master solve whet
    b. Units with NPV < npv_retirement_threshold: none → stop (converged)
    c. max_iterations rounds of retirements done → stop (they are kept)
    d. Retire them for the whole horizon (9.3) and solve the master again
+   e. Re-solve not optimal → undo this round and stop: the last optimal plan
+      and its retirements are kept
 ```
 
-A retired unit stays retired in the next rounds. The log lists each round's retired units with their NPV.
+A retired unit stays retired in the next rounds. The log lists each round's retired units with their NPV. When a re-solve is not optimal (retiring the units made the master infeasible, for instance through the hard curtailment limit of §8.3), a warning names the units of the undone round and the solver status, and the run goes on with the last optimal plan; the results list only the retirements applied.
 
 ### 9.2 Unit NPV
 
@@ -745,6 +747,14 @@ The NPV is that of keeping the unit in the solved plan, over the modelled years,
 The terms are the same expressions the objective uses (`add_gen_step_cost!`, `add_bat_step_cost!`, `build_annual_asset_cost`), evaluated at the solution: summed over the units of a system where every cost is a unit's, they make up the master's objective. In a stochastic master the NPV is the probability-weighted mean over the scenarios, each with its own operation, cost multipliers and discount rate \(r_\omega\) (STOCH-1). Benders takes the operation from the subproblems of the iteration whose plan it returns.
 
 A unit with \(\text{NPV} <\) `npv_retirement_threshold` (\$, default 0) is retired. A unit no year of the plan keeps in service (past its lifetime, not extended) is not checked.
+
+**Myopic mode.** Each annual master models one year \(y_0\), but the NPV covers the unit's remaining in-service years inside the planning horizon, as perfect foresight values them (`extra_years` = last horizon year − \(y_0\), `extra_unit_npv`). It is an approximation (myopic foresight): the later years' operation is not modelled but held at the solved year's level, with the yearly factors the master knows. For a later year \(y_0 + k\) while the unit is within its `life_time`:
+
+\[
+\text{NPV}^{+}_{g,n} = \sum_{k} \frac{\delta^k E_{y_0} p^{LCOE} - \delta^k \left( C^{op}_{y_0} - F_{y_0} + F_{y_0} \gamma^k \right) - c^{fix}_{g,n} \bar{P}_{g,n} (1-d)^{a_{y_0}+k}}{(1+r)^{k}} \tag{NPV-3}
+\]
+
+with \(\delta = 1-d\) the capacity degradation, \(F_{y_0}\) the fuel part of the operating cost and \(\gamma\) its yearly growth (the primary-energy fuel's `price_growth_rate`, a stochastic scenario's `fuel_price_growth`; flat `fuel_cost` and the CO2 price have no path in the master). A battery keeps its yearly revenue, operating cost and fixed O&M. No life extension is assumed: in the first year past its `life_time` (the first later year for a unit the master life-extended) the unit pays its decommissioning on the capacity it had, discounted to that year, and nothing after. In a stochastic master each scenario uses its own multipliers and discount rate.
 
 ### 9.3 Retirement
 

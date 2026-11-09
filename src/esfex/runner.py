@@ -3820,6 +3820,8 @@ class Orchestrator:
                                                      for k in ("storage", "transport")}),
                     retired_units=list(npv_retired),
                     npv_unit_keys=npv_unit_keys,
+                    # The NPV covers the unit's years up to the horizon end
+                    npv_horizon_end=years_range[-1],
                 )
 
                 # 7. Solve

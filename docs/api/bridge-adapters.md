@@ -267,6 +267,7 @@ class MasterProblemAdapter:
 | `benders_max_iterations`, `benders_tolerance` | `int`, `float` | Benders settings: iteration cap and relative gap for convergence. |
 | `retired_units` | `list[tuple]` | NPV-based retirement: `(kind, unit key, bus)` units an earlier myopic year retired; they stay out of this model and do not pay their decommissioning again. |
 | `npv_unit_keys` | `set[str]` | NPV-based retirement: the generator and battery keys whose NPV is checked (default: all; the myopic runner passes the original units). |
+| `npv_horizon_end` | `int` | NPV-based retirement: last planning year when it goes past `years` (the myopic runner passes it): the NPV also covers the unit's in-service years up to it (`extra_years` of Julia `unit_npvs`). |
 
 **Methods:**
 
@@ -286,7 +287,7 @@ def solve(self) -> int
 
 Optimize the master problem (or run Benders decomposition). Returns PuLP-compatible status code.
 
-With the system's `npv_retirement` on, it then runs the NPV-based retirement ([Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement)): it computes each existing unit's NPV in the plan (Julia `unit_npvs`), retires the units below `npv_retirement_threshold` (Julia `retire_units`), rebuilds the model with `build_model` and solves again, for at most `npv_retirement_max_iterations` rounds, in every solver mode. The retired units are listed in `npv_retirements` (dicts with `kind`, `key`, `name`, `bus`, `node`, `npv` in $ and `iteration`), and stay retired in later builds of this adapter.
+With the system's `npv_retirement` on, it then runs the NPV-based retirement ([Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement)): it computes each existing unit's NPV in the plan (Julia `unit_npvs`), retires the units below `npv_retirement_threshold` (Julia `retire_units`), rebuilds the model with `build_model` and solves again, for at most `npv_retirement_max_iterations` rounds, in every solver mode. A re-solve that is not optimal (or raises) undoes its round: the last optimal model and its retirements are restored, a warning names the round's units and the solver status, and `solve()` returns 1 for that plan. The retired units are listed in `npv_retirements` (dicts with `kind`, `key`, `name`, `bus`, `node`, `npv` in $ and `iteration`), and stay retired in later builds of this adapter.
 
 ### get_solution_values
 
