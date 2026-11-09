@@ -2550,7 +2550,9 @@ def _fix_disconnected_components(
     (equipment → line → LV_bus → line → TR → line → HV_bus).
 
     For components **without equipment**: creates a bus-to-bus bridge
-    line to the nearest same-voltage bus in the main component.
+    line to the nearest bus in the main component, at the island bus's
+    voltage; when the two voltage levels differ the line ends at a new bus
+    beside the main bus, joined to it by a transformer.
 
     When *max_connection_km* is set, components beyond that distance
     from the main network are NOT bridged — they form independent
@@ -2777,19 +2779,67 @@ def _fix_disconnected_components(
 
             iso_bus = state.buses[best_iso]
             main_bus = state.buses[best_main_bid]
-            v = max(iso_bus.voltage_kv, main_bus.voltage_kv) or 110.0
+            v_iso = iso_bus.voltage_kv or 0.0
+            v_main = main_bus.voltage_kv or 0.0
+            v = v_iso or v_main or 110.0
             cap = _estimate_bridge_capacity(v)
+
+            # Different voltage levels (beyond 10 %): the line runs at the
+            # island's voltage to a new bus at the main bus's substation,
+            # stepped to the main level by a transformer there — as the
+            # equipment chains and voltage-mismatch fixes join levels —
+            # instead of a line straight between two voltages.
+            end_bid = best_main_bid
+            if v_iso > 0 and v_main > 0 and (
+                    abs(v_iso - v_main) > 0.10 * max(v_iso, v_main)):
+                dy = iso_bus.latitude - main_bus.latitude
+                dx = iso_bus.longitude - main_bus.longitude
+                norm = math.hypot(dy, dx) or 1.0
+                end_bid = model.add_bus(
+                    parent_node=main_bus.parent_node,
+                    name=f"Auto bridge {v_iso:g}kV",
+                    voltage_kv=v_iso,
+                    latitude=main_bus.latitude + dy / norm * MIN_CHAIN_SPREAD,
+                    longitude=main_bus.longitude + dx / norm * MIN_CHAIN_SPREAD,
+                )
+                state.buses[end_bid].frequency_hz = main_bus.frequency_hz
+                hv, lv = ((best_main_bid, end_bid) if v_main > v_iso
+                          else (end_bid, best_main_bid))
+                tr_idx = model.add_transformer(
+                    name=f"Auto TR {max(v_iso, v_main):g}/"
+                         f"{min(v_iso, v_main):g}kV",
+                    from_bus=hv, to_bus=lv,
+                    from_voltage_kv=max(v_iso, v_main),
+                    to_voltage_kv=min(v_iso, v_main),
+                    rated_power_mva=cap,
+                    latitude=main_bus.latitude, longitude=main_bus.longitude,
+                )
+                model.add_line(
+                    from_bus=best_main_bid, to_bus=best_main_bid,
+                    capacity_mw=cap,
+                    from_endpoint=EndpointRef("bus", best_main_bid),
+                    to_endpoint=EndpointRef("transformer", str(tr_idx)),
+                )
+                model.add_line(
+                    from_bus=end_bid, to_bus=end_bid, capacity_mw=cap,
+                    from_endpoint=EndpointRef("transformer", str(tr_idx)),
+                    to_endpoint=EndpointRef("bus", end_bid),
+                )
+                nn_main.add(end_bid)
+                main_comp.add(end_bid)
+                created += 4
+            end_bus = state.buses[end_bid]
 
             lid = f"line_{state._next_line_id}"
             state._next_line_id += 1
             bridge = GuiTransmissionLine(
                 line_id=lid,
-                from_bus=best_main_bid, to_bus=best_iso,
-                from_node=main_bus.parent_node,
+                from_bus=end_bid, to_bus=best_iso,
+                from_node=end_bus.parent_node,
                 to_node=iso_bus.parent_node,
                 capacity_mw=cap, voltage_kv=v, waypoints=[],
                 frequency_hz=main_bus.frequency_hz,
-                from_endpoint=EndpointRef("bus", best_main_bid),
+                from_endpoint=EndpointRef("bus", end_bid),
                 to_endpoint=EndpointRef("bus", best_iso),
             )
             # Length between the end buses and the standard line type's
@@ -2806,8 +2856,10 @@ def _fix_disconnected_components(
             state.transmission_lines.append(bridge)
             created += 1
 
+            via = (f" via TR {v_main:g}/{v_iso:g}kV"
+                   if end_bid != best_main_bid else "")
             log.append(
-                f"  Bridge: {best_iso} → {best_main_bid}"
+                f"  Bridge: {best_iso} → {best_main_bid}{via}"
                 f"  [{best_dist:.1f} km, {cap:.0f} MW]"
             )
 
