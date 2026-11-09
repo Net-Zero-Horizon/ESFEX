@@ -1900,7 +1900,11 @@ class SystemConfig(BaseModel):
     max_annual_increment: float = Field(default=0.10, ge=0, alias="MAX_ANNUAL_INCREMENT")
     max_annual_system_cost: float = Field(default=20e9, alias="MAX_ANNUAL_SYSTEM_COST")
     discount_rate: float = Field(default=0.05, ge=0, le=1)
-    base_lcoe: float = Field(default=93.0, ge=0)
+    base_lcoe: float = Field(
+        default=93.0, ge=0,
+        description="Revenue per MWh an existing generator produces in its NPV "
+                    "($/MWh), for the NPV-based retirement (npv_retirement)",
+    )
     inertia_limit_threshold: float = Field(default=0.1, ge=0, alias="INERTIA_LIMIT_THRESHOLD")
 
     # Frequency stability analysis parameters
@@ -1917,7 +1921,22 @@ class SystemConfig(BaseModel):
     demand_shift_cost_rate: float = Field(default=0.1, ge=0, description="Cost rate per hour of demand shift distance")
     dynamic_reserve_contribution: float = Field(default=0.5, ge=0, le=1, description="Fraction of rated_power for dynamic reserve")
     reserve_margin: float = Field(default=1.15, ge=1.0, description="Capacity adequacy reserve margin (e.g. 1.15 = 15%)")
-    npv_annual_return_rate: float = Field(default=0.15, ge=0, le=1, description="NPV revenue estimation rate for investments")
+    npv_annual_return_rate: float = Field(default=0.15, ge=0, le=1, description="An existing battery's yearly revenue in its NPV, as a fraction of its power investment cost (invest_cost × MW), for the NPV-based retirement")
+    # NPV-based retirement of existing units (development runs)
+    npv_retirement: bool = Field(
+        default=False,
+        description="Retire the existing generators and batteries whose NPV in the "
+                    "master's plan is below npv_retirement_threshold, and re-solve "
+                    "the master (every master mode)",
+    )
+    npv_retirement_max_iterations: int = Field(
+        default=5, ge=0,
+        description="Most rounds of retirements (each followed by a master re-solve)",
+    )
+    npv_retirement_threshold: float = Field(
+        default=0.0,
+        description="A unit whose NPV ($) is below this is retired",
+    )
 
     # Power flow mode selection
     power_flow_mode: Literal[

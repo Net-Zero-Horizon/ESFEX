@@ -2506,6 +2506,12 @@ class MasterProblemAdapter:
         solver_method: str = "monolithic",
         benders_max_iterations: int = 50,
         benders_tolerance: float = 1e-4,
+        # NPV-based retirement (system setting npv_retirement): units an
+        # earlier myopic year retired [(kind, unit key, bus)], kept retired
+        # here without paying their decommissioning again, and the unit
+        # keys whose NPV is checked (None: every existing unit)
+        retired_units: Optional[List[tuple]] = None,
+        npv_unit_keys: Optional[set] = None,
         **kwargs,
     ):
         """
@@ -2549,6 +2555,12 @@ class MasterProblemAdapter:
             profile_start_hour: Horizon hour (year index × 8760 + hour) of the
                 first planned hour; every profile is rotated to start there,
                 wrapping around when it is shorter, as in the dispatch
+            retired_units: Units already retired by the NPV iteration of an
+                earlier (myopic) year, as ``(kind, unit key, bus)`` with kind
+                "generator" or "battery" and the 1-based master bus; they stay
+                retired, without paying their decommissioning again
+            npv_unit_keys: Generator and battery keys whose NPV the NPV
+                retirement checks (default: every existing unit)
             **kwargs: Additional parameters (system_config: explicit SystemConfig override)
         """
         system_config_override = kwargs.pop("system_config", None)
@@ -2654,6 +2666,18 @@ class MasterProblemAdapter:
         self._benders_result = None
         self._benders_solution = None
         self._benders_use_rep_days = True
+        self._use_rep_days = True
+
+        # NPV-based retirement: settings of the system, the units earlier
+        # years retired, and the ones this master retires
+        # (npv_retirements: dicts, see _solve_npv_retirement)
+        sc = self.system_config
+        self.npv_retirement = bool(getattr(sc, 'npv_retirement', False))
+        self.npv_max_iterations = int(getattr(sc, 'npv_retirement_max_iterations', 5))
+        self.npv_threshold = float(getattr(sc, 'npv_retirement_threshold', 0.0))
+        self._retired_carried = list(retired_units or [])
+        self._npv_unit_keys = set(npv_unit_keys) if npv_unit_keys is not None else None
+        self.npv_retirements: List[Dict[str, Any]] = []
 
         # Get solver config
         self._solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
@@ -3057,7 +3081,8 @@ class MasterProblemAdapter:
 
         logger.debug("Building Julia MasterProblem model...")
 
-        self._jl_input = self._create_input()
+        self._use_rep_days = use_representative_days
+        self._jl_input = self._with_npv_retirements(self._create_input())
 
         # Resolve declarative user constraints targeting the investment model
         # (technology names → 1-based tech indices, year values → year indices).
@@ -3272,13 +3297,129 @@ class MasterProblemAdapter:
 
         logger.debug(f"MasterProblem LP exported to: {filepath}")
 
+    # ── NPV-based retirement (system setting npv_retirement) ────────────────
+
+    def _unit_index(self, kind: str, key: str) -> Optional[int]:
+        """1-based Julia index of generator or battery *key*."""
+        units = (self.system_config.generators if kind == "generator"
+                 else self.system_config.batteries)
+        keys = list(units.keys())
+        return keys.index(key) + 1 if key in keys else None
+
+    def _jl_units(self, units: List[tuple]) -> Any:
+        """Julia ``Vector{UnitNPV}`` of ``(kind, key, bus)`` units."""
+        jl = get_julia()
+        ESFEX = get_esfex_module()
+        vec = jl.seval("ESFEX.UnitNPV[]")
+        name = str(getattr(self.system_config, 'name', 'primary'))
+        for kind, key, bus in units:
+            idx = self._unit_index(kind, key)
+            if idx is not None:
+                jl.seval("push!")(vec, ESFEX.UnitNPV(kind, idx, int(bus), name, 0.0, 0.0, True))
+        return vec
+
+    def _with_npv_retirements(self, jl_input: Any) -> Any:
+        """*jl_input* with the units retired by the NPV iteration: the ones an
+        earlier myopic year retired (no decommissioning again) and the ones
+        this master retired so far (decommissioned in its first year)."""
+        if not (self._retired_carried or self.npv_retirements):
+            return jl_input
+        ESFEX = get_esfex_module()
+        if self._retired_carried:
+            jl_input = ESFEX.retire_units(
+                jl_input, self._jl_units(self._retired_carried), decommission=False)
+        if self.npv_retirements:
+            jl_input = ESFEX.retire_units(jl_input, self._jl_units(
+                [(r["kind"], r["key"], r["bus"]) for r in self.npv_retirements]))
+        return jl_input
+
+    def _unit_npvs(self) -> List[Dict[str, Any]]:
+        """NPV ($) of each existing unit in the solved plan (Julia
+        ``unit_npvs``), as dicts with kind, key, name, bus (1-based, the
+        master's location), node (0-based), npv and retire (below the
+        threshold)."""
+        jl = get_julia()
+        ESFEX = get_esfex_module()
+        if self.solver_method == "benders":
+            result = self._benders_solution
+        else:
+            result = ESFEX.extract_master_solution(
+                self._jl_model, self._jl_vars, self._jl_input, unit_operation=True)
+        npvs = ESFEX.unit_npvs(result, self._jl_input,
+                               npv_threshold=scale_cost(self.npv_threshold))
+        node_of = jl.seval("(inp, b) -> inp.network.bus_to_node[b]")
+        out = []
+        for u in npvs:
+            kind = str(u.unit_type)
+            units = (self.system_config.generators if kind == "generator"
+                     else self.system_config.batteries)
+            key = list(units.keys())[int(u.unit_idx) - 1]
+            if self._npv_unit_keys is not None and key not in self._npv_unit_keys:
+                continue
+            bus = int(u.node)
+            out.append({
+                "kind": kind, "key": key,
+                "name": str(getattr(units[key], 'name', key)),
+                "bus": bus, "node": int(node_of(self._jl_input, bus)) - 1,
+                "npv": float(u.npv) * COST_UNSCALE,
+                "retire": bool(u.recommend_retirement),
+            })
+        return out
+
+    def _solve_npv_retirement(self, status: int) -> int:
+        """NPV-based retirement around the solve: while the plan is optimal,
+        retire the existing units whose NPV is below the threshold for the
+        whole horizon, rebuild and re-solve; stop when no new unit is below
+        it or after ``npv_retirement_max_iterations`` rounds. Each retired
+        unit is added to ``npv_retirements`` with its NPV and round.
+        Returns the status of the last solve."""
+        rounds = 0
+        while status == 1:
+            npvs = self._unit_npvs()
+            for u in npvs:
+                logger.debug(f"  NPV {u['kind']} {u['name']} (node {u['node']}, "
+                             f"bus {u['bus']}): ${u['npv']:,.0f}")
+            flagged = [u for u in npvs if u["retire"]]
+            if not flagged:
+                logger.info(
+                    f"NPV retirement: no existing unit below the threshold "
+                    f"(${self.npv_threshold:,.0f}) after {rounds} round(s)")
+                break
+            if rounds >= self.npv_max_iterations:
+                logger.warning(
+                    f"NPV retirement: {len(flagged)} unit(s) still below the "
+                    f"threshold after {rounds} round(s) "
+                    f"(npv_retirement_max_iterations); keeping them")
+                break
+            rounds += 1
+            logger.info(
+                f"NPV retirement, round {rounds}: retiring {len(flagged)} unit(s): "
+                + ", ".join(f"{u['name']} at node {u['node']} (NPV ${u['npv']:,.0f})"
+                            for u in flagged))
+            for u in flagged:
+                u = dict(u, iteration=rounds)
+                u.pop("retire")
+                self.npv_retirements.append(u)
+            self.build_model(use_representative_days=self._use_rep_days)
+            status = self._solve_once()
+        return status
+
     def solve(self) -> int:
         """
-        Solve the master problem.
+        Solve the master problem; with the system's ``npv_retirement`` on,
+        retire the existing units whose NPV is below the threshold and
+        re-solve (:meth:`_solve_npv_retirement`).
 
         Returns:
             PuLP-compatible status code (1 = optimal)
         """
+        status = self._solve_once()
+        if self.npv_retirement:
+            status = self._solve_npv_retirement(status)
+        return status
+
+    def _solve_once(self) -> int:
+        """Solve the built master problem once."""
         jl = get_julia()
 
         if self.solver_method == "benders":
@@ -3355,6 +3496,7 @@ class MasterProblemAdapter:
             tolerance=self.benders_tolerance,
             use_representative_days=self._benders_use_rep_days,
             verbose_benders=self._solver.verbose,
+            record_unit_operation=self.npv_retirement,
         )
         self._benders_solution = self._benders_result.solution
 
@@ -3893,7 +4035,8 @@ class MGAAdapter:
         # selected. ``_create_input`` builds the Pydantic-to-Julia
         # marshalled input without constructing the optimisation model —
         # both ``run_mga_spores`` and ``run_spores`` do that internally.
-        jl_input = self.master._create_input()
+        # Units the NPV-based retirement retired stay out.
+        jl_input = self.master._with_npv_retirements(self.master._create_input())
 
         if self._method == "spores":
             self._jl_result = self._run_spores(jl_input, use_representative_days)

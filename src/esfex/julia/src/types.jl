@@ -2235,6 +2235,13 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `life_extension_cost_factor::Float64`: Fraction of investment cost for annual extension
 - `decommissioning_cost_factor::Float64`: Fraction of investment cost for decommissioning
 
+## NPV-based retirement
+- `base_lcoe::Float64`: revenue per MWh generated in a generator's NPV
+- `npv_annual_return_rate::Float64`: a battery's yearly revenue in its NPV,
+  as a fraction of its power investment cost
+- `npv_retired_units::Vector{RetiredUnit}`: units the NPV iteration retired
+  (`retire_units`), decommissioned in the first year
+
 ## CO2 budget, start-ups
 - `co2_budget_groups::Vector{CO2BudgetGroup}`: Annual CO2 budget per system
   with its own violation penalty (empty = none)
@@ -2247,6 +2254,21 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `gap::Float64`: MIP gap tolerance
 - `verbose::Bool`: Verbose output
 """
+
+"""
+    RetiredUnit
+
+An existing unit the NPV iteration retired for the whole horizon
+(`retire_units`): `unit_type` "generator" or "battery", its index and the bus
+(master location) where it is retired, and the MW it pays decommissioning on
+in the first modelled year (0 when that was paid in an earlier myopic year).
+"""
+struct RetiredUnit
+    unit_type::String
+    unit_idx::Int
+    bus::Int
+    decommissioned_mw::Float64
+end
 
 """
     SystemNodeRange
@@ -2327,9 +2349,9 @@ struct MasterProblemInput
 
     # Configurable parameters (previously hardcoded)
     reserve_margin::Float64             # Capacity adequacy reserve margin (e.g. 1.15 = 15% margin)
-    # Read only by calculate_unit_npv / solve_with_npv_iteration (Julia API; the runner does not call them)
+    # NPV-based retirement (calculate_unit_npv, solve_with_npv_iteration)
     npv_annual_return_rate::Float64     # Battery NPV revenue per year as a fraction of its power investment cost
-    base_lcoe::Float64                  # Base LCOE ($/MWh) for NPV revenue estimation
+    base_lcoe::Float64                  # Revenue per MWh a generator produces in the NPV ($/MWh)
 
     # Hours per year (indexed by year_idx; always 8760, leap years included)
     hours_per_year::Vector{Int}
@@ -2386,6 +2408,10 @@ struct MasterProblemInput
     # M2 (#89): fuel balance, fuel infrastructure and electrolyzers; nothing
     # when primary energy is off (master_fuel.jl)
     primary_energy::Union{Nothing, MasterFuelInput}
+    # Units the NPV iteration retired (retire_units): their capacity is
+    # already 0 in `generators` / `batteries`; this charges their
+    # decommissioning in the first year (build_annual_asset_cost)
+    npv_retired_units::Vector{RetiredUnit}
 end
 
 # Constructor with defaults
@@ -2456,7 +2482,8 @@ function MasterProblemInput(;
     re_target_override::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
     co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[],
     unit_commitment::Bool = false,
-    primary_energy::Union{Nothing, MasterFuelInput} = nothing
+    primary_energy::Union{Nothing, MasterFuelInput} = nothing,
+    npv_retired_units::Vector{RetiredUnit} = RetiredUnit[]
 )
     return MasterProblemInput(
         years, base_year,
@@ -2490,7 +2517,7 @@ function MasterProblemInput(;
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         re_target_override,
         co2_budget_groups, unit_commitment,
-        primary_energy
+        primary_energy, npv_retired_units
     )
 end
 
@@ -2573,6 +2600,37 @@ mutable struct MasterProblemVariables
 end
 
 """
+    UnitOperation
+
+What the solved master did with each existing unit in one scenario (one
+entry, probability 1, for a deterministic master), read by
+`calculate_unit_npv`. Keys are `(kind, unit index, bus, year index)` with
+kind `:gen` or `:bat`; values are per modelled year, undiscounted, in the
+master's cost unit:
+- `energy`: MWh the generator produced, its representative days (or TSAM
+  periods) scaled to the year as the master scales their cost;
+- `operating_cost`: what the master charges the unit for that operation:
+  fuel (`fuel_cost`, its offer curve, or with primary energy on the fuel it
+  burns at the fuel's price), maintenance,
+  CO2 price, LP-relaxed start-ups; for a battery maintenance on charge and
+  discharge and its throughput (or offer-curve) cost;
+- `asset_cost`: its share of `build_annual_asset_cost`: fixed O&M on the
+  capacity in service, life extension and decommissioning.
+`discount_rate` is the scenario's (base rate × its multiplier).
+"""
+struct UnitOperation
+    probability::Float64
+    discount_rate::Float64
+    energy::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
+    operating_cost::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
+    asset_cost::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
+end
+
+UnitOperation(probability::Float64, discount_rate::Float64) = UnitOperation(
+    probability, discount_rate, Dict{Tuple{Symbol,Int,Int,Int}, Float64}(),
+    Dict{Tuple{Symbol,Int,Int,Int}, Float64}(), Dict{Tuple{Symbol,Int,Int,Int}, Float64}())
+
+"""
     MasterProblemResult
 
 Solution output from the Master Problem.
@@ -2605,6 +2663,11 @@ Solution output from the Master Problem.
     costs (fixed O&M, life extension, decommissioning) are not included
 - `re_penetration_by_year`: Achieved RE penetration per year
 - `cumulative_capacity_by_year`: Cumulative capacity by technology and year
+
+## Units' operation
+- `unit_operation`: each existing unit's generation and costs per year and
+    scenario (`UnitOperation`), for `calculate_unit_npv`; empty unless the
+    result was extracted with `unit_operation = true`
 """
 struct MasterProblemResult
     # Status
@@ -2646,11 +2709,18 @@ struct MasterProblemResult
     # M2 (#89): fuel infrastructure and electrolyzers built by the master
     # (extract_master_fuel_solution); empty without primary energy
     fuel_investment::Dict{String, Any}
+    # Each existing unit's operation and costs in the solved plan, for the
+    # NPV (extract_master_solution(...; unit_operation = true)); empty
+    # unless asked for
+    unit_operation::Vector{UnitOperation}
 end
 
 # Without the fuel builds (no primary energy)
 MasterProblemResult(args::Vararg{Any, 21}) =
     MasterProblemResult(args..., Dict{String, Any}())
+# Without the units' operation
+MasterProblemResult(args::Vararg{Any, 22}) =
+    MasterProblemResult(args..., UnitOperation[])
 
 """
     BendersResult
@@ -2810,11 +2880,11 @@ NPV calculation result for a single unit.
 # Fields
 - `unit_type::String`: "generator" or "battery"
 - `unit_idx::Int`: Unit index
-- `node::Int`: Node index
+- `node::Int`: Bus index (the master's location of the unit)
 - `system::String`: System name (for multi-system)
 - `npv::Float64`: Net present value
-- `remaining_lifetime::Float64`: Years remaining
-- `recommend_retirement::Bool`: Whether NPV suggests early retirement
+- `remaining_lifetime::Float64`: Modelled years the unit is in service in the plan
+- `recommend_retirement::Bool`: NPV below the threshold: retire it
 """
 struct UnitNPV
     unit_type::String
@@ -2832,11 +2902,12 @@ end
 Result from NPV-based iterative retirement analysis.
 
 # Fields
-- `iterations::Int`: Number of iterations performed
-- `converged::Bool`: Whether iteration converged
+- `iterations::Int`: Number of master solves
+- `converged::Bool`: The last solve left no unit below the threshold
 - `final_result::MasterProblemResult`: Final solution
 - `forced_retirements::Vector{UnitNPV}`: Units forced to retire
-- `npv_history::Vector{Dict{String, Float64}}`: NPV per iteration
+- `npv_history::Vector{Dict{String, Float64}}`: per master solve, the NPV of
+  every unit evaluated (`"generator_g_bus"`, `"battery_b_bus"`)
 """
 struct NPVIterationResult
     iterations::Int

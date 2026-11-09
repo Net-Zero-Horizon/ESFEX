@@ -1121,6 +1121,10 @@ def _system_to_gui_state(sys: SystemConfig,
         demand_scale=getattr(sys, 'demand_scale', 1.0),
         discount_rate=getattr(sys, 'discount_rate', 0.05),
         base_lcoe=getattr(sys, 'base_lcoe', 93.0),
+        npv_annual_return_rate=getattr(sys, 'npv_annual_return_rate', 0.15),
+        npv_retirement=bool(getattr(sys, 'npv_retirement', False)),
+        npv_retirement_max_iterations=int(getattr(sys, 'npv_retirement_max_iterations', 5)),
+        npv_retirement_threshold=getattr(sys, 'npv_retirement_threshold', 0.0),
         target_re_penetration=getattr(sys, 'target_re_penetration', 1.0),
         min_annual_increment=getattr(sys, 'min_annual_increment', 0.01),
         max_annual_increment=getattr(sys, 'max_annual_increment', 0.10),
@@ -3535,6 +3539,10 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     sys_dict["demand_scale"] = s.demand_scale
     sys_dict["discount_rate"] = s.discount_rate
     sys_dict["base_lcoe"] = s.base_lcoe
+    sys_dict["npv_annual_return_rate"] = s.npv_annual_return_rate
+    sys_dict["npv_retirement"] = s.npv_retirement
+    sys_dict["npv_retirement_max_iterations"] = s.npv_retirement_max_iterations
+    sys_dict["npv_retirement_threshold"] = s.npv_retirement_threshold
     sys_dict["target_re_penetration"] = s.target_re_penetration
     sys_dict["min_annual_increment"] = s.min_annual_increment
     sys_dict["max_annual_increment"] = s.max_annual_increment
