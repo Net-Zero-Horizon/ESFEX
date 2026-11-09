@@ -127,6 +127,7 @@ class LineForm(QWidget):
 
         self._num_circuits = QSpinBox()
         self._num_circuits.setRange(1, 10)
+        self._num_circuits.setToolTip(tr("line_form.circuits_tip"))
         self._num_circuits.valueChanged.connect(self._on_changed)
         layout.addRow(tr("line_form.circuits"), self._num_circuits)
 

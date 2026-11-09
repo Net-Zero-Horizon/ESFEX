@@ -124,7 +124,7 @@ Adds security constraints for the loss of a single element to the dispatch. See 
 | Transmission | On | Line outage constraints |
 | Trans. Reserve Factor (frac) | 0.70 | Usable fraction of line capacity under N-1 |
 | Generation | On | Generator outage constraints |
-| Reserve Type | Largest Unit | `Largest Unit`: the headroom of the other units and batteries must cover the output of the largest unit. `Percentage`: the headroom of all units and batteries must cover Reserve Percentage × the system demand of each step. |
+| Reserve Type | Largest Unit | `Largest Unit`: the headroom of the other units and batteries must cover the output of the largest unit. `Percentage`: the headroom of all units and batteries must cover Reserve Percentage × the system demand of each step. In a multi-system run each system meets it on its own, with its own largest unit and demand. |
 | Reserve Percentage (frac) | 0.15 | Used when Reserve Type is `Percentage` |
 | Use SCOPF | Off | Replace preventive N-1 reserves with post-contingency (LODF) line limits for every pair of lines, added in one solve (not iterative) |
 | Allow Corrective Actions | Off | Allow post-contingency battery and generator re-dispatch instead of preventive reserve |

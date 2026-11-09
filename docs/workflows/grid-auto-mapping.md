@@ -174,7 +174,7 @@ Levels 3 and 4 of earlier versions ran the same reduction as level 2 and are no 
 | 6. Converters | `converter` | AC/DC converters with AC-side and DC-side buses. |
 | 7. Fuel entries | `fuel_entry` | Fuel entry points with mapped fuel type. |
 | 8. Fuel storage | `fuel_storage` | Fuel storage facilities with mapped fuel type. |
-| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance (from the length measured at phase 4, per circuit) are recomputed. Anything still unresolved (an all-untagged pocket) falls back to 220 kV. |
+| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance (from the length measured at phase 4, for all the line's circuits together) are recomputed. Anything still unresolved (an all-untagged pocket) falls back to 220 kV. |
 | 8.5. Voltage floor | Buses below Min voltage | Generators and batteries on sub-floor buses move to the nearest bus at or above the floor; the sub-floor buses and their lines and transformers are removed. |
 | 9. Fuel consistency | All generators | Every generator fuel exists in the catalog and is supplied. |
 | Station clustering | All buses | Same-voltage buses within the station merge radius are merged; internal self-loops are dropped. |
@@ -355,7 +355,7 @@ P = \sqrt{3}\, V\, I_{nom} \times 0.9 \times n_{circuits}
 | 500 | 4.30 | 3,352 |
 | 750 | 5.80 | 6,781 |
 
-\(V\) is the line's own voltage and 0.9 is a thermal margin (not an N-1 derate). The same line type provides the per-km impedance, so rating and impedance stay consistent. The number of circuits comes from the OSM `circuits` tag, or else from `cables` (3 cables per AC circuit); default 1. A tagged capacity is multiplied by the number of circuits.
+\(V\) is the line's own voltage and 0.9 is a thermal margin (not an N-1 derate). The same line type provides the per-km impedance, so rating and impedance stay consistent. The number of circuits comes from the OSM `circuits` tag, or else from `cables` (3 cables per AC circuit); default 1. A tagged capacity is multiplied by the number of circuits. The builder writes the whole line: its rating is that of all circuits together and its R and X those of one circuit divided by the number of circuits (B multiplied by it), which is how the model reads a line's values.
 
 Parameter inference later raises a line or transformer rating that is below 1.25 times the worst-case flow across it, capped by the system peak demand (×1.25) and by a surge-impedance-loading ceiling per voltage class (500 kV: 2,400 MW; 345 kV: 1,200; 220 kV: 600; 110 kV: 250; 66 kV: 120; 33 kV: 60; 10 kV: 20; below: 10), with a 5 MW floor. It never lowers a rating.
 
