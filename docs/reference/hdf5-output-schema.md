@@ -23,8 +23,8 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 ├── detailed_results/
 │   └── year_YYYY_threshold_0/     # Per-year time series
 │       ├── generation/            # Generator output
-│       ├── gen_status/            # On/off status (UC mode)
-│       ├── gen_startup/           # Startup events (UC mode)
+│       ├── gen_status/            # Units online (UC mode)
+│       ├── gen_startup/           # Units started (UC mode)
 │       ├── battery_charge/        # Charging power
 │       ├── battery_discharge/     # Discharging power
 │       ├── battery_soc/           # State of charge
@@ -221,7 +221,7 @@ with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
 
 Full time-series results for each year. The `threshold_0` suffix is fixed.
 
-Node axes are at node level: when the operational network has buses that differ from the nodes, bus results are aggregated to nodes before writing (sum for quantities; max for `gen_status`, `nodal_electricity_prices` and `voltage_angle`). `voltage_magnitude` and `reactive_generation` stay at bus level.
+Node axes are at node level: when the operational network has buses that differ from the nodes, bus results are aggregated to nodes before writing (sum for quantities, `gen_status` included (units online); max for `nodal_electricity_prices` and `voltage_angle`). `voltage_magnitude` and `reactive_generation` stay at bus level.
 
 ### Attributes (Per-Year Metadata)
 
@@ -277,8 +277,9 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 |----------|-------|
 | Shape | (num_nodes, hours) |
 | Type | float64 |
-| Units | Binary (0/1) |
-| Description | Commitment status. Written only in unit-commitment mode |
+| Units | units online (0..`num_units`; 0/1 for a single-unit plant) |
+| Attributes | `num_units`: the generator's units per node (summed over the node's buses) |
+| Description | Commitment status: units online. Written only in unit-commitment mode. Files written before clustered unit commitment hold 0/1 and no `num_units` (read as one unit) |
 
 #### gen_startup/{generator_name}
 
@@ -286,8 +287,9 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 |----------|-------|
 | Shape | (num_nodes, hours) |
 | Type | float64 |
-| Units | 0-1 |
-| Description | Startup events (continuous variable in [0, 1]). Written only in unit-commitment mode |
+| Units | units started (0..`num_units`) |
+| Attributes | `num_units`, as on `gen_status` |
+| Description | Units started per step. A start costs `start_up_cost / num_units`. Written only in unit-commitment mode |
 
 #### curtailment
 
@@ -610,8 +612,8 @@ Virtual unit names start with `"Investment "`, followed by the technology's data
 | Category | Dataset Pattern | Shape | dtype | Units |
 |----------|----------------|-------|-------|-------|
 | Generation | `generation/{name}` | (N, H) | float64 | MW |
-| Status | `gen_status/{name}` | (N, H) | float64 | 0/1 |
-| Startup | `gen_startup/{name}` | (N, H) | float64 | 0-1 |
+| Status | `gen_status/{name}` | (N, H) | float64 | units online |
+| Startup | `gen_startup/{name}` | (N, H) | float64 | units started |
 | Curtailment | `curtailment` | (N, H) | float64 | MW |
 | Bat. charge | `battery_charge/{name}` | (N, H) | float64 | MW |
 | Bat. discharge | `battery_discharge/{name}` | (N, H) | float64 | MW |

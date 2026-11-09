@@ -1865,8 +1865,10 @@ def _merged_generator_params(units: list) -> dict:
     """Parameters of the one generator that stands for *units* (same fuel
     and type), used by every generator merge.
 
-    Rated power and the start-up cost ($ per start: the aggregate starts as
-    one unit) add up. Everything given per MW of rating or as a fraction of
+    Rated power, the units (num_units) and the start-up cost ($ per start of
+    the whole plant) add up, so one unit of the merged plant still costs
+    start_up_cost / num_units to start (each original unit's own cost when
+    the units are alike). Everything given per MW of rating or as a fraction of
     it — min_power and ramps (fractions), inertia H (s), efficiencies, costs
     in $/MWh, $/MW·yr and $/MW, degradation, risk derating, min up/down
     times, governor constants — is averaged with rated power as the weight.
@@ -1876,6 +1878,7 @@ def _merged_generator_params(units: list) -> dict:
     w = [float(u.rated_power) for u in units]
     params = {
         "rated_power": sum(w),
+        "num_units": sum(max(1, int(getattr(u, "num_units", 1) or 1)) for u in units),
         "start_up_cost": sum(float(u.start_up_cost) for u in units),
         "ramp_up": _merge_ramp(units, "ramp_up", w),
         "ramp_down": _merge_ramp(units, "ramp_down", w),

@@ -9167,14 +9167,30 @@ class UCHourlyPriceChart(QWidget):
         }
 
 
+def num_units_at(ds, node: int) -> int:
+    """Units of a generator's ``gen_status`` / ``gen_startup`` dataset *ds*
+    at global node *node*: the ``num_units`` the runner records on it (one
+    for older files, which held 0/1 status)."""
+    try:
+        units = ds.attrs.get("num_units")
+    except Exception:  # noqa: BLE001 - shims without attributes
+        units = None
+    if units is None:
+        return 1
+    units = np.atleast_1d(np.asarray(units))
+    if not 0 <= node < len(units):
+        return 1
+    return max(1, int(units[node]))
+
+
 class UCCommitmentHeatmapChart(QWidget):
-    """Binary commitment heatmap: units × hours, on/off per cell.
+    """Commitment heatmap: plants × hours, units online per cell.
 
     The signature visualization of a UC run. Filters to committable
-    units (gen_status present + at least one transition or some hours
-    off) — pure renewables would be flat 1s and add noise. Units are
-    labelled ``"<tech> @ node_X"`` so the user can see which physical
-    asset is committing where.
+    plants (gen_status present and changing) — pure renewables would be
+    flat and add noise. Rows are labelled ``"<tech> @ node_X"`` so the
+    user can see which physical asset is committing where; a plant of
+    several units (``num_units``) shows the share of them online.
     """
 
     TITLE = "Commitment Heatmap"
@@ -9244,9 +9260,11 @@ class UCCommitmentHeatmapChart(QWidget):
             rng = _system_node_range(h5f, bp)
             units: list[str] = []
             rows: list[list[int]] = []
+            num_units: list[int] = []
             n_hours = 0
             for gen_name in sorted(status_grp.keys()):
-                arr = status_grp[gen_name][:]
+                ds = status_grp[gen_name]
+                arr = ds[:]
                 if arr.ndim < 2:
                     continue
                 # Already this system's nodes (_open_scenario); the label
@@ -9255,18 +9273,21 @@ class UCCommitmentHeatmapChart(QWidget):
                 if n_hours == 0:
                     n_hours = arr.shape[1]
                 for n_i in range(arr.shape[0]):
-                    row = arr[n_i, :]
-                    if not (row.max() > 0.5 and row.min() < 0.5):
-                        # Always-on or always-off — not interesting
-                        # for the commitment heatmap.
+                    row = np.round(arr[n_i, :].astype(float))
+                    if row.max() < 0.5 or row.min() == row.max():
+                        # Never on, or the same units online all along —
+                        # not interesting for the commitment heatmap.
                         continue
                     units.append(f"{gen_name} @ n{node_offset + n_i}")
-                    rows.append([int(round(float(v))) for v in row])
+                    rows.append([int(v) for v in row])
+                    num_units.append(max(num_units_at(ds, node_offset + n_i),
+                                         int(row.max())))
         return {
             "year": int(year),
             "hours": list(range(n_hours)),
             "units": units,
             "status": rows,
+            "num_units": num_units,
         }
 
 

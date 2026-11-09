@@ -105,7 +105,9 @@ struct GeneratorConfig
     frequency_hz::Float64
     current_type::String             # "AC" or "DC"
     # reservoir_* fields (hydro), risk_coefficient,
-    # reservoir_min_release, cascade_downstream, cascade_delay_hours
+    # reservoir_min_release, cascade_downstream, cascade_delay_hours,
+    # reservoir_head_min_factor
+    num_units::Vector{Int}           # identical units per bus (clustered UC)
 end
 ```
 

@@ -302,6 +302,20 @@ function build_variables!(model, input::PowerSystemInput)
         # Unit commitment mode: gen_status is Binary, gen_startup is Continuous [0,1]
         gen_status = @variable(model, [g=1:n_gen, b=buses_of_gen[g], t=1:hours], Bin, base_name="gen_status")
         gen_startup = @variable(model, [g=1:n_gen, b=buses_of_gen[g], t=1:hours], lower_bound=0, upper_bound=1, base_name="gen_startup")
+        # Clustered unit commitment: a plant of N > 1 identical units commits
+        # an integer number of them (0..N) and starts up to N in a step
+        for g in 1:n_gen, b in buses_of_gen[g]
+            N = units_of(input.generators[g], b)
+            N > 1 || continue
+            for t in 1:hours
+                v = gen_status[g, b, t]
+                unset_binary(v)
+                set_integer(v)
+                set_lower_bound(v, 0)
+                set_upper_bound(v, N)
+                set_upper_bound(gen_startup[g, b, t], N)
+            end
+        end
         # gen_shutdown stays nothing (matches Python which has no shutdown variable)
     else
         # Economic dispatch: gen_status is implicitly 1 for
@@ -680,8 +694,11 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     if vars.gen_startup !== nothing
         for g in 1:n_gen
             for b in vars.buses_of_gen[g], t in 1:hours
+                # start_up_cost starts the whole plant: one of its N units
+                # costs start_up_cost / N
+                gen = input.generators[g]
                 add_to_expression!(startup_cost,
-                    input.generators[g].start_up_cost[b], vars.gen_startup[g, b, t])
+                    gen.start_up_cost[b] / units_of(gen, b), vars.gen_startup[g, b, t])
             end
         end
     end
@@ -1266,6 +1283,18 @@ Matches legacy PowerSystem.py:
 - Renewable: gen_output <= rated * availability
 - Non-renewable: gen_output <= rated AND gen_output <= M * gen_status
 - Curtailment is NOT part of generator capacity constraints (it's per-node, defined separately)
+
+Unit commitment with `num_units = N > 1` at a bus (clustered units):
+`gen_status` counts the units online (integer 0..N), each of `rated / N`:
+- min_power × rated/N × status <= gen_output <= rated/N × status
+- gen_output <= rated × availability, and status <= ceil(N × availability):
+  availability is the share of the plant's units available, so a derated
+  plant commits only the units it still has
+- startup >= status[t] − status[t−1] (units started)
+- min up: Σ startup over the last min_up steps <= status[t]
+- min down: Σ shutdown over the last min_down steps <= N − status[t], with
+  shutdown = startup − (status[t] − status[t−1])
+With N = 1 the binary formulation is unchanged.
 """
 function add_generator_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing)
@@ -1325,6 +1354,10 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
             # large aggregated unit below its rated power.
             M_gb = max(_demand_M, gen.rated_power[b] * 1.1)
 
+            # Clustered unit commitment: N identical units of rated / N each
+            N = units_of(gen, b)
+            clustered = N > 1 && capacity_override === nothing && is_uc
+
             for t in 1:hours
                 # availability caps every generator (see segment note above):
                 # default 1.0, CF for renewables, <1 under a scheduled outage.
@@ -1337,7 +1370,16 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                     # In economic dispatch, gen_status is fixed to 1, so the big-M constraint
                     # is redundant with `gen_output <= total_capacity` and only pollutes the
                     # LP matrix with a coefficient of M (~1e4), worsening conditioning.
-                    if capacity_override === nothing && vars.gen_status !== nothing && is_uc
+                    if clustered
+                        # Each online unit gives at most rated / N, and only
+                        # the units still available can be committed
+                        @constraint(model,
+                            vars.gen_output[g, b, t] <= (rated / N) * vars.gen_status[g, b, t])
+                        n_avail = units_available(N, avail)
+                        n_avail < N && @constraint(model,
+                            vars.gen_status[g, b, t] <= n_avail,
+                            base_name = "units_available_g$(g)_b$(b)_t$(t)")
+                    elseif capacity_override === nothing && vars.gen_status !== nothing && is_uc
                         @constraint(model,
                             vars.gen_output[g, b, t] <= M_gb * vars.gen_status[g, b, t]
                         )
@@ -1346,7 +1388,9 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
 
                 # UC constraints only in operational dispatch (not master)
                 if capacity_override === nothing && is_uc
+                    # Minimum stable output of each online unit
                     min_out = gen.min_power[b] * rated
+                    clustered && (min_out /= N)
                     @constraint(model,
                         vars.gen_output[g, b, t] >= min_out * vars.gen_status[g, b, t]
                     )
@@ -1384,7 +1428,9 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
             end
 
             # Unit commitment logic (only in operational dispatch, not master)
-            if capacity_override === nothing && is_uc && rated > 0
+            if clustered && rated > 0
+                add_clustered_commitment!(model, vars, input, g, b, N, tres)
+            elseif capacity_override === nothing && is_uc && rated > 0
                 # min_up / min_down are in hours; the constraints count time
                 # steps. Round up so a step longer than the minimum still
                 # enforces at least one step (8 h at 6-h steps → 2 steps).
@@ -1431,6 +1477,93 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
         end
     end
 
+end
+
+"""
+    units_available(N, avail) -> Int
+
+Units of an `N`-unit plant that can be committed in a step with
+availability `avail` (the share of the plant available): `ceil(N × avail)`,
+so 1.2 units' worth lets two units run, sharing the 1.2 units of power.
+"""
+units_available(N::Int, avail::Real) = clamp(ceil(Int, N * avail - 1e-6), 0, N)
+
+"""
+    add_clustered_commitment!(model, vars, input, g, b, N, tres)
+
+Start-up and minimum up/down time constraints of generator `g` at bus `b`
+made of `N > 1` identical units (`gen_status` = units online, integer):
+
+    startup[t] ≥ status[t] − status[t−1]
+    Σ_{τ=t−MU+1..t} startup[τ] ≤ status[t]                        (MU ≥ 2)
+    Σ_{τ=t−MD+1..t} (startup[τ] − status[τ] + status[τ−1]) ≤ N − status[t]  (MD ≥ 2)
+
+with MU / MD the minimum up / down times in steps and status[0] the units
+online at the end of the previous window (at most `N`). A unit started in
+the last MU steps is still online; a unit shut down in the last MD steps
+cannot be online again. `startup` only has a lower bound: a larger value
+costs more and tightens both sums, so it equals the units started.
+"""
+function add_clustered_commitment!(model, vars, input, g::Int, b::Int, N::Int, tres)
+    gen = input.generators[g]
+    hours = input.temporal.hours
+    min_up = ceil(Int, gen.min_up_time[b] / tres)
+    min_down = ceil(Int, gen.min_down_time[b] / tres)
+    u = t -> vars.gen_status[g, b, t]
+    su = t -> vars.gen_startup[g, b, t]
+    u0 = clamp(get(get(input.generator_initial_status, g, Dict{Int,Float64}()), b, 0.0),
+               0.0, Float64(N))
+    prev(t) = t > 1 ? u(t - 1) : u0
+
+    for t in 1:hours
+        @constraint(model, su(t) >= u(t) - prev(t),
+            base_name = "startup_detect_g$(g)_b$(b)_t$(t)")
+    end
+    if min_up > 1
+        for t in 1:hours
+            started = AffExpr(0.0)
+            for τ in max(1, t - min_up + 1):t
+                add_to_expression!(started, su(τ))
+            end
+            @constraint(model, started <= u(t), base_name = "min_up_g$(g)_b$(b)_t$(t)")
+        end
+    end
+    if min_down > 1
+        for t in 1:hours
+            stopped = AffExpr(0.0)
+            for τ in max(1, t - min_down + 1):t
+                add_to_expression!(stopped, su(τ))
+                add_to_expression!(stopped, -1.0, u(τ))
+                add_to_expression!(stopped, prev(τ))
+            end
+            @constraint(model, stopped <= N - u(t), base_name = "min_down_g$(g)_b$(b)_t$(t)")
+        end
+    end
+end
+
+"""
+    online_capacity(model, vars, input, g, b, t, p_gb)
+
+Power generator `g` at bus `b` can give in step `t` with the units it has
+online (unit commitment), `p_gb` being its power in service:
+`p_gb × availability × status` for a single unit; for `N > 1` units the
+lesser of `p_gb / N × units online` and `p_gb × availability`, a variable
+(made once per step and kept in `model.ext`) bounded by both.
+"""
+function online_capacity(model, vars, input, g::Int, b::Int, t::Int, p_gb)
+    gen = input.generators[g]
+    cap_t = p_gb * gen.availability[t, b]
+    N = units_of(gen, b)
+    N == 1 && return cap_t * vars.gen_status[g, b, t]
+    cache = get!(model.ext, :gen_online_capacity) do
+        Dict{NTuple{3, Int}, VariableRef}()
+    end
+    return get!(cache, (g, b, t)) do
+        c = @variable(model, lower_bound = 0, upper_bound = cap_t,
+                      base_name = "gen_online_cap_g$(g)_b$(b)_t$(t)")
+        @constraint(model, c <= (p_gb / N) * vars.gen_status[g, b, t])
+        c
+    end
 end
 
 """
@@ -2191,7 +2324,8 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                         elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
                             cap_t = p_gb * gen.availability[t, b]
                             if spinning
-                                add_to_expression!(available_reserve, cap_t, vars.gen_status[g, b, t])
+                                add_to_expression!(available_reserve,
+                                    online_capacity(model, vars, input, g, b, t, p_gb))
                             else
                                 add_to_expression!(available_reserve, cap_t)
                             end
@@ -2235,8 +2369,9 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                                 capacity_override[(g, b)], input.dynamic_reserve_contribution)
                         elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
                             if spinning
+                                # each online unit responds with its share
                                 add_to_expression!(available_dynamic,
-                                    input.dynamic_reserve_contribution * p_gb,
+                                    input.dynamic_reserve_contribution * p_gb / units_of(gen, b),
                                     vars.gen_status[g, b, t])
                             else
                                 add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, p_gb)
@@ -2793,7 +2928,8 @@ function _add_system_gen_n1!(model, vars::PowerSystemVariables, input::PowerSyst
                 headroom = AffExpr(0.0)
                 cap_t = p_gb * gen.availability[t, b]
                 if spinning
-                    add_to_expression!(headroom, cap_t, vars.gen_status[g, b, t])
+                    add_to_expression!(headroom,
+                        online_capacity(model, vars, input, g, b, t, p_gb))
                 else
                     add_to_expression!(headroom, cap_t)
                 end
@@ -3604,6 +3740,8 @@ function recover_uc_duals_via_copy(
             if is_binary(new_v)
                 unset_binary(new_v)
             end
+            # clustered units (integer units online)
+            is_integer(new_v) && unset_integer(new_v)
             fix(new_v, status_vals[g, b, t]; force=true)
         end
     end

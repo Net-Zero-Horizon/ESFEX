@@ -148,6 +148,9 @@ class GeneratorForm(QWidget):
         # --- Operating Parameters ---
         grp_op = QGroupBox(tr("generator_form.group_operating"))
         fl_op = QFormLayout(grp_op)
+        self._num_units = self._int_spin(1, 10000)
+        self._num_units.setToolTip(tr("generator_form.num_units_tooltip"))
+        fl_op.addRow(tr("generator_form.num_units"), self._num_units)
         self._min_power = self._dbl_spin(0, 1, 3)
         fl_op.addRow(tr("generator_form.min_power"), self._min_power)
         self._min_up = self._int_spin(0, 168)
@@ -241,6 +244,7 @@ class GeneratorForm(QWidget):
         self._maintenance_cost = self._dbl_spin(0, 1e6, 2)
         fl_cost.addRow(tr("generator_form.maintenance_cost"), self._maintenance_cost)
         self._start_up_cost = self._dbl_spin(0, 1e9, 0)
+        self._start_up_cost.setToolTip(tr("generator_form.startup_cost_tooltip"))
         fl_cost.addRow(tr("generator_form.startup_cost"), self._start_up_cost)
         self._decommissioning_cost = self._dbl_spin(0, 1e9, 0)
         fl_cost.addRow(tr("generator_form.decommissioning_cost"), self._decommissioning_cost)
@@ -416,6 +420,7 @@ class GeneratorForm(QWidget):
         self._degradation_rate.setValue(inst.degradation_rate)
         self._risk_coefficient.setValue(getattr(inst, "risk_coefficient", 1.0))
 
+        self._num_units.setValue(getattr(inst, "num_units", 1))
         self._min_power.setValue(inst.min_power)
         self._min_up.setValue(inst.min_up)
         self._min_down.setValue(inst.min_down)
@@ -533,6 +538,7 @@ class GeneratorForm(QWidget):
             ("initial_age", self._initial_age),
             ("degradation_rate", self._degradation_rate),
             ("risk_coefficient", self._risk_coefficient),
+            ("num_units", self._num_units),
             ("min_power", self._min_power),
             ("min_up", self._min_up),
             ("min_down", self._min_down),

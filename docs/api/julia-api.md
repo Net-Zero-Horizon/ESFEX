@@ -130,8 +130,12 @@ struct GeneratorConfig
     # ... turbine/pump efficiency, evaporation, pump capacity, spillage,
     #     reservoir investment, min release, cascade, head dependence
     risk_coefficient::Vector{Float64}         # Geographic derating (0-1)
+    # ... reservoir_min_release, cascade, head dependence
+    num_units::Vector{Int}                    # Identical units per bus (clustered UC); units_of(gen, b)
 end
 ```
+
+Older call sites may omit the trailing fields: the constructors fill the defaults (`num_units` = one unit per bus).
 
 ### BatteryConfig
 

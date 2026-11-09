@@ -1213,6 +1213,12 @@ def convert_generator_config(
 
     frequency_hz = float(getattr(gen, 'frequency_hz', 50.0))
     current_type = str(getattr(gen, 'current_type', 'AC'))
+    # Units per node for clustered unit commitment (a single value is
+    # broadcast; Julia counts fewer than 1 as 1)
+    num_units_node = [int(n) for n in (getattr(gen, 'num_units', None) or [1])]
+    if len(num_units_node) == 1:
+        num_units_node = num_units_node * num_nodes
+    num_units_node += [1] * (num_nodes - len(num_units_node))
 
     # Reservoir fields — fill with zeros if empty
     res_capacity = gen.reservoir_capacity if gen.reservoir_capacity else [0.0] * num_nodes
@@ -1262,6 +1268,7 @@ def convert_generator_config(
         ramp_down = prop(gen.ramp_down)
         min_up = prop(min_up_float)
         min_down = prop(min_down_float)
+        num_units = [int(n) for n in prop(num_units_node)]
         fuel_cost = prop(gen.fuel_cost)
         fixed_cost = prop(gen.fixed_cost)
         maint_cost = prop(gen.maintenance_cost)
@@ -1295,6 +1302,7 @@ def convert_generator_config(
         ramp_down = gen.ramp_down
         min_up = min_up_float
         min_down = min_down_float
+        num_units = num_units_node
         fuel_cost = gen.fuel_cost
         fixed_cost = gen.fixed_cost
         maint_cost = gen.maintenance_cost
@@ -1378,6 +1386,7 @@ def convert_generator_config(
             if bus_to_node
             else (getattr(gen, 'reservoir_head_min_factor', None) or [1.0])
         ),
+        py_to_julia_int_vector(num_units),
     )
 
 

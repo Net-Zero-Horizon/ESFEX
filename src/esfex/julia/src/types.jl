@@ -356,6 +356,10 @@ Generator/technology configuration.
 - `reservoir_spillage_allowed::Bool`: Whether reservoir spillage is permitted
 - `reservoir_invest_cost::Vector{Float64}`: Reservoir expansion cost per node (\$/MWh)
 - `reservoir_invest_max::Vector{Float64}`: Max reservoir expansion per node (MWh)
+- `num_units::Vector{Int}`: Identical units the capacity at each bus is made of
+  (clustered unit commitment: `min_power`, start-ups and min up/down apply per
+  unit of `rated_power / num_units`; `start_up_cost` is per start of all of
+  them). Fewer than 1 counts as 1, see [`units_of`](@ref).
 """
 struct GeneratorConfig
     name::String
@@ -414,13 +418,16 @@ struct GeneratorConfig
     # head_min_factor*rated at the minimum level up to rated at the maximum
     # level — a depleted reservoir means low head means less peak power.
     reservoir_head_min_factor::Vector{Float64}
+    # Clustered unit commitment: identical units per bus (1 = one unit)
+    num_units::Vector{Int}
 end
 
 # Backward-compatible constructors. The struct grew over time, so older call
 # sites pass fewer positional arguments and the newer fields take neutral
 # defaults: reservoir_min_release = zeros, cascade_downstream = "" (terminal),
-# cascade_delay_hours = 0, reservoir_head_min_factor = ones (no head effect).
-# Dispatch is by argument count (38 / 39 / 41 / full 42).
+# cascade_delay_hours = 0, reservoir_head_min_factor = ones (no head effect),
+# num_units = ones (one unit per bus).
+# Dispatch is by argument count (38 / 39 / 41 / 42 / full 43).
 
 # 38-arg: through risk_coefficient.
 function GeneratorConfig(
@@ -446,6 +453,7 @@ function GeneratorConfig(
         reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
         reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
         zeros(Float64, n), "", 0, ones(Float64, n),  # min_release, cascade_*, head_min_factor
+        ones(Int, n),  # num_units
     )
 end
 
@@ -474,6 +482,7 @@ function GeneratorConfig(
         reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
         reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
         reservoir_min_release, "", 0, ones(Float64, n),  # cascade_*, head_min_factor
+        ones(Int, n),  # num_units
     )
 end
 
@@ -503,8 +512,46 @@ function GeneratorConfig(
         reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
         reservoir_min_release, cascade_downstream, cascade_delay_hours,
         ones(Float64, n),  # reservoir_head_min_factor
+        ones(Int, n),  # num_units
     )
 end
+
+# 42-arg: through reservoir_head_min_factor (one unit per bus).
+function GeneratorConfig(
+    name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
+    ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
+    fixed_cost, maintenance_cost, inertia, invest_cost, availability,
+    reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
+    frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
+    reservoir_min_level, reservoir_max_level, reservoir_inflow,
+    reservoir_turbine_efficiency, reservoir_evaporation_rate,
+    reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
+    reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
+    reservoir_min_release, cascade_downstream, cascade_delay_hours,
+    reservoir_head_min_factor,
+)
+    return GeneratorConfig(
+        name, type, fuel, rated_power, min_power, efficiency_rated, efficiency_min,
+        ramp_up, ramp_down, min_up_time, min_down_time, start_up_cost, fuel_cost,
+        fixed_cost, maintenance_cost, inertia, invest_cost, availability,
+        reservable, life_time, initial_age, degradation_rate, decommissioning_cost,
+        frequency_hz, current_type, reservoir_capacity, reservoir_initial_level,
+        reservoir_min_level, reservoir_max_level, reservoir_inflow,
+        reservoir_turbine_efficiency, reservoir_evaporation_rate,
+        reservoir_pump_capacity, reservoir_pump_efficiency, reservoir_spillage_allowed,
+        reservoir_invest_cost, reservoir_invest_max, risk_coefficient,
+        reservoir_min_release, cascade_downstream, cascade_delay_hours,
+        reservoir_head_min_factor, ones(Int, length(rated_power)),
+    )
+end
+
+"""
+    units_of(gen, b) -> Int
+
+Identical units generator `gen` has at bus `b` (clustered unit commitment):
+`gen.num_units[b]`, at least 1, and 1 where the vector is shorter.
+"""
+units_of(gen, b::Int) = length(gen.num_units) >= b ? max(1, gen.num_units[b]) : 1
 
 """
     BatteryConfig

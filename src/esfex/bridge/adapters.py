@@ -549,6 +549,14 @@ def _per_bus_unit_on_model_buses(
                 else:
                     reduced[r] += v
             out[field_name] = reduced
+        elif field_name == "num_units":
+            # The units of the buses whose capacity a retained bus takes
+            units = [0] * len(retained)
+            for o in range(n_orig):
+                r = reduced_of.get(o, target.get(o))
+                if r is not None and float(rp[o] or 0.0) > 0:
+                    units[r] += int(values[o])
+            out[field_name] = [max(1, u) for u in units]
         else:
             out[field_name] = [values[o] for o in retained]
     return out
@@ -1555,7 +1563,8 @@ class PowerSystemAdapter:
                     # Also propagate the ageing overrides (no degradation and
                     # no end of life for MasterProblem cumulative capacities,
                     # which already hold the retirements and life extension)
-                    for f in ('degradation_rate', 'initial_age', 'life_time'):
+                    # and the units left of that capacity (units_in_service)
+                    for f in ('degradation_rate', 'initial_age', 'life_time', 'num_units'):
                         if f in updated_data:
                             gen_dict[f] = updated_data[f]
                     gen_to_convert = GeneratorConfig(**gen_dict)
@@ -1646,6 +1655,8 @@ class PowerSystemAdapter:
                 initial_age=vdata.get("initial_age", [0] * nn),
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
+                # Units of the technology's unit_size (one when it has none)
+                num_units=vdata.get("num_units", [1] * nn),
                 invest_cost=[0.0] * nn,
                 frequency_hz=vdata.get("frequency_hz", 50.0),
                 current_type=vdata.get("current_type", "AC"),
