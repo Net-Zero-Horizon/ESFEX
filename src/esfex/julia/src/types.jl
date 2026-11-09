@@ -2615,8 +2615,13 @@ master's cost unit:
   CO2 price, LP-relaxed start-ups; for a battery maintenance on charge and
   discharge and its throughput (or offer-curve) cost;
 - `asset_cost`: its share of `build_annual_asset_cost`: fixed O&M on the
-  capacity in service, life extension and decommissioning.
-`discount_rate` is the scenario's (base rate × its multiplier).
+  capacity in service, life extension and decommissioning;
+- `fuel_cost`: the fuel part of a generator's `operating_cost`, and
+  `fuel_growth` its yearly growth factor in the master (the primary-energy
+  fuel's `price_growth_rate`, a scenario's `fuel_price_growth`), for the
+  years past the modelled ones (`calculate_unit_npv`'s `extra_years`).
+`discount_rate` is the scenario's (base rate × its multiplier),
+`multipliers` its `ScenarioMultipliers` (`nothing` when deterministic).
 """
 struct UnitOperation
     probability::Float64
@@ -2624,11 +2629,14 @@ struct UnitOperation
     energy::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
     operating_cost::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
     asset_cost::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
+    fuel_cost::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
+    fuel_growth::Dict{Tuple{Symbol,Int,Int,Int}, Float64}
+    multipliers::Any
 end
 
-UnitOperation(probability::Float64, discount_rate::Float64) = UnitOperation(
-    probability, discount_rate, Dict{Tuple{Symbol,Int,Int,Int}, Float64}(),
-    Dict{Tuple{Symbol,Int,Int,Int}, Float64}(), Dict{Tuple{Symbol,Int,Int,Int}, Float64}())
+UnitOperation(probability::Float64, discount_rate::Float64; multipliers = nothing) =
+    UnitOperation(probability, discount_rate,
+        (Dict{Tuple{Symbol,Int,Int,Int}, Float64}() for _ in 1:5)..., multipliers)
 
 """
     MasterProblemResult

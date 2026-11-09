@@ -357,6 +357,28 @@ system's import, route transport and shortfall costs are not shared out to
 the units.
 """
 function master_fuel_unit_price(input::MasterProblemInput, g::Int, b::Int, year_idx::Int)
+    fm = _master_unit_fuel(input, g, b)
+    fm === nothing && return nothing
+    fuel, mwhe = fm
+    pe = input.primary_energy.pe
+    price = fuel.price_base * (1 + fuel.price_growth_rate)^(input.years[year_idx] - pe.base_year)
+    return price / mwhe
+end
+
+"""
+    master_fuel_unit_growth(input, g, b) -> Union{Nothing, Float64}
+
+Yearly growth factor (1 + `price_growth_rate`) of the tank fuel generator
+`g` burns at bus `b` (`master_fuel_unit_price`); `nothing` when it is not
+fuel-coupled there.
+"""
+function master_fuel_unit_growth(input::MasterProblemInput, g::Int, b::Int)
+    fm = _master_unit_fuel(input, g, b)
+    return fm === nothing ? nothing : 1.0 + fm[1].price_growth_rate
+end
+
+# The FuelConfig and MWh per fuel unit of generator g's tank fuel at bus b
+function _master_unit_fuel(input::MasterProblemInput, g::Int, b::Int)
     has_master_fuel(input) || return nothing
     pe = input.primary_energy.pe
     haskey(pe.generator_fuel_map, g) || return nothing
@@ -366,9 +388,7 @@ function master_fuel_unit_price(input::MasterProblemInput, g::Int, b::Int, year_
     1 <= node <= pe.num_nodes || return nothing
     idx = findfirst(f -> f.name == fuel_name, pe.fuels)
     idx === nothing && return nothing
-    fuel = pe.fuels[idx]
-    price = fuel.price_base * (1 + fuel.price_growth_rate)^(input.years[year_idx] - pe.base_year)
-    return price / mwhe
+    return pe.fuels[idx], mwhe
 end
 
 """
