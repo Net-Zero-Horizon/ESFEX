@@ -871,7 +871,7 @@ Implemented in `add_n1_security_constraints!()` (preventive) or, with `scopf_ena
 H^{\text{N1}}_t + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t} \quad \forall t \tag{N1-1}
 \]
 
-where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable non-renewable units, counted only when online in unit commitment, plus the headroom of reservable batteries), summed over the whole system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_shortfall_t*`) keeps the problem feasible.
+where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable non-renewable units, counted only when online in unit commitment, plus the headroom of reservable batteries), summed over the system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_reserve_system_shortfall_t*`) keeps the problem feasible. Like the reserves, N1-1 holds **per system**: in a merged multi-system run each original system has its own largest unit, covered only by its own units' and batteries' headroom (`n1_gen_reserve_system_s{k}_t*`, shortfall `n1_gen_reserve_system_s{k}_shortfall_t*`, for system \(k\)); earlier versions had one requirement, the largest unit of all systems, covered by the headroom of every system.
 
 #### N1-2: Transmission N-1 (preventive)
 
@@ -879,11 +879,11 @@ where \((g^*, n^*)\) is the unit with the largest rated power in the system and 
 -\bar{F}_{\ell} \cdot \omega - s^{\text{N1,l}}_{\ell,t} \leq f_{\ell,t} \leq \bar{F}_{\ell} \cdot \omega + s^{\text{N1,l}}_{\ell,t} \quad \forall \ell: \bar{F}_{\ell} > 0, \; t \tag{N1-2}
 \]
 
-where \(\omega\) is the `transmission_reserve_factor`. Every transmission line with positive capacity is critical, each parallel circuit on its own flow (`n1_trans_reserve_l*`, over-flow slack `n1_trans_over_l*`).
+where \(\omega\) is the `transmission_reserve_factor`. Every transmission line with positive capacity is critical, each line (all its circuits together) on its own flow (`n1_trans_reserve_l*`, over-flow slack `n1_trans_over_l*`).
 
 Both slacks are priced at `loss_of_reserve_static` per MW and time step (reported as `n1_security_shortfall_cost`), so an insecure fleet or network shows up as a cost instead of an infeasible model.
 
-With `generation_reserve_type: percentage` the right-hand side of N1-1 is `generation_reserve_percentage` × the total demand of step \(t\) instead of the largest unit's output, and no unit is excluded from \(H^{\text{N1}}_t\) (same constraint and shortfall names).
+With `generation_reserve_type: percentage` the right-hand side of N1-1 is `generation_reserve_percentage` × the system's total demand of step \(t\) instead of the largest unit's output, and no unit is excluded from \(H^{\text{N1}}_t\) (same constraint and shortfall names).
 
 `critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` configure the post-hoc contingency analysis of the Studio's single-line diagram, not the optimisation.
 

@@ -421,6 +421,7 @@
     "resistance_pu": "Resistência (pu):",
     "susceptance_pu": "Suscetância (pu):",
     "circuits": "Circuitos:",
+    "circuits_tip": "Número de circuitos em paralelo. Capacidade, reatância, resistência e susceptância são as da linha inteira, todos os circuitos juntos: alterar o número não as reescala. Só uma reatância derivada da reatância por km (de um circuito) é dividida por ele.",
     "frequency": "Frequência (Hz):",
     "current_type": "Tipo de corrente:",
     "edit_trace": "Editar traçado",

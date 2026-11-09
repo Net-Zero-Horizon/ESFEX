@@ -36,9 +36,10 @@ def test_node_link_impedance_is_the_parallel_equivalent():
     # X = 1 / (1/0.1 + 1/0.3) = 0.075
     assert _node_link_impedances([_line(0, 1, 0.02, 0.1), _line(1, 0, 0.06, 0.3)], [], dc, 100.0) == {
         (0, 1): pytest.approx((0.015, 0.075))}
-    # Two circuits of (0.04, 0.2) are one line of (0.02, 0.1)
+    # A line's R and X are those of all its circuits: a 2-circuit line of
+    # (0.02, 0.1) is not halved again
     assert _node_link_impedances(
-        [_line(0, 1, 0.04, 0.2, circuits=2), _line(0, 1, 0.06, 0.3)], [], dc, 100.0) == {
+        [_line(0, 1, 0.02, 0.1, circuits=2), _line(0, 1, 0.06, 0.3)], [], dc, 100.0) == {
         (0, 1): pytest.approx((0.015, 0.075))}
     # Lines inside a node do not join nodes
     assert _node_link_impedances([_line(1, 1, 0.02, 0.1)], [], dc, 100.0) == {}

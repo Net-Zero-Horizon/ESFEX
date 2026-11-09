@@ -741,10 +741,28 @@ function create_benders_subproblem(
                   copy_of((:reservoir, string(g), b))
         for (g, b) in benders_reservoir_builds(master_vars, input, year_idx))
     add_reservoir_constraints!(sp_model, ps_vars, day_input; capacity_override=res_cap)
-    add_reserve_constraints!(sp_model, ps_vars, day_input;
+    # The units the master builds hold reserve, as in the monolithic master;
+    # their capacity is a constant of the reserve constraints, recorded for
+    # the cut like the capacity limits ("tech_pow", "bt_pow")
+    reserve_refs = add_reserve_constraints!(sp_model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         battery_capacity_override=total_cap_bat_power,
-        demand_scale=1.0)
+        demand_scale=1.0,
+        extra_headroom=master_unit_headroom(input, start_hour, tech_output,
+            (t, b) -> get(fixed_caps.tech_capacity, (t, b), 0.0),
+            bat_tech_discharge, bat_tech_charge,
+            (bt, b) -> get(fixed_caps.bat_tech_power, (bt, b), 0.0)))
+    reserve_groups = reserve_node_groups(day_input)
+    for ((k, ts), crefs) in reserve_refs, b in 1:n_buses
+        input.network.bus_to_node[b] in reserve_groups[k] || continue
+        for (kind, i, a, d) in master_unit_reserve_terms(input, start_hour, b, ts)
+            store_kind = kind === :tech ? "tech_pow" : "bt_pow"
+            (kind === :tech ? tech_output : bat_tech_discharge) === nothing && continue
+            entries = get!(constraint_store, store_kind, Tuple{Any, Float64, Int, Int}[])
+            push!(entries, (crefs[1], a, i, b))
+            crefs[2] === nothing || push!(entries, (crefs[2], d, i, b))
+        end
+    end
     add_inertia_constraints!(sp_model, ps_vars, day_input)
     # Converters at their rated power plus a copy of the MW the master built
     conv_cap = Dict{Tuple{String,Int}, Any}()
@@ -1108,6 +1126,11 @@ function extract_subproblem_duals(
                 tech_duals[(t, b)] = total_dual
             end
         end
+    end
+    # Reserve headroom and dynamic capability of the technologies built
+    # (master_unit_reserve_terms): Σ dual × coefficient of the capacity
+    for (cref, coef, t, b) in get(sp.constraint_store, "tech_pow", ())
+        tech_duals[(t, b)] = get(tech_duals, (t, b), 0.0) + dual(cref) * coef
     end
 
     # Battery tech power and energy duals: Σ dual × coefficient of the

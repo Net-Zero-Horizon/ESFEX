@@ -173,6 +173,8 @@ class TransmissionLineGeo(BaseModel):
     to_node: int = Field(ge=0)
     from_bus: Optional[int] = None   # Bus index (0-indexed), preferred over from_node
     to_bus: Optional[int] = None     # Bus index (0-indexed), preferred over to_node
+    # capacity_mw, reactance_pu, resistance_pu and susceptance_pu are those of
+    # the whole line, all its num_circuits circuits together
     capacity_mw: Optional[float] = None
     waypoints: list[GeoCoordinate] = Field(
         default_factory=list,
@@ -185,13 +187,19 @@ class TransmissionLineGeo(BaseModel):
     reactance_pu: Optional[float] = None
     reactance_per_km: Optional[float] = Field(
         default=None, ge=0,
-        description="Series reactance (ohm/km) used to derive reactance_pu "
-                    "from length_km when reactance_pu is not set; "
+        description="Series reactance of one circuit (ohm/km) used to derive "
+                    "reactance_pu from length_km (divided by num_circuits) "
+                    "when reactance_pu is not set; "
                     "None or 0 = dc_power_flow.reactance_per_km",
     )
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
-    num_circuits: int = 1
+    num_circuits: int = Field(
+        default=1,
+        description="Parallel circuits. Descriptive: capacity_mw and the "
+                    "impedances already include every circuit and are not "
+                    "rescaled by it",
+    )
     # Operating cost of the flow ($ per MWh per km), set on inter-system
     # links: the master and the dispatch charge length_km × cost_per_mw_km × |flow|
     cost_per_mw_km: float = Field(default=0.0, ge=0)

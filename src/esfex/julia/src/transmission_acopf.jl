@@ -127,10 +127,9 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
         i, j = line.from_node, line.to_node
         i == j && continue  # skip self-loops
 
-        nc = line.num_circuits
-        r = line.resistance_pu / nc
-        x = line.reactance_pu / nc
-        b_sh = line.susceptance_pu * nc
+        r = line.resistance_pu
+        x = line.reactance_pu
+        b_sh = line.susceptance_pu
 
         if abs(x) < 1e-12 && abs(r) < 1e-12
             continue
@@ -152,7 +151,7 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
             -g_s, -b_s,                  # g_ft, b_ft
             g_s, b_s + b_sh/2,           # g_tt, b_tt
             -g_s, -b_s,                  # g_tf, b_tf
-            line.capacity_mw * nc,       # capacity_mva (use MW ≈ MVA for consistency)
+            line.capacity_mw,            # capacity_mva (use MW ≈ MVA for consistency)
             1.0,                         # tap
             line.line_id
         ))

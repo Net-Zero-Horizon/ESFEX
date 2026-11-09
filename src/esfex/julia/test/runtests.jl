@@ -100,11 +100,22 @@ import Ipopt
         @test Yb[2, 2] ≈ ys + im * 0.03
         @test Yb[1, 2] ≈ -ys                  # off-diagonals unaffected by shunt
 
-        # Parallel circuits halve the effective series impedance, so the
-        # series admittance doubles relative to a single circuit.
-        Yp = build_ybus([line(x = 0.2, r = 0.02, circuits = 2)],
+        # A line's r, x, b are those of all its circuits together: the
+        # circuit count does not rescale them (it used to halve them again).
+        Yp = build_ybus([line(x = 0.2, r = 0.02, b = 0.06, circuits = 2)],
                         TransformerData[], 2)
-        @test Yp[1, 2] ≈ -1.0 / complex(0.01, 0.1)
+        @test Yp[1, 2] ≈ -1.0 / complex(0.02, 0.2)
+        @test Yp[1, 1] ≈ 1.0 / complex(0.02, 0.2) + im * 0.03
+
+        # Same for the DC network: capacity and reactance as given
+        dc_lines = [line(x = 0.05, circuits = 2), line(from = 2, to = 3, x = 0.1)]
+        dc_net = NetworkConfig(3, 3, BusData[], [1, 2, 3], zeros(3, 3), zeros(3, 3),
+                               100.0, 0.4, 220.0, 0.6, 1, zeros(3), zeros(3), dc_lines,
+                               TransformerData[], ACDCConverterData[],
+                               FrequencyConverterData[], 0.1)
+        _, dc_caps, dc_x = ESFEX.build_from_line_data(dc_net)
+        @test dc_caps == [100.0, 100.0]
+        @test dc_x == [0.05, 0.1]
 
         # Zero-impedance lines are skipped (matrix stays all-zero).
         Yz = build_ybus([line(x = 0.0, r = 0.0)], TransformerData[], 2)
@@ -1672,6 +1683,66 @@ import Ipopt
             shed, cost = line_n1(true)
             @test shed ≈ 0.0 atol = 1e-6
             @test cost ≈ 80.0 * H atol = 1e-6
+        end
+
+        @testset "generation N-1 per system" begin
+            # Two systems, one node each, no link. A: a 100 MW unit serving
+            # 50 MW and a 30 MW backup; B: one 40 MW unit serving 20 MW. A
+            # merged run had one requirement, the overall largest unit (A's)
+            # covered by A's backup and B's headroom: secure. Per system, A
+            # is 20 MW short and B, losing its only unit, 20 MW short.
+            H = 2
+            function sgen(name, rated, fcost)
+                z = zeros(2)
+                GeneratorConfig(
+                    name, "Non-renewable", "Gas", rated, z,
+                    fill(0.5, 2), fill(0.4, 2), ones(2), ones(2), z, z, z,
+                    fill(fcost, 2), z, z, z, z, ones(H, 2), true,
+                    fill(30.0, 2), z, z, z, 50.0, "AC",
+                    z, z, z, z, zeros(H, 2), z, z, z, z, false, z, z, z,
+                )
+            end
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            net2 = NetworkConfig(2, 2, buses, [1, 2], zeros(2, 2), zeros(2, 2),
+                                 100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                 TransmissionLineData[], TransformerData[],
+                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gens = [sgen("Big", [100.0, 40.0], 1.0e-5), sgen("Backup", [30.0, 0.0], 1.0e-4)]
+            function sys_n1(groups; rtype = "largest_unit", rpct = 0.0)
+                input = PowerSystemInput(
+                    name = "A_B", year = 2025, network = net2, generators = gens,
+                    batteries = BatteryConfig[], demand = repeat([50.0 20.0], H),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    co2_budget_groups = groups,
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0,
+                    n1_security_enabled = true, n1_generation_enabled = true,
+                    n1_generation_reserve_type = rtype,
+                    n1_generation_reserve_percentage = rpct,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                return model, res.cost_breakdown.n1_security_shortfall_cost
+            end
+            two = [CO2BudgetGroup("A", [1], Inf, 0.0), CO2BudgetGroup("B", [2], Inf, 0.0)]
+            model, cost = sys_n1(two)
+            @test cost ≈ 40.0 * H atol = 1e-6
+            @test constraint_by_name(model, "n1_gen_reserve_system_s1_t1") !== nothing
+            @test constraint_by_name(model, "n1_gen_reserve_system_s2_t1") !== nothing
+            # One system: one requirement, as before
+            model, cost = sys_n1(CO2BudgetGroup[])
+            @test cost ≈ 0.0 atol = 1e-6
+            @test constraint_by_name(model, "n1_gen_reserve_system_t1") !== nothing
+            # Percentage of each system's own demand: at 150 %, A needs 75 MW
+            # (80 MW of headroom) and B 30 MW (20 MW: 10 short). Over the
+            # merged demand it was 105 MW against 100 MW of headroom.
+            _, cost = sys_n1(two; rtype = "percentage", rpct = 0.5)
+            @test cost ≈ 0.0 atol = 1e-6
+            _, cost = sys_n1(two; rtype = "percentage", rpct = 1.5)
+            @test cost ≈ 10.0 * H atol = 1e-6
         end
 
         @testset "zero ramp rate means no ramp limit" begin
@@ -3629,10 +3700,14 @@ import Ipopt
 
             # No Benders-only investment rules: with a 20 % RE target already
             # met and dear PV and batteries, nothing is built (the Benders
-            # master forced 0.07 MW of PV and 0.35 MWh of battery)
+            # master forced 0.07 MW of PV and 0.35 MWh of battery). The
+            # battery is not reservable: a reservable one is worth building
+            # to hold the reserve the non-reservable gas unit cannot.
             pv_dear = ESFEX.with_fields(pv; invest_cost = [1.0])
-            li_dear = BatteryTechnologyConfig("LiNew", [1.0], [1.0], [100.0], [400.0], 1.0, 8.0,
-                [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false, "AC", o, [1.0])
+            li_dear = ESFEX.with_fields(
+                BatteryTechnologyConfig("LiNew", [1.0], [1.0], [100.0], [400.0], 1.0, 8.0,
+                    [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false, "AC", o,
+                    [1.0]); reservable = false)
             for bts in (BatteryTechnologyConfig[], [li_dear])
                 mono, bend = both(MasterProblemInput(
                     years = [2025], network = net1, generators = [gas1],
@@ -3769,6 +3844,68 @@ import Ipopt
                 @test br.gap < 1e-6
                 @test br.objective ≈ objective_value(model) rtol = 1e-6
             end
+        end
+
+        @testset "master: units it builds hold reserve, as in the dispatch" begin
+            # 50 MW of load on a cheap unit that is not reservable; a 20 %
+            # static reserve (10 MW) needs another unit. The master's built
+            # capacity held no reserve, so it paid the shortfall forever
+            # instead of building a reservable peaker or battery.
+            o = [0.0]
+            base = mkgen("Base", "Non-renewable", "Gas", [100.0], [1.0e-5],
+                         ones(H24, 1); nb = 1, H = H24)
+            gt(avail, reservable) = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0e-3],
+                [100.0], fill(avail, H24, 1), [1.0], [1.0], [1.0], [1.0], o, o, o, [1.0e-3],
+                o, o, o, o, [25.0], o, o, 50.0, "AC", reservable, [1.0])
+            li(reservable) = ESFEX.with_fields(
+                BatteryTechnologyConfig("LiNew", [1.0e-3], [1.0e-4], [100.0], [400.0], 1.0, 8.0,
+                    [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false, "AC", o,
+                    [1.0]); reservable = reservable)
+            res_inp(techs, bts) = MasterProblemInput(
+                years = [2025], network = net1, generators = [base],
+                batteries = BatteryConfig[], technologies = techs, battery_technologies = bts,
+                base_demand = fill(50.0, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                reserve_margin = 0.0, reserve_static_default_ratio = 0.2,
+                loss_of_reserve_static = 1.0e-3,
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, verbose = false)
+            # (technologies, battery technologies, MW built, reserve shortfall)
+            cases = (
+                ([gt(1.0, true)], BatteryTechnologyConfig[], 10.0, 0.0),
+                # Headroom is built capacity × availability, as in the dispatch
+                ([gt(0.5, true)], BatteryTechnologyConfig[], 20.0, 0.0),
+                ([gt(1.0, false)], BatteryTechnologyConfig[], 0.0, 10.0 * H24),
+                (TechnologyConfig[], [li(true)], 10.0, 0.0),
+                (TechnologyConfig[], [li(false)], 0.0, 10.0 * H24),
+            )
+            for (techs, bts, built, short) in cases
+                inp = res_inp(techs, bts)
+                model, mvars = master1(inp)
+                @test sum(mvals(model, "op_y1_d1_rs_loss")) ≈ short atol = 1e-6
+                mw = isempty(techs) ? value(mvars.bat_tech_power_investment[1][1][1]) :
+                                      value(mvars.tech_investment[1][1][1])
+                @test mw ≈ built atol = 1e-6
+                br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.gap < 1e-6
+                @test br.objective ≈ objective_value(model) rtol = 1e-6
+            end
+
+            # The dispatch, with the 20 MW the master built as an existing
+            # unit at availability 0.5, holds the same 10 MW without shortfall
+            peaker = ESFEX.with_fields(
+                mkgen("GT", "Non-renewable", "Gas", [20.0], [1.0e-3], fill(0.5, H24, 1);
+                      nb = 1, H = H24); reservable = true)
+            input = PowerSystemInput(
+                name = "res_built", year = 2025, network = net1, generators = [base, peaker],
+                batteries = BatteryConfig[], demand = fill(50.0, H24, 1),
+                temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                reserve_static_default_ratio = 0.2, loss_of_reserve_static = 1.0e-3,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test sum(value.(vars.reserve_static_loss)) ≈ 0.0 atol = 1e-6
         end
 
         @testset "dispatch charges converter costs and full start-ups" begin

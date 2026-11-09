@@ -93,7 +93,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `transmission_reserve_factor` | float (0–1) | `0.7` | Pre-contingency loading limit as a fraction of line rating |
 | `critical_line_threshold` | float (≥ 0) | `0` | Studio SLD analysis only: minimum loading (fraction of capacity) for a line or transformer to be tripped by Run All N-1 / Screening. Not used by the optimisation. |
 | `generation_enabled` | bool | `true` | Include generator contingencies |
-| `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. |
+| `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. Per system in a multi-system run (each system's own units, largest unit and demand) |
 | `generation_reserve_percentage` | float (0–1) | `0.15` | Reserve fraction when `generation_reserve_type: percentage` |
 | `scopf_enabled` | bool | `false` | Use SCOPF instead of preventive N-1 reserves: post-contingency (LODF) flow limits for every pair of lines, in one solve, with priced overloads. |
 | `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
@@ -193,7 +193,7 @@ One entry of `meta_network.systems_links`. Each list holds one value per link; a
 | `length_km` | list[float] | `[]` | Length per link (km) |
 | `reactance_per_km` | list[float] | `[]` | Reactance per link (Ω/km) |
 | `susceptance_pu` | list[float] | `[]` | Susceptance per link (p.u.) |
-| `num_circuits` | list[int] | `[]` | Parallel circuits per link |
+| `num_circuits` | list[int] | `[]` | Parallel circuits per link (descriptive: `existing_capacity_MW` and the impedances are per link, all circuits together) |
 | `frequency_hz` | list[float] | `[]` | Frequency per link (Hz) |
 | `current_type` | list[str] | `[]` | `AC` or `DC` per link |
 | `decorative` | list[bool] | `[]` | Studio: draw-only link |
@@ -235,7 +235,7 @@ There is no `demand_growth` or `initial_re_penetration` key; both are ignored if
 | `sim_rooftop` / `SIM_ROOFTOP` | bool | `false` | Simulate rooftop solar (needs `rooftop_solar_config`) |
 | `inertia_limit_threshold` / `INERTIA_LIMIT_THRESHOLD` | float (≥ 0) | `0.1` | Minimum system inertia requirement in MW·s (Σ output × H), an absolute value |
 | `load_damping` | float (≥ 0) | `0.01` | Load damping coefficient D (pu): fraction of demand that reduces per Hz deviation |
-| `frequency_nominal` | float (> 0) | `50` | Nominal system frequency (Hz) |
+| `frequency_nominal` | float (> 0) | `50` | Nominal system frequency (Hz). The Studio writes the frequency of the system's AC buses when the value is none of theirs |
 | `rocof_limit` | float (> 0) | `2` | Maximum allowable ROCOF before protection trips (Hz/s) |
 | `frequency_nadir_limit` | float (> 0) | `49` | Minimum allowable frequency before UFLS (Hz) |
 | `soc_end_tolerance` | float (0–0.5) | `0.05` | Allowed deviation (fraction) of the end level from the start level. Reservoirs: ± band at the end of every window. Batteries: the year's last window must end at ≥ (1 − tolerance) × the year-start SOC (soft) |
@@ -393,16 +393,16 @@ See [Nodes and buses](../user-guide/configuration.md#nodes-and-buses) in the gui
 | `to_node` | int (≥ 0) | required | Destination node (0-based) |
 | `from_bus` | int \| null | `null` | Origin bus (0-based index into `buses`). **Without it (or a `bus` endpoint) the line is skipped** |
 | `to_bus` | int \| null | `null` | Destination bus (0-based). **Without it (or a `bus` endpoint) the line is skipped** |
-| `capacity_mw` | float \| null | `null` | Thermal rating (MW). Missing → 0 |
+| `capacity_mw` | float \| null | `null` | Thermal rating of the whole line, all its circuits together (MW). Missing → 0 |
 | `waypoints` | list[[GeoCoordinate](#geocoordinate)] | `[]` | Intermediate geographic waypoints for line routing |
 | `voltage_kv` | float \| null | `null` | Voltage (kV). Missing → `dc_power_flow.voltage_level_kv` |
 | `line_type` | `overhead` \| `underground` \| `submarine` \| null | `null` | `overhead`, `underground` or `submarine` |
 | `length_km` | float \| null | `null` | Length (km) |
-| `reactance_pu` | float \| null | `null` | Reactance (p.u. on `ac_power_flow.base_mva`). Missing → length × `reactance_per_km` / Z_base with Z_base = V² / `base_mva` (V = `voltage_kv`, else `voltage_level_kv`); 0.01 without a length |
-| `reactance_per_km` | float (≥ 0) \| null | `null` | This line's reactance (Ω/km) for the derivation above; null or 0 = `dc_power_flow.reactance_per_km` |
-| `resistance_pu` | float \| null | `null` | Resistance (p.u.). Missing → 0 |
-| `susceptance_pu` | float \| null | `null` | Susceptance (p.u.). Missing → 0 |
-| `num_circuits` | int | `1` | Parallel circuits |
+| `reactance_pu` | float \| null | `null` | Reactance of the whole line (p.u. on `ac_power_flow.base_mva`). Missing → length × `reactance_per_km` / Z_base / `num_circuits` with Z_base = V² / `base_mva` (V = `voltage_kv`, else `voltage_level_kv`); 0.01 / `num_circuits` without a length |
+| `reactance_per_km` | float (≥ 0) \| null | `null` | Reactance of one circuit of this line (Ω/km) for the derivation above; null or 0 = `dc_power_flow.reactance_per_km` |
+| `resistance_pu` | float \| null | `null` | Resistance of the whole line (p.u.). Missing → 0 |
+| `susceptance_pu` | float \| null | `null` | Susceptance of the whole line (p.u.). Missing → 0 |
+| `num_circuits` | int | `1` | Parallel circuits. Descriptive: `capacity_mw` and the impedances above already include every circuit, so the model does not multiply or divide them by this count. It only divides a reactance derived from `reactance_per_km` |
 | `cost_per_mw_km` | float (≥ 0) | `0` | Operating cost of the flow ($ per MWh and km): the master and the dispatch (DC power flow, not ACOPF) charge `length_km` × `cost_per_mw_km` × \|flow\|. Set by a multi-system run on its inter-system links |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` | `"AC"` | Current type |
