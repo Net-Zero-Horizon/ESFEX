@@ -550,16 +550,27 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
                 element_type="generator", element_id=inst_id,
             ))
 
-        # min_power > rated_power
-        if gen.rated_power > 0 and gen.min_power > gen.rated_power:
+        # min_power is a fraction of rated power; ramps are fractions of
+        # rated power per hour (0 = no limit). The loader clamps both.
+        if not 0.0 <= gen.min_power <= 1.0:
             issues.append(ValidationIssue(
                 severity="error", category="Generator",
                 message=(
-                    f"Generator '{gen.name}' ({inst_id}): "
-                    f"min_power ({gen.min_power}) > rated_power ({gen.rated_power})"
+                    f"Generator '{gen.name}' ({inst_id}): min_power={gen.min_power} "
+                    "is outside 0–1 (fraction of rated power)"
                 ),
                 element_type="generator", element_id=inst_id,
             ))
+        for attr in ("ramp_up", "ramp_down"):
+            if getattr(gen, attr) < 0:
+                issues.append(ValidationIssue(
+                    severity="error", category="Generator",
+                    message=(
+                        f"Generator '{gen.name}' ({inst_id}): {attr}={getattr(gen, attr)} "
+                        "is negative (fraction of rated power per hour; 0 = no limit)"
+                    ),
+                    element_type="generator", element_id=inst_id,
+                ))
 
         # Efficiency out of range (non-renewable)
         if gen.fuel and gen.fuel not in RENEWABLE_FUELS:
@@ -1827,6 +1838,96 @@ def _weighted_avg(values: list[float], weights: list[float]) -> float:
     return sum(v * w for v, w in zip(values, weights)) / total_w
 
 
+def _merge_avg(units: list, attr: str, weights: list[float]) -> float:
+    """Weighted mean of ``attr`` over *units*; the plain mean when every
+    weight is 0 (units without capacity still keep their parameters)."""
+    values = [float(getattr(u, attr, 0.0) or 0.0) for u in units]
+    if sum(weights) <= 0:
+        return sum(values) / len(values)
+    return _weighted_avg(values, weights)
+
+
+def _merge_ramp(units: list, attr: str, weights: list[float]) -> float:
+    """Aggregate ramp limit (fraction of the merged rating per hour).
+
+    0 means "no limit": such a unit counts as moving its full rating in an
+    hour, and the result stays 0 only when no unit is limited.
+    """
+    values = [float(getattr(u, attr, 0.0) or 0.0) for u in units]
+    if all(v <= 0 for v in values):
+        return 0.0
+    if sum(weights) <= 0:
+        weights = [1.0] * len(units)
+    return _weighted_avg([v if v > 0 else 1.0 for v in values], weights)
+
+
+def _merged_generator_params(units: list) -> dict:
+    """Parameters of the one generator that stands for *units* (same fuel
+    and type), used by every generator merge.
+
+    Rated power and the start-up cost ($ per start: the aggregate starts as
+    one unit) add up. Everything given per MW of rating or as a fraction of
+    it — min_power and ramps (fractions), inertia H (s), efficiencies, costs
+    in $/MWh, $/MW·yr and $/MW, degradation, risk derating, min up/down
+    times, governor constants — is averaged with rated power as the weight.
+    The droop is the equivalent one of the units in parallel,
+    ΣP / Σ(P/R). The lifetime is the shortest and the age the oldest.
+    """
+    w = [float(u.rated_power) for u in units]
+    params = {
+        "rated_power": sum(w),
+        "start_up_cost": sum(float(u.start_up_cost) for u in units),
+        "ramp_up": _merge_ramp(units, "ramp_up", w),
+        "ramp_down": _merge_ramp(units, "ramp_down", w),
+        "min_up": int(round(_merge_avg(units, "min_up", w))),
+        "min_down": int(round(_merge_avg(units, "min_down", w))),
+        "life_time": min(u.life_time for u in units),
+        "initial_age": max(u.initial_age for u in units),
+    }
+    for attr in ("min_power", "eff_at_rated", "eff_at_min", "fuel_cost",
+                 "fixed_cost", "maintenance_cost", "degradation_rate",
+                 "inertia", "governor_time_const", "decommissioning_cost",
+                 "risk_coefficient"):
+        params[attr] = _merge_avg(units, attr, w)
+    droops = [float(u.droop or 0.0) for u in units]
+    if sum(w) > 0 and all(d > 0 for d in droops):
+        params["droop"] = sum(w) / sum(p / d for p, d in zip(w, droops))
+    else:
+        params["droop"] = _merge_avg(units, "droop", w)
+    return params
+
+
+def _merged_battery_params(units: list) -> dict:
+    """Parameters of the one battery that stands for *units*.
+
+    Power, energy and the charge/discharge limits (MW, MWh) add up.
+    Efficiencies, initial SOC and degradation are averaged with energy
+    capacity as the weight; costs per MW or per MWh discharged, inertia,
+    ramps and risk derating with rated power. Depth of discharge and
+    lifetime keep the most restrictive value, the age the oldest.
+    """
+    w_p = [float(u.rated_power) for u in units]
+    w_e = [float(u.capacity) for u in units]
+    params = {
+        "rated_power": sum(w_p),
+        "capacity": sum(w_e),
+        "MaxChargePower": sum(float(u.MaxChargePower) for u in units),
+        "MaxDischargePower": sum(float(u.MaxDischargePower) for u in units),
+        "ramp_up": _merge_ramp(units, "ramp_up", w_p),
+        "ramp_down": _merge_ramp(units, "ramp_down", w_p),
+        "max_DoD": min(u.max_DoD for u in units),
+        "life_time": min(u.life_time for u in units),
+        "initial_age": max(u.initial_age for u in units),
+    }
+    for attr in ("efficiency_charge", "efficiency_discharge", "soc_initial",
+                 "degradation_rate"):
+        params[attr] = _merge_avg(units, attr, w_e)
+    for attr in ("fixed_cost", "maintenance_cost", "throughput_degradation_cost",
+                 "decommissioning_cost", "inertia", "risk_coefficient"):
+        params[attr] = _merge_avg(units, attr, w_p)
+    return params
+
+
 def find_infrastructure_simplifications(
     state: GuiSystemState,
     level: Literal["bus", "circuit", "node"] = "bus",
@@ -2052,23 +2153,8 @@ def apply_infrastructure_simplification(
                 [g.longitude for g in instances], powers,
             )
 
-        # Capacity-weighted averages
         agg_params = {
-            "rated_power": total_power,
-            "min_power": sum(g.min_power for g in instances),
-            "eff_at_rated": _weighted_avg([g.eff_at_rated for g in instances], powers),
-            "eff_at_min": _weighted_avg([g.eff_at_min for g in instances], powers),
-            "fuel_cost": _weighted_avg([g.fuel_cost for g in instances], powers),
-            "fixed_cost": _weighted_avg([g.fixed_cost for g in instances], powers),
-            "maintenance_cost": _weighted_avg([g.maintenance_cost for g in instances], powers),
-            "degradation_rate": _weighted_avg([g.degradation_rate for g in instances], powers),
-            "life_time": min(g.life_time for g in instances),
-            "initial_age": max(g.initial_age for g in instances),
-            "ramp_up": sum(g.ramp_up for g in instances),
-            "ramp_down": sum(g.ramp_down for g in instances),
-            "inertia": sum(g.inertia for g in instances),
-            "start_up_cost": sum(g.start_up_cost for g in instances),
-            "decommissioning_cost": sum(g.decommissioning_cost for g in instances),
+            **_merged_generator_params(instances),
             "availability_file": instances[0].availability_file,
             "frequency_hz": instances[0].frequency_hz,
             "current_type": instances[0].current_type,
@@ -2134,29 +2220,7 @@ def apply_infrastructure_simplification(
             )
 
         agg_params = {
-            "rated_power": total_power,
-            "capacity": total_cap,
-            "MaxChargePower": sum(b.MaxChargePower for b in instances),
-            "MaxDischargePower": sum(b.MaxDischargePower for b in instances),
-            "efficiency_charge": _weighted_avg(
-                [b.efficiency_charge for b in instances], capacities,
-            ),
-            "efficiency_discharge": _weighted_avg(
-                [b.efficiency_discharge for b in instances], capacities,
-            ),
-            "soc_initial": _weighted_avg(
-                [b.soc_initial for b in instances], capacities,
-            ),
-            "max_DoD": min(b.max_DoD for b in instances),
-            "degradation_rate": _weighted_avg(
-                [b.degradation_rate for b in instances], capacities,
-            ),
-            "life_time": min(b.life_time for b in instances),
-            "initial_age": max(b.initial_age for b in instances),
-            "fixed_cost": _weighted_avg([b.fixed_cost for b in instances], powers),
-            "maintenance_cost": _weighted_avg(
-                [b.maintenance_cost for b in instances], powers,
-            ),
+            **_merged_battery_params(instances),
             "availability_file": instances[0].availability_file,
             "current_type": instances[0].current_type,
             "latitude": agg_lat,
@@ -2481,32 +2545,92 @@ def _find_bridges(adj: dict[str, set[str]]) -> set[frozenset[str]]:
     return bridges
 
 
+def _line_length_km(state: GuiSystemState, ln) -> float:
+    """Length of a line: its ``length_km``, else measured from its end
+    buses through its waypoints (0 when their coordinates are unknown)."""
+    if (ln.length_km or 0.0) > 0:
+        return float(ln.length_km)
+    a, b = state.buses.get(ln.from_bus), state.buses.get(ln.to_bus)
+    if a is None or b is None:
+        return 0.0
+    if not (a.latitude or a.longitude) or not (b.latitude or b.longitude):
+        return 0.0
+    pts = ([(a.latitude, a.longitude)]
+           + [(wp.lat, wp.lng) for wp in (ln.waypoints or [])]
+           + [(b.latitude, b.longitude)])
+    return sum(_haversine_km(*pts[i], *pts[i + 1]) for i in range(len(pts) - 1))
+
+
+def _line_impedance_pu(state: GuiSystemState, ln) -> tuple[float, float, float]:
+    """(R, X, B) in p.u. of a line, for combining it with other branches.
+
+    A line with a reactance keeps its own values. One without (an OSM line
+    with no voltage tag, a bridge line) gets them from its length and
+    voltage the way the Grid Builder derives the others: the standard line
+    type of its voltage (or its own ``reactance_per_km``), on the system
+    base ``ac_power_flow.base_mva``, divided over its circuits. X stays 0
+    when the length or the voltage is unknown.
+    """
+    r = float(ln.resistance_pu or 0.0)
+    x = float(ln.reactance_pu or 0.0)
+    b = float(ln.susceptance_pu or 0.0)
+    if x > 0:
+        return r, x, b
+    v = float(ln.voltage_kv or 0.0)
+    if v <= 0:
+        v = max((float(state.buses[e].voltage_kv or 0.0)
+                 for e in (ln.from_bus, ln.to_bus) if e in state.buses),
+                default=0.0)
+    length = _line_length_km(state, ln)
+    if v <= 0 or length <= 0:
+        return r, 0.0, b
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    base = float(getattr(getattr(state, "ac_power_flow", None), "base_mva", 0.0)
+                 or 100.0)
+    r_est, x_est, b_est = estimate_line_pu_params(v, length, base)
+    own_x_km = float(getattr(ln, "reactance_per_km", None) or 0.0)
+    if own_x_km > 0:
+        x_est = own_x_km * length / (v * v / base)
+    n = max(1, int(ln.num_circuits or 1))
+    return (r if r > 0 else r_est / n), x_est / n, (b if b > 0 else b_est * n)
+
+
 def _compute_parallel_impedance(
     lines: list,
     min_x: float = 0.0001,
+    state: Optional[GuiSystemState] = None,
 ) -> dict:
     """Compute equivalent impedance for parallel lines.
+
+    With *state*, a line without a reactance takes the one derived from
+    its length and voltage (:func:`_line_impedance_pu`) instead of being
+    left out of the combination.
 
     Returns dict with capacity_mw, reactance_pu, resistance_pu,
     susceptance_pu, num_circuits.
     """
     capacity = sum(ln.capacity_mw for ln in lines)
     num_circuits = sum(ln.num_circuits for ln in lines)
+    if state is not None:
+        imp = [_line_impedance_pu(state, ln) for ln in lines]
+    else:
+        imp = [(ln.resistance_pu, ln.reactance_pu, ln.susceptance_pu)
+               for ln in lines]
 
     # Parallel reactance: 1/X_eq = sum(1/X_i)
     inv_x_sum = 0.0
-    for ln in lines:
-        x = ln.reactance_pu if ln.reactance_pu and ln.reactance_pu > 0 else None
-        if x is not None:
+    for _, x, _ in imp:
+        if x and x > 0:
             inv_x_sum += 1.0 / x
     reactance = (1.0 / inv_x_sum) if inv_x_sum > 0 else None
 
     # Parallel resistance: 1/R_eq = sum(1/R_i)
     inv_r_sum = 0.0
     all_have_r = True
-    for ln in lines:
-        r = ln.resistance_pu if ln.resistance_pu and ln.resistance_pu > 0 else None
-        if r is not None:
+    for r, _, _ in imp:
+        if r and r > 0:
             inv_r_sum += 1.0 / r
         else:
             all_have_r = False
@@ -2514,8 +2638,8 @@ def _compute_parallel_impedance(
 
     # Susceptance adds in parallel
     susceptance = None
-    if any(ln.susceptance_pu is not None for ln in lines):
-        susceptance = sum(ln.susceptance_pu or 0.0 for ln in lines)
+    if any(b is not None for _, _, b in imp):
+        susceptance = sum(b or 0.0 for _, _, b in imp)
 
     return {
         "capacity_mw": capacity,
@@ -2557,7 +2681,7 @@ def _find_parallel_lines(
     for key, lines in groups.items():
         if len(lines) < 2:
             continue
-        equiv = _compute_parallel_impedance(lines, config.min_reactance_pu)
+        equiv = _compute_parallel_impedance(lines, config.min_reactance_pu, state)
         # Keep waypoints from the highest-capacity line for visualization
         best_line = max(lines, key=lambda ln: ln.capacity_mw)
 
@@ -3212,13 +3336,10 @@ def _find_series_buses(
             if bus_a == bus_b:
                 continue
 
-            # Series impedance: Z_eq = Z_1 + Z_2
-            x_a = ln_a.reactance_pu or 0.0
-            x_b = ln_b.reactance_pu or 0.0
-            r_a = ln_a.resistance_pu or 0.0
-            r_b = ln_b.resistance_pu or 0.0
-            b_a = ln_a.susceptance_pu or 0.0
-            b_b = ln_b.susceptance_pu or 0.0
+            # Series impedance: Z_eq = Z_1 + Z_2 (a line without a
+            # reactance contributes the one derived from its length)
+            r_a, x_a, b_a = _line_impedance_pu(state, ln_a)
+            r_b, x_b, b_b = _line_impedance_pu(state, ln_b)
 
             eq_x = (x_a + x_b) if (x_a > 0 or x_b > 0) else None
             eq_r = (r_a + r_b) if (r_a > 0 or r_b > 0) else None
@@ -3621,23 +3742,8 @@ def _apply_small_gen_absorb(
         if small is None or absorber is None:
             continue
 
-        # Add capacity and sum key parameters
-        absorber.rated_power += small.rated_power
-        absorber.min_power += small.min_power
-        absorber.ramp_up += small.ramp_up
-        absorber.ramp_down += small.ramp_down
-        absorber.inertia += small.inertia
-
-        # Weighted average for cost/efficiency parameters
-        total_p = absorber.rated_power  # already includes small
-        old_p = total_p - small.rated_power
-        if total_p > 0:
-            for attr in ("eff_at_rated", "eff_at_min", "fuel_cost",
-                         "fixed_cost", "maintenance_cost", "degradation_rate"):
-                old_val = getattr(absorber, attr)
-                small_val = getattr(small, attr)
-                new_val = (old_val * old_p + small_val * small.rated_power) / total_p
-                setattr(absorber, attr, new_val)
+        for attr, value in _merged_generator_params([absorber, small]).items():
+            setattr(absorber, attr, value)
 
         state.generators.pop(small_id, None)
         changed += 1
@@ -4450,7 +4556,7 @@ def _consolidate_parallel_lines(state: GuiSystemState) -> int:
     for key, lines in groups.items():
         if len(lines) < 2:
             continue
-        equiv = _compute_parallel_impedance(lines)
+        equiv = _compute_parallel_impedance(lines, state=state)
         best = max(lines, key=lambda ln: ln.capacity_mw)
 
         # Generate unique ID
@@ -4602,32 +4708,10 @@ def _aggregate_equipment(state: GuiSystemState, model: "GuiModel") -> int:
         sources = [gid for gid in gids if gid != target_id]
 
         # Absorb sources into target
-        for src_id in sources:
-            src = state.generators.get(src_id)
-            if src is None:
-                continue
-            old_power = target.rated_power
-            new_power = old_power + src.rated_power
-
-            # Weighted averages
-            if new_power > 0:
-                for attr in ("eff_at_rated", "eff_at_min", "fuel_cost",
-                             "fixed_cost", "maintenance_cost",
-                             "degradation_rate"):
-                    old_val = getattr(target, attr)
-                    src_val = getattr(src, attr)
-                    setattr(target, attr,
-                            (old_val * old_power + src_val * src.rated_power) / new_power)
-
-            target.rated_power = new_power
-            target.min_power += src.min_power
-            target.ramp_up += src.ramp_up
-            target.ramp_down += src.ramp_down
-            target.inertia += src.inertia
-            target.start_up_cost += src.start_up_cost
-            target.decommissioning_cost += src.decommissioning_cost
-            target.life_time = min(target.life_time, src.life_time)
-            target.initial_age = max(target.initial_age, src.initial_age)
+        units = [target] + [state.generators[s] for s in sources
+                            if s in state.generators]
+        for attr, value in _merged_generator_params(units).items():
+            setattr(target, attr, value)
 
         # Remove source generators and their wire lines (visual only).
         # L1 does NOT change topology — buses/transformers/real lines stay.
@@ -4655,37 +4739,10 @@ def _aggregate_equipment(state: GuiSystemState, model: "GuiModel") -> int:
         target = state.batteries[target_id]
         sources = [bid for bid in bids if bid != target_id]
 
-        for src_id in sources:
-            src = state.batteries.get(src_id)
-            if src is None:
-                continue
-            old_power = target.rated_power
-            old_cap = target.capacity
-            new_power = old_power + src.rated_power
-            new_cap = old_cap + src.capacity
-
-            if new_cap > 0:
-                for attr in ("efficiency_charge", "efficiency_discharge",
-                             "soc_initial", "degradation_rate"):
-                    old_val = getattr(target, attr)
-                    src_val = getattr(src, attr)
-                    setattr(target, attr,
-                            (old_val * old_cap + src_val * src.capacity) / new_cap)
-
-            if new_power > 0:
-                for attr in ("fixed_cost", "maintenance_cost"):
-                    old_val = getattr(target, attr)
-                    src_val = getattr(src, attr)
-                    setattr(target, attr,
-                            (old_val * old_power + src_val * src.rated_power) / new_power)
-
-            target.rated_power = new_power
-            target.capacity = new_cap
-            target.MaxChargePower += src.MaxChargePower
-            target.MaxDischargePower += src.MaxDischargePower
-            target.max_DoD = min(target.max_DoD, src.max_DoD)
-            target.life_time = min(target.life_time, src.life_time)
-            target.initial_age = max(target.initial_age, src.initial_age)
+        units = [target] + [state.batteries[s] for s in sources
+                            if s in state.batteries]
+        for attr, value in _merged_battery_params(units).items():
+            setattr(target, attr, value)
 
         for src_id in sources:
             _cleanup_source_wire_lines(state, "battery", src_id)
@@ -5015,9 +5072,12 @@ def _eliminate_series_buses(state: GuiSystemState) -> int:
             if bus_a == bus_b:
                 continue
 
-            # Series impedance
-            eq_x = (ln_a.reactance_pu or 0) + (ln_b.reactance_pu or 0)
-            eq_r = (ln_a.resistance_pu or 0) + (ln_b.resistance_pu or 0)
+            # Series impedance (a line without a reactance contributes the
+            # one derived from its length)
+            r_a, x_a, _ = _line_impedance_pu(state, ln_a)
+            r_b, x_b, _ = _line_impedance_pu(state, ln_b)
+            eq_x = x_a + x_b
+            eq_r = r_a + r_b
             eq_cap = min(ln_a.capacity_mw, ln_b.capacity_mw)
             best = ln_a if ln_a.capacity_mw >= ln_b.capacity_mw else ln_b
 
@@ -5233,12 +5293,13 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     for ln in state.transmission_lines:
         if getattr(ln, "decorative", False):
             continue
+        # A line without a reactance takes the one of its length and
+        # voltage; left out, a pair of such lines fell back to 0.01 p.u.
+        # whatever its length.
+        r, x, b = _line_impedance_pu(state, ln)
         _accumulate(
             group_of.get(ln.from_bus), group_of.get(ln.to_bus),
-            float(ln.capacity_mw or 0.0),
-            float(getattr(ln, "reactance_pu", 0.0) or 0.0),
-            float(getattr(ln, "resistance_pu", 0.0) or 0.0),
-            float(getattr(ln, "susceptance_pu", 0.0) or 0.0))
+            float(ln.capacity_mw or 0.0), x, r, b)
     for tr in state.transformers:
         _accumulate(
             group_of.get(tr.from_bus), group_of.get(tr.to_bus),
@@ -5289,13 +5350,27 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     except Exception:
         def _haversine_km(*_a, **_k):
             return 0.0
+    from esfex.utils.per_unit import DEFAULT_REACTANCE_PU
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    base_mva = float(getattr(getattr(state, "ac_power_flow", None),
+                             "base_mva", 0.0) or 100.0)
     new_lines: list = []
     for (gi, gj), p in sorted(pair.items()):
-        xeq = (1.0 / p["invx"]) if p["invx"] > 0 else 0.01
-        req = (1.0 / p["invr"]) if p["invr"] > 0 else 0.0
         bi, bj = new_buses[grp_bus_id[gi]], new_buses[grp_bus_id[gj]]
         length = _haversine_km(bi.latitude, bi.longitude,
                                bj.latitude, bj.longitude)
+        if p["invx"] > 0:
+            xeq = 1.0 / p["invx"]
+            req = (1.0 / p["invr"]) if p["invr"] > 0 else 0.0
+        else:
+            # No branch of the pair has a usable length either: use the
+            # distance between the two node buses at their voltage.
+            req, xeq, _ = estimate_line_pu_params(
+                max(grp_v[gi], grp_v[gj]), length, base_mva)
+            if xeq <= 0:
+                xeq = DEFAULT_REACTANCE_PU
         new_lines.append(GuiTransmissionLine(
             # Keeps the historical ``eq_<i>_<j>`` shape for the usual
             # one-bus-per-node case; a split node contributes its suffix.
