@@ -18,7 +18,7 @@ A node is a geographic aggregation: it owns one or more buses and holds the dema
 |-----|-------|------|-------------|
 | **General** | Name | -- | Display name for the node (e.g., "Saint-Denis Substation") |
 | | Centroid (geographic reference): Latitude / Longitude | degrees | Optional reference point (WGS84). **Place** picks it on the map; **View** centres the map on it. |
-| | Static Reserve | MW | Minimum spinning reserve requirement at this node: free capacity of reservable generators and batteries (in unit commitment, only committed units count). It is capacity kept free, not energy generated. |
+| | Static Reserve | MW | Minimum spinning reserve requirement of this node. The requirements of all the nodes of a system are added up and held in the free capacity of any reservable generator or battery of that system (in unit commitment, only committed units count), not only the ones at this node. It is capacity kept free, not energy generated. |
 | | Dynamic Reserve | MW | Frequency-response reserve requirement. Held in the same free capacity as the static reserve (a MW counts once); each unit can give at most `dynamic_reserve_contribution` of its rated power. |
 | | Reserve Duration | h | Duration over which reserve capacity must be sustained. Integer, 0 to 24; default 1. |
 | | Losses | frac | Distribution losses at this node (0.0 to 1.0). A value of 0.03 means 3% of generation is lost in local distribution. |

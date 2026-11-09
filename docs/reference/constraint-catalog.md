@@ -82,13 +82,13 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * bse
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `reserve_static_{ni}_{t}` | RES-1 | Static reserve: `reserve_static + loss_of_reserve >= requirement` |
-| `reserve_static_ub_{ni}_{t}` | RES-1 | Static reserve held is at most the requirement |
-| `reserve_dynamic_avail_{ni}_{t}` | RES-2a | Dynamic reserve at most `dynamic_reserve_contribution` × rated power of reservable units (committed units in UC) and batteries |
-| `reserve_dynamic_req_{ni}_{t}` | RES-2b | Dynamic reserve requirement |
-| `reserve_dynamic_ub_{ni}_{t}` | RES-2b | Dynamic reserve held is at most the requirement |
-| `reserve_dynamic_zero_{ni}_{t}` | RES-2c | Dynamic reserve = 0 at nodes without a dynamic requirement |
-| `reserve_headroom_{ni}_{t}` | RES-3 | Static + dynamic reserve fit in the free capacity of reservable generators and batteries (committed units in UC) |
+| `reserve_static_{ni}_{t}` | RES-1 | Static reserve: `reserve_static + loss_of_reserve >= requirement` (per node) |
+| `reserve_static_held_{ni}_{t}` | RES-1 | Static reserve held at node `ni` = the system's held share (`reserve_static_share_s{k}_t{t}`, 0–1) × its requirement |
+| `reserve_dynamic_avail_s{k}_t{t}` | RES-2a | Dynamic reserve of system `k` at most `dynamic_reserve_contribution` × rated power of its reservable units (committed units in UC) and batteries |
+| `reserve_dynamic_req_{ni}_{t}` | RES-2b | Dynamic reserve requirement (per node) |
+| `reserve_dynamic_held_{ni}_{t}` | RES-2b | Dynamic reserve held at node `ni` = the system's held share (`reserve_dynamic_share_s{k}_t{t}`) × its requirement |
+| `reserve_dynamic_zero_{ni}_{t}` | RES-2c | Dynamic reserve = 0 in systems without a dynamic requirement |
+| `reserve_headroom_s{k}_t{t}` | RES-3 | Static + dynamic reserve of system `k` fit in the free capacity of its reservable generators and batteries (committed units in UC) |
 
 ### Power Balance
 
