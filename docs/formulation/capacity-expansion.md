@@ -703,57 +703,62 @@ When `tsam_inter_period_linking = false`, each period is cyclic on its own (BAT-
 
 
 **Julia function**: `solve_with_npv_iteration(input; max_iterations=5, npv_threshold=0.0)`
+**Run setting**: `npv_retirement` (system settings, off by default), with `npv_retirement_max_iterations` and `npv_retirement_threshold`.
 
-After the initial solve, this procedure identifies units that are economically unviable and forces their retirement through iterative re-optimization.
-
-!!! note "Julia API only"
-    `solve_with_npv_iteration` and the functions it uses (`calculate_unit_npv`, `get_units_with_negative_npv`, `force_unit_retirements!`) are Julia API functions for scripts that call the ESFEX package directly. `esfex run` does not call them, in any mode: the master retires units by age and life extension only (Sec. 7.6), and a run's results contain no NPV retirements. `base_lcoe` and `npv_annual_return_rate` are read only by these functions. They work on the deterministic master (`create_master_problem`), not on the stochastic or Benders one.
+With `npv_retirement` on, a `development` run checks after the master solve whether each existing generator and battery pays for itself in the solved plan, retires for the whole horizon the units that do not, and solves the master again. Off, the master retires units by age and life extension only (Sec. 7.6) and the run is unchanged. The runner applies it to every master mode: the monolithic master, Benders decomposition, the stochastic master and each annual master of a myopic run (a unit a myopic year retires stays retired in the later years, which do not charge its decommissioning again; only the original units are checked, not earlier years' builds). With MGA, the NPV retirement runs first and the alternatives keep its retirements.
 
 ### 9.1 Algorithm
 
 
 ```
-1. Solve initial Master Problem
-2. For iter = 1 to max_iterations:
-   a. For each unit (generator g at node n, battery b at node n):
-      - Calculate NPV over remaining lifetime
-   b. Identify units with NPV < threshold
-   c. If none found: CONVERGED, return
-   d. Force retirement of negative-NPV units
-   e. Re-solve Master Problem
-3. Return result (converged or max iterations reached)
+1. Solve the master
+2. Loop:
+   a. NPV of each existing unit location (generator g or battery b at bus n)
+      in service in some year of the plan (NPV-1, NPV-2)
+   b. Units with NPV < npv_retirement_threshold: none → stop (converged)
+   c. max_iterations rounds of retirements done → stop (they are kept)
+   d. Retire them for the whole horizon (9.3) and solve the master again
 ```
 
-### 9.2 Unit NPV Calculation
+A retired unit stays retired in the next rounds. The log lists each round's retired units with their NPV.
+
+### 9.2 Unit NPV
 
 
-**Julia function**: `calculate_unit_npv(result, input, unit_type, unit_idx, node)`
+**Julia functions**: `calculate_unit_npv(result, input, unit_type, unit_idx, node)`, `unit_npvs(result, input)`, `extract_unit_operation(model, vars, input)`
 
-For a generator with remaining life \(L_{rem} = \max(0, \tau_{g,n} - a^0_{g,n})\):
+The NPV is that of keeping the unit in the solved plan, over the modelled years, discounted as the objective discounts them (OBJ-1):
 
 \[
-\text{NPV}_g = \sum_{y=1}^{\min(\lceil L_{rem} \rceil, Y)} \frac{(R - C)(1-\delta_{g,n})^y}{(1+r)^y} - \frac{c^{dec}_{g,n} \bar{P}_{g,n}}{(1+r)^{L_{rem}}} \tag{NPV-1}
+\text{NPV}_{g,n} = \sum_{y=1}^{Y} \frac{E_{y,g,n} \cdot p^{LCOE} - C^{op}_{y,g,n} - C^{asset}_{y,g,n}}{(1+r)^{y-1}} \tag{NPV-1}
 \]
 
-where, with annual generation \(G = \bar{P}_{g,n} \cdot \overline{\alpha}_{g,n} \cdot \eta^{rated}_{g,n} \cdot H_{year}\) (mean availability times rated efficiency):
+\[
+\text{NPV}_{b,n} = \sum_{y=1}^{Y} \frac{\rho \cdot c^{inv,P}_{b,n} \cdot \bar{P}^{bat,cum}_{y,b,n} - C^{op}_{y,b,n} - C^{asset}_{y,b,n}}{(1+r)^{y-1}} \tag{NPV-2}
+\]
 
-- **Revenue**: \(R = G \cdot\) `base_lcoe`
-- **Cost**: \(C = G \cdot (c^{fuel}_{g,n} + c^{maint}_{g,n}) + \bar{P}_{g,n} \cdot c^{fix}_{g,n}\) (fixed O&M per MW-year)
+- \(E_{y,g,n}\) is the energy the master dispatched the generator in year \(y\): its output on the representative days (or TSAM periods), scaled to the year as their cost is (SCALE-1, \(\Delta t \cdot\) the days each one stands for). The generation comes from the master's own operation, not from a fixed capacity factor, and already holds the unit's degradation and the end of its life (CUM-1).
+- \(p^{LCOE}\) is `base_lcoe` (\$/MWh), \(\rho\) is `npv_annual_return_rate` and \(c^{inv,P}_{b,n}\) the battery's power investment cost; \(\bar{P}^{bat,cum}_{y,b,n}\) its discharge power in service (CUM-2).
+- \(C^{op}_{y,g,n}\) is what the master charges the unit for that operation (\(C^{day}\), scaled the same way): its fuel (`fuel_cost`, or its offer curve), maintenance per MWh, the CO2 price on its emissions and its LP-relaxed start-ups (unit commitment in the dispatch). With primary energy on, a fuel-coupled unit pays no `fuel_cost` in the master (it burns tank fuel, §8.3.12); its NPV charges the fuel it burns at the fuel's price that year (`price_base` grown at `price_growth_rate`) per MWh it makes from a unit of fuel. The fuel system's import, transport and shortfall costs are not shared out to the units. For a battery, maintenance on the MWh charged and discharged and its throughput (or offer-curve) cost on the discharge.
+- \(C^{asset}_{y,g,n}\) is the unit's share of OBJ-3b: fixed O&M on its capacity in service, life extension past its lifetime and its decommissioning in the plan (at the end of its life if that falls within the horizon).
 
-For batteries the revenue is \(\bar{P}^{bat} \cdot c^{inv,P} \cdot\) `npv_annual_return_rate` and the cost \(\bar{P}^{bat} \cdot c^{fix}\).
+The terms are the same expressions the objective uses (`add_gen_step_cost!`, `add_bat_step_cost!`, `build_annual_asset_cost`), evaluated at the solution: summed over the units of a system where every cost is a unit's, they make up the master's objective. In a stochastic master the NPV is the probability-weighted mean over the scenarios, each with its own operation, cost multipliers and discount rate \(r_\omega\) (STOCH-1). Benders takes the operation from the subproblems of the iteration whose plan it returns.
 
-Units with \(\text{NPV}_g < 0\) are flagged for retirement.
+A unit with \(\text{NPV} <\) `npv_retirement_threshold` (\$, default 0) is retired. A unit no year of the plan keeps in service (past its lifetime, not extended) is not checked.
 
-### 9.3 Result
+### 9.3 Retirement
 
 
-The function returns an `NPVIterationResult` containing:
+**Julia function**: `retire_units(input, units; decommission=true)`
 
-- Number of iterations performed
-- Whether convergence was achieved
-- Final `MasterProblemResult`
-- List of all forced retirements (`UnitNPV` records)
-- NPV history across iterations
+A retired unit has no capacity at its bus for the whole horizon: no dispatch, no life extension, no fixed O&M and no end-of-life decommissioning. It pays its decommissioning cost once, in the first year, on its (degraded) capacity then, as a unit retiring at the end of its life does (\(C^{dec}_y\), OBJ-3b; `npv_retired_units` of the master input). The master is then solved again from scratch, so the same mechanism works for every solver.
+
+In the run, the retired generators have no capacity in the dispatch from the first year on (the master's cumulative capacity is 0), and the retired batteries no power or energy at their node. The results file lists them in the `npv_retirements` group ([HDF5 Output Schema](../reference/hdf5-output-schema.md)), which the dashboard's retirement chart also reads.
+
+### 9.4 Result
+
+
+`solve_with_npv_iteration` (Julia API; `solver = :benders` for Benders) returns an `NPVIterationResult` with the number of master solves, whether the last one left no unit below the threshold, the final `MasterProblemResult`, the retired units (`UnitNPV` records) and, per solve, the NPV of every unit checked. A result extracted with `extract_master_solution(model, vars, input; unit_operation = true)` (or by `run_benders_decomposition(...; record_unit_operation = true)`) holds the units' operation (`unit_operation`) that `calculate_unit_npv` needs.
 
 ---
 
@@ -935,13 +940,12 @@ create_master_problem(input)
   |-- apply_user_constraints!()                   # custom constraints
   +-- build_master_objective!()                   # OBJ-1
 
-solve_with_npv_iteration(input)                  # Julia API only, not called by esfex run
-  |-- create_master_problem()
-  |-- optimize!()
+solve_with_npv_iteration(input)                  # Sec. 9 (the runner: MasterProblemAdapter.solve)
   +-- loop:
-        |-- get_units_with_negative_npv()         # Sec. 9.2
-        |-- force_unit_retirements!()
-        +-- optimize!()
+        |-- create_master_problem(); optimize!()  # or run_benders_decomposition()
+        |-- extract_master_solution(...; unit_operation = true)
+        |-- unit_npvs()                           # NPV-1, NPV-2
+        +-- retire_units()                        # Sec. 9.3
 ```
 
 ---

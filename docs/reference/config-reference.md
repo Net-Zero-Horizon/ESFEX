@@ -214,13 +214,16 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `demand_paths` | list[str] \| null | `null` | One demand file per node; overrides `demand_path`; length must equal the node count |
 | `demand_scale` | float (> 0) | `1` | Multiplier applied to all demand |
 | `discount_rate` | float (0–1) | `0.05` | Discount rate |
-| `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in the unit NPV of the Julia API `solve_with_npv_iteration` ($/MWh). `esfex run` does not use it. See [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement) |
+| `base_lcoe` | float (≥ 0) | `93` | Revenue per MWh an existing generator produces, in its NPV for the NPV-based retirement (`npv_retirement`) ($/MWh). See [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement) |
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target. See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |
 | `max_annual_system_cost` / `MAX_ANNUAL_SYSTEM_COST` | float | `20000000000` | Annual investment budget cap ($) |
 | `life_extension_cost_factor` | float (≥ 0) | `0.2` | Yearly cost of keeping a unit past its lifetime, as a fraction of its `invest_cost` ($/MW) |
-| `npv_annual_return_rate` | float (0–1) | `0.15` | Battery revenue per year as a fraction of its power investment cost, in the unit NPV of the Julia API `solve_with_npv_iteration`. `esfex run` does not use it |
+| `npv_annual_return_rate` | float (0–1) | `0.15` | An existing battery's revenue per year in its NPV, as a fraction of its power investment cost (`invest_cost` × MW in service), for the NPV-based retirement |
+| `npv_retirement` | bool | `false` | NPV-based retirement (`development` runs, every master mode): after the master solve, retire for the whole horizon the existing generators and batteries whose NPV in the plan is below `npv_retirement_threshold` (they pay their decommissioning cost in the first year and no fixed O&M), and solve the master again. Off: the master retires units by age and life extension only. See [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement) |
+| `npv_retirement_max_iterations` | int (≥ 0) | `5` | Most rounds of retirements, each followed by a master re-solve; units still below the threshold after them are kept |
+| `npv_retirement_threshold` | float | `0` | A unit whose NPV ($) is below this is retired |
 | `reserve_margin` | float (≥ 1.0) | `1.15` | Capacity adequacy reserve margin (e.g. 1.15 = 15%) |
 
 There is no `demand_growth` or `initial_re_penetration` key; both are ignored if present. The initial RE share is always computed from existing capacity.

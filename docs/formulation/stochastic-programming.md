@@ -363,7 +363,7 @@ The stochastic extension is compatible with all other ESFEX features:
 | Primary Energy | Not in the master | Primary-energy constraints apply only in the operational dispatch, which runs on the base case |
 | Multi-System | Full | Merged systems form one master; scenarios come from the first system |
 | TSAM | Full | Shared periods, per-scenario operation and seasonal chains |
-| NPV Iteration | Not applied | `solve_with_npv_iteration` is a Julia API function on the deterministic master; `esfex run` does not call it |
+| NPV-based retirement | Full | With `npv_retirement` on, each unit's NPV is the probability-weighted mean over the scenarios, each with its own operation, costs and discount rate ([Capacity Expansion §9](capacity-expansion.md#9-npv-based-iterative-retirement)) |
 
 ---
 

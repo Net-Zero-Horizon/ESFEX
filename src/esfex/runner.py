@@ -745,6 +745,11 @@ class Orchestrator:
         self._year_task = None
         self._window_task = None
 
+        # Existing units the NPV-based retirement retired (npv_retirement):
+        # dicts with kind, key, name, bus, node, npv ($), iteration, year,
+        # index, capacity_mw and share (see _record_npv_retirements)
+        self._npv_retirements: list[dict] = []
+
     def _setup_logging(self):
         """Attach the run's file handler and ensure a console handler exists.
 
@@ -1442,7 +1447,8 @@ class Orchestrator:
             "dynamic_reserve_contribution", "soc_end_tolerance",
             "min_cycling_ratio", "min_cycling_period_days",
             "demand_shift_cost_rate",
-            "npv_annual_return_rate",
+            "npv_annual_return_rate", "npv_retirement",
+            "npv_retirement_max_iterations", "npv_retirement_threshold",
         )}
 
         def _shift_ends(obj, node_off: int, bus_off: int):
@@ -2103,6 +2109,7 @@ class Orchestrator:
             console.print(f"[green]Master Problem solved[/green] ({total_inv} investments, {total_ret} retirements)")
             logger.info(f"Master problem solved for {len(years_range)} years")
 
+            self._write_npv_retirements(hdf5_path)
             self._pm.call_hook(
                 "post_master_problem",
                 investments=master_investments,
@@ -2191,6 +2198,7 @@ class Orchestrator:
                         cumulative_units_config = self._build_config_from_cumulative(
                             units_config, year_caps, year_offset=year_idx
                         )
+                        self._apply_npv_retirements(cumulative_units_config, year)
 
                     # Rebuild gen/bat name lists to include virtual units
                     # (must happen BEFORE HDF5 export so all generators are captured)
@@ -3530,6 +3538,7 @@ class Orchestrator:
         master_cfg = getattr(self.config, 'master_problem', None)
         planning_mode = getattr(master_cfg, 'planning_mode', 'perfect_foresight')
 
+        self._npv_retirements = []
         solve = (self._solve_master_problem_myopic if planning_mode == "myopic"
                  else self._solve_master_problem_foresight)
         result = solve(years_range, demand, hours, num_nodes,
@@ -3648,6 +3657,11 @@ class Orchestrator:
             # Electrolyzer power the master built: {key: {year index: MW per node}}
             elz_builds: dict[str, dict[int, list[float]]] = {}
             current_re = overall_initial_re
+            # NPV-based retirement: the original units retired by earlier
+            # years stay retired; built units are not checked
+            npv_retired: list[tuple] = []
+            npv_unit_keys = (set(self.master_system.generators)
+                             | set(self.master_system.batteries))
 
             for y_idx, year in enumerate(years_range):
                 logger.debug(f"\n--- Myopic: Year {year} ({y_idx+1}/{num_years}) ---")
@@ -3804,6 +3818,8 @@ class Orchestrator:
                         year_system, year,
                         cumulative=fuel_carried and {k: fuel_carried.get(k, {})
                                                      for k in ("storage", "transport")}),
+                    retired_units=list(npv_retired),
+                    npv_unit_keys=npv_unit_keys,
                 )
 
                 # 7. Solve
@@ -3821,6 +3837,8 @@ class Orchestrator:
 
                 result = master.get_solution_values()
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
+                for r in self._record_npv_retirements(master, year):
+                    npv_retired.append((r["kind"], r["key"], r["bus"]))
                 to_caps = getattr(master, "fuel_capacities_by_year", None)
                 year_elz = ((to_caps(result) if to_caps is not None else {})
                             .get(1, {}).get("electrolyzer", {}))
@@ -4447,6 +4465,14 @@ class Orchestrator:
             if use_mga:
                 from esfex.bridge.adapters import MGAAdapter
 
+                if master.npv_retirement:
+                    # The NPV retirement first; the alternatives keep the
+                    # units it retires
+                    master.build_model(use_representative_days=True)
+                    if master.solve() != 1:
+                        logger.error("Master problem not optimal (NPV retirement before MGA)")
+                        return None, None
+
                 logger.info("=" * 60)
                 logger.info(
                     f"MGA MODE ENABLED  "
@@ -4485,6 +4511,9 @@ class Orchestrator:
             solution = result.get('solution', {})
             # Fuel storage, routes and electrolyzers, for the dispatch (#89)
             self._store_master_fuel(master, result, list(years_range))
+            # Units the NPV-based retirement retired: out of service from
+            # the first year
+            self._record_npv_retirements(master, years_range[0])
 
             investments_by_year = {}
             retirements_by_year = {}
@@ -4929,6 +4958,82 @@ class Orchestrator:
                 pass
             out[key] = out[key] + float(value) if key in out else value
         return out
+
+    def _record_npv_retirements(self, master, year: int) -> list[dict]:
+        """Add the units *master*'s NPV-based retirement retired to
+        ``self._npv_retirements``, out of service from *year* on, with the
+        configured MW at their node (``capacity_mw``) and its share of the
+        unit's configured MW (``share``). Returns the added records."""
+        added = []
+        for r in getattr(master, "npv_retirements", None) or []:
+            units = (self.master_system.generators if r["kind"] == "generator"
+                     else self.master_system.batteries)
+            unit = units.get(r["key"])
+            if unit is None:
+                continue
+            field = "rated_power" if r["kind"] == "generator" else "MaxDischargePower"
+            per_node = [float(v) for v in (getattr(unit, field, None) or [])]
+            node = int(r["node"])
+            mw = per_node[node] if 0 <= node < len(per_node) else 0.0
+            total = sum(per_node)
+            rec = dict(r, year=int(year), index=list(units).index(r["key"]),
+                       capacity_mw=mw,
+                       share=min(1.0, mw / total) if total > 0 else 0.0)
+            self._npv_retirements.append(rec)
+            added.append(rec)
+        return added
+
+    def _apply_npv_retirements(self, units_config: dict[str, Any], year: int) -> None:
+        """Batteries the NPV-based retirement retired by *year*: no power or
+        energy at their node in the dispatch. (A retired generator already
+        has no capacity there: the master's cumulative capacity is 0.)"""
+        num_nodes = self.primary_system.nodes.num_nodes or 1
+        for r in self._npv_retirements:
+            if r["kind"] != "battery" or r["year"] > year:
+                continue
+            unit = units_config.get(r["key"])
+            node = int(r["node"])
+            if unit is None or not 0 <= node < num_nodes:
+                continue
+            for f in ("MaxChargePower", "MaxDischargePower", "capacity", "rated_power"):
+                if f in unit:
+                    vals = [float(x) for x in _per_node_list(unit.get(f, [0.0]), num_nodes)]
+                    vals[node] = 0.0
+                    unit[f] = vals
+
+    def _write_npv_retirements(self, path: Optional[Path]) -> None:
+        """Write the NPV-based retirements to the results file, group
+        ``npv_retirements`` (only when the system's ``npv_retirement`` is on):
+        one entry per retired unit location with its kind, key, name, index
+        (0-based, in the system's generators or batteries, as the
+        ``retirement_gen_{index}`` attributes), node, the year it is out of
+        service from, its NPV ($), the round that retired it, its configured
+        MW there and that MW's share of the unit."""
+        if path is None or not getattr(self.master_system, "npv_retirement", False):
+            return
+        import h5py
+
+        recs = self._npv_retirements
+        with h5py.File(path, "a") as f:
+            if "npv_retirements" in f:
+                del f["npv_retirements"]
+            grp = f.create_group("npv_retirements")
+            grp.attrs["description"] = (
+                "Existing units retired for the whole horizon because their NPV "
+                "in the master's plan was below npv_retirement_threshold")
+            grp.attrs["threshold"] = float(getattr(
+                self.master_system, "npv_retirement_threshold", 0.0))
+            grp.attrs["max_iterations"] = int(getattr(
+                self.master_system, "npv_retirement_max_iterations", 5))
+            str_dt = h5py.string_dtype()
+            for col in ("kind", "key", "name"):
+                grp.create_dataset(col, data=[str(r[col]) for r in recs], dtype=str_dt)
+            for col in ("index", "node", "year", "iteration"):
+                grp.create_dataset(col, data=np.array([int(r[col]) for r in recs], dtype=np.int64))
+            for col in ("npv", "capacity_mw", "share"):
+                grp.create_dataset(col, data=np.array([float(r[col]) for r in recs], dtype=float))
+            grp["npv"].attrs["units"] = "$"
+            grp["capacity_mw"].attrs["units"] = "MW"
 
     def _retired_share(self, gen_idx: int, flags) -> float:
         """Share of existing master generator *gen_idx* (0-based) retired.

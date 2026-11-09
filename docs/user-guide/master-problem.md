@@ -209,6 +209,27 @@ From that year on, the master may keep any part of it online with a continuous *
 
 Technology investments are not life-extended: they leave the capacity sum when they reach `lifetime`.
 
+### NPV-based retirement
+
+With the system setting `npv_retirement: true` (off by default), the run also retires existing units that do not pay for themselves. After the master solve, each existing generator and battery gets an NPV over the modelled years, from the plan itself:
+
+- a generator earns `base_lcoe` ($/MWh) on the energy the master dispatched it on the representative days (scaled to the year), and pays what the master charges it: fuel (or the fuel price, with primary energy on), maintenance, CO2 price, start-ups, fixed O&M on its capacity in service, life extension and decommissioning;
+- a battery earns `npv_annual_return_rate` × its power investment cost × its MW in service per year, and pays its fixed O&M, maintenance, throughput cost, life extension and decommissioning.
+
+Units with an NPV below `npv_retirement_threshold` ($, default 0) are retired for the whole horizon: they leave the plan and the dispatch from the first year, pay no more fixed O&M and pay their `decommissioning_cost` once, in the first year. The master is then solved again, and the check repeats until no new unit falls below the threshold or after `npv_retirement_max_iterations` rounds (default 5). The log lists each round's retired units and their NPV, and the results file the `npv_retirements` group ([HDF5 Output Schema](../reference/hdf5-output-schema.md#npv_retirements)).
+
+It works with every master mode: monolithic, Benders, stochastic (the NPV is the probability-weighted mean over the scenarios) and myopic (each year's master checks the original units it still has; a unit retired one year stays retired). The formula is in [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement).
+
+```yaml
+systems:
+  my_system:
+    npv_retirement: true
+    npv_retirement_max_iterations: 5
+    npv_retirement_threshold: 0.0     # $
+    base_lcoe: 93.0                   # $/MWh earned per MWh generated
+    npv_annual_return_rate: 0.15      # battery revenue per year / power investment cost
+```
+
 
 ---
 
@@ -326,7 +347,7 @@ temporal:
 | `mga.num_alternatives` | 10 | MGA only (1 to 100) |
 | `mga.objectives` | `[]` | SPORES objective menu, see [SporesObjective](../api/config-schema.md#sporesobjective). Must be non-empty for SPORES and empty for MGA |
 
-The system-level keys that shape the plan (`TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `discount_rate`, `life_extension_cost_factor`, `MAX_ANNUAL_SYSTEM_COST`, `reserve_margin`) are described in the [Configuration guide](configuration.md).
+The system-level keys that shape the plan (`TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `discount_rate`, `life_extension_cost_factor`, `MAX_ANNUAL_SYSTEM_COST`, `reserve_margin`) are described in the [Configuration guide](configuration.md); the NPV-based retirement keys [above](#npv-based-retirement) and in the [Configuration Reference](../reference/config-reference.md).
 
 
 ### Demand Seen by the Master
