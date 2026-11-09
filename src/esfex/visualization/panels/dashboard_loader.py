@@ -883,7 +883,6 @@ class DashboardLoader:
         ("soc_violation_cost",       "SOC violation"),
         ("transfer_margin_cost",     "Transfer margin"),
         ("fre_penetration_cost",     "RE-penetration penalty"),
-        ("npv_penalty_cost",         "NPV penalty"),
         ("demand_shift_cost",        "Demand shift"),
     ]
 

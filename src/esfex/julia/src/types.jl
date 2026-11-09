@@ -1176,22 +1176,6 @@ struct PowerSystemInput
     # Demand constraints
     max_annual_system_cost::Float64
 
-    # NPV/lifecycle tracking (P2: matches Python legacy power_system.py lines 528-938)
-    # unit_npv: (gen_idx, node) → NPV value (or ("bat_N", node) → NPV)
-    unit_npv::Dict{Tuple{Int,Int}, Float64}
-    # replacement_needed: (gen_idx, node) → bool (true if remaining life <= 2 or NPV < threshold)
-    replacement_needed::Dict{Tuple{Int,Int}, Bool}
-    # Battery replacement: ("bat_idx", node) → NPV/bool (use negative gen_idx for batteries: -(bat_idx+1))
-    bat_unit_npv::Dict{Tuple{Int,Int}, Float64}
-    bat_replacement_needed::Dict{Tuple{Int,Int}, Bool}
-    # force_replacement_threshold: NPV threshold below which replacement is forced
-    force_replacement_threshold::Float64
-    # decommissioning costs per unit: (gen_idx, node) → cost
-    decommissioning_cost_gen::Dict{Tuple{Int,Int}, Float64}
-    decommissioning_cost_bat::Dict{Tuple{Int,Int}, Float64}
-    # discount_rate for NPV computation
-    discount_rate::Float64
-
     # Configurable parameters (previously hardcoded)
     soc_end_tolerance::Float64              # Battery end-of-horizon SOC tolerance (±fraction)
     cyclic_end_soc::Bool                    # If true, force end-of-window SOC == initial (cyclic)
@@ -1204,8 +1188,6 @@ struct PowerSystemInput
     soc_violation_penalty::Float64          # Penalty for SOC limit violation
     demand_shift_cost_rate::Float64         # Cost rate per hour of shift distance
     dynamic_reserve_contribution::Float64   # Fraction of rated_power for dynamic reserve
-    max_decommission_cost_per_mw::Float64  # Cap on decommissioning cost ($/MW)
-    max_npv_penalty_per_mw::Float64        # Cap on NPV-based penalty ($/MW)
 
     # Hours in this year (always 8760: leap years are modelled as 8760 h)
     hours_per_year::Int
@@ -1323,15 +1305,6 @@ function PowerSystemInput(;
     reserve_dynamic_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     # Demand constraints
     max_annual_system_cost::Float64 = Inf,
-    # NPV/lifecycle tracking (P2)
-    unit_npv::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
-    replacement_needed::Dict{Tuple{Int,Int}, Bool} = Dict{Tuple{Int,Int}, Bool}(),
-    bat_unit_npv::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
-    bat_replacement_needed::Dict{Tuple{Int,Int}, Bool} = Dict{Tuple{Int,Int}, Bool}(),
-    force_replacement_threshold::Float64 = -1.0,
-    decommissioning_cost_gen::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
-    decommissioning_cost_bat::Dict{Tuple{Int,Int}, Float64} = Dict{Tuple{Int,Int}, Float64}(),
-    discount_rate::Float64 = 0.08,
     # Configurable parameters (previously hardcoded)
     soc_end_tolerance::Float64 = 0.05,
     cyclic_end_soc::Bool = true,
@@ -1344,8 +1317,6 @@ function PowerSystemInput(;
     soc_violation_penalty::Float64 = 1.0,
     demand_shift_cost_rate::Float64 = 1e-7,
     dynamic_reserve_contribution::Float64 = 0.5,
-    max_decommission_cost_per_mw::Float64 = 0.5,
-    max_npv_penalty_per_mw::Float64 = 1.0,
     hours_per_year::Int = hours_in_year(year),
     # PWL loss model: 0=no losses, -1=linear legacy, N>0=PWL with N segments
     pwl_loss_segments::Int = 3,
@@ -1412,14 +1383,6 @@ function PowerSystemInput(;
         reserve_static_requirement,
         reserve_dynamic_requirement,
         max_annual_system_cost,
-        unit_npv,
-        replacement_needed,
-        bat_unit_npv,
-        bat_replacement_needed,
-        force_replacement_threshold,
-        decommissioning_cost_gen,
-        decommissioning_cost_bat,
-        discount_rate,
         soc_end_tolerance,
         cyclic_end_soc,
         bat_soc_end_min,
@@ -1431,8 +1394,6 @@ function PowerSystemInput(;
         soc_violation_penalty,
         demand_shift_cost_rate,
         dynamic_reserve_contribution,
-        max_decommission_cost_per_mw,
-        max_npv_penalty_per_mw,
         hours_per_year,
         pwl_loss_segments,
         gen_cost_curves,
@@ -1556,11 +1517,6 @@ mutable struct PowerSystemVariables
     freq_flow_a_to_b::Union{Matrix{VariableRef}, Nothing}  # A→B power per converter per hour
     freq_flow_b_to_a::Union{Matrix{VariableRef}, Nothing}  # B→A power per converter per hour
 
-    # NPV forced replacement variables
-    # Continuous variables for units where replacement_needed=true
-    gen_forced_replacement::Union{Dict{Tuple{Int,Int}, VariableRef}, Nothing}
-    bat_forced_replacement::Union{Dict{Tuple{Int,Int}, VariableRef}, Nothing}
-
     # Reservoir hydroelectric variables (gen × node × hour) — SparseAxisArray
     reservoir_level::Any         # Water level (MWh-eq), dim3 = hours+1
     reservoir_spillage::Any      # Overflow (MW-eq)
@@ -1614,8 +1570,6 @@ function PowerSystemVariables(
     acdc_invert = nothing,
     freq_flow_a_to_b = nothing,
     freq_flow_b_to_a = nothing,
-    gen_forced_replacement = nothing,
-    bat_forced_replacement = nothing,
     reservoir_level = nothing,
     reservoir_spillage = nothing,
     reservoir_pump = nothing,
@@ -1643,8 +1597,6 @@ function PowerSystemVariables(
         acdc_invert,
         freq_flow_a_to_b,
         freq_flow_b_to_a,
-        gen_forced_replacement,
-        bat_forced_replacement,
         reservoir_level,
         reservoir_spillage,
         reservoir_pump,
@@ -1691,7 +1643,6 @@ struct CostBreakdown
     reservoir_spillage_cost::Float64
     demand_shift_cost::Float64
     rooftop_curtailment_cost::Float64
-    npv_penalty_cost::Float64
     # PrimaryEnergy sub-costs (merged into cost_expressions by
     # PrimaryEnergyAdapter.integrate_with_power_system).
     pe_supply_cost::Float64
@@ -2376,11 +2327,9 @@ struct MasterProblemInput
 
     # Configurable parameters (previously hardcoded)
     reserve_margin::Float64             # Capacity adequacy reserve margin (e.g. 1.15 = 15% margin)
-    npv_annual_return_rate::Float64     # NPV revenue estimation rate for investments
+    # Read only by calculate_unit_npv / solve_with_npv_iteration (Julia API; the runner does not call them)
+    npv_annual_return_rate::Float64     # Battery NPV revenue per year as a fraction of its power investment cost
     base_lcoe::Float64                  # Base LCOE ($/MWh) for NPV revenue estimation
-    max_npv_penalty_per_mw::Float64     # Cap on NPV-based penalty ($/MW)
-    max_decommission_cost_per_mw::Float64  # Cap on decommissioning cost ($/MW)
-    force_replacement_threshold::Float64   # NPV threshold for forced replacement ($)
 
     # Hours per year (indexed by year_idx; always 8760, leap years included)
     hours_per_year::Vector{Int}
@@ -2479,9 +2428,6 @@ function MasterProblemInput(;
     reserve_margin::Float64 = 1.15,
     npv_annual_return_rate::Float64 = 0.15,
     base_lcoe::Float64 = 9.3e-5,
-    max_npv_penalty_per_mw::Float64 = 1.0,
-    max_decommission_cost_per_mw::Float64 = 0.5,
-    force_replacement_threshold::Float64 = -0.5,
     hours_per_year::Vector{Int} = [hours_in_year(y) for y in years],
     reserve_static_default_ratio::Float64 = 0.15,
     reserve_static_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
@@ -2530,7 +2476,7 @@ function MasterProblemInput(;
         life_extension_cost_factor, decommissioning_cost_factor,
         sectoral_demand, sectoral_criticality,
         reserve_margin, npv_annual_return_rate,
-        base_lcoe, max_npv_penalty_per_mw, max_decommission_cost_per_mw, force_replacement_threshold,
+        base_lcoe,
         hours_per_year,
         reserve_static_default_ratio,
         reserve_static_requirement, reserve_dynamic_requirement,

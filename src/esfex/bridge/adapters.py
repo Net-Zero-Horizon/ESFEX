@@ -343,48 +343,6 @@ def _custom_constraints_to_julia(specs: list[dict], jl) -> Any:
     return jl_vec
 
 
-def _dict_to_jl_tuple_dict(py_dict: dict) -> Any:
-    """Convert {(g,b): float} Python dict to Julia Dict{Tuple{Int,Int}, Float64}.
-
-    Accepts keys as tuples (g, b) or strings "g_b".
-    """
-    jl = get_julia()
-    if not py_dict:
-        return jl.seval("Dict{Tuple{Int64,Int64}, Float64}()")
-    pairs = []
-    for key, val in py_dict.items():
-        if isinstance(key, tuple):
-            g, b = int(key[0]), int(key[1])
-        else:
-            parts = str(key).split("_")
-            g, b = int(parts[0]), int(parts[1])
-        pairs.append(f"({g}, {b}) => {float(val)}")
-    return jl.seval(f"Dict{{Tuple{{Int64,Int64}}, Float64}}({', '.join(pairs)})")
-
-
-def _scale_dict_values(py_dict: dict) -> dict:
-    """Scale all values in a {key: float} dict by COST_SCALE ($ -> M$)."""
-    if not py_dict:
-        return py_dict
-    return {k: v * COST_SCALE for k, v in py_dict.items()}
-
-
-def _dict_to_jl_tuple_bool_dict(py_dict: dict) -> Any:
-    """Convert {(g,b): bool} Python dict to Julia Dict{Tuple{Int,Int}, Bool}."""
-    jl = get_julia()
-    if not py_dict:
-        return jl.seval("Dict{Tuple{Int64,Int64}, Bool}()")
-    pairs = []
-    for key, val in py_dict.items():
-        if isinstance(key, tuple):
-            g, b = int(key[0]), int(key[1])
-        else:
-            parts = str(key).split("_")
-            g, b = int(parts[0]), int(parts[1])
-        pairs.append(f"({g}, {b}) => {'true' if val else 'false'}")
-    return jl.seval(f"Dict{{Tuple{{Int64,Int64}}, Bool}}({', '.join(pairs)})")
-
-
 # ─── Renewable fuel types (no transport cost adjustment) ───
 _RENEWABLE_FUELS = {"Sun", "Wind", "Water", "OTEC", "None"}
 
@@ -2079,14 +2037,6 @@ class PowerSystemAdapter:
                 [p * COST_SCALE for p in self.kwargs.get('electricity_price', [])[:self.hours]]
                 if self.kwargs.get('electricity_price') else []
             ),
-            # NPV/lifecycle tracking (H1: wire P2 fields)
-            unit_npv=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('unit_npv', {}))),
-            replacement_needed=_dict_to_jl_tuple_bool_dict(self.kwargs.get('replacement_needed', {})),
-            bat_unit_npv=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('bat_unit_npv', {}))),
-            bat_replacement_needed=_dict_to_jl_tuple_bool_dict(self.kwargs.get('bat_replacement_needed', {})),
-            decommissioning_cost_gen=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('decommissioning_cost_gen', {}))),
-            decommissioning_cost_bat=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('decommissioning_cost_bat', {}))),
-            discount_rate=float(self.kwargs.get('discount_rate', sys.discount_rate)),
             # Configurable parameters (previously hardcoded)
             soc_end_tolerance=float(getattr(sys, 'soc_end_tolerance', 0.05)),
             # Operational rolling windows chain SOC across windows via boundary
@@ -2107,8 +2057,6 @@ class PowerSystemAdapter:
             soc_violation_penalty=scale_cost(float(getattr(sys.penalties, 'soc_violation', 1e6))),
             demand_shift_cost_rate=scale_cost(float(getattr(sys, 'demand_shift_cost_rate', 0.1))),
             dynamic_reserve_contribution=float(getattr(sys, 'dynamic_reserve_contribution', 0.5)),
-            max_decommission_cost_per_mw=scale_cost(float(getattr(sys, 'max_decommission_cost_per_mw', 5e5))),
-            max_npv_penalty_per_mw=scale_cost(float(getattr(sys, 'max_npv_penalty_per_mw', 1e6))),
             # PWL transmission loss model
             pwl_loss_segments=_pwl_segments_from_config(sys.dc_power_flow),
             # Rooftop solar generation (hours × nodes matrix, or nothing)
@@ -3045,9 +2993,6 @@ class MasterProblemAdapter:
             reserve_margin=float(getattr(sys, 'reserve_margin', 1.15)),
             npv_annual_return_rate=float(getattr(sys, 'npv_annual_return_rate', 0.15)),
             base_lcoe=scale_cost(float(getattr(sys, 'base_lcoe', 93.0))),
-            max_npv_penalty_per_mw=scale_cost(float(getattr(sys, 'max_npv_penalty_per_mw', 1e6))),
-            max_decommission_cost_per_mw=scale_cost(float(getattr(sys, 'max_decommission_cost_per_mw', 5e5))),
-            force_replacement_threshold=scale_cost(float(getattr(sys, 'force_replacement', -5e5))),
             solver_name=self._solver.name,
             threads=self._solver.threads,
             time_limit=float(self._solver.time_limit),

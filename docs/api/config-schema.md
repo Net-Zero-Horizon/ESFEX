@@ -124,7 +124,7 @@ class SystemConfig(BaseModel):
     ...
 ```
 
-Legacy uppercase aliases: `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `MAX_NPV_PENALTY_PER_MW`, `MAX_DECOMMISSION_COST_PER_MW`, `FORCE_REPLACEMENT`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
+Legacy uppercase aliases: `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
 
 **Properties:**
 

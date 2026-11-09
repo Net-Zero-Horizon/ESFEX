@@ -124,10 +124,10 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 ## 3. Objective Function
 
 
-The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (forced replacement, the fixed O&M of generators, batteries and electrolyzers) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
+The total system cost over the window is minimized. Terms priced per MWh are written below as sums of MW over time steps; in the model they are multiplied by the time step \(\Delta t\) (`resolution_hours`). Annual terms (the fixed O&M of generators, batteries and electrolyzers) are multiplied by the window's share of the year, \(T \Delta t / 8760\) (`hours_per_year`), so the windows of a year add up to one annual charge. Start-ups are events inside the window and are charged in full:
 
 \[
-\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{npv}} + Z^{\text{fix}} + Z^{\text{bat,fix}} + Z^{\text{elz,fix}} \right) + Z^{\text{start}} \tag{OBJ}
+\min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{fix}} + Z^{\text{bat,fix}} + Z^{\text{elz,fix}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
 Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
@@ -312,19 +312,11 @@ Z^{\text{shift}} = \sum_{s,n,t,t'} |t - t'| \, \Delta t \cdot \gamma^{\text{shif
 
 where \(\gamma^{\text{shift}}\) is the `demand_shift_cost_rate` (\$ per MWh and per hour moved) and \(|t - t'| \, \Delta t\) the shift distance in hours.
 
-### 3.14 NPV-Based Forced Replacement Penalty
-
-\[
-Z^{\text{npv}} = \sum_{g,n} \left( C^{\text{decom}}_{g,n} \cdot \bar{P}_{g,n} + C^{\text{npv}}_{g,n} \cdot \bar{P}_{g,n} \cdot 0.1 \right) \cdot r_{g,n} \tag{OBJ-15}
-\]
-
-where \(r_{g,n}\) is the forced replacement variable (continuous) and costs are capped at `max_decommission_cost_per_mw` and `max_npv_penalty_per_mw`. Batteries flagged for replacement get the analogous term: decommissioning cost × discharge power plus 10 % of the absolute negative NPV.
-
-### 3.15 Reservoir Costs
+### 3.14 Reservoir Costs
 
 Spilled reservoir water is charged at the electricity price \(\pi_t\) (1 % of VOLL when no price vector is given). See [Reservoir Hydropower](reservoir-hydro.md).
 
-### 3.16 Line Flow Cost
+### 3.15 Line Flow Cost
 
 Lines with a `cost_per_mw_km` (the inter-system links of a merged multi-system run) pay \(c^{\text{flow}}_l\) = `length_km × cost_per_mw_km` (\$/MWh, the `flow_cost` of `TransmissionLineData`) for the energy they carry in either direction, as the master does:
 

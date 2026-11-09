@@ -214,16 +214,13 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `demand_paths` | list[str] \| null | `null` | One demand file per node; overrides `demand_path`; length must equal the node count |
 | `demand_scale` | float (> 0) | `1` | Multiplier applied to all demand |
 | `discount_rate` | float (0–1) | `0.05` | Discount rate |
-| `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in NPV calculations ($/MWh) |
+| `base_lcoe` | float (≥ 0) | `93` | Reference LCOE used to value generation in the unit NPV of the Julia API `solve_with_npv_iteration` ($/MWh). `esfex run` does not use it. See [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement) |
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target. See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |
 | `max_annual_system_cost` / `MAX_ANNUAL_SYSTEM_COST` | float | `20000000000` | Annual investment budget cap ($) |
-| `max_npv_penalty_per_mw` / `MAX_NPV_PENALTY_PER_MW` | float | `1000000` | NPV penalty cap ($/MW) |
-| `max_decommission_cost_per_mw` / `MAX_DECOMMISSION_COST_PER_MW` | float | `500000` | Decommissioning cost cap ($/MW) |
-| `force_replacement` / `FORCE_REPLACEMENT` | float | `-500000` | Replacement incentive ($/MW, negative = incentive) |
 | `life_extension_cost_factor` | float (≥ 0) | `0.2` | Yearly cost of keeping a unit past its lifetime, as a fraction of its `invest_cost` ($/MW) |
-| `npv_annual_return_rate` | float (0–1) | `0.15` | NPV revenue estimation rate for investments |
+| `npv_annual_return_rate` | float (0–1) | `0.15` | Battery revenue per year as a fraction of its power investment cost, in the unit NPV of the Julia API `solve_with_npv_iteration`. `esfex run` does not use it |
 | `reserve_margin` | float (≥ 1.0) | `1.15` | Capacity adequacy reserve margin (e.g. 1.15 = 15%) |
 
 There is no `demand_growth` or `initial_re_penetration` key; both are ignored if present. The initial RE share is always computed from existing capacity.

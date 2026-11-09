@@ -71,9 +71,6 @@ systems:
     MIN_ANNUAL_INCREMENT: 0.01
     MAX_ANNUAL_INCREMENT: 0.1
     MAX_ANNUAL_SYSTEM_COST: 20000000000.0
-    MAX_NPV_PENALTY_PER_MW: 1000000.0
-    MAX_DECOMMISSION_COST_PER_MW: 500000.0
-    FORCE_REPLACEMENT: -500000.0
     discount_rate: 0.05
     base_lcoe: 93.0
     INERTIA_LIMIT_THRESHOLD: 0.1
@@ -534,9 +531,6 @@ systems:
     min_annual_increment: 0.01
     max_annual_increment: 0.1
     max_annual_system_cost: 20000000000.0
-    max_npv_penalty_per_mw: 1000000.0
-    max_decommission_cost_per_mw: 500000.0
-    force_replacement: -500000.0
     inertia_limit_threshold: 0.1
     sim_rooftop: false
 plugins: {}

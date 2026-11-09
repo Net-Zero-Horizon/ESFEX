@@ -193,7 +193,7 @@ Click a **system name** in the Element Tree. Each system has independent paramet
 |-------|---------|-------------|
 | Demand Scale (x) | 1.0 | Multiplier applied to all demand in this system |
 | Discount Rate (frac) | 0.05 | Discount rate for net present value |
-| Base LCOE ($/MWh) | 93.0 | Electricity price used to estimate investment revenue in the master problem's NPV calculations |
+| Base LCOE ($/MWh) | 93.0 | Electricity price that values generation in the unit NPV of the Julia API `solve_with_npv_iteration`; `esfex run` does not use it |
 | Target RE Penetration (frac) | 1.0 | Final-year renewable energy share target. Shortfalls are penalized with the FRE Penetration Loss penalty. |
 | Min Annual Increment (frac) | 0.01 | Minimum yearly increase in RE share |
 | Max Annual Increment (frac) | 0.10 | Maximum yearly increase in RE share |
@@ -210,9 +210,6 @@ The master-problem meaning of the RE target, increments, discount rate and cost 
 | Field | Default | Description |
 |-------|---------|-------------|
 | Max Annual System Cost ($) | 20e9 | Cap on annual system cost |
-| Max NPV Penalty ($/MW) | 1e6 | Cap per MW on the NPV penalty |
-| Max Decommission Cost ($/MW) | 5e5 | Cap per MW on decommissioning cost |
-| Force Replacement ($) | −5e5 | NPV threshold below which a unit is replaced |
 | Life Extension Cost Factor (x) | 0.20 | Life extension costs `invest_cost × factor` per MW per year |
 
 ### Penalties
