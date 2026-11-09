@@ -698,7 +698,7 @@
     "energy_per_kg": "H₂ 1kgあたりエネルギー (kWh/kg):",
     "fixed_cost": "固定費 ($/MW/年):",
     "variable_cost": "可変費 ($/MWh):",
-    "water_cost": "水コスト ($/m³):",
+    "water_cost": "水コスト ($/kg H₂):",
     "lifetime": "寿命 (年):"
   },
   "ev_form": {

@@ -221,6 +221,20 @@ def _concat_window_series(windows) -> dict:
     }
 
 
+def _stamp_built_power(ds, built: list, i: int) -> None:
+    """Record on results dataset ``ds`` the MW in service per node of unit
+    ``i`` when the master built it (``built[i]`` not None): such a unit has
+    no config in the results file, and its fixed O&M is charged on it."""
+    if i < len(built) and built[i] is not None:
+        ds.attrs["rated_power"] = np.asarray(built[i], dtype=float)
+
+
+# Operating-cost fields of the candidate technologies written to the results
+# file (system_configuration/technologies, /battery_technologies)
+_TECH_COST_ATTRS = ("fuel_cost", "fixed_cost", "maintenance_cost", "start_up_cost")
+_BAT_TECH_COST_ATTRS = ("maintenance_cost", "fixed_cost")
+
+
 def unique_unit_names(names: list[str]) -> list[str]:
     """Index-aligned unit names with homonyms made unique.
 
@@ -1860,6 +1874,9 @@ class Orchestrator:
             bat.name if hasattr(bat, 'name') else key
             for key, bat in self.primary_system.batteries.items()
         ])
+        # No master-built units yet (see _rebuild_unit_names)
+        self._gen_built_mw = []
+        self._bat_built_mw = []
 
         # Preload all availability profiles ONCE (cache for operational phase)
         self._availability_cache = self._preload_availability_profiles(num_nodes)
@@ -6987,10 +7004,15 @@ class Orchestrator:
         # the dashboard can bucket by fuel without parsing plant names.
         gen_names: list[str] = []
         gen_fuels: list[str] = []
+        # MW in service per node of the units the master built (None for the
+        # configured units): they have no config in the results file, so the
+        # export records their capacity on their datasets
+        gen_built: list = []
         # 1) Original generators (same order as sys.generators iteration)
         for key, gen in sys.generators.items():
             gen_names.append(gen.name if hasattr(gen, 'name') else key)
             gen_fuels.append(str(getattr(gen, 'fuel', '') or ''))
+            gen_built.append(None)
 
         # 2) Virtual generators from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -7007,12 +7029,15 @@ class Orchestrator:
             # Investment gens carry their technology's fuel in vdata
             # (populated when they were synthesised from a tech).
             gen_fuels.append(str(vdata.get("fuel", "") or ""))
+            gen_built.append(self._unit_power_by_node(vdata, rp))
 
         # --- Battery names ---
         bat_names = []
+        bat_built: list = []
         # 1) Original batteries (same order as sys.batteries iteration)
         for key, bat in sys.batteries.items():
             bat_names.append(bat.name if hasattr(bat, 'name') else key)
+            bat_built.append(None)
 
         # 2) Virtual batteries from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -7025,12 +7050,33 @@ class Orchestrator:
             if not cap or (max(cap) < 0.01 and max(charge_pow) < 0.01):
                 continue
             bat_names.append(vdata.get("name", key))
+            bat_built.append(self._unit_power_by_node(
+                vdata, vdata.get("MaxDischargePower", charge_pow)))
 
         # Homonyms get a " (N)" suffix (HDF5 needs unique dataset names);
         # order and length are kept, so the fuel list stays index-aligned.
         self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
+        self._gen_built_mw = gen_built
         self._bat_names = unique_unit_names(bat_names)
+        self._bat_built_mw = bat_built
+
+    def _unit_power_by_node(self, vdata: dict, power) -> list[float]:
+        """Per-node MW of a virtual unit's ``power`` list, which is per bus
+        when the unit carries ``_is_per_bus`` (summed onto the buses' parent
+        nodes) and per node otherwise."""
+        num_nodes = self._num_nodes
+        values = [float(v) for v in (power or [])]
+        buses = self.primary_system.buses or []
+        if vdata.get("_is_per_bus") and len(values) == len(buses):
+            from esfex.bridge.converters import node_bus_mapping_required
+            if node_bus_mapping_required(buses, num_nodes):
+                out = [0.0] * num_nodes
+                for b, v in zip(buses, values):
+                    if 0 <= b.parent_node < num_nodes:
+                        out[b.parent_node] += v
+                return out
+        return (values + [0.0] * num_nodes)[:num_nodes]
 
     # ------------------------------------------------------------------
     # System-unit mapping (for per-system HDF5 export)
@@ -7665,6 +7711,11 @@ class Orchestrator:
                     tg.attrs["type"] = tech.type
                     tg.attrs["fuel"] = tech.fuel
                     tg.attrs["invest_cost"] = str(list(tech.invest_cost))
+                    # Operating costs of the units the master builds from it
+                    # (no generator config of their own): read by the results
+                    # dashboard and the financial analysis
+                    for k in _TECH_COST_ATTRS:
+                        tg.attrs[k] = str(list(getattr(tech, k)))
                     if tech.color:
                         tg.attrs["color"] = tech.color
 
@@ -7682,6 +7733,8 @@ class Orchestrator:
                     btg.attrs["name"] = bt.name
                     btg.attrs["invest_cost_power"] = str(list(bt.invest_cost_power))
                     btg.attrs["invest_cost_energy"] = str(list(bt.invest_cost_energy))
+                    for k in _BAT_TECH_COST_ATTRS:
+                        btg.attrs[k] = str(list(getattr(bt, k)))
                     if bt.color:
                         btg.attrs["color"] = bt.color
 
@@ -7844,6 +7897,7 @@ class Orchestrator:
                 # missing (shouldn't happen, but the export should never
                 # crash on stale state).
                 gen_fuels = getattr(self, '_gen_fuels', []) or []
+                gen_built = getattr(self, '_gen_built_mw', None) or []
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_output.shape[0]:
                         ds_name = gen_ds[g]
@@ -7859,6 +7913,7 @@ class Orchestrator:
                         # HDF5 happy when the source data didn't supply
                         # one (e.g. legacy configs).
                         ds.attrs["fuel"] = gen_fuels[g] if g < len(gen_fuels) else ""
+                        _stamp_built_power(ds, gen_built, g)
 
             # --- Generator status (unit commitment on/off) ---
             if result.gen_status is not None:
@@ -7923,6 +7978,7 @@ class Orchestrator:
                     bat_group.attrs["description"] = (
                         f"{bat_key} [nodes x hours] for each battery"
                     )
+                    bat_built = getattr(self, '_bat_built_mw', None) or []
                     for b, name in enumerate(self._bat_names):
                         if b < bat_data.shape[0]:
                             ds = bat_group.create_dataset(
@@ -7931,6 +7987,8 @@ class Orchestrator:
                             )
                             ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
                             ds.attrs["units"] = "MW"
+                            if bat_key == "battery_discharge":
+                                _stamp_built_power(ds, bat_built, b)
 
             # --- Battery SOC (per battery) ---
             if result.bat_soc is not None:

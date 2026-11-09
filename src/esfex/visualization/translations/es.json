@@ -698,7 +698,7 @@
     "energy_per_kg": "Energía por kg H₂ (kWh/kg):",
     "fixed_cost": "Costo Fijo ($/MW/año):",
     "variable_cost": "Costo Variable ($/MWh):",
-    "water_cost": "Costo del Agua ($/m³):",
+    "water_cost": "Costo del Agua ($/kg H₂):",
     "lifetime": "Vida Útil (años):"
   },
   "ev_form": {
