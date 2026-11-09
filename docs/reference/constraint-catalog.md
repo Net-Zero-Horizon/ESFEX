@@ -253,6 +253,7 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 | `bat_tech_min_dur_bt{bt}_b{b}_y{y}`, `bat_tech_max_dur_bt{bt}_b{b}_y{y}` | TECH-3 | Battery-technology E/P ratio per period |
 | `cumul_node_tech_t{t}_n{ni}`, `cumul_node_bat_tech_pow_bt{bt}_n{ni}`, `cumul_node_bat_tech_cap_bt{bt}_n{ni}` | TECH-4 | Node-aggregate limits (nodes with several buses) |
 | `cumul_res_g{g}_b{b}` | TECH-5 | Cumulative reservoir investment limit |
+| `def_cap_tech_y{y}_t{t}_b{b}`, `def_cap_bt_pow_y{y}_bt{bt}_b{b}`, `def_cap_bt_en_y{y}_bt{bt}_b{b}`, `def_cap_trans_y{y}_{i}_{j}`, `def_cap_res_y{y}_g{g}_b{b}`, `def_cap_conv_y{y}_{kind}{c}`, `def_cap_fuel_y{y}_{kind}_{name}_{i}` | CUM-5 | Capacity state variable `cap_*` of year `y` = the capacity built and in service (CUM-1b, CUM-3, CUM-4, reservoirs, converters, fuel builds); the representative-day rows use `cap_*` |
 
 ### Budget
 
@@ -293,7 +294,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `tech_cap_t{t}_b{b}_ts{ts}_y{y}_d{d}` | OP-1 | Technology output <= cumulative capacity (× availability for renewables) |
+| `tech_cap_t{t}_b{b}_ts{ts}_y{y}_d{d}` | OP-1 | Technology output <= cumulative capacity `cap_tech_y{y}_t{t}_b{b}` (× availability for renewables) |
 | `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}_y{y}_d{d}` | OP-1b | Technology with a `fuel_cost_curve`: segment `k` <= `fraction_k` × cumulative capacity (× availability); the segments sum to the output and are charged their marginal costs instead of `fuel_cost` |
 | `bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*` | OP-2a | Battery-technology power (× availability) and energy limits; unnamed BAT-9 ramp limits on the power built |
 | `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*` | OP-2b | Battery-technology SOC: initial, dynamics (`× Δt`), cyclic |

@@ -16,7 +16,8 @@
 using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
-             coefficient, objective_function, all_variables, name, fix, constant, is_binary
+             coefficient, objective_function, all_variables, name, fix, constant, is_binary,
+             list_of_constraint_types, all_constraints, constraint_object, AffExpr
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -3958,6 +3959,79 @@ import Ipopt
                 @test objective_value(model) ≈ br.objective rtol = 1e-6
                 @test br.solution.objective ≈ br.objective rtol = 1e-9
             end
+        end
+
+        @testset "master: investment variables stay out of the hourly rows" begin
+            # Every technology, battery and corridor build used to be summed,
+            # with its degradation, into each hourly row of every later year:
+            # dense columns that stalled interior-point solvers on large
+            # masters. Per-year capacity state variables now carry it: the same
+            # optimum, and an investment column has the same few nonzeros
+            # however many hours the master models.
+            nb, ny = 2, 3
+            Hy = 24 * 4                       # four days per modelled year
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 20.0, 0.1, 0.0, 0.0, 100.0, 220.0, 1,
+                                        50.0, "AC", 0.0)
+            net = NetworkConfig(2, 2, buses, [1, 2], [0 20.0; 20.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [2.0e-4, 2.0e-4], [100.0, 100.0], [line],
+                TransformerData[], ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [80.0, 0.0], [1.0e-4, 0.0],
+                        ones(Hy, nb); nb = nb, H = Hy)
+            sun = [max(0.0, sin(pi * (mod(h - 1, 24) - 6) / 12)) * (1.0 - 0.1 * ((h - 1) ÷ 24))
+                   for h in 1:Hy]
+            z, o = zeros(nb), ones(nb)
+            pv = TechnologyConfig("PV", "Renewable", "Solar", [3.0e-4, 3.0e-4], [100.0, 100.0],
+                hcat(sun, sun), o, o, o, o, z, z, z, z, [1.0e-6, 1.0e-6], z, z, z,
+                [2.0, 2.0], [0.05, 0.05], z, 50.0, "AC", false, o)
+            li = BatteryTechnologyConfig("Li", [2.0e-4, 2.0e-4], [5.0e-5, 5.0e-5],
+                [50.0, 50.0], [200.0, 200.0], 1.0, 8.0, [0.95, 0.95], [0.95, 0.95], z,
+                [15.0, 15.0], [0.5, 0.5], z, o, z, z, [1.0e-7, 1.0e-7], false, "AC", z, o,
+                z, z, [1.0e-6, 1.0e-6], true, zeros(0, nb))
+            dem = hcat(fill(10.0, Hy), [30.0 + 5.0 * sin(2pi * h / 24) for h in 1:Hy])
+            inp(days) = MasterProblemInput(
+                years = collect(2025:2025 + ny - 1), network = net, generators = [gas],
+                batteries = BatteryConfig[], technologies = [pv], battery_technologies = [li],
+                base_demand = repeat(dem, ny, 1), hours_per_year = fill(Hy, ny),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = days, min_day_separation = 1,
+                demand_growth = 0.05, transmission_loss_segments = 0, verbose = false)
+            inv_pfx = ("tech_inv", "bat_tech_pow_inv", "bat_tech_cap_inv", "trans_inv")
+            function inv_nonzeros(model)
+                cnt = Dict{String, Int}(name(v) => 0 for v in all_variables(model)
+                                        if any(startswith(name(v), p) for p in inv_pfx))
+                for (F, S) in list_of_constraint_types(model)
+                    F <: AffExpr || continue
+                    for c in all_constraints(model, F, S), (v, a) in constraint_object(c).func.terms
+                        a != 0 && haskey(cnt, name(v)) && (cnt[name(v)] += 1)
+                    end
+                end
+                return cnt
+            end
+            counts = Dict{Int, Dict{String, Int}}()
+            for days in (1, 3)
+                input = inp(days)
+                m1, v1, _ = create_master_problem(input)
+                m0, v0, _ = create_master_problem(input; capacity_states = false)
+                optimize!(m1)
+                optimize!(m0)
+                @test string(termination_status(m1)) == "OPTIMAL"
+                @test objective_value(m1) ≈ objective_value(m0) rtol = 1e-9
+                r1 = extract_master_solution(m1, v1, input)
+                r0 = extract_master_solution(m0, v0, input)
+                @test r1.total_investment_by_year ≈ r0.total_investment_by_year rtol = 1e-6
+                # Something of each kind is built, so the rows above matter
+                @test sum(sum(v) for d in values(r1.tech_investment) for v in values(d)) > 1
+                @test sum(sum(v) for d in values(r1.bat_tech_power_investment)
+                          for v in values(d)) > 1
+                @test sum(sum(values(d)) for d in values(r1.transfer_investment)) > 1
+                counts[days] = inv_nonzeros(m1)
+                # Without the states a build's column grows with the hours
+                @test maximum(values(inv_nonzeros(m0))) > 24 * days
+            end
+            @test counts[1] == counts[3]
+            @test maximum(values(counts[3])) <= 2 * ny + 6
         end
 
         @testset "reserves are pooled per system" begin
