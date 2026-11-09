@@ -165,7 +165,8 @@ end
 
 Classify buses for AC power flow:
 - Type 3 (Slack): Reference bus — known |V| and θ
-- Type 2 (PV): Generator buses with active non-renewable generation — known P and |V|
+- Type 2 (PV): Generator buses with active dispatchable generation (any unit
+  but a variable renewable, see `is_variable_renewable`) — known P and |V|
 - Type 1 (PQ): Load buses — known P and Q
 """
 function classify_buses(gen_output_t::Matrix{Float64},
@@ -176,11 +177,10 @@ function classify_buses(gen_output_t::Matrix{Float64},
 
     n_gen = length(generators)
     for g in 1:n_gen
-        if generators[g].type != "Renewable"
-            for b in 1:num_buses
-                if gen_output_t[g, b] > 1e-3
-                    bus_types[b] = 2  # PV (dispatchable generator)
-                end
+        for b in 1:num_buses
+            is_variable_renewable(generators[g], b) && continue
+            if gen_output_t[g, b] > 1e-3
+                bus_types[b] = 2  # PV (dispatchable generator)
             end
         end
     end

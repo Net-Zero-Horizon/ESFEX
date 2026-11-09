@@ -80,8 +80,8 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 |-------|-------|-------|-------------|
 | `demand` | (N, T) | MW | Gross demand (float32): base demand, plus EV demand when EV optimisation is off. Rooftop solar is not subtracted. Files written before the `dimensions` attribute was added hold it (T, N) when N ≥ T; `esfex.io.exporter.demand_node_hours()` reads both |
 | `generation/{gen_name}` | (N, T) | MW | Per-generator output (group, one dataset per unit; attribute `fuel`) |
-| `gen_status/{gen_name}` | (N, T) | 0/1 | Commitment status (UC mode only) |
-| `gen_startup/{gen_name}` | (N, T) | 0-1 | Startup events (UC mode only) |
+| `gen_status/{gen_name}` | (N, T) | units | Units online (UC mode only; committed generators only, none for PV, wind or run-of-river hydro) |
+| `gen_startup/{gen_name}` | (N, T) | units | Units started (UC mode only; same generators as `gen_status`) |
 | `curtailment` | (N, T) | MW | Renewable curtailment per node, summed over generators (legacy files had a `(T,)` aggregate) |
 | `battery_charge/{bat_name}` | (N, T) | MW | Per-battery charge (group) |
 | `battery_discharge/{bat_name}` | (N, T) | MW | Per-battery discharge (group) |

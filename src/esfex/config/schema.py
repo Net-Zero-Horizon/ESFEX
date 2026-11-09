@@ -613,6 +613,44 @@ def canonical_unit_type(value):
     return value
 
 
+# Fuels of variable renewables (spaces, '_' and '-' removed, lower case);
+# water / hydro only without a reservoir. Same sets as the Julia model
+# (``VARIABLE_RENEWABLE_FUELS`` / ``HYDRO_FUELS`` in types.jl).
+VARIABLE_RENEWABLE_FUELS = frozenset({
+    "sun", "solar", "pv", "solarpv", "photovoltaic",
+    "wind", "windonshore", "windoffshore", "onshorewind", "offshorewind",
+    "otec", "wave", "tidal", "none", "",
+})
+HYDRO_FUELS = frozenset({"water", "hydro", "runofriver"})
+
+
+def is_variable_renewable(unit_type, fuel, reservoir_capacity: float = 0.0) -> bool:
+    """Whether a unit is a variable renewable at a node: type ``Renewable``
+    and a fuel-less resource whose output follows its availability profile
+    (sun, wind, ocean, no fuel, or water / hydro without a reservoir there).
+
+    A variable renewable is not committed in unit commitment (no on/off
+    status or start-ups), holds no reserve and is what curtailment
+    measures; every other unit (biomass, geothermal, reservoir hydro,
+    thermal) is dispatchable. Mirrors ``is_variable_renewable`` in the
+    Julia model.
+    """
+    if canonical_unit_type(unit_type) != "Renewable":
+        return False
+    key = "".join(str(fuel or "").lower().split()).replace("_", "").replace("-", "")
+    if key in VARIABLE_RENEWABLE_FUELS:
+        return True
+    return key in HYDRO_FUELS and not (reservoir_capacity or 0.0) > 0
+
+
+def is_committed_unit(unit_type, fuel, reservoir_capacity=None) -> bool:
+    """Whether a generator is committed in unit commitment at any node:
+    it is not a variable renewable at one of them at least
+    (``reservoir_capacity`` per node, or none)."""
+    res = list(reservoir_capacity or []) or [0.0]
+    return any(not is_variable_renewable(unit_type, fuel, r) for r in res)
+
+
 class GeneratorConfig(BaseModel):
     """Generator unit configuration."""
 

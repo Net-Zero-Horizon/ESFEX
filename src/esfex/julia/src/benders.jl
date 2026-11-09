@@ -642,15 +642,12 @@ function create_benders_subproblem(
 
         for t in 1:n_tech
             tech = input.technologies[t]
-            is_renewable = tech.type == "Renewable"
             for b in 1:n_buses
                 cumul_cap = get(fixed_caps.tech_capacity, (t, b), 0.0)
                 avails = Vector{Float64}(undef, hours)
                 for ts in 1:hours
-                    actual_hour = start_hour + ts - 1
-                    avail_hours = size(tech.availability, 1)
-                    avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
-                    avail = is_renewable ? tech.availability[avail_hour, b] : 1.0
+                    # Same availability as the monolithic master (every technology)
+                    avail = tech_availability_at(tech, start_hour + ts - 1, b)
                     avails[ts] = avail
                     rhs = cumul_cap * avail
                     cname = "tech_cap_t$(t)_b$(b)_ts$(ts)"
@@ -974,17 +971,13 @@ function create_benders_subproblem(
     if tech_output !== nothing
         for tc in 1:n_tech
             tech = input.technologies[tc]
-            if tech.type != "Renewable"
-                continue
-            end
+            # variable renewables only, as the monolithic master
+            is_variable_renewable(tech, 1) || continue
             for b in 1:n_buses
                 cumul_cap = get(fixed_caps.tech_capacity, (tc, b), 0.0)
                 avail_total = 0.0
                 for ts in 1:hours
-                    actual_hour = start_hour + ts - 1
-                    avail_hours = size(tech.availability, 1)
-                    avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
-                    avail = tech.availability[avail_hour, b]
+                    avail = tech_availability_at(tech, start_hour + ts - 1, b)
                     avail_total += avail
                     # Also at zero capacity: the output's −curtailment_cost is
                     # part of the capacity constraint's dual

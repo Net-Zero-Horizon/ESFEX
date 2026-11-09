@@ -349,7 +349,7 @@ p_{g,n,t} \leq \bar{P}^{\text{eff}}_{g,n} \cdot a_{g,n,t} \quad \forall g, n, t 
 
 For renewables \(a\) is the capacity-factor profile; for other units it is 1 by default. A [scheduled interruption](../user-guide/scheduled-interruptions.md) multiplies \(a\) by the outage factor of its window (0 for a full outage), for any unit type. \(\bar{P}^{\text{eff}}\) is the rated power in service (§5: degraded, 0 past the lifetime).
 
-In unit commitment, non-renewable units and reservoir hydro are also tied to their commitment status:
+In unit commitment, every unit except a variable renewable is also tied to its commitment status. A **variable renewable** is a `Renewable` unit whose `fuel` is a resource without a fuel: sun (`Sun`, `Solar`, `PV`), wind (`Wind`), the ocean (`OTEC`, `Wave`, `Tidal`) or none (`None` or empty), or water (`Water`, `Hydro`) at a node where it has no reservoir (run of river); the fuel name is read without case, spaces, `_` or `-`. Its output only follows its availability (GEN-1a): it has no status or start-up variables, no minimum output and no minimum up/down times, holds no reserve (RES-3) and is not counted in the N-1 headroom, and it is what curtailment measures (CUR-1). Every other unit is dispatchable, a renewable one included: biomass, biogas, geothermal, waste and reservoir hydro are committed like thermal units and hold reserve when `reservable`. The renewable-energy share (RE-1) still counts every `Renewable` unit. Earlier versions exempted every `Renewable` unit without a reservoir: a biomass unit then had a free status (0 while it generated, no minimum output, no start-up paid), and a PV or wind unit had free, costless start-ups the solver left at arbitrary values.
 
 \[
 p_{g,n,t} \leq M_{g,n} \cdot u_{g,n,t}, \qquad M_{g,n} = \max\left(1.1 \cdot \max(\mathbf{D}),\; 10^4,\; 1.1 \, \bar{P}_{g,n}\right) \tag{GEN-1b}
@@ -571,7 +571,7 @@ Charge and discharge each rise by at most `ramp_up` and fall by at most `ramp_do
 
 Implemented in `add_reserve_constraints!()`.
 
-Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Each node has its own requirement, but the requirement is met **per system**: the requirements of all the nodes of a system \(S\) are held in the free capacity of every reservable generator (\(\mathcal{G}^{\text{res}}\), non-renewable with `reservable: true`) and reservable battery (\(\mathcal{B}^{\text{res}}\), `reservable: true`) of that system, wherever it is. A node with demand and no unit of its own is covered by the headroom of the rest of its system. In a merged multi-system run each original system keeps its own requirement and only its own units' headroom counts (development-zone nodes belong to the system of the bus they connect to); a single-system run is one system. The headroom at node \(n\) is
+Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Each node has its own requirement, but the requirement is met **per system**: the requirements of all the nodes of a system \(S\) are held in the free capacity of every reservable generator (\(\mathcal{G}^{\text{res}}\), `reservable: true` and not a variable renewable, see GEN-1b: biomass and reservoir hydro hold reserve, PV and wind do not) and reservable battery (\(\mathcal{B}^{\text{res}}\), `reservable: true`) of that system, wherever it is. A node with demand and no unit of its own is covered by the headroom of the rest of its system. In a merged multi-system run each original system keeps its own requirement and only its own units' headroom counts (development-zone nodes belong to the system of the bus they connect to); a single-system run is one system. The headroom at node \(n\) is
 
 \[
 H_{n,t} = \sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} \cdot u_{g,n,t} - p_{g,n,t} \right) + \sum_{b \in \mathcal{B}^{\text{res}}} \left( \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right)
@@ -707,7 +707,7 @@ Implemented in `add_curtailment_constraints!()`.
 \text{CU}_{i,t} = \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \left( \bar{P}^{\text{eff}}_{g,n} \, a_{g,n,t} - p_{g,n,t} \right) \quad \forall i, t \tag{CUR-1}
 \]
 
-Curtailment is defined per node as the difference between available and dispatched variable renewable generation over the node's buses. \(\mathcal{G}^{\text{RE}}_{\text{var}}\) are the renewable units without a reservoir: reservoir hydro is dispatchable within its water budget and is not counted.
+Curtailment is defined per node as the difference between available and dispatched variable renewable generation over the node's buses. \(\mathcal{G}^{\text{RE}}_{\text{var}}\) are the variable renewables (GEN-1b): a dispatchable unit (reservoir hydro, biomass, geothermal) that runs below its availability is not spilling anything and is not counted.
 
 #### CUR-2: Curtailment Upper Bound
 
@@ -911,7 +911,7 @@ Implemented in `add_n1_security_constraints!()` (preventive) or, with `scopf_ena
 H^{\text{N1}}_t + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t} \quad \forall t \tag{N1-1}
 \]
 
-where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable non-renewable units, counted only when online in unit commitment, plus the headroom of reservable batteries), summed over the system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_reserve_system_shortfall_t*`) keeps the problem feasible. Like the reserves, N1-1 holds **per system**: in a merged multi-system run each original system has its own largest unit, covered only by its own units' and batteries' headroom (`n1_gen_reserve_system_s{k}_t*`, shortfall `n1_gen_reserve_system_s{k}_shortfall_t*`, for system \(k\)); earlier versions had one requirement, the largest unit of all systems, covered by the headroom of every system.
+where \((g^*, n^*)\) is the unit with the largest rated power in the system and \(H^{\text{N1}}_t\) is the headroom of everything else that could replace it: the same headroom as in RES-3 (reservable units other than variable renewables, counted only when online in unit commitment, plus the headroom of reservable batteries), summed over the system and excluding \((g^*, n^*)\). If the largest unit trips, the rest must be able to pick up its output (`n1_gen_reserve_system_t*`); the shortfall \(s^{\text{N1,g}}_t\) (`n1_gen_reserve_system_shortfall_t*`) keeps the problem feasible. Like the reserves, N1-1 holds **per system**: in a merged multi-system run each original system has its own largest unit, covered only by its own units' and batteries' headroom (`n1_gen_reserve_system_s{k}_t*`, shortfall `n1_gen_reserve_system_s{k}_shortfall_t*`, for system \(k\)); earlier versions had one requirement, the largest unit of all systems, covered by the headroom of every system.
 
 #### N1-2: Transmission N-1 (preventive)
 
@@ -935,7 +935,7 @@ With `scopf_enabled`, post-contingency line limits replace N1-2. For every pair 
 -\bar{F}_l - o_{l,t} \leq f_{l,t} + \text{LODF}_{l,k} \, f_{k,t} \leq \bar{F}_l + o_{l,t} \quad \forall l, k, t \tag{N1-3}
 \]
 
-(`scopf_line*_outage*_t*_pos/neg`), where \(o_{l,t}\) is line \(l\)'s worst post-contingency overload (`scopf_over_l*_t*`). Generation N-1 is either N1-1 (`scopf_n1_gen_reserve_t*`) or, with `corrective_enabled`, a re-dispatch form: every non-renewable unit other than \((g^*, n^*)\), reservable or not, contributes its headroom \(h_{g,n,t}\) up to what it can ramp in one step, plus the headroom of every battery, reservable or not (`n1_corrective_gen_t*`):
+(`scopf_line*_outage*_t*_pos/neg`), where \(o_{l,t}\) is line \(l\)'s worst post-contingency overload (`scopf_over_l*_t*`). Generation N-1 is either N1-1 (`scopf_n1_gen_reserve_t*`) or, with `corrective_enabled`, a re-dispatch form: every unit other than \((g^*, n^*)\) and the variable renewables, reservable or not, contributes its headroom \(h_{g,n,t}\) up to what it can ramp in one step, plus the headroom of every battery, reservable or not (`n1_corrective_gen_t*`):
 
 \[
 \sum_{(g,n) \neq (g^*,n^*)} r_{g,n,t} + \sum_{b,n} \left( \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right) + s^{\text{N1,g}}_t \geq p_{g^*,n^*,t}, \quad r_{g,n,t} \leq \min\left(h_{g,n,t}, \bar{P}_{g,n} R^{\text{up}}_{g,n} \Delta t\right) \tag{N1-4}

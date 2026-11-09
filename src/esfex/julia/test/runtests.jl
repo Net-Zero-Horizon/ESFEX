@@ -1322,6 +1322,74 @@ import Ipopt
             @test prices !== nothing && all(isfinite, prices)
         end
 
+        @testset "variable renewables are not committed; biomass is" begin
+            # Rule: a variable renewable (type Renewable with sun / wind /
+            # ocean / no fuel, or water without a reservoir) has no
+            # commitment and holds no reserve; any other unit is dispatchable.
+            vr(type, fuel; res = 0.0) = ESFEX.is_variable_renewable(
+                ESFEX.with_fields(mkgen("U", type, fuel, [10.0], [0.0], ones(1, 1); nb = 1, H = 1);
+                                  reservoir_capacity = [res]), 1)
+            @test all(vr("Renewable", f) for f in ("Sun", "Solar", "PV", "Wind", "Wind offshore",
+                                                     "OTEC", "None", "", "Water", "Hydro", "sun"))
+            @test !any(vr("Renewable", f) for f in ("Biomass", "Biogas", "Geothermal", "Waste"))
+            @test !vr("Renewable", "Water"; res = 100.0)
+            @test !vr("Non-renewable", "Gas") && !vr("Non-renewable", "Sun")
+
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            H = 4
+            unit(name, type, fuel, rated, fcost, avail; minp = 0.0, start = 0.0,
+                 reservable = true) = ESFEX.with_fields(
+                mkgen(name, type, fuel, [rated], [fcost], avail; nb = 1, H = H);
+                min_power = [minp], start_up_cost = [start], reservable = reservable)
+            pv = unit("PV", "Renewable", "Sun", 50.0, 0.0, reshape([0.0, 1.0, 1.0, 0.0], H, 1))
+            # Biomass, cheaper than gas: min 50 %, a start costs 1e-3
+            bio = unit("Bio", "Renewable", "Biomass", 40.0, 1.0e-5, ones(H, 1);
+                       minp = 0.5, start = 1.0e-3)
+            gas = unit("Gas", "Non-renewable", "Gas", 100.0, 5.0e-5, ones(H, 1);
+                       reservable = false)
+            function run(mode)
+                input = PowerSystemInput(
+                    name = "vre", year = 2025, network = net, generators = [pv, bio, gas],
+                    batteries = BatteryConfig[], demand = fill(30.0, H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_requirement = Dict(1 => 10.0),
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0, curtailment_cost = 1.0e-6,
+                    mode = mode, solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return model, vars, extract_solution(model, vars, input)
+            end
+            model, vars, res = run("unit_commitment")
+            # PV has no status / start-up variables (its start-ups were free
+            # and arbitrary: 25,200 for the Cuban PV fleet in 720 h)
+            @test count(v -> startswith(name(v), "gen_startup"), all_variables(model)) == 2H
+            @test count(v -> startswith(name(v), "gen_status"), all_variables(model)) == 2H
+            @test all(iszero, res.gen_status[1, 1, :]) && all(iszero, res.gen_startup[1, 1, :])
+            # Biomass is committed: online wherever it generates, at least its
+            # minimum, and its start is paid
+            out_bio, on_bio = res.gen_output[2, 1, :], res.gen_status[2, 1, :]
+            @test any(out_bio .> 1.0)
+            @test all(on_bio[t] ≈ 1.0 for t in 1:H if out_bio[t] > 1e-6)
+            @test all(out_bio .>= 20.0 .* on_bio .- 1e-6)
+            @test res.cost_breakdown.startup_cost ≈ 1.0e-3 * sum(res.gen_startup[2, 1, :]) rtol = 1e-6
+            @test sum(res.gen_startup[2, 1, :]) ≈ 1.0 atol = 1e-6
+            for mode in ("unit_commitment", "economic_dispatch")
+                model, vars, res = run(mode)
+                # Biomass holds reserve (gas is not reservable, PV never)
+                @test sum(value.(vars.reserve_static_loss)) ≈ 0.0 atol = 1e-6
+                # Curtailment is PV's only: a biomass unit below its
+                # availability spills nothing
+                pv_spill = [50.0 * pv.availability[t, 1] - res.gen_output[1, 1, t] for t in 1:H]
+                @test value.(vars.curtailment[1, :]) ≈ pv_spill atol = 1e-6
+            end
+        end
+
         @testset "min up/down times are hours, not steps" begin
             # 4 h minimum at 2-h steps spans 2 steps: at t=4 only τ = 3, 4.
             H = 4
@@ -2956,6 +3024,18 @@ import Ipopt
             m3, _ = master1(mk(true); mult = ScenarioMultipliers(gen_start_up_cost = 3.0))
             @test objective_value(m1) - objective_value(m0) ≈ 365 * 2.0e-3 rtol = 1e-6
             @test objective_value(m3) - objective_value(m0) ≈ 3 * 365 * 2.0e-3 rtol = 1e-6
+            # A biomass unit is committed like any dispatchable unit: it was
+            # exempt as type "Renewable", so the master charged it no start-up
+            bio = ESFEX.with_fields(gen; type = "Renewable", fuel = "Biomass")
+            mkb(uc) = MasterProblemInput(
+                years = [2025], network = net1, generators = [bio],
+                batteries = BatteryConfig[], base_demand = dem,
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                unit_commitment = uc, verbose = false)
+            b0, _ = master1(mkb(false))
+            b1, _ = master1(mkb(true))
+            @test objective_value(b1) - objective_value(b0) ≈ 365 * 2.0e-3 rtol = 1e-6
             input = PowerSystemInput(
                 name = "uc", year = 2025, network = net1, generators = [gen],
                 batteries = BatteryConfig[], demand = dem,
@@ -3491,6 +3571,26 @@ import Ipopt
                                                  invest_cost = [1.0e-3]), [fo_tech(fc)], 120.0))
                 inp = fo_master(gas; techs = techs, demand = demand)
                 model, _ = master1(inp)
+                br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.gap < 1e-6
+                @test br.objective ≈ objective_value(model) rtol = 1e-6
+            end
+        end
+
+        @testset "non-renewable technology output follows its availability (master, Benders)" begin
+            # 160 MW against 140 MW existing: a gas technology (dearer to run
+            # than the existing units) available at 50 % must build 40 MW to
+            # give 20. The master capped a non-renewable technology at its
+            # built capacity × 1.0, while the dispatch caps the generator it
+            # becomes by its profile.
+            gt(avail) = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0e-3], [100.0],
+                avail, [1.0], [1.0], [1.0], [1.0], [0.0], [0.0], [0.0], [5.0e-5],
+                [0.0], [0.0], [0.0], [0.0], [25.0], [0.0], [0.0], 50.0, "AC", false, [1.0])
+            for (avail, mw) in ((ones(H24, 1), 20.0), (fill(0.5, H24, 1), 40.0))
+                inp = fo_master(fo_gas(0.0); techs = [gt(avail)], demand = 160.0)
+                model, _ = master1(inp)
+                @test sum(mvals(model, "tech_inv")) ≈ mw rtol = 1e-6
                 br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
                                                verbose_benders = false)
                 @test br.gap < 1e-6
