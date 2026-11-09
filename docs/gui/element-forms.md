@@ -51,7 +51,8 @@ All forms of electricity production: solar PV, wind turbines, diesel engines, ga
 | | Initial Age | years | Age of the unit at the start of the horizon. |
 | | Degradation | fraction/yr | Annual capacity degradation, as a fraction per year: 0.005 means 0.5 %/yr. |
 | | Risk Coefficient | 0-1 | Geographic risk derating factor, normally computed by the Risk workflow. 1.0 = no derating. |
-| **Operating Parameters** | Min Power | pu | Minimum stable output as a fraction of rated power. Applied with unit commitment. |
+| **Operating Parameters** | Units | - | Identical units the plant at this node is made of (`num_units`, default 1). Unit commitment commits a whole number of them, each of Rated Power / Units with its own Min Power, start-ups and Min Up / Min Down; the availability is the share of units available. Merging generators in the Grid Builder adds their units up. |
+| | Min Power | pu | Minimum stable output as a fraction of rated power (of one unit's rating when Units > 1). Applied with unit commitment. |
 | | Min Up / Min Down | h | Minimum on / off time after a start / stop. Unit commitment only. |
 | | Ramp Up / Ramp Down | pu/h | Maximum change in output per hour as a fraction of capacity; the limit per time step is `min(1, ramp × resolution)`. Default 1.0; 0 = no limit. |
 | | Eff. at Rated / Eff. at Min | frac | Conversion efficiency at full load and at minimum output (0.0 to 1.0). |
@@ -59,7 +60,7 @@ All forms of electricity production: solar PV, wind turbines, diesel engines, ga
 | | Cost Curve | dropdown | Fuel cost model: flat (default), linear, stepwise or exponential. See [Cost Curve Widgets](#cost-curve-widgets). |
 | | Fixed | $/MW·yr | Fixed O&M per MW of rated power per year, charged while the unit is in service whether or not it runs (prorated to the simulated hours). |
 | | Maintenance | $/MWh | Variable O&M cost per MWh generated. |
-| | Start-up | $ | Cost per start. Unit commitment only. |
+| | Start-up | $ | Cost of starting the whole plant; one of its units costs Start-up / Units. Unit commitment only. |
 | | Decommissioning | $/MW | Cost of retiring capacity. |
 | **Electrical** | Frequency | Hz | Unit frequency. |
 | | Current Type | -- | `AC`, `DC` or `AC_DC`. |
