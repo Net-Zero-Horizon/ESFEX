@@ -1485,6 +1485,10 @@ class Orchestrator:
         from esfex.config.schema import ElectrolyzerConfig, PrimaryEnergySourceConfig
 
         # Scalars: first system wins, as for discount_rate & co. below.
+        # frequency_nominal / frequency_nadir_limit / rocof_limit /
+        # load_damping are not read by the dispatch or the master; the
+        # frequency analysis (SLD gauge, Analysis panel) takes them from each
+        # system's own config, so a 50 Hz + 60 Hz merge keeps both.
         base_scalars = {f: getattr(base, f) for f in (
             "frequency_nominal", "frequency_nadir_limit", "rocof_limit",
             "load_damping", "reserve_margin", "reserve_static_default_ratio",

@@ -173,3 +173,33 @@ def test_absorb_skips_when_no_demand_assigned():
     assert counts["buses_removed"] == 0
     assert "bus_2" in state.buses and "bus_3" in state.buses
     assert state.generators["g_isl"].bus == "bus_2"
+
+
+def test_reconnect_line_impedance_on_system_base():
+    """A reconnection line's impedance is on ac_power_flow.base_mva (it used
+    the 100 MVA default whatever the system base)."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    d3 = _km_to_deg(3.0)
+    state = GuiSystemState(
+        name="R",
+        buses={
+            "bus_0": _bus("bus_0", 0.0, 0.0),
+            "bus_1": _bus("bus_1", 0.0, 0.2),
+            "bus_2": _bus("bus_2", d3, 0.6),
+            "bus_3": _bus("bus_3", d3, 0.65),
+        },
+        transmission_lines=[_line("l0", "bus_0", "bus_1"),
+                            _line("l1", "bus_2", "bus_3")],
+    )
+    state.ac_power_flow.base_mva = 200.0
+    counts = _reconnect_isolated_bounded(
+        state, ParseResult(), max_km=50.0, snap_km=0.5)
+    assert counts["linked"] == 1
+    ln = next(ln for ln in state.transmission_lines
+              if ln.line_id.startswith("reconnect_"))
+    r, x, b = estimate_line_pu_params(220.0, ln.length_km, 200.0)
+    assert ln.reactance_pu == pytest.approx(x)
+    assert ln.resistance_pu == pytest.approx(r)
+    assert ln.susceptance_pu == pytest.approx(b)

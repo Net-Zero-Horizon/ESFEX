@@ -2588,10 +2588,9 @@ def _line_impedance_pu(state: GuiSystemState, ln) -> tuple[float, float, float]:
     if v <= 0 or length <= 0:
         return r, 0.0, b
     from esfex.visualization.workflows.grid_mapping_quality import (
-        estimate_line_pu_params,
+        estimate_line_pu_params, system_base_mva,
     )
-    base = float(getattr(getattr(state, "ac_power_flow", None), "base_mva", 0.0)
-                 or 100.0)
+    base = system_base_mva(state)
     r_est, x_est, b_est = estimate_line_pu_params(v, length, base)
     own_x_km = float(getattr(ln, "reactance_per_km", None) or 0.0)
     if own_x_km > 0:
@@ -5355,10 +5354,9 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
             return 0.0
     from esfex.utils.per_unit import DEFAULT_REACTANCE_PU
     from esfex.visualization.workflows.grid_mapping_quality import (
-        estimate_line_pu_params,
+        estimate_line_pu_params, system_base_mva,
     )
-    base_mva = float(getattr(getattr(state, "ac_power_flow", None),
-                             "base_mva", 0.0) or 100.0)
+    base_mva = system_base_mva(state)
     new_lines: list = []
     for (gi, gj), p in sorted(pair.items()):
         bi, bj = new_buses[grp_bus_id[gi]], new_buses[grp_bus_id[gj]]

@@ -345,3 +345,61 @@ class TestSldResultsLoaderEnhanced:
         assert 2030 in loader.years
         assert loader.hours_per_year == 48
         assert loader.num_nodes == 2
+
+
+class TestSldLineFlows:
+    """Several lines joining the same node pair split the pair's flow."""
+
+    @staticmethod
+    def _loader(tmp_path, lines, pf01, pf10):
+        from types import SimpleNamespace
+        from esfex.visualization.sld.sld_results_loader import SldResultsLoader
+        h5_path = _create_test_hdf5(tmp_path)
+        with h5py.File(h5_path, "a") as f:
+            pf = np.zeros((2, 2, 24))
+            pf[0, 1, :] = pf01
+            pf[1, 0, :] = pf10
+            f["detailed_results/year_2030_threshold_0"].create_dataset(
+                "power_flow", data=pf)
+        state = _create_mock_state()
+        state.transmission_lines = [SimpleNamespace(**ln) for ln in lines]
+        return SldResultsLoader(h5_path, state)
+
+    def test_parallel_lines_split_by_susceptance(self, tmp_path):
+        # Net 0 -> 1 flow: 100 - 10 = 90 MW. X 0.1 and 0.3 -> shares 3/4, 1/4.
+        # The second line is drawn 1 -> 0, so its flow is negative.
+        loader = self._loader(tmp_path, [
+            dict(line_id="a", from_bus="bus_0", to_bus="bus_1",
+                 capacity_mw=100.0, reactance_pu=0.1),
+            dict(line_id="b", from_bus="bus_1", to_bus="bus_0",
+                 capacity_mw=50.0, reactance_pu=0.3),
+        ], pf01=100.0, pf10=10.0)
+        lines = loader.get_timestep(2030, 3)["lines"]
+        assert lines["edge_a"]["flow_mw"] == pytest.approx(67.5)
+        assert lines["edge_a"]["utilization_pct"] == pytest.approx(67.5)
+        assert lines["edge_b"]["flow_mw"] == pytest.approx(-22.5)
+        assert lines["edge_b"]["utilization_pct"] == pytest.approx(45.0)
+
+    def test_parallel_lines_without_reactance_split_by_capacity(self, tmp_path):
+        # 200 MW over 300 + 100 MW of lines: both 50 % loaded (each line used
+        # to carry the whole 200 MW: 67 % and 200 %).
+        loader = self._loader(tmp_path, [
+            dict(line_id="a", from_bus="bus_0", to_bus="bus_1",
+                 capacity_mw=300.0, reactance_pu=None),
+            dict(line_id="b", from_bus="bus_0", to_bus="bus_1",
+                 capacity_mw=100.0, reactance_pu=0.2),
+        ], pf01=200.0, pf10=0.0)
+        lines = loader.get_timestep(2030, 0)["lines"]
+        assert lines["edge_a"]["flow_mw"] == pytest.approx(150.0)
+        assert lines["edge_b"]["flow_mw"] == pytest.approx(50.0)
+        assert lines["edge_a"]["utilization_pct"] == pytest.approx(50.0)
+        assert lines["edge_b"]["utilization_pct"] == pytest.approx(50.0)
+
+    def test_single_line_carries_the_net_pair_flow(self, tmp_path):
+        loader = self._loader(tmp_path, [
+            dict(line_id="a", from_bus="bus_0", to_bus="bus_1",
+                 capacity_mw=100.0, reactance_pu=0.1),
+        ], pf01=30.0, pf10=50.0)
+        lines = loader.get_timestep(2030, 0)["lines"]
+        assert lines["edge_a"]["flow_mw"] == pytest.approx(-20.0)
+        assert lines["edge_a"]["utilization_pct"] == pytest.approx(20.0)

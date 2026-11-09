@@ -52,6 +52,7 @@ from esfex.visualization.workflows.grid_mapping_quality import (
     estimate_transformer_impedance_pu,
     estimate_transformer_losses_fraction,
     estimate_transformer_mva,
+    system_base_mva,
 )
 
 logger = logging.getLogger(__name__)
@@ -918,11 +919,12 @@ def _repair_frequency_consistency(state) -> int:
 
 
 def _line_pu_params(voltage_kv: float, length_km: float,
-                    num_circuits: int = 1) -> tuple[float, float, float]:
-    """(R, X, B) p.u. of a line of *num_circuits* circuits in parallel: the
-    standard line type of its voltage, series values divided by N and the
-    shunt one multiplied by N."""
-    r_pu, x_pu, b_pu = estimate_line_pu_params(voltage_kv, length_km)
+                    num_circuits: int = 1,
+                    base_mva: float = 100.0) -> tuple[float, float, float]:
+    """(R, X, B) p.u. on the system base *base_mva* of a line of
+    *num_circuits* circuits in parallel: the standard line type of its
+    voltage, series values divided by N and the shunt one multiplied by N."""
+    r_pu, x_pu, b_pu = estimate_line_pu_params(voltage_kv, length_km, base_mva)
     n = max(1, int(num_circuits or 1))
     return r_pu / n, x_pu / n, b_pu * n
 
@@ -998,7 +1000,8 @@ def _propagate_voltage(state) -> int:
             v, getattr(ln, "num_circuits", 1) or 1)
         if getattr(ln, "length_km", None):
             ln.resistance_pu, ln.reactance_pu, ln.susceptance_pu = _line_pu_params(
-                v, ln.length_km, getattr(ln, "num_circuits", 1))
+                v, ln.length_km, getattr(ln, "num_circuits", 1),
+                system_base_mva(state))
         changed += 1
 
     # Conservative fallback for anything still unknown (an all-untagged pocket
@@ -1087,7 +1090,8 @@ def _create_buses_from_substation(
             from_voltage_kv=v_high,
             to_voltage_kv=v_low,
             rated_power_mva=auto_mva,
-            impedance_pu=estimate_transformer_impedance_pu(auto_mva, ratio),
+            impedance_pu=estimate_transformer_impedance_pu(
+                auto_mva, ratio, system_base_mva(state)),
             losses_fraction=estimate_transformer_losses_fraction(auto_mva),
             latitude=sub.latitude + offset * 0.5,
             longitude=sub.longitude + offset * 0.5,
@@ -1181,7 +1185,8 @@ def _ensure_generator_stepup(
         from_voltage_kv=v_hi,
         to_voltage_kv=v_lo,
         rated_power_mva=mva,
-        impedance_pu=estimate_transformer_impedance_pu(mva, ratio),
+        impedance_pu=estimate_transformer_impedance_pu(
+            mva, ratio, system_base_mva(state)),
         losses_fraction=estimate_transformer_losses_fraction(mva),
         latitude=gen.latitude,
         longitude=gen.longitude,
@@ -1424,7 +1429,8 @@ def _create_line(
         for i in range(len(coords) - 1)
     ) or None
     if v and v > 0 and length_km:
-        r_pu, x_pu, b_pu = _line_pu_params(v, length_km, line.num_circuits)
+        r_pu, x_pu, b_pu = _line_pu_params(v, length_km, line.num_circuits,
+                                           system_base_mva(state))
     else:
         r_pu = x_pu = b_pu = None  # type: ignore[assignment]
 
@@ -1511,7 +1517,8 @@ def _reconnect_isolated_bounded(
         return dist, plat + qy / 111_000.0, plng + qx / kx
 
     def _add_line(from_bus, to_bus, v, length_km, existing_ids, tag):
-        r_pu, x_pu, b_pu = estimate_line_pu_params(v, length_km)
+        r_pu, x_pu, b_pu = estimate_line_pu_params(
+            v, length_km, system_base_mva(state))
         fb, tb = state.buses[from_bus], state.buses[to_bus]
         lid = _new_id("reconnect_", existing_ids)
         existing_ids.add(lid)
@@ -1826,7 +1833,8 @@ def _connect_colocated_voltage_levels(
                     from_node=node, to_node=node,
                     from_voltage_kv=v_hi, to_voltage_kv=v_lo,
                     rated_power_mva=auto_mva,
-                    impedance_pu=estimate_transformer_impedance_pu(auto_mva, ratio),
+                    impedance_pu=estimate_transformer_impedance_pu(
+                        auto_mva, ratio, system_base_mva(state)),
                     losses_fraction=estimate_transformer_losses_fraction(auto_mva),
                     latitude=bh.latitude, longitude=bh.longitude,
                 ))
@@ -1886,7 +1894,7 @@ def _create_transformer(
 
     cap = tr.capacity_mw if tr.capacity_mw > 0 else 100.0
     ratio = (v_high / v_low) if v_low > 0 else 2.0
-    z_pu = estimate_transformer_impedance_pu(cap, ratio)
+    z_pu = estimate_transformer_impedance_pu(cap, ratio, system_base_mva(state))
     losses = estimate_transformer_losses_fraction(cap)
 
     state.transformers.append(GuiTransformer(

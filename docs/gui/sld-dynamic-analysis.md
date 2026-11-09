@@ -85,6 +85,10 @@ Values read from the HDF5 results for the selected year and hour, shown with gen
 
 On/off and start-up data come from the `gen_status` and `gen_startup` datasets, which unit-commitment runs write. Without them, every generator is shown online.
 
+### Line Flows
+
+The results store one flow per pair of nodes (`power_flow`), so a line between two nodes shows the net flow between them, positive in the line's drawn direction. When several lines join the same two nodes they share that flow: in proportion to their susceptance (1/X) when all of them have a reactance, otherwise in proportion to their capacity, so each shows the loading of the pair. A line's loading is its share of the flow over its own capacity. Earlier versions gave every such line the whole flow of the pair (counted in one direction only) over that line's own capacity.
+
 ### Reserve Badges
 
 Compact badge near each node's bus:
@@ -236,7 +240,7 @@ systems:
     frequency_nadir_limit: 49.0   # Min frequency threshold (Hz)
 ```
 
-Both with results loaded and in analysis mode, `load_damping` and `rocof_limit` are used as set. A `frequency_nominal` left at the default 50 Hz is replaced by the frequency of the first bus that has one (so a 60 Hz grid works without the key), and a `frequency_nadir_limit` left at the default 49 Hz becomes 1 Hz below the nominal frequency. Systems created in the Studio, which does not edit these keys, get the defaults, except that on save `frequency_nominal` becomes the frequency the system's AC buses run at when it is none of theirs, with `frequency_nadir_limit` moved by the same amount. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
+Both with results loaded and in analysis mode, `load_damping` and `rocof_limit` are used as set. The keys are read from the system being edited, also for the results of a multi-system run, so a 50 Hz and a 60 Hz system linked in one run each keep their own values; the optimisation itself does not use them. A `frequency_nominal` left at the default 50 Hz is replaced by the frequency of the first bus that has one (so a 60 Hz grid works without the key), and a `frequency_nadir_limit` left at the default 49 Hz becomes 1 Hz below the nominal frequency. Systems created in the Studio, which does not edit these keys, get the defaults, except that on save `frequency_nominal` becomes the frequency the system's AC buses run at when it is none of theirs, with `frequency_nadir_limit` moved by the same amount. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
 
 
 ---
