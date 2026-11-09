@@ -1022,6 +1022,36 @@ Per-release notes are also published on the
   committed (Cuba: status 0 while it generated) and its unused capacity
   was counted, and priced, as curtailment.
 
+- **Capacity adequacy counts dispatchable units at their availability.** In
+  the master problem's capacity adequacy constraint (`reserve_margin`), every
+  non-`Renewable` unit and all storage counted at full capacity whatever its
+  availability profile, and `Renewable` units that can be dispatched
+  (biomass, reservoir hydro) counted at the minimum of their profile, which
+  is 0 for a seasonal sugar mill. All units now follow one rule. Variable
+  renewables (sun, wind, ocean, run-of-river hydro) keep their capacity
+  credit, the minimum of their profile. Every other generator, technology,
+  battery and battery technology counts at its mean availability over the
+  node's peak period, the year's top 10 % demand steps, so derates, outages
+  and seasons in the profile count. A unit without a profile still counts
+  fully. The monolithic, Benders and stochastic masters share the
+  constraint. Plans whose dispatchable units have availability profiles may
+  now build more firm capacity.
+
+- **Large masters no longer stall interior-point solvers.** In the master
+  problem, every technology, battery-technology, transmission, reservoir,
+  converter and fuel build was written, with its degradation, into each
+  hourly constraint of every later year: output and reserve limits,
+  curtailment, battery, line, reservoir, converter and fuel limits. On a
+  long, many-node horizon these investment columns were dense. The Cuba
+  25-year master had about 13,000 of them, and Gurobi's barrier needed
+  ~40 GB per factorisation and ~200 s per iteration, so the solve could not
+  finish. Each year's built capacity is now one variable, defined once from
+  the investments, and the hourly constraints use that variable. The LP and
+  its optimum are unchanged: same objective, same investments, same
+  results. An investment column now has a few nonzeros whatever the number
+  of hours. The Benders master, which has no hourly rows, is unchanged.
+  See Capacity Expansion §6.5 (capacity state variables) in the docs.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -2300,6 +2330,29 @@ Per-release notes are also published on the
   flow and wrong loadings. The net flow of the pair is now shared among its
   lines by susceptance (1/X) when they all have a reactance, otherwise by
   capacity, and each line's loading is its share over its own capacity.
+
+- **Parallel lines are summed in the flow between two buses.** When several
+  lines (or transformers) joined the same two buses, the `power_flow` result
+  kept only the first line's flow. Everything built on it undercounted the
+  others: the HDF5 node `power_flow` dataset, the single-line diagram, the
+  import/export charts, the dashboard and the inter-system
+  `power_flow/{A}_to_{B}` flows. The pair flow is now the sum of every line
+  between the two buses. A custom constraint on `power_flow` also saw only
+  the first line. It now covers all of them, and the pair may be given in
+  either direction (`[2, 1, h]` is minus `[1, 2, h]`). A pair with no line
+  between it is now a clear error, not a `KeyError`. The per-line flows are
+  unchanged.
+
+- **The impedance of small transformers depends on their rating and the
+  system base.** The Grid Builder gave every transformer under 100 MVA a
+  flat 0.06 p.u. (below 10 MVA) or 0.10 p.u., whatever its rating and
+  `ac_power_flow.base_mva`, and capped larger units at 0.14 p.u. Every size
+  is now referred to the system base as z_own × S_base / S_rated, with a
+  typical z_own of 6 % below 10 MVA and 10 % from 10 MVA up, and a floor of
+  0.005 p.u. A small transformer therefore couples its buses as weakly as it
+  physically does: a 5 MVA unit is 1.2 p.u. on a 100 MVA base, where it
+  used to be 0.06. The transformer form accepted only 0 to 1 p.u. and cut
+  such values to 1.0. It now accepts up to 1000 p.u.
 
 ## [0.3.0] — 2026-08-27
 
