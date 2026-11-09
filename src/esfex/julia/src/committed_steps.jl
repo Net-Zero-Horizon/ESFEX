@@ -41,7 +41,7 @@ const _STEP_INDEXED_PS_FIELDS = (
     :gen_output, :gen_status, :gen_startup, :gen_shutdown,
     :curtailment, :fre_penetration_loss, :co2_emissions,
     :bat_charge, :bat_discharge, :bat_soc, :bat_charge_status, :soc_violation, :bat_spillage,
-    :power_flow, :power_flow_by_line, :voltage_angle, :transfer_margin,
+    :power_flow_by_line, :voltage_angle, :transfer_margin,
     :reserve_static, :reserve_dynamic, :reserve_static_loss, :reserve_dynamic_loss,
     :load_shed, :ev_charging, :ev_v2g, :ev_soc, :ev_loss, :ev_charge_status,
     :electrolyzer_power, :loss_of_inertia,

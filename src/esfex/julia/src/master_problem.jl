@@ -1752,8 +1752,8 @@ function create_day_ps_vars!(
         lower_bound = -π, upper_bound = π,
         base_name = "$(prefix)_vangle")
 
-    # Power flow dict (legacy node-pair indexing, populated by add_dc_constraints!)
-    power_flow = Dict{Tuple{Int,Int}, Vector{VariableRef}}()
+    # Bus pair → line indices (populated by add_dc_constraints!)
+    pair_lines = Dict{Tuple{Int,Int}, Vector{Int}}()
 
     # Reserve variables [node, hour]
     reserve_static = @variable(model,
@@ -1850,7 +1850,7 @@ function create_day_ps_vars!(
         gen_output, gen_status, nothing, nothing,  # no startup/shutdown
         curtailment, fre_penetration_loss,
         bat_charge, bat_discharge, bat_soc,
-        power_flow, voltage_angle,
+        pair_lines, voltage_angle,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
         buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;

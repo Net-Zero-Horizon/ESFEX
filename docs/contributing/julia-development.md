@@ -294,7 +294,7 @@ end
 
 #### Network Constraints (Self-Loop Prevention)
 
-Flows are stored as `vars.power_flow::Dict{(from, to), Vector{VariableRef}}`, keyed by bus pairs with a line. Never create a self-loop entry `(i, i)`: it would appear as incoming power at bus `i` without a matching outflow, creating energy from nothing.
+Flows are one variable vector per physical branch, `vars.power_flow_by_line[ℓ][t]` (lines, then transformers, each stored low → high bus). `vars.pair_lines::Dict{(i, j), Vector{Int}}` maps a bus pair `i < j` to all of its branches, so parallel lines are summed wherever a pair flow is meant: `pair_flow(vars, i, j, t)` in custom constraints, and the `power_flow` result. Never create a self-loop branch `(i, i)`: it would appear as incoming power at bus `i` without a matching outflow, creating energy from nothing.
 
 #### Age-Based Retirement
 
@@ -320,7 +320,8 @@ Fields of `PowerSystemVariables` (`types.jl`):
 | `curtailment[n, t]` | node, time | `Array` |
 | `load_shed[b, t]` | bus, time | `Array` |
 | `reserve_static`, `reserve_dynamic` (+ `_loss`) | node, time | `Array` |
-| `power_flow[(i, j)][t]` | bus pair, time | `Dict{Tuple{Int,Int}, Vector}` |
+| `power_flow_by_line[ℓ][t]` | branch, time | `Vector{Vector{VariableRef}}` (`nothing` without DC flows) |
+| `pair_lines[(i, j)]` | bus pair `i < j` | `Dict{Tuple{Int,Int}, Vector{Int}}`: indices into `power_flow_by_line` |
 | `voltage_angle[n, t]` | node, time | `Array` |
 | `ev_charging`, `ev_v2g`, `ev_loss` | node, time | `Array` or `nothing` |
 | `ev_soc` | node, time + 1 | `Array` or `nothing` |

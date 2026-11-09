@@ -95,7 +95,7 @@ Operational constraints do not apply to the master problem's representative days
 Notes on the network variables:
 
 - Bus numbers are 1-based positions in the system's `buses` list (one bus per node when `buses` is empty). A node can have several buses, so a node number and a bus number usually refer to different elements. With `network_reduction.enabled`, the model uses the reduced bus list.
-- `power_flow` exists only in the DC power-flow model (`power_flow_mode: dcopf` or `dcopf_ac_verify`). The pair must be given in the direction in which the line is defined. When several lines connect the same two buses, only the first of them is used.
+- `power_flow` exists only in the DC power-flow model (`power_flow_mode: dcopf` or `dcopf_ac_verify`). The term is the total flow of every line and transformer between the two buses, signed from `from_bus` to `to_bus`, so the pair may be given in either direction (`[2, 1, h]` is minus `[1, 2, h]`). A pair with no line between it is an error.
 
 **Investment** (`target: investment`):
 
