@@ -12,7 +12,7 @@ Dataclass that stores the state carried between rolling horizon windows.
 @dataclass
 class BoundaryConditions:
     battery_soc: Dict[int, Dict[int, float]]     # {bat_idx: {node: soc_value}}
-    generator_status: Dict[int, Dict[int, int]]   # {gen_idx: {node: 0_or_1}}
+    generator_status: Dict[int, Dict[int, int]]   # {gen_idx: {node: units online}}
     ev_soc: Dict[int, float]                      # {node: soc_value}
 ```
 
@@ -21,7 +21,7 @@ class BoundaryConditions:
 | Field | Type | Description |
 |-------|------|-------------|
 | `battery_soc` | `dict[int, dict[int, float]]` | Final SOC (MWh) of each battery at each node from the previous window. Used as initial SOC for the next window. |
-| `generator_status` | `dict[int, dict[int, int]]` | Final on/off status (0 or 1) of each generator at each node. Only relevant in unit commitment mode. |
+| `generator_status` | `dict[int, dict[int, int]]` | Final status of each generator at each node: units online (0 or 1 for a single-unit plant, up to `num_units`). Only relevant in unit commitment mode. |
 | `ev_soc` | `dict[int, float]` | Final EV fleet SOC per node. |
 
 **Methods:**
