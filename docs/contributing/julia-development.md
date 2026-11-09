@@ -313,7 +313,7 @@ Fields of `PowerSystemVariables` (`types.jl`):
 | Variable | Indices | Container |
 |----------|---------|-----------|
 | `gen_output[g, b, t]` | generator, bus, time | `SparseAxisArray` (active pairs only) |
-| `gen_status`, `gen_startup` | generator, bus, time | `SparseAxisArray`; `nothing` outside UC |
+| `gen_status`, `gen_startup` | generator, bus, time | `SparseAxisArray` over the committed pairs only (`committed_buses`: no variable renewable, see `is_variable_renewable`); `nothing` outside UC |
 | `gen_shutdown` | — | Always `nothing` (field kept for compatibility; no shutdown variable is built) |
 | `bat_charge`, `bat_discharge`, `bat_soc` | battery, bus, time | `SparseAxisArray` |
 | `bat_spillage`, `soc_violation` | battery, bus, time | `nothing` when not needed |

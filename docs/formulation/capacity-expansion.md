@@ -459,7 +459,7 @@ The units the master builds are existing units in the dispatch, where they hold 
 H^{build}_{n,t} = \sum_{k \in \mathcal{K}^{res}} \left( \alpha_{k,t',n} \, \bar{P}^{tech}_{y,k,n} - P^{tech}_{k,n,t} \right) + \sum_{k \in \mathcal{B}^{res}_{tech}} \left( a^{bt}_{k,t',n} \, \bar{P}^{bt}_{y,k,n} - P^{bt,dis}_{k,n,t} + P^{bt,ch}_{k,n,t} \right) \tag{RES-M1}
 \]
 
-with \(\mathcal{K}^{res}\) the `reservable`, non-renewable technologies (\(\alpha\) their availability profile, as the dispatch reads it for the generators they become) and \(\mathcal{B}^{res}_{tech}\) the `reservable` battery technologies (\(a^{bt}\) their availability). The dynamic capability (RES-2) gains `dynamic_reserve_contribution` × \(\bar{P}^{tech}_{y,k,n}\) and × \(a^{bt}_{k,t',n} \, \bar{P}^{bt}_{y,k,n}\). Existing generators hold \(\bar{P}^{cum}_{y,g,n} \, \alpha_{g,t',n} - P^{day}_{g,n,t}\), their capacity in service times availability, as in the dispatch (earlier versions left out the availability). Renewable technologies hold no reserve, as renewable generators in the dispatch. Before this, a plan whose firm capacity was all built paid the reserve shortfall in every representative day although its units would hold the reserve in the dispatch. The Benders subproblems add the same terms; the duals of the headroom and dynamic-capability constraints, each times its coefficient, enter the capacity gradients of the cut.
+with \(\mathcal{K}^{res}\) the `reservable` technologies that are not variable renewables (GEN-1b in [Operational Dispatch](operational-dispatch.md#gen-1-generator-capacity-limits); \(\alpha\) their availability profile, as the dispatch reads it for the generators they become) and \(\mathcal{B}^{res}_{tech}\) the `reservable` battery technologies (\(a^{bt}\) their availability). The dynamic capability (RES-2) gains `dynamic_reserve_contribution` × \(\bar{P}^{tech}_{y,k,n}\) and × \(a^{bt}_{k,t',n} \, \bar{P}^{bt}_{y,k,n}\). Existing generators hold \(\bar{P}^{cum}_{y,g,n} \, \alpha_{g,t',n} - P^{day}_{g,n,t}\), their capacity in service times availability, as in the dispatch (earlier versions left out the availability). Variable renewable technologies (sun, wind, ocean, run-of-river water) hold no reserve, as variable renewables in the dispatch; a biomass or geothermal technology does. Before this, a plan whose firm capacity was all built paid the reserve shortfall in every representative day although its units would hold the reserve in the dispatch. The Benders subproblems add the same terms; the duals of the headroom and dynamic-capability constraints, each times its coefficient, enter the capacity gradients of the cut.
 
 #### 8.3.1 Power Balance
 
@@ -484,10 +484,10 @@ P^{day}_{g,n,t} \leq \bar{P}^{cum}_{y,g,n} \cdot \alpha_{g,t',n} \qquad \forall\
 \]
 
 \[
-P^{tech}_{k,n,t} \leq \bar{P}^{tech}_{y,k,n} \cdot \alpha_{k,t',n} \quad (k \in \mathcal{K}_{RE}), \qquad P^{tech}_{k,n,t} \leq \bar{P}^{tech}_{y,k,n} \quad (k \notin \mathcal{K}_{RE}) \tag{GEN-2}
+P^{tech}_{k,n,t} \leq \bar{P}^{tech}_{y,k,n} \cdot \alpha_{k,t',n} \qquad \forall\, k \tag{GEN-2}
 \]
 
-where \(t' = \text{mod1}(\text{start\_hour} + t - 1,\; T_{avail})\) maps the representative day step to the availability profile (`tech_cap_t*_b*_ts*_y*_d*` for technologies). Ramp limits (GEN-3) apply to existing generators; minimum generation, commitment and minimum up/down times do not.
+where \(t' = \text{mod1}(\text{start\_hour} + t - 1,\; T_{avail})\) maps the representative day step to the availability profile (`tech_cap_t*_b*_ts*_y*_d*` for technologies). Every technology has its availability \(\alpha_{k}\) (1 without a profile): the capacity factor of a renewable, the derates and scheduled outages of a dispatchable one, as the generator it becomes in the dispatch. Earlier versions capped a non-renewable technology at its full built capacity, so the master counted on energy the dispatch then did not have. Ramp limits (GEN-3) apply to existing generators; minimum generation, commitment and minimum up/down times do not.
 
 #### 8.3.3 Battery Constraints Linked to Investment
 
@@ -540,10 +540,10 @@ The ratio variable is bounded by each day's achieved share, so it equals the wor
 
 #### 8.3.6 Curtailment Limit per Day
 
-When `max_curtailment_ratio < 1.0`, curtailment of existing renewables and of candidate renewable technologies is limited to a fraction of renewable generation (`max_curtailment_y*_d*`):
+When `max_curtailment_ratio < 1.0`, curtailment of existing variable renewables and of candidate variable renewable technologies (\(\mathcal{K}_{VRE}\)) is limited to a fraction of renewable generation (`max_curtailment_y*_d*`):
 
 \[
-\sum_{n,t} CU^{day}_{n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} \left( \bar{P}^{tech}_{y,k,n} \alpha_{k,t',n} - P^{tech}_{k,n,t} \right) \leq \bar{\kappa} \left( \sum_{g \in \mathcal{G}_{RE},n,t} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} P^{tech}_{k,n,t} \right) \tag{CURT-1}
+\sum_{n,t} CU^{day}_{n,t} + \sum_{k \in \mathcal{K}_{VRE},n,t} \left( \bar{P}^{tech}_{y,k,n} \alpha_{k,t',n} - P^{tech}_{k,n,t} \right) \leq \bar{\kappa} \left( \sum_{g \in \mathcal{G}_{RE},n,t} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE},n,t} P^{tech}_{k,n,t} \right) \tag{CURT-1}
 \]
 
 This is a hard constraint. It pushes investment towards storage rather than relying on curtailment to manage surplus RE. The operational dispatch has no such cap; it prices curtailment at `curtailment_cost`. With the cap on, the candidates' curtailment \(\bar{P}^{tech}_{y,k,n} \alpha_{k,t',n} - P^{tech}_{k,n,t}\) is also charged at \(c^{CU}\) in the day's cost, like \(CU^{day}\) in OBJ-5.
@@ -580,7 +580,7 @@ An electrical inter-system link charges `distance_km` × `cost_per_mw_km` per MW
 
 #### 8.3.10 Start-ups (LP)
 
-When the dispatch commits units (`master_problem.use_uc_in_dispatch`), each thermal or reservoir generator with a start-up cost or a minimum power gets an online capacity \(U_{g,n,t}\) (MW), a continuous relaxation of the dispatch's on/off status:
+When the dispatch commits units (`master_problem.use_uc_in_dispatch`), each generator the dispatch commits (every one but a variable renewable: thermal, biomass, geothermal, reservoir hydro) with a start-up cost or a minimum power gets an online capacity \(U_{g,n,t}\) (MW), a continuous relaxation of the dispatch's on/off status:
 
 \[
 U_{g,n,t} \leq \bar{P}^{cum}_{y,g,n}, \qquad \underline{p}_{g,n} U_{g,n,t} \leq P^{day}_{g,n,t} \leq U_{g,n,t}, \qquad SU_{g,n,t} \geq U_{g,n,t} - U_{g,n,t-1} \tag{SU-1}
