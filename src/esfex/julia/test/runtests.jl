@@ -988,6 +988,57 @@ import Ipopt
             @test haskey(res.power_flow, (1, 2))          # line flow extracted
         end
 
+        @testset "parallel lines: pair flow sums every line" begin
+            # Two identical 60 MW lines carry 100 MW from bus 1 to bus 2. The
+            # pair flow (results, custom constraints) kept only the first
+            # line's 50 MW.
+            H = 1; N = 2
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [3.0e-5, 3.0e-5],
+                        ones(H, N); nb = N, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            mkline(id, i, j) = TransmissionLineData(id, i, j, 60.0, 0.1, 0.0, 0.0,
+                                                    100.0, 220.0, 1, 50.0, "AC")
+            # The second line is entered 2 → 1: still the same pair
+            net = NetworkConfig(N, N, buses, [1, 2],
+                                [0.0 120.0; 120.0 0.0], [0.0 100.0; 100.0 0.0],
+                                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                [mkline("La", 1, 2), mkline("Lb", 2, 1)], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            mkinput() = PowerSystemInput(
+                name = "par", year = 2025, network = net, generators = [gas],
+                batteries = BatteryConfig[], demand = [0.0 100.0],
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                pwl_loss_segments = 0)
+            inp = mkinput()
+            model, vars = create_power_system(inp)
+            optimize!(model)
+            res = extract_solution(model, vars, inp)
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6
+            @test collect(keys(res.power_flow)) == [(1, 2)]
+            @test res.power_flow[(1, 2)][1] ≈ 100.0 atol = 1e-6
+            @test sum(f[1] for f in res.power_flow_by_line) ≈ 100.0 atol = 1e-6
+
+            # A custom cap on the pair binds on both lines together; the pair
+            # may be named in either direction (2 → 1 flow = -100 MW).
+            for (idx, sense, rhs) in (([1, 2, 1], "<=", 70.0), ([2, 1, 1], ">=", -70.0))
+                cc = [Dict("name" => "cap_pair", "type" => "linear", "sense" => sense,
+                           "rhs" => rhs,
+                           "terms" => [Dict("variable" => "power_flow",
+                                            "index" => idx, "coefficient" => 1.0)])]
+                inp = mkinput()
+                model, vars = create_power_system(inp; custom_constraints = cc)
+                optimize!(model)
+                res = extract_solution(model, vars, inp)
+                @test res.power_flow[(1, 2)][1] ≈ 70.0 atol = 1e-6
+                @test res.load_shed_total ≈ 30.0 atol = 1e-6
+            end
+            @test_throws ErrorException create_power_system(mkinput(); custom_constraints = [
+                Dict("name" => "x", "type" => "linear", "sense" => "<=", "rhs" => 1.0,
+                     "terms" => [Dict("variable" => "power_flow", "index" => [1, 1, 1])])])
+        end
+
         @testset "linear losses cost energy in either direction" begin
             # The linear model scaled the flow at the lower-index end by (1 - λ),
             # so a flow leaving bus 1 delivered more than was sent (95 MW
