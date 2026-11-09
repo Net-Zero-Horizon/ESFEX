@@ -61,7 +61,7 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
-| \(f_{\ell,t}\) | \(\ell,t\) | free | MW | Power flow per physical line (`power_flow`) |
+| \(f_{\ell,t}\) | \(\ell,t\) | free | MW | Power flow per physical line (`power_flow_by_line`; the `power_flow` result sums the lines between each bus pair) |
 | \(\theta_{n,t}\) | \(n,t\) | \([-\pi, \pi]\) | rad | Voltage angle (`voltage_angle`) |
 | \(\mu_{i,j,t}\) | \(i,j,t\) | \(\geq 0\) | MW | Transfer margin slack (`transfer_margin`). Created only when the network has no transmission lines; it appears in no constraint, so it is always 0 |
 

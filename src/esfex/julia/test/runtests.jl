@@ -989,6 +989,57 @@ import Ipopt
             @test haskey(res.power_flow, (1, 2))          # line flow extracted
         end
 
+        @testset "parallel lines: pair flow sums every line" begin
+            # Two identical 60 MW lines carry 100 MW from bus 1 to bus 2. The
+            # pair flow (results, custom constraints) kept only the first
+            # line's 50 MW.
+            H = 1; N = 2
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [3.0e-5, 3.0e-5],
+                        ones(H, N); nb = N, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            mkline(id, i, j) = TransmissionLineData(id, i, j, 60.0, 0.1, 0.0, 0.0,
+                                                    100.0, 220.0, 1, 50.0, "AC")
+            # The second line is entered 2 → 1: still the same pair
+            net = NetworkConfig(N, N, buses, [1, 2],
+                                [0.0 120.0; 120.0 0.0], [0.0 100.0; 100.0 0.0],
+                                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                [mkline("La", 1, 2), mkline("Lb", 2, 1)], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            mkinput() = PowerSystemInput(
+                name = "par", year = 2025, network = net, generators = [gas],
+                batteries = BatteryConfig[], demand = [0.0 100.0],
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                pwl_loss_segments = 0)
+            inp = mkinput()
+            model, vars = create_power_system(inp)
+            optimize!(model)
+            res = extract_solution(model, vars, inp)
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6
+            @test collect(keys(res.power_flow)) == [(1, 2)]
+            @test res.power_flow[(1, 2)][1] ≈ 100.0 atol = 1e-6
+            @test sum(f[1] for f in res.power_flow_by_line) ≈ 100.0 atol = 1e-6
+
+            # A custom cap on the pair binds on both lines together; the pair
+            # may be named in either direction (2 → 1 flow = -100 MW).
+            for (idx, sense, rhs) in (([1, 2, 1], "<=", 70.0), ([2, 1, 1], ">=", -70.0))
+                cc = [Dict("name" => "cap_pair", "type" => "linear", "sense" => sense,
+                           "rhs" => rhs,
+                           "terms" => [Dict("variable" => "power_flow",
+                                            "index" => idx, "coefficient" => 1.0)])]
+                inp = mkinput()
+                model, vars = create_power_system(inp; custom_constraints = cc)
+                optimize!(model)
+                res = extract_solution(model, vars, inp)
+                @test res.power_flow[(1, 2)][1] ≈ 70.0 atol = 1e-6
+                @test res.load_shed_total ≈ 30.0 atol = 1e-6
+            end
+            @test_throws ErrorException create_power_system(mkinput(); custom_constraints = [
+                Dict("name" => "x", "type" => "linear", "sense" => "<=", "rhs" => 1.0,
+                     "terms" => [Dict("variable" => "power_flow", "index" => [1, 1, 1])])])
+        end
+
         @testset "linear losses cost energy in either direction" begin
             # The linear model scaled the flow at the lower-index end by (1 - λ),
             # so a flow leaving bus 1 delivered more than was sent (95 MW
@@ -3308,6 +3359,43 @@ import Ipopt
         end
         # 30 MW of load and a 60 MW hour: the battery covers the spike
         spike = vcat(fill(30.0, 12), [60.0], fill(30.0, 11))
+
+        @testset "capacity adequacy: firm capacity at peak-period availability" begin
+            # Peak period = top 10 % of the day's demand: steps 18-20 (100 MW).
+            # Dispatchable units count at their mean availability there, variable
+            # renewables at their minimum availability. Every non-"Renewable"
+            # unit used to count fully and "Renewable" biomass at its minimum
+            # (0 for a seasonal mill); storage ignored its availability.
+            demand = fill(50.0, H24); demand[18:20] .= 100.0
+            half_at_peak = ones(H24, 1); half_at_peak[18:20, 1] .= 0.5
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5], half_at_peak;
+                        nb = 1, H = H24)
+            mill_avail = ones(H24, 1); mill_avail[1:12, 1] .= 0.0   # off-season
+            mill = mkgen("Mill", "Renewable", "Biomass", [30.0], [1.0e-5], mill_avail;
+                         nb = 1, H = H24)
+            sun = zeros(H24, 1); sun[8:17, 1] .= 1.0
+            pv = mkgen("PV", "Renewable", "Sun", [40.0], [0.0], sun; nb = 1, H = H24)
+            o = [0.0]
+            gt = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0], [50.0], half_at_peak,
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            # mkgen leaves risk_coefficient at 0 (no firm capacity at all)
+            firm(g) = ESFEX.with_fields(g; risk_coefficient = [1.0])
+            inp = MasterProblemInput(years = [2025], network = net1,
+                generators = firm.([gas, mill, pv]), batteries = [mkbat(avail = half_at_peak)],
+                technologies = [gt], base_demand = reshape(demand, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                reserve_margin = 1.2, verbose = false)
+            @test ESFEX.adequacy_peak_steps(inp, 1, 1) == [18, 19, 20]
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp)
+            ESFEX.add_capacity_adequacy_constraints!(model, vars, inp)
+            con = constraint_by_name(model, "cap_adequacy_y1_node1")
+            # firm: gas 100 × 0.5 + mill 30 × 1 + PV 40 × 0 + battery 20 × 0.5 = 90
+            @test ESFEX.normalized_rhs(con) ≈ 1.2 * 100.0 - 90.0
+            @test ESFEX.normalized_coefficient(con, vars.tech_investment[1][1][1]) ≈ 0.5
+        end
 
         @testset "battery ramp limits, with the rolling-horizon seam" begin
             # 5 MW/h: from 0 MW at the previous window's last step the battery

@@ -1113,12 +1113,55 @@ function add_re_increment_constraints!(
 end
 
 """
+    adequacy_peak_steps(input, y_idx, ni) -> Vector{Int}
+
+Master steps (rows of `base_demand`) of year `y_idx` in the top 10 % of
+node `ni`'s demand (at or above its 90th percentile): the peak period in
+which the firm capacity of a dispatchable unit is its mean availability.
+"""
+function adequacy_peak_steps(input::MasterProblemInput, y_idx::Int, ni::Int)
+    D = input.base_demand
+    tpy = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
+    y0, y1 = (y_idx - 1) * tpy + 1, min(y_idx * tpy, size(D, 1))
+    rows = y1 >= y0 ? (y0:y1) : (1:size(D, 1))
+    isempty(rows) && return Int[]
+    d = size(D, 2) >= ni ? D[rows, ni] : vec(maximum(D[rows, :], dims = 2))
+    threshold = sort(d)[max(1, ceil(Int, 0.9 * length(d)))]
+    return collect(rows)[d .>= threshold]
+end
+
+"""
+    firm_capacity_credit(availability, b, peak_steps; variable) -> Float64
+
+Share of a unit's capacity at bus `b` that counts as firm in the capacity
+adequacy constraint: for a variable renewable (`variable`, see
+`is_variable_renewable`), the minimum of its availability profile (its
+capacity credit: 0 for solar); for any other unit (thermal, biomass,
+reservoir hydro, storage), its mean availability over the node's peak
+period `peak_steps` (`adequacy_peak_steps`), so derates, outages and
+seasons the profile holds count. 1.0 without a profile.
+"""
+function firm_capacity_credit(availability::AbstractMatrix, b::Int, peak_steps;
+                              variable::Bool)
+    (size(availability, 1) == 0 || b > size(availability, 2)) && return 1.0
+    variable && return minimum(@view availability[:, b])
+    isempty(peak_steps) && return 1.0
+    n = size(availability, 1)
+    return sum(availability[mod1(t, n), b] for t in peak_steps) / length(peak_steps)
+end
+
+"""
     add_capacity_adequacy_constraints!(model, vars, input)
 
 Add capacity adequacy constraints ensuring total capacity meets peak demand.
 
 This is a simplified planning constraint that requires, per node:
   local_capacity + imports - exports >= peak_demand * reserve_margin
+
+Capacity counts at its firm share (`firm_capacity_credit`) × risk
+coefficient: variable renewables at their capacity credit, every other
+generator, technology and storage unit at its mean availability over the
+node's peak period.
 
 Imports between two nodes are limited to the transfer capacity between
 their buses (existing lines plus cumulative transfer investment), so a node
@@ -1177,14 +1220,14 @@ function add_capacity_adequacy_constraints!(
 
             # Build cumulative capacity expression across ALL buses on this node
             total_capacity = AffExpr(0.0)
+            peak = adequacy_peak_steps(input, y_idx, ni)
 
             for n in 1:n_buses
                 # Skip buses not on this node
                 input.network.bus_to_node[n] != ni && continue
 
-                # Generator capacity: unified retirement with degradation
-                # For renewables, derate by capacity credit (minimum availability)
-                # to avoid counting solar at full rated when it produces 0 at night
+                # Generator capacity: unified retirement with degradation,
+                # at its firm share (firm_capacity_credit)
                 for g in 1:n_gen
                     gen = input.generators[g]
                     rated_power = gen.rated_power[n]
@@ -1193,16 +1236,8 @@ function add_capacity_adequacy_constraints!(
                     age_at_year = initial_age + y_idx - 1
                     degradation_rate = gen.degradation_rate[n]
 
-                    # Capacity credit: for renewables, use minimum availability
-                    # Solar: 0.0 at night → no firm capacity contribution
-                    # Wind: low but >0 minimum → small firm contribution
-                    # Dispatchable: 1.0 (always available)
-                    is_renewable = gen.type == "Renewable"
-                    if is_renewable && size(gen.availability, 1) > 0 && n <= size(gen.availability, 2)
-                        capacity_credit = minimum(gen.availability[:, n])
-                    else
-                        capacity_credit = 1.0
-                    end
+                    capacity_credit = firm_capacity_credit(gen.availability, n, peak;
+                        variable = is_variable_renewable(gen, n))
 
                     # Risk coefficient: geographic hazard derating (default 1.0)
                     risk_coef = n <= length(gen.risk_coefficient) ? gen.risk_coefficient[n] : 1.0
@@ -1230,6 +1265,7 @@ function add_capacity_adequacy_constraints!(
                     age_at_year = initial_age + y_idx - 1
 
                     bat_risk = n <= length(bat.risk_coefficient) ? bat.risk_coefficient[n] : 1.0
+                    bat_risk *= firm_capacity_credit(bat.availability, n, peak; variable = false)
 
                     # Existing: active if age < lifetime
                     if age_at_year < lifetime && base_power > 0
@@ -1247,12 +1283,8 @@ function add_capacity_adequacy_constraints!(
                     tech = input.technologies[t]
                     tech_lifetime = tech.life_time[n]
                     tech_deg = tech.degradation_rate[n]
-                    # Capacity credit: minimum availability (same logic as existing generators)
-                    if tech.type == "Renewable" && size(tech.availability, 1) > 0 && n <= size(tech.availability, 2)
-                        tech_cc = minimum(tech.availability[:, n])
-                    else
-                        tech_cc = 1.0
-                    end
+                    tech_cc = firm_capacity_credit(tech.availability, n, peak;
+                        variable = is_variable_renewable(tech, n))
                     tech_risk = n <= length(tech.risk_coefficient) ? tech.risk_coefficient[n] : 1.0
                     for y in 1:vars.years_per_inv_period:y_idx
                         inv_age = y_idx - y
@@ -1268,6 +1300,7 @@ function add_capacity_adequacy_constraints!(
                     btech = input.battery_technologies[bt]
                     bt_lifetime = btech.life_time[n]
                     btech_risk = n <= length(btech.risk_coefficient) ? btech.risk_coefficient[n] : 1.0
+                    btech_risk *= firm_capacity_credit(btech.availability, n, peak; variable = false)
                     for y in 1:vars.years_per_inv_period:y_idx
                         inv_age = y_idx - y
                         if inv_age < bt_lifetime
@@ -1893,8 +1926,8 @@ function create_day_ps_vars!(
         lower_bound = -π, upper_bound = π,
         base_name = "$(prefix)_vangle")
 
-    # Power flow dict (legacy node-pair indexing, populated by add_dc_constraints!)
-    power_flow = Dict{Tuple{Int,Int}, Vector{VariableRef}}()
+    # Bus pair → line indices (populated by add_dc_constraints!)
+    pair_lines = Dict{Tuple{Int,Int}, Vector{Int}}()
 
     # Reserve variables [node, hour]
     reserve_static = @variable(model,
@@ -1991,7 +2024,7 @@ function create_day_ps_vars!(
         gen_output, gen_status, nothing, nothing,  # no startup/shutdown
         curtailment, fre_penetration_loss,
         bat_charge, bat_discharge, bat_soc,
-        power_flow, voltage_angle,
+        pair_lines, voltage_angle,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
         buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;

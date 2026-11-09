@@ -236,28 +236,23 @@ def estimate_transformer_impedance_pu(
 ) -> float:
     """Typical short-circuit impedance referred to the system base.
 
-    Power transformers have a near-constant impedance on their *own*
-    base (~10 %).  To express it on the system base ``S_base`` we scale
-    by ``S_base / S_trafo``.  This keeps small/medium units at sensible
-    values (≤10 MVA → 6 %, 10–100 MVA → 10 %) and prevents the previous
-    flat 14 % from being applied to very large units, which would
-    over-couple buses and inflate flow_angle shadow prices.
+    A transformer's impedance is near-constant on its *own* rating:
+    about 6 % below 10 MVA (distribution units) and 10 % from 10 MVA up.
+    On the system base ``S_base`` it is ``z_own × S_base / S_rated`` for
+    every size, so a small unit couples its buses weakly and a large one
+    tightly.  (Units under 100 MVA used to get a flat 0.06 / 0.10 p.u.
+    whatever their rating and the system base.)
 
-    Resulting impedance is clamped to ``[0.005, 0.14]`` for numerical
-    stability and to avoid unphysically rigid coupling on 1 GVA+
-    transformers.  ``ratio`` is reserved for future autotransformer
+    The result is floored at 0.005 p.u. to avoid unphysically rigid
+    coupling on very large units.  An unknown rating (``rated_mva <= 0``)
+    gives 0.10 p.u.  ``ratio`` is reserved for future autotransformer
     refinement (typical ~8 %, GSU ~14 %, etc.).
     """
     del ratio  # reserved
     if rated_mva <= 0:
         return 0.10
-    if rated_mva < 10.0:
-        return 0.06
-    if rated_mva < 100.0:
-        return 0.10
-    # Large units: scale own-base 10 % to system base.
-    x_sys = 0.10 * system_base_mva / rated_mva
-    return max(0.005, min(0.14, x_sys))
+    z_own = 0.06 if rated_mva < 10.0 else 0.10
+    return max(0.005, z_own * system_base_mva / rated_mva)
 
 
 def estimate_transformer_losses_fraction(rated_mva: float) -> float:
