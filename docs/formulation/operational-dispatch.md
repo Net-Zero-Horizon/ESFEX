@@ -26,7 +26,7 @@ Three operating modes are available:
 | \(k \in \mathcal{K}\) | AC/DC converters | `1:n_acdc` |
 | \(f \in \mathcal{F}\) | Frequency converters | `1:n_freq` |
 
-The mapping from bus to geographic node is given by `bus_to_node[n]`, written as \(n_i\). Each bus carries a `demand_fraction` \(\alpha_n\) of its parent node's demand; a bus with `role: connection` carries no demand (\(\alpha_n = 0\) in every balance and bound below).
+The mapping from bus to geographic node is given by `bus_to_node[n]`, written as \(n_i\). Each bus carries a `demand_fraction` \(\alpha_n\) of its parent node's demand; a bus with `role: connection` carries no demand (\(\alpha_n = 0\) in every balance and bound below). The demand of a node with no bus that carries demand enters no balance and cannot be served or shed by the model: it is added to the results as load shedding at that node, at \(C^{\text{VOLL}}\) per MWh in the load-shedding cost and the objective (a constant).
 
 Generators, batteries, load shedding, voltage angles and electrolyzer power are indexed by bus. Curtailment, the RE-target slack, CO2 emissions, reserves, sectoral load shedding, flexible demand, EV fleet and rooftop curtailment are indexed by node; where a node-level quantity enters a bus balance it is multiplied by \(\alpha_n\). Per-node configuration arrays (capacities, costs, `invest_max`) are mapped onto the buses before the model is built.
 

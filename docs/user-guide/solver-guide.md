@@ -77,7 +77,7 @@ Override the solver from the command line without editing the YAML file:
 esfex run -c config.yaml -s gurobi
 ```
 
-The `options` block is kept; options that belong to a different solver are dropped with a warning (see below).
+The `options` block is kept; options that belong to a different solver are dropped with a warning (see below). Each dropped option is reported once per run, not for every window.
 
 ### Checking Available Solvers
 
@@ -252,7 +252,7 @@ If `solver_method` is not set, HiGHS chooses the algorithm itself.
 
 Each solver exposes tunable parameters through the `options` dictionary. The tables list the options the Studio offers; the key in the first column is what you write in `options`.
 
-**Method-specific options.** Some options apply to one LP algorithm only (column *Applies when*). They are passed to the solver only when the controlling method option is set **explicitly** to one of the listed methods. If the method is left at its automatic value (`choose` / `auto`) or set to another method, the option is dropped with a warning in the log. For example, `simplex_scale_strategy` takes effect only together with `solver_method: simplex`.
+**Method-specific options.** Some options apply to one LP algorithm only (column *Applies when*). They are passed to the solver only when the controlling method option is set **explicitly** to one of the listed methods. If the method is left at its automatic value (`choose` / `auto`) or set to another method, the option is dropped with a warning in the log (once per run). For example, `simplex_scale_strategy` takes effect only together with `solver_method: simplex`.
 
 Keys that are not in any table are passed to the solver unchanged, so any native solver parameter can be set. Keys that belong to another solver's table are dropped with a warning (this keeps a Gurobi option from breaking a HiGHS run after `-s highs`).
 

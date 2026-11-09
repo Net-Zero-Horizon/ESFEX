@@ -167,7 +167,8 @@ Extract all variable values from the solved model. Calls `ESFEX.extract_solution
 | `power_flow`, `power_flow_by_line` | Flow per bus pair `{(i, j): array}` and per physical line |
 | `bat_spillage`, `ev_*`, `loss_of_inertia`, `transfer_margin`, `reservoir_*` | Present when the feature is active |
 | `n1_gen_reserve_duals`, `n1_trans_reserve_duals`, `n1_binding_contingencies`, `n1_security_cost` | N-1 security outputs |
-| `total_generation`, `total_demand`, `total_losses`, `re_penetration`, `total_co2`, `load_shed_total`, `total_curtailment` | Scalars |
+| `unattached_load_shed` | `(node, hour)` MW: the demand of nodes with no load bus, unserved (present only when such nodes exist); it is included in `load_shed_total`, `objective` and `cost_breakdown` |
+| `total_generation`, `total_demand`, `total_losses`, `re_penetration`, `total_co2`, `load_shed_total`, `total_curtailment` | Scalars (MWh, tCO2). `total_losses` is the transmission loss of the DC loss model (0 when the flow is lossless or AC) |
 
 When network reduction is enabled, the arrays are expanded back to the original buses and lines before they are returned.
 

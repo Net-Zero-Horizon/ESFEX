@@ -1537,6 +1537,10 @@ mutable struct PowerSystemVariables
 
     # ACOPF variables (nothing when using DCOPF)
     acopf_vars::Any  # Union{ACOPFVariables, Nothing}
+
+    # Transmission loss per line (line × hour, MW) of the DC power flow's
+    # loss model; nothing when the flow is lossless or not DC
+    line_losses::Union{Vector{Vector{VariableRef}}, Nothing}
 end
 
 # Constructor with optional fields defaulting to nothing
@@ -1575,7 +1579,8 @@ function PowerSystemVariables(
     reservoir_pump = nothing,
     gen_seg_output = Dict{Tuple{Int,Int}, Any}(),
     bat_seg_discharge = Dict{Tuple{Int,Int}, Any}(),
-    acopf_vars = nothing
+    acopf_vars = nothing,
+    line_losses = nothing
 )
     return PowerSystemVariables(
         gen_output, gen_status, gen_startup, gen_shutdown,
@@ -1606,7 +1611,8 @@ function PowerSystemVariables(
         bats_at_bus,
         gen_seg_output,
         bat_seg_discharge,
-        acopf_vars
+        acopf_vars,
+        line_losses
     )
 end
 

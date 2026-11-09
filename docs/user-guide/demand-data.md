@@ -196,6 +196,7 @@ systems:
 
 - **Fractions are not normalised.** Make the `demand_fraction` values of a node's `load` and `mixed` buses sum to 1. Because new buses default to `role: load` with `demand_fraction: 1.0`, two buses on one node left at their defaults carry the node's demand twice.
 - If a system defines no `buses`, one bus per node is created with `demand_fraction: 1.0`.
+- A node with demand but no `load` or `mixed` bus (no bus at all, only `connection` buses, or only fractions of 0) has its demand in no power balance. That demand is reported as unserved: it appears in `loss_load` at that node, in the year's load shedding, and in `load_shedding_cost` at `LOSS_OF_LOAD` per MWh. The log warns once per run with the list of such nodes.
 - Load shedding is per bus and can never exceed the demand at that bus, so a `connection` bus cannot shed load.
 - Node-level EV charging and V2G enter each bus's power balance scaled by the same fraction.
 

@@ -62,6 +62,25 @@ from esfex.io.demand import load_availability_profile, load_inflow_profile
 logger = logging.getLogger(__name__)
 
 
+# Warnings that would repeat for every rolling window (and every master
+# solve) are logged once per run: the runner calls reset_run_warnings() when
+# a run starts.
+_RUN_WARNINGS: set = set()
+
+
+def reset_run_warnings() -> None:
+    """Forget the warnings logged so far, so a new run logs them again."""
+    _RUN_WARNINGS.clear()
+
+
+def _warn_once(key, msg: str, *args) -> None:
+    """``logger.warning(msg, *args)`` the first time ``key`` is seen in a run."""
+    if key in _RUN_WARNINGS:
+        return
+    _RUN_WARNINGS.add(key)
+    logger.warning(msg, *args)
+
+
 # Values of a controlling combo (HiGHS "solver_method", Gurobi "method") that
 # mean "let the solver decide" — no specific algorithm is pinned, so no
 # algorithm-specific option should be forced.
@@ -129,6 +148,20 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
     return drops
 
 
+def _nodes_without_load_bus(buses, num_nodes: int) -> list[int]:
+    """Nodes (0-indexed) whose demand no bus of the dispatch carries.
+
+    The dispatch puts a node's demand on its ``load`` and ``mixed`` buses,
+    each taking its ``demand_fraction``; a node with no such bus (no bus at
+    all, or only ``connection`` buses) has its demand in no power balance.
+    """
+    carried = np.zeros(num_nodes)
+    for b in buses:
+        if getattr(b, "role", "load") in ("load", "mixed") and 0 <= b.parent_node < num_nodes:
+            carried[b.parent_node] += max(float(b.demand_fraction), 0.0)
+    return [n for n in range(num_nodes) if carried[n] <= 1e-9]
+
+
 def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
     """Convert Python solver options dict to Julia Dict{String, Any}.
 
@@ -194,7 +227,8 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
         # Drop method-inapplicable options (e.g. PDLP flags while LP method is
         # left on "choose") before they reach — and are rejected by — the solver.
         if key_str in method_drops or attr_str in method_drops:
-            logger.warning(
+            _warn_once(
+                ("solver_option_method", active, key_str),
                 "Dropping solver option %r: it only applies to a specific "
                 "LP/QP method that is not currently selected.",
                 key_str,
@@ -205,7 +239,8 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
         # valid solver parameters that simply aren't surfaced in the GUI.
         owners = attr_owners.get(attr_str) or attr_owners.get(key_str)
         if owners and active not in owners:
-            logger.warning(
+            _warn_once(
+                ("solver_option_owner", active, key_str),
                 "Dropping solver option %r: attribute belongs to %s, "
                 "active solver is %r",
                 key_str, "/".join(sorted(owners)), active,
@@ -517,6 +552,41 @@ def _per_bus_unit_on_model_buses(
         else:
             out[field_name] = [values[o] for o in retained]
     return out
+
+
+def _add_unattached_load_shed(result: Dict[str, Any], demand, nodes, jl_input,
+                              keep_steps: Optional[int] = None) -> None:
+    """Report the demand of nodes without a load bus as unserved load.
+
+    That demand sits in no power balance (see ``_nodes_without_load_bus``),
+    so the model can neither serve nor shed it. It is added to the result as
+    ``unattached_load_shed`` [node, step] (MW), to ``load_shed_total`` (MWh)
+    and, at the model's loss-of-load penalty, to the load-shedding cost, the
+    cost total and the objective (only the committed ``keep_steps`` count
+    in the totals, as for the rest of the window).
+    """
+    if not nodes or demand is None:
+        return
+    from esfex.bridge.converters import COST_UNSCALE
+    dem = np.asarray(demand, dtype=float)               # [step, node]
+    n_steps, n_nodes = dem.shape
+    unserved = np.zeros((n_nodes, n_steps))
+    for n in nodes:
+        if n < n_nodes:
+            unserved[n] = np.clip(dem[:, n], 0.0, None)
+    result["unattached_load_shed"] = unserved
+    kept = n_steps if keep_steps is None or not 0 < int(keep_steps) < n_steps else int(keep_steps)
+    tres = max(1.0, float(jl_input.temporal.resolution_hours))
+    energy = float(unserved[:, :kept].sum()) * tres
+    if energy <= 0:
+        return
+    cost = energy * float(jl_input.loss_of_load_penalty) * COST_UNSCALE
+    result["load_shed_total"] = float(result.get("load_shed_total", 0.0)) + energy
+    result["objective"] = float(result.get("objective", 0.0)) + cost
+    cbd = result.get("cost_breakdown")
+    if cbd is not None:
+        cbd["load_shedding_cost"] = cbd.get("load_shedding_cost", 0.0) + cost
+        cbd["total"] = cbd.get("total", 0.0) + cost
 
 
 def _expand_powersystem_result(
@@ -1393,17 +1463,23 @@ class PowerSystemAdapter:
         num_buses = len(buses)
         need_expansion = node_bus_mapping_required(buses, num_nodes)
         b2n_arg = bus_to_node_0idx if need_expansion else None
-        if need_expansion and num_buses < num_nodes:
-            _orphan = sorted(set(range(num_nodes)) - set(bus_to_node_0idx))
-            if _orphan:
-                logger.warning(
-                    "%d node(s) have no operational bus (%s%s): any demand or "
-                    "capacity there cannot be served and is dropped from the "
-                    "dispatch. This usually means the network reduction left "
-                    "those nodes empty.",
-                    len(_orphan), _orphan[:10],
-                    "…" if len(_orphan) > 10 else "",
-                )
+        self._unattached_nodes = _nodes_without_load_bus(buses, num_nodes)
+        _dem = np.asarray(self.demand) if self.demand is not None else None
+        _orphan = [n for n in self._unattached_nodes
+                   if _dem is not None and _dem.ndim == 2 and n < _dem.shape[1]
+                   and float(np.nanmax(_dem[:, n], initial=0.0)) > 0.0]
+        if _orphan:
+            _warn_once(
+                ("unattached_nodes", sys.name, tuple(_orphan)),
+                "%d node(s) have no operational load bus (%s%s): their demand "
+                "cannot be served and is reported as unserved load (loss of "
+                "load, priced at the loss_of_load penalty). Units at a node "
+                "with no bus at all are not dispatched. Give each such node a "
+                "bus with role 'load' or 'mixed' (a network reduction can "
+                "also leave nodes without buses).",
+                len(_orphan), _orphan[:10],
+                "…" if len(_orphan) > 10 else "",
+            )
 
         # Resolve generator/battery → bus mapping from transmission_lines_geo
         gen_bus_per_node, bat_bus_per_node = _resolve_element_bus_mapping(sys)
@@ -2398,6 +2474,10 @@ class PowerSystemAdapter:
                     "expected %s — keeping the zero matrix from MIP",
                     recovered_unscaled.shape, _np.asarray(expected).shape,
                 )
+
+        _add_unattached_load_shed(result, self.demand,
+                                  getattr(self, "_unattached_nodes", None),
+                                  self._jl_input, keep_steps)
 
         # Expand results back to the original bus/line topology when
         # network reduction was applied.  All per-bus arrays (generation,
