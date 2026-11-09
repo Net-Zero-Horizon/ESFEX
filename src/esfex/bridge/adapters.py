@@ -1187,7 +1187,9 @@ class PowerSystemAdapter:
         self.units_config = kwargs.get('units_config', {})  # Updated capacities from investments
         self.sectoral_demand = kwargs.get('sectoral_demand', {})  # Sectoral demand arrays
         self.rooftop_generation = kwargs.get('rooftop_generation', None)  # (hours × nodes) or None
-        self.re_penetration_target_override = kwargs.get('re_penetration_target', None)  # Year-specific RE target
+        # Year-specific RE target (development mode only). target_re_penetration
+        # is a planning target: without a year's value the dispatch applies none.
+        self.re_penetration_target_override = kwargs.get('re_penetration_target', None)
         self.boundary_conditions = kwargs.get('boundary_conditions', {}) or {}
         self.kwargs = kwargs
 
@@ -1990,7 +1992,7 @@ class PowerSystemAdapter:
             loss_of_reserve_dynamic=scale_cost(float(sys.penalties.loss_of_reserve_dynamic)),
             co2_cost=scale_cost(float(sys.penalties.co2_cost)),
             curtailment_cost=scale_cost(float(getattr(sys.penalties, 'curtailment_cost', 20.0))),
-            re_penetration_target=float(self.re_penetration_target_override if self.re_penetration_target_override is not None else sys.target_re_penetration),
+            re_penetration_target=float(self.re_penetration_target_override or 0.0),
             co2_budget=float(sys.co2_budget.annual_budget) if sys.co2_budget.enabled else float("inf"),
             inertia_limit=float(sys.inertia_limit_threshold),
             mode=self.mode,

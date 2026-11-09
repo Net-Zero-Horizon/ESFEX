@@ -95,7 +95,7 @@ class PowerSystemAdapter:
 | `boundary_conditions` | `dict` | State carried over from the previous rolling window, each a `(unit, bus)` array: `gen_status_init`, `gen_output_prev`, `reservoir_level`, `battery_soc` (MWh), `battery_discharge_prev` and `battery_charge_prev` (MW, for the batteries' ramp limits). On the year's last window also `battery_soc_end_min` (MWh floor) and `battery_soc_end_cyclic` (bool). |
 | `sectoral_demand` | `dict` | Sectoral demand arrays `{sector_name: np.ndarray(hours, nodes)}`. |
 | `rooftop_generation` | `np.ndarray` | Rooftop solar generation profile `(hours, nodes)` in MW. The runner passes `None`: rooftop output is already subtracted from the demand it sends. |
-| `re_penetration_target` | `float` | Year-specific RE penetration target override (0-1). |
+| `re_penetration_target` | `float` | The year's RE penetration target (0-1) from the development master's path. `None` or 0: no RE-penetration constraint (`target_re_penetration` is a planning target and is not applied by the dispatch on its own). |
 | `ev_config_data` | `dict` | EV fleet configuration for V2G constraints. |
 | `electricity_price` | `list[float]` | Time-varying electricity prices for V2G compensation. |
 
