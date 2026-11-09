@@ -183,7 +183,7 @@ The capacity available in year \(y\) is the sum of:
 2. **Life-extended capacity** of existing units past their lifetime.
 3. **Every earlier investment** still within its technology `lifetime`, derated as `(1 - degradation_rate)^(y - y_built)`.
 
-Renewable technologies are further limited by their availability profile in each representative-day hour.
+Every technology is further limited by its availability profile in each representative-day hour: the capacity factor of a renewable, the derates and scheduled outages of a dispatchable one (1 where it has no profile), as the generator it becomes in the dispatch.
 
 
 ---
@@ -205,7 +205,7 @@ From that year on, the master may keep any part of it online with a continuous *
 - avoids the unit's `decommissioning_cost`, which is charged on the capacity that retires.
 
 !!! note "Units with `invest_cost` 0"
-    Existing units often have `invest_cost: [0.0]` (the Studio default). At a node where it is 0, life extension is priced with the investment cost of the unit's candidate: for a generator, the technology with the same `fuel` and `type` (the one named by the generator's `technology` field if several match, else the first in the configuration); for a battery, the battery technology named by its `technology` field, else the first battery technology (`invest_cost_power`). With no candidate the extension stays free, and a warning names the unit (`... extending its life is free in the master problem`); such a unit never retires in the master.
+    Existing units often have `invest_cost: [0.0]` (the Studio default). At a node where it is 0, life extension is priced with the investment cost of the unit's candidate: for a generator, the technology with the same `fuel` and `type` (the one named by the generator's `technology` field if several match, else the first in the configuration); for a battery, the battery technology named by its `technology` field, else the first battery technology (`invest_cost_power`). With no candidate the extension stays free, and a warning names the unit (`... extending its life is free in the master problem`); such a unit never retires in the master. Only the nodes where the unit has capacity count: a unit whose `invest_cost` is set at all of them takes no candidate's cost and gets no warning, whatever its `invest_cost` at the other nodes.
 
 Technology investments are not life-extended: they leave the capacity sum when they reach `lifetime`.
 

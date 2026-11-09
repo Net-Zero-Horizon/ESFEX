@@ -299,12 +299,15 @@ function build_variables!(model, input::PowerSystemInput)
     gen_shutdown = nothing
 
     if is_uc
-        # Unit commitment mode: gen_status is Binary, gen_startup is Continuous [0,1]
-        gen_status = @variable(model, [g=1:n_gen, b=buses_of_gen[g], t=1:hours], Bin, base_name="gen_status")
-        gen_startup = @variable(model, [g=1:n_gen, b=buses_of_gen[g], t=1:hours], lower_bound=0, upper_bound=1, base_name="gen_startup")
+        # Unit commitment mode: gen_status is Binary, gen_startup is Continuous [0,1].
+        # Only committed units have them: a variable renewable has no
+        # on/off decision (left free, its status and start-ups were arbitrary).
+        committed = [committed_buses(input.generators[g], buses_of_gen[g]) for g in 1:n_gen]
+        gen_status = @variable(model, [g=1:n_gen, b=committed[g], t=1:hours], Bin, base_name="gen_status")
+        gen_startup = @variable(model, [g=1:n_gen, b=committed[g], t=1:hours], lower_bound=0, upper_bound=1, base_name="gen_startup")
         # Clustered unit commitment: a plant of N > 1 identical units commits
         # an integer number of them (0..N) and starts up to N in a step
-        for g in 1:n_gen, b in buses_of_gen[g]
+        for g in 1:n_gen, b in committed[g]
             N = units_of(input.generators[g], b)
             N > 1 || continue
             for t in 1:hours
@@ -693,10 +696,10 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     startup_cost = AffExpr(0.0)
     if vars.gen_startup !== nothing
         for g in 1:n_gen
-            for b in vars.buses_of_gen[g], t in 1:hours
+            gen = input.generators[g]
+            for b in committed_buses(gen, vars.buses_of_gen[g]), t in 1:hours
                 # start_up_cost starts the whole plant: one of its N units
                 # costs start_up_cost / N
-                gen = input.generators[g]
                 add_to_expression!(startup_cost,
                     gen.start_up_cost[b] / units_of(gen, b), vars.gen_startup[g, b, t])
             end
@@ -1279,9 +1282,10 @@ end
 
 Add generator operational constraints: capacity, ramps, min up/down times.
 
-Matches legacy PowerSystem.py:
-- Renewable: gen_output <= rated * availability
-- Non-renewable: gen_output <= rated AND gen_output <= M * gen_status
+- Every generator: gen_output <= rated * availability
+- Unit commitment, every unit but a variable renewable
+  ([`is_variable_renewable`](@ref)): gen_output <= M * gen_status,
+  gen_output >= min_power * rated * gen_status, start-ups, min up/down
 - Curtailment is NOT part of generator capacity constraints (it's per-node, defined separately)
 
 Unit commitment with `num_units = N > 1` at a bus (clustered units):
@@ -1316,10 +1320,13 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
 
     for g in 1:n_gen
         gen = input.generators[g]
-        is_renewable = gen.type == "Renewable"
 
         for b in vars.buses_of_gen[g]
             rated = gen.rated_power[b]
+            # Committed in this unit-commitment dispatch: every unit but a
+            # variable renewable (its output only follows its availability)
+            committed = capacity_override === nothing && is_uc &&
+                        !is_variable_renewable(gen, b)
 
             # When capacity_override provided (master problem), use precomputed capacity
             # and skip degradation
@@ -1330,9 +1337,6 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                 rated = generator_power_in_service(gen, b, input)
                 total_capacity = rated
             end
-
-            # Reservoir generators: output limited by turbine capacity, not availability
-            has_reservoir = gen.reservoir_capacity[b] > 0
 
             # Segment upper bounds for PWL cost decomposition
             if haskey(vars.gen_seg_output, (g, b))
@@ -1356,7 +1360,7 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
 
             # Clustered unit commitment: N identical units of rated / N each
             N = units_of(gen, b)
-            clustered = N > 1 && capacity_override === nothing && is_uc
+            clustered = N > 1 && committed
 
             for t in 1:hours
                 # availability caps every generator (see segment note above):
@@ -1365,29 +1369,26 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
                 @constraint(model,
                     vars.gen_output[g, b, t] <= total_capacity * avail)
 
-                if !(is_renewable && !has_reservoir)
-                    # gen_status big-M only when NOT using capacity_override AND in UC mode.
-                    # In economic dispatch, gen_status is fixed to 1, so the big-M constraint
-                    # is redundant with `gen_output <= total_capacity` and only pollutes the
-                    # LP matrix with a coefficient of M (~1e4), worsening conditioning.
-                    if clustered
-                        # Each online unit gives at most rated / N, and only
-                        # the units still available can be committed
-                        @constraint(model,
-                            vars.gen_output[g, b, t] <= (rated / N) * vars.gen_status[g, b, t])
-                        n_avail = units_available(N, avail)
-                        n_avail < N && @constraint(model,
-                            vars.gen_status[g, b, t] <= n_avail,
-                            base_name = "units_available_g$(g)_b$(b)_t$(t)")
-                    elseif capacity_override === nothing && vars.gen_status !== nothing && is_uc
-                        @constraint(model,
-                            vars.gen_output[g, b, t] <= M_gb * vars.gen_status[g, b, t]
-                        )
-                    end
+                # gen_status big-M only for a committed unit (UC dispatch, not
+                # the master). In economic dispatch there is no gen_status: the
+                # big-M would be redundant with `gen_output <= total_capacity`
+                # and only pollute the LP matrix with a coefficient of M (~1e4).
+                if clustered
+                    # Each online unit gives at most rated / N, and only
+                    # the units still available can be committed
+                    @constraint(model,
+                        vars.gen_output[g, b, t] <= (rated / N) * vars.gen_status[g, b, t])
+                    n_avail = units_available(N, avail)
+                    n_avail < N && @constraint(model,
+                        vars.gen_status[g, b, t] <= n_avail,
+                        base_name = "units_available_g$(g)_b$(b)_t$(t)")
+                elseif committed
+                    @constraint(model,
+                        vars.gen_output[g, b, t] <= M_gb * vars.gen_status[g, b, t]
+                    )
                 end
 
-                # UC constraints only in operational dispatch (not master)
-                if capacity_override === nothing && is_uc
+                if committed
                     # Minimum stable output of each online unit
                     min_out = gen.min_power[b] * rated
                     clustered && (min_out /= N)
@@ -1430,7 +1431,7 @@ function add_generator_constraints!(model, vars::PowerSystemVariables, input;
             # Unit commitment logic (only in operational dispatch, not master)
             if clustered && rated > 0
                 add_clustered_commitment!(model, vars, input, g, b, N, tres)
-            elseif capacity_override === nothing && is_uc && rated > 0
+            elseif committed && rated > 0
                 # min_up / min_down are in hours; the constraints count time
                 # steps. Round up so a step longer than the minimum still
                 # enforces at least one step (8 h at 6-h steps → 2 steps).
@@ -2260,7 +2261,8 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     spinning = capacity_override === nothing && vars.gen_status !== nothing &&
         vars.gen_startup !== nothing
 
-    reservable(gen) = gen.reservable && gen.type != "Renewable"
+    # Dispatchable units hold reserve (a variable renewable, never)
+    reservable(gen, b) = gen.reservable && !is_variable_renewable(gen, b)
     req_dynamic = [get(input.reserve_dynamic_requirement, ni, 0.0) for ni in 1:n_node]
     groups = reserve_node_groups(input)
 
@@ -2307,7 +2309,7 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                 end
             end
 
-            # Free headroom of reservable non-renewable generators and batteries
+            # Free headroom of reservable dispatchable generators and batteries
             available_reserve = AffExpr(0.0)
             held = AffExpr(0.0)
             for ni in nodes
@@ -2316,7 +2318,7 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                 for b in node_buses[ni]
                     for g in vars.gens_at_bus[b]
                         gen = input.generators[g]
-                        reservable(gen) || continue
+                        reservable(gen, b) || continue
                         if capacity_override !== nothing && haskey(capacity_override, (g, b))
                             add_to_expression!(available_reserve, capacity_override[(g, b)],
                                                gen.availability[t, b])
@@ -2363,7 +2365,7 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                 for b in node_buses[ni]
                     for g in vars.gens_at_bus[b]
                         gen = input.generators[g]
-                        reservable(gen) || continue
+                        reservable(gen, b) || continue
                         if capacity_override !== nothing && haskey(capacity_override, (g, b))
                             add_to_expression!(available_dynamic,
                                 capacity_override[(g, b)], input.dynamic_reserve_contribution)
@@ -2722,11 +2724,10 @@ function add_curtailment_constraints!(model, vars::PowerSystemVariables, input;
             for b in node_buses[ni]
                 for g in vars.gens_at_bus[b]
                     gen = input.generators[g]
-                    # Reservoir hydro is dispatchable (energy-limited by the
-                    # water balance), not a must-take variable renewable, so it
-                    # is excluded from availability-based curtailment accounting
-                    # — consistent with add_generator_constraints!.
-                    if gen.type == "Renewable" && gen.reservoir_capacity[b] <= 0
+                    # Only variable renewables are curtailed: a dispatchable
+                    # unit (reservoir hydro, biomass, ...) that runs below
+                    # its availability is not spilling anything.
+                    if is_variable_renewable(gen, b)
                         avail = gen.availability[t, b]
                         if capacity_override !== nothing && haskey(capacity_override, (g, b))
                             add_to_expression!(available_renewable,
@@ -2919,10 +2920,10 @@ function _add_system_gen_n1!(model, vars::PowerSystemVariables, input::PowerSyst
     for t in 1:input.temporal.hours
         cover = AffExpr(0.0)
         for (g, gen) in enumerate(input.generators)
-            gen.type == "Renewable" && continue
             corrective || gen.reservable || continue
             for b in vars.buses_of_gen[g]
                 in_system(b) || continue
+                is_variable_renewable(gen, b) && continue
                 p_gb = generator_power_in_service(gen, b, input)
                 ((g, b) == (g_star, b_star) || p_gb <= 0) && continue
                 headroom = AffExpr(0.0)
@@ -3710,7 +3711,7 @@ function recover_uc_duals_via_copy(
     status_vals = Array{Float64}(undef, n_gen, n_bus, hours)
     fill!(status_vals, 0.0)
     for g in 1:n_gen
-        for b in vars.buses_of_gen[g], t in 1:hours
+        for b in committed_buses(input.generators[g], vars.buses_of_gen[g]), t in 1:hours
             status_vals[g, b, t] = round(value(vars.gen_status[g, b, t]))
         end
     end
@@ -3735,7 +3736,7 @@ function recover_uc_duals_via_copy(
     # On the copy: relax ``gen_status`` to continuous and pin to MIP
     # incumbent values. The original model is untouched.
     for g in 1:n_gen
-        for b in vars.buses_of_gen[g], t in 1:hours
+        for b in committed_buses(input.generators[g], vars.buses_of_gen[g]), t in 1:hours
             new_v = reference_map[vars.gen_status[g, b, t]]
             if is_binary(new_v)
                 unset_binary(new_v)
@@ -3820,20 +3821,22 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             gen_out[g, b, t] = value(vars.gen_output[g, b, t])
         end
 
-        # Generator status — sparse to dense
+        # Generator status and startup — sparse to dense. Only committed
+        # units have them (0 for a variable renewable: no on/off decision).
         gen_stat = nothing
         if vars.gen_status !== nothing
             gen_stat = zeros(n_gen, n_bus, hours)
-            for g in 1:n_gen, b in vars.buses_of_gen[g], t in 1:hours
+            for g in 1:n_gen, b in committed_buses(input.generators[g], vars.buses_of_gen[g]),
+                    t in 1:hours
                 gen_stat[g, b, t] = value(vars.gen_status[g, b, t])
             end
         end
 
-        # Generator startup — sparse to dense
         gen_start = nothing
         if vars.gen_startup !== nothing
             gen_start = zeros(n_gen, n_bus, hours)
-            for g in 1:n_gen, b in vars.buses_of_gen[g], t in 1:hours
+            for g in 1:n_gen, b in committed_buses(input.generators[g], vars.buses_of_gen[g]),
+                    t in 1:hours
                 gen_start[g, b, t] = value(vars.gen_startup[g, b, t])
             end
         end
