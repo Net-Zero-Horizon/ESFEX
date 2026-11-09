@@ -553,6 +553,49 @@ Identical units generator `gen` has at bus `b` (clustered unit commitment):
 """
 units_of(gen, b::Int) = length(gen.num_units) >= b ? max(1, gen.num_units[b]) : 1
 
+# Fuels of variable renewables (spaces, '_' and '-' removed, lower case):
+# weather and ocean resources, and no fuel at all. Water / hydro is variable
+# only without a reservoir (run of river).
+const VARIABLE_RENEWABLE_FUELS = Set(["sun", "solar", "pv", "solarpv", "photovoltaic",
+    "wind", "windonshore", "windoffshore", "onshorewind", "offshorewind",
+    "otec", "wave", "tidal", "none", ""])
+const HYDRO_FUELS = Set(["water", "hydro", "runofriver"])
+
+"""
+    is_variable_renewable(unit, b) -> Bool
+
+Whether generator or technology `unit` is a variable renewable at bus `b`:
+type `"Renewable"` and a fuel-less resource whose output follows its
+availability profile — sun, wind, ocean (OTEC, wave, tidal), no fuel
+(`"None"` or empty), or water / hydro without a reservoir at `b`.
+
+A variable renewable is not committed (no on/off status or start-ups in
+unit commitment), holds no reserve, is not counted in generation N-1
+and is what curtailment measures. Every other unit, renewable or not
+(biomass, biogas, geothermal, reservoir hydro, thermal), is dispatchable:
+committed in unit commitment and holding reserve when `reservable`. The
+renewable-energy share still counts every `"Renewable"` unit.
+Mirrored in Python by `esfex.config.schema.is_variable_renewable`.
+"""
+function is_variable_renewable(unit, b::Int)
+    unit.type == "Renewable" || return false
+    fuel = replace(lowercase(strip(unit.fuel)), r"[\s_\-]" => "")
+    fuel in VARIABLE_RENEWABLE_FUELS && return true
+    fuel in HYDRO_FUELS || return false
+    hasproperty(unit, :reservoir_capacity) || return true
+    res = unit.reservoir_capacity
+    return !(b <= length(res) && res[b] > 0)
+end
+
+"""
+    committed_buses(gen, buses) -> Vector{Int}
+
+The buses of `buses` where generator `gen` is committed in unit commitment
+(has `gen_status` / `gen_startup`): those where it is not a variable
+renewable ([`is_variable_renewable`](@ref)).
+"""
+committed_buses(gen, buses) = [b for b in buses if !is_variable_renewable(gen, b)]
+
 """
     BatteryConfig
 

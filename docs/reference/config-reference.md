@@ -96,7 +96,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `generation_reserve_type` | `largest_unit` \| `percentage` | `"largest_unit"` | `largest_unit`: other units' headroom covers the largest unit's output. `percentage`: all units' headroom covers `generation_reserve_percentage` × system demand of each step. Per system in a multi-system run (each system's own units, largest unit and demand) |
 | `generation_reserve_percentage` | float (0–1) | `0.15` | Reserve fraction when `generation_reserve_type: percentage` |
 | `scopf_enabled` | bool | `false` | Use SCOPF instead of preventive N-1 reserves: post-contingency (LODF) flow limits for every pair of lines, in one solve, with priced overloads. |
-| `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all non-renewable units within one step of ramp, plus batteries, instead of reservable units' headroom. |
+| `corrective_enabled` | bool | `false` | With `scopf_enabled`: generation N-1 by re-dispatch of all units but the variable renewables within one step of ramp, plus batteries, instead of reservable units' headroom. |
 | `compute_security_cost` | bool | `false` | Re-solve each operational window without the N-1 constraints and report objective(with N-1) − objective(without) as `n1_security_cost`. Roughly doubles the solve time. Off: `n1_security_cost` stays 0. |
 | `contingency_depth` | `n1` \| `n1_1` | `"n1"` | Studio SLD analysis only (default depth of Run All N-1): 'n1' = single element outage, 'n1_1' = sequential double outage (N-1-1). |
 | `redistribution_mode` | `pro_rata` \| `droop` | `"pro_rata"` | Studio SLD analysis only: how generation is redistributed after a contingency. 'pro_rata' distributes proportionally to capacity, 'droop' uses governor droop response characteristics. |
@@ -543,7 +543,7 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `type` | `Renewable` \| `Non-renewable` \| `Storage` \| `Electrolyzer` | required | `Renewable`, `Non-renewable` or `Electrolyzer` (case-insensitive; translated Studio labels accepted). Any other value is logged and treated as `Non-renewable` |
 | `fuel` | str | required | Fuel name; links to `fuels` for cost and emissions (`Sun`, `Wind`, `Water` for renewables) |
 | `technology` | str \| null | `null` | Key of a `technologies` entry; its `eff_at_rated` is the fallback efficiency for fuel-cost linking |
-| `reservable` | bool | `true` | Can provide reserves |
+| `reservable` | bool | `true` | Can provide reserves. A variable renewable (`Renewable` with fuel `Sun`, `Wind`, an ocean resource, none, or `Water` without a reservoir) never does; a dispatchable renewable (biomass, geothermal, reservoir hydro) does, and is committed in unit commitment like a thermal unit |
 | `life_time` | list[int] | required | Lifetime per node (years) |
 | `initial_age` | list[int] | required | Age at the start of the horizon per node (years) |
 | `degradation_rate` | list[float] | required | Capacity degradation per node (fraction/year, `0.01` = 1 %) |
@@ -752,7 +752,7 @@ Candidate generation technology for the master problem, under `technologies: {<k
 | `min_down` | list[int] | `[0]` | Min down time per node (hours) |
 | `frequency_hz` | float (> 0) | `50` | Operating frequency (Hz) |
 | `current_type` | `AC` \| `DC` \| `AC_DC` | `"AC"` | Current type |
-| `reservable` | bool | `true` | Can provide reserves |
+| `reservable` | bool | `true` | Can provide reserves (not a variable renewable technology: sun, wind, ocean, water) |
 | `decommissioning_cost` | list[float] | `[0.0]` | Decommissioning cost per node ($/MW) |
 | `risk_coefficient` | list[float] | `[1.0]` | Per-node geographic risk derating (0-1). Reduces effective capacity credit to account for hazard exposure. Computed from node hazard intensity and component fragility via the Risk Workbench. |
 | `color` | str \| null | `null` | Display color hex code (e.g. '#FF0000') for results visualization |

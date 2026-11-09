@@ -28,7 +28,12 @@ import pandas as pd
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
-from esfex.config.schema import CostCurveConfig, ESFEXConfig, SystemConfig
+from esfex.config.schema import (
+    CostCurveConfig,
+    ESFEXConfig,
+    SystemConfig,
+    is_committed_unit,
+)
 from esfex.bridge.adapters import (
     MasterProblemAdapter,
     PowerSystemAdapter,
@@ -1971,6 +1976,12 @@ class Orchestrator:
         self._gen_fuels = [
             (getattr(gen, 'fuel', None) or '') or ''
             for _, gen in self.primary_system.generators.items()
+        ]
+        # Committed in unit commitment (not a variable renewable everywhere):
+        # only these get gen_status / gen_startup datasets
+        self._gen_committed = [
+            is_committed_unit(gen.type, gen.fuel, getattr(gen, 'reservoir_capacity', None))
+            for gen in self.primary_system.generators.values()
         ]
         self._bat_names = unique_unit_names([
             bat.name if hasattr(bat, 'name') else key
@@ -7288,10 +7299,14 @@ class Orchestrator:
         gen_in_service: list = []
         # Units per node (clustered unit commitment): what gen_status counts
         gen_units: list = []
+        # Committed in unit commitment (see is_committed_unit)
+        gen_committed: list[bool] = []
         # 1) Original generators (same order as sys.generators iteration)
         for key, gen in sys.generators.items():
             gen_names.append(gen.name if hasattr(gen, 'name') else key)
             gen_fuels.append(str(getattr(gen, 'fuel', '') or ''))
+            gen_committed.append(is_committed_unit(
+                gen.type, gen.fuel, getattr(gen, 'reservoir_capacity', None)))
             gen_in_service.append(existing(key, gen, "rated_power", True))
             data = units_config.get(key) or {}
             gen_units.append([int(n) for n in _per_node_list(
@@ -7313,6 +7328,9 @@ class Orchestrator:
             # Investment gens carry their technology's fuel in vdata
             # (populated when they were synthesised from a tech).
             gen_fuels.append(str(vdata.get("fuel", "") or ""))
+            gen_committed.append(is_committed_unit(
+                vdata.get("type", ""), vdata.get("fuel", ""),
+                vdata.get("reservoir_capacity")))
             gen_in_service.append(self._unit_power_by_node(vdata, rp))
             # Units at the buses that hold capacity, summed per node
             units = _per_node_list(vdata.get("num_units") or [1], len(rp), 1)
@@ -7346,6 +7364,7 @@ class Orchestrator:
         # order and length are kept, so the fuel list stays index-aligned.
         self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
+        self._gen_committed = gen_committed
         self._gen_in_service_mw = gen_in_service
         self._gen_num_units = gen_units
         self._bat_names = unique_unit_names(bat_names)
@@ -8136,15 +8155,23 @@ class Orchestrator:
                         _stamp_power_in_service(ds, gen_in_service, g)
 
             # --- Generator status (unit commitment: units online) ---
+            # Only committed generators: a variable renewable has no on/off
+            # decision, so no gen_status / gen_startup dataset
             gen_units = getattr(self, '_gen_num_units', None) or []
+            committed = getattr(self, '_gen_committed', None) or []
+
+            def _is_committed(g):
+                return committed[g] if g < len(committed) else True
+
             if result.gen_status is not None:
                 status_group = scenario.create_group("gen_status")
                 status_group.attrs["description"] = (
-                    "Generator units online [nodes x hours] for each generator "
-                    "(0..num_units; 0/1 for a single-unit plant)"
+                    "Generator units online [nodes x hours] for each committed "
+                    "generator (0..num_units; 0/1 for a single-unit plant); "
+                    "variable renewables have none"
                 )
                 for g, name in enumerate(self._gen_names):
-                    if g < result.gen_status.shape[0]:
+                    if g < result.gen_status.shape[0] and _is_committed(g):
                         ds_name = gen_ds[g]
                         ds = status_group.create_dataset(
                             ds_name, data=result.gen_status[g],
@@ -8158,11 +8185,11 @@ class Orchestrator:
             if result.gen_startup is not None:
                 startup_group = scenario.create_group("gen_startup")
                 startup_group.attrs["description"] = (
-                    "Generator units started [nodes x hours] for each generator; "
-                    "each start costs start_up_cost / num_units"
+                    "Generator units started [nodes x hours] for each committed "
+                    "generator; each start costs start_up_cost / num_units"
                 )
                 for g, name in enumerate(self._gen_names):
-                    if g < result.gen_startup.shape[0]:
+                    if g < result.gen_startup.shape[0] and _is_committed(g):
                         ds_name = gen_ds[g]
                         ds = startup_group.create_dataset(
                             ds_name, data=result.gen_startup[g],

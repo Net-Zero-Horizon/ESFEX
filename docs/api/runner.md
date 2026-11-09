@@ -231,7 +231,7 @@ class YearResults:
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
 | `gen_output` | `Optional[np.ndarray]` | `(gen, node, hour)` | Generator output (MW) |
-| `gen_status` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units online (UC mode; 0/1 for a single-unit plant) |
+| `gen_status` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units online (UC mode; 0/1 for a single-unit plant; 0 for a variable renewable, which is not committed and gets no HDF5 dataset) |
 | `gen_startup` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units started |
 | `curtailment` | `Optional[np.ndarray]` | `(gen, node, hour)` | RE curtailment (MW); summed over generators when written to HDF5 |
 

@@ -279,7 +279,7 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 | Type | float64 |
 | Units | units online (0..`num_units`; 0/1 for a single-unit plant) |
 | Attributes | `num_units`: the generator's units per node (summed over the node's buses) |
-| Description | Commitment status: units online. Written only in unit-commitment mode. Files written before clustered unit commitment hold 0/1 and no `num_units` (read as one unit) |
+| Description | Commitment status: units online. Written only in unit-commitment mode, and only for committed generators: a variable renewable (PV, wind, ocean, run-of-river hydro; see [GEN-1b](../formulation/operational-dispatch.md#gen-1-generator-capacity-limits)) has no dataset, and readers count it online whenever it generates. Files written before clustered unit commitment hold 0/1 and no `num_units` (read as one unit); files written before this rule also hold datasets for variable renewables, with status 0 and meaningless start-ups |
 
 #### gen_startup/{generator_name}
 
@@ -289,7 +289,7 @@ Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `
 | Type | float64 |
 | Units | units started (0..`num_units`) |
 | Attributes | `num_units`, as on `gen_status` |
-| Description | Units started per step. A start costs `start_up_cost / num_units`. Written only in unit-commitment mode |
+| Description | Units started per step. A start costs `start_up_cost / num_units`. Written only in unit-commitment mode, for the generators that have a `gen_status` dataset |
 
 #### curtailment
 

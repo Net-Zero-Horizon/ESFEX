@@ -1925,6 +1925,19 @@ function batteries_for_day(batteries::AbstractVector, start_hour::Int, hours::In
 end
 
 """
+    tech_availability_at(tech, hour, b) -> Float64
+
+Availability of technology `tech` at bus `b` in master step `hour`
+(wrapping around a shorter profile; 1.0 without a profile): the capacity
+factor of a renewable, the derates and outages of a dispatchable unit, as
+the generator it becomes in the dispatch gets them.
+"""
+function tech_availability_at(tech, hour::Int, b::Int)
+    m = tech.availability
+    return size(m, 1) == 0 ? 1.0 : m[mod1(hour, size(m, 1)), b]
+end
+
+"""
     master_unit_reserve_terms(input, start_hour, b, ts)
         -> Vector{Tuple{Symbol, Int, Float64, Float64}}
 
@@ -1933,7 +1946,8 @@ day or TSAM period starting at master step `start_hour`, by the dispatch's
 rules for the units they become (`add_reserve_constraints!`), as
 `(kind, index, a, d)`:
 
-- `(:tech, t, a, d)`: a reservable, non-renewable technology. Headroom
+- `(:tech, t, a, d)`: a reservable, dispatchable technology (not a variable
+  renewable, see `is_variable_renewable`). Headroom
   `a × cap − output` with `a` its availability; dynamic capability
   `d × cap`, `d = dynamic_reserve_contribution`.
 - `(:bat_tech, bt, a, d)`: a reservable battery technology. Headroom
@@ -1951,8 +1965,8 @@ function master_unit_reserve_terms(input::MasterProblemInput, start_hour::Int,
     hour = start_hour + ts - 1
     at_hour(m) = size(m, 1) == 0 ? 1.0 : m[mod1(hour, size(m, 1)), b]
     for (t, tech) in enumerate(input.technologies)
-        (tech.reservable && tech.type != "Renewable") || continue
-        push!(out, (:tech, t, at_hour(tech.availability), contribution))
+        (tech.reservable && !is_variable_renewable(tech, b)) || continue
+        push!(out, (:tech, t, tech_availability_at(tech, hour, b), contribution))
     end
     for (bt, btech) in enumerate(input.battery_technologies)
         btech.reservable || continue
@@ -2221,7 +2235,6 @@ function add_day_operational_constraints!(
 
         for t in 1:n_tech
             tech = input.technologies[t]
-            is_renewable = tech.type == "Renewable"
             for b in 1:n_buses
                 cumul_cap = AffExpr(0.0)
                 tech_lifetime = tech.life_time[b]
@@ -2236,10 +2249,9 @@ function add_day_operational_constraints!(
                 tech_caps[(t, b)] = cumul_cap
                 avails = Vector{Float64}(undef, hours)
                 for ts in 1:hours
-                    actual_hour = start_hour + ts - 1
-                    avail_hours = size(tech.availability, 1)
-                    avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
-                    avail = is_renewable ? tech.availability[avail_hour, b] : 1.0
+                    # Every technology's profile (also a dispatchable one's
+                    # derates and outages), as the dispatch applies it
+                    avail = tech_availability_at(tech, start_hour + ts - 1, b)
                     avails[ts] = avail
                     @constraint(model,
                         tech_output[t, b, ts] <= cumul_cap * avail,
@@ -2574,12 +2586,13 @@ function add_day_operational_constraints!(
                 end
             end
         end
-        # Add technology RE curtailment: available - dispatched
+        # Add technology RE curtailment: available - dispatched (variable
+        # renewables only, as the dispatch's curtailment)
         if tech_output !== nothing
             n_tech_local = length(input.technologies)
             for tc in 1:n_tech_local
                 tech = input.technologies[tc]
-                if tech.type == "Renewable"
+                if is_variable_renewable(tech, 1)
                     for b in 1:n_buses
                         # Recompute cumulative capacity (same as tech constraint setup)
                         cumul_cap = AffExpr(0.0)
@@ -2594,10 +2607,7 @@ function add_day_operational_constraints!(
                             end
                         end
                         for ts in 1:hours
-                            actual_hour = start_hour + ts - 1
-                            avail_hours = size(tech.availability, 1)
-                            avail_hour = avail_hours > 0 ? mod1(actual_hour, avail_hours) : 1
-                            avail = tech.availability[avail_hour, b]
+                            avail = tech_availability_at(tech, start_hour + ts - 1, b)
                             # tech curtailment = cumul_cap × avail - tech_output
                             add_to_expression!(total_curtailment, cumul_cap * avail)
                             add_to_expression!(total_curtailment, -1.0, tech_output[tc, b, ts])
@@ -2709,8 +2719,8 @@ function add_day_commitment!(model::Model, ps_vars::PowerSystemVariables,
     input.unit_commitment || return cost
     tres = max(1.0, input.temporal_resolution_hours)
     for (g, gen) in enumerate(input.generators)
-        (gen.type == "Renewable" && !any(gen.reservoir_capacity .> 0)) && continue
-        for b in ps_vars.buses_of_gen[g]
+        # Committed units only, as in the dispatch (no variable renewable)
+        for b in committed_buses(gen, ps_vars.buses_of_gen[g])
             suc = gen.start_up_cost[b]
             pmin = gen.min_power[b]
             rated = gen.rated_power[b] *

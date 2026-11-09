@@ -83,7 +83,7 @@ Values read from the HDF5 results for the selected year and hour, shown with gen
 | **Offline** | Gray circle overlay + "OFF" label | Generator is not committed for this hour |
 | **Starting up** | Green upward arrow badge | Generator starts up this hour |
 
-On/off and start-up data come from the `gen_status` and `gen_startup` datasets, which unit-commitment runs write. Without them, every generator is shown online.
+On/off and start-up data come from the `gen_status` and `gen_startup` datasets, which unit-commitment runs write for the committed generators. Without them, every generator is shown online; variable renewables (PV, wind, run-of-river hydro) are not committed and have none.
 
 ### Reserve Badges
 
