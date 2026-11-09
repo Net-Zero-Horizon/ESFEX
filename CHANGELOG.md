@@ -933,6 +933,42 @@ Per-release notes are also published on the
   negative ramps as errors (it compared `min_power` with the rated power in
   MW, a check that never fired for a fraction).
 
+- **A line's capacity and impedance are those of the whole line.**
+  `capacity_mw`, `reactance_pu`, `resistance_pu` and `susceptance_pu` of a
+  transmission line now describe all of its `num_circuits` circuits together,
+  everywhere: the dispatch (DC and AC power flow, ACOPF, preventive N-1 and
+  SCOPF), the master's node links and the Studio. `num_circuits` is
+  descriptive; the model no longer multiplies the capacity by it or divides
+  the impedances by it. Only a reactance derived from `reactance_per_km`
+  (the value of one circuit) is divided over the circuits. A line of two
+  300 MW circuits of 0.1 p.u. each is written `capacity_mw: 600`,
+  `reactance_pu: 0.05`, `num_circuits: 2`, which is what the Grid Builder
+  and the Studio's parallel-line merges already wrote. A hand-written YAML
+  that gave the rating of one circuit with `num_circuits` > 1 must now give
+  the whole line's.
+
+- **N-1 generation security is per system in a multi-system run.** Like the
+  reserves, each original system of a merged run now has its own N-1
+  requirement: its own largest unit (or its own demand with
+  `generation_reserve_type: percentage`), covered only by its own units' and
+  batteries' headroom (`n1_gen_reserve_system_s{k}_t{t}`, likewise for the
+  SCOPF and corrective forms). There used to be one requirement over the
+  merged network: the largest unit of all systems, covered by the headroom
+  of every system. A single-system run is unchanged. The N-1 generation dual
+  reported per step is the sum over the systems.
+
+- **A system's nominal frequency follows its buses.** When the Studio saves
+  a system whose `frequency_nominal` is a frequency none of its AC buses
+  runs at, it writes their most common frequency and moves
+  `frequency_nadir_limit` by the same amount (49 Hz on 50 Hz becomes 59 Hz
+  on 60 Hz). A Grid Builder network of a 60 Hz region used to keep the
+  50 Hz / 49 Hz defaults. A mixed 50/60 Hz system keeps a nominal frequency
+  some of its buses run at; `rocof_limit` (Hz/s) is not changed.
+
+- **A new bus takes the frequency of its node.** A bus added in the editor
+  or by auto-complete (the LV bus behind an auto transformer) now runs at
+  the frequency of the node's other AC buses instead of 50 Hz.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -2106,6 +2142,48 @@ Per-release notes are also published on the
   line's length (else the distance between its end buses) and voltage
   (else the higher of its end buses), with the standard line type of that
   voltage or the line's own `reactance_per_km`, on `ac_power_flow.base_mva`.
+
+- **Multi-circuit lines no longer carry n² times their rating.** The Grid
+  Builder writes a line of n circuits with its total rating and its total
+  impedance (one circuit's divided by n), but the dispatch then multiplied
+  the capacity by `num_circuits` and divided the reactance and resistance by
+  it once more: a double-circuit OSM line carried four times its rating at a
+  quarter of its reactance, and drew too large a share of the flow. The
+  master's adequacy and node links, the Studio's results and the contingency
+  tools already read the whole-line values, so the master and the dispatch
+  also disagreed on these lines. The network reduction left a merged line's
+  circuit count at the sum of its members while its reactance was already
+  the parallel equivalent, which divided it again.
+
+- **Built capacity holds reserve in the master.** The capacity the master
+  builds from reservable, non-renewable technologies and reservable battery
+  technologies did not count towards the reserve headroom of its
+  representative days, so a plan whose firm capacity was all new paid the
+  reserve shortfall in every day, although the dispatch, where those units
+  are existing units, held the reserve. The master (monolithic, TSAM,
+  stochastic and Benders, whose cuts now carry the value of that headroom)
+  now adds `availability × capacity built − output` for each such
+  technology and `availability × power built − discharge + charge` for each
+  such battery technology, and their share of the dynamic reserve, as the
+  dispatch does for the units they become. An existing generator's headroom
+  in the master is now its capacity in service × availability − output, as
+  in the dispatch (the availability was left out). The capacity-adequacy
+  constraint (`reserve_margin`) already counted the battery power built.
+
+- **The Grid Builder built 60 Hz regions at 50 Hz.** GridFinder lines and
+  WRI/GEM plants carry no frequency but were given 50 Hz, so their endpoint
+  buses were created at 50 Hz. On a sparsely mapped 60 Hz grid such as Cuba
+  they outnumbered the 60 Hz substations, and the frequency-consistency
+  step then set the whole network (buses, lines, generators) to 50 Hz.
+  Elements without a frequency tag now take the mains frequency of their
+  location, and the consistency step also aligns AC lines with their area.
+
+- **Bridge lines had no length or impedance.** The bus-to-bus bridge lines
+  `iterative_auto_connect` adds for components without equipment carried
+  no length, no R/X/B and 50 Hz. They now get the distance between their
+  end buses, the impedance of the standard line type of their voltage on
+  the system base (like every other built line), and the frequency of the
+  main-network bus they connect to.
 
 ## [0.3.0] — 2026-08-27
 
