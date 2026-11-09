@@ -19,6 +19,11 @@ Generator and battery variables exist only for (unit, bus) pairs with capacity o
 | `startup_detect_g{g}_b{b}_t{t}` | GEN-4 | Startup detection: `startup >= status[t] - status[t-1]` |
 | `min_up_g{g}_b{b}_t{t}_tau{τ}` | GEN-5a | Minimum up time (in steps: `ceil(hours / Δt)`) |
 | `min_down_g{g}_b{b}_t{t}_tau{τ}` | GEN-5b | Minimum down time |
+| `gen_output <= rated / N * status`, `gen_output >= min_power * rated / N * status` | GEN-6a | Plant of `num_units` N > 1 (unit commitment): `status` = units online (integer 0..N), replaces GEN-1b and GEN-2 |
+| `units_available_g{g}_b{b}_t{t}` | GEN-6b | `status <= ceil(N * availability)`, steps where fewer than N units are available |
+| `min_up_g{g}_b{b}_t{t}` | GEN-6c | Units started in the last min-up steps `<= status[t]` (N > 1, replaces GEN-5a) |
+| `min_down_g{g}_b{b}_t{t}` | GEN-6d | Units shut down in the last min-down steps `<= N - status[t]` (N > 1, replaces GEN-5b) |
+| `gen_online_cap_g{g}_b{b}_t{t}` (variable) | RES-3 | Capacity of the units online, `<= rated / N * status` and `<= rated * availability`; spinning reserve and N-1 headroom of a plant of N > 1 units |
 
 ### PWL Cost Curve Constraints (Generators)
 

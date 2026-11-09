@@ -180,6 +180,7 @@ class GuiGeneratorInstance:
     eff_at_min: float = 0.25
     min_up: int = 0
     min_down: int = 0
+    num_units: int = 1       # identical units (clustered unit commitment)
     ramp_up: float = 1.0     # fraction of capacity per hour (0 = no limit)
     ramp_down: float = 1.0
     inertia: float = 0.0

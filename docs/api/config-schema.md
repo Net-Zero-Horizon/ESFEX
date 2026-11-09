@@ -204,7 +204,8 @@ class GeneratorConfig(BaseModel):
     degradation_rate: list[float]          # fraction/year
     decommissioning_cost: list[float]      # $/MW
     rated_power: list[float]               # MW
-    min_power: list[float]                 # fraction of rated
+    num_units: list[int] = [1]             # identical units (clustered UC), >= 1
+    min_power: list[float]                 # fraction of rated (of one unit's rating)
     min_up: list[int]                      # hours
     min_down: list[int]                    # hours
     ramp_up: list[float]                   # fraction of capacity per hour
@@ -212,7 +213,7 @@ class GeneratorConfig(BaseModel):
     eff_at_rated: list[float]
     eff_at_min: list[float]
     inertia: list[float]                   # H (s)
-    start_up_cost: list[float]             # $ per start
+    start_up_cost: list[float]             # $ per start of the whole plant (/ num_units per unit)
     fuel_cost: list[float]                 # $/MWh
     fixed_cost: list[float]                # $/MW per year (fixed O&M)
     maintenance_cost: list[float]          # $/MWh

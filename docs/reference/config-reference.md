@@ -549,7 +549,8 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `degradation_rate` | list[float] | required | Capacity degradation per node (fraction/year, `0.01` = 1 %) |
 | `decommissioning_cost` | list[float] | required | Decommissioning cost per node ($/MW) |
 | `rated_power` | list[float] | required | Installed capacity per node (MW) |
-| `min_power` | list[float] | required | Minimum stable output per node, fraction of rated power (applied with unit commitment). Outside 0–1 the loader clamps it with a warning |
+| `num_units` | list[int] (≥ 1) | `[1]` | Identical units the capacity at each node is made of. Unit commitment commits a whole number of them, each of `rated_power / num_units` MW with its own minimum output, start-ups and min up/down times; the availability is the share of units available ([GEN-6](../formulation/operational-dispatch.md#gen-6-plants-of-several-units-clustered-unit-commitment)). `1` = one on/off unit. Ignored by economic dispatch and the master problem |
+| `min_power` | list[float] | required | Minimum stable output per node, fraction of rated power, of each unit's rating when `num_units` > 1 (applied with unit commitment). Outside 0–1 the loader clamps it with a warning |
 | `min_up` | list[int] | required | Minimum up time per node (hours, unit commitment; rounded up to whole time steps) |
 | `min_down` | list[int] | required | Minimum down time per node (hours, unit commitment; rounded up to whole time steps) |
 | `ramp_up` | list[float] | required | Ramp-up limit per node, fraction of capacity per hour (scaled to `resolution_hours`). `0` = no limit; a negative value is clamped to 0 with a warning |
@@ -557,7 +558,7 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `eff_at_rated` | list[float] | required | Efficiency at rated output per node (0–1) |
 | `eff_at_min` | list[float] | required | Efficiency at minimum output per node (0–1) |
 | `inertia` | list[float] | required | Inertia constant H per node (s) |
-| `start_up_cost` | list[float] | required | Start-up cost per node ($ per start) |
+| `start_up_cost` | list[float] | required | Start-up cost per node ($ per start of the node's whole capacity); one of `num_units` units costs `start_up_cost / num_units` per start |
 | `fuel_cost` | list[float] | required | Fuel cost per node ($/MWh). Required key; if all zero and `fuel` is in `fuels` (any type, a `Renewable` biomass unit too), the loader computes it (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `fixed_cost` | list[float] | required | Fixed O&M per node ($ per MW of power in service per year), charged whether or not the unit runs: degraded rated power while within `life_time`, prorated to each dispatch window; the master charges it per year on the same MW (life-extended MW after `life_time`) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
@@ -744,7 +745,8 @@ Candidate generation technology for the master problem, under `technologies: {<k
 | `inertia` | list[float] | `[0.0]` | Inertia constant H per node (s) |
 | `droop` | list[float] | `[0.05]` | Governor droop characteristic per node (pu), e.g. 0.05 = 5% |
 | `governor_time_const` | list[float] | `[5.0]` | Governor time constant per node (seconds) |
-| `start_up_cost` | list[float] | `[0.0]` | Startup cost per node ($) |
+| `start_up_cost` | list[float] | `[0.0]` | Startup cost per node ($ per start of the capacity built at a bus; one of its units costs it divided by the number of units) |
+| `unit_size` | list[float] (≥ 0) | `[0.0]` | Size of one unit per node (MW). Capacity the master builds reaches unit commitment in the dispatch as `ceil(MW at the bus / unit_size)` identical units (generator `num_units`); `0` = one unit |
 | `eff_at_min` | list[float] | `[0.0]` | Efficiency at min power per node |
 | `min_up` | list[int] | `[0]` | Min up time per node (hours) |
 | `min_down` | list[int] | `[0]` | Min down time per node (hours) |

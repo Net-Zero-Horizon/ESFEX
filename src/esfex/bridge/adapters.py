@@ -549,6 +549,14 @@ def _per_bus_unit_on_model_buses(
                 else:
                     reduced[r] += v
             out[field_name] = reduced
+        elif field_name == "num_units":
+            # The units of the buses whose capacity a retained bus takes
+            units = [0] * len(retained)
+            for o in range(n_orig):
+                r = reduced_of.get(o, target.get(o))
+                if r is not None and float(rp[o] or 0.0) > 0:
+                    units[r] += int(values[o])
+            out[field_name] = [max(1, u) for u in units]
         else:
             out[field_name] = [values[o] for o in retained]
     return out

@@ -6,7 +6,7 @@ The operational dispatch determines the hourly generation schedule that meets de
 Three operating modes are available:
 
 - **Economic dispatch (ED):** Generator commitment is fixed to 1; the problem is a continuous LP.
-- **Unit commitment (UC):** Generator on/off status is a binary decision variable, yielding a MIP with minimum up/down times and startup costs.
+- **Unit commitment (UC):** Generator on/off status is a binary decision variable (an integer number of units online for a plant of several units, see GEN-6), yielding a MIP with minimum up/down times and startup costs.
 - **Development:** Identical to ED but includes investment decision variables for capacity expansion screening.
 
 ---
@@ -43,8 +43,8 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
 | \(p_{g,n,t}\) | \(g,n,t\) | \(\geq 0\) | MW | Generator output (`gen_output`) |
-| \(u_{g,n,t}\) | \(g,n,t\) | \(\{0,1\}\) (UC) or \(=1\) (ED) | -- | Generator status (`gen_status`) |
-| \(v_{g,n,t}\) | \(g,n,t\) | \([0,1]\) | -- | Startup indicator (`gen_startup`); UC mode only |
+| \(u_{g,n,t}\) | \(g,n,t\) | \(\{0,1\}\) (UC), \(\{0,\dots,N_{g,n}\}\) (UC, \(N_{g,n} > 1\) units) or \(=1\) (ED) | -- | Generator status: units online (`gen_status`) |
+| \(v_{g,n,t}\) | \(g,n,t\) | \([0,N_{g,n}]\) | -- | Units started (`gen_startup`); UC mode only |
 
 ### 2.2 Battery Variables
 
@@ -192,10 +192,10 @@ Z^{\text{op,pwl}}_{g,n} = \sum_{t} \sum_{k=1}^{K} c_k \cdot p^{(k)}_{g,n,t} \tag
 ### 3.2 Startup Costs (UC mode only)
 
 \[
-Z^{\text{start}} = \sum_{g,n,t} c^{\text{su}}_{g,n} \, v_{g,n,t} \tag{OBJ-2}
+Z^{\text{start}} = \sum_{g,n,t} \frac{c^{\text{su}}_{g,n}}{N_{g,n}} \, v_{g,n,t} \tag{OBJ-2}
 \]
 
-Each start costs its full `start_up_cost`, in the objective and in the `startup_cost` breakdown; it is not prorated like the annual one-off terms.
+`start_up_cost` \(c^{\text{su}}_{g,n}\) is the cost of starting the whole plant at the node, so each of its \(N_{g,n}\) units (`num_units`, GEN-6) costs \(c^{\text{su}}_{g,n} / N_{g,n}\) per start; with one unit (the default) a start costs the full `start_up_cost`. Start-ups are charged in full, in the objective and in the `startup_cost` breakdown; they are not prorated like the annual one-off terms.
 
 ### 3.3 Battery Maintenance Cost
 
@@ -416,6 +416,46 @@ u_{g,n,t} \geq u_{g,n,\tau} - u_{g,n,\tau-1} \quad \forall g, n, t, \; \tau \in 
 
 The windows above count time steps: \(T^{\text{up}}_g\) and \(T^{\text{down}}_g\) are the minimum times in hours divided by the time step (`resolution_hours`) and rounded up, so 8 h at 6-hour steps spans 2 steps.
 
+#### GEN-6: Plants of Several Units (clustered unit commitment)
+
+A generator's capacity at a node is made of \(N_{g,n}\) identical units (`num_units[n]`, default 1). With \(N_{g,n} = 1\) the plant is one on/off unit and GEN-1b to GEN-5 above apply unchanged. With \(N_{g,n} > 1\), unit commitment decides how many units are online: \(u_{g,n,t} \in \{0, \dots, N_{g,n}\}\) is an integer, \(v_{g,n,t} \in [0, N_{g,n}]\) counts the units started, and every unit has the rating \(\bar{P}_{g,n} / N_{g,n}\), with \(\bar{P}_{g,n}\) the plant's degraded rated power as in GEN-2. GEN-1b, GEN-2 and GEN-5 are replaced by
+
+\[
+\underline{P}_{g,n} \, \frac{\bar{P}_{g,n}}{N_{g,n}} \, u_{g,n,t} \;\leq\; p_{g,n,t} \;\leq\; \frac{\bar{P}_{g,n}}{N_{g,n}} \, u_{g,n,t} \tag{GEN-6a}
+\]
+
+\[
+u_{g,n,t} \leq \left\lceil N_{g,n} \, a_{g,n,t} \right\rceil \tag{GEN-6b}
+\]
+
+\[
+\sum_{\tau = \max(1,\, t - T^{\text{up}}_g + 1)}^{t} v_{g,n,\tau} \;\leq\; u_{g,n,t} \tag{GEN-6c}
+\]
+
+\[
+\sum_{\tau = \max(1,\, t - T^{\text{down}}_g + 1)}^{t} \left( v_{g,n,\tau} - u_{g,n,\tau} + u_{g,n,\tau-1} \right) \;\leq\; N_{g,n} - u_{g,n,t} \tag{GEN-6d}
+\]
+
+while GEN-1a (\(p \leq \bar{P}^{\text{eff}} a\)), GEN-3 and GEN-4 hold as written.
+
+- **GEN-6a**: each online unit runs between its minimum stable output (`min_power` is a fraction of one unit's rating) and its rating. A plant can follow a load below its whole-plant minimum by running fewer units.
+- **GEN-6b**: the availability \(a_{g,n,t}\) (profile × scheduled-outage factor) is read as the share of the plant's units available. With GEN-1a it caps the output at \(\bar{P}^{\text{eff}} a\), and GEN-6b keeps the committed units to those that are available, rounded up: at 30 % availability a 2-unit plant can commit one unit (\(\lceil 0.6 \rceil\)), and a 4-unit plant two units (\(\lceil 1.2 \rceil\)) that share 1.2 units' worth of power. A derated plant whose availability is below `min_power` can still run units, while a single-unit plant with \(a < \underline{P}\) cannot be committed (GEN-1a and GEN-2 exclude each other). The constraint is added only for steps with \(\lceil N a \rceil < N\); \(10^{-6}\) is subtracted before rounding up, so 0.30000001 × 10 counts as 3 units.
+- **GEN-6c** (minimum up time, added when \(T^{\text{up}}_g \geq 2\) steps): the units started in the last \(T^{\text{up}}_g\) steps are still online.
+- **GEN-6d** (minimum down time, added when \(T^{\text{down}}_g \geq 2\) steps): \(v_{g,n,\tau} - (u_{g,n,\tau} - u_{g,n,\tau-1})\) is the number of units shut down in step \(\tau\); those shut down in the last \(T^{\text{down}}_g\) steps cannot be online again.
+- \(v\) has only a lower bound (GEN-4): a larger value costs more and only tightens GEN-6c and GEN-6d, so at the optimum it equals the units started and GEN-6d counts the units shut down. Units are identical, so which unit stops is not modelled: the plant may stop a unit that has met its minimum up time while a younger one keeps running.
+- \(u_{g,n,0}\), the units online at the end of the previous window (`generator_initial_status`), is capped at \(N_{g,n}\).
+
+The start-up cost of a unit is \(c^{\text{su}}_{g,n} / N_{g,n}\) (OBJ-2). Ramp limits (GEN-3) apply to the plant's total output. Spinning reserve (RES-3) and the N-1 headroom count the capacity of the units online, \(\min(\bar{P}_{g,n} u_{g,n,t} / N_{g,n},\; \bar{P}_{g,n} a_{g,n,t})\), and the dynamic reserve (RES-2a) \(\alpha^{\text{dyn}} \bar{P}_{g,n} u_{g,n,t} / N_{g,n}\). Economic dispatch and the master problem (LP) do not use \(N_{g,n}\): the master's linear start-ups (with `use_uc_in_dispatch`) already price a MW started at \(c^{\text{su}}_{g,n} / \bar{P}_{g,n}\), which is \(c^{\text{su}}_{g,n} / N_{g,n}\) per unit.
+
+**Units of master-built and life-extended capacity.** Capacity the master builds from a candidate technology reaches the dispatch as a generator of \(\lceil P / \text{unit\_size} \rceil\) units at each bus it is placed on (\(P\) the MW at that bus, `unit_size` of the technology; one unit when `unit_size` is 0, the default). An existing plant keeps its `num_units` while the master keeps at least its degraded rating \(\bar{P}_{g,n}\); when it keeps less (a partial life extension), it keeps \(\lceil N_{g,n} \, P / \bar{P}_{g,n} \rceil\) units (at least 1), whole units of the original size with the last one possibly smaller.
+
+**Results.** `gen_status` holds the units online and `gen_startup` the units started (0/1 for single-unit plants); at node level they are summed over the node's buses. Each dataset records the generator's units per node in the attribute `num_units` ([HDF5 output schema](../reference/hdf5-output-schema.md)).
+
+**Configuration parameters:**
+
+- `generators[g].num_units[n]` -- identical units at node \(n\) (integer ≥ 1, default 1)
+- `technologies[k].unit_size[n]` -- size of one unit built at node \(n\) (MW, default 0 = one unit)
+
 ---
 
 
@@ -537,7 +577,7 @@ Reserve is headroom, not energy: it is capacity kept free, and it does not enter
 H_{n,t} = \sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} \cdot u_{g,n,t} - p_{g,n,t} \right) + \sum_{b \in \mathcal{B}^{\text{res}}} \left( \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right)
 \]
 
-where \(u_{g,n,t}\) is the commitment status in unit commitment (an offline unit holds no spinning reserve) and 1 otherwise. A battery can raise its discharge to its limit (degraded rating × outage factor × availability, \(o_{b,t}\) as in BAT-1) and can stop charging. In the master problem the battery's rating is the power in service that year (0 once retired, unless its life is extended).
+where \(u_{g,n,t}\) is the commitment status in unit commitment (an offline unit holds no spinning reserve) and 1 otherwise. For a plant of \(N_{g,n} > 1\) units the term \(\bar{P}_{g,n} a_{g,n,t} u_{g,n,t}\) is replaced by the capacity of the units online, \(\min(\bar{P}_{g,n} u_{g,n,t} / N_{g,n},\; \bar{P}_{g,n} a_{g,n,t})\) (GEN-6), through a variable bounded by both. A battery can raise its discharge to its limit (degraded rating × outage factor × availability, \(o_{b,t}\) as in BAT-1) and can stop charging. In the master problem the battery's rating is the power in service that year (0 once retired, unless its life is extended).
 
 #### RES-1: Static Reserve Requirement
 
@@ -557,7 +597,7 @@ r^{\text{sta}}_{n,t} + \lambda^{\text{sta}}_{n,t} \geq R^{\text{sta}}_{n,t}, \qq
 r^{\text{dyn}}_{n,t} + \lambda^{\text{dyn}}_{n,t} \geq R^{\text{dyn}}_n, \qquad r^{\text{dyn}}_{n,t} = \sigma^{\text{dyn}}_{S,t} \, R^{\text{dyn}}_n, \quad 0 \leq \sigma^{\text{dyn}}_{S,t} \leq 1 \quad \forall S, n \in S, t \tag{RES-2b}
 \]
 
-where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (fraction of rated power that can respond fast enough). RES-2a and the share of RES-2b are added only for systems with a node with a dynamic requirement \(R^{\text{dyn}}_n > 0\) (`reserve_dynamic_requirement`); elsewhere \(r^{\text{dyn}} = 0\).
+where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (fraction of rated power that can respond fast enough); for a plant of \(N_{g,n} > 1\) units \(\bar{P}_{g,n} u_{g,n,t}\) is read as \(\bar{P}_{g,n} u_{g,n,t} / N_{g,n}\), the rating of the units online (GEN-6). RES-2a and the share of RES-2b are added only for systems with a node with a dynamic requirement \(R^{\text{dyn}}_n > 0\) (`reserve_dynamic_requirement`); elsewhere \(r^{\text{dyn}} = 0\).
 
 #### RES-3: Shared Headroom
 
