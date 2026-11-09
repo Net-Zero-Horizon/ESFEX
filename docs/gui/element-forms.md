@@ -335,7 +335,7 @@ Converts electricity to hydrogen, enabling power-to-gas coupling.
 | | Energy per kg H₂ | kWh/kg | Electricity needed per kg of hydrogen |
 | **Economics** | Fixed Cost | $/MW/yr | Annual fixed O&M |
 | | Variable Cost | $/MWh | Cost per MWh of electricity consumed |
-| | Water Cost | $/m³ | Cost of water |
+| | Water Cost | $/kg H₂ | Cost of the water per kg of hydrogen produced |
 | **Lifecycle** | Lifetime | years | Life of an electrolyzer the master builds (existing ones do not age) |
 
 Investment in new electrolyzer capacity is configured in the [Investment Portfolio](#investment-portfolio). The **Delete Electrolyzer** button asks for confirmation.
