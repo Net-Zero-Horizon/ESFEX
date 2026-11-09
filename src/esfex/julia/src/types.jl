@@ -2643,6 +2643,13 @@ Container for Master Problem decision variables.
 - `slack_re_target`: RE target slack per year
 - `slack_capacity`: Capacity slack per year per node
 - `slack_budget`: Budget slack per year
+
+# Capacity in service
+- `capacity_state`: per year, the capacity built and still in service of each
+  candidate unit, corridor, reservoir, converter and fuel build, as a state
+  variable defined by one equality on the investment variables
+  (`add_capacity_states!`); the hourly rows use it instead of the investment
+  sum. Empty in the Benders master, which has no hourly rows.
 """
 mutable struct MasterProblemVariables
     # Technology investment variables: Dict{year, Dict{tech_idx, Vector{VariableRef}}} (per bus)
@@ -2694,6 +2701,9 @@ mutable struct MasterProblemVariables
     # M2 (#89): fuel storage/transport and electrolyzer builds (nothing
     # without primary energy)
     fuel::Union{Nothing, MasterFuelVariables}
+    # Capacity in service per year: key (see `add_capacity_states!`) =>
+    # state variable, or 0 when nothing can be built
+    capacity_state::Dict{Tuple, AffExpr}
 end
 
 """

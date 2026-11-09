@@ -462,7 +462,8 @@ function build_master_variables!(
         years_per_inv_period,
         converter_investment,
         Dict{Tuple{Int,Int,Int}, VariableRef}(),  # co2_budget_violation
-        build_master_fuel_variables!(model, input, years_per_inv_period)  # M2 (#89)
+        build_master_fuel_variables!(model, input, years_per_inv_period),  # M2 (#89)
+        Dict{Tuple, AffExpr}()  # capacity_state: add_capacity_states!
     )
 end
 
@@ -477,37 +478,212 @@ master_converters(network::NetworkConfig) = vcat(
     [(("freq", c), conv) for (c, conv) in enumerate(network.freq_converters)])
 
 """
+    tech_capacity_built(vars, input, t, b, year_idx) -> AffExpr
+
+MW of candidate technology `t` at bus `b` in service in year `year_idx`:
+each build at an investment-period start up to that year, degraded by its
+age, `Σ (1 − degradation_rate)^age × tech_investment`, while younger than
+the technology's `life_time`.
+"""
+tech_capacity_built(vars::MasterProblemVariables, input::MasterProblemInput,
+                    t::Int, b::Int, year_idx::Int; state::Bool = true) =
+    capacity_in_service(vars, (:tech, year_idx, t, b); state) do
+        tech = input.technologies[t]
+        cap = AffExpr(0.0)
+        for y in 1:vars.years_per_inv_period:year_idx
+            age = year_idx - y
+            age < tech.life_time[b] || continue
+            add_to_expression!(cap, vars.tech_investment[y][t][b],
+                               (1.0 - tech.degradation_rate[b])^age)
+        end
+        cap
+    end
+
+"""
+    bat_tech_power_built(vars, input, bt, b, year_idx) -> AffExpr
+    bat_tech_energy_built(vars, input, bt, b, year_idx) -> AffExpr
+
+Discharge power (MW) and energy (MWh) of battery technology `bt` at bus `b`
+built up to year `year_idx` and still within its `life_time`.
+"""
+bat_tech_power_built(vars::MasterProblemVariables, input::MasterProblemInput,
+                     bt::Int, b::Int, year_idx::Int; state::Bool = true) =
+    capacity_in_service(vars, (:bat_tech_power, year_idx, bt, b); state) do
+        _bat_tech_built(vars, input, bt, b, year_idx, vars.bat_tech_power_investment)
+    end
+
+bat_tech_energy_built(vars::MasterProblemVariables, input::MasterProblemInput,
+                      bt::Int, b::Int, year_idx::Int; state::Bool = true) =
+    capacity_in_service(vars, (:bat_tech_energy, year_idx, bt, b); state) do
+        _bat_tech_built(vars, input, bt, b, year_idx, vars.bat_tech_capacity_investment)
+    end
+
+function _bat_tech_built(vars, input, bt, b, year_idx, inv)
+    cap = AffExpr(0.0)
+    for y in 1:vars.years_per_inv_period:year_idx
+        year_idx - y < input.battery_technologies[bt].life_time[b] || continue
+        add_to_expression!(cap, inv[y][bt][b])
+    end
+    return cap
+end
+
+"""
+    transfer_capacity_built(vars, from, to, year_idx) -> Union{Nothing, AffExpr}
+
+MW built on the corridor between buses `from` and `to` up to year
+`year_idx` (transmission builds do not retire), on the investment variable
+`corridor_investment` picks; `nothing` when the corridor cannot be expanded.
+"""
+function transfer_capacity_built(vars::MasterProblemVariables, from::Int, to::Int,
+                                 year_idx::Int)
+    inv = get(vars.transfer_investment, 1, nothing)
+    inv === nothing && return nothing
+    i, j = haskey(inv, (from, to)) ? (from, to) :
+           haskey(inv, (to, from)) ? (to, from) : (0, 0)
+    i == 0 && return nothing
+    return capacity_in_service(vars, (:transfer, year_idx, i, j)) do
+        cap = AffExpr(0.0)
+        for y in 1:vars.years_per_inv_period:year_idx
+            v = get(get(vars.transfer_investment, y, Dict{Tuple{Int,Int}, VariableRef}()),
+                    (i, j), nothing)
+            v === nothing || add_to_expression!(cap, v)
+        end
+        cap
+    end
+end
+
+"""
     reservoir_capacity_built(vars, g, b, year_idx) -> AffExpr
 
 Reservoir capacity (MWh) of generator `g` at bus `b` built at the
 investment-period starts up to year `year_idx`. Reservoirs do not retire.
 """
-function reservoir_capacity_built(vars::MasterProblemVariables, g::Int, b::Int,
-                                  year_idx::Int)
-    built = AffExpr(0.0)
-    for y in 1:vars.years_per_inv_period:year_idx
-        v = get(get(vars.reservoir_investment, y, Dict{Int, Vector{VariableRef}}()), g, nothing)
-        v === nothing || add_to_expression!(built, v[b])
+reservoir_capacity_built(vars::MasterProblemVariables, g::Int, b::Int, year_idx::Int) =
+    capacity_in_service(vars, (:reservoir, year_idx, g, b)) do
+        built = AffExpr(0.0)
+        for y in 1:vars.years_per_inv_period:year_idx
+            v = get(get(vars.reservoir_investment, y, Dict{Int, Vector{VariableRef}}()), g, nothing)
+            v === nothing || add_to_expression!(built, v[b])
+        end
+        built
     end
-    return built
-end
 
 """
     converter_capacity(vars, conv, key, year_idx)
 
 Converter capacity in year `year_idx`: its rated power plus the MW built at
-the investment-period starts up to that year. As in the dispatch, a
-converter does not age or retire.
+the investment-period starts up to that year (`converter_built`). As in the
+dispatch, a converter does not age or retire.
 """
 function converter_capacity(vars::MasterProblemVariables, conv, key::Tuple{String,Int},
                             year_idx::Int)
-    cap = AffExpr(conv.rated_power_mva)
-    for y in 1:vars.years_per_inv_period:year_idx
-        v = get(get(vars.converter_investment, y, Dict{Tuple{String,Int}, VariableRef}()),
-                key, nothing)
-        v === nothing || add_to_expression!(cap, v)
-    end
+    cap = converter_built(vars, key, year_idx)
+    add_to_expression!(cap, conv.rated_power_mva)
     return cap
+end
+
+converter_built(vars::MasterProblemVariables, key::Tuple{String,Int}, year_idx::Int;
+                state::Bool = true) =
+    capacity_in_service(vars, (:converter, year_idx, key[1], key[2]); state) do
+        built = AffExpr(0.0)
+        for y in 1:vars.years_per_inv_period:year_idx
+            v = get(get(vars.converter_investment, y, Dict{Tuple{String,Int}, VariableRef}()),
+                    key, nothing)
+            v === nothing || add_to_expression!(built, v)
+        end
+        built
+    end
+
+"""
+    master_fuel_capacity(vars, input, year_idx, key) -> AffExpr
+
+`master_fuel_extra_expr` (fuel storage, route transport or electrolyzer
+capacity built and in service) through its state variable.
+"""
+master_fuel_capacity(vars::MasterProblemVariables, input::MasterProblemInput,
+                     year_idx::Int, key::Tuple{Symbol,String,Int}) =
+    capacity_in_service(vars, (:fuel, year_idx, key)) do
+        master_fuel_extra_expr(vars.fuel, input, year_idx, key)
+    end
+
+"""
+    capacity_in_service(definition, vars, key; state=true) -> AffExpr
+
+The capacity `key` stands for: its state variable when the model has one
+(`add_capacity_states!`) and `state` is on, otherwise `definition()`, the
+sum over the investment variables (the objective's fixed costs keep the
+sum). Always a fresh expression the caller may extend.
+"""
+function capacity_in_service(definition::Function, vars::MasterProblemVariables, key::Tuple;
+                             state::Bool = true)
+    s = state ? get(vars.capacity_state, key, nothing) : nothing
+    return s === nothing ? definition() : copy(s)
+end
+
+"""
+    add_capacity_states!(model, vars, input)
+
+One state variable per year for the capacity built and still in service of
+each candidate technology and battery technology (power and energy) per bus,
+expandable corridor, reservoir, converter and fuel build, defined by one
+equality, e.g. for a technology
+
+    cap[y, t, b] = Σ_{y' ≤ y, age < life_time} (1 − degradation_rate)^(y − y') × tech_investment[y', t, b]
+
+The hourly rows of the representative days (output, reserve, curtailment,
+battery, line, reservoir, converter and fuel limits) then hold `cap[y, …]`
+instead of the sum, so each investment variable appears only in these
+definitions and in a few yearly rows (build limits, budget, adequacy,
+objective) rather than in every hour of every later year: the same LP, with
+far fewer nonzeros and no dense investment columns for interior-point
+solvers. A capacity with no investment variable (e.g. no build before its
+first investment period) is the constant 0.
+"""
+function add_capacity_states!(model::Model, vars::MasterProblemVariables,
+                              input::MasterProblemInput)
+    function state!(key, expr::AffExpr, name::String)
+        if isempty(expr.terms)
+            vars.capacity_state[key] = AffExpr(0.0)
+            return
+        end
+        cap = @variable(model, lower_bound = 0, base_name = name)
+        @constraint(model, cap == expr, base_name = "def_" * name)
+        vars.capacity_state[key] = AffExpr(0.0, cap => 1.0)
+    end
+    n_buses = input.network.num_buses
+    corridors = collect(keys(get(vars.transfer_investment, 1, Dict{Tuple{Int,Int}, VariableRef}())))
+    reservoirs = collect(keys(get(vars.reservoir_investment, 1, Dict{Int, Vector{VariableRef}}())))
+    converters = collect(keys(get(vars.converter_investment, 1, Dict{Tuple{String,Int}, VariableRef}())))
+    fuel_keys = vars.fuel === nothing ? MasterFuelKey[] : master_fuel_keys(input)
+    for y in eachindex(input.years)
+        for t in eachindex(input.technologies), b in 1:n_buses
+            state!((:tech, y, t, b), tech_capacity_built(vars, input, t, b, y),
+                   "cap_tech_y$(y)_t$(t)_b$(b)")
+        end
+        for bt in eachindex(input.battery_technologies), b in 1:n_buses
+            state!((:bat_tech_power, y, bt, b), bat_tech_power_built(vars, input, bt, b, y),
+                   "cap_bt_pow_y$(y)_bt$(bt)_b$(b)")
+            state!((:bat_tech_energy, y, bt, b), bat_tech_energy_built(vars, input, bt, b, y),
+                   "cap_bt_en_y$(y)_bt$(bt)_b$(b)")
+        end
+        for (i, j) in corridors
+            state!((:transfer, y, i, j), transfer_capacity_built(vars, i, j, y),
+                   "cap_trans_y$(y)_$(i)_$(j)")
+        end
+        for g in reservoirs, b in 1:n_buses
+            state!((:reservoir, y, g, b), reservoir_capacity_built(vars, g, b, y),
+                   "cap_res_y$(y)_g$(g)_b$(b)")
+        end
+        for key in converters
+            state!((:converter, y, key[1], key[2]), converter_built(vars, key, y),
+                   "cap_conv_y$(y)_$(key[1])$(key[2])")
+        end
+        for k in fuel_keys
+            state!((:fuel, y, k), master_fuel_capacity(vars, input, y, k),
+                   "cap_fuel_y$(y)_$(k[1])_$(k[2])_$(k[3])")
+        end
+    end
+    return nothing
 end
 
 # =============================================================================
@@ -1154,6 +1330,9 @@ Returns Dict with:
 - "gen" => Dict{gen_idx, Vector{AffExpr}} per node
 - "bat_power" => Dict{bat_idx, Vector{AffExpr}} per node
 - "bat_capacity" => Dict{bat_idx, Vector{AffExpr}} per node
+- "tech", "bat_tech_power", "bat_tech_capacity" => the candidates' capacity
+  built and in service (`tech_capacity_built`, `bat_tech_power_built`,
+  `bat_tech_energy_built`) per node
 """
 function build_cumulative_capacity_expressions(
     vars::MasterProblemVariables,
@@ -1257,54 +1436,20 @@ function build_cumulative_capacity_expressions(
     end
     result["bat_capacity"] = bat_cap
 
-    # Technology capacity expressions (per-technology investments)
-    n_tech = length(input.technologies)
-    ypp = vars.years_per_inv_period
-    tech_cap = Dict{Int, Vector{AffExpr}}()
-    for t in 1:n_tech
-        tech = input.technologies[t]
-        tech_cap[t] = Vector{AffExpr}(undef, n_buses)
-        for n in 1:n_buses
-            cap = AffExpr(0.0)
-            tech_lifetime = tech.life_time[n]
-            tech_deg = tech.degradation_rate[n]
-            for y in 1:ypp:year_idx
-                inv_age = year_idx - y
-                if inv_age < tech_lifetime
-                    deg_factor = (1.0 - tech_deg) ^ inv_age
-                    add_to_expression!(cap, vars.tech_investment[y][t][n], deg_factor)
-                end
-            end
-            tech_cap[t][n] = cap
-        end
-    end
-    result["tech"] = tech_cap
-
-    # Battery technology power and capacity expressions
-    n_bat_tech = length(input.battery_technologies)
-    bat_tech_pow = Dict{Int, Vector{AffExpr}}()
-    bat_tech_cap = Dict{Int, Vector{AffExpr}}()
-    for bt in 1:n_bat_tech
-        btech = input.battery_technologies[bt]
-        bat_tech_pow[bt] = Vector{AffExpr}(undef, n_buses)
-        bat_tech_cap[bt] = Vector{AffExpr}(undef, n_buses)
-        for n in 1:n_buses
-            pow = AffExpr(0.0)
-            ecap = AffExpr(0.0)
-            bt_lifetime = btech.life_time[n]
-            for y in 1:ypp:year_idx
-                inv_age = year_idx - y
-                if inv_age < bt_lifetime
-                    add_to_expression!(pow, vars.bat_tech_power_investment[y][bt][n])
-                    add_to_expression!(ecap, vars.bat_tech_capacity_investment[y][bt][n])
-                end
-            end
-            bat_tech_pow[bt][n] = pow
-            bat_tech_cap[bt][n] = ecap
-        end
-    end
-    result["bat_tech_power"] = bat_tech_pow
-    result["bat_tech_capacity"] = bat_tech_cap
+    # Technology and battery technology capacity built and in service
+    # (sums over the investment variables: the objective's fixed O&M)
+    result["tech"] = Dict{Int, Vector{AffExpr}}(
+        t => [tech_capacity_built(vars, input, t, n, year_idx; state = false)
+              for n in 1:n_buses]
+        for t in eachindex(input.technologies))
+    result["bat_tech_power"] = Dict{Int, Vector{AffExpr}}(
+        bt => [bat_tech_power_built(vars, input, bt, n, year_idx; state = false)
+               for n in 1:n_buses]
+        for bt in eachindex(input.battery_technologies))
+    result["bat_tech_capacity"] = Dict{Int, Vector{AffExpr}}(
+        bt => [bat_tech_energy_built(vars, input, bt, n, year_idx; state = false)
+               for n in 1:n_buses]
+        for bt in eachindex(input.battery_technologies))
 
     return result
 end
@@ -1509,19 +1654,15 @@ function build_annual_asset_cost(
     for (bt, btech) in enumerate(input.battery_technologies), n in 1:n_buses
         fc = btech.fixed_cost[n] * m_fixed
         fc > 0 || continue
-        for y in 1:vars.years_per_inv_period:y_idx
-            haskey(vars.bat_tech_power_investment, y) || continue
-            y_idx - y < btech.life_time[n] || continue
-            add_to_expression!(annual_cost, vars.bat_tech_power_investment[y][bt][n], fc)
-        end
+        add_to_expression!(annual_cost,
+            bat_tech_power_built(vars, input, bt, n, y_idx; state = false), fc)
     end
 
     # Fixed cost of the converter capacity built up to this year
     for (key, conv) in master_converters(input.network)
         conv.fixed_cost > 0 || continue
-        built = converter_capacity(vars, conv, key, y_idx)
-        add_to_expression!(built, -conv.rated_power_mva)
-        add_to_expression!(annual_cost, conv.fixed_cost, built)
+        add_to_expression!(annual_cost, conv.fixed_cost,
+                           converter_built(vars, key, y_idx; state = false))
     end
 
     # Decommissioning costs (incremental, LP-linear)
@@ -2236,16 +2377,7 @@ function add_day_operational_constraints!(
         for t in 1:n_tech
             tech = input.technologies[t]
             for b in 1:n_buses
-                cumul_cap = AffExpr(0.0)
-                tech_lifetime = tech.life_time[b]
-                tech_deg = tech.degradation_rate[b]
-                for y in 1:vars.years_per_inv_period:year_idx
-                    inv_age = year_idx - y
-                    if inv_age < tech_lifetime
-                        deg = (1.0 - tech_deg) ^ inv_age
-                        add_to_expression!(cumul_cap, vars.tech_investment[y][t][b], deg)
-                    end
-                end
+                cumul_cap = tech_capacity_built(vars, input, t, b, year_idx)
                 tech_caps[(t, b)] = cumul_cap
                 avails = Vector{Float64}(undef, hours)
                 for ts in 1:hours
@@ -2268,19 +2400,11 @@ function add_day_operational_constraints!(
     bat_tech_charge = nothing
     bat_tech_soc = nothing
     # Power and energy built and still in service this year
-    function bt_built(bt, b, pick)
-        cap = AffExpr(0.0)
-        for y in 1:vars.years_per_inv_period:year_idx
-            year_idx - y < input.battery_technologies[bt].life_time[b] || continue
-            add_to_expression!(cap, pick(y)[bt][b])
-        end
-        return cap
-    end
+    bt_pow(bt, b) = bat_tech_power_built(vars, input, bt, b, year_idx)
+    bt_en(bt, b) = bat_tech_energy_built(vars, input, bt, b, year_idx)
     if n_bat_tech > 0
         bat_tech_discharge, bat_tech_charge, bat_tech_soc = add_battery_tech_day!(
-            model, input,
-            (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_power_investment[y]),
-            (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_capacity_investment[y]),
+            model, input, bt_pow, bt_en,
             start_hour, hours; suffix = "_y$(year_idx)_d$(day_idx)")
     end
 
@@ -2362,7 +2486,7 @@ function add_day_operational_constraints!(
         demand_scale=1.0,  # demand already scaled in demand_slice
         extra_headroom=master_unit_headroom(input, start_hour, tech_output,
             (t, b) -> get(tech_caps, (t, b), 0.0), bat_tech_discharge, bat_tech_charge,
-            (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_power_investment[y])))
+            bt_pow))
     add_inertia_constraints!(model, ps_vars, day_input)
     # AC/DC and frequency converters as the dispatch models them, at their
     # rated power plus the converter capacity the master builds
@@ -2407,26 +2531,21 @@ function add_day_operational_constraints!(
     if n_buses > 1 && n_lines > 0
         transmission = with_loss_model(TransmissionDC(input.network),
             input.transmission_loss_segments, input.network.s_base)
-        inv_years = [y for y in 1:vars.years_per_inv_period:year_idx
-                     if haskey(vars.transfer_investment, y)]
-        expandable = Set{Int}(l for (l, (from, to)) in enumerate(transmission.lines)
-            if any(corridor_investment(vars.transfer_investment[y], from, to) !== nothing
-                   for y in inv_years))
+        # Line capacity: base plus the MW built on its corridor so far
+        # (transmission.lines includes transformers)
+        line_cap_override = Dict{Int, Any}()
+        expandable = Set{Int}()
+        for (l, (from, to)) in enumerate(transmission.lines)
+            cap = AffExpr(transmission.line_capacities[l])
+            built = transfer_capacity_built(vars, from, to, year_idx)
+            if built !== nothing
+                push!(expandable, l)
+                add_to_expression!(cap, built)
+            end
+            line_cap_override[l] = cap
+        end
         add_dc_constraints!(model, transmission, ps_vars, day_input;
             extra_injections_fn=extra_fn, expandable_lines=expandable)
-
-        # Build line capacity overrides with cumulative investment
-        # Use transmission.lines (from TransmissionDC) which includes transformers
-        line_cap_override = Dict{Int, Any}()
-        for (l, (from, to)) in enumerate(transmission.lines)
-            base_cap = transmission.line_capacities[l]
-            inv_cap = AffExpr(0.0)
-            for y in inv_years
-                v = corridor_investment(vars.transfer_investment[y], from, to)
-                v === nothing || add_to_expression!(inv_cap, v)
-            end
-            line_cap_override[l] = base_cap + inv_cap
-        end
         add_line_capacity_constraints!(model, transmission, ps_vars, day_input;
             capacity_override=line_cap_override)
         line_flow_cost = add_line_flow_cost!(model, transmission, ps_vars, input, hours)
@@ -2594,18 +2713,7 @@ function add_day_operational_constraints!(
                 tech = input.technologies[tc]
                 if is_variable_renewable(tech, 1)
                     for b in 1:n_buses
-                        # Recompute cumulative capacity (same as tech constraint setup)
-                        cumul_cap = AffExpr(0.0)
-                        tech_lifetime = tech.life_time[b]
-                        tech_deg = tech.degradation_rate[b]
-                        for y in 1:vars.years_per_inv_period:year_idx
-                            inv_age = year_idx - y
-                            if inv_age < tech_lifetime
-                                deg = (1.0 - tech_deg) ^ inv_age
-                                add_to_expression!(cumul_cap,
-                                    vars.tech_investment[y][tc][b], deg)
-                            end
-                        end
+                        cumul_cap = tech_caps[(tc, b)]
                         for ts in 1:hours
                             avail = tech_availability_at(tech, start_hour + ts - 1, b)
                             # tech curtailment = cumul_cap × avail - tech_output
@@ -3230,7 +3338,7 @@ function add_representative_days_validation!(
             # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
             add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
-                extra = k -> master_fuel_extra_expr(vars.fuel, input, y_idx, k)),
+                extra = k -> master_fuel_capacity(vars, input, y_idx, k)),
                 master_fuel_day_scale(input))
             push!(vars.operational_costs[y_idx], day_cost)
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
@@ -3457,7 +3565,7 @@ function add_tsam_periods_validation!(
             # (cyclic tanks per period; the day's cost is in $, × weight)
             add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
-                extra = k -> master_fuel_extra_expr(vars.fuel, input, y_idx, k)),
+                extra = k -> master_fuel_capacity(vars, input, y_idx, k)),
                 weight)
             push!(vars.operational_costs[y_idx], day_cost)
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
@@ -3489,6 +3597,9 @@ Create the Master Problem optimization model.
 - `input::MasterProblemInput`: Master problem configuration
 - `use_representative_days::Bool`: Whether to add representative day subproblems
                                    CRITICAL: Must be true for correct RE target enforcement!
+- `capacity_states::Bool`: hourly rows reference per-year capacity state
+                           variables (`add_capacity_states!`, default) instead
+                           of the investment sums; the same LP either way
 
 # Returns
 - `model::Model`: JuMP model
@@ -3498,7 +3609,8 @@ Create the Master Problem optimization model.
 function create_master_problem(
     input::MasterProblemInput;
     use_representative_days::Bool = true,
-    custom_constraints = nothing
+    custom_constraints = nothing,
+    capacity_states::Bool = true
 )
     # Create model with optimizer
     model = Model(create_optimizer(
@@ -3515,6 +3627,8 @@ function create_master_problem(
 
     # Create variables
     vars = build_master_variables!(model, input)
+    # Capacity in service per year, referenced by the hourly rows
+    capacity_states && add_capacity_states!(model, vars, input)
 
     # Add constraints
     add_investment_constraints!(model, vars, input)
