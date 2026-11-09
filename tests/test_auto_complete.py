@@ -2080,3 +2080,49 @@ class TestBusNN:
         elapsed = time.time() - t0
         assert created == len(issues)  # every isolated bus bridged
         assert elapsed < 5.0, f"bridging too slow ({elapsed:.1f}s)"
+
+    def test_bridge_line_gets_length_impedance_and_frequency(self):
+        """An empty-component bridge line carries its length between the end
+        buses, the standard line type's impedance at its voltage on the
+        system base, and the main network's frequency (it used to carry
+        none of them: no length, no impedance and 50 Hz on a 60 Hz grid)."""
+        from esfex.visualization.workflows.grid_mapping_steps import (
+            _fix_disconnected_components, _haversine_km,
+        )
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_pu_params,
+        )
+        from esfex.visualization.data.gui_model import (
+            GuiTransmissionLine, EndpointRef,
+        )
+        buses = {
+            "m0": GuiBus(bus_id="m0", name="m0", parent_node=0,
+                         voltage_kv=220.0, frequency_hz=60.0,
+                         latitude=22.0, longitude=-80.0),
+            "m1": GuiBus(bus_id="m1", name="m1", parent_node=0,
+                         voltage_kv=220.0, frequency_hz=60.0,
+                         latitude=22.5, longitude=-80.0),
+            "iso": GuiBus(bus_id="iso", name="iso", parent_node=0,
+                          voltage_kv=220.0, frequency_hz=60.0,
+                          latitude=22.5, longitude=-79.7),
+        }
+        lines = [GuiTransmissionLine(
+            line_id="ml", from_bus="m0", to_bus="m1", capacity_mw=100.0,
+            voltage_kv=220.0, frequency_hz=60.0,
+            from_endpoint=EndpointRef("bus", "m0"),
+            to_endpoint=EndpointRef("bus", "m1"))]
+        state = _make_state(buses=buses, transmission_lines=lines)
+        state.ac_power_flow.base_mva = 200.0
+        model = MockGuiModel(state)
+        created, _log = _fix_disconnected_components(
+            model, state, [{"component": {"iso"}, "equipment": []}])
+        assert created == 1
+        bridge = state.transmission_lines[-1]
+        assert {bridge.from_bus, bridge.to_bus} == {"m1", "iso"}
+        dist = _haversine_km(22.5, -80.0, 22.5, -79.7)
+        assert bridge.length_km == pytest.approx(dist)
+        r, x, b = estimate_line_pu_params(220.0, dist, 200.0)
+        assert bridge.reactance_pu == pytest.approx(x)
+        assert bridge.resistance_pu == pytest.approx(r)
+        assert bridge.susceptance_pu == pytest.approx(b)
+        assert bridge.frequency_hz == 60.0

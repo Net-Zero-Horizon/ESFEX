@@ -2782,15 +2782,28 @@ def _fix_disconnected_components(
 
             lid = f"line_{state._next_line_id}"
             state._next_line_id += 1
-            state.transmission_lines.append(GuiTransmissionLine(
+            bridge = GuiTransmissionLine(
                 line_id=lid,
                 from_bus=best_main_bid, to_bus=best_iso,
                 from_node=main_bus.parent_node,
                 to_node=iso_bus.parent_node,
                 capacity_mw=cap, voltage_kv=v, waypoints=[],
+                frequency_hz=main_bus.frequency_hz,
                 from_endpoint=EndpointRef("bus", best_main_bid),
                 to_endpoint=EndpointRef("bus", best_iso),
-            ))
+            )
+            # Length between the end buses and the standard line type's
+            # impedance at that voltage, like every other built line.
+            from esfex.visualization.data.validation import (
+                _line_impedance_pu, _line_length_km,
+            )
+            bridge.length_km = _line_length_km(state, bridge) or None
+            r_pu, x_pu, b_pu = _line_impedance_pu(state, bridge)
+            if x_pu > 0:
+                bridge.resistance_pu = r_pu
+                bridge.reactance_pu = x_pu
+                bridge.susceptance_pu = b_pu
+            state.transmission_lines.append(bridge)
             created += 1
 
             log.append(
