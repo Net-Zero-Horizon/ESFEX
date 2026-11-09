@@ -160,7 +160,7 @@ where \(V_i\) and \(V_j\) are the complex bus voltages. The admittance elements 
 | \(Y_{tt}\) | \(g_s + jb_s + jb_{sh}/2\) |
 | \(Y_{tf}\) | \(-(g_s + jb_s)/\tau\) |
 
-For transmission lines, \(\tau = 1\); a line with \(k\) circuits uses \(r/k\), \(x/k\), \(k \cdot b_{sh}\) and capacity \(k\) × `capacity_mw` (MW taken as MVA). For transformers, \(\tau\) is the tap ratio and there is no shunt term.
+For transmission lines, \(\tau = 1\); \(r\), \(x\), \(b_{sh}\) and the capacity `capacity_mw` (MW taken as MVA) are those of the whole line, all its circuits together, and are not rescaled by `num_circuits`. For transformers, \(\tau\) is the tap ratio and there is no shunt term.
 
 The real and imaginary parts of each admittance element (\(g_{ff}, b_{ff}, g_{ft}, b_{ft}\), etc.) are precomputed in the `ACOPFBranch` struct and used directly in the power flow expressions.
 

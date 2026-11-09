@@ -158,13 +158,13 @@ Electrical connections between buses or equipment: overhead lines, underground c
 |---------|-------|------|-------------|
 | (header) | System and endpoints | -- | Read-only: system name and the names of the connected nodes. |
 | **Bus endpoints** | From bus / To bus | -- | The buses the line connects. Set when the line is traced on the map; can be changed here. |
-| **Properties** | Capacity | MW | Maximum power transfer in either direction. |
+| **Properties** | Capacity | MW | Maximum power transfer in either direction, all circuits together. |
 | | Voltage | kV | Operating voltage. |
 | | Type | -- | overhead, underground or submarine (blank = unspecified). |
 | | Length | km | Line length. 0 (shown as "Auto") = a distance is computed when the model is built. |
 | | Reactance per km | ohm/km | This line's series reactance per km (saved as `reactance_per_km`). Used with the length when no per-unit reactance is set. 0 = "Default" (the system's DC power flow reactance per km). |
 | | Reactance / Resistance / Susceptance | pu | Per-unit X, R and B on the system base (`ac_power_flow.base_mva`). Reactance 0 = "Global": derived as length × reactance per km / Z_base, with Z_base = V² / S_base from the line voltage; 0.01 pu without a length. |
-| | Circuits | -- | Number of parallel circuits (1 to 10). |
+| | Circuits | -- | Number of parallel circuits (1 to 10). Descriptive: the capacity and the per-unit values are those of the whole line, all circuits together, and changing the count does not rescale them. Only a reactance derived from the reactance per km is divided over the circuits. |
 | | Frequency / Current Type | Hz, -- | Inherited from the connected bus. |
 | **Appearance** | Color, Width | -, px | Line colour and width (0 = auto, uses the global line scaling). |
 | **Actions** | Edit Trace | toggle | Enable/disable editing of the polyline vertices. |

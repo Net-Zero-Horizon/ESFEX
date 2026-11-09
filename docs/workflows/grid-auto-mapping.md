@@ -355,7 +355,7 @@ P = \sqrt{3}\, V\, I_{nom} \times 0.9 \times n_{circuits}
 | 500 | 4.30 | 3,352 |
 | 750 | 5.80 | 6,781 |
 
-\(V\) is the line's own voltage and 0.9 is a thermal margin (not an N-1 derate). The same line type provides the per-km impedance, so rating and impedance stay consistent. The number of circuits comes from the OSM `circuits` tag, or else from `cables` (3 cables per AC circuit); default 1. A tagged capacity is multiplied by the number of circuits.
+\(V\) is the line's own voltage and 0.9 is a thermal margin (not an N-1 derate). The same line type provides the per-km impedance, so rating and impedance stay consistent. The number of circuits comes from the OSM `circuits` tag, or else from `cables` (3 cables per AC circuit); default 1. A tagged capacity is multiplied by the number of circuits. The builder writes the whole line: its rating is that of all circuits together and its R and X those of one circuit divided by the number of circuits (B multiplied by it), which is how the model reads a line's values.
 
 Parameter inference later raises a line or transformer rating that is below 1.25 times the worst-case flow across it, capped by the system peak demand (×1.25) and by a surge-impedance-loading ceiling per voltage class (500 kV: 2,400 MW; 345 kV: 1,200; 220 kV: 600; 110 kV: 250; 66 kV: 120; 33 kV: 60; 10 kV: 20; below: 10), with a 5 MW floor. It never lowers a rating.
 

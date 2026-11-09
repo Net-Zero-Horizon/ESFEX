@@ -182,7 +182,7 @@ def _build_graph(
     # DC power flow defaults for deriving reactance from line length
     # (same rule as converters.convert_transmission_line_data).
     from esfex.config.schema import DCPowerFlowConfig
-    from esfex.utils.per_unit import derived_reactance_pu, system_s_base
+    from esfex.utils.per_unit import line_reactance_pu, system_s_base
     dc_cfg = getattr(sys_config, "dc_power_flow", None) or DCPowerFlowConfig()
     s_base = system_s_base(sys_config)
 
@@ -199,15 +199,10 @@ def _build_graph(
             skipped.append(line.line_id or f"line_{orig_idx}")
             continue
 
-        # Match Julia's reactance derivation exactly: per-line value if
-        # given, else derived from length_km, else minimal default 0.01.
+        # Match the bridge's reactance exactly: per-line value if given,
+        # else derived from length_km over its circuits, else 0.01.
         length = float(line.length_km) if line.length_km is not None else 0.0
-        x_raw = line.reactance_pu
-        if x_raw is None or float(x_raw) <= 0:
-            x_pu = derived_reactance_pu(length, line.voltage_kv, dc_cfg, s_base,
-                                        getattr(line, "reactance_per_km", None))
-        else:
-            x_pu = float(x_raw)
+        x_pu = line_reactance_pu(line, length, dc_cfg, s_base)
         r_pu = float(line.resistance_pu) if line.resistance_pu is not None else 0.0
         cap = float(line.capacity_mw) if line.capacity_mw is not None else 0.0
         n_circ = int(line.num_circuits or 1)

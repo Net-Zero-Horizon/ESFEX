@@ -600,13 +600,10 @@ def convert_transmission_line_data(
         if i < distances.shape[0] and j < distances.shape[1]:
             length_km = float(distances[i, j])
 
-    # Determine reactance: use per-line value or derive from length + global defaults
-    reactance_pu = line.reactance_pu
-    if reactance_pu is None or reactance_pu <= 0:
-        from esfex.utils.per_unit import derived_reactance_pu
-        reactance_pu = derived_reactance_pu(
-            length_km, line.voltage_kv, dc_config, s_base_mva,
-            getattr(line, "reactance_per_km", None))
+    # Reactance of the whole line: its own value, else derived from its length
+    # (one circuit's reactance divided over its circuits)
+    from esfex.utils.per_unit import line_reactance_pu
+    reactance_pu = line_reactance_pu(line, length_km, dc_config, s_base_mva)
 
     resistance_pu = line.resistance_pu if line.resistance_pu is not None else 0.0
     susceptance_pu = line.susceptance_pu if line.susceptance_pu is not None else 0.0

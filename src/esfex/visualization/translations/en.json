@@ -421,6 +421,7 @@
     "resistance_pu": "Resistance (pu):",
     "susceptance_pu": "Susceptance (pu):",
     "circuits": "Circuits:",
+    "circuits_tip": "Number of parallel circuits. Capacity, reactance, resistance and susceptance are those of the whole line, all circuits together: changing the count does not rescale them. Only a reactance derived from the reactance per km (one circuit) is divided by it.",
     "frequency": "Frequency (Hz):",
     "current_type": "Current Type:",
     "edit_trace": "Edit Trace",

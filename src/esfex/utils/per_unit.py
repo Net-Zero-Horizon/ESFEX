@@ -4,6 +4,12 @@ Line impedances are per unit on the system power base ``S_base``
 (``ac_power_flow.base_mva``, MVA) and the line's own voltage, as the Grid
 Builder writes them: ``Z_base = V² / S_base``. The DC model turns them back
 into MW with the same ``S_base`` (flow = S_base · Δθ / x, loss = r · F² / S_base).
+
+A line's ``capacity_mw``, ``reactance_pu``, ``resistance_pu`` and
+``susceptance_pu`` are those of the whole line, all of its ``num_circuits``
+parallel circuits together; the model never rescales them by the circuit
+count. Only a reactance derived from a per-km value (that of one circuit) is
+divided over the circuits.
 """
 
 from __future__ import annotations
@@ -41,3 +47,25 @@ def derived_reactance_pu(
     x_km = reactance_per_km if own else dc_config.reactance_per_km
     z_base = v * v / s_base_mva
     return length_km * x_km / z_base
+
+
+def line_reactance_pu(
+    line: Any,
+    length_km: Optional[float],
+    dc_config: Any,
+    s_base_mva: float,
+) -> float:
+    """Series reactance (p.u.) of a whole line, all its circuits together.
+
+    The line's own ``reactance_pu`` when > 0. Otherwise the reactance of one
+    circuit of *length_km* (:func:`derived_reactance_pu`, from the line's
+    ``reactance_per_km`` or the system default) divided by its
+    ``num_circuits``.
+    """
+    x = getattr(line, "reactance_pu", None)
+    if x is not None and x > 0:
+        return float(x)
+    n = max(1, int(getattr(line, "num_circuits", 1) or 1))
+    return derived_reactance_pu(
+        length_km, getattr(line, "voltage_kv", None), dc_config, s_base_mva,
+        getattr(line, "reactance_per_km", None)) / n

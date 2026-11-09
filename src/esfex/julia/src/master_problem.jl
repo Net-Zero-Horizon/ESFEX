@@ -1925,6 +1925,82 @@ function batteries_for_day(batteries::AbstractVector, start_hour::Int, hours::In
 end
 
 """
+    master_unit_reserve_terms(input, start_hour, b, ts)
+        -> Vector{Tuple{Symbol, Int, Float64, Float64}}
+
+The candidate units that hold reserve at bus `b`, step `ts` of a master
+day or TSAM period starting at master step `start_hour`, by the dispatch's
+rules for the units they become (`add_reserve_constraints!`), as
+`(kind, index, a, d)`:
+
+- `(:tech, t, a, d)`: a reservable, non-renewable technology. Headroom
+  `a × cap − output` with `a` its availability; dynamic capability
+  `d × cap`, `d = dynamic_reserve_contribution`.
+- `(:bat_tech, bt, a, d)`: a reservable battery technology. Headroom
+  `a × P − discharge + charge` with `P` the discharge power built and `a` its
+  availability; dynamic capability `d × P`, `d = a × dynamic_reserve_contribution`.
+
+`a` and `d` are the coefficients of the capacity built (master investment
+expressions, Benders subproblem constants) in the system's reserve headroom
+and dynamic-capability constraints.
+"""
+function master_unit_reserve_terms(input::MasterProblemInput, start_hour::Int,
+                                   b::Int, ts::Int)
+    out = Tuple{Symbol, Int, Float64, Float64}[]
+    contribution = input.dynamic_reserve_contribution
+    hour = start_hour + ts - 1
+    at_hour(m) = size(m, 1) == 0 ? 1.0 : m[mod1(hour, size(m, 1)), b]
+    for (t, tech) in enumerate(input.technologies)
+        (tech.reservable && tech.type != "Renewable") || continue
+        push!(out, (:tech, t, at_hour(tech.availability), contribution))
+    end
+    for (bt, btech) in enumerate(input.battery_technologies)
+        btech.reservable || continue
+        a = at_hour(btech.availability)
+        push!(out, (:bat_tech, bt, a, contribution * a))
+    end
+    return out
+end
+
+"""
+    master_unit_headroom(input, start_hour, tech_output, tech_cap,
+                         bt_dis, bt_ch, bt_pow) -> Function
+
+`extra_headroom` for `add_reserve_constraints!` in a master day: `(b, ts) ->
+(headroom, dynamic)` of the candidate units at bus `b`
+(`master_unit_reserve_terms`), or `nothing` when none holds reserve.
+`tech_cap(t, b)` and `bt_pow(bt, b)` give the capacity built; `tech_output`,
+`bt_dis` and `bt_ch` are the day's dispatch variables (`nothing` without
+technologies / battery technologies).
+"""
+function master_unit_headroom(input::MasterProblemInput, start_hour::Int, tech_output,
+                              tech_cap::Function, bt_dis, bt_ch, bt_pow::Function)
+    return (b, ts) -> begin
+        headroom = AffExpr(0.0)
+        dynamic = AffExpr(0.0)
+        any_unit = false
+        for (kind, i, a, d) in master_unit_reserve_terms(input, start_hour, b, ts)
+            if kind === :tech
+                tech_output === nothing && continue
+                cap = tech_cap(i, b)
+                add_to_expression!(headroom, cap, a)
+                add_to_expression!(headroom, -1.0, tech_output[i, b, ts])
+                add_to_expression!(dynamic, cap, d)
+            else
+                bt_dis === nothing && continue
+                P = bt_pow(i, b)
+                add_to_expression!(headroom, P, a)
+                add_to_expression!(headroom, -1.0, bt_dis[i, b, ts])
+                add_to_expression!(headroom, 1.0, bt_ch[i, b, ts])
+                add_to_expression!(dynamic, P, d)
+            end
+            any_unit = true
+        end
+        return any_unit ? (headroom, dynamic) : nothing
+    end
+end
+
+"""
     add_battery_tech_day!(model, input, pow_cap, en_cap, start_hour, hours;
                           suffix="", store=nothing) -> (discharge, charge, soc)
 
@@ -2132,6 +2208,8 @@ function add_day_operational_constraints!(
     n_bat_tech = length(input.battery_technologies)
 
     tech_output = nothing
+    # Capacity of each technology in service this year (for the reserves)
+    tech_caps = Dict{Tuple{Int,Int}, AffExpr}()
     # Fuel cost of technologies with an offer curve (day_operational_cost
     # charges the others their flat fuel_cost)
     tech_curve_cost = AffExpr(0.0)
@@ -2155,6 +2233,7 @@ function add_day_operational_constraints!(
                         add_to_expression!(cumul_cap, vars.tech_investment[y][t][b], deg)
                     end
                 end
+                tech_caps[(t, b)] = cumul_cap
                 avails = Vector{Float64}(undef, hours)
                 for ts in 1:hours
                     actual_hour = start_hour + ts - 1
@@ -2176,16 +2255,16 @@ function add_day_operational_constraints!(
     bat_tech_discharge = nothing
     bat_tech_charge = nothing
     bat_tech_soc = nothing
-    if n_bat_tech > 0
-        # Power and energy built and still in service this year
-        function bt_built(bt, b, pick)
-            cap = AffExpr(0.0)
-            for y in 1:vars.years_per_inv_period:year_idx
-                year_idx - y < input.battery_technologies[bt].life_time[b] || continue
-                add_to_expression!(cap, pick(y)[bt][b])
-            end
-            return cap
+    # Power and energy built and still in service this year
+    function bt_built(bt, b, pick)
+        cap = AffExpr(0.0)
+        for y in 1:vars.years_per_inv_period:year_idx
+            year_idx - y < input.battery_technologies[bt].life_time[b] || continue
+            add_to_expression!(cap, pick(y)[bt][b])
         end
+        return cap
+    end
+    if n_bat_tech > 0
         bat_tech_discharge, bat_tech_charge, bat_tech_soc = add_battery_tech_day!(
             model, input,
             (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_power_investment[y]),
@@ -2264,10 +2343,14 @@ function add_day_operational_constraints!(
         initial_reservoir_overrides=initial_reservoir_overrides,
         final_reservoir_targets=final_reservoir_targets,
         capacity_override=res_cap)
+    # The units the master builds hold reserve as they will in the dispatch
     add_reserve_constraints!(model, ps_vars, day_input;
         capacity_override=total_cap_gen,
         battery_capacity_override=total_cap_bat_power,
-        demand_scale=1.0)  # demand already scaled in demand_slice
+        demand_scale=1.0,  # demand already scaled in demand_slice
+        extra_headroom=master_unit_headroom(input, start_hour, tech_output,
+            (t, b) -> get(tech_caps, (t, b), 0.0), bat_tech_discharge, bat_tech_charge,
+            (bt, b) -> bt_built(bt, b, y -> vars.bat_tech_power_investment[y])))
     add_inertia_constraints!(model, ps_vars, day_input)
     # AC/DC and frequency converters as the dispatch models them, at their
     # rated power plus the converter capacity the master builds
