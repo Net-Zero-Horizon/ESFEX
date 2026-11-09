@@ -265,6 +265,38 @@ def _prefer_field_names(model: type, data: dict[str, Any]) -> None:
             del data[alias]
 
 
+def _clamp_generator_fractions(generators: dict[str, GeneratorConfig]) -> None:
+    """Bring min_power into 0–1 and negative ramps to 0, with a warning.
+
+    min_power is a fraction of rated power and ramp_up/ramp_down are
+    fractions of rated power per hour (0 = no limit). Values outside that
+    range (e.g. min_power 1.6 left by Studio versions up to 0.3.0, which
+    summed it when merging units) are clamped instead of rejected, so the
+    project still opens in the Studio and can be corrected there.
+    """
+    for key, gen in generators.items():
+        for attr, lo, hi in (("min_power", 0.0, 1.0),
+                             ("ramp_up", 0.0, None), ("ramp_down", 0.0, None)):
+            values = list(getattr(gen, attr))
+            bad = [i for i, v in enumerate(values)
+                   if v < lo or (hi is not None and v > hi)]
+            if not bad:
+                continue
+            changes = []
+            for i in bad:
+                new = lo if values[i] < lo else hi
+                changes.append(f"node {i}: {values[i]:g} → {new:g}")
+                values[i] = new
+            setattr(gen, attr, values)
+            shown = ", ".join(changes[:5])
+            if len(changes) > 5:
+                shown += f" (+{len(changes) - 5} more)"
+            rng = ("0–1 (fraction of rated power)" if hi is not None
+                   else "≥ 0 (fraction of rated power per hour, 0 = no limit)")
+            log.warning("Generator %s: %s must be %s; clamped %s.",
+                        key, attr, rng, shown)
+
+
 def _warn_zero_ramps(generators: dict[str, GeneratorConfig]) -> None:
     """Point out installed units whose ramp limit is 0. The dispatch treats
     it as "no ramp limit"; projects saved by older Studio versions hold 0
@@ -282,6 +314,49 @@ def _warn_zero_ramps(generators: dict[str, GeneratorConfig]) -> None:
             "0 means no ramp limit; set a fraction of capacity per hour to limit ramping.",
             len(zero), shown,
         )
+
+
+# Lazard 2024 LCOE 17.0 midpoints minus typical fuel cost — the non-fuel
+# portion (capex amortized + fixed + var O&M). Without this thermals look
+# artificially cheap (fuel only ~$16-32/MWh) compared to renewable LCOE
+# ($34+) and the LP never dispatches/invests in renewables. It is a
+# variable adder ($/MWh, into maintenance_cost) that stands in for O&M
+# data the generator lacks: a generator with its own fixed_cost
+# ($/MW·yr) or a substantial maintenance_cost keeps its values, so the
+# fixed O&M is never charged twice.
+_NON_FUEL_LCOE = {
+    "gas": 60.0,        # CCGT $76 − $16 fuel
+    "fuel_oil": 55.0,   # Steam HFO $80 − $27
+    "diesel": 60.0,     # Steam diesel (peakers are higher but rare here)
+    "biomass": 20.0,    # Mostly fuel; add modest
+}
+# Fuel names (lower case, without spaces, "_" or "-") of each family above
+_NON_FUEL_ALIASES = {
+    "gas": ("gas", "naturalgas", "ng", "lng"),
+    "fuel_oil": ("fueloil", "oil", "hfo", "heavyfueloil", "crude", "crudeoil"),
+    "diesel": ("diesel", "gasoil"),
+    "biomass": ("biomass",),
+}
+_NON_FUEL_FAMILY = {alias: family for family, aliases in _NON_FUEL_ALIASES.items()
+                    for alias in aliases}
+
+
+def _non_fuel_om_adder(fuel_key: str, fuel: Any = None) -> float:
+    """Non-fuel O&M adder ($/MWh) for a fuel, 0 if it is not a known family.
+
+    The fuel's key and its display name (``fuels[key].name``) are matched
+    ignoring case, spaces, "_" and "-", so "Natural_gas", "Natural Gas",
+    "NG" and "LNG" all count as gas, "HFO" or "Crude" as fuel oil and
+    "Gasoil" as diesel.
+    """
+    for name in (fuel_key, getattr(fuel, "name", None)):
+        if not isinstance(name, str):
+            continue
+        norm = "".join(ch for ch in name.lower() if ch not in " _-")
+        family = _NON_FUEL_FAMILY.get(norm)
+        if family is not None:
+            return _NON_FUEL_LCOE[family]
+    return 0.0
 
 
 def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
@@ -327,6 +402,7 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
                 batteries[key] = _convert_battery(key, value)
         del system_data["batteries"]
 
+    _clamp_generator_fractions(generators)
     _warn_zero_ramps(generators)
 
     # Convert fuels
@@ -453,29 +529,16 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
     # (same formula already in runner._fuel_based_cost, applied post-hoc for LCOE).
     _fuels_dict = system_data.get("fuels", {})
     _techs_dict = system_data.get("technologies", {})
-    # Lazard 2024 LCOE 17.0 midpoints minus typical fuel cost — the non-fuel
-    # portion (capex amortized + fixed + var O&M). Without this thermals look
-    # artificially cheap (fuel only ~$16-32/MWh) compared to renewable LCOE
-    # ($34+) and the LP never dispatches/invests in renewables. It is a
-    # variable adder ($/MWh, into maintenance_cost) that stands in for O&M
-    # data the generator lacks: a generator with its own fixed_cost
-    # ($/MW·yr) or a substantial maintenance_cost keeps its values, so the
-    # fixed O&M is never charged twice.
-    _NON_FUEL_LCOE = {
-        "Gas": 60.0,        # CCGT $76 − $16 fuel
-        "Fuel_oil": 55.0,   # Steam HFO $80 − $27
-        "Oil": 55.0,
-        "Diesel": 60.0,     # Steam diesel (peakers are higher but rare here)
-        "Biomass": 20.0,    # Mostly fuel; add modest
-    }
 
     if isinstance(_fuels_dict, dict) and _fuels_dict:
         _linked_fuel = 0
         _linked_maint = 0
         _silent_freebies: list[str] = []  # non-renewable gens that end up at $0/MWh
         for _gk, _g in generators.items():
-            if getattr(_g, "type", "") == "Renewable":
-                continue  # Sun/Wind/Water have no fuel cost
+            # Any type burning a priced fuel pays for it (a Renewable
+            # biomass unit too); Sun/Wind/Water have no fuel entry or a
+            # price of 0, so they stay free.
+            _renewable = getattr(_g, "type", "") == "Renewable"
             _fuel_name = getattr(_g, "fuel", None) or "None"
             # Flag the silent-failure mode: a non-renewable generator with
             # no fuel reference ends up at fuel_cost=0 AND 0 emissions in the
@@ -484,13 +547,13 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             # the user sees it before solving.
             if _fuel_name in ("None", "", None):
                 _fc_now = list(getattr(_g, "fuel_cost", None) or [])
-                if not _fc_now or max(_fc_now) <= 0:
+                if not _renewable and (not _fc_now or max(_fc_now) <= 0):
                     _silent_freebies.append(getattr(_g, "name", _gk))
                 continue
             _fuel = _fuels_dict.get(_fuel_name)
             if _fuel is None:
                 _fc_now = list(getattr(_g, "fuel_cost", None) or [])
-                if not _fc_now or max(_fc_now) <= 0:
+                if not _renewable and (not _fc_now or max(_fc_now) <= 0):
                     _silent_freebies.append(
                         f"{getattr(_g, 'name', _gk)} (fuel={_fuel_name!r} not in fuels)"
                     )
@@ -528,7 +591,7 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             # present — the non-fuel portion is separate from fuel cost.
             # Only adds where fuel_cost > 0 (active nodes), not where padding
             # leaves 0.
-            _adder = _NON_FUEL_LCOE.get(_fuel_name, 0.0)
+            _adder = _non_fuel_om_adder(_fuel_name, _fuel)
             if _adder <= 0:
                 continue
             _existing_maint = list(getattr(_g, "maintenance_cost", None) or [])

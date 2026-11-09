@@ -87,7 +87,7 @@ def _thermal_gen(name="Gas_plant", fuel="Gas", technology=None,
         "degradation_rate": [0.005, 0.005],
         "decommissioning_cost": [300, 300],
         "rated_power": [100, 100],
-        "min_power": [10, 10],
+        "min_power": [0.1, 0.1],
         "min_up": [4, 4],
         "min_down": [4, 4],
         "ramp_up": [0.5, 0.5],
@@ -720,6 +720,100 @@ class TestFuelLinking:
         sc = _convert_system(data)
         # Coal not in _NON_FUEL_LCOE -> adder 0 -> maintenance unchanged
         assert sc.generators["unit_0"].maintenance_cost == [0.0, 0.0]
+
+
+    def test_renewable_with_priced_fuel_pays_it(self):
+        """A Renewable unit whose fuel has a price (biomass) gets its fuel
+        cost and the biomass adder: it was skipped for being Renewable, so
+        it ran for free."""
+        data = _minimal_system()
+        data["fuels"] = {"Biomass": _fuel(price_base=40.0, energy_content=4.5)}
+        data["fuels"]["Biomass"]["name"] = "Biomass"
+        g = _renewable_gen(name="Bagasse", fuel="Biomass")
+        g["eff_at_rated"] = [0.28, 0.28]
+        g["fixed_cost"] = [0.0, 0.0]
+        g["maintenance_cost"] = [0.0, 0.0]
+        data["unit_0"] = g
+        sc = _convert_system(data)
+        gen = sc.generators["unit_0"]
+        assert gen.fuel_cost[0] == pytest.approx(40.0 / 4.5 / 0.28)
+        assert gen.maintenance_cost == [20.0, 20.0]
+
+    def test_renewable_without_fuel_entry_not_flagged(self, caplog):
+        """Sun/Wind/Water have no fuel entry: no cost, no 'free unit' warning."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _renewable_gen(name="PV", fuel="Sun")
+        data["unit_1"] = _renewable_gen(name="WT", fuel="None")
+        with caplog.at_level(logging.WARNING):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].fuel_cost == [0, 0]
+        assert not any("no valid fuel" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("fuel_key,adder", [
+        ("Natural_gas", 60.0), ("Natural Gas", 60.0), ("NG", 60.0),
+        ("LNG", 60.0), ("Gas", 60.0), ("Fuel_oil", 55.0), ("HFO", 55.0),
+        ("Crude", 55.0), ("Oil", 55.0), ("Diesel", 60.0), ("Gasoil", 60.0),
+        ("Biomass", 20.0), ("Coal", 0.0),
+    ])
+    def test_non_fuel_adder_matches_fuel_aliases(self, fuel_key, adder):
+        """The adder is found whatever the fuel is called: the Studio's
+        "Natural_gas" got none while fuel oil and diesel did."""
+        data = _minimal_system()
+        fuel = _fuel()
+        fuel["name"] = fuel_key
+        data["fuels"] = {fuel_key: fuel}
+        data["unit_0"] = _thermal_gen(name="P", fuel=fuel_key, fuel_cost=[30, 30])
+        sc = _convert_system(data)
+        assert sc.generators["unit_0"].maintenance_cost == [adder, adder]
+
+    def test_non_fuel_adder_matches_fuel_display_name(self):
+        data = _minimal_system()
+        gas = _fuel()
+        gas["name"] = "Natural Gas"
+        data["fuels"] = {"fuel_1": gas}
+        data["unit_0"] = _thermal_gen(name="P", fuel="fuel_1", fuel_cost=[30, 30])
+        sc = _convert_system(data)
+        assert sc.generators["unit_0"].maintenance_cost == [60.0, 60.0]
+
+
+class TestGeneratorFractionBounds:
+    """min_power is a fraction of rated power and ramps a fraction per hour:
+    the loader clamps values outside that range with a warning (Studio
+    merges summed them, e.g. min_power 1.6)."""
+
+    def test_min_power_above_one_clamped(self, caplog):
+        data = _minimal_system()
+        data["unit_0"] = _thermal_gen(name="CCGT")
+        data["unit_0"]["min_power"] = [1.6, 0.4]
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].min_power == [1.0, 0.4]
+        msg = [r.getMessage() for r in caplog.records if "min_power" in r.getMessage()]
+        assert len(msg) == 1
+        assert "unit_0" in msg[0] and "node 0: 1.6 → 1" in msg[0]
+
+    def test_negative_values_clamped_to_zero(self, caplog):
+        data = _minimal_system()
+        data["unit_0"] = _thermal_gen(name="CCGT")
+        data["unit_0"]["min_power"] = [-0.2, 0.4]
+        data["unit_0"]["ramp_up"] = [-1.0, 0.5]
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        gen = sc.generators["unit_0"]
+        assert gen.min_power == [0.0, 0.4]
+        assert gen.ramp_up == [0.0, 0.5]
+        assert any("ramp_up must be ≥ 0" in r.getMessage() for r in caplog.records)
+
+    def test_valid_values_untouched(self, caplog):
+        data = _minimal_system()
+        data["unit_0"] = _thermal_gen(name="CCGT")
+        data["unit_0"]["ramp_up"] = [21.0, 0.5]     # large but valid (no upper bound)
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].min_power == [0.1, 0.1]
+        assert sc.generators["unit_0"].ramp_up == [21.0, 0.5]
+        assert not any("clamped" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

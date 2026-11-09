@@ -140,6 +140,8 @@ Units are read from a `generators:` / `batteries:` mapping or from legacy system
 
 `Availability` may also be written as `availability_file`.
 
+Generator `min_power` (a fraction of rated power) is clamped to 0–1 and a negative `ramp_up`/`ramp_down` (fractions of rated power per hour, 0 = no limit) to 0, with one warning per unit and field listing the nodes and values changed. The file still loads, so a project holding such values (Studio up to 0.3.0 summed `min_power` and ramps when merging units) opens in the Studio and can be corrected there.
+
 ### Other sections
 
 - **Fuels:** `name`, `unit`, `emission_factor` (default 0), `energy_content`, `price_base` (default 0), `price_growth_rate`.
@@ -154,18 +156,19 @@ Units are read from a `generators:` / `batteries:` mapping or from legacy system
 
 ### Fuel-cost linking and non-fuel O&M adder
 
-After the units are built, and only if the system has a non-empty `fuels` block, the loader adjusts each generator whose type is not `Renewable` and whose `fuel` is a key of `fuels`:
+After the units are built, and only if the system has a non-empty `fuels` block, the loader adjusts each generator whose `fuel` is a key of `fuels`, of any type (a `Renewable` biomass unit with a priced fuel pays it; Sun, Wind and Water have no entry or a price of 0):
 
 1. **Fuel cost.** If `fuel_cost` is missing or its maximum is ≤ 0, and the fuel has `price_base > 0` and `energy_content > 0`, each node's fuel cost becomes `price_base / energy_content / eff`, where `eff` is the unit's `eff_at_rated` at that node, or the linked technology's first `eff_at_rated` when the unit's is 0. Nodes with no usable efficiency get 0.
-2. **Non-fuel adder.** A fixed non-fuel cost (described in the code as Lazard 2024 LCOE midpoints minus fuel) is added to `maintenance_cost`, by exact fuel name:
+2. **Non-fuel adder.** A fixed non-fuel cost (described in the code as Lazard 2024 LCOE midpoints minus fuel) is added to `maintenance_cost`, by fuel family. The fuel's key and its `name` are compared ignoring case, spaces, `_` and `-`:
 
-    | Fuel name | Adder ($/MWh) |
+    | Fuel names | Adder ($/MWh) |
     |---|---|
-    | `Gas`, `Diesel` | 60 |
-    | `Oil`, `Fuel_oil` | 55 |
+    | Gas: `Gas`, `Natural_gas`, `NG`, `LNG` | 60 |
+    | Diesel: `Diesel`, `Gasoil` | 60 |
+    | Fuel oil: `Fuel_oil`, `Oil`, `HFO`, `Heavy_fuel_oil`, `Crude`, `Crude_oil` | 55 |
     | `Biomass` | 20 |
 
-    The adder is a variable (per-MWh) cost that stands in for O&M data the unit lacks. It is applied at every node whose fuel cost is positive, and skipped for the whole unit if the unit has its own fixed O&M (`fixed_cost` > 0, $/MW per year; the adder, which includes fixed O&M, would charge it twice) or its largest `maintenance_cost` is already at least half the adder. It applies whether the fuel cost was given or computed in step 1. Other fuel names get no adder.
+    The adder is a variable (per-MWh) cost that stands in for O&M data the unit lacks. It is applied at every node whose fuel cost is positive, and skipped for the whole unit if the unit has its own fixed O&M (`fixed_cost` > 0, $/MW per year; the adder, which includes fixed O&M, would charge it twice) or its largest `maintenance_cost` is already at least half the adder. It applies whether the fuel cost was given or computed in step 1. Other fuel names (coal, for instance) get no adder.
 
 The loader logs (INFO) each unit that receives the adder, with the resulting `maintenance_cost`, and how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
 

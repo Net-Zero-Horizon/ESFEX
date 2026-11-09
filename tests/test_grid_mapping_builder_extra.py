@@ -703,8 +703,36 @@ class TestCreateLine:
         gmb._create_line(state, line, 5.0, result, {}, None)
         gl = state.transmission_lines[-1]
         assert gl.voltage_kv is None
-        assert gl.length_km is None
-        assert gl.resistance_pu is None
+        # The length is measured anyway, so the impedance can be derived
+        # once _propagate_voltage infers the voltage.
+        assert gl.length_km == pytest.approx(151.9, abs=0.5)
+        assert gl.resistance_pu is None and gl.reactance_pu is None
+
+    def test_untagged_line_gets_impedance_from_inferred_voltage(self):
+        """Regression: an OSM line without a voltage tag kept no length, so
+        _propagate_voltage gave it a voltage but no impedance, and the
+        node-level reduction then wrote 0.01 p.u. for it whatever its
+        length."""
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_pu_params,
+        )
+        state = _make_state(buses={})
+        result = ParseResult()
+        line = _feat("line", name="L", voltage_kv=0.0, num_circuits=2,
+                     line_coords=[(21.0, -82.0), (21.5, -82.5)])
+        gmb._create_line(state, line, 5.0, result, {}, None)
+        gl = state.transmission_lines[-1]
+        assert gl.reactance_pu is None
+        # One end turns out to be a 110 kV substation (tagged neighbour)
+        state.buses[gl.from_bus].voltage_kv = 110.0
+
+        gmb._propagate_voltage(state)
+        assert gl.voltage_kv == 110.0
+        r, x, b = estimate_line_pu_params(110.0, gl.length_km)
+        # Two circuits in parallel, as for a tagged line
+        assert gl.reactance_pu == pytest.approx(x / 2)
+        assert gl.resistance_pu == pytest.approx(r / 2)
+        assert gl.susceptance_pu == pytest.approx(b * 2)
 
     def test_explicit_capacity_scaled_by_circuits(self):
         state = _make_state(buses={})
