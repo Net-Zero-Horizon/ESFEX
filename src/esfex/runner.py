@@ -11,6 +11,7 @@ Manages the complete simulation workflow including:
 
 import gc
 import logging
+import math
 import os
 import time
 from copy import deepcopy
@@ -233,6 +234,15 @@ def _stamp_power_in_service(ds, in_service: list, i: int) -> None:
     unit the master built has no config in the results file)."""
     if i < len(in_service) and in_service[i] is not None:
         ds.attrs["rated_power"] = np.asarray(in_service[i], dtype=float)
+
+
+def _stamp_num_units(ds, num_units: list, i: int) -> None:
+    """Record on a ``gen_status`` / ``gen_startup`` dataset the units per
+    node of generator ``i`` (``num_units[i]``, see
+    ``Orchestrator._rebuild_unit_names``): the readers show the units online
+    against it and charge each unit start ``start_up_cost / num_units``."""
+    if i < len(num_units) and num_units[i] is not None:
+        ds.attrs["num_units"] = np.asarray(num_units[i], dtype=np.int64)
 
 
 def existing_power_in_service(unit: dict, power_key: str, num_nodes: int,
@@ -560,6 +570,35 @@ def technology_unit_fields(tech, rep, rep_curve=None) -> dict:
         "current_type": tech.current_type,
         "reservable": tech.reservable,
     }
+
+
+def units_of_capacity(power_mw: float, unit_size_mw: float) -> int:
+    """Units of *unit_size_mw* MW that *power_mw* MW of a built technology
+    reaches unit commitment as: ``ceil(power / unit_size)`` (no unit larger
+    than the declared size), and one unit when the technology has no unit
+    size or nothing is built."""
+    if unit_size_mw <= 0 or power_mw <= 0:
+        return 1
+    return max(1, math.ceil(power_mw / unit_size_mw - 1e-6))
+
+
+def units_in_service(num_units: int, rated_mw: float, power_mw: float,
+                     degradation_rate: float = 0.0, age: float = 0.0) -> int:
+    """Units of an existing plant of *num_units* units and *rated_mw* MW that
+    are left when the master keeps *power_mw* MW of it.
+
+    Degradation shrinks every unit, so a capacity at or above the degraded
+    rating ``rated × (1 − degradation)^age`` keeps all units. Less (a partial
+    life extension) keeps ``ceil(num_units × power / degraded rating)``
+    units: whole units of the original size, the last one possibly smaller.
+    """
+    n = max(1, int(num_units))
+    if n == 1 or rated_mw <= 0:
+        return n
+    ref = rated_mw * (1.0 - degradation_rate) ** max(age, 0.0)
+    if ref <= 0 or power_mw >= ref * (1 - 1e-6):
+        return n
+    return min(n, max(1, math.ceil(n * power_mw / ref - 1e-6)))
 
 
 def battery_technology_unit_fields(bat_tech, rep) -> dict:
@@ -1000,7 +1039,10 @@ class Orchestrator:
                     alias = field_info.alias or field_name
                     val = d.get(alias, d.get(field_name))
                     if isinstance(val, list) and len(val) in (1, node_counts[si]):
-                        if field_name in ("life_time", "initial_age", "min_up", "min_down"):
+                        if field_name == "num_units":
+                            # At least one unit everywhere (no capacity there)
+                            d[alias if alias in d else field_name] = _pad_int(val, si, 1)
+                        elif field_name in ("life_time", "initial_age", "min_up", "min_down"):
                             d[alias if alias in d else field_name] = _pad_int(val, si)
                         else:
                             d[alias if alias in d else field_name] = _pad(val, si)
@@ -1939,6 +1981,7 @@ class Orchestrator:
         ])
         # MW in service per unit, set each year (see _rebuild_unit_names)
         self._gen_in_service_mw = []
+        self._gen_num_units = []
         self._bat_in_service_mw = []
 
         # Preload all availability profiles ONCE (cache for operational phase)
@@ -5978,8 +6021,9 @@ class Orchestrator:
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
             electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
             electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
-            # Status variables: MAX across buses (1 if active at any bus)
-            gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
+            # Units online: SUM across buses (a plant the master built is
+            # spread over the node's buses, each piece with its own units)
+            gen_status = self._aggregate_buses_to_nodes(gen_status, "sum")
             # Prices: MAX across buses (highest marginal price)
             prices = self._aggregate_buses_to_nodes(prices, "max")
             voltage_angle = self._aggregate_buses_to_nodes(voltage_angle, "max")
@@ -6184,8 +6228,12 @@ class Orchestrator:
                            / HOURS_STD_YEAR / float(output.sum()))
                     total_cost = (fc + fxc + mc) * output
                     # Add startup cost if available
+                    # (one of num_units units costs start_up_cost / num_units)
                     if result.gen_startup is not None and g < result.gen_startup.shape[0]:
                         su = gen.start_up_cost[n] if n < len(gen.start_up_cost) else 0.0
+                        units = (self._gen_num_units[g] if g < len(self._gen_num_units)
+                                 else [])
+                        su /= max(1, units[n] if n < len(units) else 1)
                         total_cost += su * result.gen_startup[g, n, :]
                     lcoe[g, n, mask] = total_cost[mask] / output[mask]
             result.lcoe = lcoe
@@ -7241,11 +7289,17 @@ class Orchestrator:
         gen_names: list[str] = []
         gen_fuels: list[str] = []
         gen_in_service: list = []
+        # Units per node (clustered unit commitment): what gen_status counts
+        gen_units: list = []
         # 1) Original generators (same order as sys.generators iteration)
         for key, gen in sys.generators.items():
             gen_names.append(gen.name if hasattr(gen, 'name') else key)
             gen_fuels.append(str(getattr(gen, 'fuel', '') or ''))
             gen_in_service.append(existing(key, gen, "rated_power", True))
+            data = units_config.get(key) or {}
+            gen_units.append([int(n) for n in _per_node_list(
+                data.get("num_units") or getattr(gen, "num_units", None) or [1],
+                num_nodes, 1)])
 
         # 2) Virtual generators from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -7263,6 +7317,10 @@ class Orchestrator:
             # (populated when they were synthesised from a tech).
             gen_fuels.append(str(vdata.get("fuel", "") or ""))
             gen_in_service.append(self._unit_power_by_node(vdata, rp))
+            # Units at the buses that hold capacity, summed per node
+            units = _per_node_list(vdata.get("num_units") or [1], len(rp), 1)
+            gen_units.append([int(round(v)) for v in self._unit_power_by_node(
+                vdata, [u if p > 0 else 0 for u, p in zip(units, rp)])])
 
         # --- Battery names ---
         bat_names = []
@@ -7292,6 +7350,7 @@ class Orchestrator:
         self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
         self._gen_in_service_mw = gen_in_service
+        self._gen_num_units = gen_units
         self._bat_names = unique_unit_names(bat_names)
         self._bat_in_service_mw = bat_in_service
 
@@ -7475,6 +7534,16 @@ class Orchestrator:
                 # Per master location (bus or node): per node here
                 node_caps = self._master_values_by_node(bus_caps, num_nodes)
                 updated[unit_key]["rated_power"] = node_caps.tolist()
+                # Whole units of the original size left of that capacity
+                base = base_units_config[unit_key]
+                units = _per_node_list(base.get("num_units") or [1], num_nodes, 1)
+                rated0 = _per_node_list(base.get("rated_power") or [], num_nodes)
+                deg = _per_node_list(base.get("degradation_rate") or [], num_nodes)
+                age0 = _per_node_list(base.get("initial_age") or [], num_nodes, 0)
+                updated[unit_key]["num_units"] = [
+                    units_in_service(units[n], float(rated0[n]), float(node_caps[n]),
+                                     float(deg[n]), float(age0[n]) + (year_offset or 0))
+                    for n in range(num_nodes)]
                 # Prevent double degradation/retirement in power_system.jl:
                 # the master's capacity already holds both (and the life
                 # extension), so no degradation and no end of life here
@@ -7592,6 +7661,9 @@ class Orchestrator:
                 updated[vgen_key] = {
                     **technology_unit_fields(tech, _rep, _rep_curve),
                     "rated_power": bus_rated,
+                    # Units of the technology's unit_size at each bus
+                    "num_units": [units_of_capacity(float(p), float(u)) for p, u in
+                                  zip(bus_rated, _rep(tech.unit_size, 0.0))],
                     "Availability": tech.availability_file,
                     # Already degraded by master problem — prevent double degradation
                     "degradation_rate": [0.0] * num_buses,
@@ -8066,11 +8138,13 @@ class Orchestrator:
                         ds.attrs["fuel"] = gen_fuels[g] if g < len(gen_fuels) else ""
                         _stamp_power_in_service(ds, gen_in_service, g)
 
-            # --- Generator status (unit commitment on/off) ---
+            # --- Generator status (unit commitment: units online) ---
+            gen_units = getattr(self, '_gen_num_units', None) or []
             if result.gen_status is not None:
                 status_group = scenario.create_group("gen_status")
                 status_group.attrs["description"] = (
-                    "Generator on/off status [nodes x hours] for each generator (1=on, 0=off)"
+                    "Generator units online [nodes x hours] for each generator "
+                    "(0..num_units; 0/1 for a single-unit plant)"
                 )
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_status.shape[0]:
@@ -8080,13 +8154,15 @@ class Orchestrator:
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
-                        ds.attrs["units"] = "binary (0/1)"
+                        ds.attrs["units"] = "units online"
+                        _stamp_num_units(ds, gen_units, g)
 
             # --- Generator startup events (per generator) ---
             if result.gen_startup is not None:
                 startup_group = scenario.create_group("gen_startup")
                 startup_group.attrs["description"] = (
-                    "Generator startup events [nodes x hours] for each generator"
+                    "Generator units started [nodes x hours] for each generator; "
+                    "each start costs start_up_cost / num_units"
                 )
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_startup.shape[0]:
@@ -8096,7 +8172,8 @@ class Orchestrator:
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
-                        ds.attrs["units"] = "binary (0/1)"
+                        ds.attrs["units"] = "units started"
+                        _stamp_num_units(ds, gen_units, g)
 
             # --- Curtailment per node (aggregated across generators) ---
             # Keep the node axis so the visualizer can attribute curtailment
