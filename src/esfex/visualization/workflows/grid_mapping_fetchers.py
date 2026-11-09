@@ -45,7 +45,9 @@ class GridFeature:
     voltage_kv: float = 0.0
     voltage_kv_secondary: float = 0.0   # multi-voltage substations
     capacity_mw: float = 0.0
-    frequency_hz: float = 50.0
+    # 0 = unknown (GridFinder lines, WRI/GEM plants): the builder takes the
+    # mains frequency of the location (infer_frequency_hz) instead
+    frequency_hz: float = 0.0
     current_type: str = "AC"             # "AC" or "DC"
     # Generator-specific
     fuel: str = ""

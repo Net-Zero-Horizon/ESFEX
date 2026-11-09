@@ -404,6 +404,18 @@ class TestBuses:
         bid = model.add_bus(voltage_kv=400.0, junk=1)
         assert model.state.buses[bid].voltage_kv == 400.0
 
+    def test_add_bus_takes_the_frequency_of_its_node(self, model):
+        # A new bus (an auto-complete LV bus behind a transformer) runs at the
+        # frequency of its node's AC buses, not at the 50 Hz default.
+        model.add_bus(parent_node=0, frequency_hz=60.0)
+        model.add_bus(parent_node=0, frequency_hz=0.0, current_type="DC")
+        bid = model.add_bus(parent_node=0, voltage_kv=0.48)
+        assert model.state.buses[bid].frequency_hz == 60.0
+        # An explicit value wins; a bus on a node without buses keeps 50 Hz.
+        assert model.state.buses[
+            model.add_bus(parent_node=0, frequency_hz=50.0)].frequency_hz == 50.0
+        assert model.state.buses[model.add_bus(parent_node=1)].frequency_hz == 50.0
+
     def test_update_bus_valid_and_missing(self, model):
         bid = model.add_bus()
         model.update_bus(bid, voltage_kv=33.0, nope=1)
