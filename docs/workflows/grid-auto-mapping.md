@@ -179,7 +179,7 @@ Levels 3 and 4 of earlier versions ran the same reduction as level 2 and are no 
 | 9. Fuel consistency | All generators | Every generator fuel exists in the catalog and is supplied. |
 | Station clustering | All buses | Same-voltage buses within the station merge radius are merged; internal self-loops are dropped. |
 | Co-located voltage levels | Buses of different voltage at one station | A transformer is inserted between voltage levels that sit within the station merge radius. |
-| Frequency consistency | All buses | Missing frequencies are filled from the location (50/60 Hz), each AC-connected area gets one frequency, and equipment is aligned with its bus. |
+| Frequency consistency | All buses | Missing frequencies are filled from the location (50/60 Hz), each AC-connected area gets one frequency, and equipment and AC lines are aligned with their bus. Features without a frequency tag (GridFinder lines, WRI/GEM plants, untagged OSM elements) take the frequency of their location; earlier versions gave GridFinder lines 50 Hz, so on a sparsely mapped 60 Hz grid such as Cuba their buses outvoted the substations and the whole network was built at 50 Hz. On save, the system's `frequency_nominal` becomes the frequency its AC buses run at (see [Frequency Stability](../formulation/frequency-stability.md)). |
 
 The build worker then runs:
 
@@ -235,7 +235,7 @@ All fetchers normalize raw source data into a common `GridFeature` dataclass bef
 | `voltage_kv` | float | Primary voltage in kV (0 = unknown) |
 | `voltage_kv_secondary` | float | Secondary voltage for multi-voltage substations (0 = single voltage) |
 | `capacity_mw` | float | Rated capacity in MW or MVA (0 = unknown) |
-| `frequency_hz` | float | System frequency in Hz (default 50) |
+| `frequency_hz` | float | Mains frequency in Hz (0 = unknown: the bus takes the frequency of its location) |
 | `current_type` | str | `"AC"`, `"DC"` or `"AC_DC"` |
 | `fuel` | str | Fuel type for generators (e.g., `"Solar"`, `"Natural Gas"`, `"Diesel"`) |
 | `gen_type` | str | `"Renewable"`, `"Non-renewable"` or `"Storage"` |
@@ -561,4 +561,4 @@ print(result.summary())
 
 `build_grid_from_features` runs the build phases listed in [Build pipeline](#build-pipeline); the GUI worker additionally runs parameter inference, simplification and the isolated-component cleanup (`infer_electrical_params` in `grid_mapping_inference`, `apply_simplification_level` and `drop_isolated_components` in `esfex.visualization.data.validation`).
 
-It also accepts `reconnect_max_km` (default 0). A positive value enables an opt-in bounded reconnection: isolated components within that distance of the main network are tapped onto nearby lines or linked to the nearest same-voltage bus, and remaining islands that have only generation or only demand are absorbed into the connected grid. The GUI always passes 0, and the builder modules also contain an `iterative_auto_connect` and a `fuel_auto_route` function (in `grid_mapping_steps`) that the GUI no longer calls.
+It also accepts `reconnect_max_km` (default 0). A positive value enables an opt-in bounded reconnection: isolated components within that distance of the main network are tapped onto nearby lines or linked to the nearest same-voltage bus, and remaining islands that have only generation or only demand are absorbed into the connected grid. The GUI always passes 0, and the builder modules also contain an `iterative_auto_connect` and a `fuel_auto_route` function (in `grid_mapping_steps`) that the GUI no longer calls. The bus-to-bus bridge lines `iterative_auto_connect` adds for components without equipment carry the distance between their end buses as `length_km`, the R, X and B of the standard line type of their voltage on the system base, and the frequency of the main-network bus they connect to.

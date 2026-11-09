@@ -462,6 +462,30 @@ def test_rich_roundtrip_yaml_reloads(tmp_path):
     assert "RT" in states2
 
 
+def test_nominal_frequency_follows_the_buses(tmp_path):
+    """A 60 Hz network is written with frequency_nominal 60 Hz and the nadir
+    limit moved with it (it used to keep the 50 Hz / 49 Hz defaults);
+    rocof_limit (Hz/s) is unchanged."""
+    cfg = _rich_config("F")
+    assert cfg.systems["F"].frequency_nominal == 50.0
+    states = S.config_to_gui_states(cfg)
+    for b in states["F"].buses.values():
+        b.frequency_hz = 60.0
+    out = tmp_path / "f.yaml"
+    S.gui_state_to_yaml(states, cfg, out)
+    sysd = yaml.safe_load(out.read_text())["systems"]["F"]
+    assert sysd["frequency_nominal"] == 60.0
+    assert sysd["frequency_nadir_limit"] == pytest.approx(59.0)
+    assert sysd["rocof_limit"] == 2.0
+
+    # A mixed 50/60 Hz system keeps a nominal frequency some buses run at.
+    next(iter(states["F"].buses.values())).frequency_hz = 50.0
+    S.gui_state_to_yaml(states, cfg, out)
+    sysd = yaml.safe_load(out.read_text())["systems"]["F"]
+    assert sysd["frequency_nominal"] == 50.0
+    assert sysd["frequency_nadir_limit"] == 49.0
+
+
 # ---------------------------------------------------------------------------
 # transformer legacy self-loop repair (from_bus == to_bus, voltages distinct)
 # ---------------------------------------------------------------------------

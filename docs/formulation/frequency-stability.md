@@ -129,7 +129,7 @@ The frequency analysis uses parameters from the system configuration:
 | `rocof_limit` | `SystemConfig` | 2.0 Hz/s | Maximum allowable ROCOF |
 | `frequency_nadir_limit` | `SystemConfig` | 49.0 Hz | Minimum allowable frequency |
 
-Droop and governor time constant are per-node arrays (like other generator parameters), allowing different settings for each generator at each node. The SLD frequency gauge uses the four `SystemConfig` keys; a `frequency_nominal` left at 50 Hz follows the buses' frequency, and a `frequency_nadir_limit` left at 49 Hz becomes 1 Hz below nominal (see [SLD Dynamic Analysis](../gui/sld-dynamic-analysis.md)).
+Droop and governor time constant are per-node arrays (like other generator parameters), allowing different settings for each generator at each node. The SLD frequency gauge uses the four `SystemConfig` keys; a `frequency_nominal` left at 50 Hz follows the buses' frequency, and a `frequency_nadir_limit` left at 49 Hz becomes 1 Hz below nominal (see [SLD Dynamic Analysis](../gui/sld-dynamic-analysis.md)). When the Studio saves a system whose `frequency_nominal` is a frequency none of its AC buses runs at (a Grid Builder network of a 60 Hz region with the 50 Hz default), it writes their most common frequency and moves `frequency_nadir_limit` by the same amount (49 Hz on 50 Hz becomes 59 Hz on 60 Hz). A mixed 50/60 Hz system keeps a nominal frequency some of its buses run at. `rocof_limit` is a protection setting in Hz/s and is not changed.
 
 ## N-1 Frequency Screening
 
