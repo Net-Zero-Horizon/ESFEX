@@ -986,9 +986,12 @@ class GridMappingBuildStep(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
 
-        layout.addWidget(QLabel(
-            tr("grid_builder.b_step_2_build_connect_b")
-        ))
+        # Wrapped: unwrapped, this long intro set the page's minimum width,
+        # wider than the wizard, and everything (the build progress bar
+        # most visibly) ran past the window's edge.
+        intro = QLabel(tr("grid_builder.b_step_2_build_connect_b"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         # ── Target System ────────────────────────────────────────────
         sys_group = QGroupBox(tr("grid_builder.target_system"))
