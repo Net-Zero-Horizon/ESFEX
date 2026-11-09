@@ -1974,7 +1974,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "reservoir_spillage_cost": float(cb.reservoir_spillage_cost) * COST_UNSCALE,
             "demand_shift_cost": float(cb.demand_shift_cost) * COST_UNSCALE,
             "rooftop_curtailment_cost": float(cb.rooftop_curtailment_cost) * COST_UNSCALE,
-            "npv_penalty_cost": float(cb.npv_penalty_cost) * COST_UNSCALE,
             # PrimaryEnergy sub-costs.
             "pe_supply_cost": float(cb.pe_supply_cost) * COST_UNSCALE,
             "pe_loss_cost": float(cb.pe_loss_cost) * COST_UNSCALE,

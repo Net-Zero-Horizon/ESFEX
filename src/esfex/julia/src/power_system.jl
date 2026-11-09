@@ -495,31 +495,6 @@ function build_variables!(model, input::PowerSystemInput)
         reservoir_pump = @variable(model, [g=1:n_gen, b=buses_of_gen[g], t=1:hours], lower_bound=0, base_name="res_pump")
     end
 
-    # Forced replacement variables
-    # Continuous variables for units where replacement_needed=true
-    gen_forced_replacement = nothing
-    bat_forced_replacement = nothing
-    if !isempty(input.replacement_needed)
-        gen_forced_replacement = Dict{Tuple{Int,Int}, VariableRef}()
-        for ((g, b), needed) in input.replacement_needed
-            if needed
-                var = @variable(model, lower_bound=0,
-                               base_name="gen_forced_repl_$(g)_$(b)")
-                gen_forced_replacement[(g, b)] = var
-            end
-        end
-    end
-    if !isempty(input.bat_replacement_needed)
-        bat_forced_replacement = Dict{Tuple{Int,Int}, VariableRef}()
-        for ((bi, b), needed) in input.bat_replacement_needed
-            if needed
-                var = @variable(model, lower_bound=0,
-                               base_name="bat_forced_repl_$(bi)_$(b)")
-                bat_forced_replacement[(bi, b)] = var
-            end
-        end
-    end
-
     # =========================================================================
     # Segment variables for PWL (bidding curve) cost decomposition
     # Created for every generator and battery with a cost curve: a single
@@ -587,8 +562,6 @@ function build_variables!(model, input::PowerSystemInput)
         rooftop_curtailment = rooftop_curtailment,
         ev_charge_status = ev_charge_status,
         demand_shift = demand_shift,
-        gen_forced_replacement = gen_forced_replacement,
-        bat_forced_replacement = bat_forced_replacement,
         reservoir_level = reservoir_level,
         reservoir_spillage = reservoir_spillage,
         reservoir_pump = reservoir_pump,
@@ -1020,55 +993,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     end
 
     # ==========================================================================
-    # NPV Forced Replacement Penalty
-    # Decommissioning cost + NPV-proportional penalty for units needing replacement
-    # ==========================================================================
-    MAX_DECOMMISSION_COST_PER_MW = input.max_decommission_cost_per_mw
-    MAX_NPV_PENALTY_PER_MW = input.max_npv_penalty_per_mw
-    npv_penalty_cost = AffExpr(0.0)
-
-    if vars.gen_forced_replacement !== nothing && !isempty(vars.gen_forced_replacement)
-        for ((g, b), var) in vars.gen_forced_replacement
-            current_capacity = input.generators[g].rated_power[b]
-            if current_capacity <= 0
-                continue
-            end
-            # Decommissioning cost (bounded)
-            decom_cost = get(input.decommissioning_cost_gen, (g, b), 0.0)
-            bounded_decom = min(decom_cost, MAX_DECOMMISSION_COST_PER_MW)
-            if bounded_decom > 0
-                add_to_expression!(npv_penalty_cost, var, bounded_decom * current_capacity)
-            end
-            # NPV penalty (bounded) - only if NPV is negative
-            unit_npv = get(input.unit_npv, (g, b), 0.0)
-            if unit_npv < 0
-                npv_penalty_per_mw = min(abs(unit_npv) / max(current_capacity, 1.0), MAX_NPV_PENALTY_PER_MW)
-                # 10% of NPV penalty to avoid overshadowing dispatch costs
-                add_to_expression!(npv_penalty_cost, var, npv_penalty_per_mw * current_capacity * 0.1)
-            end
-        end
-    end
-
-    if vars.bat_forced_replacement !== nothing && !isempty(vars.bat_forced_replacement)
-        for ((bi, b), var) in vars.bat_forced_replacement
-            current_capacity = input.batteries[bi].max_discharge_power[b]
-            if current_capacity <= 0
-                continue
-            end
-            # Decommissioning cost
-            decom_cost = get(input.decommissioning_cost_bat, (bi, b), 0.0)
-            if decom_cost > 0
-                add_to_expression!(npv_penalty_cost, var, decom_cost * current_capacity)
-            end
-            # NPV penalty
-            bat_npv = get(input.bat_unit_npv, (bi, b), 0.0)
-            if bat_npv < 0
-                add_to_expression!(npv_penalty_cost, var, abs(bat_npv) * 0.1)
-            end
-        end
-    end
-
-    # ==========================================================================
     # Reservoir Spillage Cost (opportunity cost of wasted water)
     # ==========================================================================
     reservoir_spillage_cost = AffExpr(0.0)
@@ -1125,10 +1049,7 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
     window_real_hours = Float64(hours * temporal_resolution_hours)
     non_energy_window_fraction = annual_hours > 0 ?
         window_real_hours / annual_hours : 1.0
-    non_energy_costs = (
-        npv_penalty_cost + fixed_om_cost +
-        electrolyzer_fixed_cost
-    )
+    non_energy_costs = fixed_om_cost + electrolyzer_fixed_cost
     # Start-ups are events inside the window: charged in full, neither per
     # MWh nor prorated (they were prorated × window/year like the annual costs)
     @objective(model, Min,
@@ -1166,7 +1087,6 @@ function build_objective!(model, vars::PowerSystemVariables, input::PowerSystemI
         :reservoir_spillage_cost => reservoir_spillage_cost,
         :demand_shift_cost => demand_shift_cost,
         :rooftop_curtailment_cost => rooftop_curtailment_cost,
-        :npv_penalty_cost => npv_penalty_cost,
         # Added by add_n1_security_constraints!, which runs after this.
         :n1_security_shortfall_cost => AffExpr(0.0),
     )
@@ -3991,7 +3911,6 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             _v(:reservoir_spillage_cost),
             _v(:demand_shift_cost),
             _v(:rooftop_curtailment_cost),
-            _v(:npv_penalty_cost, false),
             # PrimaryEnergy sub-costs. NOT scaled by tres — the PE objective
             # is built per-period/per-hour and already in solver units for the window.
             _v(:pe_supply_cost, false),
@@ -4049,225 +3968,4 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         cost_bd,
         elz_power_out, elz_h2_out,
     )
-end
-
-"""
-    calculate_unit_npv(
-        rated_capacity, fuel_cost_mwh, fixed_cost_mw_yr, maintenance_cost_mwh,
-        remaining_life, degradation_rate, decommissioning_cost,
-        discount_rate, actual_cf, system_lcoe
-    ) -> Float64
-
-Calculate NPV for a specific unit.
-Matches Python legacy `_calculate_unit_npv` (power_system.py lines 622-806).
-
-# Arguments
-- `rated_capacity`: Unit capacity (MW)
-- `fuel_cost_mwh`: Fuel cost per MWh
-- `fixed_cost_mw_yr`: Fixed O&M per MW of capacity per year
-- `maintenance_cost_mwh`: Maintenance cost per MWh
-- `remaining_life`: Years remaining
-- `degradation_rate`: Annual degradation rate
-- `decommissioning_cost`: Decommissioning cost
-- `discount_rate`: Discount rate for NPV
-- `actual_cf`: Actual capacity factor from optimization
-- `system_lcoe`: System electricity price per MWh
-"""
-function calculate_unit_npv(
-    rated_capacity::Float64, fuel_cost_mwh::Float64,
-    fixed_cost_mw_yr::Float64, maintenance_cost_mwh::Float64,
-    remaining_life::Float64, degradation_rate::Float64,
-    decommissioning_cost::Float64, discount_rate::Float64,
-    actual_cf::Float64, system_lcoe::Float64
-)::Float64
-    if remaining_life <= 0
-        return -decommissioning_cost
-    end
-    if rated_capacity <= 0
-        return 0.0
-    end
-
-    # Annual generation and costs
-    annual_generation = rated_capacity * actual_cf * Float64(HOURS_STD_YEAR)  # MWh/year
-    annual_capacity_costs = maintenance_cost_mwh * annual_generation +
-                            fixed_cost_mw_yr * rated_capacity
-    annual_fuel_costs = annual_generation * fuel_cost_mwh
-    total_annual_costs = annual_capacity_costs + annual_fuel_costs
-
-    # NPV over remaining life with degradation
-    npv = 0.0
-    for year in 0:(Int(floor(remaining_life)) - 1)
-        degradation_factor = (1.0 - degradation_rate)^year
-        year_generation = annual_generation * degradation_factor
-        year_costs = total_annual_costs * degradation_factor
-        year_revenue = year_generation * system_lcoe
-        net_cash_flow = year_revenue - year_costs
-        present_value = net_cash_flow / ((1.0 + discount_rate)^year)
-        npv += present_value
-    end
-
-    # Subtract decommissioning cost at end of life
-    if decommissioning_cost > 0 && remaining_life > 0
-        decommissioning_pv = decommissioning_cost / ((1.0 + discount_rate)^remaining_life)
-        npv -= decommissioning_pv
-    end
-
-    return npv
-end
-
-"""
-    update_npv_from_results!(input::PowerSystemInput, result::PowerSystemResult)
-        -> (updated_unit_npv, updated_replacement_needed, updated_bat_unit_npv, updated_bat_replacement_needed)
-
-Update NPV values for all units using actual generation data from optimization results.
-Matches Python legacy `update_npv_from_results` (power_system.py lines 808-938).
-
-Should be called after each optimization window to update unit NPV values based on
-real operational performance.
-
-Returns updated dictionaries suitable for passing to next optimization window's input.
-"""
-function update_npv_from_results!(
-    input::PowerSystemInput,
-    result::PowerSystemResult
-)
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
-    n_bus = input.network.num_buses
-    hours = input.temporal.hours
-    discount_rate = input.discount_rate
-
-    updated_unit_npv = copy(input.unit_npv)
-    updated_replacement_needed = copy(input.replacement_needed)
-    updated_bat_unit_npv = copy(input.bat_unit_npv)
-    updated_bat_replacement_needed = copy(input.bat_replacement_needed)
-
-    # Compute average system electricity price from result energy_prices
-    avg_price = 0.0
-    price_count = 0
-    for b in 1:n_bus, t in 1:hours
-        p = result.energy_prices[b, t]
-        if p != 0.0
-            avg_price += abs(p)
-            price_count += 1
-        end
-    end
-    avg_price = price_count > 0 ? avg_price / price_count : 50.0  # Fallback
-
-    # Update generator NPVs
-    for g in 1:n_gen
-        gen = input.generators[g]
-        for b in 1:n_bus
-            rated = gen.rated_power[b]
-            if rated <= 0
-                continue
-            end
-            lifetime = length(gen.life_time) >= b ? gen.life_time[b] : 25.0
-            initial_age = length(gen.initial_age) >= b ? gen.initial_age[b] : 0.0
-            current_age = initial_age + max(0.0, Float64(input.year - input.base_year))
-            current_age = min(current_age, lifetime)
-            remaining_life = max(0.0, lifetime - current_age)
-
-            degradation_rate = length(gen.degradation_rate) >= b ? gen.degradation_rate[b] : 0.04
-
-            # Compute actual capacity factor from result
-            total_gen = 0.0
-            total_revenue = 0.0
-            for t in 1:hours
-                val = result.gen_output[g, b, t]
-                if val > 0
-                    total_gen += val
-                    # Use nodal price if available
-                    price_t = abs(result.energy_prices[b, t])
-                    if price_t == 0
-                        price_t = avg_price
-                    end
-                    total_revenue += val * price_t
-                end
-            end
-            actual_cf = hours > 0 && rated > 0 ? min(1.0, total_gen / (rated * hours)) : 0.0
-            system_lcoe = total_gen > 0 ? total_revenue / total_gen : avg_price
-
-            # Ensure minimum reasonable price
-            if system_lcoe < 50.0
-                fuel_cost = length(gen.fuel_cost) >= b ? gen.fuel_cost[b] : 0.0
-                maint_cost = length(gen.maintenance_cost) >= b ? gen.maintenance_cost[b] : 0.0
-                system_lcoe = max(50.0, (fuel_cost + maint_cost) * 1.2)
-            end
-
-            decom_cost = get(input.decommissioning_cost_gen, (g, b), 0.0)
-            fuel_cost = length(gen.fuel_cost) >= b ? gen.fuel_cost[b] : 0.0
-            fixed_cost = length(gen.fixed_cost) >= b ? gen.fixed_cost[b] : 0.0
-            maint_cost = length(gen.maintenance_cost) >= b ? gen.maintenance_cost[b] : 0.0
-
-            npv = calculate_unit_npv(
-                rated, fuel_cost, fixed_cost, maint_cost,
-                remaining_life, degradation_rate, decom_cost,
-                discount_rate, actual_cf, system_lcoe
-            )
-
-            updated_unit_npv[(g, b)] = npv
-            updated_replacement_needed[(g, b)] = (
-                remaining_life <= 2.0 ||
-                npv < input.force_replacement_threshold ||
-                (npv < 0 && remaining_life < lifetime / 2)
-            )
-        end
-    end
-
-    # Update battery NPVs
-    for bi in 1:n_bat
-        bat = input.batteries[bi]
-        for b in 1:n_bus
-            rated = bat.max_discharge_power[b]
-            if rated <= 0
-                continue
-            end
-            lifetime = length(bat.life_time) >= b ? bat.life_time[b] : 15.0
-            initial_age = length(bat.initial_age) >= b ? bat.initial_age[b] : 0.0
-            current_age = initial_age + max(0.0, Float64(input.year - input.base_year))
-            current_age = min(current_age, lifetime)
-            remaining_life = max(0.0, lifetime - current_age)
-
-            degradation_rate = length(bat.degradation_rate) >= b ? bat.degradation_rate[b] : 0.05
-
-            # Compute actual capacity factor from discharge
-            total_discharge = 0.0
-            total_revenue = 0.0
-            for t in 1:hours
-                val = result.bat_discharge[bi, b, t]
-                if val > 0
-                    total_discharge += val
-                    price_t = abs(result.energy_prices[b, t])
-                    if price_t == 0
-                        price_t = avg_price
-                    end
-                    total_revenue += val * price_t
-                end
-            end
-            actual_cf = hours > 0 && rated > 0 ? min(1.0, total_discharge / (rated * hours)) : 0.0
-            system_lcoe = total_discharge > 0 ? total_revenue / total_discharge : avg_price
-
-            decom_cost = get(input.decommissioning_cost_bat, (bi, b), 0.0)
-            maint_cost = length(bat.maintenance_cost) >= b ? bat.maintenance_cost[b] : 0.0
-
-            fixed_cost = length(bat.fixed_cost) >= b ? bat.fixed_cost[b] : 0.0
-
-            npv = calculate_unit_npv(
-                rated, 0.0, fixed_cost, maint_cost,
-                remaining_life, degradation_rate, decom_cost,
-                discount_rate, actual_cf, system_lcoe
-            )
-
-            updated_bat_unit_npv[(bi, b)] = npv
-            updated_bat_replacement_needed[(bi, b)] = (
-                remaining_life <= 2.0 ||
-                npv < input.force_replacement_threshold ||
-                (npv < 0 && remaining_life < lifetime / 2)
-            )
-        end
-    end
-
-    return (updated_unit_npv, updated_replacement_needed,
-            updated_bat_unit_npv, updated_bat_replacement_needed)
 end

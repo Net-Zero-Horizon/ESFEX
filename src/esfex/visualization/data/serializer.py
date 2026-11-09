@@ -1125,9 +1125,6 @@ def _system_to_gui_state(sys: SystemConfig,
         min_annual_increment=getattr(sys, 'min_annual_increment', 0.01),
         max_annual_increment=getattr(sys, 'max_annual_increment', 0.10),
         max_annual_system_cost=getattr(sys, 'max_annual_system_cost', 20e9),
-        max_npv_penalty_per_mw=getattr(sys, 'max_npv_penalty_per_mw', 1e6),
-        max_decommission_cost_per_mw=getattr(sys, 'max_decommission_cost_per_mw', 5e5),
-        force_replacement=getattr(sys, 'force_replacement', -5e5),
         life_extension_cost_factor=getattr(sys, 'life_extension_cost_factor', 0.20),
         inertia_limit_threshold=getattr(sys, 'inertia_limit_threshold', 0.1),
         sim_rooftop=getattr(sys, 'sim_rooftop', False),
@@ -3542,9 +3539,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     sys_dict["min_annual_increment"] = s.min_annual_increment
     sys_dict["max_annual_increment"] = s.max_annual_increment
     sys_dict["max_annual_system_cost"] = s.max_annual_system_cost
-    sys_dict["max_npv_penalty_per_mw"] = s.max_npv_penalty_per_mw
-    sys_dict["max_decommission_cost_per_mw"] = s.max_decommission_cost_per_mw
-    sys_dict["force_replacement"] = s.force_replacement
     sys_dict["life_extension_cost_factor"] = s.life_extension_cost_factor
     sys_dict["inertia_limit_threshold"] = s.inertia_limit_threshold
     sys_dict["sim_rooftop"] = s.sim_rooftop

@@ -98,10 +98,6 @@ class PowerSystemAdapter:
 | `re_penetration_target` | `float` | Year-specific RE penetration target override (0-1). |
 | `ev_config_data` | `dict` | EV fleet configuration for V2G constraints. |
 | `electricity_price` | `list[float]` | Time-varying electricity prices for V2G compensation. |
-| `unit_npv`, `bat_unit_npv` | `dict` | NPV values per (generator or battery, bus) for lifecycle-aware dispatch. |
-| `replacement_needed`, `bat_replacement_needed` | `dict` | Boolean flags per (unit, bus) indicating replacement needed. |
-| `decommissioning_cost_gen`, `decommissioning_cost_bat` | `dict` | Decommissioning cost per (unit, bus) in $. |
-| `discount_rate` | `float` | Overrides `sys.discount_rate`. |
 
 **Methods:**
 

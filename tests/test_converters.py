@@ -746,7 +746,6 @@ class TestConvertPowerSystemResult:
         cb.reservoir_spillage_cost = 0.0
         cb.demand_shift_cost = 0.0
         cb.rooftop_curtailment_cost = 0.0
-        cb.npv_penalty_cost = 0.0
         cb.pe_supply_cost = 0.0
         cb.pe_loss_cost = 0.0
         cb.pe_excess_cost = 0.0
@@ -785,7 +784,6 @@ class TestConvertPowerSystemResult:
             "electrolyzer_cost", "converter_cost", "spillage_cost",
             "reservoir_spillage_cost",
             "demand_shift_cost", "rooftop_curtailment_cost",
-            "npv_penalty_cost",
             "pe_supply_cost", "pe_loss_cost", "pe_excess_cost",
             "pe_transport_cost", "pe_investment_cost",
             "pe_electrolyzer_cost",

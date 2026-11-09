@@ -528,9 +528,6 @@ class GuiSystemSettings:
     min_annual_increment: float = 0.01
     max_annual_increment: float = 0.10
     max_annual_system_cost: float = 20e9
-    max_npv_penalty_per_mw: float = 1e6
-    max_decommission_cost_per_mw: float = 5e5
-    force_replacement: float = -5e5
     life_extension_cost_factor: float = 0.20
     inertia_limit_threshold: float = 0.1
     sim_rooftop: bool = False
