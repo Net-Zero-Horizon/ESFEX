@@ -809,8 +809,9 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
     The master charges a life-extended MW ``invest_cost x
     life_extension_cost_factor`` per year. Existing units often carry an
     ``invest_cost`` of 0 (the Studio default), which made extension free.
-    Where a unit's ``invest_cost`` is 0 at a node, the candidate it would be
-    replaced with supplies the cost: for a generator, the technology with
+    Where a unit's ``invest_cost`` is 0 at a node where it has capacity (the
+    other nodes are ignored), the candidate it would be replaced with
+    supplies the cost: for a generator, the technology with
     the same fuel and type (the one named by its ``technology`` field
     first, else the first in config order); for a battery, the battery
     technology named by its ``technology`` field, else the first battery
@@ -875,9 +876,9 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
     gen_costs: dict = {}
     techs = getattr(sys, "technologies", None) or {}
     for key, gen in (getattr(sys, "generators", None) or {}).items():
-        if not any(p > 0 for p in gen.rated_power):
-            continue
-        if all(c > 0 for c in gen.invest_cost[:len(gen.rated_power)]):
+        # Only the nodes where the unit has capacity: elsewhere its 0 cost
+        # prices nothing
+        if not _still_free(gen.invest_cost, gen.rated_power):
             continue
         candidates, prefix = _own_system(key, gen, techs)
         matches = [(k, t) for k, t in candidates
@@ -899,9 +900,7 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
     bat_costs: dict = {}
     btechs = getattr(sys, "battery_technologies", None) or {}
     for key, bat in (getattr(sys, "batteries", None) or {}).items():
-        if not any(p > 0 for p in bat.rated_power):
-            continue
-        if all(c > 0 for c in bat.invest_cost[:len(bat.rated_power)]):
+        if not _still_free(bat.invest_cost, bat.rated_power):
             continue
         candidates, prefix = _own_system(key, bat, btechs)
         named = [m for m in candidates if bat.technology in _names(*m, prefix)]

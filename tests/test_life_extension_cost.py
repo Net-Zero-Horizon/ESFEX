@@ -65,6 +65,22 @@ def test_no_candidate_stays_free_and_warns_once(caplog):
     assert len(warned) == 1 and "'coal'" in warned[0].message
 
 
+def test_cost_set_where_the_unit_is_does_not_warn(caplog):
+    """Only the nodes with capacity count: a unit priced at every node it
+    occupies (0 elsewhere) warned that extending its life was free when no
+    candidate shared its fuel (Cuba: every plant)."""
+    adapters._FREE_EXTENSION_WARNED.clear()
+    gen = _make_generator("Old", "Non-renewable", "Coal", [100.0, 0.0],
+                          invest_cost=[8.0, 0.0])
+    bat = _make_battery("Li", 2).model_copy(
+        update={"rated_power": [0.0, 20.0], "invest_cost": [0.0, 5.0]})
+    sysc = _make_system_config(num_nodes=2, generators={"coal": gen},
+                               batteries={"li": bat})
+    with caplog.at_level(logging.WARNING, logger="esfex.bridge.adapters"):
+        assert life_extension_invest_costs(sysc) == ({}, {})
+    assert not [r for r in caplog.records if "is free" in r.message]
+
+
 def _merged(systems):
     """Merge systems ``{name: SystemConfig}`` as a multi-system run does."""
     from esfex.config.schema import ESFEXConfig, MetaNetworkConfig
