@@ -386,7 +386,7 @@ _SLICE_BOTH_AXES_DATASETS = frozenset({"power_flow"})
 # ``[N, T]`` arrays. Member keys are filtered to system-owned
 # techs (prefix match on system name).
 _TECH_GROUPS = frozenset({
-    "generation",
+    "generation", "gen_status", "gen_startup",
     "capacity_factor", "lcoe", "vallcoe",
     "battery_capacity_factor", "battery_charge", "battery_discharge",
     "battery_lcoe", "battery_soc", "battery_vallcoe",
@@ -695,7 +695,9 @@ def _open_scenario(h5f: h5py.File, base_prefix: str, sc_key: str):
     system behind ``base_prefix``.
 
     Falls back to the legacy per-system mirror when present, so old
-    result files keep working unchanged."""
+    result files keep working unchanged. Either way its per-node arrays
+    and per-unit groups hold this system's nodes only: readers must not
+    slice them again with ``_system_node_range`` (a global node range)."""
     if not base_prefix:
         return h5f["detailed_results"][sc_key]
     legacy = f"{base_prefix}/detailed_results"
@@ -1792,6 +1794,15 @@ def _attr_node_values(val) -> np.ndarray:
         return np.zeros(0)
 
 
+def _config_mw(cfg: dict, key: str, rng) -> float:
+    """``cfg[key]`` (a per-node list over every system's nodes) summed over
+    the node range ``rng`` of a subsystem (all nodes when None)."""
+    mw = _attr_node_values(cfg.get(key, 0.0))
+    if rng is not None and mw.size >= rng[1]:
+        mw = mw[rng[0]:rng[1]]
+    return float(mw.sum())
+
+
 def _gen_capacity_in_service(h5f: h5py.File, base_prefix: str, sc) -> float:
     """Total generator MW in service in scenario ``sc`` over the system's
     nodes: each unit's MW in service recorded on its ``generation`` dataset
@@ -1805,12 +1816,8 @@ def _gen_capacity_in_service(h5f: h5py.File, base_prefix: str, sc) -> float:
     rng = _system_node_range(h5f, base_prefix)
     total = 0.0
     for gi, name in enumerate(_load_gen_data(sc)):
-        cfg = resolve(name, gi, power_in_service(grp, name))
-        mw = _attr_node_values(cfg.get("rated_power", 0.0))
-        # The configs' and the attr's per-node lists span every system
-        if rng is not None and mw.size >= rng[1]:
-            mw = mw[rng[0]:rng[1]]
-        total += float(mw.sum())
+        total += _config_mw(resolve(name, gi, power_in_service(grp, name)),
+                            "rated_power", rng)
     return total
 
 
@@ -9241,12 +9248,9 @@ class UCCommitmentHeatmapChart(QWidget):
                 arr = status_grp[gen_name][:]
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
-                    node_offset = lo
-                else:
-                    node_offset = 0
+                # Already this system's nodes (_open_scenario); the label
+                # keeps the global node index
+                node_offset = rng[0] if rng is not None else 0
                 if n_hours == 0:
                     n_hours = arr.shape[1]
                 for n_i in range(arr.shape[0]):
@@ -9335,7 +9339,6 @@ class UCDispatchStackChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             if "generation" not in sc:
                 return {"error": "generation missing"}
-            rng = _system_node_range(h5f, bp)
 
             # Build fuel/tech maps the same way the dashboard mix does:
             # each dataset finds its unit's config (fuel) by name
@@ -9346,12 +9349,7 @@ class UCDispatchStackChart(QWidget):
             for gi, (gen_name, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    sliced = arr[lo:hi]
-                else:
-                    sliced = arr
-                hourly = sliced.sum(axis=0)
+                hourly = arr.sum(axis=0)
                 if n_hours == 0:
                     n_hours = int(hourly.shape[0])
                 tech = _tech_bucket_for_gen(unit_config(gen_name, gi), gen_name)
@@ -9369,9 +9367,6 @@ class UCDispatchStackChart(QWidget):
                 for arr in grp.values():
                     if arr.ndim < 2:
                         continue
-                    if rng is not None:
-                        lo, hi = rng
-                        arr = arr[lo:hi]
                     s = arr.sum(axis=0)
                     if len(s) < n_hours:
                         s = np.pad(s, (0, n_hours - len(s)))
@@ -9392,9 +9387,6 @@ class UCDispatchStackChart(QWidget):
                 # first n_hours nodes (a curve matching neither the forecast
                 # nor the dispatch).
                 arr = orient_to_node_hours(arr, n_hours)
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 s = arr.sum(axis=0)
                 if len(s) < n_hours:
                     s = np.pad(s, (0, n_hours - len(s)))
@@ -9556,16 +9548,9 @@ class UCLoadShedCurtailmentChart(QWidget):
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
-            rng = _system_node_range(h5f, bp)
 
-            # ``rng`` is a NODE index range (used to isolate one system in a
-            # multi-system file). It applies only to per-NODE arrays such as
-            # ``demand``. Per-BUS arrays (``loss_load``, ``curtailment`` —
-            # first dim = bus count, which for a bus-level / reduced network
-            # is far larger than the node count) must NOT be sliced with it,
-            # or the total is truncated to the first few buses (which read the
-            # shed as a tiny fraction of demand). Detect the node dimension
-            # from the demand array and slice only matching arrays.
+            # A subsystem's scenario is already sliced to its nodes
+            # (_open_scenario): the arrays are summed as read.
             #
             # ``demand`` is stored (hours, nodes) while the per-node result
             # arrays are (nodes, hours); orient everything to (nodes, hours)
@@ -9578,10 +9563,6 @@ class UCLoadShedCurtailmentChart(QWidget):
                    if "electricity_prices" in sc
                    and len(sc["electricity_prices"].shape) == 1 else None)
 
-            _n_nodes = None
-            if "demand" in sc and len(sc["demand"].shape) >= 2:
-                _n_nodes = _demand_node_hours(sc).shape[0]
-
             def _hourly_total(key: str) -> np.ndarray:
                 if key not in sc:
                     return np.zeros(0)
@@ -9589,10 +9570,6 @@ class UCLoadShedCurtailmentChart(QWidget):
                 if arr.ndim < 2:
                     return arr.astype(float)
                 arr = orient_to_node_hours(arr, _nh)
-                if (rng is not None and _n_nodes is not None
-                        and arr.shape[0] == _n_nodes):
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 return arr.sum(axis=0).astype(float)
 
             ls = _hourly_total("loss_load")
@@ -9710,8 +9687,8 @@ class UCMarginalTechChart(QWidget):
 
             unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
-            status_grp = sc.get("gen_status") if hasattr(sc, "get") else None
-            # Per-hour system-wide load shed (sliced to system nodes).
+            status_grp = sc["gen_status"] if "gen_status" in sc else None
+            # Per-hour system-wide load shed (the system's nodes).
             # When this is > 0 the balance constraint is pegged to VOLL
             # and the marginal "unit" is the load-shed variable itself,
             # not whichever thermal is dispatching at its rated power.
@@ -9719,9 +9696,6 @@ class UCMarginalTechChart(QWidget):
             if "loss_load" in sc:
                 ls_arr = sc["loss_load"][:]
                 if ls_arr.ndim >= 2:
-                    if rng is not None:
-                        lo, hi = rng
-                        ls_arr = ls_arr[lo:hi]
                     ls_hourly = ls_arr.sum(axis=0).astype(float)
                 else:
                     ls_hourly = ls_arr.astype(float)
@@ -9731,9 +9705,6 @@ class UCMarginalTechChart(QWidget):
                     arr = status_grp[k][:]
                     if arr.ndim < 2:
                         continue
-                    if rng is not None:
-                        lo, hi = rng
-                        arr = arr[lo:hi]
                     status_by_gen[k] = arr
 
             # Determine common hour count from generation.
@@ -9750,9 +9721,9 @@ class UCMarginalTechChart(QWidget):
                 ep = sc["electricity_prices"][:]
                 hour_lmp = [float(v) for v in ep[:n_hours]]
 
-            # Per-gen rated capacity (max of fuel_cost-scaled gen_output
-            # would be circular; pull from config "rated_power" when
-            # available, else from the per-hour max observed).
+            # Per-gen capacity: its MW in service over the system's nodes
+            # (config rated_power for older files), else the per-hour max
+            # observed.
             def _max_node(arr: np.ndarray) -> np.ndarray:
                 # Sliced array shape [nodes_in_sys, hours]; for marginal
                 # logic we collapse to system-level total per gen.
@@ -9770,9 +9741,6 @@ class UCMarginalTechChart(QWidget):
                 arr = gen_data[gname]
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 tot = _max_node(arr)
                 if len(tot) < n_hours:
                     tot = np.pad(tot, (0, n_hours - len(tot)))
@@ -9793,8 +9761,8 @@ class UCMarginalTechChart(QWidget):
                 fc = _attr_scalar(cfg, "fuel_cost")
                 mc = _attr_scalar(cfg, "maintenance_cost")
                 var_costs[gi] = fc + mc
-                # Rated power: prefer config attr, fall back to observed max.
-                rp = _attr_scalar(cfg, "rated_power")
+                # MW in service, fall back to observed max.
+                rp = _config_mw(cfg, "rated_power", rng)
                 rated[gi] = rp if rp > 0 else float(np.max(gen_total[gi, :]))
                 techs.append(_tech_bucket_for_gen(cfg, gname))
 
@@ -10052,31 +10020,20 @@ class UCStorageSOCChart(QWidget):
         n_days = max(1, n_hours // steps_per_day)
         usable = n_days * steps_per_day
 
-        def _slice_sys(arr: np.ndarray) -> np.ndarray:
-            if arr.ndim < 2:
-                return arr
-            if rng is not None:
-                lo, hi = rng
-                return arr[lo:hi]
-            return arr
-
         bat_names = sorted(set(soc.keys()) | set(charge.keys()) | set(discharge.keys()))
         out: dict[str, dict] = {
             "soc_pct": {}, "daily_cycles": {}, "totals": {},
         }
         for bi, bname in enumerate(bat_names):
-            soc_arr = _slice_sys(soc.get(bname, np.zeros((1, n_hours))))
-            ch_arr  = _slice_sys(charge.get(bname, np.zeros((1, n_hours))))
-            dh_arr  = _slice_sys(discharge.get(bname, np.zeros((1, n_hours))))
+            soc_arr = soc.get(bname, np.zeros((1, n_hours)))
+            ch_arr  = charge.get(bname, np.zeros((1, n_hours)))
+            dh_arr  = discharge.get(bname, np.zeros((1, n_hours)))
             # Capacity (MWh): prefer the peak of the summed SOC; fall back
             # to the battery's configured energy capacity over the system's
             # nodes (its config found by name)
             cap_mwh = float(soc_arr.sum(axis=0).max()) if soc_arr.size else 0.0
             if cap_mwh <= 0:
-                cap = _attr_node_values(bat_config(bname, bi).get("capacity", 0.0))
-                if rng is not None and cap.size >= rng[1]:
-                    cap = cap[rng[0]:rng[1]]
-                cap_mwh = float(cap.sum())
+                cap_mwh = _config_mw(bat_config(bname, bi), "capacity", rng)
             soc_total = soc_arr.sum(axis=0)[:n_hours]
             soc_pct = (
                 (soc_total / cap_mwh * 100.0) if cap_mwh > 0
@@ -10173,12 +10130,8 @@ class UCNetLoadDurationChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             if "demand" not in sc:
                 return {"error": "demand missing"}
-            rng = _system_node_range(h5f, bp)
             dem_arr = _demand_node_hours(sc)
             if dem_arr.ndim >= 2:
-                if rng is not None:
-                    lo, hi = rng
-                    dem_arr = dem_arr[lo:hi]
                 demand = dem_arr.sum(axis=0).astype(float)
             else:
                 demand = dem_arr.astype(float)
@@ -10196,9 +10149,6 @@ class UCNetLoadDurationChart(QWidget):
                 tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
                 if tech not in RE_LABELS:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 hourly = arr.sum(axis=0).astype(float)
                 if len(hourly) < n_hours:
                     hourly = np.pad(hourly, (0, n_hours - len(hourly)))
@@ -10290,7 +10240,6 @@ class UCRampDistributionChart(QWidget):
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
-            rng = _system_node_range(h5f, bp)
             unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
             # Aggregate ramp magnitudes per tech bucket.
@@ -10299,9 +10248,6 @@ class UCRampDistributionChart(QWidget):
                 if arr.ndim < 2:
                     continue
                 tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 # System-level hourly output for this generator, then
                 # |ΔP| between consecutive hours.
                 hourly = arr.sum(axis=0).astype(float)
@@ -10421,12 +10367,9 @@ class UCLMPByNodeChart(QWidget):
             rng = _system_node_range(h5f, bp)
             if nodal.ndim != 2:
                 return {"error": "nodal prices not 2-D"}
-            if rng is not None:
-                lo, hi = rng
-                nodal = nodal[lo:hi]
-                node_offset = lo
-            else:
-                node_offset = 0
+            # Rows and node names are already this system's (_open_scenario,
+            # _open_system_config); the fallback label keeps the global index
+            node_offset = rng[0] if rng is not None else 0
             # Try to pull node names from system_configuration.
             node_labels: list[str] = []
             sc_cfg = _open_system_config(h5f, bp)
@@ -10436,8 +10379,8 @@ class UCLMPByNodeChart(QWidget):
                     names = sc_cfg["nodes"]["name"][:]
                     for i in range(nodal.shape[0]):
                         gi = node_offset + i
-                        if gi < len(names):
-                            v = names[gi]
+                        if i < len(names):
+                            v = names[i]
                             if isinstance(v, bytes):
                                 v = v.decode(errors="replace")
                             node_labels.append(str(v))

@@ -93,7 +93,7 @@ class FinancialAssumptions:
 |-------|---------|-------------|
 | `ppa_price` | 0.0 | Power Purchase Agreement price (\$/MWh). When 0, nodal prices from the optimization (shadow prices of the power balance constraint) are used as the revenue basis. |
 | `ppa_escalation` | 0.02 | Annual PPA price escalation rate. Price in year \(y\): \(P_0 (1 + e)^y\). |
-| `capacity_payment` | 0.0 | Annual capacity payment (\$/MW-year). Multiplied by total installed capacity. |
+| `capacity_payment` | 0.0 | Annual capacity payment (\$/MW-year). Multiplied by each year's generator MW in service over all nodes (the `rated_power` attribute of the results' generation datasets; older files: the configured `rated_power`). |
 | `rec_price` | 0.0 | Renewable Energy Certificate price (\$/MWh). Applied to renewable generation only. |
 
 ### Environmental

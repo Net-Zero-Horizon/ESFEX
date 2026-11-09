@@ -747,6 +747,26 @@ def _recalculate_costs(
     return costs
 
 
+def _generator_mw_in_service(year_data: dict, gen_configs: list[dict],
+                             tech_configs: list[dict]) -> float:
+    """Total generator MW in service in a year, over all nodes: the MW in
+    service recorded on each ``generation`` dataset (the master's builds,
+    retirements, life extension and degradation applied), or, for a unit
+    without it (files written before it was recorded), its configured
+    ``rated_power``."""
+    gen_by_name = _index_configs_by_name(gen_configs)
+    tech_by_name = _index_configs_by_name(tech_configs)
+    in_service = year_data.get("power_in_service", {}).get("generation", {})
+    total = 0.0
+    for idx, name in enumerate(sorted(year_data.get("generation", {}))):
+        n_nodes = max(1, np.shape(year_data["generation"][name])[0])
+        cfg = _lookup_config(name, gen_by_name, gen_configs, idx,
+                             tech_by_name=tech_by_name,
+                             in_service_mw=in_service.get(name))
+        total += float(np.sum(_as_array(cfg.get("rated_power", 0.0), n_nodes)))
+    return total
+
+
 def _year_share(series: np.ndarray, temporal_res: float) -> float:
     """Share of a year covered by ``series`` (steps on its last axis)."""
     return series.shape[-1] * temporal_res / HOURS_STD_YEAR
@@ -931,6 +951,7 @@ def compute_system_financials(
     annual_startup = np.zeros(n_years)
     annual_penalties = np.zeros(n_years)
     annual_generation = np.zeros(n_years)  # MWh
+    annual_capacity = np.zeros(n_years)    # generator MW in service
     annual_co2 = np.zeros(n_years)
     annual_capex = np.zeros(n_years)
     total_capex = 0.0
@@ -960,6 +981,8 @@ def compute_system_financials(
             continue
 
         year_data = _load_year_data(h5_path, scenario_key)
+        annual_capacity[y_idx] = _generator_mw_in_service(
+            year_data, info["gen_configs"], info["tech_configs"])
 
         # Try granular cost breakdown first
         cbd = _try_load_cost_breakdown(h5_path, year)
@@ -1210,12 +1233,8 @@ def compute_system_financials(
     # Capacity payments
     cap_rev = np.zeros(n_years)
     if assumptions.capacity_payment > 0:
-        # Use total installed capacity (rough estimate)
-        total_mw = sum(
-            float(_as_array(gc.get("rated_power", 0.0), 1)[0])
-            for gc in info["gen_configs"]
-        )
-        cap_rev[:] = total_mw * assumptions.capacity_payment
+        # On each year's generator MW in service, over all nodes
+        cap_rev = annual_capacity * assumptions.capacity_payment
 
     total_revenue = annual_revenue + rec_rev + cap_rev
 

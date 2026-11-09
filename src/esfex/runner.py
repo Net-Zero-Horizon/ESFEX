@@ -4874,13 +4874,38 @@ class Orchestrator:
         ``transfer_investment_{i}_{j}`` and the life-extension arrays are
         indexed by bus there and by node otherwise.
         """
+        buses = self.master_system.buses or []
+        if self._master_on_buses() and 0 <= idx < len(buses):
+            return buses[idx].parent_node
+        return idx
+
+    def _master_on_buses(self) -> bool:
+        """Whether the master's per-location results (investments, life
+        extension, cumulative capacities) are indexed by the buses of its
+        network rather than by node: it solves on its own buses when they
+        are not one per node, in node order (``node_bus_mapping_required``).
+        The array length cannot tell: a network can have as many buses as
+        nodes without being one bus per node."""
         from esfex.bridge.converters import node_bus_mapping_required
 
         base = self.master_system
         buses = base.buses or []
-        if buses and node_bus_mapping_required(buses, base.num_nodes) and 0 <= idx < len(buses):
-            return buses[idx].parent_node
-        return idx
+        return bool(buses) and node_bus_mapping_required(buses, base.num_nodes)
+
+    def _master_values_by_node(self, values, num_nodes: int) -> np.ndarray:
+        """One unit's or technology's per-location master values (MW, MWh)
+        as a per-node array: the values of a node's buses are summed on a
+        bus-level master (see :meth:`_master_on_buses`)."""
+        arr = np.asarray(values, dtype=float)
+        out = np.zeros(num_nodes)
+        if not self._master_on_buses():
+            out[:min(len(arr), num_nodes)] = arr[:num_nodes]
+            return out
+        for idx, v in enumerate(arr):
+            node = self._master_index_node(idx)
+            if 0 <= node < num_nodes:
+                out[node] += v
+        return out
 
     def _master_investments_by_node(self, investments: dict) -> dict:
         """*investments* (``{key: value}`` of the master) with each key's
@@ -7297,32 +7322,12 @@ class Orchestrator:
         # So we must ZERO OUT degradation_rate and initial_age to prevent
         # power_system.jl from applying them again (double degradation/retirement).
         gen_caps = year_caps.get('gen', {})
-        # Detect master granularity (same logic as for tech_caps below).
-        gen_master_per_node = (
-            bus_to_node is not None
-            and gen_caps
-            and len(next(iter(gen_caps.values()))) == num_nodes
-        )
         for g_jl, bus_caps in gen_caps.items():
             py_idx = int(g_jl) - 1  # Julia 1-based → Python 0-based
             unit_key = gen_idx_to_key.get(py_idx)
             if unit_key and unit_key in updated:
-                bus_arr = np.array(bus_caps)
-                if gen_master_per_node:
-                    # Master output is already per-node; copy directly.
-                    node_caps = np.array(bus_arr[:num_nodes], dtype=float)
-                    if len(node_caps) < num_nodes:
-                        node_caps = np.concatenate([
-                            node_caps, np.zeros(num_nodes - len(node_caps))
-                        ])
-                else:
-                    # Aggregate per-bus capacities to per-node by
-                    # mapping each bus to its parent node.
-                    node_caps = np.zeros(num_nodes)
-                    for b_idx in range(len(bus_arr)):
-                        n_idx = bus_to_node[b_idx] if bus_to_node else b_idx
-                        if n_idx < num_nodes:
-                            node_caps[n_idx] += bus_arr[b_idx]
+                # Per master location (bus or node): per node here
+                node_caps = self._master_values_by_node(bus_caps, num_nodes)
                 updated[unit_key]["rated_power"] = node_caps.tolist()
                 # Prevent double degradation/retirement in power_system.jl:
                 # the master's capacity already holds both (and the life
@@ -7354,21 +7359,12 @@ class Orchestrator:
         tech_caps = year_caps.get('tech', {})
         tech_keys = list(self.primary_system.technologies.keys())
 
-        # Detect master granularity: master may run on a node-level network
-        # (when `primary_system.buses` is empty after merge → converters
-        # auto-create one bus per node, so `n_buses == num_nodes`).  In that
-        # case the per-bus arrays returned by Julia are actually **per-node**
-        # (length num_nodes) and must be mapped onto the bus-level
-        # operational network.  Each node's investment is placed at the
-        # node's first (canonical) bus — a deterministic, neutral mapping.
-        # (No demand-fraction redistribution heuristic: capacity is placed
-        # organically and the DC-OPF routes it; if a single-bus injection is
-        # infeasible that indicates a real model issue to fix, not to mask.)
-        master_per_node = (
-            bus_to_node is not None
-            and tech_caps
-            and len(next(iter(tech_caps.values()))) == num_nodes
-        )
+        # Master granularity (_master_on_buses, not the array length): a
+        # node-level master (the merged master network, one bus per node)
+        # returns per-node arrays, laid out below on the bus-level
+        # operational network; a bus-level master (the master solves on the
+        # operational buses themselves) returns per-bus arrays.
+        master_per_node = bus_to_node is not None and not self._master_on_buses()
         first_bus_of_node: dict[int, int] | None = None
         node_buses_map: dict[int, list[int]] | None = None
         if master_per_node or bus_to_node is not None:
@@ -7468,11 +7464,7 @@ class Orchestrator:
         bat_tech_pow_caps = year_caps.get('bat_tech_power', {})
         bat_tech_cap_caps = year_caps.get('bat_tech_capacity', {})
         bat_tech_keys = list(self.primary_system.battery_technologies.keys())
-        bat_master_per_node = (
-            bus_to_node is not None
-            and bat_tech_pow_caps
-            and len(next(iter(bat_tech_pow_caps.values()))) == num_nodes
-        )
+        bat_master_per_node = bus_to_node is not None and not self._master_on_buses()
         if bat_master_per_node and first_bus_of_node is None:
             first_bus_of_node = {}
             for b_idx, b in enumerate(buses):
@@ -7573,16 +7565,7 @@ class Orchestrator:
             return
 
         def to_nodes(arr) -> np.ndarray:
-            arr = np.asarray(arr, dtype=float)
-            out = np.zeros(num_nodes)
-            if bus_to_node is None or len(arr) == num_nodes:
-                out[:min(len(arr), num_nodes)] = arr[:num_nodes]
-                return out
-            for b_idx, v in enumerate(arr):
-                n_idx = bus_to_node[b_idx] if b_idx < len(bus_to_node) else b_idx
-                if 0 <= n_idx < num_nodes:
-                    out[n_idx] += v
-            return out
+            return self._master_values_by_node(arr, num_nodes)
 
         bat_keys = [k for k, d in updated.items()
                     if d.get("_type") == "battery" or d.get("type") == "Storage"]

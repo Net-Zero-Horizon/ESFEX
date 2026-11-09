@@ -263,3 +263,173 @@ def test_technology_properties_follow_the_bus_nodes(tmp_path):
     assert bat["MaxDischargePower"] == [5.0]
     assert bat["maintenance_cost"] == [4.0]
     assert bat["efficiency_charge"] == [0.9]
+
+
+# ── second system of a multi-system file: no second node slicing ──────
+
+def _two_system_file(path):
+    """Systems A (node 0) and B (node 1). In B: coal (fuel 50, 40 MW in
+    service of 100 configured) at full output, gas (fuel 80, 30 MW) at 25 MW
+    and oil (fuel 120, 10 MW) at full output: gas is the only partial unit,
+    the marginal one while committed."""
+    H = 24
+    with h5py.File(path, "w") as f:
+        f.attrs["temporal_resolution_hours"] = 1
+        f.attrs["subsystem_names"] = ["A", "B"]
+        f.attrs["subsystem_offsets"] = [0, 1]
+        f.attrs["subsystem_node_counts"] = [1, 1]
+        f.create_dataset("summary_results/year", data=[2025])
+        sc = f.create_group("system_configuration")
+        sc.create_dataset("nodes/name", data=np.array([b"nA", b"nB"]))
+        gens = sc.create_group("generators")
+        gens.attrs["num_generators"] = 3
+        for i, (name, fuel, cost, rated) in enumerate((
+                ("coal", "Coal", 50.0, 100.0), ("gas", "Gas", 80.0, 30.0),
+                ("oil", "Oil", 120.0, 10.0))):
+            gens.create_group(f"generator_{i}").attrs.update(
+                name=f"B/{name}", key=f"B__{name}", fuel=fuel, fuel_cost=cost,
+                maintenance_cost=0.0, rated_power=f"[0.0, {rated}]")
+        bats = sc.create_group("batteries")
+        bats.attrs["num_batteries"] = 1
+        bats.create_group("battery_0").attrs.update(
+            name="B/bess", key="B__bess", capacity="[0.0, 40.0]")
+        y = f.create_group(SC)
+        y.attrs["year"] = 2025
+
+        def per_node(a, b):
+            return np.array([np.full(H, a), np.full(H, b)], dtype=float)
+
+        coal = y.create_dataset("generation/B - coal", data=per_node(0.0, 40.0))
+        coal.attrs["rated_power"] = np.array([0.0, 40.0])
+        y.create_dataset("generation/B - gas", data=per_node(0.0, 25.0))
+        y.create_dataset("generation/B - oil", data=per_node(0.0, 10.0))
+        status = np.array([np.zeros(H), np.r_[np.zeros(4), np.ones(H - 4)]])
+        for name in ("B - coal", "B - gas", "B - oil"):
+            y.create_dataset(f"gen_status/{name}", data=status)
+        y.create_dataset("demand", data=per_node(1.0, 75.0))
+        y.create_dataset("loss_load", data=per_node(0.0, 0.5))
+        y.create_dataset("curtailment", data=per_node(0.0, 3.0))
+        y.create_dataset("nodal_electricity_prices", data=per_node(5.0, 80.0))
+        y.create_dataset("electricity_prices", data=np.full(H, 40.0))
+        y.create_dataset("battery_soc/B - bess", data=per_node(0.0, 20.0))
+        y.create_dataset("battery_charge/B - bess", data=per_node(0.0, 1.0))
+        y.create_dataset("battery_discharge/B - bess", data=per_node(0.0, 2.0))
+    return path
+
+
+def test_uc_charts_of_a_second_system_read_its_nodes_once(tmp_path):
+    """The subsystem view already holds B's node; the charts sliced it
+    again with B's global range and read nothing."""
+    from esfex.visualization.panels import results_charts as rc
+    path = _two_system_file(tmp_path / "res.h5")
+    kw = dict(base_prefix="systems/B")
+
+    stack = rc.UCDispatchStackChart._build_payload(None, path, [2025], **kw)
+    assert {k: sum(v) for k, v in stack["gen_by_tech"].items()} == pytest.approx(
+        {"Coal": 960.0, "Gas": 600.0, "Fuel oil": 240.0})
+    assert sum(stack["demand"]) == pytest.approx(75.0 * 24)
+    assert sum(stack["bat_discharge"]) == pytest.approx(48.0)
+
+    shed = rc.UCLoadShedCurtailmentChart._build_payload(None, path, [2025], **kw)
+    assert shed["load_shed_total_mwh"] == pytest.approx(12.0)
+    assert shed["demand_total_mwh"] == pytest.approx(75.0 * 24)
+
+    nl = rc.UCNetLoadDurationChart._build_payload(None, path, [2025], **kw)
+    assert max(nl["demand_sorted"]) == pytest.approx(75.0)
+
+    soc = rc.UCStorageSOCChart._build_payload(None, path, [2025], **kw)
+    assert soc["totals"]["B - bess"]["discharge_mwh"] == pytest.approx(48.0)
+
+    heat = rc.UCCommitmentHeatmapChart._build_payload(None, path, [2025], **kw)
+    assert heat["units"] == ["B - coal @ n1", "B - gas @ n1", "B - oil @ n1"]
+
+    lmp = rc.UCLMPByNodeChart._build_payload(None, path, [2025], **kw)
+    assert lmp["nodes"] == ["nB"]
+    assert lmp["mean_by_node"] == pytest.approx([80.0])
+
+    marg = rc.UCMarginalTechChart._build_payload(None, path, [2025], **kw)
+    # Coal runs at its 40 MW in service (not the per-node mean of its
+    # rating): gas, the only partial unit, is marginal while committed
+    assert marg["hours_marginal"]["Gas"] == 20
+
+
+def test_uc_ramps_of_a_second_system(tmp_path):
+    from esfex.visualization.panels import results_charts as rc
+    path = _two_system_file(tmp_path / "res.h5")
+    with h5py.File(path, "a") as f:
+        f[f"{SC}/generation/B - gas"][1, 12:] = 5.0
+    ramps = rc.UCRampDistributionChart._build_payload(
+        None, path, [2025], base_prefix="systems/B")
+    assert "error" not in ramps and "Gas" in str(ramps)
+
+
+def test_dashboard_uc_hourly_of_a_second_system(tmp_path):
+    from esfex.visualization.panels.dashboard_loader import DashboardLoader
+    from esfex.visualization.panels.results_charts import _open_scenario
+    path = _two_system_file(tmp_path / "res.h5")
+    with h5py.File(path, "r") as f:
+        sc = _open_scenario(f, "systems/B", "year_2025_threshold_0")
+        out = DashboardLoader({}, {})._read_uc_hourly(f, "systems/B", sc)
+    assert sum(out["trajectory"]["demand_mw"]) == pytest.approx(75.0 * 24)
+    mix = {s["label"]: sum(s["values"]) for s in out["mix"]["series_pos"]}
+    assert mix["Coal"] == pytest.approx(960.0)
+
+
+def test_dashboard_start_ups_of_a_second_system(tmp_path):
+    """gen_status is now sliced by the view, like generation: the cost
+    reader must not slice it again."""
+    from esfex.visualization.panels.dashboard_loader import DashboardLoader
+    path = _two_system_file(tmp_path / "res.h5")
+    with h5py.File(path, "a") as f:
+        gens = f["system_configuration/generators"]
+        for i in range(3):
+            gens[f"generator_{i}"].attrs["start_up_cost"] = "[0.0, 100.0]"
+    with h5py.File(path, "r") as f:
+        cost = DashboardLoader({}, {})._per_system_cost(f, "systems/B", 2025)
+    # One start-up per unit at B's node (status 0 → 1 at hour 4)
+    assert cost["startup_cost"] == pytest.approx(3 * 100.0)
+
+
+# ── capacity payment ──────────────────────────────────────────────────
+
+def test_capacity_payment_on_the_mw_in_service(tmp_path):
+    """It took node 0 of each configured generator's rated_power (0 for a
+    unit at another node), never the master's builds or retirements."""
+    path = _two_system_file(tmp_path / "res.h5")
+    base = fa.compute_system_financials(path, fa.FinancialAssumptions())
+    paid = fa.compute_system_financials(
+        path, fa.FinancialAssumptions(capacity_payment=1000.0))
+    extra = (paid.cash_flows["revenue"].to_numpy()
+             - base.cash_flows["revenue"].to_numpy())
+    # coal 40 MW in service + gas 30 + oil 10 configured
+    assert extra == pytest.approx([1000.0 * 80.0])
+
+
+# ── master results indexed by bus or by node ─────────────────────────
+
+def test_bus_level_master_with_as_many_buses_as_nodes(tmp_path):
+    """Two nodes, two buses both at node 0: the master solves on the buses,
+    but its arrays (as long as the node list) were read per node."""
+    old = _make_generator("Old", "Non-renewable", "Coal", [100.0, 0.0],
+                          life_time=[40, 40], initial_age=[0, 0])
+    tech = _make_technology("Gas CC", "Gas", 2, tech_type="Non-renewable")
+    sysc = _make_system_config(num_nodes=2, generators={"old": old},
+                               technologies={"gas": tech})
+    orch = Orchestrator(_make_esfex_config(sysc), output_dir=tmp_path)
+    buses = [SimpleNamespace(parent_node=0, demand_fraction=1.0),
+             SimpleNamespace(parent_node=0, demand_fraction=0.0)]
+    orch.primary_system = orch.primary_system.model_copy(update={"buses": buses})
+    orch.master_system = orch.primary_system          # a bus-level master
+    gen_key = next(iter(orch.primary_system.generators))
+    tech_key = next(iter(orch.primary_system.technologies))
+    units = orch._build_config_from_cumulative(orch._gather_units(), {
+        "gen": {1: np.array([60.0, 20.0])},
+        "tech": {1: np.array([30.0, 10.0])}})
+    # Both buses are node 0's
+    assert units[gen_key]["rated_power"] == [80.0, 0.0]
+    assert units[f"inv_{tech_key}"]["rated_power"] == [30.0, 10.0]
+    # A node-level master keeps its per-node arrays
+    orch.master_system = orch.master_system.model_copy(update={"buses": []})
+    units = orch._build_config_from_cumulative(orch._gather_units(), {
+        "gen": {1: np.array([60.0, 20.0])}})
+    assert units[gen_key]["rated_power"] == [60.0, 20.0]
