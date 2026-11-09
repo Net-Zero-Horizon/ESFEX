@@ -1902,7 +1902,7 @@ function generators_for_day(generators::AbstractVector, start_hour::Int, hours::
             gen.risk_coefficient,
             gen.reservoir_min_release,
             gen.cascade_downstream, gen.cascade_delay_hours,
-            gen.reservoir_head_min_factor
+            gen.reservoir_head_min_factor, gen.num_units
         )
     end
 end

@@ -1,11 +1,13 @@
 /* Commitment Heatmap (UC) — the signature visualisation of a Unit
- * Commitment run. Rows are committable units (gen × node), columns are
- * hours, cells are 0/1 (off/on). Renewable / non-committable units are
- * omitted so the heatmap focuses on what UC actually decides.
+ * Commitment run. Rows are committable plants (gen × node), columns are
+ * hours, cells are the units online (0/1 for a single-unit plant).
+ * Renewable / non-committable units are omitted so the heatmap focuses on
+ * what UC actually decides.
  *
  * Payload contract (see UCCommitmentHeatmapChart._build_payload):
  *   { year, hours: [0..N-1], units: ["Diesel @ Havana", …],
- *     status: [[0|1, …], …]   # rows × cols matching units × hours }
+ *     status: [[0..n, …], …],  # rows × cols matching units × hours
+ *     num_units: [n, …] }      # units of each row's plant (optional)
  */
 "use strict";
 
@@ -62,24 +64,31 @@ function hideStatus() {
 }
 
 function renderHeatmap(data) {
-    // Two-tone colorscale: light grey for off, accent green for on.
-    // Discrete (not interpolated) — explicit stops at the band edges.
+    // Light grey for off; green for on, paler when only some of a
+    // plant's units are online (a single-unit plant is off or full green).
     const colorscale = [
         [0.0, "#ECEFF1"],
-        [0.5, "#ECEFF1"],
-        [0.5, "#27AE60"],
+        [0.001, "#ECEFF1"],
+        [0.001, "#A9DFBF"],
         [1.0, "#27AE60"],
     ];
+    const nUnits = data.num_units || data.status.map(() => 1);
+    // Colour by the share of the plant online; hover shows the units
+    const share = data.status.map((row, i) =>
+        row.map(v => v / Math.max(1, nUnits[i])));
+    const text = data.status.map((row, i) =>
+        row.map(v => v + " / " + Math.max(1, nUnits[i])));
 
     const trace = {
-        z: data.status,
+        z: share,
         x: data.hours,
         y: data.units,
+        text: text,
         type: "heatmap",
         colorscale: colorscale,
         zmin: 0, zmax: 1,
         showscale: false,
-        hovertemplate: "Unit: %{y}<br>Hour: %{x}<br>Status: %{z:.0f}<extra></extra>",
+        hovertemplate: "Unit: %{y}<br>Hour: %{x}<br>Units online: %{text}<extra></extra>",
         xgap: 1, ygap: 1,
     };
 

@@ -205,7 +205,7 @@ class SimulationState:
 
 Complete results for one simulation year, including all optimization variables, derived metrics, and scalar summaries.
 
-Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities; max for `gen_status`, `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), also for the `power_flow`, `transfer_margin` and N-1 dual series; a key missing from a window (no binding dual there) is zero-filled for that window's steps. The scalars (`objective`, `emissions`, `load_shed`, `total_generation`, `total_demand`) and `cost_breakdown` likewise add up each window's committed steps only ([Result Stitching](../formulation/operational-dispatch.md#104-result-stitching)).
+Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities, `gen_status` included: units online; max for `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), also for the `power_flow`, `transfer_margin` and N-1 dual series; a key missing from a window (no binding dual there) is zero-filled for that window's steps. The scalars (`objective`, `emissions`, `load_shed`, `total_generation`, `total_demand`) and `cost_breakdown` likewise add up each window's committed steps only ([Result Stitching](../formulation/operational-dispatch.md#104-result-stitching)).
 
 ```python
 @dataclass
@@ -231,8 +231,8 @@ class YearResults:
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
 | `gen_output` | `Optional[np.ndarray]` | `(gen, node, hour)` | Generator output (MW) |
-| `gen_status` | `Optional[np.ndarray]` | `(gen, node, hour)` | Generator on/off status (UC mode) |
-| `gen_startup` | `Optional[np.ndarray]` | `(gen, node, hour)` | Startup events |
+| `gen_status` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units online (UC mode; 0/1 for a single-unit plant) |
+| `gen_startup` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units started |
 | `curtailment` | `Optional[np.ndarray]` | `(gen, node, hour)` | RE curtailment (MW); summed over generators when written to HDF5 |
 
 ### Storage Arrays

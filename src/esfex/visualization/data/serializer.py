@@ -115,7 +115,7 @@ _COMMON_SCALAR_FIELDS = [
 ]
 
 # Generator-only fields (NOT shared with batteries)
-_GEN_ONLY_FIELDS = ["droop", "governor_time_const"]
+_GEN_ONLY_FIELDS = ["droop", "governor_time_const", "num_units"]
 
 _GEN_SCALAR_FIELDS_BASE = _COMMON_SCALAR_FIELDS + _GEN_ONLY_FIELDS
 
@@ -729,6 +729,9 @@ def _system_to_gui_state(sys: SystemConfig,
                 arr = getattr(gen, f, None)
                 if arr is not None and node_idx < len(arr):
                     setattr(inst, f, arr[node_idx])
+            # A single num_units holds for every node
+            if len(gen.num_units) == 1:
+                inst.num_units = int(gen.num_units[0])
             # Import fuel cost curve (per-node)
             fcc = getattr(gen, 'fuel_cost_curve', None)
             if fcc and node_idx < len(fcc):
@@ -2984,7 +2987,12 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             gen_dict["cascade_delay_hours"] = int(getattr(rep, 'cascade_delay_hours', 0) or 0)
         # Rebuild per-node arrays
         for field_name in _GEN_SCALAR_FIELDS:
-            arr = [0] * n if field_name in ("life_time", "initial_age", "min_up", "min_down") else [0.0] * n
+            if field_name == "num_units":
+                arr = [1] * n   # at least one unit, also where there is none
+            elif field_name in ("life_time", "initial_age", "min_up", "min_down"):
+                arr = [0] * n
+            else:
+                arr = [0.0] * n
             for node_idx, inst in node_instances.items():
                 arr[node_idx] = getattr(inst, field_name)
             gen_dict[field_name] = arr

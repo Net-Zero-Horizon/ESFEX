@@ -1188,30 +1188,32 @@ class DashboardLoader:
                 fuel_c  += float(e) * self._attr_at_node(cfg, "fuel_cost", n)
                 maint_c += float(e) * self._attr_at_node(cfg, "maintenance_cost", n)
 
-        # Startup: ESFEX writes gen_status (binary on/off) but the
-        # number of starts is what the cost is keyed on. Without a
-        # ``gen_startup`` dataset we fall back to counting 0→1
-        # transitions in ``gen_status`` (same as the solver's
-        # ``startup`` decision variable in UC mode). A subsystem view slices
-        # ``gen_status`` to this system's units and nodes, like generation.
+        # Startup: ESFEX writes gen_status (units online) and the units
+        # started are what the cost is keyed on: the increases of
+        # ``gen_status`` (the solver's ``startup`` variable in UC mode).
+        # One of a plant's num_units units costs start_up_cost / num_units.
+        # A subsystem view slices ``gen_status`` to this system's units and
+        # nodes, like generation.
         if "gen_status" in sc:
+            from esfex.visualization.panels.results_charts import num_units_at
             gs_grp = sc["gen_status"]
             for gname in gs_grp:
                 if gname not in gen_data:
                     continue
-                arr = np.asarray(gs_grp[gname][:])
+                ds = gs_grp[gname]
+                arr = np.asarray(ds[:])
                 if arr.ndim < 2:
                     continue
                 cfg = gen_cfg_by_ds[gname]
-                # transitions per node = sum of clip(diff, 0, 1)
+                # units started per node = sum of the increases
                 diffs = np.diff(arr, axis=1, prepend=0)
-                starts_by_node = np.clip(diffs, 0, 1).sum(axis=1)
+                starts_by_node = np.clip(diffs, 0, None).sum(axis=1)
                 for k, st in enumerate(starts_by_node):
                     if st == 0:
                         continue
                     startup_c += float(st) * self._attr_at_node(
                         cfg, "start_up_cost", node0 + k
-                    )
+                    ) / num_units_at(ds, node0 + k)
 
         # Battery maintenance: (charge + discharge) × per-node coeff.
         # (A set gave an arbitrary order, paired with bat_cfgs by position.)

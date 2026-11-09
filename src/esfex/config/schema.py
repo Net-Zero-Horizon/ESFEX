@@ -629,13 +629,26 @@ class GeneratorConfig(BaseModel):
     def _normalize_type(cls, v):
         return canonical_unit_type(v)
 
+    @field_validator("num_units")
+    @classmethod
+    def _check_num_units(cls, v):
+        if any(n < 1 for n in v):
+            raise ValueError("num_units must be at least 1 at every node")
+        return v
+
     # Per-node arrays (length = num_nodes)
     life_time: list[int] = Field(description="Lifetime per node (years)")
     initial_age: list[int] = Field(description="Initial age per node (years)")
     degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     decommissioning_cost: list[float] = Field(description="Decommissioning cost per node ($/MW)")
     rated_power: list[float] = Field(description="Installed capacity per node (MW)")
-    min_power: list[float] = Field(description="Minimum output fraction per node")
+    num_units: list[int] = Field(
+        default_factory=lambda: [1],
+        description="Identical units the capacity at each node is made of (≥ 1). "
+        "Unit commitment commits a whole number of them (each rated_power / num_units "
+        "MW, with its own minimum output, start-ups and min up/down times); "
+        "1 = the node's capacity is one unit")
+    min_power: list[float] = Field(description="Minimum output fraction per node (of each unit's rating in unit commitment)")
     min_up: list[int] = Field(description="Minimum up time per node (hours)")
     min_down: list[int] = Field(description="Minimum down time per node (hours)")
     ramp_up: list[float] = Field(description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
@@ -645,7 +658,7 @@ class GeneratorConfig(BaseModel):
     inertia: list[float] = Field(description="Inertia constant H per node (s)")
     droop: list[float] = Field(default_factory=lambda: [0.05], description="Governor droop characteristic per node (pu), e.g. 0.05 = 5%")
     governor_time_const: list[float] = Field(default_factory=lambda: [5.0], description="Governor time constant per node (seconds)")
-    start_up_cost: list[float] = Field(description="Startup cost per node ($)")
+    start_up_cost: list[float] = Field(description="Startup cost per node ($ per start of the node's whole capacity; one of num_units units costs start_up_cost / num_units)")
     fuel_cost: list[float] = Field(description="Fuel cost per node ($/MWh)")
     fuel_cost_curve: Optional[list[CostCurveConfig]] = Field(
         default=None,
@@ -821,6 +834,13 @@ class TechnologyConfig(BaseModel):
     def _normalize_type(cls, v):
         return canonical_unit_type(v)
 
+    @field_validator("unit_size")
+    @classmethod
+    def _check_unit_size(cls, v):
+        if any(s < 0 for s in v):
+            raise ValueError("unit_size cannot be negative")
+        return v
+
     invest_cost: list[float] = Field(description="Investment cost per node ($/MW)")
     invest_max_power: list[float] = Field(description="Max investment per node (MW)")
     availability_file: Optional[str] = Field(None, alias="Availability")
@@ -840,7 +860,12 @@ class TechnologyConfig(BaseModel):
     inertia: list[float] = Field(default_factory=lambda: [0.0], description="Inertia constant H per node (s)")
     droop: list[float] = Field(default_factory=lambda: [0.05], description="Governor droop characteristic per node (pu), e.g. 0.05 = 5%")
     governor_time_const: list[float] = Field(default_factory=lambda: [5.0], description="Governor time constant per node (seconds)")
-    start_up_cost: list[float] = Field(default_factory=lambda: [0.0], description="Startup cost per node ($)")
+    start_up_cost: list[float] = Field(default_factory=lambda: [0.0], description="Startup cost per node ($ per start of a built plant; one of its units costs start_up_cost / number of units)")
+    unit_size: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Size of one unit per node (MW). The capacity the master builds at a "
+        "bus reaches unit commitment as ceil(capacity / unit_size) identical units; "
+        "0 = one unit")
     eff_at_min: list[float] = Field(default_factory=lambda: [0.0], description="Efficiency at min power per node")
     min_up: list[int] = Field(default_factory=lambda: [0], description="Min up time per node (hours)")
     min_down: list[int] = Field(default_factory=lambda: [0], description="Min down time per node (hours)")

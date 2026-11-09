@@ -585,11 +585,16 @@ def _load_year_data(h5_path: Path | str, scenario_key: str) -> dict:
         if "CO2_emissions" in grp:
             data["co2_emissions"] = grp["CO2_emissions"][:]
 
-        # Startup
+        # Startup: units started, and the units per node each start is a
+        # share of (older files: one unit)
         if "gen_startup" in grp:
             data["gen_startup"] = {}
+            data["gen_num_units"] = {}
             for name in grp["gen_startup"]:
-                data["gen_startup"][name] = grp["gen_startup"][name][:]
+                ds = grp["gen_startup"][name]
+                data["gen_startup"][name] = ds[:]
+                if "num_units" in ds.attrs:
+                    data["gen_num_units"][name] = np.asarray(ds.attrs["num_units"])
 
         # Battery data
         for key in ("battery_charge", "battery_discharge", "battery_soc"):
@@ -700,12 +705,15 @@ def _recalculate_costs(
             costs["om_cost"] += float(np.sum(energy_mwh * maint_cost[n])) + (
                 fixed_cost[n] * rated[n] * _year_share(gen_output, temporal_res))
 
-            # Startup costs
+            # Startup costs: a unit start costs start_up_cost / num_units
             if "gen_startup" in year_data and gen_name in year_data["gen_startup"]:
                 starts = year_data["gen_startup"][gen_name]
+                units = year_data.get("gen_num_units", {}).get(gen_name)
+                n_units = (max(1, int(units[n])) if units is not None and n < len(units)
+                           else 1)
                 if n < starts.shape[0]:
                     costs["startup_cost"] += float(
-                        np.sum(starts[n, :]) * su_cost[n]
+                        np.sum(starts[n, :]) * su_cost[n] / n_units
                     )
 
             # Revenue
