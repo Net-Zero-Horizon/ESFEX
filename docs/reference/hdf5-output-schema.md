@@ -257,7 +257,7 @@ The node index `n` (and `i`, `j`) is always a node: when the master solves on bu
 
 Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery; in electrolyzer groups, another electrolyzer) gets a ` (1)`, ` (2)`, ... suffix: two units named `Gas` are written as `Gas` and `Gas (1)`. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...). Readers that look up a unit's configuration by name (financial analysis, results charts) strip the suffix.
 
-Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape` and `units`. The datasets of the units the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)) also carry `rated_power`: their MW in service in the year, per node; `battery_discharge/{name}` of a built battery carries its power in service the same way.
+Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape`, `units` and `rated_power`: the unit's MW in service in the year, per node, the capacity the dispatch charges fixed O&M on. For an existing unit this is its rated power after the master's retirements and life extension (development runs), or, without a master, its rated power degraded with age and 0 past its `life_time`; for a unit the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)), its built capacity in service. `battery_discharge/{name}` carries the battery's discharge power in service the same way (not degraded; 0 past its `life_time` unless the master keeps it). The results dashboard, the results charts (installed capacity, reserve margin) and the financial analysis read it; for files written before this version, where only the units the master built carry it, they use the configured `rated_power` (`MaxDischargePower`) of the other units.
 
 ### Generation Data
 
@@ -600,7 +600,7 @@ Virtual units use the same dataset structure as their physical counterparts.
 
 ### Identifying Virtual Units
 
-Virtual unit names start with `"Investment "`, followed by the technology's dataset name (`Investment Cuba - Solar PV` for technology `Cuba/Solar PV`). They do not appear in `system_configuration/generators/` or `batteries/`, which only list the configured units; the candidate technologies are in `system_configuration/technologies/` and `battery_technologies/`. The results dashboard, the results charts and the financial analysis cost a virtual unit with its technology's operating costs, and charge its fixed O&M on the `rated_power` attribute of its `generation/` (or `battery_discharge/`) dataset.
+Virtual unit names start with `"Investment "`, followed by the technology's dataset name (`Investment Cuba - Solar PV` for technology `Cuba/Solar PV`). They do not appear in `system_configuration/generators/` or `batteries/`, which only list the configured units; the candidate technologies are in `system_configuration/technologies/` and `battery_technologies/`. The results dashboard, the results charts and the financial analysis cost a virtual unit with its technology's operating costs, and charge its fixed O&M, like every unit's, on the `rated_power` attribute of its `generation/` (or `battery_discharge/`) dataset.
 
 ---
 

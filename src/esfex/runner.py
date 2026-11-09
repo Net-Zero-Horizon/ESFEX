@@ -221,12 +221,40 @@ def _concat_window_series(windows) -> dict:
     }
 
 
-def _stamp_built_power(ds, built: list, i: int) -> None:
+def _stamp_power_in_service(ds, in_service: list, i: int) -> None:
     """Record on results dataset ``ds`` the MW in service per node of unit
-    ``i`` when the master built it (``built[i]`` not None): such a unit has
-    no config in the results file, and its fixed O&M is charged on it."""
-    if i < len(built) and built[i] is not None:
-        ds.attrs["rated_power"] = np.asarray(built[i], dtype=float)
+    ``i`` (``in_service[i]``, see ``Orchestrator._rebuild_unit_names``): the
+    readers charge fixed O&M on it and count it as installed capacity (a
+    unit the master built has no config in the results file)."""
+    if i < len(in_service) and in_service[i] is not None:
+        ds.attrs["rated_power"] = np.asarray(in_service[i], dtype=float)
+
+
+def existing_power_in_service(unit: dict, power_key: str, num_nodes: int,
+                              year_offset: int, degrade: bool = True) -> list[float]:
+    """Per-node MW in service of an existing unit in the dispatch's year, as
+    the dispatch charges its fixed O&M (``fixed_om_annual_cost`` in
+    power_system.jl): ``unit[power_key]``, nothing at a node past its
+    ``life_time`` (age = ``initial_age`` + *year_offset*) and, with
+    *degrade* (generators), shrunk by ``(1 - degradation_rate)^age``.
+
+    *unit* is the dispatch's config of the unit: after a master run it holds
+    the master's capacity (retirements and life extension applied) with no
+    degradation and no end of life, so it is taken as is.
+    """
+    power = _per_node_list(unit.get(power_key) or [], num_nodes)
+    age0 = _per_node_list(unit.get("initial_age") or [], num_nodes, 0)
+    life = _per_node_list(unit.get("life_time") or [], num_nodes, float("inf"))
+    deg = _per_node_list(unit.get("degradation_rate") or [], num_nodes, 0.0)
+    out = []
+    for p, a0, lt, d in zip(power, age0, life, deg):
+        p, age = float(p), float(a0) + year_offset
+        if p > 0 and float(lt) - age <= 0:
+            p = 0.0
+        elif p > 0 and degrade and float(d) > 0:
+            p *= (1.0 - float(d)) ** age
+        out.append(p)
+    return out
 
 
 # Operating-cost fields of the candidate technologies written to the results
@@ -578,6 +606,29 @@ def _per_node_list(arr, n: int, default=0.0) -> list:
     if len(arr) == 1:
         return [arr[0]] * n
     return list(arr) + [arr[-1]] * (n - len(arr))
+
+
+def _node_values_on_buses(arr, num_buses: int, bus_to_node, default=0.0) -> list:
+    """A candidate technology's per-node list laid out on the *num_buses*
+    buses of a unit built from it: each bus gets its parent node's value
+    (``bus_to_node[b]``; *default* past the list). Without a node-to-bus
+    mapping the buses are the nodes, in order. A single value is broadcast.
+
+    The list is per node whatever its length: a merged system pads it to
+    every system's nodes (zero at the other systems'), and a network can
+    have fewer buses than nodes, so a list at least as long as the bus list
+    is not per bus. Reading its first *num_buses* entries, or broadcasting
+    the first one, gave the buses another node's value (another system's
+    padding zero: no maintenance or throughput cost)."""
+    if not arr:
+        return [default] * num_buses
+    if len(arr) == 1:
+        return [arr[0]] * num_buses
+    if bus_to_node is None:
+        return (list(arr[:num_buses]) if len(arr) >= num_buses
+                else [arr[0]] * num_buses)
+    return [arr[node] if 0 <= node < len(arr) else default
+            for node in bus_to_node[:num_buses]]
 
 
 def _unit_node_span(offsets: dict, unit_key: str, num_nodes: int) -> tuple[str, int, int]:
@@ -1874,9 +1925,9 @@ class Orchestrator:
             bat.name if hasattr(bat, 'name') else key
             for key, bat in self.primary_system.batteries.items()
         ])
-        # No master-built units yet (see _rebuild_unit_names)
-        self._gen_built_mw = []
-        self._bat_built_mw = []
+        # MW in service per unit, set each year (see _rebuild_unit_names)
+        self._gen_in_service_mw = []
+        self._bat_in_service_mw = []
 
         # Preload all availability profiles ONCE (cache for operational phase)
         self._availability_cache = self._preload_availability_profiles(num_nodes)
@@ -2143,7 +2194,8 @@ class Orchestrator:
 
                     # Rebuild gen/bat name lists to include virtual units
                     # (must happen BEFORE HDF5 export so all generators are captured)
-                    self._rebuild_unit_names(cumulative_units_config)
+                    self._rebuild_unit_names(cumulative_units_config,
+                                             year_offset=year - self.state.base_year)
 
                     # Log capacity state for debugging
                     cap_summary = []
@@ -4822,13 +4874,38 @@ class Orchestrator:
         ``transfer_investment_{i}_{j}`` and the life-extension arrays are
         indexed by bus there and by node otherwise.
         """
+        buses = self.master_system.buses or []
+        if self._master_on_buses() and 0 <= idx < len(buses):
+            return buses[idx].parent_node
+        return idx
+
+    def _master_on_buses(self) -> bool:
+        """Whether the master's per-location results (investments, life
+        extension, cumulative capacities) are indexed by the buses of its
+        network rather than by node: it solves on its own buses when they
+        are not one per node, in node order (``node_bus_mapping_required``).
+        The array length cannot tell: a network can have as many buses as
+        nodes without being one bus per node."""
         from esfex.bridge.converters import node_bus_mapping_required
 
         base = self.master_system
         buses = base.buses or []
-        if buses and node_bus_mapping_required(buses, base.num_nodes) and 0 <= idx < len(buses):
-            return buses[idx].parent_node
-        return idx
+        return bool(buses) and node_bus_mapping_required(buses, base.num_nodes)
+
+    def _master_values_by_node(self, values, num_nodes: int) -> np.ndarray:
+        """One unit's or technology's per-location master values (MW, MWh)
+        as a per-node array: the values of a node's buses are summed on a
+        bus-level master (see :meth:`_master_on_buses`)."""
+        arr = np.asarray(values, dtype=float)
+        out = np.zeros(num_nodes)
+        if not self._master_on_buses():
+            out[:min(len(arr), num_nodes)] = arr[:num_nodes]
+            return out
+        for idx, v in enumerate(arr):
+            node = self._master_index_node(idx)
+            if 0 <= node < num_nodes:
+                out[node] += v
+        return out
 
     def _master_investments_by_node(self, investments: dict) -> dict:
         """*investments* (``{key: value}`` of the master) with each key's
@@ -6983,7 +7060,8 @@ class Orchestrator:
                 f"({scaled_bus_lines} bus-level lines scaled)"
             )
 
-    def _rebuild_unit_names(self, units_config: dict[str, Any]) -> None:
+    def _rebuild_unit_names(self, units_config: dict[str, Any],
+                            year_offset: int = 0) -> None:
         """Rebuild generator/battery name lists from units_config.
 
         Must replicate the EXACT same ordering and filtering as the
@@ -6995,8 +7073,20 @@ class Orchestrator:
           2. Virtual generators (from units_config, not in sys.generators)
           3. Original batteries (from sys.batteries)
           4. Virtual batteries (from units_config, not in sys.batteries)
+
+        Also records each unit's MW in service per node in the dispatch's
+        year (*year_offset* = years since the base year), for the export:
+        the units the master built have no config in the results file, and
+        the configured ``rated_power`` of an existing unit ignores its
+        retirement, life extension and degradation.
         """
         sys = self.primary_system
+        num_nodes = self._num_nodes
+
+        def existing(key, unit, power_key, degrade):
+            data = units_config.get(key) or unit.model_dump()
+            return existing_power_in_service(data, power_key, num_nodes,
+                                             year_offset, degrade=degrade)
 
         # --- Generator names + parallel fuel list ---
         # _gen_fuels mirrors _gen_names index-for-index so the export
@@ -7004,15 +7094,12 @@ class Orchestrator:
         # the dashboard can bucket by fuel without parsing plant names.
         gen_names: list[str] = []
         gen_fuels: list[str] = []
-        # MW in service per node of the units the master built (None for the
-        # configured units): they have no config in the results file, so the
-        # export records their capacity on their datasets
-        gen_built: list = []
+        gen_in_service: list = []
         # 1) Original generators (same order as sys.generators iteration)
         for key, gen in sys.generators.items():
             gen_names.append(gen.name if hasattr(gen, 'name') else key)
             gen_fuels.append(str(getattr(gen, 'fuel', '') or ''))
-            gen_built.append(None)
+            gen_in_service.append(existing(key, gen, "rated_power", True))
 
         # 2) Virtual generators from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -7029,15 +7116,16 @@ class Orchestrator:
             # Investment gens carry their technology's fuel in vdata
             # (populated when they were synthesised from a tech).
             gen_fuels.append(str(vdata.get("fuel", "") or ""))
-            gen_built.append(self._unit_power_by_node(vdata, rp))
+            gen_in_service.append(self._unit_power_by_node(vdata, rp))
 
         # --- Battery names ---
         bat_names = []
-        bat_built: list = []
-        # 1) Original batteries (same order as sys.batteries iteration)
+        bat_in_service: list = []
+        # 1) Original batteries (same order as sys.batteries iteration);
+        # their fixed O&M is on the rated (not degraded) discharge power
         for key, bat in sys.batteries.items():
             bat_names.append(bat.name if hasattr(bat, 'name') else key)
-            bat_built.append(None)
+            bat_in_service.append(existing(key, bat, "MaxDischargePower", False))
 
         # 2) Virtual batteries from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -7050,16 +7138,16 @@ class Orchestrator:
             if not cap or (max(cap) < 0.01 and max(charge_pow) < 0.01):
                 continue
             bat_names.append(vdata.get("name", key))
-            bat_built.append(self._unit_power_by_node(
+            bat_in_service.append(self._unit_power_by_node(
                 vdata, vdata.get("MaxDischargePower", charge_pow)))
 
         # Homonyms get a " (N)" suffix (HDF5 needs unique dataset names);
         # order and length are kept, so the fuel list stays index-aligned.
         self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
-        self._gen_built_mw = gen_built
+        self._gen_in_service_mw = gen_in_service
         self._bat_names = unique_unit_names(bat_names)
-        self._bat_built_mw = bat_built
+        self._bat_in_service_mw = bat_in_service
 
     def _unit_power_by_node(self, vdata: dict, power) -> list[float]:
         """Per-node MW of a virtual unit's ``power`` list, which is per bus
@@ -7234,32 +7322,12 @@ class Orchestrator:
         # So we must ZERO OUT degradation_rate and initial_age to prevent
         # power_system.jl from applying them again (double degradation/retirement).
         gen_caps = year_caps.get('gen', {})
-        # Detect master granularity (same logic as for tech_caps below).
-        gen_master_per_node = (
-            bus_to_node is not None
-            and gen_caps
-            and len(next(iter(gen_caps.values()))) == num_nodes
-        )
         for g_jl, bus_caps in gen_caps.items():
             py_idx = int(g_jl) - 1  # Julia 1-based → Python 0-based
             unit_key = gen_idx_to_key.get(py_idx)
             if unit_key and unit_key in updated:
-                bus_arr = np.array(bus_caps)
-                if gen_master_per_node:
-                    # Master output is already per-node; copy directly.
-                    node_caps = np.array(bus_arr[:num_nodes], dtype=float)
-                    if len(node_caps) < num_nodes:
-                        node_caps = np.concatenate([
-                            node_caps, np.zeros(num_nodes - len(node_caps))
-                        ])
-                else:
-                    # Aggregate per-bus capacities to per-node by
-                    # mapping each bus to its parent node.
-                    node_caps = np.zeros(num_nodes)
-                    for b_idx in range(len(bus_arr)):
-                        n_idx = bus_to_node[b_idx] if bus_to_node else b_idx
-                        if n_idx < num_nodes:
-                            node_caps[n_idx] += bus_arr[b_idx]
+                # Per master location (bus or node): per node here
+                node_caps = self._master_values_by_node(bus_caps, num_nodes)
                 updated[unit_key]["rated_power"] = node_caps.tolist()
                 # Prevent double degradation/retirement in power_system.jl:
                 # the master's capacity already holds both (and the life
@@ -7291,21 +7359,12 @@ class Orchestrator:
         tech_caps = year_caps.get('tech', {})
         tech_keys = list(self.primary_system.technologies.keys())
 
-        # Detect master granularity: master may run on a node-level network
-        # (when `primary_system.buses` is empty after merge → converters
-        # auto-create one bus per node, so `n_buses == num_nodes`).  In that
-        # case the per-bus arrays returned by Julia are actually **per-node**
-        # (length num_nodes) and must be mapped onto the bus-level
-        # operational network.  Each node's investment is placed at the
-        # node's first (canonical) bus — a deterministic, neutral mapping.
-        # (No demand-fraction redistribution heuristic: capacity is placed
-        # organically and the DC-OPF routes it; if a single-bus injection is
-        # infeasible that indicates a real model issue to fix, not to mask.)
-        master_per_node = (
-            bus_to_node is not None
-            and tech_caps
-            and len(next(iter(tech_caps.values()))) == num_nodes
-        )
+        # Master granularity (_master_on_buses, not the array length): a
+        # node-level master (the merged master network, one bus per node)
+        # returns per-node arrays, laid out below on the bus-level
+        # operational network; a bus-level master (the master solves on the
+        # operational buses themselves) returns per-bus arrays.
+        master_per_node = bus_to_node is not None and not self._master_on_buses()
         first_bus_of_node: dict[int, int] | None = None
         node_buses_map: dict[int, list[int]] | None = None
         if master_per_node or bus_to_node is not None:
@@ -7364,28 +7423,9 @@ class Orchestrator:
                 if max(bus_rated) < 0.1:
                     continue
 
-                # Helper to replicate a per-node property to per-bus length.
-                # Critical: when arr is a per-node array padded by _merge_systems
-                # (len == total_nodes, with 0 at other systems' offsets), the
-                # legacy `[arr[0]]*n` fallback would broadcast the padding-zero
-                # of the OTHER system to all buses, zeroing this system's
-                # property. Use bus_to_node mapping to put each bus's node's
-                # value at that bus.
-                def _rep(arr, default=0.0, n=num_buses):
-                    if not arr:
-                        return [default] * n
-                    if len(arr) >= n:
-                        return list(arr[:n])
-                    if len(arr) == 1:
-                        return [arr[0]] * n
-                    if bus_to_node is not None and len(arr) <= len(bus_to_node):
-                        out = [0.0] * n
-                        for _b in range(n):
-                            _nidx = bus_to_node[_b]
-                            if _nidx < len(arr):
-                                out[_b] = arr[_nidx]
-                        return out
-                    return [arr[0]] * n
+                # The technology's per-node properties, per bus
+                def _rep(arr, default=0.0):
+                    return _node_values_on_buses(arr, num_buses, bus_to_node, default)
 
                 def _rep_curve(curves, n=num_buses):
                     # The technology's per-node bidding curves, per bus. A
@@ -7424,11 +7464,7 @@ class Orchestrator:
         bat_tech_pow_caps = year_caps.get('bat_tech_power', {})
         bat_tech_cap_caps = year_caps.get('bat_tech_capacity', {})
         bat_tech_keys = list(self.primary_system.battery_technologies.keys())
-        bat_master_per_node = (
-            bus_to_node is not None
-            and bat_tech_pow_caps
-            and len(next(iter(bat_tech_pow_caps.values()))) == num_nodes
-        )
+        bat_master_per_node = bus_to_node is not None and not self._master_on_buses()
         if bat_master_per_node and first_bus_of_node is None:
             first_bus_of_node = {}
             for b_idx, b in enumerate(buses):
@@ -7482,33 +7518,11 @@ class Orchestrator:
                 if max(bus_pow) < 0.1 and max(bus_cap) < 0.1:
                     continue
 
-                def _brep(arr, n=num_buses, default=0.0):
-                    if not arr:
-                        return [default] * n
-                    if len(arr) >= n:
-                        return list(arr[:n])
-                    if len(arr) == 1:
-                        return [arr[0]] * n
-                    # Per-node array (padded by _merge_systems with 0 at other
-                    # systems' offsets): expand to per-bus via bus_to_node.
-                    # Without this, [arr[0]]*n broadcasts the padding-zero of
-                    # the OTHER system to all buses — for batteries this means
-                    # zero maintenance_cost and zero throughput_degradation_cost
-                    # in the LP, which removes the incentive against the
-                    # simultaneous charge+discharge LP-relaxation pathology.
-                    if bus_to_node is not None and len(arr) <= len(bus_to_node):
-                        out = [default] * n
-                        for _b in range(n):
-                            _nidx = bus_to_node[_b]
-                            if _nidx < len(arr):
-                                out[_b] = arr[_nidx]
-                        return out
-                    return [arr[0]] * n
-
                 vbat_key = f"inv_{bt_key}"
                 updated[vbat_key] = {
                     **battery_technology_unit_fields(
-                        bat_tech, lambda arr, default: _brep(arr, default=default)),
+                        bat_tech, lambda arr, default: _node_values_on_buses(
+                            arr, num_buses, bus_to_node, default)),
                     "capacity": bus_cap,
                     "MaxChargePower": bus_pow,
                     "MaxDischargePower": bus_pow,
@@ -7551,16 +7565,7 @@ class Orchestrator:
             return
 
         def to_nodes(arr) -> np.ndarray:
-            arr = np.asarray(arr, dtype=float)
-            out = np.zeros(num_nodes)
-            if bus_to_node is None or len(arr) == num_nodes:
-                out[:min(len(arr), num_nodes)] = arr[:num_nodes]
-                return out
-            for b_idx, v in enumerate(arr):
-                n_idx = bus_to_node[b_idx] if b_idx < len(bus_to_node) else b_idx
-                if 0 <= n_idx < num_nodes:
-                    out[n_idx] += v
-            return out
+            return self._master_values_by_node(arr, num_nodes)
 
         bat_keys = [k for k, d in updated.items()
                     if d.get("_type") == "battery" or d.get("type") == "Storage"]
@@ -7897,7 +7902,7 @@ class Orchestrator:
                 # missing (shouldn't happen, but the export should never
                 # crash on stale state).
                 gen_fuels = getattr(self, '_gen_fuels', []) or []
-                gen_built = getattr(self, '_gen_built_mw', None) or []
+                gen_in_service = getattr(self, '_gen_in_service_mw', None) or []
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_output.shape[0]:
                         ds_name = gen_ds[g]
@@ -7913,7 +7918,7 @@ class Orchestrator:
                         # HDF5 happy when the source data didn't supply
                         # one (e.g. legacy configs).
                         ds.attrs["fuel"] = gen_fuels[g] if g < len(gen_fuels) else ""
-                        _stamp_built_power(ds, gen_built, g)
+                        _stamp_power_in_service(ds, gen_in_service, g)
 
             # --- Generator status (unit commitment on/off) ---
             if result.gen_status is not None:
@@ -7978,7 +7983,7 @@ class Orchestrator:
                     bat_group.attrs["description"] = (
                         f"{bat_key} [nodes x hours] for each battery"
                     )
-                    bat_built = getattr(self, '_bat_built_mw', None) or []
+                    bat_in_service = getattr(self, '_bat_in_service_mw', None) or []
                     for b, name in enumerate(self._bat_names):
                         if b < bat_data.shape[0]:
                             ds = bat_group.create_dataset(
@@ -7988,7 +7993,7 @@ class Orchestrator:
                             ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
                             ds.attrs["units"] = "MW"
                             if bat_key == "battery_discharge":
-                                _stamp_built_power(ds, bat_built, b)
+                                _stamp_power_in_service(ds, bat_in_service, b)
 
             # --- Battery SOC (per battery) ---
             if result.bat_soc is not None:
