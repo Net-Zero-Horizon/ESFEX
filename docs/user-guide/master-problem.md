@@ -183,6 +183,8 @@ The capacity available in year \(y\) is the sum of:
 2. **Life-extended capacity** of existing units past their lifetime.
 3. **Every earlier investment** still within its technology `lifetime`, derated as `(1 - degradation_rate)^(y - y_built)`.
 
+The model holds each year's built capacity in one variable, defined once from the investments and used by every representative-day hour of that year ([Capacity State Variables](../formulation/capacity-expansion.md#65-capacity-state-variables)). Long horizons with many nodes then stay solvable with interior-point solvers.
+
 Every technology is further limited by its availability profile in each representative-day hour: the capacity factor of a renewable, the derates and scheduled outages of a dispatchable one (1 where it has no profile), as the generator it becomes in the dispatch.
 
 
