@@ -2219,11 +2219,21 @@ Each node's held reserve is the same share of its requirement across the
 system (`reserve_static[n,t] = σ[S,t] × requirement[n,t]`, likewise for the
 dynamic reserve), so a system shortfall is reported at every node in
 proportion to its requirement rather than at an arbitrary node.
+
+In the master (`capacity_override`), a generator's headroom is its capacity
+in service × availability − output, as in the dispatch. `extra_headroom(b, t)`
+adds the headroom and dynamic capability of further units at bus `b`
+(the master's candidate technologies, see `master_unit_reserve_terms`) as a
+tuple `(headroom, dynamic)` of expressions, or `nothing`.
+
+Returns `Dict((k, t) => (headroom constraint, dynamic constraint or nothing))`
+over system `k` of `reserve_node_groups(input)` and step `t`.
 """
 function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
     battery_capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
-    demand_scale::Float64 = 1.0)
+    demand_scale::Float64 = 1.0,
+    extra_headroom::Union{Function, Nothing} = nothing)
     n_bus = input.network.num_buses
     n_node = input.network.num_nodes
     b2n = input.network.bus_to_node
@@ -2255,6 +2265,7 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     groups = reserve_node_groups(input)
 
     req_static = zeros(n_node)
+    refs = Dict{Tuple{Int,Int}, Tuple{Any, Any}}()
     for t in 1:hours
         # Per-node requirements: what the node needs held, and its shortfall
         for ni in 1:n_node
@@ -2307,7 +2318,8 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                         gen = input.generators[g]
                         reservable(gen) || continue
                         if capacity_override !== nothing && haskey(capacity_override, (g, b))
-                            add_to_expression!(available_reserve, capacity_override[(g, b)])
+                            add_to_expression!(available_reserve, capacity_override[(g, b)],
+                                               gen.availability[t, b])
                             add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
                         elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
                             cap_t = p_gb * gen.availability[t, b]
@@ -2330,12 +2342,17 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                         add_to_expression!(available_reserve, -1.0, vars.bat_discharge[bi, b, t])
                         add_to_expression!(available_reserve, 1.0, vars.bat_charge[bi, b, t])
                     end
+                    if extra_headroom !== nothing
+                        extra = extra_headroom(b, t)
+                        extra === nothing || add_to_expression!(available_reserve, extra[1])
+                    end
                 end
             end
 
             # Static and dynamic reserve are held in the same free headroom
-            @constraint(model, held <= available_reserve,
+            c_headroom = @constraint(model, held <= available_reserve,
                 base_name = "reserve_headroom_s$(k)_t$(t)")
+            refs[(k, t)] = (c_headroom, nothing)
 
             # Dynamic reserve: limited to the share of rated power that can respond
             has_dynamic || continue
@@ -2368,12 +2385,18 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                         add_to_expression!(available_dynamic,
                             input.dynamic_reserve_contribution, p)
                     end
+                    if extra_headroom !== nothing
+                        extra = extra_headroom(b, t)
+                        extra === nothing || add_to_expression!(available_dynamic, extra[2])
+                    end
                 end
             end
-            @constraint(model, held_dynamic <= available_dynamic,
+            c_dynamic = @constraint(model, held_dynamic <= available_dynamic,
                 base_name = "reserve_dynamic_avail_s$(k)_t$(t)")
+            refs[(k, t)] = (c_headroom, c_dynamic)
         end
     end
+    return refs
 end
 
 """
@@ -2794,10 +2817,11 @@ end
 Preventive N-1 security: the system must survive the loss of its largest
 element without re-dispatch.
 
-1. Generation N-1: the headroom of the other reservable units (online ones in
-   unit commitment) and of the batteries must cover the largest unit's output
-   (`n1_generation_reserve_type = "largest_unit"`) or
-   `n1_generation_reserve_percentage` × the system demand of each step
+1. Generation N-1, per system (`reserve_node_groups`: one per original system
+   of a merged run): the headroom of the system's other reservable units
+   (online ones in unit commitment) and batteries must cover the output of
+   the system's largest unit (`n1_generation_reserve_type = "largest_unit"`)
+   or `n1_generation_reserve_percentage` × the system's demand of each step
    (`"percentage"`).
 2. Transmission N-1: each line carries at most `n1_transmission_reserve_factor`
    of its capacity, leaving room for post-contingency redistribution.
@@ -2818,14 +2842,16 @@ function add_n1_security_constraints!(model, vars::PowerSystemVariables, input::
 end
 
 """
-    _n1_largest_unit(input) -> (g, b)
+    _n1_largest_unit(input, in_system=b -> true) -> (g, b)
 
-Generator and bus of the largest unit by rated power, or (0, 0) if none.
+Generator and bus of the largest unit by rated power among the buses
+`in_system(b)` accepts, or (0, 0) if none.
 """
-function _n1_largest_unit(input::PowerSystemInput)
+function _n1_largest_unit(input::PowerSystemInput, in_system::Function = b -> true)
     best = (0, 0)
     best_cap = 0.0
     for (g, gen) in enumerate(input.generators), b in eachindex(gen.rated_power)
+        in_system(b) || continue
         p_gb = generator_power_in_service(gen, b, input)
         if p_gb > best_cap
             best_cap = p_gb
@@ -2838,17 +2864,20 @@ end
 """
     _add_gen_n1!(model, vars, input, n1_cost; corrective, cname)
 
-Generation N-1: if the largest unit (g*, b*) trips, the rest of the system must
-replace its output. For each step
+Generation N-1, per system S of `reserve_node_groups(input)` (one per
+original system of a merged run): if the system's largest unit (g*, b*)
+trips, the rest of that system must replace its output. For each step
 
-    cover_t + shortfall_t ≥ gen_output[g*, b*, t]      (constraint `\$(cname)_t\$(t)`)
+    cover_{S,t} + shortfall_{S,t} ≥ gen_output[g*, b*, t]
 
-With `n1_generation_reserve_type = "percentage"` the requirement is instead
-`n1_generation_reserve_percentage × Σ_n demand[t, n]` and no unit is excluded
-from the cover.
+(constraint `\$(cname)_t\$(t)` with one system, `\$(cname)_s\$(k)_t\$(t)`
+for system k of several). With `n1_generation_reserve_type = "percentage"`
+the requirement is instead `n1_generation_reserve_percentage × Σ_{n∈S}
+demand[t, n]` and no unit is excluded from the cover.
 
-with cover_t the batteries' headroom (discharge power × availability −
-discharge + charge; reservable batteries only when preventive) plus,
+with cover_{S,t}, over the buses of S only, the batteries' headroom
+(discharge power × availability − discharge + charge; reservable batteries
+only when preventive) plus,
 per non-renewable unit other than (g*, b*), its headroom
 (available capacity, × status in unit commitment, − output):
 - preventive (`corrective = false`): reservable units only, full headroom
@@ -2861,13 +2890,29 @@ The shortfall is priced at `loss_of_reserve_static` through `n1_cost`.
 function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput,
                       n1_cost::AffExpr; corrective::Bool, cname::String)
     pct = input.n1_generation_reserve_type == "percentage"
-    if pct
-        g_star, b_star = 0, 0
-        input.n1_generation_reserve_percentage > 0 || return
-    else
-        g_star, b_star = _n1_largest_unit(input)
-        (g_star == 0 || !(b_star in vars.buses_of_gen[g_star])) && return
+    pct && input.n1_generation_reserve_percentage <= 0 && return
+    groups = reserve_node_groups(input)
+    b2n = input.network.bus_to_node
+    for (k, nodes) in enumerate(groups)
+        in_system = b -> b2n[b] in nodes
+        prefix = length(groups) == 1 ? cname : "$(cname)_s$(k)"
+        if pct
+            g_star, b_star = 0, 0
+        else
+            g_star, b_star = _n1_largest_unit(input, in_system)
+            (g_star == 0 || !(b_star in vars.buses_of_gen[g_star])) && continue
+        end
+        _add_system_gen_n1!(model, vars, input, n1_cost, in_system, nodes,
+                            g_star, b_star; corrective, cname = prefix)
     end
+end
+
+# Generation N-1 of one system (buses `in_system`, nodes `nodes`); the largest
+# unit (g_star, b_star), or (0, 0) for the percentage requirement
+function _add_system_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput,
+                             n1_cost::AffExpr, in_system::Function, nodes,
+                             g_star::Int, b_star::Int; corrective::Bool, cname::String)
+    pct = g_star == 0
     spinning = vars.gen_status !== nothing && vars.gen_startup !== nothing
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
     bat_power = battery_reserve_power(vars, input)
@@ -2877,6 +2922,7 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
             gen.type == "Renewable" && continue
             corrective || gen.reservable || continue
             for b in vars.buses_of_gen[g]
+                in_system(b) || continue
                 p_gb = generator_power_in_service(gen, b, input)
                 ((g, b) == (g_star, b_star) || p_gb <= 0) && continue
                 headroom = AffExpr(0.0)
@@ -2902,6 +2948,7 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
         end
         for bi in eachindex(input.batteries), b in vars.buses_of_bat[bi]
             corrective || input.batteries[bi].reservable || continue
+            in_system(b) || continue
             p = bat_power(bi, b, t)
             p === nothing && continue
             add_to_expression!(cover, p)
@@ -2910,7 +2957,7 @@ function _add_gen_n1!(model, vars::PowerSystemVariables, input::PowerSystemInput
         end
         short = @variable(model, lower_bound = 0, base_name = "$(cname)_shortfall_t$(t)")
         need = pct ?
-            input.n1_generation_reserve_percentage * sum(@view input.demand[t, :]) :
+            input.n1_generation_reserve_percentage * sum(input.demand[t, n] for n in nodes) :
             vars.gen_output[g_star, b_star, t]
         @constraint(model, cover + short >= need, base_name = "$(cname)_t$(t)")
         add_to_expression!(n1_cost, input.loss_of_reserve_static, short)
@@ -2942,8 +2989,8 @@ end
 """
     _add_line_n1_reserve!(model, vars, input, n1_cost)
 
-Preventive transmission N-1: each physical line (parallel circuits each on
-their own) carries at most `n1_transmission_reserve_factor` × its capacity;
+Preventive transmission N-1: each line (all of its circuits together)
+carries at most `n1_transmission_reserve_factor` × its capacity;
 the excess is a priced slack (`n1_trans_over_l*_t*`).
 """
 function _add_line_n1_reserve!(model, vars::PowerSystemVariables, input::PowerSystemInput,
@@ -2953,7 +3000,7 @@ function _add_line_n1_reserve!(model, vars::PowerSystemVariables, input::PowerSy
         lf === nothing && continue
         pf, _ = lf
         line = input.network.transmission_lines[k]
-        usable = line.capacity_mw * line.num_circuits * factor
+        usable = line.capacity_mw * factor
         usable > 0 || continue
         for t in 1:input.temporal.hours
             over = @variable(model, lower_bound = 0, base_name = "n1_trans_over_l$(k)_t$(t)")
@@ -3046,7 +3093,7 @@ function _build_ptdf_matrix(input::PowerSystemInput)
     B = zeros(n_bus, n_bus)
     for line in lines
         i, j = line.from_node, line.to_node
-        x = line.reactance_pu / line.num_circuits
+        x = line.reactance_pu
         if abs(x) < 1e-12 || i == j
             continue
         end
@@ -3077,7 +3124,7 @@ function _build_ptdf_matrix(input::PowerSystemInput)
     ptdf = zeros(n_lines, n_bus)
     for (l, line) in enumerate(lines)
         i, j = line.from_node, line.to_node
-        x = line.reactance_pu / line.num_circuits
+        x = line.reactance_pu
         if abs(x) < 1e-12 || i == j
             continue
         end
@@ -3152,7 +3199,7 @@ function add_scopf_constraints!(model, vars::PowerSystemVariables, input::PowerS
     if input.n1_transmission_enabled && !isempty(lines)
         lodf = _build_lodf_matrix(_build_ptdf_matrix(input), lines)
         flows = _line_flows(vars, input)
-        caps = [line.capacity_mw * line.num_circuits for line in lines]
+        caps = [line.capacity_mw for line in lines]
         over = Dict{Tuple{Int,Int}, VariableRef}()   # (l, t) → worst overload of l
         for k in eachindex(lines), l in eachindex(lines)
             (l == k || caps[k] <= 0 || caps[l] <= 0 || abs(lodf[l, k]) < 1e-6) && continue
@@ -4025,18 +4072,24 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             gen_duals = zeros(hours)
             prefix = !input.n1_scopf_enabled ? "n1_gen_reserve_system" :
                      input.n1_corrective_enabled ? "n1_corrective_gen" : "scopf_n1_gen_reserve"
+            # One constraint per system (_add_gen_n1!): the step's dual is
+            # their sum
+            n_sys = length(reserve_node_groups(input))
             for t in 1:hours
-                cname = "$(prefix)_t$(t)"
-                try
-                    con = constraint_by_name(model, cname)
-                    if con !== nothing
-                        d = dual(con)
-                        gen_duals[t] = d
-                        if abs(d) > 1e-6 && !(cname in binding_names)
-                            push!(binding_names, cname)
+                names = n_sys == 1 ? ["$(prefix)_t$(t)"] :
+                    ["$(prefix)_s$(k)_t$(t)" for k in 1:n_sys]
+                for cname in names
+                    try
+                        con = constraint_by_name(model, cname)
+                        if con !== nothing
+                            d = dual(con)
+                            gen_duals[t] += d
+                            if abs(d) > 1e-6 && !(cname in binding_names)
+                                push!(binding_names, cname)
+                            end
                         end
+                    catch
                     end
-                catch
                 end
             end
             if any(abs.(gen_duals) .> 1e-6)

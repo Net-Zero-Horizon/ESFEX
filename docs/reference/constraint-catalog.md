@@ -84,11 +84,11 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * bse
 |---------------|--------|-------------|
 | `reserve_static_{ni}_{t}` | RES-1 | Static reserve: `reserve_static + loss_of_reserve >= requirement` (per node) |
 | `reserve_static_held_{ni}_{t}` | RES-1 | Static reserve held at node `ni` = the system's held share (`reserve_static_share_s{k}_t{t}`, 0–1) × its requirement |
-| `reserve_dynamic_avail_s{k}_t{t}` | RES-2a | Dynamic reserve of system `k` at most `dynamic_reserve_contribution` × rated power of its reservable units (committed units in UC) and batteries |
+| `reserve_dynamic_avail_s{k}_t{t}` | RES-2a | Dynamic reserve of system `k` at most `dynamic_reserve_contribution` × rated power of its reservable units (committed units in UC) and batteries; in the master also of the reservable capacity built |
 | `reserve_dynamic_req_{ni}_{t}` | RES-2b | Dynamic reserve requirement (per node) |
 | `reserve_dynamic_held_{ni}_{t}` | RES-2b | Dynamic reserve held at node `ni` = the system's held share (`reserve_dynamic_share_s{k}_t{t}`) × its requirement |
 | `reserve_dynamic_zero_{ni}_{t}` | RES-2c | Dynamic reserve = 0 in systems without a dynamic requirement |
-| `reserve_headroom_s{k}_t{t}` | RES-3 | Static + dynamic reserve of system `k` fit in the free capacity of its reservable generators and batteries (committed units in UC) |
+| `reserve_headroom_s{k}_t{t}` | RES-3 | Static + dynamic reserve of system `k` fit in the free capacity of its reservable generators and batteries (committed units in UC); in the master also of the reservable technologies and battery technologies built (RES-M1) |
 
 ### Power Balance
 
@@ -103,7 +103,7 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * bse
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `n1_gen_reserve_system_t{t}` | N1-1 | Headroom of the other reservable units and batteries + `n1_gen_shortfall_t{t}` >= output of the largest unit |
+| `n1_gen_reserve_system_t{t}` | N1-1 | Headroom of the other reservable units and batteries + `n1_gen_reserve_system_shortfall_t{t}` >= output of the largest unit. In a merged multi-system run one per system `k` (`n1_gen_reserve_system_s{k}_t{t}`), over that system's units, batteries and largest unit (likewise `scopf_n1_gen_reserve_s{k}_t{t}`, `n1_corrective_gen_s{k}_t{t}`) |
 | `n1_trans_reserve_l{l}_t{t}_pos`, `_neg` | N1-2 | Per physical line: `±flow <= reserve_factor * capacity + n1_trans_over_l{l}_t{t}` |
 | `scopf_line{l}_outage{k}_t{t}_pos`, `_neg` | N1-3 | SCOPF: `|f_l + LODF[l,k]·f_k| <= cap_l + scopf_over_l{l}_t{t}` |
 | `scopf_n1_gen_reserve_t{t}` | N1-1 | SCOPF: same headroom test as `n1_gen_reserve_system_t{t}`, slack `scopf_n1_gen_reserve_shortfall_t{t}` |

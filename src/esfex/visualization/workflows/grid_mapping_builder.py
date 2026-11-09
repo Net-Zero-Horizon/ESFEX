@@ -899,7 +899,13 @@ def _repair_frequency_consistency(state) -> int:
                 buses[b].frequency_hz = freq
                 changed += 1
 
-    # 4. Equipment runs at the frequency of the bus it connects to.
+    # 4. Equipment runs at the frequency of the bus it connects to, and an AC
+    #    line at the frequency of its area.
+    for ln in state.transmission_lines:
+        b = buses.get(ln.from_bus) or buses.get(ln.to_bus)
+        if (b is not None and b.frequency_hz
+                and getattr(ln, "current_type", "AC") != "DC"):
+            ln.frequency_hz = b.frequency_hz
     for gen in state.generators.values():
         b = buses.get(gen.bus)
         if b is not None and b.frequency_hz:
@@ -1434,7 +1440,9 @@ def _create_line(
         from_endpoint=EndpointRef("bus", from_bus),
         to_endpoint=EndpointRef("bus", to_bus),
         num_circuits=line.num_circuits,
-        frequency_hz=line.frequency_hz,
+        # An untagged line runs at the frequency of the bus it starts at.
+        frequency_hz=(line.frequency_hz if line.frequency_hz > 0
+                      else state.buses[from_bus].frequency_hz),
         current_type=line.current_type,
         length_km=length_km,
         resistance_pu=r_pu,
@@ -1577,7 +1585,8 @@ def _reconnect_isolated_bounded(
                 state.buses[jid] = GuiBus(
                     bus_id=jid, name=jid.replace("_", " ").title(),
                     parent_node=state.buses[ln.from_bus].parent_node,
-                    voltage_kv=v, latitude=qlat, longitude=qlng, role="connection")
+                    voltage_kv=v, latitude=qlat, longitude=qlng, role="connection",
+                    frequency_hz=state.buses[ln.from_bus].frequency_hz)
                 orig_to = ln.to_bus
                 half = (ln.length_km or _haversine_km(
                     state.buses[ln.from_bus].latitude, state.buses[ln.from_bus].longitude,

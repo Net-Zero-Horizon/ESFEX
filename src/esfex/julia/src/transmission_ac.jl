@@ -107,10 +107,10 @@ function build_ybus(lines::Vector{TransmissionLineData},
     # Process transmission lines
     for line in lines
         i, j = line.from_node, line.to_node
-        # Effective impedance per circuit (parallel circuits reduce impedance)
-        r = line.resistance_pu / line.num_circuits
-        x = line.reactance_pu / line.num_circuits
-        b_sh = line.susceptance_pu * line.num_circuits
+        # Whole-line values (all circuits together)
+        r = line.resistance_pu
+        x = line.reactance_pu
+        b_sh = line.susceptance_pu
 
         if abs(x) < 1e-12 && abs(r) < 1e-12
             continue  # Skip zero-impedance lines
@@ -355,9 +355,9 @@ function calculate_line_flows(V::Vector{Float64}, theta::Vector{Float64},
     # Transmission lines (standard π-model)
     for (k, line) in enumerate(lines)
         i, j = line.from_node, line.to_node
-        r = line.resistance_pu / line.num_circuits
-        x = line.reactance_pu / line.num_circuits
-        b_sh = line.susceptance_pu * line.num_circuits
+        r = line.resistance_pu
+        x = line.reactance_pu
+        b_sh = line.susceptance_pu
 
         if abs(x) < 1e-12 && abs(r) < 1e-12
             continue
@@ -533,7 +533,7 @@ function run_ac_power_flow(input::PowerSystemInput, result::PowerSystemResult,
     line_overloads = Tuple{Int,Float64,Float64}[]
     for (k, line) in enumerate(lines)
         flow = max(abs(p_from[k]), abs(p_to[k]))
-        cap = line.capacity_mw * line.num_circuits
+        cap = line.capacity_mw
         if cap > 0 && flow > cap
             push!(line_overloads, (k, flow, cap))
         end

@@ -2208,6 +2208,41 @@ class TestFrequencyConsistency:
         assert st.buses["D"].frequency_hz == 60.0
         # Generator runs at the frequency of the bus it connects to.
         assert st.generators["g"].frequency_hz == 50.0
+        # So do the AC lines of the area.
+        assert {ln.frequency_hz for ln in st.transmission_lines} == {50.0}
+
+    def test_gridfinder_lines_do_not_turn_a_60hz_grid_to_50hz(self):
+        """Cuba is a 60 Hz grid. GridFinder lines and WRI/GEM plants carry no
+        frequency; they used to carry the GridFeature default of 50 Hz, their
+        endpoint buses outvoted the 60 Hz substations, and the whole build
+        (buses, lines, generators) ended up at 50 Hz."""
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            GridFeature,
+        )
+        model = MockGuiModel(_make_state(buses={}))
+        feats = [
+            GridFeature(source="osm", feature_type="substation", name="A",
+                        latitude=22.0, longitude=-80.0, voltage_kv=220.0,
+                        frequency_hz=60.0),
+            GridFeature(source="wri", feature_type="generator", name="G",
+                        latitude=22.0, longitude=-80.0, capacity_mw=100.0,
+                        fuel="Gas"),
+            GridFeature(source="gridfinder", feature_type="line", name="GF1",
+                        latitude=22.0, longitude=-79.7,
+                        line_coords=[(22.0, -80.0), (22.0, -79.5)]),
+            GridFeature(source="gridfinder", feature_type="line", name="GF2",
+                        latitude=22.0, longitude=-79.2,
+                        line_coords=[(22.0, -79.5), (22.0, -79.0)]),
+            GridFeature(source="gridfinder", feature_type="line", name="GF3",
+                        latitude=22.2, longitude=-79.5,
+                        line_coords=[(22.0, -79.5), (22.5, -79.5)]),
+        ]
+        gmb.build_grid_from_features(model, feats)
+        s = model.state
+        assert len(s.buses) >= 3 and len(s.transmission_lines) >= 2
+        assert {b.frequency_hz for b in s.buses.values()} == {60.0}
+        assert {ln.frequency_hz for ln in s.transmission_lines} == {60.0}
+        assert {g.frequency_hz for g in s.generators.values()} == {60.0}
 
 
 class TestVoltagePropagation:

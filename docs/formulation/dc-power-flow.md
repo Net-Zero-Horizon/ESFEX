@@ -84,8 +84,8 @@ f_{l,t} = \frac{S_{base}}{x_l} \left( \theta_{i,t} - \theta_{j,t} \right) \quad 
 
 where \(x_l\) is the line reactance in p.u. and \(S_{base}\) converts the per-unit susceptance to MW per radian. \(S_{base}\) is the system power base `ac_power_flow.base_mva` (default 100 MVA), the base the Grid Builder uses for line per-unit values. Constraint name: `flow_angle_{l}_{t}`.
 
-- **Parallel circuits**: a line with `num_circuits` \(k\) uses reactance `reactance_pu / k` and capacity `capacity_mw × k`.
-- **Missing reactance**: a line without `reactance_pu` gets `length_km × reactance_per_km / Z_base`, with \(Z_{base} = V^2 / S_{base}\) and \(V\) the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. when it has no length. A reactance \(\leq 0\) is replaced by 0.01 p.u.
+- **Parallel circuits**: `capacity_mw`, `reactance_pu` and `resistance_pu` describe the whole line, all its `num_circuits` circuits together; the model uses them as given and does not rescale them by the circuit count. A line of two 300 MW circuits of 0.1 p.u. each is written `capacity_mw: 600`, `reactance_pu: 0.05`, `num_circuits: 2` (this is what the Grid Builder writes).
+- **Missing reactance**: a line without `reactance_pu` gets `length_km × reactance_per_km / Z_base / num_circuits` (the per-km value is that of one circuit), with \(Z_{base} = V^2 / S_{base}\) and \(V\) the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. / `num_circuits` when it has no length. A reactance \(\leq 0\) is replaced by 0.01 p.u.
 - **Negligible lines**: a branch with capacity below 0.1 MW has its flow fixed to zero (`flow_zero_{l}_{t}`) unless investment can expand it: a candidate corridor of 0 MW in the master problem, such as a development-zone link, or a corridor whose ends both allow transference investment in a development-mode dispatch.
 
 DC-2 replaced an earlier cycle-based KVL formulation; one equation per line handles parallel lines and disconnected networks directly.
@@ -185,7 +185,7 @@ ESFEX supports three transmission loss models, selected via `dc_power_flow.loss_
 | Linear | `"linear"` | A constant fraction \(\lambda_l\) of the flow is lost |
 | Piecewise linear | `"pwl"` | PWL approximation of quadratic \(I^2R\) losses (default) |
 
-The loss coefficient of a branch is its per-unit series resistance \(R_l\): `resistance_pu / num_circuits` for lines (0 when not given, i.e. lossless) and the transformer resistance above for transformers.
+The loss coefficient of a branch is its per-unit series resistance \(R_l\): `resistance_pu` for lines (0 when not given, i.e. lossless) and the transformer resistance above for transformers.
 
 The master problem's representative days and the Benders subproblems use the same `loss_model`, with `pwl_loss_segments_master` segments for `pwl`. Their network has one link per connected node pair (from `nodes_connections`). The link's reactance and resistance are those of the bus-level lines joining the two nodes in parallel, the resistance weighted by how the flow splits between them:
 
@@ -193,7 +193,7 @@ The master problem's representative days and the Benders subproblems use the sam
 X^{link}_{ij} = \Big(\sum_k 1/X_k\Big)^{-1}, \qquad R^{link}_{ij} = \sum_{k} R_k \, s_k^2, \qquad s_k = \frac{1/X_k}{\sum_{m} 1/X_m}
 \]
 
-with \(R_k\), \(X_k\) per circuit. A node pair with no bus-level lines between them gets a lossless link whose reactance is derived from its `fuel_transport_distances` entry and `voltage_level_kv` (0.01 p.u. without a distance).
+with \(R_k\), \(X_k\) those of each whole line. A node pair with no bus-level lines between them gets a lossless link whose reactance is derived from its `fuel_transport_distances` entry and `voltage_level_kv` (0.01 p.u. without a distance).
 
 ### Linear Model
 
@@ -331,8 +331,8 @@ With `scopf_enabled: false` (default) the constraints are preventive; with `scop
 
 ### Critical Elements
 
-- **Transmission lines**: every transmission line (each parallel circuit on its own) with capacity \(C_l = \) `capacity_mw × num_circuits` \(> 0\). No loading threshold is applied. Transformers are not included.
-- **Largest generator**: the (generator, bus) pair with the largest `rated_power`, chosen once from the configured ratings, independently of commitment, output or investment.
+- **Transmission lines**: every transmission line (all its circuits together: the outage of a line takes out all of them) with capacity \(C_l = \) `capacity_mw` \(> 0\). No loading threshold is applied. Transformers are not included.
+- **Largest generator**: the (generator, bus) pair with the largest `rated_power`, chosen once from the configured ratings, independently of commitment, output or investment. In a merged multi-system run each original system has its own (see below).
 
 ### Preventive N-1 (soft)
 
@@ -345,7 +345,7 @@ H^{N1}_t + s^{gen}_t \geq p_{g^*,n^*,t} \quad \forall t
 \tag{N1-1}
 \]
 
-where \(H^{N1}_t\) is the system-wide headroom of reservable non-renewable units other than \((g^*, n^*)\) (online units only in unit commitment) plus battery headroom, as in the reserve constraints of the [operational dispatch](operational-dispatch.md). Constraint `n1_gen_reserve_system_t{t}`, shortfall `n1_gen_shortfall_t{t}`.
+where \(H^{N1}_t\) is the system-wide headroom of reservable non-renewable units other than \((g^*, n^*)\) (online units only in unit commitment) plus battery headroom, as in the reserve constraints of the [operational dispatch](operational-dispatch.md). Constraint `n1_gen_reserve_system_t{t}`, shortfall `n1_gen_reserve_system_shortfall_t{t}`. In a merged multi-system run N1-1 holds per original system, like the reserves: each system's largest unit, covered by that system's headroom only (`n1_gen_reserve_system_s{k}_t{t}` for system \(k\)). The N-1 generation dual reported per step is the sum over the systems.
 
 #### N1-2: Transmission
 
@@ -360,7 +360,7 @@ where \(\rho^{post}\) is `transmission_reserve_factor` (default 0.70) and \(f_{l
 
 Both slacks are priced at `penalties.loss_of_reserve_static` per MW and time step and reported as `n1_security_shortfall_cost`, so an insecure fleet or network shows up as a cost instead of an infeasible model.
 
-With `generation_reserve_type: percentage` the requirement of N1-1 is `generation_reserve_percentage` × the total demand of the step instead of the largest unit's output, and no unit is excluded from the headroom.
+With `generation_reserve_type: percentage` the requirement of N1-1 is `generation_reserve_percentage` × the system's total demand of the step instead of the largest unit's output, and no unit is excluded from the headroom.
 
 `critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` only configure the post-hoc contingency analysis of the Studio's single-line diagram.
 
@@ -373,7 +373,7 @@ The PTDF (Power Transfer Distribution Factor) matrix is computed from the networ
 \]
 
 where:
-- \(\mathbf{B}_{bus}\) is the bus susceptance matrix with \(b_l = 1/X_l\) (reactance divided by the number of circuits)
+- \(\mathbf{B}_{bus}\) is the bus susceptance matrix with \(b_l = 1/X_l\) (\(X_l\) the reactance of the whole line)
 - \(\mathbf{B}_f\) is the branch-bus susceptance matrix
 
 The slack bus row and column are removed before inversion (pseudo-inverse). Only transmission lines are included, not transformers.
@@ -406,7 +406,7 @@ When `scopf_enabled: true`, the preventive constraints are replaced, in a single
 \tag{SCOPF-1}
 \]
 
-with \(C_l\) the base capacity (`capacity_mw × num_circuits`), \(f\) the flow of each physical line in its own from→to direction, and \(o_{l,t} \geq 0\) the worst post-contingency overload of line \(l\) over all outages (`scopf_over_l{l}_t{t}`). Constraint names `scopf_line{l}_outage{k}_t{t}_pos` / `_neg`. All pairs are added at once; there is no iteration.
+with \(C_l\) the base capacity (`capacity_mw`), \(f\) the flow of each physical line in its own from→to direction, and \(o_{l,t} \geq 0\) the worst post-contingency overload of line \(l\) over all outages (`scopf_over_l{l}_t{t}`). Constraint names `scopf_line{l}_outage{k}_t{t}_pos` / `_neg`. All pairs are added at once; there is no iteration.
 
 **Generation** (if `generation_enabled`):
 
