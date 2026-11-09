@@ -161,6 +161,56 @@ def test_myopic_keeps_retired_units_out(tmp_path):
     # Reported retired, and out of service, in both years
     assert [r.retirements for r in results] == [{"gen_1": pytest.approx(1.0)}] * 2
     _check_results_file(h5, [r.year for r in results], retired=True)
+    # The first year's NPV covers both years of the horizon (its operation
+    # held), as perfect foresight values them; it covered that year only
+    npv = {r["key"]: r["npv"] for r in orch._npv_retirements}
+    two_years = 1 + 1 / 1.05
+    assert npv["peaker"] == pytest.approx(-PEAKER_FIXED * two_years)
+    assert npv["bat"] == pytest.approx(-(BAT_FIXED - 0.15 * 800.0 * 50.0) * two_years)
+    foresight, _, _ = _run(tmp_path, "foresight2", years=2, npv=True)
+    assert {r["key"]: r["npv"] for r in foresight._npv_retirements} == pytest.approx(npv)
+
+
+def _failing_resolve(monkeypatch):
+    """Make every master re-solve after an NPV retirement round report
+    INFEASIBLE (the model is rebuilt and solved, then reported failed)."""
+    from esfex.bridge.adapters import MasterProblemAdapter
+
+    real = MasterProblemAdapter._solve_once
+
+    def solve_once(self):
+        status = real(self)
+        if self.npv_retirements:
+            self._last_status = "INFEASIBLE"
+            return -1
+        return status
+    monkeypatch.setattr(MasterProblemAdapter, "_solve_once", solve_once)
+
+
+@pytest.mark.julia
+@pytest.mark.parametrize("planning", ["perfect_foresight", "myopic"])
+def test_failed_resolve_keeps_the_last_optimal_plan(tmp_path, monkeypatch, caplog, planning):
+    """A re-solve that is not optimal undoes its round: the run goes on with
+    the last optimal plan, the units kept and none listed as retired (it
+    stopped with "Master problem failed")."""
+    import logging
+
+    _failing_resolve(monkeypatch)
+    years = 2 if planning == "myopic" else 1
+    with caplog.at_level(logging.WARNING):
+        orch, results, h5 = _run(tmp_path, planning, years=years, npv=True, planning=planning)
+    assert len(results) == years
+    assert orch._npv_retirements == []
+    assert orch._current_units_config["peaker"]["rated_power"][0] > 0
+    assert orch._current_units_config["bat"]["MaxDischargePower"] == pytest.approx([50.0])
+    warnings = [r.getMessage() for r in caplog.records
+                if "NPV retirement" in r.getMessage() and r.levelno == logging.WARNING]
+    assert len(warnings) == years
+    assert all("not optimal (INFEASIBLE)" in w and "Peaker" in w and "Bat" in w
+               for w in warnings)
+    with h5py.File(h5, "r") as f:
+        assert len(f["npv_retirements/key"]) == 0
+    _check_results_file(h5, [r.year for r in results], retired=False)
 
 
 @pytest.mark.julia

@@ -2512,6 +2512,7 @@ class MasterProblemAdapter:
         # keys whose NPV is checked (None: every existing unit)
         retired_units: Optional[List[tuple]] = None,
         npv_unit_keys: Optional[set] = None,
+        npv_horizon_end: Optional[int] = None,
         **kwargs,
     ):
         """
@@ -2561,6 +2562,10 @@ class MasterProblemAdapter:
                 retired, without paying their decommissioning again
             npv_unit_keys: Generator and battery keys whose NPV the NPV
                 retirement checks (default: every existing unit)
+            npv_horizon_end: Last year of the planning horizon when it goes
+                past ``years`` (a myopic year's master): the NPV also covers
+                the unit's remaining in-service years up to it, its last
+                modelled year's operation held (Julia ``extra_unit_npv``)
             **kwargs: Additional parameters (system_config: explicit SystemConfig override)
         """
         system_config_override = kwargs.pop("system_config", None)
@@ -2677,7 +2682,10 @@ class MasterProblemAdapter:
         self.npv_threshold = float(getattr(sc, 'npv_retirement_threshold', 0.0))
         self._retired_carried = list(retired_units or [])
         self._npv_unit_keys = set(npv_unit_keys) if npv_unit_keys is not None else None
+        self.npv_extra_years = (max(0, int(npv_horizon_end) - int(years[-1]))
+                                if npv_horizon_end is not None and years else 0)
         self.npv_retirements: List[Dict[str, Any]] = []
+        self._last_status = ""
 
         # Get solver config
         self._solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
@@ -3346,7 +3354,8 @@ class MasterProblemAdapter:
             result = ESFEX.extract_master_solution(
                 self._jl_model, self._jl_vars, self._jl_input, unit_operation=True)
         npvs = ESFEX.unit_npvs(result, self._jl_input,
-                               npv_threshold=scale_cost(self.npv_threshold))
+                               npv_threshold=scale_cost(self.npv_threshold),
+                               extra_years=self.npv_extra_years)
         node_of = jl.seval("(inp, b) -> inp.network.bus_to_node[b]")
         out = []
         for u in npvs:
@@ -3366,13 +3375,23 @@ class MasterProblemAdapter:
             })
         return out
 
+    # The solved model the NPV iteration falls back on when a re-solve fails
+    _SOLVED_STATE = ("_jl_model", "_jl_vars", "_jl_input", "_jl_targets", "_jl_scenarios",
+                     "_benders_result", "_benders_solution", "solver_method",
+                     "_benders_use_rep_days")
+
     def _solve_npv_retirement(self, status: int) -> int:
         """NPV-based retirement around the solve: while the plan is optimal,
         retire the existing units whose NPV is below the threshold for the
         whole horizon, rebuild and re-solve; stop when no new unit is below
         it or after ``npv_retirement_max_iterations`` rounds. Each retired
         unit is added to ``npv_retirements`` with its NPV and round.
-        Returns the status of the last solve."""
+
+        A re-solve that is not optimal (or fails) undoes its round: the last
+        optimal model and its retirements are kept, a warning names the
+        units of the undone round and the solver status, and the iteration
+        stops (the run goes on with that plan). Returns the status of the
+        plan kept."""
         rounds = 0
         while status == 1:
             npvs = self._unit_npvs()
@@ -3396,12 +3415,28 @@ class MasterProblemAdapter:
                 f"NPV retirement, round {rounds}: retiring {len(flagged)} unit(s): "
                 + ", ".join(f"{u['name']} at node {u['node']} (NPV ${u['npv']:,.0f})"
                             for u in flagged))
+            kept = {a: getattr(self, a) for a in self._SOLVED_STATE}
+            n_before = len(self.npv_retirements)
             for u in flagged:
                 u = dict(u, iteration=rounds)
                 u.pop("retire")
                 self.npv_retirements.append(u)
-            self.build_model(use_representative_days=self._use_rep_days)
-            status = self._solve_once()
+            try:
+                self.build_model(use_representative_days=self._use_rep_days)
+                status = self._solve_once()
+            except Exception as e:  # noqa: BLE001 — a failed re-solve is undone
+                status, self._last_status = 0, f"error: {e}"
+            if status != 1:
+                undone = self.npv_retirements[n_before:]
+                del self.npv_retirements[n_before:]
+                for a, v in kept.items():
+                    setattr(self, a, v)
+                logger.warning(
+                    f"NPV retirement, round {rounds}: the master re-solve after retiring "
+                    + ", ".join(f"{u['name']} at node {u['node']}" for u in undone)
+                    + f" is not optimal ({self._last_status}); keeping these units and "
+                    "the last optimal plan")
+                return 1
         return status
 
     def solve(self) -> int:
@@ -3442,6 +3477,7 @@ class MasterProblemAdapter:
 
         status = jl.seval("termination_status(_mp_model)")
         status_str = str(status)
+        self._last_status = status_str
 
         primal_status = str(jl.seval("primal_status(_mp_model)"))
         logger.info(f"MasterProblem termination: {status_str}, primal: {primal_status}")
@@ -3501,6 +3537,7 @@ class MasterProblemAdapter:
         self._benders_solution = self._benders_result.solution
 
         status_str = str(self._benders_solution.status)
+        self._last_status = status_str
         gap = float(self._benders_result.gap)
         iters = int(self._benders_result.iterations)
         obj = float(self._benders_result.objective) * COST_UNSCALE
