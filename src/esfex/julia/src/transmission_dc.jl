@@ -93,9 +93,8 @@ function TransmissionDC(network::NetworkConfig)
             # Transmission line
             src = transmission_src_indices[idx]
             if !isempty(network.transmission_lines) && src <= length(network.transmission_lines)
-                # Per-circuit R, like the reactance in build_from_line_data
-                tl = network.transmission_lines[src]
-                push!(losses, tl.resistance_pu / tl.num_circuits)
+                # Whole-line R, like the reactance in build_from_line_data
+                push!(losses, network.transmission_lines[src].resistance_pu)
             else
                 push!(losses, reactances[idx] * network.default_r_to_x_ratio)
             end
@@ -252,9 +251,9 @@ function build_from_line_data(network::NetworkConfig)
         i, j = tl.from_node, tl.to_node
         edge = i < j ? (i, j) : (j, i)
         push!(lines, edge)
-        # Effective values accounting for parallel circuits
-        push!(reactances, tl.reactance_pu / tl.num_circuits)
-        push!(capacities, tl.capacity_mw * tl.num_circuits)
+        # Whole-line values: they already include all of its circuits
+        push!(reactances, tl.reactance_pu)
+        push!(capacities, tl.capacity_mw)
     end
 
     return lines, capacities, reactances

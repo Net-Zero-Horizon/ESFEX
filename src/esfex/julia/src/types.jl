@@ -55,13 +55,14 @@ Per-line transmission data for enhanced DC/AC power flow.
 - `line_id::String`: Unique line identifier (e.g., "line_0")
 - `from_node::Int`: Source node (1-indexed)
 - `to_node::Int`: Destination node (1-indexed)
-- `capacity_mw::Float64`: Thermal capacity per circuit (MW)
-- `reactance_pu::Float64`: Series reactance in p.u. (on system base)
-- `resistance_pu::Float64`: Series resistance in p.u. (for AC PF / losses)
-- `susceptance_pu::Float64`: Shunt charging susceptance in p.u. (for AC PF)
+- `capacity_mw::Float64`: Thermal capacity of the whole line, all circuits together (MW)
+- `reactance_pu::Float64`: Series reactance of the whole line in p.u. (on system base)
+- `resistance_pu::Float64`: Series resistance of the whole line in p.u. (for AC PF / losses)
+- `susceptance_pu::Float64`: Shunt charging susceptance of the whole line in p.u. (for AC PF)
 - `length_km::Float64`: Line length (km)
 - `voltage_kv::Float64`: Rated voltage (kV)
-- `num_circuits::Int`: Number of parallel circuits
+- `num_circuits::Int`: Number of parallel circuits. Descriptive: the values
+  above already include all circuits, so the model does not rescale them.
 - `frequency_hz::Float64`, `current_type::String`: "AC" or "DC"
 - `flow_cost::Float64`: Cost per MWh carried in either direction (solver cost
   units/MWh; 0 = free). Inter-system links of a merged run get
