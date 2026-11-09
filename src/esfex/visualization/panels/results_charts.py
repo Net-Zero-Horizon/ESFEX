@@ -15,7 +15,7 @@ import numpy as np
 
 from esfex.io.exporter import demand_is_step_major, demand_node_hours
 from esfex.models.financial_analysis import (
-    _index_configs_by_name, _lookup_config, built_power,
+    _index_configs_by_name, _lookup_config, power_in_service,
 )
 from esfex.utils.temporal import HOURS_STD_YEAR, model_time_index
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -1745,18 +1745,105 @@ def _config_children(grp, singular: str) -> list:
 
 
 def _gen_config_resolver(h5f: h5py.File, base_prefix: str = ""):
-    """``resolve(dataset_name, idx=-1, built_mw=None)`` → the config of the
-    generator behind a results dataset: its own config by name, or, for a
-    unit the master built (``"Investment <technology>"``, no config of its
-    own), its technology's (see ``financial_analysis._lookup_config``)."""
-    gen_cfgs = _load_gen_configs(h5f, base_prefix)
-    by_name = _index_configs_by_name(gen_cfgs)
-    tech_by_name = _index_configs_by_name(_load_tech_configs(h5f, base_prefix))
+    """``resolve(dataset_name, idx=-1, in_service_mw=None)`` → the config of
+    the generator behind a results dataset: its own config by name, or, for
+    a unit the master built (``"Investment <technology>"``, no config of its
+    own), its technology's; with ``in_service_mw``, its ``rated_power`` is
+    that MW (see ``financial_analysis._lookup_config``)."""
+    return _unit_config_resolver(
+        _load_gen_configs(h5f, base_prefix),
+        _load_tech_configs(h5f, base_prefix), "rated_power")
 
-    def resolve(name: str, idx: int = -1, built_mw=None) -> dict:
-        return _lookup_config(name, by_name, gen_cfgs, idx,
-                              tech_by_name=tech_by_name, built_mw=built_mw)
+
+def _bat_config_resolver(h5f: h5py.File, base_prefix: str = ""):
+    """The battery counterpart of :func:`_gen_config_resolver` (built
+    batteries take their battery technology's config; ``in_service_mw`` is
+    the ``MaxDischargePower``)."""
+    return _unit_config_resolver(
+        _load_bat_configs(h5f, base_prefix),
+        _load_bat_tech_configs(h5f, base_prefix), "MaxDischargePower")
+
+
+def _unit_config_resolver(configs: list[dict], tech_configs: list[dict],
+                          power_key: str):
+    by_name = _index_configs_by_name(configs)
+    tech_by_name = _index_configs_by_name(tech_configs)
+
+    def resolve(name: str, idx: int = -1, in_service_mw=None) -> dict:
+        return _lookup_config(name, by_name, configs, idx,
+                              tech_by_name=tech_by_name,
+                              in_service_mw=in_service_mw, power_key=power_key)
     return resolve
+
+
+def _attr_node_values(val) -> np.ndarray:
+    """A per-node config attr (scalar, array or stringified list) as a 1-D
+    float array."""
+    if isinstance(val, (bytes, str)):
+        import ast
+        s = val.decode() if isinstance(val, bytes) else val
+        try:
+            val = ast.literal_eval(s.strip())
+        except (ValueError, SyntaxError):
+            return np.zeros(0)
+    try:
+        return np.atleast_1d(np.asarray(val, dtype=float)).ravel()
+    except (TypeError, ValueError):
+        return np.zeros(0)
+
+
+def _gen_capacity_in_service(h5f: h5py.File, base_prefix: str, sc) -> float:
+    """Total generator MW in service in scenario ``sc`` over the system's
+    nodes: each unit's MW in service recorded on its ``generation`` dataset
+    (the master's builds, retirements, life extension and degradation
+    applied). A unit without it (files written before it was recorded) counts
+    its config's ``rated_power``."""
+    if "generation" not in sc:
+        return 0.0
+    grp = sc["generation"]
+    resolve = _gen_config_resolver(h5f, base_prefix)
+    rng = _system_node_range(h5f, base_prefix)
+    total = 0.0
+    for gi, name in enumerate(_load_gen_data(sc)):
+        cfg = resolve(name, gi, power_in_service(grp, name))
+        mw = _attr_node_values(cfg.get("rated_power", 0.0))
+        # The configs' and the attr's per-node lists span every system
+        if rng is not None and mw.size >= rng[1]:
+            mw = mw[rng[0]:rng[1]]
+        total += float(mw.sum())
+    return total
+
+
+def _legacy_unit_investments(inv_data: dict, key: str,
+                             configs: list[dict]) -> list[tuple[dict, float]]:
+    """``(config, MW)`` of each unit in the per-unit investment results
+    ``key`` (``gen_investment_power`` / ``bat_investment_power``) of
+    :func:`_load_investment_data`: a ``{key}/{unit}`` dataset finds its
+    unit's config by name (h5py lists them alphabetically); an old ``[unit]``
+    array is index-aligned with the configured units."""
+    out: list[tuple[dict, float]] = []
+    by_name = _index_configs_by_name(configs)
+    for name, mw in inv_data.get(key + "_by_name", {}).items():
+        cfg = _lookup_config(name, by_name, configs)
+        if cfg and mw > 0:
+            out.append((cfg, float(mw)))
+    if key in inv_data:
+        for i, mw in enumerate(np.ravel(inv_data[key])):
+            if mw > 0 and i < len(configs):
+                out.append((configs[i], float(mw)))
+    return out
+
+
+def _legacy_investment_cost(inv_data: dict, gen_configs: list[dict],
+                            bat_configs: list[dict]) -> float:
+    """$ of the per-unit investments of :func:`_legacy_unit_investments`:
+    MW × the unit's ``invest_cost``."""
+    return sum(
+        mw * _parse_invest_cost(cfg["invest_cost"])
+        for key, configs in (("gen_investment_power", gen_configs),
+                             ("bat_investment_power", bat_configs))
+        for cfg, mw in _legacy_unit_investments(inv_data, key, configs)
+        if "invest_cost" in cfg)
 
 
 def _load_gen_configs(h5f: h5py.File, base_prefix: str = "") -> list[dict]:
@@ -2416,39 +2503,22 @@ class GenerationMixChart(QWidget):
                         cost_per_mw = inv_data.get("bat_tech_costs", {}).get(bt_name, 0)
                         year_cost += float(inv_mw) * cost_per_mw / 1e6
 
-                if "gen_investment_power" in inv_data:
-                    for gi, inv_mw in enumerate(inv_data["gen_investment_power"]):
-                        if inv_mw > 0 and gi < len(gen_configs):
-                            gc = gen_configs[gi]
-                            gn = gc.get("name", f"Gen_{gi}")
-                            if isinstance(gn, bytes):
-                                gn = gn.decode()
-                            info = _resolve_gen_tech(gn, gen_tech_map)
-                            if info is None:
-                                continue
-                            gn_canon = info["label"]
-                            if gn_canon not in gen_inv_by_tech:
-                                gen_inv_by_tech[gn_canon] = np.zeros(len(scenarios))
-                            gen_inv_by_tech[gn_canon][year_idx] += float(inv_mw) / 1000
-                            if "invest_cost" in gc:
-                                year_cost += float(inv_mw) * _parse_invest_cost(gc["invest_cost"]) / 1e6
-
-                if "bat_investment_power" in inv_data:
-                    for bi, inv_mw in enumerate(inv_data["bat_investment_power"]):
-                        if inv_mw > 0 and bi < len(bat_configs):
-                            bc = bat_configs[bi]
-                            bn = bc.get("name", f"Battery_{bi}")
-                            if isinstance(bn, bytes):
-                                bn = bn.decode()
-                            info = _resolve_gen_tech(bn, gen_tech_map)
-                            if info is None:
-                                continue
-                            bn_canon = info["label"]
-                            if bn_canon not in bat_inv_by_tech:
-                                bat_inv_by_tech[bn_canon] = np.zeros(len(scenarios))
-                            bat_inv_by_tech[bn_canon][year_idx] += float(inv_mw) / 1000
-                            if "invest_cost" in bc:
-                                year_cost += float(inv_mw) * _parse_invest_cost(bc["invest_cost"]) / 1e6
+                for key, configs, inv_by_tech in (
+                        ("gen_investment_power", gen_configs, gen_inv_by_tech),
+                        ("bat_investment_power", bat_configs, bat_inv_by_tech)):
+                    for uc, inv_mw in _legacy_unit_investments(inv_data, key, configs):
+                        un = uc.get("name", "")
+                        if isinstance(un, bytes):
+                            un = un.decode()
+                        info = _resolve_gen_tech(un, gen_tech_map)
+                        if info is None:
+                            continue
+                        u_canon = info["label"]
+                        if u_canon not in inv_by_tech:
+                            inv_by_tech[u_canon] = np.zeros(len(scenarios))
+                        inv_by_tech[u_canon][year_idx] += inv_mw / 1000
+                        if "invest_cost" in uc:
+                            year_cost += inv_mw * _parse_invest_cost(uc["invest_cost"]) / 1e6
 
                 total_cost_by_year.append(year_cost)
 
@@ -7436,18 +7506,7 @@ class CashFlowChart(QWidget):
                     if inv_mw > 0 and (sys_filter is None or bt_name.startswith(sys_filter + "/")):
                         rate = inv_data.get("bat_tech_costs", {}).get(bt_name, 0)
                         year_capex += float(inv_mw) * rate
-                if "gen_investment_power" in inv_data:
-                    for gi, inv_mw in enumerate(inv_data["gen_investment_power"]):
-                        if inv_mw > 0 and gi < len(gen_configs):
-                            gc = gen_configs[gi]
-                            if "invest_cost" in gc:
-                                year_capex += float(inv_mw) * _parse_invest_cost(gc["invest_cost"])
-                if "bat_investment_power" in inv_data:
-                    for bi, inv_mw in enumerate(inv_data["bat_investment_power"]):
-                        if inv_mw > 0 and bi < len(bat_configs):
-                            bc = bat_configs[bi]
-                            if "invest_cost" in bc:
-                                year_capex += float(inv_mw) * _parse_invest_cost(bc["invest_cost"])
+                year_capex += _legacy_investment_cost(inv_data, gen_configs, bat_configs)
                 capex.append(year_capex)
 
         if not yr_list:
@@ -7681,7 +7740,8 @@ class SystemMetricsEvolutionChart(QWidget):
         return _sum_nodes(a) if a.ndim >= 2 else a
 
     def _extract_metrics(self, sc, sc_key, h5f, tres, gen_configs,
-                         bat_configs, tech_configs, bat_tech_configs) -> dict:
+                         bat_configs, tech_configs, bat_tech_configs,
+                         base_prefix: str = "") -> dict:
         out: dict[str, float] = {}
 
         ll = self._flat(sc, "loss_load")
@@ -7703,14 +7763,10 @@ class SystemMetricsEvolutionChart(QWidget):
             out["peak_uns"] = float(np.max(ll))
         if dem is not None and len(dem) > 0:
             peak_dem = float(np.max(dem))
-            # Reserve margin = (installed capacity − peak demand) / peak demand
-            installed_mw = 0.0
-            for gc in gen_configs:
-                rp = gc.get("rated_power", 0)
-                try:
-                    installed_mw += float(_parse_invest_cost(rp))
-                except Exception:
-                    pass
+            # Reserve margin = (installed capacity − peak demand) / peak
+            # demand, with the generator MW in service this year (the
+            # master's builds and retirements included)
+            installed_mw = _gen_capacity_in_service(h5f, base_prefix, sc)
             if peak_dem > 0:
                 out["reserve_margin"] = (installed_mw / peak_dem - 1.0) * 100.0
             out["cap_total"] = installed_mw
@@ -7833,19 +7889,8 @@ class SystemMetricsEvolutionChart(QWidget):
             for nm, mw in inv_data.get("bat_tech_power_investments", {}).items():
                 if mw > 0:
                     inv_cost += float(mw) * inv_data.get("bat_tech_costs", {}).get(nm, 0)
-            # Legacy per-generator investments (operational paths).
-            if "gen_investment_power" in inv_data:
-                for gi, mw in enumerate(inv_data["gen_investment_power"]):
-                    if mw > 0 and gi < len(gen_configs):
-                        gc = gen_configs[gi]
-                        if "invest_cost" in gc:
-                            inv_cost += float(mw) * _parse_invest_cost(gc["invest_cost"])
-            if "bat_investment_power" in inv_data:
-                for bi, mw in enumerate(inv_data["bat_investment_power"]):
-                    if mw > 0 and bi < len(bat_configs):
-                        bc = bat_configs[bi]
-                        if "invest_cost" in bc:
-                            inv_cost += float(mw) * _parse_invest_cost(bc["invest_cost"])
+            # Legacy per-unit investments (operational paths).
+            inv_cost += _legacy_investment_cost(inv_data, gen_configs, bat_configs)
             out["inv_cost"] = inv_cost / 1e6
         except Exception:
             logger.exception("inv_cost extraction failed")
@@ -7889,7 +7934,7 @@ class SystemMetricsEvolutionChart(QWidget):
                 m = self._extract_metrics(
                     sc, sc_key, h5f, tres,
                     gen_configs, bat_configs,
-                    tech_configs, bat_tech_configs,
+                    tech_configs, bat_tech_configs, base_prefix=bp,
                 )
                 per_year_metrics[int(year)] = m
 
@@ -9292,11 +9337,10 @@ class UCDispatchStackChart(QWidget):
                 return {"error": "generation missing"}
             rng = _system_node_range(h5f, bp)
 
-            # Build fuel/tech maps the same way the dashboard mix does.
-            gen_configs = _load_gen_configs(h5f, bp)
+            # Build fuel/tech maps the same way the dashboard mix does:
+            # each dataset finds its unit's config (fuel) by name
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
-            # Iterate generators in insertion order; positional index
-            # into gen_configs gives the config dict with name/fuel.
             tech_series: dict[str, np.ndarray] = {}
             n_hours = 0
             for gi, (gen_name, arr) in enumerate(gen_data.items()):
@@ -9310,8 +9354,7 @@ class UCDispatchStackChart(QWidget):
                 hourly = sliced.sum(axis=0)
                 if n_hours == 0:
                     n_hours = int(hourly.shape[0])
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
-                tech = _tech_bucket_for_gen(cfg, gen_name)
+                tech = _tech_bucket_for_gen(unit_config(gen_name, gi), gen_name)
                 if tech in tech_series:
                     tech_series[tech] = tech_series[tech] + hourly
                 else:
@@ -9745,9 +9788,8 @@ class UCMarginalTechChart(QWidget):
                 else:
                     # No gen_status — treat as ON whenever output > 0.
                     gen_on[gi, :] = gen_total[gi, :] > 1e-3
-                built = (built_power(sc["generation"], gname)
-                         if "generation" in sc else None)
-                cfg = unit_config(gname, gi, built)
+                cfg = unit_config(gname, gi, power_in_service(sc["generation"], gname)
+                                  if "generation" in sc else None)
                 fc = _attr_scalar(cfg, "fuel_cost")
                 mc = _attr_scalar(cfg, "maintenance_cost")
                 var_costs[gi] = fc + mc
@@ -9988,7 +10030,7 @@ class UCStorageSOCChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             rng = _system_node_range(h5f, bp)
             tres = _get_temporal_res(h5f)
-            bat_configs = _load_bat_configs(h5f, bp)
+            bat_config = _bat_config_resolver(h5f, bp)
             soc = _load_bat_data(sc, "battery_soc")
             charge = _load_bat_data(sc, "battery_charge")
             discharge = _load_bat_data(sc, "battery_discharge")
@@ -10026,12 +10068,15 @@ class UCStorageSOCChart(QWidget):
             soc_arr = _slice_sys(soc.get(bname, np.zeros((1, n_hours))))
             ch_arr  = _slice_sys(charge.get(bname, np.zeros((1, n_hours))))
             dh_arr  = _slice_sys(discharge.get(bname, np.zeros((1, n_hours))))
-            cfg = bat_configs[bi] if bi < len(bat_configs) else {}
-            # Capacity (MWh): prefer per-node max of soc; fall back to
-            # the config's rated_capacity attr.
+            # Capacity (MWh): prefer the peak of the summed SOC; fall back
+            # to the battery's configured energy capacity over the system's
+            # nodes (its config found by name)
             cap_mwh = float(soc_arr.sum(axis=0).max()) if soc_arr.size else 0.0
             if cap_mwh <= 0:
-                cap_mwh = _attr_scalar(cfg, "rated_capacity", 0.0)
+                cap = _attr_node_values(bat_config(bname, bi).get("capacity", 0.0))
+                if rng is not None and cap.size >= rng[1]:
+                    cap = cap[rng[0]:rng[1]]
+                cap_mwh = float(cap.sum())
             soc_total = soc_arr.sum(axis=0)[:n_hours]
             soc_pct = (
                 (soc_total / cap_mwh * 100.0) if cap_mwh > 0
@@ -10140,7 +10185,7 @@ class UCNetLoadDurationChart(QWidget):
             n_hours = demand.size
             # Sum RE generation: walk gen_data and accept generators
             # whose canonical bucket matches one of the renewable labels.
-            gen_configs = _load_gen_configs(h5f, bp)
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
             re_total = np.zeros(n_hours)
             RE_LABELS = {"Wind", "Solar", "Hydro", "Biomass", "OTEC",
@@ -10148,8 +10193,7 @@ class UCNetLoadDurationChart(QWidget):
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
-                tech = _tech_bucket_for_gen(cfg, gname)
+                tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
                 if tech not in RE_LABELS:
                     continue
                 if rng is not None:
@@ -10247,15 +10291,14 @@ class UCRampDistributionChart(QWidget):
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             rng = _system_node_range(h5f, bp)
-            gen_configs = _load_gen_configs(h5f, bp)
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
             # Aggregate ramp magnitudes per tech bucket.
             ramps_by_tech: dict[str, list[float]] = {}
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
-                tech = _tech_bucket_for_gen(cfg, gname)
+                tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
                 if rng is not None:
                     lo, hi = rng
                     arr = arr[lo:hi]
