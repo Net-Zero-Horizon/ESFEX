@@ -2126,3 +2126,57 @@ class TestBusNN:
         assert bridge.resistance_pu == pytest.approx(r)
         assert bridge.susceptance_pu == pytest.approx(b)
         assert bridge.frequency_hz == 60.0
+
+    def test_bridge_between_voltage_levels_goes_through_transformer(self):
+        """A 110 kV island whose nearest main bus is 220 kV is joined by a
+        110 kV line to a new 110 kV bus at the main substation, stepped up
+        by a 220/110 kV transformer. The bridge used to be a single line at
+        max(220, 110) kV straight between the two voltage levels."""
+        from esfex.visualization.workflows.grid_mapping_steps import (
+            _build_bus_adjacency, _find_connected_components,
+            _fix_disconnected_components,
+        )
+        from esfex.visualization.data.gui_model import (
+            GuiTransmissionLine, EndpointRef,
+        )
+        buses = {
+            "m0": GuiBus(bus_id="m0", name="m0", parent_node=0,
+                         voltage_kv=220.0, frequency_hz=60.0,
+                         latitude=22.0, longitude=-80.0),
+            "m1": GuiBus(bus_id="m1", name="m1", parent_node=0,
+                         voltage_kv=220.0, frequency_hz=60.0,
+                         latitude=22.5, longitude=-80.0),
+            "iso": GuiBus(bus_id="iso", name="iso", parent_node=1,
+                          voltage_kv=110.0, frequency_hz=60.0,
+                          latitude=22.5, longitude=-79.7),
+        }
+        lines = [GuiTransmissionLine(
+            line_id="ml", from_bus="m0", to_bus="m1", capacity_mw=100.0,
+            voltage_kv=220.0, frequency_hz=60.0,
+            from_endpoint=EndpointRef("bus", "m0"),
+            to_endpoint=EndpointRef("bus", "m1"))]
+        state = _make_state(buses=buses, transmission_lines=lines)
+        model = MockGuiModel(state)
+        created, _log = _fix_disconnected_components(
+            model, state, [{"component": {"iso"}, "equipment": []}])
+
+        assert len(state.transformers) == 1
+        tr = state.transformers[0]
+        assert (tr.from_voltage_kv, tr.to_voltage_kv) == (220.0, 110.0)
+        assert tr.from_bus == "m1"
+        new_bus = state.buses[tr.to_bus]
+        assert new_bus.voltage_kv == 110.0
+        assert new_bus.parent_node == 0
+        assert new_bus.frequency_hz == 60.0
+        bridge = state.transmission_lines[-1]
+        assert {bridge.from_bus, bridge.to_bus} == {tr.to_bus, "iso"}
+        assert bridge.voltage_kv == 110.0
+        # No line joins two buses of different voltage.
+        for ln in state.transmission_lines:
+            vf = state.buses[ln.from_bus].voltage_kv
+            vt = state.buses[ln.to_bus].voltage_kv
+            assert vf == vt, ln.line_id
+        # One component, and the island is reached through the transformer.
+        comps = _find_connected_components(_build_bus_adjacency(state))
+        assert len(comps) == 1
+        assert created == 5  # bus, transformer, 2 connection lines, bridge
