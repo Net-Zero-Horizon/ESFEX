@@ -753,7 +753,7 @@ A unit with \(\text{NPV} <\) `npv_retirement_threshold` (\$, default 0) is retir
 
 A retired unit has no capacity at its bus for the whole horizon: no dispatch, no life extension, no fixed O&M and no end-of-life decommissioning. It pays its decommissioning cost once, in the first year, on its (degraded) capacity then, as a unit retiring at the end of its life does (\(C^{dec}_y\), OBJ-3b; `npv_retired_units` of the master input). The master is then solved again from scratch, so the same mechanism works for every solver.
 
-In the run, the retired generators have no capacity in the dispatch from the first year on (the master's cumulative capacity is 0), and the retired batteries no power or energy at their node. The results file lists them in the `npv_retirements` group ([HDF5 Output Schema](../reference/hdf5-output-schema.md)), which the dashboard's retirement chart also reads.
+In the run, the retired generators have no capacity in the dispatch from the first year on (the master's cumulative capacity is 0), and the retired batteries no power or energy at their node. The results file lists them in the `npv_retirements` group ([HDF5 Output Schema](../reference/hdf5-output-schema.md)), and the retired generators count in the yearly `retirement_gen_{g}` attributes the dashboard's retirement chart reads.
 
 ### 9.4 Result
 

@@ -75,6 +75,43 @@ def _retired(orch):
     return {(r["kind"], r["key"]) for r in orch._npv_retirements}
 
 
+# Fixed O&M ($/yr) of the units: diesel 100 MW × $5, peaker 40 MW × $20,000,
+# battery 50 MW × $1,000
+DIESEL_FIXED, PEAKER_FIXED, BAT_FIXED = 500.0, 800_000.0, 50_000.0
+
+
+def _check_results_file(h5, years, *, retired: bool):
+    """Each year of the results file: the peaker (generator index 1) is
+    reported retired, its MW in service and the battery's are 0, the
+    dashboard's retirement chart sees it and its per-system fixed O&M leaves
+    both out (or, with *retired* False, the opposite)."""
+    from esfex.visualization.panels.dashboard_loader import DashboardLoader
+    from esfex.visualization.panels.results_charts import (
+        _load_decommissioning_data, _load_gen_configs,
+    )
+    with h5py.File(h5, "r") as f:
+        for year in years:
+            sc = f[f"detailed_results/year_{year}_threshold_0"]
+            assert "retirement_gen_0" not in sc.attrs
+            peaker_mw = sc["generation/Peaker"].attrs["rated_power"]
+            bat_mw = sc["battery_discharge/Bat"].attrs["rated_power"]
+            assert sc["generation/Diesel"].attrs["rated_power"] == pytest.approx([100.0])
+            _, fracs = _load_decommissioning_data(sc, gen_configs=_load_gen_configs(f))
+            fixed = DashboardLoader({}, {})._per_system_cost(f, "", year)["fixed_om_cost"]
+            if retired:
+                assert sc.attrs["retirement_gen_1"] == pytest.approx(1.0)
+                assert peaker_mw == pytest.approx([0.0])
+                assert bat_mw == pytest.approx([0.0])
+                assert fracs.get(1) == pytest.approx(1.0)
+                assert fixed == pytest.approx(DIESEL_FIXED)
+            else:
+                assert "retirement_gen_1" not in sc.attrs
+                assert peaker_mw == pytest.approx([40.0])
+                assert bat_mw == pytest.approx([50.0])
+                assert fracs.get(1, 0.0) == pytest.approx(0.0)
+                assert fixed == pytest.approx(DIESEL_FIXED + PEAKER_FIXED + BAT_FIXED)
+
+
 @pytest.mark.julia
 @pytest.mark.parametrize("method", ["monolithic", "benders"])
 def test_uneconomic_units_are_retired(tmp_path, method):
@@ -88,20 +125,14 @@ def test_uneconomic_units_are_retired(tmp_path, method):
     assert units["peaker"]["rated_power"] == pytest.approx([0.0])
     assert units["bat"]["MaxDischargePower"] == pytest.approx([0.0])
     assert units["diesel"]["rated_power"][0] > 0
-    # Listed in the results file, where the dashboard's retirement chart
-    # finds the peaker (generator index 1) retired in full
-    from esfex.visualization.panels.results_charts import (
-        _load_decommissioning_data, _load_gen_configs,
-    )
+    # Listed in the results file, and reported as retirements
     with h5py.File(h5, "r") as f:
         grp = f["npv_retirements"]
         assert sorted(k.decode() if isinstance(k, bytes) else k for k in grp["key"][:]) == \
             ["bat", "peaker"]
         assert all(v < 0 for v in grp["npv"][:])
-        sc = f[f"detailed_results/year_{results[0].year}_threshold_0"]
-        _, fracs = _load_decommissioning_data(sc, gen_configs=_load_gen_configs(f))
-        assert fracs.get(1) == pytest.approx(1.0)
-        assert fracs.get(0, 0.0) == pytest.approx(0.0)
+    assert results[0].retirements == {"gen_1": pytest.approx(1.0)}
+    _check_results_file(h5, [results[0].year], retired=True)
 
 
 @pytest.mark.julia
@@ -112,6 +143,7 @@ def test_off_retires_nothing(tmp_path):
     assert off._current_units_config["bat"]["MaxDischargePower"] == pytest.approx([50.0])
     with h5py.File(h5, "r") as f:
         assert "npv_retirements" not in f
+    _check_results_file(h5, [off_results[0].year], retired=False)
     # The retired units no longer pay fixed O&M in the dispatch
     _, on_results, _ = _run(tmp_path, "on", npv=True)
     assert on_results[0].objective < off_results[0].objective
@@ -119,13 +151,16 @@ def test_off_retires_nothing(tmp_path):
 
 @pytest.mark.julia
 def test_myopic_keeps_retired_units_out(tmp_path):
-    orch, results, _ = _run(tmp_path, "myopic", years=2, npv=True, planning="myopic")
+    orch, results, h5 = _run(tmp_path, "myopic", years=2, npv=True, planning="myopic")
     # Retired by the first year's master, once; the second keeps them out
     assert _retired(orch) == {("generator", "peaker"), ("battery", "bat")}
     assert {r["year"] for r in orch._npv_retirements} == {results[0].year}
     units = orch._current_units_config  # the second year's dispatch
     assert units["peaker"]["rated_power"] == pytest.approx([0.0])
     assert units["bat"]["MaxDischargePower"] == pytest.approx([0.0])
+    # Reported retired, and out of service, in both years
+    assert [r.retirements for r in results] == [{"gen_1": pytest.approx(1.0)}] * 2
+    _check_results_file(h5, [r.year for r in results], retired=True)
 
 
 @pytest.mark.julia

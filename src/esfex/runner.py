@@ -3868,7 +3868,7 @@ class Orchestrator:
                         if int(gen_idx) > n_gen0:
                             continue
                         py_idx = int(gen_idx) - 1
-                        retired = self._retired_share(py_idx, node_values)
+                        retired = self._retired_share(py_idx, node_values, year)
                         if retired > 0.01:
                             year_ret[f'gen_{py_idx}'] = retired
                 retirements_by_year[year] = year_ret
@@ -4577,7 +4577,7 @@ class Orchestrator:
                         # node_values: 1.0/0.0 per master location (bus on
                         # a bus-level master); share of the unit's capacity
                         py_idx = int(gen_idx) - 1  # Convert to 0-indexed
-                        retired = self._retired_share(py_idx, node_values)
+                        retired = self._retired_share(py_idx, node_values, year)
                         if retired > 0.01:  # threshold to avoid floating point noise
                             year_ret[f'gen_{py_idx}'] = retired
 
@@ -5035,12 +5035,14 @@ class Orchestrator:
             grp["npv"].attrs["units"] = "$"
             grp["capacity_mw"].attrs["units"] = "MW"
 
-    def _retired_share(self, gen_idx: int, flags) -> float:
+    def _retired_share(self, gen_idx: int, flags, year: Optional[int] = None) -> float:
         """Share of existing master generator *gen_idx* (0-based) retired.
 
         *flags* is its share in service per master location (1 within its
         lifetime; past it, the share the master keeps by life extension, 0
-        when it retires it), per bus on a bus-level master. Each
+        when it retires it), per bus on a bus-level master. With *year*, the
+        nodes where the NPV-based retirement retired it by then
+        (``self._npv_retirements``) are retired in full. Each
         node is retired as far as its locations are, weighted by the unit's
         ``rated_power`` there; a unit without capacity takes the plain share
         of retired nodes.
@@ -5053,6 +5055,11 @@ class Orchestrator:
             node = self._master_index_node(i)
             if 0 <= node < n:
                 retired[node] = max(retired[node], 1.0 - status)
+        if year is not None:
+            for r in self._npv_retirements:
+                if (r["kind"] == "generator" and r["index"] == gen_idx
+                        and r["year"] <= year and 0 <= r["node"] < n):
+                    retired[r["node"]] = 1.0
         gens = list(base.generators.values())
         rated = (np.array(_per_node_list(gens[gen_idx].rated_power, n), dtype=float)
                  if 0 <= gen_idx < len(gens) else np.zeros(n))
