@@ -426,48 +426,146 @@ def estimate_generator_defaults(canonical_fuel: str) -> dict:
 # ── Frequency inference ─────────────────────────────────────────────
 
 
-# Approximate bounding boxes for 60 Hz regions worldwide.
-# Anywhere outside these is 50 Hz (the global default — Europe,
-# Africa, India, China, Australia, most of Asia).
+def _box(la_min: float, la_max: float,
+         lo_min: float, lo_max: float) -> list[tuple[float, float]]:
+    """A lat/lng bounding box as a polygon."""
+    return [(la_min, lo_min), (la_min, lo_max), (la_max, lo_max), (la_max, lo_min)]
+
+
+# Mains-frequency regions, as (Hz, polygon of (lat, lng) vertices). The FIRST
+# region containing a point decides; anywhere outside all of them is 50 Hz
+# (the world default: Europe, Africa, India, China, Australia, most of Asia).
+# Polygons are coarse country outlines that follow the borders where a 60 Hz
+# country meets a 50 Hz one; 50 Hz entries carve exceptions (islands,
+# neighbours) out of the 60 Hz areas listed after them.
 # Source: World map of mains electricity systems.
-_60HZ_REGIONS: list[tuple[float, float, float, float]] = [
-    # (lat_min, lat_max, lng_min, lng_max)
-    # North America (USA, Canada, most of Mexico)
-    (15.0, 72.0, -169.0, -52.0),
-    # Central America & Caribbean (Cuba, Panama, Costa Rica, Honduras, etc.)
-    (7.0, 23.5, -92.0, -59.0),
-    # Northern South America (Colombia, Venezuela, Ecuador, Peru, Brazil)
-    (-35.0, 13.0, -82.0, -34.0),
-    # Saudi Arabia, Bahrain, Kuwait, parts of Yemen
-    (12.0, 33.0, 34.0, 56.0),
-    # South Korea
-    (33.0, 39.0, 124.0, 132.0),
-    # Philippines
-    (4.5, 21.5, 116.0, 127.0),
-    # Taiwan
-    (21.5, 25.5, 119.5, 122.5),
-    # Japan WEST of ~138 °E (60 Hz half): Kyushu, Shikoku, Chugoku, Kansai,
-    # up to the Fossa Magna (~138 °E). East of it — Kanto (Tokyo), Tohoku,
-    # Hokkaido — is 50 Hz (the world default, so no box needed).
-    (24.0, 46.0, 128.0, 138.0),
-    # Liberia
-    (4.0, 9.0, -12.0, -7.0),
+_FREQUENCY_REGIONS: list[tuple[float, list[tuple[float, float]]]] = [
+    # ── 50 Hz exceptions inside the 60 Hz areas below ──
+    # Greenland (west of it, Baffin Bay / Nares Strait, is Canada).
+    (50.0, [(59.0, -43.0), (59.5, -49.0), (64.0, -56.0), (70.0, -61.0),
+            (75.0, -68.0), (76.5, -74.0), (78.0, -73.5), (80.0, -68.5),
+            (81.5, -63.5), (82.3, -61.3), (84.0, -60.0), (84.0, -10.0),
+            (59.0, -10.0)]),
+    # Saint Pierre and Miquelon.
+    (50.0, _box(46.7, 47.2, -56.5, -56.1)),
+    # Jamaica.
+    (50.0, _box(17.6, 18.6, -78.5, -76.1)),
+    # Lesser Antilles: Guadeloupe, Dominica, Martinique, Saint Lucia,
+    # Saint Vincent & the Grenadines and Grenada; Barbados.
+    (50.0, _box(15.8, 16.55, -61.85, -61.0)),
+    (50.0, _box(15.15, 15.7, -61.5, -61.2)),
+    (50.0, _box(14.35, 14.9, -61.25, -60.8)),
+    (50.0, _box(13.65, 14.15, -61.1, -60.85)),
+    (50.0, _box(11.95, 13.4, -61.85, -61.1)),
+    (50.0, _box(13.0, 13.4, -59.7, -59.4)),
+    # Curaçao and Bonaire (Aruba, to the west, is 60 Hz).
+    (50.0, _box(11.95, 12.45, -69.2, -68.15)),
+    # French Guiana (between 60 Hz Suriname and Brazil).
+    (50.0, _box(2.1, 6.0, -54.0, -51.65)),
+    # Bahrain (inside the Saudi Arabia outline).
+    (50.0, _box(25.75, 26.35, 50.35, 50.85)),
+    # ── 60 Hz ──
+    # North America: USA (incl. Alaska, Hawaii), Canada, Mexico, Bermuda.
+    (60.0, _box(14.5, 84.0, -169.0, -52.0)),
+    (60.0, _box(51.0, 56.0, -180.0, -169.0)),   # Aleutians
+    (60.0, _box(51.0, 53.5, 172.0, 180.0)),     # Aleutians (west of 180°)
+    # Central America & the Caribbean (Cuba, Panama, Costa Rica, Honduras...).
+    (60.0, _box(7.0, 23.5, -93.0, -59.0)),
+    # South America: Colombia, Venezuela, Ecuador (incl. Galápagos), Peru,
+    # Brazil, Guyana, Suriname. The southern edge follows Brazil's borders
+    # with Uruguay, Argentina, Paraguay and Bolivia, then Peru's with
+    # Bolivia and Chile; Bolivia, Paraguay, Chile, Argentina and Uruguay
+    # are 50 Hz.
+    (60.0, [(13.5, -82.0), (11.5, -60.0), (9.0, -57.0), (7.0, -52.0),
+            (3.0, -32.0), (-8.0, -32.0), (-20.0, -28.0), (-34.2, -52.8),
+            (-33.75, -53.4), (-32.56, -53.38), (-31.87, -54.16),
+            (-30.9, -55.53), (-30.38, -56.45), (-30.18, -57.6),
+            (-29.75, -57.09), (-28.66, -56.0), (-27.6, -54.67),
+            (-27.15, -53.85), (-26.25, -53.65), (-25.6, -53.85),
+            (-25.59, -54.59), (-24.07, -54.27), (-22.54, -55.73),
+            (-22.1, -56.52), (-22.08, -57.98), (-20.17, -58.15),
+            (-19.3, -58.0), (-19.0, -57.68), (-17.9, -57.5),
+            (-16.3, -58.3), (-15.5, -60.2), (-13.5, -61.9), (-12.5, -63.5),
+            (-10.8, -65.35), (-9.7, -65.4), (-9.9, -66.6), (-11.0, -68.75),
+            (-10.95, -69.57), (-12.5, -68.7), (-14.3, -69.2),
+            (-15.5, -69.4), (-16.56, -69.04), (-17.3, -69.6),
+            (-17.5, -69.5), (-18.35, -70.38), (-18.35, -82.0),
+            (-5.0, -82.0), (-2.0, -92.5), (2.0, -92.5), (2.0, -82.0)]),
+    # Saudi Arabia (its neighbours — Jordan, Iraq, Kuwait, Qatar, UAE, Oman,
+    # Yemen — and Egypt / Sudan / Eritrea across the Red Sea are 50 Hz).
+    (60.0, [(29.36, 34.95), (29.19, 36.07), (29.9, 37.5), (31.5, 37.0),
+            (32.23, 39.3), (31.0, 41.5), (29.1, 44.7), (29.06, 46.42),
+            (28.53, 48.43), (27.8, 49.7), (26.5, 50.35), (25.0, 50.6),
+            (24.75, 50.8), (24.6, 51.3), (24.25, 51.58), (22.93, 52.58),
+            (22.7, 55.2), (19.0, 52.0), (18.6, 49.1), (17.0, 47.6),
+            (17.0, 47.0), (17.3, 46.4), (17.4, 44.2), (16.4, 42.78),
+            (16.4, 41.6), (18.0, 40.2), (22.0, 38.0), (26.0, 35.8),
+            (27.9, 34.6), (28.5, 34.75)]),
+    # Korea.
+    (60.0, _box(33.0, 39.0, 124.0, 132.0)),
+    # Philippines (Sabah, Malaysia, to the south-west is 50 Hz).
+    (60.0, [(21.5, 116.5), (21.5, 127.0), (6.5, 127.0), (4.5, 125.8),
+            (4.5, 119.3), (7.6, 117.6), (7.6, 116.0)]),
+    # Taiwan with Penghu; Kinmen and Matsu off the (50 Hz) Fujian coast.
+    (60.0, [(24.0, 119.2), (25.0, 120.5), (25.45, 121.4), (25.7, 122.2),
+            (24.0, 122.5), (21.8, 121.9), (21.8, 120.7), (23.0, 119.2)]),
+    (60.0, _box(24.38, 24.55, 118.21, 118.5)),
+    (60.0, _box(25.93, 26.4, 119.88, 120.52)),
+    # Japan WEST of the Fossa Magna (60 Hz half): Kyushu, Shikoku, Chugoku,
+    # Kansai, Chubu, Hokuriku and Okinawa, bounded by the Itoigawa (Niigata)
+    # – Fuji River (Shizuoka) line. East of it — Kanto (Tokyo), Tohoku,
+    # Hokkaido — is 50 Hz (the world default, so no region needed).
+    (60.0, [(37.0, 137.85), (38.0, 137.6), (38.0, 135.0), (35.5, 130.5),
+            (34.0, 129.0), (33.0, 128.0), (30.0, 127.0), (24.0, 122.5),
+            (23.8, 125.0), (25.5, 131.8), (28.0, 131.5), (31.5, 132.3),
+            (32.0, 133.5), (33.0, 136.0), (34.3, 138.4), (35.12, 138.63)]),
+    # Liberia (Sierra Leone, Guinea and Côte d'Ivoire around it are 50 Hz).
+    (60.0, [(6.95, -11.55), (7.6, -10.6), (8.4, -10.3), (8.55, -9.5),
+            (7.75, -9.2), (7.45, -8.5), (6.6, -8.4), (5.8, -7.6),
+            (4.35, -7.5), (4.0, -7.7), (6.5, -12.0)]),
+    # US Pacific territories and freely associated states: Guam & Northern
+    # Marianas, Palau, Micronesia, Marshall Islands, American Samoa.
+    (60.0, _box(13.0, 20.7, 144.5, 146.2)),
+    (60.0, _box(2.8, 8.3, 131.0, 134.8)),
+    (60.0, _box(0.8, 10.2, 137.5, 163.2)),
+    (60.0, _box(4.5, 14.8, 160.7, 172.2)),
+    (60.0, _box(-14.6, -11.0, -171.2, -168.1)),
+    # French Polynesia.
+    (60.0, _box(-28.0, -7.8, -155.0, -134.0)),
 ]
+
+
+def _in_polygon(lat: float, lng: float,
+                poly: list[tuple[float, float]]) -> bool:
+    """Even-odd ray casting test of (lat, lng) against a (lat, lng) polygon
+    (planar, fine for country-scale outlines away from the poles and 180°)."""
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        yi, xi = poly[i]
+        yj, xj = poly[j]
+        if (yi > lat) != (yj > lat):
+            x_cross = xi + (lat - yi) * (xj - xi) / (yj - yi)
+            if lng < x_cross:
+                inside = not inside
+        j = i
+    return inside
 
 
 def infer_frequency_hz(lat: float, lng: float) -> float:
     """Return the standard mains frequency (50 or 60 Hz) for a location.
 
-    Uses rough country bounding boxes for the (relatively few) 60 Hz
-    regions; everywhere else defaults to 50 Hz, the world standard.
-    Japan straddles both: WEST of the Fossa Magna (~138 °E) is 60 Hz
-    (Osaka, Kyushu), EAST is 50 Hz (Tokyo/Kanto, Tohoku, Hokkaido) —
-    captured by the box for that country. Verified against OSM: Kanto
-    power infrastructure carries ``frequency=50``.
+    Looks the point up in coarse country outlines of the (relatively few)
+    60 Hz countries, with the 50 Hz islands and neighbours inside those
+    outlines checked first; everywhere else defaults to 50 Hz, the world
+    standard. Japan straddles both: WEST of the Fossa Magna (Itoigawa –
+    Fuji River) is 60 Hz (Osaka, Nagoya, Kyushu), EAST is 50 Hz
+    (Tokyo/Kanto, Tohoku, Hokkaido). Verified against OSM: Kanto power
+    infrastructure carries ``frequency=50``.
     """
-    for la_min, la_max, lo_min, lo_max in _60HZ_REGIONS:
-        if la_min <= lat <= la_max and lo_min <= lng <= lo_max:
-            return 60.0
+    for hz, poly in _FREQUENCY_REGIONS:
+        if _in_polygon(lat, lng, poly):
+            return hz
     return 50.0
 
 
