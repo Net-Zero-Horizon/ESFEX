@@ -26,7 +26,7 @@ Three operating modes are available:
 | \(k \in \mathcal{K}\) | AC/DC converters | `1:n_acdc` |
 | \(f \in \mathcal{F}\) | Frequency converters | `1:n_freq` |
 
-The mapping from bus to geographic node is given by `bus_to_node[n]`, written as \(n_i\). Each bus carries a `demand_fraction` \(\alpha_n\) of its parent node's demand; a bus with `role: connection` carries no demand (\(\alpha_n = 0\) in every balance and bound below).
+The mapping from bus to geographic node is given by `bus_to_node[n]`, written as \(n_i\). Each bus carries a `demand_fraction` \(\alpha_n\) of its parent node's demand; a bus with `role: connection` carries no demand (\(\alpha_n = 0\) in every balance and bound below). The demand of a node with no bus that carries demand enters no balance and cannot be served or shed by the model: it is added to the results as load shedding at that node, at \(C^{\text{VOLL}}\) per MWh in the load-shedding cost and the objective (a constant).
 
 Generators, batteries, load shedding, voltage angles and electrolyzer power are indexed by bus. Curtailment, the RE-target slack, CO2 emissions, reserves, sectoral load shedding, flexible demand, EV fleet and rooftop curtailment are indexed by node; where a node-level quantity enters a bus balance it is multiplied by \(\alpha_n\). Per-node configuration arrays (capacities, costs, `invest_max`) are mapped onto the buses before the model is built.
 
@@ -531,7 +531,7 @@ Charge and discharge each rise by at most `ramp_up` and fall by at most `ramp_do
 
 Implemented in `add_reserve_constraints!()`.
 
-Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Both requirements are held in the free capacity of reservable generators (\(\mathcal{G}^{\text{res}}\), non-renewable with `reservable: true`) and reservable batteries (\(\mathcal{B}^{\text{res}}\), `reservable: true`) at the node:
+Reserve is headroom, not energy: it is capacity kept free, and it does not enter the power balance. Each node has its own requirement, but the requirement is met **per system**: the requirements of all the nodes of a system \(S\) are held in the free capacity of every reservable generator (\(\mathcal{G}^{\text{res}}\), non-renewable with `reservable: true`) and reservable battery (\(\mathcal{B}^{\text{res}}\), `reservable: true`) of that system, wherever it is. A node with demand and no unit of its own is covered by the headroom of the rest of its system. In a merged multi-system run each original system keeps its own requirement and only its own units' headroom counts (development-zone nodes belong to the system of the bus they connect to); a single-system run is one system. The headroom at node \(n\) is
 
 \[
 H_{n,t} = \sum_{g \in \mathcal{G}^{\text{res}}} \left( \bar{P}_{g,n} \cdot a_{g,n,t} \cdot u_{g,n,t} - p_{g,n,t} \right) + \sum_{b \in \mathcal{B}^{\text{res}}} \left( \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} - p^{\text{dis}}_{b,n,t} + p^{\text{ch}}_{b,n,t} \right)
@@ -542,30 +542,30 @@ where \(u_{g,n,t}\) is the commitment status in unit commitment (an offline unit
 #### RES-1: Static Reserve Requirement
 
 \[
-r^{\text{sta}}_{n,t} + \lambda^{\text{sta}}_{n,t} \geq R^{\text{sta}}_n, \qquad r^{\text{sta}}_{n,t} \leq R^{\text{sta}}_n \quad \forall n, t \tag{RES-1}
+r^{\text{sta}}_{n,t} + \lambda^{\text{sta}}_{n,t} \geq R^{\text{sta}}_{n,t}, \qquad r^{\text{sta}}_{n,t} = \sigma^{\text{sta}}_{S,t} \, R^{\text{sta}}_{n,t}, \quad 0 \leq \sigma^{\text{sta}}_{S,t} \leq 1 \quad \forall S, n \in S, t \tag{RES-1}
 \]
 
-\(R^{\text{sta}}_n\) is either specified per node (`reserve_static_requirement[n]`) or defaults to `reserve_static_default_ratio` \(\times\) node demand. The shortage slack \(\lambda^{\text{sta}}_{n,t}\) is penalized in the objective.
+\(R^{\text{sta}}_{n,t}\) is either specified per node (`reserve_static_requirement[n]`) or defaults to `reserve_static_default_ratio` \(\times\) node demand. \(\sigma^{\text{sta}}_{S,t}\) is the share of the system's requirement that is held: every node of the system holds the same share, so a system shortfall is reported at each node in proportion to its requirement. The shortage slack \(\lambda^{\text{sta}}_{n,t}\) is penalized in the objective.
 
 #### RES-2: Dynamic Reserve
 
 \[
-r^{\text{dyn}}_{n,t} \leq \sum_{g \in \mathcal{G}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}_{g,n} \cdot u_{g,n,t} + \sum_{b \in \mathcal{B}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} \quad \forall n, t \tag{RES-2a}
+\sum_{n \in S} r^{\text{dyn}}_{n,t} \leq \sum_{n \in S} \Big( \sum_{g \in \mathcal{G}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}_{g,n} \cdot u_{g,n,t} + \sum_{b \in \mathcal{B}^{\text{res}}} \alpha^{\text{dyn}} \cdot \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} \Big) \quad \forall S, t \tag{RES-2a}
 \]
 
 \[
-r^{\text{dyn}}_{n,t} + \lambda^{\text{dyn}}_{n,t} \geq R^{\text{dyn}}_n, \qquad r^{\text{dyn}}_{n,t} \leq R^{\text{dyn}}_n \quad \forall n, t \tag{RES-2b}
+r^{\text{dyn}}_{n,t} + \lambda^{\text{dyn}}_{n,t} \geq R^{\text{dyn}}_n, \qquad r^{\text{dyn}}_{n,t} = \sigma^{\text{dyn}}_{S,t} \, R^{\text{dyn}}_n, \quad 0 \leq \sigma^{\text{dyn}}_{S,t} \leq 1 \quad \forall S, n \in S, t \tag{RES-2b}
 \]
 
-where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (fraction of rated power that can respond fast enough). RES-2a and RES-2b are added only at nodes with a dynamic requirement \(R^{\text{dyn}}_n > 0\) (`reserve_dynamic_requirement`); elsewhere \(r^{\text{dyn}} = 0\).
+where \(\alpha^{\text{dyn}}\) is the `dynamic_reserve_contribution` factor (fraction of rated power that can respond fast enough). RES-2a and the share of RES-2b are added only for systems with a node with a dynamic requirement \(R^{\text{dyn}}_n > 0\) (`reserve_dynamic_requirement`); elsewhere \(r^{\text{dyn}} = 0\).
 
 #### RES-3: Shared Headroom
 
 \[
-r^{\text{sta}}_{n,t} + r^{\text{dyn}}_{n,t} \leq H_{n,t} \quad \forall n, t \tag{RES-3}
+\sum_{n \in S} \left( r^{\text{sta}}_{n,t} + r^{\text{dyn}}_{n,t} \right) \leq \sum_{n \in S} H_{n,t} \quad \forall S, t \tag{RES-3}
 \]
 
-A MW of free capacity counts once: static and dynamic reserve are held in the same headroom. When it is short, the shortfall is penalized through \(\lambda\); the model may also commit more units (unit commitment) or lower output at a node and import, if that is cheaper than the penalty.
+A MW of free capacity counts once: static and dynamic reserve are held in the same headroom. When it is short, the shortfall is penalized through \(\lambda\); the model may also commit more units (unit commitment) or lower output and import, if that is cheaper than the penalty. Transmission limits are not checked for reserve: a MW of headroom counts for any node of its system.
 
 ---
 
@@ -693,7 +693,7 @@ Implemented in `add_renewable_constraint!()`.
 where:
 
 - \(\Delta t\) is the temporal resolution (hours)
-- \(\tau^{\text{RE}}\) is `re_penetration_target`; the constraint is added only when it is positive
+- \(\tau^{\text{RE}}\) is `re_penetration_target`; the constraint is added only when it is positive. `target_re_penetration` is a planning target: in a `development` run the dispatch of each year gets that year's value on the master's RE path (capped at what the installed capacity can deliver), while `economic_dispatch` and `unit_commitment` runs (no master) apply no RE-penetration constraint. The achieved RE penetration is reported in every mode.
 - \(E^{\text{total}}_{\text{demand}} = \sum_{t,i} D_{t,i} \cdot \Delta t\) is total energy demand in the window
 
 Battery discharge does not count: a battery may have been charged from fossil generation. The slack variable \(\phi_{i,t}\) is penalized by \(C^{\text{FRE}}\) in the objective, so the target never makes the problem infeasible.

@@ -28,7 +28,12 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
 from esfex.config.schema import CostCurveConfig, ESFEXConfig, SystemConfig
-from esfex.bridge.adapters import PowerSystemAdapter, MasterProblemAdapter, PrimaryEnergyAdapter
+from esfex.bridge.adapters import (
+    MasterProblemAdapter,
+    PowerSystemAdapter,
+    PrimaryEnergyAdapter,
+    reset_run_warnings,
+)
 from esfex.bridge.converters import (
     battery_availability_key,
     battery_technology_availability_key,
@@ -1784,6 +1789,7 @@ class Orchestrator:
                 "master_only needs simulation_mode 'development' "
                 f"(got {self.config.simulation_mode!r})")
         self.master_solution = None
+        reset_run_warnings()
         years = years or DEFAULT_RUN_YEARS
         self._start_date = self._resolve_start_date(start_year)
         start_year = self._start_date.year
@@ -2264,8 +2270,10 @@ class Orchestrator:
                     if vgen_info or vbat_info:
                         logger.info(f"Year {year} investments: {', '.join(vgen_info + vbat_info)}")
 
-                    # Run operational dispatch with rolling horizon
-                    # Pass year-specific RE target (not the final target)
+                    # Run operational dispatch with rolling horizon.
+                    # target_re_penetration is a planning target: the dispatch
+                    # gets the master's trajectory value for this year, and
+                    # none in the operations modes (no master).
                     year_re_target = master_re_targets.get(year, 0.0)
                     # Cap at what the fixed plan can physically deliver. The
                     # master's target is an aspirational ramp the least-cost
@@ -2283,7 +2291,8 @@ class Orchestrator:
                                 f"→ achievable={achievable_re:.1%} (plan capacity-limited)"
                             )
                         year_re_target = capped
-                    logger.info(f"Year {year} RE target (operational): {year_re_target:.1%}")
+                    if self.config.simulation_mode == "development":
+                        logger.info(f"Year {year} RE target (operational): {year_re_target:.1%}")
                     year_result = self._run_operational_dispatch(
                         year=year,
                         year_idx=year_idx,
@@ -2292,7 +2301,7 @@ class Orchestrator:
                         hours=len(year_demand),
                         num_nodes=num_nodes,
                         units_config=cumulative_units_config,
-                        re_penetration_target=year_re_target if year_re_target > 0 else None,
+                        re_penetration_target=year_re_target,
                     )
                     year_result.investments = year_investments
                     year_result.retirements = master_retirements.get(year, {})
@@ -5475,7 +5484,9 @@ class Orchestrator:
         Run operational dispatch using rolling horizon.
 
         Args:
-            re_penetration_target: Year-specific RE target (0-1). If None, uses config default.
+            re_penetration_target: Year-specific RE target (0-1), from the
+                development master's trajectory. None or 0: no RE-penetration
+                constraint (operations modes).
 
         Returns:
             YearResults for this year
@@ -5534,6 +5545,7 @@ class Orchestrator:
         all_loss_reserve_static = []
         all_loss_reserve_dynamic = []
         all_load_shed = []
+        all_unattached_shed = []
         all_co2_emissions = []
         all_prices = []
         all_voltage_angle = []
@@ -5816,6 +5828,8 @@ class Orchestrator:
                 all_loss_reserve_dynamic.append(_trim(window_result["loss_of_reserve_dynamic"], keep_hours))
             if window_result.get("load_shed") is not None:
                 all_load_shed.append(_trim(window_result["load_shed"], keep_hours))
+            if window_result.get("unattached_load_shed") is not None:
+                all_unattached_shed.append(_trim(window_result["unattached_load_shed"], keep_hours))
             if window_result.get("co2_emissions") is not None:
                 all_co2_emissions.append(_trim(window_result["co2_emissions"], keep_hours))
             if window_result.get("energy_prices") is not None:
@@ -5969,6 +5983,14 @@ class Orchestrator:
             # Prices: MAX across buses (highest marginal price)
             prices = self._aggregate_buses_to_nodes(prices, "max")
             voltage_angle = self._aggregate_buses_to_nodes(voltage_angle, "max")
+
+        # Demand of nodes without a load bus: in no power balance, so it is
+        # reported as unserved load at its node (the adapter already added it
+        # to load_shed_total, the cost breakdown and the objective).
+        if all_unattached_shed and len(all_unattached_shed) == len(all_load_shed):
+            unattached = np.concatenate(all_unattached_shed, axis=-1)
+            if load_shed_arr is not None and load_shed_arr.shape == unattached.shape:
+                load_shed_arr = load_shed_arr + unattached
 
         logger.debug(f"Year {year} dispatch: obj=${total_objective:,.0f}, "
                       f"RE={avg_re:.1%}, CO2={total_emissions:.0f}t, time={total_solve_time:.1f}s")
@@ -6797,6 +6819,8 @@ class Orchestrator:
                 "loss_of_reserve_dynamic": solution.get('loss_of_reserve_dynamic'),
                 # Load shedding [node x hour] and CO2 [node x hour]
                 "load_shed": solution.get('load_shed'),
+                # Demand of nodes without a load bus, unserved [node x hour]
+                "unattached_load_shed": solution.get('unattached_load_shed'),
                 "co2_emissions": solution.get('co2_emissions'),
                 # Network
                 "energy_prices": solution.get('energy_prices'),
@@ -6862,50 +6886,58 @@ class Orchestrator:
                 )
                 result["ac_power_flow"] = ac_results
 
-            # Compute balance from solution arrays (matches KCL terms)
-            go = solution.get('gen_output')
-            ls = solution.get('load_shed')
-            bd = solution.get('bat_discharge')
-            bc = solution.get('bat_charge')
-            ev_ch = solution.get('ev_charging')
-            ev_v2g = solution.get('ev_v2g')
-            rs = solution.get('reserve_static')
-            rd = solution.get('reserve_dynamic')
+            # Energy balance of the committed steps (MWh), with the terms of
+            # the power balance. Reserves are headroom, not energy, so they
+            # are not in it; transmission losses are reported on their own.
+            tres = max(1.0, float(getattr(self.config.temporal, 'resolution_hours', 1) or 1))
 
-            gen_sum = float(np.sum(go)) if go is not None else 0
-            ls_sum = float(np.sum(ls)) if ls is not None else 0
-            bd_sum = float(np.sum(bd)) if bd is not None else 0
-            bc_sum = float(np.sum(bc)) if bc is not None else 0
-            ev_ch_sum = float(np.sum(ev_ch)) if ev_ch is not None else 0
-            ev_v2g_sum = float(np.sum(ev_v2g)) if ev_v2g is not None else 0
-            rs_sum = float(np.sum(rs)) if rs is not None else 0
-            rd_sum = float(np.sum(rd)) if rd is not None else 0
-            dem_sum = float(np.sum(demand)) if demand is not None else 0
-            rooftop_sum = float(np.sum(rooftop_generation)) if rooftop_generation is not None else 0
+            def _mwh(arr):
+                if arr is None:
+                    return 0.0
+                a = np.asarray(arr, dtype=float)
+                return float(np.nansum(a[..., :k])) * tres if a.ndim else 0.0
+
+            gen_sum = _mwh(solution.get('gen_output'))
+            ls_sum = (_mwh(solution.get('load_shed'))
+                      + _mwh(solution.get('unattached_load_shed')))
+            bd_sum = _mwh(solution.get('bat_discharge'))
+            bc_sum = _mwh(solution.get('bat_charge'))
+            ev_ch_sum = _mwh(solution.get('ev_charging'))
+            ev_v2g_sum = _mwh(solution.get('ev_v2g'))
+            elz_sum = _mwh(solution.get('electrolyzer_power'))
+            pump_sum = _mwh(solution.get('reservoir_pump'))
+            dem_sum = (float(np.nansum(np.asarray(demand, dtype=float)[:k])) * tres
+                       if demand is not None else 0.0)
+            rooftop_sum = (float(np.nansum(np.asarray(rooftop_generation, dtype=float)[:k])) * tres
+                           if rooftop_generation is not None else 0.0)
+            loss_sum = float(solution.get('total_losses', 0.0) or 0.0)
 
             supply = gen_sum + bd_sum + ev_v2g_sum + ls_sum + rooftop_sum
-            demand_side = dem_sum + bc_sum + rs_sum + rd_sum + ev_ch_sum
+            consumption = dem_sum + bc_sum + ev_ch_sum + elz_sum + pump_sum + loss_sum
 
-            gap = supply - demand_side
-            gap_pct = abs(gap) / demand_side * 100 if demand_side > 0 else 0
+            gap = supply - consumption
+            gap_pct = abs(gap) / consumption * 100 if consumption > 0 else 0
+            loss_pct = loss_sum / supply * 100 if supply > 0 else 0
 
             # Concise balance line for every window (matches Julia @info)
             logger.debug(
                 f"Window {window} solved: obj=${result['objective']:,.0f} | "
-                f"balance: supply={supply:.1f} demand={demand_side:.1f} gap={gap:.1f} ({gap_pct:.1f}%) | "
+                f"energy balance (MWh): supply={supply:.1f} use={consumption:.1f} "
+                f"gap={gap:.1f} ({gap_pct:.2f}%) | losses={loss_sum:.1f} ({loss_pct:.2f}%) | "
                 f"gen={gen_sum:.1f} ls={ls_sum:.1f} bat={bd_sum - bc_sum:.1f} ev={ev_v2g_sum - ev_ch_sum:.1f}"
             )
 
             # Detailed balance for first 3 windows per year
             if window < 3:
                 logger.debug(
-                    f"  BALANCE W{window} detail: "
+                    f"  BALANCE W{window} detail (MWh): "
                     f"gen={gen_sum:.1f} bat_dch={bd_sum:.1f} ev_v2g={ev_v2g_sum:.1f} "
                     f"ls={ls_sum:.1f} rooftop={rooftop_sum:.1f} | "
                     f"dem={dem_sum:.1f} bat_ch={bc_sum:.1f} ev_ch={ev_ch_sum:.1f} "
-                    f"res_s={rs_sum:.1f} res_d={rd_sum:.1f}"
+                    f"electrolyzer={elz_sum:.1f} pump={pump_sum:.1f} losses={loss_sum:.1f}"
                 )
                 # Log per-generator output
+                go = solution.get('gen_output')
                 if go is not None:
                     for g, name in enumerate(self._gen_names):
                         if g < go.shape[0]:

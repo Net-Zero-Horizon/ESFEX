@@ -2067,17 +2067,30 @@ end
     add_reserve_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
 Add the static (spinning) and dynamic (frequency response) reserve
-requirements per node. Reserve is headroom, not energy: both are held in the
-free capacity of reservable generators and batteries, and share it (a MW of
+requirements, one per system (`reserve_node_groups`). Each node keeps its own
+requirement (`reserve_static_requirement[n]`, or
+`reserve_static_default_ratio` × its demand; `reserve_dynamic_requirement[n]`)
+and its own held/shortfall variables, but the system's requirements are held
+in the pooled headroom of every reservable generator and battery of the
+system, wherever it sits:
+
+    Σ_{n∈S} (reserve_static[n,t] + reserve_dynamic[n,t]) ≤ Σ_{n∈S} headroom[n,t]
+    Σ_{n∈S} reserve_dynamic[n,t] ≤ Σ_{n∈S} dynamic_capability[n,t]
+
+Reserve is headroom, not energy: static and dynamic reserve share it (a MW of
 headroom counts once). In unit commitment only committed generators hold
 headroom. Dynamic reserve is further limited to
 `dynamic_reserve_contribution` of the rated power that can respond.
+
+Each node's held reserve is the same share of its requirement across the
+system (`reserve_static[n,t] = σ[S,t] × requirement[n,t]`, likewise for the
+dynamic reserve), so a system shortfall is reported at every node in
+proportion to its requirement rather than at an arbitrary node.
 """
 function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
     battery_capacity_override::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
     demand_scale::Float64 = 1.0)
-    n_gen = length(input.generators)
     n_bus = input.network.num_buses
     n_node = input.network.num_nodes
     b2n = input.network.bus_to_node
@@ -2104,82 +2117,112 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
     spinning = capacity_override === nothing && vars.gen_status !== nothing &&
         vars.gen_startup !== nothing
 
-    for t in 1:hours
-        for ni in 1:n_node
-            # Free headroom of reservable non-renewable generators at this node
-            available_reserve = AffExpr(0.0)
-            for b in node_buses[ni]
-                for g in vars.gens_at_bus[b]
-                    gen = input.generators[g]
-                    if !gen.reservable || gen.type == "Renewable"
-                        continue
-                    end
-                    if capacity_override !== nothing && haskey(capacity_override, (g, b))
-                        cap_g_b = capacity_override[(g, b)]
-                        add_to_expression!(available_reserve, cap_g_b)
-                        add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
-                    elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
-                        cap_t = p_gb * gen.availability[t, b]
-                        if spinning
-                            add_to_expression!(available_reserve, cap_t, vars.gen_status[g, b, t])
-                        else
-                            add_to_expression!(available_reserve, cap_t)
-                        end
-                        add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
-                    end
-                end
-                # Battery contribution: discharge headroom + charge that can be cut.
-                # A battery currently dispatching P_d has (P_d_max - P_d) more to
-                # give; one currently charging P_c can release P_c by stopping.
-                for bi in bats_at_bus[b]
-                    p = bat_power(bi, b, t)
-                    p === nothing && continue
-                    add_to_expression!(available_reserve, p)
-                    add_to_expression!(available_reserve, -1.0, vars.bat_discharge[bi, b, t])
-                    add_to_expression!(available_reserve, 1.0, vars.bat_charge[bi, b, t])
-                end
-            end
+    reservable(gen) = gen.reservable && gen.type != "Renewable"
+    req_dynamic = [get(input.reserve_dynamic_requirement, ni, 0.0) for ni in 1:n_node]
+    groups = reserve_node_groups(input)
 
-            # Static reserve requirement at node level
+    req_static = zeros(n_node)
+    for t in 1:hours
+        # Per-node requirements: what the node needs held, and its shortfall
+        for ni in 1:n_node
             node_demand = input.demand[t, ni] * demand_scale
-            reserve_req = haskey(input.reserve_static_requirement, ni) ?
+            req_static[ni] = haskey(input.reserve_static_requirement, ni) ?
                 input.reserve_static_requirement[ni] : input.reserve_static_default_ratio * max(node_demand, 0.0)
 
             @constraint(model,
-                vars.reserve_static[ni, t] + vars.reserve_static_loss[ni, t] >= reserve_req,
+                vars.reserve_static[ni, t] + vars.reserve_static_loss[ni, t] >= req_static[ni],
                 base_name = "reserve_static_$(ni)_$(t)"
             )
+            if req_dynamic[ni] > 0
+                @constraint(model,
+                    vars.reserve_dynamic[ni, t] + vars.reserve_dynamic_loss[ni, t] >= req_dynamic[ni],
+                    base_name = "reserve_dynamic_req_$(ni)_$(t)")
+            end
+        end
 
-            @constraint(model,
-                vars.reserve_static[ni, t] <= reserve_req,
-                base_name = "reserve_static_ub_$(ni)_$(t)"
-            )
+        # Per-system: the share of the requirement held, and the pooled headroom
+        for (k, nodes) in enumerate(groups)
+            share = @variable(model, lower_bound = 0, upper_bound = 1,
+                              base_name = "reserve_static_share_s$(k)_t$(t)")
+            for ni in nodes
+                @constraint(model, vars.reserve_static[ni, t] == req_static[ni] * share,
+                    base_name = "reserve_static_held_$(ni)_$(t)")
+            end
+            has_dynamic = any(req_dynamic[ni] > 0 for ni in nodes)
+            if has_dynamic
+                share_dynamic = @variable(model, lower_bound = 0, upper_bound = 1,
+                                          base_name = "reserve_dynamic_share_s$(k)_t$(t)")
+                for ni in nodes
+                    @constraint(model, vars.reserve_dynamic[ni, t] == req_dynamic[ni] * share_dynamic,
+                        base_name = "reserve_dynamic_held_$(ni)_$(t)")
+                end
+            else
+                for ni in nodes
+                    @constraint(model, vars.reserve_dynamic[ni, t] <= 0,
+                        base_name = "reserve_dynamic_zero_$(ni)_$(t)")
+                end
+            end
 
-            # Static and dynamic reserve are held in the same free headroom
-            @constraint(model,
-                vars.reserve_static[ni, t] + vars.reserve_dynamic[ni, t] <= available_reserve,
-                base_name = "reserve_headroom_$(ni)_$(t)"
-            )
-
-            # Dynamic reserve at node level
-            reserve_req_dynamic = get(input.reserve_dynamic_requirement, ni, 0.0)
-            if reserve_req_dynamic > 0
-                available_dynamic = AffExpr(0.0)
+            # Free headroom of reservable non-renewable generators and batteries
+            available_reserve = AffExpr(0.0)
+            held = AffExpr(0.0)
+            for ni in nodes
+                add_to_expression!(held, vars.reserve_static[ni, t])
+                add_to_expression!(held, vars.reserve_dynamic[ni, t])
                 for b in node_buses[ni]
                     for g in vars.gens_at_bus[b]
                         gen = input.generators[g]
-                        if gen.reservable && gen.type != "Renewable"
-                            if capacity_override !== nothing && haskey(capacity_override, (g, b))
+                        reservable(gen) || continue
+                        if capacity_override !== nothing && haskey(capacity_override, (g, b))
+                            add_to_expression!(available_reserve, capacity_override[(g, b)])
+                            add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
+                        elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
+                            cap_t = p_gb * gen.availability[t, b]
+                            if spinning
+                                add_to_expression!(available_reserve, cap_t, vars.gen_status[g, b, t])
+                            else
+                                add_to_expression!(available_reserve, cap_t)
+                            end
+                            add_to_expression!(available_reserve, -1.0, vars.gen_output[g, b, t])
+                        end
+                    end
+                    # Battery contribution: discharge headroom + charge that can be cut.
+                    # A battery currently dispatching P_d has (P_d_max - P_d) more to
+                    # give; one currently charging P_c can release P_c by stopping.
+                    for bi in bats_at_bus[b]
+                        p = bat_power(bi, b, t)
+                        p === nothing && continue
+                        add_to_expression!(available_reserve, p)
+                        add_to_expression!(available_reserve, -1.0, vars.bat_discharge[bi, b, t])
+                        add_to_expression!(available_reserve, 1.0, vars.bat_charge[bi, b, t])
+                    end
+                end
+            end
+
+            # Static and dynamic reserve are held in the same free headroom
+            @constraint(model, held <= available_reserve,
+                base_name = "reserve_headroom_s$(k)_t$(t)")
+
+            # Dynamic reserve: limited to the share of rated power that can respond
+            has_dynamic || continue
+            available_dynamic = AffExpr(0.0)
+            held_dynamic = AffExpr(0.0)
+            for ni in nodes
+                add_to_expression!(held_dynamic, vars.reserve_dynamic[ni, t])
+                for b in node_buses[ni]
+                    for g in vars.gens_at_bus[b]
+                        gen = input.generators[g]
+                        reservable(gen) || continue
+                        if capacity_override !== nothing && haskey(capacity_override, (g, b))
+                            add_to_expression!(available_dynamic,
+                                capacity_override[(g, b)], input.dynamic_reserve_contribution)
+                        elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
+                            if spinning
                                 add_to_expression!(available_dynamic,
-                                    capacity_override[(g, b)], input.dynamic_reserve_contribution)
-                            elseif (p_gb = generator_power_in_service(gen, b, input)) > 0
-                                if spinning
-                                    add_to_expression!(available_dynamic,
-                                        input.dynamic_reserve_contribution * p_gb,
-                                        vars.gen_status[g, b, t])
-                                else
-                                    add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, p_gb)
-                                end
+                                    input.dynamic_reserve_contribution * p_gb,
+                                    vars.gen_status[g, b, t])
+                            else
+                                add_to_expression!(available_dynamic, input.dynamic_reserve_contribution, p_gb)
                             end
                         end
                     end
@@ -2191,23 +2234,48 @@ function add_reserve_constraints!(model, vars::PowerSystemVariables, input;
                             input.dynamic_reserve_contribution, p)
                     end
                 end
-
-                @constraint(model,
-                    vars.reserve_dynamic[ni, t] <= available_dynamic,
-                    base_name = "reserve_dynamic_avail_$(ni)_$(t)")
-                @constraint(model,
-                    vars.reserve_dynamic[ni, t] + vars.reserve_dynamic_loss[ni, t] >= reserve_req_dynamic,
-                    base_name = "reserve_dynamic_req_$(ni)_$(t)")
-                @constraint(model,
-                    vars.reserve_dynamic[ni, t] <= reserve_req_dynamic,
-                    base_name = "reserve_dynamic_ub_$(ni)_$(t)")
-            else
-                @constraint(model,
-                    vars.reserve_dynamic[ni, t] <= 0,
-                    base_name = "reserve_dynamic_zero_$(ni)_$(t)")
             end
+            @constraint(model, held_dynamic <= available_dynamic,
+                base_name = "reserve_dynamic_avail_s$(k)_t$(t)")
         end
     end
+end
+
+"""
+    reserve_node_groups(input) -> Vector{Vector{Int}}
+
+The nodes of each system, over which `add_reserve_constraints!` pools the
+reserve headroom: `input.reserve_node_groups` when the input sets it,
+otherwise the systems of `input.co2_budget_groups` (one per original system
+in a merged multi-system run; see `system_node_groups`), otherwise one group
+with every node.
+"""
+function reserve_node_groups(input)
+    hasproperty(input, :reserve_node_groups) && return input.reserve_node_groups
+    n_node = input.network.num_nodes
+    hasproperty(input, :co2_budget_groups) || return [collect(1:n_node)]
+    return system_node_groups(input.co2_budget_groups, n_node)
+end
+
+"""
+    system_node_groups(groups, n_node) -> Vector{Vector{Int}}
+
+The node sets of the per-system `groups` (`CO2BudgetGroup`s: a merged run has
+one per original system, its contiguous nodes plus its zone nodes). Nodes no
+group lists form one extra group; with no groups every node is one system.
+"""
+function system_node_groups(groups::AbstractVector, n_node::Integer)
+    isempty(groups) && return [collect(1:n_node)]
+    seen = falses(n_node)
+    out = Vector{Int}[]
+    for grp in groups
+        nodes = [n for n in grp.nodes if 1 <= n <= n_node && !seen[n]]
+        seen[nodes] .= true
+        isempty(nodes) || push!(out, nodes)
+    end
+    rest = findall(!, seen)
+    isempty(rest) || push!(out, rest)
+    return out
 end
 
 """
@@ -3706,6 +3774,14 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
     total_demand = sum(@view input.demand[kept, :]) * tres_tot
     total_curt = sum(@view curt[:, kept]) * tres_tot
     total_ls = sum(@view ls[:, kept]) * tres_tot
+    # Transmission losses of the DC loss model (0 when lossless)
+    total_losses = 0.0
+    if vars.line_losses !== nothing && has_values(model)
+        for losses in vars.line_losses, t in kept
+            total_losses += value(losses[t])
+        end
+        total_losses *= tres_tot
+    end
 
     # Renewable energy penetration (unit-free ratio)
     re_gen = 0.0
@@ -3957,7 +4033,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         res_static, res_dynamic, res_static_loss, res_dynamic_loss,
         ls, co2_em,
         prices,
-        total_gen, total_demand, 0.0,  # losses (computed by DC power flow)
+        total_gen, total_demand, total_losses,
         re_pen, total_co2, total_ls,
         spillage_out,
         ev_charge_out, ev_v2g_out, ev_soc_out, ev_loss_out,

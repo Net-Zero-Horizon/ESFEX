@@ -95,7 +95,7 @@ class PowerSystemAdapter:
 | `boundary_conditions` | `dict` | State carried over from the previous rolling window, each a `(unit, bus)` array: `gen_status_init`, `gen_output_prev`, `reservoir_level`, `battery_soc` (MWh), `battery_discharge_prev` and `battery_charge_prev` (MW, for the batteries' ramp limits). On the year's last window also `battery_soc_end_min` (MWh floor) and `battery_soc_end_cyclic` (bool). |
 | `sectoral_demand` | `dict` | Sectoral demand arrays `{sector_name: np.ndarray(hours, nodes)}`. |
 | `rooftop_generation` | `np.ndarray` | Rooftop solar generation profile `(hours, nodes)` in MW. The runner passes `None`: rooftop output is already subtracted from the demand it sends. |
-| `re_penetration_target` | `float` | Year-specific RE penetration target override (0-1). |
+| `re_penetration_target` | `float` | The year's RE penetration target (0-1) from the development master's path. `None` or 0: no RE-penetration constraint (`target_re_penetration` is a planning target and is not applied by the dispatch on its own). |
 | `ev_config_data` | `dict` | EV fleet configuration for V2G constraints. |
 | `electricity_price` | `list[float]` | Time-varying electricity prices for V2G compensation. |
 
@@ -167,7 +167,8 @@ Extract all variable values from the solved model. Calls `ESFEX.extract_solution
 | `power_flow`, `power_flow_by_line` | Flow per bus pair `{(i, j): array}` and per physical line |
 | `bat_spillage`, `ev_*`, `loss_of_inertia`, `transfer_margin`, `reservoir_*` | Present when the feature is active |
 | `n1_gen_reserve_duals`, `n1_trans_reserve_duals`, `n1_binding_contingencies`, `n1_security_cost` | N-1 security outputs |
-| `total_generation`, `total_demand`, `total_losses`, `re_penetration`, `total_co2`, `load_shed_total`, `total_curtailment` | Scalars |
+| `unattached_load_shed` | `(node, hour)` MW: the demand of nodes with no load bus, unserved (present only when such nodes exist); it is included in `load_shed_total`, `objective` and `cost_breakdown` |
+| `total_generation`, `total_demand`, `total_losses`, `re_penetration`, `total_co2`, `load_shed_total`, `total_curtailment` | Scalars (MWh, tCO2). `total_losses` is the transmission loss of the DC loss model (0 when the flow is lossless or AC) |
 
 When network reduction is enabled, the arrays are expanded back to the original buses and lines before they are returned.
 

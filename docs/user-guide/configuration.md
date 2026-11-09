@@ -479,7 +479,7 @@ The values shown are the defaults. `max_curtailment_ratio` is a hard limit per r
     life_extension_cost_factor: 0.2
 ```
 
-The uppercase names are legacy aliases written by the Studio; the lowercase field names (`target_re_penetration`, `max_annual_system_cost`, ...) work too. There is no `initial_re_penetration` key: the starting RE share is always computed from existing capacity. How the target path is built is described in [Master Problem](master-problem.md).
+The uppercase names are legacy aliases written by the Studio; the lowercase field names (`target_re_penetration`, `max_annual_system_cost`, ...) work too. There is no `initial_re_penetration` key: the starting RE share is always computed from existing capacity. The RE target is a planning target, used only in `development` runs; `economic_dispatch` and `unit_commitment` runs apply none. How the target path is built is described in [Master Problem](master-problem.md).
 
 ### Power Flow
 
