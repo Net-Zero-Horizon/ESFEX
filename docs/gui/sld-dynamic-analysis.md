@@ -85,6 +85,10 @@ Values read from the HDF5 results for the selected year and hour, shown with gen
 
 On/off and start-up data come from the `gen_status` and `gen_startup` datasets, which unit-commitment runs write. Without them, every generator is shown online.
 
+### Line Flows
+
+The results store one flow per pair of nodes (`power_flow`), so a line between two nodes shows the net flow between them, positive in the line's drawn direction. When several lines join the same two nodes they share that flow: in proportion to their susceptance (1/X) when all of them have a reactance, otherwise in proportion to their capacity, so each shows the loading of the pair. A line's loading is its share of the flow over its own capacity. Earlier versions gave every such line the whole flow of the pair (counted in one direction only) over that line's own capacity.
+
 ### Reserve Badges
 
 Compact badge near each node's bus:
