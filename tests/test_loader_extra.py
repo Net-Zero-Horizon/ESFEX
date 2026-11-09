@@ -818,11 +818,11 @@ class TestFieldNameAndAlias:
         the alias, which discarded the edit."""
         data = _minimal_system()
         data.update(TARGET_RE_PENETRATION=1.0, target_re_penetration=0.8,
-                    FORCE_REPLACEMENT=-5e5, force_replacement=-5e5)
+                    MAX_ANNUAL_INCREMENT=0.1, max_annual_increment=0.1)
         with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
             sc = _convert_system(data)
         assert sc.target_re_penetration == 0.8
-        assert sc.force_replacement == -5e5
+        assert sc.max_annual_increment == 0.1
         warned = [r.getMessage() for r in caplog.records if "are set; using" in r.getMessage()]
         assert len(warned) == 1 and "target_re_penetration" in warned[0]
 

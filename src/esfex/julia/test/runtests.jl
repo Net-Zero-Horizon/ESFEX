@@ -230,35 +230,31 @@ import Ipopt
         @test tmap6[0] == 1                       # hour 0 maps to the first slot
     end
 
-    @testset "calculate_unit_npv" begin
-        # End-of-life unit: NPV is just the (negative) decommissioning cost.
-        @test calculate_unit_npv(100.0, 20.0, 5.0, 5.0, 0.0, 0.0, 50.0,
-                                 0.05, 0.6, 100.0) == -50.0
-        # Zero capacity contributes nothing.
-        @test calculate_unit_npv(0.0, 20.0, 5.0, 5.0, 25.0, 0.0, 50.0,
-                                 0.05, 0.6, 100.0) == 0.0
-
-        # One year, no degradation/discount/decommissioning: NPV equals the
-        # single-year net cash flow = generation * (lcoe - fuel - maintenance)
-        # - fixed O&M per MW-year * capacity.
-        gen = 100.0 * 0.5 * Float64(ESFEX.HOURS_STD_YEAR)  # MWh
-        expected = gen * (100.0 - (20.0 + 5.0)) - 5.0 * 100.0
-        @test calculate_unit_npv(100.0, 20.0, 5.0, 5.0, 1.0, 0.0, 0.0,
-                                 0.0, 0.5, 100.0) ≈ expected
-
-        # A unit whose price exceeds its costs has positive NPV; flip the price
-        # below cost and the NPV goes negative.
-        @test calculate_unit_npv(100.0, 20.0, 5.0, 5.0, 10.0, 0.0, 0.0,
-                                 0.05, 0.6, 120.0) > 0
-        @test calculate_unit_npv(100.0, 60.0, 10.0, 10.0, 10.0, 0.0, 0.0,
-                                 0.05, 0.6, 50.0) < 0
-
-        # Adding a decommissioning cost can only lower NPV, never raise it.
-        without = calculate_unit_npv(100.0, 20.0, 5.0, 5.0, 10.0, 0.0, 0.0,
-                                     0.05, 0.6, 120.0)
-        with = calculate_unit_npv(100.0, 20.0, 5.0, 5.0, 10.0, 0.0, 1.0e6,
-                                  0.05, 0.6, 120.0)
-        @test with < without
+    @testset "no forced replacement in the dispatch" begin
+        # The dispatch's forced-replacement variables had a cost but no
+        # constraint (always 0) and nothing set their inputs: removed.
+        for f in (:unit_npv, :replacement_needed, :bat_unit_npv,
+                  :bat_replacement_needed, :force_replacement_threshold,
+                  :decommissioning_cost_gen, :decommissioning_cost_bat,
+                  :discount_rate, :max_decommission_cost_per_mw,
+                  :max_npv_penalty_per_mw)
+            @test !hasfield(PowerSystemInput, f)
+        end
+        @test !hasfield(PowerSystemVariables, :gen_forced_replacement)
+        @test !hasfield(PowerSystemVariables, :bat_forced_replacement)
+        @test !hasfield(ESFEX.CostBreakdown, :npv_penalty_cost)
+        @test !isdefined(ESFEX, :update_npv_from_results!)
+        for f in (:max_npv_penalty_per_mw, :max_decommission_cost_per_mw,
+                  :force_replacement_threshold)
+            @test !hasfield(MasterProblemInput, f)
+        end
+        # The master's NPV retirement helpers stay (Julia API)
+        @test hasfield(MasterProblemInput, :base_lcoe)
+        @test hasfield(MasterProblemInput, :npv_annual_return_rate)
+        @test isempty(methods(calculate_unit_npv, (Float64, Float64, Float64, Float64,
+            Float64, Float64, Float64, Float64, Float64, Float64)))
+        @test !isempty(methods(calculate_unit_npv,
+            (MasterProblemResult, MasterProblemInput, String, Int, Int)))
     end
 
     @testset "create_temporal_mapping" begin

@@ -206,7 +206,7 @@ Click the system name in the Element Tree. The form has three tabs.
 
 ### Cost Limits
 
-Max Annual System Cost, Max NPV Penalty, Max Decommission Cost, Force Replacement, and Life Extension Cost Factor.
+Max Annual System Cost and Life Extension Cost Factor.
 
 ### Penalties
 
