@@ -449,7 +449,7 @@ For each year \(y\) and representative day \(d\), a full set of dispatch variabl
 
 **Julia function**: `add_day_operational_constraints!(model, ps_vars, vars, input, year_idx, day_idx, demand, start_hour)`
 
-The day reuses the operational-dispatch constraint builders of `power_system.jl` and `transmission_dc.jl` in economic-dispatch mode, with the capacities of §6 passed in as expressions of the investment variables: generators, batteries, reservoirs, reserves (RES-1 to RES-3), inertia, power balance and curtailment. With primary energy on, the day also has the fuel block of §8.3.12 (fuel balance and electrolyzers). Rooftop solar, EVs, unit commitment and N-1 are not modelled in the master.
+The day reuses the operational-dispatch constraint builders of `power_system.jl` and `transmission_dc.jl` in economic-dispatch mode, with the capacities of §6 passed in as expressions of the investment variables: generators, batteries, reservoirs, reserves (RES-1 to RES-3, held per system as in the dispatch: one system, or one per original system of a merged run), inertia, power balance and curtailment. With primary energy on, the day also has the fuel block of §8.3.12 (fuel balance and electrolyzers). Rooftop solar, EVs, unit commitment and N-1 are not modelled in the master.
 
 #### 8.3.1 Power Balance
 

@@ -90,8 +90,8 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 | `battery_capacity_factor/{bat_name}` | (N, T) | unitless | Per-battery CF (group) |
 | `battery_lcoe/{bat_name}` | (N, T) | $/MWh | Per-battery LCOE (group) |
 | `battery_vallcoe/{bat_name}` | (N, T) | $/MWh | Per-battery value-adjusted LCOE (group) |
-| `reserve_static`, `reserve_dynamic` | (N, T) | MW | Reserve held as free capacity (at most the requirement; not generated energy) |
-| `loss_of_reserve_static`, `loss_of_reserve_dynamic` | (N, T) | MW | Unmet reserves |
+| `reserve_static`, `reserve_dynamic` | (N, T) | MW | The node's reserve requirement held as free capacity anywhere in its system (at most the requirement; not generated energy) |
+| `loss_of_reserve_static`, `loss_of_reserve_dynamic` | (N, T) | MW | Unmet reserves: the system's shortfall, split over its nodes in proportion to their requirement |
 | `loss_load` | (N, T) | MW | Unserved demand |
 | `CO2_emissions` | (N, T) | tCO2/h | Per-node emission rate; × `temporal_resolution_hours` gives tonnes per step |
 | `nodal_electricity_prices` | (N, T) | $/MWh | LMPs per node (max over a node's buses) |

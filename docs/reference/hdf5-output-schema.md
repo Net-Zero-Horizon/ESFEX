@@ -464,10 +464,10 @@ The dispatch builds nothing: in a `development` run the master's builds reach ea
 | Dataset | Shape | Type | Units | Description |
 |---------|-------|------|-------|-------------|
 | `demand` | (num_nodes, hours) | float32 | MW | Gross demand (same content as `/demand/year_YYYY_base_demand`, transposed); attribute `dimensions = "nodes x hours"` |
-| `reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve held as free capacity |
-| `reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve held as free capacity |
-| `loss_of_reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve deficit |
-| `loss_of_reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve deficit |
+| `reserve_static` | (num_nodes, hours) | float64 | MW | The node's static reserve requirement held as free capacity anywhere in its system |
+| `reserve_dynamic` | (num_nodes, hours) | float64 | MW | The node's dynamic reserve requirement held as free capacity anywhere in its system |
+| `loss_of_reserve_static` | (num_nodes, hours) | float64 | MW | Static reserve deficit: the system's shortfall, split over its nodes in proportion to their requirement |
+| `loss_of_reserve_dynamic` | (num_nodes, hours) | float64 | MW | Dynamic reserve deficit, split like the static one |
 | `loss_load` | (num_nodes, hours) | float64 | MW | Load shedding |
 | `CO2_emissions` | (num_nodes, hours) | float64 | tCO2/h | CO2 emission rate per step; × `temporal_resolution_hours` gives the tonnes emitted in the step |
 | `voltage_angle` | (num_nodes, hours) | float64 | radians | Voltage angles (max over a node's buses) |
