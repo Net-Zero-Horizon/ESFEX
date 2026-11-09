@@ -1003,6 +1003,25 @@ Per-release notes are also published on the
   Commitment Heatmap shows the share of a plant's units online, with the
   units in the tooltip.
 
+- **One rule decides which units are committed: variable renewables are
+  not, everything else is.** A *variable renewable* is a `Renewable` unit
+  whose fuel is sun (`Sun`, `Solar`, `PV`), wind, an ocean resource (`OTEC`,
+  `Wave`, `Tidal`) or none (`None`, empty), or water / hydro at a node where
+  it has no reservoir. It has no on/off status or start-ups in unit
+  commitment, holds no reserve, is left out of the generation N-1 headroom
+  and is what curtailment measures. Every other unit is dispatchable,
+  renewable or not: biomass, biogas, geothermal, waste and reservoir hydro
+  are now committed like thermal units (minimum output, start-up cost,
+  minimum up/down times), hold static and dynamic reserve when `reservable`
+  (reservoir hydro held none before), count in the N-1 headroom, take part
+  in the master's LP start-ups and are PV buses in the AC power flow. A
+  candidate technology follows the same rule in the master's reserves and
+  curtailment. The renewable-energy share still counts every `Renewable`
+  unit. Before, the exemption was keyed on `type == "Renewable"`, so a
+  biomass plant with a minimum output and a start-up cost was never
+  committed (Cuba: status 0 while it generated) and its unused capacity
+  was counted, and priced, as curtailment.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -2218,6 +2237,69 @@ Per-release notes are also published on the
   end buses, the impedance of the standard line type of their voltage on
   the system base (like every other built line), and the frequency of the
   main-network bus they connect to.
+
+- **Start-ups and status of solar, wind and run-of-river units were
+  arbitrary.** Unit commitment created `gen_status` and `gen_startup` for
+  every generator, but the constraints only bound the committed ones: a PV
+  or wind unit's start-up variable was free and cost nothing, so the solver
+  left any value there (Cuba UC, 720 h: 25,200 start-ups for the PV fleet,
+  720 for each wind and hydro unit, 3,600 for the sugar mills). These units
+  now get no status or start-up variables; the results arrays hold 0 for
+  them, and the HDF5 file has no `gen_status` / `gen_startup` dataset for a
+  generator that is a variable renewable at all its nodes (the dashboard,
+  commitment heatmap, dispatch stack and single-line diagram already treat a
+  generator without one as online whenever it generates).
+
+- **The master ignored the availability of non-renewable technologies.**
+  The monolithic master and the Benders subproblems capped a non-renewable
+  technology's output at its built capacity × 1, while the generator it
+  becomes in the dispatch is capped by the technology's availability
+  profile (derates, scheduled outages), as the reserve headroom already
+  was. Every technology's output is now capped by its availability in each
+  representative-day step (1 without a profile), so the master no longer
+  plans on energy the dispatch does not have.
+
+- **False "extending its life is free" warning.** The life-extension cost
+  check tested `invest_cost` at every node, including nodes where the unit
+  has no capacity (where it is 0), so a unit priced at every node it
+  occupies still warned that its life extension was free when no technology
+  shared its fuel (Cuba: every plant). Only the nodes with capacity are
+  checked now, for generators and batteries. Costs were not affected.
+
+- **The Grid Builder gave 50 Hz countries 60 Hz.** The mains-frequency
+  lookup used wide bounding boxes: the South America box also covered
+  Argentina, Uruguay, Paraguay, Bolivia and Chile, the Saudi Arabia box
+  Kuwait, Bahrain, Qatar, the UAE, Jordan and Yemen, the Liberia box parts of
+  Guinea, Sierra Leone and Côte d'Ivoire, and the North America box western
+  Greenland, so their buses were built at 60 Hz (Buenos Aires, Kuwait City).
+  The lookup now uses coarse country outlines that follow the borders with
+  50 Hz neighbours, with 50 Hz exceptions checked first (Greenland, Jamaica,
+  most of the Lesser Antilles, Curaçao and Bonaire, French Guiana, Bahrain).
+  Okinawa, Kinmen, Matsu, the Galápagos, southern Chiapas, the US Pacific
+  territories and French Polynesia, which fell outside every box, are now
+  60 Hz.
+
+- **Grid Builder impedances ignored the system base.** Lines it built, lines
+  whose voltage it inferred, island reconnection lines and the transformers
+  it created (substation banks, generator step-ups, co-located voltage
+  levels, OSM transformers, parameter inference) had their per-unit
+  impedance computed on 100 MVA whatever `ac_power_flow.base_mva` was. They
+  now use the system base, like the validation's line impedances.
+
+- **Bridge lines joined two voltage levels with no transformer.** The
+  bus-to-bus bridge that `iterative_auto_connect` adds for an isolated
+  component without equipment ran at the higher of the two bus voltages,
+  straight from a 110 kV island bus to a 220 kV main bus. It now runs at the
+  island's voltage; when the nearest main bus is at another level (more than
+  10 % apart), it ends at a new bus beside that bus, joined to it by a
+  transformer, as the equipment chains do.
+
+- **SLD line flows on parallel lines.** In results mode every line between
+  two nodes showed the node pair's whole flow, counted in one direction
+  only, over that line's own capacity, so parallel lines showed the same
+  flow and wrong loadings. The net flow of the pair is now shared among its
+  lines by susceptance (1/X) when they all have a reactance, otherwise by
+  capacity, and each line's loading is its share over its own capacity.
 
 ## [0.3.0] — 2026-08-27
 
