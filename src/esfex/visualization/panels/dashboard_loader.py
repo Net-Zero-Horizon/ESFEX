@@ -414,14 +414,8 @@ class DashboardLoader:
         from esfex.visualization.panels.results_charts import (
             orient_to_node_hours,
         )
-        rng = None
-        try:
-            from esfex.visualization.panels.results_charts import (
-                _system_node_range as _sys_node_range,
-            )
-            rng = _sys_node_range(f, bp)
-        except Exception:
-            pass
+        # A subsystem's ``sc`` is already sliced to its nodes
+        # (_open_scenario): the arrays are summed as read.
         tres = int(f.attrs.get("temporal_resolution_hours", 1))
 
         # LMPs (system average + hourly load shed for the trajectory
@@ -442,9 +436,6 @@ class DashboardLoader:
             # nodes > hours (all of Japan: 72 nodes > 24 h) mis-reads demand and
             # inflates the shed share (184% instead of the true 69%).
             arr = orient_to_node_hours(arr, n_hours)
-            if rng is not None:
-                lo, hi = rng
-                arr = arr[lo:hi]
             s = arr.sum(axis=0).astype(float)
             if n_hours and len(s) < n_hours:
                 s = _np.pad(s, (0, n_hours - len(s)))
@@ -460,7 +451,7 @@ class DashboardLoader:
         try:
             from esfex.visualization.panels.results_charts import (
                 _load_gen_data,
-                _load_gen_configs,
+                _gen_config_resolver,
                 _tech_bucket_for_gen,
                 get_generation_colors,
                 get_generation_default_color,
@@ -469,20 +460,18 @@ class DashboardLoader:
             _load_gen_data = None
         tech_series: dict[str, _np.ndarray] = {}
         if _load_gen_data is not None:
-            cfgs = _load_gen_configs(f, bp)
+            # Each dataset finds its unit's config by name (h5py lists them
+            # alphabetically; the master's builds take their technology's)
+            unit_config = _gen_config_resolver(f, bp)
             gen_data = _load_gen_data(sc)
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 hourly = arr.sum(axis=0).astype(float)
                 if n_hours and len(hourly) < n_hours:
                     hourly = _np.pad(hourly, (0, n_hours - len(hourly)))
                 hourly = hourly[:n_hours] if n_hours else hourly
-                cfg = cfgs[gi] if gi < len(cfgs) else {}
-                tech = _tech_bucket_for_gen(cfg, gname)
+                tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
                 if tech in tech_series:
                     tech_series[tech] = tech_series[tech] + hourly
                 else:
@@ -500,9 +489,6 @@ class DashboardLoader:
             for arr in d.values():
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 s = arr.sum(axis=0).astype(float)
                 if n_hours and len(s) < n_hours:
                     s = _np.pad(s, (0, n_hours - len(s)))
@@ -1137,7 +1123,7 @@ class DashboardLoader:
         tres = int(f.attrs.get("temporal_resolution_hours", 1))
 
         from esfex.models.financial_analysis import (
-            _index_configs_by_name, _lookup_config, built_power,
+            _index_configs_by_name, _lookup_config, power_in_service,
         )
         from esfex.visualization.panels.results_charts import (
             _load_gen_configs, _load_bat_configs, _load_tech_configs,
@@ -1149,9 +1135,11 @@ class DashboardLoader:
         # Each dataset finds its unit's config by name: h5py lists the
         # datasets alphabetically, not in config order. The units the master
         # built ("Investment <technology>") have no config of their own: they
-        # take their technology's, with the MW in service the runner records
-        # on their dataset. Position is only the fallback for files whose
-        # configs carry no name.
+        # take their technology's. Fixed O&M is charged on the MW in service
+        # the runner records on each unit's dataset (retirements, life
+        # extension and degradation applied; older files: the configured
+        # rating). Position is only the fallback for files whose configs
+        # carry no name.
         gen_by_name = _index_configs_by_name(gen_cfgs)
         bat_by_name = _index_configs_by_name(bat_cfgs)
         tech_by_name = _index_configs_by_name(_load_tech_configs(f, bp))
@@ -1160,13 +1148,13 @@ class DashboardLoader:
         def _gen_cfg(name, idx):
             return _lookup_config(
                 name, gen_by_name, gen_cfgs, idx, tech_by_name=tech_by_name,
-                built_mw=built_power(sc["generation"], name)
+                in_service_mw=power_in_service(sc["generation"], name)
                 if "generation" in sc else None)
 
         def _bat_cfg(name, idx):
             return _lookup_config(
                 name, bat_by_name, bat_cfgs, idx, tech_by_name=bat_tech_by_name,
-                built_mw=built_power(sc["battery_discharge"], name)
+                in_service_mw=power_in_service(sc["battery_discharge"], name)
                 if "battery_discharge" in sc else None,
                 power_key="MaxDischargePower")
 
@@ -1192,7 +1180,7 @@ class DashboardLoader:
             year_share = arr.shape[-1] * tres / HOURS_STD_YEAR
             for k, e in enumerate(energy_by_node):
                 n = lo + k
-                # Fixed O&M on the rated power, whether or not it ran
+                # Fixed O&M on the power in service, whether or not it ran
                 fix_c += (self._attr_at_node(cfg, "fixed_cost", n)
                           * self._attr_at_node(cfg, "rated_power", n) * year_share)
                 if e == 0:
@@ -1204,9 +1192,8 @@ class DashboardLoader:
         # number of starts is what the cost is keyed on. Without a
         # ``gen_startup`` dataset we fall back to counting 0→1
         # transitions in ``gen_status`` (same as the solver's
-        # ``startup`` decision variable in UC mode). ``gen_status`` is not
-        # node-sliced in a subsystem view: slice it here, for this
-        # system's units only.
+        # ``startup`` decision variable in UC mode). A subsystem view slices
+        # ``gen_status`` to this system's units and nodes, like generation.
         if "gen_status" in sc:
             gs_grp = sc["gen_status"]
             for gname in gs_grp:
@@ -1215,8 +1202,6 @@ class DashboardLoader:
                 arr = np.asarray(gs_grp[gname][:])
                 if arr.ndim < 2:
                     continue
-                if node0 or arr.shape[0] != gen_data[gname].shape[0]:
-                    arr = arr[node0:node0 + gen_data[gname].shape[0]]
                 cfg = gen_cfg_by_ds[gname]
                 # transitions per node = sum of clip(diff, 0, 1)
                 diffs = np.diff(arr, axis=1, prepend=0)
@@ -1235,7 +1220,7 @@ class DashboardLoader:
             c_arr = gen_charge.get(bname, np.zeros(0))
             d_arr = gen_discharge.get(bname, np.zeros(0))
             cfg = _bat_cfg(bname, bi)
-            # Fixed O&M ($/MW·yr) on the rated discharge power
+            # Fixed O&M ($/MW·yr) on the discharge power in service
             if d_arr.ndim == 2:
                 share = d_arr.shape[-1] * tres / HOURS_STD_YEAR
                 for k in range(d_arr.shape[0]):

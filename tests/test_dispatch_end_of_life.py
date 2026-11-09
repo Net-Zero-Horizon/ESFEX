@@ -102,3 +102,12 @@ def test_life_extended_unit_runs_and_is_not_reported_retired(tmp_path):
         # The old unit serves the 50 MW load every step (MW per step)
         assert float(np.max(yr.load_shed_array)) == pytest.approx(0.0, abs=1e-3)
         assert float(np.mean(yr.gen_output[0].sum(axis=0))) == pytest.approx(50.0, rel=1e-3)
+    # The results file records the MW the master keeps in service (bug
+    # sweep S12): the readers charged fixed O&M on the configured rating
+    import h5py
+    (h5_path,) = (tmp_path / "out").rglob("*.h5")
+    with h5py.File(h5_path, "r") as f:
+        for yr in results:
+            gen = f[f"detailed_results/year_{yr.year}_threshold_0/generation"]
+            (name,) = list(gen)
+            assert 50.0 - 1e-3 <= float(np.sum(gen[name].attrs["rated_power"])) <= 100.0
