@@ -108,11 +108,11 @@ Same encoding, from `BatteryConfig.model_dump()`. Group attribute `num_batteries
 
 ### system_configuration/technologies/technology_{i}/
 
-Attributes `key`, `name`, `type`, `fuel`, `invest_cost` (string-encoded list) and `color` (if set). Group attribute `num_technologies`.
+Attributes `key`, `name`, `type`, `fuel`, `invest_cost`, the operating costs `fuel_cost`, `fixed_cost`, `maintenance_cost` and `start_up_cost` (string-encoded per-node lists) and `color` (if set). Group attribute `num_technologies`. The operating costs are those of the units the master builds from the technology, which have no group under `generators/`; files written before they were recorded lack them.
 
 ### system_configuration/battery_technologies/battery_technology_{i}/
 
-Attributes `key`, `name`, `invest_cost_power`, `invest_cost_energy` (string-encoded lists) and `color` (if set). Group attribute `num_battery_technologies`.
+Attributes `key`, `name`, `invest_cost_power`, `invest_cost_energy`, `maintenance_cost`, `fixed_cost` (string-encoded per-node lists) and `color` (if set). Group attribute `num_battery_technologies`.
 
 ### system_configuration/transmission_lines/line_{i}/
 
@@ -257,7 +257,7 @@ The node index `n` (and `i`, `j`) is always a node: when the master solves on bu
 
 Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery; in electrolyzer groups, another electrolyzer) gets a ` (1)`, ` (2)`, ... suffix: two units named `Gas` are written as `Gas` and `Gas (1)`. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...). Readers that look up a unit's configuration by name (financial analysis, results charts) strip the suffix.
 
-Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape` and `units`.
+Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape` and `units`. The datasets of the units the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)) also carry `rated_power`: their MW in service in the year, per node; `battery_discharge/{name}` of a built battery carries its power in service the same way.
 
 ### Generation Data
 
@@ -600,7 +600,7 @@ Virtual units use the same dataset structure as their physical counterparts.
 
 ### Identifying Virtual Units
 
-Virtual unit names start with `"Investment "`. They do not appear in `system_configuration/generators/` or `batteries/`, which only list the configured units; the candidate technologies are in `system_configuration/technologies/` and `battery_technologies/`.
+Virtual unit names start with `"Investment "`, followed by the technology's dataset name (`Investment Cuba - Solar PV` for technology `Cuba/Solar PV`). They do not appear in `system_configuration/generators/` or `batteries/`, which only list the configured units; the candidate technologies are in `system_configuration/technologies/` and `battery_technologies/`. The results dashboard, the results charts and the financial analysis cost a virtual unit with its technology's operating costs, and charge its fixed O&M on the `rated_power` attribute of its `generation/` (or `battery_discharge/`) dataset.
 
 ---
 

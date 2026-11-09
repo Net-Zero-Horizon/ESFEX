@@ -82,7 +82,7 @@ Per-technology financial comparison. This step links the physical optimization r
 
 **Metrics table:**
 
-One row per generator and battery (including virtual units from technology investments). Columns:
+One row per generator and battery (including virtual units from technology investments). A virtual unit has no configuration of its own: it is costed with its technology's fuel, maintenance and fixed O&M costs, the fixed O&M on its MW in service in each year. Results files written before the technologies' operating costs were recorded have none for these rows; the investment metrics of Step 6 then borrow the costs of an existing unit of the same fuel. Columns:
 
 | Column | Units | Description |
 |--------|-------|-------------|
