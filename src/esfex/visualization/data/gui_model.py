@@ -524,6 +524,11 @@ class GuiSystemSettings:
     demand_scale: float = 1.0
     discount_rate: float = 0.05
     base_lcoe: float = 93.0
+    # NPV-based retirement of existing units
+    npv_annual_return_rate: float = 0.15
+    npv_retirement: bool = False
+    npv_retirement_max_iterations: int = 5
+    npv_retirement_threshold: float = 0.0
     target_re_penetration: float = 1.0
     min_annual_increment: float = 0.01
     max_annual_increment: float = 0.10

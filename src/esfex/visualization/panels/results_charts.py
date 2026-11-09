@@ -2035,7 +2035,10 @@ def _load_decommissioning_data(
 
     Reads from:
     1. Scenario attrs: retirement_gen_{idx} (cumulative fraction retired)
-    2. Scenario sub-groups: decommissioning, gen_forced_replacement (legacy)
+    2. The file's ``npv_retirements`` group: generators the NPV-based
+       retirement took out of service by this scenario's year (their share
+       of the unit; the larger of the two fractions counts)
+    3. Scenario sub-groups: decommissioning, gen_forced_replacement (legacy)
 
     If *fallback_sc* is provided, retirement attrs are read from there when
     the primary scenario has none.
@@ -2074,6 +2077,20 @@ def _load_decommissioning_data(
                 rated_mw = _parse_total_mw(rated)  # handles str/list/scalar
                 ret_mw = fraction * rated_mw
                 out[name] = out.get(name, 0.0) + ret_mw
+
+    # --- NPV-based retirements (file-level group, by generator index) ---
+    year = sc.attrs.get("year")
+    npv_grp = sc.file.get("npv_retirements") if year is not None else None
+    if npv_grp is not None and "index" in npv_grp:
+        npv_share: dict[int, float] = {}
+        for kind, g_idx, yr, share in zip(npv_grp["kind"][:], npv_grp["index"][:],
+                                          npv_grp["year"][:], npv_grp["share"][:]):
+            kind = kind.decode() if isinstance(kind, bytes) else str(kind)
+            if kind == "generator" and int(yr) <= int(year):
+                g_idx = int(g_idx)
+                npv_share[g_idx] = min(1.0, npv_share.get(g_idx, 0.0) + float(share))
+        for g_idx, share in npv_share.items():
+            raw_fractions[g_idx] = max(raw_fractions.get(g_idx, 0.0), share)
 
     # --- Explicit decommissioning group (if present) ---
     if "decommissioning" in sc:

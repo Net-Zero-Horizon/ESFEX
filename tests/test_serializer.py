@@ -1654,6 +1654,29 @@ class TestRoundTrip:
         assert sys_data["discount_rate"] == pytest.approx(0.05)
         assert sys_data["target_re_penetration"] == pytest.approx(0.5)
 
+    def test_round_trip_npv_retirement_settings(self):
+        """The NPV-based retirement settings load into Studio and save back,
+        edits included."""
+        sys_cfg = _make_system_config("TestSystem").model_copy(update={
+            "npv_retirement": True, "npv_retirement_max_iterations": 3,
+            "npv_retirement_threshold": -5e5, "npv_annual_return_rate": 0.08})
+        config = _make_esfex_config(sys_cfg)
+        settings = config_to_gui_states(config)["TestSystem"].settings
+        assert settings.npv_retirement is True
+        assert settings.npv_retirement_max_iterations == 3
+        assert settings.npv_retirement_threshold == pytest.approx(-5e5)
+        assert settings.npv_annual_return_rate == pytest.approx(0.08)
+        sys_data = self._round_trip(config)["systems"]["TestSystem"]
+        assert sys_data["npv_retirement"] is True
+        assert sys_data["npv_retirement_max_iterations"] == 3
+        assert sys_data["npv_retirement_threshold"] == pytest.approx(-5e5)
+        assert sys_data["npv_annual_return_rate"] == pytest.approx(0.08)
+        # Defaults: off
+        default = config_to_gui_states(_make_esfex_config())["TestSystem"].settings
+        assert default.npv_retirement is False
+        assert default.npv_retirement_max_iterations == 5
+        assert default.npv_retirement_threshold == 0.0
+
     def test_round_trip_preserves_fuel_properties(self):
         config = _make_esfex_config()
         data = self._round_trip(config)

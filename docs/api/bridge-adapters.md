@@ -265,6 +265,8 @@ class MasterProblemAdapter:
 | `profile_start_hour` | `int` | Horizon hour (year index × 8760 + hour) of the first planned hour: every profile is rotated to start there, wrapping around a shorter one. The myopic runner passes `y_idx × 8760` for each one-year model. |
 | `solver_method` | `str` | `"monolithic"` (one JuMP model) or `"benders"` (`run_benders_decomposition`). |
 | `benders_max_iterations`, `benders_tolerance` | `int`, `float` | Benders settings: iteration cap and relative gap for convergence. |
+| `retired_units` | `list[tuple]` | NPV-based retirement: `(kind, unit key, bus)` units an earlier myopic year retired; they stay out of this model and do not pay their decommissioning again. |
+| `npv_unit_keys` | `set[str]` | NPV-based retirement: the generator and battery keys whose NPV is checked (default: all; the myopic runner passes the original units). |
 
 **Methods:**
 
@@ -283,6 +285,8 @@ def solve(self) -> int
 ```
 
 Optimize the master problem (or run Benders decomposition). Returns PuLP-compatible status code.
+
+With the system's `npv_retirement` on, it then runs the NPV-based retirement ([Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement)): it computes each existing unit's NPV in the plan (Julia `unit_npvs`), retires the units below `npv_retirement_threshold` (Julia `retire_units`), rebuilds the model with `build_model` and solves again, for at most `npv_retirement_max_iterations` rounds, in every solver mode. The retired units are listed in `npv_retirements` (dicts with `kind`, `key`, `name`, `bus`, `node`, `npv` in $ and `iteration`), and stay retired in later builds of this adapter.
 
 ### get_solution_values
 

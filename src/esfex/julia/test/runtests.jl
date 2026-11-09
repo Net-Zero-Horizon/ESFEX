@@ -3671,6 +3671,181 @@ import Ipopt
             end
         end
 
+        @testset "NPV-based retirement of existing units" begin
+            # One bus, 50 MW flat, two years of one 24 h representative day
+            # (hours_per_year 24: the day is the year). Gas (200 MW, $30/MWh)
+            # serves the load; a $200/MWh peaker (50 MW) never runs but pays
+            # $1000/MW·yr of fixed O&M; a battery (20 MW / 40 MWh).
+            # calculate_unit_npv used to ignore the result (fixed capacity
+            # factor, and it read a field generators do not have), and
+            # force_unit_retirements! did nothing.
+            H = 24
+            wf = ESFEX.with_fields
+            gas = wf(mkgen("Gas", "Non-renewable", "Gas", [200.0], [3.0e-5], ones(H, 1);
+                           nb = 1, H = H); fixed_cost = [1.0e-5], maintenance_cost = [2.0e-6])
+            peaker = wf(mkgen("Peaker", "Non-renewable", "Diesel", [50.0], [2.0e-4],
+                              ones(H, 1); nb = 1, H = H);
+                        fixed_cost = [1.0e-3], decommissioning_cost = [1.0e-4])
+            bat = wf(BatteryConfig("Li1", [40.0], [20.0], [20.0], [0.95], [0.95],
+                                   [0.0], [1.0], [0.5], [0.0], [0.0], [0.0],
+                                   [10.0], [0.0], [0.0], 0.0, 100.0, [2.0e-6],
+                                   [0.0], false, "AC", [0.0], [1.0e-6], [0.0]);
+                     invest_cost_power = [0.1], fixed_cost = [1.0e-3])
+            mkinput(; kw...) = MasterProblemInput(; years = [2025, 2026],
+                network = single_bus(), generators = [gas, peaker], batteries = [bat],
+                base_demand = fill(50.0, 2H, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, hours_per_year = [24, 24], slack_penalty = 0.0,
+                verbose = false, kw...)
+            df(op, y) = 1.0 / (1.0 + op.discount_rate)^(y - 1)
+            unit_total(op) = sum(df(op, k[4]) * v for (k, v) in op.operating_cost) +
+                             sum(df(op, k[4]) * v for (k, v) in op.asset_cost)
+            function solve(i)
+                local m, v
+                m, v, _ = create_master_problem(i; use_representative_days = true)
+                ESFEX.set_silent(m)
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                return m, v, extract_master_solution(m, v, i; unit_operation = true)
+            end
+
+            inp = mkinput()
+            model, mv, res = solve(inp)
+            op = only(res.unit_operation)
+            @test op.probability == 1.0
+            # Every cost of this system is an existing unit's: the units'
+            # operating and asset costs make up the master's objective
+            @test unit_total(op) ≈ objective_value(model) rtol = 1e-9
+            # Gas produces the load; the peaker nothing
+            for y in 1:2
+                @test op.energy[(:gen, 1, 1, y)] ≈ 50.0 * H rtol = 1e-6
+                @test op.energy[(:gen, 2, 1, y)] ≈ 0.0 atol = 1e-6
+                @test op.operating_cost[(:gen, 1, 1, y)] ≈ 50.0 * H * (3.0e-5 + 2.0e-6) rtol = 1e-6
+                @test op.asset_cost[(:gen, 2, 1, y)] ≈ 50.0 * 1.0e-3 rtol = 1e-9
+                @test op.asset_cost[(:bat, 1, 1, y)] ≈ 20.0 * 1.0e-3 rtol = 1e-9
+            end
+            npvs = Dict((u.unit_type, u.unit_idx) => u for u in unit_npvs(res, inp))
+            @test length(npvs) == 3
+            r = inp.discount_rate
+            # Revenue: the dispatched MWh × base_lcoe
+            gas_npv = sum((op.energy[(:gen, 1, 1, y)] * inp.base_lcoe -
+                           op.operating_cost[(:gen, 1, 1, y)] - op.asset_cost[(:gen, 1, 1, y)]) /
+                          (1 + r)^(y - 1) for y in 1:2)
+            @test npvs[("generator", 1)].npv ≈ gas_npv rtol = 1e-9
+            @test npvs[("generator", 1)].npv > 0
+            @test npvs[("generator", 2)].npv ≈ -50.0 * 1.0e-3 * (1 + 1 / (1 + r)) rtol = 1e-9
+            @test npvs[("generator", 2)].recommend_retirement
+            @test npvs[("generator", 2)].remaining_lifetime == 2.0
+            # Battery revenue: npv_annual_return_rate × invest_cost_power × MW
+            bat_npv = sum((inp.npv_annual_return_rate * 0.1 * 20.0 -
+                           op.operating_cost[(:bat, 1, 1, y)] - op.asset_cost[(:bat, 1, 1, y)]) /
+                          (1 + r)^(y - 1) for y in 1:2)
+            @test npvs[("battery", 1)].npv ≈ bat_npv rtol = 1e-9
+            @test !npvs[("battery", 1)].recommend_retirement
+            @test [u.unit_idx for u in get_units_with_negative_npv(res, inp)] == [2]
+            # A threshold above the gas NPV flags it too
+            @test length(get_units_with_negative_npv(res, inp;
+                npv_threshold = npvs[("generator", 1)].npv + 1.0)) == 3
+            # Without the units' operation the NPV cannot be computed
+            @test_throws ErrorException calculate_unit_npv(
+                extract_master_solution(model, mv, inp), inp, "generator", 1, 1)
+
+            # Retiring the peaker: no capacity, no fixed O&M, its
+            # decommissioning ($100/MW) paid once, in the first year
+            rinp = retire_units(inp, [npvs[("generator", 2)]])
+            @test rinp.generators[2].rated_power == [0.0]
+            @test only(rinp.npv_retired_units).decommissioned_mw ≈ 50.0
+            rmodel, rmv, rres = solve(rinp)
+            @test all(rres.cumulative_gen_capacity[y][2][1] == 0.0 for y in 1:2)
+            @test objective_value(rmodel) ≈ objective_value(model) -
+                  50.0 * 1.0e-3 * (1 + 1 / (1 + r)) + 50.0 * 1.0e-4 rtol = 1e-9
+            @test value(ESFEX.build_annual_asset_cost(rmv, rinp, 1)) -
+                  value(ESFEX.build_annual_asset_cost(rmv, rinp, 2)) ≈ 50.0 * 1.0e-4 rtol = 1e-6
+            # A myopic later year keeps it retired without paying again
+            ninp = retire_units(inp, [npvs[("generator", 2)]]; decommission = false)
+            nmodel, _, _ = solve(ninp)
+            @test objective_value(nmodel) ≈ objective_value(rmodel) - 50.0 * 1.0e-4 rtol = 1e-9
+
+            # The iteration retires the peaker, re-solves and stops
+            it = solve_with_npv_iteration(inp; max_iterations = 5)
+            @test it.converged
+            @test it.iterations == 2
+            @test [(u.unit_type, u.unit_idx) for u in it.forced_retirements] == [("generator", 2)]
+            @test it.final_result.objective ≈ objective_value(rmodel) rtol = 1e-9
+            @test it.npv_history[1]["generator_2_1"] < 0
+            @test !haskey(it.npv_history[2], "generator_2_1")
+            # max_iterations = 0: flags, but does not retire
+            it0 = solve_with_npv_iteration(inp; max_iterations = 0)
+            @test !it0.converged && isempty(it0.forced_retirements)
+
+            # Benders: same units' operation, same retirement
+            br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                           verbose_benders = false, record_unit_operation = true)
+            bop = only(br.solution.unit_operation)
+            @test unit_total(bop) ≈ objective_value(model) rtol = 1e-6
+            for u in unit_npvs(br.solution, inp)
+                @test u.npv ≈ npvs[(u.unit_type, u.unit_idx)].npv rtol = 1e-5
+            end
+            bit = solve_with_npv_iteration(inp; solver = :benders, max_iterations = 60,
+                                           tolerance = 1e-7, verbose_benders = false)
+            @test bit.converged
+            @test [(u.unit_type, u.unit_idx) for u in bit.forced_retirements] == [("generator", 2)]
+            @test bit.final_result.objective ≈ objective_value(rmodel) rtol = 1e-6
+            # Benders without recording keeps the result as it was
+            @test isempty(run_benders_decomposition(inp; max_iterations = 60,
+                tolerance = 1e-7, verbose_benders = false).solution.unit_operation)
+
+            # Stochastic: one UnitOperation per scenario (its probability and
+            # discount rate); they make up the expected objective
+            sc = [Scenario("low", 0.3, ScenarioMultipliers(fuel_cost = 0.5, gen_fixed_cost = 2.0)),
+                  Scenario("high", 0.7, ScenarioMultipliers(fuel_cost = 2.0, discount_rate = 2.0))]
+            smodel, smv, _, _ = create_stochastic_master_problem(
+                StochasticMasterInput(inp, sc, true))
+            ESFEX.set_silent(smodel)
+            optimize!(smodel)
+            sres = extract_master_solution(smodel, smv, inp; unit_operation = true)
+            sops = sres.unit_operation
+            @test [o.probability for o in sops] == [0.3, 0.7]
+            @test sops[2].discount_rate ≈ 2 * inp.discount_rate
+            @test sum(o.probability * unit_total(o) for o in sops) ≈ objective_value(smodel) rtol = 1e-9
+            @test sops[1].operating_cost[(:gen, 1, 1, 1)] ≈ 50.0 * H * (1.5e-5 + 2.0e-6) rtol = 1e-6
+            @test sops[1].asset_cost[(:gen, 2, 1, 1)] ≈ 2 * 50.0 * 1.0e-3 rtol = 1e-9
+            snpv = only(u for u in unit_npvs(sres, inp) if u.unit_idx == 1 && u.unit_type == "generator")
+            per_sc = [sum((o.energy[(:gen, 1, 1, y)] * inp.base_lcoe -
+                           o.operating_cost[(:gen, 1, 1, y)] - o.asset_cost[(:gen, 1, 1, y)]) /
+                          (1 + o.discount_rate)^(y - 1) for y in 1:2) for o in sops]
+            @test snpv.npv ≈ 0.3 * per_sc[1] + 0.7 * per_sc[2] rtol = 1e-9
+
+            # LP start-ups (the dispatch commits units) are the unit's too: no
+            # load in the first 6 h, and a 50 % minimum power, so gas starts
+            # each morning (reservable: it holds the reserve the battery held)
+            ucgas = wf(gas; min_power = [0.5], start_up_cost = [1.0e-3], reservable = true)
+            dem = repeat(vcat(zeros(6), fill(50.0, H - 6)), 2)
+            uinp = MasterProblemInput(; years = [2025, 2026], network = single_bus(),
+                generators = [ucgas], batteries = BatteryConfig[],
+                base_demand = reshape(dem, 2H, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, hours_per_year = [24, 24], slack_penalty = 0.0,
+                verbose = false, unit_commitment = true)
+            umodel, _, ures = solve(uinp)
+            uop = only(ures.unit_operation)
+            @test unit_total(uop) ≈ objective_value(umodel) rtol = 1e-9
+            fuel_only = uop.energy[(:gen, 1, 1, 1)] * (3.0e-5 + 2.0e-6)
+            @test uop.operating_cost[(:gen, 1, 1, 1)] - fuel_only > 1e-6
+
+            # Primary energy on: a fuel-coupled unit pays the fuel it burns at
+            # the fuel's price (3e-5 per unit, 5 MWh per unit), not fuel_cost
+            finp = fuel_invest_input()
+            fm, fv, _ = create_master_problem(finp; use_representative_days = true)
+            ESFEX.set_silent(fm)
+            optimize!(fm)
+            fop = only(extract_master_solution(fm, fv, finp; unit_operation = true).unit_operation)
+            for y in 1:2
+                @test fop.operating_cost[(:gen, 1, 1, y)] ≈
+                      fop.energy[(:gen, 1, 1, y)] * 3.0e-5 / 5.0 rtol = 1e-9
+            end
+        end
+
         @testset "solve_dcopf benchmark" begin
             # Cheap gen at bus 1 supplies a bus-2 load across one line.
             r = solve_dcopf(num_buses = 2, demand = [0.0, 100.0],

@@ -193,7 +193,11 @@ Click a **system name** in the Element Tree. Each system has independent paramet
 |-------|---------|-------------|
 | Demand Scale (x) | 1.0 | Multiplier applied to all demand in this system |
 | Discount Rate (frac) | 0.05 | Discount rate for net present value |
-| Base LCOE ($/MWh) | 93.0 | Electricity price that values generation in the unit NPV of the Julia API `solve_with_npv_iteration`; `esfex run` does not use it |
+| Base LCOE ($/MWh) | 93.0 | Revenue per MWh an existing generator produces, in its NPV for the NPV-based retirement (`base_lcoe`) |
+| Battery NPV Return Rate (frac/yr) | 0.15 | An existing battery's yearly revenue in its NPV, as a fraction of its power investment cost (`npv_annual_return_rate`) |
+| NPV-based Retirement | Off | After the master solve, retire for the whole horizon the existing generators and batteries whose NPV in the plan is below the threshold, and solve the master again (`npv_retirement`; development runs, every master mode). See [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement) |
+| NPV Retirement Max Iterations | 5 | Most rounds of retirements, each followed by a master re-solve (`npv_retirement_max_iterations`) |
+| NPV Retirement Threshold ($) | 0 | A unit whose NPV is below this is retired (`npv_retirement_threshold`) |
 | Target RE Penetration (frac) | 1.0 | Final-year renewable energy share target. Shortfalls are penalized with the FRE Penetration Loss penalty. |
 | Min Annual Increment (frac) | 0.01 | Minimum yearly increase in RE share |
 | Max Annual Increment (frac) | 0.10 | Maximum yearly increase in RE share |
