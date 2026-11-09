@@ -212,6 +212,16 @@ Per-release notes are also published on the
   binaries fixed. Economic dispatch and the master problem (LP) still ignore
   it.
 
+- **The results file records what the master built units cost to run.**
+  `system_configuration/technologies/technology_{i}` now carries the
+  technology's `fuel_cost`, `fixed_cost`, `maintenance_cost` and
+  `start_up_cost`, and `battery_technologies/battery_technology_{i}` its
+  `maintenance_cost` and `fixed_cost` (string-encoded per-node lists, like
+  `invest_cost`). The `generation/{name}` dataset of a unit the master built
+  (`Investment <technology>`) carries a `rated_power` attribute, its MW in
+  service in the year per node; `battery_discharge/{name}` of a built
+  battery carries its power in service the same way.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -776,6 +786,45 @@ Per-release notes are also published on the
 - **Removed unused helpers:** `Orchestrator._apply_retirements_to_config`
   (never called) and `esfex.utils.adjust_investment_limits` /
   `adjust_transmission_parameters` (exported but used nowhere).
+
+- **The dispatch's forced replacement was removed.** The operational dispatch
+  created a `gen_forced_replacement` / `bat_forced_replacement` variable for
+  each unit flagged in `PowerSystemInput.replacement_needed` /
+  `bat_replacement_needed` and charged it a decommissioning cost plus 10 % of
+  the unit's negative NPV, but no constraint used these variables, so they
+  were always 0. Nothing in Python ever flagged a unit or passed an NPV
+  either, so `npv_penalty_cost` was always 0. All of it is gone:
+  - the `PowerSystemInput` fields `unit_npv`, `replacement_needed`,
+    `bat_unit_npv`, `bat_replacement_needed`, `force_replacement_threshold`,
+    `decommissioning_cost_gen`, `decommissioning_cost_bat`, `discount_rate`,
+    `max_decommission_cost_per_mw` and `max_npv_penalty_per_mw`, and the
+    adapter keyword arguments of the same names;
+  - the variables, their objective term, the Julia function
+    `update_npv_from_results!` and the per-unit
+    `calculate_unit_npv(rated_capacity, ...)` method it used (the master's
+    `calculate_unit_npv(result, input, ...)` stays);
+  - the `npv_penalty_cost` entry of the cost breakdown (`CostBreakdown`, HDF5
+    `cost_breakdown`, the dashboard's cost waterfall). Results written
+    earlier still open; the old entry was always 0 and is ignored;
+  - the system settings `max_npv_penalty_per_mw` / `MAX_NPV_PENALTY_PER_MW`,
+    `max_decommission_cost_per_mw` / `MAX_DECOMMISSION_COST_PER_MW` and
+    `force_replacement` / `FORCE_REPLACEMENT` (also unused by the master,
+    whose `MasterProblemInput` loses the three matching fields), with their
+    Studio fields under **Cost Limits**.
+
+  A configuration that still sets one of these settings gets the usual
+  unknown-key warning; Studio projects saved earlier still open and are saved
+  without them.
+
+- **The NPV iterative retirement is documented as a Julia API function.**
+  `solve_with_npv_iteration` and its helpers (`calculate_unit_npv`,
+  `get_units_with_negative_npv`, `force_unit_retirements!`) are unchanged,
+  but `esfex run` never calls them in any mode: the master retires units by
+  age and life extension only. The docs (Capacity Expansion §9, Julia API,
+  Configuration Reference, Studio Global Settings) now say so, and that
+  `base_lcoe` and `npv_annual_return_rate` are read only by these functions.
+  The stochastic-programming page no longer claims that the NPV iteration is
+  applied after a stochastic solve.
 
 ### Fixed
 
@@ -1761,6 +1810,43 @@ Per-release notes are also published on the
   round. Both are corrected, and the master-problem guide's investment
   table now lists fuel storage, routes and electrolyzers with their real
   keys and limits.
+
+- **Units the master built are costed in the results dashboard, charts and
+  financial analysis.** Their datasets have no generator or battery config,
+  so the dashboard's per-system cost breakdown gave them no fuel,
+  maintenance, start-up or fixed O&M cost, the Fuel Supply and Cash Flow
+  charts matched them to another unit by a name suffix (or to none), the
+  UC marginal-technology chart and the financial analysis's cost fallback
+  and per-technology table paired them with another unit's config by
+  position (h5py lists datasets alphabetically), and the investment metrics
+  borrowed the costs of an existing unit of the same fuel. One shared lookup
+  now resolves an `Investment <technology>` dataset to its technology's
+  config, with fixed O&M ($/MW·yr) on the MW in service that year. A
+  results file whose configs carry names no longer pairs an unmatched
+  dataset with a config by position. Files written before this change have
+  no operating costs for these units (the investment metrics still borrow
+  them from a same-fuel unit).
+
+- **The dashboard's per-system costs of every system after the first were
+  0.** For a subsystem the configs were read with `range(num_generators)`
+  over a view that keeps the global `generator_<i>` keys (so the second
+  system's configs came back empty), and the arrays, already cut to the
+  system's nodes, were cut again (to nothing). The results charts' config
+  loaders had the same `range` problem. The per-system breakdown also read
+  no start-ups for a subsystem, and priced battery builds with a generator
+  technology's `invest_cost` (0) and no energy cost: battery power and
+  energy builds now use `invest_cost_power` and `invest_cost_energy`.
+
+- **Battery fixed O&M in the financial analysis.** The cost fallback (files
+  without `cost_breakdown`) and the per-technology table now charge
+  batteries their `fixed_cost` ($/MW·yr) on the discharge power, as the
+  dispatch does; the per-technology table also reads each node's own costs
+  (it took the first node's, which in a merged system is another system's
+  zero).
+
+- **Electrolyzer water cost label.** The Studio's electrolyzer form (all
+  five languages) and its GUI page said $/m³; `water_cost` is charged per kg
+  of hydrogen produced, so they now say $/kg H₂.
 
 ## [0.3.0] — 2026-08-27
 
