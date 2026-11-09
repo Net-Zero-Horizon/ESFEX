@@ -53,6 +53,7 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │   └── detailed_results/
 │       └── year_YYYY_threshold_0/
 │           └── power_flow/{A}_to_{B}  # Multi-system runs only
+├── npv_retirements/               # Only when npv_retirement is on
 ├── mga/                           # Only when MGA / SPORES is enabled
 └── plugins/{name}/                # Optional, written by plugins in post_year
 ```
@@ -667,6 +668,25 @@ with one set of adjustments per generator and node for the year:
 Battery VALLCOE uses the same energy and capacity adjustments (on discharge) and a fixed $a^{flex} = -0.05$.
 
 ---
+
+## npv_retirements/
+
+Written when the system setting `npv_retirement` is on (empty datasets when no unit was retired): the existing units the NPV-based retirement took out of service for the whole horizon ([Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement)). One entry per retired unit location; all datasets have the same length.
+
+| Dataset | Type | Description |
+|---------|------|-------------|
+| `kind` | str | `generator` or `battery` |
+| `key` | str | Unit key in the configuration |
+| `name` | str | Unit name |
+| `index` | int | 0-based index in `system_configuration/generators/` (or `batteries/`), as in `retirement_gen_{g}` |
+| `node` | int | 0-based node |
+| `year` | int | First year the unit is out of service (the first planning year; in a myopic run, the year whose master retired it) |
+| `npv` | float | The unit's NPV when it was retired ($) |
+| `iteration` | int | Round of the NPV iteration that retired it |
+| `capacity_mw` | float | The unit's configured MW at that node (`rated_power`, or `MaxDischargePower` for a battery) |
+| `share` | float | That MW's share of the unit's configured MW over all nodes |
+
+Attributes: `threshold` (`npv_retirement_threshold`, $) and `max_iterations`. The retirement attributes `retirement_gen_{g}` of `detailed_results` come from the master's life-extension decisions and do not include these retirements; the dashboard's retirement chart reads both (the larger share counts). The retired units' capacity in the dispatch is 0 from `year` on.
 
 ## MGA/SPORES Results
 

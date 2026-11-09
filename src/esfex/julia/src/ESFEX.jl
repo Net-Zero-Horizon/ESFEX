@@ -205,9 +205,9 @@ export create_stochastic_master_problem
 export scenario_master_input, build_stochastic_objective!
 
 # NPV Iteration and Retirement
-export UnitNPV, NPVIterationResult
-export calculate_unit_npv, get_units_with_negative_npv
-export force_unit_retirements!, solve_with_npv_iteration
+export UnitNPV, NPVIterationResult, UnitOperation, RetiredUnit
+export calculate_unit_npv, get_units_with_negative_npv, unit_npvs
+export extract_unit_operation, retire_units, solve_with_npv_iteration
 
 # MGA / SPORES
 export MGAResult

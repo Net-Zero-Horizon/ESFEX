@@ -277,3 +277,26 @@ def test_inertia_field_takes_mws(qapp):
     form = SystemForm(GuiModel())
     form._inertia_limit_thr.setValue(5000.0)
     assert form._inertia_limit_thr.value() == pytest.approx(5000.0)
+
+
+def test_npv_retirement_fields(qapp):
+    """The system form shows and edits the NPV-based retirement settings."""
+    from esfex.visualization.panels.system_form import SystemForm
+
+    model = GuiModel()
+    s = model.state.settings
+    s.npv_retirement, s.npv_retirement_max_iterations = True, 3
+    s.npv_retirement_threshold, s.npv_annual_return_rate = -1e5, 0.08
+    form = SystemForm(model)
+    form.load_element()
+    assert form._npv_retirement.isChecked()
+    assert form._npv_max_iter.value() == 3
+    assert form._npv_threshold.value() == pytest.approx(-1e5)
+    assert form._npv_return_rate.value() == pytest.approx(0.08)
+    form._npv_retirement.setChecked(False)   # toggled -> _on_changed
+    form._npv_max_iter.setValue(7)
+    form._npv_threshold.setValue(2e5)
+    form._on_changed()
+    assert s.npv_retirement is False
+    assert s.npv_retirement_max_iterations == 7
+    assert s.npv_retirement_threshold == pytest.approx(2e5)

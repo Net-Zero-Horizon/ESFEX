@@ -1419,6 +1419,9 @@ those of the iteration with the best upper bound.
 - `tolerance::Float64=1e-4`: Relative gap tolerance for convergence
 - `use_representative_days::Bool=true`: Use representative days (vs TSAM)
 - `verbose_benders::Bool=true`: Log iteration progress
+- `record_unit_operation::Bool=false`: keep each existing unit's operation in
+  the best iteration's subproblems in `solution.unit_operation`, for
+  `calculate_unit_npv`
 
 # Returns
 - `BendersResult`: Solution with convergence history
@@ -1428,7 +1431,8 @@ function run_benders_decomposition(
     max_iterations::Int = 50,
     tolerance::Float64 = 1e-4,
     use_representative_days::Bool = true,
-    verbose_benders::Bool = true
+    verbose_benders::Bool = true,
+    record_unit_operation::Bool = false
 )::BendersResult
     start_time = time()
     num_years = length(input.years)
@@ -1451,8 +1455,9 @@ function run_benders_decomposition(
     # Solve every representative day of year `y_idx` at capacities `caps` and
     # queue its cut in `cuts` as (kind, year, day, cut). Returns the year's
     # operating cost, whether every day solved, and whether every day met
-    # its curtailment limit.
-    function evaluate_year!(cuts, y_idx, caps, iter)
+    # its curtailment limit. With `op`, each day's operation of the existing
+    # units is added to it (their NPV).
+    function evaluate_year!(cuts, y_idx, caps, iter; op = nothing)
         year_cost = 0.0
         solved = true
         feasible = true
@@ -1486,6 +1491,9 @@ function run_benders_decomposition(
                 feasible = false
             else
                 year_cost += objective_value(sp.model)
+                op === nothing || add_unit_day_operation!(op, sp.ps_vars, input, y_idx,
+                    sp.hours, sp.scaling_factor,
+                    get(get(sp.model.ext, :master_startup, IdDict()), sp.ps_vars, nothing))
             end
         end
         return year_cost, solved, feasible
@@ -1622,6 +1630,10 @@ function run_benders_decomposition(
     best_values = Dict{VariableRef, Float64}()
     best_year_ops = zeros(num_years)
     year_operational_costs = zeros(num_years)
+    # The existing units' operation in the best iteration's subproblems
+    new_op() = record_unit_operation ? UnitOperation(1.0, input.discount_rate) : nothing
+    iter_op = new_op()
+    best_op = iter_op
     theta_vars = Set(values(theta))
 
     # Create optimizer factory for resetting between iterations
@@ -1635,6 +1647,9 @@ function run_benders_decomposition(
 
     # The best iteration's plan: the master as solved if that is the last
     # solve, otherwise re-solved with its variables fixed to the best values
+    # With record_unit_operation, the plan's unit operation and asset costs
+    unit_ops(op) = op === nothing ? UnitOperation[] :
+        [add_unit_asset_costs!(op, vars, input, nothing)]
     function best_solution(last_solved_iter)
         if best_iter == 0
             @warn "Benders: no iteration solved every subproblem within the " *
@@ -1642,7 +1657,8 @@ function run_benders_decomposition(
             set_optimizer(master_model, master_optimizer)
             optimize!(master_model)
             return extract_master_solution_from_benders(master_model, vars, input,
-                                                        year_operational_costs)
+                                                        year_operational_costs;
+                                                        unit_operation = unit_ops(iter_op))
         end
         if best_iter != last_solved_iter
             for (v, x) in best_values
@@ -1652,7 +1668,8 @@ function run_benders_decomposition(
             optimize!(master_model)
         end
         return extract_master_solution_from_benders(master_model, vars, input, best_year_ops;
-                                                    objective = best_ub)
+                                                    objective = best_ub,
+                                                    unit_operation = unit_ops(best_op))
     end
 
     iterations = 0
@@ -1695,12 +1712,14 @@ function run_benders_decomposition(
         total_operational_cost = 0.0
         year_operational_costs = zeros(num_years)
         all_subproblems_solved = true
+        iter_op = new_op()
 
         for y_idx in 1:num_years
             isempty(rep_days_by_year[y_idx]) && continue
             # Evaluate fixed capacities from master solution
             fixed_caps = evaluate_fixed_capacities(vars, input, y_idx; ctx)
-            year_cost, solved, feasible = evaluate_year!(cuts, y_idx, fixed_caps, iter)
+            year_cost, solved, feasible = evaluate_year!(cuts, y_idx, fixed_caps, iter;
+                                                         op = iter_op)
             all_subproblems_solved &= solved && feasible
             year_operational_costs[y_idx] = year_cost
             total_operational_cost += discount(y_idx) * year_cost
@@ -1719,6 +1738,7 @@ function run_benders_decomposition(
             best_ub = ub
             best_iter = iter
             best_year_ops = copy(year_operational_costs)
+            best_op = iter_op
             best_values = Dict(v => value(v) for v in all_variables(master_model)
                                if !(v in theta_vars))
         end
@@ -1796,19 +1816,21 @@ end
 
 """
     extract_master_solution_from_benders(model, vars, input, year_operational_costs;
-                                         objective=nothing)
+                                         objective=nothing, unit_operation=UnitOperation[])
 
 Extract a MasterProblemResult from the Benders master solution.
 Reuses the logic from extract_master_solution but provides operational costs
 from subproblem solves instead of embedded variables, and `objective` (the
 plan's upper bound) instead of the master's objective when given.
+`unit_operation` is the existing units' operation in the plan's subproblems.
 """
 function extract_master_solution_from_benders(
     model::Model,
     vars::MasterProblemVariables,
     input::MasterProblemInput,
     year_operational_costs::Vector{Float64};
-    objective::Union{Nothing, Float64} = nothing
+    objective::Union{Nothing, Float64} = nothing,
+    unit_operation::Vector{UnitOperation} = UnitOperation[]
 )::MasterProblemResult
     # Use existing extraction (it handles investment vars, cumulative caps, etc.)
     result = extract_master_solution(model, vars, input)
@@ -1836,6 +1858,7 @@ function extract_master_solution_from_benders(
         result.cumulative_bat_tech_capacity,
         result.reservoir_investment,
         result.converter_investment,
-        result.fuel_investment  # M2 (#89)
+        result.fuel_investment,  # M2 (#89)
+        unit_operation
     )
 end

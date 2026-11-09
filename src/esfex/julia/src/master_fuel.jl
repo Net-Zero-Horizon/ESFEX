@@ -343,6 +343,35 @@ function add_master_fuel_day!(model::Model, ps_vars::PowerSystemVariables,
 end
 
 """
+    master_fuel_unit_price(input, g, b, year_idx) -> Union{Nothing, Float64}
+
+What a MWh of existing generator `g` at bus `b` costs in fuel in year
+`year_idx` when it burns tank fuel (primary energy on, the unit mapped to a
+fuel, as `add_master_fuel_day!` couples it): the fuel's price that year
+(`price_base` grown at `price_growth_rate`, as the fuel balance prices it)
+over the MWh the unit makes per fuel unit. The master charges the fuel
+through the balance instead of the unit's `fuel_cost` (a unit with an offer
+curve keeps its curve too). `nothing` when the unit pays its own
+`fuel_cost`. For the unit's NPV (`add_unit_day_operation!`): the fuel
+system's import, route transport and shortfall costs are not shared out to
+the units.
+"""
+function master_fuel_unit_price(input::MasterProblemInput, g::Int, b::Int, year_idx::Int)
+    has_master_fuel(input) || return nothing
+    pe = input.primary_energy.pe
+    haskey(pe.generator_fuel_map, g) || return nothing
+    fuel_name, mwhe, _, _ = pe.generator_fuel_map[g]
+    mwhe > 1e-6 || return nothing
+    node = input.network.bus_to_node[b]
+    1 <= node <= pe.num_nodes || return nothing
+    idx = findfirst(f -> f.name == fuel_name, pe.fuels)
+    idx === nothing && return nothing
+    fuel = pe.fuels[idx]
+    price = fuel.price_base * (1 + fuel.price_growth_rate)^(input.years[year_idx] - pe.base_year)
+    return price / mwhe
+end
+
+"""
     master_fuel_day_scale(input) -> Float64
 
 Days of the year one representative day stands for (the fuel block's day
