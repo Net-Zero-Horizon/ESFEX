@@ -3833,6 +3833,82 @@ import Ipopt
             fuel_only = uop.energy[(:gen, 1, 1, 1)] * (3.0e-5 + 2.0e-6)
             @test uop.operating_cost[(:gen, 1, 1, 1)] - fuel_only > 1e-6
 
+            # A re-solve that is not optimal undoes its round. Solar (12 h a
+            # day) and a store that takes its surplus serve the load; the
+            # store's fixed O&M ($1M/MW·yr) and the idle gas make both NPVs
+            # negative, but without the store the surplus breaks the master's
+            # 5 % curtailment limit (a hard constraint): infeasible. The
+            # iteration used to stop there with nothing returned to keep.
+            day_sun = reshape(vcat(ones(12), zeros(12)), H, 1)
+            solar = mkgen("Solar", "Renewable", "Sun", [100.0], [0.0], day_sun; nb = 1, H = H)
+            store = wf(BatteryConfig("Store", [700.0], [60.0], [60.0], [1.0], [1.0],
+                                     [0.0], [1.0], [0.0], [0.0], [0.0], [0.0],
+                                     [10.0], [0.0], [0.0], 0.0, 100.0, [0.0],
+                                     [0.0], false, "AC", [0.0], [0.0], [0.0]);
+                       invest_cost_power = [0.1], fixed_cost = [1.0])
+            cinp = MasterProblemInput(; years = [2025], network = single_bus(),
+                generators = [solar, gas], batteries = [store],
+                base_demand = fill(50.0, H, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, hours_per_year = [24], slack_penalty = 0.0,
+                verbose = false)
+            cmodel, _, cres = solve(cinp)
+            flagged = get_units_with_negative_npv(cres, cinp)
+            @test sort([(u.unit_type, u.unit_idx) for u in flagged]) ==
+                  [("battery", 1), ("generator", 2)]
+            fm, _, _ = create_master_problem(retire_units(cinp, flagged))
+            ESFEX.set_silent(fm)
+            optimize!(fm)
+            @test string(termination_status(fm)) == "INFEASIBLE"
+            cit = @test_logs (:warn, r"not optimal \(INFEASIBLE\); keeping these units") match_mode = :any solve_with_npv_iteration(cinp)
+            @test !cit.converged && cit.iterations == 2
+            @test isempty(cit.forced_retirements)
+            @test cit.final_result.objective ≈ objective_value(cmodel) rtol = 1e-9
+
+            # Myopic: a one-year master's NPV can cover the unit's later
+            # years in the horizon (extra_years), its operation held. With
+            # nothing changing from year to year it is the two-year master's
+            # NPV (it covered the master's own year only).
+            one = mkinput(; years = [2025], base_demand = fill(50.0, H, 1), hours_per_year = [24])
+            _, _, ores = solve(one)
+            for u in unit_npvs(ores, one; extra_years = 1)
+                @test u.npv ≈ npvs[(u.unit_type, u.unit_idx)].npv rtol = 1e-9
+                @test u.remaining_lifetime == 2.0
+            end
+            @test only(u for u in unit_npvs(ores, one) if u.unit_idx == 2 &&
+                       u.unit_type == "generator").npv ≈ -50.0 * 1.0e-3 rtol = 1e-9
+            # The peaker reaches its life_time (31, age 29 now) in year 3 of
+            # 4: two years in service, then decommissioned (on 50 MW)
+            old = mkinput(; years = [2025], base_demand = fill(50.0, H, 1), hours_per_year = [24],
+                          generators = [gas, wf(peaker; initial_age = [29.0], life_time = [31.0])])
+            _, _, olres = solve(old)
+            pk = only(u for u in unit_npvs(olres, old; extra_years = 3) if u.unit_idx == 2 &&
+                      u.unit_type == "generator")
+            @test pk.remaining_lifetime == 2.0
+            @test pk.npv ≈ -50.0 * 1.0e-3 * (1 + 1 / (1 + r)) - 50.0 * 1.0e-4 / (1 + r)^2 rtol = 1e-9
+            # Degradation and fuel price growth (a scenario's fuel_price_growth)
+            dgas = wf(gas; degradation_rate = [0.01])
+            gsc = [Scenario("g", 1.0, ScenarioMultipliers(fuel_price_growth = 1.1))]
+            ginp = mkinput(; years = [2025], base_demand = fill(50.0, H, 1), hours_per_year = [24],
+                           generators = [dgas])
+            gm, gv, _, _ = create_stochastic_master_problem(StochasticMasterInput(ginp, gsc, true))
+            ESFEX.set_silent(gm)
+            optimize!(gm)
+            gres = extract_master_solution(gm, gv, ginp; unit_operation = true)
+            gop = only(gres.unit_operation)
+            k1 = (:gen, 1, 1, 1)
+            @test gop.fuel_growth[k1] ≈ 1.1
+            @test gop.fuel_cost[k1] ≈ gop.energy[k1] * 3.0e-5 rtol = 1e-9
+            E, C, F = gop.energy[k1], gop.operating_cost[k1], gop.fuel_cost[k1]
+            expected = E * ginp.base_lcoe - C - gop.asset_cost[k1]
+            for k in 1:2
+                d = 0.99^k
+                expected += (E * d * ginp.base_lcoe - ((C - F) * d + F * d * 1.1^k) -
+                             1.0e-5 * 200.0 * 0.99^k) / (1 + r)^k
+            end
+            @test only(u for u in unit_npvs(gres, ginp; extra_years = 2)
+                       if u.unit_type == "generator").npv ≈ expected rtol = 1e-9
+
             # Primary energy on: a fuel-coupled unit pays the fuel it burns at
             # the fuel's price (3e-5 per unit, 5 MWh per unit), not fuel_cost
             finp = fuel_invest_input()
