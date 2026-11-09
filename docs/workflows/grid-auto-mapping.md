@@ -174,7 +174,7 @@ Levels 3 and 4 of earlier versions ran the same reduction as level 2 and are no 
 | 6. Converters | `converter` | AC/DC converters with AC-side and DC-side buses. |
 | 7. Fuel entries | `fuel_entry` | Fuel entry points with mapped fuel type. |
 | 8. Fuel storage | `fuel_storage` | Fuel storage facilities with mapped fuel type. |
-| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance (from the length measured at phase 4, per circuit) are recomputed. Anything still unresolved (an all-untagged pocket) falls back to 220 kV. |
+| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance (from the length measured at phase 4, for all the line's circuits together) are recomputed. Anything still unresolved (an all-untagged pocket) falls back to 220 kV. |
 | 8.5. Voltage floor | Buses below Min voltage | Generators and batteries on sub-floor buses move to the nearest bus at or above the floor; the sub-floor buses and their lines and transformers are removed. |
 | 9. Fuel consistency | All generators | Every generator fuel exists in the catalog and is supplied. |
 | Station clustering | All buses | Same-voltage buses within the station merge radius are merged; internal self-loops are dropped. |
