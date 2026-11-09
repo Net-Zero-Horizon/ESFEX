@@ -250,7 +250,7 @@ Investment and retirement decisions of the master problem for this year are stor
 | `investment_reservoir_investment_{g}_{n}` | Reservoir capacity added to generator `g` at node `n` (MWh) |
 | `investment_converter_investment_acdc_{c}` | Capacity added to AC/DC converter `c` (MW) |
 | `investment_converter_investment_freq_{c}` | Capacity added to frequency converter `c` (MW) |
-| `retirement_gen_{g}` | Share (0-1) of existing generator `g`'s capacity (`rated_power` summed over nodes) retired by this year (capacity the master keeps by life extension counts as in service) |
+| `retirement_gen_{g}` | Share (0-1) of existing generator `g`'s capacity (`rated_power` summed over nodes) retired by this year (capacity the master keeps by life extension counts as in service; a node where the NPV-based retirement retired it counts as retired) |
 
 The node index `n` (and `i`, `j`) is always a node: when the master solves on buses (a one-node system with several buses, development zones), the buses of a node are summed onto it, and transmission built between two buses of the same node is not listed. Investments below 0.1 and retirement fractions below 0.01 are not written. Battery retirements are not exported. Technology indices follow `system_configuration/technologies/`; generator indices follow `system_configuration/generators/`; converter indices follow the system's `acdc_converters` and `freq_converters` lists.
 
@@ -686,7 +686,7 @@ Written when the system setting `npv_retirement` is on (empty datasets when no u
 | `capacity_mw` | float | The unit's configured MW at that node (`rated_power`, or `MaxDischargePower` for a battery) |
 | `share` | float | That MW's share of the unit's configured MW over all nodes |
 
-Attributes: `threshold` (`npv_retirement_threshold`, $) and `max_iterations`. The retirement attributes `retirement_gen_{g}` of `detailed_results` come from the master's life-extension decisions and do not include these retirements; the dashboard's retirement chart reads both (the larger share counts). The retired units' capacity in the dispatch is 0 from `year` on.
+Attributes: `threshold` (`npv_retirement_threshold`, $) and `max_iterations`. The retired generators also count in the `retirement_gen_{g}` attributes of `detailed_results` from `year` on (their nodes fully retired), which the dashboard's retirement chart reads. Batteries have no retirement attribute; this group is where their retirements are listed. The retired units' capacity in the dispatch, and the `rated_power` (MW in service) of their `generation/` and `battery_discharge/` datasets, is 0 from `year` on.
 
 ## MGA/SPORES Results
 
