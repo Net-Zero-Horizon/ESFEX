@@ -886,6 +886,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   `solve_with_npv_iteration` take `extra_years`; `UnitOperation` keeps each
   unit's fuel cost and its growth.
 
+- **Reserves are held per system, not per node.** The static and dynamic
+  reserve requirement of each node (`nodes.reserve_static` /
+  `reserve_dynamic`, or `reserve_static_default_ratio` × its demand) used to
+  be covered only by the reservable units and batteries at that node, so a
+  node with demand and no unit of its own was always short: the Cuba case
+  paid 2.6 TWh of reserve shortfall (260 M$) and showed distorted prices
+  while the system had GWs of free capacity. The requirements of all the
+  nodes of a system are now held in the pooled headroom of every reservable
+  unit and battery of that system; in a merged multi-system run each
+  original system keeps its own requirement, covered only by its own units
+  (development-zone nodes belong to the system of the bus they connect to).
+  The dispatch, the master problem and the Benders subproblems use the same
+  constraint. The per-node results keep their shape: `reserve_static` /
+  `reserve_dynamic` are each node's requirement held somewhere in its system,
+  and a system shortfall (`loss_of_reserve_*`) is split over its nodes in
+  proportion to their requirement. Every run with reserves can change: less
+  reserve shortfall and lower reserve cost wherever some nodes had spare
+  capacity and others did not. Constraint names: `reserve_headroom_s{k}_t{t}`
+  and `reserve_dynamic_avail_s{k}_t{t}` (system `k`), and
+  `reserve_static_held_*` / `reserve_dynamic_held_*` per node replace the
+  `*_ub_*` bounds.
+
+- **The RE target applies only to development runs.** `target_re_penetration`
+  is a planning target: the dispatch of a `development` run gets that year's
+  value on the master's RE path (capped at what the installed capacity can
+  deliver), and `economic_dispatch` and `unit_commitment` runs apply no
+  RE-penetration constraint. Without a master the dispatch used to fall back
+  to the end-of-horizon target, so the first year was held to it (Cuba:
+  557 M$ of `fre_penetration_cost` in one year of economic dispatch); a
+  development year whose path value was 0 got the final target the same
+  way. RE penetration is still computed and reported in every mode.
+
+- **Out-of-range `min_power` and ramps are clamped on load.** A generator's
+  `min_power` (a fraction of rated power) outside 0–1 is clamped to 0–1, and
+  a negative `ramp_up`/`ramp_down` to 0 (no limit), with one warning per
+  unit and field naming the nodes and values changed. They were accepted
+  as they were: a `min_power` of 1.6 asked a committed unit for 160 % of its
+  rating. The file still loads, so a project holding such values opens in
+  the Studio, whose validation now reports `min_power` outside 0–1 and
+  negative ramps as errors (it compared `min_power` with the rated power in
+  MW, a check that never fired for a fraction).
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -1987,6 +2029,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   included); the `npv_retirements` group lists only the retirements applied.
   `solve_with_npv_iteration` does the same and names the units and status
   in its warning.
+
+- **Demand at a node without a load bus is reported as unserved.** A node
+  with demand and no `load` or `mixed` bus (no bus at all, or only
+  `connection` buses) has its demand in no power balance. It was dropped
+  silently: the HDF5 file showed its demand with `loss_load` 0, and the
+  summary loss of load left it out (Cuba node 35: 22.4 GWh). That demand now
+  appears as load shedding at the node (`loss_load`, `YearResults.load_shed`
+  and `load_shed_array`) and in `load_shedding_cost` and the objective at
+  `LOSS_OF_LOAD` per MWh. The warning that lists such nodes is logged once
+  per run instead of once per window.
+
+- **The window balance in the debug log is an energy balance.** It added
+  the static and dynamic reserve to the demand side and left out the
+  transmission losses, so it reported gaps of up to 3.5 %. It now compares
+  the energy of the committed steps (MWh): generation, battery discharge,
+  V2G, load shedding and rooftop against demand, battery charge, EV
+  charging, electrolyzers, pumping and transmission losses, and prints the
+  losses separately. The dispatch result's `total_losses` now holds the
+  losses of the DC loss model (it was always 0).
+
+- **"Dropping solver option" warnings are logged once per run.** An option
+  that does not apply to the selected solver or LP method was reported
+  again for every rolling window (Cuba, three options: 627 lines for one
+  year).
+
+- **Merged generators no longer add up their per-MW parameters.** Every
+  Studio merge of generators (equipment aggregation of simplification
+  level 1 and 2, the Validate dialog's infrastructure and small-generator
+  merges) summed `min_power`, `ramp_up`, `ramp_down` and `inertia`, and some
+  of them `decommissioning_cost`: four gas units at `min_power` 0.4 became
+  one at 1.6, and ramps of 21 appeared (Cuba). These are fractions of rated
+  power, H in seconds and $/MW, so they are now averaged with rated power as
+  the weight, like the efficiencies and costs already were; a ramp of 0 (no
+  limit) counts as a full rating per hour, the droop is the parallel
+  equivalent and min up/down times, governor constant and risk derating are
+  averaged too. The start-up cost ($ per start) still adds up. Battery
+  merges average ramps, inertia, decommissioning and cycling cost the same
+  way; the aggregate battery used to take the defaults or the largest
+  unit's values for them.
+  Projects saved earlier keep their summed values until the units are
+  edited; the loader clamps `min_power` above 1.
+
+- **A Renewable unit burning a priced fuel pays for it.** The loader linked
+  `fuel_cost` from the `fuels` block only for non-renewable generators, so a
+  `Renewable` biomass unit whose fuel had a price (Cuba: `Biomass`,
+  40 $/kTon) ran for free. Any generator whose fuel has a price now gets the
+  fuel cost, and the biomass non-fuel O&M adder; Sun, Wind and Water have no
+  fuel entry or a price of 0 and stay free, without the "no valid fuel"
+  warning.
+
+- **The non-fuel O&M adder recognises the Studio's fuel names.** The adder
+  was looked up by the exact fuel key `Gas`, so gas units of a Studio
+  project (fuel `Natural_gas`) got none while fuel oil and diesel units got
+  theirs, and gas looked 60 $/MWh cheaper than it is. The fuel's key and its
+  `name` are now compared ignoring case, spaces, `_` and `-`, with aliases
+  (gas: `Natural_gas`, `NG`, `LNG`; fuel oil: `Oil`, `HFO`, `Crude`;
+  diesel: `Gasoil`). The values and the rules that skip the adder are
+  unchanged; each unit that receives it is still named in the log (INFO).
+
+- **Lines without a reactance get the one of their length, not 0.01 p.u.**
+  The Grid Builder measured a line's length only when OSM tagged its
+  voltage, so an untagged line whose voltage was inferred from its
+  neighbours got a voltage and a rating but no impedance (and the impedance
+  of a multi-circuit inferred line was not divided over its circuits). The
+  node-level reduction then left such lines out of each node pair's
+  parallel combination and gave a pair where no line had a reactance
+  0.01 p.u. whatever its length: 124 of the 266 Cuba branches, 9 to 150 km
+  long. Lines are now always measured, and every parallel, series and
+  equivalent-branch combination derives a missing R, X and B from the
+  line's length (else the distance between its end buses) and voltage
+  (else the higher of its end buses), with the standard line type of that
+  voltage or the line's own `reactance_per_km`, on `ac_power_flow.base_mva`.
 
 ## [0.3.0] — 2026-08-27
 
