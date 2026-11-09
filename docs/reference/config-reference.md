@@ -235,7 +235,7 @@ There is no `demand_growth` or `initial_re_penetration` key; both are ignored if
 | `sim_rooftop` / `SIM_ROOFTOP` | bool | `false` | Simulate rooftop solar (needs `rooftop_solar_config`) |
 | `inertia_limit_threshold` / `INERTIA_LIMIT_THRESHOLD` | float (≥ 0) | `0.1` | Minimum system inertia requirement in MW·s (Σ output × H), an absolute value |
 | `load_damping` | float (≥ 0) | `0.01` | Load damping coefficient D (pu): fraction of demand that reduces per Hz deviation |
-| `frequency_nominal` | float (> 0) | `50` | Nominal system frequency (Hz) |
+| `frequency_nominal` | float (> 0) | `50` | Nominal system frequency (Hz). The Studio writes the frequency of the system's AC buses when the value is none of theirs |
 | `rocof_limit` | float (> 0) | `2` | Maximum allowable ROCOF before protection trips (Hz/s) |
 | `frequency_nadir_limit` | float (> 0) | `49` | Minimum allowable frequency before UFLS (Hz) |
 | `soc_end_tolerance` | float (0–0.5) | `0.05` | Allowed deviation (fraction) of the end level from the start level. Reservoirs: ± band at the end of every window. Batteries: the year's last window must end at ≥ (1 − tolerance) × the year-start SOC (soft) |
