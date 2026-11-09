@@ -2218,6 +2218,8 @@ function add_day_operational_constraints!(
         reserve_static_default_ratio = input.reserve_static_default_ratio,
         reserve_dynamic_requirement = input.reserve_dynamic_requirement,
         dynamic_reserve_contribution = input.dynamic_reserve_contribution,
+        # Reserves are pooled per system (one per original system of a merged run)
+        reserve_node_groups = system_node_groups(input.co2_budget_groups, n_nodes),
         inertia_limit = input.inertia_limit,
         inertia_limit_hourly = Float64[],
         rooftop_generation = nothing,

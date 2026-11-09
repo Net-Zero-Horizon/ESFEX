@@ -390,7 +390,7 @@ For each year of the horizon:
 1. The master's cumulative capacity for that year (existing units after retirement, degradation and life extension, plus investments) replaces the units' `rated_power`.
 2. Technology and battery-technology investments are added as `inv_<key>` units at the buses where they were built. Transmission investments are added to line capacity.
 3. Operational dispatch solves the year in rolling-horizon windows as economic dispatch, or as unit commitment with `use_uc_in_dispatch: true`. See the [Configuration guide](configuration.md) for `temporal` settings.
-4. The master's RE share for the year becomes the dispatch RE target, capped at what the installed capacity can deliver.
+4. The master's RE share for the year becomes the dispatch RE target, capped at what the installed capacity can deliver. A year whose share on the path is 0 gets no RE constraint. (Without a master, in `economic_dispatch` and `unit_commitment` runs, the dispatch applies no RE target at all.)
 
 The representative-day cost is an estimate, so dispatch costs differ from it. If dispatch sheds load that the master did not anticipate, increase `representative_days` or switch to TSAM.
 

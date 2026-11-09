@@ -3564,6 +3564,80 @@ import Ipopt
             end
         end
 
+        @testset "reserves are pooled per system" begin
+            # Node 1 has 50 MW of load and no unit; node 2 has the only
+            # (reservable) unit, 200 MW for 100 MW of load. A 20 % static
+            # reserve (10 MW per node) used to be held per node, so node 1
+            # was always 10 MW short although the system had 100 MW free.
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 100.0, 0.1, 0.0, 0.0, 100.0, 220.0,
+                                        1, 50.0, "AC")
+            net2 = NetworkConfig(2, 2, buses, [1, 2], [0 100.0; 100.0 0], zeros(2, 2),
+                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                [line], TransformerData[], ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas(rated; H) = ESFEX.with_fields(
+                mkgen("Gas", "Non-renewable", "Gas", [0.0, rated], [1.0e-5, 1.0e-5],
+                      ones(H, 2); nb = 2, H = H); reservable = true)
+            two_systems = [CO2BudgetGroup("A", [1], Inf, 1.0), CO2BudgetGroup("B", [2], Inf, 1.0)]
+            H = 2
+            function dispatch(rated; groups = CO2BudgetGroup[], rd = Dict{Int, Float64}())
+                input = PowerSystemInput(
+                    name = "res2", year = 2025, network = net2, generators = [gas(rated; H = H)],
+                    batteries = BatteryConfig[], demand = fill(50.0, H, 2),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_default_ratio = 0.2, reserve_dynamic_requirement = rd,
+                    dynamic_reserve_contribution = 0.1,
+                    loss_of_reserve_static = 1.0, loss_of_reserve_dynamic = 1.0,
+                    loss_of_load_penalty = 100.0, pwl_loss_segments = 0,
+                    co2_budget_groups = groups,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return value.(vars.reserve_static_loss), value.(vars.reserve_dynamic_loss),
+                       value.(vars.reserve_static)
+            end
+            # One system: node 2's headroom holds node 1's reserve too.
+            rs_loss, _, rs = dispatch(200.0)
+            @test sum(rs_loss) ≈ 0.0 atol = 1e-6
+            @test rs ≈ fill(10.0, 2, H) atol = 1e-6
+            # 110 MW: 10 MW free for 20 MW of reserve. The shortfall is shared
+            # in proportion to each node's requirement.
+            rs_loss, _, _ = dispatch(110.0)
+            @test rs_loss ≈ fill(5.0, 2, H) atol = 1e-6
+            # Merged run, one system per node: system A has no unit of its own.
+            rs_loss, _, _ = dispatch(200.0; groups = two_systems)
+            @test rs_loss[1, :] ≈ fill(10.0, H) atol = 1e-6
+            @test rs_loss[2, :] ≈ zeros(H) atol = 1e-6
+            # Dynamic reserve at node 1, held by node 2's unit (0.1 × 200 MW).
+            _, rd_loss, _ = dispatch(200.0; rd = Dict(1 => 15.0))
+            @test sum(rd_loss) ≈ 0.0 atol = 1e-6
+            _, rd_loss, _ = dispatch(200.0; rd = Dict(1 => 25.0))
+            @test rd_loss[1, :] ≈ fill(5.0, H) atol = 1e-6
+
+            # Master and Benders: same pooled reserve over one representative day
+            function res_master(groups)
+                MasterProblemInput(
+                    years = [2025], network = net2, generators = [gas(200.0; H = H24)],
+                    batteries = BatteryConfig[], base_demand = fill(50.0, H24, 2),
+                    target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                    reserve_margin = 0.0, reserve_static_default_ratio = 0.2,
+                    loss_of_reserve_static = 1.0e-3, co2_budget_groups = groups,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    transmission_loss_segments = 0, verbose = false)
+            end
+            for (groups, short) in ((CO2BudgetGroup[], 0.0), (two_systems, 10.0 * H24))
+                inp = res_master(groups)
+                model, _ = master1(inp)
+                @test sum(mvals(model, "op_y1_d1_rs_loss")) ≈ short atol = 1e-6
+                br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.gap < 1e-6
+                @test br.objective ≈ objective_value(model) rtol = 1e-6
+            end
+        end
+
         @testset "dispatch charges converter costs and full start-ups" begin
             # Converter variable cost: build_objective! ran before the
             # converter variables existed, so the term was always empty.
