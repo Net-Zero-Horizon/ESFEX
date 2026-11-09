@@ -870,6 +870,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   written before keep working: the readers fall back to the configured
   `rated_power` (`MaxDischargePower` for a battery) of the units without it.
 
+- **Myopic NPV retirement values a unit over the rest of the horizon.** Each
+  annual master of a myopic run valued an existing unit over that one year
+  only, so a unit that loses money every year looked a horizon's worth less
+  bad than in perfect foresight. Its NPV now covers its remaining in-service
+  years inside the planning horizon: the solved year's generation, operating
+  cost and fixed O&M held at that level, scaled by the unit's capacity
+  degradation (and its fuel cost by the fuel's yearly price growth: the
+  primary-energy fuel's `price_growth_rate`, a stochastic scenario's
+  `fuel_price_growth`), with no life extension, so it pays its
+  decommissioning in the first year past its `life_time`, all discounted
+  from the current year. It is an approximation (the later years are not
+  dispatched). Perfect-foresight runs are unchanged. Julia:
+  `calculate_unit_npv`, `unit_npvs`, `get_units_with_negative_npv` and
+  `solve_with_npv_iteration` take `extra_years`; `UnitOperation` keeps each
+  unit's fuel cost and its growth.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -1960,6 +1976,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   many buses as nodes, without being one bus per node, had its per-bus
   capacities placed on the wrong nodes. The runner now decides from the
   master's network whether its results are per bus or per node.
+
+- **A failed re-solve no longer stops the run.** When the master re-solve
+  after an NPV retirement round was not optimal (retiring the units made it
+  infeasible, for instance through the hard curtailment limit), the run
+  aborted with "Master problem failed". The round is now undone: the last
+  optimal plan and the retirements made up to it are kept, a warning names
+  the units of the undone round and the solver status, the iteration stops
+  and the run continues, in every master mode (myopic years and MGA
+  included); the `npv_retirements` group lists only the retirements applied.
+  `solve_with_npv_iteration` does the same and names the units and status
+  in its warning.
 
 ## [0.3.0] — 2026-08-27
 
