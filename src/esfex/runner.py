@@ -46,7 +46,7 @@ from esfex.models.ev import (
 )
 from esfex.io.demand import _read_tabular, create_sectoral_demand, read_hourly_table
 from esfex.utils import aggregate_demand_to_resolution
-from esfex.utils.per_unit import derived_reactance_pu, system_s_base
+from esfex.utils.per_unit import derived_reactance_pu, line_reactance_pu, system_s_base
 from esfex.utils.temporal import (
     DEFAULT_RUN_YEARS,
     HOURS_STD_YEAR,
@@ -74,7 +74,8 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
     that link the impedance of the lines it stands for. Parallel lines share a
     flow F in proportion to 1/X: the equivalent reactance is 1 / Σ 1/X_k, and
     the loss F² Σ R_k s_k² with s_k = (1/X_k)/Σ 1/X gives the equivalent R.
-    R and X are per circuit, as in the dispatch network.
+    R and X are those of each whole line (all its circuits), as in the
+    dispatch network.
     """
     by_pair: dict[tuple[int, int], list[tuple[float, float]]] = {}
     for line in lines:
@@ -82,13 +83,9 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
         b = buses[line.to_bus].parent_node if line.to_bus is not None and line.to_bus < len(buses) else line.to_node
         if a == b:
             continue
-        x = line.reactance_pu
-        if x is None or x <= 0:
-            x = derived_reactance_pu(line.length_km, line.voltage_kv, dc_config,
-                                     s_base_mva, line.reactance_per_km)
-        n = max(line.num_circuits, 1)
+        x = line_reactance_pu(line, line.length_km, dc_config, s_base_mva)
         by_pair.setdefault((min(a, b), max(a, b)), []).append(
-            ((line.resistance_pu or 0.0) / n, x / n))
+            (line.resistance_pu or 0.0, x))
     result = {}
     for pair, rx in by_pair.items():
         total_b = sum(1.0 / x for _, x in rx)

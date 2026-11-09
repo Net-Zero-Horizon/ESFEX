@@ -94,7 +94,7 @@ Click a line on the map or in the tree:
 | **Length (km)** | Physical length (computed from the trace) | 200.0 |
 | **Reactance (pu)** | Per-unit reactance (DC power flow) | 0.05 |
 | **Resistance (pu)** | Per-unit resistance | 0.01 |
-| **Circuits** | Number of parallel circuits | 1 |
+| **Circuits** | Number of parallel circuits (the capacity and impedances above are for all of them together) | 1 |
 
 Draw three lines to connect the nodes:
 
