@@ -173,6 +173,14 @@ def estimate_line_capacity_mw(
     return s_per_circuit * _LINE_SECURITY_FACTOR * max(1, num_circuits)
 
 
+def system_base_mva(state) -> float:
+    """The system's per-unit power base ``ac_power_flow.base_mva`` (100 MVA
+    when unset), on which every estimated line and transformer impedance is
+    expressed."""
+    return float(getattr(getattr(state, "ac_power_flow", None), "base_mva", 0.0)
+                 or 100.0)
+
+
 def estimate_line_pu_params(
     voltage_kv: float,
     length_km: float,

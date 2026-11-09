@@ -316,6 +316,7 @@ def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
         from esfex.visualization.workflows.grid_mapping_quality import (
             estimate_transformer_impedance_pu,
             estimate_transformer_losses_fraction,
+            system_base_mva,
         )
     except Exception:
         estimate_transformer_impedance_pu = None
@@ -346,7 +347,8 @@ def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
                 tr.from_voltage_kv / tr.to_voltage_kv
                 if tr.to_voltage_kv > 0 else 2.0
             )
-            new_z = estimate_transformer_impedance_pu(tr.rated_power_mva, ratio)
+            new_z = estimate_transformer_impedance_pu(
+                tr.rated_power_mva, ratio, system_base_mva(state))
             if abs(new_z - tr.impedance_pu) > 0.01:
                 tr.impedance_pu = new_z
                 rep.transformers_impedance_set += 1
