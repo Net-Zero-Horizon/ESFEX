@@ -119,11 +119,13 @@ function resolve_term(vars::PowerSystemVariables, input, variable::String,
             add_to_expression!(e, 1.0, arr[n, hh])
         end
     elseif variable == "power_flow"
+        # All parallel branches of the pair, signed for from → to
         from, to, h = idx[1], idx[2], idx[3]
-        flows = vars.power_flow[(from, to)]
-        rng = h == -1 ? (1:length(flows)) : (h:h)
-        for hh in rng
-            add_to_expression!(e, 1.0, flows[hh])
+        key = from < to ? (from, to) : (to, from)
+        haskey(vars.pair_lines, key) || error("Custom constraint '$cname': " *
+            "no line between buses $from and $to for power_flow.")
+        for hh in _hour_range(h, input)
+            add_to_expression!(e, pair_flow(vars, from, to, hh))
         end
     else
         error("Unsupported operational variable '$variable' in custom " *

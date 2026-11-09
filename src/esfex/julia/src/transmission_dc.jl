@@ -310,6 +310,22 @@ function build_incidence_matrix(num_buses::Int, lines::Vector{Tuple{Int,Int}})
 end
 
 """
+    pair_flow(vars, i, j, t) -> AffExpr
+
+Flow from bus `i` to bus `j` at step `t`: the sum over every branch between
+the pair (parallel lines and transformers), signed for the `i → j` direction
+(branches are stored low → high bus). Zero when no branch joins the pair.
+"""
+function pair_flow(vars::PowerSystemVariables, i::Int, j::Int, t::Int)
+    e = AffExpr(0.0)
+    key, sgn = i < j ? ((i, j), 1.0) : ((j, i), -1.0)
+    for ℓ in get(vars.pair_lines, key, Int[])
+        add_to_expression!(e, sgn, vars.power_flow_by_line[ℓ][t])
+    end
+    return e
+end
+
+"""
     add_dc_constraints!(model, transmission::TransmissionDC, vars, input)
 
 Add DC power flow constraints to JuMP model.
@@ -337,13 +353,10 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     end
     vars.power_flow_by_line = pf_by_line
 
-    # Also populate the node-pair power_flow dict (consumed by N-1 constraints
-    # and result extraction). For parallel lines the first line's variables
-    # represent the pair; the full per-line breakdown stays in power_flow_by_line.
+    # Bus pair → every branch between it (parallel lines, transformers), for
+    # pair flows (results, custom constraints) that sum all of them
     for (ℓ, (i, j)) in enumerate(transmission.lines)
-        if !haskey(vars.power_flow, (i, j))
-            vars.power_flow[(i, j)] = pf_by_line[ℓ]
-        end
+        push!(get!(vars.pair_lines, (i, j), Int[]), ℓ)
     end
 
     n_gen = length(input.generators)

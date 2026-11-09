@@ -1549,8 +1549,10 @@ mutable struct PowerSystemVariables
     soc_violation::Any           # Nothing if not needed
     bat_spillage::Any            # Nothing if not needed
 
-    # Transmission (from × to → hour vector) — legacy node-pair indexing
-    power_flow::Dict{Tuple{Int,Int}, Vector{VariableRef}}
+    # Transmission: (from_bus, to_bus) pair → indices into power_flow_by_line
+    # of every branch (line or transformer) between the pair, so parallel
+    # branches are summed wherever a pair flow is meant (see `pair_flow`)
+    pair_lines::Dict{Tuple{Int,Int}, Vector{Int}}
     # Per physical line flow variables (line_index → hour vector) — for parallel lines
     power_flow_by_line::Union{Vector{Vector{VariableRef}}, Nothing}
     voltage_angle::Array{VariableRef, 2}  # node × hour
@@ -1639,7 +1641,7 @@ function PowerSystemVariables(
     gen_output, gen_status, gen_startup, gen_shutdown,
     curtailment, fre_penetration_loss,
     bat_charge, bat_discharge, bat_soc,
-    power_flow, voltage_angle,
+    pair_lines, voltage_angle,
     reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
     load_shed,
     buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;
@@ -1677,7 +1679,7 @@ function PowerSystemVariables(
         gen_output, gen_status, gen_startup, gen_shutdown,
         curtailment, fre_penetration_loss, co2_emissions,
         bat_charge, bat_discharge, bat_soc, bat_charge_status, soc_violation, bat_spillage,
-        power_flow, power_flow_by_line, voltage_angle, transfer_margin,
+        pair_lines, power_flow_by_line, voltage_angle, transfer_margin,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
         ev_charging, ev_v2g, ev_soc, ev_loss,
