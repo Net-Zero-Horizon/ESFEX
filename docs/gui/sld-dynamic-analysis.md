@@ -236,7 +236,7 @@ systems:
     frequency_nadir_limit: 49.0   # Min frequency threshold (Hz)
 ```
 
-Both with results loaded and in analysis mode, `load_damping` and `rocof_limit` are used as set. A `frequency_nominal` left at the default 50 Hz is replaced by the frequency of the first bus that has one (so a 60 Hz grid works without the key), and a `frequency_nadir_limit` left at the default 49 Hz becomes 1 Hz below the nominal frequency. Systems created in the Studio, which does not edit these keys, get the defaults, except that on save `frequency_nominal` becomes the frequency the system's AC buses run at when it is none of theirs, with `frequency_nadir_limit` moved by the same amount. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
+Both with results loaded and in analysis mode, `load_damping` and `rocof_limit` are used as set. The keys are read from the system being edited, also for the results of a multi-system run, so a 50 Hz and a 60 Hz system linked in one run each keep their own values; the optimisation itself does not use them. A `frequency_nominal` left at the default 50 Hz is replaced by the frequency of the first bus that has one (so a 60 Hz grid works without the key), and a `frequency_nadir_limit` left at the default 49 Hz becomes 1 Hz below the nominal frequency. Systems created in the Studio, which does not edit these keys, get the defaults, except that on save `frequency_nominal` becomes the frequency the system's AC buses run at when it is none of theirs, with `frequency_nadir_limit` moved by the same amount. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
 
 
 ---
