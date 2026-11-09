@@ -16,7 +16,7 @@
 using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
-             coefficient, objective_function, all_variables, name, fix, constant
+             coefficient, objective_function, all_variables, name, fix, constant, is_binary
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -1176,6 +1176,139 @@ import Ipopt
             @test step_change(1) ≈ 20.0 atol = 1e-6
             @test step_change(2) ≈ 40.0 atol = 1e-6
             @test step_change(6) > 40.0                # 0.2 × 6 ≥ 1: no limit
+        end
+
+        @testset "clustered unit commitment (num_units)" begin
+            # Each generator at a bus was ONE on/off unit: a derated fleet
+            # (availability < min_power) could never be committed, a 2-unit
+            # plant could not run one unit, and a small isolated plant could
+            # not follow a load below its whole-plant minimum.
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            # A thermal plant of `n` units; min_up / min_down in hours
+            function cgen(name, rated, n, fcost, avail; minp = 0.0, start = 0.0,
+                          up = 0.0, down = 0.0, reservable = true)
+                z = zeros(1)
+                H = size(avail, 1)
+                gen = GeneratorConfig(
+                    name, "Non-renewable", "Gas", [rated], [minp],
+                    [0.5], [0.4], ones(1), ones(1), [up], [down], [start],
+                    [fcost], z, z, z, z, avail, reservable,
+                    [30.0], z, z, z, 50.0, "AC",
+                    z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z,
+                )
+                return ESFEX.with_fields(gen; num_units = [n])
+            end
+            function run_uc(gens, load; rs = 0.0, init = nothing)
+                H = length(load)
+                input = PowerSystemInput(
+                    name = "cuc", year = 2025, network = net, generators = gens,
+                    batteries = BatteryConfig[], demand = reshape(Float64.(load), H, 1),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    reserve_static_requirement = rs > 0 ? Dict(1 => rs) : Dict{Int,Float64}(),
+                    reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                    loss_of_load_penalty = 100.0,
+                    generator_initial_status = init === nothing ?
+                        Dict{Int, Dict{Int, Float64}}() : init,
+                    mode = "unit_commitment", solver_name = "highs", verbose = false)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                return res, model, vars, input
+            end
+            out(res, g) = res.gen_output[g, 1, :]
+            units(res, g) = round.(Int, res.gen_status[g, 1, :])
+
+            # One unit (the default) keeps the binary model
+            res, model, vars, _ = run_uc([cgen("A", 100.0, 1, 1.0e-5, ones(2, 1); minp = 0.5)],
+                                         [60.0, 60.0])
+            @test is_binary(vars.gen_status[1, 1, 1])
+
+            # Derated fleet: 2 × 250 MW at 30 % availability (150 MW), min 40 %
+            # of a unit (100 MW). As one 500 MW unit its 200 MW minimum is above
+            # what is available, so it was never committed and the load shed.
+            avail = fill(0.3, 2, 1)
+            res, _, _, _ = run_uc([cgen("ST", 500.0, 1, 1.0e-5, avail; minp = 0.4)], [120.0, 120.0])
+            @test res.load_shed_total ≈ 240.0 atol = 1e-6
+            res, _, _, _ = run_uc([cgen("ST", 500.0, 2, 1.0e-5, avail; minp = 0.4)], [120.0, 120.0])
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6
+            @test units(res, 1) == [1, 1]           # one unit: ceil(2 × 0.3) = 1
+            @test out(res, 1) ≈ [120.0, 120.0] atol = 1e-6
+            # Availability caps the committed units and the total output:
+            # 1.2 units' worth lets two units run but never above 150 MW
+            res, _, _, _ = run_uc([cgen("ST", 500.0, 4, 1.0e-5, avail; minp = 0.4)], [140.0, 160.0])
+            @test all(units(res, 1) .<= 2)
+            @test out(res, 1) ≈ [140.0, 150.0] atol = 1e-6
+            @test res.load_shed_total ≈ 10.0 atol = 1e-6
+
+            # A 2 × 250 MW plant (min 60 % of a unit) runs one unit for 250 MW
+            res, _, _, _ = run_uc([cgen("CC", 500.0, 1, 1.0e-5, ones(2, 1); minp = 0.6)], [250.0, 250.0])
+            @test res.load_shed_total ≈ 500.0 atol = 1e-6   # 300 MW minimum as one unit
+            res, _, _, _ = run_uc([cgen("CC", 500.0, 2, 1.0e-5, ones(2, 1); minp = 0.6)], [250.0, 250.0])
+            @test units(res, 1) == [1, 1]
+            @test out(res, 1) ≈ [250.0, 250.0] atol = 1e-6
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6
+
+            # An isolated 8 MW diesel plant of 4 units (min 50 %) follows a 2 MW
+            # night load and a 7 MW day load
+            load = [2.0, 2.0, 7.0, 7.0, 2.0]
+            res, _, _, _ = run_uc([cgen("D", 8.0, 4, 1.0e-4, ones(5, 1); minp = 0.5)], load)
+            @test res.load_shed_total ≈ 0.0 atol = 1e-6
+            @test out(res, 1) ≈ load atol = 1e-6
+            @test all(1 .<= units(res, 1) .<= 4)
+            @test units(res, 1)[3] == 4             # 7 MW needs all four units
+
+            # Start-up cost is per start of the whole plant: one of 2 units
+            # costs half. The plant starts one unit, then a second.
+            res, _, _, _ = run_uc([cgen("A", 100.0, 2, 1.0e-5, ones(2, 1); minp = 0.4, start = 1.0e-3)],
+                                  [30.0, 80.0])
+            @test units(res, 1) == [1, 2]
+            @test res.gen_startup[1, 1, :] ≈ [1.0, 1.0] atol = 1e-6
+            @test res.cost_breakdown.startup_cost ≈ 2 * 0.5e-3 atol = 1e-9
+
+            # Minimum up time, per unit: without one, a second unit runs for
+            # the 80 MW hour. With 3 h up both units (started at t1 and t2)
+            # would still be online at t3, where their 50 MW minimum exceeds
+            # the 30 MW load, so the dear peaker covers the peak instead.
+            peaker(H) = cgen("P", 100.0, 1, 1.0e-4, ones(H, 1))
+            load = [30.0, 80.0, 30.0, 30.0]
+            res, _, _, _ = run_uc([cgen("A", 100.0, 2, 1.0e-5, ones(4, 1); minp = 0.5), peaker(4)], load)
+            @test units(res, 1) == [1, 2, 1, 1]
+            @test out(res, 2) ≈ zeros(4) atol = 1e-6
+            res, _, _, _ = run_uc([cgen("A", 100.0, 2, 1.0e-5, ones(4, 1); minp = 0.5, up = 3.0),
+                                   peaker(4)], load)
+            @test units(res, 1) == [1, 1, 1, 1]
+            @test out(res, 2) ≈ [0.0, 30.0, 0.0, 0.0] atol = 1e-6
+            # Minimum down time, per unit: the unit shut down for the 30 MW hour
+            # cannot restart the next hour
+            load = [100.0, 30.0, 80.0, 80.0]
+            init = Dict(1 => Dict(1 => 2.0))
+            res, _, _, _ = run_uc([cgen("A", 100.0, 2, 1.0e-5, ones(4, 1); minp = 0.5, down = 2.0),
+                                   peaker(4)], load; init = init)
+            @test units(res, 1) == [2, 1, 1, 2]
+            @test out(res, 2) ≈ [0.0, 0.0, 30.0, 0.0] atol = 1e-6
+
+            # Spinning reserve: the units online hold rated / N each, within
+            # the plant's availability. 40 MW of reserve on a 30 MW load:
+            # two of 2 × 50 MW units online give 70 MW of headroom.
+            res, model, vars, input = run_uc(
+                [cgen("A", 100.0, 2, 1.0e-5, ones(2, 1); minp = 0.2, start = 1.0e-6)],
+                [30.0, 30.0]; rs = 40.0)
+            @test units(res, 1) == [2, 2]
+            @test sum(value.(vars.reserve_static_loss)) ≈ 0.0 atol = 1e-6
+            # At 60 % availability two units still run but share 60 MW: 30 MW free
+            res, model, vars, input = run_uc(
+                [cgen("A", 100.0, 2, 1.0e-5, fill(0.6, 2, 1); minp = 0.2, start = 1.0e-6)],
+                [30.0, 30.0]; rs = 40.0)
+            @test units(res, 1) == [2, 2]
+            @test value.(vars.reserve_static_loss[1, :]) ≈ [10.0, 10.0] atol = 1e-6
+            # Prices are recovered on the LP copy with the integer units fixed
+            prices = ESFEX.recover_uc_duals_via_copy(model, vars, input)
+            @test prices !== nothing && all(isfinite, prices)
         end
 
         @testset "min up/down times are hours, not steps" begin
