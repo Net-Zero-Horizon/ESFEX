@@ -911,6 +911,16 @@ def _repair_frequency_consistency(state) -> int:
     return changed
 
 
+def _line_pu_params(voltage_kv: float, length_km: float,
+                    num_circuits: int = 1) -> tuple[float, float, float]:
+    """(R, X, B) p.u. of a line of *num_circuits* circuits in parallel: the
+    standard line type of its voltage, series values divided by N and the
+    shunt one multiplied by N."""
+    r_pu, x_pu, b_pu = estimate_line_pu_params(voltage_kv, length_km)
+    n = max(1, int(num_circuits or 1))
+    return r_pu / n, x_pu / n, b_pu * n
+
+
 def _propagate_voltage(state) -> int:
     """Infer voltage for buses/lines OSM left untagged, from their tagged
     neighbours — instead of defaulting every unknown to 220 kV.
@@ -933,7 +943,6 @@ def _propagate_voltage(state) -> int:
 
     from esfex.visualization.workflows.grid_mapping_quality import (
         estimate_line_capacity_mw,
-        estimate_line_pu_params,
     )
 
     buses = state.buses
@@ -982,8 +991,8 @@ def _propagate_voltage(state) -> int:
         ln.capacity_mw = estimate_line_capacity_mw(
             v, getattr(ln, "num_circuits", 1) or 1)
         if getattr(ln, "length_km", None):
-            r, x, bsus = estimate_line_pu_params(v, ln.length_km)
-            ln.resistance_pu, ln.reactance_pu, ln.susceptance_pu = r, x, bsus
+            ln.resistance_pu, ln.reactance_pu, ln.susceptance_pu = _line_pu_params(
+                v, ln.length_km, getattr(ln, "num_circuits", 1))
         changed += 1
 
     # Conservative fallback for anything still unknown (an all-untagged pocket
@@ -1399,24 +1408,17 @@ def _create_line(
         effective_cap = estimate_line_capacity_mw(
             v_line, line.num_circuits)
 
-    # Compute geometric length and physical impedance/susceptance.
-    # ``length_km`` left None for cases without an explicit voltage —
-    # the model will fall back to system defaults.
-    length_km: float | None = None
-    if v and v > 0:
-        coords = line.line_coords
-        length_km = sum(
-            _haversine_km(coords[i][0], coords[i][1],
-                          coords[i + 1][0], coords[i + 1][1])
-            for i in range(len(coords) - 1)
-        )
-        r_pu, x_pu, b_pu = estimate_line_pu_params(v, length_km)
-        # Per-circuit values in parallel: divide series by N, multiply
-        # shunt by N (standard parallel-line composition).
-        n = max(1, line.num_circuits)
-        r_pu /= n
-        x_pu /= n
-        b_pu *= n
+    # Geometric length always; impedance/susceptance once the voltage is
+    # known. A line without one gets them when _propagate_voltage infers its
+    # voltage from its neighbours (it needs the length for that).
+    coords = line.line_coords
+    length_km: float | None = sum(
+        _haversine_km(coords[i][0], coords[i][1],
+                      coords[i + 1][0], coords[i + 1][1])
+        for i in range(len(coords) - 1)
+    ) or None
+    if v and v > 0 and length_km:
+        r_pu, x_pu, b_pu = _line_pu_params(v, length_km, line.num_circuits)
     else:
         r_pu = x_pu = b_pu = None  # type: ignore[assignment]
 

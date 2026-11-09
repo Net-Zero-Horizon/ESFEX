@@ -551,6 +551,100 @@ def test_apply_infra_generator_uses_weighted_centroid_when_no_bus_coords():
     assert agg.longitude == pytest.approx(30.0)
 
 
+# Generator/battery merges: extensive values add up, per-MW ones are averaged
+# (regression: min_power, ramps, inertia, decommissioning cost were summed,
+# e.g. four 0.4 units gave min_power 1.6).
+
+
+def _gas_units():
+    a = _gen("g1", bus="bus_0", fuel="Natural_gas", rated=300.0,
+             min_power=0.4, ramp_up=0.5, ramp_down=0.5, inertia=5.0,
+             start_up_cost=1000.0, decommissioning_cost=30.0, min_up=4,
+             droop=0.05, fixed_cost=20000.0)
+    b = _gen("g2", bus="bus_0", fuel="Natural_gas", rated=100.0,
+             min_power=0.2, ramp_up=0.0, ramp_down=1.0, inertia=3.0,
+             start_up_cost=500.0, decommissioning_cost=10.0, min_up=8,
+             droop=0.04, fixed_cost=40000.0)
+    return a, b
+
+
+def _check_gas_merge(agg):
+    assert agg.rated_power == pytest.approx(400.0)
+    assert agg.min_power == pytest.approx((0.4 * 300 + 0.2 * 100) / 400)   # 0.35
+    # ramp 0 = no limit → counts as a full rating per hour
+    assert agg.ramp_up == pytest.approx((0.5 * 300 + 1.0 * 100) / 400)
+    assert agg.ramp_down == pytest.approx((0.5 * 300 + 1.0 * 100) / 400)
+    assert agg.inertia == pytest.approx((5.0 * 300 + 3.0 * 100) / 400)     # H (s)
+    assert agg.decommissioning_cost == pytest.approx(25.0)                 # $/MW
+    assert agg.fixed_cost == pytest.approx(25000.0)                        # $/MW·yr
+    assert agg.start_up_cost == pytest.approx(1500.0)                      # $ per start
+    assert agg.min_up == 5
+    assert agg.droop == pytest.approx(400.0 / (300 / 0.05 + 100 / 0.04))
+
+
+def test_merged_generator_params_ramp_zero_stays_unlimited():
+    a = _gen("a", rated=50.0, ramp_up=0.0)
+    b = _gen("b", rated=50.0, ramp_up=0.0)
+    assert V._merged_generator_params([a, b])["ramp_up"] == 0.0
+
+
+def test_apply_infra_generator_merge_averages_intensive_params():
+    a, b = _gas_units()
+    st = _state(nodes=[_node(0)], buses={"bus_0": _bus("bus_0")},
+                generators={"g1": a, "g2": b})
+    model = FakeModel(st)
+    sugg = V.find_infrastructure_simplifications(st, level="bus")[0]
+    _check_gas_merge(st.generators[V.apply_infrastructure_simplification(model, sugg)])
+
+
+def test_small_gen_absorb_averages_intensive_params():
+    a, b = _gas_units()
+    st = _state(nodes=[_node(0)], buses={"bus_0": _bus("bus_0")},
+                generators={"g1": a, "g2": b})
+    sugg = V.TopologySuggestion(
+        action_type="small_gen_absorb", level=4, description="",
+        elements_removed=1, buses_to_merge={},
+        equipment_reassignment={"g2": "__absorb__g1"})
+    assert V._apply_small_gen_absorb(FakeModel(st), sugg) == 1
+    assert set(st.generators) == {"g1"}
+    _check_gas_merge(st.generators["g1"])
+
+
+def test_aggregate_equipment_averages_intensive_params():
+    a, b = _gas_units()
+    st = _state(nodes=[_node(0)], buses={"bus_0": _bus("bus_0")},
+                generators={"g1": a, "g2": b}, transmission_lines=[])
+    assert V._aggregate_equipment(st, FakeModel(st)) == 1
+    assert set(st.generators) == {"g1"}
+    _check_gas_merge(st.generators["g1"])
+
+
+def test_battery_merges_keep_per_mw_params():
+    def _bats():
+        return {
+            "b1": _bat("b1", rated=30.0, capacity=60.0, MaxChargePower=30.0,
+                       MaxDischargePower=30.0, ramp_up=0.5, inertia=0.2,
+                       decommissioning_cost=10.0, throughput_degradation_cost=1.0),
+            "b2": _bat("b2", rated=10.0, capacity=40.0, MaxChargePower=10.0,
+                       MaxDischargePower=10.0, ramp_up=0.0, inertia=0.6,
+                       decommissioning_cost=30.0, throughput_degradation_cost=3.0),
+        }
+    st = _state(nodes=[_node(0)], buses={"bus_0": _bus("bus_0")}, batteries=_bats())
+    sugg = V.find_infrastructure_simplifications(st, level="bus")[0]
+    new = st.batteries[V.apply_infrastructure_simplification(FakeModel(st), sugg)]
+    st2 = _state(nodes=[_node(0)], buses={"bus_0": _bus("bus_0")},
+                 batteries=_bats(), transmission_lines=[], generators={})
+    V._aggregate_equipment(st2, FakeModel(st2))
+    for agg in (new, st2.batteries["b1"]):
+        assert agg.rated_power == pytest.approx(40.0)
+        assert agg.capacity == pytest.approx(100.0)
+        assert agg.MaxDischargePower == pytest.approx(40.0)
+        assert agg.ramp_up == pytest.approx((0.5 * 30 + 1.0 * 10) / 40)
+        assert agg.inertia == pytest.approx(0.3)
+        assert agg.decommissioning_cost == pytest.approx(15.0)
+        assert agg.throughput_degradation_cost == pytest.approx(1.5)
+
+
 def test_weighted_avg_zero_weight():
     assert V._weighted_avg([1.0, 2.0], [0.0, 0.0]) == 0.0
     assert V._weighted_avg([2.0, 4.0], [1.0, 1.0]) == 3.0
@@ -1485,6 +1579,62 @@ def test_reduce_to_node_mesh_collapses_and_combines():
     # longer stranded behind the 120 MW intra-node line).
     assert st.generators["g"].bus == "node_0"
     assert st.transformers == []
+
+
+def test_reduce_to_node_mesh_derives_reactance_of_lines_without_one():
+    """Lines without a reactance (OSM lines with no voltage tag, bridges)
+    get it from their length and voltage; the equivalent branch was 0.01
+    p.u. whatever its length when no line of the pair had one, and a
+    reactance-less line was left out of a parallel combination."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    # ~55.6 km apart (0.5° of latitude)
+    buses = {
+        "a": _bus("a", node=0, voltage=220, lat=21.0, lng=-80.0),
+        "b": _bus("b", node=1, voltage=220, lat=21.5, lng=-80.0),
+        "c": _bus("c", node=2, voltage=110, lat=22.0, lng=-80.0),
+    }
+    lines = [
+        _line("ab", "a", "b", cap=500.0),                         # no x, no length
+        _line("bc1", "b", "c", cap=200.0, length_km=60.0,
+              voltage_kv=110.0),                                  # no x
+        _line("bc2", "b", "c", cap=200.0, reactance_pu=0.2),
+    ]
+    st = _state(nodes=[_node(i) for i in range(3)], buses=buses,
+                transmission_lines=lines, transformers=[],
+                generators={}, batteries={})
+    V.reduce_to_node_mesh(st)
+    eq = {frozenset((l.from_bus, l.to_bus)): l for l in st.transmission_lines
+          if not getattr(l, "decorative", False)}
+    ab = eq[frozenset(("node_0", "node_1"))]
+    length_ab = V._haversine_km(21.0, -80.0, 21.5, -80.0)
+    r, x, _ = estimate_line_pu_params(220.0, length_ab)
+    assert ab.reactance_pu == pytest.approx(x)
+    assert ab.reactance_pu != pytest.approx(0.01)
+    assert ab.resistance_pu == pytest.approx(r)
+    bc = eq[frozenset(("node_1", "node_2"))]
+    _, x60, _ = estimate_line_pu_params(110.0, 60.0)
+    assert bc.reactance_pu == pytest.approx(1.0 / (1.0 / x60 + 1.0 / 0.2))
+
+
+def test_line_impedance_pu_uses_own_values_and_system_base():
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    buses = {"a": _bus("a", voltage=110), "b": _bus("b", voltage=110)}
+    st = _state(buses=buses)
+    own = _line("own", "a", "b", reactance_pu=0.3, resistance_pu=0.05)
+    assert V._line_impedance_pu(st, own) == (0.05, 0.3, 0.0)
+    st.ac_power_flow.base_mva = 200.0
+    two = _line("two", "a", "b", length_km=40.0, num_circuits=2)
+    r, x, b = estimate_line_pu_params(110.0, 40.0, 200.0)
+    assert V._line_impedance_pu(st, two) == pytest.approx((r / 2, x / 2, b * 2))
+    per_km = _line("km", "a", "b", length_km=40.0, reactance_per_km=0.5)
+    assert V._line_impedance_pu(st, per_km)[1] == pytest.approx(
+        0.5 * 40.0 / (110.0 ** 2 / 200.0))
+    # Neither length nor coordinates: nothing to derive from
+    assert V._line_impedance_pu(st, _line("u", "a", "b"))[1] == 0.0
 
 
 def test_reduce_to_node_mesh_is_mesh_not_star():

@@ -549,16 +549,16 @@ Existing generating units, under `generators: {<key>: {...}}` or as legacy `unit
 | `degradation_rate` | list[float] | required | Capacity degradation per node (fraction/year, `0.01` = 1 %) |
 | `decommissioning_cost` | list[float] | required | Decommissioning cost per node ($/MW) |
 | `rated_power` | list[float] | required | Installed capacity per node (MW) |
-| `min_power` | list[float] | required | Minimum stable output per node, fraction of rated power (applied with unit commitment) |
+| `min_power` | list[float] | required | Minimum stable output per node, fraction of rated power (applied with unit commitment). Outside 0–1 the loader clamps it with a warning |
 | `min_up` | list[int] | required | Minimum up time per node (hours, unit commitment; rounded up to whole time steps) |
 | `min_down` | list[int] | required | Minimum down time per node (hours, unit commitment; rounded up to whole time steps) |
-| `ramp_up` | list[float] | required | Ramp-up limit per node, fraction of capacity per hour (scaled to `resolution_hours`). `0` = no limit |
-| `ramp_down` | list[float] | required | Ramp-down limit per node, fraction of capacity per hour (scaled to `resolution_hours`). `0` = no limit |
+| `ramp_up` | list[float] | required | Ramp-up limit per node, fraction of capacity per hour (scaled to `resolution_hours`). `0` = no limit; a negative value is clamped to 0 with a warning |
+| `ramp_down` | list[float] | required | Ramp-down limit per node, fraction of capacity per hour (scaled to `resolution_hours`). `0` = no limit; a negative value is clamped to 0 with a warning |
 | `eff_at_rated` | list[float] | required | Efficiency at rated output per node (0–1) |
 | `eff_at_min` | list[float] | required | Efficiency at minimum output per node (0–1) |
 | `inertia` | list[float] | required | Inertia constant H per node (s) |
 | `start_up_cost` | list[float] | required | Start-up cost per node ($ per start) |
-| `fuel_cost` | list[float] | required | Fuel cost per node ($/MWh). Required key; if all zero and `fuel` is in `fuels`, the loader computes it (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
+| `fuel_cost` | list[float] | required | Fuel cost per node ($/MWh). Required key; if all zero and `fuel` is in `fuels` (any type, a `Renewable` biomass unit too), the loader computes it (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `fixed_cost` | list[float] | required | Fixed O&M per node ($ per MW of power in service per year), charged whether or not the unit runs: degraded rated power while within `life_time`, prorated to each dispatch window; the master charges it per year on the same MW (life-extended MW after `life_time`) |
 | `maintenance_cost` | list[float] | required | Variable O&M per node ($/MWh). The loader may add a non-fuel adder for thermal fuels (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `invest_cost` | list[float] | required by loader | Per-node $/MW. Required by the loader. Investment in new capacity is modelled with `technologies`; this value prices life extension (× `life_extension_cost_factor`). Where it is 0, the technology with the same `fuel` and `type` supplies it |
