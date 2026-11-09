@@ -3359,6 +3359,43 @@ import Ipopt
         # 30 MW of load and a 60 MW hour: the battery covers the spike
         spike = vcat(fill(30.0, 12), [60.0], fill(30.0, 11))
 
+        @testset "capacity adequacy: firm capacity at peak-period availability" begin
+            # Peak period = top 10 % of the day's demand: steps 18-20 (100 MW).
+            # Dispatchable units count at their mean availability there, variable
+            # renewables at their minimum availability. Every non-"Renewable"
+            # unit used to count fully and "Renewable" biomass at its minimum
+            # (0 for a seasonal mill); storage ignored its availability.
+            demand = fill(50.0, H24); demand[18:20] .= 100.0
+            half_at_peak = ones(H24, 1); half_at_peak[18:20, 1] .= 0.5
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5], half_at_peak;
+                        nb = 1, H = H24)
+            mill_avail = ones(H24, 1); mill_avail[1:12, 1] .= 0.0   # off-season
+            mill = mkgen("Mill", "Renewable", "Biomass", [30.0], [1.0e-5], mill_avail;
+                         nb = 1, H = H24)
+            sun = zeros(H24, 1); sun[8:17, 1] .= 1.0
+            pv = mkgen("PV", "Renewable", "Sun", [40.0], [0.0], sun; nb = 1, H = H24)
+            o = [0.0]
+            gt = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0], [50.0], half_at_peak,
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            # mkgen leaves risk_coefficient at 0 (no firm capacity at all)
+            firm(g) = ESFEX.with_fields(g; risk_coefficient = [1.0])
+            inp = MasterProblemInput(years = [2025], network = net1,
+                generators = firm.([gas, mill, pv]), batteries = [mkbat(avail = half_at_peak)],
+                technologies = [gt], base_demand = reshape(demand, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                reserve_margin = 1.2, verbose = false)
+            @test ESFEX.adequacy_peak_steps(inp, 1, 1) == [18, 19, 20]
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp)
+            ESFEX.add_capacity_adequacy_constraints!(model, vars, inp)
+            con = constraint_by_name(model, "cap_adequacy_y1_node1")
+            # firm: gas 100 × 0.5 + mill 30 × 1 + PV 40 × 0 + battery 20 × 0.5 = 90
+            @test ESFEX.normalized_rhs(con) ≈ 1.2 * 100.0 - 90.0
+            @test ESFEX.normalized_coefficient(con, vars.tech_investment[1][1][1]) ≈ 0.5
+        end
+
         @testset "battery ramp limits, with the rolling-horizon seam" begin
             # 5 MW/h: from 0 MW at the previous window's last step the battery
             # gives 5 then 10 MW, so 10 of the second step's 20 MW are shed.
