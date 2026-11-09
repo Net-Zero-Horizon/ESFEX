@@ -24,6 +24,7 @@ import numpy as np
 from esfex.utils.temporal import HOURS_STD_YEAR
 
 from esfex.visualization.panels.results_charts import (
+    _SlicedScenarioView,
     _open_scenario,
     _open_summary_results,
     _open_system_config,
@@ -1128,17 +1129,16 @@ class DashboardLoader:
             self._cost_cache[cache_key] = None
             return None
 
-        # Read the GLOBAL scenario datasets, then slice to this system's
-        # node range. ``_open_scenario`` returns a sliced view when
-        # ``bp`` carries a subsystem prefix, but the per-system mirror
-        # is collapsed in the Phase-2 layout — we re-derive the range
-        # explicitly so the math is the same whether or not the mirror
-        # exists.
+        # A subsystem's scenario is a view whose node axis is already this
+        # system's nodes (``_open_scenario``); the configs' per-node lists
+        # stay global, so its row k is global node ``node0 + k``. The root
+        # (single system) and a legacy per-system mirror are read as is.
         rng = self._system_node_range(f, bp)
+        node0 = rng[0] if (rng is not None and isinstance(sc, _SlicedScenarioView)) else 0
         tres = int(f.attrs.get("temporal_resolution_hours", 1))
 
         from esfex.models.financial_analysis import (
-            _index_configs_by_name, _lookup_config,
+            _index_configs_by_name, _lookup_config, built_power,
         )
         from esfex.visualization.panels.results_charts import (
             _load_gen_configs, _load_bat_configs, _load_tech_configs,
@@ -1146,50 +1146,51 @@ class DashboardLoader:
         )
         gen_cfgs = _load_gen_configs(f, bp)
         bat_cfgs = _load_bat_configs(f, bp)
-        tech_cfgs = _load_tech_configs(f, bp)
-        bat_tech_cfgs = _load_bat_tech_configs(f, bp)
 
         # Each dataset finds its unit's config by name: h5py lists the
-        # datasets alphabetically, not in config order, and the investment
-        # units have datasets but no config here. Position is only the
-        # fallback for files whose configs carry no name.
+        # datasets alphabetically, not in config order. The units the master
+        # built ("Investment <technology>") have no config of their own: they
+        # take their technology's, with the MW in service the runner records
+        # on their dataset. Position is only the fallback for files whose
+        # configs carry no name.
         gen_by_name = _index_configs_by_name(gen_cfgs)
         bat_by_name = _index_configs_by_name(bat_cfgs)
+        tech_by_name = _index_configs_by_name(_load_tech_configs(f, bp))
+        bat_tech_by_name = _index_configs_by_name(_load_bat_tech_configs(f, bp))
 
-        def _unit_cfg(name, by_name, cfgs, idx):
-            if by_name:
-                return _lookup_config(name, by_name, cfgs)
-            return cfgs[idx] if idx < len(cfgs) else {}
+        def _gen_cfg(name, idx):
+            return _lookup_config(
+                name, gen_by_name, gen_cfgs, idx, tech_by_name=tech_by_name,
+                built_mw=built_power(sc["generation"], name)
+                if "generation" in sc else None)
+
+        def _bat_cfg(name, idx):
+            return _lookup_config(
+                name, bat_by_name, bat_cfgs, idx, tech_by_name=bat_tech_by_name,
+                built_mw=built_power(sc["battery_discharge"], name)
+                if "battery_discharge" in sc else None,
+                power_key="MaxDischargePower")
+
         gen_data = _load_gen_data(sc)
         gen_charge = _load_bat_data(sc, "battery_charge")
         gen_discharge = _load_bat_data(sc, "battery_discharge")
 
-        def _slice_nodes(arr: np.ndarray) -> np.ndarray:
-            """Return ``arr`` restricted to this system's node range
-            along axis 0. ``arr`` is ``[nodes, hours]`` or flat ``[hours]``
-            (single-node legacy export); the latter passes through."""
-            if arr.ndim < 2 or rng is None:
-                return arr
-            lo, hi = rng
-            return arr[lo:hi]
-
         fuel_c = fix_c = maint_c = startup_c = bat_maint_c = 0.0
 
         # Operational costs: Σ_{g, n∈sys, h} P[g,n,h] × coef[g,n] × Δt
-        gen_names_in_order = list(gen_data.keys())
-        for gi, gname in enumerate(gen_names_in_order):
+        gen_cfg_by_ds: dict[str, dict] = {}
+        for gi, gname in enumerate(gen_data):
             arr = gen_data[gname]
-            cfg = _unit_cfg(gname, gen_by_name, gen_cfgs, gi)
-            sliced = _slice_nodes(arr)
-            if sliced.ndim < 2:
+            cfg = gen_cfg_by_ds[gname] = _gen_cfg(gname, gi)
+            if arr.ndim < 2:
                 # Treat as node-0 series.
-                energy_by_node = np.array([float(np.nansum(sliced)) * tres])
+                energy_by_node = np.array([float(np.nansum(arr)) * tres])
                 lo = 0
             else:
-                energy_by_node = np.nansum(sliced, axis=1) * tres
-                lo = rng[0] if rng is not None else 0
+                energy_by_node = np.nansum(arr, axis=1) * tres
+                lo = node0
             # Share of the year these steps cover (fixed O&M is $/MW·yr)
-            year_share = sliced.shape[-1] * tres / HOURS_STD_YEAR
+            year_share = arr.shape[-1] * tres / HOURS_STD_YEAR
             for k, e in enumerate(energy_by_node):
                 n = lo + k
                 # Fixed O&M on the rated power, whether or not it ran
@@ -1204,29 +1205,28 @@ class DashboardLoader:
         # number of starts is what the cost is keyed on. Without a
         # ``gen_startup`` dataset we fall back to counting 0→1
         # transitions in ``gen_status`` (same as the solver's
-        # ``startup`` decision variable in UC mode).
-        gen_status = sc.get("gen_status") if hasattr(sc, "get") else None
-        if gen_status is not None:
-            gs_data = (
-                gen_status if isinstance(gen_status, dict)
-                else {k: gen_status[k][:] for k in gen_status}
-            )
-            for gi, gname in enumerate(gs_data):
-                arr = gs_data[gname]
-                cfg = _unit_cfg(gname, gen_by_name, gen_cfgs, gi)
-                sliced = _slice_nodes(arr)
-                if sliced.ndim < 2:
+        # ``startup`` decision variable in UC mode). ``gen_status`` is not
+        # node-sliced in a subsystem view: slice it here, for this
+        # system's units only.
+        if "gen_status" in sc:
+            gs_grp = sc["gen_status"]
+            for gname in gs_grp:
+                if gname not in gen_data:
                     continue
+                arr = np.asarray(gs_grp[gname][:])
+                if arr.ndim < 2:
+                    continue
+                if node0 or arr.shape[0] != gen_data[gname].shape[0]:
+                    arr = arr[node0:node0 + gen_data[gname].shape[0]]
+                cfg = gen_cfg_by_ds[gname]
                 # transitions per node = sum of clip(diff, 0, 1)
-                diffs = np.diff(sliced, axis=1, prepend=0)
+                diffs = np.diff(arr, axis=1, prepend=0)
                 starts_by_node = np.clip(diffs, 0, 1).sum(axis=1)
-                lo = rng[0] if rng is not None else 0
-                for k, s in enumerate(starts_by_node):
-                    if s == 0:
+                for k, st in enumerate(starts_by_node):
+                    if st == 0:
                         continue
-                    n = lo + k
-                    startup_c += float(s) * self._attr_at_node(
-                        cfg, "start_up_cost", n
+                    startup_c += float(st) * self._attr_at_node(
+                        cfg, "start_up_cost", node0 + k
                     )
 
         # Battery maintenance: (charge + discharge) × per-node coeff.
@@ -1235,26 +1235,23 @@ class DashboardLoader:
         for bi, bname in enumerate(bat_names):
             c_arr = gen_charge.get(bname, np.zeros(0))
             d_arr = gen_discharge.get(bname, np.zeros(0))
-            cfg = _unit_cfg(bname, bat_by_name, bat_cfgs, bi)
+            cfg = _bat_cfg(bname, bi)
             # Fixed O&M ($/MW·yr) on the rated discharge power
-            d_sl = _slice_nodes(d_arr) if d_arr.size else d_arr
-            if d_sl.ndim == 2:
-                lo = rng[0] if rng is not None else 0
-                share = d_sl.shape[-1] * tres / HOURS_STD_YEAR
-                for k in range(d_sl.shape[0]):
-                    fix_c += (self._attr_at_node(cfg, "fixed_cost", lo + k)
-                              * self._attr_at_node(cfg, "MaxDischargePower", lo + k)
+            if d_arr.ndim == 2:
+                share = d_arr.shape[-1] * tres / HOURS_STD_YEAR
+                for k in range(d_arr.shape[0]):
+                    fix_c += (self._attr_at_node(cfg, "fixed_cost", node0 + k)
+                              * self._attr_at_node(cfg, "MaxDischargePower", node0 + k)
                               * share)
             for arr in (c_arr, d_arr):
                 if arr.size == 0:
                     continue
-                sliced = _slice_nodes(arr)
-                if sliced.ndim < 2:
-                    energy_by_node = np.array([float(np.nansum(sliced)) * tres])
+                if arr.ndim < 2:
+                    energy_by_node = np.array([float(np.nansum(arr)) * tres])
                     lo = 0
                 else:
-                    energy_by_node = np.nansum(sliced, axis=1) * tres
-                    lo = rng[0] if rng is not None else 0
+                    energy_by_node = np.nansum(arr, axis=1) * tres
+                    lo = node0
                 for k, e in enumerate(energy_by_node):
                     if e == 0:
                         continue
@@ -1263,41 +1260,34 @@ class DashboardLoader:
                         cfg, "maintenance_cost", n
                     )
 
-        # Investment cost: MW added per-system × invest cost per MW.
-        # We piggy-back on the existing ``_investment_mw`` logic but
-        # need the tech-config invest_cost (a per-node vector stored
-        # as a string by the runner).
+        # Investment cost: MW (MWh) the master added this year × the
+        # technology's invest cost per MW (per MWh). The attrs are on the
+        # ROOT scenario, keyed by global technology and node index:
+        # ``investment_tech_investment_power_<t>_<n>``,
+        # ``investment_bat_tech_investment_{power|capacity}_<bt>_<n>``.
+        tech_cfgs = _load_tech_configs(f, "")
+        bat_tech_cfgs = _load_bat_tech_configs(f, "")
         inv_cost = 0.0
         root_path = f"detailed_results/year_{year}_threshold_0"
         if root_path in f:
             for attr_key, attr_val in f[root_path].attrs.items():
-                if not attr_key.startswith("investment_") or "_power_" not in attr_key:
+                if attr_key.startswith("investment_bat_tech_investment_power_"):
+                    pool, cost_key = bat_tech_cfgs, "invest_cost_power"
+                elif attr_key.startswith("investment_bat_tech_investment_capacity_"):
+                    pool, cost_key = bat_tech_cfgs, "invest_cost_energy"
+                elif attr_key.startswith("investment_tech_investment_power_"):
+                    pool, cost_key = tech_cfgs, "invest_cost"
+                else:
                     continue
                 try:
-                    node = int(attr_key.rsplit("_", 1)[-1])
+                    t_idx, node = (int(v) for v in attr_key.rsplit("_", 2)[-2:])
                     mw = float(attr_val)
                 except (TypeError, ValueError):
                     continue
                 if rng is not None and not (rng[0] <= node < rng[1]):
                     continue
-                # Pick the tech config: the attr name carries the tech
-                # index (e.g. ``investment_gen_power_3_7`` → gen tech 3,
-                # node 7). Fallback to gen tech 0 if we can't parse.
-                # ``investment_<bat|gen>_power_<t>_<n>``
-                parts = attr_key.split("_")
-                tech_pool = (
-                    bat_tech_cfgs if "bat" in attr_key else tech_cfgs
-                )
-                try:
-                    t_idx = int(parts[-2])
-                except (ValueError, IndexError):
-                    t_idx = 0
-                tech_cfg = (
-                    tech_pool[t_idx] if 0 <= t_idx < len(tech_pool) else {}
-                )
-                inv_cost += mw * self._attr_at_node(
-                    tech_cfg, "invest_cost", node
-                )
+                tech_cfg = pool[t_idx] if 0 <= t_idx < len(pool) else {}
+                inv_cost += mw * self._attr_at_node(tech_cfg, cost_key, node)
 
         components = {
             "fuel_cost": fuel_c,

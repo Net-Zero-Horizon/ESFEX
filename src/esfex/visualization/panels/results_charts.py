@@ -14,6 +14,9 @@ import h5py
 import numpy as np
 
 from esfex.io.exporter import demand_is_step_major, demand_node_hours
+from esfex.models.financial_analysis import (
+    _index_configs_by_name, _lookup_config, built_power,
+)
 from esfex.utils.temporal import HOURS_STD_YEAR, model_time_index
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -1323,19 +1326,14 @@ def _get_gen_types(h5f: h5py.File, base_prefix: str = "") -> dict[str, str]:
         if cache is not None:
             cache.gen_types[base_prefix] = types
         return types
-    gen_grp = sc["generators"]
-    n = int(gen_grp.attrs.get("num_generators", 0))
-    for i in range(n):
-        gk = f"generator_{i}"
-        if gk in gen_grp:
-            g = gen_grp[gk]
-            name = g.attrs.get("name", gk)
-            if isinstance(name, bytes):
-                name = name.decode()
-            gtype = g.attrs.get("type", "Unknown")
-            if isinstance(gtype, bytes):
-                gtype = gtype.decode()
-            types[name] = gtype
+    for g in _config_children(sc["generators"], "generator"):
+        name = g.attrs.get("name", g.name.rsplit("/", 1)[-1])
+        if isinstance(name, bytes):
+            name = name.decode()
+        gtype = g.attrs.get("type", "Unknown")
+        if isinstance(gtype, bytes):
+            gtype = gtype.decode()
+        types[name] = gtype
     if cache is not None:
         cache.gen_types[base_prefix] = types
     return types
@@ -1727,17 +1725,38 @@ def _load_config_section(
     """Iterate ``{singular}_{i}`` children of a system_configuration
     section (``generators`` / ``batteries`` / ``technologies`` /
     ``battery_technologies``) and return the list of ``dict(attrs)``."""
-    configs: list[dict] = []
     sc = _open_system_config(h5f, base_prefix)
     if sc is None or section not in sc:
-        return configs
-    grp = sc[section]
-    n = int(grp.attrs.get(num_attr, 0))
-    for i in range(n):
-        ck = f"{singular}_{i}"
-        if ck in grp:
-            configs.append(dict(grp[ck].attrs))
-    return configs
+        return []
+    return [dict(g.attrs) for g in _config_children(sc[section], singular)]
+
+
+def _config_children(grp, singular: str) -> list:
+    """The ``{singular}_{i}`` children of a system_configuration section,
+    in index order.
+
+    The children present are listed, not ``range(num_*)``: a subsystem's
+    filtered view keeps the global keys (``generator_5``…) and reports the
+    filtered count, so the range found nothing past the first system."""
+    prefix = f"{singular}_"
+    idx = sorted(int(k[len(prefix):]) for k in grp.keys()
+                 if k.startswith(prefix) and k[len(prefix):].isdigit())
+    return [grp[f"{prefix}{i}"] for i in idx]
+
+
+def _gen_config_resolver(h5f: h5py.File, base_prefix: str = ""):
+    """``resolve(dataset_name, idx=-1, built_mw=None)`` → the config of the
+    generator behind a results dataset: its own config by name, or, for a
+    unit the master built (``"Investment <technology>"``, no config of its
+    own), its technology's (see ``financial_analysis._lookup_config``)."""
+    gen_cfgs = _load_gen_configs(h5f, base_prefix)
+    by_name = _index_configs_by_name(gen_cfgs)
+    tech_by_name = _index_configs_by_name(_load_tech_configs(h5f, base_prefix))
+
+    def resolve(name: str, idx: int = -1, built_mw=None) -> dict:
+        return _lookup_config(name, by_name, gen_cfgs, idx,
+                              tech_by_name=tech_by_name, built_mw=built_mw)
+    return resolve
 
 
 def _load_gen_configs(h5f: h5py.File, base_prefix: str = "") -> list[dict]:
@@ -5921,41 +5940,7 @@ class FuelSupplyChart(QWidget):
 
         with _open_h5(h5_path) as h5f:
             tres = _get_temporal_res(h5f)
-            gen_configs = _load_gen_configs(h5f, bp)
-
-            # gen_name → (fuel, avg_fuel_cost $/MWh). Average across
-            # the time-varying fuel_cost vector so each fuel gets a
-            # single price for the year-cost aggregation.
-            gen_fuel_info: dict[str, tuple[str, float]] = {}
-            for gc in gen_configs:
-                name = gc.get("name", "")
-                if isinstance(name, bytes):
-                    name = name.decode()
-                fuel = gc.get("fuel", "")
-                if isinstance(fuel, bytes):
-                    fuel = fuel.decode()
-                if not fuel or fuel.lower() in ("none", ""):
-                    continue
-                fc_raw = gc.get("fuel_cost", None)
-                avg_fc = 0.0
-                if fc_raw is not None:
-                    if isinstance(fc_raw, (list, np.ndarray)):
-                        vals = [float(v) for v in fc_raw if float(v) > 0]
-                        avg_fc = float(np.mean(vals)) if vals else 0.0
-                    elif isinstance(fc_raw, str):
-                        try:
-                            parsed = [float(v) for v in fc_raw.strip("[]").split(",")
-                                      if float(v.strip()) > 0]
-                            avg_fc = float(np.mean(parsed)) if parsed else 0.0
-                        except (ValueError, TypeError):
-                            avg_fc = 0.0
-                    else:
-                        try:
-                            v = float(fc_raw)
-                            avg_fc = v if v > 0 else 0.0
-                        except (ValueError, TypeError):
-                            avg_fc = 0.0
-                gen_fuel_info[name] = (fuel, avg_fc)
+            unit_config = _gen_config_resolver(h5f, bp)
 
             for sc_key, year in _sorted_scenarios(h5f, bp):
                 sc = _open_scenario(h5f, bp, sc_key)
@@ -5966,18 +5951,17 @@ class FuelSupplyChart(QWidget):
                 for gen_name, arr in gen_data.items():
                     total = _sum_nodes(arr) if arr.ndim >= 2 else arr
                     gen_mwh = float(np.sum(total)) * tres
-                    # Match generator → (fuel, avg_fuel_cost)
-                    matched_fuel = None
-                    matched_fc = 0.0
-                    for cfg_name, (cfg_fuel, cfg_fc) in gen_fuel_info.items():
-                        suffix = cfg_name.split("/")[-1] if "/" in cfg_name else cfg_name
-                        if cfg_name.endswith(gen_name) or gen_name.endswith(suffix):
-                            matched_fuel = cfg_fuel
-                            matched_fc = cfg_fc
-                            break
-                    if matched_fuel is None:
+                    # The unit's (or a master-built unit's technology's) fuel
+                    # and fuel cost averaged over the per-node vector
+                    cfg = unit_config(gen_name)
+                    matched_fuel = cfg.get("fuel", "")
+                    if isinstance(matched_fuel, bytes):
+                        matched_fuel = matched_fuel.decode()
+                    matched_fc = CashFlowChart._scalar_avg_cost(cfg.get("fuel_cost"))
+                    if not matched_fuel or str(matched_fuel).lower() == "none":
                         _, cat = _canonical_tech_name(gen_name)
                         matched_fuel = "Renewable" if cat == "renewable" else "Other"
+                        matched_fc = 0.0
                     gen_by_fuel[matched_fuel] = gen_by_fuel.get(matched_fuel, 0.0) + gen_mwh
                     all_fuels.add(matched_fuel)
                     cost = gen_mwh * matched_fc
@@ -7377,16 +7361,10 @@ class CashFlowChart(QWidget):
                          if _is_per_system else bt_configs)
             sys_filter = bp.split("/")[-1] if _is_per_system else None
 
-            # Pre-compute (fuel, $/MWh fuel, $/ton co2) per generator
-            gen_fuel_info: dict[str, tuple[float, float]] = {}
-            for gc in gen_configs:
-                name = gc.get("name", "")
-                if isinstance(name, bytes):
-                    name = name.decode()
-                gen_fuel_info[name] = (
-                    self._scalar_avg_cost(gc.get("fuel_cost")),
-                    self._scalar_avg_cost(gc.get("co2_emission_cost")),
-                )
+            # $/ton CO2 of each configured generator
+            co2_rates = [r for gc in gen_configs
+                         if (r := self._scalar_avg_cost(gc.get("co2_emission_cost"))) > 0]
+            unit_config = _gen_config_resolver(h5f, bp)
 
             for sc_key, year in _sorted_scenarios(h5f, bp):
                 sc = _open_scenario(h5f, bp, sc_key)
@@ -7414,7 +7392,6 @@ class CashFlowChart(QWidget):
                 # Average $/ton across configs (weighted by their gen
                 # share would be more accurate, but matches the
                 # matplotlib chart's existing simplification).
-                co2_rates = [r for (_f, r) in gen_fuel_info.values() if r > 0]
                 avg_co2_rate = float(np.mean(co2_rates)) if co2_rates else 0.0
                 year_co2_cost = co2_total_t * avg_co2_rate
 
@@ -7423,14 +7400,9 @@ class CashFlowChart(QWidget):
                     gen_mwh = float(np.sum(total)) * tres
                     if gen_mwh <= 0:
                         continue
-                    # Best-effort match against gen_configs by suffix
-                    matched_fc = 0.0
-                    for cfg_name, (fc, _co2) in gen_fuel_info.items():
-                        suffix = cfg_name.split("/")[-1] if "/" in cfg_name else cfg_name
-                        if cfg_name.endswith(gen_name) or gen_name.endswith(suffix):
-                            matched_fc = fc
-                            break
-                    year_fuel += gen_mwh * matched_fc
+                    # The unit's (or its technology's) mean fuel cost
+                    year_fuel += gen_mwh * self._scalar_avg_cost(
+                        unit_config(gen_name).get("fuel_cost"))
                 fuel_cost.append(year_fuel)
                 co2_cost.append(year_co2_cost)
 
@@ -9693,7 +9665,7 @@ class UCMarginalTechChart(QWidget):
             sc = _open_scenario(h5f, bp, sc_key)
             rng = _system_node_range(h5f, bp)
 
-            gen_configs = _load_gen_configs(h5f, bp)
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
             status_grp = sc.get("gen_status") if hasattr(sc, "get") else None
             # Per-hour system-wide load shed (sliced to system nodes).
@@ -9773,7 +9745,9 @@ class UCMarginalTechChart(QWidget):
                 else:
                     # No gen_status — treat as ON whenever output > 0.
                     gen_on[gi, :] = gen_total[gi, :] > 1e-3
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
+                built = (built_power(sc["generation"], gname)
+                         if "generation" in sc else None)
+                cfg = unit_config(gname, gi, built)
                 fc = _attr_scalar(cfg, "fuel_cost")
                 mc = _attr_scalar(cfg, "maintenance_cost")
                 var_costs[gi] = fc + mc
