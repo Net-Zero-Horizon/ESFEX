@@ -180,3 +180,25 @@ def test_fetch_error_does_not_forecast(ready_step, monkeypatch):
     assert calls == []
     assert ready_step._btn_fetch_forecast.isEnabled()
     assert "Fetch error" in ready_step._lbl_forecast_status.text()
+
+
+def test_finished_forecast_enables_the_later_steps(step):
+    # A finished forecast must unlock the demand view, observed-data loading,
+    # the bus distribution and Apply. Once these enables sat, unreachable,
+    # after the return of a helper wedged into the method.
+    import types
+    _select(step, "spatial")
+    for b in (step._btn_view_demand, step._btn_load_observed,
+              step._btn_fetch_bld, step._btn_apply):
+        b.setEnabled(False)
+    node = types.SimpleNamespace(name="N1", centroid_lat=0.0, centroid_lng=0.0)
+    result = types.SimpleNamespace(
+        peak_mw=[10.0], annual_gwh=[50.0], load_factor=[0.57],
+        total_peak_mw=10.0, total_annual_gwh=50.0, total_load_factor=0.57,
+        demand_source="ml_density", warnings=[], demand_multi_year=None,
+        cell_annual_mwh=[1.0], cell_lats=[0.0], cell_lons=[0.0])
+    step._populate_forecast_results(result, [node], 1)
+    assert step._forecast_nodes == [node]
+    for b in (step._btn_view_demand, step._btn_load_observed,
+              step._btn_fetch_bld, step._btn_apply):
+        assert b.isEnabled()

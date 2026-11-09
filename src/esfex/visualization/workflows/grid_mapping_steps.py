@@ -4702,26 +4702,6 @@ class GridMappingDemandStep(QWidget):
                 self._lbl_forecast_summary.text() + "<br>" + missing)
             self._lbl_forecast_summary.setStyleSheet("color: #d35400; padding: 4px;")
 
-    @staticmethod
-    def _density_model_missing_text(result):
-        """What the forecast lacks for want of data, else '': the density
-        model (no spatial cells, a trend instead of the model's pattern) or
-        population / GDP rasters that could not be downloaded."""
-        if result is None:
-            return ""
-        warnings = [str(w) for w in getattr(result, "warnings", []) or []]
-        if not getattr(result, "cell_annual_mwh", None) and any(
-                w.startswith("Density model not found") for w in warnings):
-            from esfex.paths import BUNDLED_MODELS_DIR
-            return tr("grid_builder.forecast_without_density_model",
-                      source=getattr(result, "demand_source", "?"),
-                      path=str(BUNDLED_MODELS_DIR))
-        failed = [w.split(": ", 1)[1] for w in warnings
-                  if w.startswith("Data download failed: ")]
-        if failed:
-            return tr("grid_builder.forecast_data_download_failed", files=failed[0])
-        return ""
-
         # Remember the forecast nodes so the demand visualizer can read the
         # per-node hourly series straight from the result.
         self._forecast_nodes = list(nodes)
@@ -4741,6 +4721,26 @@ class GridMappingDemandStep(QWidget):
         # exists (spatial becomes runnable; a footprint proxy already was).
         self._update_distribute_enabled()
         self._btn_apply.setEnabled(True)
+
+    @staticmethod
+    def _density_model_missing_text(result):
+        """What the forecast lacks for want of data, else '': the density
+        model (no spatial cells, a trend instead of the model's pattern) or
+        population / GDP rasters that could not be downloaded."""
+        if result is None:
+            return ""
+        warnings = [str(w) for w in getattr(result, "warnings", []) or []]
+        if not getattr(result, "cell_annual_mwh", None) and any(
+                w.startswith("Density model not found") for w in warnings):
+            from esfex.paths import BUNDLED_MODELS_DIR
+            return tr("grid_builder.forecast_without_density_model",
+                      source=getattr(result, "demand_source", "?"),
+                      path=str(BUNDLED_MODELS_DIR))
+        failed = [w.split(": ", 1)[1] for w in warnings
+                  if w.startswith("Data download failed: ")]
+        if failed:
+            return tr("grid_builder.forecast_data_download_failed", files=failed[0])
+        return ""
 
     def _on_view_demand(self):
         """Open the demand visualizer with every forecasted node's series."""
