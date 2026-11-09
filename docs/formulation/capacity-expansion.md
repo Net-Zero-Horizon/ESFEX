@@ -248,7 +248,7 @@ C^{slack} = \sum_{y=1}^{Y} \left[ c^{slack} \cdot s^{re}_y + c^{slack} \cdot s^{
 ## 6. Cumulative Capacity Expressions
 
 
-For each unit and bus, the capacity available in year \(y\) combines existing (degraded) capacity, life-extended capacity and invested capacity, each subject to age-based retirement. The capacities are built inline where they are used (`add_day_operational_constraints!`, `add_capacity_adequacy_constraints!`); `build_cumulative_capacity_expressions()` evaluates the same expressions for result extraction.
+For each unit and bus, the capacity available in year \(y\) combines existing (degraded) capacity, life-extended capacity and invested capacity, each subject to age-based retirement. The capacities are built inline where they are used (`add_day_operational_constraints!`, `add_capacity_adequacy_constraints!`), and the built capacities reach the hourly rows through per-year state variables (§6.5). `build_cumulative_capacity_expressions()` evaluates the same expressions, with the investment sums, for the fixed O&M in the objective.
 
 ### 6.1 Existing Generators
 
@@ -289,6 +289,19 @@ Battery technologies accumulate their investments without degradation:
 \]
 
 The corridor's investment is added to the line once, in whichever direction the variable exists. Transmission investment does not retire.
+
+### 6.5 Capacity State Variables
+
+
+The sums above do not enter the hourly constraints directly. For each year \(y\), each built capacity (candidate technology, battery-technology power and energy per bus, expandable corridor, reservoir, converter, fuel storage, route transport and electrolyzer) has a state variable defined by one equality, e.g. for a technology:
+
+\[
+C^{tech}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} (1 - \delta_{k,n})^{y-y'} \, I^{tech}_{y',k,n}, \qquad C^{tech}_{y,k,n} \geq 0 \tag{CUM-5}
+\]
+
+(`cap_tech_y*_t*_b*`, defined by `def_cap_tech_y*_t*_b*`; likewise `cap_bt_pow_*`, `cap_bt_en_*`, `cap_trans_*`, `cap_res_*`, `cap_conv_*` and `cap_fuel_*`). Every representative-day or TSAM-period constraint limited by a built capacity uses \(C_{y,\cdot}\): output and offer-curve segments, reserve headroom, curtailment, battery power and energy, line flows, reservoir levels, converters, fuel tanks, routes and electrolyzers.
+
+The LP and its optimum are the same as with the sums written out. Only the size changes. With the sums, each investment variable appeared in every hourly row of every later year. A 25-year master with 136 nodes had about 13,000 such dense columns, and its interior-point factorisation was too large to solve. Now an investment variable appears only in its CUM-5 definitions (at most one per year), the yearly rows (investment limits, budget, adequacy) and the objective, so its column length does not depend on the number of hours modelled. The objective's fixed O&M and the adequacy constraint keep the sums. The Benders master has no hourly rows and no state variables. Results are extracted from the investment variables as before.
 
 ---
 
