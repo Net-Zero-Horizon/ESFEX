@@ -419,6 +419,20 @@ class TestCreateBusesFromSubstation:
         assert result.transformers_added == 1
         assert len(state.transformers) == 1
 
+    def test_auto_transformer_impedance_on_system_base(self):
+        """The substation transformer's impedance is referred to
+        ac_power_flow.base_mva (800 MVA bank at 10 % own base: 0.05 p.u. on
+        400 MVA, 0.0125 p.u. on the 100 MVA it used regardless)."""
+        state = _make_state(buses={})
+        state.ac_power_flow.base_mva = 400.0
+        sub = _feat("substation", name="S", voltage_kv=220.0,
+                    voltage_kv_secondary=110.0)
+        gmb._create_buses_from_substation(
+            state, sub, "per_voltage", 5.0, ParseResult(), {}, None)
+        tr = state.transformers[0]
+        assert tr.rated_power_mva == 800.0
+        assert tr.impedance_pu == pytest.approx(0.05)
+
     def test_per_voltage_snap_collapse_no_transformer(self):
         # Both voltage levels snap to a single existing bus (huge snap_km
         # and an existing close bus) → no self-transformer.
@@ -733,6 +747,33 @@ class TestCreateLine:
         assert gl.reactance_pu == pytest.approx(x / 2)
         assert gl.resistance_pu == pytest.approx(r / 2)
         assert gl.susceptance_pu == pytest.approx(b * 2)
+
+    def test_impedance_on_system_base(self):
+        """Line impedances are on ac_power_flow.base_mva, not a fixed
+        100 MVA (tagged lines and voltages inferred later alike)."""
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_pu_params,
+        )
+        state = _make_state(buses={})
+        state.ac_power_flow.base_mva = 250.0
+        result = ParseResult()
+        tagged = _feat("line", name="T", voltage_kv=220.0,
+                       line_coords=[(21.0, -82.0), (21.5, -82.5)])
+        gmb._create_line(state, tagged, 5.0, result, {}, None)
+        gl = state.transmission_lines[-1]
+        r, x, b = estimate_line_pu_params(220.0, gl.length_km, 250.0)
+        assert gl.reactance_pu == pytest.approx(x)
+        assert gl.resistance_pu == pytest.approx(r)
+        assert gl.susceptance_pu == pytest.approx(b)
+
+        untagged = _feat("line", name="U", voltage_kv=0.0,
+                         line_coords=[(23.0, -80.0), (23.5, -80.5)])
+        gmb._create_line(state, untagged, 5.0, result, {}, None)
+        ul = state.transmission_lines[-1]
+        state.buses[ul.from_bus].voltage_kv = 110.0
+        gmb._propagate_voltage(state)
+        r, x, b = estimate_line_pu_params(110.0, ul.length_km, 250.0)
+        assert ul.reactance_pu == pytest.approx(x)
 
     def test_explicit_capacity_scaled_by_circuits(self):
         state = _make_state(buses={})

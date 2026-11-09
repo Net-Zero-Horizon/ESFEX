@@ -374,6 +374,34 @@ def test_infer_transformer_full_path_sets_mva_and_impedance():
     assert tr.losses_fraction > 0
 
 
+def test_infer_transformer_impedance_on_system_base():
+    """The re-derived transformer impedance is referred to
+    ac_power_flow.base_mva, not a fixed 100 MVA."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_transformer_impedance_pu,
+    )
+    state = _state(
+        buses={
+            "a": _bus(role="gen", voltage_kv=220.0, parent_node=0),
+            "b": _bus(role="load", voltage_kv=110.0, parent_node=0,
+                      demand_fraction=1.0),
+        },
+        generators={"g": _gen("a", 30.0)},
+        nodes=[_node(0, 30.0)],
+        transformers=[
+            _trafo("a", "b", from_voltage_kv=220.0, to_voltage_kv=110.0,
+                   rated_power_mva=1000.0, impedance_pu=0.0,
+                   losses_fraction=0.0)
+        ],
+    )
+    state.ac_power_flow = SimpleNamespace(base_mva=500.0)
+    gmi.infer_electrical_params(state)
+    tr = state.transformers[0]
+    assert tr.impedance_pu == pytest.approx(
+        estimate_transformer_impedance_pu(tr.rated_power_mva, 2.0, 500.0))
+    assert tr.impedance_pu == pytest.approx(0.05)  # 10 % × 500 / 1000
+
+
 def test_infer_transformer_mva_bumped():
     state = _state(
         buses={
