@@ -2895,3 +2895,26 @@ class GuiModel(QObject):
                 if hasattr(bus, k):
                     setattr(bus, k, v)
             self.busUpdated.emit(bus_id)
+
+    def set_demand_fractions(self, fractions: dict[str, float],
+                             roles: dict[str, str] | None = None) -> int:
+        """Set many buses' demand fractions (and roles) as one undo step.
+
+        ``update_bus`` per bus took an undo snapshot for each one, pickling
+        the whole state (the nodes' hourly demand included), and its
+        ``busUpdated`` redrew the bus's marker and walked all its connected
+        equipment. A demand fraction changes neither, so this takes one
+        snapshot and emits no per-bus signal. Returns the buses updated."""
+        self._last_checkpoint = 0.0          # this change is its own undo step
+        self.checkpoint()
+        n = 0
+        for bus_id, frac in fractions.items():
+            bus = self.state.buses.get(bus_id)
+            if bus is None:
+                continue
+            bus.demand_fraction = frac
+            if roles and bus_id in roles:
+                bus.role = roles[bus_id]
+            n += 1
+        self.dataMutated.emit()
+        return n
