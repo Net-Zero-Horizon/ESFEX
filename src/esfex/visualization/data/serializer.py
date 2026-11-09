@@ -45,6 +45,7 @@ from esfex.visualization.data.gui_model import (
     GuiGeneratorInstance,
     GuiGlobalSettings,
     GuiVisualScaling,
+    majority_ac_frequency,
     GuiInvestmentEntry,
     GuiInvestmentNodeData,
     GuiInterSystemLink,
@@ -2848,6 +2849,35 @@ def _drop_shadowed_aliases(model, d: dict) -> None:
             d.pop(field.alias, None)
 
 
+def _sync_nominal_frequency(state: GuiSystemState, sys_dict: dict) -> None:
+    """Make the system's ``frequency_nominal`` the frequency its buses run at.
+
+    The Grid Builder sets the mains frequency of the region on every bus,
+    generator and line, but nothing set the system-level nominal frequency,
+    so a 60 Hz grid kept the 50 Hz default. A nominal frequency that none of
+    the AC buses runs at becomes their most common frequency (one a mixed
+    50/60 Hz system's buses run at is kept), and ``frequency_nadir_limit``
+    moves with it so the margin below nominal is unchanged (49 Hz on 50 Hz
+    becomes 59 Hz on 60 Hz). ``rocof_limit`` is a protection setting in Hz/s
+    and stays as it is.
+    """
+    bus_freqs = {
+        float(b.frequency_hz) for b in state.buses.values()
+        if b.current_type != "DC" and (b.frequency_hz or 0) > 0
+    }
+    f_bus = majority_ac_frequency(state.buses.values())
+    if not f_bus:
+        return
+    f_old = float(sys_dict.get("frequency_nominal")
+                  or SystemConfig.model_fields["frequency_nominal"].default)
+    if f_old in bus_freqs:
+        return
+    nadir = float(sys_dict.get("frequency_nadir_limit")
+                  or SystemConfig.model_fields["frequency_nadir_limit"].default)
+    sys_dict["frequency_nominal"] = f_bus
+    sys_dict["frequency_nadir_limit"] = nadir + (f_bus - f_old)
+
+
 def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     """Mutate *sys_dict* to reflect *state*."""
     n = len(state.nodes)
@@ -3195,6 +3225,7 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             }
             for bus in state.buses.values()
         ]
+        _sync_nominal_frequency(state, sys_dict)
 
     # Transformers
     if state.transformers:

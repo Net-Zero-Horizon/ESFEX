@@ -35,7 +35,7 @@ Select a mode from the toolbar and click the map. Placement modes stay active, s
 
 1. Click **Bus** in the toolbar.
 2. Click the map. The bus is created at that point, in the node with the nearest centroid.
-3. Configure name, voltage, frequency, current type, bus type (PQ/PV/slack), role, and demand fraction in the Properties Panel. New buses default to 220 kV and role *connection*.
+3. Configure name, voltage, frequency, current type, bus type (PQ/PV/slack), role, and demand fraction in the Properties Panel. New buses default to 220 kV and role *connection*, and take the frequency of the node's other AC buses (50 Hz on a node without buses).
 
 ### Placing Generators, Storage, and Electrolyzers
 

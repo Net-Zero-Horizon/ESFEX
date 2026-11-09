@@ -133,6 +133,17 @@ class GuiBus:
     role_user_set: bool = False
 
 
+def majority_ac_frequency(buses) -> Optional[float]:
+    """The most common frequency of the AC *buses* (first seen wins a tie),
+    or ``None`` when none has a frequency."""
+    counts: dict[float, int] = {}
+    for b in buses:
+        f = float(getattr(b, "frequency_hz", 0.0) or 0.0)
+        if f > 0 and getattr(b, "current_type", "AC") != "DC":
+            counts[f] = counts.get(f, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
 @dataclass
 class GuiGeneratorInstance:
     """A single generator unit at a specific node.
@@ -2814,6 +2825,15 @@ class GuiModel(QObject):
         if not name:
             name = bus_id.replace("_", " ").title()
         bus = GuiBus(bus_id=bus_id, name=name, parent_node=parent_node)
+        if "frequency_hz" not in kwargs:
+            # A new bus (an auto-complete LV bus, a bus added in the editor)
+            # runs at the frequency of its node's AC buses, not at 50 Hz on a
+            # 60 Hz grid.
+            node_freq = majority_ac_frequency(
+                b for b in self.state.buses.values()
+                if b.parent_node == parent_node)
+            if node_freq:
+                bus.frequency_hz = node_freq
         for k, v in kwargs.items():
             if hasattr(bus, k):
                 setattr(bus, k, v)
