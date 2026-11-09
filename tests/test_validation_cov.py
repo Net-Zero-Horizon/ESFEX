@@ -400,13 +400,19 @@ def test_validate_generators_node_mismatch_warning():
 def test_validate_generators_negative_and_minpower():
     g_neg = _gen("g1", bus="b", rated=-5.0)
     g_min = _gen("g2", bus="b", rated=100.0)
-    g_min.min_power = 200.0
+    g_min.min_power = 1.6           # a fraction of rated power: > 1 is invalid
+    g_ramp = _gen("g3", bus="b", rated=100.0)
+    g_ramp.ramp_down = -0.5
+    g_ok = _gen("g4", bus="b", rated=100.0)
+    g_ok.min_power = 0.4
     state = _state(buses={"b": _bus("b")},
-                   generators={"g1": g_neg, "g2": g_min})
+                   generators={"g1": g_neg, "g2": g_min, "g3": g_ramp, "g4": g_ok})
     issues = V._validate_generators(state)
     txt = _msgs(issues)
     assert "negative rated_power" in txt
-    assert "min_power (200.0) > rated_power (100.0)" in txt
+    assert "min_power=1.6 is outside 0–1" in txt
+    assert "ramp_down=-0.5 is negative" in txt
+    assert not any(i.element_id == "g4" for i in issues)
 
 
 def test_validate_generators_efficiency_and_lifetime():
