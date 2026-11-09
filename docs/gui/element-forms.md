@@ -184,7 +184,7 @@ Connects buses at different voltage levels.
 | From bus / To bus | -- | The buses on each side |
 | From Voltage / To Voltage | kV | Voltage on each side (the labels switch to HV/LV or Side A/Side B) |
 | Rated Power | MVA | Transformer power rating |
-| Impedance | pu | Series impedance in per-unit (0 to 1) |
+| Impedance | pu | Series impedance in per-unit on the system base (`ac_power_flow.base_mva`), 0 to 1000. A transformer's impedance is near-constant on its own rating, so on the system base it is \(z_{own} \times S_{base} / S_{rated}\): a small unit is often above 1 p.u. (6 % on a 5 MVA unit is 1.2 p.u. on 100 MVA). |
 | Losses | frac | Loss fraction |
 | Color, Size | -, px | Marker style (Appearance section) |
 

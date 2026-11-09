@@ -88,8 +88,10 @@ class TransformerForm(QWidget):
         self._rated_power.editingFinished.connect(self._on_changed)
         layout.addRow(tr("transformer_form.rated_power"), self._rated_power)
 
+        # Per unit on the system base: a small unit is often above 1 p.u.
+        # (z_own × S_base / S_rated, e.g. 6 % × 100 / 5 MVA = 1.2 p.u.)
         self._impedance = QDoubleSpinBox()
-        self._impedance.setRange(0, 1)
+        self._impedance.setRange(0, 1000)
         self._impedance.setDecimals(4)
         self._impedance.editingFinished.connect(self._on_changed)
         layout.addRow(tr("transformer_form.impedance"), self._impedance)
