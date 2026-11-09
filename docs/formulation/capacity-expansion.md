@@ -706,6 +706,9 @@ When `tsam_inter_period_linking = false`, each period is cyclic on its own (BAT-
 
 After the initial solve, this procedure identifies units that are economically unviable and forces their retirement through iterative re-optimization.
 
+!!! note "Julia API only"
+    `solve_with_npv_iteration` and the functions it uses (`calculate_unit_npv`, `get_units_with_negative_npv`, `force_unit_retirements!`) are Julia API functions for scripts that call the ESFEX package directly. `esfex run` does not call them, in any mode: the master retires units by age and life extension only (Sec. 7.6), and a run's results contain no NPV retirements. `base_lcoe` and `npv_annual_return_rate` are read only by these functions. They work on the deterministic master (`create_master_problem`), not on the stochastic or Benders one.
+
 ### 9.1 Algorithm
 
 
@@ -932,7 +935,7 @@ create_master_problem(input)
   |-- apply_user_constraints!()                   # custom constraints
   +-- build_master_objective!()                   # OBJ-1
 
-solve_with_npv_iteration(input)
+solve_with_npv_iteration(input)                  # Julia API only, not called by esfex run
   |-- create_master_problem()
   |-- optimize!()
   +-- loop:

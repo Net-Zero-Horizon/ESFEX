@@ -474,3 +474,53 @@ def test_round9_old_project_resaves_without_removed_keys(tmp_path):
     gui_state_to_yaml(states, cfg, out, global_settings=config_to_global_settings(cfg))
     raw = yaml.safe_load(out.read_text(encoding="utf-8"))
     assert find_unknown_keys(raw) == []
+
+
+# ── Round 11: the dispatch's forced replacement, which nothing drove ──
+
+# As an older Studio wrote them: the alias and the field name, both.
+_R11_SYSTEM = {
+    "MAX_NPV_PENALTY_PER_MW": 1e6, "MAX_DECOMMISSION_COST_PER_MW": 5e5,
+    "FORCE_REPLACEMENT": -5e5,
+    "max_npv_penalty_per_mw": 1e6, "max_decommission_cost_per_mw": 5e5,
+    "force_replacement": -5e5,
+}
+_R11_PATHS = sorted(f"systems.island.{k}" for k in _R11_SYSTEM)
+
+
+def _r11_old_project() -> dict:
+    raw = _raw()
+    raw["systems"]["island"].update(_R11_SYSTEM)
+    return raw
+
+
+def test_round11_removed_replacement_keys_are_reported(tmp_path, caplog):
+    """The NPV-penalty and decommissioning caps and the replacement threshold
+    only fed the dispatch's forced-replacement term, which no constraint
+    used (always 0): they are gone, and old files get the generic warning."""
+    with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+        cfg = load_config(_write(tmp_path, _r11_old_project()))
+    assert sorted(cfg.unknown_keys) == _R11_PATHS
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "Unknown configuration key systems.island.MAX_NPV_PENALTY_PER_MW" in logged
+    assert "deprecated" not in logged.lower()
+    sysc = cfg.systems["island"]
+    assert not hasattr(sysc, "force_replacement")
+    # The master's NPV helpers still read these
+    assert sysc.base_lcoe == 93.0 and sysc.npv_annual_return_rate == 0.15
+
+
+def test_round11_old_project_resaves_without_removed_keys(tmp_path):
+    pytest.importorskip("PySide6")
+    from esfex.visualization.data.serializer import (
+        config_to_global_settings, config_to_gui_states, gui_state_to_yaml,
+    )
+
+    cfg = load_config(_write(tmp_path, _r11_old_project()))
+    states = config_to_gui_states(cfg, base_dir=FIXTURE.parent)
+    out = tmp_path / "resaved.yaml"
+    gui_state_to_yaml(states, cfg, out, global_settings=config_to_global_settings(cfg))
+    raw = yaml.safe_load(out.read_text(encoding="utf-8"))
+    assert find_unknown_keys(raw) == []
+    assert not set(_R11_SYSTEM) & set(raw["systems"]["island"])
+    assert not hasattr(states["island"].settings, "force_replacement")

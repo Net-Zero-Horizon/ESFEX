@@ -2,7 +2,7 @@
 
 Constraint names as they appear in the JuMP model (and in an LP file written by the solver). `{g}` generator, `{bi}` battery, `{b}` bus, `{ni}` node, `{t}` time step, `{y}` year, `{d}` representative day, `{s}` system, `{l}`/`{ℓ}` line. Rows whose pattern is a formula are constraints JuMP leaves unnamed. The formulation pages explain each family: [Operational Dispatch](../formulation/operational-dispatch.md), [Capacity Expansion](../formulation/capacity-expansion.md), [DC Power Flow](../formulation/dc-power-flow.md), [AC OPF](../formulation/ac-power-flow.md).
 
-Generator and battery variables exist only for (unit, bus) pairs with capacity or investment potential, so there are no zero-capacity constraints. `gen_forced_repl_{g}_{b}`, `bat_forced_repl_{bi}_{b}` and `bat_spillage_{bi}_{b}_{t}` are variable names, not constraints.
+Generator and battery variables exist only for (unit, bus) pairs with capacity or investment potential, so there are no zero-capacity constraints. `bat_spillage_{bi}_{b}_{t}` is a variable name, not a constraint.
 
 ## power_system.jl --- Operational Dispatch
 

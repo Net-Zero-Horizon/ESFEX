@@ -712,9 +712,8 @@ class TestGuiSystemSettings:
         assert ss.min_annual_increment == 0.01
         assert ss.max_annual_increment == 0.10
         assert ss.max_annual_system_cost == 20e9
-        assert ss.max_npv_penalty_per_mw == 1e6
-        assert ss.max_decommission_cost_per_mw == 5e5
-        assert ss.force_replacement == -5e5
+        assert not hasattr(ss, "max_npv_penalty_per_mw")
+        assert not hasattr(ss, "force_replacement")
         assert ss.life_extension_cost_factor == 0.20
         assert ss.inertia_limit_threshold == 0.1
         assert ss.sim_rooftop is False

@@ -190,7 +190,6 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `reservoir_spillage_cost` | float | $ | Reservoir overflow penalty |
 | `demand_shift_cost` | float | $ | Demand shifting cost |
 | `rooftop_curtailment_cost` | float | $ | Rooftop solar curtailment penalty |
-| `npv_penalty_cost` | float | $ | NPV lifecycle penalty |
 | `pe_supply_cost` | float | $ | Primary energy supply cost |
 | `pe_loss_cost` | float | $ | Primary energy loss-of-supply penalty |
 | `pe_excess_cost` | float | $ | Primary energy excess penalty |

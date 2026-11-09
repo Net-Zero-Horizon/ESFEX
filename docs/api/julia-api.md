@@ -358,8 +358,8 @@ end
 | `calculate_day_operational_cost_tsam` | `(ps_vars, input, year_idx, hours, weight; tech_output=nothing) -> AffExpr` | Cost of one TSAM period, scaled by `resolution × weight`. Not exported. |
 | `build_master_objective!` | `(model, vars, input)` | NPV of investment costs + operational costs from representative days. |
 | `build_investment_cost_expression` | `(vars, input; mult=nothing, discount_rate=input.discount_rate) -> AffExpr` | Discounted investment cost. `mult` (a `ScenarioMultipliers`) scales unit investment costs for a stochastic scenario (technologies, battery power and energy, transmission). |
-| `calculate_unit_npv` | `(result, input, unit_type, unit_idx, node; npv_threshold=0.0) -> UnitNPV` | NPV of one existing unit from a solved master result. |
-| `solve_with_npv_iteration` | `(input; max_iterations=5, npv_threshold=0.0, use_representative_days=true) -> NPVIterationResult` | Iterative retirement: solve, compute unit NPV, force negative-NPV retirements, re-solve. |
+| `calculate_unit_npv` | `(result, input, unit_type, unit_idx, node; npv_threshold=0.0) -> UnitNPV` | NPV of one existing unit from a solved master result. Julia API only: `esfex run` does not call it. |
+| `solve_with_npv_iteration` | `(input; max_iterations=5, npv_threshold=0.0, use_representative_days=true) -> NPVIterationResult` | Iterative retirement on the deterministic master: solve, compute unit NPV, force negative-NPV retirements, re-solve. Julia API only: `esfex run` does not call it. |
 | `extract_master_solution` | `(model, vars, input) -> MasterProblemResult` | Extract investment/retirement decisions per year per technology per bus. |
 | `build_cumulative_capacity_expressions` | `(model, vars, input)` | Build JuMP expressions for cumulative installed capacity per technology per bus per year. |
 

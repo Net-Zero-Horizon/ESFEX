@@ -144,24 +144,6 @@ class SystemForm(QWidget):
         self._max_annual_cost.editingFinished.connect(self._on_changed)
         cl.addRow(tr("system_form.max_annual_cost"), self._max_annual_cost)
 
-        self._max_npv_penalty = QDoubleSpinBox()
-        self._max_npv_penalty.setRange(0, 1e12)
-        self._max_npv_penalty.setDecimals(0)
-        self._max_npv_penalty.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.max_npv_penalty"), self._max_npv_penalty)
-
-        self._max_decom_cost = QDoubleSpinBox()
-        self._max_decom_cost.setRange(0, 1e12)
-        self._max_decom_cost.setDecimals(0)
-        self._max_decom_cost.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.max_decom_cost"), self._max_decom_cost)
-
-        self._force_replacement = QDoubleSpinBox()
-        self._force_replacement.setRange(-1e12, 1e12)
-        self._force_replacement.setDecimals(0)
-        self._force_replacement.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.force_replacement"), self._force_replacement)
-
         self._life_ext_factor = QDoubleSpinBox()
         self._life_ext_factor.setRange(0, 10)
         self._life_ext_factor.setDecimals(3)
@@ -246,9 +228,6 @@ class SystemForm(QWidget):
 
         # Cost Limits
         self._max_annual_cost.setValue(s.max_annual_system_cost)
-        self._max_npv_penalty.setValue(s.max_npv_penalty_per_mw)
-        self._max_decom_cost.setValue(s.max_decommission_cost_per_mw)
-        self._force_replacement.setValue(s.force_replacement)
         self._life_ext_factor.setValue(s.life_extension_cost_factor)
 
         # Penalties
@@ -298,9 +277,6 @@ class SystemForm(QWidget):
 
         # Cost Limits
         s.max_annual_system_cost = self._max_annual_cost.value()
-        s.max_npv_penalty_per_mw = self._max_npv_penalty.value()
-        s.max_decommission_cost_per_mw = self._max_decom_cost.value()
-        s.force_replacement = self._force_replacement.value()
         s.life_extension_cost_factor = self._life_ext_factor.value()
 
         # Penalties
