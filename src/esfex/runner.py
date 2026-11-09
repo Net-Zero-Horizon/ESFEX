@@ -2264,8 +2264,10 @@ class Orchestrator:
                     if vgen_info or vbat_info:
                         logger.info(f"Year {year} investments: {', '.join(vgen_info + vbat_info)}")
 
-                    # Run operational dispatch with rolling horizon
-                    # Pass year-specific RE target (not the final target)
+                    # Run operational dispatch with rolling horizon.
+                    # target_re_penetration is a planning target: the dispatch
+                    # gets the master's trajectory value for this year, and
+                    # none in the operations modes (no master).
                     year_re_target = master_re_targets.get(year, 0.0)
                     # Cap at what the fixed plan can physically deliver. The
                     # master's target is an aspirational ramp the least-cost
@@ -2283,7 +2285,8 @@ class Orchestrator:
                                 f"→ achievable={achievable_re:.1%} (plan capacity-limited)"
                             )
                         year_re_target = capped
-                    logger.info(f"Year {year} RE target (operational): {year_re_target:.1%}")
+                    if self.config.simulation_mode == "development":
+                        logger.info(f"Year {year} RE target (operational): {year_re_target:.1%}")
                     year_result = self._run_operational_dispatch(
                         year=year,
                         year_idx=year_idx,
@@ -2292,7 +2295,7 @@ class Orchestrator:
                         hours=len(year_demand),
                         num_nodes=num_nodes,
                         units_config=cumulative_units_config,
-                        re_penetration_target=year_re_target if year_re_target > 0 else None,
+                        re_penetration_target=year_re_target,
                     )
                     year_result.investments = year_investments
                     year_result.retirements = master_retirements.get(year, {})
@@ -5475,7 +5478,9 @@ class Orchestrator:
         Run operational dispatch using rolling horizon.
 
         Args:
-            re_penetration_target: Year-specific RE target (0-1). If None, uses config default.
+            re_penetration_target: Year-specific RE target (0-1), from the
+                development master's trajectory. None or 0: no RE-penetration
+                constraint (operations modes).
 
         Returns:
             YearResults for this year
