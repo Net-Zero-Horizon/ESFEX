@@ -554,13 +554,13 @@ def _load_year_data(h5_path: Path | str, scenario_key: str) -> dict:
             for name in grp["generation"]:
                 data["generation"][name] = grp["generation"][name][:]
 
-        # MW in service of the units the master built, {group: {name: [node]}}
-        data["built_power"] = {}
+        # MW in service of each unit, {group: {name: [node]}}
+        data["power_in_service"] = {}
         for key in ("generation", "battery_discharge"):
             if key in grp:
-                data["built_power"][key] = {
+                data["power_in_service"][key] = {
                     name: mw for name in grp[key]
-                    if (mw := built_power(grp[key], name)) is not None}
+                    if (mw := power_in_service(grp[key], name)) is not None}
 
         # Prices
         if "nodal_electricity_prices" in grp:
@@ -651,11 +651,13 @@ def _recalculate_costs(
     """Reconstruct cost components from generation × config unit costs.
 
     Used when /cost_breakdown/ is not present in HDF5. The units the
-    master built are costed with their technology's config.
+    master built are costed with their technology's config; fixed O&M is
+    charged on each unit's MW in service (``year_data["power_in_service"]``,
+    the configured rating for older files).
     """
     tech_by_name = _index_configs_by_name(tech_configs or [])
     bat_tech_by_name = _index_configs_by_name(bat_tech_configs or [])
-    built = year_data.get("built_power", {})
+    in_service = year_data.get("power_in_service", {})
     costs = {
         "fuel_cost": 0.0,
         "om_cost": 0.0,
@@ -676,7 +678,7 @@ def _recalculate_costs(
         gen_output = year_data["generation"][gen_name]  # [nodes x hours]
         cfg = _lookup_config(
             gen_name, gen_by_name, gen_configs, g_idx, tech_by_name=tech_by_name,
-            built_mw=built.get("generation", {}).get(gen_name))
+            in_service_mw=in_service.get("generation", {}).get(gen_name))
         if not cfg:
             continue
 
@@ -692,8 +694,9 @@ def _recalculate_costs(
             energy_mwh = output_n * temporal_res
 
             costs["fuel_cost"] += float(np.sum(energy_mwh * fuel_cost[n]))
-            # Maintenance per MWh; fixed O&M per MW·yr of rated power, for
-            # the simulated share of the year, whether or not the unit ran
+            # Maintenance per MWh; fixed O&M per MW·yr of the power in
+            # service, for the simulated share of the year, whether or not
+            # the unit ran
             costs["om_cost"] += float(np.sum(energy_mwh * maint_cost[n])) + (
                 fixed_cost[n] * rated[n] * _year_share(gen_output, temporal_res))
 
@@ -721,7 +724,7 @@ def _recalculate_costs(
     ):
         cfg = _lookup_config(
             bat_name, bat_by_name, bat_configs, b_idx, tech_by_name=bat_tech_by_name,
-            built_mw=built.get("battery_discharge", {}).get(bat_name),
+            in_service_mw=in_service.get("battery_discharge", {}).get(bat_name),
             power_key="MaxDischargePower")
         if not cfg:
             continue
@@ -793,10 +796,12 @@ def _index_configs_by_name(configs: list[dict]) -> dict[str, dict]:
 
 
 # The units the master builds have no config of their own: the dispatch
-# names them after their candidate technology, and their datasets carry the
-# MW in service that year in this attr.
+# names them after their candidate technology. Every unit's generation (and
+# battery_discharge) dataset carries its MW in service that year, per node,
+# in this attr: the units the master built, and the existing units after
+# retirement, life extension and degradation.
 INVESTMENT_PREFIX = "Investment "
-BUILT_POWER_ATTR = "rated_power"
+POWER_IN_SERVICE_ATTR = "rated_power"
 
 
 def _by_name(name: str, by_name: dict[str, dict]) -> dict | None:
@@ -814,39 +819,41 @@ def _lookup_config(
     name: str, by_name: dict[str, dict],
     configs: list[dict], idx: int = -1,
     tech_by_name: dict[str, dict] | None = None,
-    built_mw=None, power_key: str = "rated_power",
+    in_service_mw=None, power_key: str = "rated_power",
 ) -> dict:
     """Resolve the config of the unit behind dataset ``name``.
 
     1. The unit's own config, by name.
     2. A unit the master built (``"Investment <technology>"``): the
-       candidate technology's config from ``tech_by_name``, with
-       ``power_key`` set to ``built_mw`` (its MW in service that year, see
-       :func:`built_power`) so that fixed O&M applies to it.
+       candidate technology's config from ``tech_by_name``.
     3. By position, only when no config carries a name (legacy files):
        with names, an unmatched dataset would get another unit's costs.
+
+    With ``in_service_mw`` (the unit's MW in service that year, see
+    :func:`power_in_service`), the returned config's ``power_key`` holds it,
+    so that fixed O&M and capacity apply to the MW in service, not to the
+    configured rating. Files without the attr keep the config's value.
     """
     cfg = _by_name(name, by_name)
-    if cfg is not None:
-        return cfg
-    if tech_by_name and name.startswith(INVESTMENT_PREFIX):
-        tcfg = _by_name(name[len(INVESTMENT_PREFIX):], tech_by_name)
-        if tcfg is not None:
-            tcfg = dict(tcfg)
-            if built_mw is not None:
-                tcfg[power_key] = built_mw
-            return tcfg
-    if not by_name and 0 <= idx < len(configs):
-        return configs[idx]
-    return {}
+    if cfg is None and tech_by_name and name.startswith(INVESTMENT_PREFIX):
+        cfg = _by_name(name[len(INVESTMENT_PREFIX):], tech_by_name)
+    if cfg is None and not by_name and 0 <= idx < len(configs):
+        cfg = configs[idx]
+    if cfg is None:
+        return {}
+    if in_service_mw is not None:
+        cfg = dict(cfg)
+        cfg[power_key] = in_service_mw
+    return cfg
 
 
-def built_power(group, name: str):
-    """The MW in service per node of master-built unit ``name`` in the
-    results ``group`` (``generation``, ``battery_discharge``), or None
-    (an existing unit, or a file written before this attr existed)."""
+def power_in_service(group, name: str):
+    """The MW in service per node of unit ``name`` in the results ``group``
+    (``generation``, ``battery_discharge``), or None for a file written
+    before the attr existed (only the master-built units carried it in
+    files written before the existing units did)."""
     try:
-        val = group[name].attrs.get(BUILT_POWER_ATTR)
+        val = group[name].attrs.get(POWER_IN_SERVICE_ATTR)
     except (KeyError, TypeError, AttributeError):
         return None
     return None if val is None else np.asarray(val, dtype=float)
@@ -1050,7 +1057,7 @@ def compute_system_financials(
         # node is the MW in service the runner records on the dataset (older
         # files: the peak generation); CAPEX is booked on the INCREMENTAL
         # capacity added each year × the technology's per-node invest_cost.
-        gen_built = year_data.get("built_power", {}).get("generation", {})
+        gen_in_service = year_data.get("power_in_service", {}).get("generation", {})
         for ds_name, gen_arr in year_data.get("generation", {}).items():
             if not ds_name.startswith(INVESTMENT_PREFIX):
                 continue
@@ -1059,7 +1066,7 @@ def compute_system_financials(
                 continue
             n_g = gen_arr.shape[0]
             inv_cost_node = _as_array(tcfg.get("invest_cost", 0.0), n_g)
-            mw_node = (_as_array(gen_built[ds_name], n_g) if ds_name in gen_built
+            mw_node = (_as_array(gen_in_service[ds_name], n_g) if ds_name in gen_in_service
                        else np.max(gen_arr, axis=1))
             prev = invest_installed_mw.get(ds_name, np.zeros(n_g))
             incremental = np.maximum(mw_node - prev, 0.0)
@@ -1097,7 +1104,7 @@ def compute_system_financials(
         # records (older files: peak max(charge, discharge)) per node; energy
         # MWh = peak SOC per node. CAPEX = power × invest_cost_power + energy ×
         # invest_cost_energy, booked on incremental capacity.
-        bat_built = year_data.get("built_power", {}).get("battery_discharge", {})
+        bat_in_service = year_data.get("power_in_service", {}).get("battery_discharge", {})
         for ds_name, dis_arr in year_data.get("battery_discharge", {}).items():
             if not ds_name.startswith(INVESTMENT_PREFIX):
                 continue
@@ -1109,8 +1116,8 @@ def compute_system_financials(
             n_b = dis_arr.shape[0]
             cost_p = _as_array(btcfg.get("invest_cost_power", 0.0), n_b)
             cost_e = _as_array(btcfg.get("invest_cost_energy", 0.0), n_b)
-            if ds_name in bat_built:
-                power_node = _as_array(bat_built[ds_name], n_b)
+            if ds_name in bat_in_service:
+                power_node = _as_array(bat_in_service[ds_name], n_b)
             else:
                 dis_peak = np.max(dis_arr, axis=1)
                 chg_peak = (np.max(chg_arr, axis=1) if chg_arr is not None
@@ -1419,14 +1426,14 @@ def compute_technology_financials(
         bat_by_name = _index_configs_by_name(info["bat_configs"])
         tech_by_name = _index_configs_by_name(info["tech_configs"])
         bat_tech_by_name = _index_configs_by_name(info["bat_tech_configs"])
-        built = year_data.get("built_power", {})
+        in_service = year_data.get("power_in_service", {})
 
         for g_idx, gen_name in enumerate(gen_names):
             gen_arr = year_data["generation"][gen_name]
             cfg = _lookup_config(
                 gen_name, gen_by_name, info["gen_configs"], g_idx,
                 tech_by_name=tech_by_name,
-                built_mw=built.get("generation", {}).get(gen_name))
+                in_service_mw=in_service.get("generation", {}).get(gen_name))
 
             if gen_name not in tech_acc:
                 tech_acc[gen_name] = {
@@ -1459,7 +1466,7 @@ def compute_technology_financials(
 
                 fc, fxc, mc = float(fc_n[n]), float(fxc_n[n]), float(mc_n[n])
                 acc["fuel_cost"][y_idx] += float(np.sum(energy)) * fc
-                # Fixed O&M per MW·yr of the node's rated power
+                # Fixed O&M per MW·yr of the node's power in service
                 acc["om_cost"][y_idx] += float(np.sum(energy)) * mc + fxc * float(
                     rated[n]) * _year_share(gen_arr, info["temporal_res"])
 
@@ -1492,7 +1499,7 @@ def compute_technology_financials(
             bat_cfg = _lookup_config(
                 bat_name, bat_by_name, info["bat_configs"], b_idx,
                 tech_by_name=bat_tech_by_name,
-                built_mw=built.get("battery_discharge", {}).get(bat_name),
+                in_service_mw=in_service.get("battery_discharge", {}).get(bat_name),
                 power_key="MaxDischargePower",
             )
             discharge = year_data["battery_discharge"][bat_name]

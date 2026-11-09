@@ -58,7 +58,7 @@ def test_lookup_resolves_master_built_unit_to_its_technology():
     by_name = fa._index_configs_by_name(gens)
     tech_by_name = fa._index_configs_by_name(techs)
     cfg = fa._lookup_config("Investment Cuba - Gas CC (1)", by_name, gens, 0,
-                            tech_by_name=tech_by_name, built_mw=np.array([7.0]))
+                            tech_by_name=tech_by_name, in_service_mw=np.array([7.0]))
     assert cfg["fuel_cost"] == "[3.0]"
     np.testing.assert_array_equal(cfg["rated_power"], [7.0])
     # The technology's own config is not modified
@@ -177,10 +177,10 @@ def test_export_records_technology_costs_and_built_power(tmp_path):
             sc["generation/Investment Gas CC"].attrs["rated_power"], [10.0])
         np.testing.assert_array_equal(
             sc["battery_discharge/Investment Li"].attrs["rated_power"], [5.0])
-        # The configured units keep their config's capacity
+        # The configured units record theirs too (bug sweep S12, see
+        # test_in_service_capacity.py); only discharge datasets carry it
         for name in sc["generation"]:
-            if name != "Investment Gas CC":
-                assert "rated_power" not in sc["generation"][name].attrs
+            assert "rated_power" in sc["generation"][name].attrs
         assert "rated_power" not in sc["battery_charge/Investment Li"].attrs
 
 
