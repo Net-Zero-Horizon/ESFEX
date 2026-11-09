@@ -5263,7 +5263,7 @@ class GridMappingDemandStep(QWidget):
         cells = getattr(res, "cell_annual_mwh", None) if res is not None else None
         if not cells:
             self._lbl_bld_status.setText(
-                self._density_model_missing_text(res)
+                GridMappingDemandStep._density_model_missing_text(res)
                 or tr("grid_builder.run_the_demand_forecast_auto_xgboost"))
             return
         state = self._model.state if self._model else None

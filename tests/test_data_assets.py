@@ -8,6 +8,7 @@ in the package and the rasters are fetched from the data release.
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -78,6 +79,16 @@ def test_population_reads_a_tile_without_the_global_file(tmp_path, monkeypatch):
     full = tmp_path / "gpw_v4_population_density_rev11_2020_30_sec_2020.tif"
     full.write_bytes(b"")
     assert pf._gpw_path(2020, 22.0, -80.0) == full    # a local dataset wins
+
+
+def test_bundled_manifest_lists_population_tiles_and_gdp():
+    data_assets.manifest.cache_clear()
+    man = json.loads(data_assets._MANIFEST_PATH.read_text())
+    names = man["assets"]
+    assert man["tag"]
+    assert "gpw_v4_popdens_2020_n30w090.tif" in names
+    assert "GDP2030_ssp2.tif" in names
+    assert all(len(m["sha256"]) == 64 and m["size"] > 0 for m in names.values())
 
 
 def test_models_ship_with_the_package(tmp_path, monkeypatch):
