@@ -410,6 +410,25 @@ class TestBuses:
         assert model.state.buses[bid].voltage_kv == 33.0
         model.update_bus("missing", voltage_kv=1.0)   # no-op
 
+    def test_set_demand_fractions_is_one_undo_step(self, model):
+        # Apply Demand Fractions once took an undo snapshot (a pickle of the
+        # whole state) and redrew the marker for every bus.
+        idx = model.add_node("N")
+        ids = [model.add_bus(parent_node=idx, role="connection") for _ in range(50)]
+        model._undo_suspended = False
+        seen = []
+        model.busUpdated.connect(seen.append)
+        depth = len(model._undo_stack._stack)
+        n = model.set_demand_fractions({b: 0.02 for b in ids} | {"missing": 1.0},
+                                       roles={ids[0]: "load"})
+        assert n == 50 and seen == []
+        assert len(model._undo_stack._stack) == depth + 1
+        assert model.state.buses[ids[0]].role == "load"
+        assert all(model.state.buses[b].demand_fraction == 0.02 for b in ids)
+        assert model.undo()                       # one undo restores all of it
+        assert model.state.buses[ids[0]].role == "connection"
+        assert all(model.state.buses[b].demand_fraction == 0.0 for b in ids)
+
     def test_get_buses_for_node(self, model):
         model.add_bus(parent_node=0)
         model.add_bus(parent_node=1)

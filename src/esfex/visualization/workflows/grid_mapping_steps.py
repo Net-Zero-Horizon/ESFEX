@@ -5394,8 +5394,10 @@ class GridMappingDemandStep(QWidget):
             applied_demand += write_forecast_demand_csvs(
                 self._nodes_in_scope(), self._forecast_result, out_dir)
 
-        # Apply bus fractions
+        # Apply bus fractions, in one batch (one undo step, no per-bus redraw).
         skipped_connection = 0
+        fractions: dict[str, float] = {}
+        roles: dict[str, str] = {}
         for a in self._assignments:
             bus_id = a["bus_id"]
             new_frac = a["new_fraction"]
@@ -5406,18 +5408,13 @@ class GridMappingDemandStep(QWidget):
                     # (spatial/footprint split across an HV node's busbars, which
                     # role-repair leaves as 'connection'). Promote it to 'load'
                     # so the model honours the demand rather than dropping it.
-                    target_bus.role = "load"
+                    roles[bus_id] = "load"
                 else:
                     # Zero-share busbar: keep it demand-free.
                     skipped_connection += 1
                     continue
-            try:
-                self._model.update_bus(bus_id, demand_fraction=new_frac)
-                applied_fracs += 1
-            except Exception:
-                if bus_id in state.buses:
-                    state.buses[bus_id].demand_fraction = new_frac
-                    applied_fracs += 1
+            fractions[bus_id] = new_frac
+        applied_fracs = self._model.set_demand_fractions(fractions, roles)
         if skipped_connection:
             # Expected, not an error: HV connection busbars (grid junctions) get
             # a zero demand share, so they stay demand-free. Node demand is fully
