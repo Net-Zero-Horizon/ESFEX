@@ -277,7 +277,7 @@ systems:
 
 ### Capacity Adequacy
 
-For each node and year, firm capacity must cover the year's peak demand × `reserve_margin` (default 1.15). Firm capacity counts existing renewable generators at their **capacity credit** (the minimum of their availability profile, so solar contributes almost nothing) and dispatchable generators at full capacity, each times its `risk_coefficient`, plus life-extended capacity, technology investments (renewables also at their capacity credit), and the power of existing and new batteries. Net imports from neighbouring nodes also count, up to the transfer capacity between them (existing lines plus transfer investment), so a node can rely on a neighbour's surplus. A penalised slack keeps the model feasible.
+For each node and year, firm capacity must cover the year's peak demand × `reserve_margin` (default 1.15). Firm capacity counts existing generators, life-extended capacity, technology investments and the power of existing and new batteries, each at its firm share times its `risk_coefficient`: variable renewables (sun, wind, ocean, run-of-river hydro) at their **capacity credit**, the minimum of their availability profile (so solar contributes nothing); every other unit (thermal, biomass, reservoir hydro, storage) at its **mean availability over the node's peak period**, the top 10 % demand steps of the year, so derates, outages and seasonal availability count. A unit without an availability profile counts fully. Net imports from neighbouring nodes also count, up to the transfer capacity between them (existing lines plus transfer investment), so a node can rely on a neighbour's surplus. A penalised slack keeps the model feasible.
 
 
 ### CO₂
