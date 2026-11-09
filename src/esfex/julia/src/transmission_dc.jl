@@ -357,6 +357,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     pwl = transmission.pwl_losses  # may be nothing
     pwl_loss_by_line = has_pwl ?
         [Vector{VariableRef}(undef, hours) for _ in 1:n_line] : nothing
+    vars.line_losses = pwl_loss_by_line
 
     shift_net = demand_shift_net(vars)
 

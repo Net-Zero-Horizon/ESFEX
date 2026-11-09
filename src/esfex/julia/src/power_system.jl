@@ -3774,6 +3774,14 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
     total_demand = sum(@view input.demand[kept, :]) * tres_tot
     total_curt = sum(@view curt[:, kept]) * tres_tot
     total_ls = sum(@view ls[:, kept]) * tres_tot
+    # Transmission losses of the DC loss model (0 when lossless)
+    total_losses = 0.0
+    if vars.line_losses !== nothing && has_values(model)
+        for losses in vars.line_losses, t in kept
+            total_losses += value(losses[t])
+        end
+        total_losses *= tres_tot
+    end
 
     # Renewable energy penetration (unit-free ratio)
     re_gen = 0.0
@@ -4025,7 +4033,7 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         res_static, res_dynamic, res_static_loss, res_dynamic_loss,
         ls, co2_em,
         prices,
-        total_gen, total_demand, 0.0,  # losses (computed by DC power flow)
+        total_gen, total_demand, total_losses,
         re_pen, total_co2, total_ls,
         spillage_out,
         ev_charge_out, ev_v2g_out, ev_soc_out, ev_loss_out,
