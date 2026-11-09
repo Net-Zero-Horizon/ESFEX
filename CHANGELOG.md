@@ -222,6 +222,38 @@ Per-release notes are also published on the
   service in the year per node; `battery_discharge/{name}` of a built
   battery carries its power in service the same way.
 
+- **NPV-based retirement of existing units in `esfex run`.** A new system
+  setting `npv_retirement` (off by default), with
+  `npv_retirement_max_iterations` (default 5) and
+  `npv_retirement_threshold` (default $0), makes a `development` run retire
+  the existing generators and batteries that do not pay for themselves:
+  after the master solve, each unit's NPV is computed from the solved plan
+  (a generator earns `base_lcoe` on the MWh the master dispatched it on the
+  representative days, scaled to the year; a battery earns
+  `npv_annual_return_rate` × its power investment cost × its MW in service;
+  both pay what the master charges them: fuel or fuel price, maintenance,
+  CO2 price, start-ups, fixed O&M, life extension and decommissioning,
+  discounted as the objective is). Units below the threshold are retired for
+  the whole horizon (no capacity, no life extension, no fixed O&M, their
+  `decommissioning_cost` paid once in the first year) and the master is
+  solved again, until no new unit falls below it or after the maximum
+  rounds; the log lists each round's units and NPVs. It works with the
+  monolithic master, Benders, the stochastic master (probability-weighted
+  NPV), each annual master of a myopic run (a unit retired one year stays
+  retired, without paying its decommissioning again) and before MGA. The
+  retired units leave the dispatch, and the results file lists them in a
+  new `npv_retirements` group (unit, node, year, NPV, round, MW). The
+  Studio shows the three
+  settings and `npv_annual_return_rate` under the system's General settings.
+  Off, runs are unchanged. The retired generators count in the yearly
+  `retirement_gen_{g}` attributes of the results file (and in
+  `YearResults.retirements`, the plugins' `post_master_problem` hook and the
+  run summary) from their retirement year on, each retired node in full;
+  their MW in service (`rated_power` of their `generation/` and
+  `battery_discharge/` datasets) is 0 and the dashboard charges them no
+  fixed O&M. Batteries have no retirement attribute in the results file;
+  their NPV retirements are listed in `npv_retirements`.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -816,15 +848,32 @@ Per-release notes are also published on the
   unknown-key warning; Studio projects saved earlier still open and are saved
   without them.
 
-- **The NPV iterative retirement is documented as a Julia API function.**
-  `solve_with_npv_iteration` and its helpers (`calculate_unit_npv`,
-  `get_units_with_negative_npv`, `force_unit_retirements!`) are unchanged,
-  but `esfex run` never calls them in any mode: the master retires units by
-  age and life extension only. The docs (Capacity Expansion §9, Julia API,
-  Configuration Reference, Studio Global Settings) now say so, and that
-  `base_lcoe` and `npv_annual_return_rate` are read only by these functions.
-  The stochastic-programming page no longer claims that the NPV iteration is
-  applied after a stochastic solve.
+- **`base_lcoe` and `npv_annual_return_rate` now take effect** when
+  `npv_retirement` is on (they fed only Julia functions no run called). The
+  docs no longer call them, or the NPV iteration, "Julia API only".
+- **The Julia NPV API works on the solved plan.** `calculate_unit_npv`
+  ignored its `result` (fixed capacity factor = mean availability × an
+  efficiency field generators do not have, so it raised for any generator),
+  and `force_unit_retirements!` did nothing, so `solve_with_npv_iteration`
+  retired nothing. `calculate_unit_npv` now reads the units' operation and
+  costs kept in `MasterProblemResult.unit_operation`
+  (`extract_master_solution(...; unit_operation = true)`,
+  `run_benders_decomposition(...; record_unit_operation = true)`);
+  `retire_units(input, units)` replaces `force_unit_retirements!` (removed);
+  `solve_with_npv_iteration` re-solves with the units retired and takes
+  `solver = :benders`. New: `unit_npvs`, `extract_unit_operation`, the
+  `UnitOperation` and `RetiredUnit` types and the `MasterProblemInput` field
+  `npv_retired_units`.
+
+- **The results file records every unit's capacity in service.** The
+  `rated_power` attribute of each `generation/{name}` and
+  `battery_discharge/{name}` dataset, written so far only for the units the
+  master built, now holds every unit's MW in service per node in that year:
+  for an existing unit, its rating after the master's retirements and life
+  extension (development runs) or, without a master, degraded with age and 0
+  past its `life_time`, as the dispatch charges its fixed O&M. Results files
+  written before keep working: the readers fall back to the configured
+  `rated_power` (`MaxDischargePower` for a battery) of the units without it.
 
 ### Fixed
 
@@ -1847,6 +1896,75 @@ Per-release notes are also published on the
 - **Electrolyzer water cost label.** The Studio's electrolyzer form (all
   five languages) and its GUI page said $/m³; `water_cost` is charged per kg
   of hydrogen produced, so they now say $/kg H₂.
+
+- **Fixed O&M of existing units on the capacity in service.** The results
+  dashboard's per-system costs and the financial analysis's cost
+  reconstruction (results files without a cost breakdown) charged the fixed
+  O&M of existing units on their configured `rated_power`, also after the
+  master retired them at the end of their life or kept only part of them by
+  life extension, and without their degradation. They now use the MW in
+  service the results file records.
+
+- **System Metrics: installed capacity and reserve margin.** The chart's
+  Total Installed Capacity and Reserve Margin summed the configured
+  generators' rated power (averaged over the nodes, not summed), so the MW
+  the master built and its retirements were missing. They now add up each
+  generator's MW in service in the year over the system's nodes.
+
+- **Results charts pair each unit with its own configuration.** The UC
+  Hourly Dispatch, Net Load Duration, Ramp Distribution and Storage SOC
+  charts and the dashboard's UC generation mix took the configuration of
+  the unit in the same position as the dataset. HDF5 lists the datasets
+  alphabetically and the units the master built have no configuration of
+  their own, so a unit could be drawn with another one's fuel (a solar build
+  counted as coal, and missing from the renewable net load). They now find
+  each unit's configuration by name, or its technology's for a unit the
+  master built. The Storage SOC chart's fallback capacity, for a battery
+  without state-of-charge data, reads the battery's `capacity` (it read a
+  field that does not exist). The per-unit investment groups
+  (`gen_investment_power/`, `bat_investment_power/`) of older results files
+  were ignored by the Generation Mix, Cash Flow and System Metrics capex;
+  they are now counted, each with its own unit's `invest_cost`.
+
+- **Technology properties of a build on a network with fewer buses than
+  nodes.** When the master's build of a candidate technology was laid out
+  on the buses for the dispatch, the technology's per-node properties (fuel
+  and maintenance costs, efficiencies, ramp limits, ...) were read by
+  position whenever the node list was at least as long as the bus list (a
+  network with as many or fewer buses than nodes, such as a reduced network
+  that dropped the buses of some nodes): a bus got another node's value,
+  possibly another system's padding zero. Each bus now gets its own node's
+  value.
+
+- **UC charts of the second and later systems were empty.** In a
+  multi-system run, the UC Hourly Dispatch, Load Shedding & Curtailment, Net
+  Load Duration, Ramp Distribution, Storage SOC, Marginal Technology and LMP
+  by Node charts, and the dashboard's UC overview, cut the system's nodes
+  out of data that was already this system's alone. Every system but the
+  first showed no generation, demand, storage or prices (the LMP chart
+  failed). They now read the system's data once. The per-unit on/off status
+  of a system is now limited to its own units and nodes like its
+  generation.
+
+- **Marginal Technology chart: unit capacity.** A unit counted as running
+  below its capacity (and so as a candidate to set the price) against the
+  mean of its per-node rating, which in a merged system is diluted by the
+  other systems' zero entries. It now uses the unit's MW in service over the
+  system's nodes.
+
+- **Financial analysis: capacity payments.** The capacity payment
+  (`capacity_payment`, $/MW·yr) was paid on the first node's configured
+  `rated_power` of each generator (nothing for a unit at another node), the
+  same every year, without the master's builds or retirements. It is now
+  paid on each year's generator MW in service over all nodes.
+
+- **Master capacities on a bus-level master with as many buses as
+  nodes.** The dispatch read the master's capacities (existing units,
+  builds, battery life extension) per node whenever the array was as long
+  as the node list. A master solved on the buses of a network that has as
+  many buses as nodes, without being one bus per node, had its per-bus
+  capacities placed on the wrong nodes. The runner now decides from the
+  master's network whether its results are per bus or per node.
 
 ## [0.3.0] — 2026-08-27
 
