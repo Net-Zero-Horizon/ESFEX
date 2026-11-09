@@ -176,16 +176,26 @@ def test_estimate_line_pu_values():
 def test_transformer_impedance_branches():
     assert Q.estimate_transformer_impedance_pu(0) == 0.10
     assert Q.estimate_transformer_impedance_pu(-5) == 0.10
-    assert Q.estimate_transformer_impedance_pu(5) == 0.06
-    assert Q.estimate_transformer_impedance_pu(50) == 0.10
-    # large unit: 0.10 * 100 / 1000 = 0.01, within clamp
-    assert Q.estimate_transformer_impedance_pu(1000) == pytest.approx(0.01)
-    # very large → clamped to lower bound 0.005
-    assert Q.estimate_transformer_impedance_pu(100000) == 0.005
-    # just at 100 boundary → scaled branch: 0.10*100/100 = 0.10
+    # own-base 6 % below 10 MVA, 10 % above, × S_base / S_rated
+    assert Q.estimate_transformer_impedance_pu(5) == pytest.approx(1.2)
+    assert Q.estimate_transformer_impedance_pu(50) == pytest.approx(0.2)
     assert Q.estimate_transformer_impedance_pu(100) == pytest.approx(0.10)
+    assert Q.estimate_transformer_impedance_pu(1000) == pytest.approx(0.01)
+    # very large → floored at 0.005
+    assert Q.estimate_transformer_impedance_pu(100000) == 0.005
     # ratio arg is ignored
-    assert Q.estimate_transformer_impedance_pu(5, ratio=99) == 0.06
+    assert Q.estimate_transformer_impedance_pu(5, ratio=99) == pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("rated, z_own", [(2.0, 0.06), (8.0, 0.06),
+                                          (20.0, 0.10), (60.0, 0.10),
+                                          (250.0, 0.10)])
+@pytest.mark.parametrize("base", [10.0, 100.0, 1000.0])
+def test_transformer_impedance_scales_with_rating_and_base(rated, z_own, base):
+    """Every size is referred to the system base: z_own × S_base / S_rated
+    (units under 100 MVA used to get a flat 0.06 / 0.10 p.u.)."""
+    z = Q.estimate_transformer_impedance_pu(rated, 2.0, base)
+    assert z == pytest.approx(max(0.005, z_own * base / rated))
 
 
 # ── estimate_transformer_losses_fraction ─────────────────────────────

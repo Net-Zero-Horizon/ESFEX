@@ -492,7 +492,7 @@ The detailed `demand` is always `(num_nodes, hours)` and carries `dimensions = "
 
 | Dataset | Shape | Units | Description |
 |---------|-------|-------|-------------|
-| `power_flow` | (num_nodes, num_nodes, hours) | MW | Flow from node i to node j, aggregated from bus-pair flows; lines inside one node are dropped |
+| `power_flow` | (num_nodes, num_nodes, hours) | MW | Flow from node i to node j, aggregated from bus-pair flows (all parallel lines summed); lines inside one node are dropped |
 | `transfer_margin` | (num_nodes, num_nodes, hours) | MW | Transfer margin slack, aggregated from bus pairs like `power_flow` |
 
 With a rolling horizon, each window contributes only its committed steps (the overlap tail is dropped), as for every other time series.

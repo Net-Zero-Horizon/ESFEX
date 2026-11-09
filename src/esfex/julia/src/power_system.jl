@@ -360,9 +360,9 @@ function build_variables!(model, input::PowerSystemInput)
         bat_spillage = bat_spillage_var
     end
 
-    # Transmission
-    power_flow = Dict{Tuple{Int,Int}, Vector{VariableRef}}()
-    # Note: power flow variables are created per line in TransmissionDC
+    # Transmission: flow variables are created per line in TransmissionDC,
+    # which also fills the bus pair → lines map
+    pair_lines = Dict{Tuple{Int,Int}, Vector{Int}}()
 
     # Voltage angles (bus × hour), bounded to [-π, π] rad
     @variable(model, -π <= voltage_angle[1:n_bus, 1:hours] <= π)
@@ -558,7 +558,7 @@ function build_variables!(model, input::PowerSystemInput)
         gen_output, gen_status, gen_startup, gen_shutdown,
         curtailment, fre_penetration_loss,
         bat_charge, bat_discharge, bat_soc,
-        power_flow, voltage_angle,
+        pair_lines, voltage_angle,
         reserve_static, reserve_dynamic, reserve_static_loss, reserve_dynamic_loss,
         load_shed,
         buses_of_gen, gens_at_bus, buses_of_bat, bats_at_bus;
@@ -3988,18 +3988,18 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         total_co2 += sum(@view gen_out[g, b, kept]) * co2_factor * tres_tot
     end
 
-    # Power flow values (legacy node-pair dict)
-    pf = Dict{Tuple{Int,Int}, Vector{Float64}}()
-    if has_values(model)
-        for (key, var_vec) in vars.power_flow
-            pf[key] = value.(var_vec)
-        end
-    end
-
     # Per-line power flow values
     pf_by_line = nothing
     if has_values(model) && vars.power_flow_by_line !== nothing
         pf_by_line = [value.(pf_var) for pf_var in vars.power_flow_by_line]
+    end
+
+    # Bus-pair flows: sum of every branch between the pair (parallel lines)
+    pf = Dict{Tuple{Int,Int}, Vector{Float64}}()
+    if pf_by_line !== nothing
+        for (key, lines) in vars.pair_lines
+            pf[key] = sum(pf_by_line[ℓ] for ℓ in lines)
+        end
     end
 
     # Battery spillage
