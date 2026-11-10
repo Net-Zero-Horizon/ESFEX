@@ -1103,8 +1103,7 @@ Per-release notes are also published on the
   stochastic scenario. Benders shares each year's target out over its
   representative days and reaches the same optimum.
   `re_penetration_by_year` / `re_penetration_by_system` now report the
-  achieved share (renewable energy over demand). In myopic planning this
-  achieved share anchors the next year's increment bounds.
+  achieved share (renewable energy over demand).
 
 - **The investment budget and capacity adequacy bind.** Their slacks shared
   the RE target's generic penalty of 1 M$ per unit. Going over the budget
