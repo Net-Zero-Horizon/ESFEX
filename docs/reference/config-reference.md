@@ -218,7 +218,7 @@ One entry under `systems`. The uppercase aliases are the legacy keys the Studio 
 | `target_re_penetration` / `TARGET_RE_PENETRATION` | float (0–1) | `1` | Final-year renewable share target of a `development` run (ignored in `economic_dispatch` and `unit_commitment`). See [Master Problem](../user-guide/master-problem.md) |
 | `min_annual_increment` / `MIN_ANNUAL_INCREMENT` | float (≥ 0) | `0.01` | Lower bound on the yearly increase of the RE target path |
 | `max_annual_increment` / `MAX_ANNUAL_INCREMENT` | float (≥ 0) | `0.1` | Upper bound on the yearly increase of the RE target path |
-| `max_annual_system_cost` / `MAX_ANNUAL_SYSTEM_COST` | float | `20000000000` | Annual investment budget cap ($) |
+| `max_annual_system_cost` / `MAX_ANNUAL_SYSTEM_COST` | float | `20000000000` | Annual investment budget cap ($). In the master problem it limits the overnight cost of the technologies, battery technologies, transmission and reservoirs built each investment period; each $ over it costs 10 $ |
 | `life_extension_cost_factor` | float (≥ 0) | `0.2` | Yearly cost of keeping a unit past its lifetime, as a fraction of its `invest_cost` ($/MW) |
 | `npv_annual_return_rate` | float (0–1) | `0.15` | An existing battery's revenue per year in its NPV, as a fraction of its power investment cost (`invest_cost` × MW in service), for the NPV-based retirement |
 | `npv_retirement` | bool | `false` | NPV-based retirement (`development` runs, every master mode): after the master solve, retire for the whole horizon the existing generators and batteries whose NPV in the plan is below `npv_retirement_threshold` (they pay their decommissioning cost in the first year and no fixed O&M), and solve the master again. Off: the master retires units by age and life extension only. See [Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement) |
@@ -887,7 +887,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `loss_of_load` | float | `10000000` | Value of lost load ($/MWh unserved) |
+| `loss_of_load` | float | `10000000` | Value of lost load ($/MWh unserved). In the master problem it also prices the capacity-adequacy shortfall: each MW missing at a node's peak costs `loss_of_load` × the hours of the node's peak period (the top 10 % of the year's demand) |
 | `loss_of_reserve_static` | float | `100` | $/MW static reserve deficit |
 | `loss_of_reserve_dynamic` | float | `100` | $/MW dynamic reserve deficit |
 | `loss_of_inertia` | float | `200` | $/MW-s inertia deficit |
@@ -897,7 +897,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `rooftop_curtailment` | float | `5` | $/MWh rooftop curtailed |
 | `co2_cost` | float | `10` | $/tCO2 |
 | `co2_budget_violation` | float | `500` | $/tCO2 over budget |
-| `fre_penetration_loss` | float | `100` | $/MWh RE shortfall |
+| `fre_penetration_loss` | float | `100` | $/MWh RE shortfall. In the master problem, each MWh of renewable energy a system misses from its annual RE target costs this much (100 $/MWh when it is 0 or less); in the dispatch, the shortfall over a window |
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
 | `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |

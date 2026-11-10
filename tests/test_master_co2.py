@@ -32,8 +32,11 @@ def _gas_built(tmp_path, tag, co2_cost, scenarios=None):
     np.savetxt(demand, np.full(8760, 60.0))
     diesel = _make_generator("Diesel", "Non-renewable", "Diesel", [150.0],
                              degradation_rate=[0.0], fuel_cost=[80.0])
+    # The master pays an annuity (5 %, 25 years): this overnight cost makes
+    # it 200 000 $/MW in the one modelled year
+    crf = 0.05 * 1.05 ** 25 / (1.05 ** 25 - 1)
     gas = _make_technology("gas_new", "Gas", 1, tech_type="Non-renewable",
-                           invest_cost=200000.0, invest_max_power=500.0)
+                           invest_cost=200000.0 / crf, invest_max_power=500.0)
     gas = gas.model_copy(update={"fuel_cost": [150.0]})
     sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],
                                generators={"diesel": diesel}, technologies={"gas_new": gas})

@@ -2323,7 +2323,10 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `initial_re_penetration::Float64`: Initial RE penetration (first year)
 
 ## Penalties
-- `slack_penalty::Float64`: Penalty for constraint violations
+- `loss_of_load_penalty::Float64`: VOLL (cost per MWh not served); also prices
+  the capacity adequacy slack (`adequacy_slack_penalty`)
+- `fre_penetration_loss_penalty::Float64`: cost per MWh of renewable energy
+  missing from a system's annual RE target (`add_re_target_constraints!`)
 
 ## Operational Settings
 - `temporal_resolution_hours::Int`: Hours per timestep (for aggregation)
@@ -2417,7 +2420,6 @@ struct MasterProblemInput
     system_node_ranges::Vector{SystemNodeRange}
 
     # Penalties (from config, not hardcoded)
-    slack_penalty::Float64              # Generic slack for budget/capacity adequacy
     loss_of_load_penalty::Float64       # $/MW not supplied (config: Loss_of_load)
     fre_penetration_loss_penalty::Float64  # $/MWh RE shortfall (config: FRE_penetration_loss)
     max_curtailment_ratio::Float64      # Max curtailment as fraction of RE generation (0.05 = 5%)
@@ -2532,7 +2534,6 @@ function MasterProblemInput(;
     min_re_increment::Float64 = 0.0,
     max_re_increment::Float64 = 1.0,
     system_node_ranges::Vector{SystemNodeRange} = SystemNodeRange[],
-    slack_penalty::Float64 = 1.0,
     loss_of_load_penalty::Float64 = 10.0,
     fre_penetration_loss_penalty::Float64 = 1e-4,
     max_curtailment_ratio::Float64 = 0.05,
@@ -2593,7 +2594,7 @@ function MasterProblemInput(;
         target_re_penetration, initial_re_penetration,
         min_re_increment, max_re_increment,
         system_node_ranges,
-        slack_penalty, loss_of_load_penalty, fre_penetration_loss_penalty,
+        loss_of_load_penalty, fre_penetration_loss_penalty,
         max_curtailment_ratio, curtailment_cost,
         temporal_resolution_hours, representative_days_per_year, min_day_separation,
         investment_resolution_hours,
@@ -2635,16 +2636,20 @@ Container for Master Problem decision variables.
 - `gen_life_extension`: MW of a generator kept past its lifetime (continuous, `nothing` within it)
 - `bat_life_extension`: MW of discharge power of a battery kept past its lifetime (same)
 
-# RE Tracking (indexed by [year])
-- `re_penetration_ratio`: Achieved RE penetration per year
+# RE Tracking (indexed by [(system, year)])
+- `re_penetration_ratio`: the RE share credited to a system in a year (its
+  renewable energy plus the shortfall slack, over its demand); the RE
+  increment bounds act on it
 
 # Operational Variables (per representative day)
 - `operational_subproblems`: Dict mapping (year, day) to PowerSystem models
 
 # Slack Variables
-- `slack_re_target`: RE target slack per year
-- `slack_capacity`: Capacity slack per year per node
-- `slack_budget`: Budget slack per year
+- `slack_re_target`: renewable energy missing from the RE target (MWh/year)
+  per (scenario, system, year), scenario 0 when deterministic; created with
+  the representative days (`add_re_target_constraints!`)
+- `slack_capacity`: Capacity adequacy shortfall (MW) per year per node
+- `slack_budget`: Investment over the annual budget per year
 
 # Capacity in service
 - `capacity_state`: per year, the capacity built and still in service of each
@@ -2674,7 +2679,7 @@ mutable struct MasterProblemVariables
     operational_costs::Dict{Int, Vector{AffExpr}}
 
     # Slack variables
-    slack_re_target::Dict{Int, VariableRef}
+    slack_re_target::Dict{Tuple{Int,Int,Int}, VariableRef}  # (scenario, system, year)
     slack_capacity::Dict{Tuple{Int,Int}, VariableRef}  # (year, node) => slack
     slack_budget::Dict{Int, VariableRef}
 
@@ -2772,19 +2777,30 @@ Solution output from the Master Problem.
     (life-extended MW over the discharge power)
 
 ## Summary Metrics
-- `total_investment_by_year`: Total investment per year (\$)
+- `total_investment_by_year`: overnight cost of the builds of each year (\$,
+    undiscounted): what the annual budget limits
 - `total_operational_cost_by_year`: Operating cost per year (\$, undiscounted):
     the representative days' (or TSAM periods') cost scaled to the year,
     CO2-budget violations included; the expected value over the scenarios in
     a stochastic master; the subproblems' cost in Benders. The annual asset
     costs (fixed O&M, life extension, decommissioning) are not included
-- `re_penetration_by_year`: Achieved RE penetration per year
+- `re_penetration_by_year`: Achieved RE share per year: the renewable energy
+    of the representative days (or TSAM periods) over the demand, both
+    scaled to the year (all systems together; the expected value in a
+    stochastic master)
+- `re_penetration_by_system`: the same per system
 - `cumulative_capacity_by_year`: Cumulative capacity by technology and year
 
 ## Units' operation
 - `unit_operation`: each existing unit's generation and costs per year and
     scenario (`UnitOperation`), for `calculate_unit_npv`; empty unless the
     result was extracted with `unit_operation = true`
+
+## Investment annuities
+- `annuity_cost_by_year`: the investment annuities paid in each year (\$,
+    undiscounted): every build in service that year pays
+    `capital_recovery_factor` × its overnight cost, what the objective
+    charges (base costs and discount rate in a stochastic master)
 """
 struct MasterProblemResult
     # Status
@@ -2830,6 +2846,8 @@ struct MasterProblemResult
     # NPV (extract_master_solution(...; unit_operation = true)); empty
     # unless asked for
     unit_operation::Vector{UnitOperation}
+    # Investment annuities paid per year (undiscounted)
+    annuity_cost_by_year::Vector{Float64}
 end
 
 # Without the fuel builds (no primary energy)
@@ -2838,6 +2856,9 @@ MasterProblemResult(args::Vararg{Any, 21}) =
 # Without the units' operation
 MasterProblemResult(args::Vararg{Any, 22}) =
     MasterProblemResult(args..., UnitOperation[])
+# Without the annuities
+MasterProblemResult(args::Vararg{Any, 23}) =
+    MasterProblemResult(args..., Float64[])
 
 """
     BendersResult
