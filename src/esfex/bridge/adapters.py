@@ -1690,8 +1690,9 @@ class PowerSystemAdapter:
                             resolution_hours,
                         )
 
-            if v_avail is None:
-                logger.warning(f"Virtual gen {key}: NO availability matched for file={avail_file}")
+            # No availability_file: available at full capacity (normal for a
+            # thermal technology; a renewable one is reported once per run
+            # when the runner preloads the profiles, not in every window).
 
             # Per-bus virtual generators: arrays already at bus-level length,
             # expand availability to per-bus and skip node→bus expansion.
@@ -1718,10 +1719,11 @@ class PowerSystemAdapter:
             gen_order.append((key, vgen))
             if is_per_bus and b2n_arg is not None:
                 per_bus_gen_keys.add(key)
-            avail_shape = v_avail.shape if v_avail is not None else "NONE"
-            avail_mean = float(np.mean(v_avail)) if v_avail is not None else 0.0
-            logger.info(f"Virtual gen: {vdata.get('name', key)}, type={vdata.get('type')}, "
-                       f"rated={rp}, avail_shape={avail_shape}, avail_mean={avail_mean:.3f}")
+            avail_mean = float(np.mean(v_avail)) if v_avail is not None else 1.0
+            logger.debug("Virtual gen: %s, type=%s, rated=%s, availability %s (mean %.3f)",
+                         vdata.get('name', key), vdata.get('type'), rp,
+                         "profile" if v_avail is not None else "none, full capacity",
+                         avail_mean)
 
         # Convert batteries
         bat_order = []  # (key, python_config) in Julia push order

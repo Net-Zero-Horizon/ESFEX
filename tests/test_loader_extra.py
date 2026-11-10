@@ -777,6 +777,115 @@ class TestFuelLinking:
         assert sc.generators["unit_0"].maintenance_cost == [60.0, 60.0]
 
 
+def _tech(fuel="Fuel_oil", typ="Non-renewable", **kw):
+    d = {
+        "type": typ,
+        "fuel": fuel,
+        "invest_cost": [900000.0, 900000.0],
+        "invest_max_power": [500.0, 500.0],
+        "eff_at_rated": [0.42, 0.42],
+        "degradation_rate": [0.0, 0.0],
+        "lifetime": 25,
+        "maintenance_cost": [6.4, 6.4],
+        "fixed_cost": [40000.0, 40000.0],
+    }
+    d.update(kw)
+    return d
+
+
+class TestTechnologyFuelLinking:
+    """Candidate technologies get their fuel cost from the fuels block like
+    generators: they kept fuel_cost 0, so the master built fuel-oil engines
+    as free generation (Cuba, 2,538 MW running at no fuel cost)."""
+
+    def _fuel_oil(self):
+        f = _fuel(price_base=405.0, energy_content=11.2, emission_factor=0.279)
+        f["name"] = "Fuel oil"
+        return {"Fuel_oil": f}
+
+    def test_technology_gets_fuel_cost(self):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {"engines": _tech()}
+        sc = _convert_system(data)
+        fc = sc.technologies["engines"].fuel_cost
+        assert fc == pytest.approx([405.0 / 11.2 / 0.42] * 2)
+        # No non-fuel O&M adder: a technology pays capital through invest_cost
+        assert sc.technologies["engines"].maintenance_cost == [6.4, 6.4]
+
+    def test_per_node_efficiency_and_single_value(self):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {
+            "a": _tech(eff_at_rated=[0.4, 0.0]),
+            "b": _tech(eff_at_rated=[0.35]),
+        }
+        sc = _convert_system(data)
+        assert sc.technologies["a"].fuel_cost == pytest.approx([405.0 / 11.2 / 0.4, 0.0])
+        assert sc.technologies["b"].fuel_cost == pytest.approx([405.0 / 11.2 / 0.35] * 2)
+
+    def test_explicit_fuel_cost_wins(self):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {"engines": _tech(fuel_cost=[70.0, 75.0])}
+        sc = _convert_system(data)
+        assert sc.technologies["engines"].fuel_cost == [70.0, 75.0]
+
+    def test_renewables_free_priced_biomass_pays(self):
+        data = _minimal_system()
+        bio = _fuel(price_base=40.0, energy_content=4.5, emission_factor=0.0)
+        data["fuels"] = {**self._fuel_oil(), "Biomass": bio,
+                         "Sun": _fuel(price_base=0.0, energy_content=0.0)}
+        data["technologies"] = {
+            "pv": _tech(fuel="Sun", typ="Renewable", eff_at_rated=[1.0, 1.0]),
+            "wind": _tech(fuel="Wind", typ="Renewable", eff_at_rated=[1.0, 1.0]),
+            "bio": _tech(fuel="Biomass", typ="Renewable", eff_at_rated=[0.3, 0.3]),
+        }
+        sc = _convert_system(data)
+        assert sc.technologies["pv"].fuel_cost == [0.0]
+        assert sc.technologies["wind"].fuel_cost == [0.0]
+        assert sc.technologies["bio"].fuel_cost == pytest.approx([40.0 / 4.5 / 0.3] * 2)
+
+    def test_free_non_renewable_technology_warns(self, caplog):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {
+            "ghost": _tech(fuel="Kerosene"),
+            "nofuel": _tech(fuel="None"),
+            "ok": _tech(),
+            "pv": _tech(fuel="Sun", typ="Renewable"),
+        }
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            _convert_system(data)
+        msgs = [r.getMessage() for r in caplog.records
+                if "candidate technologies with fuel_cost 0" in r.getMessage()]
+        assert len(msgs) == 1
+        assert "ghost" in msgs[0] and "not in fuels" in msgs[0]
+        assert "nofuel" in msgs[0]
+        assert "ok (" not in msgs[0] and "pv" not in msgs[0]
+
+    def test_free_technology_warns_without_fuels_block(self, caplog):
+        data = _minimal_system()
+        data["technologies"] = {"engines": _tech()}
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            _convert_system(data)
+        assert any("candidate technologies with fuel_cost 0" in r.getMessage()
+                   and "engines" in r.getMessage() for r in caplog.records)
+
+    def test_virtual_unit_of_built_capacity_pays_fuel(self):
+        """The fuel cost reaches the units the dispatch and the myopic master
+        build from the technology."""
+        from esfex.runner import technology_unit_fields
+
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {"engines": _tech()}
+        sc = _convert_system(data)
+        fields = technology_unit_fields(
+            sc.technologies["engines"], lambda arr, d: list(arr) or [d])
+        assert fields["fuel_cost"] == pytest.approx([405.0 / 11.2 / 0.42] * 2)
+
+
 class TestGeneratorFractionBounds:
     """min_power is a fraction of rated power and ramps a fraction per hour:
     the loader clamps values outside that range with a warning (Studio
