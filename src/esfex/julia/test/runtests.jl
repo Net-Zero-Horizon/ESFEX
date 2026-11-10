@@ -656,6 +656,90 @@ import Ipopt
             @test calculate_target_ratios(mk(Dict((1, 1) => 0.42)))[(1, 1)] ≈ 0.42
         end
 
+        @testset "master: RE increment bounds stop at 100 %" begin
+            # The minimum increment chained the credited share (at most 1)
+            # from the anchor: an anchor above 1 - min_inc (a myopic year
+            # anchored at last year's achieved share of 107 %, Cuba), or a
+            # long chain, made the master infeasible in presolve.
+            H = 48
+            gas = mkgen("Gas", "Non-renewable", "Gas", [150.0],
+                        [1.0], ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            function re_ratios(years, init, lo, hi)
+                inp = MasterProblemInput(
+                    years = years, network = net, generators = [gas],
+                    batteries = BatteryConfig[],
+                    base_demand = fill(100.0, length(years) * 8760, 1),
+                    target_re_penetration = 0.0, initial_re_penetration = init,
+                    min_re_increment = lo, max_re_increment = hi,
+                    representative_days_per_year = 1, min_day_separation = 1,
+                    loss_of_load_penalty = 10.0, verbose = false)
+                model, mvars, _ = create_master_problem(inp; use_representative_days = true)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                return [value(mvars.re_penetration_ratio[(1, y)]) for y in eachindex(years)]
+            end
+            # One-year master anchored above 100 %: the share stays at 1
+            @test re_ratios([2028], 1.0748, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
+            # Anchor 0.995: the last step is 0.005, not 0.01
+            @test re_ratios([2028], 0.995, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
+            # Perfect foresight: 0.8 + 0.15 per year passes 1 in year 2; the
+            # credited share (paid as shortfall, no renewables) is held at
+            # the floor 0.95, 1, 1
+            r = re_ratios([2025, 2026, 2027], 0.8, 0.15, 0.5)
+            @test r ≈ [0.95, 1.0, 1.0] atol = 1e-6
+            @test ESFEX.re_increment_floor(0.8, 0.15, 0) ≈ 0.8
+            @test ESFEX.re_increment_floor(0.8, 0.15, 1) ≈ 0.95
+            @test ESFEX.re_increment_floor(0.8, 0.15, 2) == 1.0
+            @test ESFEX.re_increment_floor(1.2, 0.01, 0) == 1.0
+            # The RE-1 path never asks for more than 100 %
+            mk2(init) = MasterProblemInput(
+                years = [2025, 2026, 2027], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(100.0, H, 1),
+                target_re_penetration = 1.0, initial_re_penetration = init,
+                min_re_increment = 0.3, max_re_increment = 1.0)
+            @test [calculate_target_ratios(mk2(0.6))[(1, y)] for y in 1:3] ≈ [0.6, 0.9, 1.0]
+
+            # A Benders master that fails (a minimum increment above the
+            # maximum) writes its LP only into debug_lp_dir; it used to go to
+            # the temp folder on every verbose run.
+            bad = MasterProblemInput(
+                years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(100.0, 8760, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                min_re_increment = 0.2, max_re_increment = 0.1,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 10.0, verbose = false)
+            dir, tmp = mktempdir(), mktempdir()
+            withenv("TMPDIR" => tmp) do
+                @test_throws ErrorException run_benders_decomposition(
+                    bad; max_iterations = 3, debug_lp_dir = dir)
+                @test_throws ErrorException run_benders_decomposition(bad; max_iterations = 3)
+            end
+            @test isfile(joinpath(dir, "benders_master_failed_iter1.lp"))
+            @test isempty(readdir(tmp))
+
+            # The conflict of an infeasible master names the two bounds; a
+            # model that was not found infeasible has none
+            model, _, _ = create_master_problem(bad; use_representative_days = true)
+            optimize!(model)
+            @test sort(ESFEX.master_conflict(model)) == [
+                "re_max_increment_s1_y1 : re_ratio_s1_y1 ≤ 0.1",
+                "re_min_increment_s1_y1 : re_ratio_s1_y1 ≥ 0.2"]
+            ok, _, _ = create_master_problem(MasterProblemInput(
+                years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(100.0, 8760, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                verbose = false); use_representative_days = true)
+            optimize!(ok)
+            @test isempty(ESFEX.master_conflict(ok))
+        end
+
         @testset "master: each representative day reads its own inflow" begin
             # An empty reservoir is the only source; day 2 is the peak (the
             # representative) day and the only day with inflow. The day model

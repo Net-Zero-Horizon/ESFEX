@@ -434,7 +434,7 @@ create_optimizer(; solver_name="highs", threads=4, time_limit=3600.0,
 
 For the master problem, `diagnose_infeasibility(model, vars::MasterProblemVariables, input::MasterProblemInput)` reports the values of the slack variables (RE target, budget, capacity) by category as a `Dict{String,Float64}`. It does not compute an IIS.
 
-For an IIS, use a solver that supports it. With Gurobi, setting `ESFEX_DUMP_IIS=1` makes the Python adapter write the first infeasible model as an LP file to `ESFEX_IIS_DIR` and log the constraints `compute_conflict!` finds. The runner also writes `window_infeasible_y<year>_w<window>.lp` to `<output>/logs/` when a dispatch window is not optimal.
+For an IIS, use a solver that supports it. With Gurobi, setting `ESFEX_DUMP_IIS=1` makes the Python adapter write the first infeasible model as an LP file to `ESFEX_IIS_DIR` and log the constraints `compute_conflict!` finds. The runner also writes `window_infeasible_y<year>_w<window>.lp` to `<output>/logs/` when a dispatch window is not optimal. `master_conflict(model; limit=20)` returns the constraints of an infeasible master's conflict as strings (empty when the solver cannot compute one); the myopic runner logs them when a year's master is infeasible. With `ESFEX_BENDERS_DEBUG_LP=1`, Benders writes the master and subproblem LPs that fail to `<output>/logs/` (`run_benders_decomposition(...; debug_lp_dir)`).
 
 ### Model Statistics
 
