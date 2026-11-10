@@ -367,6 +367,8 @@ Julia error tracebacks can be opaque when propagated to Python. Useful aids:
 - The runner writes LP files to `<output>/logs/`: `master_problem_debug.lp` for every master-problem build, and `window_infeasible_y<year>_w<window>.lp` when a dispatch window is not optimal.
 - `PowerSystemAdapter.write_lp(path)` and `MasterProblemAdapter.write_lp(path)` export a built model.
 - With Gurobi, `ESFEX_DUMP_IIS=1` computes an irreducible infeasible subsystem for the first infeasible model and writes it to `ESFEX_IIS_DIR` (default `/tmp`).
+- `ESFEX_BENDERS_DEBUG_LP=1` makes Benders write the master and subproblem LPs that fail in its first five iterations (`benders_master_failed_iter<i>.lp`, `benders_sp_failed_y<y>_d<d>_iter<i>.lp`) to `<output>/logs/`. Without it no LP is written.
+- When a myopic year's master is infeasible, the run stops and logs the constraints that cannot hold together, if the solver can compute them (HiGHS and Gurobi can).
 - `--verbose` raises the console log level. Each run also writes `<output>/logs/optimization_<timestamp>.log`.
 
 ```python
@@ -412,6 +414,7 @@ ESFEX's own variables:
 | `ESFEX_PLUGIN_PATH` | Extra plugin search directories (`os.pathsep`-separated) | unset |
 | `ESFEX_DUMP_IIS` | `1` = write the IIS of the first infeasible model (Gurobi only) | unset |
 | `ESFEX_IIS_DIR` | Directory for the IIS / infeasible LP file | `/tmp` |
+| `ESFEX_BENDERS_DEBUG_LP` | `1` = Benders writes the master and subproblem LPs that fail to `<output>/logs/` | unset |
 | `ESFEX_OPS_ONLY_YEARS` | Debug: run operational dispatch only for these years (comma- or space-separated); same as `Orchestrator.run(dispatch_years=...)`, which takes precedence | unset |
 | `ESFEX_DATA_ROOT` | Dataset root (`esfex.paths`): demand-model training data and the caches the Studio writes (Geofabrik extracts, OSM tiles, CMIP6 subsets, the forecast's population and GDP rasters); `~` is expanded. A model in its `data/models` folder replaces the one shipped in `esfex/assets/models` | `~/.esfex/data` |
 | `ESFEX_ASSETS_URL` | Base URL of the demand-forecast rasters (`esfex.data_assets`); the test suite points it at a missing local folder so tests never download | ESFEX `data-v1` release |
