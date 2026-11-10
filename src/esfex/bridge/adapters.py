@@ -2583,6 +2583,10 @@ class MasterProblemAdapter:
         # RE targets {(system_1idx, year_1idx): share} replacing the RE-1
         # trajectory (myopic mode: each year's target from the full horizon)
         re_target_override: Optional[dict] = None,
+        # Actual RE share per system (1-based order of system_node_ranges, or
+        # one value) the year before the first modelled year, from which the
+        # maximum annual increment is measured (myopic: last year's share)
+        re_share_anchor: Optional[List[float]] = None,
         # Config path for resolving relative file paths (availability, inflow)
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
@@ -2626,6 +2630,10 @@ class MasterProblemAdapter:
             max_re_increment: Maximum annual RE penetration increment
             re_target_override: RE targets {(system, year): share}, both
                 1-based, that replace the RE-1 trajectory (myopic mode)
+            re_share_anchor: actual RE share per system the year before the
+                first modelled year, from which max_re_increment caps the
+                growth (myopic mode: the share the previous year achieved);
+                None = each system's initial share
             life_extension_cost_factor: Cost factor for life extension
                 (default: the system's life_extension_cost_factor)
             decommissioning_cost_factor: Cost factor for decommissioning
@@ -2689,6 +2697,7 @@ class MasterProblemAdapter:
         self.max_re_increment = max_re_increment
         self.system_node_ranges = system_node_ranges or []
         self.re_target_override = re_target_override or {}
+        self.re_share_anchor = [float(a) for a in (re_share_anchor or [])]
         self.life_extension_cost_factor = life_extension_cost_factor
         self.decommissioning_cost_factor = decommissioning_cost_factor
 
@@ -3154,6 +3163,8 @@ class MasterProblemAdapter:
                 "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
                     f"({int(s)}, {int(y)}) => {float(v)!r}"
                     for (s, y), v in self.re_target_override.items()) + ")"),
+            re_share_anchor=(py_to_julia_vector(self.re_share_anchor)
+                             if self.re_share_anchor else jl.seval("Float64[]")),
             # CO2 budgets and start-ups, as in the dispatch (link flow costs
             # ride on the network's lines, `flow_cost`)
             co2_budget_groups=_master_co2_budget_groups(sys, ESFEX),

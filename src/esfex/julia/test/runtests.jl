@@ -660,7 +660,8 @@ import Ipopt
             # The minimum increment chained the credited share (at most 1)
             # from the anchor: an anchor above 1 - min_inc (a myopic year
             # anchored at last year's achieved share of 107 %, Cuba), or a
-            # long chain, made the master infeasible in presolve.
+            # long chain, made the master infeasible in presolve. The floor
+            # is now a priced target: E + slack ≥ floor × D.
             H = 48
             gas = mkgen("Gas", "Non-renewable", "Gas", [150.0],
                         [1.0], ones(H, 1); nb = 1, H = H)
@@ -669,7 +670,7 @@ import Ipopt
                                 100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
                                 TransmissionLineData[], TransformerData[],
                                 ACDCConverterData[], FrequencyConverterData[], 0.1)
-            function re_ratios(years, init, lo, hi)
+            function credited(years, init, lo, hi)
                 inp = MasterProblemInput(
                     years = years, network = net, generators = [gas],
                     batteries = BatteryConfig[],
@@ -677,21 +678,28 @@ import Ipopt
                     target_re_penetration = 0.0, initial_re_penetration = init,
                     min_re_increment = lo, max_re_increment = hi,
                     representative_days_per_year = 1, min_day_separation = 1,
+                    # RE-1 off (its year 1 is the initial share): the floor alone
+                    re_target_override = Dict((1, y) => 0.0 for y in eachindex(years)),
                     loss_of_load_penalty = 10.0, verbose = false)
                 model, mvars, _ = create_master_problem(inp; use_representative_days = true)
                 optimize!(model)
                 @test string(termination_status(model)) == "OPTIMAL"
-                return [value(mvars.re_penetration_ratio[(1, y)]) for y in eachindex(years)]
+                rec = model.ext[:master_re]
+                return [(value(rec[(0, 1, y)][1]) + value(mvars.slack_re_target[(0, 1, y)])) /
+                        rec[(0, 1, y)][2] for y in eachindex(years)]
             end
-            # One-year master anchored above 100 %: the share stays at 1
-            @test re_ratios([2028], 1.0748, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
+            # One-year master anchored above 100 %: the floor stays at 1
+            @test credited([2028], 1.0748, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
             # Anchor 0.995: the last step is 0.005, not 0.01
-            @test re_ratios([2028], 0.995, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
+            @test credited([2028], 0.995, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
             # Perfect foresight: 0.8 + 0.15 per year passes 1 in year 2; the
             # credited share (paid as shortfall, no renewables) is held at
             # the floor 0.95, 1, 1
-            r = re_ratios([2025, 2026, 2027], 0.8, 0.15, 0.5)
+            r = credited([2025, 2026, 2027], 0.8, 0.15, 0.5)
             @test r ≈ [0.95, 1.0, 1.0] atol = 1e-6
+            # A minimum increment above the maximum is no longer infeasible:
+            # the floor is priced, the cap holds the actual share
+            @test credited([2025], 0.0, 0.2, 0.1)[1] ≈ 0.2 atol = 1e-6
             @test ESFEX.re_increment_floor(0.8, 0.15, 0) ≈ 0.8
             @test ESFEX.re_increment_floor(0.8, 0.15, 1) ≈ 0.95
             @test ESFEX.re_increment_floor(0.8, 0.15, 2) == 1.0
@@ -704,14 +712,18 @@ import Ipopt
                 min_re_increment = 0.3, max_re_increment = 1.0)
             @test [calculate_target_ratios(mk2(0.6))[(1, y)] for y in 1:3] ≈ [0.6, 0.9, 1.0]
 
-            # A Benders master that fails (a minimum increment above the
-            # maximum) writes its LP only into debug_lp_dir; it used to go to
+            # A Benders master that fails (a candidate whose build limit is
+            # below 0) writes its LP only into debug_lp_dir; it used to go to
             # the temp folder on every verbose run.
+            o = [0.0]
+            broken = TechnologyConfig("PV", "Renewable", "Sun", [1.0], [-1.0], ones(8760, 1),
+                                      [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                      [25.0], o, o, 50.0, "AC", false, [1.0])
             bad = MasterProblemInput(
                 years = [2025], network = net, generators = [gas],
-                batteries = BatteryConfig[], base_demand = fill(100.0, 8760, 1),
+                batteries = BatteryConfig[], technologies = [broken],
+                base_demand = fill(100.0, 8760, 1),
                 target_re_penetration = 0.0, initial_re_penetration = 0.0,
-                min_re_increment = 0.2, max_re_increment = 0.1,
                 representative_days_per_year = 1, min_day_separation = 1,
                 loss_of_load_penalty = 10.0, verbose = false)
             dir, tmp = mktempdir(), mktempdir()
@@ -728,8 +740,7 @@ import Ipopt
             model, _, _ = create_master_problem(bad; use_representative_days = true)
             optimize!(model)
             @test sort(ESFEX.master_conflict(model)) == [
-                "re_max_increment_s1_y1 : re_ratio_s1_y1 ≤ 0.1",
-                "re_min_increment_s1_y1 : re_ratio_s1_y1 ≥ 0.2"]
+                "tech_inv_y1_t1[1] ≤ -1", "tech_inv_y1_t1[1] ≥ 0"]
             ok, _, _ = create_master_problem(MasterProblemInput(
                 years = [2025], network = net, generators = [gas],
                 batteries = BatteryConfig[], base_demand = fill(100.0, 8760, 1),
@@ -738,6 +749,132 @@ import Ipopt
                 verbose = false); use_representative_days = true)
             optimize!(ok)
             @test isempty(ESFEX.master_conflict(ok))
+        end
+
+        @testset "master: RE growth capped on the actual share (RE-3)" begin
+            # Cheap PV against 100 $/MWh gas, initial share 5 %, at most
+            # +10 points a year. The increments bounded only the credited
+            # share (≤ renewable energy + shortfall), never the renewable
+            # energy itself: the master went 5 % → 100 % in year 1 (Cuba:
+            # 5 % → 89 %).
+            years = [2025, 2026, 2027]
+            Hy = length(years) * 8760
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                        ones(Hy, 1); nb = 1, H = Hy)
+            o = [0.0]
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [1.0], [500.0], ones(Hy, 1),
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            g20(; existing_pv = 0.0, kw...) = MasterProblemInput(; years = years,
+                network = net,
+                generators = existing_pv > 0 ?
+                    [gas, mkgen("PVold", "Renewable", "Sun", [existing_pv], [0.0],
+                                ones(Hy, 1); nb = 1, H = Hy)] : [gas],
+                batteries = BatteryConfig[], technologies = [pv],
+                base_demand = fill(50.0, Hy, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.05,
+                min_re_increment = 0.0, max_re_increment = 0.10,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 0.01, max_curtailment_ratio = 0.05,
+                verbose = false, kw...)
+            function solve_g20(inp)
+                m, v, _ = create_master_problem(inp; use_representative_days = true)
+                ESFEX.set_silent(m)
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                return m, v, extract_master_solution(m, v, inp)
+            end
+            cap = [0.15, 0.25, 0.35]
+
+            inp = g20()
+            m, v, res = solve_g20(inp)
+            @test res.re_penetration_by_year ≈ cap atol = 1e-6
+            @test [value(v.re_penetration_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
+            @test all(value(x) < 1e-6 for x in values(m.ext[:re_cap_slack]))
+            # The cap is measured from the previous year's actual share: no
+            # sun in 2025 (share 0) lets 2026 reach 10 %, not 25 %
+            dark = vcat(zeros(8760, 1), ones(2 * 8760, 1))
+            dinp = g20(technologies = [ESFEX.with_fields(pv; availability = dark)])
+            dm, _, dres = solve_g20(dinp)
+            @test dres.re_penetration_by_year ≈ [0.0, 0.10, 0.20] atol = 1e-6
+            dbr = run_benders_decomposition(dinp; max_iterations = 60, tolerance = 1e-7,
+                                            verbose_benders = false)
+            @test dbr.objective ≈ objective_value(dm) rtol = 1e-6
+            @test dbr.solution.re_penetration_by_year ≈ [0.0, 0.10, 0.20] atol = 1e-4
+            # TSAM periods
+            tinp = g20(use_tsam = true,
+                       tsam_period_start_hours = [[1], [8761], [17521]],
+                       tsam_period_weights = [[365.0], [365.0], [365.0]],
+                       tsam_chronological_order = [[1], [1], [1]])
+            tm, tv, tres = solve_g20(tinp)
+            @test tres.re_penetration_by_year ≈ cap atol = 1e-6
+            # Benders: the same plan and cost
+            br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(m) rtol = 1e-6
+            @test br.solution.re_penetration_by_year ≈ cap atol = 1e-4
+            # Stochastic: per scenario, each on its own renewable energy
+            sc = [Scenario("lo", 0.5, ScenarioMultipliers(fuel_cost = 1.0)),
+                  Scenario("hi", 0.5, ScenarioMultipliers(fuel_cost = 2.0))]
+            sm, sv, _, _ = create_stochastic_master_problem(StochasticMasterInput(inp, sc, true))
+            ESFEX.set_silent(sm)
+            optimize!(sm)
+            @test string(termination_status(sm)) == "OPTIMAL"
+            for k in 1:2, y in 1:3
+                e, d = sm.ext[:master_re][(k, 1, y)]
+                @test value(e) / d <= cap[y] + 1e-6
+            end
+            @test [value(sv.re_penetration_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
+            # A myopic year measures the step from the share the year before
+            # achieved (re_share_anchor), not from the initial share
+            minp = g20(years = [2027], base_demand = fill(50.0, 8760, 1),
+                       re_share_anchor = [0.30],
+                       generators = [mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                                           ones(8760, 1); nb = 1, H = 8760)],
+                       technologies = [ESFEX.with_fields(pv; availability = ones(8760, 1))])
+            _, _, mres = solve_g20(minp)
+            @test mres.re_penetration_by_year[1] ≈ 0.40 atol = 1e-6
+            # The anchor is clamped to [0, 1]
+            @test ESFEX.re_share_anchor(ESFEX.with_fields(minp; re_share_anchor = [1.07]), 1) == 1.0
+            @test ESFEX.re_share_anchor(inp, 1) ≈ 0.05
+
+            # Existing renewables above the cap (30 MW = 60 % of demand,
+            # curtailed at most 5 %) do not make the master infeasible: the
+            # excess is paid at re_cap_penalty (VOLL), no PV is built that
+            # year, and the next years grow 10 points from there
+            xinp = g20(existing_pv = 30.0)
+            xm, xv, xres = solve_g20(xinp)
+            @test sum(xres.tech_investment[1][1]) < 1e-6
+            x1 = 30.0 / 1.05 / 50.0
+            @test xres.re_penetration_by_year ≈ [x1, x1 + 0.1, x1 + 0.2] rtol = 1e-6
+            over = xm.ext[:re_cap_slack][(0, 1, 1)]
+            @test value(over) > 0
+            @test coefficient(objective_function(xm), over) ≈ 0.01
+            @test ESFEX.diagnose_infeasibility(xm, xv, xinp)["total_re_cap_slack"] > 0
+            xbr = run_benders_decomposition(xinp; max_iterations = 60, tolerance = 1e-7,
+                                            verbose_benders = false)
+            @test xbr.objective ≈ objective_value(xm) rtol = 1e-6
+
+            # The annual investment budget binds in every master: 4 M$ a
+            # year buys 4 MW of PV (no RE cap)
+            binp = g20(max_re_increment = 1.0, max_annual_investment = 4.0)
+            bm, bv, bres = solve_g20(binp)
+            @test bres.total_investment_by_year ≈ fill(4.0, 3) rtol = 1e-6
+            @test all(value(bv.slack_budget[y]) < 1e-6 for y in 1:3)
+            bbr = run_benders_decomposition(binp; max_iterations = 60, tolerance = 1e-7,
+                                            verbose_benders = false)
+            @test all(bbr.solution.total_investment_by_year .<= 4.0 + 1e-4)
+            @test bbr.objective ≈ objective_value(bm) rtol = 1e-6
+            bsm, bsv, _, _ = create_stochastic_master_problem(StochasticMasterInput(binp, sc, true))
+            ESFEX.set_silent(bsm)
+            optimize!(bsm)
+            @test extract_master_solution(bsm, bsv, binp).total_investment_by_year ≈
+                  fill(4.0, 3) rtol = 1e-6
         end
 
         @testset "master: each representative day reads its own inflow" begin
@@ -4037,7 +4174,7 @@ import Ipopt
                 base_demand = fill(50.0, H24, 1), target_re_penetration = 0.0,
                 initial_re_penetration = 0.0, max_curtailment_ratio = 0.99,
                 representative_days_per_year = 1, min_day_separation = 1, verbose = false)
-            for iters in (2, 3)
+            for iters in (3, 4)   # the first iterations give no upper bound
                 br = run_benders_decomposition(inp; max_iterations = iters, tolerance = 1e-9,
                                                verbose_benders = false)
                 @test br.iterations == iters && br.gap > 1e-9

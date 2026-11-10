@@ -149,7 +149,7 @@ Any violated constraint in the optimal solution has a clear economic interpretat
 
 RE targets are planning targets: only `development` runs use them. They interpolate linearly from the initial RE share to `target_re_penetration` (default 1.0) over the planning horizon. The initial share is computed from the existing renewable fleet and the first year's demand; it is not a configuration setting. Example: with an initial share of 0.20 and a target of 0.80 over 25 years, the year 10 target is approximately 42.5%.
 
-Annual increment bounds (`min_annual_increment`, default 0.01, and `max_annual_increment`, default 0.10) limit year-to-year changes of the target, reflecting construction timelines and grid integration constraints.
+Annual increment bounds (`min_annual_increment`, default 0.01, and `max_annual_increment`, default 0.10) limit year-to-year changes of the target, reflecting construction timelines and grid integration constraints. The maximum also caps the actual renewable share the plan reaches: each year at most `max_annual_increment` above the previous year's share, so a system at 5 % reaches at most 15 % the next year.
 
 The `economic_dispatch` and `unit_commitment` modes operate a fixed fleet and apply no RE target; the RE penetration they reach is still reported.
 
