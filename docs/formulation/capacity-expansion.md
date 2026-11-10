@@ -433,7 +433,7 @@ RE targets are set per system \(\sigma\) (one global system when the configurati
 \rho^{target}_{\sigma,1} = \rho^{init}_\sigma, \qquad \rho^{target}_{\sigma,y} = \rho^{init}_\sigma + \frac{y - 1}{Y - 1} \left( \rho^{target} - \rho^{init}_\sigma \right) \quad (y \geq 2) \tag{RE-1}
 \]
 
-with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\). In myopic planning each one-year master takes its year's \(\rho^{target}_{\sigma,y}\) from this trajectory over the whole horizon (`re_target_override`), while RE-3 starts from the share reached the year before.
+with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\), and the target never above 1 (the minimum step can otherwise push the path past 100 %). In myopic planning each one-year master takes its year's \(\rho^{target}_{\sigma,y}\) from this trajectory over the whole horizon (`re_target_override`), and RE-3 the bounds perfect foresight places on that year (below).
 
 **RE-2: RE target** (annual, soft, `re_target_s{σ}_y{y}`). The renewable energy of system \(\sigma\) over the year, from its representative days (or TSAM periods) scaled to the year as their cost is, plus the energy missing, covers the target share of its demand scaled the same way:
 
@@ -453,13 +453,15 @@ with \(w_d = \Delta t \, (H_{year}/24)/D_r\) for a representative day and \(\Del
 \rho_{\sigma,y} \, D_{\sigma,y} \leq E^{RE}_{\sigma,y} + s^{re}_{\sigma,y} \tag{RE-2b}
 \]
 
-**RE-3: RE increment bounds** (`re_min_increment_*`, `re_max_increment_*`), with year 1 anchored to the initial penetration:
+**RE-3: RE increment bounds** (`re_min_increment_*`, `re_max_increment_*`), with year 1 anchored to the initial penetration (clamped to \([0, 1]\)):
 
 \[
-\Delta\rho^{min} \leq \rho_{\sigma,y} - \rho_{\sigma,y-1} \leq \Delta\rho^{max} \qquad \forall\, \sigma,\, y, \quad \rho_{\sigma,0} = \rho^{init}_\sigma \tag{RE-3}
+\min\!\big(\Delta\rho^{min},\, 1 - F_{\sigma,y-1}\big) \leq \rho_{\sigma,y} - \rho_{\sigma,y-1} \leq \Delta\rho^{max} \qquad \forall\, \sigma,\, y, \quad \rho_{\sigma,0} = \rho^{init}_\sigma, \quad F_{\sigma,y} = \min\!\big(\rho^{init}_\sigma + y\,\Delta\rho^{min},\, 1\big) \tag{RE-3}
 \]
 
-Each bound is added only when it is active (\(\Delta\rho^{min} > 0\), \(\Delta\rho^{max} < 1\)). The bounds act on the credited share of RE-2b, so a minimum increment may be met by priced shortfall and never makes the master infeasible. The share reported (`re_penetration_by_year`, §12) is the achieved one, \(E^{RE}_{\sigma,y}/D_{\sigma,y}\); in myopic planning it anchors the next year's RE-3.
+Each bound is added only when it is active (\(\Delta\rho^{min} > 0\), \(\Delta\rho^{max} < 1\)). The minimum step stops at 100 %: once the floor \(F_{\sigma,y}\) reaches 1 (a high initial share or a long horizon), the share only has to stay there. The bounds act on the credited share of RE-2b (at most 1), so a minimum increment may be met by priced shortfall and never makes the master infeasible (as long as \(\Delta\rho^{min} \leq \Delta\rho^{max}\)). The share reported (`re_penetration_by_year`, §12) is the achieved one, \(E^{RE}_{\sigma,y}/D_{\sigma,y}\), which can pass 100 % when renewables also charge storage or cover losses.
+
+In myopic planning, year \(k\) (0-based) anchors RE-3 at \(\min(\rho^{init}_\sigma + k\,\Delta\rho^{min},\, 1)\), where the perfect-foresight chain stands the year before, so its one-year master gets the floor \(F_{\sigma,k+1}\) perfect foresight places on that year. The share reached in earlier years does not move it. Earlier versions anchored it at that achieved share: a year that overshot raised every later year's floor, and once the achieved share passed \(1 - \Delta\rho^{min}\) every later master was infeasible.
 
 ### 7.6 Retirement and Life Extension (RET)
 

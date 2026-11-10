@@ -141,6 +141,14 @@ Solve the optimization model. Returns a PuLP-compatible status code:
 | `-1` | Infeasible |
 | `-2` | Unbounded |
 
+### conflict
+
+```python
+def conflict(self, limit: int = 20) -> list[str]
+```
+
+After an infeasible solve, the constraints and bounds that cannot hold together (the solver's irreducible infeasible subsystem), at most `limit` of them. Empty when the solver cannot compute one (HiGHS and Gurobi can) or under Benders. The myopic runner logs them when a year's master is infeasible.
+
 ### get_solution_values
 
 ```python
@@ -268,6 +276,7 @@ class MasterProblemAdapter:
 | `retired_units` | `list[tuple]` | NPV-based retirement: `(kind, unit key, bus)` units an earlier myopic year retired; they stay out of this model and do not pay their decommissioning again. |
 | `npv_unit_keys` | `set[str]` | NPV-based retirement: the generator and battery keys whose NPV is checked (default: all; the myopic runner passes the original units). |
 | `npv_horizon_end` | `int` | NPV-based retirement: last planning year when it goes past `years` (the myopic runner passes it): the NPV also covers the unit's in-service years up to it (`extra_years` of Julia `unit_npvs`). |
+| `debug_lp_dir` | `str` | Folder where Benders writes the master and subproblem LPs that fail (keyword; the runner passes `<output>/logs` when `ESFEX_BENDERS_DEBUG_LP=1`). None: no LP is written. |
 
 **Methods:**
 

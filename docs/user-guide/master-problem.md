@@ -59,6 +59,10 @@ The Master Problem is a **linear program (LP)**. All investment variables are co
 
 In `myopic` mode, each year's model starts from the base-year fleet aged by the number of years elapsed. The capacity built in earlier years is added as existing units: one unit per technology and build year, at the nodes where it was built, with the technology's operating parameters. When the master works on buses (a one-node system with several buses, or development zones), each bus with new capacity gets its own unit on that bus, so the next year's model sees the capacity where it was built. Each unit ages from its build year with the technology's degradation rate and retires at the end of the technology's `lifetime`, as perfect foresight counts its investments. The `invest_max_power` / `invest_max_capacity` of each technology is a limit over the whole horizon, so every year's model can only build what earlier years left. The operational dispatch of each year receives the capacity of that year's model: the existing units plus, per technology, what was built that year and what is left of earlier builds.
 
+Each year's objective holds that year's operating cost and one year of annuities on what that year builds. Capacity built earlier is existing capacity and its annuities are not counted again, so a year that builds little reports a much lower objective than the years before it. The yearly objectives of a myopic run therefore do not add up to the cost of the plan.
+
+If a year's model is not optimal, the myopic run stops with an error that names the year, the solver status and, for an infeasible model with a solver that can compute one (HiGHS and Gurobi can), the constraints that cannot hold together. Later years would otherwise plan from a fleet without that year's builds, and no dispatch is run on the partial plan.
+
 The two modes treat the RE target differently. See [RE Penetration Trajectory](#re-penetration-trajectory).
 
 MGA/SPORES runs only in `perfect_foresight` mode.
@@ -252,16 +256,16 @@ $$
 \tau_y = \rho^{init} + \frac{y-1}{Y-1}\left(\rho^{target} - \rho^{init}\right)
 $$
 
-The step \(\tau_y - \tau_{y-1}\) is then clamped to `[MIN_ANNUAL_INCREMENT, MAX_ANNUAL_INCREMENT]` (defaults 0.01 and 0.10). Because of the clamp, the path can end **below** `TARGET_RE_PENETRATION` (large gap, small maximum step) or **above** it (small gap, larger minimum step).
+The step \(\tau_y - \tau_{y-1}\) is then clamped to `[MIN_ANNUAL_INCREMENT, MAX_ANNUAL_INCREMENT]` (defaults 0.01 and 0.10). Because of the clamp, the path can end **below** `TARGET_RE_PENETRATION` (large gap, small maximum step) or **above** it (small gap, larger minimum step), but never above 100 %.
 
 The path enters the model in three ways:
 
 - Each year, the renewable energy of each system (existing renewable generators plus renewable technologies, over the representative days scaled to the year) plus the energy missing must cover \(\tau_y\) × the system's demand over the same days. The missing energy costs `FRE_penetration_loss` per MWh (100 \$/MWh by default, the dispatch's penalty), discounted like the year's other costs. Battery discharge does not count as renewable. The target is annual: a sunny day may make up for a cloudy one.
-- A yearly RE share credited to the system (its renewable energy plus the energy missing, over its demand) changes from year to year by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT`, starting from \(\rho^{init}\).
+- A yearly RE share credited to the system (its renewable energy plus the energy missing, over its demand, at most 100 %) changes from year to year by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT`, starting from \(\rho^{init}\). The minimum step stops at 100 %: once \(\rho^{init}\) plus the minimum steps reaches it, the share only has to stay there, so these bounds never make the model infeasible (keep `MIN_ANNUAL_INCREMENT` ≤ `MAX_ANNUAL_INCREMENT`).
 
-With several systems, each system has its own target, its own shortfall and its own starting value. The RE share reported for each year is the achieved one: renewable energy over demand, without the shortfall.
+With several systems, each system has its own target, its own shortfall and its own starting value. The RE share reported for each year is the achieved one: renewable energy over demand, without the shortfall. It can pass 100 % when renewables also charge storage or cover losses.
 
-In `myopic` mode, each year is a one-year model whose target is that year's \(\tau_y\) on the same path, computed over the whole horizon from \(\rho^{init}\) to `TARGET_RE_PENETRATION` with the same clamped steps. The increment bounds start from the RE share reached the year before: this year's share must rise by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT` (shortfalls are paid through `FRE_penetration_loss`).
+In `myopic` mode, each year is a one-year model whose target is that year's \(\tau_y\) on the same path, computed over the whole horizon from \(\rho^{init}\) to `TARGET_RE_PENETRATION` with the same clamped steps. The increment bounds are also those of perfect foresight: year \(k\) of the run (counting from 0) starts them from \(\rho^{init} + k \cdot\) `MIN_ANNUAL_INCREMENT` (at most 100 %), so its credited share must reach \(\rho^{init} + (k+1) \cdot\) `MIN_ANNUAL_INCREMENT` (shortfalls are paid through `FRE_penetration_loss`). The share reached in earlier years does not move them.
 
 ```yaml
 systems:

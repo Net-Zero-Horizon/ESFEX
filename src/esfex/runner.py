@@ -509,7 +509,7 @@ def re_target_trajectory(initial: float, target: float, num_years: int,
     """Yearly RE targets of the planning horizon (RE-1, as the Julia
     ``calculate_target_ratios``): the initial share in year 1, then a
     linear path to ``target`` whose yearly step is clamped to
-    ``[min_inc, max_inc]``."""
+    ``[min_inc, max_inc]``, never above 1 (100 %)."""
     path: list[float] = []
     for y in range(num_years):
         if y == 0:
@@ -521,8 +521,19 @@ def re_target_trajectory(initial: float, target: float, num_years: int,
             tau = path[-1] + min_inc
         elif step > max_inc:
             tau = path[-1] + max_inc
-        path.append(tau)
+        path.append(min(tau, 1.0))
     return path
+
+
+def myopic_re_anchor(initial: float, min_inc: float, y_idx: int) -> float:
+    """Year-0 anchor of the RE increment bounds (RE-3) in myopic year
+    *y_idx* (0-based): where the perfect-foresight chain stands the year
+    before, the initial share plus *y_idx* minimum steps, at most 1 (the
+    Julia ``re_increment_floor``). The share reached in earlier years does
+    not move it, so each one-year master gets the bounds perfect foresight
+    places on that year."""
+    start = min(max(float(initial), 0.0), 1.0)
+    return min(start + y_idx * max(float(min_inc), 0.0), 1.0)
 
 
 def _warn_flat_renewable(kind: str, key: str) -> None:
@@ -3696,8 +3707,9 @@ class Orchestrator:
                     system_node_ranges.append((sname, off + 1, cnt, sys_init_re))
                 logger.debug(f"Per-system RE: {per_system_initial_re}")
 
-            # Per-system current RE tracking
-            current_re_per_system: dict[str, float] = dict(per_system_initial_re)
+            # Achieved RE share per system, for the log
+            current_re_per_system: dict[str, float] = {
+                name: init for name, _, _, init in system_node_ranges}
 
             # Each year's RE target follows the perfect-foresight trajectory
             # (RE-1: initial -> TARGET_RE_PENETRATION over the horizon, steps
@@ -3733,7 +3745,14 @@ class Orchestrator:
                 # 1. This year's RE target on the horizon trajectory
                 year_targets = {(s + 1, 1): path[y_idx] for s, path in enumerate(re_paths)}
                 year_target_re = re_paths[0][y_idx]
-                logger.debug(f"  RE target: {year_target_re:.2%} (current: {current_re:.2%})")
+                # The increment bounds (RE-3) perfect foresight places on
+                # this year: anchored where its chain stands the year before
+                # (initial share + y_idx minimum steps, at most 100 %), not
+                # at the share reached, which may pass 100 % and would make
+                # every later year infeasible
+                year_anchor = myopic_re_anchor(overall_initial_re, min_inc, y_idx)
+                logger.debug(f"  RE target: {year_target_re:.2%} (achieved last year: "
+                             f"{current_re:.2%}, increment anchor: {year_anchor:.2%})")
 
                 # 2. The master system as this year sees it: units aged,
                 # earlier years' builds as existing units, limits reduced
@@ -3835,9 +3854,9 @@ class Orchestrator:
                 # 6. Build per-system node ranges with current RE for this year
                 year_sys_ranges: list[tuple] = []
                 if system_node_ranges:
-                    for name, first_bus, n_bus, _ in system_node_ranges:
-                        sys_current_re = current_re_per_system.get(name, current_re)
-                        year_sys_ranges.append((name, first_bus, n_bus, sys_current_re))
+                    for name, first_bus, n_bus, init in system_node_ranges:
+                        year_sys_ranges.append(
+                            (name, first_bus, n_bus, myopic_re_anchor(init, min_inc, y_idx)))
 
                 # 7. Create single-year MasterProblem
                 master = MasterProblemAdapter(
@@ -3849,7 +3868,7 @@ class Orchestrator:
                     discount_rate=getattr(primary, 'discount_rate', 0.05),
                     max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
                     target_re_penetration=year_target_re,
-                    initial_re_penetration=current_re,
+                    initial_re_penetration=year_anchor,
                     min_re_increment=min_inc,
                     max_re_increment=max_inc,
                     system_node_ranges=year_sys_ranges,
@@ -3886,6 +3905,7 @@ class Orchestrator:
                     npv_unit_keys=npv_unit_keys,
                     # The NPV covers the unit's years up to the horizon end
                     npv_horizon_end=years_range[-1],
+                    debug_lp_dir=self._benders_debug_lp_dir(),
                 )
 
                 # 7. Solve
@@ -3893,13 +3913,10 @@ class Orchestrator:
                 status = master.solve()
 
                 if status != 1:
-                    logger.error(f"Myopic year {year}: not optimal (status={status})")
-                    # Continue with empty investments for this year
-                    investments_by_year[year] = {}
-                    retirements_by_year[year] = {}
-                    if fuel_carried:
-                        self._master_fuel_by_year[year] = deepcopy(fuel_carried)
-                    continue
+                    # Later years build on this one: without its plan they
+                    # would plan from a stale fleet, so the run stops
+                    self._report_myopic_failure(master, year, years_range[:y_idx])
+                    return None, None, None, None
 
                 result = master.get_solution_values()
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
@@ -3946,28 +3963,24 @@ class Orchestrator:
                 # 11. Accumulate investments for next year
                 self._accumulate_myopic_investments(year_inv, y_idx, built)
 
-                # 12. Update current RE penetration (global + per-system)
-                re_pen = result.get('re_penetration_by_year', [])
-                if re_pen:
-                    current_re = float(re_pen[0]) if isinstance(re_pen, list) else float(re_pen)
-                else:
-                    current_re = year_target_re
-
-                # Update per-system RE tracking
-                re_per_sys = result.get('re_penetration_by_system', {})
-                for sname, re_vals in re_per_sys.items():
-                    if isinstance(re_vals, (list, tuple)) and re_vals:
+                # 12. Achieved RE share (global + per system), for the log
+                re_pen = np.atleast_1d(result.get('re_penetration_by_year', []))
+                current_re = float(re_pen[0]) if re_pen.size else year_target_re
+                for sname, re_vals in result.get('re_penetration_by_system', {}).items():
+                    re_vals = np.atleast_1d(re_vals)
+                    if sname in current_re_per_system and re_vals.size:
                         current_re_per_system[sname] = float(re_vals[0])
-                    elif isinstance(re_vals, (int, float)):
-                        current_re_per_system[sname] = float(re_vals)
 
                 total_year_inv = sum(year_inv.values())
-                re_sys_str = ", ".join(f"{s}={v:.1%}" for s, v in current_re_per_system.items())
+                re_sys_str = ""
+                if current_re_per_system:
+                    re_sys_str = " (per system: " + ", ".join(
+                        f"{s}={v:.1%}" for s, v in current_re_per_system.items()) + ")"
                 logger.debug(
                     f"  Year {year}: {len(year_inv)} investments "
                     f"({total_year_inv:.0f} MW total), "
                     f"{len(year_ret)} retirements, "
-                    f"RE achieved: {current_re:.2%} (per-system: {re_sys_str})"
+                    f"RE achieved: {current_re:.2%}{re_sys_str}"
                 )
 
             # Summary
@@ -3978,14 +3991,9 @@ class Orchestrator:
                 f"{total_ret} retirements across {num_years} years"
             )
 
-            # Build RE targets from tracked values
-            re_targets_by_year = {}
-            for y_idx, year in enumerate(years_range):
-                if y_idx == 0:
-                    re_targets_by_year[year] = overall_initial_re
-                else:
-                    progress = y_idx / (num_years - 1) if num_years > 1 else 1.0
-                    re_targets_by_year[year] = overall_initial_re + progress * (target_re - overall_initial_re)
+            # Each year's RE target, as its master had it
+            re_targets_by_year = {year: re_paths[0][y_idx]
+                                  for y_idx, year in enumerate(years_range)}
 
             return investments_by_year, retirements_by_year, cumulative_caps_by_year, re_targets_by_year
 
@@ -3996,6 +4004,41 @@ class Orchestrator:
             console.print(f"[bold red]Myopic master problem error:[/bold red] {e}")
             console.print(f"[dim]{tb}[/dim]")
             return None, None, None, None
+
+    def _benders_debug_lp_dir(self) -> Optional[str]:
+        """The run's ``logs`` folder when ``ESFEX_BENDERS_DEBUG_LP=1``: Benders
+        writes the master and subproblem LPs that fail there. None (no LP
+        written) otherwise."""
+        if os.environ.get("ESFEX_BENDERS_DEBUG_LP") != "1":
+            return None
+        lp_dir = self.output_dir / "logs"
+        lp_dir.mkdir(parents=True, exist_ok=True)
+        return str(lp_dir)
+
+    @staticmethod
+    def _report_myopic_failure(master, year: int, solved_years: list[int]) -> None:
+        """Log why a myopic run stops at *year*: the master's termination
+        status, the years already planned and, for an infeasible master,
+        the constraints that cannot hold together (when the solver can
+        compute them)."""
+        status = getattr(master, "_last_status", "") or "unknown status"
+        done = (f"years {solved_years[0]}-{solved_years[-1]} were planned"
+                if solved_years else "no year was planned")
+        lines = [
+            f"Myopic year {year}: the master problem is not optimal ({status}). "
+            f"Each year plans from the fleet the years before it built, so the "
+            f"run stops here ({done}); no dispatch is run on a partial plan."]
+        conflict = master.conflict() if "INFEASIBLE" in status.upper() else []
+        if conflict:
+            lines.append("Constraints that cannot hold together:")
+            lines.extend(f"  {c}" for c in conflict)
+        elif "INFEASIBLE" in status.upper():
+            lines.append(
+                "The RE target, budget and capacity adequacy are priced, so a hard "
+                "limit cannot be met: check the investment limits, the life-extension "
+                "and retirement settings and the custom constraints (the solver "
+                "reported no infeasible subsystem).")
+        logger.error("\n".join(lines))
 
     def _prepare_system_for_myopic_year(
         self,
@@ -4522,6 +4565,7 @@ class Orchestrator:
                 system_config=self.master_system,
                 # Fuel balance, fuel infrastructure and electrolyzers (#89)
                 primary_energy=self._master_fuel_kwargs(self.master_system, years_range[-1]),
+                debug_lp_dir=self._benders_debug_lp_dir(),
             )
 
             # --- MGA mode ---

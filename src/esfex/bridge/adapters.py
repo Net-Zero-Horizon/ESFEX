@@ -2658,9 +2658,12 @@ class MasterProblemAdapter:
                 past ``years`` (a myopic year's master): the NPV also covers
                 the unit's remaining in-service years up to it, its last
                 modelled year's operation held (Julia ``extra_unit_npv``)
-            **kwargs: Additional parameters (system_config: explicit SystemConfig override)
+            **kwargs: Additional parameters (system_config: explicit SystemConfig
+                override; debug_lp_dir: folder where Benders writes the master
+                and subproblem LPs that fail, none when unset)
         """
         system_config_override = kwargs.pop("system_config", None)
+        self.debug_lp_dir = kwargs.pop("debug_lp_dir", None)
         if isinstance(config, ESFEXConfig):
             self.esfex_config = config
             self.system_config = system_config_override or config.primary_system
@@ -3600,6 +3603,20 @@ class MasterProblemAdapter:
             )
             return 0
 
+    def conflict(self, limit: int = 20) -> list[str]:
+        """Constraints and bounds of an infeasible master that cannot hold
+        together (the solver's irreducible infeasible subsystem), at most
+        *limit* of them; empty when the solver cannot compute one (HiGHS
+        and Gurobi can), under Benders, or when no model was solved."""
+        if self._jl_model is None or self.solver_method == "benders":
+            return []
+        try:
+            return [str(c) for c in get_esfex_module().master_conflict(
+                self._jl_model, limit=limit)]
+        except Exception as e:  # diagnosis only: never mask the failure
+            logger.debug(f"No conflict for the master: {e}")
+            return []
+
     def _solve_benders(self) -> int:
         """Solve the master problem by Benders decomposition.
 
@@ -3623,6 +3640,7 @@ class MasterProblemAdapter:
             use_representative_days=self._benders_use_rep_days,
             verbose_benders=self._solver.verbose,
             record_unit_operation=self.npv_retirement,
+            debug_lp_dir=str(self.debug_lp_dir or ""),
         )
         self._benders_solution = self._benders_result.solution
 
