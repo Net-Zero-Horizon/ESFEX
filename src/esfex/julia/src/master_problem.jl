@@ -261,8 +261,9 @@ function build_master_variables!(
     # When system_node_ranges is empty, sys_idx=1 covers all buses
     re_penetration_ratio = Dict{Tuple{Int,Int}, VariableRef}()
 
-    # Slack variables
-    slack_re_target = Dict{Int, VariableRef}()
+    # Slack variables (the RE target's come with the representative days,
+    # add_re_target_constraints!)
+    slack_re_target = Dict{Tuple{Int,Int,Int}, VariableRef}()
     slack_capacity = Dict{Tuple{Int,Int}, VariableRef}()
     slack_budget = Dict{Int, VariableRef}()
 
@@ -388,11 +389,6 @@ function build_master_variables!(
         end
 
         # Slack variables
-        slack_re_target[y_idx] = @variable(model,
-            lower_bound = 0,
-            base_name = "slack_re_y$(y_idx)"
-        )
-
         slack_budget[y_idx] = @variable(model,
             lower_bound = 0,
             base_name = "slack_budget_y$(y_idx)"
@@ -904,72 +900,30 @@ end
 """
     add_budget_constraints!(model, vars, input)
 
-Add annual investment budget constraints.
+Annual investment budget, at each investment-period start: the overnight
+cost of the technologies, battery technologies (power and energy),
+transmission corridors and reservoirs built that year
+(`master_investment_terms`, base costs) stays within
+`max_annual_investment` plus the slack `slack_budget`. The budget limits the
+capital committed in the build year, not the annuities the objective
+charges. The slack is priced at `BUDGET_SLACK_PENALTY` per unit over the
+budget (`master_slack_cost`), so the budget binds unless keeping it would
+cost more than that, and never makes the master infeasible.
 """
 function add_budget_constraints!(
     model::Model,
     vars::MasterProblemVariables,
     input::MasterProblemInput
 )
-    num_years = length(input.years)
-    n_buses = input.network.num_buses
-    b2n = input.network.bus_to_node
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
-    ypp = vars.years_per_inv_period
-
-    # Budget constraints only at investment period starts
-    for y_idx in 1:ypp:num_years
-        annual_cost = AffExpr(0.0)
-
-        # Technology investment costs
-        for t in 1:length(input.technologies)
-            tech = input.technologies[t]
-            for n in 1:n_buses
-                add_to_expression!(annual_cost,
-                    vars.tech_investment[y_idx][t][n],
-                    tech.invest_cost[n])
-            end
-        end
-
-        # Battery technology investment costs
-        for bt in 1:length(input.battery_technologies)
-            btech = input.battery_technologies[bt]
-            for n in 1:n_buses
-                # Power cost
-                add_to_expression!(annual_cost,
-                    vars.bat_tech_power_investment[y_idx][bt][n],
-                    btech.invest_cost_power[n])
-                # Capacity cost
-                add_to_expression!(annual_cost,
-                    vars.bat_tech_capacity_investment[y_idx][bt][n],
-                    btech.invest_cost_capacity[n])
-            end
-        end
-
-        # Transmission investment costs
-        for (var, trans_cost) in corridor_cost_terms(vars.transfer_investment[y_idx],
-                                                     input.network.transference_invest_cost)
-            add_to_expression!(annual_cost, var, trans_cost)
-        end
-
-        # Reservoir investment costs
-        for g in 1:n_gen
-            gen = input.generators[g]
-            if haskey(vars.reservoir_investment[y_idx], g)
-                for n in 1:n_buses
-                    if gen.reservoir_invest_max[n] > 0
-                        add_to_expression!(annual_cost,
-                            vars.reservoir_investment[y_idx][g][n],
-                            gen.reservoir_invest_cost[n])
-                    end
-                end
-            end
-        end
-
-        # Budget constraint with slack
+    annual_cost = Dict{Int, AffExpr}(y => AffExpr(0.0)
+        for y in 1:vars.years_per_inv_period:length(input.years))
+    for t in master_investment_terms(vars, input)
+        t.kind in BUDGET_KINDS || continue
+        add_to_expression!(annual_cost[t.year], t.var, t.cost)
+    end
+    for (y_idx, cost) in sort(collect(annual_cost); by = first)
         @constraint(model,
-            annual_cost <= input.max_annual_investment + vars.slack_budget[y_idx],
+            cost <= input.max_annual_investment + vars.slack_budget[y_idx],
             base_name = "budget_y$(y_idx)"
         )
     end
@@ -1019,35 +973,137 @@ function add_retirement_cascade_constraints!(
 end
 
 """
-    add_re_target_constraints!(model, vars, input, targets)
+    master_systems(input) -> Vector{SystemNodeRange}
 
-Add renewable energy penetration target constraints.
+The systems an RE target holds for: `input.system_node_ranges` (one per
+system of a merged run), or one system over all buses.
+"""
+master_systems(input::MasterProblemInput) = isempty(input.system_node_ranges) ?
+    [SystemNodeRange("global", 1, input.network.num_buses, input.initial_re_penetration)] :
+    input.system_node_ranges
 
-CRITICAL: Python legacy (line 1204) uses EQUALITY constraint:
-  re_penetration_ratio[y] == target
+"""
+    system_day_demand(input, year_idx, start_hour, hours) -> Vector{Float64}
 
-This FORCES the exact target, not a minimum with slack.
+Demand of each system (`master_systems`) over a representative day or TSAM
+period starting at master step `start_hour`: its buses' shares
+(`demand_fraction`) of their node's demand, with the year's demand growth,
+summed over the steps (MW × steps; the caller scales it to the year).
+"""
+function system_day_demand(input::MasterProblemInput, year_idx::Int,
+                           start_hour::Int, hours::Int)
+    D = input.base_demand
+    rows = size(D, 1)
+    growth = (1.0 + input.demand_growth)^(year_idx - 1)
+    systems = master_systems(input)
+    out = zeros(length(systems))
+    for (s, sr) in enumerate(systems), b in sr.first_bus:(sr.first_bus + sr.num_buses - 1)
+        node = input.network.bus_to_node[b]
+        frac = input.network.buses[b].demand_fraction
+        for t in 1:hours
+            out[s] += D[rows > 0 ? mod1(start_hour + t - 1, rows) : 1, node] * frac
+        end
+    end
+    return out .* growth
+end
+
+"""
+    system_day_renewable(ps_vars, tech_output, input, hours) -> Vector{AffExpr}
+
+Renewable output of each system (`master_systems`) over a representative
+day or TSAM period, summed over its steps: the existing generators and
+candidate technologies of type "Renewable" at the system's buses. Battery
+discharge does not count (a battery may charge from fossil units), as in
+the dispatch.
+"""
+function system_day_renewable(ps_vars::PowerSystemVariables, tech_output,
+                              input::MasterProblemInput, hours::Int)
+    systems = master_systems(input)
+    out = [AffExpr(0.0) for _ in systems]
+    for (s, sr) in enumerate(systems)
+        buses = sr.first_bus:(sr.first_bus + sr.num_buses - 1)
+        for (g, gen) in enumerate(input.generators)
+            gen.type == "Renewable" || continue
+            for b in ps_vars.buses_of_gen[g]
+                b in buses || continue
+                for t in 1:hours
+                    add_to_expression!(out[s], ps_vars.gen_output[g, b, t])
+                end
+            end
+        end
+        tech_output === nothing && continue
+        for (tc, tech) in enumerate(input.technologies)
+            tech.type == "Renewable" || continue
+            for b in buses, t in 1:hours
+                add_to_expression!(out[s], tech_output[tc, b, t])
+            end
+        end
+    end
+    return out
+end
+
+"""
+    re_shortfall_penalty(input) -> Float64
+
+Price of a MWh of renewable energy missing from an RE target: the
+configured `fre_penetration_loss_penalty` (`penalties.fre_penetration_loss`,
+a stochastic scenario's × `penalty_fre_penetration`), or the dispatch's
+default of 100 \$/MWh (1e-4 in the master's M\$) when it is not positive.
+"""
+re_shortfall_penalty(input::MasterProblemInput) =
+    input.fre_penetration_loss_penalty > 0 ? input.fre_penetration_loss_penalty : 1e-4
+
+"""
+    add_re_target_constraints!(model, vars, input, y_idx, targets, re_energy, re_demand;
+                               scenario_idx=0) -> AffExpr
+
+Annual renewable-energy target of each system in year `y_idx`. With
+`re_energy[σ]` the system's renewable output and `re_demand[σ]` its demand
+over the representative days (or TSAM periods), each scaled to the year as
+its cost is (MWh/year), and `slack_re_target[(scenario_idx, σ, y_idx)]` the
+renewable energy missing (MWh/year):
+
+    re_energy[σ] + slack ≥ target[σ, y] × re_demand[σ]             (re_target)
+    re_penetration_ratio[σ, y] × re_demand[σ] ≤ re_energy[σ] + slack  (re_ratio)
+
+The target is annual: a sunny day may make up for a cloudy one, as over a
+dispatch window. The ratio is the share credited to the system, on which the
+increment bounds (`add_re_increment_constraints!`) act. Returns the cost of
+the slacks at `re_shortfall_penalty` per MWh, which the caller adds to the
+year's operating cost (discounted and, in a stochastic master, weighted by
+the scenario's probability like it). The renewable energy and demand are
+kept in `model.ext[:master_re]` for the achieved share
+(`master_re_shares`). A system without demand gets no constraint.
 """
 function add_re_target_constraints!(
     model::Model,
     vars::MasterProblemVariables,
     input::MasterProblemInput,
-    targets::Dict{Tuple{Int,Int}, Float64}
-)
-    num_years = length(input.years)
-    n_sys = max(1, length(input.system_node_ranges))
-
-    for s_idx in 1:n_sys
-        for y_idx in 1:num_years
-            target = targets[(s_idx, y_idx)]
-            # Use >= with slack to allow falling short (penalized in objective)
-            # Equality was infeasible: daily RE availability varies by day
-            @constraint(model,
-                vars.re_penetration_ratio[(s_idx, y_idx)] + vars.slack_re_target[y_idx] >= target,
-                base_name = "re_target_s$(s_idx)_y$(y_idx)"
-            )
-        end
+    y_idx::Int,
+    targets::Dict{Tuple{Int,Int}, Float64},
+    re_energy::Vector{AffExpr},
+    re_demand::Vector{Float64};
+    scenario_idx::Int = 0
+)::AffExpr
+    cost = AffExpr(0.0)
+    tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
+    record = get!(() -> Dict{Tuple{Int,Int,Int}, Tuple{AffExpr, Float64}}(),
+                  model.ext, :master_re)
+    for s in eachindex(master_systems(input))
+        demand = re_demand[s]
+        demand > 0 || continue
+        slack = @variable(model, lower_bound = 0,
+            base_name = "slack_re$(tag)_s$(s)_y$(y_idx)")
+        vars.slack_re_target[(scenario_idx, s, y_idx)] = slack
+        credited = re_energy[s] + slack
+        @constraint(model, credited >= targets[(s, y_idx)] * demand,
+            base_name = "re_target$(tag)_s$(s)_y$(y_idx)")
+        @constraint(model, vars.re_penetration_ratio[(s, y_idx)] * demand <= credited,
+            base_name = "re_ratio$(tag)_s$(s)_y$(y_idx)")
+        add_to_expression!(cost, re_shortfall_penalty(input), slack)
+        record[(scenario_idx, s, y_idx)] = (re_energy[s], demand)
     end
+    return cost
 end
 
 """
@@ -1492,26 +1548,94 @@ end
 # =============================================================================
 
 """
-    build_investment_cost_expression(vars, input; mult=nothing, discount_rate=input.discount_rate)
-
-Build the NPV investment cost expression (first-stage costs only).
-Returns an AffExpr containing discounted investment costs at period starts.
-A stochastic scenario's `mult` scales the technology investment costs
-(`invest_cost_renewables` / `invest_cost_conventional`), battery technology
-power and energy costs (`invest_cost_storage` × `bat_invest_cost_power` /
-`bat_invest_cost_capacity`), transmission (`invest_cost_transmission`) and
-converters (`converter_invest_cost`).
+Economic lifetime (years) of a build whose input gives none: transmission
+corridors, and reservoirs, electrolyzers and fuel infrastructure without a
+positive lifetime. It sets the build's annuity (`capital_recovery_factor`)
+and the years it pays it.
 """
-function build_investment_cost_expression(
-    vars::MasterProblemVariables,
-    input::MasterProblemInput;
-    mult::Union{Nothing, ScenarioMultipliers} = nothing,
-    discount_rate::Float64 = input.discount_rate
-)::AffExpr
-    num_years = length(input.years)
+const DEFAULT_ASSET_LIFETIME = 40.0
+
+"""
+Price of the annual investment budget slack (`add_budget_constraints!`) per
+unit of overnight cost over the budget: 10 \$ per \$ exceeded, so a build
+over the budget must save ten times its cost.
+"""
+const BUDGET_SLACK_PENALTY = 10.0
+
+"""
+Investment kinds the annual budget covers (`add_budget_constraints!`):
+converters and the fuel builds are outside it.
+"""
+const BUDGET_KINDS = (:tech, :bat_power, :bat_energy, :transfer, :reservoir)
+
+"""
+    capital_recovery_factor(rate, life) -> Float64
+
+Share of an overnight cost paid each year so that `life` equal payments are
+worth it at discount rate `rate`: `r(1+r)^L / ((1+r)^L − 1)`, or `1/L`
+(straight line) when `rate` is 0. A non-positive `life` takes
+`DEFAULT_ASSET_LIFETIME`.
+"""
+function capital_recovery_factor(rate::Real, life::Real)
+    L = life > 0 ? Float64(life) : DEFAULT_ASSET_LIFETIME
+    abs(rate) < 1e-12 && return 1.0 / L
+    g = (1.0 + rate)^L
+    return rate * g / (g - 1.0)
+end
+
+"""
+    annuity_years(build_year, life, num_years) -> UnitRange{Int}
+
+Years of the horizon (indices `1:num_years`) in which a build of year
+`build_year` is in service and pays its annuity: from the build year while
+its age is below `life` (`DEFAULT_ASSET_LIFETIME` when not positive), as
+`tech_capacity_built` keeps it in service.
+"""
+function annuity_years(build_year::Int, life::Real, num_years::Int)
+    L = life > 0 ? life : DEFAULT_ASSET_LIFETIME
+    return build_year:min(num_years, build_year + ceil(Int, L) - 1)
+end
+
+"""
+    annuity_npv_factor(rate, life, build_year, num_years) -> Float64
+
+Discounted annuities per unit of overnight cost of a build of year
+`build_year`: `capital_recovery_factor(rate, life)` × Σ 1/(1+rate)^(y−1) over
+its `annuity_years`, each year discounted like that year's other costs. A
+build whose life fits in the horizon pays `(1+rate)/(1+rate)^(build_year−1)`
+per unit (its first payment falls in the build year); one built near the
+end pays only for the years left.
+"""
+annuity_npv_factor(rate::Real, life::Real, build_year::Int, num_years::Int) =
+    capital_recovery_factor(rate, life) *
+    sum(1.0 / (1.0 + rate)^(y - 1) for y in annuity_years(build_year, life, num_years);
+        init = 0.0)
+
+"""
+    master_investment_terms(vars, input; mult=nothing) -> Vector{NamedTuple}
+
+Every investment variable of the master as `(kind, year, var, cost, life)`:
+its build year (an investment-period start), its overnight cost per unit
+built and its economic lifetime (years):
+- `:tech`: technology MW, `invest_cost`, `life_time`;
+- `:bat_power` / `:bat_energy`: battery-technology MW / MWh,
+  `invest_cost_power` / `invest_cost_capacity`, `life_time`;
+- `:transfer`: corridor MW, the higher `transference_invest_cost` of its two
+  ends (`corridor_cost_terms`, once per corridor), `DEFAULT_ASSET_LIFETIME`;
+- `:converter`: converter MW, `invest_cost`, `life_time`;
+- `:reservoir`: reservoir MWh, `reservoir_invest_cost`, the generator's
+  `life_time`;
+- `:fuel`: fuel storage, route transport and electrolyzer builds
+  (`master_fuel_investment_terms`).
+A stochastic scenario's `mult` scales the costs: technologies by
+`invest_cost_renewables` / `invest_cost_conventional`, battery technologies
+by `invest_cost_storage` × `bat_invest_cost_power` / `bat_invest_cost_capacity`,
+transmission by `invest_cost_transmission`, converters by
+`converter_invest_cost`, the fuel builds by theirs.
+"""
+function master_investment_terms(vars::MasterProblemVariables, input::MasterProblemInput;
+                                 mult::Union{Nothing, ScenarioMultipliers} = nothing)
     n_buses = input.network.num_buses
-    n_gen = length(input.generators)
-    # Stochastic scenarios scale the unit investment costs
     m_re = mult === nothing ? 1.0 : mult.invest_cost_renewables
     m_conv = mult === nothing ? 1.0 : mult.invest_cost_conventional
     m_sto = mult === nothing ? 1.0 : mult.invest_cost_storage
@@ -1520,72 +1644,113 @@ function build_investment_cost_expression(
     m_tx = mult === nothing ? 1.0 : mult.invest_cost_transmission
     m_cvt = mult === nothing ? 1.0 : mult.converter_invest_cost
 
-    inv_cost = AffExpr(0.0)
-
-    ypp = vars.years_per_inv_period
-    for y_idx in 1:ypp:num_years
-        discount_factor = 1.0 / ((1.0 + discount_rate)^(y_idx - 1))
-
-        investment_cost = AffExpr(0.0)
-
-        # Technology investment
-        for t in 1:length(input.technologies)
-            tech = input.technologies[t]
+    terms = NamedTuple{(:kind, :year, :var, :cost, :life),
+                       Tuple{Symbol, Int, VariableRef, Float64, Float64}}[]
+    term!(kind, y, v, cost, life) = push!(terms,
+        (kind = kind, year = y, var = v, cost = Float64(cost), life = Float64(life)))
+    for y in 1:vars.years_per_inv_period:length(input.years)
+        for (t, tech) in enumerate(input.technologies)
             m_t = tech.type == "Renewable" ? m_re : m_conv
             for n in 1:n_buses
-                add_to_expression!(investment_cost,
-                    vars.tech_investment[y_idx][t][n],
-                    tech.invest_cost[n] * m_t)
+                term!(:tech, y, vars.tech_investment[y][t][n], tech.invest_cost[n] * m_t,
+                      tech.life_time[n])
             end
         end
-
-        # Battery technology investment
-        for bt in 1:length(input.battery_technologies)
-            btech = input.battery_technologies[bt]
-            for n in 1:n_buses
-                add_to_expression!(investment_cost,
-                    vars.bat_tech_power_investment[y_idx][bt][n],
-                    btech.invest_cost_power[n] * m_bat_p)
-                add_to_expression!(investment_cost,
-                    vars.bat_tech_capacity_investment[y_idx][bt][n],
-                    btech.invest_cost_capacity[n] * m_bat_e)
-            end
+        for (bt, btech) in enumerate(input.battery_technologies), n in 1:n_buses
+            term!(:bat_power, y, vars.bat_tech_power_investment[y][bt][n],
+                  btech.invest_cost_power[n] * m_bat_p, btech.life_time[n])
+            term!(:bat_energy, y, vars.bat_tech_capacity_investment[y][bt][n],
+                  btech.invest_cost_capacity[n] * m_bat_e, btech.life_time[n])
         end
-
-        # Transmission investment
-        for (var, trans_cost) in corridor_cost_terms(vars.transfer_investment[y_idx],
-                                                     input.network.transference_invest_cost)
-            add_to_expression!(investment_cost, var, trans_cost * m_tx)
+        for (v, cost) in corridor_cost_terms(vars.transfer_investment[y],
+                                             input.network.transference_invest_cost)
+            term!(:transfer, y, v, cost * m_tx, DEFAULT_ASSET_LIFETIME)
         end
-
-        # Converter investment
         for (key, conv) in master_converters(input.network)
-            v = get(vars.converter_investment[y_idx], key, nothing)
-            v === nothing || add_to_expression!(investment_cost, v, conv.invest_cost * m_cvt)
+            v = get(vars.converter_investment[y], key, nothing)
+            v === nothing || term!(:converter, y, v, conv.invest_cost * m_cvt, conv.life_time)
         end
-
-        # Reservoir capacity investment
-        for g in 1:n_gen
-            gen = input.generators[g]
-            if haskey(vars.reservoir_investment[y_idx], g)
-                for n in 1:n_buses
-                    if gen.reservoir_invest_max[n] > 0
-                        add_to_expression!(investment_cost,
-                            vars.reservoir_investment[y_idx][g][n],
-                            gen.reservoir_invest_cost[n])
-                    end
-                end
+        for (g, gen) in enumerate(input.generators)
+            haskey(vars.reservoir_investment[y], g) || continue
+            for n in 1:n_buses
+                gen.reservoir_invest_max[n] > 0 || continue
+                term!(:reservoir, y, vars.reservoir_investment[y][g][n],
+                      gen.reservoir_invest_cost[n], gen.life_time[n])
             end
         end
-
-        add_to_expression!(inv_cost, investment_cost, discount_factor)
     end
-
     # M2 (#89): fuel storage, route transport and electrolyzer builds
-    add_to_expression!(inv_cost, master_fuel_investment_cost(vars, input;
-        mult = mult, discount_rate = discount_rate))
+    for (y, v, cost, life) in master_fuel_investment_terms(vars, input; mult = mult)
+        term!(:fuel, y, v, cost, life)
+    end
+    return terms
+end
 
+"""
+    build_investment_cost_expression(vars, input; mult=nothing, discount_rate=input.discount_rate)
+
+Discounted investment cost of the plan, as annuities: each unit (MW, MWh)
+built pays `capital_recovery_factor(discount_rate, life)` × its overnight
+cost in every year of the horizon it is in service (`annuity_years`),
+discounted to the base year like the other annual costs
+(`annuity_npv_factor`). Nothing is charged after the horizon, so a build
+near its end pays only for the years it serves, as in GenX and PyPSA,
+instead of its whole overnight cost with no residual value. The terms and
+the stochastic multipliers are `master_investment_terms`'; `discount_rate`
+is the scenario's in a stochastic master.
+"""
+function build_investment_cost_expression(
+    vars::MasterProblemVariables,
+    input::MasterProblemInput;
+    mult::Union{Nothing, ScenarioMultipliers} = nothing,
+    discount_rate::Float64 = input.discount_rate
+)::AffExpr
+    num_years = length(input.years)
+    inv_cost = AffExpr(0.0)
+    for t in master_investment_terms(vars, input; mult = mult)
+        t.cost == 0 && continue
+        add_to_expression!(inv_cost, t.var,
+            t.cost * annuity_npv_factor(discount_rate, t.life, t.year, num_years))
+    end
     return inv_cost
+end
+
+"""
+    adequacy_slack_penalty(input, y_idx, ni) -> Float64
+
+Price per MW of capacity adequacy shortfall at node `ni` in year `y_idx`
+(`slack_capacity`): the loss-of-load penalty (VOLL, per MWh) × the hours of
+the node's peak period, the steps `adequacy_peak_steps` takes as the peak
+(the top 10 % of the year's demand) × the step length. A MW missing at the
+peak would leave load unserved in each of those hours, so the slack costs
+more than any firm capacity and binds unless no build can close the gap.
+"""
+adequacy_slack_penalty(input::MasterProblemInput, y_idx::Int, ni::Int) =
+    input.loss_of_load_penalty * length(adequacy_peak_steps(input, y_idx, ni)) *
+    max(1, input.temporal_resolution_hours)
+
+"""
+    master_slack_cost(vars, input; discount_rate=input.discount_rate) -> AffExpr
+
+Cost of the first-stage slacks, each year discounted like its other costs:
+the investment over the annual budget at `BUDGET_SLACK_PENALTY` per unit and
+the capacity adequacy shortfall at `adequacy_slack_penalty` per MW. (The RE
+target's shortfall is an operating cost of the year, `add_re_target_constraints!`.)
+"""
+function master_slack_cost(vars::MasterProblemVariables, input::MasterProblemInput;
+                           discount_rate::Float64 = input.discount_rate)
+    cost = AffExpr(0.0)
+    for y_idx in eachindex(input.years)
+        df = 1.0 / (1.0 + discount_rate)^(y_idx - 1)
+        v = get(vars.slack_budget, y_idx, nothing)
+        v === nothing || add_to_expression!(cost, v, BUDGET_SLACK_PENALTY * df)
+        for ni in 1:input.network.num_nodes
+            v = get(vars.slack_capacity, (y_idx, ni), nothing)
+            v === nothing && continue
+            add_to_expression!(cost, v, adequacy_slack_penalty(input, y_idx, ni) * df)
+        end
+    end
+    return cost
 end
 
 """
@@ -1789,7 +1954,10 @@ end
 """
     build_master_objective!(model, vars, input)
 
-Build the objective function: NPV of investment + operational costs.
+Build the objective function: the discounted investment annuities
+(`build_investment_cost_expression`), the existing assets' annual costs,
+the representative days' operating cost (RE-target shortfall and CO2-budget
+violations included) and the budget and adequacy slacks (`master_slack_cost`).
 """
 function build_master_objective!(
     model::Model,
@@ -1820,14 +1988,8 @@ function build_master_objective!(
         end
     end
 
-    # Slack penalties
-    for y_idx in 1:num_years
-        add_to_expression!(total_cost, vars.slack_re_target[y_idx], input.slack_penalty)
-        add_to_expression!(total_cost, vars.slack_budget[y_idx], input.slack_penalty)
-        for ni in 1:input.network.num_nodes
-            add_to_expression!(total_cost, vars.slack_capacity[(y_idx, ni)], input.slack_penalty)
-        end
-    end
+    # Budget and adequacy slacks (the RE shortfall is in the operating cost)
+    add_to_expression!(total_cost, master_slack_cost(vars, input))
 
     @objective(model, Min, total_cost)
 
@@ -2599,98 +2761,8 @@ function add_day_operational_constraints!(
     remainder_premium = add_day_sectoral_shed_constraints!(model, ps_vars, input,
         demand_slice, start_hour, growth_factor; label = "y$(year_idx)_d$(day_idx)")
 
-    # =========================================================================
-    # CRITICAL: Per-System Renewable Penetration Constraints — master-specific
-    # Links to re_penetration_ratio[(s,y)] variable
-    # MUST include both existing generators AND technology investments
-    # =========================================================================
-    targets = calculate_target_ratios(input)
-
-    # Build system ranges (default: single system covering all buses)
-    sys_ranges = input.system_node_ranges
-    if isempty(sys_ranges)
-        sys_ranges = [SystemNodeRange("global", 1, n_buses, input.initial_re_penetration)]
-    end
-
-    for (s_idx, sr) in enumerate(sys_ranges)
-        sys_first = sr.first_bus
-        sys_last = sr.first_bus + sr.num_buses - 1
-        sys_buses = Set(sys_first:sys_last)
-
-        sys_renewable = AffExpr(0.0)
-        sys_generation = AffExpr(0.0)
-
-        # Existing generators — only count buses in this system
-        for g in 1:n_gen
-            gen = input.generators[g]
-            is_renewable = gen.type == "Renewable"
-            for n in ps_vars.buses_of_gen[g]
-                n in sys_buses || continue
-                for t in 1:hours
-                    add_to_expression!(sys_generation, ps_vars.gen_output[g, n, t])
-                    if is_renewable
-                        add_to_expression!(sys_renewable, ps_vars.gen_output[g, n, t])
-                    end
-                end
-            end
-        end
-
-        # Technology investments — only count buses in this system
-        if tech_output !== nothing
-            for tc in 1:n_tech
-                tech = input.technologies[tc]
-                is_renewable = tech.type == "Renewable"
-                for b in sys_first:sys_last
-                    for t in 1:hours
-                        add_to_expression!(sys_generation, tech_output[tc, b, t])
-                        if is_renewable
-                            add_to_expression!(sys_renewable, tech_output[tc, b, t])
-                        end
-                    end
-                end
-            end
-        end
-
-        target_ratio = targets[(s_idx, year_idx)]
-
-        # System demand for this day (only system's buses)
-        sys_demand_day = 0.0
-        for t in 1:hours
-            actual_hour = start_hour + t - 1
-            hours_in_data = size(input.base_demand, 1)
-            hour_in_year = hours_in_data > 0 ? mod1(actual_hour, hours_in_data) : 1
-            for b in sys_first:sys_last
-                parent_node = input.network.bus_to_node[b]
-                bus_fraction = input.network.buses[b].demand_fraction
-                sys_demand_day += input.base_demand[hour_in_year, parent_node] * bus_fraction
-            end
-        end
-        sys_demand_day *= growth_factor
-
-        # Map bus range to unique nodes for node-level variables
-        sys_node_set = unique([input.network.bus_to_node[b] for b in sys_first:sys_last])
-        sys_fre_loss = @expression(model,
-            sum(ps_vars.fre_penetration_loss[n, t] for n in sys_node_set, t in 1:hours))
-
-        # RE minimum: at least target_ratio of system demand must be renewable
-        @constraint(model,
-            sys_renewable + sys_fre_loss >= target_ratio * sys_demand_day,
-            base_name = "re_min_day_s$(s_idx)_y$(year_idx)_d$(day_idx)")
-
-        # NOTE: No per-day maximum RE constraint. Exceeding the RE target on
-        # high-availability days is physically valid and expected. The annual
-        # re_target constraint (with slack) ensures the overall ratio is met.
-
-        if sys_demand_day > 0
-            # RE ratio lower bound: ratio represents the worst-case daily fraction
-            @constraint(model,
-                vars.re_penetration_ratio[(s_idx, year_idx)] * sys_demand_day <= sys_renewable + sys_fre_loss,
-                base_name = "re_ratio_lb_s$(s_idx)_y$(year_idx)_d$(day_idx)")
-            # NOTE: No upper bound on per-day RE ratio. The re_penetration_ratio
-            # represents the minimum achieved fraction across all representative
-            # days, allowing higher RE on favorable days.
-        end
-    end
+    # The RE target is annual (add_re_target_constraints!): the caller adds
+    # the day's system_day_renewable and system_day_demand to the year's.
 
     # =========================================================================
     # Maximum Curtailment Constraint — master-specific
@@ -3089,9 +3161,11 @@ function day_operational_cost(
             add_to_expression!(cost, ps_vars.load_shed[b, t], input.loss_of_load_penalty)
         end
 
+        # RE-target shortfall: the Benders subproblems' slack (the monolithic
+        # master's is annual, add_re_target_constraints!; there it stays 0)
         for n in 1:n_nodes
             add_to_expression!(cost, ps_vars.fre_penetration_loss[n, t],
-                input.fre_penetration_loss_penalty)
+                re_shortfall_penalty(input))
         end
 
         # Curtailment penalty (existing renewable generators).
@@ -3346,6 +3420,9 @@ function add_representative_days_validation!(
 
         vars.operational_costs[y_idx] = AffExpr[]
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
+        # Each system's renewable output and demand, scaled to the year
+        re_energy = [AffExpr(0.0) for _ in master_systems(input)]
+        re_demand = zeros(length(re_energy))
 
         for (day_idx, start_hour) in enumerate(rep_days)
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
@@ -3377,16 +3454,41 @@ function add_representative_days_validation!(
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
                 rep_day_scaling(input))
 
-            # The day's CO2, scaled to the year like its cost
+            # The day's CO2, renewable output and demand, scaled to the
+            # year like its cost
             for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
                 add_to_expression!(annual_co2[k], e, rep_day_scaling(input))
             end
+            add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
+                        start_hour, hours, rep_day_scaling(input))
         end
 
         push!(vars.operational_costs[y_idx],
             add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
                 scenario_idx=scenario_idx))
+        push!(vars.operational_costs[y_idx],
+            add_re_target_constraints!(model, vars, input, y_idx, targets,
+                re_energy, re_demand; scenario_idx=scenario_idx))
     end
+end
+
+"""
+    add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
+                start_hour, hours, scale)
+
+Add a representative day's (or TSAM period's) renewable output
+(`system_day_renewable`) and demand (`system_day_demand`) per system,
+× `scale` (step length × the days it stands for), to the year's.
+"""
+function add_day_re!(re_energy::Vector{AffExpr}, re_demand::Vector{Float64},
+                     ps_vars::PowerSystemVariables, tech_output,
+                     input::MasterProblemInput, y_idx::Int, start_hour::Int,
+                     hours::Int, scale::Float64)
+    for (s, e) in enumerate(system_day_renewable(ps_vars, tech_output, input, hours))
+        add_to_expression!(re_energy[s], e, scale)
+    end
+    re_demand .+= scale .* system_day_demand(input, y_idx, start_hour, hours)
+    return nothing
 end
 
 # =============================================================================
@@ -3460,6 +3562,8 @@ function add_tsam_periods_validation!(
 
         vars.operational_costs[y_idx] = AffExpr[]
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
+        re_energy = [AffExpr(0.0) for _ in master_systems(input)]
+        re_demand = zeros(length(re_energy))
 
         # --- Create inter-period SOC boundary variables ---
         if input.tsam_inter_period_linking && n_bat > 0
@@ -3604,16 +3708,22 @@ function add_tsam_periods_validation!(
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
                 max(1.0, input.temporal_resolution_hours) * weight)
 
-            # The period's CO2, weighted to the year like its cost
+            # The period's CO2, renewable output and demand, weighted to
+            # the year like its cost
             tres = max(1.0, input.temporal_resolution_hours)
             for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
                 add_to_expression!(annual_co2[k], e, tres * weight)
             end
+            add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
+                        start_hour, hours, tres * weight)
         end
 
         push!(vars.operational_costs[y_idx],
             add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
                 scenario_idx=scenario_idx))
+        push!(vars.operational_costs[y_idx],
+            add_re_target_constraints!(model, vars, input, y_idx, targets,
+                re_energy, re_demand; scenario_idx=scenario_idx))
     end
 end
 
@@ -3681,9 +3791,8 @@ function create_master_problem(
         end
     end
 
-    # Also add the simple RE target constraint as a fallback
-    # (but the real enforcement comes from representative days)
-    add_re_target_constraints!(model, vars, input, targets)
+    # The annual RE targets come with the representative days / TSAM periods
+    # (add_re_target_constraints!), which hold the renewable energy
 
     # Add RE increment constraints (min/max annual change in RE ratio)
     add_re_increment_constraints!(model, vars, input)
@@ -3846,9 +3955,6 @@ function extract_master_solution(
                     end
                 end
             end
-            for n in 1:n_buses
-                total_inv_by_year[y_idx] += tech_inv[y_idx][t][n] * tech.invest_cost[n]
-            end
         end
 
         # Battery technology investment extraction
@@ -3872,10 +3978,6 @@ function extract_master_solution(
                     end
                 end
             end
-            for n in 1:n_buses
-                total_inv_by_year[y_idx] += bat_tech_pow_inv[y_idx][bt][n] * btech.invest_cost_power[n]
-                total_inv_by_year[y_idx] += bat_tech_cap_inv[y_idx][bt][n] * btech.invest_cost_capacity[n]
-            end
         end
 
         # Transmission investment
@@ -3889,22 +3991,11 @@ function extract_master_solution(
             end
         end
 
-        # RE penetration — average across systems weighted by demand
-        n_sys = max(1, length(input.system_node_ranges))
-        re_sum = 0.0
-        for s_idx in 1:n_sys
-            re_sum += value(vars.re_penetration_ratio[(s_idx, y_idx)])
-        end
-        re_by_year[y_idx] = re_sum / n_sys  # unweighted mean across systems
     end
 
-    # Per-system RE penetration
-    re_by_system = Dict{String, Vector{Float64}}()
-    n_sys = max(1, length(input.system_node_ranges))
-    for s_idx in 1:n_sys
-        sname = isempty(input.system_node_ranges) ? "global" : input.system_node_ranges[s_idx].name
-        re_by_system[sname] = [value(vars.re_penetration_ratio[(s_idx, y_idx)]) for y_idx in 1:num_years]
-    end
+    # Achieved RE share per year and system
+    re_by_year, re_by_system = master_re_shares(input,
+        master_re_energy(model, vars, input))
 
     # Extract reservoir investment
     res_inv = Dict{Int, Dict{Int, Vector{Float64}}}()
@@ -3913,11 +4004,6 @@ function extract_master_solution(
         for g in 1:n_gen
             if haskey(vars.reservoir_investment[y_idx], g)
                 res_inv[y_idx][g] = [value(vars.reservoir_investment[y_idx][g][n]) for n in 1:n_buses]
-                # Add to investment cost summary
-                gen = input.generators[g]
-                for n in 1:n_buses
-                    total_inv_by_year[y_idx] += res_inv[y_idx][g][n] * gen.reservoir_invest_cost[n]
-                end
             end
         end
     end
@@ -3929,21 +4015,19 @@ function extract_master_solution(
         for (key, var) in get(vars.converter_investment, y_idx, Dict{Tuple{String,Int}, VariableRef}())
             conv_inv[y_idx][key] = value(var)
         end
-        for (key, conv) in master_converters(input.network)
-            total_inv_by_year[y_idx] += get(conv_inv[y_idx], key, 0.0) * conv.invest_cost
-        end
     end
 
-    # Transmission corridors (charged once per corridor, as in the objective)
-    for (y_idx, inv) in vars.transfer_investment
-        for (var, cost) in corridor_cost_terms(inv, input.network.transference_invest_cost)
-            total_inv_by_year[y_idx] += value(var) * cost
+    # Overnight cost of each year's builds, and the annuities each year pays
+    # (base costs and discount rate)
+    annuity_by_year = zeros(num_years)
+    for t in master_investment_terms(vars, input)
+        t.cost == 0 && continue
+        built = value(t.var) * t.cost
+        total_inv_by_year[t.year] += built
+        crf = capital_recovery_factor(input.discount_rate, t.life)
+        for y in annuity_years(t.year, t.life, num_years)
+            annuity_by_year[y] += built * crf
         end
-    end
-
-    # Fuel storage, route transport and electrolyzer builds (M2)
-    for (y_idx, var, cost) in master_fuel_investment_terms(vars, input)
-        total_inv_by_year[y_idx] += value(var) * cost
     end
 
     # Operating cost of each year's representative days (or TSAM periods),
@@ -3978,8 +4062,74 @@ function extract_master_solution(
         res_inv,
         conv_inv,
         extract_master_fuel_solution(vars, input),  # M2 (#89)
-        unit_operation ? extract_unit_operation(model, vars, input) : UnitOperation[]
+        unit_operation ? extract_unit_operation(model, vars, input) : UnitOperation[],
+        annuity_by_year
     )
+end
+
+"""
+    annuity_costs(result, num_years) -> Vector{Float64}
+
+`result.annuity_cost_by_year`, or zeros for a result built without it.
+"""
+annuity_costs(result::MasterProblemResult, num_years::Int) =
+    length(result.annuity_cost_by_year) == num_years ? result.annuity_cost_by_year :
+                                                       zeros(num_years)
+
+"""
+    master_re_energy(model, vars, input) -> Dict{Tuple{Int,Int}, Tuple{Float64, Float64}}
+
+Renewable energy and demand (MWh/year) per (system, year) in the solved
+master, from its representative days (`model.ext[:master_re]`, kept by
+`add_re_target_constraints!`); the probability-weighted mean over the
+scenarios in a stochastic master. Without representative days (a master
+built without them, the Benders master) a system's year counts its credited
+ratio `re_penetration_ratio` over a unit demand.
+"""
+function master_re_energy(model::Model, vars::MasterProblemVariables,
+                          input::MasterProblemInput)
+    out = Dict{Tuple{Int,Int}, Tuple{Float64, Float64}}()
+    record = get(model.ext, :master_re, nothing)
+    if record === nothing || isempty(record)
+        for ((s, y), v) in vars.re_penetration_ratio
+            out[(s, y)] = (value(v), 1.0)
+        end
+        return out
+    end
+    scenarios = get(model.ext, :master_scenarios, nothing)
+    for ((k, s, y), (energy, demand)) in record
+        p = k == 0 || scenarios === nothing ? 1.0 : scenarios[k].probability
+        e0, d0 = get(out, (s, y), (0.0, 0.0))
+        out[(s, y)] = (e0 + p * value(energy), d0 + p * demand)
+    end
+    return out
+end
+
+"""
+    master_re_shares(input, re_energy) -> (by_year, by_system)
+
+Achieved RE share from the renewable energy and demand per (system, year)
+`re_energy` (`master_re_energy`): per year over all systems
+(Σ energy / Σ demand) and per system name. A year without demand reports 0.
+"""
+function master_re_shares(input::MasterProblemInput,
+                          re_energy::AbstractDict{Tuple{Int,Int}, Tuple{Float64, Float64}})
+    num_years = length(input.years)
+    systems = master_systems(input)
+    share(e, d) = d > 0 ? e / d : 0.0
+    by_year = zeros(num_years)
+    by_system = Dict{String, Vector{Float64}}(sr.name => zeros(num_years) for sr in systems)
+    for y in 1:num_years
+        e_tot, d_tot = 0.0, 0.0
+        for (s, sr) in enumerate(systems)
+            e, d = get(re_energy, (s, y), (0.0, 0.0))
+            by_system[sr.name][y] = share(e, d)
+            e_tot += e
+            d_tot += d
+        end
+        by_year[y] = share(e_tot, d_tot)
+    end
+    return by_year, by_system
 end
 
 # =============================================================================
@@ -4172,14 +4322,9 @@ function build_stochastic_objective!(
         end
     end
 
-    # ── Slack penalties (scenario-independent) ──
-    for y_idx in 1:num_years
-        add_to_expression!(total_cost, vars.slack_re_target[y_idx], input.slack_penalty)
-        add_to_expression!(total_cost, vars.slack_budget[y_idx], input.slack_penalty)
-        for ni in 1:input.network.num_nodes
-            add_to_expression!(total_cost, vars.slack_capacity[(y_idx, ni)], input.slack_penalty)
-        end
-    end
+    # Budget and adequacy slacks: first stage, at the base discount rate.
+    # Each scenario's RE shortfall is in its operating cost.
+    add_to_expression!(total_cost, master_slack_cost(vars, input))
 
     @objective(model, Min, total_cost)
 
@@ -4659,13 +4804,18 @@ function diagnose_infeasibility(
         total_budget_slack = 0.0
         total_capacity_slack = 0.0
 
-        for y_idx in 1:num_years
-            re_slack_val = value(vars.slack_re_target[y_idx])
+        # Renewable energy missing from the RE targets (MWh/year), per
+        # system and year (summed over the scenarios of a stochastic master)
+        for ((_, s, y_idx), v) in vars.slack_re_target
+            re_slack_val = value(v)
             if re_slack_val > 1e-6
                 total_re_slack += re_slack_val
-                violations["re_target_y$(y_idx)"] = re_slack_val
+                key = "re_target_s$(s)_y$(y_idx)"
+                violations[key] = get(violations, key, 0.0) + re_slack_val
             end
+        end
 
+        for y_idx in 1:num_years
             budget_slack_val = value(vars.slack_budget[y_idx])
             if budget_slack_val > 1e-6
                 total_budget_slack += budget_slack_val
@@ -4906,10 +5056,12 @@ function log_solution_summary(
     push!(lines, "[INVESTMENT DETAILS BY YEAR - $(system_name)]")
     push!(lines, "-" ^ 100)
 
+    annuities = annuity_costs(result, num_years)
     for y_idx in 1:num_years
         year = input.years[y_idx]
         total_inv = result.total_investment_by_year[y_idx]
-        push!(lines, "\n  Year $(year): Total Investment = \$$(round(total_inv, digits=2)) M")
+        push!(lines, "\n  Year $(year): Total Investment = \$$(round(total_inv, digits=2)) M " *
+                     "(overnight; annuities paid this year: \$$(round(annuities[y_idx], digits=2)) M)")
 
         # Collect all technologies with investments this year
         tech_names = String[]
@@ -5013,7 +5165,7 @@ function log_solution_summary(
         op_cost = result.total_operational_cost_by_year[y_idx]
         discount_factor = 1.0 / ((1.0 + input.discount_rate) ^ (y_idx - 1))
         discounted = op_cost * discount_factor
-        cumulative_npv += discounted + result.total_investment_by_year[y_idx] * discount_factor
+        cumulative_npv += discounted + annuities[y_idx] * discount_factor
         push!(lines, "  $(rpad(year, 6))  \$$(rpad(round(op_cost, digits=2), 18))M  \$$(round(cumulative_npv, digits=2))M")
     end
 
@@ -5205,17 +5357,18 @@ function log_solution_summary(
     push!(lines, "-" ^ 100)
     total_investment = sum(result.total_investment_by_year)
     total_operational = sum(result.total_operational_cost_by_year)
-    push!(lines, "  Total Investment (undiscounted): \$$(round(total_investment, digits=2)) M")
+    push!(lines, "  Total Investment (undiscounted, overnight): \$$(round(total_investment, digits=2)) M")
+    push!(lines, "  Total Investment Annuities (undiscounted): \$$(round(sum(annuities), digits=2)) M")
     push!(lines, "  Total Operational (undiscounted): \$$(round(total_operational, digits=2)) M")
     push!(lines, "  NPV Objective: \$$(round(result.objective, digits=2)) M")
 
-    # Discounted investment + operating cost; the rest of the objective is
-    # the annual cost of the assets in service (fixed O&M, life extension,
-    # decommissioning) and the slack penalties
+    # Discounted investment annuities + operating cost; the rest of the
+    # objective is the annual cost of the assets in service (fixed O&M, life
+    # extension, decommissioning) and the budget and adequacy slacks
     calculated_npv = 0.0
     for y_idx in 1:num_years
         df = 1.0 / ((1.0 + input.discount_rate) ^ (y_idx - 1))
-        calculated_npv += (result.total_investment_by_year[y_idx] + result.total_operational_cost_by_year[y_idx]) * df
+        calculated_npv += (annuities[y_idx] + result.total_operational_cost_by_year[y_idx]) * df
     end
     push!(lines, "  NPV of investment + operation: \$$(round(calculated_npv, digits=2)) M")
     push!(lines, "  Asset costs and slack penalties (NPV): \$$(round(result.objective - calculated_npv, digits=2)) M")
@@ -5293,6 +5446,7 @@ function export_solution_to_dict(
 
     # Summary metrics
     export_dict["total_investment_by_year"] = result.total_investment_by_year
+    export_dict["annuity_cost_by_year"] = annuity_costs(result, length(input.years))
     export_dict["total_operational_cost_by_year"] = result.total_operational_cost_by_year
     export_dict["re_penetration_by_year"] = result.re_penetration_by_year
     export_dict["re_penetration_by_system"] = Dict{String, Any}(

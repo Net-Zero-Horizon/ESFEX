@@ -403,16 +403,19 @@ function master_fuel_day_scale(input::MasterProblemInput)
 end
 
 """
-    master_fuel_investment_terms(vars, input; mult=nothing) -> Vector{(year_idx, var, cost)}
+    master_fuel_investment_terms(vars, input; mult=nothing) -> Vector{(year_idx, var, cost, life)}
 
 Each fuel storage, route transport and electrolyzer build variable with its
-build year and overnight cost per unit built (not discounted).
-`fuel_storage_invest_cost`, `fuel_transport_cost` (D-5: it also scales the
-route investment) and `electrolyzer_invest_cost` scale them per scenario.
+build year, overnight cost per unit built (not discounted) and economic
+lifetime (years): the fuel's `lifetime_storage` / `lifetime_transport`, the
+electrolyzer's `life_time` (0 takes `DEFAULT_ASSET_LIFETIME` in the
+annuity). `fuel_storage_invest_cost`, `fuel_transport_cost` (D-5: it also
+scales the route investment) and `electrolyzer_invest_cost` scale them per
+scenario. `master_investment_terms` adds them to the master's investments.
 """
 function master_fuel_investment_terms(vars::MasterProblemVariables, input::MasterProblemInput;
                                       mult::Union{Nothing, ScenarioMultipliers} = nothing)
-    terms = Tuple{Int, VariableRef, Float64}[]
+    terms = Tuple{Int, VariableRef, Float64, Float64}[]
     fv = vars.fuel
     (fv === nothing || !has_master_fuel(input)) && return terms
     pe = input.primary_energy.pe
@@ -423,7 +426,8 @@ function master_fuel_investment_terms(vars::MasterProblemVariables, input::Maste
         infra = get(pe.infrastructure, fname, nothing)
         infra === nothing && continue
         for n in eachindex(v)
-            push!(terms, (y, v[n], m_sto * infra.storage_investment_cost))
+            push!(terms, (y, v[n], m_sto * infra.storage_investment_cost,
+                          infra.lifetime_storage))
         end
     end
     for (y, by_fuel) in fv.transport, (fname, v) in by_fuel
@@ -431,33 +435,18 @@ function master_fuel_investment_terms(vars::MasterProblemVariables, input::Maste
         infra === nothing && continue
         for r in eachindex(v)
             km = pe.transport_routes[r].distance_km
-            push!(terms, (y, v[r], m_tr * infra.transport_investment_cost * km))
+            push!(terms, (y, v[r], m_tr * infra.transport_investment_cost * km,
+                          infra.lifetime_transport))
         end
     end
     for (y, by_elz) in fv.electrolyzer, (e, v) in by_elz
         ec = input.primary_energy.electrolyzers[e]
         for b in eachindex(v)
-            push!(terms, (y, v[b], m_elz * _elz_value(ec.invest_cost, b)))
+            push!(terms, (y, v[b], m_elz * _elz_value(ec.invest_cost, b),
+                          _elz_value(ec.life_time, b)))
         end
     end
     return terms
-end
-
-"""
-    master_fuel_investment_cost(vars, input; mult=nothing, discount_rate) -> AffExpr
-
-Overnight cost of the fuel storage, route transport and electrolyzer builds,
-discounted to the build year like the master's other investments
-(`master_fuel_investment_terms`).
-"""
-function master_fuel_investment_cost(vars::MasterProblemVariables, input::MasterProblemInput;
-                                     mult::Union{Nothing, ScenarioMultipliers} = nothing,
-                                     discount_rate::Float64 = input.discount_rate)
-    cost = AffExpr(0.0)
-    for (y, v, c) in master_fuel_investment_terms(vars, input; mult = mult)
-        add_to_expression!(cost, v, c / ((1.0 + discount_rate)^(y - 1)))
-    end
-    return cost
 end
 
 """
