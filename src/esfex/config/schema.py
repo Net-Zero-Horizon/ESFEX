@@ -888,7 +888,9 @@ class TechnologyConfig(BaseModel):
     min_output: list[float] = Field(default_factory=lambda: [0.0], description="Min output fraction per node")
     ramp_up: list[float] = Field(default_factory=lambda: [1.0], description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
     ramp_down: list[float] = Field(default_factory=lambda: [1.0], description="Ramp down limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
-    fuel_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fuel cost per node ($/MWh)")
+    fuel_cost: list[float] = Field(default_factory=lambda: [0.0], description=(
+        "Fuel cost per node ($/MWh). If all zero and fuel is in fuels, the loader "
+        "computes price_base / energy_content / eff_at_rated"))
     fuel_cost_curve: Optional[list[CostCurveConfig]] = Field(
         default=None,
         description="Per-node bidding/offer curve for fuel cost. Overrides flat fuel_cost when present.",

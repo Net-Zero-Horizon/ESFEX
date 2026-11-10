@@ -339,6 +339,8 @@ Technologies are what the master problem can build. Each is passed to the schema
 
 Required: `type`, `fuel`, `invest_cost`, `invest_max_power`, `eff_at_rated`, `degradation_rate`, `lifetime`. Capacity built by the master problem becomes a virtual generator in operational dispatch.
 
+**Fuel cost.** A technology prices its fuel like a generator: if `fuel_cost` is missing or all zero and `fuel` names an entry of `fuels`, the loader sets it per node to `price_base / energy_content / eff_at_rated` (a single `eff_at_rated` value counts for every node). The master problem and the units it builds then pay that cost per MWh. The non-fuel O&M adder is not applied to technologies: it stands in for capital cost, which a technology pays through `invest_cost`. A `Non-renewable` technology that ends with no fuel cost and no `fuel_cost_curve` (no fuel, a fuel missing from `fuels`, or a fuel without `price_base` and `energy_content`) is named in a warning, because the master would build it as free generation.
+
 ### Cost curves
 
 A per-node offer curve can replace the flat `fuel_cost` of a technology:
