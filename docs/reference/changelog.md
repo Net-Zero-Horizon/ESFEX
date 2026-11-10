@@ -1121,6 +1121,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   can).
   Like a perfect-foresight master that fails, no dispatch is run.
 
+- `re_penetration_ratio` in the master is now the actual RE share
+  (renewable energy used over demand; the probability-weighted energy over
+  the weighted demand in a stochastic master), with no upper bound. The
+  minimum-increment floor joins the RE target row (`re_target_s*_y*`
+  requires the higher of the two); `add_re_increment_constraints!` is
+  replaced by `add_re_growth_cap!` and `define_re_share!`, and
+  `MasterProblemInput` takes `re_share_anchor` (the share before year 1;
+  the myopic runner passes last year's achieved share). A minimum
+  increment above the maximum no longer makes the master infeasible.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -2462,6 +2472,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   minimum step now stops at 100 %: once the share reaches it, it only has to
   stay there. The RE target path is also capped at 100 % (the minimum step
   could push it above).
+
+- **The maximum annual RE increment caps the renewable share the plan
+  actually reaches.** `max_annual_increment` bounded the yearly change of a
+  *credited* share that the master could set as low as it liked (it only
+  had to stay below renewable energy plus shortfall), so it never limited
+  the renewable energy: a myopic Cuba run went from a 5 % share to 89 % in
+  its first year, and perfect foresight did the same. The master now caps
+  the actual share of each system and year (renewable energy used, after
+  curtailment, over demand, as the master weights the representative days
+  or TSAM periods): at most `max_annual_increment` above the previous
+  year's actual share, year 1 above the initial share. A system at 5 % with
+  the default 0.10 reaches at most 15 % in year 1 and 25 % in year 2, and a
+  year that grows less lowers the next year's cap. Renewable energy above
+  the cap costs the value of lost load (`loss_of_load`) per MWh, so the
+  master curtails or runs other units instead of building more renewables;
+  the slack only keeps the model feasible when existing renewables must
+  produce more than the cap allows (the curtailment limit keeps them
+  running), and the diagnostics report it as `re_max_increment_s*_y*`. The
+  cap holds in perfect foresight, TSAM, MGA, per scenario in the stochastic
+  master (each over its own previous year), and in Benders, where the
+  master now sets each representative day's renewable energy and the
+  subproblems match it. In myopic mode each year's cap is measured from the
+  share the previous year achieved (clamped to 100 %); the
+  `min_annual_increment` floor still follows the perfect-foresight path,
+  its shortfall priced at `FRE_penetration_loss` per MWh as before. The
+  Cuba myopic master now goes 5.2 % → 15.2 % → 25.2 % → 35.2 % over
+  2025-2027, each year within its 2.147 G$ investment budget.
 
 ## [0.3.0] — 2026-08-27
 
