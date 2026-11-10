@@ -27,7 +27,7 @@ from esfex.config.schema import (  # noqa: E402
 FALLBACK = "Benders decomposition does not support"
 
 
-def _solar_built(tmp_path, method, *, cap=None, use_tsam=False):
+def _solar_built(tmp_path, method, *, cap=None, use_tsam=False, max_inc=1.0):
     from esfex.runner import Orchestrator
 
     demand = tmp_path / f"demand_{method}.csv"
@@ -38,7 +38,10 @@ def _solar_built(tmp_path, method, *, cap=None, use_tsam=False):
                              invest_cost=20000.0, invest_max_power=50.0)
     sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],
                                generators={"diesel": diesel}, technologies={"solar_new": solar})
-    update = {"demand_path": str(demand), "penalties": PenaltiesConfig(loss_of_load=10000.0)}
+    # max_inc: the RE growth cap (1.0 = off; the default 0.10 caps solar
+    # at 10 % of the load in year 1)
+    update = {"demand_path": str(demand), "penalties": PenaltiesConfig(loss_of_load=10000.0),
+              "max_annual_increment": max_inc}
     if cap is not None:
         # At most `cap` MW of solar may be built
         update["custom_constraints"] = [CustomConstraintConfig(
@@ -51,7 +54,7 @@ def _solar_built(tmp_path, method, *, cap=None, use_tsam=False):
         temporal=TemporalConfig(resolution_hours=24, rolling_horizon_hours=720, overlap_hours=0),
         master_problem=MasterProblemConfig(solver_method=method, use_tsam=use_tsam,
                                            tsam_num_periods=2))
-    tag = f"{method}_{cap}_{use_tsam}"
+    tag = f"{method}_{cap}_{use_tsam}_{max_inc}"
     results = Orchestrator(cfg, output_dir=tmp_path / tag).run(years=1)
     return results[0].investments.get("tech_investment_power_0_0", 0.0)
 
@@ -63,6 +66,15 @@ def test_benders_builds_what_the_monolithic_master_builds(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert _solar_built(tmp_path, "benders") == pytest.approx(mono, abs=0.5)
     assert not any(FALLBACK in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.julia
+def test_benders_holds_the_re_growth_cap_like_the_monolithic_master(tmp_path):
+    """No renewables to start with and at most +10 points a year: both
+    masters build 6 MW of solar (10 % of the 60 MW load), not 50 MW."""
+    mono = _solar_built(tmp_path, "monolithic", max_inc=0.10)
+    assert mono == pytest.approx(6.0, abs=1e-3)
+    assert _solar_built(tmp_path, "benders", max_inc=0.10) == pytest.approx(mono, abs=0.05)
 
 
 @pytest.mark.julia

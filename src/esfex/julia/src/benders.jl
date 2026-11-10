@@ -117,7 +117,7 @@ end
 #   (:line, "", l)                    MW built on line l's corridor up to the year
 #   (:reservoir, "g", b)              reservoir MWh built up to the year
 #   (:gen_life, "g", b), (:bat_life, "bi", b)  life-extended MW this year
-#   (:re_share, "s", d)               RE share of its demand system s credits to day d
+#   (:re_share, "s", d)               share of day d's demand of system s its renewables cover
 #   (:co2, "k", d)                    share of group k's CO2 budget given to day d
 
 const BendersCopyKey = Tuple{Symbol, String, Int}
@@ -187,23 +187,37 @@ function add_benders_co2_allocation!(model::Model, input::MasterProblemInput,
 end
 
 """
+    benders_re_capped(input) -> Bool
+
+Whether the RE growth cap is active (`max_re_increment` < 1): each
+representative day's renewable energy is then a master decision
+(`add_benders_re_allocation!`).
+"""
+benders_re_capped(input::MasterProblemInput) = input.max_re_increment < 1.0
+
+"""
     add_benders_re_allocation!(model, vars, input, targets, rep_days_by_year) -> Dict
 
-RE target decomposition. The annual target of a system couples every
-representative day of the year (`add_re_target_constraints!`), so the master
-shares it out: a variable `ρ[y,σ,d] ≥ 0` per year, system and day
-(`re_share_y{y}_s{σ}_d{d}`), the share of the day's own demand `D_d` the day
-must cover with renewable energy, with, for `w` the days' scaling to the
-year and `D = Σ_d w D_d`,
+RE decomposition. The annual RE target and the growth cap of a system couple
+every representative day of the year (`add_re_target_constraints!`), so the
+master sets each day's renewable energy: a variable `ρ[y,σ,d] ≥ 0` per year,
+system and day (`re_share_y{y}_s{σ}_d{d}`), the share of the day's own demand
+`D_d` its renewable energy used covers. With `w` the days' scaling to the
+year and `D = Σ_d w D_d`, the year's actual share is
 
-    Σ_d w D_d ρ[y,σ,d] / D ≥ target[σ, y]                 (re_target)
-    Σ_d w D_d ρ[y,σ,d] / D ≥ re_penetration_ratio[σ, y]   (re_ratio)
+    re_penetration_ratio[σ, y] × D = Σ_d w D_d ρ[y,σ,d]           (re_ratio)
 
-Subproblem d holds its renewable output plus a shortfall slack, priced at
-`re_shortfall_penalty` per MWh in its cost, to `ρ × D_d`. Summed over the
-days this is the monolithic constraint with its annual slack the days'
-slacks scaled to the year, at the same price, so both have the same
-optimum; the cuts carry each day's marginal cost of its share to the master.
+on which the master puts the monolithic bounds. With a growth cap
+(`benders_re_capped`): the target or floor (`re_required_share`) with its
+shortfall `slack_re_target[(0, σ, y)]` priced at `re_shortfall_penalty`,
+and the cap over the previous year's share (`add_re_growth_cap!`), both
+added to the objective, discounted; subproblem d produces exactly `ρ × D_d`
+of renewable energy, a deviation either way priced at `re_cap_penalty` per
+MWh, so at the optimum the master's shares are the days' renewable output.
+Without a cap the shares only have to reach the target or floor and
+subproblem d covers `ρ × D_d` with its renewable energy plus a shortfall
+priced at `re_shortfall_penalty`. Either way both have the monolithic
+optimum; the cuts carry each day's marginal cost of its share.
 """
 function add_benders_re_allocation!(model::Model, vars::MasterProblemVariables,
                                     input::MasterProblemInput,
@@ -212,29 +226,51 @@ function add_benders_re_allocation!(model::Model, vars::MasterProblemVariables,
     share = Dict{Tuple{Int,Int,Int}, VariableRef}()
     timesteps_per_day = 24 ÷ input.temporal_resolution_hours
     w = rep_day_scaling(input)
-    for (y_idx, days) in rep_days_by_year
+    cost = AffExpr(0.0)
+    defined = Set{Tuple{Int,Int}}()   # (system, year) with an actual share
+    for y_idx in sort(collect(keys(rep_days_by_year)))
+        days = rep_days_by_year[y_idx]
         day_demand = Dict{Int, Vector{Float64}}()
         for (d, start_hour) in enumerate(days)
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
             end_hour >= start_hour || continue
             day_demand[d] = system_day_demand(input, y_idx, start_hour, end_hour - start_hour + 1)
         end
+        df = 1.0 / (1.0 + input.discount_rate)^(y_idx - 1)
         for s in eachindex(master_systems(input))
+            ratio = vars.re_penetration_ratio[(s, y_idx)]
             total = w * sum((dd[s] for dd in values(day_demand)); init = 0.0)
-            total > 0 || continue
-            credited = AffExpr(0.0)
+            if total <= 0
+                fix(ratio, 0.0; force = true)
+                continue
+            end
+            energy = AffExpr(0.0)
             for (d, dd) in day_demand
                 dd[s] > 0 || continue
                 share[(y_idx, s, d)] = @variable(model, lower_bound = 0,
                     base_name = "re_share_y$(y_idx)_s$(s)_d$(d)")
-                add_to_expression!(credited, w * dd[s] / total, share[(y_idx, s, d)])
+                add_to_expression!(energy, w * dd[s], share[(y_idx, s, d)])
             end
-            @constraint(model, credited >= targets[(s, y_idx)],
-                base_name = "re_target_s$(s)_y$(y_idx)")
-            @constraint(model, vars.re_penetration_ratio[(s, y_idx)] <= credited,
-                base_name = "re_ratio_s$(s)_y$(y_idx)")
+            @constraint(model, total * ratio == energy, base_name = "re_ratio_s$(s)_y$(y_idx)")
+            required = re_required_share(input, targets, s, y_idx) * total
+            if !benders_re_capped(input)
+                # Without a growth cap the days only have to reach their
+                # shares, their shortfall priced in the subproblems
+                @constraint(model, energy >= required, base_name = "re_target_s$(s)_y$(y_idx)")
+                continue
+            end
+            slack = @variable(model, lower_bound = 0, base_name = "slack_re_s$(s)_y$(y_idx)")
+            vars.slack_re_target[(0, s, y_idx)] = slack
+            @constraint(model, energy + slack >= required, base_name = "re_target_s$(s)_y$(y_idx)")
+            add_to_expression!(cost, re_shortfall_penalty(input) * df, slack)
+            prev = (s, y_idx - 1) in defined ? vars.re_penetration_ratio[(s, y_idx - 1)] :
+                                               re_share_anchor(input, s)
+            add_to_expression!(cost,
+                add_re_growth_cap!(model, input, s, y_idx, energy, total, prev), df)
+            push!(defined, (s, y_idx))
         end
     end
+    @objective(model, Min, objective_function(model) + cost)
     return share
 end
 
@@ -377,9 +413,10 @@ that day's operating cost (multi-cut). Returns
 `(model, vars, targets, theta, inv_cost_expr)`.
 
 It has no constraint of its own linking investment to the renewable energy
-or to storage: `run_benders_decomposition` shares each year's RE target out
-over the days (`add_benders_re_allocation!`) and the cuts carry the value of
-every capacity and share.
+or to storage: `run_benders_decomposition` sets each day's renewable
+energy, with the year's RE target and growth cap on it
+(`add_benders_re_allocation!`), and the cuts carry the value of every
+capacity and share.
 """
 function create_benders_master(
     input::MasterProblemInput;
@@ -407,9 +444,9 @@ function create_benders_master(
     add_retirement_cascade_constraints!(model, vars, input)
     add_capacity_adequacy_constraints!(model, vars, input)
     add_transmission_symmetry_constraints!(model, vars, input)
-    add_re_increment_constraints!(model, vars, input)
 
-    # NOTE: NO add_representative_days_validation! — this is the decomposed part
+    # NOTE: NO add_representative_days_validation! — this is the decomposed
+    # part; the RE target and growth cap come with add_benders_re_allocation!
 
     # θ[(y, d)] is in units of actual_cost / COST_SCALE; cuts and objective
     # use COST_SCALE accordingly.
@@ -912,24 +949,32 @@ function create_benders_subproblem(
         end
     end
 
-    # Per system, as in the monolithic master (add_re_target_constraints!):
-    # its renewable output plus a shortfall slack (fre_penetration_loss at
-    # its nodes, priced per MWh in the day's cost) covers the share of the
-    # day's demand the master gave the day (add_benders_re_allocation!)
+    # Per system, as the monolithic master counts it (add_re_target_constraints!),
+    # the day's renewable energy used against the share of the day's demand
+    # the master gives the day (add_benders_re_allocation!), scaled to the
+    # year. With a growth cap it is that share: a deviation either way costs
+    # re_cap_penalty per MWh. Without one it covers the share, a shortfall
+    # costing re_shortfall_penalty per MWh.
     systems = master_systems(input)
     sys_renewable = system_day_renewable(ps_vars, tech_output, input, hours)
     sys_demand_day = system_day_demand(input, year_idx, start_hour, hours)
-    for (s_idx, sr) in enumerate(systems)
+    capped = benders_re_capped(input)
+    re_dev_cost = AffExpr(0.0)
+    for s_idx in eachindex(systems)
         sys_demand_day[s_idx] > 0 || continue
-        sys_nodes = unique(b2n[b] for b in sr.first_bus:(sr.first_bus + sr.num_buses - 1))
-        shortfall = AffExpr(0.0)
-        for ni in sys_nodes, t in 1:hours
-            add_to_expression!(shortfall, ps_vars.fre_penetration_loss[ni, t])
+        tag = "s$(s_idx)_y$(year_idx)_d$(day_idx)"
+        under = @variable(sp_model, lower_bound = 0, base_name = "re_under_$(tag)")
+        dev = rep_day_scaling(input) * (sys_renewable[s_idx] -
+            copy_of((:re_share, string(s_idx), day_idx)) * sys_demand_day[s_idx])
+        if capped
+            over = @variable(sp_model, lower_bound = 0, base_name = "re_over_$(tag)")
+            @constraint(sp_model, dev == over - under, base_name = "re_share_$(tag)")
+            add_to_expression!(re_dev_cost, re_cap_penalty(input), over)
+            add_to_expression!(re_dev_cost, re_cap_penalty(input), under)
+        else
+            @constraint(sp_model, dev + under >= 0, base_name = "re_share_$(tag)")
+            add_to_expression!(re_dev_cost, re_shortfall_penalty(input), under)
         end
-        @constraint(sp_model,
-            sys_renewable[s_idx] + shortfall >=
-                copy_of((:re_share, string(s_idx), day_idx)) * sys_demand_day[s_idx],
-            base_name = "re_share_s$(s_idx)_y$(year_idx)_d$(day_idx)")
     end
     # The day's renewable output and demand per system, for the achieved share
     constraint_store["re_day"] = (sys_renewable, sys_demand_day)
@@ -1022,6 +1067,7 @@ function create_benders_subproblem(
         Dict(k => g * scaling_factor for (k, g) in tech_curt_grad))
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
         tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium)
+    add_to_expression!(day_cost, re_dev_cost)
 
     # CO2 budgets: the day's emissions, scaled to the year, within the share
     # of the budget the master gives this day (a copy) plus a violation slack

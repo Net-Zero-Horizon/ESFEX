@@ -2321,10 +2321,18 @@ Input configuration for the Master Problem (capacity expansion planning).
 ## Targets
 - `target_re_penetration::Float64`: Target RE penetration (final year)
 - `initial_re_penetration::Float64`: Initial RE penetration (first year)
+- `min_re_increment`, `max_re_increment`: RE-3 bounds. The minimum sets a
+  floor `initial + y × min` on the share (`re_required_share`); the maximum
+  caps the growth of the ACTUAL share over the previous year's
+  (`add_re_growth_cap!`)
+- `re_share_anchor::Vector{Float64}`: actual RE share per system the year
+  before the first modelled year (a myopic year: the share achieved the year
+  before); empty = each system's initial share (`re_share_anchor`)
 
 ## Penalties
 - `loss_of_load_penalty::Float64`: VOLL (cost per MWh not served); also prices
-  the capacity adequacy slack (`adequacy_slack_penalty`)
+  the capacity adequacy slack (`adequacy_slack_penalty`) and the renewable
+  energy above the RE growth cap (`re_cap_penalty`)
 - `fre_penetration_loss_penalty::Float64`: cost per MWh of renewable energy
   missing from a system's annual RE target (`add_re_target_constraints!`)
 
@@ -2513,6 +2521,11 @@ struct MasterProblemInput
     # already 0 in `generators` / `batteries`; this charges their
     # decommissioning in the first year (build_annual_asset_cost)
     npv_retired_units::Vector{RetiredUnit}
+    # Actual RE share per system the year before the first modelled year,
+    # from which year 1's growth cap is measured (re_share_anchor); a myopic
+    # year passes the share the previous year achieved. Empty = each
+    # system's initial share.
+    re_share_anchor::Vector{Float64}
 end
 
 # Constructor with defaults
@@ -2583,7 +2596,8 @@ function MasterProblemInput(;
     co2_budget_groups::Vector{CO2BudgetGroup} = CO2BudgetGroup[],
     unit_commitment::Bool = false,
     primary_energy::Union{Nothing, MasterFuelInput} = nothing,
-    npv_retired_units::Vector{RetiredUnit} = RetiredUnit[]
+    npv_retired_units::Vector{RetiredUnit} = RetiredUnit[],
+    re_share_anchor::Vector{Float64} = Float64[]
 )
     return MasterProblemInput(
         years, base_year,
@@ -2617,7 +2631,7 @@ function MasterProblemInput(;
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         re_target_override,
         co2_budget_groups, unit_commitment,
-        primary_energy, npv_retired_units
+        primary_energy, npv_retired_units, re_share_anchor
     )
 end
 
@@ -2637,9 +2651,9 @@ Container for Master Problem decision variables.
 - `bat_life_extension`: MW of discharge power of a battery kept past its lifetime (same)
 
 # RE Tracking (indexed by [(system, year)])
-- `re_penetration_ratio`: the RE share credited to a system in a year (its
-  renewable energy plus the shortfall slack, over its demand); the RE
-  increment bounds act on it
+- `re_penetration_ratio`: the actual RE share of a system in a year (its
+  renewable energy used over its demand, `define_re_share!`; in the Benders
+  master the share it gives the representative days); no upper bound
 
 # Operational Variables (per representative day)
 - `operational_subproblems`: Dict mapping (year, day) to PowerSystem models
@@ -2647,7 +2661,9 @@ Container for Master Problem decision variables.
 # Slack Variables
 - `slack_re_target`: renewable energy missing from the RE target (MWh/year)
   per (scenario, system, year), scenario 0 when deterministic; created with
-  the representative days (`add_re_target_constraints!`)
+  the representative days (`add_re_target_constraints!`). The renewable
+  energy over the growth cap (`add_re_growth_cap!`) is in
+  `model.ext[:re_cap_slack]`, keyed the same way.
 - `slack_capacity`: Capacity adequacy shortfall (MW) per year per node
 - `slack_budget`: Investment over the annual budget per year
 

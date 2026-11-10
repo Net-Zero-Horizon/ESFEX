@@ -278,9 +278,9 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `re_target_s{s}_y{y}` | RE-2 | Annual renewable energy of system `s` (representative days scaled to the year) + `slack_re_s{s}_y{y}` (MWh, at `fre_penetration_loss` per MWh) >= target × its demand; one per scenario (`_sc{k}`) in a stochastic master |
-| `re_ratio_s{s}_y{y}` | RE-2b | Credited share `re_ratio` × demand <= renewable energy + shortfall |
-| `re_min_increment_s{s}_y{y}`, `re_max_increment_s{s}_y{y}` | RE-3 | Annual change of the RE ratio, year 1 anchored to the initial penetration |
+| `re_target_s{s}_y{y}` | RE-2, RE-3a | Annual renewable energy of system `s` (representative days scaled to the year) + `slack_re_s{s}_y{y}` (MWh, at `fre_penetration_loss` per MWh) >= max(target, initial + y × `min_re_increment`) × its demand; one per scenario (`_sc{k}`) in a stochastic master |
+| `re_ratio_s{s}_y{y}` | RE-2b | Actual share `re_ratio` × demand == renewable energy used (probability-weighted in a stochastic master) |
+| `re_max_increment_s{s}_y{y}` | RE-3b | Renewable energy used <= (previous year's actual share + `max_re_increment`) × demand + `slack_re_cap_s{s}_y{y}` (MWh, at VOLL); year 1 from the initial share (myopic: last year's achieved share); one per scenario (`_sc{k}`) in a stochastic master |
 
 ### Retirement and Life Extension
 
@@ -323,14 +323,14 @@ In the stochastic master these names carry a scenario tag.
 | `benders_cut_y{y}_d{d}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}_d{d}`, one per year, representative day and iteration (`iter0`: warm start) |
 | `benders_feas_y{y}_d{d}_iter{k}` | BEN-FEAS | Feasibility cut: the capacities must let day `d` meet its curtailment limit |
 | `co2_alloc_budget_y{y}_{group}` | BEN-CO2-1 | Master: the days' shares `co2_alloc_y{y}_{group}_d{d}` of a CO2 budget sum to at most 1 |
-| `re_target_s{s}_y{y}`, `re_ratio_s{s}_y{y}` | BEN-RE-1 | Master: the days' RE shares `re_share_y{y}_s{s}_d{d}`, weighted by their demand, cover the target and the credited share |
-| `re_share_s{s}_y{y}_d{d}` | BEN-RE-2 | Subproblem: renewable output + shortfall (`fre_penetration_loss`, priced per MWh) >= the day's RE share (a copy variable) × its demand |
+| `re_ratio_s{s}_y{y}`, `re_target_s{s}_y{y}`, `re_max_increment_s{s}_y{y}` | BEN-RE-1 | Master: the year's share is the days' RE shares `re_share_y{y}_s{s}_d{d}` weighted by their demand; the target and floor (RE-2) and, with `max_re_increment` < 1, the growth cap (RE-3b) act on it |
+| `re_share_s{s}_y{y}_d{d}` | BEN-RE-2 | Subproblem: with a growth cap, renewable output − the day's RE share (a copy variable) × its demand, scaled to the year, == `re_over_*` − `re_under_*` (both at VOLL per MWh); without one, renewable output + `re_under_*` (at `fre_penetration_loss`) >= share × demand |
 | `co2_budget_y{y}_d{d}_{group}` | BEN-CO2-2 | Subproblem: the day's emissions, scaled to the year, within its share of the budget plus `co2_budget_violation_y{y}_d{d}_{group}` |
 | `max_curt_y{y}_d{d}` | BEN-CURT | Subproblem: hard curtailment cap, as in the monolithic master; its slack `curt_excess_y{y}_d{d}` is fixed to 0 and only freed (and minimised) to build a feasibility cut |
 | `tech_cap_t{t}_b{b}_ts{ts}`, `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}` | BEN-CAP | Subproblem: technology output and offer-curve segments at the fixed capacity; their duals form the cut's technology gradient |
 | `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line, reservoir or fuel capacity built, life extension, a day's RE share, CO2 share) fixed to the master's value; the dual is its cut gradient |
 
-The Benders master also contains TECH, BUD, RET-2, CAP, TXN, RE-3 and the RE and CO2 shares, and nothing else: no constraint of its own links investment to the renewable energy or to storage.
+The Benders master also contains TECH, BUD, RET-2, CAP, TXN, the RE target and growth cap on the RE shares, and the CO2 shares, and nothing else: no constraint of its own links investment to the renewable energy or to storage.
 
 ---
 
