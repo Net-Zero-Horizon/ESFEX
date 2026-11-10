@@ -273,6 +273,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   only in part (a partial life extension) keeps the whole units of its
   original size that fit in that capacity.
 
+- **Investment annuities in the master results.** `MasterProblemResult` has a
+  new field `annuity_cost_by_year`, and the master adapter's result dict a
+  key `annuity_cost_by_year`: the investment annuities paid in each year
+  (undiscounted), which is what the objective charges.
+  `total_investment_by_year` is unchanged: the overnight cost of the
+  capacity built that year, which is what the annual budget limits. The
+  solution summary in the log shows both.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -1046,6 +1054,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   results. An investment column now has a few nonzeros whatever the number
   of hours. The Benders master, which has no hourly rows, is unchanged.
   See Capacity Expansion §6.5 (capacity state variables) in the docs.
+
+- **The master pays for investment as annuities.** A MW (or MWh) built used
+  to cost its full overnight cost in the build year, with no residual value
+  at the end of the horizon. Capacity built in the last years of a run then
+  carried its whole cost for a few years of service and was seldom built.
+  Each build now pays `CRF(r, L)` × its overnight cost in every year it is in
+  service inside the horizon, discounted like that year's other costs (as
+  GenX and PyPSA do). Here `CRF(r, L) = r(1+r)^L / ((1+r)^L − 1)`, `r` is the
+  discount rate (a stochastic scenario's own), and `L` is the build's
+  lifetime: the technology or battery technology `lifetime`, the converter's
+  and electrolyzer's `life_time`, the generator's `life_time` for reservoir
+  capacity, the fuel infrastructure's storage and transport `lifetime`, and
+  40 years for transmission, which has no lifetime field. This applies in
+  every master mode (monolithic, TSAM, stochastic, myopic, MGA/SPORES and
+  Benders). A plan from the same configuration can change: more capacity
+  built late in the horizon, especially renewables and storage. The annual
+  budget (`MAX_ANNUAL_SYSTEM_COST`) still limits the overnight cost
+  committed in each year.
+
+- **The master's RE target is annual, with one shortfall per system and
+  year.** The target used to be held on every representative day, so a
+  sunny day's renewable surplus could not make up for a cloudy day. A second,
+  yearly ratio constraint had a slack shared by all systems, a fraction
+  priced at a generic 1 M$ per 100 % shortfall; it was redundant with the
+  daily constraints and never bound. Now each system's renewable energy over
+  the year (its representative days or TSAM periods scaled to the year) plus
+  the energy missing must cover the target share of its demand. Each MWh
+  missing costs
+  `penalties.fre_penetration_loss` (the dispatch's penalty, 100 $/MWh by
+  default and when it is 0 or less; × `penalty_fre_penetration` in a
+  stochastic scenario), the price the daily shortfall already had. The cost
+  is added to the year's operating cost and discounted like it. Each system
+  of a merged run has its own target and shortfall, and so does each
+  stochastic scenario. Benders shares each year's target out over its
+  representative days and reaches the same optimum.
+  `re_penetration_by_year` / `re_penetration_by_system` now report the
+  achieved share (renewable energy over demand). In myopic planning this
+  achieved share anchors the next year's increment bounds.
+
+- **The investment budget and capacity adequacy bind.** Their slacks shared
+  the RE target's generic penalty of 1 M$ per unit. Going over the budget
+  therefore cost 1 $ per $, so the budget had no effect. Each $ over the
+  budget now costs 10 $. Each MW of adequacy shortfall at a node now costs
+  `penalties.loss_of_load` × the hours of the node's peak period (the top
+  10 % of the year's demand), which is more than any firm capacity.
+  Neither slack makes the master infeasible. Both are discounted like the
+  year's other costs.
+
+- **Removed `slack_penalty`** from `MasterProblemAdapter` and the Julia
+  `MasterProblemInput`, because the master no longer uses it.
 
 ### Fixed
 
@@ -2348,6 +2406,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   physically does: a 5 MVA unit is 1.2 p.u. on a 100 MVA base, where it
   used to be 0.06. The transformer form accepted only 0 to 1 p.u. and cut
   such values to 1.0. It now accepts up to 1000 p.u.
+
+- Candidate technologies burning a priced fuel now pay for it. The loader
+  computed `fuel_cost` from the `fuels` block (`price_base / energy_content /
+  eff_at_rated`) only for generators, so a technology such as `fuel: Fuel_oil`
+  without an explicit `fuel_cost` kept a fuel cost of 0: the master built it
+  as free generation and the dispatch ran the built units at no fuel cost (on
+  the Cuba case, 2,538 MW of fuel-oil engines produced 20.7 TWh for 21.6 M$ of
+  fuel a year instead of about 1.8 G$). Technologies now get the same link per
+  node (an explicit `fuel_cost` wins; Sun, Wind and Water stay free; a priced
+  fuel such as biomass is paid by a `Renewable` technology too). The non-fuel
+  O&M adder of generators is not applied to technologies, since it stands in
+  for capital cost they pay through `invest_cost`. A `Non-renewable`
+  technology left with no fuel cost and no offer curve is named in a warning.
+- The dispatch no longer logs "Virtual gen …: NO availability matched for
+  file=None" as a warning in every window for each unit built from a
+  technology without an availability profile (1,045 times in a 5-year run).
+  Such a unit is available at full capacity, which is normal for thermal
+  plant; a renewable technology without a profile is still reported once per
+  run. The per-window "Virtual gen" summary line moved from INFO to DEBUG.
 
 ## [0.3.0] — 2026-08-27
 
