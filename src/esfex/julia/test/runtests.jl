@@ -4017,6 +4017,17 @@ import Ipopt
                 @test coefficient(e, vars.tech_investment[y][1][1]) ≈
                       crf(25) * sum(1 / (1 + r)^(k - 1) for k in y:3)
             end
+            # Two-year investment periods: a period's build pays from its
+            # first year
+            inp4 = ESFEX.with_fields(inp3; years = [2025, 2026, 2027, 2028],
+                investment_resolution_hours = 2 * 8760, hours_per_year = fill(24, 4),
+                base_demand = fill(50.0, 4H24, 1))
+            model4 = ESFEX.Model()
+            vars4 = ESFEX.build_master_variables!(model4, inp4)
+            e4 = ESFEX.build_investment_cost_expression(vars4, inp4)
+            @test sort(collect(keys(vars4.tech_investment))) == [1, 3]
+            @test coefficient(e4, vars4.tech_investment[3][1][1]) ≈
+                  crf(25) * (1 / (1 + r)^2 + 1 / (1 + r)^3)
 
             # --- A PV build late in the horizon is now economic ---
             # Sun only in the third year. 1 MW of PV saves 12 MWh × 3e-5 of
