@@ -1428,6 +1428,10 @@ those of the iteration with the best upper bound.
 - `record_unit_operation::Bool=false`: keep each existing unit's operation in
   the best iteration's subproblems in `solution.unit_operation`, for
   `calculate_unit_npv`
+- `debug_lp_dir::String=""`: directory where the master and subproblem LPs
+  that fail in the first five iterations are written
+  (`benders_master_failed_iter*.lp`, `benders_sp_failed_y*_d*_iter*.lp`);
+  empty (the default) writes none
 
 # Returns
 - `BendersResult`: Solution with convergence history
@@ -1438,7 +1442,8 @@ function run_benders_decomposition(
     tolerance::Float64 = 1e-4,
     use_representative_days::Bool = true,
     verbose_benders::Bool = true,
-    record_unit_operation::Bool = false
+    record_unit_operation::Bool = false,
+    debug_lp_dir::String = ""
 )::BendersResult
     start_time = time()
     num_years = length(input.years)
@@ -1481,9 +1486,9 @@ function run_benders_decomposition(
                 @warn "Benders: Subproblem (y=$(y_idx), d=$(day_idx)) failed after retry: " *
                       "$(termination_status(sp.model))"
                 solved = false
-                # Save the first failing LPs for diagnosis (verbose runs)
-                if verbose_benders && iter <= 5
-                    lp = joinpath(tempdir(),
+                # Save the first failing LPs for diagnosis (debug runs)
+                if !isempty(debug_lp_dir) && iter <= 5
+                    lp = joinpath(debug_lp_dir,
                         "benders_sp_failed_y$(y_idx)_d$(day_idx)_iter$(iter).lp")
                     try
                         write_to_file(sp.model, lp)
@@ -1707,8 +1712,8 @@ function run_benders_decomposition(
         master_status = termination_status(master_model)
         if master_status != MOI.OPTIMAL && master_status != MOI.LOCALLY_SOLVED
             @warn "Benders: Master solve failed at iteration $(iter): $(master_status)"
-            if verbose_benders
-                lp = joinpath(tempdir(), "benders_master_failed_iter$(iter).lp")
+            if !isempty(debug_lp_dir) && iter <= 5
+                lp = joinpath(debug_lp_dir, "benders_master_failed_iter$(iter).lp")
                 try
                     write_to_file(master_model, lp)
                     @info "  Debug LP written to $(lp)"
@@ -1814,8 +1819,8 @@ function run_benders_decomposition(
             "iteration; no lower bound was established. This usually means the " *
             "investment master is over-constrained — e.g. an RE-penetration " *
             "target the candidate technologies cannot meet, or too tight an " *
-            "investment budget. Run with verbose output to write the master " *
-            "LP to $(joinpath(tempdir(), "benders_master_failed_iter1.lp"))."
+            "investment budget. Set ESFEX_BENDERS_DEBUG_LP=1 to write the " *
+            "master LP (benders_master_failed_iter1.lp) to the run's logs folder."
         )
     end
 

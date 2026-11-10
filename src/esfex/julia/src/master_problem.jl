@@ -27,8 +27,8 @@ using JuMP: objective_function
     calculate_target_ratios(input::MasterProblemInput)
 
 Calculate progressive RE penetration targets for each year.
-Linear interpolation from initial to target penetration.
-Applies min/max increment constraints as in Python legacy (lines 99-122).
+Linear interpolation from initial to target penetration, each step clamped
+to the min/max increments, never above 1.
 Entries of `input.re_target_override` replace the computed targets.
 """
 function calculate_target_ratios(input::MasterProblemInput)::Dict{Tuple{Int,Int}, Float64}
@@ -83,7 +83,9 @@ function _compute_year_target(
         elseif increment > max_inc
             target = prev_target + max_inc
         end
-        return target
+        # A share above 100 % cannot be met (the minimum step may push the
+        # path past it)
+        return min(target, 1.0)
     end
 end
 
@@ -1107,16 +1109,29 @@ function add_re_target_constraints!(
 end
 
 """
+    re_increment_floor(initial_re, min_inc, y_idx) -> Float64
+
+Least credited RE share the minimum increment asks of year `y_idx` (RE-3):
+`initial_re + y_idx × min_inc`, at most 1 (the share cannot pass 100 %),
+with `initial_re` clamped to [0, 1]. Year 0 is the anchor itself.
+"""
+re_increment_floor(initial_re::Real, min_inc::Real, y_idx::Int) =
+    min(clamp(Float64(initial_re), 0.0, 1.0) + y_idx * max(Float64(min_inc), 0.0), 1.0)
+
+"""
     add_re_increment_constraints!(model, vars, input)
 
-Add annual RE penetration increment constraints.
+Annual RE increment bounds (RE-3) on the credited share
+`re_penetration_ratio` of each system, anchored at year 0 to the system's
+initial share (clamped to [0, 1]):
 
-Matches Python legacy (lines 346-358):
-  increment = re_ratio[y] - re_ratio[y-1]
-  model += increment >= min_increment
-  model += increment <= max_increment
+    ρ[y] − ρ[y−1] ≥ min(Δmin, 1 − F[y−1])     with F[y] = re_increment_floor(ρ₀, Δmin, y)
+    ρ[y] − ρ[y−1] ≤ Δmax
 
-This ensures that the annual change in RE penetration stays within bounds.
+The minimum step stops at 100 %: once the floor reaches it (an initial share
+close to 1, or a long horizon), the share only has to stay there, so the
+bounds never make the master infeasible (the credited share may always be
+reached through the priced RE shortfall).
 """
 function add_re_increment_constraints!(
     model::Model,
@@ -1133,27 +1148,19 @@ function add_re_increment_constraints!(
     n_sys = max(1, length(input.system_node_ranges))
 
     for s_idx in 1:n_sys
-        # Initial RE penetration (year-0 reference) for the increment
-        # constraint at y_idx=1.  Without anchoring the first year the
-        # master can jump from initial_re to anything between [0, 1]
-        # without violating the year-on-year increment bound, defeating
-        # the purpose of the ``max_annual_increment`` parameter.
-        sys_initial_re = if isempty(input.system_node_ranges)
-            input.initial_re_penetration
-        else
-            input.system_node_ranges[s_idx].initial_re
-        end
+        sys_initial_re = clamp(isempty(input.system_node_ranges) ?
+            input.initial_re_penetration : input.system_node_ranges[s_idx].initial_re,
+            0.0, 1.0)
 
         for y_idx in 1:num_years
-            if y_idx == 1
-                increment = vars.re_penetration_ratio[(s_idx, y_idx)] - sys_initial_re
-            else
-                increment = vars.re_penetration_ratio[(s_idx, y_idx)] - vars.re_penetration_ratio[(s_idx, y_idx - 1)]
-            end
+            prev = y_idx == 1 ? sys_initial_re : vars.re_penetration_ratio[(s_idx, y_idx - 1)]
+            increment = vars.re_penetration_ratio[(s_idx, y_idx)] - prev
 
             if input.min_re_increment > 0
+                step = re_increment_floor(sys_initial_re, input.min_re_increment, y_idx) -
+                       re_increment_floor(sys_initial_re, input.min_re_increment, y_idx - 1)
                 @constraint(model,
-                    increment >= input.min_re_increment,
+                    increment >= step,
                     base_name = "re_min_increment_s$(s_idx)_y$(y_idx)"
                 )
             end
@@ -4130,6 +4137,32 @@ function master_re_shares(input::MasterProblemInput,
         by_year[y] = share(e_tot, d_tot)
     end
     return by_year, by_system
+end
+
+"""
+    master_conflict(model; limit=20) -> Vector{String}
+
+A set of constraints and bounds that cannot hold together (an irreducible
+infeasible subsystem) of a master the solver found infeasible, at most
+`limit` of them, printed as constraints. Empty when the solver cannot
+compute one (HiGHS and Gurobi can) or finds none, so the caller can always
+report it.
+"""
+function master_conflict(model::Model; limit::Int = 20)::Vector{String}
+    out = String[]
+    try
+        JuMP.compute_conflict!(model)
+        MOI.get(model, MOI.ConflictStatus()) == MOI.CONFLICT_FOUND || return out
+        for (F, S) in JuMP.list_of_constraint_types(model),
+                c in JuMP.all_constraints(model, F, S)
+            MOI.get(model, MOI.ConstraintConflictStatus(), c) == MOI.NOT_IN_CONFLICT && continue
+            push!(out, string(c))
+            length(out) >= limit && return out
+        end
+    catch e
+        @debug "No conflict from the solver" exception = e
+    end
+    return out
 end
 
 # =============================================================================
