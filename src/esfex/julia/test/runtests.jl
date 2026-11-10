@@ -405,7 +405,8 @@ import Ipopt
         # GeneratorConfig has 38 positional fields; this keeps the boilerplate
         # in one place. Per-bus vectors are sized to `nb`; `avail` is the
         # [hours x buses] availability matrix. All reservoir fields are zeroed
-        # (no hydro), reservable=false.
+        # (no hydro), reservable=false, risk_coefficient 1 (the schema
+        # default: the unit's capacity counts in the master's adequacy).
         function mkgen(name, type, fuel, rated, fcost, avail; nb, H)
             z = zeros(nb)
             GeneratorConfig(
@@ -413,7 +414,7 @@ import Ipopt
                 fill(0.5, nb), fill(0.4, nb), ones(nb), ones(nb), z, z, z,
                 fcost, z, z, z, z, avail, false,
                 fill(30.0, nb), z, z, z, 50.0, "AC",
-                z, z, z, z, zeros(H, nb), z, z, z, z, false, z, z, z,
+                z, z, z, z, zeros(H, nb), z, z, z, z, false, z, z, ones(nb),
             )
         end
 
@@ -2504,7 +2505,7 @@ import Ipopt
                 generators = [gas], batteries = BatteryConfig[],
                 base_demand = fill(50.0, 2H, 1), target_re_penetration = 0.0,
                 initial_re_penetration = 0.0, representative_days_per_year = 1,
-                min_day_separation = 1, hours_per_year = [24, 24], slack_penalty = 0.0,
+                min_day_separation = 1, hours_per_year = [24, 24],
                 verbose = false, primary_energy = MasterFuelInput(pe, [elz]))
         end
 
@@ -2546,7 +2547,7 @@ import Ipopt
             res = extract_master_solution(model, mv, inp)
             @test res.total_investment_by_year[1] > 0
             @test sum(res.total_investment_by_year) ≈
-                  value(ESFEX.master_fuel_investment_cost(mv, inp; discount_rate = 0.0)) rtol = 1e-9
+                  sum(value(v) * c for (_, v, c, _) in ESFEX.master_fuel_investment_terms(mv, inp)) rtol = 1e-9
             # Each year's operating cost is reported (it was always 0):
             # with the investment and the annual asset costs it makes up
             # the objective (no slack here)
@@ -3145,9 +3146,11 @@ import Ipopt
             obj = objective_function(model)
             @test coefficient(obj, only(v for v in all_variables(model)
                                         if name(v) == "acdc_rectify[1,1]")) ≈ 365 * 2.0e-6
-            @test coefficient(obj, mvars.converter_investment[1][("acdc", 1)]) ≈ 1.0e-3
+            # Its annuity over its 30-year life_time, paid in the one year
+            @test coefficient(obj, mvars.converter_investment[1][("acdc", 1)]) ≈
+                  1.0e-3 * ESFEX.capital_recovery_factor(inp.discount_rate, 30)
             # converter_invest_cost: a dear converter is not built (load is shed)
-            model, mvars = master1(inp; mult = ScenarioMultipliers(converter_invest_cost = 1.0e9))
+            model, mvars = master1(inp; mult = ScenarioMultipliers(converter_invest_cost = 1.0e10))
             @test value(mvars.converter_investment[1][("acdc", 1)]) ≈ 0.0 atol = 1e-6
         end
 
@@ -3236,9 +3239,12 @@ import Ipopt
                 e = ESFEX.build_investment_cost_expression(vars, inp; mult = m)
                 return coefficient(e, vt), coefficient(e, vc)
             end
-            @test coefs(ScenarioMultipliers()) == (1.0, 2.0)
-            @test coefs(ScenarioMultipliers(invest_cost_conventional = 3.0)) == (3.0, 2.0)
-            @test coefs(ScenarioMultipliers(converter_invest_cost = 7.0)) == (1.0, 14.0)
+            # Annuities over the technology's 25 and the converter's 30 years
+            a = (ESFEX.capital_recovery_factor(inp.discount_rate, 25),
+                 ESFEX.capital_recovery_factor(inp.discount_rate, 30))
+            @test all(coefs(ScenarioMultipliers()) .≈ (1.0, 2.0) .* a)
+            @test all(coefs(ScenarioMultipliers(invest_cost_conventional = 3.0)) .≈ (3.0, 2.0) .* a)
+            @test all(coefs(ScenarioMultipliers(converter_invest_cost = 7.0)) .≈ (1.0, 14.0) .* a)
         end
 
         @testset "master: flow cost of inter-system links" begin
@@ -3866,11 +3872,14 @@ import Ipopt
             @test bend.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-4
 
             # Curtailment cost on candidate PV: at 2e-5 per MWh curtailed the
-            # 16.7 MW that would saturate the peak hours no longer pay off
+            # 16.7 MW that would saturate the peak hours no longer pay off.
+            # Overnight costs below are set so that the one-year annuity is
+            # 0.08 (PV, 25 years) or 1.0 (dear PV and battery, 15 years).
             o = [0.0]
+            crf(life) = ESFEX.capital_recovery_factor(0.05, life)
             sun = reshape(vcat(zeros(6), [0.25, 0.5, 0.75], ones(6), [0.75, 0.5, 0.25],
                                zeros(6)), H24, 1)
-            pv = TechnologyConfig("PV", "Renewable", "Sun", [0.08], [100.0], sun,
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [0.08 / crf(25)], [100.0], sun,
                                   [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
                                   [25.0], o, o, 50.0, "AC", false, [1.0])
             gas1 = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
@@ -3892,9 +3901,9 @@ import Ipopt
             # master forced 0.07 MW of PV and 0.35 MWh of battery). The
             # battery is not reservable: a reservable one is worth building
             # to hold the reserve the non-reservable gas unit cannot.
-            pv_dear = ESFEX.with_fields(pv; invest_cost = [1.0])
+            pv_dear = ESFEX.with_fields(pv; invest_cost = [1.0 / crf(25)])
             li_dear = ESFEX.with_fields(
-                BatteryTechnologyConfig("LiNew", [1.0], [1.0], [100.0], [400.0], 1.0, 8.0,
+                BatteryTechnologyConfig("LiNew", [1.0 / crf(15)], [1.0 / crf(15)], [100.0], [400.0], 1.0, 8.0,
                     [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0], o, o, o, false, "AC", o,
                     [1.0]); reservable = false)
             for bts in (BatteryTechnologyConfig[], [li_dear])
@@ -3959,6 +3968,174 @@ import Ipopt
                 @test objective_value(model) ≈ br.objective rtol = 1e-6
                 @test br.solution.objective ≈ br.objective rtol = 1e-9
             end
+        end
+
+        @testset "master economics: annuities, RE shortfall per MWh, budget" begin
+            # One node, 50 MW flat, gas at 3e-5 per MWh. PV (25-year life)
+            # is the candidate; hours_per_year = 24 × days makes each
+            # representative day stand for itself (scaling 1).
+            r = 0.05
+            crf(life) = ESFEX.capital_recovery_factor(r, life)
+            o = [0.0]
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [3.0e-5],
+                        ones(H24, 1); nb = 1, H = H24)
+            pvtech(avail; cost, imax = [100.0]) =
+                TechnologyConfig("PV", "Renewable", "Sun", cost, imax, avail,
+                                 [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                 [25.0], o, o, 50.0, "AC", false, [1.0])
+            solve_master(inp) = begin
+                m, v, _ = create_master_problem(inp; use_representative_days = true)
+                ESFEX.set_silent(m)
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                m, v
+            end
+
+            # --- CRF and the annuity sum (OBJ-2, OBJ-3) ---
+            @test crf(20) ≈ r * 1.05^20 / (1.05^20 - 1)
+            @test ESFEX.capital_recovery_factor(0.0, 20) ≈ 1 / 20
+            # A 2-year build in a 3-year horizon: two payments worth
+            # (1 + r) × the overnight cost at the build year; a build in the
+            # last year pays one annuity
+            @test ESFEX.annuity_npv_factor(r, 2, 1, 3) ≈ 1 + r
+            @test ESFEX.annuity_npv_factor(r, 2, 2, 3) ≈ (1 + r) / (1 + r)
+            @test ESFEX.annuity_npv_factor(r, 25, 3, 3) ≈ crf(25) / (1 + r)^2
+            @test ESFEX.annuity_npv_factor(0.0, 4, 1, 10) ≈ 1.0
+            @test collect(ESFEX.annuity_years(2, 2.5, 10)) == [2, 3, 4]
+            sun = reshape(vcat(zeros(6), ones(12), zeros(6)), H24, 1)
+            inp3 = MasterProblemInput(years = [2025, 2026, 2027], network = net1,
+                generators = [gas], batteries = BatteryConfig[],
+                technologies = [pvtech(repeat(sun, 3); cost = [1.0], imax = [10.0])],
+                base_demand = fill(50.0, 3H24, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, hours_per_year = [24, 24, 24],
+                max_curtailment_ratio = 1.0, curtailment_cost = 0.0, verbose = false)
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp3)
+            e = ESFEX.build_investment_cost_expression(vars, inp3)
+            for y in 1:3
+                @test coefficient(e, vars.tech_investment[y][1][1]) ≈
+                      crf(25) * sum(1 / (1 + r)^(k - 1) for k in y:3)
+            end
+            # Two-year investment periods: a period's build pays from its
+            # first year
+            inp4 = ESFEX.with_fields(inp3; years = [2025, 2026, 2027, 2028],
+                investment_resolution_hours = 2 * 8760, hours_per_year = fill(24, 4),
+                base_demand = fill(50.0, 4H24, 1))
+            model4 = ESFEX.Model()
+            vars4 = ESFEX.build_master_variables!(model4, inp4)
+            e4 = ESFEX.build_investment_cost_expression(vars4, inp4)
+            @test sort(collect(keys(vars4.tech_investment))) == [1, 3]
+            @test coefficient(e4, vars4.tech_investment[3][1][1]) ≈
+                  crf(25) * (1 / (1 + r)^2 + 1 / (1 + r)^3)
+
+            # --- A PV build late in the horizon is now economic ---
+            # Sun only in the third year. 1 MW of PV saves 12 MWh × 3e-5 of
+            # gas a year (3.6e-4): more than its annuity (0.004 × crf(25) =
+            # 2.8e-4) but far less than its overnight cost. Charged in full
+            # in the build year with no residual value it was never built.
+            avail = vcat(zeros(2H24, 1), sun)
+            late = ESFEX.with_fields(inp3; technologies = [pvtech(avail; cost = [0.004])])
+            m, v = solve_master(late)
+            res = extract_master_solution(m, v, late)
+            @test res.tech_investment[3][1][1] ≈ 50.0 rtol = 1e-6
+            @test res.tech_investment[1][1][1] ≈ 0.0 atol = 1e-6
+            @test res.tech_investment[2][1][1] ≈ 0.0 atol = 1e-6
+            # Reporting: overnight cost in the build year, the annuity paid
+            @test res.total_investment_by_year ≈ [0.0, 0.0, 50.0 * 0.004] atol = 1e-9
+            @test res.annuity_cost_by_year ≈ [0.0, 0.0, 50.0 * 0.004 * crf(25)] atol = 1e-9
+            br = run_benders_decomposition(late; max_iterations = 40, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(m) rtol = 1e-6
+            @test br.solution.tech_investment[3][1][1] ≈ 50.0 rtol = 1e-4
+            @test br.solution.annuity_cost_by_year ≈ res.annuity_cost_by_year rtol = 1e-4
+
+            # --- Annual RE target, shortfall priced per MWh ---
+            # Two representative days, the first with 12 h of sun, the
+            # second dark; a 20 % target of the 2400 MWh. PV (annuity 7e-4
+            # per MW) is worth building up to the target at 1e-3 per MWh
+            # missing: 40 MW make the 480 MWh on the sunny day. The target
+            # used to hold on each day: 20 MW for the sunny one, the dark
+            # one short at the penalty.
+            sun2 = vcat(sun, zeros(H24, 1))
+            re_inp(; kw...) = MasterProblemInput(; years = [2025], network = net1,
+                generators = [gas], batteries = BatteryConfig[],
+                technologies = [pvtech(sun2; cost = [7.0e-4 / crf(25)])],
+                base_demand = fill(50.0, 2H24, 1), target_re_penetration = 0.2,
+                initial_re_penetration = 0.2, representative_days_per_year = 2,
+                min_day_separation = 1, hours_per_year = [2H24],
+                fre_penetration_loss_penalty = 1.0e-3,
+                max_curtailment_ratio = 1.0, curtailment_cost = 0.0, verbose = false, kw...)
+            inp = re_inp()
+            m, v = solve_master(inp)
+            res = extract_master_solution(m, v, inp)
+            @test res.tech_investment[1][1][1] ≈ 40.0 rtol = 1e-6
+            @test value(v.slack_re_target[(0, 1, 1)]) ≈ 0.0 atol = 1e-6
+            @test res.re_penetration_by_year[1] ≈ 0.2 rtol = 1e-6
+            @test res.re_penetration_by_system["global"][1] ≈ 0.2 rtol = 1e-6
+            # The same with TSAM periods (weight 1 each) and with Benders
+            tinp = re_inp(use_tsam = true, tsam_period_start_hours = [[1, 25]],
+                          tsam_period_weights = [[1.0, 1.0]], tsam_chronological_order = [[1, 2]])
+            tm, tv = solve_master(tinp)
+            @test objective_value(tm) ≈ objective_value(m) rtol = 1e-9
+            @test value(tv.tech_investment[1][1][1]) ≈ 40.0 rtol = 1e-6
+            br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(m) rtol = 1e-6
+            @test br.solution.tech_investment[1][1][1] ≈ 40.0 rtol = 1e-4
+            @test br.solution.re_penetration_by_year[1] ≈ 0.2 rtol = 1e-4
+
+            # 30 MW at most: 360 MWh, 120 MWh short, paid 1e-3 per MWh (it
+            # used to be a fraction of the target at 1 M$ per 100 %)
+            sinp = re_inp(technologies = [pvtech(sun2; cost = [7.0e-4 / crf(25)], imax = [30.0])])
+            sm, sv = solve_master(sinp)
+            s = sv.slack_re_target[(0, 1, 1)]
+            @test value(s) ≈ 120.0 rtol = 1e-6
+            @test coefficient(objective_function(sm), s) ≈ 1.0e-3
+            sres = extract_master_solution(sm, sv, sinp)
+            @test sres.re_penetration_by_year[1] ≈ 0.15 rtol = 1e-6
+            @test ESFEX.diagnose_infeasibility(sm, sv, sinp)["re_target_s1_y1"] ≈ 120.0 rtol = 1e-6
+            sbr = run_benders_decomposition(sinp; max_iterations = 40, tolerance = 1e-7,
+                                            verbose_benders = false)
+            @test sbr.objective ≈ objective_value(sm) rtol = 1e-6
+            @test sbr.solution.re_penetration_by_year[1] ≈ 0.15 rtol = 1e-4
+            # A stochastic scenario prices its own shortfall with its multiplier
+            sc = [Scenario("s", 1.0, ScenarioMultipliers(penalty_fre_penetration = 2.0))]
+            stm, stv, _, _ = create_stochastic_master_problem(StochasticMasterInput(sinp, sc, true))
+            ESFEX.set_silent(stm)
+            optimize!(stm)
+            @test coefficient(objective_function(stm), stv.slack_re_target[(1, 1, 1)]) ≈ 2.0e-3
+            @test objective_value(stm) ≈ objective_value(sm) + 120.0 * 1.0e-3 rtol = 1e-6
+            # Without a configured penalty: the dispatch's 100 $/MWh (1e-4)
+            zm, zv = solve_master(re_inp(fre_penetration_loss_penalty = 0.0))
+            @test coefficient(objective_function(zm), zv.slack_re_target[(0, 1, 1)]) ≈ 1.0e-4
+
+            # --- The annual budget binds ---
+            # A budget of 0.1 buys 10 MW (overnight 0.01 each). At 5e-3 per
+            # MWh missing, a MW of PV saves 0.06 a year: more than its
+            # overnight cost plus the old 1:1 budget slack (0.02), less than
+            # the slack at 10 per unit over the budget.
+            binp = re_inp(technologies = [pvtech(sun2; cost = [0.01])],
+                          fre_penetration_loss_penalty = 5.0e-3, max_annual_investment = 0.1)
+            bm, bv = solve_master(binp)
+            bres = extract_master_solution(bm, bv, binp)
+            @test bres.tech_investment[1][1][1] ≈ 10.0 rtol = 1e-6
+            @test value(bv.slack_budget[1]) ≈ 0.0 atol = 1e-6
+            @test bres.total_investment_by_year[1] ≈ 0.1 rtol = 1e-6
+            @test coefficient(objective_function(bm), bv.slack_budget[1]) ≈ ESFEX.BUDGET_SLACK_PENALTY
+            bbr = run_benders_decomposition(binp; max_iterations = 40, tolerance = 1e-7,
+                                            verbose_benders = false)
+            @test bbr.objective ≈ objective_value(bm) rtol = 1e-6
+
+            # --- Adequacy shortfall at VOLL × the node's peak hours ---
+            # 100 MW of gas for a 100 MW peak × 1.15: 15 MW short. The peak
+            # period is every step of a flat day: 24 h × VOLL (10) per MW.
+            ainp = ESFEX.with_fields(inp3; base_demand = fill(100.0, 3H24, 1),
+                                     technologies = TechnologyConfig[])
+            am, av = solve_master(ainp)
+            @test value(av.slack_capacity[(1, 1)]) ≈ 15.0 rtol = 1e-6
+            @test coefficient(objective_function(am), av.slack_capacity[(2, 1)]) ≈
+                  10.0 * 24 / (1 + r)
         end
 
         @testset "master: investment variables stay out of the hourly rows" begin
@@ -4301,7 +4478,7 @@ import Ipopt
                 network = single_bus(), generators = [gas, peaker], batteries = [bat],
                 base_demand = fill(50.0, 2H, 1), target_re_penetration = 0.0,
                 initial_re_penetration = 0.0, representative_days_per_year = 1,
-                min_day_separation = 1, hours_per_year = [24, 24], slack_penalty = 0.0,
+                min_day_separation = 1, hours_per_year = [24, 24],
                 verbose = false, kw...)
             df(op, y) = 1.0 / (1.0 + op.discount_rate)^(y - 1)
             unit_total(op) = sum(df(op, k[4]) * v for (k, v) in op.operating_cost) +
@@ -4431,7 +4608,7 @@ import Ipopt
                 generators = [ucgas], batteries = BatteryConfig[],
                 base_demand = reshape(dem, 2H, 1), target_re_penetration = 0.0,
                 initial_re_penetration = 0.0, representative_days_per_year = 1,
-                min_day_separation = 1, hours_per_year = [24, 24], slack_penalty = 0.0,
+                min_day_separation = 1, hours_per_year = [24, 24],
                 verbose = false, unit_commitment = true)
             umodel, _, ures = solve(uinp)
             uop = only(ures.unit_operation)
@@ -4456,7 +4633,7 @@ import Ipopt
                 generators = [solar, gas], batteries = [store],
                 base_demand = fill(50.0, H, 1), target_re_penetration = 0.0,
                 initial_re_penetration = 0.0, representative_days_per_year = 1,
-                min_day_separation = 1, hours_per_year = [24], slack_penalty = 0.0,
+                min_day_separation = 1, hours_per_year = [24],
                 verbose = false)
             cmodel, _, cres = solve(cinp)
             flagged = get_units_with_negative_npv(cres, cinp)

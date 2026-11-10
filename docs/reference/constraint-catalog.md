@@ -278,7 +278,8 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `re_target_s{s}_y{y}` | RE-2 | `re_ratio + slack_re >= target` per system |
+| `re_target_s{s}_y{y}` | RE-2 | Annual renewable energy of system `s` (representative days scaled to the year) + `slack_re_s{s}_y{y}` (MWh, at `fre_penetration_loss` per MWh) >= target × its demand; one per scenario (`_sc{k}`) in a stochastic master |
+| `re_ratio_s{s}_y{y}` | RE-2b | Credited share `re_ratio` × demand <= renewable energy + shortfall |
 | `re_min_increment_s{s}_y{y}`, `re_max_increment_s{s}_y{y}` | RE-3 | Annual change of the RE ratio, year 1 anchored to the initial penetration |
 
 ### Retirement and Life Extension
@@ -301,8 +302,6 @@ The days reuse the dispatch constraints above (generators with capacity override
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |
 | `lol_sec_sum_y{y}_d{d}_n{n}_t{t}`, `lol_sec_residual_y{y}_d{d}_n{n}_t{t}` | OP-5 | Bus load shed minus sectoral LOL is in [0, bus demand not covered by any sector] (the sectoral LOL is part of the load shed) |
-| `re_min_day_s{s}_y{y}_d{d}` | RE-DAY-1 | RE generation (existing + technologies) + FRE slack >= target × day demand |
-| `re_ratio_lb_s{s}_y{y}_d{d}` | RE-DAY-2 | RE ratio <= the day's achieved share |
 | `max_curtailment_y{y}_d{d}` | CURT-1 | Curtailment (existing + technologies) <= `max_curtailment_ratio` × RE generation |
 
 ### TSAM Inter-Period Linking
@@ -324,14 +323,14 @@ In the stochastic master these names carry a scenario tag.
 | `benders_cut_y{y}_d{d}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}_d{d}`, one per year, representative day and iteration (`iter0`: warm start) |
 | `benders_feas_y{y}_d{d}_iter{k}` | BEN-FEAS | Feasibility cut: the capacities must let day `d` meet its curtailment limit |
 | `co2_alloc_budget_y{y}_{group}` | BEN-CO2-1 | Master: the days' shares `co2_alloc_y{y}_{group}_d{d}` of a CO2 budget sum to at most 1 |
-| `re_min_day_s*_y*_d*` | BEN-REDAY | Subproblem: RE share at least the year's target |
-| `re_ratio_lb_s*_y*_d*` | BEN-REDAY | Subproblem: RE share at least the master's RE ratio (a copy variable) |
+| `re_target_s{s}_y{y}`, `re_ratio_s{s}_y{y}` | BEN-RE-1 | Master: the days' RE shares `re_share_y{y}_s{s}_d{d}`, weighted by their demand, cover the target and the credited share |
+| `re_share_s{s}_y{y}_d{d}` | BEN-RE-2 | Subproblem: renewable output + shortfall (`fre_penetration_loss`, priced per MWh) >= the day's RE share (a copy variable) × its demand |
 | `co2_budget_y{y}_d{d}_{group}` | BEN-CO2-2 | Subproblem: the day's emissions, scaled to the year, within its share of the budget plus `co2_budget_violation_y{y}_d{d}_{group}` |
 | `max_curt_y{y}_d{d}` | BEN-CURT | Subproblem: hard curtailment cap, as in the monolithic master; its slack `curt_excess_y{y}_d{d}` is fixed to 0 and only freed (and minimised) to build a feasibility cut |
 | `tech_cap_t{t}_b{b}_ts{ts}`, `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}` | BEN-CAP | Subproblem: technology output and offer-curve segments at the fixed capacity; their duals form the cut's technology gradient |
-| `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line, reservoir or fuel capacity built, life extension, RE ratio, CO2 share) fixed to the master's value; the dual is its cut gradient |
+| `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line, reservoir or fuel capacity built, life extension, a day's RE share, CO2 share) fixed to the master's value; the dual is its cut gradient |
 
-The Benders master also contains TECH, BUD, RET-2, CAP, TXN and RE-2/RE-3, and nothing else: no constraint of its own links investment to the RE ratio or to storage.
+The Benders master also contains TECH, BUD, RET-2, CAP, TXN, RE-3 and the RE and CO2 shares, and nothing else: no constraint of its own links investment to the renewable energy or to storage.
 
 ---
 

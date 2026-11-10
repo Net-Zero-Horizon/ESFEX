@@ -2562,7 +2562,6 @@ class MasterProblemAdapter:
         initial_re_penetration: float = 0.1,
         min_re_increment: float = 0.0,
         max_re_increment: float = 1.0,
-        slack_penalty: float = 1e6,
         life_extension_cost_factor: Optional[float] = None,
         decommissioning_cost_factor: float = 0.1,
         temporal_resolution_hours: int = 24,
@@ -2627,7 +2626,6 @@ class MasterProblemAdapter:
             max_re_increment: Maximum annual RE penetration increment
             re_target_override: RE targets {(system, year): share}, both
                 1-based, that replace the RE-1 trajectory (myopic mode)
-            slack_penalty: Penalty for violating soft constraints
             life_extension_cost_factor: Cost factor for life extension
                 (default: the system's life_extension_cost_factor)
             decommissioning_cost_factor: Cost factor for decommissioning
@@ -2688,7 +2686,6 @@ class MasterProblemAdapter:
         self.max_re_increment = max_re_increment
         self.system_node_ranges = system_node_ranges or []
         self.re_target_override = re_target_override or {}
-        self.slack_penalty = slack_penalty
         self.life_extension_cost_factor = life_extension_cost_factor
         self.decommissioning_cost_factor = decommissioning_cost_factor
 
@@ -3097,7 +3094,6 @@ class MasterProblemAdapter:
             min_re_increment=self.min_re_increment,
             max_re_increment=self.max_re_increment,
             system_node_ranges=self._build_jl_system_node_ranges(jl),
-            slack_penalty=scale_cost(self.slack_penalty),
             loss_of_load_penalty=loss_of_load_penalty,
             fre_penetration_loss_penalty=fre_penetration_loss_penalty,
             max_curtailment_ratio=max_curtailment_ratio,
@@ -3879,7 +3875,11 @@ class MasterProblemAdapter:
             'status': str(jl_result.status),
             'objective': float(jl_result.objective) * COST_UNSCALE,
             'solve_time': float(jl_result.solve_time),
+            # Overnight cost of each year's builds (what the budget limits)
             'total_investment_by_year': np.array(jl_result.total_investment_by_year) * COST_UNSCALE,
+            # Investment annuities paid each year (what the objective charges)
+            'annuity_cost_by_year': np.array(getattr(jl_result, 'annuity_cost_by_year', []),
+                                             dtype=float) * COST_UNSCALE,
             'total_operational_by_year': np.array(jl_result.total_operational_cost_by_year) * COST_UNSCALE,
             're_penetration_by_year': np.array(jl_result.re_penetration_by_year),
             're_penetration_by_system': {

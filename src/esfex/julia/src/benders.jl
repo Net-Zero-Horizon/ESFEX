@@ -106,7 +106,7 @@ end
 # Copy variables
 # =============================================================================
 #
-# A master quantity that a subproblem reads (a built capacity, the RE ratio, a
+# A master quantity that a subproblem reads (a built capacity, an RE share, a
 # CO2 allocation) enters the subproblem as a copy variable fixed to the
 # master's value. The dual of the fixing constraint is the day's marginal cost
 # of that quantity, and the cut multiplies it by the master expression the
@@ -117,21 +117,25 @@ end
 #   (:line, "", l)                    MW built on line l's corridor up to the year
 #   (:reservoir, "g", b)              reservoir MWh built up to the year
 #   (:gen_life, "g", b), (:bat_life, "bi", b)  life-extended MW this year
-#   (:re_ratio, "s", 0)               system s's RE ratio this year
+#   (:re_share, "s", d)               RE share of its demand system s credits to day d
 #   (:co2, "k", d)                    share of group k's CO2 budget given to day d
 
 const BendersCopyKey = Tuple{Symbol, String, Int}
 
 """
 Master-side data the copy keys refer to: the CO2 allocation variables
-`(year, group, day) => budget share` and the bus pair of each line (`TransmissionDC`
-order, which `(:line, "", l)` indexes).
+`(year, group, day) => budget share`, the bus pair of each line
+(`TransmissionDC` order, which `(:line, "", l)` indexes) and the RE shares
+`(year, system, day) => share` (`add_benders_re_allocation!`).
 """
 struct BendersCopyContext
     co2_alloc::Dict{Tuple{Int,Int,Int}, VariableRef}
     line_ends::Vector{Tuple{Int,Int}}
+    re_share::Dict{Tuple{Int,Int,Int}, VariableRef}
 end
 
+BendersCopyContext(co2_alloc, line_ends) =
+    BendersCopyContext(co2_alloc, line_ends, Dict{Tuple{Int,Int,Int}, VariableRef}())
 BendersCopyContext() = BendersCopyContext(Dict{Tuple{Int,Int,Int}, VariableRef}(),
                                           Tuple{Int,Int}[])
 
@@ -183,6 +187,58 @@ function add_benders_co2_allocation!(model::Model, input::MasterProblemInput,
 end
 
 """
+    add_benders_re_allocation!(model, vars, input, targets, rep_days_by_year) -> Dict
+
+RE target decomposition. The annual target of a system couples every
+representative day of the year (`add_re_target_constraints!`), so the master
+shares it out: a variable `ρ[y,σ,d] ≥ 0` per year, system and day
+(`re_share_y{y}_s{σ}_d{d}`), the share of the day's own demand `D_d` the day
+must cover with renewable energy, with, for `w` the days' scaling to the
+year and `D = Σ_d w D_d`,
+
+    Σ_d w D_d ρ[y,σ,d] / D ≥ target[σ, y]                 (re_target)
+    Σ_d w D_d ρ[y,σ,d] / D ≥ re_penetration_ratio[σ, y]   (re_ratio)
+
+Subproblem d holds its renewable output plus a shortfall slack, priced at
+`re_shortfall_penalty` per MWh in its cost, to `ρ × D_d`. Summed over the
+days this is the monolithic constraint with its annual slack the days'
+slacks scaled to the year, at the same price, so both have the same
+optimum; the cuts carry each day's marginal cost of its share to the master.
+"""
+function add_benders_re_allocation!(model::Model, vars::MasterProblemVariables,
+                                    input::MasterProblemInput,
+                                    targets::Dict{Tuple{Int,Int}, Float64},
+                                    rep_days_by_year::Dict{Int, Vector{Int}})
+    share = Dict{Tuple{Int,Int,Int}, VariableRef}()
+    timesteps_per_day = 24 ÷ input.temporal_resolution_hours
+    w = rep_day_scaling(input)
+    for (y_idx, days) in rep_days_by_year
+        day_demand = Dict{Int, Vector{Float64}}()
+        for (d, start_hour) in enumerate(days)
+            end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
+            end_hour >= start_hour || continue
+            day_demand[d] = system_day_demand(input, y_idx, start_hour, end_hour - start_hour + 1)
+        end
+        for s in eachindex(master_systems(input))
+            total = w * sum((dd[s] for dd in values(day_demand)); init = 0.0)
+            total > 0 || continue
+            credited = AffExpr(0.0)
+            for (d, dd) in day_demand
+                dd[s] > 0 || continue
+                share[(y_idx, s, d)] = @variable(model, lower_bound = 0,
+                    base_name = "re_share_y$(y_idx)_s$(s)_d$(d)")
+                add_to_expression!(credited, w * dd[s] / total, share[(y_idx, s, d)])
+            end
+            @constraint(model, credited >= targets[(s, y_idx)],
+                base_name = "re_target_s$(s)_y$(y_idx)")
+            @constraint(model, vars.re_penetration_ratio[(s, y_idx)] <= credited,
+                base_name = "re_ratio_s$(s)_y$(y_idx)")
+        end
+    end
+    return share
+end
+
+"""
     benders_copy_expr(vars, input, year_idx, key, ctx) -> AffExpr
 
 The master expression copy key `key` stands for in year `year_idx`.
@@ -211,8 +267,8 @@ function benders_copy_expr(vars::MasterProblemVariables, input::MasterProblemInp
         add_to_expression!(expr, vars.gen_life_extension[year_idx][parse(Int, name)][i])
     elseif kind === :bat_life
         add_to_expression!(expr, vars.bat_life_extension[year_idx][parse(Int, name)][i])
-    elseif kind === :re_ratio
-        add_to_expression!(expr, vars.re_penetration_ratio[(parse(Int, name), year_idx)])
+    elseif kind === :re_share
+        add_to_expression!(expr, ctx.re_share[(year_idx, parse(Int, name), i)])
     elseif kind === :co2
         add_to_expression!(expr, ctx.co2_alloc[(year_idx, parse(Int, name), i)])
     else
@@ -246,14 +302,15 @@ end
 
 The value a subproblem fixes copy `key` to: `fc.fuel_extra[key]` when the
 master set it, otherwise the capacity in `fc` it stands for (life
-extension, RE ratio), an even share of the CO2 budget, or nothing built.
+extension; the RE share, the system's RE ratio `fc.re_ratios`, e.g. the
+target in a warm start), an even share of the CO2 budget, or nothing built.
 """
 function copy_value(fc::FixedCapacities, input::MasterProblemInput, key::BendersCopyKey)
     haskey(fc.fuel_extra, key) && return fc.fuel_extra[key]
     kind, name, i = key
     kind === :gen_life && return get(fc.gen_capacity, (parse(Int, name), i), 0.0)
     kind === :bat_life && return get(fc.bat_power, (parse(Int, name), i), 0.0)
-    if kind === :re_ratio
+    if kind === :re_share
         s = parse(Int, name)
         return length(fc.re_ratios) >= s ? fc.re_ratios[s] : fc.re_ratios[1]
     end
@@ -319,9 +376,10 @@ plus one recourse variable θ[(y, d)] per year and representative day for
 that day's operating cost (multi-cut). Returns
 `(model, vars, targets, theta, inv_cost_expr)`.
 
-It has no constraint of its own linking investment to the RE ratio or to
-storage: the subproblems' `re_ratio_lb` prices the ratio through its copy,
-and the cuts carry the value of every capacity.
+It has no constraint of its own linking investment to the renewable energy
+or to storage: `run_benders_decomposition` shares each year's RE target out
+over the days (`add_benders_re_allocation!`) and the cuts carry the value of
+every capacity and share.
 """
 function create_benders_master(
     input::MasterProblemInput;
@@ -349,7 +407,6 @@ function create_benders_master(
     add_retirement_cascade_constraints!(model, vars, input)
     add_capacity_adequacy_constraints!(model, vars, input)
     add_transmission_symmetry_constraints!(model, vars, input)
-    add_re_target_constraints!(model, vars, input, targets)
     add_re_increment_constraints!(model, vars, input)
 
     # NOTE: NO add_representative_days_validation! — this is the decomposed part
@@ -373,13 +430,8 @@ function create_benders_master(
         for d in eachindex(get(rep_days_by_year, y_idx, Int[]))
             add_to_expression!(total_cost, theta[(y_idx, d)], discount_factor * COST_SCALE)
         end
-
-        add_to_expression!(total_cost, vars.slack_re_target[y_idx], input.slack_penalty)
-        add_to_expression!(total_cost, vars.slack_budget[y_idx], input.slack_penalty)
-        for ni in 1:input.network.num_nodes
-            add_to_expression!(total_cost, vars.slack_capacity[(y_idx, ni)], input.slack_penalty)
-        end
     end
+    add_to_expression!(total_cost, master_slack_cost(vars, input))
 
     @objective(model, Min, total_cost)
 
@@ -509,9 +561,9 @@ function evaluate_fixed_capacities(
     # Line capacity is computed per subproblem since it depends on the network topology
     # (handled in create_benders_subproblem)
 
-    # RE ratios from master — per system for per-system subproblem constraints
-    n_sys = max(1, length(input.system_node_ranges))
-    re_ratios = [value(vars.re_penetration_ratio[(s, year_idx)]) for s in 1:n_sys]
+    # RE ratios from master, the RE shares' default (the shares are copies)
+    re_ratios = [value(vars.re_penetration_ratio[(s, year_idx)])
+                 for s in eachindex(master_systems(input))]
 
     copies = master_fuel_extra_values(vars.fuel, input, year_idx)  # M2 (#89)
     for (key, _) in master_converters(input.network)
@@ -528,6 +580,9 @@ function evaluate_fixed_capacities(
     end
     for ((y, grp, d), v) in ctx.co2_alloc
         y == year_idx && (copies[(:co2, string(grp), d)] = value(v))
+    end
+    for ((y, s, d), v) in ctx.re_share
+        y == year_idx && (copies[(:re_share, string(s), d)] = value(v))
     end
 
     return FixedCapacities(
@@ -838,113 +893,46 @@ function create_benders_subproblem(
         demand_slice, start_hour, growth_factor)
 
     # =========================================================================
-    # RE Penetration with FIXED ratio — PER SYSTEM
+    # RE target: each system's share of the year's target given to this day
     # =========================================================================
-    # Build per-system renewable generation and demand expressions.
-    # When system_node_ranges is defined, each system gets its own RE constraint
-    # so the optimizer can't concentrate all RE in one subsystem.
-    n_sys = max(1, length(input.system_node_ranges))
-    sys_ranges = input.system_node_ranges
-
-    # Global totals (still needed for curtailment constraint)
+    # Renewable output (all systems; the curtailment limit below caps it)
     total_renewable = AffExpr(0.0)
-    total_generation = AffExpr(0.0)
-
-    # Per-system renewable expressions
-    sys_renewable = [AffExpr(0.0) for _ in 1:n_sys]
-    sys_fre_loss = [AffExpr(0.0) for _ in 1:n_sys]
-    sys_demand_day = zeros(n_sys)
-
-    # Helper: map bus → system index
-    bus_to_sys = ones(Int, n_buses)  # default to system 1
-    if length(sys_ranges) > 0
-        for s_idx in 1:length(sys_ranges)
-            sr = sys_ranges[s_idx]
-            for b in sr.first_bus:(sr.first_bus + sr.num_buses - 1)
-                if b <= n_buses
-                    bus_to_sys[b] = s_idx
-                end
-            end
-        end
-    end
-
-    for g in 1:n_gen
-        gen = input.generators[g]
-        is_renewable = gen.type == "Renewable"
-        for n in ps_vars.buses_of_gen[g]
-            s = bus_to_sys[n]
-            for t in 1:hours
-                add_to_expression!(total_generation, ps_vars.gen_output[g, n, t])
-                if is_renewable
-                    add_to_expression!(total_renewable, ps_vars.gen_output[g, n, t])
-                    add_to_expression!(sys_renewable[s], ps_vars.gen_output[g, n, t])
-                end
-            end
+    for (g, gen) in enumerate(input.generators)
+        gen.type == "Renewable" || continue
+        for n in ps_vars.buses_of_gen[g], t in 1:hours
+            add_to_expression!(total_renewable, ps_vars.gen_output[g, n, t])
         end
     end
     if tech_output !== nothing
-        for tc in 1:n_tech
-            tech = input.technologies[tc]
-            is_renewable = tech.type == "Renewable"
-            for b in 1:n_buses
-                s = bus_to_sys[b]
-                for t in 1:hours
-                    add_to_expression!(total_generation, tech_output[tc, b, t])
-                    if is_renewable
-                        add_to_expression!(total_renewable, tech_output[tc, b, t])
-                        add_to_expression!(sys_renewable[s], tech_output[tc, b, t])
-                    end
-                end
+        for (tc, tech) in enumerate(input.technologies)
+            tech.type == "Renewable" || continue
+            for b in 1:n_buses, t in 1:hours
+                add_to_expression!(total_renewable, tech_output[tc, b, t])
             end
         end
     end
 
-    # FRE loss per system (node-level variables)
-    n_nodes = input.network.num_nodes
-    # Map nodes to systems via the bus_to_sys mapping (use first bus of each node)
-    node_to_sys = zeros(Int, n_nodes)
-    for b in 1:n_buses
-        ni = input.network.bus_to_node[b]
-        if node_to_sys[ni] == 0
-            node_to_sys[ni] = bus_to_sys[b]
+    # Per system, as in the monolithic master (add_re_target_constraints!):
+    # its renewable output plus a shortfall slack (fre_penetration_loss at
+    # its nodes, priced per MWh in the day's cost) covers the share of the
+    # day's demand the master gave the day (add_benders_re_allocation!)
+    systems = master_systems(input)
+    sys_renewable = system_day_renewable(ps_vars, tech_output, input, hours)
+    sys_demand_day = system_day_demand(input, year_idx, start_hour, hours)
+    for (s_idx, sr) in enumerate(systems)
+        sys_demand_day[s_idx] > 0 || continue
+        sys_nodes = unique(b2n[b] for b in sr.first_bus:(sr.first_bus + sr.num_buses - 1))
+        shortfall = AffExpr(0.0)
+        for ni in sys_nodes, t in 1:hours
+            add_to_expression!(shortfall, ps_vars.fre_penetration_loss[ni, t])
         end
-    end
-    for ni in 1:n_nodes
-        s = node_to_sys[ni]
-        for t in 1:hours
-            add_to_expression!(sys_fre_loss[s], ps_vars.fre_penetration_loss[ni, t])
-        end
-    end
-
-    # Per-system demand on this representative day
-    # demand is already sliced to [hours × nodes] for this representative day
-    total_demand_day = sum(demand) * growth_factor
-    for n in 1:n_buses
-        s = bus_to_sys[n]
-        parent_node = input.network.bus_to_node[n]
-        bus_fraction = input.network.buses[n].demand_fraction
-        for t in 1:hours
-            sys_demand_day[s] += demand[t, parent_node] * bus_fraction * growth_factor
-        end
-    end
-
-    # Per-system RE floors as in the monolithic master: at the year's target
-    # (re_min_day) and at the master's RE ratio (re_ratio_lb, a copy, so the
-    # cut prices the ratio). There is no upper bound: renewable output above
-    # the target on a good day is valid.
-    targets = calculate_target_ratios(input)
-    for s_idx in 1:n_sys
         @constraint(sp_model,
-            sys_renewable[s_idx] + sys_fre_loss[s_idx] >=
-                targets[(s_idx, year_idx)] * sys_demand_day[s_idx],
-            base_name = "re_min_day_s$(s_idx)_y$(year_idx)_d$(day_idx)")
-        if sys_demand_day[s_idx] > 0
-            @constraint(sp_model,
-                copy_of((:re_ratio, string(s_idx), 0)) * sys_demand_day[s_idx] <=
-                    sys_renewable[s_idx] + sys_fre_loss[s_idx],
-                base_name = "re_ratio_lb_s$(s_idx)_y$(year_idx)_d$(day_idx)")
-        end
+            sys_renewable[s_idx] + shortfall >=
+                copy_of((:re_share, string(s_idx), day_idx)) * sys_demand_day[s_idx],
+            base_name = "re_share_s$(s_idx)_y$(year_idx)_d$(day_idx)")
     end
+    # The day's renewable output and demand per system, for the achieved share
+    constraint_store["re_day"] = (sys_renewable, sys_demand_day)
 
     # Max curtailment — includes BOTH generator and technology RE curtailment.
     # Technology curtailment = fixed_cap × avail - tech_output (capacity not dispatched).
@@ -1466,16 +1454,20 @@ function run_benders_decomposition(
         create_benders_master(input; rep_days_by_year)
     ypp = vars.years_per_inv_period
 
-    # Master side of the copy variables: CO2 allocations per day, line ends
+    # Master side of the copy variables: CO2 allocations per day, line ends,
+    # RE shares per day
     ctx = BendersCopyContext(add_benders_co2_allocation!(master_model, input, rep_days_by_year),
-                             benders_line_ends(input))
+                             benders_line_ends(input),
+                             add_benders_re_allocation!(master_model, vars, input, targets,
+                                                        rep_days_by_year))
 
     # Solve every representative day of year `y_idx` at capacities `caps` and
     # queue its cut in `cuts` as (kind, year, day, cut). Returns the year's
     # operating cost, whether every day solved, and whether every day met
     # its curtailment limit. With `op`, each day's operation of the existing
-    # units is added to it (their NPV).
-    function evaluate_year!(cuts, y_idx, caps, iter; op = nothing)
+    # units is added to it (their NPV); with `re`, each system's renewable
+    # output and demand scaled to the year (its achieved RE share).
+    function evaluate_year!(cuts, y_idx, caps, iter; op = nothing, re = nothing)
         year_cost = 0.0
         solved = true
         feasible = true
@@ -1512,6 +1504,14 @@ function run_benders_decomposition(
                 op === nothing || add_unit_day_operation!(op, sp.ps_vars, input, y_idx,
                     sp.hours, sp.scaling_factor,
                     get(get(sp.model.ext, :master_startup, IdDict()), sp.ps_vars, nothing))
+                if re !== nothing
+                    renewable, demand = sp.constraint_store["re_day"]
+                    for s in eachindex(demand)
+                        e0, d0 = get(re, (s, y_idx), (0.0, 0.0))
+                        re[(s, y_idx)] = (e0 + sp.scaling_factor * value(renewable[s]),
+                                          d0 + sp.scaling_factor * demand[s])
+                    end
+                end
             end
         end
         return year_cost, solved, feasible
@@ -1652,6 +1652,10 @@ function run_benders_decomposition(
     new_op() = record_unit_operation ? UnitOperation(1.0, input.discount_rate) : nothing
     iter_op = new_op()
     best_op = iter_op
+    # Each system's renewable energy and demand per year in the subproblems
+    new_re() = Dict{Tuple{Int,Int}, Tuple{Float64, Float64}}()
+    iter_re = new_re()
+    best_re = iter_re
     theta_vars = Set(values(theta))
 
     # Create optimizer factory for resetting between iterations
@@ -1676,7 +1680,8 @@ function run_benders_decomposition(
             optimize!(master_model)
             return extract_master_solution_from_benders(master_model, vars, input,
                                                         year_operational_costs;
-                                                        unit_operation = unit_ops(iter_op))
+                                                        unit_operation = unit_ops(iter_op),
+                                                        re_energy = iter_re)
         end
         if best_iter != last_solved_iter
             for (v, x) in best_values
@@ -1687,7 +1692,8 @@ function run_benders_decomposition(
         end
         return extract_master_solution_from_benders(master_model, vars, input, best_year_ops;
                                                     objective = best_ub,
-                                                    unit_operation = unit_ops(best_op))
+                                                    unit_operation = unit_ops(best_op),
+                                                    re_energy = best_re)
     end
 
     iterations = 0
@@ -1731,13 +1737,14 @@ function run_benders_decomposition(
         year_operational_costs = zeros(num_years)
         all_subproblems_solved = true
         iter_op = new_op()
+        iter_re = new_re()
 
         for y_idx in 1:num_years
             isempty(rep_days_by_year[y_idx]) && continue
             # Evaluate fixed capacities from master solution
             fixed_caps = evaluate_fixed_capacities(vars, input, y_idx; ctx)
             year_cost, solved, feasible = evaluate_year!(cuts, y_idx, fixed_caps, iter;
-                                                         op = iter_op)
+                                                         op = iter_op, re = iter_re)
             all_subproblems_solved &= solved && feasible
             year_operational_costs[y_idx] = year_cost
             total_operational_cost += discount(y_idx) * year_cost
@@ -1757,6 +1764,7 @@ function run_benders_decomposition(
             best_iter = iter
             best_year_ops = copy(year_operational_costs)
             best_op = iter_op
+            best_re = iter_re
             best_values = Dict(v => value(v) for v in all_variables(master_model)
                                if !(v in theta_vars))
         end
@@ -1834,13 +1842,16 @@ end
 
 """
     extract_master_solution_from_benders(model, vars, input, year_operational_costs;
-                                         objective=nothing, unit_operation=UnitOperation[])
+                                         objective=nothing, unit_operation=UnitOperation[],
+                                         re_energy=nothing)
 
 Extract a MasterProblemResult from the Benders master solution.
 Reuses the logic from extract_master_solution but provides operational costs
 from subproblem solves instead of embedded variables, and `objective` (the
 plan's upper bound) instead of the master's objective when given.
-`unit_operation` is the existing units' operation in the plan's subproblems.
+`unit_operation` is the existing units' operation in the plan's subproblems,
+`re_energy` each system's renewable energy and demand per year in them
+(the achieved RE share, `master_re_shares`).
 """
 function extract_master_solution_from_benders(
     model::Model,
@@ -1848,10 +1859,14 @@ function extract_master_solution_from_benders(
     input::MasterProblemInput,
     year_operational_costs::Vector{Float64};
     objective::Union{Nothing, Float64} = nothing,
-    unit_operation::Vector{UnitOperation} = UnitOperation[]
+    unit_operation::Vector{UnitOperation} = UnitOperation[],
+    re_energy::Union{Nothing, AbstractDict} = nothing
 )::MasterProblemResult
     # Use existing extraction (it handles investment vars, cumulative caps, etc.)
     result = extract_master_solution(model, vars, input)
+    re_by_year, re_by_system = re_energy === nothing || isempty(re_energy) ?
+        (result.re_penetration_by_year, result.re_penetration_by_system) :
+        master_re_shares(input, re_energy)
 
     # Override operational costs with values from subproblem solves
     return MasterProblemResult(
@@ -1866,8 +1881,8 @@ function extract_master_solution_from_benders(
         result.bat_life_extension,
         result.total_investment_by_year,
         year_operational_costs,  # Override with actual subproblem costs
-        result.re_penetration_by_year,
-        result.re_penetration_by_system,
+        re_by_year,
+        re_by_system,
         result.cumulative_gen_capacity,
         result.cumulative_bat_capacity,
         result.cumulative_bat_power,
@@ -1877,6 +1892,7 @@ function extract_master_solution_from_benders(
         result.reservoir_investment,
         result.converter_investment,
         result.fuel_investment,  # M2 (#89)
-        unit_operation
+        unit_operation,
+        result.annuity_cost_by_year
     )
 end

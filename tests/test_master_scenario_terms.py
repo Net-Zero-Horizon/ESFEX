@@ -230,8 +230,10 @@ def test_master_builds_converter_capacity_the_dispatch_uses(tmp_path):
     # what remains is the link's losses.
     assert built == pytest.approx(30.0, abs=0.5)
     assert shed < 1.0
+    # 1e10 $/MW: its annuity (6.5e8 $/MW·yr over 30 years) is dearer than
+    # shedding the MW all year (8.76e7 $)
     dear = [StochasticScenarioConfig(name="dear", probability=1.0,
-                                     multipliers={"converter_invest_cost": 1e6})]
+                                     multipliers={"converter_invest_cost": 1e7})]
     built, shed = _converter_run(tmp_path, "dear", dear)
     assert built == pytest.approx(0.0, abs=1e-3)
     assert shed > 0.0
