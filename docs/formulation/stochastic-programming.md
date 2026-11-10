@@ -148,22 +148,24 @@ P^{day,(\omega_s)}_{g,n,t} \text{ varies by scenario } s \quad \text{(separate v
 The stochastic objective minimizes the expected total cost: each scenario values the common investment with its own cost multipliers and discount rate, adds the existing-asset costs (life extension, decommissioning) and its own operating cost, and is weighted by its probability:
 
 \[
-\min \; Z^{stoch} = \sum_{s=1}^{S} \pi_s \left[ \sum_{y \in \mathcal{Y}^{inv}} \frac{C^{inv}_{y,s}}{(1+r_s)^{y-1}} + \sum_{y=1}^{Y} \frac{C^{asset}_{y,s} + C^{op}_{y,s}}{(1+r_s)^{y-1}} \right] + C^{slack}
+\min \; Z^{stoch} = \sum_{s=1}^{S} \pi_s \left[ C^{inv}_{s} + \sum_{y=1}^{Y} \frac{C^{asset}_{y,s} + C^{op}_{y,s}}{(1+r_s)^{y-1}} \right] + C^{slack}
 \tag{STOCH-OBJ}
 \]
+
+\(C^{slack}\) holds the first-stage budget and adequacy slacks (OBJ-7 of [Capacity Expansion](capacity-expansion.md#53-slack-penalties)), discounted at the base rate.
 
 Built by `build_stochastic_objective!()`.
 
 ### 4.2 First-Stage Investment Cost
 
 
-Investment decisions are common to all scenarios, but their unit cost is uncertain: each scenario values the same investment with its own investment-cost multipliers and discount rate, and the objective takes the probability-weighted sum:
+Investment decisions are common to all scenarios, but their unit cost is uncertain: each scenario values the same investment with its own investment-cost multipliers and discount rate, as the annuities of OBJ-2 in [Capacity Expansion](capacity-expansion.md#51-investment-cost-annuities), and the objective takes the probability-weighted sum:
 
 \[
-C^{inv}_{y,s} = \sum_{t,n} m^{tech}_{s} \, c^{inv}_{t,n} \, I^{tech}_{y,t,n} + \sum_{b,n} m^{sto}_s \left( m^{P}_s \, c^{inv,P}_{b,n} I^{bat,P}_{y,b,n} + m^{E}_s \, c^{inv,E}_{b,n} I^{bat,E}_{y,b,n} \right) + \sum_{\text{corridors}} m^{tx}_s \, c^{tr} \, I^{tr}_{y} + C^{PE}_y + C^{res}_y
+C^{inv}_{s} = \sum_{u} m^{u}_{s} \, c_u \, I_u \, \mathrm{CRF}(r_s, L_u) \sum_{y = y_u}^{\min(Y,\; y_u + \lceil L_u \rceil - 1)} \frac{1}{(1+r_s)^{y-1}}
 \]
 
-where \(m^{tech}_s\) is `invest_cost_renewables` or `invest_cost_conventional` by technology type, \(m^{sto}_s\) is `invest_cost_storage`, \(m^{P}_s\) and \(m^{E}_s\) are `bat_invest_cost_power` and `bat_invest_cost_capacity`, and \(m^{tx}_s\) is `invest_cost_transmission`. Primary-energy (\(C^{PE}\)) and reservoir (\(C^{res}\)) investment are not scaled. Life extension and decommissioning of existing assets (\(C^{asset}_{y,s}\)) are added every year, discounted at \(r_s\); the decommissioning costs are multiplied by `gen_decommissioning_cost` and `bat_decommissioning_cost`.
+where \(u\) runs over the builds (amount \(I_u\) built in year \(y_u\), overnight cost \(c_u\), lifetime \(L_u\)) and \(m^{u}_s\) is the scenario's multiplier for the build's kind: `invest_cost_renewables` or `invest_cost_conventional` by technology type, `invest_cost_storage` × `bat_invest_cost_power` or `bat_invest_cost_capacity` for battery technologies, `invest_cost_transmission` for transmission, `converter_invest_cost` for converters, and the fuel storage, transport and electrolyzer multipliers for the primary-energy builds. Reservoir investment is not scaled. Life extension and decommissioning of existing assets (\(C^{asset}_{y,s}\)) are added every year, discounted at \(r_s\); the decommissioning costs are multiplied by `gen_decommissioning_cost` and `bat_decommissioning_cost`.
 
 ### 4.3 Second-Stage Operational Cost
 
@@ -174,7 +176,7 @@ For each scenario \(s\) the operational cost comes from that scenario's own repr
 C^{op}_{y,s} = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d,s}
 \]
 
-where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment, RE-penetration shortfall), as scaled by the multipliers of §2.2 (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
+where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment), as scaled by the multipliers of §2.2. \(C^{op}_{y,s}\) also holds the scenario's CO2-budget violation and its RE-target shortfall: each scenario has its own annual RE constraint (RE-2) over its own renewable energy and demand, with its own shortfall priced at `fre_penetration_loss` × `penalty_fre_penetration` (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
 
 ### 4.4 Scenario-Adjusted Discount Rate
 
@@ -237,7 +239,7 @@ For each scenario \(s\), a separate set of representative-day operational constr
 |-----------|-------------|
 | Power balance (PB-1, DC-1) | Demand × `demand_growth`^(y−1) |
 | Operational cost | Fuel × `fuel_cost` × `fuel_price_growth`^(y−1); maintenance × `maintenance_cost` |
-| RE target per day (RE-DAY-1) | Holds in every scenario's operation |
+| Annual RE target (RE-2) | Holds in every scenario, over its own renewable energy and demand, with its own shortfall at `fre_penetration_loss` × `penalty_fre_penetration` |
 
 Capacity adequacy (CAP-1) is built once, on the base-case demand. The cumulative capacity expressions (CUM-1 through CUM-4) link the common investment variables to each scenario's operation, so the same infrastructure serves all scenarios: a scenario whose demand outgrows the plan sheds load at VOLL, which the expected cost weighs against more investment.
 
