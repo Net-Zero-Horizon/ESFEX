@@ -738,7 +738,7 @@ Candidate generation technology for the master problem, under `technologies: {<k
 | `min_output` | list[float] | `[0.0]` | Minimum output per node (fraction) |
 | `ramp_up` | list[float] | `[1.0]` | Ramp-up limit per node (fraction of capacity per hour, scaled to `resolution_hours`; `0` = no limit) |
 | `ramp_down` | list[float] | `[1.0]` | Ramp-down limit per node (fraction of capacity per hour, scaled to `resolution_hours`; `0` = no limit) |
-| `fuel_cost` | list[float] | `[0.0]` | Fuel cost per node ($/MWh) |
+| `fuel_cost` | list[float] | `[0.0]` | Fuel cost per node ($/MWh). If all zero and `fuel` is in `fuels`, the loader computes it as for generators (see [Loader](../api/config-loader.md#fuel-cost-linking-and-non-fuel-om-adder)) |
 | `fuel_cost_curve` | list[[CostCurveConfig](#costcurveconfig)] \| null | `null` | Per-node offer curve; replaces `fuel_cost` in the master problem and in the dispatch of the built capacity. See [CostCurveConfig](#costcurveconfig) |
 | `fixed_cost` | list[float] | `[0.0]` | Fixed O&M per node ($ per MW of power built per year), charged every year the build is in service, at its degraded power |
 | `maintenance_cost` | list[float] | `[0.0]` | Maintenance cost per node ($/MWh) |
