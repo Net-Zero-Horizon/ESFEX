@@ -112,16 +112,18 @@ The master works at `temporal.resolution_hours`. Demand is aggregated with the *
 The objective is the discounted sum of the yearly costs, with year 1 undiscounted:
 
 $$
-\min \; \sum_{y=1}^{Y} \frac{1}{(1+r)^{y-1}} \left[ C^{inv}_y + C^{ext}_y + C^{dec}_y + C^{op}_y \right] + C^{slack}
+\min \; \sum_{y=1}^{Y} \frac{1}{(1+r)^{y-1}} \left[ C^{inv}_y + C^{ext}_y + C^{dec}_y + C^{op}_y + C^{slack}_y \right]
 $$
 
-- \(C^{inv}_y\): **overnight investment cost**, charged in full in the year the capacity is built (the first year of its investment period). It covers technologies (`invest_cost` × MW), battery technologies (`invest_cost_power` × MW + `invest_cost_energy` × MWh), transmission (`transference_invest_cost` × MW), primary-energy storage and transport, and reservoir capacity. The cost is **not** annualised, and there is no salvage credit for lifetime left at the end of the horizon.
+- \(C^{inv}_y\): **investment annuities**. Every MW (or MWh) built pays \(\mathrm{CRF}(r, L) = r(1+r)^L / ((1+r)^L - 1)\) times its overnight cost in each year it is in service inside the horizon, from the first year of its investment period until it reaches its lifetime \(L\) (\(1/L\) per year when `discount_rate` is 0). This covers technologies (`invest_cost` × MW, `lifetime`), battery technologies (`invest_cost_power` × MW + `invest_cost_energy` × MWh, `lifetime`), transmission (`transference_invest_cost` × MW, 40 years), converters (`invest_cost`, `life_time`), reservoir capacity (`reservoir_invest_cost`, the generator's `life_time`), and primary-energy storage, transport and electrolyzers (their `lifetime` / `life_time`). Nothing is charged after the horizon, so a plant built in the last years pays only for the years it serves, not its whole overnight cost (as in GenX and PyPSA).
 - \(C^{ext}_y\): life-extension cost of existing units kept beyond their lifetime.
 - \(C^{dec}_y\): decommissioning cost of existing units when they retire.
-- \(C^{op}_y\): representative-day operating cost scaled to the year. It includes fuel, fixed and maintenance cost of existing units and new technologies, plus the penalty terms of the dispatch (unserved energy, RE shortfall, curtailment, reserve and inertia shortfall).
-- \(C^{slack}\): fixed internal penalties on the slack of the yearly RE target, the investment budget and capacity adequacy. These are not discounted.
+- \(C^{op}_y\): representative-day operating cost scaled to the year. It includes fuel, fixed and maintenance cost of existing units and new technologies, plus the penalty terms of the dispatch (unserved energy, curtailment, reserve and inertia shortfall), the RE-target shortfall at `FRE_penetration_loss` per MWh and the CO2-budget violation.
+- \(C^{slack}_y\): the investment over `MAX_ANNUAL_SYSTEM_COST`, at 10 \$ per \$ exceeded, and the capacity-adequacy shortfall, at `loss_of_load` (VOLL) per MWh for each hour of the node's peak period. Both are high enough to bind, and neither makes the model infeasible.
 
 `r` is the system's `discount_rate` (default 0.05). A higher rate favours deferring capital-intensive investment.
+
+Earlier versions charged the full overnight cost in the build year, with no salvage value at the end of the horizon, so capacity built late in the horizon was rarely worth building. They also priced the budget and adequacy slacks at a fixed internal penalty of 1 M\$ per unit, so going over the budget cost 1 \$ per \$ and the budget had no effect, and they held the RE target on every representative day instead of over the year.
 
 
 ---
@@ -140,7 +142,7 @@ The master only invests through **candidate technologies**. Existing `generators
 | Electrolyzers | `electrolyzers` (`invest_cost`), with primary energy on | MW | `invest_max_power` |
 | Reservoir capacity | generator `reservoir_invest_cost` / `reservoir_invest_max` | MWh | `reservoir_invest_max` |
 
-`invest_max_power` and `invest_max_capacity` are per-node lists. Each value is a **cumulative** cap on what can be built at that node over the whole horizon. When a node has several buses, investment can go to any of them, but the node total stays within the cap. A value of `0.0` disables investment at that node. Total investment cost per investment period is limited to the system's `MAX_ANNUAL_SYSTEM_COST`, with a penalised slack.
+`invest_max_power` and `invest_max_capacity` are per-node lists. Each value is a **cumulative** cap on what can be built at that node over the whole horizon. When a node has several buses, investment can go to any of them, but the node total stays within the cap. A value of `0.0` disables investment at that node. The overnight cost of the technologies, battery technologies, transmission and reservoirs built in each investment period is limited to the system's `MAX_ANNUAL_SYSTEM_COST`; going over it costs 10 \$ per \$ exceeded.
 
 ```yaml
 systems:
@@ -254,11 +256,10 @@ The step \(\tau_y - \tau_{y-1}\) is then clamped to `[MIN_ANNUAL_INCREMENT, MAX_
 
 The path enters the model in three ways:
 
-- On every representative day, renewable generation (existing renewable generators plus renewable technologies) plus an RE-shortfall slack must cover \(\tau_y\) × day demand. The slack costs `FRE_penetration_loss` per MWh. Battery discharge does not count as renewable.
-- A yearly RE-share variable, bounded by the lowest daily share, must reach \(\tau_y\). This uses the fixed internal slack penalty.
-- The year-to-year change of that RE share must lie between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT`, starting from \(\rho^{init}\).
+- Each year, the renewable energy of each system (existing renewable generators plus renewable technologies, over the representative days scaled to the year) plus the energy missing must cover \(\tau_y\) × the system's demand over the same days. The missing energy costs `FRE_penetration_loss` per MWh (100 \$/MWh by default, the dispatch's penalty), discounted like the year's other costs. Battery discharge does not count as renewable. The target is annual: a sunny day may make up for a cloudy one.
+- A yearly RE share credited to the system (its renewable energy plus the energy missing, over its demand) changes from year to year by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT`, starting from \(\rho^{init}\).
 
-With several systems, each system has its own RE share and starting value.
+With several systems, each system has its own target, its own shortfall and its own starting value. The RE share reported for each year is the achieved one: renewable energy over demand, without the shortfall.
 
 In `myopic` mode, each year is a one-year model whose target is that year's \(\tau_y\) on the same path, computed over the whole horizon from \(\rho^{init}\) to `TARGET_RE_PENETRATION` with the same clamped steps. The increment bounds start from the RE share reached the year before: this year's share must rise by between `MIN_ANNUAL_INCREMENT` and `MAX_ANNUAL_INCREMENT` (shortfalls are paid through `FRE_penetration_loss`).
 
@@ -279,7 +280,7 @@ systems:
 
 ### Capacity Adequacy
 
-For each node and year, firm capacity must cover the year's peak demand × `reserve_margin` (default 1.15). Firm capacity counts existing generators, life-extended capacity, technology investments and the power of existing and new batteries, each at its firm share times its `risk_coefficient`: variable renewables (sun, wind, ocean, run-of-river hydro) at their **capacity credit**, the minimum of their availability profile (so solar contributes nothing); every other unit (thermal, biomass, reservoir hydro, storage) at its **mean availability over the node's peak period**, the top 10 % demand steps of the year, so derates, outages and seasonal availability count. A unit without an availability profile counts fully. Net imports from neighbouring nodes also count, up to the transfer capacity between them (existing lines plus transfer investment), so a node can rely on a neighbour's surplus. A penalised slack keeps the model feasible.
+For each node and year, firm capacity must cover the year's peak demand × `reserve_margin` (default 1.15). Firm capacity counts existing generators, life-extended capacity, technology investments and the power of existing and new batteries, each at its firm share times its `risk_coefficient`: variable renewables (sun, wind, ocean, run-of-river hydro) at their **capacity credit**, the minimum of their availability profile (so solar contributes nothing); every other unit (thermal, biomass, reservoir hydro, storage) at its **mean availability over the node's peak period**, the top 10 % demand steps of the year, so derates, outages and seasonal availability count. A unit without an availability profile counts fully. Net imports from neighbouring nodes also count, up to the transfer capacity between them (existing lines plus transfer investment), so a node can rely on a neighbour's surplus. A slack keeps the model feasible; each MW of it costs `loss_of_load` × the hours of that peak period, more than any firm capacity.
 
 
 ### CO₂

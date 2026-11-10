@@ -5,7 +5,7 @@
 
 The **Master Problem** minimizes the net present value (NPV) of total system cost over a multi-year planning horizon [**[24]**](../reference/bibliography.md#ref24), choosing which candidate technologies (`technologies`, `battery_technologies`) to build, which transmission links to expand, how long to keep existing units, and when. With the default `master_problem.planning_mode: perfect_foresight` it considers all years simultaneously — a decision to invest in year 3 accounts for the remaining useful life and operational savings through the last year. With `planning_mode: myopic` it solves year by year, using only the information available at each decision.
 
-The Master Problem is a linear program (LP) operating on representative days [**[22]**](../reference/bibliography.md#ref22), [**[23]**](../reference/bibliography.md#ref23) rather than full hourly detail. Investment decisions are continuous (MW of capacity), avoiding the computational cost of mixed-integer programming at the strategic level. Investment costs are annualized and discounted to present value; the optimizer balances capital cost against operational savings.
+The Master Problem is a linear program (LP) operating on representative days [**[22]**](../reference/bibliography.md#ref22), [**[23]**](../reference/bibliography.md#ref23) rather than full hourly detail. Investment decisions are continuous (MW of capacity), avoiding the computational cost of mixed-integer programming at the strategic level. Investment costs are annuities (the capital recovery factor × the overnight cost) paid in each year the capacity is in service within the horizon, discounted to present value; the optimizer balances capital cost against operational savings.
 
 ---
 
@@ -132,7 +132,7 @@ The penalties are set per system under `penalties:` (key names are case-insensit
 | Constraint | Config key (`penalties.`) | Default | Interpretation |
 |-----------|---------------------------|---------|----------------|
 | Unserved demand (loss of load) | `loss_of_load` | 10,000,000 $/MWh | Value of lost load [**[33]**](../reference/bibliography.md#ref33) -- the economic damage of not serving demand |
-| RE penetration shortfall | `fre_penetration_loss` | 100 $/MWh | Policy cost of missing the renewable energy target |
+| RE penetration shortfall | `fre_penetration_loss` | 100 $/MWh | Policy cost of each MWh of renewable energy missing from the RE target |
 | Reserve shortfall | `loss_of_reserve_static`, `loss_of_reserve_dynamic` | 100 $/MW | Cost of not holding the required reserve |
 | Curtailment | `curtailment_cost` | 20 $/MWh | Cost of curtailed renewable energy (the master problem also caps curtailment at `max_curtailment_ratio` of RE output) |
 | CO₂ budget violation | `co2_budget_violation` | 500 $/t | Penalty for exceeding the annual emissions budget (`co2_budget`) |

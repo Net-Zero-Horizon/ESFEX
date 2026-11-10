@@ -211,7 +211,6 @@ class MasterProblemAdapter:
         initial_re_penetration: float = 0.1,
         min_re_increment: float = 0.0,
         max_re_increment: float = 1.0,
-        slack_penalty: float = 1e6,
         life_extension_cost_factor: float = 0.3,
         decommissioning_cost_factor: float = 0.1,
         temporal_resolution_hours: int = 24,
@@ -305,7 +304,7 @@ Extract investment and retirement decisions keyed by year. Returns a dictionary 
 - Retirement decisions
 - Total NPV cost
 
-The top-level keys include `status`, `objective`, `solve_time`, `solution` (per-year dicts of `tech_investment_power_{t}_{n}`, `bat_tech_investment_power_{bt}_{n}`, `bat_tech_investment_capacity_{bt}_{n}` and `transfer_investment_{i}_{j}` values), `tech_investment`, `bat_tech_power_investment`, `bat_tech_capacity_investment`, `cumulative_*` capacities, `total_investment_by_year`, `total_operational_by_year` and `re_penetration_by_year`.
+The top-level keys include `status`, `objective`, `solve_time`, `solution` (per-year dicts of `tech_investment_power_{t}_{n}`, `bat_tech_investment_power_{bt}_{n}`, `bat_tech_investment_capacity_{bt}_{n}` and `transfer_investment_{i}_{j}` values), `tech_investment`, `bat_tech_power_investment`, `bat_tech_capacity_investment`, `cumulative_*` capacities, `total_investment_by_year` (overnight cost of each year's builds, what the budget limits), `annuity_cost_by_year` (investment annuities paid each year, what the objective charges), `total_operational_by_year` and `re_penetration_by_year` (achieved RE share).
 
 The `{n}`, `{i}`, `{j}` indices and the per-bus arrays refer to the system's own buses (one per node in the merged multi-node master). When network reduction is enabled the master solves on the reduced network, and its results are laid out on the original buses before they are returned: eliminated buses hold no capacity.
 

@@ -306,13 +306,13 @@ where \(c^{trans}_{f,r}\) is the transport cost per unit per km (`transport_cost
 
 ### Investment Costs
 
-The dispatch has no investment cost: the master builds the fuel infrastructure and charges it, like its other assets, as an overnight cost discounted to the build year:
+The dispatch has no investment cost: the master builds the fuel infrastructure and charges it, like its other assets, as annuities paid in each year the capacity is in service inside the horizon ([Capacity Expansion](capacity-expansion.md#51-investment-cost-annuities), OBJ-2):
 
 \[
-C^{invest} = \sum_{y} \delta_y \left( \sum_{f,n} c^{stor,inv}_f \, I^{stor}_{f,n,y} + \sum_{f,r} c^{trans,inv}_f \, d_r \, I^{trans}_{f,r,y} \right)
+C^{invest} = \sum_{y} \left( \sum_{f,n} c^{stor,inv}_f \, I^{stor}_{f,n,y} \, A(L^{stor}_f, y) + \sum_{f,r} c^{trans,inv}_f \, d_r \, I^{trans}_{f,r,y} \, A(L^{trans}_f, y) \right), \qquad A(L, y) = \mathrm{CRF}(r, L) \sum_{y'=y}^{\min(Y,\, y + \lceil L \rceil - 1)} \delta_{y'}
 \]
 
-with \(c^{stor,inv}_f\) and \(c^{trans,inv}_f\) the `investment_cost` of the fuel's `fuel_infrastructure` entries and \(\delta_y\) the master's discount factor. Built fuel capacity does not retire within the horizon.
+with \(c^{stor,inv}_f\) and \(c^{trans,inv}_f\) the `investment_cost` of the fuel's `fuel_infrastructure` entries, \(L^{stor}_f\) and \(L^{trans}_f\) their `lifetime` (defaults 30 and 20 years) and \(\delta_{y'}\) the master's discount factor. Built fuel capacity does not retire within the horizon; it pays its annuity for its lifetime.
 
 ### Penalty Costs
 
@@ -429,8 +429,8 @@ with the terms defined above. The PE terms are added to the operational dispatch
 |------|-------------|
 | Supply cost | Fuel procurement at import nodes |
 | Transport cost | Operating cost proportional to distance |
-| Storage investment | Master only: overnight cost of the tanks it builds |
-| Transport investment | Master only: overnight cost of the route capacity it builds |
+| Storage investment | Master only: annuities of the tanks it builds |
+| Transport investment | Master only: annuities of the route capacity it builds |
 | Shortfall penalties | Fuel shortfall, unmet non-electric demand, excess supply |
 
 ## Power System Coupling
