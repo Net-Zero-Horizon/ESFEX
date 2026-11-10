@@ -65,8 +65,9 @@ Investment variables exist only for period-start years \(y \in \mathcal{Y}^{inv}
 |----------|--------|-------|-------------|------------|
 | \(X_{y,g,n}\) | \([0, \bar{P}_{g,n}(1-\delta_{g,n})^{a}]\) | MW | Capacity of generator \(g\) kept past its lifetime | `gen_life_extension` (`gen_life_ext_*`) |
 | \(X^{bat}_{y,b,n}\) | \([0, \bar{P}^{bat}_{b,n}]\) | MW | Battery power kept past its lifetime | `bat_life_extension` (`bat_life_ext_*`) |
-| \(\rho_{\sigma,y}\) | \([0, 1]\) | -- | RE share credited to system \(\sigma\) (its renewable energy plus shortfall, over its demand; RE-2b) | `re_penetration_ratio[(σ,y)]` |
+| \(\rho_{\sigma,y}\) | \(\geq 0\) | -- | Actual RE share of system \(\sigma\) (its renewable energy used, over its demand; RE-2b) | `re_penetration_ratio[(σ,y)]` |
 | \(s^{re}_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Renewable energy missing from system \(\sigma\)'s RE target | `slack_re_target[(0,σ,y)]` (scenario \(\omega\): `[(ω,σ,y)]`) |
+| \(s^{grow}_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Renewable energy system \(\sigma\) uses above its growth cap (RE-3b) | `slack_re_cap_s{σ}_y{y}` (`model.ext[:re_cap_slack]`) |
 | \(s^{cap}_{y,n}\) | \(\mathbb{R}_+\) | MW | Capacity adequacy shortfall per node | `slack_capacity[(y,n)]` |
 | \(s^{bud}_y\) | \(\mathbb{R}_+\) | \$ | Overnight investment over the annual budget | `slack_budget[y]` |
 
@@ -243,7 +244,7 @@ C^{day}_{y,d} = \sum_{t=1}^{H} \Big[ & \sum_{g,n} \left(c^{fuel}_{g,n} + c^{main
 \quad + \sum_{t=1}^{H} \Big[ \sum_{c} c^{var}_c \left(P^{c,1}_{c,t} + P^{c,2}_{c,t}\right) + \sum_{\ell} c^{flow}_\ell \, |f^{day}_{\ell,t}| \Big] + \frac{1}{\Delta t} \sum_{g,n,t} \frac{c^{su}_{g,n}}{\bar{P}_{g,n}} \, SU_{g,n,t} \tag{OBJ-6a}
 \]
 
-OBJ-6a is the converters' variable cost on the power they carry in either direction (plus the constant standby term of the dispatch), the flow cost of inter-system links (§8.3.9) and the start-ups of §8.3.10 (an event, not energy: the \(1/\Delta t\) cancels the step length of OBJ-4). The CO2 budget violation of §8.3.11 is added to \(C^{op}_y\) once per year at each system's penalty, and so is the RE-target shortfall \(c^{fre} s^{re}_{\sigma,y}\) of RE-2. The per-step slack \(\lambda^{fre}\) of OBJ-5 is the Benders subproblems' RE shortfall (§11b); in the monolithic master it is in no constraint and stays 0.
+OBJ-6a is the converters' variable cost on the power they carry in either direction (plus the constant standby term of the dispatch), the flow cost of inter-system links (§8.3.9) and the start-ups of §8.3.10 (an event, not energy: the \(1/\Delta t\) cancels the step length of OBJ-4). The CO2 budget violation of §8.3.11 is added to \(C^{op}_y\) once per year at each system's penalty, and so are the RE-target shortfall \(c^{fre} s^{re}_{\sigma,y}\) of RE-2 and the renewable energy above the growth cap \(c^{VOLL} s^{grow}_{\sigma,y}\) of RE-3b. The per-step slack \(\lambda^{fre}\) of OBJ-5 is in no master constraint and stays 0.
 
 where \(\kappa_s\) is the criticality weight for sector \(s\). The sectoral shed \(L^{sec,day}\) is part of \(L^{day}\) (SEC-2), which OBJ-5 already charges at VOLL; OBJ-6 adds the criticality premium, so a sector's shed MWh costs \(c^{VOLL} \kappa_s\), and the unclassified remainder \(L^{day}_{n,t} - \sum_s L^{sec,day}_{s,n,t}\) gets the premium \(c^{VOLL} (m_{n,t} - 1)\), where \(m_{n,t}\) is the demand-weighted mean of the sector criticalities at the bus's parent node in that hour (1 where no sector has demand), as in the dispatch (OBJ-4a). The carbon cost is the one the dispatch charges, so a carbon price shifts the plan towards lower-emission units. Batteries pay their `maintenance_cost` on every MWh charged and discharged and their throughput cost on discharge, as in the dispatch; for battery technologies (\(k\)) these are the technology's `maintenance_cost` and `throughput_degradation_cost`. When `max_curtailment_ratio` < 1, the curtailment of candidate renewable technologies, \(\sum (\text{capacity} \cdot \alpha - P^{tech})\), is charged at \(c^{CU}\) as well. All of \(C^{day}\) is scaled to the year the same way (OBJ-4, or \(\Delta t \cdot w_p\) for a TSAM period of weight \(w_p\)), in the monolithic, TSAM, multi-system and stochastic masters; the Benders subproblems charge the same day cost except the candidates' curtailment, which they price only above the cap ([§11b](#11b-benders-decomposition)).
 
@@ -262,6 +263,7 @@ C^{slack} = \sum_{y=1}^{Y} \frac{\pi^{bud} \, s^{bud}_y + \sum_{n \in \mathcal{N
 - **Budget** (`BUDGET_SLACK_PENALTY`, \(\pi^{bud} = 10\)): every \$ over the annual budget costs 10 \$, so the budget binds unless keeping it would cost more than ten times the overspend (for example load shed at VOLL).
 - **Capacity adequacy** (`adequacy_slack_penalty`): a MW missing at the peak is priced as load not served in each hour of the node's peak period \(\mathcal{T}^{peak}_{y,n}\), the steps CAP-1 takes as the peak (the top 10 % of the year's demand, about 876 hours). This is above the yearly cost of any firm capacity, so the slack is used only when no build can close the gap.
 - **RE target**: the shortfall \(s^{re}_{\sigma,y}\) is an operating cost of the year, at \(c^{fre}\) per MWh (RE-2).
+- **RE growth cap**: the renewable energy above the cap \(s^{grow}_{\sigma,y}\) is an operating cost of the year, at VOLL per MWh (RE-3b, `re_cap_penalty`).
 
 No slack makes the master infeasible. In a stochastic master the budget and adequacy slacks are first-stage and are discounted at the base rate. Earlier versions priced the budget and adequacy slacks, and a redundant yearly RE-ratio slack, at a generic `slack_penalty` of 1 M\$ per unit: every \$ over the budget cost 1 \$, so the budget did not constrain the plan.
 
@@ -423,7 +425,7 @@ A unit without an availability profile counts fully. Earlier versions counted ev
 ### 7.5 RE Target Constraints (RE)
 
 
-**Julia functions**: `calculate_target_ratios(input)`, `add_re_target_constraints!()`, `add_re_increment_constraints!()`
+**Julia functions**: `calculate_target_ratios(input)`, `add_re_target_constraints!()`, `add_re_growth_cap!()`, `define_re_share!()`
 
 RE targets are set per system \(\sigma\) (one global system when the configuration has a single system).
 
@@ -433,12 +435,12 @@ RE targets are set per system \(\sigma\) (one global system when the configurati
 \rho^{target}_{\sigma,1} = \rho^{init}_\sigma, \qquad \rho^{target}_{\sigma,y} = \rho^{init}_\sigma + \frac{y - 1}{Y - 1} \left( \rho^{target} - \rho^{init}_\sigma \right) \quad (y \geq 2) \tag{RE-1}
 \]
 
-with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\), and the target never above 1 (the minimum step can otherwise push the path past 100 %). In myopic planning each one-year master takes its year's \(\rho^{target}_{\sigma,y}\) from this trajectory over the whole horizon (`re_target_override`), and RE-3 the bounds perfect foresight places on that year (below).
+with the step from the previous year's target clamped to \([\Delta\rho^{min}, \Delta\rho^{max}]\), and the target never above 1 (the minimum step can otherwise push the path past 100 %). In myopic planning each one-year master takes its year's \(\rho^{target}_{\sigma,y}\) from this trajectory over the whole horizon (`re_target_override`), and RE-3 its bounds (below).
 
-**RE-2: RE target** (annual, soft, `re_target_s{σ}_y{y}`). The renewable energy of system \(\sigma\) over the year, from its representative days (or TSAM periods) scaled to the year as their cost is, plus the energy missing, covers the target share of its demand scaled the same way:
+**RE-2: RE target** (annual, soft, `re_target_s{σ}_y{y}`). The renewable energy of system \(\sigma\) over the year, from its representative days (or TSAM periods) scaled to the year as their cost is, plus the energy missing, covers the required share of its demand scaled the same way: the RE-1 target or, with a minimum increment, the floor \(F_{\sigma,y}\) of RE-3, whichever is higher:
 
 \[
-E^{RE}_{\sigma,y} + s^{re}_{\sigma,y} \geq \rho^{target}_{\sigma,y} \, D_{\sigma,y} \tag{RE-2}
+E^{RE}_{\sigma,y} + s^{re}_{\sigma,y} \geq \max\!\big(\rho^{target}_{\sigma,y},\, F_{\sigma,y}\big) \, D_{\sigma,y} \tag{RE-2}
 \]
 
 \[
@@ -447,21 +449,31 @@ E^{RE}_{\sigma,y} = \sum_{d} w_d \sum_{t} \Big( \sum_{g \in \mathcal{G}_{RE}} \s
 
 with \(w_d = \Delta t \, (H_{year}/24)/D_r\) for a representative day and \(\Delta t \, w_p\) for a TSAM period, and \(D_{n,t}\) a bus's share (`demand_fraction`) of its node's demand with the year's growth. Battery discharge does not count, as in the dispatch. The shortfall \(s^{re}_{\sigma,y}\) (MWh/year) is charged at \(c^{fre}\) in the year's operating cost and discounted like it; in a stochastic master each scenario has its own shortfall, priced with its `penalty_fre_penetration` multiplier and weighted by its probability. The target is a planning target: a day rich in sun or wind may make up for a poor one, as over a dispatch window. Each system of a merged run has its own target and its own slack. Earlier versions held the target on every representative day (its shortfall at the same \(c^{fre}\) per MWh), so a day's surplus could not make up for another's, plus a yearly ratio with a fraction-valued slack that never bound.
 
-**RE-2b: Credited share** (`re_ratio_s{σ}_y{y}`):
+**RE-2b: Actual share** (`re_ratio_s{σ}_y{y}`). \(\rho_{\sigma,y}\) is the share of its demand the system covers with renewable energy it uses (after curtailment):
 
 \[
-\rho_{\sigma,y} \, D_{\sigma,y} \leq E^{RE}_{\sigma,y} + s^{re}_{\sigma,y} \tag{RE-2b}
+\rho_{\sigma,y} \, D_{\sigma,y} = E^{RE}_{\sigma,y} \tag{RE-2b}
 \]
 
-**RE-3: RE increment bounds** (`re_min_increment_*`, `re_max_increment_*`), with year 1 anchored to the initial penetration (clamped to \([0, 1]\)):
+It has no upper bound: \(E^{RE}\) can pass the demand when renewables also charge storage or cover losses. In a stochastic master it is the probability-weighted energy over the weighted demand, as reported (`re_penetration_by_year`, §12).
+
+**RE-3: RE increment bounds.** The minimum increment sets a floor that the share must reach or pay the shortfall of RE-2 for, a straight line from the initial share (clamped to \([0, 1]\)) that stops at 100 %:
 
 \[
-\min\!\big(\Delta\rho^{min},\, 1 - F_{\sigma,y-1}\big) \leq \rho_{\sigma,y} - \rho_{\sigma,y-1} \leq \Delta\rho^{max} \qquad \forall\, \sigma,\, y, \quad \rho_{\sigma,0} = \rho^{init}_\sigma, \quad F_{\sigma,y} = \min\!\big(\rho^{init}_\sigma + y\,\Delta\rho^{min},\, 1\big) \tag{RE-3}
+F_{\sigma,y} = \min\!\big(\rho^{init}_\sigma + y\,\Delta\rho^{min},\, 1\big) \tag{RE-3a}
 \]
 
-Each bound is added only when it is active (\(\Delta\rho^{min} > 0\), \(\Delta\rho^{max} < 1\)). The minimum step stops at 100 %: once the floor \(F_{\sigma,y}\) reaches 1 (a high initial share or a long horizon), the share only has to stay there. The bounds act on the credited share of RE-2b (at most 1), so a minimum increment may be met by priced shortfall and never makes the master infeasible (as long as \(\Delta\rho^{min} \leq \Delta\rho^{max}\)). The share reported (`re_penetration_by_year`, §12) is the achieved one, \(E^{RE}_{\sigma,y}/D_{\sigma,y}\), which can pass 100 % when renewables also charge storage or cover losses.
+The maximum increment caps the growth of the **actual** share over the previous year's actual share (`re_max_increment_s{σ}_y{y}`), year 1 over the initial share \(\rho^{0}_\sigma\) (clamped to \([0, 1]\)):
 
-In myopic planning, year \(k\) (0-based) anchors RE-3 at \(\min(\rho^{init}_\sigma + k\,\Delta\rho^{min},\, 1)\), where the perfect-foresight chain stands the year before, so its one-year master gets the floor \(F_{\sigma,k+1}\) perfect foresight places on that year. The share reached in earlier years does not move it. Earlier versions anchored it at that achieved share: a year that overshot raised every later year's floor, and once the achieved share passed \(1 - \Delta\rho^{min}\) every later master was infeasible.
+\[
+E^{RE}_{\sigma,y} \leq \Big(\frac{E^{RE}_{\sigma,y-1}}{D_{\sigma,y-1}} + \Delta\rho^{max}\Big) D_{\sigma,y} + s^{grow}_{\sigma,y}, \qquad \frac{E^{RE}_{\sigma,0}}{D_{\sigma,0}} = \rho^{0}_\sigma \tag{RE-3b}
+\]
+
+Both are linear: the demands are data. A system with a 5 % share and \(\Delta\rho^{max} = 0.10\) reaches at most 15 % in year 1 and 25 % in year 2, however cheap new renewables are; a year that grows less (a dark year, or a held-back build) lowers the next year's cap with it. The slack \(s^{grow}_{\sigma,y}\) (MWh/year, `slack_re_cap_s{σ}_y{y}`) is priced at `re_cap_penalty`: the value of lost load \(c^{VOLL}\) (and at least \(c^{fre}\)), in the year's operating cost. Renewable energy above the cap thus costs as much as load shed: the master curtails renewable output or runs other units instead, and builds no new renewables beyond the cap. The slack only keeps the master feasible when existing renewables must produce more than the cap allows (the curtailment limit `max_curtailment_ratio` keeps them running); `diagnose_infeasibility` reports it as `re_max_increment_s{σ}_y{y}`. Each bound is added only when it is active (\(\Delta\rho^{min} > 0\), \(\Delta\rho^{max} < 1\)). A minimum increment above the maximum is not infeasible either: the floor's shortfall is paid. In a stochastic master each scenario caps its own share over its own previous year, as its target is its own.
+
+Earlier versions bounded the increments of a *credited* share \(\rho_{\sigma,y} D_{\sigma,y} \leq E^{RE}_{\sigma,y} + s^{re}_{\sigma,y}\) that the master could set as low as it liked, so \(\Delta\rho^{max}\) never limited the renewable energy: a myopic master of Cuba went from a 5 % share to 89 % in its first year.
+
+In myopic planning, year \(k\) (0-based) anchors the floor at \(\min(\rho^{init}_\sigma + k\,\Delta\rho^{min},\, 1)\), where the perfect-foresight chain stands the year before, so its one-year master gets the floor \(F_{\sigma,k+1}\) perfect foresight places on that year; the share reached in earlier years does not move it. The cap RE-3b of year \(k\) is measured from the share the year before achieved, clamped to \([0, 1]\) (`re_share_anchor`; year 0: the initial share). In the Benders master the same bounds act on the shares the master gives the representative days ([§11b](#11b-benders-decomposition)).
 
 ### 7.6 Retirement and Life Extension (RET)
 
@@ -905,15 +917,15 @@ where \(r_\omega = r \cdot m^{discount}_\omega\) is the scenario-adjusted discou
 
 Instead of one LP with all representative days embedded, Benders solves an investment-only master and one dispatch subproblem per year and representative day, linked by optimality and feasibility cuts. It reaches the monolithic optimum: the master has exactly the investment constraints and costs of the monolithic master, and the subproblems exactly its representative-day operation.
 
-**Master** (`create_benders_master`): the variables and constraints of §3 and §7 (TECH, BUD, RET, CAP, TXN, RE-2, RE-3) without representative days, plus one recourse variable \(\theta_{y,d} \geq 0\) per year and representative day (`theta_y{y}_d{d}`, in the cost units of the input, M\$ from the bridge) that estimates that day's operating cost:
+**Master** (`create_benders_master`): the variables and constraints of §3 and §7 (TECH, BUD, RET, CAP, TXN) without representative days, plus one recourse variable \(\theta_{y,d} \geq 0\) per year and representative day (`theta_y{y}_d{d}`, in the cost units of the input, M\$ from the bridge) that estimates that day's operating cost:
 
 \[
 \min \; C^{inv} + \sum_{y} \frac{C^{asset}_y + \sum_d \theta_{y,d}}{(1+r)^{y-1}} + C^{slack} \tag{BEN-1}
 \]
 
-\(C^{inv}\) (the annuities of OBJ-2), \(C^{asset}_y\) (`build_annual_asset_cost`: life extension, decommissioning, the fixed cost of the converter capacity built and of the batteries in service, and the electrolyzers' fixed cost) and \(C^{slack}\) (OBJ-7) are the monolithic master's. The master has no constraint of its own linking investment to the renewable energy or to storage: it shares each RE target out over the days (below), and the cuts carry the value of every capacity and share.
+\(C^{inv}\) (the annuities of OBJ-2), \(C^{asset}_y\) (`build_annual_asset_cost`: life extension, decommissioning, the fixed cost of the converter capacity built and of the batteries in service, and the electrolyzers' fixed cost) and \(C^{slack}\) (OBJ-7) are the monolithic master's. The master has no constraint of its own linking investment to the renewable energy or to storage: it sets each day's renewable energy, with the year's RE target and growth cap on it (below), and the cuts carry the value of every capacity and share.
 
-**Subproblems** (`create_benders_subproblem`): the representative-day dispatch of §8.3 with the capacities fixed at the master's values, including the converters, the link flow cost, the LP start-ups, the candidates' curtailment cost, the full loss-of-load penalty (VOLL and the sectoral premiums) and the fuel block. Each day covers the RE share the master gave it (below), and its curtailment at most \(\bar{\kappa}\) times its renewable output (`max_curt_y*_d*`, a hard limit), as in the monolithic model.
+**Subproblems** (`create_benders_subproblem`): the representative-day dispatch of §8.3 with the capacities fixed at the master's values, including the converters, the link flow cost, the LP start-ups, the candidates' curtailment cost, the full loss-of-load penalty (VOLL and the sectoral premiums) and the fuel block. Each day meets the RE share the master gave it (below), and its curtailment at most \(\bar{\kappa}\) times its renewable output (`max_curt_y*_d*`, a hard limit), as in the monolithic model.
 
 **Copy variables**: every master quantity a subproblem reads, other than the technology and battery-technology capacities (their gradient is the duals of the constraints holding them, each times its coefficient: availability on the power limits, ramp rate × \(\Delta t\) on the ramp limits, availability and `dynamic_reserve_contribution` on the reserve constraints of §8.3.0), enters it as a copy variable fixed to the master's value (`copy_*`, `fuel_cap_*`): the converter MW built up to the year, the MW built on each line's corridor, the reservoir MWh built up to the year (the level bounds of §8.3 include it), a life-extended unit's capacity, each day's RE share, the fuel storage, route and electrolyzer capacity in service (§8.3.12) and the CO2 allocations below. The dual of the fixing constraint is that quantity's gradient in the cut.
 
@@ -931,19 +943,19 @@ Instead of one LP with all representative days embedded, Benders solves an inves
 
 (`co2_budget_y{y}_d{d}_{group}`, slack `co2_budget_violation_y{y}_d{d}_{group}`). Summed over the days this is CO2-1 with \(V_{\sigma,y} = \sum_d v_{\sigma,y,d}\) at the same price, so both have the same optimum. The cuts carry each day's marginal cost of allowance to the master, which moves the budget to the days where it saves the most.
 
-**RE target** (RE-2, `add_benders_re_allocation!`): the annual target of a system couples all representative days of a year in the same way. The master has a variable \(q_{\sigma,y,d} \geq 0\) per system, year and day (`re_share_y{y}_s{σ}_d{d}`), the share of the day's own demand \(D_{\sigma,y,d}\) that the day must cover with renewable energy, with
+**RE target and growth cap** (RE-2, RE-2b, RE-3, `add_benders_re_allocation!`): the annual target and the growth cap of a system couple all representative days of a year, and the cap also couples the years. The master has a variable \(q_{\sigma,y,d} \geq 0\) per system, year and day (`re_share_y{y}_s{σ}_d{d}`), the share of the day's own demand \(D_{\sigma,y,d}\) the day covers with renewable energy, and the year's share is
 
 \[
-\sum_{d} \frac{w_d D_{\sigma,y,d}}{D_{\sigma,y}} \, q_{\sigma,y,d} \geq \max\big(\rho^{target}_{\sigma,y}, \rho_{\sigma,y}\big) \tag{BEN-RE-1}
+\rho_{\sigma,y} \, D_{\sigma,y} = \sum_{d} w_d D_{\sigma,y,d} \, q_{\sigma,y,d} \tag{BEN-RE-1}
 \]
 
-(two rows, `re_target_s{σ}_y{y}` and `re_ratio_s{σ}_y{y}`). Subproblem \(d\) covers its share with its renewable output plus a shortfall slack \(\lambda^{fre}\) at the system's nodes, priced at \(c^{fre}\) per MWh in its cost (OBJ-5):
+(`re_ratio_s{σ}_y{y}`). With a growth cap (\(\Delta\rho^{max} < 1\), `benders_re_capped`) the master holds RE-2 (`re_target_s{σ}_y{y}`, shortfall \(s^{re}_{\sigma,y}\) at \(c^{fre}\)) and RE-3b (`re_max_increment_s{σ}_y{y}`, slack at VOLL) on \(\rho_{\sigma,y} D_{\sigma,y}\), both in its objective, discounted, and subproblem \(d\) produces exactly that renewable energy, a deviation either way priced at VOLL (`re_cap_penalty`) per MWh:
 
 \[
-\sum_{t} \Big( \sum_{g \in \mathcal{G}_{RE}} \sum_{n \in \sigma} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE}} \sum_{n \in \sigma} P^{tech}_{k,n,t} + \sum_{n \in \sigma} \lambda^{fre}_{n,t} \Big) \geq q_{\sigma,y,d} \, D_{\sigma,y,d} \tag{BEN-RE-2}
+w_d \Big( \sum_{t} \Big( \sum_{g \in \mathcal{G}_{RE}} \sum_{n \in \sigma} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE}} \sum_{n \in \sigma} P^{tech}_{k,n,t} \Big) - q_{\sigma,y,d} \, D_{\sigma,y,d} \Big) = u^{+}_{\sigma,y,d} - u^{-}_{\sigma,y,d} \tag{BEN-RE-2}
 \]
 
-(`re_share_s{σ}_y{y}_d{d}`). Scaled to the year and summed over the days this is RE-2 and RE-2b with \(s^{re}_{\sigma,y} = \sum_d w_d \sum_{n,t} \lambda^{fre}_{n,t}\) at the same price, so both have the same optimum. In the warm-start cuts every day's share is the year's target.
+(`re_share_s{σ}_y{y}_d{d}`, slacks `re_over_*`, `re_under_*`). At the optimum the master's shares are the days' renewable output, so the bounds act on the actual share and both have the same optimum. Without a cap the shares only have to reach the target or floor (a hard row in the master) and subproblem \(d\) covers its share with its renewable output plus a shortfall `re_under_*` priced at \(c^{fre}\) per MWh, which summed over the days is RE-2's shortfall. In the warm-start cuts every day's share is the year's target. With a cap, a run stopped at `benders_max_iterations` before converging may report a cost that includes deviations of the shares from the days' output.
 
 **Cuts and loop**: after each master solve, all subproblems are solved and the duals of their capacity constraints and copy variables give one optimality cut per year, representative day and iteration (`benders_cut_y{y}_d{d}_iter{k}`, multi-cut): \(\theta_{y,d} \geq\) intercept + gradient × (technology and battery-technology capacities, copied quantities). A renewable technology's gradient also includes \(c^{CU}\) times its availability over the day: the curtailment cost its capacity adds. Every master quantity a subproblem reads has a gradient, so the cut is added for every day and iteration, also when all gradients are zero (\(\theta_{y,d}\) is then at least the day's operating cost). One cut per day, rather than one per year, lets the master see how each day's cost depends on its own quantities, such as its share of the CO2 budget.
 
@@ -993,6 +1005,7 @@ If the model solves successfully but with non-zero slack, the diagnostics report
 | Slack Variable | Indicates |
 |----------------|-----------|
 | \(s^{re}_{\sigma,y} > 0\) | MWh of renewable energy missing from system \(\sigma\)'s target in year \(y\) (`re_target_s{σ}_y{y}`) |
+| \(s^{grow}_{\sigma,y} > 0\) | MWh of renewable energy above system \(\sigma\)'s growth cap in year \(y\) (`re_max_increment_s{σ}_y{y}`): existing renewables the curtailment limit keeps running |
 | \(s^{bud}_y > 0\) | Investment budget exceeded in year \(y\) |
 | \(s^{cap}_{y,n} > 0\) | Capacity inadequacy at node \(n\) in year \(y\) |
 
@@ -1017,8 +1030,9 @@ create_master_problem(input)
   |     |-- create_day_ps_vars!()                 # Sec. 8.2
   |     |-- add_day_operational_constraints!()    # Sec. 8.3
   |     |-- calculate_day_operational_cost()      # OBJ-5, SCALE-1
-  |     +-- add_re_target_constraints!()          # RE-2, RE-2b (once per year)
-  |-- add_re_increment_constraints!()             # RE-3
+  |     +-- add_re_target_constraints!()          # RE-2, RE-3 (once per year)
+  |           +-- add_re_growth_cap!()            # RE-3b
+  |-- define_re_share!()                          # RE-2b
   |-- apply_user_constraints!()                   # custom constraints
   +-- build_master_objective!()                   # OBJ-1
         |-- build_investment_cost_expression()    # OBJ-2 (annuities)

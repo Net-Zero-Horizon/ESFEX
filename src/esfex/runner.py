@@ -526,12 +526,13 @@ def re_target_trajectory(initial: float, target: float, num_years: int,
 
 
 def myopic_re_anchor(initial: float, min_inc: float, y_idx: int) -> float:
-    """Year-0 anchor of the RE increment bounds (RE-3) in myopic year
-    *y_idx* (0-based): where the perfect-foresight chain stands the year
-    before, the initial share plus *y_idx* minimum steps, at most 1 (the
-    Julia ``re_increment_floor``). The share reached in earlier years does
-    not move it, so each one-year master gets the bounds perfect foresight
-    places on that year."""
+    """Year-0 anchor of the RE minimum-increment floor (RE-3) in myopic
+    year *y_idx* (0-based): where the perfect-foresight chain stands the
+    year before, the initial share plus *y_idx* minimum steps, at most 1
+    (the Julia ``re_increment_floor``). The share reached in earlier years
+    does not move it, so each one-year master gets the floor perfect
+    foresight places on that year. (The maximum increment is measured from
+    the share the previous year achieved: ``re_share_anchor``.)"""
     start = min(max(float(initial), 0.0), 1.0)
     return min(start + y_idx * max(float(min_inc), 0.0), 1.0)
 
@@ -3745,14 +3746,18 @@ class Orchestrator:
                 # 1. This year's RE target on the horizon trajectory
                 year_targets = {(s + 1, 1): path[y_idx] for s, path in enumerate(re_paths)}
                 year_target_re = re_paths[0][y_idx]
-                # The increment bounds (RE-3) perfect foresight places on
-                # this year: anchored where its chain stands the year before
-                # (initial share + y_idx minimum steps, at most 100 %), not
-                # at the share reached, which may pass 100 % and would make
-                # every later year infeasible
+                # The minimum-increment floor (RE-3) perfect foresight places
+                # on this year: anchored where its chain stands the year
+                # before (initial share + y_idx minimum steps, at most 100 %)
                 year_anchor = myopic_re_anchor(overall_initial_re, min_inc, y_idx)
+                # The maximum increment caps the growth over the share the
+                # previous year achieved (year 0: the initial share), in [0, 1]
+                share_anchor = ([min(max(current_re_per_system[name], 0.0), 1.0)
+                                 for name, _, _, _ in system_node_ranges]
+                                if system_node_ranges else
+                                [min(max(current_re, 0.0), 1.0)])
                 logger.debug(f"  RE target: {year_target_re:.2%} (achieved last year: "
-                             f"{current_re:.2%}, increment anchor: {year_anchor:.2%})")
+                             f"{current_re:.2%}, floor anchor: {year_anchor:.2%})")
 
                 # 2. The master system as this year sees it: units aged,
                 # earlier years' builds as existing units, limits reduced
@@ -3873,6 +3878,7 @@ class Orchestrator:
                     max_re_increment=max_inc,
                     system_node_ranges=year_sys_ranges,
                     re_target_override=year_targets,
+                    re_share_anchor=share_anchor,
                     temporal_resolution_hours=resolution_hours,
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,

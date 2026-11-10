@@ -233,6 +233,7 @@ class MasterProblemAdapter:
         use_stochastic: bool = False,
         stochastic_scenarios: Optional[List[dict]] = None,
         system_node_ranges: Optional[List[tuple]] = None,
+        re_share_anchor: Optional[List[float]] = None,  # actual RE share per system before year 1
         config_path: Optional[str] = None,
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
         inflow_cache: Optional[Dict[str, np.ndarray]] = None,

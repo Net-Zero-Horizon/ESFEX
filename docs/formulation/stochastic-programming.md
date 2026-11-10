@@ -106,7 +106,7 @@ The stochastic Master Problem has the following two-stage structure:
 \min_{I} \; C^{1st}(I) + \mathbb{E}_\omega\left[Q(I, \omega)\right]
 \]
 
-subject to investment constraints (TECH-1 to TECH-4, BUD-1, RET-2, TXN-1, CAP-1, RE-2, RE-3) that are scenario-independent.
+subject to investment constraints (TECH-1 to TECH-4, BUD-1, RET-2, TXN-1, CAP-1) that are scenario-independent. The RE target and increment bounds (RE-2, RE-3) hold per scenario (§5.2).
 
 **Second stage** (recourse, scenario-dependent):
 
@@ -176,7 +176,7 @@ For each scenario \(s\) the operational cost comes from that scenario's own repr
 C^{op}_{y,s} = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d,s}
 \]
 
-where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment), as scaled by the multipliers of §2.2. \(C^{op}_{y,s}\) also holds the scenario's CO2-budget violation and its RE-target shortfall: each scenario has its own annual RE constraint (RE-2) over its own renewable energy and demand, with its own shortfall priced at `fre_penetration_loss` × `penalty_fre_penetration` (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
+where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment), as scaled by the multipliers of §2.2. \(C^{op}_{y,s}\) also holds the scenario's CO2-budget violation, the renewable energy above its RE growth cap (RE-3b) and its RE-target shortfall: each scenario has its own annual RE constraint (RE-2) over its own renewable energy and demand, with its own shortfall priced at `fre_penetration_loss` × `penalty_fre_penetration` (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
 
 ### 4.4 Scenario-Adjusted Discount Rate
 
@@ -226,7 +226,6 @@ The following constraints apply identically across all scenarios:
 | TECH-1 to TECH-4 | [Capacity Expansion](capacity-expansion.md#71-investment-limits-tech) | Cumulative investment limits |
 | RET-2 | [Capacity Expansion](capacity-expansion.md#76-retirement-and-life-extension-ret) | Life-extension cascade |
 | CAP-1 | [Capacity Expansion](capacity-expansion.md#74-capacity-adequacy-cap) | Capacity adequacy (base-case demand) |
-| RE-2, RE-3 | [Capacity Expansion](capacity-expansion.md#75-re-target-constraints-re) | RE target and increments |
 | BUD-1 | [Capacity Expansion](capacity-expansion.md#72-budget-constraint-bud) | Annual investment budget |
 | TXN-1 | [Capacity Expansion](capacity-expansion.md#73-transmission-symmetry-txn) | Transmission symmetry |
 
@@ -239,7 +238,8 @@ For each scenario \(s\), a separate set of representative-day operational constr
 |-----------|-------------|
 | Power balance (PB-1, DC-1) | Demand × `demand_growth`^(y−1) |
 | Operational cost | Fuel × `fuel_cost` × `fuel_price_growth`^(y−1); maintenance × `maintenance_cost` |
-| Annual RE target (RE-2) | Holds in every scenario, over its own renewable energy and demand, with its own shortfall at `fre_penetration_loss` × `penalty_fre_penetration` |
+| Annual RE target and minimum-increment floor (RE-2, RE-3a) | Hold in every scenario, over its own renewable energy and demand, with its own shortfall at `fre_penetration_loss` × `penalty_fre_penetration` |
+| RE growth cap (RE-3b) | Every scenario's actual share grows at most `max_annual_increment` over its own share the year before (year 1: the initial share); energy above it at `loss_of_load` × `penalty_loss_of_load`. `re_penetration_ratio` is the probability-weighted renewable energy over the weighted demand |
 
 Capacity adequacy (CAP-1) is built once, on the base-case demand. The cumulative capacity expressions (CUM-1 through CUM-4) link the common investment variables to each scenario's operation, so the same infrastructure serves all scenarios: a scenario whose demand outgrows the plan sheds load at VOLL, which the expected cost weighs against more investment.
 

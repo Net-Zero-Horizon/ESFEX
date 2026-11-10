@@ -140,6 +140,20 @@ def test_increment_bounds_follow_the_perfect_foresight_chain(tmp_path):
         [0.0, 0.01, 0.02, 0.03])
 
 
+def test_max_increment_is_measured_from_the_share_achieved(tmp_path):
+    """The maximum increment capped only a credited share, never the
+    renewable energy: each myopic year now caps the growth over the share
+    the year before achieved (year 1: the initial share), clamped to 1."""
+    out, captured = _gas_only_myopic(tmp_path, lambda _: 1, re_achieved=0.34)
+    assert out[0] is not None
+    assert [c["re_share_anchor"] for c in captured] == [
+        pytest.approx([0.0]), pytest.approx([0.34]), pytest.approx([0.34]),
+        pytest.approx([0.34])]
+    (tmp_path / "over").mkdir()
+    _, captured = _gas_only_myopic(tmp_path / "over", lambda _: 1)
+    assert [c["re_share_anchor"] for c in captured][1:] == [[1.0]] * 3
+
+
 def test_myopic_re_anchor_stops_at_100_percent():
     from esfex.runner import myopic_re_anchor
 
@@ -148,11 +162,9 @@ def test_myopic_re_anchor_stops_at_100_percent():
     assert myopic_re_anchor(1.07, 0.01, 0) == 1.0
 
 
-@pytest.mark.julia
-def test_myopic_year_after_a_fully_renewable_year_is_optimal(tmp_path):
-    """Year 1 covers the whole load with cheap wind (achieved share 100 %).
-    Year 2's minimum increment was anchored there and asked for 101 % of a
-    share capped at 100 %: the master was infeasible."""
+def _wind_island_myopic(tmp_path, max_inc):
+    """Two myopic years of an island with cheap wind; returns each year's
+    solve status and achieved RE share."""
     from test_myopic_master_history import _system
     from test_zones import _make_technology
 
@@ -164,7 +176,7 @@ def test_myopic_year_after_a_fully_renewable_year_is_optimal(tmp_path):
     sysc = sysc.model_copy(update={
         "technologies": {**sysc.technologies, "wind": wind},
         "target_re_penetration": 0.2, "min_annual_increment": 0.01,
-        "max_annual_increment": 0.10})
+        "max_annual_increment": max_inc})
     cfg = _make_esfex_config(
         sysc, simulation_mode="development",
         temporal=TemporalConfig(resolution_hours=24, rolling_horizon_hours=720, overlap_hours=0),
@@ -182,9 +194,31 @@ def test_myopic_year_after_a_fully_renewable_year_is_optimal(tmp_path):
     orch = _create_orchestrator(cfg, tmp_path=tmp_path / "out")
     with patch.object(MasterProblemAdapter, "solve", recording_solve):
         orch.run(years=2, master_only=True)
+    assert orch.master_solution is not None
+    return statuses, shares
+
+
+@pytest.mark.julia
+def test_myopic_year_after_a_fully_renewable_year_is_optimal(tmp_path):
+    """Year 1 covers the whole load with cheap wind (achieved share 100 %).
+    Year 2's minimum increment was anchored there and asked for 101 % of a
+    share capped at 100 %: the master was infeasible."""
+    statuses, shares = _wind_island_myopic(tmp_path, 1.0)
     assert statuses == [1, 1]
     assert shares[0] >= 0.99                       # wind serves all the load
-    assert orch.master_solution is not None
+
+
+@pytest.mark.julia
+def test_myopic_years_grow_at_most_the_max_increment(tmp_path):
+    """With cheap wind the first one-year master went from 0 % to 100 %
+    renewable: max_annual_increment bounded only a credited share. Each
+    year now grows at most 10 points over the share achieved the year
+    before."""
+    statuses, shares = _wind_island_myopic(tmp_path, 0.10)
+    assert statuses == [1, 1]
+    assert shares[0] <= 0.10 + 1e-6
+    assert shares[1] <= shares[0] + 0.10 + 1e-6
+    assert shares[1] > 0.15                        # cheap wind still grows
 
 
 def test_a_year_that_is_not_optimal_stops_the_run(tmp_path, caplog):
