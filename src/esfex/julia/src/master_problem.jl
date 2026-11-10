@@ -259,8 +259,8 @@ function build_master_variables!(
     gen_life_extension = Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}()
     bat_life_extension = Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}()
 
-    # RE ratio — per system (sys_idx, y_idx) → variable
-    # When system_node_ranges is empty, sys_idx=1 covers all buses
+    # Actual RE share per (system, year), defined by define_re_share!; with
+    # no system_node_ranges, system 1 covers all buses
     re_penetration_ratio = Dict{Tuple{Int,Int}, VariableRef}()
 
     # Slack variables (the RE target's come with the representative days,
@@ -376,16 +376,11 @@ function build_master_variables!(
             end
         end
 
-        # RE penetration ratio — per system
-        n_sys = length(input.system_node_ranges)
-        if n_sys == 0
-            n_sys = 1  # single global system
-        end
-        for s_idx in 1:n_sys
-            sname = n_sys == 1 && isempty(input.system_node_ranges) ? "global" : input.system_node_ranges[s_idx].name
+        # Actual RE share per system: no upper bound, the renewable energy a
+        # system uses may pass its demand (storage losses, exports)
+        for s_idx in eachindex(master_systems(input))
             re_penetration_ratio[(s_idx, y_idx)] = @variable(model,
                 lower_bound = 0,
-                upper_bound = 1,
                 base_name = "re_ratio_s$(s_idx)_y$(y_idx)"
             )
         end
@@ -1056,26 +1051,110 @@ re_shortfall_penalty(input::MasterProblemInput) =
     input.fre_penetration_loss_penalty > 0 ? input.fre_penetration_loss_penalty : 1e-4
 
 """
+    re_cap_penalty(input) -> Float64
+
+Price of a MWh of renewable energy a system uses above its growth cap
+(`add_re_growth_cap!`): the value of lost load (`loss_of_load_penalty`), and
+at least the RE shortfall price (`re_shortfall_penalty`). Renewable energy
+above the cap costs as much as load shed, so the master curtails renewable
+output or runs other units instead; the slack only keeps the master
+feasible where existing renewables must produce more than the cap allows
+(the curtailment limit `max_curtailment_ratio` keeps them running).
+"""
+re_cap_penalty(input::MasterProblemInput) =
+    max(input.loss_of_load_penalty, re_shortfall_penalty(input))
+
+"""
+    re_share_anchor(input, s) -> Float64
+
+Actual RE share of system `s` in the year before the first modelled year,
+from which year 1's growth cap is measured: `input.re_share_anchor[s]` when
+given (a myopic year: the share the previous year achieved), otherwise the
+system's initial share; clamped to [0, 1].
+"""
+function re_share_anchor(input::MasterProblemInput, s::Int)
+    a = s <= length(input.re_share_anchor) ? input.re_share_anchor[s] :
+        master_systems(input)[s].initial_re
+    return clamp(Float64(a), 0.0, 1.0)
+end
+
+"""
+    re_increment_floor(initial_re, min_inc, y_idx) -> Float64
+
+Least RE share the minimum increment asks of year `y_idx` (RE-3):
+`initial_re + y_idx × min_inc`, at most 1 (the share cannot pass 100 %),
+with `initial_re` clamped to [0, 1]. Year 0 is the anchor itself.
+"""
+re_increment_floor(initial_re::Real, min_inc::Real, y_idx::Int) =
+    min(clamp(Float64(initial_re), 0.0, 1.0) + y_idx * max(Float64(min_inc), 0.0), 1.0)
+
+"""
+    re_required_share(input, targets, s, y_idx) -> Float64
+
+Least RE share system `s` must reach in year `y_idx` before its shortfall is
+priced (`add_re_target_constraints!`): its RE-1 target `targets[(s, y_idx)]`
+and, with a minimum increment, the floor `re_increment_floor` from the
+system's initial share (RE-3), whichever is higher.
+"""
+function re_required_share(input::MasterProblemInput,
+                           targets::Dict{Tuple{Int,Int}, Float64}, s::Int, y_idx::Int)
+    required = targets[(s, y_idx)]
+    input.min_re_increment > 0 || return required
+    return max(required, re_increment_floor(master_systems(input)[s].initial_re,
+                                            input.min_re_increment, y_idx))
+end
+
+"""
+    add_re_growth_cap!(model, input, s, y_idx, energy, demand, prev_share;
+                       scenario_idx=0) -> AffExpr
+
+Maximum annual increment (RE-3) of system `s`'s ACTUAL RE share in year
+`y_idx`. With `energy` the renewable energy the system uses (MWh/year, after
+curtailment), `demand` its demand (MWh/year) and `prev_share` its actual
+share the year before (an expression, or `re_share_anchor` in year 1):
+
+    energy ≤ (prev_share + Δmax) × demand + over        (re_max_increment)
+
+`over` (MWh/year, `slack_re_cap…`) is priced at `re_cap_penalty`; the
+returned cost goes with the year's operating cost. Nothing when
+`max_re_increment` ≥ 1 or the system has no demand.
+"""
+function add_re_growth_cap!(model::Model, input::MasterProblemInput, s::Int, y_idx::Int,
+                            energy, demand::Float64, prev_share; scenario_idx::Int = 0)
+    cost = AffExpr(0.0)
+    (input.max_re_increment < 1.0 && demand > 0) || return cost
+    tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
+    over = @variable(model, lower_bound = 0, base_name = "slack_re_cap$(tag)_s$(s)_y$(y_idx)")
+    @constraint(model, energy - demand * prev_share <= input.max_re_increment * demand + over,
+        base_name = "re_max_increment$(tag)_s$(s)_y$(y_idx)")
+    get!(() -> Dict{Tuple{Int,Int,Int}, VariableRef}(), model.ext,
+         :re_cap_slack)[(scenario_idx, s, y_idx)] = over
+    add_to_expression!(cost, re_cap_penalty(input), over)
+    return cost
+end
+
+"""
     add_re_target_constraints!(model, vars, input, y_idx, targets, re_energy, re_demand;
                                scenario_idx=0) -> AffExpr
 
-Annual renewable-energy target of each system in year `y_idx`. With
-`re_energy[σ]` the system's renewable output and `re_demand[σ]` its demand
-over the representative days (or TSAM periods), each scaled to the year as
-its cost is (MWh/year), and `slack_re_target[(scenario_idx, σ, y_idx)]` the
-renewable energy missing (MWh/year):
+Annual RE bounds of each system in year `y_idx`. With `re_energy[σ]` the
+system's renewable energy used and `re_demand[σ]` its demand over the
+representative days (or TSAM periods), each scaled to the year as its cost
+is (MWh/year), and `slack_re_target[(scenario_idx, σ, y_idx)]` the renewable
+energy missing (MWh/year):
 
-    re_energy[σ] + slack ≥ target[σ, y] × re_demand[σ]             (re_target)
-    re_penetration_ratio[σ, y] × re_demand[σ] ≤ re_energy[σ] + slack  (re_ratio)
+    re_energy[σ] + slack ≥ re_required_share(σ, y) × re_demand[σ]   (re_target)
 
-The target is annual: a sunny day may make up for a cloudy one, as over a
-dispatch window. The ratio is the share credited to the system, on which the
-increment bounds (`add_re_increment_constraints!`) act. Returns the cost of
-the slacks at `re_shortfall_penalty` per MWh, which the caller adds to the
-year's operating cost (discounted and, in a stochastic master, weighted by
-the scenario's probability like it). The renewable energy and demand are
-kept in `model.ext[:master_re]` for the achieved share
-(`master_re_shares`). A system without demand gets no constraint.
+the RE-1 target or the RE-3 minimum-increment floor, whichever is higher,
+and the growth cap on the actual share (`add_re_growth_cap!`), measured from
+the same scenario's share the year before (year 1: `re_share_anchor`). The
+target is annual: a sunny day may make up for a cloudy one, as over a
+dispatch window. Returns the cost of the slacks (`re_shortfall_penalty` and
+`re_cap_penalty` per MWh), which the caller adds to the year's operating cost
+(discounted and, in a stochastic master, weighted by the scenario's
+probability like it). The renewable energy and demand are kept in
+`model.ext[:master_re]` for the actual share (`define_re_share!`,
+`master_re_shares`). A system without demand gets no constraint.
 """
 function add_re_target_constraints!(
     model::Model,
@@ -1097,82 +1176,50 @@ function add_re_target_constraints!(
         slack = @variable(model, lower_bound = 0,
             base_name = "slack_re$(tag)_s$(s)_y$(y_idx)")
         vars.slack_re_target[(scenario_idx, s, y_idx)] = slack
-        credited = re_energy[s] + slack
-        @constraint(model, credited >= targets[(s, y_idx)] * demand,
+        @constraint(model,
+            re_energy[s] + slack >= re_required_share(input, targets, s, y_idx) * demand,
             base_name = "re_target$(tag)_s$(s)_y$(y_idx)")
-        @constraint(model, vars.re_penetration_ratio[(s, y_idx)] * demand <= credited,
-            base_name = "re_ratio$(tag)_s$(s)_y$(y_idx)")
         add_to_expression!(cost, re_shortfall_penalty(input), slack)
+        prev = get(record, (scenario_idx, s, y_idx - 1), nothing)
+        prev_share = prev === nothing ? re_share_anchor(input, s) : (1.0 / prev[2]) * prev[1]
+        add_to_expression!(cost, add_re_growth_cap!(model, input, s, y_idx, re_energy[s],
+                                                    demand, prev_share; scenario_idx))
         record[(scenario_idx, s, y_idx)] = (re_energy[s], demand)
     end
     return cost
 end
 
 """
-    re_increment_floor(initial_re, min_inc, y_idx) -> Float64
+    define_re_share!(model, vars, input)
 
-Least credited RE share the minimum increment asks of year `y_idx` (RE-3):
-`initial_re + y_idx × min_inc`, at most 1 (the share cannot pass 100 %),
-with `initial_re` clamped to [0, 1]. Year 0 is the anchor itself.
+Define `re_penetration_ratio[σ, y]` as the actual RE share of each system
+and year in the representative days / TSAM periods (`model.ext[:master_re]`):
+its renewable energy used over its demand, both scaled to the year; in a
+stochastic master the probability-weighted energy over the weighted demand,
+as `master_re_energy` reports it. A system-year without demand is fixed at 0.
+Nothing for a master without representative days.
 """
-re_increment_floor(initial_re::Real, min_inc::Real, y_idx::Int) =
-    min(clamp(Float64(initial_re), 0.0, 1.0) + y_idx * max(Float64(min_inc), 0.0), 1.0)
-
-"""
-    add_re_increment_constraints!(model, vars, input)
-
-Annual RE increment bounds (RE-3) on the credited share
-`re_penetration_ratio` of each system, anchored at year 0 to the system's
-initial share (clamped to [0, 1]):
-
-    ρ[y] − ρ[y−1] ≥ min(Δmin, 1 − F[y−1])     with F[y] = re_increment_floor(ρ₀, Δmin, y)
-    ρ[y] − ρ[y−1] ≤ Δmax
-
-The minimum step stops at 100 %: once the floor reaches it (an initial share
-close to 1, or a long horizon), the share only has to stay there, so the
-bounds never make the master infeasible (the credited share may always be
-reached through the priced RE shortfall).
-"""
-function add_re_increment_constraints!(
-    model::Model,
-    vars::MasterProblemVariables,
-    input::MasterProblemInput
-)
-    num_years = length(input.years)
-
-    # Skip if min/max increments allow any change
-    if input.min_re_increment <= 0 && input.max_re_increment >= 1.0
-        return
+function define_re_share!(model::Model, vars::MasterProblemVariables,
+                          input::MasterProblemInput)
+    record = get(model.ext, :master_re, nothing)
+    (record === nothing || isempty(record)) && return nothing
+    scenarios = get(model.ext, :master_scenarios, nothing)
+    energy = Dict{Tuple{Int,Int}, AffExpr}()
+    demand = Dict{Tuple{Int,Int}, Float64}()
+    for ((k, s, y), (e, d)) in record
+        p = k == 0 || scenarios === nothing ? 1.0 : scenarios[k].probability
+        add_to_expression!(get!(() -> AffExpr(0.0), energy, (s, y)), e, p)
+        demand[(s, y)] = get(demand, (s, y), 0.0) + p * d
     end
-
-    n_sys = max(1, length(input.system_node_ranges))
-
-    for s_idx in 1:n_sys
-        sys_initial_re = clamp(isempty(input.system_node_ranges) ?
-            input.initial_re_penetration : input.system_node_ranges[s_idx].initial_re,
-            0.0, 1.0)
-
-        for y_idx in 1:num_years
-            prev = y_idx == 1 ? sys_initial_re : vars.re_penetration_ratio[(s_idx, y_idx - 1)]
-            increment = vars.re_penetration_ratio[(s_idx, y_idx)] - prev
-
-            if input.min_re_increment > 0
-                step = re_increment_floor(sys_initial_re, input.min_re_increment, y_idx) -
-                       re_increment_floor(sys_initial_re, input.min_re_increment, y_idx - 1)
-                @constraint(model,
-                    increment >= step,
-                    base_name = "re_min_increment_s$(s_idx)_y$(y_idx)"
-                )
-            end
-
-            if input.max_re_increment < 1.0
-                @constraint(model,
-                    increment <= input.max_re_increment,
-                    base_name = "re_max_increment_s$(s_idx)_y$(y_idx)"
-                )
-            end
+    for ((s, y), v) in vars.re_penetration_ratio
+        d = get(demand, (s, y), 0.0)
+        if d > 0
+            @constraint(model, d * v == energy[(s, y)], base_name = "re_ratio_s$(s)_y$(y)")
+        else
+            fix(v, 0.0; force = true)
         end
     end
+    return nothing
 end
 
 """
@@ -3798,11 +3845,10 @@ function create_master_problem(
         end
     end
 
-    # The annual RE targets come with the representative days / TSAM periods
-    # (add_re_target_constraints!), which hold the renewable energy
-
-    # Add RE increment constraints (min/max annual change in RE ratio)
-    add_re_increment_constraints!(model, vars, input)
+    # The annual RE target, minimum-increment floor and growth cap come with
+    # the representative days / TSAM periods (add_re_target_constraints!),
+    # which hold the renewable energy; re_penetration_ratio is their share
+    define_re_share!(model, vars, input)
 
     # User-defined investment constraints (declarative config + plugin overlays).
     apply_user_constraints!(model, vars, input, custom_constraints)
@@ -4224,8 +4270,10 @@ function create_stochastic_master_problem(input::StochasticMasterInput;
     end
 
     build_stochastic_objective!(model, vars, base_input, input.scenarios, scenario_costs)
-    # Each scenario's weight in the units' NPV (extract_unit_operation)
+    # Each scenario's weight in the units' NPV (extract_unit_operation) and
+    # in the reported RE share
     model.ext[:master_scenarios] = input.scenarios
+    define_re_share!(model, vars, base_input)
 
     return model, vars, targets, input.scenarios
 end
@@ -4847,6 +4895,16 @@ function diagnose_infeasibility(
                 violations[key] = get(violations, key, 0.0) + re_slack_val
             end
         end
+        # Renewable energy over the RE growth cap (MWh/year)
+        total_re_cap_slack = 0.0
+        for ((_, s, y_idx), v) in get(model.ext, :re_cap_slack, Dict{Tuple{Int,Int,Int}, VariableRef}())
+            val = value(v)
+            if val > 1e-6
+                total_re_cap_slack += val
+                key = "re_max_increment_s$(s)_y$(y_idx)"
+                violations[key] = get(violations, key, 0.0) + val
+            end
+        end
 
         for y_idx in 1:num_years
             budget_slack_val = value(vars.slack_budget[y_idx])
@@ -4865,6 +4923,7 @@ function diagnose_infeasibility(
         end
 
         violations["total_re_slack"] = total_re_slack
+        violations["total_re_cap_slack"] = total_re_cap_slack
         violations["total_budget_slack"] = total_budget_slack
         violations["total_capacity_slack"] = total_capacity_slack
     else

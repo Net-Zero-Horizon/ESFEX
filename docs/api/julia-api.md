@@ -221,8 +221,8 @@ struct MasterProblemInput
     # RE targets
     target_re_penetration::Float64
     initial_re_penetration::Float64
-    min_re_increment::Float64
-    max_re_increment::Float64
+    min_re_increment::Float64                   # Floor initial + y × min (RE-3a)
+    max_re_increment::Float64                   # Cap on the actual share's yearly growth (RE-3b)
     system_node_ranges::Vector{SystemNodeRange} # Per-system RE targets
     # Representative days
     temporal_resolution_hours::Int
@@ -259,6 +259,7 @@ struct MasterProblemInput
     base_lcoe::Float64                             # $/MWh a generator earns in its NPV
     npv_annual_return_rate::Float64                # Battery NPV revenue / power investment cost, per year
     npv_retired_units::Vector{RetiredUnit}         # Retired by retire_units: decommissioned in year 1
+    re_share_anchor::Vector{Float64}               # Actual RE share per system before year 1 (myopic: last year's); empty = initial
     # ... additional fields (sectoral demand, primary energy, cost curves)
 end
 ```
@@ -356,9 +357,12 @@ end
 | `add_retirement_cascade_constraints!` | `(model, vars, input)` | Life-extension capacity of a unit can only decrease from one year to the next, so a retirement is not reversed. |
 | `add_capacity_adequacy_constraints!` | `(model, vars, input)` | Ensures installed capacity meets peak demand plus reserve margin. |
 | `add_transmission_symmetry_constraints!` | `(model, vars, input)` | Holds `transfer_investment[i,j] == transfer_investment[j,i]` where both directions exist. |
-| `add_re_target_constraints!` | `(model, vars, input, y_idx, targets, re_energy, re_demand; scenario_idx=0) -> AffExpr` | Annual RE target of each system in year `y_idx`: its renewable energy over the representative days (scaled to the year) plus a shortfall slack `slack_re_target[(scenario_idx, σ, y_idx)]` (MWh) covers the target share of its demand, and bounds the credited share `re_penetration_ratio`. Called by the representative-day and TSAM validations; returns the slacks' cost at `re_shortfall_penalty` per MWh, part of the year's operating cost. |
-| `add_re_increment_constraints!` | `(model, vars, input)` | Year-over-year RE penetration change limits (RE-3); the minimum step stops at 100 %. |
-| `re_increment_floor` | `(initial_re, min_inc, y_idx) -> Float64` | Least credited RE share the minimum increment asks of year `y_idx`: `initial_re + y_idx × min_inc`, at most 1. |
+| `add_re_target_constraints!` | `(model, vars, input, y_idx, targets, re_energy, re_demand; scenario_idx=0) -> AffExpr` | Annual RE bounds of each system in year `y_idx`: its renewable energy over the representative days (scaled to the year) plus a shortfall slack `slack_re_target[(scenario_idx, σ, y_idx)]` (MWh) covers `re_required_share` of its demand (RE-2, RE-3a), and the growth cap `add_re_growth_cap!` holds its actual share over the same scenario's previous year. Called by the representative-day and TSAM validations; returns the slacks' cost, part of the year's operating cost. |
+| `add_re_growth_cap!` | `(model, input, s, y_idx, energy, demand, prev_share; scenario_idx=0) -> AffExpr` | RE-3b: `energy ≤ (prev_share + max_re_increment) × demand + slack`, the slack (MWh, `model.ext[:re_cap_slack]`) priced at `re_cap_penalty` (VOLL, at least the RE shortfall price). Nothing when `max_re_increment` ≥ 1. |
+| `define_re_share!` | `(model, vars, input)` | Defines `re_penetration_ratio[σ, y]` as the actual RE share (renewable energy used over demand; probability-weighted in a stochastic master). |
+| `re_required_share` | `(input, targets, s, y_idx) -> Float64` | The RE-1 target or the minimum-increment floor, whichever is higher. |
+| `re_increment_floor` | `(initial_re, min_inc, y_idx) -> Float64` | Least RE share the minimum increment asks of year `y_idx`: `initial_re + y_idx × min_inc`, at most 1. |
+| `re_share_anchor` | `(input, s) -> Float64` | Actual RE share of system `s` before year 1, from which year 1's cap is measured: `input.re_share_anchor[s]` (myopic: last year's achieved share) or its initial share, clamped to [0, 1]. |
 | `master_conflict` | `(model; limit=20) -> Vector{String}` | Constraints of an infeasible master's conflict (IIS), empty when the solver cannot compute one. |
 | `select_representative_days` | `(demand, year_idx, num_days, min_separation, timesteps_per_day, timesteps_per_year) -> Vector{Int}` | Pick representative days of one year from the demand profile. |
 | `add_representative_days_validation!` | `(model, vars, input, targets; scenario=nothing, scenario_idx=0)` | Adds operational feasibility constraints on representative days. Creates sub-problem variables and constraints per day per year. With `scenario`, the days run on `scenario_master_input(...)`. The TSAM equivalent is the internal `add_tsam_periods_validation!`. |
