@@ -254,7 +254,6 @@ class TestMasterProblemTargets:
             max_annual_investment=1e9,
             target_re_penetration=0.8,
             initial_re_penetration=0.2,
-            slack_penalty=1e6,
         )
 
         targets = ESFEX.calculate_target_ratios(jl_input)
@@ -373,7 +372,6 @@ class TestMasterProblemSolve:
             max_annual_investment=5e8,  # 500M budget
             target_re_penetration=0.5,
             initial_re_penetration=0.3,
-            slack_penalty=1e9,
             verbose=False,
         )
 
@@ -464,7 +462,7 @@ class TestMasterProblemSolve:
                 base_demand=py_to_julia_matrix(simple_demand),
                 representative_days_per_year=2, min_day_separation=1,
                 target_re_penetration=0.0, initial_re_penetration=0.0,
-                slack_penalty=1e9, verbose=False,
+                verbose=False,
             )
             model, mvars, _ = ESFEX.create_master_problem(
                 jl_input, use_representative_days=True)
@@ -553,7 +551,7 @@ class TestMasterProblemSolve:
                 base_demand=py_to_julia_matrix(demand),
                 representative_days_per_year=2, min_day_separation=1,
                 target_re_penetration=0.0, initial_re_penetration=0.0,
-                slack_penalty=1e9, verbose=False,
+                verbose=False,
                 use_tsam=True,
                 tsam_period_start_hours=jl.seval("[[1, 25]]"),
                 tsam_period_weights=jl.seval("[[1.0, 1.0]]"),
@@ -614,8 +612,7 @@ class TestMasterProblemSolve:
                 initial_re_penetration=0.0,
                 representative_days_per_year=2,
                 min_day_separation=1,
-                slack_penalty=1e9,
-                verbose=False,
+                    verbose=False,
             )
 
         # Monolithic representative-day reference solve.
@@ -675,7 +672,6 @@ class TestMasterProblemSolve:
             batteries=simple_batteries,
             base_demand=py_to_julia_matrix(simple_demand),
             max_annual_investment=budget,
-            slack_penalty=1e12,  # High penalty to discourage slack
         )
 
         model, vars, targets = ESFEX.create_master_problem(jl_input)
