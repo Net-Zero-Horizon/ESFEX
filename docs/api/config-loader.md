@@ -172,6 +172,8 @@ After the units are built, and only if the system has a non-empty `fuels` block,
 
 The loader logs (INFO) each unit that receives the adder, with the resulting `maintenance_cost`, and how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
 
+**Candidate technologies.** Step 1 also applies to each entry of `technologies` whose `fuel` is a key of `fuels` and whose `fuel_cost` is missing or all zero: `price_base / energy_content / eff_at_rated` per node, a single `eff_at_rated` value counting for every node. The non-fuel adder (step 2) is not applied, since it includes capital cost, which a technology pays through `invest_cost`. The technologies linked are logged (INFO). A `Non-renewable` technology with no fuel cost left and no `fuel_cost_curve` is named in a warning with the reason (no fuel, fuel not in `fuels`, or no usable price, energy content or efficiency), even when the system has no `fuels` block.
+
 ---
 
 ## Exceptions

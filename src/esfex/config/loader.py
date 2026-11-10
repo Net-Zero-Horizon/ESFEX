@@ -359,6 +359,74 @@ def _non_fuel_om_adder(fuel_key: str, fuel: Any = None) -> float:
     return 0.0
 
 
+def _fuel_cost_from_fuel(fuel: Any, effs: list, n: int,
+                         fallback_eff: float = 0.0) -> Optional[list[float]]:
+    """Per-node fuel cost ($/MWh) of a unit burning *fuel*:
+    ``price_base / energy_content / eff`` at each of *n* nodes.
+
+    ``eff`` is ``effs[i]`` where positive, else *fallback_eff*; a node with
+    no usable efficiency gets 0. None when the fuel has no positive price
+    or energy content.
+    """
+    price = float(getattr(fuel, "price_base", 0.0) or 0.0)
+    energy = float(getattr(fuel, "energy_content", 0.0) or 0.0)
+    if price <= 0 or energy <= 0:
+        return None
+    out = []
+    for i in range(n):
+        eff = float(effs[i]) if i < len(effs) and effs[i] > 0 else fallback_eff
+        out.append(price / energy / eff if eff > 0 else 0.0)
+    return out
+
+
+def _link_technology_fuel_costs(technologies: dict, fuels: dict) -> None:
+    """Price the fuel of candidate technologies from the ``fuels`` block.
+
+    Same rule as for generators: a technology whose ``fuel`` is a key of
+    *fuels* and whose ``fuel_cost`` is missing or all zero gets
+    ``price_base / energy_content / eff_at_rated`` per node, whatever its
+    type (Sun, Wind and Water have no entry or a price of 0). Without it,
+    the master built thermal candidates as free generation and the dispatch
+    ran the built units at no fuel cost. The non-fuel O&M adder is not
+    applied: it includes capital, which a technology pays through its
+    ``invest_cost``. A non-renewable technology that still has no fuel cost
+    (and no offer curve) is named in a warning.
+    """
+    linked: list[str] = []
+    free: list[str] = []
+    for key, tech in technologies.items():
+        fuel_name = getattr(tech, "fuel", None) or "None"
+        fuel = fuels.get(fuel_name)
+        fc = list(getattr(tech, "fuel_cost", None) or [])
+        if fuel is not None and (not fc or max(fc) <= 0):
+            n = max(len(tech.invest_cost), len(tech.invest_max_power),
+                    len(tech.eff_at_rated), len(fc), 1)
+            effs = list(tech.eff_at_rated or [])
+            # A single efficiency is the technology's at every node
+            new_fc = _fuel_cost_from_fuel(
+                fuel, effs, n, float(effs[0]) if len(effs) == 1 else 0.0)
+            if new_fc is not None:
+                tech.fuel_cost = new_fc
+                fc = new_fc
+                linked.append(key)
+        if (tech.type != "Renewable" and not tech.fuel_cost_curve
+                and (not fc or max(fc) <= 0)):
+            reason = ("no fuel" if fuel_name in ("None", "") else
+                      f"fuel {fuel_name!r} not in fuels" if fuel is None else
+                      f"fuel {fuel_name!r} has no price_base/energy_content > 0"
+                      " or eff_at_rated is 0")
+            free.append(f"{key} ({reason})")
+    if linked:
+        log.info("Loader: fuel_cost of technologies %s computed from the fuels block "
+                 "(price_base / energy_content / eff_at_rated)", ", ".join(linked))
+    if free:
+        log.warning(
+            "Non-renewable candidate technologies with fuel_cost 0: the master "
+            "builds them as free generation and the dispatch runs them at no fuel "
+            "cost. Give them a fuel_cost or a priced fuel in fuels. Affected (%d): %s",
+            len(free), ", ".join(free))
+
+
 def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
     """Convert a system dictionary to SystemConfig."""
     # Extract generators and batteries
@@ -562,24 +630,19 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             # --- Part 1: compute fuel_cost from fuels block if missing ---
             _fc_existing = list(getattr(_g, "fuel_cost", None) or [])
             if not _fc_existing or max(_fc_existing) <= 0:
-                _price = float(getattr(_fuel, "price_base", 0.0) or 0.0)
-                _energy = float(getattr(_fuel, "energy_content", 0.0) or 0.0)
-                if _price > 0 and _energy > 0:
-                    _eff_list = list(getattr(_g, "eff_at_rated", None) or [])
-                    _tech_eff = 0.0
-                    _tech_id = getattr(_g, "technology", None)
-                    if _tech_id and isinstance(_techs_dict, dict):
-                        _tech = _techs_dict.get(_tech_id)
-                        if _tech is not None:
-                            _te = list(getattr(_tech, "eff_at_rated", None) or [])
-                            if _te and _te[0] > 0:
-                                _tech_eff = float(_te[0])
-                    _rp = list(getattr(_g, "rated_power", None) or [])
-                    _n = max(len(_rp), len(_fc_existing), 1)
-                    _new_fc = []
-                    for _i in range(_n):
-                        _eff = float(_eff_list[_i]) if _i < len(_eff_list) and _eff_list[_i] > 0 else _tech_eff
-                        _new_fc.append(_price / _energy / _eff if _eff > 0 else 0.0)
+                _tech_eff = 0.0
+                _tech_id = getattr(_g, "technology", None)
+                if _tech_id and isinstance(_techs_dict, dict):
+                    _tech = _techs_dict.get(_tech_id)
+                    if _tech is not None:
+                        _te = list(getattr(_tech, "eff_at_rated", None) or [])
+                        if _te and _te[0] > 0:
+                            _tech_eff = float(_te[0])
+                _rp = list(getattr(_g, "rated_power", None) or [])
+                _n = max(len(_rp), len(_fc_existing), 1)
+                _new_fc = _fuel_cost_from_fuel(
+                    _fuel, list(getattr(_g, "eff_at_rated", None) or []), _n, _tech_eff)
+                if _new_fc is not None:
                     try:
                         _g.fuel_cost = _new_fc
                         _linked_fuel += 1
@@ -633,6 +696,10 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
                     f" … (+{len(_silent_freebies)-10} more)" if len(_silent_freebies) > 10 else ""
                 ),
             )
+
+    if isinstance(_techs_dict, dict) and _techs_dict:
+        _link_technology_fuel_costs(
+            _techs_dict, _fuels_dict if isinstance(_fuels_dict, dict) else {})
 
     _prefer_field_names(SystemConfig, system_data)
     system = SystemConfig(
