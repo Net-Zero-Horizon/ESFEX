@@ -80,7 +80,7 @@ MGA/SPORES runs only in `perfect_foresight` mode.
 Benders solves the same problem as the monolithic master and reaches the same optimum: the same investment constraints and costs, the same representative-day dispatch with the full loss-of-load penalty, and the same hard curtailment limit (`max_curtailment_ratio`). If it stops at `benders_max_iterations`, it returns the plan of its best iteration together with that plan's operating cost, and logs the remaining gap.
 
 !!! note "Benders: limitations"
-    - Benders always selects representative days by peak demand. With `use_tsam: true`, or with investment-target custom constraints, the run solves the monolithic master instead and logs a warning saying why.
+    - Benders always uses the default representative days (the ones the monolithic master uses). With `use_tsam: true`, or with investment-target custom constraints, the run solves the monolithic master instead and logs a warning saying why.
     - Benders ignores `stochastic: true` (with a warning) and solves the master deterministically.
 
 
@@ -88,10 +88,15 @@ Benders solves the same problem as the monolithic master and reaches the same op
 
 The master cannot dispatch every hour of every year. Instead, it builds a full dispatch model (generation, storage, curtailment, load shedding, reserves) for a few **representative days** per year, and checks the planned capacity against them.
 
-By default the days are chosen by **peak demand**, once for the whole horizon, on the horizon-mean demand (the mean over the planning years of each hour of the year):
+By default the days are chosen once for the whole horizon, on the horizon-mean demand and the horizon-mean renewable availability (the mean over the planning years of each hour of the year), so that the days hold the year's demand energy and renewable energy:
 
-1. The day with the highest hourly total demand (summed over all nodes) is always selected.
-2. The year is split into `representative_days` equal segments. In each segment, ESFEX picks the day with the highest peak that is at least `min_day_separation` **days** away from every day already selected.
+1. The day with the highest hourly total demand (summed over all nodes) is always selected, so the master sees the peak.
+2. The year is split into `representative_days` equal segments, and every segment other than the peak day's gets one day, at least `min_day_separation` **days** away from every other selected day.
+3. Within their segments, the days are chosen so that, for the system demand and for every renewable availability profile the master uses (the existing renewable generators' and the renewable candidate technologies', one per distinct profile, averaged over the nodes where the units sit or may be built), the mean over the selected days is as close as possible to the annual mean: ESFEX minimises \(\sum_f (\bar{x}^{days}_f / \bar{x}^{year}_f - 1)^2\), first picking one segment at a time, then moving one or two days at a time while that lowers the error.
+
+Since every day stands for the same number of days of the year, this keeps the demand energy, and the energy per MW of solar or wind, that the master sees on its days equal to the year's. Earlier versions took the highest-peak day of each segment from the demand alone. Where hot days are also sunny and windy, those days overrated demand and renewables. For the Cuba case with 5 days the master saw 6 % more demand, 14 % more sun and 45 % more wind than the year had. It then reported much more renewable energy than the hourly dispatch of the same plan delivered, and retired thermal plants the real year still needed. With the new choice all three are within 1 %.
+
+The log lists, for the demand and each renewable profile, the mean on the days over the annual mean ("Representative days mean / annual mean: demand 1.002, …"), and warns when one is off by more than 10 %. With few days a strongly seasonal profile cannot be matched: a profile that is zero for two thirds of the year is either on 1 of 5 days (0.6 ×) or on 2 (1.2 ×). Use more days, or TSAM, when the warning names a profile that matters.
 
 Every planning year then models the **same calendar days**, each with its own demand and its own block of multi-year availability profiles; in `myopic` mode every annual master uses them too. The weather sample is therefore the same from year to year, and the RE share of a fleet that does not change does not swing between years. The log lists the dates ("Representative days, the same for every planning year: …"). Earlier versions chose each year's own peak days.
 
@@ -105,7 +110,7 @@ Each representative day's cost is scaled by (days in the year) / `representative
 
 ### TSAM Clustering
 
-With `use_tsam: true`, peak-based selection is replaced by time-series clustering. In that case `representative_days` and `min_day_separation` are ignored. The daily profiles of demand and of the existing renewable generators' availability, averaged over the planning years (each year's block of a multi-year profile, a shorter profile repeating, as in the dispatch), are clustered once into `tsam_num_periods` representative days (`tsam_method: kmedoids` or `kmeans`), and every year (every annual master in `myopic` mode) uses the same days and weights with its own demand and profiles. Each day is weighted by the size of its cluster. With `tsam_inter_period_linking: true`, the state of charge of existing batteries (and reservoir levels) is carried across the representative days in chronological order, which lets the model represent seasonal storage.
+With `use_tsam: true`, the default selection is replaced by time-series clustering. In that case `representative_days` and `min_day_separation` are ignored. The daily profiles of demand and of the availability of the renewable generators and renewable candidate technologies (one per distinct profile), averaged over the planning years (each year's block of a multi-year profile, a shorter profile repeating, as in the dispatch), are clustered once into `tsam_num_periods` representative days (`tsam_method: kmedoids` or `kmeans`), and every year (every annual master in `myopic` mode) uses the same days and weights with its own demand and profiles. Each day is weighted by the size of its cluster; the peak-demand day replaces the representative of its cluster. The log lists the weighted mean of each profile on the periods over its annual mean, as for representative days. With `tsam_inter_period_linking: true`, the state of charge of existing batteries (and reservoir levels) is carried across the representative days in chronological order, which lets the model represent seasonal storage.
 
 
 ### Time Resolution
@@ -343,9 +348,9 @@ temporal:
 |-----------|---------|--------|
 | `planning_mode` | `perfect_foresight` | `perfect_foresight` or `myopic` (see [Planning Mode](#planning-mode)) |
 | `solver_method` | `monolithic` | `monolithic` or `benders` |
-| `representative_days` | 5 | Days per year (peak-based selection). Ignored when `use_tsam: true` |
+| `representative_days` | 5 | Days per year (the peak day plus days matching the year's demand and renewable energy). Ignored when `use_tsam: true` |
 | `min_day_separation` | 5 | Minimum distance, in **days**, between selected days. Ignored when `use_tsam: true` |
-| `use_tsam` | false | Cluster days instead of picking peak days |
+| `use_tsam` | false | Cluster days instead of the default selection |
 | `tsam_num_periods` | 10 | Number of clustered representative days per year (2 to 365) |
 | `tsam_method` | `kmedoids` | `kmedoids` or `kmeans` |
 | `tsam_inter_period_linking` | true | Chain storage state of charge across clustered days |

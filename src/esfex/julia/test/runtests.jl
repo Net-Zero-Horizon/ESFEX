@@ -988,6 +988,60 @@ import Ipopt
             @test master_rep_days(ESFEX.with_fields(inp; base_demand = D[1:8760, :]), 2) == Int[]
         end
 
+        @testset "master: representative days match the year's demand and RE energy" begin
+            # The high days are both the high-demand and the sunny/windy
+            # days. The peak-based choice (peak day + highest peak of each
+            # segment) gave the master, which weighs each day as 365/n days,
+            # a year with far more demand, sun and wind than the real one
+            # (Cuba: PV ×1.14, wind ×1.45, demand ×1.06).
+            a = [((d * 97) % 365) / 364 for d in 0:364]
+            shape = [1.0 + 0.2 * sin(2π * (h - 8) / 24) for h in 0:23]
+            sun = [max(sin(π * (h - 6) / 12), 0.0) for h in 0:23]
+            total = reduce(vcat, [100.0 * (1.0 + x) .* shape for x in a])
+            D = hcat(0.6 .* total, 0.4 .* total)
+            pv = reduce(vcat, [(0.5 + x) * 0.4 .* sun for x in a])
+            wind = repeat(0.2 .+ 0.6 .* a; inner = 24)
+            ratio(s, offs) = sum(sum(s[o .+ (1:24)]) for o in offs) / (24 * length(offs)) /
+                             (sum(s) / length(s))
+
+            old = select_representative_days(D, 1, 5, 5, 24, 8760) .- 1
+            @test ratio(pv, old) > 1.3 && ratio(wind, old) > 1.4 && ratio(total, old) > 1.2
+
+            offs = representative_day_offsets(D, 1, 5, 5, 24, 8760; profiles = [pv, wind])
+            @test length(offs) == 5
+            @test offs[1] == old[1]                       # the peak day stays
+            days = sort(offs .÷ 24)
+            @test minimum(diff(days)) >= 5
+            @test all(abs(ratio(s, offs) - 1) < 0.03 for s in (total, pv, wind))
+            @test representative_day_ratios(D, 1, offs, 24, 8760; profiles = [pv, wind]) ≈
+                  [ratio(s, offs) for s in (total, pv, wind)]
+            # Equal features on every day: the peak-based choice
+            @test representative_day_offsets(fill(1.0, 8760, 1), 1, 3, 1, 24, 8760) ==
+                  [0, 121 * 24, 242 * 24]
+
+            # Julia fallback (no rep_day_offsets): the master's renewable
+            # generators and candidate technologies give the profiles
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            solar = mkgen("Solar", "Renewable", "Sun", [50.0], [0.0],
+                          reshape(pv, :, 1); nb = 1, H = 8760)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [150.0], [1.0e-4],
+                        reshape(wind, :, 1); nb = 1, H = 8760)
+            inp = MasterProblemInput(years = [2025], network = net,
+                generators = [solar, gas], batteries = BatteryConfig[],
+                base_demand = D[:, 1:1] .+ D[:, 2:2],
+                representative_days_per_year = 5, min_day_separation = 5,
+                verbose = false)
+            @test ESFEX.master_re_profiles(inp) == [pv]
+            @test master_rep_day_offsets(inp) ==
+                  representative_day_offsets(inp.base_demand, 1, 5, 5, 24, 8760;
+                                             profiles = [pv])
+            @test abs(ratio(pv, master_rep_day_offsets(inp)) - 1) < 0.03
+        end
+
         @testset "master: each representative day reads its own inflow" begin
             # An empty reservoir is the only source; day 2 is the peak (the
             # representative) day and the only day with inflow. The day model

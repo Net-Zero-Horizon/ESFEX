@@ -2630,24 +2630,55 @@ def _master_co2_budget_groups(sys, ESFEX):
     return groups
 
 
+def _julia_profiles(profiles: Optional[List[np.ndarray]]) -> Any:
+    """*profiles* (1-D series) as a Julia ``Vector{Vector{Float64}}``."""
+    jl = get_julia()
+    out = jl.seval("Vector{Float64}[]")
+    for p in profiles or []:
+        jl.seval("push!")(out, py_to_julia_vector(np.asarray(p, dtype=float).ravel()))
+    return out
+
+
 def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
-                           min_separation: int, resolution_hours: int = 1) -> List[int]:
+                           min_separation: int, resolution_hours: int = 1,
+                           profiles: Optional[List[np.ndarray]] = None) -> List[int]:
     """Representative days of a development run, chosen once: the first
     step (0-based, within a year) of each day, the same calendar days for
     every planning year.
 
-    Julia ``representative_day_offsets``: the peak day and the highest-peak
-    day of each segment of the year (``min_separation`` days apart) of the
-    horizon-mean demand, the mean over the ``num_years`` yearly blocks of
-    *demand* (steps of ``resolution_hours`` × nodes).
+    Julia ``representative_day_offsets``: the peak day of the horizon-mean
+    demand (the mean over the ``num_years`` yearly blocks of *demand*, steps
+    of ``resolution_hours`` × nodes), then one day per segment of the year
+    (``min_separation`` days apart) such that the days' mean demand and the
+    days' mean of each renewable availability series in *profiles* (1-D, at
+    the same resolution, one or several years) match the annual means.
     """
     ESFEX = get_esfex_module()
     resolution_hours = max(1, int(resolution_hours))
     offsets = ESFEX.representative_day_offsets(
         py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
         int(num_days), int(min_separation), 24 // resolution_hours,
-        HOURS_STD_YEAR // resolution_hours)
+        HOURS_STD_YEAR // resolution_hours, profiles=_julia_profiles(profiles))
     return [int(o) for o in offsets]
+
+
+def master_rep_day_ratios(demand: np.ndarray, num_years: int, offsets: List[int],
+                          resolution_hours: int = 1,
+                          profiles: Optional[List[np.ndarray]] = None,
+                          weights: Optional[List[float]] = None) -> List[float]:
+    """Mean on the representative days (or TSAM periods, weighted by
+    *weights*) starting at *offsets* over the annual mean, for the
+    horizon-mean demand and then each of *profiles* (Julia
+    ``representative_day_ratios``). 1.0 means the master's year has the real
+    year's energy; NaN for a series that is zero all year."""
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    ratios = ESFEX.representative_day_ratios(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        py_to_julia_int_vector([int(o) for o in offsets]), 24 // resolution_hours,
+        HOURS_STD_YEAR // resolution_hours, profiles=_julia_profiles(profiles),
+        weights=py_to_julia_vector([float(w) for w in weights or []]))
+    return [float(r) for r in ratios]
 
 
 class MasterProblemAdapter:
@@ -2677,7 +2708,7 @@ class MasterProblemAdapter:
         min_day_separation: int = 7,
         # First step (0-based, within a year) of each representative day,
         # the same for every year; None: Julia chooses them from the
-        # horizon-mean demand (master_rep_day_offsets)
+        # horizon-mean demand and renewable profiles (master_rep_day_offsets)
         rep_day_offsets: Optional[List[int]] = None,
         investment_resolution_hours: int = 8760,
         # TSAM parameters
@@ -2756,7 +2787,8 @@ class MasterProblemAdapter:
             rep_day_offsets: First step of each representative day within a
                 year (0-based), the same calendar days for every year
                 (``master_rep_day_offsets``); None lets the Julia master
-                choose them from the horizon-mean demand
+                choose them from the horizon-mean demand and its renewable
+                availability profiles
             use_tsam: Enable TSAM clustering
             tsam_period_start_hours: Per-year list of period start hours (1-indexed)
             tsam_period_weights: Per-year list of period weights
