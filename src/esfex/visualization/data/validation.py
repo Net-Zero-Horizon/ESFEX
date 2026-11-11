@@ -151,7 +151,7 @@ class SimplificationPlan:
 # Category → validator list mapping
 _CATEGORY_VALIDATORS: dict[str, list[str]] = {
     "structural": ["_validate_nodes", "_validate_lines", "_validate_line_connections"],
-    "configuration": ["_validate_config_keys"],
+    "configuration": ["_validate_config_keys", "_validate_re_increments"],
     "electrical": [
         "_validate_buses",
         "_validate_generators",
@@ -267,6 +267,17 @@ def _validate_config_keys(state: GuiSystemState) -> list[ValidationIssue]:
         )
         for key in getattr(state, "unknown_config_keys", None) or []
     ]
+
+
+def _validate_re_increments(state: GuiSystemState) -> list[ValidationIssue]:
+    """Warn when the RE minimum annual increment exceeds the maximum one."""
+    from esfex.config.schema import re_increment_conflict
+    s = getattr(state, "settings", None)
+    if s is None:
+        return []
+    msg = re_increment_conflict(s.min_annual_increment, s.max_annual_increment)
+    return [ValidationIssue(severity="warning", category="Configuration",
+                            message=msg)] if msg else []
 
 
 def _validate_nodes(state: GuiSystemState) -> list[ValidationIssue]:

@@ -209,3 +209,56 @@ def test_virtual_generator_min_power_is_a_fraction(tmp_path):
     assert vgen["rated_power"] == [60.0]
     assert vgen["min_power"] == [0.3]
     assert vgen["fuel_cost"] == [40.0]
+
+
+# Each myopic year's objective charges only the annuities of what that year
+# builds; the reported yearly cost adds those of earlier years' builds still
+# in service, so it is comparable with a perfect-foresight year.
+
+def test_earlier_build_annuities_follow_the_build_lifetimes():
+    from esfex.runner import earlier_build_annuities
+    streams = [(0, 25.0, 100.0), (0, 2.0, 10.0), (1, 0.0, 1.0)]
+    assert earlier_build_annuities(streams, 0) == 0.0     # nothing built before
+    assert earlier_build_annuities(streams, 1) == 110.0   # year-1 builds
+    assert earlier_build_annuities(streams, 2) == 101.0   # the 2-year build retired
+    assert earlier_build_annuities(streams, 40) == 1.0    # no life: 40 years
+    assert earlier_build_annuities(streams, 41) == 0.0
+
+
+def test_myopic_year_cost_adds_earlier_annuities(tmp_path, caplog):
+    import logging
+    orch = Orchestrator(_make_esfex_config(_system("Island")), output_dir=tmp_path)
+    streams: list = []
+    with caplog.at_level(logging.INFO, logger="esfex.runner"):
+        orch._report_myopic_year_cost(2025, 0, {"objective": 500.0,
+                                                "annuity_streams": [(1, 25.0, 80.0)]},
+                                      streams)
+        orch._report_myopic_year_cost(2026, 1, {"objective": 300.0,
+                                                "annuity_streams": []}, streams)
+    assert orch.myopic_year_costs[2025] == {"objective": 500.0,
+                                            "earlier_annuities": 0.0, "total": 500.0}
+    assert orch.myopic_year_costs[2026] == {"objective": 300.0,
+                                            "earlier_annuities": 80.0, "total": 380.0}
+    assert streams == [(0, 25.0, 80.0)]
+    assert any("Myopic year 2026" in r.getMessage() and "$380" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.julia
+def test_myopic_reported_cost_carries_year_one_annuity(tmp_path):
+    sysc = _system("Island", tmp_path)
+    cfg = _make_esfex_config(
+        sysc, simulation_mode="development",
+        temporal=TemporalConfig(resolution_hours=24, rolling_horizon_hours=720, overlap_hours=0),
+        master_problem=MasterProblemConfig(planning_mode="myopic"))
+    orch = Orchestrator(cfg, output_dir=tmp_path / "out")
+    orch.run(years=2, master_only=True)
+    y1, y2 = sorted(orch.master_solution["investments"])
+    gas_y1 = orch.master_solution["investments"][y1]["tech_investment_power_0_0"]
+    rate, life = sysc.discount_rate, 25
+    crf = rate * (1 + rate) ** life / ((1 + rate) ** life - 1)
+    costs = orch.myopic_year_costs
+    assert costs[y1]["earlier_annuities"] == 0.0
+    assert costs[y2]["earlier_annuities"] == pytest.approx(gas_y1 * 200000.0 * crf, rel=1e-6)
+    assert costs[y2]["total"] == pytest.approx(
+        costs[y2]["objective"] + costs[y2]["earlier_annuities"])

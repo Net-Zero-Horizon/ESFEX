@@ -2817,6 +2817,10 @@ Solution output from the Master Problem.
     undiscounted): every build in service that year pays
     `capital_recovery_factor` × its overnight cost, what the objective
     charges (base costs and discount rate in a stochastic master)
+- `annuity_streams`: `(build year index, life in years, annuity per year)`
+    of the builds, summed per build year and life: a stream is paid in the
+    `annuity_years` of its build year and life (the myopic runner adds the
+    streams of earlier years to each year's reported cost)
 """
 struct MasterProblemResult
     # Status
@@ -2864,6 +2868,9 @@ struct MasterProblemResult
     unit_operation::Vector{UnitOperation}
     # Investment annuities paid per year (undiscounted)
     annuity_cost_by_year::Vector{Float64}
+    # The annuity streams behind them: (build year, life in years, annuity
+    # per year), summed over the builds of a year with the same life
+    annuity_streams::Vector{Tuple{Int, Float64, Float64}}
 end
 
 # Without the fuel builds (no primary energy)
@@ -2875,6 +2882,9 @@ MasterProblemResult(args::Vararg{Any, 22}) =
 # Without the annuities
 MasterProblemResult(args::Vararg{Any, 23}) =
     MasterProblemResult(args..., Float64[])
+# Without the annuity streams
+MasterProblemResult(args::Vararg{Any, 24}) =
+    MasterProblemResult(args..., Tuple{Int, Float64, Float64}[])
 
 """
     BendersResult

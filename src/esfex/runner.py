@@ -537,6 +537,28 @@ def myopic_re_anchor(initial: float, min_inc: float, y_idx: int) -> float:
     return min(start + y_idx * max(float(min_inc), 0.0), 1.0)
 
 
+# Economic lifetime of a build without a positive one (the Julia
+# DEFAULT_ASSET_LIFETIME)
+_DEFAULT_ASSET_LIFETIME = 40.0
+
+
+def earlier_build_annuities(streams: Iterable[tuple], y_idx: int) -> float:
+    """Investment annuities ($) myopic year *y_idx* (0-based) pays on the
+    capacity earlier myopic years built. *streams* holds ``(build year
+    index, life, annuity per year)`` with 0-based build years; a build pays
+    from its build year while its age is below its life, as the Julia
+    ``annuity_years`` (``_DEFAULT_ASSET_LIFETIME`` when not positive). A
+    one-year master charges only the annuities of what that year builds, so
+    these are what its objective leaves out next to a perfect-foresight
+    year."""
+    total = 0.0
+    for build, life, annuity in streams:
+        span = math.ceil(life if life > 0 else _DEFAULT_ASSET_LIFETIME)
+        if build < y_idx <= build + span - 1:
+            total += annuity
+    return total
+
+
 def _warn_flat_renewable(kind: str, key: str) -> None:
     """Log that a renewable unit without an availability profile is modelled
     as available in every hour (capacity factor 1.0)."""
@@ -783,6 +805,8 @@ class Orchestrator:
         self.state: Optional[SimulationState] = None
         self.results: list[YearResults] = []
         self.master_solution: Optional[dict] = None  # set by run(master_only=True)
+        # Myopic runs: {year: {"objective", "earlier_annuities", "total"}} ($)
+        self.myopic_year_costs: dict = {}
 
         logger.debug(f"Orchestrator initialized for system: {self.system_name}")
         logger.debug(f"Mode: {config.simulation_mode}")
@@ -3739,6 +3763,10 @@ class Orchestrator:
             npv_retired: list[tuple] = []
             npv_unit_keys = (set(self.master_system.generators)
                              | set(self.master_system.batteries))
+            # Annuity streams of the years solved so far, (0-based build
+            # year, life, $/year), for the reported yearly cost
+            annuity_streams: list[tuple[int, float, float]] = []
+            self.myopic_year_costs = {}
 
             for y_idx, year in enumerate(years_range):
                 logger.debug(f"\n--- Myopic: Year {year} ({y_idx+1}/{num_years}) ---")
@@ -3925,6 +3953,7 @@ class Orchestrator:
                     return None, None, None, None
 
                 result = master.get_solution_values()
+                self._report_myopic_year_cost(year, y_idx, result, annuity_streams)
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
                 for r in self._record_npv_retirements(master, year):
                     npv_retired.append((r["kind"], r["key"], r["bus"]))
@@ -3996,6 +4025,11 @@ class Orchestrator:
                 f"\nMyopic planning complete: {total_inv} investments, "
                 f"{total_ret} retirements across {num_years} years"
             )
+            if self.myopic_year_costs:
+                logger.info(
+                    "Myopic plan cost, sum of the yearly costs with the earlier "
+                    "builds' annuities (undiscounted): $%s",
+                    f"{sum(c['total'] for c in self.myopic_year_costs.values()):,.0f}")
 
             # Each year's RE target, as its master had it
             re_targets_by_year = {year: re_paths[0][y_idx]
@@ -4020,6 +4054,39 @@ class Orchestrator:
         lp_dir = self.output_dir / "logs"
         lp_dir.mkdir(parents=True, exist_ok=True)
         return str(lp_dir)
+
+    def _master_debug_lp_path(self) -> Optional[Path]:
+        """``<output>/logs/master_problem_debug.lp`` when
+        ``ESFEX_MASTER_DEBUG_LP=1``: the perfect-foresight monolithic master
+        is written there before it is solved. None (no LP written)
+        otherwise."""
+        if os.environ.get("ESFEX_MASTER_DEBUG_LP") != "1":
+            return None
+        lp_dir = self.output_dir / "logs"
+        lp_dir.mkdir(parents=True, exist_ok=True)
+        return lp_dir / "master_problem_debug.lp"
+
+    def _report_myopic_year_cost(self, year: int, y_idx: int, result: dict,
+                                 streams: list) -> None:
+        """Log myopic year *year*'s cost comparable with a perfect-foresight
+        year and keep it in ``myopic_year_costs[year]``: its master's
+        objective, which charges only the annuities of what this year builds,
+        plus the annuities this year pays on what earlier years built
+        (``earlier_build_annuities``). Reporting only: the optimisation is
+        unchanged. Then adds this year's annuity streams to *streams*."""
+        objective = result.get("objective")
+        if objective is not None:
+            earlier = earlier_build_annuities(streams, y_idx)
+            self.myopic_year_costs[year] = {
+                "objective": float(objective), "earlier_annuities": earlier,
+                "total": float(objective) + earlier}
+            logger.info(
+                f"Myopic year {year}: master objective ${objective:,.0f} + "
+                f"${earlier:,.0f} annuities of capacity built in earlier years "
+                f"= ${objective + earlier:,.0f}")
+        # One-year master: its builds are of year index 1
+        streams.extend((y_idx, life, annuity)
+                       for _, life, annuity in result.get("annuity_streams", []))
 
     @staticmethod
     def _report_myopic_failure(master, year: int, solved_years: list[int]) -> None:
@@ -4607,12 +4674,12 @@ class Orchestrator:
             else:
                 master.build_model(use_representative_days=True)
 
-                # Export LP file for debugging
-                lp_dir = self.output_dir / "logs"
-                lp_dir.mkdir(parents=True, exist_ok=True)
-                lp_file = lp_dir / "master_problem_debug.lp"
-                master.write_lp(str(lp_file))
-                logger.debug(f"Master problem LP exported to: {lp_file}")
+                # LP file for debugging and the LP-level sensitivity analysis,
+                # only on request: a large master's LP takes GB and minutes
+                lp_file = self._master_debug_lp_path()
+                if lp_file is not None and master.solver_method != "benders":
+                    master.write_lp(str(lp_file))
+                    logger.info(f"Master problem LP exported to: {lp_file}")
 
                 status = master.solve()
 

@@ -955,3 +955,74 @@ class TestMethodGatedDrops:
     def test_empty_options_no_drops(self):
         from esfex.bridge.adapters import _method_gated_drops
         assert _method_gated_drops({}, "highs") == set()
+
+
+class TestMethodGatedDropsCommercialSolvers:
+    """Gurobi accepts every parameter whatever the algorithm. A saved Cuba
+    config (``Method: -1, Crossover: -1, BarConvTol: 1e-8``) had Crossover and
+    BarConvTol dropped ("not currently selected"), and so had a config with
+    barrier selected (``Method: 2``): the Studio saves combos as their integer
+    value, which never matched the gate's labels."""
+
+    def test_auto_method_keeps_barrier_options(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        opts = {"Method": -1, "Crossover": 0, "BarConvTol": 1e-8,
+                "IterationLimit": 1000}
+        assert _method_gated_drops(opts, "gurobi") == set()
+
+    def test_barrier_saved_as_integer_keeps_crossover(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        drops = _method_gated_drops({"Method": 2, "Crossover": 0, "BarConvTol": 1e-9,
+                                     "IterationLimit": 1000}, "gurobi")
+        assert "Crossover" not in drops and "BarConvTol" not in drops
+        assert "IterationLimit" in drops  # simplex iterations, barrier selected
+
+    def test_simplex_drops_barrier_options(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        for method in (0, 1, "dual_simplex"):
+            drops = _method_gated_drops({"Method": method, "Crossover": 0,
+                                         "BarConvTol": 1e-9}, "gurobi")
+            assert {"Crossover", "BarConvTol"} <= drops
+
+    def test_cplex_auto_keeps_tolerances(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        opts = {"CPXPARAM_LPMethod": 0, "CPXPARAM_Barrier_ConvergeTol": 1e-9,
+                "CPXPARAM_Simplex_Tolerances_Feasibility": 1e-7}
+        assert _method_gated_drops(opts, "cplex") == set()
+        opts["CPXPARAM_LPMethod"] = 1  # primal simplex
+        assert _method_gated_drops(opts, "cplex") == {
+            "CPXPARAM_Barrier_ConvergeTol", "barrier_conv_tol"}
+
+    def test_highs_stays_strict_under_choose(self):
+        from esfex.bridge.adapters import _method_gated_drops
+        assert "pdlp_scaling" in _method_gated_drops(
+            {"solver": "choose", "pdlp_scaling": True}, "highs")
+
+
+class TestBarrierOptionsUnderAutoMethod:
+    def test_crossover_off_with_auto_method(self):
+        from esfex.bridge.adapters import _barrier_options_under_auto_method as f
+        assert f({"Method": -1, "Crossover": 0}, "gurobi")
+        assert f({"method": "auto", "crossover": "off"}, "gurobi")
+        assert f({"Crossover": 0}, "gurobi")  # Method left at its default
+
+    def test_no_hint_otherwise(self):
+        from esfex.bridge.adapters import _barrier_options_under_auto_method as f
+        assert not f({"Method": 2, "Crossover": 0}, "gurobi")     # barrier selected
+        assert not f({"Method": -1, "Crossover": -1}, "gurobi")   # crossover on
+        assert not f({"Method": -1}, "gurobi")
+        assert not f({"Method": -1, "Crossover": 0}, "highs")
+
+    @pytest.mark.julia
+    def test_logged_once_and_options_forwarded(self, caplog):
+        import logging
+        from esfex.bridge.adapters import _solver_options_to_julia, reset_run_warnings
+        reset_run_warnings()
+        opts = {"Method": -1, "Crossover": 0, "BarConvTol": 1e-9}
+        with caplog.at_level(logging.WARNING, logger="esfex.bridge.adapters"):
+            d1 = _solver_options_to_julia(opts, "gurobi")
+            _solver_options_to_julia(opts, "gurobi")
+        assert {str(k) for k in d1.keys()} == {"Method", "Crossover", "BarConvTol"}
+        hints = [r for r in caplog.records if "concurrent optimizer" in r.getMessage()]
+        assert len(hints) == 1
+        assert not any("Dropping solver option" in r.getMessage() for r in caplog.records)
