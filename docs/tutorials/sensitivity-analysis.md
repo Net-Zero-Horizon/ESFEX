@@ -32,7 +32,7 @@ This bundles SALib [**[19]**](../reference/bibliography.md#ref19) (Sensitivity A
 
 ### LP-Level Analysis
 
-Parses an exported LP file (`.lp` format), perturbs groups of objective coefficients and constraint right-hand sides, and re-solves each perturbation. A development-mode run with perfect-foresight planning writes its master problem to `<output>/logs/master_problem_debug.lp` (not with myopic planning or when MGA/SPORES is enabled). The parameters are detected from the LP's variable and constraint names: investment cost per technology (`inv_tech_<t>`), per battery technology (`inv_bat_pow_<b>`, `inv_bat_cap_<b>`), transmission investment (`inv_trans`), the load-shedding and RE-shortfall penalties, and the RE-target and curtailment-limit right-hand sides. Runs thousands of evaluations in minutes.
+Parses an exported LP file (`.lp` format), perturbs groups of objective coefficients and constraint right-hand sides, and re-solves each perturbation. A development-mode run with perfect-foresight planning writes its master problem to `<output>/logs/master_problem_debug.lp` when the environment variable `ESFEX_MASTER_DEBUG_LP=1` is set (e.g. `ESFEX_MASTER_DEBUG_LP=1 esfex run -c my_system.yaml`); not with myopic planning, the Benders solver or when MGA/SPORES is enabled. The Studio's sensitivity dialog picks that file up from the run's `logs` folder. The parameters are detected from the LP's variable and constraint names: investment cost per technology (`inv_tech_<t>`), per battery technology (`inv_bat_pow_<b>`, `inv_bat_cap_<b>`), transmission investment (`inv_trans`), the load-shedding and RE-shortfall penalties, and the RE-target and curtailment-limit right-hand sides. Runs thousands of evaluations in minutes.
 
 ### Config-Level Analysis
 
@@ -127,7 +127,7 @@ from esfex.sensitivity.engine import (
     get_lp_parameters,
 )
 
-# Auto-detect parameters from LP file
+# Auto-detect parameters from LP file (written with ESFEX_MASTER_DEBUG_LP=1)
 lp_path = "results/logs/master_problem_debug.lp"
 parameters = get_lp_parameters(lp_path)
 

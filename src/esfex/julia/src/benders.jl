@@ -1449,6 +1449,48 @@ function solve_benders_day!(sp::SubproblemData)
     return solved(sp.model) ? :optimal : :failed
 end
 
+"""Termination statuses of a solver stopped by a resource limit."""
+const LIMIT_STATUSES = (MOI.TIME_LIMIT, MOI.NODE_LIMIT, MOI.ITERATION_LIMIT,
+                        MOI.SOLUTION_LIMIT, MOI.OBJECTIVE_LIMIT, MOI.OTHER_LIMIT,
+                        MOI.MEMORY_LIMIT)
+
+"""
+    limit_with_feasible_point(model) -> Bool
+
+True when the solver stopped `model` at a resource limit (`LIMIT_STATUSES`)
+and holds a feasible primal point: a valid plan, not proven optimal.
+"""
+limit_with_feasible_point(model::Model) =
+    termination_status(model) in LIMIT_STATUSES &&
+    primal_status(model) == MOI.FEASIBLE_POINT
+
+"""
+    limited_master_lower_bound(model, lb_history) -> Float64
+
+Lower bound of a Benders iteration whose master stopped at a limit: its
+objective is no bound. A proven bound is used: the objective of a feasible
+dual point (an LP, by weak duality) or the solver's MIP bound
+(`objective_bound`, for a master with integer variables); else, and when
+it is lower, the previous iteration's lower bound (the master only gains
+cuts, so it stays valid); else `-Inf`.
+"""
+function limited_master_lower_bound(model::Model, lb_history::Vector{Float64})
+    previous = isempty(lb_history) ? -Inf : lb_history[end]
+    bound = try
+        if dual_status(model) == MOI.FEASIBLE_POINT
+            dual_objective_value(model)
+        elseif num_constraints(model, VariableRef, MOI.Integer) +
+               num_constraints(model, VariableRef, MOI.ZeroOne) > 0
+            objective_bound(model)
+        else
+            -Inf
+        end
+    catch
+        -Inf
+    end
+    return isfinite(bound) ? max(bound, previous) : previous
+end
+
 # =============================================================================
 # Main Benders Decomposition Loop
 # =============================================================================
@@ -1756,7 +1798,15 @@ function run_benders_decomposition(
         set_optimizer(master_model, master_optimizer)
         optimize!(master_model)
         master_status = termination_status(master_model)
-        if master_status != MOI.OPTIMAL && master_status != MOI.LOCALLY_SOLVED
+        master_solved = master_status == MOI.OPTIMAL || master_status == MOI.LOCALLY_SOLVED
+        if !master_solved && limit_with_feasible_point(master_model)
+            # A master stopped at a limit (time, iterations…) still holds a
+            # feasible plan: evaluate it, but its objective is no lower bound
+            @warn "Benders: the master stopped at $(master_status) at iteration " *
+                  "$(iter) with a feasible plan; using it (the lower bound is the " *
+                  "solver's bound or the previous one). Raise solver.time_limit " *
+                  "to solve it to optimality."
+        elseif !master_solved
             @warn "Benders: Master solve failed at iteration $(iter): $(master_status)"
             if !isempty(debug_lp_dir) && iter <= 5
                 lp = joinpath(debug_lp_dir, "benders_master_failed_iter$(iter).lp")
@@ -1769,7 +1819,8 @@ function run_benders_decomposition(
         end
         iterations = iter
 
-        lb = objective_value(master_model)
+        lb = master_solved ? objective_value(master_model) :
+             limited_master_lower_bound(master_model, lb_history)
         push!(lb_history, lb)
 
         # ----- Evaluate investment cost at current solution -----
@@ -1944,6 +1995,7 @@ function extract_master_solution_from_benders(
         result.converter_investment,
         result.fuel_investment,  # M2 (#89)
         unit_operation,
-        result.annuity_cost_by_year
+        result.annuity_cost_by_year,
+        result.annuity_streams
     )
 end

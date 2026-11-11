@@ -208,6 +208,8 @@ Julia's own thread count is separate: ESFEX sets `JULIA_NUM_THREADS=4` if it is 
 | 10+ nodes, 25 years | 3,600-7,200 s | Large problem; may need relaxed gap |
 | MIP unit commitment | 600-1,800 s per window | Per rolling-horizon window |
 
+A solve stopped by `time_limit` (or another limit) is used when the solver holds a feasible solution: a dispatch window or a master problem (perfect foresight, myopic year, stochastic, Benders master iteration) then logs a WARNING with the objective, the solver's bound and the gap, and the run goes on with that solution. A limit without a feasible solution stops the run with an error. A barrier solve without crossover has no feasible solution until it converges.
+
 ### MIP Gap
 
 The solver stops when:
@@ -222,6 +224,22 @@ $$\frac{|BestBound - BestSolution|}{|BestSolution|} \leq gap$$
 | 0.05 (5%) | Very relaxed | Very fast | Approximate |
 
 For LP models, the solver always reaches exact optimality regardless of this setting.
+
+### Large LP Master Problems
+
+A multi-year master problem of a large system is one big LP (tens of millions of nonzeros). For it, barrier without crossover is usually much faster than the default method, and it uses all the threads:
+
+```yaml
+solver:
+  name: gurobi
+  threads: 16
+  time_limit: 21600
+  options:
+    Method: 2        # barrier (method: barrier)
+    Crossover: 0     # no crossover (crossover: off)
+```
+
+Without crossover the solution is the barrier's interior point, accurate to `bar_conv_tol` (default 1e-8): investments and costs are reliable, but the solution is not a vertex, so more units can be partly built or dispatched than in a simplex solution. Keep `method: auto` (concurrent) when you need a vertex solution or when barrier struggles numerically. The solver options apply to every solve of the run, the dispatch windows too, where the default method is often faster on the small window LPs.
 
 ### LP Method Selection
 
@@ -252,7 +270,7 @@ If `solver_method` is not set, HiGHS chooses the algorithm itself.
 
 Each solver exposes tunable parameters through the `options` dictionary. The tables list the options the Studio offers; the key in the first column is what you write in `options`.
 
-**Method-specific options.** Some options apply to one LP algorithm only (column *Applies when*). They are passed to the solver only when the controlling method option is set **explicitly** to one of the listed methods. If the method is left at its automatic value (`choose` / `auto`) or set to another method, the option is dropped with a warning in the log (once per run). For example, `simplex_scale_strategy` takes effect only together with `solver_method: simplex`.
+**Method-specific options.** Some options apply to some LP algorithms only (column *Applies when*, or the *Method-specific* line under a table). With another method selected, the option is dropped with a warning in the log (once per run). With HiGHS, the method must be set **explicitly**: under `solver_method: choose` the option is dropped too, because some HiGHS builds reject an option of an algorithm that is not running. For example, `simplex_scale_strategy` takes effect only together with `solver_method: simplex`. Gurobi, CPLEX and Xpress accept every parameter whatever the algorithm, and their automatic method may run barrier, so with the method on `auto` the option is passed when the line under the table lists `auto`. The method may be written as its name (`method: barrier`) or, as the Studio saves it, as the solver's value (`Method: 2`).
 
 Keys that are not in any table are passed to the solver unchanged, so any native solver parameter can be set. Keys that belong to another solver's table are dropped with a warning (this keeps a Gurobi option from breaking a HiGHS run after `-s highs`).
 
@@ -290,7 +308,9 @@ When `solver_method: simplex` is set, ESFEX also turns crossover off.
 | `heuristics` | float | 0.0 to 1.0 | 0.05 | Time fraction for MIP heuristics |
 | `iteration_limit` | int | 0 to 2,147,483,647 | 2,147,483,647 | Max iterations |
 
-Method-specific: `crossover` and `bar_conv_tol` need `method: barrier` or `concurrent`; `iteration_limit` needs `method: primal_simplex`, `dual_simplex` or `concurrent`.
+Method-specific: `crossover` and `bar_conv_tol` need `method: auto`, `barrier` or `concurrent`; `iteration_limit` needs `method: auto`, `primal_simplex`, `dual_simplex` or `concurrent`.
+
+With `method: auto`, Gurobi solves an LP with its concurrent optimizer: barrier and simplex run side by side and share the threads, and `crossover: off` only applies if barrier finishes first. With `crossover: off` and `method: auto` the log recommends `method: barrier` (once per run). See [Large LP master problems](#large-lp-master-problems).
 
 ### CPLEX Options
 
@@ -305,7 +325,7 @@ Method-specific: `crossover` and `bar_conv_tol` need `method: barrier` or `concu
 | `barrier_conv_tol` | float | 1e-12 to 1e-1 | 1e-8 | Barrier convergence tolerance |
 | `mip_emphasis` | combo | `balanced`, `feasibility`, `optimality`, `best_bound`, `hidden_feasibility` | `balanced` | MIP solving emphasis |
 
-Method-specific: `feasibility_tol` and `optimality_tol` need `lp_method: primal_simplex`, `dual_simplex` or `network`; `barrier_conv_tol` needs `lp_method: barrier`. CPLEX ignores `solver.verbose`.
+Method-specific: `feasibility_tol` and `optimality_tol` need `lp_method: auto`, `primal_simplex`, `dual_simplex` or `network`; `barrier_conv_tol` needs `lp_method: auto` or `barrier`. CPLEX ignores `solver.verbose`.
 
 ### GLPK Options
 
@@ -352,7 +372,7 @@ Method-specific: `feasibility_tol` and `optimality_tol` need `lp_method: primal_
 | `OPTIMALITYTOL` | float | 1e-12 to 1e-1 | 1e-6 | Optimality tolerance |
 | `BARGAPSTOP` | float | 1e-12 to 1.0 | 1e-8 | Barrier gap stop |
 
-Method-specific: `BARGAPSTOP` needs `DEFAULTALG: barrier`.
+Method-specific: `BARGAPSTOP` needs `DEFAULTALG: auto` or `barrier`.
 
 ### Clarabel, SCS and Ipopt
 
