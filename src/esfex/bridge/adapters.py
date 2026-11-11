@@ -2630,6 +2630,26 @@ def _master_co2_budget_groups(sys, ESFEX):
     return groups
 
 
+def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
+                           min_separation: int, resolution_hours: int = 1) -> List[int]:
+    """Representative days of a development run, chosen once: the first
+    step (0-based, within a year) of each day, the same calendar days for
+    every planning year.
+
+    Julia ``representative_day_offsets``: the peak day and the highest-peak
+    day of each segment of the year (``min_separation`` days apart) of the
+    horizon-mean demand, the mean over the ``num_years`` yearly blocks of
+    *demand* (steps of ``resolution_hours`` × nodes).
+    """
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    offsets = ESFEX.representative_day_offsets(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        int(num_days), int(min_separation), 24 // resolution_hours,
+        HOURS_STD_YEAR // resolution_hours)
+    return [int(o) for o in offsets]
+
+
 class MasterProblemAdapter:
     """
     Python adapter for the Julia MasterProblem optimization model.
@@ -2655,6 +2675,10 @@ class MasterProblemAdapter:
         temporal_resolution_hours: int = 24,
         representative_days_per_year: int = 12,
         min_day_separation: int = 7,
+        # First step (0-based, within a year) of each representative day,
+        # the same for every year; None: Julia chooses them from the
+        # horizon-mean demand (master_rep_day_offsets)
+        rep_day_offsets: Optional[List[int]] = None,
         investment_resolution_hours: int = 8760,
         # TSAM parameters
         use_tsam: bool = False,
@@ -2729,6 +2753,10 @@ class MasterProblemAdapter:
             investment_resolution_hours: Hours per investment period (8760=annual)
             representative_days_per_year: Number of representative days
             min_day_separation: Minimum days between representative days
+            rep_day_offsets: First step of each representative day within a
+                year (0-based), the same calendar days for every year
+                (``master_rep_day_offsets``); None lets the Julia master
+                choose them from the horizon-mean demand
             use_tsam: Enable TSAM clustering
             tsam_period_start_hours: Per-year list of period start hours (1-indexed)
             tsam_period_weights: Per-year list of period weights
@@ -2838,6 +2866,7 @@ class MasterProblemAdapter:
         self.temporal_resolution_hours = temporal_resolution_hours
         self.representative_days_per_year = representative_days_per_year
         self.min_day_separation = min_day_separation
+        self.rep_day_offsets = [int(o) for o in rep_day_offsets or []]
         self.investment_resolution_hours = investment_resolution_hours
         self.use_tsam = use_tsam
         self.tsam_period_start_hours = tsam_period_start_hours or []
@@ -3201,6 +3230,8 @@ class MasterProblemAdapter:
             temporal_resolution_hours=self.temporal_resolution_hours,
             representative_days_per_year=self.representative_days_per_year,
             min_day_separation=self.min_day_separation,
+            rep_day_offsets=(jl.seval("Int[]") if not self.rep_day_offsets else
+                             jl.seval("Vector{Int}")(self.rep_day_offsets)),
             investment_resolution_hours=self.investment_resolution_hours,
             use_tsam=self.use_tsam,
             tsam_period_start_hours=_py_nested_list_to_julia_vec_vec(jl, self.tsam_period_start_hours, "Int"),

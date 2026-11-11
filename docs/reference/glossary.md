@@ -179,7 +179,7 @@
 ## R
 
 **Representative Day**
-:   A selected peak-demand day used in the Master Problem to validate operational feasibility of investment decisions.
+:   A selected peak-demand day used in the Master Problem to validate operational feasibility of investment decisions. The days are chosen once, from the horizon-mean demand, and every planning year models the same calendar days.
 
 **RE Penetration**
 :   The fraction of total electricity generation from renewable sources: $RE = \frac{\sum RE\_generation}{\sum total\_generation}$
