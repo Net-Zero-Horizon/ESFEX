@@ -1637,18 +1637,20 @@ bus `b` in the dispatch's year: zero once the battery is past its
 without degradation, as in the master), and otherwise shrunk by
 `(1 − degradation_rate)^age`. After a master run a battery the master keeps
 past its lifetime arrives with the kept capacity and no end of life.
+Energy with neither charge nor discharge power is no storage: the capacity
+is zero there too, so the SOC floor, minimum cycling and end-of-window
+conditions never ask an idle battery for anything.
 """
 function battery_power_limits(bat, b::Int, input)
     capacity = bat.capacity[b]
     max_charge = bat.max_charge_power[b]
     max_discharge = bat.max_discharge_power[b]
-    if capacity > 0 || max_charge > 0 || max_discharge > 0
-        age, life = unit_age_in_year(bat, b, input)
-        life - age <= 0 && return 0.0, 0.0, 0.0
-        if length(bat.degradation_rate) >= b && bat.degradation_rate[b] > 0
-            f = (1 - bat.degradation_rate[b])^age
-            return capacity * f, max_charge * f, max_discharge * f
-        end
+    max_charge <= 0 && max_discharge <= 0 && return 0.0, 0.0, 0.0
+    age, life = unit_age_in_year(bat, b, input)
+    life - age <= 0 && return 0.0, 0.0, 0.0
+    if length(bat.degradation_rate) >= b && bat.degradation_rate[b] > 0
+        f = (1 - bat.degradation_rate[b])^age
+        return capacity * f, max_charge * f, max_discharge * f
     end
     return capacity, max_charge, max_discharge
 end
@@ -1834,15 +1836,29 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                     base_name = "bat_soc_initial_$(bi)_$(b)"
                 )
 
+                # Scheduled outage × availability profile, per step
+                omask = [(bat_outage === nothing ? 1.0 : bat_outage[bi, t]) *
+                         storage_availability(bat.availability, t, b) for t in 1:hours]
+                charge_limit = max_charge .* omask
+                # SOC floor per step. Self-discharge drains the battery while
+                # it cannot charge (an outage, no availability), so after
+                # such steps the floor is what full charging can hold:
+                # floor[t+1] = min(soc_min·cap, (1 − sd)·floor[t] + η·limit[t]·Δt).
+                # A battery that can charge at least its self-discharge keeps
+                # the plain soc_min·cap floor.
+                soc_floor = Vector{Float64}(undef, hours + 1)
+                soc_floor[1] = bat.soc_min[b] * capacity
                 for t in 1:hours
-                    # Scheduled outage × availability profile
-                    omask = (bat_outage === nothing ? 1.0 : bat_outage[bi, t]) *
-                            storage_availability(bat.availability, t, b)
-                    @constraint(model, vars.bat_charge[bi, b, t] <= max_charge * omask)
-                    @constraint(model, vars.bat_discharge[bi, b, t] <= max_discharge * omask)
+                    soc_floor[t+1] = min(bat.soc_min[b] * capacity,
+                        (1 - self_discharge) * soc_floor[t] + η_charge * charge_limit[t] * tres)
+                end
+
+                for t in 1:hours
+                    @constraint(model, vars.bat_charge[bi, b, t] <= charge_limit[t])
+                    @constraint(model, vars.bat_discharge[bi, b, t] <= max_discharge * omask[t])
 
                     # Mutex constraint (Big-M: 2× max possible power)
-                    if vars.bat_charge_status !== nothing
+                    if vars.bat_charge_status !== nothing && max(max_charge, max_discharge) > 0
                         M_bat = max(max_charge, max_discharge) * 2.0
 
                         @constraint(model, vars.bat_charge[bi, b, t] <= M_bat * vars.bat_charge_status[bi, b, t])
@@ -1850,7 +1866,7 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                     end
 
                     # SOC bounds
-                    @constraint(model, vars.bat_soc[bi, b, t+1] >= bat.soc_min[b] * capacity)
+                    @constraint(model, vars.bat_soc[bi, b, t+1] >= soc_floor[t+1])
                     @constraint(model, vars.bat_soc[bi, b, t+1] <=
                         bat.soc_max[b] * capacity + vars.soc_violation[bi, b, t])
 
@@ -1905,8 +1921,17 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                 if input.cyclic_end_soc
                     initial_soc_energy = soc_init
                     soc_tol = input.soc_end_tolerance
+                    # At most the SOC that charging at every step can reach
+                    # (less than the start when self-discharge outruns the
+                    # charge power, e.g. through a long outage)
+                    reach = soc_init
+                    for t in 1:hours
+                        reach = min(bat.soc_max[b] * capacity,
+                            (1 - self_discharge) * reach + η_charge * charge_limit[t] * tres)
+                    end
                     @constraint(model,
-                        vars.bat_soc[bi, b, hours+1] >= initial_soc_energy * (1.0 - soc_tol),
+                        vars.bat_soc[bi, b, hours+1] >=
+                            min(initial_soc_energy * (1.0 - soc_tol), reach),
                         base_name = "bat_soc_end_lower_$(bi)_$(b)"
                     )
                     @constraint(model,
@@ -1940,17 +1965,28 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                     end
                 end
 
-                # Minimum daily cycling constraint
+                # Minimum cycling: charge at least min_cycling_ratio × capacity
+                # per min_cycling_period_days.
                 # bat_charge is in MW; sum(bat_charge) gives MW-timesteps.
                 # min_cycling expressed in MW-timesteps: ratio * capacity_MWh * (timesteps/24) / period
                 # The tres factor cancels: energy = sum(bat_charge)*tres, days = timesteps*tres/24
+                # It never makes a window infeasible: the requirement is at
+                # most what the battery can charge in the window (none when it
+                # cannot charge at all), and a shortfall (ramp limits, ...) is
+                # priced at 10 % of VOLL per MWh, below load shedding.
                 days = hours / 24.0
-                min_cycling = input.min_cycling_ratio * capacity * days / input.min_cycling_period_days
+                min_cycling = min(
+                    input.min_cycling_ratio * capacity * days / input.min_cycling_period_days,
+                    sum(charge_limit))
                 if min_cycling > 0 && capacity > 0
+                    shortfall = @variable(model, lower_bound = 0.0,
+                        base_name = "bat_min_cycling_short_$(bi)_$(b)")
                     @constraint(model,
-                        sum(vars.bat_charge[bi, b, t] for t in 1:hours) >= min_cycling,
+                        sum(vars.bat_charge[bi, b, t] for t in 1:hours) + shortfall >= min_cycling,
                         base_name = "bat_min_cycling_$(bi)_$(b)"
                     )
+                    JuMP.set_objective_coefficient(model, shortfall,
+                        0.1 * input.loss_of_load_penalty * tres)
                 end
             end
         end
