@@ -260,9 +260,10 @@ class MasterProblemAdapter:
 | `initial_re_penetration` | `float` | Starting RE penetration ratio (auto-calculated from existing RE capacity). |
 | `temporal_resolution_hours` | `int` | Hours per timestep for representative days (e.g., 24). |
 | `representative_days_per_year` | `int` | Number of representative days per year for operational validation. |
+| `rep_day_offsets` | `list[int] \| None` | First step (0-based, within a year) of each representative day, the same for every year; the runner passes the days it chose once for the run (`master_rep_day_offsets`). `None`: the Julia master chooses them from the horizon-mean demand. |
 | `investment_resolution_hours` | `int` | Hours per investment period (8760 = one decision per year). |
 | `use_tsam` | `bool` | Use Time Series Aggregation Method (TSAM) clustering instead of peak-day selection. |
-| `tsam_period_start_hours` | `list[list[int]]` | Per-year start hours for TSAM periods (1-indexed). |
+| `tsam_period_start_hours` | `list[list[int]]` | Per-year start hours for TSAM periods (1-indexed); the runner passes the same days of the year for every year. |
 | `tsam_period_weights` | `list[list[float]]` | Per-year weights for TSAM periods. |
 | `tsam_inter_period_linking` | `bool` | Enable inter-period SOC linking for battery continuity across representative periods. |
 | `use_stochastic`, `stochastic_scenarios` | `bool`, `list[dict]` | Build the two-stage stochastic master (`create_stochastic_master_problem`): shared investment, one representative-day operation per scenario. Ignored, with a warning, when `solver_method="benders"`. |
@@ -564,6 +565,15 @@ Wraps the primary energy model (`primary_energy.jl`). Optimizes fuel supply chai
 ---
 
 ## Helper Functions
+
+### master_rep_day_offsets
+
+```python
+def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
+                           min_separation: int, resolution_hours: int = 1) -> list[int]
+```
+
+The representative days of a development run, chosen once: the first step (0-based, within a year) of each day, for every planning year. Calls the Julia `representative_day_offsets` on `demand` (steps × nodes, `num_years` yearly blocks): the peak-day selection runs on the horizon-mean demand. The runner logs their dates and passes them to every master as `rep_day_offsets`.
 
 ### _compute_geographic_fuel_adjustments
 
