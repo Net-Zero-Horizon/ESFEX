@@ -3726,7 +3726,6 @@ class Orchestrator:
             primary = self.primary_system
             resolution_hours = getattr(temporal, 'resolution_hours', 1)
             hours_per_year_raw = HOURS_STD_YEAR
-            hours_per_year_agg = HOURS_STD_YEAR // resolution_hours
 
             # Per-system RE targets
             target_re = getattr(primary, 'target_re_penetration', 1.0)
@@ -3766,6 +3765,18 @@ class Orchestrator:
             if system_node_ranges:
                 re_paths = [re_target_trajectory(init, target_re, num_years, min_inc, max_inc)
                             for _, _, _, init in system_node_ranges]
+
+            # The representative days (or TSAM periods), chosen once for the
+            # horizon: every annual master models the same calendar days
+            # with its own year's demand and profiles
+            use_tsam = master_cfg.use_tsam if master_cfg else False
+            horizon_demand_agg = (aggregate_demand_to_resolution(
+                master_demand[:hours_needed], target_hours=resolution_hours)
+                if resolution_hours > 1 else master_demand[:hours_needed])
+            tsam = (self._master_tsam_periods(horizon_demand_agg, num_years, resolution_hours)
+                    if use_tsam else None)
+            rep_day_offsets = (None if use_tsam else self._master_rep_day_offsets(
+                horizon_demand_agg, num_years, resolution_hours))
 
             # Accumulation state
             investments_by_year: dict[int, dict] = {}
@@ -3845,44 +3856,10 @@ class Orchestrator:
                 else:
                     year_demand_agg = year_demand_raw
 
-                # 4. TSAM clustering for this single year
-                use_tsam = master_cfg.use_tsam if master_cfg else False
-                tsam_starts_y = []
-                tsam_weights_y = []
-                tsam_order_y = []
-
-                if use_tsam:
-                    from esfex.models.tsam import compute_tsam_periods
-
-                    tsam_num_periods = master_cfg.tsam_num_periods if master_cfg else 10
-                    tsam_method = master_cfg.tsam_method if master_cfg else "kmedoids"
-
-                    # Build RE availability for this year's clustering
-                    year_availability = None
-                    if self._availability_cache:
-                        year_avail_dict: dict[str, np.ndarray] = {}
-                        for gen_key, gen in self.primary_system.generators.items():
-                            if gen.type != "Renewable" or gen_key not in self._availability_cache:
-                                continue
-                            avail = self._availability_cache[gen_key]
-                            if resolution_hours > 1:
-                                avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
-                            year_avail_dict[gen_key] = _profile_year_block(
-                                avail, y_idx, hours_per_year_agg)
-                        if year_avail_dict:
-                            year_availability = year_avail_dict
-
-                    tsam_result = compute_tsam_periods(
-                        demand=year_demand_agg,
-                        num_periods=tsam_num_periods,
-                        method=tsam_method,
-                        period_length_hours=24 // resolution_hours,
-                        availability=year_availability,
-                    )
-                    # 1-indexed for Julia (no year offset since single year)
-                    tsam_starts_y = [[s + 1 for s in tsam_result.period_start_hours]]
-                    tsam_weights_y = [tsam_result.period_weights]
-                    tsam_order_y = [[i + 1 for i in tsam_result.chronological_order]]
+                # 4. TSAM periods: the ones chosen once for the horizon
+                tsam_starts_y = [[st + 1 for st in tsam.period_start_hours]] if tsam else []
+                tsam_weights_y = [list(tsam.period_weights)] if tsam else []
+                tsam_order_y = [[i + 1 for i in tsam.chronological_order]] if tsam else []
 
                 # 5. Stochastic scenarios
                 use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -3931,6 +3908,7 @@ class Orchestrator:
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
                     min_day_separation=master_cfg.min_day_separation if master_cfg else 5,
+                    rep_day_offsets=rep_day_offsets,
                     solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                     benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                     benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
@@ -4059,6 +4037,68 @@ class Orchestrator:
             console.print(f"[bold red]Myopic master problem error:[/bold red] {e}")
             console.print(f"[dim]{tb}[/dim]")
             return None, None, None, None
+
+    def _rep_day_dates(self, offsets: Iterable[int], resolution_hours: int) -> str:
+        """Calendar dates ("15 Jan") of master steps *offsets* within a year,
+        on the data's calendar (``date_start``, Feb 29 skipped)."""
+        steps = HOURS_STD_YEAR // max(1, resolution_hours)
+        index = model_time_index(self._data_start(), steps, resolution_hours)
+        return ", ".join(index[int(o) % steps].strftime("%d %b") for o in offsets)
+
+    def _master_rep_day_offsets(self, demand_agg: np.ndarray, num_years: int,
+                                resolution_hours: int) -> list[int]:
+        """The representative days every master of this run models, as
+        steps within a year (0-based): chosen ONCE, from the horizon-mean
+        demand (``master_rep_day_offsets``), so each year differs from the
+        others only by its demand (and its block of multi-year profiles),
+        never by the weather sample. Logged with their dates."""
+        from esfex.bridge.adapters import master_rep_day_offsets
+        master_cfg = getattr(self.config, 'master_problem', None)
+        offsets = master_rep_day_offsets(
+            demand_agg, num_years,
+            master_cfg.representative_days if master_cfg else 5,
+            master_cfg.min_day_separation if master_cfg else 5,
+            resolution_hours)
+        logger.info("Representative days, the same for every planning year: %s",
+                    self._rep_day_dates(offsets, resolution_hours))
+        return offsets
+
+    def _master_tsam_periods(self, demand_agg: np.ndarray, num_years: int,
+                             resolution_hours: int):
+        """TSAM periods every master of this run models, chosen ONCE: the
+        clustering (``compute_tsam_periods``) of the horizon-mean demand and
+        renewable availability (the mean over the years of each step, each
+        year's block as the dispatch reads it, ``_profile_year_block``).
+        Start steps are 0-based within a year. Logged with their dates."""
+        from esfex.models.tsam import compute_tsam_periods
+
+        master_cfg = getattr(self.config, 'master_problem', None)
+        steps = HOURS_STD_YEAR // max(1, resolution_hours)
+        n_years = max(1, num_years)
+
+        def horizon_mean(arr: np.ndarray) -> np.ndarray:
+            return np.mean([_profile_year_block(arr, y, steps) for y in range(n_years)],
+                           axis=0)
+
+        availability: dict[str, np.ndarray] = {}
+        for gen_key, gen in self.primary_system.generators.items():
+            if gen.type != "Renewable" or gen_key not in (self._availability_cache or {}):
+                continue
+            avail = self._availability_cache[gen_key]
+            if resolution_hours > 1:
+                avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
+            if len(avail):
+                availability[gen_key] = horizon_mean(avail)
+        result = compute_tsam_periods(
+            demand=horizon_mean(demand_agg),
+            num_periods=master_cfg.tsam_num_periods if master_cfg else 10,
+            method=master_cfg.tsam_method if master_cfg else "kmedoids",
+            period_length_hours=24 // resolution_hours,
+            availability=availability or None,
+        )
+        logger.info("TSAM periods, the same for every planning year: %s",
+                    self._rep_day_dates(result.period_start_hours, resolution_hours))
+        return result
 
     def _benders_debug_lp_dir(self) -> Optional[str]:
         """The run's ``logs`` folder when ``ESFEX_BENDERS_DEBUG_LP=1``: Benders
@@ -4494,80 +4534,20 @@ class Orchestrator:
             tsam_order = []
 
             if use_tsam:
-                from esfex.models.tsam import compute_tsam_periods
-
-                tsam_num_periods = master_cfg.tsam_num_periods if master_cfg else 10
-                tsam_method = master_cfg.tsam_method if master_cfg else "kmedoids"
+                # The same periods for every year (chosen once), each year
+                # on its own block of the demand and profiles
                 hours_per_year = HOURS_STD_YEAR // resolution_hours
-
-                logger.debug(
-                    f"  Running TSAM clustering: {tsam_num_periods} periods, "
-                    f"method={tsam_method}"
-                )
-
-                # Build RE availability profiles for TSAM clustering
-                # This adds renewable capacity factor features so the clustering
-                # captures correlations between demand and RE availability
-                re_availability_for_tsam: dict[str, np.ndarray] | None = None
-                if self._availability_cache:
-                    re_avail_arrays: dict[str, np.ndarray] = {}
-                    for gen_key, gen in self.primary_system.generators.items():
-                        if gen.type != "Renewable":
-                            continue
-                        if gen_key not in self._availability_cache:
-                            continue
-                        avail = self._availability_cache[gen_key]
-                        # Aggregate to same resolution as demand (MEAN for CF)
-                        if resolution_hours > 1:
-                            avail = aggregate_to_resolution(
-                                avail, target_hours=resolution_hours
-                            )
-                        re_avail_arrays[gen_key] = avail
-                    if re_avail_arrays:
-                        re_availability_for_tsam = re_avail_arrays
-                        logger.debug(
-                            f"  TSAM: using {len(re_avail_arrays)} RE availability "
-                            f"profiles as clustering features"
-                        )
-
+                tsam = self._master_tsam_periods(master_demand_aggregated, num_years,
+                                                 resolution_hours)
                 for y_idx in range(num_years):
-                    year_start = y_idx * hours_per_year
-                    year_end = min(
-                        (y_idx + 1) * hours_per_year,
-                        master_demand_aggregated.shape[0],
-                    )
-                    year_demand = master_demand_aggregated[year_start:year_end, :]
-
-                    # Extract year slice of RE availability profiles
-                    year_availability = None
-                    if re_availability_for_tsam:
-                        year_availability = {}
-                        for name, avail in re_availability_for_tsam.items():
-                            # Horizon-hour rule of the dispatch: this year's
-                            # block, wrapping around a shorter profile
-                            year_avail = _profile_year_block(
-                                avail, y_idx, year_end - year_start)
-                            if year_avail.shape[0] > 0:
-                                year_availability[name] = year_avail
-                        if not year_availability:
-                            year_availability = None
-
-                    result = compute_tsam_periods(
-                        demand=year_demand,
-                        num_periods=tsam_num_periods,
-                        method=tsam_method,
-                        period_length_hours=24 // resolution_hours,
-                        availability=year_availability,
-                    )
-                    # Offset start hours to absolute position + convert to 1-indexed for Julia
-                    tsam_starts.append(
-                        [s + year_start + 1 for s in result.period_start_hours]
-                    )
-                    tsam_weights.append(result.period_weights)
-                    # Convert chronological order to 1-indexed for Julia
-                    tsam_order.append([i + 1 for i in result.chronological_order])
-
-                logger.debug(f"  TSAM clustering complete for {num_years} years")
+                    # Absolute position, 1-indexed for Julia
+                    tsam_starts.append([s + y_idx * hours_per_year + 1
+                                        for s in tsam.period_start_hours])
+                    tsam_weights.append(list(tsam.period_weights))
+                    tsam_order.append([i + 1 for i in tsam.chronological_order])
+            # The representative days: the same for every year
+            rep_day_offsets = (None if use_tsam else self._master_rep_day_offsets(
+                master_demand_aggregated, num_years, resolution_hours))
 
             # --- Stochastic scenarios (if enabled) ---
             use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -4630,6 +4610,7 @@ class Orchestrator:
                 investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                 representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
                 min_day_separation=master_cfg.min_day_separation if master_cfg else 5,
+                rep_day_offsets=rep_day_offsets,
                 solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                 benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                 benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
