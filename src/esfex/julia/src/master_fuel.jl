@@ -392,14 +392,15 @@ function _master_unit_fuel(input::MasterProblemInput, g::Int, b::Int)
 end
 
 """
-    master_fuel_day_scale(input) -> Float64
+    master_fuel_day_scale(input, ndays=input.representative_days_per_year) -> Float64
 
-Days of the year one representative day stands for (the fuel block's day
-cost is already in \$, so no ×Δt).
+Days of the year one representative day stands for, with `ndays` days
+selected in the year (the fuel block's day cost is already in \$, so no ×Δt).
 """
-function master_fuel_day_scale(input::MasterProblemInput)
+function master_fuel_day_scale(input::MasterProblemInput,
+                               ndays::Integer = input.representative_days_per_year)
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
-    return days_in_year / input.representative_days_per_year
+    return days_in_year / max(ndays, 1)
 end
 
 """

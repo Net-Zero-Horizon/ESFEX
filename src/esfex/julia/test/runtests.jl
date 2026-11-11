@@ -4201,6 +4201,37 @@ import Ipopt
             @test ff.tech_capacity == fc.tech_capacity && ff.gen_capacity == fc.gen_capacity
         end
 
+        @testset "representative days stand for the year over the days selected" begin
+            # Three days asked, 200 days apart: only two fit in a year. Each
+            # day stood for 365 / 3 days, so the year's cost and energy
+            # were a third short (T25/B25). With a flat 50 MW load the year
+            # costs the same as with two days asked (both fit).
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                        ones(8760, 1); nb = 1, H = 8760)
+            inp = MasterProblemInput(years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(50.0, 8760, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 3, min_day_separation = 200,
+                loss_of_load_penalty = 10.0, verbose = false)
+            nd = length(master_rep_day_offsets(inp))
+            @test nd == 2
+            @test ESFEX.rep_day_scaling(inp, nd) ≈ 365.0 / 2
+            @test ESFEX.master_fuel_day_scale(inp, nd) ≈ 365.0 / 2
+            ref, _ = master1(ESFEX.with_fields(inp; representative_days_per_year = 2))
+            full = objective_value(ref)
+            m, _ = master1(inp)
+            @test objective_value(m) ≈ full rtol = 1e-9
+            br = run_benders_decomposition(inp; max_iterations = 20, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ full rtol = 1e-6
+            @test br.solution.total_operational_cost_by_year[1] ≈ full rtol = 1e-6
+        end
+
         @testset "Benders reaches the monolithic optimum" begin
             # The Benders subproblems used to miss converters (no power, no
             # build), the CO2 budget, the line flow cost, LP start-ups and the

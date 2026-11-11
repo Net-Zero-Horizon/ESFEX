@@ -3523,9 +3523,10 @@ end
 
 """
     calculate_day_operational_cost(ps_vars, input, year_idx, hours;
-                                   tech_output=nothing, tech_day_cost=nothing)
+                                   tech_output=nothing, tech_day_cost=nothing, ndays)
 
-Calculate operational cost for a representative day, scaled to the year.
+Calculate operational cost for a representative day, scaled to the year
+(`rep_day_scaling` with `ndays` days selected in the year).
 `tech_day_cost` (from `add_day_operational_constraints!`) is scaled with it.
 """
 function calculate_day_operational_cost(
@@ -3534,9 +3535,10 @@ function calculate_day_operational_cost(
     year_idx::Int,
     hours::Int;
     tech_output::Union{Nothing, Any} = nothing,
-    tech_day_cost::Union{Nothing, AffExpr} = nothing
+    tech_day_cost::Union{Nothing, AffExpr} = nothing,
+    ndays::Integer = input.representative_days_per_year
 )::AffExpr
-    scaling_factor = rep_day_scaling(input)
+    scaling_factor = rep_day_scaling(input, ndays)
 
     cost = day_operational_cost(ps_vars, input, hours; tech_output)
     tech_day_cost === nothing || add_to_expression!(cost, tech_day_cost)
@@ -3544,15 +3546,35 @@ function calculate_day_operational_cost(
 end
 
 """
-    rep_day_scaling(input)
+    rep_day_scaling(input, ndays=input.representative_days_per_year)
 
 Factor from one representative day's per-step quantities to the year: the
-step length times the days each representative day stands for.
+step length times the days each representative day stands for, the year's
+days over `ndays`, the days actually selected for it. Fewer than
+`representative_days_per_year` are selected when the separation or the data
+leave no more; dividing by the setting then underweighted every cost and
+energy of the year.
 """
-function rep_day_scaling(input::MasterProblemInput)
+function rep_day_scaling(input::MasterProblemInput,
+                         ndays::Integer = input.representative_days_per_year)
     tres = max(1.0, input.temporal_resolution_hours)
     days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
-    return tres * days_in_year / input.representative_days_per_year
+    return tres * days_in_year / max(ndays, 1)
+end
+
+"""
+    warn_fewer_rep_days(input, ndays)
+
+Warn when only `ndays` representative days could be selected, fewer than
+`representative_days_per_year` (the minimum separation or the data leave
+no more); each then stands for more days of the year (`rep_day_scaling`).
+"""
+function warn_fewer_rep_days(input::MasterProblemInput, ndays::Integer)
+    ndays < input.representative_days_per_year || return nothing
+    @warn "Only $(ndays) of the $(input.representative_days_per_year) representative " *
+          "days requested could be selected (min_day_separation = " *
+          "$(input.min_day_separation)); each stands for 1/$(ndays) of the year"
+    return nothing
 end
 
 """
@@ -3652,8 +3674,11 @@ function add_representative_days_validation!(
             @warn "No representative days selected for year $(input.years[y_idx])"
             continue
         end
+        # Each day stands for the year's days over the days selected
+        nd = length(rep_days)
+        y_idx == 1 && scenario_idx <= 1 && warn_fewer_rep_days(input, nd)
         periods = [(h, min(h + timesteps_per_day - 1, size(input.base_demand, 1)) - h + 1,
-                    rep_day_scaling(input)) for h in rep_days]
+                    rep_day_scaling(input, nd)) for h in rep_days]
         cap_exempt, prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
 
         vars.operational_costs[y_idx] = AffExpr[]
@@ -3683,23 +3708,23 @@ function add_representative_days_validation!(
 
             # Operational cost scaled to the year (candidate technologies' too)
             day_cost = calculate_day_operational_cost(ps_vars, input, y_idx, hours;
-                tech_output=tech_output, tech_day_cost=tech_day_cost)
+                tech_output=tech_output, tech_day_cost=tech_day_cost, ndays=nd)
             # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
             add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
                 extra = k -> master_fuel_capacity(vars, input, y_idx, k)),
-                master_fuel_day_scale(input))
+                master_fuel_day_scale(input, nd))
             push!(vars.operational_costs[y_idx], day_cost)
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
-                rep_day_scaling(input))
+                rep_day_scaling(input, nd))
 
             # The day's CO2, renewable output and demand, scaled to the
             # year like its cost
             for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
-                add_to_expression!(annual_co2[k], e, rep_day_scaling(input))
+                add_to_expression!(annual_co2[k], e, rep_day_scaling(input, nd))
             end
             add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
-                        start_hour, hours, rep_day_scaling(input))
+                        start_hour, hours, rep_day_scaling(input, nd))
         end
 
         push!(vars.operational_costs[y_idx],
