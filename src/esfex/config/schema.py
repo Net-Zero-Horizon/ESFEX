@@ -1776,8 +1776,9 @@ class MasterProblemConfig(BaseModel):
     # Master-problem solver method.
     #   "monolithic" — single model coupling investment + representative-day
     #                  operations (default).
-    #   "benders"    — Benders decomposition: investment-only master with theta[y,d]
-    #                  recourse and per-representative-day dispatch subproblems.
+    #   "benders"    — Benders decomposition: investment-only master with theta[y]
+    #                  recourse and one dispatch subproblem per year (all its
+    #                  representative days).
     #                  Beneficial for very large problems.
     solver_method: Literal["monolithic", "benders"] = Field(
         default="monolithic",
