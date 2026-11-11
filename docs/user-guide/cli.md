@@ -640,6 +640,7 @@ esfex build-demand-dataset [OPTIONS]
 |----------|-------------|
 | `ESFEX_PLUGIN_PATH` | Extra plugin directories (`:`-separated on Linux/macOS, `;` on Windows) |
 | `JULIA_DEPOT_PATH` | Julia depot; its first entry also decides where the `esfex_solvers` environment lives |
+| `ESFEX_JULIA_RESOLVE` | Set to `1` to let ESFEX re-resolve its Julia project when `Pkg.instantiate()` cannot install missing packages (off by default; see [Julia Package Errors](../getting-started/installation.md#julia-package-errors)) |
 | `JULIA_NUM_THREADS` | Julia threads; ESFEX sets it to `4` if unset. ESFEX's Julia code is not threaded; solver threads come from `solver.threads` |
 | `ESFEX_DATA_ROOT` | Dataset and cache root (Geofabrik extracts, OSM tiles, CMIP6 subsets, the population and GDP rasters of the demand forecast); default `~/.esfex/data` |
 | `ESFEX_ASSETS_URL` | Where the demand forecast downloads its population and GDP rasters; default the ESFEX data release on GitHub. Any URL Python's `urllib` opens, `file://` included |
