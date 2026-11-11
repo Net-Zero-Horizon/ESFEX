@@ -75,9 +75,9 @@ MGA/SPORES runs only in `perfect_foresight` mode.
 | Method | Description |
 |--------|-------------|
 | `monolithic` (default) | One LP that holds the investment variables and all representative-day dispatch |
-| `benders` | Benders decomposition: an investment-only master with one recourse variable per year and representative day, and one dispatch subproblem per year and representative day. Iterates until the relative gap is below `benders_tolerance` or `benders_max_iterations` is reached |
+| `benders` | Benders decomposition: an investment-only master with one recourse variable per year, and one dispatch subproblem per year with all its representative days and the year's CO2 budget, RE target and growth cap. The subproblems use the configured solver. Iterates until the relative gap is below `benders_tolerance` or `benders_max_iterations` is reached |
 
-Benders solves the same problem as the monolithic master and reaches the same optimum: the same investment constraints and costs, the same representative-day dispatch with the full loss-of-load penalty, and the same hard curtailment limit (`max_curtailment_ratio`). If it stops at `benders_max_iterations`, it returns the plan of its best iteration together with that plan's operating cost, and logs the remaining gap.
+Benders solves the same problem as the monolithic master and reaches the same optimum: the same investment constraints and costs, the same representative-day dispatch with the full loss-of-load penalty, and the same hard curtailment limit (`max_curtailment_ratio`), and the same annual RE target, growth cap and CO2 budget. If it stops at `benders_max_iterations`, it returns the plan of its best iteration together with that plan's operating cost, and logs the remaining gap.
 
 !!! note "Benders: limitations"
     - Benders always selects representative days by peak demand. With `use_tsam: true`, or with investment-target custom constraints, the run solves the monolithic master instead and logs a warning saying why.
