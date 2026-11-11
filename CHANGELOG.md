@@ -1173,6 +1173,20 @@ Per-release notes are also published on the
   without a feasible plan is still a failure, now with an error that
   suggests raising `solver.time_limit` or using barrier without crossover.
 
+- **Julia log messages reach the ESFEX console and log file.** Under
+  juliacall the Julia models' `@info` / `@warn` / `@error` lines went to the
+  bare process stderr, outside Python logging: Benders iterations (lower and
+  upper bound, gap), warm-start progress and Julia warnings never appeared
+  in the run's log file, and a long Benders run showed no progress at all.
+  ESFEX now installs a Julia logger (`ESFEX.set_log_callback`) that hands
+  every record to the `esfex.julia` Python logger at its level (DEBUG, INFO,
+  WARNING, ERROR), with its key = value pairs and honouring `maxlog`. Benders
+  progress lines are milestones, so the `basic` console shows them too; other
+  Julia INFO lines appear from `verbose` on, and everything is in the log
+  file. Debug records are forwarded only from ESFEX's own code, not from Base
+  or the packages it loads. Records logged on worker threads are sent with
+  the next record of the main thread.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -2562,6 +2576,32 @@ Per-release notes are also published on the
   which `INFEASIBLE_POINT` also contains: a window stopped at an iteration
   limit with an infeasible primal point was taken as solved. Only a
   feasible point is accepted now.
+
+- **A small battery build no longer makes the next myopic year infeasible.**
+  The myopic runner carried each year's builds to the later years only when
+  they exceeded 0.1 MW or 0.1 MWh, each value on its own. A battery the
+  master built with 0.09 MW and 0.18 MWh reached the next year with its
+  energy and no power; its minimum-cycling constraint then asked for charge
+  that a zero charge limit forbade, and every dispatch window of that year
+  was infeasible (Cuba myopic run, year 2026). Every build above solver
+  noise (10⁻⁶ MW or MWh) is now kept whole, in the myopic carry-over, in the
+  perfect-foresight investments and in the dispatch's investment units, so
+  the dispatch and the later years see the capacity the master paid for.
+  The reported investments therefore also list builds below 0.1 MW.
+
+- **Battery constraints can no longer make a dispatch window infeasible
+  when the battery cannot charge.** A battery with energy but no charge or
+  discharge power at a bus now holds no energy there (it cannot move any),
+  so no SOC condition applies to it. The minimum cycling
+  (`min_cycling_ratio` / `min_cycling_period_days`) is capped at what the
+  battery can charge in the window (none during a whole-window outage), and
+  a shortfall it cannot avoid (ramp limits) is priced at 10 % of VOLL per
+  MWh instead of being infeasible. During steps without charge capability
+  (an outage, zero availability) self-discharge may take the SOC below
+  `soc_min`; the floor returns as fast as full charging allows. The cyclic
+  end-of-horizon band (`cyclic_end_soc`) asks at most for the SOC that full
+  charging can reach. Each of these used to make the window infeasible for a
+  battery that could not charge. A battery that can charge behaves as before.
 
 ## [0.3.0] — 2026-08-27
 
