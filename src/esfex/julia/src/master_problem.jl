@@ -4073,6 +4073,7 @@ function extract_master_solution(
     # Overnight cost of each year's builds, and the annuities each year pays
     # (base costs and discount rate)
     annuity_by_year = zeros(num_years)
+    streams = Dict{Tuple{Int, Float64}, Float64}()
     for t in master_investment_terms(vars, input)
         t.cost == 0 && continue
         built = value(t.var) * t.cost
@@ -4081,6 +4082,8 @@ function extract_master_solution(
         for y in annuity_years(t.year, t.life, num_years)
             annuity_by_year[y] += built * crf
         end
+        abs(built) > 1e-12 &&
+            (streams[(t.year, t.life)] = get(streams, (t.year, t.life), 0.0) + built * crf)
     end
 
     # Operating cost of each year's representative days (or TSAM periods),
@@ -4116,7 +4119,8 @@ function extract_master_solution(
         conv_inv,
         extract_master_fuel_solution(vars, input),  # M2 (#89)
         unit_operation ? extract_unit_operation(model, vars, input) : UnitOperation[],
-        annuity_by_year
+        annuity_by_year,
+        sort!([(y, life, a) for ((y, life), a) in streams])
     )
 end
 

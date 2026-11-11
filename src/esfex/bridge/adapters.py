@@ -82,24 +82,70 @@ def _warn_once(key, msg: str, *args) -> None:
 
 
 # Values of a controlling combo (HiGHS "solver_method", Gurobi "method") that
-# mean "let the solver decide" — no specific algorithm is pinned, so no
-# algorithm-specific option should be forced.
+# mean "let the solver decide" — no specific algorithm is pinned.
 _METHOD_AUTO_SENTINELS = frozenset({"choose", "auto"})
+
+# Solvers that reject an option of an algorithm that is not selected (some
+# HiGHS builds raise UnsupportedAttribute for `pdlp_scaling`): there a
+# method-specific option is forwarded only when its method is pinned. Gurobi,
+# CPLEX and Xpress accept every parameter whatever the algorithm, and their
+# automatic method can run barrier, so under it an option is forwarded when
+# its `enabled_when` lists the automatic choice.
+_STRICT_METHOD_GATING = frozenset({"highs"})
+
+
+def _solver_option_labels(catalog: list[dict]) -> tuple[dict, dict, dict]:
+    """``(key → attr, key → default label, key → {str(value): label})`` of a
+    solver's option catalog: the GUI saves a combo under its attr with the
+    integer value (Gurobi ``Method: 2``), the gates name its labels."""
+    key_to_attr: dict[str, str] = {}
+    ctrl_default: dict[str, str] = {}
+    value_label: dict[str, dict[str, str]] = {}
+    for opt in catalog:
+        key, attr = opt.get("key"), opt.get("attr", opt.get("key"))
+        if key and attr and key != attr:
+            key_to_attr[key] = attr
+        if key:
+            ctrl_default[key] = str(opt.get("default", "choose"))
+            if opt.get("values") is not None and opt.get("choices") is not None:
+                value_label[key] = {str(v): str(c) for v, c in
+                                    zip(opt["values"], opt["choices"])}
+    return key_to_attr, ctrl_default, value_label
+
+
+def _active_method(options: dict, ctrl_key: str, catalog: list[dict]) -> str:
+    """Label of the controlling combo ``ctrl_key`` in ``options`` (saved
+    under its key or attr, as a label or as its integer value), or its
+    default."""
+    key_to_attr, ctrl_default, value_label = _solver_option_labels(catalog)
+    ctrl_attr = key_to_attr.get(ctrl_key, ctrl_key)
+    for kk in (ctrl_key, ctrl_attr):
+        if kk in options and options[kk] is not None:
+            val = str(options[kk])
+            return value_label.get(ctrl_key, {}).get(val, val)
+    return ctrl_default.get(ctrl_key, "choose")
 
 
 def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
     """Identifiers of solver options to drop because they are method-specific
-    but the controlling combo is on auto/'choose' (or a different method).
+    and the controlling combo selects a method they do not apply to.
 
     Some options (e.g. HiGHS ``pdlp_scaling``) only apply when an LP-method
     combo (``solver_method``) is set to a specific algorithm. The GUI collects
     them under ``solver_method='choose'`` too (their ``enabled_when`` lists
     ``choose``), so a saved config carries them even when no method is pinned.
-    Forwarding such an option makes the solver reject an inapplicable
-    parameter — on some HiGHS builds ``pdlp_scaling`` raises
-    ``UnsupportedAttribute`` and aborts the *entire* model build. Only forward
-    a method-gated option when its controller is explicitly set to a matching,
-    non-auto method.
+    Forwarding such an option makes HiGHS reject an inapplicable parameter —
+    on some builds ``pdlp_scaling`` raises ``UnsupportedAttribute`` and aborts
+    the *entire* model build — so for HiGHS (``_STRICT_METHOD_GATING``) a
+    method-gated option is forwarded only when its controller is explicitly
+    set to a matching, non-auto method. The other solvers accept any
+    parameter: an option is dropped only when the method selected is one it
+    does not list (Gurobi ``Crossover`` with primal simplex), and kept under
+    the automatic method when its gate lists it (Gurobi ``Crossover`` and
+    ``BarConvTol`` with ``Method`` -1: the concurrent optimizer runs barrier).
+
+    The controller may be saved as its label (``"barrier"``) or, as the
+    Studio writes it, as its integer value (``Method: 2``).
 
     Pure (no Julia) so it can be unit-tested directly.
     """
@@ -111,22 +157,7 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
         return drops
 
     catalog = SOLVER_OPTIONS.get(active, [])
-    # key ↔ attr map and each controlling combo's default, for this solver.
-    key_to_attr: dict[str, str] = {}
-    ctrl_default: dict[str, str] = {}
-    for opt in catalog:
-        key, attr = opt.get("key"), opt.get("attr", opt.get("key"))
-        if key and attr and key != attr:
-            key_to_attr[key] = attr
-        if key:
-            ctrl_default[key] = str(opt.get("default", "choose"))
-
-    def _active_ctrl(ctrl_key: str) -> str:
-        ctrl_attr = key_to_attr.get(ctrl_key, ctrl_key)
-        for kk in (ctrl_key, ctrl_attr):
-            if kk in options and options[kk] is not None:
-                return str(options[kk])
-        return ctrl_default.get(ctrl_key, "choose")
+    strict = active in _STRICT_METHOD_GATING
 
     for opt in catalog:
         gate = opt.get("enabled_when")
@@ -135,8 +166,9 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
         applies = True
         for ctrl_key, allowed in gate.items():
             allowed_set = {str(a) for a in allowed}
-            active_val = _active_ctrl(ctrl_key)
-            if active_val in _METHOD_AUTO_SENTINELS or active_val not in allowed_set:
+            active_val = _active_method(options, ctrl_key, catalog)
+            if (strict and active_val in _METHOD_AUTO_SENTINELS) \
+                    or active_val not in allowed_set:
                 applies = False
                 break
         if not applies:
@@ -146,6 +178,71 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
             if any(i in options for i in idents):
                 drops.update(idents)
     return drops
+
+
+def _barrier_options_under_auto_method(options: dict, solver_name: str) -> bool:
+    """True when Gurobi's ``Method`` is automatic and ``Crossover`` is off.
+
+    Turning crossover off asks for a barrier solve, but on an LP the
+    automatic method runs the concurrent optimizer: barrier shares the
+    threads with simplex and the setting only matters if barrier finishes
+    first. The caller logs a recommendation to select barrier.
+    """
+    if solver_name.lower() != "gurobi":
+        return False
+    try:
+        from esfex.config.solver import SOLVER_OPTIONS
+    except Exception:
+        return False
+    catalog = SOLVER_OPTIONS.get("gurobi", [])
+    if "Crossover" not in options and "crossover" not in options:
+        return False
+    return (_active_method(options, "method", catalog) == "auto"
+            and _active_method(options, "crossover", catalog) == "off")
+
+
+# Termination statuses of a solver stopped by a resource limit
+_LIMIT_STATUSES = ("TIME_LIMIT", "NODE_LIMIT", "ITERATION_LIMIT",
+                   "SOLUTION_LIMIT", "OBJECTIVE_LIMIT", "OTHER_LIMIT",
+                   "MEMORY_LIMIT")
+
+
+def _is_limit_status(status_str: str) -> bool:
+    return any(lim in status_str for lim in _LIMIT_STATUSES)
+
+
+def _accept_limit_incumbent(jl, model_var: str, status_str: str,
+                            primal_status: str, what: str, advice: str) -> bool:
+    """Accept the FEASIBLE point a solver holds when it stopped at a limit.
+
+    True when ``status_str`` is a resource limit (time, nodes, iterations…)
+    and the primal status is ``FEASIBLE_POINT`` (not ``INFEASIBLE_POINT``):
+    the point is a valid plan or dispatch, only not proven optimal. Logs a
+    WARNING with the objective, the solver's bound and the gap when the
+    solver gives them, then ``advice``. ``model_var`` is the Julia global
+    holding the model.
+    """
+    if primal_status.split(".")[-1] != "FEASIBLE_POINT" or not _is_limit_status(status_str):
+        return False
+    try:
+        obj = float(jl.seval(f"objective_value({model_var})"))
+        bound = float(jl.seval(f"objective_bound({model_var})"))
+        if not np.isfinite(bound):
+            raise ValueError("no bound")
+        gap = abs(obj - bound) / (abs(obj) + 1e-9)
+        logger.warning(
+            "%s stopped at %s with a FEASIBLE point — accepting it "
+            "(objective=%.6g, bound=%.6g, gap=%.2f%%). It is valid but not "
+            "proven optimal; %s",
+            what, status_str, obj, bound, gap * 100.0, advice,
+        )
+    except Exception:
+        logger.warning(
+            "%s stopped at %s with a FEASIBLE point — accepting it "
+            "(optimality gap unknown). It is valid but not proven optimal; %s",
+            what, status_str, advice,
+        )
+    return True
 
 
 def _nodes_without_load_bus(buses, num_nodes: int) -> list[int]:
@@ -218,6 +315,15 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
     # Method-specific options whose controlling combo is on auto/'choose' (or a
     # different method) must not be forwarded — see _method_gated_drops.
     method_drops = _method_gated_drops(options, active)
+    if _barrier_options_under_auto_method(options, active):
+        _warn_once(
+            ("solver_option_concurrent", active),
+            "Gurobi Method is automatic with Crossover off: on an LP Gurobi runs "
+            "its concurrent optimizer, where barrier shares the threads with "
+            "simplex and Crossover only applies if barrier finishes first. For "
+            "a large LP such as the master problem, select method: barrier "
+            "(Method 2).",
+        )
 
     jl_dict = jl.seval("Dict{String, Any}()")
     for k, v in options.items():
@@ -2325,32 +2431,14 @@ class PowerSystemAdapter:
             return -1
 
         # Accept a feasible incumbent found before a resource limit was hit.
-        _LIMITS = ("TIME_LIMIT", "NODE_LIMIT", "ITERATION_LIMIT",
-                   "SOLUTION_LIMIT", "OBJECTIVE_LIMIT", "OTHER_LIMIT")
         try:
             primal_status = str(jl.seval("primal_status(_ps_model)"))
         except Exception:
             primal_status = "NO_SOLUTION"
-        if "FEASIBLE_POINT" in primal_status and any(
-            lim in status_str for lim in _LIMITS
+        if _accept_limit_incumbent(
+            jl, "_ps_model", status_str, primal_status, "The dispatch solver",
+            "loosen solver.gap or raise solver.time_limit to close the gap.",
         ):
-            try:
-                obj = float(jl.seval("objective_value(_ps_model)"))
-                bound = float(jl.seval("objective_bound(_ps_model)"))
-                gap = abs(obj - bound) / (abs(obj) + 1e-9)
-                logger.warning(
-                    "Solver stopped at %s with a FEASIBLE incumbent — accepting "
-                    "it (objective=%.6g, bound=%.6g, gap=%.2f%%). This dispatch "
-                    "is valid but not proven optimal; loosen solver.gap or raise "
-                    "solver.time_limit to close the gap.",
-                    status_str, obj, bound, gap * 100.0,
-                )
-            except Exception:
-                logger.warning(
-                    "Solver stopped at %s with a FEASIBLE incumbent — accepting "
-                    "it (optimality gap unknown). Loosen solver.gap or raise "
-                    "solver.time_limit to close it.", status_str,
-                )
             return 1
 
         # Diagnose anything else as a failure (no fallback, no acceptance)
@@ -3586,7 +3674,17 @@ class MasterProblemAdapter:
         primal_status = str(jl.seval("primal_status(_mp_model)"))
         logger.info(f"MasterProblem termination: {status_str}, primal: {primal_status}")
 
-        if "OPTIMAL" in status_str:
+        if "INFEASIBLE" in status_str:
+            logger.error("MasterProblem INFEASIBLE — check constraints")
+            return -1
+        elif "UNBOUNDED" in status_str:
+            return -2
+        # A plan the solver holds when it stopped at a limit (time,
+        # iterations…) is feasible: use it, as the dispatch does
+        accepted = "OPTIMAL" in status_str or _accept_limit_incumbent(
+            jl, "_mp_model", status_str, primal_status, "The master problem solver",
+            "raise solver.time_limit (or loosen solver.gap) to close the gap.")
+        if accepted:
             obj_val = float(jl.seval("objective_value(_mp_model)")) * COST_UNSCALE
             logger.info(f"MasterProblem objective value: {obj_val:,.2f}")
             ESFEX = get_esfex_module()
@@ -3599,20 +3697,19 @@ class MasterProblemAdapter:
             except Exception as e:
                 logger.warning(f"log_solution_summary skipped: {e}")
             return 1
-        elif "INFEASIBLE" in status_str:
-            logger.error("MasterProblem INFEASIBLE — check constraints")
-            return -1
-        elif "UNBOUNDED" in status_str:
-            return -2
+        if _is_limit_status(status_str):
+            logger.error(
+                f"MasterProblem solver stopped at {status_str} without a feasible "
+                f"plan (primal={primal_status}). Raise solver.time_limit; for a "
+                "large LP master, barrier without crossover (Gurobi method: "
+                "barrier, crossover: off) is usually much faster than the "
+                "default method.")
         else:
-            # Strict: do not accept "feasible point" results from non-optimal
-            # terminations. The solver must prove optimality. Anything else is
-            # a real bug in the formulation that needs to be surfaced.
             logger.error(
                 f"MasterProblem solver failed: status={status_str}, "
                 f"primal={primal_status}"
             )
-            return 0
+        return 0
 
     def conflict(self, limit: int = 20) -> list[str]:
         """Constraints and bounds of an infeasible master that cannot hold
@@ -3909,6 +4006,11 @@ class MasterProblemAdapter:
             # Investment annuities paid each year (what the objective charges)
             'annuity_cost_by_year': np.array(getattr(jl_result, 'annuity_cost_by_year', []),
                                              dtype=float) * COST_UNSCALE,
+            # The annuity streams behind them: (build year index 1-based,
+            # life in years, annuity $ per year)
+            'annuity_streams': [
+                (int(y), float(life), float(a) * COST_UNSCALE)
+                for (y, life, a) in getattr(jl_result, 'annuity_streams', [])],
             'total_operational_by_year': np.array(jl_result.total_operational_cost_by_year) * COST_UNSCALE,
             're_penetration_by_year': np.array(jl_result.re_penetration_by_year),
             're_penetration_by_system': {
