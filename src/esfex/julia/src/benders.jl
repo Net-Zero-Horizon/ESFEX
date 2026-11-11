@@ -219,7 +219,7 @@ function benders_year_demand(input::MasterProblemInput, y_idx::Int, days::Vector
     for start_hour in days
         end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
         end_hour >= start_hour || continue
-        out .+= rep_day_scaling(input) .*
+        out .+= rep_day_scaling(input, length(days)) .*
                 system_day_demand(input, y_idx, start_hour, end_hour - start_hour + 1)
     end
     return out
@@ -386,7 +386,7 @@ function benders_cap_exemption(input::MasterProblemInput,
         days = rep_days_by_year[y_idx]
         isempty(days) && continue
         periods = [(h, min(h + timesteps_per_day - 1, size(input.base_demand, 1)) - h + 1,
-                    rep_day_scaling(input)) for h in days]
+                    rep_day_scaling(input, length(days))) for h in days]
         out[y_idx], prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
     end
     return out
@@ -438,7 +438,6 @@ function add_benders_operating_bound!(model::Model, vars::MasterProblemVariables
                                       rep_days_by_year::Dict{Int, Vector{Int}})
     timesteps_per_day = 24 ÷ input.temporal_resolution_hours
     tres = input.temporal_resolution_hours
-    w = rep_day_scaling(input)
     systems = master_systems(input)
     b2n = input.network.bus_to_node
     D = input.base_demand
@@ -466,6 +465,7 @@ function add_benders_operating_bound!(model::Model, vars::MasterProblemVariables
     for y_idx in sort(collect(keys(theta)))
         days = get(rep_days_by_year, y_idx, Int[])
         isempty(days) && continue
+        w = rep_day_scaling(input, length(days))
         growth = (1.0 + input.demand_growth)^(y_idx - 1)
         caps = build_cumulative_capacity_expressions(vars, input, y_idx)
         # The technologies' capacity per bus as one variable each (the
@@ -863,14 +863,15 @@ end
 
 """
     create_benders_subproblem(input, year_idx, day_idx, demand, start_hour, fixed_caps, vars;
-                              re_cap_exempt=Float64[], model=nothing)
+                              re_cap_exempt=Float64[], model=nothing, ndays)
 
 Operational dispatch of a single representative day with FIXED capacities
 from the master solution, added to `model` (a year's subproblem,
 `create_benders_year_subproblem`), or, without one, in a model of its own
 whose objective is the day's cost.
 
-The day's cost scaled to the year is `constraint_store["day_cost"]`; its
+The day's cost scaled to the year (`rep_day_scaling` with the `ndays` days
+selected in the year) is `constraint_store["day_cost"]`; its
 renewable output and demand per system (`"re_day"`) and CO2 per budget group
 (`"co2_day"`), per step, are left for the year's annual constraints.
 Returns SubproblemData with constraint references for dual extraction.
@@ -884,7 +885,8 @@ function create_benders_subproblem(
     fixed_caps::FixedCapacities,
     master_vars::MasterProblemVariables;
     re_cap_exempt::Vector{Float64} = Float64[],
-    model::Union{Nothing, Model} = nothing
+    model::Union{Nothing, Model} = nothing,
+    ndays::Integer = input.representative_days_per_year
 )::SubproblemData
     hours = size(demand, 1)
     n_gen = length(input.generators)
@@ -1256,9 +1258,7 @@ function create_benders_subproblem(
     # =========================================================================
     # Objective: operational cost (includes annualization scaling factor)
     # =========================================================================
-    tres = max(1.0, input.temporal_resolution_hours)
-    days_in_year = length(input.hours_per_year) > 0 ? input.hours_per_year[1] / 24.0 : 365.0
-    scaling_factor = tres * days_in_year / input.representative_days_per_year
+    scaling_factor = rep_day_scaling(input, ndays)
 
     # Technologies' offer-curve fuel cost, battery technologies' maintenance
     # and throughput, converter variable cost, the flow cost of lines with a
@@ -1272,7 +1272,7 @@ function create_benders_subproblem(
     isempty(tech_curt_grad) || (constraint_store["tech_curt_cost"] =
         Dict(k => g * scaling_factor for (k, g) in tech_curt_grad))
     day_cost = calculate_day_operational_cost(ps_vars, input, year_idx, hours;
-        tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium)
+        tech_output=tech_output, tech_day_cost=tech_curve_cost + remainder_premium, ndays)
     # The day's CO2 per budget group, for the year's budgets
     constraint_store["co2_day"] = day_co2_by_group(ps_vars, tech_output, input, hours)
 
@@ -1280,7 +1280,7 @@ function create_benders_subproblem(
     # constraints, whose duals feed the cut like the other copies
     fuel_cost, fuel_fix = benders_fuel_day!(sp_model, ps_vars, input, year_idx,
         start_hour, hours, tech_output, fixed_caps.fuel_extra)
-    add_to_expression!(day_cost, fuel_cost, master_fuel_day_scale(input))
+    add_to_expression!(day_cost, fuel_cost, master_fuel_day_scale(input, ndays))
     merge!(copy_fix, fuel_fix)
     isempty(copy_fix) || (constraint_store["copy_fix"] = copy_fix)
     constraint_store["day_cost"] = day_cost
@@ -1345,12 +1345,12 @@ function create_benders_year_subproblem(
         end_hour >= start_hour || continue
         sp = create_benders_subproblem(input, year_idx, day_idx,
             input.base_demand[start_hour:end_hour, :], start_hour, fixed_caps, master_vars;
-            re_cap_exempt, model)
+            re_cap_exempt, model, ndays = length(days))
         push!(day_sps, sp)
         add_to_expression!(cost, sp.constraint_store["day_cost"])
     end
 
-    w = rep_day_scaling(input)
+    w = rep_day_scaling(input, length(days))
     store = Dict{String, Any}()
     copy_fix = Dict{BendersCopyKey, Any}()
 
@@ -1889,6 +1889,7 @@ function run_benders_decomposition(
     # =========================================================================
     @info "Benders: Creating investment master problem..."
     rep_days_by_year = benders_rep_days(input)
+    warn_fewer_rep_days(input, maximum(length, values(rep_days_by_year); init = 0))
     master_model, vars, targets, theta, inv_cost_expr =
         create_benders_master(input; rep_days_by_year)
     ypp = vars.years_per_inv_period

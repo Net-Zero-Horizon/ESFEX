@@ -151,7 +151,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | \(\pi^{bud}\) | \$/\$ | Price of a \$ over the annual budget (10) | `BUDGET_SLACK_PENALTY` |
 | \(c^{cap}_{y,n}\) | \$/MW | Price of a MW of adequacy shortfall: \(c^{VOLL}\) × the node's peak hours (§5.3) | `adequacy_slack_penalty` |
 | \(\bar{\kappa}\) | [0,1] | Maximum curtailment ratio | `input.max_curtailment_ratio` (default 0.05) |
-| \(D_r\) | -- | Representative days per year | `input.representative_days_per_year` |
+| \(D_r\) | -- | Representative days selected per year: `representative_days_per_year`, or fewer when the minimum separation or the data leave no more (a warning says so) | `length(master_rep_day_offsets(input))` |
 
 ---
 
@@ -225,7 +225,7 @@ Operational costs come from the representative day subproblems, scaled to a year
 C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{OBJ-4}
 \]
 
-where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, always 8760: every modelled year has 8760 h, leap years included). The cost for each representative day is (from `day_operational_cost`):
+where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, always 8760: every modelled year has 8760 h, leap years included). Each day stands for the year's days over the days actually selected (\(D_r\), `rep_day_scaling`); dividing by `representative_days_per_year` when fewer could be selected underweighted every cost and energy of the year. The cost for each representative day is (from `day_operational_cost`):
 
 \[
 \begin{aligned}
