@@ -608,6 +608,26 @@ def technology_unit_fields(tech, rep, rep_curve=None) -> dict:
     }
 
 
+# Master builds (MW, MWh) at or below this are solver noise, not builds.
+# Anything larger is kept in full: the master paid for it, so the dispatch
+# and the later years' fleet see the same capacity (a battery's power and
+# energy always together).
+MIN_BUILD = 1e-6
+
+_MASTER_BUILD_CATEGORIES = (
+    'tech_investment', 'bat_tech_power_investment', 'bat_tech_capacity_investment',
+    'transfer_investment', 'converter_investment', 'reservoir_investment')
+
+
+def master_year_builds(year_data: dict) -> dict[str, float]:
+    """One year's master investments ``{key: MW or MWh}`` from the solution's
+    per-year categories, every build above :data:`MIN_BUILD`."""
+    return {key: float(value)
+            for category in _MASTER_BUILD_CATEGORIES
+            for key, value in (year_data.get(category) or {}).items()
+            if value > MIN_BUILD}
+
+
 def units_of_capacity(power_mw: float, unit_size_mw: float) -> int:
     """Units of *unit_size_mw* MW that *power_mw* MW of a built technology
     reaches unit commitment as: ``ceil(power / unit_size)`` (no unit larger
@@ -3965,14 +3985,9 @@ class Orchestrator:
                 solution = result.get('solution', {})
                 year_data = solution.get(year, {})
 
-                # 8. Extract investments
-                year_inv: dict[str, float] = {}
-                for category in ['tech_investment', 'bat_tech_power_investment',
-                                 'bat_tech_capacity_investment', 'transfer_investment',
-                                 'converter_investment', 'reservoir_investment']:
-                    for key, value in year_data.get(category, {}).items():
-                        if value > 0.1:
-                            year_inv[key] = float(value)
+                # 8. Extract investments (all of them: the later years
+                # inherit exactly what this year's dispatch ran with)
+                year_inv = master_year_builds(year_data)
 
                 investments_by_year[year] = year_inv
 
@@ -4707,46 +4722,9 @@ class Orchestrator:
             for year in years_range:
                 year_data = solution.get(year, {})
 
-                # Collect technology investments - preserve per-node detail
-                # key format: 'tech_investment_power_{t}_{n}'
-                year_inv = {}
-                tech_inv_data = year_data.get('tech_investment', {})
-                for key, value in tech_inv_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect battery technology power investments
-                # key format: 'bat_tech_investment_power_{bt}_{n}'
-                bat_tech_pow_data = year_data.get('bat_tech_power_investment', {})
-                for key, value in bat_tech_pow_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect battery technology capacity investments
-                # key format: 'bat_tech_investment_capacity_{bt}_{n}'
-                bat_tech_cap_data = year_data.get('bat_tech_capacity_investment', {})
-                for key, value in bat_tech_cap_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect transmission investments
-                # Keys already in format: 'transfer_investment_{i}_{j}'
-                trans_inv_data = year_data.get('transfer_investment', {})
-                for key, value in trans_inv_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect converter investments
-                # key format: 'converter_investment_{acdc|freq}_{c}'
-                for key, value in year_data.get('converter_investment', {}).items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect reservoir investments (MWh)
-                # key format: 'reservoir_investment_{g}_{n}'
-                for key, value in year_data.get('reservoir_investment', {}).items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
+                # Technology, battery (power and energy), transmission,
+                # converter and reservoir investments, per node / pair
+                year_inv = master_year_builds(year_data)
 
                 investments_by_year[year] = year_inv
 
@@ -7772,7 +7750,7 @@ class Orchestrator:
                     while len(bus_rated) < num_buses:
                         bus_rated.append(0.0)
 
-                if max(bus_rated) < 0.1:
+                if max(bus_rated) <= MIN_BUILD:
                     continue
 
                 # The technology's per-node properties, per bus
@@ -7870,7 +7848,7 @@ class Orchestrator:
                     while len(bus_cap) < num_buses:
                         bus_cap.append(0.0)
 
-                if max(bus_pow) < 0.1 and max(bus_cap) < 0.1:
+                if max(bus_pow) <= MIN_BUILD and max(bus_cap) <= MIN_BUILD:
                     continue
 
                 vbat_key = f"inv_{bt_key}"

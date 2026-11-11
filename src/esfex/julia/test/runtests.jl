@@ -38,6 +38,32 @@ import Ipopt
         @test ESFEX.hours_in_year(1900) == 8760
     end
 
+    @testset "CallbackLogger hands records to the host" begin
+        got = Tuple{Int, String, Bool}[]
+        lg = CallbackLogger((l, m, ms) -> push!(got, (l, m, ms)))
+        Base.CoreLogging.with_logger(lg) do
+            @info "plain" k = 1
+            @warn "careful"
+            ESFEX.eval(:(@debug "esfex debug"))
+            @debug "foreign debug"
+            ESFEX.eval(:(@info "Benders iteration 1" _group = :benders))
+            for _ in 1:3
+                @info "once" maxlog = 1
+            end
+        end
+        @test got == [(20, "plain\n  k = 1", false), (30, "careful", false),
+                      (10, "esfex debug", false), (20, "Benders iteration 1", true),
+                      (20, "once", false)]
+        # Records from another thread wait for the logger's own thread
+        empty!(got)
+        lg.thread = -1
+        Base.CoreLogging.with_logger(() -> @info("queued"), lg)
+        @test isempty(got)
+        lg.thread = Threads.threadid()
+        @test flush_log_queue(lg) == 1
+        @test got == [(20, "queued", false)]
+    end
+
     @testset "parse_acopf_formulation" begin
         @test parse_acopf_formulation("acopf_soc") isa ESFEX.SOCFormulation
         @test parse_acopf_formulation("acopf_qc") isa ESFEX.QCFormulation
@@ -3652,6 +3678,58 @@ import Ipopt
             res = extract_solution(model, vars, input)
             @test res.load_shed_total ≈ 10.0 atol = 1e-6
             @test value(vars.bat_discharge[1, 1, 1]) ≈ 10.0 atol = 1e-6
+        end
+
+        @testset "a battery with energy and no power holds nothing" begin
+            # 0.18 MWh and no charge power at a bus (a master build whose
+            # 0.09 MW had been dropped): the minimum cycling asked for charge
+            # that bat_charge <= 0 forbade, and every window was infeasible.
+            bat = ESFEX.with_fields(mkbat(cap = 0.1833);
+                max_charge_power = [0.0], max_discharge_power = [0.0])
+            for mode in ("economic_dispatch", "unit_commitment")
+                model, vars, input = bat_dispatch([bat], fill(30.0, 48); mode = mode,
+                    min_cycling_ratio = 0.8, min_cycling_period_days = 7.0,
+                    cyclic_end_soc = false)
+                @test all(abs(value(vars.bat_soc[1, 1, t])) < 1e-9 for t in 1:49)
+                @test all(iszero, extract_solution(model, vars, input).bat_soc)
+                @test constraint_by_name(model, "bat_min_cycling_1_1") === nothing
+            end
+        end
+
+        @testset "a battery that cannot charge keeps the window feasible" begin
+            # Unavailable the whole window, 0.1 %/h self-discharge, starting
+            # at its 20 % floor: the SOC decays below the floor, and neither
+            # the floor, the minimum cycling nor the cyclic end SOC asks for
+            # charge it cannot take. All three made the window infeasible.
+            bat = ESFEX.with_fields(mkbat(avail = zeros(48, 1));
+                soc_min = [0.2], soc_initial = [0.2], self_discharge = [0.001])
+            for cyclic in (false, true)
+                model, vars, _ = bat_dispatch([bat], fill(30.0, 48);
+                    min_cycling_ratio = 0.8, min_cycling_period_days = 1.0,
+                    cyclic_end_soc = cyclic, soc_end_tolerance = 0.01)
+                @test value(vars.bat_soc[1, 1, 49]) ≈ 20.0 * 0.999^48 rtol = 1e-6
+                @test constraint_by_name(model, "bat_min_cycling_1_1") === nothing
+            end
+            # Available, it holds its floor and cycles as before
+            model, vars, _ = bat_dispatch([ESFEX.with_fields(bat; availability = zeros(0, 1))],
+                fill(30.0, 48); min_cycling_ratio = 0.8, min_cycling_period_days = 1.0,
+                cyclic_end_soc = false)
+            @test minimum(value(vars.bat_soc[1, 1, t]) for t in 2:49) >= 20.0 - 1e-6
+            @test sum(value(vars.bat_charge[1, 1, t]) for t in 1:48) >= 0.8 * 100 * 2 - 1e-6
+        end
+
+        @testset "minimum cycling out of reach is priced, not infeasible" begin
+            # 0.8 × 400 MWh a day = 320 MW-steps. Ramping 0.2 MW/h from 0 at
+            # the seam the battery charges at most 0.2 × (1 + … + 24) = 60.
+            short(m) = only(v for v in all_variables(m) if name(v) == "bat_min_cycling_short_1_1")
+            for (ramp, missing) in ((0.01, 260.0), (0.0, 0.0))
+                model, vars, _ = bat_dispatch([mkbat(cap = 400.0, ramp = ramp)], fill(30.0, H24);
+                    min_cycling_ratio = 0.8, min_cycling_period_days = 1.0,
+                    cyclic_end_soc = false, reserve_static_default_ratio = 0.0,
+                    battery_charge_prev = Dict(1 => Dict(1 => 0.0)))
+                @test value(short(model)) ≈ missing atol = 1e-6
+                @test coefficient(objective_function(model), short(model)) ≈ 0.1 * 0.01
+            end
         end
 
         @testset "only reservable batteries hold reserve" begin

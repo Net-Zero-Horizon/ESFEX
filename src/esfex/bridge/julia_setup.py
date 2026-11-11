@@ -21,6 +21,16 @@ _julia_instance = None
 _esfex_module = None
 
 
+_julia_logger = logging.getLogger("esfex.julia")
+
+
+def _forward_julia_log(level: int, message: str, milestone: bool) -> None:
+    """One Julia log record (``ESFEX.CallbackLogger``) → the ``esfex.julia``
+    logger, at its level. Benders progress lines are milestones, shown by
+    the basic console too."""
+    _julia_logger.log(int(level), str(message), extra={"milestone": bool(milestone)})
+
+
 def get_julia_path() -> Path:
     """Get the path to the Julia source directory."""
     return Path(__file__).parent.parent / "julia"
@@ -196,6 +206,10 @@ def initialize_julia(
                 jl.seval("using .ESFEX")
             else:
                 raise
+
+        # Julia's @info/@warn go to the Python logger (console and log
+        # file) instead of the bare process stderr
+        jl.ESFEX.set_log_callback(_forward_julia_log)
 
         # Pre-import optional solvers so their MOI methods live in the current
         # world age (avoids Julia 1.12 world-age errors when ESFEX lazy-loads
