@@ -65,7 +65,7 @@ ESFEX solves the planning problem in two stages [**[25]**](../reference/bibliogr
 
 The two stages are solved sequentially (not iteratively). The Master Problem's operational cost estimates from representative days may differ from actual Stage 2 costs; for well-configured systems the difference is small.
 
-The master problem itself is solved as one model by default (`master_problem.solver_method: monolithic`). For very large problems, `solver_method: benders` decomposes it into an investment master and per-representative-day dispatch subproblems. See [Master Problem](../user-guide/master-problem.md).
+The master problem itself is solved as one model by default (`master_problem.solver_method: monolithic`). For very large problems, `solver_method: benders` decomposes it into an investment master and one dispatch subproblem per year, holding that year's representative days. See [Master Problem](../user-guide/master-problem.md).
 
 
 ---

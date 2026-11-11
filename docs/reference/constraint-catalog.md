@@ -320,17 +320,17 @@ In the stochastic master these names carry a scenario tag.
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `benders_cut_y{y}_d{d}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}_d{d}`, one per year, representative day and iteration (`iter0`: warm start) |
-| `benders_feas_y{y}_d{d}_iter{k}` | BEN-FEAS | Feasibility cut: the capacities must let day `d` meet its curtailment limit |
-| `co2_alloc_budget_y{y}_{group}` | BEN-CO2-1 | Master: the days' shares `co2_alloc_y{y}_{group}_d{d}` of a CO2 budget sum to at most 1 |
-| `re_ratio_s{s}_y{y}`, `re_target_s{s}_y{y}`, `re_max_increment_s{s}_y{y}` | BEN-RE-1 | Master: the year's share is the days' RE shares `re_share_y{y}_s{s}_d{d}` weighted by their demand; the target and floor (RE-2) and, with `max_re_increment` < 1, the growth cap (RE-3b) act on it |
-| `re_share_s{s}_y{y}_d{d}` | BEN-RE-2 | Subproblem: with a growth cap, renewable output − the day's RE share (a copy variable) × its demand, scaled to the year, == `re_over_*` − `re_under_*` (both at VOLL per MWh); without one, renewable output + `re_under_*` (at `fre_penetration_loss`) >= share × demand |
-| `co2_budget_y{y}_d{d}_{group}` | BEN-CO2-2 | Subproblem: the day's emissions, scaled to the year, within its share of the budget plus `co2_budget_violation_y{y}_d{d}_{group}` |
+| `benders_cut_y{y}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}`, one per year and iteration (`iter0`: warm start), its gradient summed over the year's representative days |
+| `benders_feas_y{y}_iter{k}` | BEN-FEAS | Feasibility cut: the capacities must let every day of year `y` meet its curtailment limit |
+| `co2_budget_y{y}_{group}` | CO2-1 | Year subproblem: the year's emissions over its representative days, scaled to the year, within the budget plus `co2_budget_violation_y{y}_{group}` |
+| `re_target_s{s}_y{y}`, `re_max_increment_s{s}_y{y}` | RE-2, RE-3b | Year subproblem: the RE target or floor (shortfall `slack_re_s{s}_y{y}`) and, with `max_re_increment` < 1, the growth cap measured from a copy of the master's share of the year before |
+| `re_share_s{s}_y{y}` | BEN-RE | Year subproblem (growth cap only): the year's renewable energy + `re_share_short_s{s}_y{y}` (at VOLL) >= the master's share `re_ratio_s{s}_y{y}` (a copy) × the year's demand |
+| `op_bound_y{y}` (with `op_bound_balance_*`, `op_bound_*`) | BEN-BOUND | Master: `theta_y{y}` >= the cost of a copper-plate relaxation of year `y` (pooled units, one store per system, load shed at VOLL, the year's RE target and growth cap) |
 | `max_curt_y{y}_d{d}` | BEN-CURT | Subproblem: hard curtailment cap, as in the monolithic master; its slack `curt_excess_y{y}_d{d}` is fixed to 0 and only freed (and minimised) to build a feasibility cut |
 | `tech_cap_t{t}_b{b}_ts{ts}`, `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}` | BEN-CAP | Subproblem: technology output and offer-curve segments at the fixed capacity; their duals form the cut's technology gradient |
-| `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line, reservoir or fuel capacity built, life extension, a day's RE share, CO2 share) fixed to the master's value; the dual is its cut gradient |
+| `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line, reservoir or fuel capacity built, life extension, an RE share) fixed to the master's value; the dual is its cut gradient |
 
-The Benders master also contains TECH, BUD, RET-2, CAP, TXN, the RE target and growth cap on the RE shares, and the CO2 shares, and nothing else: no constraint of its own links investment to the renewable energy or to storage.
+The Benders master contains TECH, BUD, RET-2, CAP, TXN and the operating bound (BEN-BOUND), and nothing else: no constraint of its own links investment to the renewable energy, the CO2 budget or storage. Each year's subproblem is one LP with all its representative days and the year's annual constraints.
 
 ---
 
@@ -442,7 +442,7 @@ Each SPORES objective replaces the cost objective (and any previous SPORES objec
 |--------|----------------------|-----------|
 | `power_system.jl` | ~45 families + PWL segments | gen_output, gen_status, bat_charge, bat_discharge, bat_soc, reservoir_level, reservoir_pump, reservoir_spillage, load_shed, curtailment, reserves, ev_charging, ev_v2g, ev_soc, electrolyzer_power, gen_seg_output, bat_seg_discharge |
 | `master_problem.jl` | ~25 families | tech_investment, bat_tech_power_investment, bat_tech_capacity_investment, transfer_investment, gen_life_extension, bat_life_extension, reservoir_investment, re_penetration_ratio, slacks |
-| `benders.jl` | ~5 families + reused master and dispatch families | theta, master and subproblem copies |
+| `benders.jl` | ~4 families + reused master and dispatch families | theta, master and subproblem copies |
 | `transmission_dc.jl` | ~10 families | power_flow_by_line, voltage_angle, ploss, converter flows |
 | `primary_energy.jl` | ~30 families | fuel supply, transport, storage, hourly storage flows, fuel for power |
 | `mga.jl` | ~6 families (MGA-1, MGA-2, SPORES-1..4) | reuses master-problem variables; SPORES-2/3 add 1 scalar each, SPORES-4 adds 2 per investment var |

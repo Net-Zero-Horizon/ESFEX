@@ -368,7 +368,7 @@ Julia error tracebacks can be opaque when propagated to Python. Useful aids:
 - `ESFEX_MASTER_DEBUG_LP=1` makes the runner write the perfect-foresight master (monolithic solver, without MGA) to `<output>/logs/master_problem_debug.lp` before solving it, e.g. for the LP-level sensitivity analysis. Without it no master LP is written (a large master's LP takes GB and minutes to write).
 - `PowerSystemAdapter.write_lp(path)` and `MasterProblemAdapter.write_lp(path)` export a built model.
 - With Gurobi, `ESFEX_DUMP_IIS=1` computes an irreducible infeasible subsystem for the first infeasible model and writes it to `ESFEX_IIS_DIR` (default `/tmp`).
-- `ESFEX_BENDERS_DEBUG_LP=1` makes Benders write the master and subproblem LPs that fail in its first five iterations (`benders_master_failed_iter<i>.lp`, `benders_sp_failed_y<y>_d<d>_iter<i>.lp`) to `<output>/logs/`. Without it no LP is written.
+- `ESFEX_BENDERS_DEBUG_LP=1` makes Benders write the master and subproblem LPs that fail in its first five iterations (`benders_master_failed_iter<i>.lp`, `benders_sp_failed_y<y>_iter<i>.lp`) to `<output>/logs/`. Without it no LP is written.
 - When a myopic year's master is infeasible, the run stops and logs the constraints that cannot hold together, if the solver can compute them (HiGHS and Gurobi can).
 - `--verbose` raises the console log level. Each run also writes `<output>/logs/optimization_<timestamp>.log`.
 
