@@ -320,6 +320,13 @@ Per-release notes are also published on the
   barrier without crossover (Gurobi `Method: 2`, `Crossover: 0`) for large
   multi-year masters, with its trade-offs.
 
+- **Julia version mismatch warning.** At startup ESFEX warns once when its
+  Julia project's `Manifest.toml` was resolved with a different Julia minor
+  version than the one juliacall runs (for example a Manifest written by the
+  `julia` on the `PATH`, 1.12, loaded by juliacall's 1.11). Such a Manifest
+  may fail to load or install. The installation troubleshooting guide
+  explains how to use one Julia for both (`PYTHON_JULIAPKG_EXE`).
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -2602,6 +2609,21 @@ Per-release notes are also published on the
   end-of-horizon band (`cyclic_end_soc`) asks at most for the SOC that full
   charging can reach. Each of these used to make the window infeasible for a
   battery that could not charge. A battery that can charge behaves as before.
+
+- **ESFEX no longer deletes its Julia `Manifest.toml`.** Any error while
+  loading the ESFEX Julia module, even a syntax error in one of its `.jl`
+  files, was treated as "dependencies missing": ESFEX ran `Pkg.instantiate()`
+  and, if that failed, deleted `Manifest.toml` and re-resolved the project,
+  silently installing other package versions (with juliacall's Julia this
+  could leave HiGHS failing in every solve). Now only a missing or
+  uninstalled package triggers a repair. The Manifest is backed up to
+  `Manifest.toml.bak-<timestamp>` first (removed again if it does not
+  change), `Pkg.instantiate()` installs the recorded versions, every step is
+  logged as a warning, and if `Pkg.instantiate()` fails ESFEX stops with an
+  error instead of re-resolving. Set the new environment variable
+  `ESFEX_JULIA_RESOLVE=1` to allow `Pkg.resolve()`. Any other load error is
+  reported with the file and line that failed, and the Julia environment is
+  left untouched.
 
 ## [0.3.0] — 2026-08-27
 
