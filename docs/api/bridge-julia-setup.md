@@ -56,11 +56,14 @@ Initialize the Julia runtime and load the ESFEX module.
 1. Sets `JULIA_NUM_THREADS` environment variable (uses `setdefault` to avoid overriding user-set values).
 2. Looks for a sysimage `src/esfex/julia/ESFEX.{so,dll,dylib}`. If found, sets `PYTHON_JULIACALL_SYSIMAGE` to it (unless already set). A sysimage older than any `src/*.jl` file is still used, with a log message suggesting `esfex precompile`.
 3. Imports `juliacall` and resolves the Julia project path: `src/esfex/julia/Project.toml`.
-4. Activates the Julia project via `Pkg.activate()` and pushes the optional-solvers environment ([`get_solvers_env_path()`](#get_solvers_env_path)) onto `LOAD_PATH`.
+4. Activates the Julia project via `Pkg.activate()` and pushes the optional-solvers environment ([`get_solvers_env_path()`](#get_solvers_env_path)) onto `LOAD_PATH`. If the project's `Manifest.toml` records a different Julia minor version (`julia_version`) than the Julia juliacall runs, logs one warning naming both versions: a Manifest resolved by one Julia version may fail to load or install on another.
 5. Attempts to load the ESFEX module via `include()` and `using .ESFEX`.
 6. If loading fails with "invalid redefinition of constant", reuses the already-loaded module (happens during Julia session reuse).
-7. If loading fails with a `LoadError` or `ArgumentError`, runs `Pkg.instantiate()` to install missing dependencies, then retries loading.
-8. If `Pkg.instantiate()` fails, deletes `Manifest.toml` and retries with `Pkg.resolve(); Pkg.instantiate()`.
+7. If loading fails because a package is missing or not installed (Julia's `Package X not found in current path`, `Package X [...] is required but does not seem to be installed`, or any message telling to run `Pkg.instantiate()`), repairs the dependencies and retries loading. Every step is logged at WARNING:
+    - `Manifest.toml` is first copied to `Manifest.toml.bak-<timestamp>`; the copy is removed again if the repair leaves the Manifest unchanged.
+    - `Pkg.instantiate()` installs the versions the Manifest records.
+    - If `Pkg.instantiate()` fails, initialization stops with a `RuntimeError`. `Manifest.toml` is never deleted. Only when the environment variable `ESFEX_JULIA_RESOLVE=1` is set does ESFEX run `Pkg.resolve(); Pkg.instantiate()`, which may pick other package versions (the previous Manifest stays in the backup).
+8. Any other load error (a syntax error or an error thrown while loading ESFEX's own `.jl` sources) raises a `RuntimeError` that names the file and line, and the Julia environment is left untouched.
 9. Forwards Julia's log records to Python logging (`ESFEX.set_log_callback`): `@debug`/`@info`/`@warn`/`@error` reach the `esfex.julia` logger at the same level, so they appear on the console and in the run's log file like every other ESFEX message. Benders progress lines are milestones, shown by the `basic` console too. Debug records come only from ESFEX itself.
 10. Tries `import` for each optional solver package (Clarabel, Ipopt, SCS, GLPK, Cbc, SCIP, Gurobi, CPLEX, Xpress) so that their methods exist in the current world age; missing packages are skipped.
 
@@ -282,13 +285,17 @@ pip install juliacall
 
 The Julia project directory is missing. Ensure the package is installed correctly and `src/esfex/julia/Project.toml` exists.
 
-**`LoadError: ... package not found`**
+**`LoadError: ArgumentError: Package X not found in current path` / `... is required but does not seem to be installed`**
 
-Julia dependencies are not installed. Usually auto-resolved by `Pkg.instantiate()`, but if it fails:
-```bash
-cd src/esfex/julia
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-```
+Julia dependencies are not installed. ESFEX runs `Pkg.instantiate()` automatically. If that fails, the error says so and `Manifest.toml` is left as it was; see [Julia Package Errors](../getting-started/installation.md#julia-package-errors) to repair the project with juliacall's Julia, or set `ESFEX_JULIA_RESOLVE=1` to let ESFEX re-resolve it.
+
+**`the ESFEX Julia sources failed to load at <file>:<line>`**
+
+A syntax error or an error thrown while loading ESFEX's Julia code (for example after editing a `.jl` file). Fix the file and line named in the message. No dependency repair is attempted for this error.
+
+**`Manifest.toml ... was resolved with Julia A, but juliacall runs Julia B`**
+
+The Manifest was written by another Julia version (for example by the `julia` on your `PATH`, while juliacall uses its own Julia). See [Julia Version Mismatch](../getting-started/installation.md#julia-version-mismatch).
 
 **`invalid redefinition of constant ESFEX`**
 
@@ -302,4 +309,4 @@ Normal behavior. Julia compiles all code on first use. To speed up subsequent ru
 
 **`Manifest.toml` corruption**
 
-Delete `src/esfex/julia/Manifest.toml` and reinitialize. The initialization code attempts this automatically when `Pkg.instantiate()` fails.
+ESFEX never deletes `Manifest.toml` itself. To start from a fresh resolve, move `src/esfex/julia/Manifest.toml` aside (keep it as a backup) and reinitialize, or set `ESFEX_JULIA_RESOLVE=1` so that a failed `Pkg.instantiate()` is followed by `Pkg.resolve()`.

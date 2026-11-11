@@ -126,6 +126,7 @@ esfex info
 | `JULIA_NUM_THREADS` | `4` | Julia threads. ESFEX sets it to 4 when it is not already set. ESFEX's own Julia code does not run threaded, so this does not speed up a run; the solver's threads are `solver.threads`. |
 | `PYTHON_JULIACALL_THREADS` | unset | juliacall option; when set, it is passed to Julia as `--threads` and takes precedence over `JULIA_NUM_THREADS`. |
 | `JULIA_DEPOT_PATH` | `~/.julia` | Where Julia stores packages and compiled files. Its first entry also decides where the optional-solver environment `environments/esfex_solvers` lives. |
+| `ESFEX_JULIA_RESOLVE` | unset | Set to `1` to let ESFEX re-resolve its Julia project (`Pkg.resolve()`) when `Pkg.instantiate()` cannot install missing packages. Off by default: ESFEX never changes the recorded package versions on its own. See [Julia Package Errors](#julia-package-errors). |
 | `PYTHON_JULIACALL_HANDLE_SIGNALS` | unset | juliacall option. When unset, Julia's signal handling is off and juliacall warns if Julia runs with more than one thread; set `yes` or `no` explicitly to silence the warning. |
 
 To use more threads on a large model, raise `solver.threads` in the configuration (see the [Solver Guide](../user-guide/solver-guide.md)); the solve is where the time goes.
@@ -334,7 +335,9 @@ Two Julia environments are involved, and it helps to know where they are:
 
 ### Julia Package Errors
 
-If loading the ESFEX module fails because packages are missing, ESFEX runs `Pkg.instantiate()` on its project automatically, and if that fails it deletes the project's `Manifest.toml` and re-resolves. To repair the project by hand with juliacall's Julia:
+If loading the ESFEX module fails because packages are missing or not installed, ESFEX runs `Pkg.instantiate()` on its project automatically, after copying `Manifest.toml` to `Manifest.toml.bak-<timestamp>` (the copy is removed if the Manifest does not change). ESFEX never deletes `Manifest.toml`. If `Pkg.instantiate()` fails, ESFEX stops with an error; set `ESFEX_JULIA_RESOLVE=1` and run again to let it re-resolve the project with `Pkg.resolve()`, which may pick other package versions. Any other load error, such as a syntax error in a `.jl` file, is reported with its file and line and no repair is attempted.
+
+To repair the project by hand with juliacall's Julia:
 
 ```bash
 python -c "
@@ -351,6 +354,16 @@ If the error persists, clearing the Julia depot forces a full reinstall of all J
 rm -rf ~/.julia
 esfex info
 ```
+
+### Julia Version Mismatch
+
+At startup ESFEX warns when the project's `Manifest.toml` was resolved with a different Julia minor version than the one juliacall runs, for example:
+
+```text
+ESFEX's Julia Manifest.toml (...) was resolved with Julia 1.12.4, but juliacall runs Julia 1.11.8.
+```
+
+This happens when the Manifest was written by the `julia` on your `PATH` (for example by running the Julia tests) while juliacall uses another Julia. A Manifest resolved by one Julia version may fail to load or install on another. Use one Julia for both: point juliacall at the same Julia with `PYTHON_JULIAPKG_EXE=/path/to/julia`. Or, if packages fail to load, move `Manifest.toml` aside (keep it) and run the repair command above, so that juliacall's Julia resolves a new Manifest for its own version.
 
 ### juliacall Hangs on First Run
 
