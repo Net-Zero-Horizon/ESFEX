@@ -82,6 +82,8 @@ How much appears on the console is set by `logging.console_level` in the configu
 
 `--verbose` forces `debug` regardless of the configuration.
 
+Messages from the Julia models (logger `esfex.julia`) follow the same rules: Benders iterations (lower and upper bound, gap) are milestones and also show in `basic`, other Julia INFO lines from `verbose` on, Julia warnings as warnings.
+
 #### Console Output
 
 With `--verbose`, the run starts with a header that echoes the command-line options, followed by the configuration summary:

@@ -112,6 +112,7 @@ include("mga.jl")
 include("electrolyzer.jl")
 include("dcopf_benchmark.jl")
 include("acopf_benchmark.jl")
+include("log_forwarding.jl")   # Julia logs → the Python logger
 
 # =============================================================================
 # Exports
@@ -395,5 +396,8 @@ export solve_dcopf
 
 # ACOPF Benchmark
 export solve_acopf
+
+# Julia logs → the Python logger
+export CallbackLogger, set_log_callback, flush_log_queue
 
 end # module ESFEX
