@@ -4255,6 +4255,71 @@ import Ipopt
             @test ff.tech_capacity == fc.tech_capacity && ff.gen_capacity == fc.gen_capacity
         end
 
+        @testset "Benders: curtailment limit in the bound, priced subproblems (B26)" begin
+            # Cuba (25 years): the master's copper-plate bound curtailed for
+            # free, so it built more renewables than the years could absorb
+            # within the 5 % limit; those years only gave feasibility cuts,
+            # more of them each iteration, and the bounds stalled. Cheap PV,
+            # dear gas, one bus: within the limit PV stops at 700/13 MW.
+            o = [0.0]
+            sun = reshape(vcat(zeros(6), [0.25, 0.5, 0.75], ones(6), [0.75, 0.5, 0.25],
+                               zeros(6)), H24, 1)
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [0.001], [1000.0], sun,
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-3], ones(H24, 1);
+                        nb = 1, H = H24)
+            inp = MasterProblemInput(years = [2025], network = net1, generators = [gas],
+                batteries = BatteryConfig[], technologies = [pv],
+                base_demand = fill(50.0, H24, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, max_curtailment_ratio = 0.05,
+                curtailment_cost = 1.0e-5, representative_days_per_year = 1,
+                min_day_separation = 1, verbose = false)
+
+            # The bound holds the limit: the first master plan builds no more
+            # PV than the day can use (it built 200 MW)
+            bm, bvars, targets, _, _ = ESFEX.create_benders_master(inp)
+            ESFEX.set_silent(bm)
+            optimize!(bm)
+            @test value(bvars.tech_investment[1][1][1]) <= 700 / 13 + 1e-6
+
+            # A plan above the limit: the priced subproblem curtails no more
+            # than it must, and its cut and cost are kept; the least
+            # violation then gives the feasibility cut
+            days = ESFEX.benders_rep_days(inp)[1]
+            caps(mw) = ESFEX.FixedCapacities(Dict((1, 1) => 100.0),
+                Dict{Tuple{Int,Int}, Float64}(), Dict{Tuple{Int,Int}, Float64}(),
+                Dict((1, 1) => mw), Dict{Tuple{Int,Int}, Float64}(),
+                Dict{Tuple{Int,Int}, Float64}(), Dict{Int, Float64}(), [0.0])
+            ysp(mw) = ESFEX.create_benders_year_subproblem(inp, 1, days, caps(mw), bvars, targets)
+            pen = ESFEX.benders_curtailment_penalty(inp)
+            hard = ysp(100.0)
+            @test ESFEX.solve_benders_subproblem!(hard) === :infeasible
+            least = objective_value(hard.model)
+            @test least > 1.0
+            priced = ysp(100.0)
+            @test ESFEX.solve_benders_subproblem!(priced; penalty = pen) === :infeasible
+            @test sum(value, ESFEX.benders_curt_slacks(priced)) ≈ least rtol = 1e-6
+            @test occursin("breaks the curtailment limit on 1 of 1 days",
+                           ESFEX.benders_curtailment_report(priced, 0.05))
+            @test ESFEX.benders_cost_terms(priced.model)["curtailment above the limit"] ≈
+                  pen * least * ESFEX.rep_day_scaling(inp, 1) rtol = 1e-6
+            @test ESFEX.benders_least_violation!(priced)
+            @test objective_value(priced.model) ≈ least rtol = 1e-6
+            # Within the limit, priced and hard subproblems are the same
+            for (a, b) in ((ysp(40.0), ysp(40.0)),)
+                @test ESFEX.solve_benders_subproblem!(a) === :optimal
+                @test ESFEX.solve_benders_subproblem!(b; penalty = pen) === :optimal
+                @test objective_value(b.model) ≈ objective_value(a.model) rtol = 1e-9
+            end
+
+            br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-7,
+                                           verbose_benders = false)
+            mono, _ = master1(inp)
+            @test br.gap < 1e-6
+            @test br.objective ≈ objective_value(mono) rtol = 1e-6
+        end
+
         @testset "representative days stand for the year over the days selected" begin
             # Three days asked, 200 days apart: only two fit in a year. Each
             # day stood for 365 / 3 days, so the year's cost and energy
