@@ -111,7 +111,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `stochastic` | bool | `false` | Use the stochastic master (needs `stochastic_scenarios` in the system; falls back to deterministic if none are defined) |
-| `representative_days` | int (≥ 1) | `5` | Representative days per year, chosen once from the horizon-mean demand: every year (and every annual master of a myopic run) models the same calendar days (ignored when `use_tsam: true`) |
+| `representative_days` | int (≥ 1) | `5` | Representative days per year, chosen once from the horizon-mean demand and renewable availability: the peak-demand day plus days whose mean demand and mean availability of each renewable profile match the year's. Every year (and every annual master of a myopic run) models the same calendar days (ignored when `use_tsam: true`) |
 | `min_day_separation` | int (≥ 1) | `5` | Minimum separation between representative days, in **days** (ignored when `use_tsam: true`) |
 | `solver_method` | `monolithic` \| `benders` | `"monolithic"` | Master-problem solver: 'monolithic' or 'benders'. |
 | `benders_max_iterations` | int (≥ 1) | `50` | Maximum Benders iterations (benders solver only). |

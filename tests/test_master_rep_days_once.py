@@ -128,6 +128,7 @@ def _tsam_demand(years):
     return d
 
 
+@pytest.mark.julia
 def test_myopic_tsam_periods_chosen_once(tmp_path):
     demand = _tsam_demand(3)
     captured = _run_myopic(
@@ -141,6 +142,7 @@ def test_myopic_tsam_periods_chosen_once(tmp_path):
     assert all(c["rep_day_offsets"] is None for c in captured)
 
 
+@pytest.mark.julia
 def test_foresight_tsam_periods_chosen_once(tmp_path):
     demand = _tsam_demand(2)
     captured = _run_foresight(_orch(tmp_path, use_tsam=True, tsam_num_periods=4),

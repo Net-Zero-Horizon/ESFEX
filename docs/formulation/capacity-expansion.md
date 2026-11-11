@@ -36,7 +36,7 @@ The master works on a node-level network: when the systems are merged for planni
 | \(\mathcal{B}^{K}\) | Candidate battery technologies | `input.battery_technologies` |
 | \(\mathcal{N} = \{1, \ldots, N\}\) | Buses of the master network (one per node after merging) | `input.network.num_buses` |
 | \(\mathcal{T}_d = \{1, \ldots, H\}\) | Time steps within a representative day | `24 / temporal_resolution_hours` |
-| \(\mathcal{D}_y\) | Representative days for year \(y\): the same days of the year for every \(y\) | `master_rep_days()` |
+| \(\mathcal{D}_y\) | Representative days for year \(y\): the same days of the year for every \(y\), the peak-demand day plus days whose mean demand and renewable availability match the year's ([Representative Days](../user-guide/master-problem.md#representative-days)) | `master_rep_days()` |
 | \(\mathcal{S}\) | Demand sectors | `input.sectoral_demand` |
 | \(\Sigma\) | Systems (for per-system RE targets) | `input.system_node_ranges` |
 
@@ -507,16 +507,24 @@ Representative day subproblems link strategic investment decisions to operationa
 ### 8.1 Representative Day Selection
 
 
-**Julia functions**: `representative_day_offsets(demand, num_years, num_days, min_separation, timesteps_per_day, timesteps_per_year)`, `select_representative_days(...)`, `master_rep_days(input, y_idx)`
+**Julia functions**: `representative_day_offsets(demand, num_years, num_days, min_separation, timesteps_per_day, timesteps_per_year; profiles)`, `select_matching_days(...)`, `representative_day_ratios(...)`, `master_rep_days(input, y_idx)`
 
-The days are chosen **once for the whole horizon** and every year models the same calendar days, each with its own demand and its own block of multi-year profiles. The selection runs on the horizon-mean demand, the mean over the planning years of each step of the year, and picks high-demand days with temporal diversity:
+The days are chosen **once for the whole horizon** and every year models the same calendar days, each with its own demand and its own block of multi-year profiles. The selection runs on the horizon-mean demand and the horizon-mean renewable availability (the mean over the planning years of each step of the year). It keeps the peak day and picks the other days so that the year they stand for has the real year's demand and renewable energy:
 
-1. Compute daily peak demand for each day of the mean year: \(D^{peak}_d = \max_t \sum_n \bar{D}_{d,t,n}\)
-2. Select the global peak day first.
-3. Divide the year into \(D_r\) segments for seasonal diversity.
-4. Within each segment, select the day with the highest peak that satisfies a minimum separation constraint (\(\geq\) `min_day_separation` days from any already-selected day).
+1. Daily means of each feature \(f\) on each day \(d\) of the mean year, \(x_{d,f}\): the system demand \(\sum_n \bar{D}_{d,t,n}\), and every distinct renewable availability profile (existing renewable generators and renewable candidate technologies, each averaged over the nodes where its units have rated power or may be built). \(\bar{x}_f = \frac{1}{365}\sum_d x_{d,f}\) is the annual mean.
+2. Select the global peak day first: \(\arg\max_d \max_t \sum_n \bar{D}_{d,t,n}\).
+3. Divide the year into \(D_r\) segments for seasonal diversity; every segment but the peak day's gets one day, \(\geq\) `min_day_separation` days from every other selected day (a segment with no valid day takes one from anywhere in the year).
+4. Choose those days to minimise
 
-The runner chooses the days (`master_rep_day_offsets` in the bridge) and passes them to every master of the run as `rep_day_offsets` (steps within a year): the perfect-foresight, stochastic, MGA and Benders masters and each annual master of a myopic run. The log lists their dates ("Representative days, the same for every planning year: …"). A master built without them (the Julia API) chooses them the same way from its own `base_demand`. Earlier versions chose each year's own peak days, so the weather sample changed from year to year: in the Cuba myopic run the share the existing renewables gave swung 49 → 59 → 54 → 67 % with no capacity change, and years pushed over the growth cap (RE-3b) paid for it at the value of lost load.
+\[
+\sum_f \Big( \frac{1}{|\mathcal{D}|} \sum_{d \in \mathcal{D}} \frac{x_{d,f}}{\bar{x}_f} - 1 \Big)^2 \tag{RD-1}
+\]
+
+greedily one segment at a time, then by moving one day, or two days together, within their segments while RD-1 decreases. Ties go to the higher-peak day.
+
+Every day has the same weight \(\Delta t \cdot H_{year} / (24 D_r)\) (OBJ-4), so RD-1 at 0 means that the demand energy, and the energy per MW of each renewable profile, that the master sees equal the year's. The runner logs, per feature, the mean on the days over the annual mean ("Representative days mean / annual mean: demand 1.002, …", `representative_day_ratios`) and warns when one is off by more than 10 %. With few days a strongly seasonal profile cannot be matched exactly: one that is zero for two thirds of the year is either on 1 of 5 days (0.6 ×) or on 2 (1.2 ×).
+
+The runner chooses the days (`master_rep_day_offsets` in the bridge) and passes them to every master of the run as `rep_day_offsets` (steps within a year): the perfect-foresight, stochastic, MGA and Benders masters and each annual master of a myopic run. The log lists their dates ("Representative days, the same for every planning year: …"). A master built without them (the Julia API) chooses them the same way from its own `base_demand` and the availability of its renewable generators and technologies (`master_re_profiles`). Earlier versions chose each year's own peak days, so the weather sample changed from year to year: in the Cuba myopic run the share the existing renewables gave swung 49 → 59 → 54 → 67 % with no capacity change, and years pushed over the growth cap (RE-3b) paid for it at the value of lost load. They also took the highest-peak day of each segment from the demand alone: where hot days are sunny and windy, the master saw a year with more demand, sun and wind than the real one (Cuba, 5 days: demand × 1.06, PV × 1.14, wind × 1.45; now × 1.002, × 1.000, × 1.007). It then overrated renewable energy (95 % RE in the master against 65 % in the hourly dispatch of the same plan) and retired thermal plants the year still needed.
 
 ### 8.2 Operational Variables
 
@@ -975,7 +983,7 @@ Before the first master solve, warm-start cuts are added from two high-investmen
 
 The lower bound is the master objective; an iteration whose subproblems all solve within the curtailment limit gives an upper bound, the first-stage cost plus the subproblem costs. The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50). Either way, the plan returned is that of the iteration with the best upper bound, with that iteration's operating costs, so the reported objective is what the plan costs. With verbose output, a master or subproblem that fails to solve is written as an LP file to the system's temporary folder.
 
-Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the peak-based representative days of §8.1, the same days of the year for every year, as the monolithic master. With `use_tsam` or user investment constraints (`custom_constraints` with `target: investment`), which the Benders master does not model, the runner solves the monolithic master instead and logs a warning saying why.
+Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the representative days of §8.1, the same days of the year for every year, as the monolithic master. With `use_tsam` or user investment constraints (`custom_constraints` with `target: investment`), which the Benders master does not model, the runner solves the monolithic master instead and logs a warning saying why.
 
 ---
 

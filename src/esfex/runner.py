@@ -10,6 +10,7 @@ Manages the complete simulation workflow including:
 """
 
 import gc
+import hashlib
 import logging
 import math
 import os
@@ -4045,31 +4046,102 @@ class Orchestrator:
         index = model_time_index(self._data_start(), steps, resolution_hours)
         return ", ".join(index[int(o) % steps].strftime("%d %b") for o in offsets)
 
+    def _master_re_profiles(self, resolution_hours: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
+        """The distinct availability profiles of the renewable generators
+        and candidate technologies the master uses (the run's preloaded
+        profiles, ``_availability_cache``), at the master's resolution, as
+        ``(label, profile [steps × nodes], series)``. *series* is the mean
+        over the nodes where the units sharing the profile have capacity
+        (``rated_power`` / ``invest_max_power`` > 0; all nodes if none).
+        Units with the same profile (same file or same values) share one
+        entry, labelled with their keys."""
+        cache = self._availability_cache or {}
+        groups: dict[bytes, list] = {}
+        units = [(k, g.rated_power) for k, g in self.primary_system.generators.items()
+                 if g.type == "Renewable"]
+        units += [(k, t.invest_max_power) for k, t in self.primary_system.technologies.items()
+                  if t.type == "Renewable"]
+        for key, cap in units:
+            avail = cache.get(key)
+            if avail is None or len(avail) == 0:
+                continue
+            avail = np.asarray(avail, dtype=float)
+            if avail.ndim == 1:
+                avail = avail[:, None]
+            if resolution_hours > 1:
+                avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
+            cap = np.asarray(cap or [], dtype=float)
+            mask = np.zeros(avail.shape[1], dtype=bool)
+            if len(cap) == avail.shape[1]:
+                mask = cap > 0
+            avail = np.ascontiguousarray(avail)
+            digest = hashlib.blake2b(memoryview(avail).cast("B"),
+                                     person=str(avail.shape).encode()[:16]).digest()
+            entry = groups.setdefault(digest,
+                                      [[], avail, np.zeros(avail.shape[1], dtype=bool)])
+            entry[0].append(key)
+            entry[2] |= mask
+        out = []
+        for keys, avail, mask in groups.values():
+            label = ", ".join(keys[:3]) + (f" (+{len(keys) - 3})" if len(keys) > 3 else "")
+            weights = (mask if mask.any() else np.ones_like(mask)).astype(float)
+            series = avail @ (weights / weights.sum())
+            out.append((label, avail, series))
+        return out
+
+    def _log_rep_day_ratios(self, kind: str, demand_agg: np.ndarray, num_years: int,
+                            offsets: list[int], resolution_hours: int, profiles: list,
+                            weights: Optional[list[float]] = None) -> None:
+        """Log, per series, the representative days' (or TSAM periods')
+        mean over the annual mean, for the demand and each renewable profile
+        (``master_rep_day_ratios``): how far the master's year is from the
+        real one. Warns when one is off by more than 10 %."""
+        from esfex.bridge.adapters import master_rep_day_ratios
+        ratios = master_rep_day_ratios(demand_agg, num_years, offsets, resolution_hours,
+                                       [s for _, _, s in profiles], weights)
+        names = ["demand"] + [label for label, _, _ in profiles]
+        text = ", ".join(f"{n} {r:.3f}" for n, r in zip(names, ratios) if np.isfinite(r))
+        logger.info("%s mean / annual mean: %s", kind, text)
+        off = [n for n, r in zip(names, ratios) if np.isfinite(r) and abs(r - 1.0) > 0.10]
+        if off:
+            logger.warning(
+                "%s misrepresent the year by more than 10 %% for: %s. The master "
+                "sees more or less energy than the year has; use more days or TSAM.",
+                kind, ", ".join(off))
+
     def _master_rep_day_offsets(self, demand_agg: np.ndarray, num_years: int,
                                 resolution_hours: int) -> list[int]:
         """The representative days every master of this run models, as
         steps within a year (0-based): chosen ONCE, from the horizon-mean
-        demand (``master_rep_day_offsets``), so each year differs from the
-        others only by its demand (and its block of multi-year profiles),
-        never by the weather sample. Logged with their dates."""
+        demand and the renewable profiles (``master_rep_day_offsets``: the
+        peak day, then days that give the year's mean demand and mean
+        availability of each profile), so each year differs from the others
+        only by its demand (and its block of multi-year profiles), never by
+        the weather sample. Logged with their dates and their bias per
+        profile."""
         from esfex.bridge.adapters import master_rep_day_offsets
         master_cfg = getattr(self.config, 'master_problem', None)
+        profiles = self._master_re_profiles(resolution_hours)
         offsets = master_rep_day_offsets(
             demand_agg, num_years,
             master_cfg.representative_days if master_cfg else 5,
             master_cfg.min_day_separation if master_cfg else 5,
-            resolution_hours)
+            resolution_hours, [s for _, _, s in profiles])
         logger.info("Representative days, the same for every planning year: %s",
                     self._rep_day_dates(offsets, resolution_hours))
+        self._log_rep_day_ratios("Representative days", demand_agg, num_years, offsets,
+                                 resolution_hours, profiles)
         return offsets
 
     def _master_tsam_periods(self, demand_agg: np.ndarray, num_years: int,
                              resolution_hours: int):
         """TSAM periods every master of this run models, chosen ONCE: the
         clustering (``compute_tsam_periods``) of the horizon-mean demand and
-        renewable availability (the mean over the years of each step, each
-        year's block as the dispatch reads it, ``_profile_year_block``).
-        Start steps are 0-based within a year. Logged with their dates."""
+        the availability of the renewable generators and candidate
+        technologies (``_master_re_profiles``; the mean over the years of
+        each step, each year's block as the dispatch reads it,
+        ``_profile_year_block``). Start steps are 0-based within a year.
+        Logged with their dates and their bias per profile."""
         from esfex.models.tsam import compute_tsam_periods
 
         master_cfg = getattr(self.config, 'master_problem', None)
@@ -4080,15 +4152,8 @@ class Orchestrator:
             return np.mean([_profile_year_block(arr, y, steps) for y in range(n_years)],
                            axis=0)
 
-        availability: dict[str, np.ndarray] = {}
-        for gen_key, gen in self.primary_system.generators.items():
-            if gen.type != "Renewable" or gen_key not in (self._availability_cache or {}):
-                continue
-            avail = self._availability_cache[gen_key]
-            if resolution_hours > 1:
-                avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
-            if len(avail):
-                availability[gen_key] = horizon_mean(avail)
+        profiles = self._master_re_profiles(resolution_hours)
+        availability = {label: horizon_mean(avail) for label, avail, _ in profiles}
         result = compute_tsam_periods(
             demand=horizon_mean(demand_agg),
             num_periods=master_cfg.tsam_num_periods if master_cfg else 10,
@@ -4098,6 +4163,9 @@ class Orchestrator:
         )
         logger.info("TSAM periods, the same for every planning year: %s",
                     self._rep_day_dates(result.period_start_hours, resolution_hours))
+        self._log_rep_day_ratios("TSAM periods", demand_agg, num_years,
+                                 list(result.period_start_hours), resolution_hours, profiles,
+                                 list(result.period_weights))
         return result
 
     def _benders_debug_lp_dir(self) -> Optional[str]:

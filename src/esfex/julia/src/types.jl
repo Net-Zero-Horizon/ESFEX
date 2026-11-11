@@ -2342,8 +2342,8 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `min_day_separation::Int`: Minimum days between representative days
 - `rep_day_offsets::Vector{Int}`: first step of each representative day
   within a year (0-based), the same calendar days for every year
-  (`master_rep_days`); empty = chosen from the horizon-mean demand
-  (`master_rep_day_offsets`)
+  (`master_rep_days`); empty = chosen from the horizon-mean demand and
+  renewable availability (`master_rep_day_offsets`)
 
 ## Life Extension
 - `life_extension_cost_factor::Float64`: Fraction of investment cost for annual extension
@@ -2532,7 +2532,7 @@ struct MasterProblemInput
     re_share_anchor::Vector{Float64}
     # First step (0-based, within a year) of each representative day, the
     # same for every year (master_rep_days); empty = chosen from the
-    # horizon-mean demand (master_rep_day_offsets)
+    # horizon-mean demand and renewable availability (master_rep_day_offsets)
     rep_day_offsets::Vector{Int}
 end
 

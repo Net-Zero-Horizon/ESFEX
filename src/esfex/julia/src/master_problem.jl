@@ -197,30 +197,245 @@ function select_representative_days(
 end
 
 """
+    select_matching_days(day_means, daily_peaks, num_days, min_separation) -> Vector{Int}
+
+Representative days (1-based day indices, the peak day first) whose mean of
+every feature matches its annual mean, so that the year the days stand for
+(each `365 / num_days` days, uniform weights) has the year's demand energy
+and renewable energy. `day_means[d, f]` is feature `f`'s mean on day `d`
+(the system demand, then each renewable availability profile).
+
+The day with the highest `daily_peaks` is always kept (adequacy). The year
+is split into `num_days` segments; every segment other than the peak day's
+gets one day (temporal diversity), at least `min_separation` days from the
+others (a segment with no valid day takes one from anywhere in the year).
+The days are chosen to minimise Σ_f (mean on the days / annual mean − 1)²:
+greedily segment by segment, then by moving one day, or two days together,
+within their segments while that lowers the error. Ties go to the day with the higher peak, so features that
+are equal on every day give the peak-based choice.
+"""
+function select_matching_days(day_means::AbstractMatrix{Float64},
+                              daily_peaks::AbstractVector{Float64},
+                              num_days::Int, min_separation::Int)::Vector{Int}
+    D = size(day_means, 1)
+    n = min(num_days, D)
+    (D >= 1 && n >= 1) || return Int[]
+    annual = vec(sum(day_means; dims = 1)) ./ D
+    used = [f for f in axes(day_means, 2) if annual[f] > 1e-12]
+    X = day_means[:, used] ./ annual[used]'   # relative daily means, year = 1
+    F = length(used)
+    sep = max(min_separation, 1)
+    # `d` is `sep` days from every chosen day but those in slots i1, i2
+    sep_ok(d, chosen, i1, i2) = all(i == i1 || i == i2 || abs(d - chosen[i]) >= sep
+                                    for i in eachindex(chosen))
+    # Σ_f (mean of the days − 1)² with feature sums S and the day count m
+    err(S, m) = sum(abs2(S[f] / m - 1) for f in 1:F; init = 0.0)
+    trial = zeros(F)
+
+    peak = argmax(daily_peaks)
+    chosen = [peak]
+    S = X[peak, :]
+    seg = D ÷ n
+    segment(s) = ((s - 1) * seg + 1):(s == n ? D : s * seg)
+    peak_seg = min((peak - 1) ÷ seg + 1, n)
+    ranges = UnitRange{Int}[1:1]   # candidate days of each slot (peak: fixed)
+
+    # Greedy start: segment by segment, the day that brings the running
+    # mean closest to the year
+    for s in 1:n
+        s == peak_seg && continue
+        r = segment(s)
+        any(d -> sep_ok(d, chosen, 0, 0), r) || (r = 1:D)
+        best, best_e = 0, Inf
+        for d in r
+            sep_ok(d, chosen, 0, 0) || continue
+            trial .= S .+ @view X[d, :]
+            e = err(trial, length(chosen) + 1)
+            if e < best_e - 1e-12 ||
+               (abs(e - best_e) <= 1e-12 && daily_peaks[d] > daily_peaks[best])
+                best, best_e = d, e
+            end
+        end
+        best == 0 && continue
+        push!(chosen, best)
+        push!(ranges, r)
+        S .+= @view X[best, :]
+    end
+
+    # Improve while the error drops (the peak day stays): one day at a
+    # time, then two at a time when no single change helps (a seasonal
+    # profile can need two days moved together)
+    m = length(chosen)
+    cur = err(S, m)
+    for _ in 1:100
+        improved = false
+        for i in 2:m
+            base = S .- @view X[chosen[i], :]
+            for d in ranges[i]
+                (d == chosen[i] || !sep_ok(d, chosen, i, i)) && continue
+                trial .= base .+ @view X[d, :]
+                e = err(trial, m)
+                if e < cur - 1e-12
+                    chosen[i], cur = d, e
+                    S .= trial
+                    improved = true
+                end
+            end
+        end
+        improved && continue
+        for i in 2:m, j in (i + 1):m
+            base = S .- @view(X[chosen[i], :]) .- @view(X[chosen[j], :])
+            for di in ranges[i]
+                sep_ok(di, chosen, i, j) || continue
+                for dj in ranges[j]
+                    (abs(dj - di) >= sep && sep_ok(dj, chosen, i, j)) || continue
+                    trial .= base .+ @view(X[di, :]) .+ @view(X[dj, :])
+                    e = err(trial, m)
+                    if e < cur - 1e-12
+                        chosen[i], chosen[j], cur = di, dj, e
+                        S .= trial
+                        improved = true
+                    end
+                end
+            end
+            improved && break   # back to single moves
+        end
+        improved || break
+    end
+    return chosen
+end
+
+"""
+    horizon_mean_year(demand, num_years, timesteps_per_year) -> Matrix{Float64}
+
+The mean over the years of each step of the year: the full years `demand`
+holds, at most `num_years` (less than a year of data is returned as it is).
+"""
+function horizon_mean_year(demand::AbstractMatrix{Float64}, num_years::Int,
+                           timesteps_per_year::Int)::Matrix{Float64}
+    n_full = min(size(demand, 1) ÷ timesteps_per_year, max(num_years, 1))
+    n_full < 1 && return Matrix{Float64}(demand)
+    return sum(demand[(y - 1) * timesteps_per_year .+ (1:timesteps_per_year), :]
+               for y in 1:n_full) ./ n_full
+end
+
+"""
+    horizon_mean_profile(profile, num_years, timesteps_per_year) -> Vector{Float64}
+
+A profile's mean over the `num_years` years of each step of the year, as the
+master reads it (step `t` of year `y` is row `(y − 1) × timesteps_per_year
++ t`, wrapping around a shorter profile): a one-year profile is itself, a
+multi-year profile is averaged over its yearly blocks.
+"""
+function horizon_mean_profile(profile::AbstractVector{Float64}, num_years::Int,
+                              timesteps_per_year::Int)::Vector{Float64}
+    L = length(profile)
+    ny = L <= timesteps_per_year ? 1 : max(num_years, 1)
+    return [sum(profile[mod1((y - 1) * timesteps_per_year + t, L)] for y in 1:ny) / ny
+            for t in 1:timesteps_per_year]
+end
+
+# Day-by-day mean of `series` over its first `num_days` days
+day_means_of(series::AbstractVector{Float64}, num_days::Int, timesteps_per_day::Int) =
+    [sum(@view series[(d - 1) * timesteps_per_day .+ (1:timesteps_per_day)]) /
+     timesteps_per_day for d in 1:num_days]
+
+"""
     representative_day_offsets(demand, num_years, num_days, min_separation,
-                               timesteps_per_day, timesteps_per_year) -> Vector{Int}
+                               timesteps_per_day, timesteps_per_year;
+                               profiles=Vector{Float64}[]) -> Vector{Int}
 
 First step (0-based, within a year) of each representative day, chosen ONCE
-for the whole horizon: `select_representative_days` (the peak day, then the
-highest-peak day of each segment of the year) on the horizon-mean demand,
-the mean over the years of each step of the year (the full years `demand`
-holds, at most `num_years`; less than a year of data is used as it is).
-Every year then models the same calendar days with its own demand and
-profiles (`master_rep_days`), so the weather sample, and with it the share
-the existing renewables give, does not change from one year to the next.
+for the whole horizon by `select_matching_days`: the peak day of the
+horizon-mean demand (`horizon_mean_year`), then one day per segment of the
+year such that the days' mean system demand and the days' mean of every
+renewable availability profile in `profiles` (each averaged over the years,
+`horizon_mean_profile`) match their annual means. The master weighs every
+day equally, so this keeps the demand energy and the renewable energy of the
+modelled year equal to the real year's (peak days alone overrate demand,
+and sunny/windy days overrate renewables). Every year then models the same
+calendar days with its own demand and profiles (`master_rep_days`), so the
+weather sample does not change from one year to the next.
 """
 function representative_day_offsets(demand::Matrix{Float64}, num_years::Int, num_days::Int,
                                     min_separation::Int, timesteps_per_day::Int,
-                                    timesteps_per_year::Int)::Vector{Int}
-    rows = size(demand, 1)
-    (rows > 0 && timesteps_per_year > 0) || return Int[]
-    n_full = min(rows ÷ timesteps_per_year, max(num_years, 1))
-    mean_year = n_full < 1 ? demand :
-        sum(demand[(y - 1) * timesteps_per_year .+ (1:timesteps_per_year), :]
-            for y in 1:n_full) ./ n_full
-    days = select_representative_days(mean_year, 1, num_days, min_separation,
-                                      timesteps_per_day, size(mean_year, 1))
-    return days .- 1
+                                    timesteps_per_year::Int;
+                                    profiles::AbstractVector = Vector{Float64}[])::Vector{Int}
+    (size(demand, 1) > 0 && timesteps_per_year > 0) || return Int[]
+    mean_year = horizon_mean_year(demand, num_years, timesteps_per_year)
+    D = size(mean_year, 1) ÷ timesteps_per_day
+    D >= 1 || return Int[]
+    total = vec(sum(mean_year; dims = 2))
+    feats = [day_means_of(total, D, timesteps_per_day)]
+    for p in profiles
+        isempty(p) && continue
+        push!(feats, day_means_of(horizon_mean_profile(Vector{Float64}(p), num_years,
+                                                       timesteps_per_year),
+                                  D, timesteps_per_day))
+    end
+    peaks = [maximum(@view total[(d - 1) * timesteps_per_day .+ (1:timesteps_per_day)])
+             for d in 1:D]
+    days = select_matching_days(reduce(hcat, feats), peaks, num_days, min_separation)
+    return (days .- 1) .* timesteps_per_day
+end
+
+"""
+    representative_day_ratios(demand, num_years, offsets, timesteps_per_day,
+                              timesteps_per_year; profiles=Vector{Float64}[],
+                              weights=Float64[]) -> Vector{Float64}
+
+Mean on the representative periods starting at `offsets` (0-based steps
+within a year, `timesteps_per_day` steps each, weighted by `weights`, equal
+when empty) over the annual mean: the horizon-mean system demand first, then
+each of `profiles` (as in `representative_day_offsets`). 1.0 = the modelled
+year has the real year's energy; NaN for a series that is zero all year.
+"""
+function representative_day_ratios(demand::Matrix{Float64}, num_years::Int,
+                                   offsets::AbstractVector{<:Integer}, timesteps_per_day::Int,
+                                   timesteps_per_year::Int;
+                                   profiles::AbstractVector = Vector{Float64}[],
+                                   weights::AbstractVector = Float64[])::Vector{Float64}
+    series = Vector{Float64}[vec(sum(horizon_mean_year(demand, num_years,
+                                                       timesteps_per_year); dims = 2))]
+    for p in profiles
+        isempty(p) || push!(series, horizon_mean_profile(Vector{Float64}(p), num_years,
+                                                         timesteps_per_year))
+    end
+    w = isempty(weights) ? ones(length(offsets)) : Float64.(weights)
+    return map(series) do s
+        L = length(s)
+        annual = sum(s) / L
+        rep = sum(w[k] * sum(s[mod1(o + t, L)] for t in 1:timesteps_per_day)
+                  for (k, o) in enumerate(offsets); init = 0.0) /
+              (timesteps_per_day * sum(w; init = 0.0))
+        annual > 1e-12 ? rep / annual : NaN
+    end
+end
+
+"""
+    master_re_profiles(input) -> Vector{Vector{Float64}}
+
+The distinct availability profiles of `input`'s renewable generators and
+candidate technologies, each the mean over the buses where the unit has
+capacity (rated power, investment limit), or over all its columns when it
+has none there.
+"""
+function master_re_profiles(input::MasterProblemInput)::Vector{Vector{Float64}}
+    out = Vector{Float64}[]
+    function add!(avail::AbstractMatrix, cap::AbstractVector)
+        size(avail, 1) == 0 && return
+        cols = [b for b in axes(avail, 2) if b <= length(cap) && cap[b] > 0]
+        isempty(cols) && (cols = collect(axes(avail, 2)))
+        p = vec(sum(avail[:, cols]; dims = 2)) ./ length(cols)
+        any(==(p), out) || push!(out, p)
+    end
+    for g in input.generators
+        g.type == "Renewable" && add!(g.availability, g.rated_power)
+    end
+    for t in input.technologies
+        t.type == "Renewable" && add!(t.availability, t.invest_max)
+    end
+    return out
 end
 
 """
@@ -229,14 +444,16 @@ end
 The representative days of `input` as steps within a year (0-based):
 `input.rep_day_offsets` when given (the runner chooses them once, for every
 master of a run), otherwise `representative_day_offsets` of
-`input.base_demand` over `input.years`.
+`input.base_demand` over `input.years` and the renewable profiles of its
+generators and candidate technologies (`master_re_profiles`).
 """
 function master_rep_day_offsets(input::MasterProblemInput)::Vector{Int}
     isempty(input.rep_day_offsets) || return input.rep_day_offsets
     tres = input.temporal_resolution_hours
     tpy = (isempty(input.hours_per_year) ? 8760 : input.hours_per_year[1]) ÷ tres
     return representative_day_offsets(input.base_demand, length(input.years),
-        input.representative_days_per_year, input.min_day_separation, 24 ÷ tres, tpy)
+        input.representative_days_per_year, input.min_day_separation, 24 ÷ tres, tpy;
+        profiles = master_re_profiles(input))
 end
 
 """
