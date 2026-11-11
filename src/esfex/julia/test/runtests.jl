@@ -4174,6 +4174,118 @@ import Ipopt
             @test ESFEX.limited_master_lower_bound(lp, [1.0e12]) == 1.0e12
         end
 
+        @testset "Benders: year subproblems, operating bound, battery floor (B25)" begin
+            # Cuba (25 years, 5 days, 136 buses): θ stayed 0 and the gap at
+            # 99.9 %. The master shared each year's RE target out among the
+            # days and moved the shares for free; with no bound on θ it also
+            # moved batteries it had paid for to buses where a degenerate
+            # dual valued power alone at VOLL. Two buses, three years, five
+            # days, a growth-capped RE target, a capacity deficit, PV,
+            # engines and batteries.
+            ny, nd = 3, 5
+            Hy = ny * 8760
+            buses2 = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                      BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 10.0, 0.1, 0.0, 0.0, 30.0, 220.0, 1, 50.0,
+                                        "AC", 0.0)
+            netb = NetworkConfig(2, 2, buses2, [1, 2], [0 10.0; 10.0 0], zeros(2, 2), 100.0,
+                0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0], [line], TransformerData[],
+                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            dayk(h) = mod((h - 1) ÷ 24, 7) / 2
+            dem = hcat([30.0 + 5.0 * dayk(h) for h in 1:Hy], [25.0 + 6.0 * (3 - dayk(h)) for h in 1:Hy])
+            sunf(h, b) = (6 <= mod(h - 1, 24) < 18 ? 1.0 : 0.0) *
+                         (b == 1 ? 0.3 + 0.2 * dayk(h) : 0.9 - 0.2 * dayk(h))
+            sun = [sunf(h, b) for h in 1:Hy, b in 1:2]
+            o2 = [0.0, 0.0]
+            pvb = TechnologyConfig("PV", "Renewable", "Sun", [1.0, 1.0], [500.0, 500.0], sun,
+                [1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0], o2, o2, o2, o2, o2, o2, o2, o2,
+                [25.0, 25.0], o2, o2, 50.0, "AC", false, [1.0, 1.0])
+            engb = TechnologyConfig("Eng", "Non-renewable", "Oil", [1.0, 1.0], [300.0, 300.0],
+                ones(Hy, 2), [1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0],
+                o2, o2, o2, [8.0e-5, 8.0e-5], o2, o2, o2, o2, [25.0, 25.0], o2, o2, 50.0, "AC",
+                false, [1.0, 1.0])
+            lib = BatteryTechnologyConfig("LiNew", [0.15, 0.15], [0.2, 0.2], [50.0, 50.0],
+                [200.0, 200.0], 2.0, 8.0, [0.95, 0.95], [0.95, 0.95], o2, [15.0, 15.0],
+                [0.5, 0.5], [0.1, 0.1], [1.0, 1.0], o2, o2, [1.0e-6, 1.0e-6], false,
+                "AC", o2, [1.0, 1.0], o2, o2, o2, true, zeros(0, 2))
+            gensb = [mkgen("Gas", "Non-renewable", "Gas", [45.0, 20.0], [1.0e-4, 1.2e-4],
+                           ones(Hy, 2); nb = 2, H = Hy),
+                     mkgen("PVold", "Renewable", "Sun", [4.0, 4.0], [0.0, 0.0], sun; nb = 2, H = Hy)]
+            inp = MasterProblemInput(years = collect(2025:(2024 + ny)), network = netb,
+                generators = gensb, batteries = BatteryConfig[], technologies = [pvb, engb],
+                battery_technologies = [lib], base_demand = dem,
+                target_re_penetration = 1.0, initial_re_penetration = 0.05,
+                min_re_increment = 0.01, max_re_increment = 0.10,
+                fre_penetration_loss_penalty = 1e-4, representative_days_per_year = nd,
+                min_day_separation = 1, loss_of_load_penalty = 0.0075,
+                max_curtailment_ratio = 0.05, verbose = false)
+            mono, _ = master1(inp)
+
+            # The master's first solve already holds an operating cost: θ of
+            # each year is at least a copper-plate relaxation of the year
+            # (it was 0 until the first cuts), and the bound is a valid one
+            bm, _, _, btheta, _ = ESFEX.create_benders_master(inp)
+            ESFEX.set_silent(bm)
+            optimize!(bm)
+            @test string(termination_status(bm)) == "OPTIMAL"
+            @test sum(value(t) for t in values(btheta)) > 0.1 * objective_value(mono)
+            @test objective_value(bm) <= objective_value(mono) * (1 + 1e-9)
+
+            # One subproblem (and one θ) per year: no per-day master shares
+            @test length(btheta) == ny
+            @test !any(n -> occursin("re_share_y", n) || occursin("co2_alloc", n),
+                       name.(all_variables(bm)))
+
+            br = run_benders_decomposition(inp; max_iterations = 60, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.gap < 1e-6
+            @test br.objective ≈ objective_value(mono) rtol = 1e-6
+            # LB ≤ UB, up to the value of the battery floor's sliver
+            @test all(br.lb_history .<= br.ub_history .* (1 + 1e-6))
+
+            # The battery floor: every bus where a battery can be built sees
+            # a sliver of one, and nothing else changes
+            fc = ESFEX.FixedCapacities(Dict((1, 1) => 45.0), Dict{Tuple{Int,Int}, Float64}(),
+                Dict{Tuple{Int,Int}, Float64}(), Dict((1, 1) => 3.0),
+                Dict((1, 2) => 7.0), Dict((1, 2) => 14.0), Dict{Int, Float64}(), [0.1])
+            ff = ESFEX.benders_battery_floor(fc, inp)
+            @test ff.bat_tech_power == Dict((1, 1) => ESFEX.BENDERS_BATTERY_FLOOR, (1, 2) => 7.0)
+            @test ff.bat_tech_energy == Dict((1, 1) => 2 * ESFEX.BENDERS_BATTERY_FLOOR,
+                                             (1, 2) => 14.0)
+            @test ff.tech_capacity == fc.tech_capacity && ff.gen_capacity == fc.gen_capacity
+        end
+
+        @testset "representative days stand for the year over the days selected" begin
+            # Three days asked, 200 days apart: only two fit in a year. Each
+            # day stood for 365 / 3 days, so the year's cost and energy
+            # were a third short (T25/B25). With a flat 50 MW load the year
+            # costs the same as with two days asked (both fit).
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                        ones(8760, 1); nb = 1, H = 8760)
+            inp = MasterProblemInput(years = [2025], network = net, generators = [gas],
+                batteries = BatteryConfig[], base_demand = fill(50.0, 8760, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 3, min_day_separation = 200,
+                loss_of_load_penalty = 10.0, verbose = false)
+            nd = length(master_rep_day_offsets(inp))
+            @test nd == 2
+            @test ESFEX.rep_day_scaling(inp, nd) ≈ 365.0 / 2
+            @test ESFEX.master_fuel_day_scale(inp, nd) ≈ 365.0 / 2
+            ref, _ = master1(ESFEX.with_fields(inp; representative_days_per_year = 2))
+            full = objective_value(ref)
+            m, _ = master1(inp)
+            @test objective_value(m) ≈ full rtol = 1e-9
+            br = run_benders_decomposition(inp; max_iterations = 20, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ full rtol = 1e-6
+            @test br.solution.total_operational_cost_by_year[1] ≈ full rtol = 1e-6
+        end
+
         @testset "Benders reaches the monolithic optimum" begin
             # The Benders subproblems used to miss converters (no power, no
             # build), the CO2 budget, the line flow cost, LP start-ups and the

@@ -42,7 +42,7 @@ ESFEXConfig / SystemConfig + years + demand
     --> Python dict with investment/retirement decisions per year
 ```
 
-With `solver_method="benders"`, `build_model()` only creates the input and `solve()` calls `ESFEX.run_benders_decomposition(input; ...)`, which builds its own investment master and per-day subproblems.
+With `solver_method="benders"`, `build_model()` only creates the input and `solve()` calls `ESFEX.run_benders_decomposition(input; ...)`, which builds its own investment master and one dispatch subproblem per year (all its representative days).
 
 ---
 
