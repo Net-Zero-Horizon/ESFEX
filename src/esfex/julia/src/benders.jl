@@ -34,6 +34,12 @@ const COST_SCALE = 1.0
 # subproblem counts as meeting it
 const CURTAILMENT_FEAS_TOL = 1e-6
 
+# In-out stabilisation: weight of the master's plan in the point the
+# subproblems are solved at (the rest is the previous point solved)
+const BENDERS_INOUT_WEIGHT = 0.5
+# Gap below which the subproblems are solved at the master's plan itself
+const BENDERS_INOUT_GAP = 0.01
+
 # Least battery-technology power (MW) the subproblems see at every bus where
 # one can be built (`benders_battery_floor`), so that their duals price a
 # battery there; the energy is this × the technology's minimum duration
@@ -831,19 +837,21 @@ function existing_capacities(input::MasterProblemInput, year_idx::Int, life_ext:
 end
 
 """
-    evaluate_fixed_capacities(vars, input, year_idx; ctx=BendersCopyContext())
+    evaluate_fixed_capacities(vars, input, year_idx; ctx=BendersCopyContext(), val=value)
 
 Compute fixed capacity values from master solution for a given year.
 Same logic as build_cumulative_capacity_expressions but with value() on variables.
 The copy values (fuel, converter, line and reservoir builds, the RE shares
 of the year and the year before) are the solved `benders_copy_expr` of
-each key.
+each key. `val(v)` is the value taken for each master variable (another
+plan than the solved one: the separation point of `run_benders_decomposition`).
 """
 function evaluate_fixed_capacities(
     vars::MasterProblemVariables,
     input::MasterProblemInput,
     year_idx::Int;
-    ctx::BendersCopyContext = BendersCopyContext()
+    ctx::BendersCopyContext = BendersCopyContext(),
+    val::Function = value
 )::FixedCapacities
     n_tech = length(input.technologies)
     n_bat_tech = length(input.battery_technologies)
@@ -855,7 +863,7 @@ function evaluate_fixed_capacities(
         (kind, i, b, _) -> begin
             v = (kind === :gen ? vars.gen_life_extension :
                                  vars.bat_life_extension)[year_idx][i][b]
-            v === nothing ? 0.0 : value(v)
+            v === nothing ? 0.0 : val(v)
         end)
 
     # Technology cumulative investment capacity
@@ -870,7 +878,7 @@ function evaluate_fixed_capacities(
                 inv_age = year_idx - y
                 if inv_age < tech_lifetime
                     deg = (1.0 - tech_deg) ^ inv_age
-                    cumul += value(vars.tech_investment[y][t][b]) * deg
+                    cumul += val(vars.tech_investment[y][t][b]) * deg
                 end
             end
             if cumul > 1e-8
@@ -891,8 +899,8 @@ function evaluate_fixed_capacities(
             for y in 1:ypp:year_idx
                 inv_age = year_idx - y
                 if inv_age < bt_lifetime
-                    pow += value(vars.bat_tech_power_investment[y][bt][b])
-                    en += value(vars.bat_tech_capacity_investment[y][bt][b])
+                    pow += val(vars.bat_tech_power_investment[y][bt][b])
+                    en += val(vars.bat_tech_capacity_investment[y][bt][b])
                 end
             end
             if pow > 1e-8
@@ -910,25 +918,25 @@ function evaluate_fixed_capacities(
     # (handled in create_benders_subproblem)
 
     # RE ratios from master (the shares the subproblems read are copies)
-    re_ratios = [value(vars.re_penetration_ratio[(s, year_idx)])
+    re_ratios = [val(vars.re_penetration_ratio[(s, year_idx)])
                  for s in eachindex(master_systems(input))]
 
-    copies = master_fuel_extra_values(vars.fuel, input, year_idx)  # M2 (#89)
+    copies = master_fuel_extra_values(vars.fuel, input, year_idx; val)  # M2 (#89)
     for (key, _) in master_converters(input.network)
         k = (:converter, key[1], key[2])
-        copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
+        copies[k] = value(val, benders_copy_expr(vars, input, year_idx, k, ctx))
     end
     for l in eachindex(ctx.line_ends)
         k = (:line, "", l)
-        copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
+        copies[k] = value(val, benders_copy_expr(vars, input, year_idx, k, ctx))
     end
     for (g, b) in benders_reservoir_builds(vars, input, year_idx)
         k = (:reservoir, string(g), b)
-        copies[k] = value(benders_copy_expr(vars, input, year_idx, k, ctx))
+        copies[k] = value(val, benders_copy_expr(vars, input, year_idx, k, ctx))
     end
     # The RE shares of this year and the year before (growth cap)
     for ((s, y), v) in vars.re_penetration_ratio
-        y in (year_idx - 1, year_idx) && (copies[(:re_share, string(s), y)] = value(v))
+        y in (year_idx - 1, year_idx) && (copies[(:re_share, string(s), y)] = val(v))
     end
 
     return FixedCapacities(
@@ -2433,6 +2441,19 @@ function run_benders_decomposition(
     iter_re = new_re()
     best_re = iter_re
     theta_vars = Set(values(theta))
+    # In-out stabilisation: the subproblems are solved at a point between
+    # the master's plan and a core point (the previous point solved), whose
+    # cuts are as valid; after an iteration that did not raise the lower
+    # bound, once the gap is below BENDERS_INOUT_GAP (or with integer master
+    # variables), at the master's plan
+    continuous_master = num_constraints(master_model, VariableRef, MOI.Integer) +
+                        num_constraints(master_model, VariableRef, MOI.ZeroOne) == 0
+    core = Dict{VariableRef, Float64}()
+    best_at_master = true
+    last_gap = Inf
+    # Converged at a point between two plans: solve the master's plan once
+    # more, so that the plan returned is one the master chose
+    confirming = false
 
     # Create optimizer factory for resetting between iterations
     master_optimizer = create_optimizer(
@@ -2459,7 +2480,7 @@ function run_benders_decomposition(
                                                         unit_operation = unit_ops(iter_op),
                                                         re_energy = iter_re)
         end
-        if best_iter != last_solved_iter
+        if best_iter != last_solved_iter || !best_at_master
             for (v, x) in best_values
                 fix(v, is_integer(v) || is_binary(v) ? round(x) : x; force = true)
             end
@@ -2509,6 +2530,20 @@ function run_benders_decomposition(
         # ----- Evaluate investment cost at current solution -----
         inv_cost_val = value(inv_cost_expr)
 
+        # ----- The point the subproblems are solved at -----
+        stalled = length(lb_history) >= 2 &&
+                  lb_history[end] - lb_history[end - 1] <= 1e-6 * max(1.0, abs(lb))
+        weight = isempty(core) || stalled || !continuous_master || confirming ||
+                 last_gap <= BENDERS_INOUT_GAP ? 1.0 : BENDERS_INOUT_WEIGHT
+        point = Dict{VariableRef, Float64}(v => value(v) for v in all_variables(master_model))
+        if weight < 1.0
+            for (v, x) in point
+                point[v] = weight * x + (1.0 - weight) * get(core, v, x)
+            end
+        end
+        core = point
+        val = v -> point[v]
+
         if verbose_benders
             # Log theta values for diagnostics
             theta_sum_actual = sum(value(t) * COST_SCALE for t in values(theta); init = 0.0)
@@ -2529,7 +2564,7 @@ function run_benders_decomposition(
         for y_idx in 1:num_years
             isempty(rep_days_by_year[y_idx]) && continue
             # Evaluate fixed capacities from master solution
-            fixed_caps = evaluate_fixed_capacities(vars, input, y_idx; ctx)
+            fixed_caps = evaluate_fixed_capacities(vars, input, y_idx; ctx, val)
             year_cost, solved, feasible = evaluate_year!(cuts, y_idx, fixed_caps, iter;
                                                          op = iter_op, re = iter_re,
                                                          diag = year_diag)
@@ -2540,35 +2575,43 @@ function run_benders_decomposition(
 
         # ----- Compute upper bound -----
         # UB = first-stage cost (investment + life ext + decomm + slack) + actual operational cost
-        # The master objective includes θ × COST_SCALE × discount, so subtract that
-        theta_contribution = sum(value(t) * COST_SCALE * discount(y)
+        # The master objective includes θ × COST_SCALE × discount, so subtract
+        # that; both at the point solved
+        theta_contribution = sum(val(t) * COST_SCALE * discount(y)
                                  for (y, t) in theta; init = 0.0)
-        master_first_stage = value(objective_function(master_model)) - theta_contribution
+        master_first_stage = value(val, objective_function(master_model)) - theta_contribution
         ub = master_first_stage + total_operational_cost
         # Only an iteration whose subproblems all solved within the
         # curtailment limit gives an upper bound
-        if all_subproblems_solved && ub < best_ub
+        # (the master's plan confirming a converged point is taken when it
+        # is within the tolerance too)
+        if all_subproblems_solved &&
+           (ub < best_ub || (confirming && ub - lb <= tolerance * max(abs(ub), 1e-10)))
             best_ub = ub
             best_iter = iter
             best_year_ops = copy(year_operational_costs)
             best_op = iter_op
             best_re = iter_re
-            best_values = Dict(v => value(v) for v in all_variables(master_model)
-                               if !(v in theta_vars))
+            best_values = Dict(v => x for (v, x) in point if !(v in theta_vars))
+            best_at_master = weight == 1.0
         end
         push!(ub_history, best_ub)
 
         # ----- Check convergence -----
         gap = isfinite(best_ub) ? abs(best_ub - lb) / max(abs(best_ub), 1e-10) : Inf
+        last_gap = gap
         if verbose_benders
             @info "  UB = $(round(best_ub, digits=2)), gap = $(round(gap*100, digits=4))%, " *
                   "first_stage = $(round(master_first_stage, digits=0)), " *
-                  "total_ops = $(round(total_operational_cost, digits=0))"
+                  "total_ops = $(round(total_operational_cost, digits=0))" *
+                  (weight < 1.0 ? " (solved between the master plan and the previous point)" : "")
             log_benders_years(year_diag, Dict(y => value(t) * COST_SCALE for (y, t) in theta),
                               year_operational_costs, discount, input.base_year)
         end
 
-        if gap < tolerance
+        if gap < tolerance && !best_at_master && !confirming && iter < max_iterations
+            confirming = true
+        elseif gap < tolerance
             @info "Benders: Converged in $(iter) iterations (gap = $(round(gap*100, digits=4))%)"
             return BendersResult(
                 best_solution(iter), best_ub, iter, gap,

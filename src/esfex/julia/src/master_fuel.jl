@@ -167,12 +167,14 @@ function master_fuel_extra_expr(fv::Union{Nothing, MasterFuelVariables},
 end
 
 """
-    master_fuel_extra_values(fv, input, year_idx) -> Dict{MasterFuelKey, Float64}
+    master_fuel_extra_values(fv, input, year_idx; val=value) -> Dict{MasterFuelKey, Float64}
 
-Solved value of `master_fuel_extra_expr` for every buildable capacity (Benders).
+Solved value of `master_fuel_extra_expr` for every buildable capacity
+(Benders), with each variable's value `val(v)`.
 """
-master_fuel_extra_values(fv, input::MasterProblemInput, year_idx::Int) =
-    Dict{MasterFuelKey, Float64}(k => value(master_fuel_extra_expr(fv, input, year_idx, k))
+master_fuel_extra_values(fv, input::MasterProblemInput, year_idx::Int;
+                         val::Function = value) =
+    Dict{MasterFuelKey, Float64}(k => value(val, master_fuel_extra_expr(fv, input, year_idx, k))
                                  for k in master_fuel_keys(input))
 
 """

@@ -4313,11 +4313,19 @@ import Ipopt
                 @test objective_value(b.model) ≈ objective_value(a.model) rtol = 1e-9
             end
 
-            br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-7,
-                                           verbose_benders = false)
-            mono, _ = master1(inp)
+            # In-out stabilisation: some iterations solve the subproblems
+            # halfway between the master's plan and the previous point; the
+            # run still reaches the monolithic optimum and returns its plan
+            mono, mvars = master1(inp)
+            local br
+            @test_logs (:info, r"solved between the master plan") match_mode = :any begin
+                br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-7,
+                                               verbose_benders = true)
+            end
             @test br.gap < 1e-6
             @test br.objective ≈ objective_value(mono) rtol = 1e-6
+            @test br.solution.tech_investment[1][1][1] ≈ value(mvars.tech_investment[1][1][1]) rtol = 1e-6
+            @test all(br.lb_history .<= br.ub_history .* (1 + 1e-6))
         end
 
         @testset "representative days stand for the year over the days selected" begin
