@@ -262,3 +262,42 @@ def test_myopic_reported_cost_carries_year_one_annuity(tmp_path):
     assert costs[y2]["earlier_annuities"] == pytest.approx(gas_y1 * 200000.0 * crf, rel=1e-6)
     assert costs[y2]["total"] == pytest.approx(
         costs[y2]["objective"] + costs[y2]["earlier_annuities"])
+
+
+def test_myopic_small_battery_build_keeps_power_and_energy_together(tmp_path):
+    """A battery the master builds below 0.1 MW but above 0.1 MWh reaches the
+    next year whole. A 0.1 cut-off dropped the power and kept the energy,
+    leaving a battery with energy and no power whose minimum-cycling
+    constraint made every dispatch window of the next year infeasible."""
+    orch = _two_systems(tmp_path)
+    captured = []
+
+    class FakeMaster:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        def build_model(self, **_):
+            pass
+
+        def solve(self):
+            return 1
+
+        def get_solution_values(self):
+            year = captured[-1]["years"][0]
+            first = len(captured) == 1
+            inv = {"bat_tech_power_investment": {"bat_tech_investment_power_1_1": 0.0917},
+                   "bat_tech_capacity_investment": {"bat_tech_investment_capacity_1_1": 0.1833}}
+            return {"solution": {year: inv if first else {}},
+                    "re_penetration_by_year": [0.0]}
+
+    demand = np.full((2 * HOURS_STD_YEAR, 2), 10.0)
+    with patch("esfex.bridge.adapters.MasterProblemAdapter", FakeMaster):
+        inv, _, _, _ = orch._solve_master_problem_myopic(
+            years_range=[2025, 2026], demand=demand[:HOURS_STD_YEAR],
+            hours=HOURS_STD_YEAR, num_nodes=2, total_demand=demand)
+
+    assert inv[2025] == {"bat_tech_investment_power_1_1": 0.0917,
+                         "bat_tech_investment_capacity_1_1": 0.1833}
+    bat = captured[1]["system_config"].batteries["B__li__built_y1"]
+    assert bat.MaxChargePower == [0.0, 0.0917] and bat.MaxDischargePower == [0.0, 0.0917]
+    assert bat.capacity == [0.0, 0.1833]

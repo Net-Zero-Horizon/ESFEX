@@ -61,7 +61,8 @@ Initialize the Julia runtime and load the ESFEX module.
 6. If loading fails with "invalid redefinition of constant", reuses the already-loaded module (happens during Julia session reuse).
 7. If loading fails with a `LoadError` or `ArgumentError`, runs `Pkg.instantiate()` to install missing dependencies, then retries loading.
 8. If `Pkg.instantiate()` fails, deletes `Manifest.toml` and retries with `Pkg.resolve(); Pkg.instantiate()`.
-9. Tries `import` for each optional solver package (Clarabel, Ipopt, SCS, GLPK, Cbc, SCIP, Gurobi, CPLEX, Xpress) so that their methods exist in the current world age; missing packages are skipped.
+9. Forwards Julia's log records to Python logging (`ESFEX.set_log_callback`): `@debug`/`@info`/`@warn`/`@error` reach the `esfex.julia` logger at the same level, so they appear on the console and in the run's log file like every other ESFEX message. Benders progress lines are milestones, shown by the `basic` console too. Debug records come only from ESFEX itself.
+10. Tries `import` for each optional solver package (Clarabel, Ipopt, SCS, GLPK, Cbc, SCIP, Gurobi, CPLEX, Xpress) so that their methods exist in the current world age; missing packages are skipped.
 
 **Example:**
 

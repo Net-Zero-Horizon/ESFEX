@@ -22,6 +22,7 @@ module ESFEX
     include("electrolyzer.jl")       # Hydrogen electrolyzer model
     include("dcopf_benchmark.jl")    # Benchmark helpers
     include("acopf_benchmark.jl")
+    include("log_forwarding.jl")     # Julia log records → the Python logger
 end
 ```
 
@@ -330,7 +331,7 @@ end
 | `build_variables!` | `(model, input) -> PowerSystemVariables` | Create all decision variables: `gen_output[g,b,t]` and `bat_charge/bat_discharge/bat_soc[bi,b,t]` (sparse, only for unit-bus pairs with capacity or investment potential), `curtailment[n,t]`, `load_shed[n,t]`, reserves, etc. |
 | `build_objective!` | `(model, vars, input)` | Build cost minimization objective: fuel and maintenance costs per MWh + the window's share of the annual fixed O&M of the capacity in service (`fixed_om_annual_cost`) + start-up costs + penalty terms. |
 | `add_generator_constraints!` | `(model, vars, input)` | Generator capacity limits, ramp rates, minimum up/down times. For units with `rated_power[b]=0` and no investment potential, constrains `gen_output[g,b,t] <= 0` to prevent free generation. |
-| `add_battery_constraints!` | `(model, vars, input)` | SOC dynamics, charge/discharge limits, end-of-horizon SOC: two-sided cyclic band when `cyclic_end_soc` is true, otherwise the soft floor `bat_soc_end_min` / `bat_soc_end_min_cyclic` used on the year's last window. For zero-capacity batteries, constrains all variables to zero. |
+| `add_battery_constraints!` | `(model, vars, input)` | SOC dynamics, charge/discharge limits, end-of-horizon SOC: two-sided cyclic band when `cyclic_end_soc` is true, otherwise the soft floor `bat_soc_end_min` / `bat_soc_end_min_cyclic` used on the year's last window. For zero-capacity batteries, constrains all variables to zero; a battery with energy but no charge or discharge power at a bus counts as zero capacity there (`battery_power_limits`). The minimum cycling (`bat_min_cycling`) is capped at the window's charge capability and has a priced shortfall, so it never makes a window infeasible. |
 | `add_demand_constraints!` | `(model, vars, input; extra_injections_fn=nothing)` | Copper-plate power balance per bus and timestep: `gen + discharge + V2G + load_shed == demand + charge + EV charging + electrolyzer` (plus rooftop terms when given). `load_shed` is capped by the bus demand. With more than one bus, `create_power_system` uses the KCL of `add_dc_constraints!` (or ACOPF) instead. |
 | `add_reserve_constraints!` | `(model, vars, input)` | Static (spinning) and dynamic (frequency response) reserve: per-node requirements met per system (`reserve_node_groups`: one group per original system of a merged run) from the pooled free capacity of the system's reservable generators and batteries; committed units only in UC. |
 | `add_inertia_constraints!` | `(model, vars, input)` | System inertia floor from synchronous generators. |
@@ -477,6 +478,7 @@ Auxiliary variables and constraints installed by any of the above are tracked in
 | `diagnose_infeasibility(model, vars::MasterProblemVariables, input) -> Dict{String, Float64}` | For a solved master problem, report the RE-target, budget and capacity slack values by category. |
 | `export_solution_to_dict(result::MasterProblemResult, input) -> Dict{String, Any}` | Convert a master solution to a Dict for JSON/HDF5 serialization. |
 | `log_solution_summary(result::MasterProblemResult, input; ev_demand=nothing) -> String` | Formatted summary of a master solution (investments, costs, RE penetration). |
+| `set_log_callback(callback) -> CallbackLogger` | Install a `CallbackLogger` as Julia's global logger: each record goes to `callback(level, message, milestone)`, `level` as a Python logging level (10/20/30/40), `message` with its key = value pairs, `milestone` true for Benders progress (group `:benders`). Debug records only from ESFEX; `maxlog` honoured. Records logged on another thread than the installing one are queued and sent before the next record of that thread, or by `flush_log_queue()`. The Python bridge installs it after loading ESFEX. |
 | `register_constraint_hook!(type, fn)` | Register a user constraint type; `fn(model, vars, input, spec)` is called for each spec with `spec["type"] == type`. Not exported (call as `ESFEX.register_constraint_hook!`). |
 
 ---
