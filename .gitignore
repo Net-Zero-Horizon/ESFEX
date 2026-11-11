@@ -59,6 +59,8 @@ coverage.xml
 # A manifest pinned to one Julia release breaks buildpkg on another
 # (e.g. "Could not locate the source code for OpenSSL_jll").
 Manifest.toml
+# Backups made by the automatic dependency repair (bridge/julia_setup.py)
+Manifest.toml.bak-*
 # Coverage tracefiles emitted by `Pkg.test(coverage=true)`.
 *.cov
 lcov.info
