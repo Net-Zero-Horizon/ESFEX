@@ -196,6 +196,64 @@ function select_representative_days(
     return selected_days
 end
 
+"""
+    representative_day_offsets(demand, num_years, num_days, min_separation,
+                               timesteps_per_day, timesteps_per_year) -> Vector{Int}
+
+First step (0-based, within a year) of each representative day, chosen ONCE
+for the whole horizon: `select_representative_days` (the peak day, then the
+highest-peak day of each segment of the year) on the horizon-mean demand,
+the mean over the years of each step of the year (the full years `demand`
+holds, at most `num_years`; less than a year of data is used as it is).
+Every year then models the same calendar days with its own demand and
+profiles (`master_rep_days`), so the weather sample, and with it the share
+the existing renewables give, does not change from one year to the next.
+"""
+function representative_day_offsets(demand::Matrix{Float64}, num_years::Int, num_days::Int,
+                                    min_separation::Int, timesteps_per_day::Int,
+                                    timesteps_per_year::Int)::Vector{Int}
+    rows = size(demand, 1)
+    (rows > 0 && timesteps_per_year > 0) || return Int[]
+    n_full = min(rows ÷ timesteps_per_year, max(num_years, 1))
+    mean_year = n_full < 1 ? demand :
+        sum(demand[(y - 1) * timesteps_per_year .+ (1:timesteps_per_year), :]
+            for y in 1:n_full) ./ n_full
+    days = select_representative_days(mean_year, 1, num_days, min_separation,
+                                      timesteps_per_day, size(mean_year, 1))
+    return days .- 1
+end
+
+"""
+    master_rep_day_offsets(input) -> Vector{Int}
+
+The representative days of `input` as steps within a year (0-based):
+`input.rep_day_offsets` when given (the runner chooses them once, for every
+master of a run), otherwise `representative_day_offsets` of
+`input.base_demand` over `input.years`.
+"""
+function master_rep_day_offsets(input::MasterProblemInput)::Vector{Int}
+    isempty(input.rep_day_offsets) || return input.rep_day_offsets
+    tres = input.temporal_resolution_hours
+    tpy = (isempty(input.hours_per_year) ? 8760 : input.hours_per_year[1]) ÷ tres
+    return representative_day_offsets(input.base_demand, length(input.years),
+        input.representative_days_per_year, input.min_day_separation, 24 ÷ tres, tpy)
+end
+
+"""
+    master_rep_days(input, y_idx; offsets=master_rep_day_offsets(input)) -> Vector{Int}
+
+First master step of each representative day of year `y_idx`: the same
+days of the year (`offsets`) in the year's block of `base_demand` (and of
+multi-year profiles). Empty when `base_demand` does not reach the year.
+"""
+function master_rep_days(input::MasterProblemInput, y_idx::Int;
+                         offsets::Vector{Int} = master_rep_day_offsets(input))::Vector{Int}
+    tpy = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
+    year_start = (y_idx - 1) * tpy
+    year_start < size(input.base_demand, 1) || return Int[]
+    return [year_start + o + 1 for o in offsets]
+end
+
 # =============================================================================
 # Investment Period Helpers
 # =============================================================================
@@ -1056,10 +1114,10 @@ re_shortfall_penalty(input::MasterProblemInput) =
 Price of a MWh of renewable energy a system uses above its growth cap
 (`add_re_growth_cap!`): the value of lost load (`loss_of_load_penalty`), and
 at least the RE shortfall price (`re_shortfall_penalty`). Renewable energy
-above the cap costs as much as load shed, so the master curtails renewable
-output or runs other units instead; the slack only keeps the master
-feasible where existing renewables must produce more than the cap allows
-(the curtailment limit `max_curtailment_ratio` keeps them running).
+above the cap costs as much as load shed, so the master curtails it
+instead (existing renewables beyond the curtailment limit,
+`re_cap_exemption`); the slack only keeps the master feasible where
+renewable output cannot be curtailed (a reservoir's minimum release, say).
 """
 re_cap_penalty(input::MasterProblemInput) =
     max(input.loss_of_load_penalty, re_shortfall_penalty(input))
@@ -1105,6 +1163,122 @@ function re_required_share(input::MasterProblemInput,
 end
 
 """
+    existing_vre_available(input, y_idx, start_hour, hours) -> Vector{Float64}
+
+Energy (MW × steps) the existing variable renewables (`is_variable_renewable`)
+of each system (`master_systems`) can produce over a representative day or
+TSAM period starting at master step `start_hour`: the power they have in
+service in year `y_idx` within their lifetime (rated × degradation, as the
+day model) × availability. Life-extended units and candidate technologies
+are investment decisions and do not count.
+"""
+function existing_vre_available(input::MasterProblemInput, y_idx::Int,
+                                start_hour::Int, hours::Int)
+    systems = master_systems(input)
+    out = zeros(length(systems))
+    for (s, sr) in enumerate(systems), gen in input.generators
+        gen.type == "Renewable" || continue
+        rows = size(gen.availability, 1)
+        for b in sr.first_bus:(sr.first_bus + sr.num_buses - 1)
+            b <= length(gen.rated_power) && gen.rated_power[b] > 0 || continue
+            is_variable_renewable(gen, b) || continue
+            age = gen.initial_age[b] + (y_idx - 1)
+            age < gen.life_time[b] || continue
+            power = gen.rated_power[b] * (1.0 - gen.degradation_rate[b])^age
+            for t in 1:hours
+                avail = rows == 0 ? 1.0 : gen.availability[mod1(start_hour + t - 1, rows), b]
+                out[s] += power * avail
+            end
+        end
+    end
+    return out
+end
+
+"""
+    re_cap_exemption(input, targets, y_idx, periods, prev_floor) -> (θ, floor)
+
+Curtailment the RE growth cap forces on existing renewables (round 24).
+When a system's existing variable renewables, curtailed at most
+`max_curtailment_ratio`, would give it a higher RE share than its growth cap
+allows, the excess is curtailed: it does not count toward the share and pays
+`curtailment_cost` like any curtailment, but not the curtailment limit
+(`add_re_cap_curtailment!`). Without this the excess could only go to the
+cap's slack at the value of lost load (`re_cap_penalty`). Building
+renewables above the cap still does not pay: only the existing units'
+energy is exempt.
+
+`periods` are the year's representative days (or TSAM periods) as
+`(start_hour, hours, scale)`, `scale` taking a step to the year. With `A`
+the existing variable renewables' available energy and `D` the demand of
+system `s` over them, both scaled to the year, and `k` the cap's estimate
+(the previous year's share plus `max_re_increment`, at most 1), the system
+may curtail beyond the limit the share
+
+    θ[s] = max(0, 1 − (1 + max_curtailment_ratio) × k × D / A)
+
+of each period's available energy, so that the existing units can be held
+at the cap. The previous year's share is `re_share_anchor` in year 1 (a
+myopic year: the share last year achieved); later, the higher of the
+year's required share (`re_required_share`) and `prev_floor[s]`, the least
+share its existing renewables left it, `min(A / ((1 + ratio) × D), k)`,
+returned as `floor` for the next year. θ is 0 without a growth cap
+(`max_re_increment` ≥ 1) or curtailment limit (`max_curtailment_ratio` ≥ 1).
+"""
+function re_cap_exemption(input::MasterProblemInput,
+                          targets::Dict{Tuple{Int,Int}, Float64}, y_idx::Int,
+                          periods, prev_floor)
+    n_sys = length(master_systems(input))
+    avail = zeros(n_sys)
+    demand = zeros(n_sys)
+    for (start_hour, hours, scale) in periods
+        hours >= 1 || continue
+        avail .+= scale .* existing_vre_available(input, y_idx, start_hour, hours)
+        demand .+= scale .* system_day_demand(input, y_idx, start_hour, hours)
+    end
+    ratio = input.max_curtailment_ratio
+    active = input.max_re_increment < 1.0 && ratio < 1.0
+    θ = zeros(n_sys)
+    floor = zeros(n_sys)
+    for s in 1:n_sys
+        prev = prev_floor === nothing || y_idx == 1 ? re_share_anchor(input, s) :
+            max(re_required_share(input, targets, s, y_idx - 1), prev_floor[s])
+        k = min(prev + max(input.max_re_increment, 0.0), 1.0)
+        demand[s] > 0 || continue
+        floor[s] = min(avail[s] / ((1.0 + max(ratio, 0.0)) * demand[s]), k)
+        if active && avail[s] > 0
+            θ[s] = max(0.0, 1.0 - (1.0 + ratio) * k * demand[s] / avail[s])
+        end
+    end
+    return θ, floor
+end
+
+"""
+    add_re_cap_curtailment!(model, input, θ, y_idx, start_hour, hours, label) -> AffExpr
+
+The curtailment the RE growth cap forces on a representative day or TSAM
+period (`re_cap_exemption`): per system with `θ[s] > 0` a variable
+`re_cap_curt_{label}_s{s}` (MWh-steps) between 0 and `θ[s]` × the energy its
+existing variable renewables can produce over the period
+(`existing_vre_available`). Returns their sum, which the day's curtailment
+limit allows on top of `max_curtailment_ratio`; the curtailment itself pays
+`curtailment_cost` as any.
+"""
+function add_re_cap_curtailment!(model::Model, input::MasterProblemInput,
+                                 θ::Vector{Float64}, y_idx::Int, start_hour::Int,
+                                 hours::Int, label::String)
+    exempt = AffExpr(0.0)
+    any(>(0.0), θ) || return exempt
+    avail = existing_vre_available(input, y_idx, start_hour, hours)
+    for s in eachindex(θ)
+        (θ[s] > 0 && s <= length(avail) && avail[s] > 0) || continue
+        x = @variable(model, lower_bound = 0, upper_bound = θ[s] * avail[s],
+                      base_name = "re_cap_curt_$(label)_s$(s)")
+        add_to_expression!(exempt, x)
+    end
+    return exempt
+end
+
+"""
     add_re_growth_cap!(model, input, s, y_idx, energy, demand, prev_share;
                        scenario_idx=0) -> AffExpr
 
@@ -1116,7 +1290,9 @@ share the year before (an expression, or `re_share_anchor` in year 1):
     energy ≤ (prev_share + Δmax) × demand + over        (re_max_increment)
 
 `over` (MWh/year, `slack_re_cap…`) is priced at `re_cap_penalty`; the
-returned cost goes with the year's operating cost. Nothing when
+returned cost goes with the year's operating cost. Existing renewables
+above the cap are curtailed instead, beyond the curtailment limit
+(`re_cap_exemption`), so the slack is a last resort. Nothing when
 `max_re_increment` ≥ 1 or the system has no demand.
 """
 function add_re_growth_cap!(model::Model, input::MasterProblemInput, s::Int, y_idx::Int,
@@ -2528,7 +2704,11 @@ function add_day_operational_constraints!(
     final_reservoir_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
     # Inter-system DC-OPF: external flow contributions at border buses
     # (bus, hour) => AffExpr to add to flow_sum in KCL
-    external_injections::Union{Nothing, Dict{Tuple{Int,Int}, AffExpr}} = nothing
+    external_injections::Union{Nothing, Dict{Tuple{Int,Int}, AffExpr}} = nothing,
+    # Share of the existing renewables' energy each system may curtail
+    # beyond the curtailment limit to stay under its RE growth cap
+    # (re_cap_exemption)
+    re_cap_exempt::Vector{Float64} = Float64[]
 )
     hours = size(demand, 1)
     n_gen = length(input.generators)
@@ -2890,10 +3070,14 @@ function add_day_operational_constraints!(
                 end
             end
         end
-        # Only add constraint if there are renewable terms (avoid forcing curtailment=0)
+        # Only add constraint if there are renewable terms (avoid forcing
+        # curtailment=0). What the RE growth cap makes the system curtail is
+        # exempt from the limit (add_re_cap_curtailment!).
         if length(total_renewable.terms) > 0
             @constraint(model,
-                total_curtailment <= input.max_curtailment_ratio * total_renewable,
+                total_curtailment <= input.max_curtailment_ratio * total_renewable +
+                    add_re_cap_curtailment!(model, input, re_cap_exempt, year_idx,
+                                            start_hour, hours, "y$(year_idx)_d$(day_idx)"),
                 base_name = "max_curtailment_y$(year_idx)_d$(day_idx)")
         end
     end
@@ -3451,26 +3635,26 @@ function add_representative_days_validation!(
     num_years = length(base_input.years)
     timesteps_per_day = 24 ÷ base_input.temporal_resolution_hours
     day_offset = 1000 * scenario_idx   # keeps day names distinct per scenario
+    # The same days of the year for every year (and every scenario)
+    offsets = master_rep_day_offsets(base_input)
+    # Least RE share the existing renewables leave each system the year
+    # before (re_cap_exemption)
+    prev_floor = nothing
 
     for y_idx in 1:num_years
         # A stochastic scenario operates on its own demand and costs
         input = scenario === nothing ? base_input :
             scenario_master_input(base_input, scenario.multipliers, y_idx)
-        timesteps_per_year = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
 
-        rep_days = select_representative_days(
-            input.base_demand,
-            y_idx,
-            input.representative_days_per_year,
-            input.min_day_separation,
-            timesteps_per_day,
-            timesteps_per_year,
-        )
+        rep_days = master_rep_days(input, y_idx; offsets)
 
         if isempty(rep_days)
             @warn "No representative days selected for year $(input.years[y_idx])"
             continue
         end
+        periods = [(h, min(h + timesteps_per_day - 1, size(input.base_demand, 1)) - h + 1,
+                    rep_day_scaling(input)) for h in rep_days]
+        cap_exempt, prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
 
         vars.operational_costs[y_idx] = AffExpr[]
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
@@ -3493,7 +3677,8 @@ function add_representative_days_validation!(
 
             # Add operational constraints via delegation to power_system.jl
             tech_output, tech_day_cost = add_day_operational_constraints!(
-                model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour
+                model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour;
+                re_cap_exempt = cap_exempt
             )
 
             # Operational cost scaled to the year (candidate technologies' too)
@@ -3600,6 +3785,7 @@ function add_tsam_periods_validation!(
     # Distinct names per stochastic scenario (each has its own periods and chains)
     day_offset = 1000 * scenario_idx
     stag = scenario_idx > 0 ? "_s$(scenario_idx)" : ""
+    prev_floor = nothing   # re_cap_exemption
 
     for y_idx in 1:num_years
         input = scenario === nothing ? base_input :
@@ -3613,6 +3799,10 @@ function add_tsam_periods_validation!(
             @warn "No TSAM periods for year $(input.years[y_idx])"
             continue
         end
+        tres_p = max(1.0, input.temporal_resolution_hours)
+        periods = [(h, min(h + timesteps_per_day - 1, size(input.base_demand, 1)) - h + 1,
+                    tres_p * period_weights[k]) for (k, h) in enumerate(period_starts)]
+        cap_exempt, prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
 
         vars.operational_costs[y_idx] = AffExpr[]
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
@@ -3744,7 +3934,8 @@ function add_tsam_periods_validation!(
                 initial_soc_overrides=soc_initial,
                 final_soc_targets=soc_final,
                 initial_reservoir_overrides=res_initial,
-                final_reservoir_targets=res_final
+                final_reservoir_targets=res_final,
+                re_cap_exempt=cap_exempt
             )
 
             # Weighted operational cost (candidate technologies' too)

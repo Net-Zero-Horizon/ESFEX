@@ -2340,6 +2340,10 @@ Input configuration for the Master Problem (capacity expansion planning).
 - `temporal_resolution_hours::Int`: Hours per timestep (for aggregation)
 - `representative_days_per_year::Int`: Number of representative days
 - `min_day_separation::Int`: Minimum days between representative days
+- `rep_day_offsets::Vector{Int}`: first step of each representative day
+  within a year (0-based), the same calendar days for every year
+  (`master_rep_days`); empty = chosen from the horizon-mean demand
+  (`master_rep_day_offsets`)
 
 ## Life Extension
 - `life_extension_cost_factor::Float64`: Fraction of investment cost for annual extension
@@ -2526,6 +2530,10 @@ struct MasterProblemInput
     # year passes the share the previous year achieved. Empty = each
     # system's initial share.
     re_share_anchor::Vector{Float64}
+    # First step (0-based, within a year) of each representative day, the
+    # same for every year (master_rep_days); empty = chosen from the
+    # horizon-mean demand (master_rep_day_offsets)
+    rep_day_offsets::Vector{Int}
 end
 
 # Constructor with defaults
@@ -2597,7 +2605,8 @@ function MasterProblemInput(;
     unit_commitment::Bool = false,
     primary_energy::Union{Nothing, MasterFuelInput} = nothing,
     npv_retired_units::Vector{RetiredUnit} = RetiredUnit[],
-    re_share_anchor::Vector{Float64} = Float64[]
+    re_share_anchor::Vector{Float64} = Float64[],
+    rep_day_offsets::Vector{Int} = Int[]
 )
     return MasterProblemInput(
         years, base_year,
@@ -2631,7 +2640,7 @@ function MasterProblemInput(;
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         re_target_override,
         co2_budget_groups, unit_commitment,
-        primary_energy, npv_retired_units, re_share_anchor
+        primary_energy, npv_retired_units, re_share_anchor, rep_day_offsets
     )
 end
 

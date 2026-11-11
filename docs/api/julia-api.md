@@ -359,13 +359,17 @@ end
 | `add_capacity_adequacy_constraints!` | `(model, vars, input)` | Ensures installed capacity meets peak demand plus reserve margin. |
 | `add_transmission_symmetry_constraints!` | `(model, vars, input)` | Holds `transfer_investment[i,j] == transfer_investment[j,i]` where both directions exist. |
 | `add_re_target_constraints!` | `(model, vars, input, y_idx, targets, re_energy, re_demand; scenario_idx=0) -> AffExpr` | Annual RE bounds of each system in year `y_idx`: its renewable energy over the representative days (scaled to the year) plus a shortfall slack `slack_re_target[(scenario_idx, σ, y_idx)]` (MWh) covers `re_required_share` of its demand (RE-2, RE-3a), and the growth cap `add_re_growth_cap!` holds its actual share over the same scenario's previous year. Called by the representative-day and TSAM validations; returns the slacks' cost, part of the year's operating cost. |
-| `add_re_growth_cap!` | `(model, input, s, y_idx, energy, demand, prev_share; scenario_idx=0) -> AffExpr` | RE-3b: `energy ≤ (prev_share + max_re_increment) × demand + slack`, the slack (MWh, `model.ext[:re_cap_slack]`) priced at `re_cap_penalty` (VOLL, at least the RE shortfall price). Nothing when `max_re_increment` ≥ 1. |
+| `add_re_growth_cap!` | `(model, input, s, y_idx, energy, demand, prev_share; scenario_idx=0) -> AffExpr` | RE-3b: `energy ≤ (prev_share + max_re_increment) × demand + slack`, the slack (MWh, `model.ext[:re_cap_slack]`) priced at `re_cap_penalty` (VOLL, at least the RE shortfall price), a last resort: existing renewables above the cap are curtailed (`re_cap_exemption`). Nothing when `max_re_increment` ≥ 1. |
+| `re_cap_exemption` | `(input, targets, y_idx, periods, prev_floor) -> (θ, floor)` | RE-3c: per system, the share θ of its existing variable renewables' available energy it may curtail beyond `max_curtailment_ratio` to stay under the growth cap (0 when they stay under it), from the year's periods `(start_hour, hours, scale)`; `floor` (the least share they leave the year) feeds the next year's call. The day models add a variable bounded by θ × the day's available existing energy (`re_cap_curt_*`) to the curtailment limit. |
 | `define_re_share!` | `(model, vars, input)` | Defines `re_penetration_ratio[σ, y]` as the actual RE share (renewable energy used over demand; probability-weighted in a stochastic master). |
 | `re_required_share` | `(input, targets, s, y_idx) -> Float64` | The RE-1 target or the minimum-increment floor, whichever is higher. |
 | `re_increment_floor` | `(initial_re, min_inc, y_idx) -> Float64` | Least RE share the minimum increment asks of year `y_idx`: `initial_re + y_idx × min_inc`, at most 1. |
 | `re_share_anchor` | `(input, s) -> Float64` | Actual RE share of system `s` before year 1, from which year 1's cap is measured: `input.re_share_anchor[s]` (myopic: last year's achieved share) or its initial share, clamped to [0, 1]. |
 | `master_conflict` | `(model; limit=20) -> Vector{String}` | Constraints of an infeasible master's conflict (IIS), empty when the solver cannot compute one. |
 | `select_representative_days` | `(demand, year_idx, num_days, min_separation, timesteps_per_day, timesteps_per_year) -> Vector{Int}` | Pick representative days of one year from the demand profile. |
+| `representative_day_offsets` | `(demand, num_years, num_days, min_separation, timesteps_per_day, timesteps_per_year) -> Vector{Int}` | The representative days of a whole horizon, chosen once: `select_representative_days` on the horizon-mean demand, as 0-based steps within a year. |
+| `master_rep_day_offsets` | `(input) -> Vector{Int}` | `input.rep_day_offsets` when given (the runner's choice), else `representative_day_offsets` of `input.base_demand`. |
+| `master_rep_days` | `(input, y_idx; offsets) -> Vector{Int}` | First master step of each representative day of year `y_idx`: the same days of the year in every year's block. Used by the monolithic, stochastic, MGA and Benders masters. |
 | `add_representative_days_validation!` | `(model, vars, input, targets; scenario=nothing, scenario_idx=0)` | Adds operational feasibility constraints on representative days. Creates sub-problem variables and constraints per day per year. With `scenario`, the days run on `scenario_master_input(...)`. The TSAM equivalent is the internal `add_tsam_periods_validation!`. |
 | `create_day_ps_vars!` | `(model, input, year_idx, day_idx, hours) -> PowerSystemVariables` | Operational variables of one representative day. |
 | `add_day_operational_constraints!` | `(model, ps_vars, vars, input, year_idx, day_idx, demand, start_hour; ...)` | Detailed operational constraints for a single representative day: generator dispatch, battery SOC dynamics, power balance, reserves, DC flow. |
@@ -502,9 +506,12 @@ In the master problem, curtailment on each representative day is capped at a fra
 
 ```julia
 if input.max_curtailment_ratio < 1.0
-    @constraint(model, total_curtailment <= input.max_curtailment_ratio * total_renewable)
+    @constraint(model, total_curtailment <= input.max_curtailment_ratio * total_renewable +
+        add_re_cap_curtailment!(model, input, re_cap_exempt, year_idx, start_hour, hours, label))
 end
 ```
+
+The added term is the curtailment of existing renewables that the RE growth cap forces (`re_cap_exemption`), exempt from the limit.
 
 Benders subproblems use the same cap as a soft constraint with a penalised slack. The operational model has no ratio cap; curtailment there is priced at `curtailment_cost`.
 

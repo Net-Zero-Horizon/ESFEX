@@ -388,19 +388,36 @@ end
 """
     benders_rep_days(input) -> Dict{Int, Vector{Int}}
 
-First step of each representative day of each year, selected as the
-monolithic master selects them (`select_representative_days`).
+First step of each representative day of each year, the same days of the
+year for every year, as the monolithic master has them (`master_rep_days`).
 """
 function benders_rep_days(input::MasterProblemInput)
+    offsets = master_rep_day_offsets(input)
+    return Dict{Int, Vector{Int}}(y_idx => master_rep_days(input, y_idx; offsets)
+                                  for y_idx in eachindex(input.years))
+end
+
+"""
+    benders_cap_exemption(input, targets, rep_days_by_year) -> Dict{Int, Vector{Float64}}
+
+Each year's `re_cap_exemption` over its representative days, as the
+monolithic master computes it: the share of the existing renewables'
+energy a subproblem may curtail beyond the curtailment limit.
+"""
+function benders_cap_exemption(input::MasterProblemInput,
+                               targets::Dict{Tuple{Int,Int}, Float64},
+                               rep_days_by_year::Dict{Int, Vector{Int}})
     timesteps_per_day = 24 ÷ input.temporal_resolution_hours
-    rep_days_by_year = Dict{Int, Vector{Int}}()
-    for y_idx in eachindex(input.years)
-        timesteps_per_year = input.hours_per_year[y_idx] ÷ input.temporal_resolution_hours
-        rep_days_by_year[y_idx] = select_representative_days(
-            input.base_demand, y_idx, input.representative_days_per_year,
-            input.min_day_separation, timesteps_per_day, timesteps_per_year)
+    out = Dict{Int, Vector{Float64}}()
+    prev_floor = nothing
+    for y_idx in sort(collect(keys(rep_days_by_year)))
+        days = rep_days_by_year[y_idx]
+        isempty(days) && continue
+        periods = [(h, min(h + timesteps_per_day - 1, size(input.base_demand, 1)) - h + 1,
+                    rep_day_scaling(input)) for h in days]
+        out[y_idx], prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
     end
-    return rep_days_by_year
+    return out
 end
 
 """
@@ -648,7 +665,8 @@ function create_benders_subproblem(
     demand::Matrix{Float64},
     start_hour::Int,
     fixed_caps::FixedCapacities,
-    master_vars::MasterProblemVariables
+    master_vars::MasterProblemVariables;
+    re_cap_exempt::Vector{Float64} = Float64[]
 )::SubproblemData
     hours = size(demand, 1)
     n_gen = length(input.generators)
@@ -1039,8 +1057,13 @@ function create_benders_subproblem(
     if input.max_curtailment_ratio < 1.0 && !isempty(total_renewable.terms)
         curt_excess = @variable(sp_model, lower_bound = 0, upper_bound = 0,
             base_name = "curt_excess_y$(year_idx)_d$(day_idx)")
+        # What the RE growth cap makes the day curtail is exempt, as in the
+        # monolithic master (add_re_cap_curtailment!)
+        cap_curt = add_re_cap_curtailment!(sp_model, input, re_cap_exempt, year_idx,
+                                           start_hour, hours, "y$(year_idx)_d$(day_idx)")
         curt_cref = @constraint(sp_model,
-            total_curtailment <= input.max_curtailment_ratio * total_renewable + curt_excess,
+            total_curtailment <= input.max_curtailment_ratio * total_renewable +
+                curt_excess + cap_curt,
             base_name = "max_curt_y$(year_idx)_d$(day_idx)")
         # Store for dual extraction — needed for Benders cut gradient
         constraint_store["max_curt"] = (curt_cref, tech_avail_sum)
@@ -1546,6 +1569,7 @@ function run_benders_decomposition(
     master_model, vars, targets, theta, inv_cost_expr =
         create_benders_master(input; rep_days_by_year)
     ypp = vars.years_per_inv_period
+    cap_exempt = benders_cap_exemption(input, targets, rep_days_by_year)
 
     # Master side of the copy variables: CO2 allocations per day, line ends,
     # RE shares per day
@@ -1568,7 +1592,8 @@ function run_benders_decomposition(
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
             end_hour >= start_hour || continue
             sp = create_benders_subproblem(input, y_idx, day_idx,
-                input.base_demand[start_hour:end_hour, :], start_hour, caps, vars)
+                input.base_demand[start_hour:end_hour, :], start_hour, caps, vars;
+                re_cap_exempt = get(cap_exempt, y_idx, Float64[]))
             status = solve_benders_day!(sp)
             if status === :failed || !has_duals(sp.model)
                 @warn "Benders: Subproblem (y=$(y_idx), d=$(day_idx)) failed after retry: " *

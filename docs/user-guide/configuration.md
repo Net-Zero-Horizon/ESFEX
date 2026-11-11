@@ -460,7 +460,7 @@ Penalties price constraint violations and soft limits. Keys are case-insensitive
       non_electric_demand_loss: 100.0   # $/unit non-electric fuel demand not served
 ```
 
-The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the master problem, monolithic or Benders; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
+The values shown are the defaults. `max_curtailment_ratio` is a hard limit per representative day in the master problem, monolithic or Benders, except for curtailing existing renewables above the yearly RE growth cap (`MAX_ANNUAL_INCREMENT`), which only pays `curtailment_cost`; operational dispatch does not enforce it and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
 `soc_violation` can also be set here. Any other key under `penalties` is reported as an unknown key when the configuration loads. Older files may contain `curtailment`, `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`, `transport_congestion`, `storage_violation` or `delay_retirement_per_mw`: these were removed because they priced nothing (curtailed RE is priced by `curtailment_cost`, the curtailment limit is hard, the fuel model has no congestion, storage-violation or coupling slacks, and no run schedules a delayed retirement), and can be deleted.
 

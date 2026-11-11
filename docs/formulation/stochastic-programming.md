@@ -239,7 +239,7 @@ For each scenario \(s\), a separate set of representative-day operational constr
 | Power balance (PB-1, DC-1) | Demand × `demand_growth`^(y−1) |
 | Operational cost | Fuel × `fuel_cost` × `fuel_price_growth`^(y−1); maintenance × `maintenance_cost` |
 | Annual RE target and minimum-increment floor (RE-2, RE-3a) | Hold in every scenario, over its own renewable energy and demand, with its own shortfall at `fre_penetration_loss` × `penalty_fre_penetration` |
-| RE growth cap (RE-3b) | Every scenario's actual share grows at most `max_annual_increment` over its own share the year before (year 1: the initial share); energy above it at `loss_of_load` × `penalty_loss_of_load`. `re_penetration_ratio` is the probability-weighted renewable energy over the weighted demand |
+| RE growth cap (RE-3b) | Every scenario's actual share grows at most `max_annual_increment` over its own share the year before (year 1: the initial share); existing renewables above it are curtailed at the scenario's curtailment cost, beyond the curtailment limit (RE-3c, on the scenario's own demand), and energy that cannot be curtailed costs `loss_of_load` × `penalty_loss_of_load`. `re_penetration_ratio` is the probability-weighted renewable energy over the weighted demand |
 
 Capacity adequacy (CAP-1) is built once, on the base-case demand. The cumulative capacity expressions (CUM-1 through CUM-4) link the common investment variables to each scenario's operation, so the same infrastructure serves all scenarios: a scenario whose demand outgrows the plan sheds load at VOLL, which the expected cost weighs against more investment.
 
