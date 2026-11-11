@@ -260,7 +260,7 @@ class MasterProblemAdapter:
 | `initial_re_penetration` | `float` | Starting RE penetration ratio (auto-calculated from existing RE capacity). |
 | `temporal_resolution_hours` | `int` | Hours per timestep for representative days (e.g., 24). |
 | `representative_days_per_year` | `int` | Number of representative days per year for operational validation. |
-| `rep_day_offsets` | `list[int] \| None` | First step (0-based, within a year) of each representative day, the same for every year; the runner passes the days it chose once for the run (`master_rep_day_offsets`). `None`: the Julia master chooses them from the horizon-mean demand. |
+| `rep_day_offsets` | `list[int] \| None` | First step (0-based, within a year) of each representative day, the same for every year; the runner passes the days it chose once for the run (`master_rep_day_offsets`). `None`: the Julia master chooses them from the horizon-mean demand and its renewable profiles (`master_rep_day_offsets`). |
 | `investment_resolution_hours` | `int` | Hours per investment period (8760 = one decision per year). |
 | `use_tsam` | `bool` | Use Time Series Aggregation Method (TSAM) clustering instead of peak-day selection. |
 | `tsam_period_start_hours` | `list[list[int]]` | Per-year start hours for TSAM periods (1-indexed); the runner passes the same days of the year for every year. |
@@ -288,7 +288,7 @@ class MasterProblemAdapter:
 def build_model(self, use_representative_days: bool = True) -> None
 ```
 
-Build the JuMP capacity expansion model. If `use_representative_days` is True, includes operational validation constraints using representative days (peak demand days or TSAM clusters). With `solver_method="benders"` it only prepares the Julia input; the models are built during `solve()`. With `use_tsam` or investment-target custom constraints, which Benders does not model, it logs a warning, sets `solver_method` to `"monolithic"` and builds the monolithic master.
+Build the JuMP capacity expansion model. If `use_representative_days` is True, includes operational validation constraints using representative days (or TSAM clusters). With `solver_method="benders"` it only prepares the Julia input; the models are built during `solve()`. With `use_tsam` or investment-target custom constraints, which Benders does not model, it logs a warning, sets `solver_method` to `"monolithic"` and builds the monolithic master.
 
 ### solve
 
@@ -570,10 +570,22 @@ Wraps the primary energy model (`primary_energy.jl`). Optimizes fuel supply chai
 
 ```python
 def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
-                           min_separation: int, resolution_hours: int = 1) -> list[int]
+                           min_separation: int, resolution_hours: int = 1,
+                           profiles: list[np.ndarray] | None = None) -> list[int]
 ```
 
-The representative days of a development run, chosen once: the first step (0-based, within a year) of each day, for every planning year. Calls the Julia `representative_day_offsets` on `demand` (steps × nodes, `num_years` yearly blocks): the peak-day selection runs on the horizon-mean demand. The runner logs their dates and passes them to every master as `rep_day_offsets`.
+The representative days of a development run, chosen once: the first step (0-based, within a year) of each day, for every planning year. Calls the Julia `representative_day_offsets` on `demand` (steps × nodes, `num_years` yearly blocks) and `profiles` (1-D renewable availability series at the same resolution, one or several years): the peak day of the horizon-mean demand, then one day per segment of the year such that the days' mean demand and mean of each profile match the annual means. The runner passes the distinct availability profiles of the renewable generators and candidate technologies, logs the dates and the ratios (`master_rep_day_ratios`), and passes the days to every master as `rep_day_offsets`.
+
+### master_rep_day_ratios
+
+```python
+def master_rep_day_ratios(demand: np.ndarray, num_years: int, offsets: list[int],
+                          resolution_hours: int = 1,
+                          profiles: list[np.ndarray] | None = None,
+                          weights: list[float] | None = None) -> list[float]
+```
+
+Mean on the representative days (or TSAM periods, weighted by `weights`) starting at `offsets`, over the annual mean, for the horizon-mean demand and then each of `profiles` (Julia `representative_day_ratios`). 1.0 means the master's year has the real year's energy; NaN for a series that is zero all year.
 
 ### _compute_geographic_fuel_adjustments
 
