@@ -1953,6 +1953,23 @@ class OutageWindow(BaseModel):
         return self
 
 
+def re_increment_conflict(min_inc: float, max_inc: float) -> Optional[str]:
+    """Why ``min_annual_increment`` > ``max_annual_increment`` is a config
+    error, or None when it is not one (a maximum ≥ 1 switches the cap off).
+
+    The master's RE floor then rises faster than the actual share may grow,
+    so the floor is missed every year and its shortfall paid; the run is
+    not infeasible.
+    """
+    if max_inc >= 1.0 or min_inc <= max_inc:
+        return None
+    return (f"min_annual_increment ({min_inc:g}) is greater than "
+            f"max_annual_increment ({max_inc:g}): the RE floor rises faster "
+            "than the renewable share may grow, so the floor is missed every "
+            "year and its shortfall is paid. Set min_annual_increment ≤ "
+            "max_annual_increment.")
+
+
 class SystemConfig(BaseModel):
     """Complete configuration for a single power system."""
 
@@ -2208,6 +2225,15 @@ class SystemConfig(BaseModel):
             self.name, sorted(rescaled),
             ", ".join(f"{rescaled[n]:g}" for n in sorted(rescaled)),
         )
+        return self
+
+    @model_validator(mode='after')
+    def _warn_re_increments(self) -> 'SystemConfig':
+        """Warn when the RE minimum increment exceeds the maximum one."""
+        msg = re_increment_conflict(self.min_annual_increment, self.max_annual_increment)
+        if msg:
+            import logging
+            logging.getLogger(__name__).warning("System %r: %s", self.name, msg)
         return self
 
     @model_validator(mode='after')

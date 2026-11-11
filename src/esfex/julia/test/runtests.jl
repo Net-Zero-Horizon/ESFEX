@@ -3914,6 +3914,49 @@ import Ipopt
             end
         end
 
+        @testset "Benders master stopped at a limit" begin
+            # A master that stops at a limit with a feasible plan is used;
+            # its objective is no lower bound. It used to end the iterations.
+            MOI = ESFEX.MOI
+            m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+            ESFEX.set_silent(m)
+            ESFEX.set_attribute(m, "mip_max_improving_sols", 1)
+            ESFEX.set_attribute(m, "presolve", "off")
+            n = 30
+            w = [mod(7i, 13) + 3 for i in 1:n]
+            v = [mod(11i, 17) + 2 for i in 1:n]
+            x = ESFEX.@variable(m, [1:n], Bin)
+            ESFEX.@constraint(m, sum(w[i] * x[i] for i in 1:n) <= 60)
+            ESFEX.@objective(m, Min, -sum(v[i] * x[i] for i in 1:n))
+            optimize!(m)
+            @test termination_status(m) == MOI.SOLUTION_LIMIT
+            @test ESFEX.limit_with_feasible_point(m)
+            bound = ESFEX.objective_bound(m)
+            @test bound <= objective_value(m)
+            # The MIP bound, or the previous lower bound when it is higher
+            @test ESFEX.limited_master_lower_bound(m, Float64[]) ≈ bound
+            @test ESFEX.limited_master_lower_bound(m, [bound + 1.0]) ≈ bound + 1.0
+
+            # An LP stopped by the simplex iteration limit: no feasible
+            # primal point, but a feasible dual one bounds the optimum
+            lp = ESFEX.Model(create_optimizer(solver_name = "highs"))
+            ESFEX.set_silent(lp)
+            ESFEX.set_attribute(lp, "simplex_iteration_limit", 1)
+            ESFEX.set_attribute(lp, "presolve", "off")
+            y = ESFEX.@variable(lp, [1:n], lower_bound = 0)
+            ESFEX.@constraint(lp, [i in 1:n], y[i] >= i)
+            ESFEX.@constraint(lp, sum(y) >= 1000)
+            ESFEX.@objective(lp, Min, sum(i * y[i] for i in 1:n))
+            optimize!(lp)
+            @test termination_status(lp) == MOI.ITERATION_LIMIT
+            @test !ESFEX.limit_with_feasible_point(lp)
+            if ESFEX.dual_status(lp) == MOI.FEASIBLE_POINT
+                @test ESFEX.limited_master_lower_bound(lp, [-1.0e9]) ≈
+                      ESFEX.dual_objective_value(lp)
+            end
+            @test ESFEX.limited_master_lower_bound(lp, [1.0e12]) == 1.0e12
+        end
+
         @testset "Benders reaches the monolithic optimum" begin
             # The Benders subproblems used to miss converters (no power, no
             # build), the CO2 budget, the line flow cost, LP start-ups and the
@@ -4265,11 +4308,16 @@ import Ipopt
             # Reporting: overnight cost in the build year, the annuity paid
             @test res.total_investment_by_year ≈ [0.0, 0.0, 50.0 * 0.004] atol = 1e-9
             @test res.annuity_cost_by_year ≈ [0.0, 0.0, 50.0 * 0.004 * crf(25)] atol = 1e-9
+            # The stream behind it: (build year, life, annuity per year)
+            @test length(res.annuity_streams) == 1
+            @test res.annuity_streams[1][1:2] == (3, 25.0)
+            @test res.annuity_streams[1][3] ≈ 50.0 * 0.004 * crf(25) rtol = 1e-9
             br = run_benders_decomposition(late; max_iterations = 40, tolerance = 1e-7,
                                            verbose_benders = false)
             @test br.objective ≈ objective_value(m) rtol = 1e-6
             @test br.solution.tech_investment[3][1][1] ≈ 50.0 rtol = 1e-4
             @test br.solution.annuity_cost_by_year ≈ res.annuity_cost_by_year rtol = 1e-4
+            @test br.solution.annuity_streams[1][3] ≈ res.annuity_streams[1][3] rtol = 1e-4
 
             # --- Annual RE target, shortfall priced per MWh ---
             # Two representative days, the first with 12 h of sun, the

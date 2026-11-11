@@ -136,7 +136,7 @@ Solve the optimization model. Returns a PuLP-compatible status code:
 
 | Return Value | Meaning |
 |-------------|---------|
-| `1` | Optimal solution found |
+| `1` | Optimal solution found, or a feasible solution held when the solver stopped at a limit (time, nodes, iterations…; logged as a WARNING with the gap) |
 | `0` | Not solved |
 | `-1` | Infeasible |
 | `-2` | Unbounded |
@@ -295,7 +295,7 @@ Build the JuMP capacity expansion model. If `use_representative_days` is True, i
 def solve(self) -> int
 ```
 
-Optimize the master problem (or run Benders decomposition). Returns PuLP-compatible status code.
+Optimize the master problem (or run Benders decomposition). Returns PuLP-compatible status code: 1 when optimal, and also when the solver stopped at a limit (time, iterations…) holding a feasible plan, which is used with a WARNING giving the objective, the solver's bound and the gap; 0 for a limit without a feasible plan (the error suggests raising `solver.time_limit` or barrier without crossover), -1 infeasible, -2 unbounded. Benders uses a master iteration stopped at a limit with a feasible plan in the same way (Julia `run_benders_decomposition`).
 
 With the system's `npv_retirement` on, it then runs the NPV-based retirement ([Capacity Expansion §9](../formulation/capacity-expansion.md#9-npv-based-iterative-retirement)): it computes each existing unit's NPV in the plan (Julia `unit_npvs`), retires the units below `npv_retirement_threshold` (Julia `retire_units`), rebuilds the model with `build_model` and solves again, for at most `npv_retirement_max_iterations` rounds, in every solver mode. A re-solve that is not optimal (or raises) undoes its round: the last optimal model and its retirements are restored, a warning names the round's units and the solver status, and `solve()` returns 1 for that plan. The retired units are listed in `npv_retirements` (dicts with `kind`, `key`, `name`, `bus`, `node`, `npv` in $ and `iteration`), and stay retired in later builds of this adapter.
 
@@ -314,7 +314,7 @@ Extract investment and retirement decisions keyed by year. Returns a dictionary 
 - Retirement decisions
 - Total NPV cost
 
-The top-level keys include `status`, `objective`, `solve_time`, `solution` (per-year dicts of `tech_investment_power_{t}_{n}`, `bat_tech_investment_power_{bt}_{n}`, `bat_tech_investment_capacity_{bt}_{n}` and `transfer_investment_{i}_{j}` values), `tech_investment`, `bat_tech_power_investment`, `bat_tech_capacity_investment`, `cumulative_*` capacities, `total_investment_by_year` (overnight cost of each year's builds, what the budget limits), `annuity_cost_by_year` (investment annuities paid each year, what the objective charges), `total_operational_by_year` and `re_penetration_by_year` (achieved RE share).
+The top-level keys include `status`, `objective`, `solve_time`, `solution` (per-year dicts of `tech_investment_power_{t}_{n}`, `bat_tech_investment_power_{bt}_{n}`, `bat_tech_investment_capacity_{bt}_{n}` and `transfer_investment_{i}_{j}` values), `tech_investment`, `bat_tech_power_investment`, `bat_tech_capacity_investment`, `cumulative_*` capacities, `total_investment_by_year` (overnight cost of each year's builds, what the budget limits), `annuity_cost_by_year` (investment annuities paid each year, what the objective charges), `annuity_streams` (the streams behind them: `(build year index, life, annuity $ per year)`, 1-based build years; the myopic runner adds earlier years' streams to each year's reported cost), `total_operational_by_year` and `re_penetration_by_year` (achieved RE share).
 
 The `{n}`, `{i}`, `{j}` indices and the per-bus arrays refer to the system's own buses (one per node in the merged multi-node master). When network reduction is enabled the master solves on the reduced network, and its results are laid out on the original buses before they are returned: eliminated buses hold no capacity.
 
