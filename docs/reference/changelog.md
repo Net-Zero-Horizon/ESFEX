@@ -1194,9 +1194,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   sample changed from year to year and the share the existing renewables
   gave swung with no capacity change (the Cuba myopic run: 49 → 59 → 54 →
   67 %), pushing some years over the RE growth cap. The days are now chosen
-  once, by the same peak-demand rule (peak day, then the highest-peak day of
-  each segment, `min_day_separation` apart), on the horizon-mean demand, the
-  mean over the planning years of each hour of the year. Every year models
+  once, on the horizon means, the mean over the planning years of each hour
+  of the year (how they are chosen: see the next entry). Every year models
   the same calendar days with its own demand and its own block of
   multi-year profiles; day weights are unchanged. This holds in the
   perfect-foresight, stochastic, MGA and Benders masters and in every
@@ -1209,6 +1208,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   also clustered once, on the horizon-mean demand and renewable
   availability, and every year (every myopic annual master) uses the same
   periods and weights.
+
+- **The default representative days match the year's demand and renewable
+  energy.** The master's days were the peak-demand day plus the
+  highest-peak day of each segment of the year, chosen from the demand
+  alone. Every day stands for 365 / `representative_days` days, so where hot
+  days are also sunny and windy the master saw a year with far more demand,
+  sun and wind than the real one. In the Cuba case with 5 days it saw 6 %
+  more demand, 14 % more sun and 45 % more wind. It reported 95 % RE in 2040
+  where the hourly dispatch of the same plan gave 65 %, and retired thermal
+  plants the real year needed (up to 815 GWh/yr of load shed in the
+  dispatch). The peak-demand day is still always selected and the year is
+  still split into `representative_days` segments with one day each,
+  `min_day_separation` apart. The other days are now chosen so that, for the
+  system demand and for each distinct availability profile of the renewable
+  generators and the renewable candidate technologies, the mean over the
+  days matches the annual mean (horizon means, as before; least squares of
+  the relative errors). Cuba with 5 days: demand × 1.002, PV × 1.000, wind
+  × 1.007, hydro × 1.002. The days stay the same for every planning year,
+  day weights are unchanged, and the monolithic, stochastic, MGA, Benders
+  and myopic masters all use them. The log now lists, for the demand and
+  each renewable profile, the mean on the days over the annual mean
+  ("Representative days mean / annual mean: demand 1.002, …"), and warns
+  when one is off by more than 10 % (with few days a strongly seasonal
+  profile cannot be matched: Cuba's sugar-mill biomass, zero for 8 months,
+  is on 2 of the 5 days, × 1.22). A master built in Julia without
+  `rep_day_offsets` chooses its days the same way from its renewable
+  generators' and technologies' availability. New Julia functions
+  `select_matching_days`, `representative_day_ratios` (and
+  `representative_day_offsets` takes `profiles`); new bridge function
+  `master_rep_day_ratios` (and `master_rep_day_offsets` takes `profiles`).
+  `select_representative_days` (the old peak-based rule) is kept but no
+  longer used by default.
+
+- **TSAM also clusters the candidate technologies' availability.** With
+  `use_tsam: true` the periods were clustered on the demand and the
+  existing renewable generators' availability only. The renewable candidate
+  technologies' profiles, which are what the master builds, are now
+  included, and units that share a profile count it once. The log lists the
+  weighted mean of each profile on the periods over its annual mean.
 
 ### Fixed
 
@@ -2656,6 +2694,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   myopic masters; the VOLL slack remains only for renewable output that
   cannot be curtailed (a reservoir's minimum release, say). The dispatch
   has no growth cap and is unchanged.
+
+- **Benders decomposition converges on large cases.** On the Cuba
+  development case the lower bound stayed at the investment cost while the
+  upper bound was hundreds of times larger (25 years: gap 99.89 % after four
+  iterations of 24–36 minutes; θ was 0 in every iteration). Three causes,
+  all fixed; the optimum is unchanged:
+  - Each representative day was its own subproblem, and the master shared
+    each year's RE target, growth cap and CO2 budget out among the days, a
+    deviation either way priced at the value of lost load. The master moved
+    those shares from day to day at no cost of its own and every cut was met
+    with θ = 0. Benders now solves one LP per year with all its
+    representative days and the year's CO2 budget, RE target and growth cap
+    inside it, as in the monolithic master, and adds one cut per year. With
+    a growth cap the master keeps each year's actual RE share, which the
+    next year's cap is measured from; the year must reach it (a shortfall
+    costs the value of lost load), so the cap is never looser than the
+    monolithic one.
+  - θ had no lower bound but 0, so the master moved capacity that cost it
+    nothing (a battery it had already paid for) to wherever the latest cut
+    promised the most, one iteration after another. Each year's θ is now at
+    least the cost of a copper-plate relaxation of that year built into the
+    master (pooled units, one store per system, load shed at the value of
+    lost load, the year's RE target and growth cap); the cuts only add what
+    it leaves out, mainly the network.
+  - At a bus with no battery the subproblem's duals could value battery
+    power alone at the value of lost load in every hour. The subproblems now
+    see a sliver (10⁻⁴ MW) of each battery technology wherever one can be
+    built, so their duals price power and energy as a battery can use them.
+
+  Cuba reduced to three years: gap 98.72 % after eight iterations before,
+  0.86 % after 25 now (lower bound 829 → 6260 M$, upper bound 65 332 →
+  6 315 M$).
+- **Benders subproblems use the configured solver.** They always ran on
+  single-threaded HiGHS, also when `solver.name` was Gurobi (12–17 s per Cuba
+  day). They now use the configured solver with its threads and options
+  (HiGHS still single-threaded): a three-year Cuba iteration takes about
+  40 s with Gurobi. Failing subproblem LPs written with
+  `ESFEX_BENDERS_DEBUG_LP=1` are now named `benders_sp_failed_y<y>_iter<i>.lp`.
+- **Representative days stand for the year over the days actually
+  selected.** When fewer days could be selected than
+  `representative_days` asks (a `min_day_separation` that leaves no more, or
+  under a year of data), each day still stood for 1/`representative_days`
+  of the year, so every cost and energy of the master (monolithic,
+  stochastic, myopic, Benders) was underweighted: three days asked 200 days
+  apart gave two, and the year's operating cost was a third short. Each day
+  now stands for the year's days over the days selected, and the log warns
+  when fewer than asked could be selected.
 
 ## [0.3.0] — 2026-08-27
 
