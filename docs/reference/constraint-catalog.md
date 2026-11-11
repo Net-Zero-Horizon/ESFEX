@@ -59,14 +59,14 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 | `charge <= MaxChargePower * outage_factor * availability` | BAT-1a | Maximum charge rate (degraded rating + investment) |
 | `discharge <= MaxDischargePower * outage_factor * availability` | BAT-1b | Maximum discharge rate |
 | `soc[t+1] = soc[t]*(1-self_discharge) + (eta_c*charge - discharge/eta_d - spillage)*Δt` | BAT-2 | SOC dynamics |
-| `soc >= soc_min * capacity` | BAT-4a | Minimum SOC |
+| `soc >= soc_min * capacity` | BAT-4a | Minimum SOC; after steps where the battery cannot charge (outage, zero availability) the floor is what full charging can hold against self-discharge |
 | `soc <= soc_max * capacity + soc_violation` | BAT-4b | Soft maximum SOC |
 | `bat_soc_initial_{bi}_{b}` | BAT-3 | Initial SOC (config, or the previous window's energy in MWh) |
-| `bat_soc_end_lower_{bi}_{b}` | BAT-5a | End-of-horizon SOC lower bound (only with `cyclic_end_soc = true`, the Julia default; the Python runner turns it off) |
+| `bat_soc_end_lower_{bi}_{b}` | BAT-5a | End-of-horizon SOC lower bound (only with `cyclic_end_soc = true`, the Julia default; the Python runner turns it off), at most the SOC that charging at every step can reach |
 | `bat_soc_end_upper_{bi}_{b}` | BAT-5b | End-of-horizon SOC upper bound (same) |
 | `bat_soc_end_floor_{bi}_{b}` | BAT-5c | Soft floor at the year-start SOC on the year's last window; shortfall `bat_soc_end_short_{bi}_{b}` priced at 10 % of VOLL per time step |
 | `charge <= M_bat*cs`, `discharge <= M_bat*(1-cs)` | BAT-6 | Relaxed charge/discharge exclusivity, `M_bat = 2·max(P_ch, P_dis)`, `cs ∈ [0,1]` |
-| `bat_min_cycling_{bi}_{b}` | BAT-7 | Minimum cycling requirement over period |
+| `bat_min_cycling_{bi}_{b}` | BAT-7 | Minimum cycling requirement over period, capped at what the battery can charge in the window (none when it cannot charge); shortfall `bat_min_cycling_short_{bi}_{b}` priced at 10 % of VOLL per MWh |
 | `spillage <= MaxDischargePower` | BAT-8 | Spillage power limit (batteries with `spillage = true`) |
 | `±(charge[t] - charge[t-1]) <= ramp × Δt × MaxChargePower`, likewise discharge | BAT-9 | Ramp limits (`ramp_up` rising, `ramp_down` falling; none when 0 or ramp × Δt ≥ 1); at t = 1 from the previous window, `bat_charge_bi{bi}_b{b}_ramp_{up,down}_seam`, `bat_discharge_bi{bi}_b{b}_ramp_{up,down}_seam` |
 | `bat_soc_link_{bi}_{b}` | BAT-M1 | Master/TSAM: end SOC equals the next inter-period boundary |

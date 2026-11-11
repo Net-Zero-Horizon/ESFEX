@@ -475,6 +475,8 @@ p^{\text{dis}}_{b,n,t} \leq \bar{P}^{\text{dis}}_{b,n} \, o_{b,t} \quad \forall 
 
 where \(\bar{P}^{\text{ch}}_{b,n}\) and \(\bar{P}^{\text{dis}}_{b,n}\) are the maximum charge and discharge power ratings in service (degraded, 0 past the lifetime, DEG-2) and \(o_{b,t} \in [0,1]\) is the scheduled-interruption factor (1 outside outage windows) times the battery's availability profile `Availability` (1 without one).
 
+A battery with energy capacity but neither charge nor discharge power at a node cannot move energy: its capacity counts as 0 there, so it stores nothing and none of the SOC conditions below apply to it.
+
 #### BAT-2: SOC Dynamics
 
 \[
@@ -500,14 +502,19 @@ where \(E^{0}_{b,n} = \max(\text{soc\_initial}_{b,n}, \underline{E}_b) \times \b
 #### BAT-4: SOC Bounds (Soft Upper)
 
 \[
-E_{b,n,t+1} \geq \underline{E}_b \cdot \bar{E}^{\text{eff}}_{b,n} \quad \forall b, n, t \tag{BAT-4a}
+E_{b,n,t+1} \geq F_{b,n,t+1} \quad \forall b, n, t \tag{BAT-4a}
 \]
 
 \[
 E_{b,n,t+1} \leq \overline{E}_b \cdot \bar{E}^{\text{eff}}_{b,n} + \sigma_{b,n,t} \quad \forall b, n, t \tag{BAT-4b}
 \]
 
-where \(\underline{E}_b\) and \(\overline{E}_b\) are the minimum and maximum SOC fractions (`soc_min[n]`, `soc_max[n]`), and \(\bar{E}^{\text{eff}}_{b,n}\) is the effective capacity (including investment). The slack variable \(\sigma_{b,n,t}\) allows soft violation of the upper bound, penalized heavily in the objective (\(C^{\text{SOC}}\)).
+where \(\underline{E}_b\) and \(\overline{E}_b\) are the minimum and maximum SOC fractions (`soc_min[n]`, `soc_max[n]`), and \(\bar{E}^{\text{eff}}_{b,n}\) is the effective capacity (including investment). The floor is \(F_{b,n,t} = \underline{E}_b \bar{E}^{\text{eff}}_{b,n}\) as long as the battery can charge at least its self-discharge. In steps where it cannot (an outage, zero availability), self-discharge takes it below that floor, and the floor is what charging at full power can hold:
+
+\[
+F_{b,n,1} = \underline{E}_b \bar{E}^{\text{eff}}_{b,n}, \qquad
+F_{b,n,t+1} = \min\left( \underline{E}_b \bar{E}^{\text{eff}}_{b,n},\; (1 - \rho_b) F_{b,n,t} + \eta^{\text{ch}}_b \bar{P}^{\text{ch}}_{b,n} o_{b,t} \Delta t \right)
+\] The slack variable \(\sigma_{b,n,t}\) allows soft violation of the upper bound, penalized heavily in the objective (\(C^{\text{SOC}}\)).
 
 **Configuration parameters:**
 
@@ -547,6 +554,8 @@ where \(M_{\text{bat}} = 2 \max(\bar{P}^{\text{ch}}_{b,n}, \bar{P}^{\text{dis}}_
 \]
 
 where \(\gamma^{\text{cycle}}\) is the `min_cycling_ratio` and \(T^{\text{cycle}}_{\text{period}}\) is `min_cycling_period_days`. Ensures batteries are actively utilized.
+
+The requirement never makes a window infeasible. It is capped at what the battery can charge in the window, \(\sum_t \bar{P}^{\text{ch}}_{b,n} o_{b,t}\) (no requirement for a battery out of service the whole window), and a shortfall the battery cannot avoid (ramp limits, …) enters the left-hand side as a slack \(s^{\text{cyc}}_{b,n} \geq 0\) priced at \(0.1 \cdot C^{\text{LOL}}\) per MWh (\(0.1 \cdot C^{\text{LOL}} \Delta t\) per MW of charge per step): far above the cost of charging, so the battery cycles whenever it can, but below load shedding.
 
 #### BAT-8: Spillage Power Limit
 
