@@ -495,7 +495,7 @@ class YearResults:
     n1_security_cost: float = 0.0                           # Incremental cost of N-1 security ($)
     # System-level scalars
     emissions: float = 0.0
-    re_penetration: float = 0.0
+    re_penetration: float = 0.0   # RE share: renewable over total generation, energy-weighted
     load_shed: float = 0.0
     total_generation: float = 0.0
     total_demand: float = 0.0
@@ -524,6 +524,16 @@ def re_target_trajectory(initial: float, target: float, num_years: int,
             tau = path[-1] + max_inc
         path.append(min(tau, 1.0))
     return path
+
+
+def re_share(renewable_generation: float, total_generation: float) -> float:
+    """The RE share: renewable over total generation (0 without
+    generation), energy-weighted over whatever the two sums cover (a window,
+    a year, several years). Renewable means a unit of type "Renewable"
+    (Julia ``is_renewable_unit``); battery discharge is neither. 100 % means
+    no fossil generation."""
+    total = float(total_generation)
+    return float(renewable_generation) / total if total > 0 else 0.0
 
 
 def myopic_re_anchor(initial: float, min_inc: float, y_idx: int) -> float:
@@ -2038,6 +2048,11 @@ class Orchestrator:
             (getattr(gen, 'fuel', None) or '') or ''
             for _, gen in self.primary_system.generators.items()
         ]
+        # Renewable by the model's rule (type "Renewable"), stamped on each
+        # generation dataset as ``attrs["is_renewable"]`` for the RE share
+        self._gen_renewable = [
+            gen.type == "Renewable" for gen in self.primary_system.generators.values()
+        ]
         # Committed in unit commitment (not a variable renewable everywhere):
         # only these get gen_status / gen_startup datasets
         self._gen_committed = [
@@ -3140,9 +3155,13 @@ class Orchestrator:
         counts ``rated × availability``, with the profile read like the
         dispatch reads it: year ``year_idx``'s block (horizon hour, wrapping
         around a shorter profile), and 1.0 in every hour for a unit without a
-        profile (the dispatch runs such a unit at full capacity).
+        profile (the dispatch runs such a unit at full capacity), × its
+        scheduled outages in that year (``outage_schedule``, as the dispatch
+        folds them in).
         """
+        from esfex.bridge.converters import unit_outage_factors
         cache = getattr(self, '_availability_cache', None) or {}
+        sched = getattr(self.primary_system, "outage_schedule", None) or []
         re_available = np.zeros((hours, num_nodes))
         for avail_key, rated in units:
             rated = np.asarray(rated, dtype=float)[:num_nodes]
@@ -3150,16 +3169,25 @@ class Orchestrator:
                 continue
             availability = cache.get(avail_key)
             if availability is None or len(availability) == 0:
-                re_available[:, :len(rated)] += np.maximum(rated, 0.0)
-                continue
-            block = _profile_year_block(np.asarray(availability, dtype=float), year_idx, hours)
+                block = np.ones(hours)
+            else:
+                block = _profile_year_block(np.asarray(availability, dtype=float),
+                                            year_idx, hours)
+            outages = unit_outage_factors(sched, "generator", [avail_key],
+                                          year_idx * HOURS_STD_YEAR, hours)
             for n in range(len(rated)):
                 if rated[n] <= 0:
                     continue
                 if block.ndim == 1:
-                    re_available[:, n] += rated[n] * block
+                    a = block
                 elif n < block.shape[1]:
-                    re_available[:, n] += rated[n] * block[:, n]
+                    a = block[:, n]
+                else:
+                    continue
+                for key in ((1, 0), (1, n + 1)):
+                    if key in outages:
+                        a = a * outages[key][:len(a)]
+                re_available[:, n] += rated[n] * a
         return re_available
 
     def _existing_renewables(self, num_nodes: int):
@@ -3177,11 +3205,14 @@ class Orchestrator:
     ) -> float:
         """Calculate initial RE penetration using per-timestep dispatch estimate.
 
-        For each timestep, the usable RE is ``min(RE_available, demand)``
-        because excess RE above demand is curtailed.  This gives a realistic
-        estimate that accounts for the temporal mismatch between renewable
-        availability and load profiles. A renewable unit without an
-        availability profile counts at full capacity, as in the dispatch.
+        The RE share is renewable over total generation (:func:`re_share`).
+        Before any solve, generation is taken to meet the demand each
+        timestep: the renewable part is ``min(RE_available, demand)`` (excess
+        RE above demand is curtailed) and fossil units make up the rest, so
+        the share is Σ usable RE / Σ demand. This accounts for the temporal
+        mismatch between renewable availability and load profiles. A
+        renewable unit without an availability profile counts at full
+        capacity, and scheduled outages apply, as in the dispatch.
 
         Args:
             first_year_demand: Demand array for first year (hours × nodes)
@@ -3274,8 +3305,9 @@ class Orchestrator:
         """Calculate initial RE penetration per system using dispatch estimate.
 
         For each system and timestep, usable RE = ``min(RE_available, demand)``
-        to account for temporal mismatch.  Consistent with the energy-based
-        RE constraints in the master problem.
+        to account for temporal mismatch, over the demand: the system's RE
+        share (renewable over total generation) with generation meeting the
+        demand, as ``_calculate_initial_re_penetration``.
 
         Args:
             first_year_demand: Demand array for first year (hours × nodes)
@@ -5772,7 +5804,7 @@ class Orchestrator:
         total_solve_time = 0.0
         total_load_shed = 0.0
         total_curtailment = 0.0
-        total_re_penetration = 0.0
+        total_re_generation = 0.0
         total_emissions = 0.0
         total_generation = 0.0
         total_demand_val = 0.0
@@ -5987,7 +6019,10 @@ class Orchestrator:
             # cost breakdown already cover only its committed steps
             # (_solve_window extracts them with keep_hours).
             total_solve_time += window_result.get("solve_time", 0.0)
-            total_re_penetration += window_result.get("re_penetration", 0.0)
+            # The window's renewable generation: its RE share × its
+            # generation, both over the committed steps
+            total_re_generation += (window_result.get("re_penetration", 0.0)
+                                    * window_result.get("total_generation", 0.0))
             window_hours_total = end_hour - start_hour
             kept_fraction = keep_hours / window_hours_total if window_hours_total > 0 else 1.0
             total_objective += window_result.get("objective", 0.0)
@@ -6145,8 +6180,9 @@ class Orchestrator:
         pe_merged = (_merge_pe_windows(all_pe_results, self._pe_period_steps())
                      if all_pe_results else None)
 
-        # Average RE penetration
-        avg_re = total_re_penetration / num_solved if num_solved > 0 else 0.0
+        # The year's RE share, energy-weighted: renewable over total
+        # generation of the committed steps (not a mean of the windows')
+        avg_re = re_share(total_re_generation, total_generation)
 
         # Aggregate bus-level results back to node-level whenever the bus
         # network is not the identity mapping over nodes (see
@@ -7444,6 +7480,7 @@ class Orchestrator:
         # the dashboard can bucket by fuel without parsing plant names.
         gen_names: list[str] = []
         gen_fuels: list[str] = []
+        gen_renewable: list[bool] = []
         gen_in_service: list = []
         # Units per node (clustered unit commitment): what gen_status counts
         gen_units: list = []
@@ -7453,6 +7490,7 @@ class Orchestrator:
         for key, gen in sys.generators.items():
             gen_names.append(gen.name if hasattr(gen, 'name') else key)
             gen_fuels.append(str(getattr(gen, 'fuel', '') or ''))
+            gen_renewable.append(gen.type == "Renewable")
             gen_committed.append(is_committed_unit(
                 gen.type, gen.fuel, getattr(gen, 'reservoir_capacity', None)))
             gen_in_service.append(existing(key, gen, "rated_power", True))
@@ -7476,6 +7514,7 @@ class Orchestrator:
             # Investment gens carry their technology's fuel in vdata
             # (populated when they were synthesised from a tech).
             gen_fuels.append(str(vdata.get("fuel", "") or ""))
+            gen_renewable.append(vdata.get("type") == "Renewable")
             gen_committed.append(is_committed_unit(
                 vdata.get("type", ""), vdata.get("fuel", ""),
                 vdata.get("reservoir_capacity")))
@@ -7512,6 +7551,7 @@ class Orchestrator:
         # order and length are kept, so the fuel list stays index-aligned.
         self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
+        self._gen_renewable = gen_renewable
         self._gen_committed = gen_committed
         self._gen_in_service_mw = gen_in_service
         self._gen_num_units = gen_units
@@ -8284,6 +8324,7 @@ class Orchestrator:
                 # missing (shouldn't happen, but the export should never
                 # crash on stale state).
                 gen_fuels = getattr(self, '_gen_fuels', []) or []
+                gen_renewable = getattr(self, '_gen_renewable', []) or []
                 gen_in_service = getattr(self, '_gen_in_service_mw', None) or []
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_output.shape[0]:
@@ -8300,6 +8341,10 @@ class Orchestrator:
                         # HDF5 happy when the source data didn't supply
                         # one (e.g. legacy configs).
                         ds.attrs["fuel"] = gen_fuels[g] if g < len(gen_fuels) else ""
+                        # The RE share's rule (type "Renewable"), so readers
+                        # need not guess it from the fuel or the name
+                        if g < len(gen_renewable):
+                            ds.attrs["is_renewable"] = bool(gen_renewable[g])
                         _stamp_power_in_service(ds, gen_in_service, g)
 
             # --- Generator status (unit commitment: units online) ---

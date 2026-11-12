@@ -135,7 +135,7 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | `threshold` | (num_years,) | int | Always 0 |
 | `feasible` | (num_years,) | int | 1 if feasible, 0 if not |
 | `total_cost` | (num_years,) | float | Total annual cost ($) |
-| `renewable_penetration` | (num_years,) | float | RE penetration (0-1) |
+| `renewable_penetration` | (num_years,) | float | RE share (0-1): renewable over total generation of the year, energy-weighted; battery discharge is neither |
 | `co2_emissions` | (num_years,) | float | Annual CO2 (tonnes) |
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
 
@@ -231,7 +231,7 @@ Node axes are at node level: when the operational network has buses that differ 
 | `threshold` | int | Always 0 |
 | `feasible` | bool | Feasibility flag |
 | `total_cost` | float | Total annual cost ($) |
-| `renewable_penetration` | float | Final RE penetration |
+| `renewable_penetration` | float | The year's RE share: renewable over total generation, energy-weighted over the dispatch windows (committed steps) |
 | `co2_emissions` | float | Annual CO2 emissions (tonnes) |
 | `solve_time` | float | Total solve time (seconds) |
 | `total_generation` | float | Total energy generated (MWh) |
@@ -258,7 +258,7 @@ The node index `n` (and `i`, `j`) is always a node: when the master solves on bu
 
 Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery; in electrolyzer groups, another electrolyzer) gets a ` (1)`, ` (2)`, ... suffix: two units named `Gas` are written as `Gas` and `Gas (1)`. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...). Readers that look up a unit's configuration by name (financial analysis, results charts) strip the suffix.
 
-Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `shape`, `units` and `rated_power`: the unit's MW in service in the year, per node, the capacity the dispatch charges fixed O&M on. For an existing unit this is its rated power after the master's retirements and life extension (development runs), or, without a master, its rated power degraded with age and 0 past its `life_time`; for a unit the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)), its built capacity in service. `battery_discharge/{name}` carries the battery's discharge power in service the same way (not degraded; 0 past its `life_time` unless the master keeps it). The results dashboard, the results charts (installed capacity, reserve margin) and the financial analysis read it; for files written before this version, where only the units the master built carry it, they use the configured `rated_power` (`MaxDischargePower`) of the other units.
+Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `is_renewable` (the unit is of type `Renewable`, what the RE share counts as renewable), `shape`, `units` and `rated_power`: the unit's MW in service in the year, per node, the capacity the dispatch charges fixed O&M on. For an existing unit this is its rated power after the master's retirements and life extension (development runs), or, without a master, its rated power degraded with age and 0 past its `life_time`; for a unit the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)), its built capacity in service. `battery_discharge/{name}` carries the battery's discharge power in service the same way (not degraded; 0 past its `life_time` unless the master keeps it). The results dashboard, the results charts (installed capacity, reserve margin) and the financial analysis read it; for files written before this version, where only the units the master built carry it, they use the configured `rated_power` (`MaxDischargePower`) of the other units.
 
 ### Generation Data
 

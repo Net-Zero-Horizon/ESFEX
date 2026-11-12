@@ -2572,11 +2572,12 @@ end
 
 Add renewable energy penetration target constraint — CUMULATIVE SYSTEM-WIDE.
 
-  total_RE + FRE_loss >= target * total_demand
+  total_RE + FRE_loss >= target * total_generation
 
-RE penetration is measured against total demand (not generation). Battery
-discharge does NOT count toward RE: batteries may charge from fossil
-sources, so crediting discharge would let storage game the target.
+The RE share is renewable generation over total generation
+(`is_renewable_unit`, as every RE share of the model): at a 100 % target no
+fossil unit runs. Battery discharge is neither: batteries may charge from
+fossil sources, so crediting discharge would let storage game the target.
 FRE_loss is a penalised slack so the target can never make the LP
 infeasible.
 """
@@ -2592,14 +2593,15 @@ function add_renewable_constraint!(model, vars::PowerSystemVariables, input)
     hours = input.temporal.hours
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
 
-    # Total RE generation (cumulative, system-wide) — sparse iteration
+    # Total RE and total generation (cumulative, system-wide) — sparse iteration
     total_re = AffExpr(0.0)
+    total_gen = AffExpr(0.0)
     for g in 1:n_gen
         gen = input.generators[g]
-        if gen.type == "Renewable"
-            for b in vars.buses_of_gen[g], t in 1:hours
-                add_to_expression!(total_re, tres, vars.gen_output[g, b, t])
-            end
+        renewable = is_renewable_unit(gen)
+        for b in vars.buses_of_gen[g], t in 1:hours
+            add_to_expression!(total_gen, tres, vars.gen_output[g, b, t])
+            renewable && add_to_expression!(total_re, tres, vars.gen_output[g, b, t])
         end
     end
 
@@ -2613,12 +2615,8 @@ function add_renewable_constraint!(model, vars::PowerSystemVariables, input)
         add_to_expression!(total_fre_loss, tres, vars.fre_penetration_loss[n, t])
     end
 
-    # Total demand (energy)
-    total_demand_val = sum(input.demand[t, n] * tres
-                          for t in 1:hours, n in 1:size(input.demand, 2))
-
     @constraint(model,
-        total_re + total_fre_loss >= input.re_penetration_target * total_demand_val,
+        total_re + total_fre_loss >= input.re_penetration_target * total_gen,
         base_name = "re_penetration_target")
 end
 
@@ -4007,10 +4005,10 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         total_losses *= tres_tot
     end
 
-    # Renewable energy penetration (unit-free ratio)
+    # RE share: renewable over total generation (is_renewable_unit)
     re_gen = 0.0
     for g in 1:n_gen
-        if input.generators[g].type == "Renewable"
+        if is_renewable_unit(input.generators[g])
             re_gen += sum(@view gen_out[g, :, kept]) * tres_tot
         end
     end
