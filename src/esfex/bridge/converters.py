@@ -1941,6 +1941,10 @@ def convert_power_system_result(jl_result: Any) -> dict:
             pf_by_line.append(julia_to_py_array(line_pf))
         result["power_flow_by_line"] = pf_by_line
 
+    # Line losses [bus x hour] (MW): half of each line's loss at each end
+    if jl_result.line_losses is not None:
+        result["line_losses"] = julia_to_py_array(jl_result.line_losses)
+
     # Battery spillage [bat x node x hour]
     if jl_result.bat_spillage is not None:
         result["bat_spillage"] = julia_to_py_array(jl_result.bat_spillage)

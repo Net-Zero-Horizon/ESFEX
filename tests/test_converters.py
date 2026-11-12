@@ -568,6 +568,7 @@ class TestConvertPowerSystemResult:
 
         # Cost breakdown
         r.cost_breakdown = None
+        r.line_losses = None
 
         mock_pf = MagicMock()
         mock_pf.items.return_value = [
@@ -703,6 +704,13 @@ class TestConvertPowerSystemResult:
         r.transfer_margin = mock_tm
         result = convert_power_system_result(r)
         assert (0, 1) in result["transfer_margin"]
+
+    def test_line_losses(self):
+        r = self._make_mock_result()
+        assert "line_losses" not in convert_power_system_result(r)
+        r.line_losses = np.array([[1.5, 2.0], [1.5, 2.0]])   # [bus x hour]
+        result = convert_power_system_result(r)
+        np.testing.assert_allclose(result["line_losses"], [[1.5, 2.0], [1.5, 2.0]])
 
     def test_all_mandatory_keys_present(self):
         r = self._make_mock_result()
