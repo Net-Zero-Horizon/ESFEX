@@ -1101,6 +1101,45 @@ def compile_outage_factor(
     return factor
 
 
+def unit_outage_factors(
+    outage_schedule,
+    element_type: str,
+    unit_keys: list,
+    start_hour: int,
+    hours: int,
+    resolution_hours: int = 1,
+    by_node: bool = True,
+) -> dict:
+    """Scheduled outages of a list of units as availability factors per step.
+
+    The master's form of the dispatch's outage masks (Julia
+    ``gen_outage_factors`` / ``bat_outage_factors``): ``{(unit, node):
+    factor}`` with ``unit`` the 1-based position of the window's
+    ``element_id`` in ``unit_keys``, ``node`` the 1-based node of a
+    node-specific window (0 for a window on the whole unit, and for every
+    window when ``by_node`` is False: battery outages apply to the whole
+    unit, as in the dispatch) and ``factor`` the :func:`compile_outage_factor`
+    of those windows over ``hours`` steps of ``resolution_hours`` from
+    horizon hour ``start_hour`` (recurring windows repeat every year).
+    Entries that stay 1 over the span are left out.
+    """
+    index = {k: i + 1 for i, k in enumerate(unit_keys)}
+    windows: dict = {}
+    for ow in outage_schedule or []:
+        if ow.element_type != element_type or ow.element_id not in index:
+            continue
+        node = getattr(ow, "node", None)
+        key = (index[ow.element_id],
+               int(node) + 1 if by_node and node is not None else 0)
+        windows.setdefault(key, []).append(outage_window_tuple(ow))
+    out = {}
+    for key, ws in windows.items():
+        factor = compile_outage_factor(ws, start_hour, hours, resolution_hours)
+        if np.any(factor < 1.0):
+            out[key] = factor
+    return out
+
+
 def fuel_source_outage_windows(outage_schedule, fuel_name: str) -> list:
     """Scheduled outage windows for a fuel source, as ``(start, end, avail, recurring)``.
 

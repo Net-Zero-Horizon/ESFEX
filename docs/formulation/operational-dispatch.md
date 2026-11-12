@@ -736,19 +736,19 @@ Implemented in `add_renewable_constraint!()`.
 #### RE-1: System-Wide Renewable Penetration Target
 
 \[
-\Delta t \sum_{g \in \mathcal{G}^{\text{RE}}, n, t} p_{g,n,t} + \Delta t \sum_{i,t} \phi_{i,t} \geq \tau^{\text{RE}} \cdot E^{\text{total}}_{\text{demand}} \tag{RE-1}
+\Delta t \sum_{g \in \mathcal{G}^{\text{RE}}, n, t} p_{g,n,t} + \Delta t \sum_{i,t} \phi_{i,t} \geq \tau^{\text{RE}} \cdot \Delta t \sum_{g \in \mathcal{G}, n, t} p_{g,n,t} \tag{RE-1}
 \]
 
 where:
 
 - \(\Delta t\) is the temporal resolution (hours)
 - \(\tau^{\text{RE}}\) is `re_penetration_target`; the constraint is added only when it is positive. `target_re_penetration` is a planning target: in a `development` run the dispatch of each year gets that year's value on the master's RE path (capped at what the installed capacity can deliver), while `economic_dispatch` and `unit_commitment` runs (no master) apply no RE-penetration constraint. The achieved RE penetration is reported in every mode.
-- \(E^{\text{total}}_{\text{demand}} = \sum_{t,i} D_{t,i} \cdot \Delta t\) is total energy demand in the window
+- the right side is \(\tau^{\text{RE}}\) times the window's total generation, every generator (\(\mathcal{G}\)) and the units the master built included: the RE share is renewable over total generation, as everywhere in ESFEX ([Master Problem § RE Penetration Trajectory](../user-guide/master-problem.md#re-penetration-trajectory)), so a 100 % target means no fossil generation. Earlier versions measured it against the window's demand.
 
-Battery discharge does not count: a battery may have been charged from fossil generation. The slack variable \(\phi_{i,t}\) is penalized by \(C^{\text{FRE}}\) in the objective, so the target never makes the problem infeasible.
+Battery discharge counts neither as renewable nor as generation: a battery may have been charged from fossil generation. The slack variable \(\phi_{i,t}\) is penalized by \(C^{\text{FRE}}\) in the objective, so the target never makes the problem infeasible.
 
-!!! note "RE penetration is measured against demand, not generation"
-    This is a policy constraint. The target \(\tau^{\text{RE}}\) represents the fraction of total demand that should be served by renewable generation.
+!!! note "RE penetration is measured against generation, not demand"
+    The target \(\tau^{\text{RE}}\) is the share of the generation that must be renewable. The reported `re_penetration` of a window is the same ratio, and a year's is energy-weighted: the renewable generation of its windows (committed steps) over their total generation, not the mean of the windows' shares.
 
 ---
 

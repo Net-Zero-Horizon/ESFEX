@@ -126,7 +126,7 @@ Where `N` = `num_nodes` and `T` = time steps in the year at `temporal_resolution
 | `threshold` | (num_years,) | Threshold iteration (usually 0) |
 | `feasible` | (num_years,) | 1 if feasible, 0 if not |
 | `total_cost` | (num_years,) | Total annual cost ($) |
-| `renewable_penetration` | (num_years,) | RE penetration (0-1) |
+| `renewable_penetration` | (num_years,) | RE share (0-1): renewable over total generation of the year, energy-weighted |
 | `co2_emissions` | (num_years,) | Annual CO₂ (tonnes) |
 | `loss_of_load` | (num_years,) | Total unserved energy (MWh) |
 | `n1_security_cost` | (num_years,) | N-1 security cost ($) |

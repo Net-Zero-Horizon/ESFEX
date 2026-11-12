@@ -22,7 +22,7 @@ Each interruption is one record, an *outage window*, that applies an **availabil
 - **Per element.** Each window targets exactly one element.
 - **Overlaps multiply.** Overlapping windows on the same element compound: two windows of 0.5 in the same hour give 0.25.
 - **Coarse time steps.** With `temporal.resolution_hours > 1`, a timestep that is only partly inside a window gets `(1 - f) + f × availability`, where `f` is the covered fraction.
-- **Operational dispatch only.** The master problem's representative days do not see the interruptions.
+- **Dispatch and master problem.** The dispatch applies every window. The master problem (perfect foresight, stochastic, MGA, Benders and each year of a myopic run) applies the generator and battery windows on the representative days or TSAM periods it models, with the same hours, recurrence, node and partial-step rules, and in the capacity-adequacy credit at the peak; so a plant out for months, or not yet commissioned, does not count in the plan for the energy it cannot deliver. The other element types (lines, converters, electrolyzers, fuel elements) are dispatch only, apart from the fuel-source window the master's fuel block sees (below).
 - **Persisted.** The schedule is saved with the project and travels inside `.esfexp` bundles.
 
 ---

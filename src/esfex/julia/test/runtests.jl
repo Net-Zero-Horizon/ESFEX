@@ -710,9 +710,10 @@ import Ipopt
                 model, mvars, _ = create_master_problem(inp; use_representative_days = true)
                 optimize!(model)
                 @test string(termination_status(model)) == "OPTIMAL"
+                # The share is renewable over total generation (here all gas)
                 rec = model.ext[:master_re]
                 return [(value(rec[(0, 1, y)][1]) + value(mvars.slack_re_target[(0, 1, y)])) /
-                        rec[(0, 1, y)][2] for y in eachindex(years)]
+                        value(rec[(0, 1, y)][2]) for y in eachindex(years)]
             end
             # One-year master anchored above 100 %: the floor stays at 1
             @test credited([2028], 1.0748, 0.01, 0.10)[1] ≈ 1.0 atol = 1e-6
@@ -820,7 +821,7 @@ import Ipopt
             inp = g20()
             m, v, res = solve_g20(inp)
             @test res.re_penetration_by_year ≈ cap atol = 1e-6
-            @test [value(v.re_penetration_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
+            @test [value(v.re_energy_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
             @test all(value(x) < 1e-6 for x in values(m.ext[:re_cap_slack]))
             # The cap is measured from the previous year's actual share: no
             # sun in 2025 (share 0) lets 2026 reach 10 %, not 25 %
@@ -852,10 +853,10 @@ import Ipopt
             optimize!(sm)
             @test string(termination_status(sm)) == "OPTIMAL"
             for k in 1:2, y in 1:3
-                e, d = sm.ext[:master_re][(k, 1, y)]
-                @test value(e) / d <= cap[y] + 1e-6
+                e, g, _ = sm.ext[:master_re][(k, 1, y)]
+                @test value(e) / value(g) <= cap[y] + 1e-6
             end
-            @test [value(sv.re_penetration_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
+            @test [value(sv.re_energy_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
             # A myopic year measures the step from the share the year before
             # achieved (re_share_anchor), not from the initial share
             minp = g20(years = [2027], base_demand = fill(50.0, 8760, 1),
@@ -908,7 +909,7 @@ import Ipopt
             ESFEX.set_silent(xsm)
             optimize!(xsm)
             @test string(termination_status(xsm)) == "OPTIMAL"
-            @test [value(xsv.re_penetration_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
+            @test [value(xsv.re_energy_ratio[(1, y)]) for y in 1:3] ≈ cap atol = 1e-6
             @test all(value(x) < 1e-6 for x in values(xsm.ext[:re_cap_slack]))
             xmy = g20(years = [2027], base_demand = fill(50.0, 8760, 1),
                       re_share_anchor = [0.30],
@@ -974,15 +975,15 @@ import Ipopt
             # The monolithic master models those days: year 1's is a 50 MW
             # day, not its own 80 MW peak
             m, _, _ = create_master_problem(inp; use_representative_days = true)
-            @test m.ext[:master_re][(0, 1, 1)][2] ≈ 50.0 * 8760
-            @test m.ext[:master_re][(0, 1, 2)][2] ≈ 90.0 * 8760
+            @test m.ext[:master_re][(0, 1, 1)][3] ≈ 50.0 * 8760
+            @test m.ext[:master_re][(0, 1, 2)][3] ≈ 90.0 * 8760
             # A myopic year's one-year master takes the days chosen for the
             # horizon (rep_day_offsets), not its own year's peak (day 10)
             my = ESFEX.with_fields(inp; years = [2025], hours_per_year = [8760],
                                    base_demand = D[1:8760, :], rep_day_offsets = [d200])
             @test master_rep_days(my, 1) == [d200 + 1]
             mm, _, _ = create_master_problem(my; use_representative_days = true)
-            @test mm.ext[:master_re][(0, 1, 1)][2] ≈ 50.0 * 8760
+            @test mm.ext[:master_re][(0, 1, 1)][3] ≈ 50.0 * 8760
             @test representative_day_offsets(D, 1, 1, 1, 24, 8760) == [9 * 24]
             # Demand that does not reach a year gives it no days, as before
             @test master_rep_days(ESFEX.with_fields(inp; base_demand = D[1:8760, :]), 2) == Int[]
@@ -4325,6 +4326,149 @@ import Ipopt
             @test br.gap < 1e-6
             @test br.objective ≈ objective_value(mono) rtol = 1e-6
             @test br.solution.tech_investment[1][1][1] ≈ value(mvars.tech_investment[1][1][1]) rtol = 1e-6
+            @test all(br.lb_history .<= br.ub_history .* (1 + 1e-6))
+        end
+
+        @testset "RE share = renewable / total generation everywhere (R27)" begin
+            # The master, Benders and the dispatch target measured the RE
+            # share on demand (renewable energy used / demand): load not
+            # served counted against it, and storage losses let it pass
+            # 100 % while fossil units ran (Cuba 102–105 %). It is renewable
+            # over total generation now: 100 % only without fossil
+            # generation. 40 MW of PV against 100 MW of load; when shedding
+            # is cheaper than gas only the PV runs.
+            pv = mkgen("PV", "Renewable", "Sun", [40.0], [0.0], ones(H24, 1); nb = 1, H = H24)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4], ones(H24, 1);
+                        nb = 1, H = H24)
+            mk(voll) = MasterProblemInput(years = [2025], network = net1,
+                generators = [pv, gas], batteries = BatteryConfig[],
+                base_demand = fill(100.0, H24, 1), target_re_penetration = 0.8,
+                initial_re_penetration = 0.8, re_target_override = Dict((1, 1) => 0.8),
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = voll, fre_penetration_loss_penalty = 1.0e-3,
+                reserve_static_default_ratio = 0.0, max_curtailment_ratio = 1.0,
+                verbose = false)
+            for (voll, share, short) in ((1.0e-5, 1.0, 0.0), (10.0, 0.4, 40.0))
+                inp = mk(voll)
+                m, v = master1(inp)
+                res = extract_master_solution(m, v, inp)
+                @test res.re_penetration_by_year[1] ≈ share atol = 1e-6
+                @test res.re_penetration_by_system["global"][1] ≈ share atol = 1e-6
+                # Shortfall (MWh/year) against 80 % of the generation
+                @test value(v.slack_re_target[(0, 1, 1)]) ≈ short * 8760 rtol = 1e-6 atol = 1e-3
+                br = run_benders_decomposition(inp; max_iterations = 30, tolerance = 1e-7,
+                                               verbose_benders = false)
+                @test br.objective ≈ objective_value(m) rtol = 1e-6
+                @test br.solution.re_penetration_by_year[1] ≈ share atol = 1e-4
+                # The dispatch target alike (development mode)
+                dinp = PowerSystemInput(name = "re", year = 2025, network = net1,
+                    generators = [pv, gas], batteries = BatteryConfig[],
+                    demand = fill(100.0, H24, 1),
+                    temporal = TemporalConfig(H24, 1, H24, 0, H24, H24, 1, 1, 1),
+                    re_penetration_target = 0.8, loss_of_load_penalty = voll,
+                    fre_penetration_penalty = 1.0e-3,
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false)
+                dm, dv = create_power_system(dinp)
+                optimize!(dm)
+                @test string(termination_status(dm)) == "OPTIMAL"
+                @test extract_solution(dm, dv, dinp).re_penetration ≈ share atol = 1e-6
+                @test sum(value.(dv.fre_penetration_loss)) ≈ short * H24 atol = 1e-6
+            end
+            # The growth cap's allowance: a share times this year's
+            # generation, or last year's renewable generation scaled by the
+            # demand growth
+            @test ESFEX.re_cap_prev_allowance(0.3, 200.0, 100.0) ≈ 60.0
+            @test ESFEX.re_cap_prev_allowance((50.0, 80.0), 200.0, 100.0) ≈ 62.5
+        end
+
+        @testset "master: scheduled outages on the representative days (R27)" begin
+            # Cuba 2025: pv_2025 (729 MW) is out until each park is
+            # commissioned (full-year potential 1.18 TWh, 0.58 TWh with the
+            # outages) and ps_suheyla from hour 5112. The dispatch folds the
+            # outage_schedule into availability; the master ignored it, so
+            # it counted 1.18 TWh (RE 15.0 % against the dispatch's 12.1 %).
+            H = 8760
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-5], ones(H, 1);
+                        nb = 1, H = H)
+            oil = mkgen("Oil", "Non-renewable", "Oil", [100.0], [1.0e-4], ones(H, 1);
+                        nb = 1, H = H)
+            pv = mkgen("PV", "Renewable", "Sun", [30.0], [0.0], ones(H, 1); nb = 1, H = H)
+            half = ones(H); half[1:24] .= 0.5          # the whole unit at 50 %
+            dark = ones(H); dark[1:12] .= 0.0          # at its node (1), first 12 h
+            inp = MasterProblemInput(years = [2025], network = net1,
+                generators = [gas, oil, pv], batteries = BatteryConfig[mkbat()],
+                base_demand = fill(100.0, H, 1), target_re_penetration = 0.0,
+                initial_re_penetration = 0.0, representative_days_per_year = 1,
+                min_day_separation = 1, rep_day_offsets = [0],
+                reserve_static_default_ratio = 0.0, verbose = false,
+                gen_outage_factors = Dict((1, 0) => half, (3, 1) => dark),
+                bat_outage_factors = Dict((1, 0) => fill(0.25, H)))
+            m, _ = master1(inp)
+            out(g) = [sum(value(v) for v in all_variables(m)
+                          if startswith(name(v), "op_y1_d1_gen[$(g),1,$(t)]")) for t in 1:24]
+            @test all(out(1) .<= 50.0 + 1e-6)
+            @test sum(out(1)) ≈ 24 * 50.0 rtol = 1e-6
+            @test out(3) ≈ vcat(zeros(12), fill(30.0, 12)) atol = 1e-6
+            day = ESFEX.generators_for_day(inp, 1, 24)
+            @test day[1].availability[:, 1] ≈ fill(0.5, 24)
+            @test day[2].availability == ones(24, 1)
+            @test ESFEX.batteries_for_day(inp, 1, 24)[1].availability ≈ fill(0.25, 24, 1)
+            @test ESFEX.existing_vre_available(inp, 1, 1, 24) ≈ [12 * 30.0]
+            # Past the factors (or without any) a unit is fully available
+            @test ESFEX.master_outage_factor(inp.gen_outage_factors, 1, 1, H + 1) == 1.0
+            @test ESFEX.master_outage_factor(inp.gen_outage_factors, 3, 1, 5) == 0.0
+            @test ESFEX.master_outage_factor(inp.gen_outage_factors, 3, 2, 5) == 1.0
+            # The adequacy credit of a dispatchable unit at its peak steps
+            @test ESFEX.firm_capacity_credit(ones(10, 1), 1, 1:4; variable = false,
+                                             outage = t -> t <= 2 ? 0.0 : 1.0) ≈ 0.5
+            @test ESFEX.firm_capacity_credit(zeros(0, 1), 1, 1:4; variable = false,
+                                             outage = t -> 0.5) ≈ 0.5
+            # Benders: the same plan and cost
+            br = run_benders_decomposition(inp; max_iterations = 30, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(m) rtol = 1e-6
+        end
+
+        @testset "Benders: operating bound with linked systems (R27)" begin
+            # The bound balanced each system on its own: a system that
+            # imports in the subproblem had to shed in the bound, so θ's bound
+            # passed the year's cost (B26). Two one-bus systems on a 100 MW
+            # line: A has 50 MW of load and no unit, B 10 MW of load and a
+            # 100 MW gas unit.
+            buses2 = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                      BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 100.0, 0.1, 0.0, 0.0, 30.0, 220.0, 1,
+                                        50.0, "AC", 0.0)
+            net2 = NetworkConfig(2, 2, buses2, [1, 2], [0 10.0; 10.0 0], zeros(2, 2), 100.0,
+                0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0], [line], TransformerData[],
+                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [0.0, 100.0], [1.0e-4, 1.0e-4],
+                        ones(H24, 2); nb = 2, H = H24)
+            inp = MasterProblemInput(years = [2025], network = net2, generators = [gas],
+                batteries = BatteryConfig[],
+                base_demand = hcat(fill(50.0, H24), fill(10.0, H24)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                system_node_ranges = [SystemNodeRange("A", 1, 1, 0.0),
+                                      SystemNodeRange("B", 2, 1, 0.0)],
+                representative_days_per_year = 1, min_day_separation = 1,
+                transmission_loss_segments = 0, reserve_static_default_ratio = 0.0,
+                loss_of_load_penalty = 10.0, verbose = false)
+            @test ESFEX.benders_linked_systems(inp) == [1, 1]
+            alone = ESFEX.with_fields(inp; network = ESFEX.with_fields(net2;
+                transmission_lines = TransmissionLineData[]))
+            @test ESFEX.benders_linked_systems(alone) == [1, 2]
+            mono, _ = master1(inp)
+            bm, _, _, btheta, _ = ESFEX.create_benders_master(inp)
+            ESFEX.set_silent(bm)
+            optimize!(bm)
+            @test string(termination_status(bm)) == "OPTIMAL"
+            # A valid bound (it shed A's 50 MW at VOLL: 4.4e6 M$ a year)
+            @test objective_value(bm) <= objective_value(mono) * (1 + 1e-9)
+            # ... still the copper plate's: B's gas serves both loads
+            @test sum(value(t) for t in values(btheta)) ≈ 60 * 1.0e-4 * 8760 rtol = 1e-6
+            br = run_benders_decomposition(inp; max_iterations = 20, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(mono) rtol = 1e-6
             @test all(br.lb_history .<= br.ub_history .* (1 + 1e-6))
         end
 
