@@ -390,7 +390,7 @@ const LOSS_REPAIR_RETUNE_SHARE = 1e-3
 # Per solver: the parameter that makes a re-solve ignore the previous basis,
 # its value, and the LP method parameter with its simplex values (for which
 # the previous basis is the method's own warm start)
-const LP_WARM_START_PARAMS = Dict(
+const LP_WARM_START_PARAMS = Dict{String, Tuple{String, Any, String, Tuple}}(
     "Gurobi" => ("LPWarmStart", 0, "Method", (0, 1)),
     "CPLEX" => ("CPXPARAM_Advance", 0, "CPXPARAM_LPMethod", (1, 2, 3)),
 )
@@ -422,12 +422,15 @@ simplex, the previous basis is ignored for this solve (`lp_warm_start_off`)
 and the parameter is set back afterwards. Other solvers re-solve as they do.
 """
 function optimize_like_first!(model; kwargs...)
+    # Set on the backend: through JuMP the change would mark the solution
+    # just found as out of date (OPTIMIZE_NOT_CALLED)
+    param(name) = MOI.RawOptimizerAttribute(name)
     restore = nothing
     try
         off = lp_warm_start_off(solver_name(model), name -> get_attribute(model, name))
         if off !== nothing
             restore = off.first => get_attribute(model, off.first)
-            set_attribute(model, off.first, off.second)
+            MOI.set(backend(model), param(off.first), off.second)
         end
     catch
         restore = nothing   # a solver version without the parameter
@@ -435,7 +438,7 @@ function optimize_like_first!(model; kwargs...)
     try
         optimize!(model; ignore_optimize_hook = true, kwargs...)
     finally
-        restore === nothing || set_attribute(model, restore.first, restore.second)
+        restore === nothing || MOI.set(backend(model), param(restore.first), restore.second)
     end
     return
 end
