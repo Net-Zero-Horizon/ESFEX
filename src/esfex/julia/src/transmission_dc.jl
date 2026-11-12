@@ -325,6 +325,229 @@ function pair_flow(vars::PowerSystemVariables, i::Int, j::Int, t::Int)
     return e
 end
 
+# =============================================================================
+# Exact PWL losses: no line may lose more than the PWL loss of its net flow
+# =============================================================================
+#
+# The PWL loss of a line-step is `ploss = Σ_k m_k (dp_k + dn_k)` with the flow
+# `pf = Σ dp_k − Σ dn_k`. Nothing in an LP stops both directions carrying flow
+# at once, or a steep segment filling before a flat one, so whenever energy is
+# worth less than nothing somewhere (curtailment has a cost, a curtailment
+# limit or an RE target that counts renewable output binds) the solver loses
+# energy on the lines on purpose: up to twice the full-flow loss of every lossy
+# line, at no cost. Cuba, 2049: 9.3 TWh "lost" (23 % of supply) and no
+# curtailment. No LP can forbid it (the set {loss = f(|pf|)} is not convex),
+# so each solve is repaired instead (`optimize_exact_losses!`).
+
+"""
+    LossBlock
+
+One lossy line at one step, as `add_dc_constraints!` builds it: the loss
+constraint `ploss == Σ m_k (dp_k + dn_k)`, the flow and its segments, and the
+repair state (`dir` 0 = PWL; ±1 = linearised, flow held in that direction
+and `ploss = alpha × |pf|`; `retunes`, times `alpha` was updated).
+"""
+mutable struct LossBlock
+    con::ConstraintRef
+    ploss::VariableRef
+    pf::VariableRef
+    dp::Vector{VariableRef}
+    dn::Vector{VariableRef}
+    widths::Vector{Float64}
+    slopes::Vector{Float64}
+    open_last::Bool        # last segment unbounded (expandable line)
+    group::Int             # time step (of one add_dc_constraints! call)
+    dir::Int
+    alpha::Float64
+    retunes::Int           # times alpha followed the flow in this solve
+end
+
+"""
+    PWLLossRepair
+
+The lossy line-steps of a model (`model.ext[:pwl_loss_repair]`) and the
+number of time-step groups registered so far (one per step of each
+`add_dc_constraints!` call: a dispatch window, or one representative day of
+a master or Benders subproblem).
+"""
+mutable struct PWLLossRepair
+    blocks::Vector{LossBlock}
+    n_groups::Int
+end
+
+# A copy (copy_model) gets no registry: the hook then solves it as it stands
+JuMP.copy_extension_data(::PWLLossRepair, ::JuMP.AbstractModel, ::JuMP.AbstractModel) = nothing
+
+const LOSS_REPAIR_MAX_ROUNDS = 8
+const LOSS_REPAIR_TOL_MW = 1e-3      # over-loss (MW) ignored as solver noise
+const LOSS_REPAIR_SECANT_RTOL = 0.02 # linearised loss within 2 % of the PWL loss
+const LOSS_REPAIR_SECANT_TOL_MW = 0.1 # ... or within 0.1 MW
+const LOSS_REPAIR_MAX_RETUNES = 2    # then the line-step keeps its alpha
+
+"""
+    pwl_loss_repair!(model) -> PWLLossRepair
+
+The model's loss registry, created (with `optimize_exact_losses!` as its
+optimize hook) on first use.
+"""
+function pwl_loss_repair!(model)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    reg isa PWLLossRepair && return reg
+    reg = PWLLossRepair(LossBlock[], 0)
+    model.ext[:pwl_loss_repair] = reg
+    set_optimize_hook(model, optimize_exact_losses!)
+    return reg
+end
+
+"""
+    pwl_loss_value(blk::LossBlock, F) -> Float64
+
+PWL loss of a flow of magnitude `F` on the line: its segments filled in
+order (the open last segment of an expandable line takes the rest).
+"""
+function pwl_loss_value(blk::LossBlock, F::Real)
+    rem = max(F, 0.0)
+    loss = 0.0
+    N = length(blk.widths)
+    for k in 1:N
+        take = (k == N && blk.open_last) ? rem : min(rem, blk.widths[k])
+        loss += blk.slopes[k] * take
+        rem -= take
+        rem <= 0 && break
+    end
+    return loss
+end
+
+# Loss per MW of a linearised block at flow F: the PWL secant (first slope at 0)
+loss_secant(blk::LossBlock, F::Real) = F > 1e-6 ? pwl_loss_value(blk, F) / F : blk.slopes[1]
+
+function set_block_alpha!(blk::LossBlock, alpha::Float64)
+    for v in (blk.dir > 0 ? blk.dp : blk.dn)
+        set_normalized_coefficient(blk.con, v, -alpha)
+    end
+    blk.alpha = alpha
+end
+
+function linearise_block!(blk::LossBlock, dir::Int, alpha::Float64)
+    foreach(v -> set_upper_bound(v, 0.0), dir > 0 ? blk.dn : blk.dp)
+    blk.dir = dir
+    blk.retunes = 0
+    set_block_alpha!(blk, alpha)
+end
+
+function restore_block!(blk::LossBlock)
+    blk.dir == 0 && return
+    same, opp = blk.dir > 0 ? (blk.dp, blk.dn) : (blk.dn, blk.dp)
+    N = length(blk.widths)
+    for k in 1:N
+        set_normalized_coefficient(blk.con, same[k], -blk.slopes[k])
+        if k < N || !blk.open_last
+            set_upper_bound(opp[k], blk.widths[k])
+        else
+            delete_upper_bound(opp[k])
+        end
+    end
+    blk.dir = 0
+    blk.alpha = 0.0
+    blk.retunes = 0
+end
+
+restore_pwl_losses!(reg::PWLLossRepair) = foreach(restore_block!, reg.blocks)
+
+"""
+    optimize_exact_losses!(model; kwargs...)
+
+Optimize hook of every model with PWL line losses (set by
+`add_dc_constraints!`), so each `optimize!` returns losses that never exceed
+the PWL loss of the net flow on any line:
+
+1. Solve with the PWL loss model as built (exact wherever energy has a
+   positive value: the LP then fills segments in order, one direction).
+2. Each step where some line loses more than the PWL loss of its flow
+   `|pf|` is repaired on every lossy line of that step: the flow is held in
+   the direction it had and the loss becomes `alpha × |pf|`, with `alpha`
+   the PWL secant at that flow (a linear function of the flow, so nothing
+   can be lost beyond it). The model is solved again; `alpha` follows the
+   new flow until the loss is within 2 % (or 0.1 MW) of the PWL loss, at most
+   twice per line-step, and steps that now over-lose are repaired too (at
+   most $(LOSS_REPAIR_MAX_ROUNDS) rounds).
+
+The surplus that was lost on the lines is then curtailed (at its cost,
+within its limits), stored or not produced. Steps without over-loss keep the
+PWL model and its marginal losses. Every call starts again from the PWL
+model, so a model re-solved after a change (Benders, MGA, NPV retirement) is
+repaired for its new solution. If a repaired solve finds no solution (only
+discarding energy on the lines kept the model feasible), the PWL solve is
+kept with a warning. The model stays an LP (or the MIP it was).
+"""
+function optimize_exact_losses!(model; kwargs...)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    if !(reg isa PWLLossRepair) || isempty(reg.blocks)
+        return optimize!(model; ignore_optimize_hook = true, kwargs...)
+    end
+    restore_pwl_losses!(reg)
+    optimize!(model; ignore_optimize_hook = true, kwargs...)
+    repaired = Set{Int}()
+    for r in 1:LOSS_REPAIR_MAX_ROUNDS
+        has_values(model) || break
+        # Read the whole solution before touching the model
+        pf = [value(b.pf) for b in reg.blocks]
+        F = abs.(pf)
+        L = [value(b.ploss) for b in reg.blocks]
+        over_groups = Set{Int}()
+        retune = Int[]
+        over_mw = 0.0
+        for (i, b) in enumerate(reg.blocks)
+            exact = pwl_loss_value(b, F[i])
+            if b.dir == 0
+                excess = L[i] - exact
+                if excess > LOSS_REPAIR_TOL_MW + 1e-5 * F[i]
+                    push!(over_groups, b.group)
+                    over_mw += excess
+                end
+            elseif b.retunes < LOSS_REPAIR_MAX_RETUNES &&
+                   abs(L[i] - exact) > max(LOSS_REPAIR_SECANT_TOL_MW,
+                                           LOSS_REPAIR_SECANT_RTOL * exact)
+                # A flow that keeps moving with alpha (it sits where alpha
+                # decides it) keeps the alpha of its second update
+                push!(retune, i)
+            end
+        end
+        isempty(over_groups) && isempty(retune) && return
+        if r == LOSS_REPAIR_MAX_ROUNDS
+            isempty(over_groups) && return
+            @warn "Line losses: lines still lose $(round(over_mw; digits = 1)) MW·step " *
+                  "beyond the PWL loss of their flows after " *
+                  "$(LOSS_REPAIR_MAX_ROUNDS) repair rounds"
+            return
+        end
+        @debug "Line losses: repairing $(length(over_groups)) step(s) losing " *
+               "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss, updating " *
+               "$(length(retune)) linearised loss(es) (round $(r))"
+        for i in retune
+            set_block_alpha!(reg.blocks[i], loss_secant(reg.blocks[i], F[i]))
+            reg.blocks[i].retunes += 1
+        end
+        for (i, b) in enumerate(reg.blocks)
+            (b.dir == 0 && b.group in over_groups) || continue
+            # Held in the direction of its flow (+ at 0)
+            linearise_block!(b, pf[i] < 0 ? -1 : 1, loss_secant(b, F[i]))
+        end
+        union!(repaired, over_groups)
+        optimize!(model; ignore_optimize_hook = true, kwargs...)
+        if !has_values(model)
+            @warn "Line losses: the model has no solution once $(length(repaired)) " *
+                  "step(s) lose no more than the PWL loss of their flows " *
+                  "($(termination_status(model))); keeping the PWL solution, whose " *
+                  "lines lose energy beyond their flows' losses"
+            restore_pwl_losses!(reg)
+            optimize!(model; ignore_optimize_hook = true, kwargs...)
+            return
+        end
+    end
+    return
+end
+
 """
     add_dc_constraints!(model, transmission::TransmissionDC, vars, input)
 
@@ -414,6 +637,12 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     # Override: global slack is the reference for its component
     component_slack[slack_component] = slack
 
+    # Every lossy line-step is registered for the exact-loss repair
+    # (`optimize_exact_losses!`), each time step of this call as one group
+    loss_repair = has_pwl ? pwl_loss_repair!(model) : nothing
+    group0 = has_pwl ? loss_repair.n_groups : 0
+    has_pwl && (loss_repair.n_groups += hours)
+
     if component_count > 1
         # @debug not @warn: this function runs at every rolling-horizon
         # window setup. A multi-component network is a property of the
@@ -457,6 +686,9 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 loss_expr = AffExpr(0.0)
                 fpos_sum = AffExpr(0.0)
                 fneg_sum = AffExpr(0.0)
+                dps = Vector{VariableRef}(undef, N)
+                dns = Vector{VariableRef}(undef, N)
+                open_last = ℓ in expandable_lines
                 for k in 1:N
                     w = pwl.segment_widths[ℓ][k]
                     m = pwl.slopes[ℓ][k]
@@ -464,10 +696,12 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                         base_name="dp_$(ℓ)_$(k)_$(t)")
                     dn = @variable(model, lower_bound=0,
                         base_name="dn_$(ℓ)_$(k)_$(t)")
-                    if k < N || !(ℓ in expandable_lines)
+                    if k < N || !open_last
                         set_upper_bound(dp, w)
                         set_upper_bound(dn, w)
                     end
+                    dps[k] = dp
+                    dns[k] = dn
                     add_to_expression!(fpos_sum, dp)
                     add_to_expression!(fneg_sum, dn)
                     add_to_expression!(loss_expr, m, dp)
@@ -479,8 +713,11 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 # Store loss variable for KCL half-loss split
                 ploss = @variable(model, lower_bound=0,
                     base_name="ploss_$(ℓ)_$(t)")
-                @constraint(model, ploss == loss_expr)
+                loss_con = @constraint(model, ploss == loss_expr)
                 pwl_loss_by_line[ℓ][t] = ploss
+                push!(loss_repair.blocks, LossBlock(loss_con, ploss, pf_by_line[ℓ][t],
+                    dps, dns, pwl.segment_widths[ℓ], pwl.slopes[ℓ], open_last,
+                    group0 + t, 0, 0.0, 0))
             end
         end
 

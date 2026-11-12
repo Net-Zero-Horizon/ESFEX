@@ -1477,6 +1477,107 @@ import Ipopt
             @test ESFEX.with_loss_model(t, 0, 100.0).pwl_losses === nothing
         end
 
+        @testset "lines lose no more than the PWL loss of their flow" begin
+            # 130 MW of PV at bus 1, 100 MW of load at bus 2, curtailment at
+            # $20/MWh. The LP ran both flow directions (and the steep segments)
+            # at once to "lose" the surplus on the line for free: 30 MW of
+            # losses on a ~103 MW flow, no curtailment. Losses must be the PWL
+            # loss of the net flow and the surplus curtailed.
+            function sink_run(segments; pv = 130.0, H = 2)
+                N = 2
+                pvg = mkgen("PV", "Renewable", "Solar", [pv, 0.0], [0.0, 0.0],
+                            ones(H, N); nb = N, H = H)
+                gas = mkgen("Gas", "Non-renewable", "Gas", [0.0, 200.0],
+                            [3.0e-5, 3.0e-5], ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("L12", 1, 2, 200.0, 0.1, 0.05, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC")
+                net = NetworkConfig(N, N, buses, [1, 2],
+                                    [0.0 200.0; 200.0 0.0], [0.0 100.0; 100.0 0.0],
+                                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                    [line], TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                input = PowerSystemInput(
+                    name = "sink", year = 2025, network = net, generators = [pvg, gas],
+                    batteries = BatteryConfig[], demand = repeat([0.0 100.0], H),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = segments, curtailment_cost = 2e-5)
+                model, vars = create_power_system(input)
+                optimize!(model)
+                @test string(termination_status(model)) == "OPTIMAL"
+                res = extract_solution(model, vars, input)
+                pwl = ESFEX.with_loss_model(ESFEX.TransmissionDC(net), segments,
+                                            100.0).pwl_losses
+                for t in 1:H
+                    f = abs(value(vars.power_flow_by_line[1][t]))
+                    # PWL loss of |f|, segments filled in order
+                    rem, exact = f, 0.0
+                    for (w, m) in zip(pwl.segment_widths[1], pwl.slopes[1])
+                        exact += m * min(rem, w); rem = max(rem - w, 0.0)
+                    end
+                    @test value(vars.line_losses[1][t]) ≈ exact rtol = 0.02 atol = 1e-3
+                end
+                return res, model, vars
+            end
+            for segments in (3, 2, -1)
+                res, _, _ = sink_run(segments)
+                @test res.load_shed_total ≈ 0.0 atol = 1e-6
+                # ~103 MW sent for 100 MW served: losses ~3-6 MW per step,
+                # the rest of the 130 MW curtailed
+                @test res.total_generation < 2 * 107.0
+                @test res.total_curtailment > 2 * 23.0
+                @test res.total_generation + res.total_curtailment ≈ 2 * 130.0 atol = 1e-4
+            end
+            # Re-solving starts again from the PWL model, and repairs it again
+            res, model, vars = sink_run(3)
+            obj = objective_value(model)
+            optimize!(model)
+            @test objective_value(model) ≈ obj rtol = 1e-6
+            @test value(vars.line_losses[1][1]) < 6.0
+            # With no surplus energy has a value: the PWL model is exact as
+            # built and nothing is repaired (marginal losses kept)
+            res, model, vars = sink_run(3; pv = 90.0)
+            @test res.total_curtailment ≈ 0.0 atol = 1e-6
+            reg = model.ext[:pwl_loss_repair]
+            @test all(b -> b.dir == 0, reg.blocks)
+
+            # The master builds the same loss model on each representative
+            # day: there too a line loses only the PWL loss of its flow
+            H = 48
+            pvg = mkgen("PV", "Renewable", "Solar", [130.0, 0.0], [0.0, 0.0],
+                        ones(H, 2); nb = 2, H = H)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [0.0, 200.0], [3.0e-5, 3.0e-5],
+                        ones(H, 2); nb = 2, H = H)
+            buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                     BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+            line = TransmissionLineData("L12", 1, 2, 200.0, 0.1, 0.05, 0.0,
+                                        100.0, 220.0, 1, 50.0, "AC")
+            net = NetworkConfig(2, 2, buses, [1, 2],
+                                [0.0 200.0; 200.0 0.0], [0.0 100.0; 100.0 0.0],
+                                100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                [line], TransformerData[], ACDCConverterData[],
+                                FrequencyConverterData[], 0.1)
+            inp = MasterProblemInput(
+                years = [2025], network = net, generators = [pvg, gas],
+                batteries = BatteryConfig[], base_demand = repeat([0.0 100.0], H),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                max_curtailment_ratio = 1.0, curtailment_cost = 2e-5,
+                transmission_loss_segments = 2, verbose = false)
+            model, _, _ = create_master_problem(inp; use_representative_days = true)
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            reg = model.ext[:pwl_loss_repair]
+            @test length(reg.blocks) == 24
+            for b in reg.blocks
+                exact = ESFEX.pwl_loss_value(b, abs(value(b.pf)))
+                @test value(b.ploss) ≈ exact rtol = 0.02 atol = 1e-3
+                @test value(b.ploss) < 10.0     # it lost 40 MW (both directions full)
+            end
+        end
+
         @testset "line flow cost is charged on |flow|" begin
             # Inter-system links carry distance × cost_per_mw_km per MWh; the
             # dispatch charged nothing. A cheap unit at the far end serves the
