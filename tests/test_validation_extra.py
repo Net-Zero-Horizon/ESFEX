@@ -1656,3 +1656,140 @@ def test_reduce_to_node_mesh_is_mesh_not_star():
         deg[l.to_bus] += 1
     assert len(real) == 4                    # the 4 ring branches survive
     assert all(d == 2 for d in deg.values())  # every node degree 2 → mesh
+
+
+def test_parallel_resistance_is_loss_equivalent():
+    """Parallel lines with different R/X: the equivalent R gives the losses
+    of the lines at the DC flow split (f_i ∝ 1/x_i), not 1/R = Σ 1/R_i."""
+    l1 = _line("a", "x", "y", reactance_pu=0.1, resistance_pu=0.02)
+    l2 = _line("b", "x", "y", reactance_pu=0.2, resistance_pu=0.1)
+    eq = V._compute_parallel_impedance([l1, l2])
+    assert eq["reactance_pu"] == pytest.approx(0.2 / 3)
+    # 1 p.u. of flow splits 2/3 – 1/3
+    loss = 0.02 * (2 / 3) ** 2 + 0.1 * (1 / 3) ** 2
+    assert eq["resistance_pu"] == pytest.approx(loss)
+
+
+def test_line_impedance_pu_fills_missing_resistance_from_line_type():
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_rxb_per_km,
+    )
+    st = _state(buses={"a": _bus("a", voltage=110), "b": _bus("b", voltage=110)})
+    r_km, x_km, _ = estimate_line_rxb_per_km(110.0)
+    ln = _line("x", "a", "b", reactance_pu=0.2)              # no R, no voltage
+    assert V._line_impedance_pu(st, ln)[0] == pytest.approx(0.2 * r_km / x_km)
+
+
+def _two_node_state(lines, transformers=()):
+    # Node 0 and node 1 (~55.6 km apart) each hold a 220 kV and a 110 kV bus.
+    buses = {
+        "a220": _bus("a220", node=0, voltage=220, lat=21.0, lng=-80.0),
+        "a110": _bus("a110", node=0, voltage=110, lat=21.0, lng=-80.0),
+        "b220": _bus("b220", node=1, voltage=220, lat=21.5, lng=-80.0),
+        "b110": _bus("b110", node=1, voltage=110, lat=21.5, lng=-80.0),
+    }
+    return _state(nodes=[_node(0), _node(1)], buses=buses,
+                  transmission_lines=list(lines), transformers=list(transformers),
+                  generators={}, batteries={})
+
+
+def _equivalent(st):
+    real = [ln for ln in st.transmission_lines
+            if not getattr(ln, "decorative", False)]
+    assert len(real) == 1
+    return real[0]
+
+
+def test_reduce_to_node_mesh_parallel_lines_physically_consistent():
+    """A 220 kV double-circuit line and a 110 kV line (X but no R) between
+    two nodes: the equivalent branch has their parallel X, the R that loses
+    what the two lines lose at the DC flow split, every circuit and the
+    capacity of both. The 110 kV line's R was left out (R of the 220 kV line
+    alone) and the branch was labelled one circuit."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_capacity_mw,
+        estimate_line_pu_params,
+        estimate_line_rxb_per_km,
+    )
+    r2, x2, b2 = estimate_line_pu_params(220.0, 60.0)
+    _, x1, b1 = estimate_line_pu_params(110.0, 60.0)
+    r_km, x_km, _ = estimate_line_rxb_per_km(110.0)
+    r1 = x1 * r_km / x_km
+    cap2 = estimate_line_capacity_mw(220.0, 2)
+    cap1 = estimate_line_capacity_mw(110.0)
+    st = _two_node_state([
+        _line("hv", "a220", "b220", cap=cap2, voltage_kv=220.0, length_km=60.0,
+              num_circuits=2, reactance_pu=x2 / 2, resistance_pu=r2 / 2,
+              susceptance_pu=b2 * 2),
+        _line("lv", "a110", "b110", cap=cap1, voltage_kv=110.0, length_km=60.0,
+              reactance_pu=x1, susceptance_pu=b1),
+    ])
+    V.reduce_to_node_mesh(st)
+    eq = _equivalent(st)
+    x_eq = 1.0 / (2.0 / x2 + 1.0 / x1)
+    assert eq.reactance_pu == pytest.approx(x_eq)
+    assert eq.capacity_mw == pytest.approx(cap2 + cap1)
+    assert eq.susceptance_pu == pytest.approx(2 * b2 + b1)
+    assert eq.num_circuits == 3
+    assert eq.voltage_kv == 220.0
+    # Losses at full flow f, split by admittance, equal the equivalent's.
+    f = (cap2 + cap1) / 100.0
+    f_hv, f_lv = f * x_eq * 2.0 / x2, f * x_eq / x1
+    loss_lines = (r2 / 2) * f_hv ** 2 + r1 * f_lv ** 2
+    assert eq.resistance_pu * f ** 2 == pytest.approx(loss_lines)
+
+
+def test_reduce_to_node_mesh_branch_takes_voltage_of_its_lines():
+    """Nodes with a 220 kV bus joined only by a 110 kV line: the branch is a
+    110 kV branch (its p.u. values are on the 110 kV base), not 220 kV."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    r1, x1, _ = estimate_line_pu_params(110.0, 60.0)
+    st = _two_node_state([
+        _line("lv", "a110", "b110", cap=171.0, voltage_kv=110.0, length_km=60.0,
+              reactance_pu=x1, resistance_pu=r1),
+    ])
+    V.reduce_to_node_mesh(st)
+    eq = _equivalent(st)
+    assert eq.voltage_kv == 110.0
+    assert eq.reactance_pu * 110.0 ** 2 / 100.0 / 60.0 == pytest.approx(0.375)
+
+
+def test_reduce_to_node_mesh_transformer_branch_has_its_resistance():
+    """A transformer between two nodes enters the branch with the R of its
+    losses fraction (as the bridge derives it), not R = 0."""
+    tr = _tr("t", "a220", "b110", mva=200.0, imp=0.05)
+    tr.losses_fraction = 0.004
+    st = _two_node_state([], [tr])
+    V.reduce_to_node_mesh(st)
+    eq = _equivalent(st)
+    assert eq.resistance_pu == pytest.approx(0.004 * 0.05)
+    assert eq.reactance_pu == pytest.approx((0.05 ** 2 - (0.004 * 0.05) ** 2) ** 0.5)
+    assert eq.capacity_mw == pytest.approx(200.0)
+
+
+def test_reduce_to_node_mesh_line_without_length_spans_node_distance():
+    """A line with no reactance, no length and end buses without coordinates
+    beside one with a reactance: its capacity was summed but it was left out
+    of the impedance. It now spans the distance between the node buses."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    nodes = [_node(0), _node(1)]
+    nodes[0].centroid_lat, nodes[0].centroid_lng = 21.0, -80.0
+    nodes[1].centroid_lat, nodes[1].centroid_lng = 21.5, -80.0
+    _, x_own, _ = estimate_line_pu_params(220.0, 60.0)
+    st = _state(nodes=nodes,
+                buses={"a": _bus("a", node=0), "b": _bus("b", node=1)},
+                transmission_lines=[
+                    _line("own", "a", "b", cap=686.0, voltage_kv=220.0,
+                          reactance_pu=x_own),
+                    _line("bare", "a", "b", cap=686.0, voltage_kv=220.0)],
+                transformers=[], generators={}, batteries={})
+    V.reduce_to_node_mesh(st)
+    eq = _equivalent(st)
+    dist = V._haversine_km(21.0, -80.0, 21.5, -80.0)
+    _, x_bare, _ = estimate_line_pu_params(220.0, dist)
+    assert eq.capacity_mw == pytest.approx(1372.0)
+    assert eq.reactance_pu == pytest.approx(1.0 / (1.0 / x_own + 1.0 / x_bare))
