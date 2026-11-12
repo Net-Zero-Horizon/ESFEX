@@ -1338,7 +1338,13 @@ class ResultsPanel(QWidget):
         # and may skip indices, so ``range(num_generators)`` no longer
         # walks the right set.
         for gen_key in gen_group:
-            is_re = gen_group[gen_key].attrs.get("is_renewable", False)
+            attrs = gen_group[gen_key].attrs
+            # The RE share's rule: a unit of type "Renewable" (the stored
+            # config has no is_renewable flag of its own)
+            is_re = attrs.get("is_renewable", None)
+            if is_re is None:
+                gtype = attrs.get("type", "")
+                is_re = (gtype.decode() if isinstance(gtype, bytes) else str(gtype)) == "Renewable"
             if isinstance(is_re, (bytes, str)):
                 is_re = str(is_re).lower() in ("true", "1", "yes")
             flags.append(bool(is_re))

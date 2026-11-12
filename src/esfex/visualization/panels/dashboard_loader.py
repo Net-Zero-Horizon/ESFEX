@@ -88,6 +88,25 @@ def _collect_arrays_with_fuel(
     return []
 
 
+def _unit_is_renewable(grp, name: str, cfg=None) -> Optional[bool]:
+    """Whether the unit behind generation dataset ``grp[name]`` counts as
+    renewable in the RE share: the dataset's ``attrs["is_renewable"]`` (the
+    model's rule, a unit of type "Renewable", written by the export since
+    round 27), else the type in its config ``cfg``; None when neither says.
+    """
+    try:
+        flag = grp[name].attrs.get("is_renewable")
+    except Exception:
+        flag = None
+    if flag is not None:
+        if isinstance(flag, (bytes, str)):
+            return str(flag).lower() in ("true", "1", "yes")
+        return bool(flag)
+    if isinstance(cfg, dict) and cfg.get("type"):
+        return cfg.get("type") == "Renewable"
+    return None
+
+
 def _fmt_compact_usd(v: float) -> str:
     a = abs(v)
     if a >= 1e9:
@@ -459,11 +478,15 @@ class DashboardLoader:
         except Exception:
             _load_gen_data = None
         tech_series: dict[str, _np.ndarray] = {}
+        # Renewable generation per hour by the model's rule (None when a
+        # unit's rule is unknown: the KPI falls back to the mix labels)
+        re_hourly: Optional[_np.ndarray] = _np.zeros(n_hours or 0)
         if _load_gen_data is not None:
             # Each dataset finds its unit's config by name (h5py lists them
             # alphabetically; the master's builds take their technology's)
             unit_config = _gen_config_resolver(f, bp)
             gen_data = _load_gen_data(sc)
+            gen_grp = sc["generation"] if "generation" in sc else None
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
@@ -471,7 +494,14 @@ class DashboardLoader:
                 if n_hours and len(hourly) < n_hours:
                     hourly = _np.pad(hourly, (0, n_hours - len(hourly)))
                 hourly = hourly[:n_hours] if n_hours else hourly
-                tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
+                cfg = unit_config(gname, gi)
+                is_re = (_unit_is_renewable(gen_grp, gname, cfg)
+                         if gen_grp is not None else None)
+                if is_re is None or re_hourly is None or len(hourly) != len(re_hourly):
+                    re_hourly = None
+                elif is_re:
+                    re_hourly = re_hourly + hourly
+                tech = _tech_bucket_for_gen(cfg, gname)
                 if tech in tech_series:
                     tech_series[tech] = tech_series[tech] + hourly
                 else:
@@ -560,6 +590,7 @@ class DashboardLoader:
             "series_neg": series_neg,
             "demand_mw": [float(v) for v in demand],
             "tres": tres,
+            "re_mw": (None if re_hourly is None else [float(v) for v in re_hourly]),
         }
         return {"trajectory": trajectory, "mix": mix}
 
@@ -607,14 +638,20 @@ class DashboardLoader:
         dem_mwh = float(demand.sum() * tres)
         ens_pct = (ens_mwh / dem_mwh * 100.0) if dem_mwh > 0 else 0.0
 
-        # RE share (energy-weighted). Use the same RE label set as the
-        # planning mix.
+        # RE share (energy-weighted): renewable over total generation.
+        # Battery discharge and load shed are not generation; the units'
+        # own rule (type "Renewable") when the file has it, else the
+        # planning mix's labels.
         re_gen = total_gen = 0.0
         for s in series_pos:
+            if s.get("label") in self._NOT_GENERATION_LABELS:
+                continue
             v = _np.asarray(s.get("values", []), dtype=float).sum() * tres
             total_gen += v
             if s.get("label") in self._RENEWABLE_MIX_LABELS:
                 re_gen += v
+        if mix.get("re_mw") is not None:
+            re_gen = float(_np.sum(mix["re_mw"])) * tres
         re_share = (re_gen / total_gen) if total_gen > 0 else None
 
         # Battery cycles (equivalent full): Σ discharge MWh / capacity.
@@ -669,10 +706,38 @@ class DashboardLoader:
     # emit. "Other" intentionally excluded — keyword fallback assigns
     # any plant whose name doesn't match a known tech to "Other",
     # which is safer to classify as non-renewable than to assume.
+    # Only a fallback for files without the units' own rule (an export
+    # before round 27): the RE share counts a unit of type "Renewable"
+    # (``attrs["is_renewable"]`` on each generation dataset, the mix's
+    # ``re_gwh`` / ``re_mw``), so nuclear is not renewable.
     _RENEWABLE_MIX_LABELS = frozenset({
         "Wind", "Solar", "Hydro", "Biomass", "OTEC",
-        "Geothermal", "Nuclear", "Hydrogen",
+        "Geothermal", "Hydrogen",
     })
+    # Mix series that are not generation (left out of the RE share's total)
+    _NOT_GENERATION_LABELS = frozenset({
+        "Battery (discharge)", "Battery discharge", "Battery", "Load shed",
+    })
+
+    @classmethod
+    def _mix_year_re(cls, mix: dict, i: int) -> tuple[float, float]:
+        """``(renewable, total)`` generation of year ``i`` of a planning
+        ``mix``: the total of its series, and the renewable part by the
+        units' rule (``mix["re_gwh"]``) when the file has it, else by the
+        series labels (``_RENEWABLE_MIX_LABELS``)."""
+        ren = tot = 0.0
+        for s in mix.get("series") or []:
+            vals = s.get("values") or []
+            if i >= len(vals) or vals[i] is None:
+                continue
+            v = float(vals[i])
+            tot += v
+            if s.get("label") in cls._RENEWABLE_MIX_LABELS:
+                ren += v
+        re_gwh = mix.get("re_gwh") or []
+        if i < len(re_gwh) and re_gwh[i] is not None:
+            ren = float(re_gwh[i])
+        return ren, tot
 
     @classmethod
     def _patch_re_from_mix(cls, trajectory: Optional[dict],
@@ -693,24 +758,11 @@ class DashboardLoader:
         traj_years = trajectory.get("years") or []
         if not series or not mix_years or mix_years != traj_years:
             return
-        n = len(traj_years)
-        re_total = [0.0] * n
-        all_total = [0.0] * n
-        for s in series:
-            vals = s.get("values") or []
-            if len(vals) != n:
-                continue
-            is_re = s.get("label") in cls._RENEWABLE_MIX_LABELS
-            for i, v in enumerate(vals):
-                if v is None:
-                    continue
-                all_total[i] += float(v)
-                if is_re:
-                    re_total[i] += float(v)
-        trajectory["re_pct"] = [
-            (re_total[i] / all_total[i] * 100.0) if all_total[i] > 0 else None
-            for i in range(n)
-        ]
+        pct = []
+        for i in range(len(traj_years)):
+            ren, tot = cls._mix_year_re(mix, i)
+            pct.append(ren / tot * 100.0 if tot > 0 else None)
+        trajectory["re_pct"] = pct
 
     # ── HDF5 helpers ──────────────────────────────────────────────
 
@@ -791,6 +843,9 @@ class DashboardLoader:
         """
         fuel_map = self._fuel_map_for(f, system)
         per_tech: dict[str, list[float]] = {}
+        # Renewable GWh per year by the units' own rule; None for a year
+        # whose datasets do not carry it (older exports)
+        re_gwh: list[Optional[float]] = []
         for y in years_view:
             sc_key = f"year_{y}_threshold_0"
             try:
@@ -799,8 +854,11 @@ class DashboardLoader:
                 # Pad every existing tech with None for this year.
                 for series in per_tech.values():
                     series.append(0.0)
+                re_gwh.append(None)
                 continue
             year_totals: dict[str, float] = {}
+            year_re: Optional[float] = 0.0
+            gen_grp = yrg["generation"] if "generation" in yrg else None
             # Per-dataset ``attrs["fuel"]`` is the authoritative source
             # added by the export (2026-05+). When present, bucketing
             # is just ``fuel → tech label``; when absent (legacy h5),
@@ -814,6 +872,12 @@ class DashboardLoader:
                 # annual generation in MWh; convert to GWh.
                 total_gwh = float(np.nansum(arr)) / 1000.0
                 year_totals[tech] = year_totals.get(tech, 0.0) + total_gwh
+                is_re = (_unit_is_renewable(gen_grp, gen_name)
+                         if gen_grp is not None else None)
+                if is_re is None or year_re is None:
+                    year_re = None
+                elif is_re:
+                    year_re += total_gwh
             # Append per-tech, padding missing techs with 0 so all
             # series stay aligned in length.
             seen = set(year_totals.keys()) | set(per_tech.keys())
@@ -823,6 +887,7 @@ class DashboardLoader:
                 while len(per_tech[tech]) < years_view.index(y):
                     per_tech[tech].append(0.0)
                 per_tech[tech].append(year_totals.get(tech, 0.0))
+            re_gwh.append(year_re)
 
         # Sort series by mean magnitude descending so the largest
         # contributors land at the bottom of the stack (more readable).
@@ -840,6 +905,7 @@ class DashboardLoader:
         return {
             "years": list(years_view),
             "series": series,
+            "re_gwh": re_gwh,
         }
 
     # Cost-breakdown component → display label + sign convention.
@@ -1003,18 +1069,9 @@ class DashboardLoader:
         idx = [i for i, y in enumerate(myears) if y in years_view]
         if not idx:
             return None
-        series = mix.get("series", [])
         best: Optional[float] = None
         for i in idx:
-            ren = tot = 0.0
-            for s in series:
-                vals = s.get("values") or []
-                if i >= len(vals):
-                    continue
-                v = vals[i]
-                tot += v
-                if s.get("label") in self._RENEWABLE_MIX_LABELS:
-                    ren += v
+            ren, tot = self._mix_year_re(mix, i)
             if tot > 0:
                 share = ren / tot
                 if best is None or share > best:
@@ -1468,16 +1525,10 @@ class DashboardLoader:
         if not idx:
             return None
         ren = tot = 0.0
-        for s in mix.get("series", []):
-            vals = s.get("values") or []
-            is_re = s.get("label") in self._RENEWABLE_MIX_LABELS
-            for i in idx:
-                if i >= len(vals):
-                    continue
-                v = vals[i] or 0.0
-                tot += v
-                if is_re:
-                    ren += v
+        for i in idx:
+            r, t = self._mix_year_re(mix, i)
+            ren += r
+            tot += t
         return (ren / tot) if tot > 0 else None
 
     def _re_share_at_year(self, mix: Optional[dict],
@@ -1496,15 +1547,7 @@ class DashboardLoader:
             i = myears.index(year)
         except ValueError:
             return None
-        ren = tot = 0.0
-        for s in mix.get("series", []):
-            vals = s.get("values") or []
-            if i >= len(vals):
-                continue
-            v = vals[i] or 0.0
-            tot += v
-            if s.get("label") in self._RENEWABLE_MIX_LABELS:
-                ren += v
+        ren, tot = self._mix_year_re(mix, i)
         return (ren / tot) if tot > 0 else None
 
     # ── Year-detail payload (drill-down click on Trajectory) ─────

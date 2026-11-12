@@ -34,6 +34,7 @@ from esfex.bridge.converters import (
     build_outage_mask_by_id,
     build_outage_mask_matrix,
     compile_outage_factor,
+    unit_outage_factors,
     absolute_start_hour,
     battery_availability_key,
     battery_technology_availability_key,
@@ -3236,6 +3237,11 @@ class MasterProblemAdapter:
             jl, ESFEX, sys, gen_order, tech_order, num_nodes,
             b2n_arg, bus_to_node_0idx)
 
+        # Scheduled outages of the existing generators and batteries on the
+        # master's steps (horizon hours from profile_start_hour), as the
+        # dispatch folds them into availability
+        jl_gen_outages, jl_bat_outages = self._outage_factors(jl, sys, gen_order, bat_order)
+
         # Create input struct using keyword constructor
         jl_input = ESFEX.MasterProblemInput(
             years=jl_years,
@@ -3321,9 +3327,35 @@ class MasterProblemAdapter:
             co2_budget_groups=_master_co2_budget_groups(sys, ESFEX),
             unit_commitment=self._dispatch_commits_units(),
             primary_energy=jl_fuel,
+            gen_outage_factors=jl_gen_outages,
+            bat_outage_factors=jl_bat_outages,
         )
 
         return jl_input
+
+    def _outage_factors(self, jl, sys, gen_order, bat_order):
+        """The system's ``outage_schedule`` windows of its generators (per
+        node) and batteries (whole unit) as Julia ``gen_outage_factors`` and
+        ``bat_outage_factors``: an availability factor per master step over
+        the planned years, from horizon hour ``profile_start_hour``
+        (:func:`unit_outage_factors`, the dispatch's
+        :func:`compile_outage_factor`)."""
+        res = max(1, int(self.temporal_resolution_hours))
+        steps = len(self.years) * (HOURS_STD_YEAR // res)
+        sched = getattr(sys, "outage_schedule", None) or []
+        put = jl.seval("(d, u, n, v) -> (d[(Int(u), Int(n))] = Vector{Float64}(v); nothing)")
+        out = []
+        for kind, order, by_node in (("generator", gen_order, True),
+                                     ("battery", bat_order, False)):
+            d = jl.seval("Dict{Tuple{Int,Int}, Vector{Float64}}()")
+            factors = unit_outage_factors(sched, kind, [k for k, _ in order],
+                                          self._profile_start_hour, steps, res, by_node)
+            for (u, n), f in factors.items():
+                put(d, u, n, py_to_julia_vector(f))
+            if factors:
+                logger.debug("Master: scheduled outages on %d %s(s)", len({u for u, _ in factors}), kind)
+            out.append(d)
+        return out[0], out[1]
 
     def _dispatch_commits_units(self) -> bool:
         """Whether the dispatch of this development run commits units

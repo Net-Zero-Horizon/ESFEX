@@ -534,9 +534,10 @@ function build_master_variables!(
     gen_life_extension = Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}()
     bat_life_extension = Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}()
 
-    # Actual RE share per (system, year), defined by define_re_share!; with
-    # no system_node_ranges, system 1 covers all buses
-    re_penetration_ratio = Dict{Tuple{Int,Int}, VariableRef}()
+    # Renewable generation over demand per (system, year), the growth cap's
+    # link between years (define_re_share!); with no system_node_ranges,
+    # system 1 covers all buses
+    re_energy_ratio = Dict{Tuple{Int,Int}, VariableRef}()
 
     # Slack variables (the RE target's come with the representative days,
     # add_re_target_constraints!)
@@ -651,10 +652,11 @@ function build_master_variables!(
             end
         end
 
-        # Actual RE share per system: no upper bound, the renewable energy a
-        # system uses may pass its demand (storage losses, exports)
+        # Renewable generation over demand per system: no upper bound, the
+        # renewable energy a system uses may pass its demand (storage
+        # losses, exports)
         for s_idx in eachindex(master_systems(input))
-            re_penetration_ratio[(s_idx, y_idx)] = @variable(model,
+            re_energy_ratio[(s_idx, y_idx)] = @variable(model,
                 lower_bound = 0,
                 base_name = "re_ratio_s$(s_idx)_y$(y_idx)"
             )
@@ -718,7 +720,7 @@ function build_master_variables!(
         transfer_investment,
         gen_life_extension,
         bat_life_extension,
-        re_penetration_ratio,
+        re_energy_ratio,
         Dict{Tuple{Int,Int}, Tuple{Model, PowerSystemVariables}}(),
         Dict{Int, Vector{AffExpr}}(),
         slack_re_target,
@@ -1280,22 +1282,27 @@ function system_day_demand(input::MasterProblemInput, year_idx::Int,
 end
 
 """
-    system_day_renewable(ps_vars, tech_output, input, hours) -> Vector{AffExpr}
+    system_day_output(ps_vars, tech_output, input, hours, keep) -> Vector{AffExpr}
 
-Renewable output of each system (`master_systems`) over a representative
-day or TSAM period, summed over its steps: the existing generators and
-candidate technologies of type "Renewable" at the system's buses. Battery
-discharge does not count (a battery may charge from fossil units), as in
-the dispatch.
+Output of each system (`master_systems`) over a representative day or TSAM
+period, summed over its steps: its existing generators and candidate
+technologies `u` with `keep(u)`, at the system's buses. Battery discharge is
+not generation.
+
+    system_day_renewable(…) = system_day_output(…, is_renewable_unit)
+    system_day_generation(…) = system_day_output(…, all units)
+
+are the numerator and denominator of the RE share (`is_renewable_unit`), as
+the dispatch has them.
 """
-function system_day_renewable(ps_vars::PowerSystemVariables, tech_output,
-                              input::MasterProblemInput, hours::Int)
+function system_day_output(ps_vars::PowerSystemVariables, tech_output,
+                           input::MasterProblemInput, hours::Int, keep)
     systems = master_systems(input)
     out = [AffExpr(0.0) for _ in systems]
     for (s, sr) in enumerate(systems)
         buses = sr.first_bus:(sr.first_bus + sr.num_buses - 1)
         for (g, gen) in enumerate(input.generators)
-            gen.type == "Renewable" || continue
+            keep(gen) || continue
             for b in ps_vars.buses_of_gen[g]
                 b in buses || continue
                 for t in 1:hours
@@ -1305,7 +1312,7 @@ function system_day_renewable(ps_vars::PowerSystemVariables, tech_output,
         end
         tech_output === nothing && continue
         for (tc, tech) in enumerate(input.technologies)
-            tech.type == "Renewable" || continue
+            keep(tech) || continue
             for b in buses, t in 1:hours
                 add_to_expression!(out[s], tech_output[tc, b, t])
             end
@@ -1313,6 +1320,14 @@ function system_day_renewable(ps_vars::PowerSystemVariables, tech_output,
     end
     return out
 end
+
+system_day_renewable(ps_vars::PowerSystemVariables, tech_output,
+                     input::MasterProblemInput, hours::Int) =
+    system_day_output(ps_vars, tech_output, input, hours, is_renewable_unit)
+
+system_day_generation(ps_vars::PowerSystemVariables, tech_output,
+                      input::MasterProblemInput, hours::Int) =
+    system_day_output(ps_vars, tech_output, input, hours, _ -> true)
 
 """
     re_shortfall_penalty(input) -> Float64
@@ -1386,14 +1401,14 @@ Energy (MW × steps) the existing variable renewables (`is_variable_renewable`)
 of each system (`master_systems`) can produce over a representative day or
 TSAM period starting at master step `start_hour`: the power they have in
 service in year `y_idx` within their lifetime (rated × degradation, as the
-day model) × availability. Life-extended units and candidate technologies
+day model) × availability × scheduled outages. Life-extended units and candidate technologies
 are investment decisions and do not count.
 """
 function existing_vre_available(input::MasterProblemInput, y_idx::Int,
                                 start_hour::Int, hours::Int)
     systems = master_systems(input)
     out = zeros(length(systems))
-    for (s, sr) in enumerate(systems), gen in input.generators
+    for (s, sr) in enumerate(systems), (g, gen) in enumerate(input.generators)
         gen.type == "Renewable" || continue
         rows = size(gen.availability, 1)
         for b in sr.first_bus:(sr.first_bus + sr.num_buses - 1)
@@ -1402,9 +1417,12 @@ function existing_vre_available(input::MasterProblemInput, y_idx::Int,
             age = gen.initial_age[b] + (y_idx - 1)
             age < gen.life_time[b] || continue
             power = gen.rated_power[b] * (1.0 - gen.degradation_rate[b])^age
+            node = input.network.bus_to_node[b]
             for t in 1:hours
-                avail = rows == 0 ? 1.0 : gen.availability[mod1(start_hour + t - 1, rows), b]
-                out[s] += power * avail
+                h = start_hour + t - 1
+                avail = rows == 0 ? 1.0 : gen.availability[mod1(h, rows), b]
+                out[s] += power * avail *
+                          master_outage_factor(input.gen_outage_factors, g, node, h)
             end
         end
     end
@@ -1427,9 +1445,11 @@ energy is exempt.
 `periods` are the year's representative days (or TSAM periods) as
 `(start_hour, hours, scale)`, `scale` taking a step to the year. With `A`
 the existing variable renewables' available energy and `D` the demand of
-system `s` over them, both scaled to the year, and `k` the cap's estimate
-(the previous year's share plus `max_re_increment`, at most 1), the system
-may curtail beyond the limit the share
+system `s` over them, both scaled to the year (`D` stands for the total
+generation the share is measured on, which it is but for losses and load
+shed), and `k` the cap's estimate (the previous year's share plus
+`max_re_increment`, at most 1), the system may curtail beyond the limit the
+share
 
     θ[s] = max(0, 1 − (1 + max_curtailment_ratio) × k × D / A)
 
@@ -1496,29 +1516,51 @@ function add_re_cap_curtailment!(model::Model, input::MasterProblemInput,
 end
 
 """
-    add_re_growth_cap!(model, input, s, y_idx, energy, demand, prev_share;
+    re_cap_prev_allowance(prev, generation, demand) -> AffExpr
+
+Renewable generation (MWh/year) the previous year's RE share allows a
+system this year before the growth cap's increment (`add_re_growth_cap!`),
+with `generation` and `demand` this year's (MWh/year):
+
+- `prev` a number, the share itself (year 1: `re_share_anchor`; a myopic
+  year: the share last year achieved): `prev × generation`, exact;
+- `prev = (E, D_prev)`, last year's renewable generation `E` (an expression,
+  or `D_prev ×` a copy of `re_energy_ratio`) and demand: `E × demand /
+  D_prev`, last year's share × this year's generation with generation taken
+  to grow like demand. Both generations are decided by the model; this
+  keeps the cap linear and is exact when the ratio of generation to demand
+  (losses, load shed) is the same in both years.
+"""
+re_cap_prev_allowance(prev::Real, generation, demand::Float64) =
+    Float64(prev) * generation
+re_cap_prev_allowance(prev::Tuple, generation, demand::Float64) =
+    (demand / prev[2]) * prev[1]
+
+"""
+    add_re_growth_cap!(model, input, s, y_idx, energy, generation, allowance;
                        scenario_idx=0) -> AffExpr
 
-Maximum annual increment (RE-3) of system `s`'s ACTUAL RE share in year
-`y_idx`. With `energy` the renewable energy the system uses (MWh/year, after
-curtailment), `demand` its demand (MWh/year) and `prev_share` its actual
-share the year before (an expression, or `re_share_anchor` in year 1):
+Maximum annual increment (RE-3) of system `s`'s ACTUAL RE share (renewable
+over total generation, `is_renewable_unit`) in year `y_idx`. With `energy`
+the system's renewable generation (MWh/year, after curtailment),
+`generation` its total generation (MWh/year) and `allowance` the renewable
+generation the share of the year before allows (`re_cap_prev_allowance`):
 
-    energy ≤ (prev_share + Δmax) × demand + over        (re_max_increment)
+    energy ≤ allowance + Δmax × generation + over        (re_max_increment)
 
 `over` (MWh/year, `slack_re_cap…`) is priced at `re_cap_penalty`; the
 returned cost goes with the year's operating cost. Existing renewables
 above the cap are curtailed instead, beyond the curtailment limit
 (`re_cap_exemption`), so the slack is a last resort. Nothing when
-`max_re_increment` ≥ 1 or the system has no demand.
+`max_re_increment` ≥ 1.
 """
 function add_re_growth_cap!(model::Model, input::MasterProblemInput, s::Int, y_idx::Int,
-                            energy, demand::Float64, prev_share; scenario_idx::Int = 0)
+                            energy, generation, allowance; scenario_idx::Int = 0)
     cost = AffExpr(0.0)
-    (input.max_re_increment < 1.0 && demand > 0) || return cost
+    input.max_re_increment < 1.0 || return cost
     tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
     over = @variable(model, lower_bound = 0, base_name = "slack_re_cap$(tag)_s$(s)_y$(y_idx)")
-    @constraint(model, energy - demand * prev_share <= input.max_re_increment * demand + over,
+    @constraint(model, energy - allowance <= input.max_re_increment * generation + over,
         base_name = "re_max_increment$(tag)_s$(s)_y$(y_idx)")
     get!(() -> Dict{Tuple{Int,Int,Int}, VariableRef}(), model.ext,
          :re_cap_slack)[(scenario_idx, s, y_idx)] = over
@@ -1527,27 +1569,30 @@ function add_re_growth_cap!(model::Model, input::MasterProblemInput, s::Int, y_i
 end
 
 """
-    add_re_target_constraints!(model, vars, input, y_idx, targets, re_energy, re_demand;
-                               scenario_idx=0) -> AffExpr
+    add_re_target_constraints!(model, vars, input, y_idx, targets, re_energy,
+                               re_generation, re_demand; scenario_idx=0) -> AffExpr
 
 Annual RE bounds of each system in year `y_idx`. With `re_energy[σ]` the
-system's renewable energy used and `re_demand[σ]` its demand over the
+system's renewable generation, `re_generation[σ]` its total generation
+(`system_day_generation`) and `re_demand[σ]` its demand over the
 representative days (or TSAM periods), each scaled to the year as its cost
 is (MWh/year), and `slack_re_target[(scenario_idx, σ, y_idx)]` the renewable
 energy missing (MWh/year):
 
-    re_energy[σ] + slack ≥ re_required_share(σ, y) × re_demand[σ]   (re_target)
+    re_energy[σ] + slack ≥ re_required_share(σ, y) × re_generation[σ]   (re_target)
 
 the RE-1 target or the RE-3 minimum-increment floor, whichever is higher,
-and the growth cap on the actual share (`add_re_growth_cap!`), measured from
-the same scenario's share the year before (year 1: `re_share_anchor`). The
-target is annual: a sunny day may make up for a cloudy one, as over a
-dispatch window. Returns the cost of the slacks (`re_shortfall_penalty` and
-`re_cap_penalty` per MWh), which the caller adds to the year's operating cost
-(discounted and, in a stochastic master, weighted by the scenario's
-probability like it). The renewable energy and demand are kept in
-`model.ext[:master_re]` for the actual share (`define_re_share!`,
-`master_re_shares`). A system without demand gets no constraint.
+on the RE share (renewable over total generation: at 100 % no fossil unit
+runs), and the growth cap on the actual share (`add_re_growth_cap!`),
+measured from the same scenario's year before (year 1: `re_share_anchor`;
+`re_cap_prev_allowance`). The target is annual: a sunny day may make up for
+a cloudy one, as over a dispatch window. Returns the cost of the slacks
+(`re_shortfall_penalty` and `re_cap_penalty` per MWh), which the caller adds
+to the year's operating cost (discounted and, in a stochastic master,
+weighted by the scenario's probability like it). The renewable and total
+generation and the demand are kept in `model.ext[:master_re]` for the actual
+share (`define_re_share!`, `master_re_shares`). A system without demand
+gets no constraint.
 """
 function add_re_target_constraints!(
     model::Model,
@@ -1556,12 +1601,13 @@ function add_re_target_constraints!(
     y_idx::Int,
     targets::Dict{Tuple{Int,Int}, Float64},
     re_energy::Vector{AffExpr},
+    re_generation::Vector{AffExpr},
     re_demand::Vector{Float64};
     scenario_idx::Int = 0
 )::AffExpr
     cost = AffExpr(0.0)
     tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
-    record = get!(() -> Dict{Tuple{Int,Int,Int}, Tuple{AffExpr, Float64}}(),
+    record = get!(() -> Dict{Tuple{Int,Int,Int}, Tuple{AffExpr, AffExpr, Float64}}(),
                   model.ext, :master_re)
     for s in eachindex(master_systems(input))
         demand = re_demand[s]
@@ -1570,14 +1616,17 @@ function add_re_target_constraints!(
             base_name = "slack_re$(tag)_s$(s)_y$(y_idx)")
         vars.slack_re_target[(scenario_idx, s, y_idx)] = slack
         @constraint(model,
-            re_energy[s] + slack >= re_required_share(input, targets, s, y_idx) * demand,
+            re_energy[s] + slack >=
+                re_required_share(input, targets, s, y_idx) * re_generation[s],
             base_name = "re_target$(tag)_s$(s)_y$(y_idx)")
         add_to_expression!(cost, re_shortfall_penalty(input), slack)
         prev = get(record, (scenario_idx, s, y_idx - 1), nothing)
-        prev_share = prev === nothing ? re_share_anchor(input, s) : (1.0 / prev[2]) * prev[1]
+        allowance = re_cap_prev_allowance(
+            prev === nothing ? re_share_anchor(input, s) : (prev[1], prev[3]),
+            re_generation[s], demand)
         add_to_expression!(cost, add_re_growth_cap!(model, input, s, y_idx, re_energy[s],
-                                                    demand, prev_share; scenario_idx))
-        record[(scenario_idx, s, y_idx)] = (re_energy[s], demand)
+                                                    re_generation[s], allowance; scenario_idx))
+        record[(scenario_idx, s, y_idx)] = (re_energy[s], re_generation[s], demand)
     end
     return cost
 end
@@ -1585,12 +1634,14 @@ end
 """
     define_re_share!(model, vars, input)
 
-Define `re_penetration_ratio[σ, y]` as the actual RE share of each system
-and year in the representative days / TSAM periods (`model.ext[:master_re]`):
-its renewable energy used over its demand, both scaled to the year; in a
-stochastic master the probability-weighted energy over the weighted demand,
-as `master_re_energy` reports it. A system-year without demand is fixed at 0.
-Nothing for a master without representative days.
+Define `re_energy_ratio[σ, y]` for each system and year from the
+representative days / TSAM periods (`model.ext[:master_re]`): its renewable
+generation over its demand, both scaled to the year; in a stochastic master
+the probability-weighted generation over the weighted demand. It carries a
+year's renewable generation to the next year's growth cap
+(`re_cap_prev_allowance`, the Benders copies); the RE share itself is
+renewable over total generation (`master_re_shares`). A system-year without
+demand is fixed at 0. Nothing for a master without representative days.
 """
 function define_re_share!(model::Model, vars::MasterProblemVariables,
                           input::MasterProblemInput)
@@ -1599,15 +1650,15 @@ function define_re_share!(model::Model, vars::MasterProblemVariables,
     scenarios = get(model.ext, :master_scenarios, nothing)
     energy = Dict{Tuple{Int,Int}, AffExpr}()
     demand = Dict{Tuple{Int,Int}, Float64}()
-    for ((k, s, y), (e, d)) in record
+    for ((k, s, y), (e, _, d)) in record
         p = k == 0 || scenarios === nothing ? 1.0 : scenarios[k].probability
         add_to_expression!(get!(() -> AffExpr(0.0), energy, (s, y)), e, p)
         demand[(s, y)] = get(demand, (s, y), 0.0) + p * d
     end
-    for ((s, y), v) in vars.re_penetration_ratio
+    for ((s, y), v) in vars.re_energy_ratio
         d = get(demand, (s, y), 0.0)
         if d > 0
-            @constraint(model, d * v == energy[(s, y)], base_name = "re_ratio_s$(s)_y$(y)")
+            @constraint(model, d * v == energy[(s, y)], base_name = "re_energy_ratio_s$(s)_y$(y)")
         else
             fix(v, 0.0; force = true)
         end
@@ -1642,15 +1693,19 @@ adequacy constraint: for a variable renewable (`variable`, see
 capacity credit: 0 for solar); for any other unit (thermal, biomass,
 reservoir hydro, storage), its mean availability over the node's peak
 period `peak_steps` (`adequacy_peak_steps`), so derates, outages and
-seasons the profile holds count. 1.0 without a profile.
+seasons the profile holds count, × its scheduled-outage factor `outage(t)`
+at each peak step (`master_outage_factor`). 1.0 without a profile or
+outage.
 """
 function firm_capacity_credit(availability::AbstractMatrix, b::Int, peak_steps;
-                              variable::Bool)
-    (size(availability, 1) == 0 || b > size(availability, 2)) && return 1.0
+                              variable::Bool, outage = t -> 1.0)
+    (size(availability, 1) == 0 || b > size(availability, 2)) &&
+        return isempty(peak_steps) || variable ? 1.0 :
+               sum(outage(t) for t in peak_steps) / length(peak_steps)
     variable && return minimum(@view availability[:, b])
     isempty(peak_steps) && return 1.0
     n = size(availability, 1)
-    return sum(availability[mod1(t, n), b] for t in peak_steps) / length(peak_steps)
+    return sum(availability[mod1(t, n), b] * outage(t) for t in peak_steps) / length(peak_steps)
 end
 
 """
@@ -1740,7 +1795,8 @@ function add_capacity_adequacy_constraints!(
                     degradation_rate = gen.degradation_rate[n]
 
                     capacity_credit = firm_capacity_credit(gen.availability, n, peak;
-                        variable = is_variable_renewable(gen, n))
+                        variable = is_variable_renewable(gen, n),
+                        outage = t -> master_outage_factor(input.gen_outage_factors, g, ni, t))
 
                     # Risk coefficient: geographic hazard derating (default 1.0)
                     risk_coef = n <= length(gen.risk_coefficient) ? gen.risk_coefficient[n] : 1.0
@@ -1768,7 +1824,8 @@ function add_capacity_adequacy_constraints!(
                     age_at_year = initial_age + y_idx - 1
 
                     bat_risk = n <= length(bat.risk_coefficient) ? bat.risk_coefficient[n] : 1.0
-                    bat_risk *= firm_capacity_credit(bat.availability, n, peak; variable = false)
+                    bat_risk *= firm_capacity_credit(bat.availability, n, peak; variable = false,
+                        outage = t -> master_outage_factor(input.bat_outage_factors, b, 0, t))
 
                     # Existing: active if age < lifetime
                     if age_at_year < lifetime && base_power > 0
@@ -2691,6 +2748,69 @@ function generators_for_day(generators::AbstractVector, start_hour::Int, hours::
 end
 
 """
+    master_outage_factor(factors, unit, node, h) -> Float64
+
+Scheduled-outage availability factor of unit `unit` in master step `h`
+(`gen_outage_factors` / `bat_outage_factors` of `MasterProblemInput`): the
+product of the unit's whole-unit factor `(unit, 0)` and, for a node `> 0`,
+the factor of its windows at that node `(unit, node)`. 1.0 without a window
+or past the end of a factor series.
+"""
+function master_outage_factor(factors::AbstractDict, unit::Int, node::Int, h::Int)
+    isempty(factors) && return 1.0
+    f = 1.0
+    for key in (node > 0 ? ((unit, 0), (unit, node)) : ((unit, 0),))
+        v = get(factors, key, nothing)
+        v === nothing || h > length(v) || h < 1 || (f *= v[h])
+    end
+    return f
+end
+
+has_outage(factors::AbstractDict, unit::Int) =
+    !isempty(factors) && any(k -> k[1] == unit, keys(factors))
+
+"""
+    with_day_outages(units, factors, nodes_of_bus, start_hour, hours)
+
+`units` (a day's generators or batteries, their availability already cut to
+the day) with their scheduled outages folded in: each step `t` of a unit
+with a window is × `master_outage_factor` at master step `start_hour + t - 1`,
+as the dispatch multiplies its availability by `compile_outage_factor`. A
+unit without a profile gets one (all ones before the outage).
+"""
+function with_day_outages(units::AbstractVector, factors::AbstractDict,
+                          nodes_of_bus::AbstractVector{Int}, start_hour::Int, hours::Int)
+    isempty(factors) && return units
+    return map(enumerate(units)) do (i, u)
+        has_outage(factors, i) || return u
+        m = u.availability
+        nb = length(nodes_of_bus)
+        a = size(m, 1) == 0 ? ones(hours, nb) : Matrix{Float64}(m)
+        for t in 1:min(hours, size(a, 1)), b in 1:min(nb, size(a, 2))
+            a[t, b] *= master_outage_factor(factors, i, nodes_of_bus[b], start_hour + t - 1)
+        end
+        with_fields(u; availability = a)
+    end
+end
+
+"""
+    generators_for_day(input::MasterProblemInput, start_hour, hours)
+    batteries_for_day(input::MasterProblemInput, start_hour, hours)
+
+The master's existing generators (batteries) as a representative day or
+TSAM period starting at master step `start_hour` sees them: their profiles
+cut to the day and their scheduled outages folded in (`with_day_outages`).
+"""
+generators_for_day(input::MasterProblemInput, start_hour::Int, hours::Int) =
+    with_day_outages(generators_for_day(input.generators, start_hour, hours),
+                     input.gen_outage_factors, input.network.bus_to_node, start_hour, hours)
+
+batteries_for_day(input::MasterProblemInput, start_hour::Int, hours::Int) =
+    with_day_outages(batteries_for_day(input.batteries, start_hour, hours),
+                     input.bat_outage_factors, zeros(Int, input.network.num_buses),
+                     start_hour, hours)
+
+"""
     batteries_for_day(batteries, start_hour, hours)
 
 The batteries (or battery technologies) as a representative day starting at
@@ -3064,11 +3184,11 @@ function add_day_operational_constraints!(
     end
 
     # The day model reads availability and inflow by its own step t = 1..hours
-    day_generators = generators_for_day(input.generators, start_hour, hours)
+    day_generators = generators_for_day(input, start_hour, hours)
 
     day_input = (
         generators = day_generators,
-        batteries = batteries_for_day(input.batteries, start_hour, hours),
+        batteries = batteries_for_day(input, start_hour, hours),
         network = input.network,
         demand = demand_slice,
         temporal = (hours = hours, resolution_hours = input.temporal_resolution_hours),
@@ -3213,7 +3333,8 @@ function add_day_operational_constraints!(
         demand_slice, start_hour, growth_factor; label = "y$(year_idx)_d$(day_idx)")
 
     # The RE target is annual (add_re_target_constraints!): the caller adds
-    # the day's system_day_renewable and system_day_demand to the year's.
+    # the day's system_day_renewable, system_day_generation and
+    # system_day_demand to the year's (add_day_re!).
 
     # =========================================================================
     # Maximum Curtailment Constraint — master-specific
@@ -3900,8 +4021,10 @@ function add_representative_days_validation!(
 
         vars.operational_costs[y_idx] = AffExpr[]
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
-        # Each system's renewable output and demand, scaled to the year
+        # Each system's renewable and total generation and demand, scaled
+        # to the year
         re_energy = [AffExpr(0.0) for _ in master_systems(input)]
+        re_generation = [AffExpr(0.0) for _ in re_energy]
         re_demand = zeros(length(re_energy))
 
         for (day_idx, start_hour) in enumerate(rep_days)
@@ -3940,7 +4063,7 @@ function add_representative_days_validation!(
             for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
                 add_to_expression!(annual_co2[k], e, rep_day_scaling(input, nd))
             end
-            add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
+            add_day_re!(re_energy, re_generation, re_demand, ps_vars, tech_output, input, y_idx,
                         start_hour, hours, rep_day_scaling(input, nd))
         end
 
@@ -3949,24 +4072,29 @@ function add_representative_days_validation!(
                 scenario_idx=scenario_idx))
         push!(vars.operational_costs[y_idx],
             add_re_target_constraints!(model, vars, input, y_idx, targets,
-                re_energy, re_demand; scenario_idx=scenario_idx))
+                re_energy, re_generation, re_demand; scenario_idx=scenario_idx))
     end
 end
 
 """
-    add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
-                start_hour, hours, scale)
+    add_day_re!(re_energy, re_generation, re_demand, ps_vars, tech_output, input,
+                y_idx, start_hour, hours, scale)
 
-Add a representative day's (or TSAM period's) renewable output
-(`system_day_renewable`) and demand (`system_day_demand`) per system,
-× `scale` (step length × the days it stands for), to the year's.
+Add a representative day's (or TSAM period's) renewable generation
+(`system_day_renewable`), total generation (`system_day_generation`) and
+demand (`system_day_demand`) per system, × `scale` (step length × the days
+it stands for), to the year's.
 """
-function add_day_re!(re_energy::Vector{AffExpr}, re_demand::Vector{Float64},
+function add_day_re!(re_energy::Vector{AffExpr}, re_generation::Vector{AffExpr},
+                     re_demand::Vector{Float64},
                      ps_vars::PowerSystemVariables, tech_output,
                      input::MasterProblemInput, y_idx::Int, start_hour::Int,
                      hours::Int, scale::Float64)
     for (s, e) in enumerate(system_day_renewable(ps_vars, tech_output, input, hours))
         add_to_expression!(re_energy[s], e, scale)
+    end
+    for (s, e) in enumerate(system_day_generation(ps_vars, tech_output, input, hours))
+        add_to_expression!(re_generation[s], e, scale)
     end
     re_demand .+= scale .* system_day_demand(input, y_idx, start_hour, hours)
     return nothing
@@ -4049,6 +4177,7 @@ function add_tsam_periods_validation!(
         vars.operational_costs[y_idx] = AffExpr[]
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
         re_energy = [AffExpr(0.0) for _ in master_systems(input)]
+        re_generation = [AffExpr(0.0) for _ in re_energy]
         re_demand = zeros(length(re_energy))
 
         # --- Create inter-period SOC boundary variables ---
@@ -4201,7 +4330,7 @@ function add_tsam_periods_validation!(
             for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
                 add_to_expression!(annual_co2[k], e, tres * weight)
             end
-            add_day_re!(re_energy, re_demand, ps_vars, tech_output, input, y_idx,
+            add_day_re!(re_energy, re_generation, re_demand, ps_vars, tech_output, input, y_idx,
                         start_hour, hours, tres * weight)
         end
 
@@ -4210,7 +4339,7 @@ function add_tsam_periods_validation!(
                 scenario_idx=scenario_idx))
         push!(vars.operational_costs[y_idx],
             add_re_target_constraints!(model, vars, input, y_idx, targets,
-                re_energy, re_demand; scenario_idx=scenario_idx))
+                re_energy, re_generation, re_demand; scenario_idx=scenario_idx))
     end
 end
 
@@ -4280,7 +4409,7 @@ function create_master_problem(
 
     # The annual RE target, minimum-increment floor and growth cap come with
     # the representative days / TSAM periods (add_re_target_constraints!),
-    # which hold the renewable energy; re_penetration_ratio is their share
+    # which hold the renewable and total generation (define_re_share!)
     define_re_share!(model, vars, input)
 
     # User-defined investment constraints (declarative config + plugin overlays).
@@ -4569,28 +4698,28 @@ annuity_costs(result::MasterProblemResult, num_years::Int) =
 """
     master_re_energy(model, vars, input) -> Dict{Tuple{Int,Int}, Tuple{Float64, Float64}}
 
-Renewable energy and demand (MWh/year) per (system, year) in the solved
+Renewable and total generation (MWh/year) per (system, year) in the solved
 master, from its representative days (`model.ext[:master_re]`, kept by
 `add_re_target_constraints!`); the probability-weighted mean over the
 scenarios in a stochastic master. Without representative days (a master
-built without them, the Benders master) a system's year counts its credited
-ratio `re_penetration_ratio` over a unit demand.
+built without them, the Benders master) a system's year counts its ratio
+`re_energy_ratio` over a unit generation.
 """
 function master_re_energy(model::Model, vars::MasterProblemVariables,
                           input::MasterProblemInput)
     out = Dict{Tuple{Int,Int}, Tuple{Float64, Float64}}()
     record = get(model.ext, :master_re, nothing)
     if record === nothing || isempty(record)
-        for ((s, y), v) in vars.re_penetration_ratio
+        for ((s, y), v) in vars.re_energy_ratio
             out[(s, y)] = (value(v), 1.0)
         end
         return out
     end
     scenarios = get(model.ext, :master_scenarios, nothing)
-    for ((k, s, y), (energy, demand)) in record
+    for ((k, s, y), (energy, generation, _)) in record
         p = k == 0 || scenarios === nothing ? 1.0 : scenarios[k].probability
-        e0, d0 = get(out, (s, y), (0.0, 0.0))
-        out[(s, y)] = (e0 + p * value(energy), d0 + p * demand)
+        e0, g0 = get(out, (s, y), (0.0, 0.0))
+        out[(s, y)] = (e0 + p * value(energy), g0 + p * value(generation))
     end
     return out
 end
@@ -4598,9 +4727,10 @@ end
 """
     master_re_shares(input, re_energy) -> (by_year, by_system)
 
-Achieved RE share from the renewable energy and demand per (system, year)
-`re_energy` (`master_re_energy`): per year over all systems
-(Σ energy / Σ demand) and per system name. A year without demand reports 0.
+Achieved RE share from the renewable and total generation per (system,
+year) `re_energy` (`master_re_energy`): per year over all systems
+(Σ renewable / Σ generation, energy-weighted) and per system name. A year
+without generation reports 0.
 """
 function master_re_shares(input::MasterProblemInput,
                           re_energy::AbstractDict{Tuple{Int,Int}, Tuple{Float64, Float64}})
