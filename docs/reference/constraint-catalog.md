@@ -123,7 +123,7 @@ The N-1 slacks are priced at `loss_of_reserve_static` × Δt; they are added to 
 | `curtailment[ni,t] == available_RE - used_RE` | CUR-1 | Node curtailment of variable renewables (reservoir hydro excluded) |
 | `curtailment[ni,t] <= available_RE` | CUR-2 | Upper bound |
 
-The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_y*_d*` in the master.
+The `max_curtailment_ratio` cap is not in the dispatch; see `max_curtailment_s*_y*` in the master.
 
 ### Renewable Energy Target
 
@@ -302,7 +302,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |
 | `lol_sec_sum_y{y}_d{d}_n{n}_t{t}`, `lol_sec_residual_y{y}_d{d}_n{n}_t{t}` | OP-5 | Bus load shed minus sectoral LOL is in [0, bus demand not covered by any sector] (the sectoral LOL is part of the load shed) |
-| `max_curtailment_y{y}_d{d}` | CURT-1 | Curtailment (existing + technologies) <= `max_curtailment_ratio` × RE generation |
+| `max_curtailment_s{σ}_y{y}` | CURT-1 | Annual, per system: curtailment (existing + technologies) over the year <= `max_curtailment_ratio` × RE generation over the year (+ the RE-3c exemption); a stochastic scenario's `max_curtailment_sc{k}_s{σ}_y{y}` |
 
 ### TSAM Inter-Period Linking
 
@@ -322,12 +322,12 @@ In the stochastic master these names carry a scenario tag.
 |---------------|--------|-------------|
 | `benders_cut_y{y}_iter{k}` | BEN-CUT | Optimality cut on `theta_y{y}`, one per year and iteration (`iter0`: warm start), its gradient summed over the year's representative days |
 | `benders_cut_priced_y{y}_iter{k}` | BEN-CUT | Optimality cut from year `y`'s subproblem with its curtailment limits priced at VOLL, added when that subproblem breaks a limit |
-| `benders_feas_y{y}_iter{k}` | BEN-FEAS | Feasibility cut: the capacities must let every day of year `y` meet its curtailment limit |
+| `benders_feas_y{y}_iter{k}` | BEN-FEAS | Feasibility cut: the capacities must let year `y` meet its curtailment limits |
 | `co2_budget_y{y}_{group}` | CO2-1 | Year subproblem: the year's emissions over its representative days, scaled to the year, within the budget plus `co2_budget_violation_y{y}_{group}` |
 | `re_target_s{s}_y{y}`, `re_max_increment_s{s}_y{y}` | RE-2, RE-3b | Year subproblem: the RE target or floor (shortfall `slack_re_s{s}_y{y}`) and, with `max_re_increment` < 1, the growth cap measured from a copy of the master's share of the year before |
 | `re_share_s{s}_y{y}` | BEN-RE | Year subproblem (growth cap only): the year's renewable generation + `re_share_short_s{s}_y{y}` (at VOLL) >= the master's `re_energy_ratio_s{s}_y{y}` (a copy) × the year's demand |
-| `op_bound_y{y}` (with `op_bound_balance_*`, `op_bound_curt_y{y}_d{d}`, `op_bound_*`) | BEN-BOUND | Master: `theta_y{y}` >= the cost of a copper-plate relaxation of year `y` (pooled units, one store per system, one balance per group of linked systems `op_bound_balance_y{y}_g{g}_d{d}_t{t}`, load shed at VOLL, the year's RE target and growth cap, each day's curtailment limit) |
-| `max_curt_y{y}_d{d}` | BEN-CURT | Subproblem: curtailment cap, as in the monolithic master; its slack `curt_excess_y{y}_d{d}` costs VOLL per MWh (scaled to the year) in the subproblem whose cut bounds `theta_y{y}`, and a year that uses it is re-solved with the slacks' sum minimised: a violation left gives a feasibility cut and no upper bound, none a re-solve with the slack fixed to 0 |
+| `op_bound_y{y}` (with `op_bound_balance_*`, `op_bound_curt_s{σ}_y{y}`, `op_bound_sink_*`, `op_bound_*`) | BEN-BOUND | Master: `theta_y{y}` >= the cost of a copper-plate relaxation of year `y` (pooled units, one store per system, one balance per group of linked systems `op_bound_balance_y{y}_g{g}_d{d}_t{t}`, load shed at VOLL, the year's RE target and growth cap, each system's annual curtailment limit, supply above the load at most the lines' losses) |
+| `max_curt_s{σ}_y{y}` | BEN-CURT | Year subproblem: each system's annual curtailment cap, as in the monolithic master; its slack `curt_excess_s{σ}_y{y}` costs VOLL per MWh (scaled to the year) in the subproblem whose cut bounds `theta_y{y}`, and a year that uses it beyond `curtailment_tolerance` (1e-3 MWh/yr + 1e-6 × the system's RE generation) is re-solved with the slacks' sum minimised: a violation left gives a feasibility cut and no upper bound, none a re-solve with the slacks held at that least violation |
 | `tech_cap_t{t}_b{b}_ts{ts}`, `tech_seg_cap_t{t}_b{b}_k{k}_ts{ts}` | BEN-CAP | Subproblem: technology output and offer-curve segments at the fixed capacity; their duals form the cut's technology gradient |
 | `copy_{kind}_{name}_{index} == value`, `fuel_cap_* == value` | BEN-COPY | Subproblem: a master quantity (converter, line, reservoir or fuel capacity built, life extension, an RE share) fixed to the master's value; the dual is its cut gradient |
 

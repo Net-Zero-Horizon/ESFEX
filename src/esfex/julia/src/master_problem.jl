@@ -1330,6 +1330,137 @@ system_day_generation(ps_vars::PowerSystemVariables, tech_output,
     system_day_output(ps_vars, tech_output, input, hours, _ -> true)
 
 """
+    master_bus_systems(input) -> Vector{Int}
+
+System (`master_systems`) of each bus; 0 for a bus outside every system.
+"""
+function master_bus_systems(input::MasterProblemInput)
+    out = zeros(Int, input.network.num_buses)
+    for (s, sr) in enumerate(master_systems(input))
+        out[sr.first_bus:(sr.first_bus + sr.num_buses - 1)] .= s
+    end
+    return out
+end
+
+"""
+    system_day_curtailment(ps_vars, tech_output, tech_cap, input, start_hour, hours)
+        -> Vector{AffExpr}
+
+Curtailment of each system (`master_systems`) over a representative day or
+TSAM period starting at master step `start_hour`, summed over its steps
+(MW × steps), as the curtailment limit counts it: that of the existing
+variable renewables at its nodes (`add_curtailment_constraints!`) and of the
+candidate variable renewable technologies at its buses, their capacity
+`tech_cap(tc, b)` (a number or an expression) × availability less their
+output.
+"""
+function system_day_curtailment(ps_vars::PowerSystemVariables, tech_output, tech_cap,
+                                input::MasterProblemInput, start_hour::Int, hours::Int)
+    sys = master_bus_systems(input)
+    out = [AffExpr(0.0) for _ in master_systems(input)]
+    node_sys = zeros(Int, size(ps_vars.curtailment, 1))
+    for (b, n) in enumerate(input.network.bus_to_node)
+        n <= length(node_sys) && sys[b] > 0 && (node_sys[n] = sys[b])
+    end
+    for n in eachindex(node_sys)
+        node_sys[n] > 0 || continue
+        for t in 1:hours
+            add_to_expression!(out[node_sys[n]], ps_vars.curtailment[n, t])
+        end
+    end
+    tech_output === nothing && return out
+    for (tc, tech) in enumerate(input.technologies)
+        is_variable_renewable(tech, 1) || continue
+        for b in 1:input.network.num_buses
+            sys[b] > 0 || continue
+            cap = tech_cap(tc, b)
+            for t in 1:hours
+                add_to_expression!(out[sys[b]],
+                    tech_availability_at(tech, start_hour + t - 1, b), cap)
+                add_to_expression!(out[sys[b]], -1.0, tech_output[tc, b, t])
+            end
+        end
+    end
+    return out
+end
+
+"""
+    CurtailmentYear()
+
+A year's representative days or TSAM periods for its curtailment limit
+(`add_curtailment_limit!`): per period (`add_period_curtailment!`) the
+curtailment (`system_day_curtailment`), renewable generation
+(`system_day_renewable`) and the curtailment the RE growth cap forces
+(`re_cap_exempt_energy`) of each system (MW × steps), and the period's
+`scale` (the year its steps stand for: `rep_day_scaling`, or step length ×
+TSAM weight).
+"""
+struct CurtailmentYear
+    periods::Vector{Tuple{Vector{AffExpr}, Vector{AffExpr}, Vector{Float64}, Float64}}
+end
+CurtailmentYear() =
+    CurtailmentYear(Tuple{Vector{AffExpr}, Vector{AffExpr}, Vector{Float64}, Float64}[])
+
+add_period_curtailment!(year::CurtailmentYear, curt::Vector{AffExpr}, re::Vector{AffExpr},
+                        exempt::Vector{Float64}, scale::Float64) =
+    push!(year.periods, (curt, re, exempt, scale))
+
+"""
+    curtailment_year_sums(year) -> (curt, re, exempt, smax)
+
+Each system's curtailment, renewable generation and exemption over the
+periods of `year`, each period × its scale over the largest one `smax`:
+the year's (MWh/year) / `smax`. Representative days all stand for as many
+days, so for them it is the plain sum over the days.
+"""
+function curtailment_year_sums(year::CurtailmentYear)
+    isempty(year.periods) && return (AffExpr[], AffExpr[], Float64[], 1.0)
+    smax = maximum(p[4] for p in year.periods)
+    n = length(year.periods[1][1])
+    curt = [AffExpr(0.0) for _ in 1:n]
+    re = [AffExpr(0.0) for _ in 1:n]
+    exempt = zeros(n)
+    for (c, r, e, w) in year.periods, s in 1:n
+        add_to_expression!(curt[s], c[s], w / smax)
+        add_to_expression!(re[s], r[s], w / smax)
+        exempt[s] += e[s] * w / smax
+    end
+    return curt, re, exempt, smax
+end
+
+"""
+    add_curtailment_limit!(model, input, year, y_idx; scenario_idx=0)
+        -> Dict{Int, ConstraintRef}
+
+The curtailment limit (CURT-1) of year `y_idx`, per system: its curtailment
+of existing and candidate variable renewables over the year is at most
+`max_curtailment_ratio` × its renewable generation over the year, plus what
+the RE growth cap forces it to curtail (RE-3c, `re_cap_exempt_energy`):
+
+    Σ_p w_p C_σ,p ≤ κ × Σ_p w_p E_σ,p + Σ_p w_p X_σ,p      (max_curtailment_s{σ}_y{y})
+
+over the year's representative days or TSAM periods `p` with weights `w_p`
+(`year`, `curtailment_year_sums`: divided by the largest weight). Single
+days may curtail more. Only a system with renewable generation to measure
+it on has one, and none when `max_curtailment_ratio` ≥ 1. Returns the
+constraints by system.
+"""
+function add_curtailment_limit!(model::Model, input::MasterProblemInput,
+                                year::CurtailmentYear, y_idx::Int; scenario_idx::Int = 0)
+    out = Dict{Int, ConstraintRef}()
+    input.max_curtailment_ratio < 1.0 || return out
+    curt, re, exempt, _ = curtailment_year_sums(year)
+    tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
+    for s in eachindex(curt)
+        isempty(re[s].terms) && continue
+        out[s] = @constraint(model,
+            curt[s] <= input.max_curtailment_ratio * re[s] + exempt[s],
+            base_name = "max_curtailment$(tag)_s$(s)_y$(y_idx)")
+    end
+    return out
+end
+
+"""
     re_shortfall_penalty(input) -> Float64
 
 Price of a MWh of renewable energy missing from an RE target: the
@@ -1437,7 +1568,7 @@ When a system's existing variable renewables, curtailed at most
 `max_curtailment_ratio`, would give it a higher RE share than its growth cap
 allows, the excess is curtailed: it does not count toward the share and pays
 `curtailment_cost` like any curtailment, but not the curtailment limit
-(`add_re_cap_curtailment!`). Without this the excess could only go to the
+(`re_cap_exempt_energy`). Without this the excess could only go to the
 cap's slack at the value of lost load (`re_cap_penalty`). Building
 renewables above the cap still does not pay: only the existing units'
 energy is exempt.
@@ -1490,29 +1621,21 @@ function re_cap_exemption(input::MasterProblemInput,
 end
 
 """
-    add_re_cap_curtailment!(model, input, θ, y_idx, start_hour, hours, label) -> AffExpr
+    re_cap_exempt_energy(input, θ, y_idx, start_hour, hours) -> Vector{Float64}
 
 The curtailment the RE growth cap forces on a representative day or TSAM
-period (`re_cap_exemption`): per system with `θ[s] > 0` a variable
-`re_cap_curt_{label}_s{s}` (MWh-steps) between 0 and `θ[s]` × the energy its
-existing variable renewables can produce over the period
-(`existing_vre_available`). Returns their sum, which the day's curtailment
-limit allows on top of `max_curtailment_ratio`; the curtailment itself pays
-`curtailment_cost` as any.
+period (`re_cap_exemption`), per system: `θ[s]` × the energy its existing
+variable renewables can produce over the period (`existing_vre_available`,
+MW × steps). The year's curtailment limit allows it on top of
+`max_curtailment_ratio` (`add_curtailment_limit!`); the curtailment itself
+pays `curtailment_cost` as any.
 """
-function add_re_cap_curtailment!(model::Model, input::MasterProblemInput,
-                                 θ::Vector{Float64}, y_idx::Int, start_hour::Int,
-                                 hours::Int, label::String)
-    exempt = AffExpr(0.0)
-    any(>(0.0), θ) || return exempt
+function re_cap_exempt_energy(input::MasterProblemInput, θ::Vector{Float64},
+                              y_idx::Int, start_hour::Int, hours::Int)
+    n_sys = length(master_systems(input))
+    any(>(0.0), θ) || return zeros(n_sys)
     avail = existing_vre_available(input, y_idx, start_hour, hours)
-    for s in eachindex(θ)
-        (θ[s] > 0 && s <= length(avail) && avail[s] > 0) || continue
-        x = @variable(model, lower_bound = 0, upper_bound = θ[s] * avail[s],
-                      base_name = "re_cap_curt_$(label)_s$(s)")
-        add_to_expression!(exempt, x)
-    end
-    return exempt
+    return [s <= length(θ) ? max(θ[s], 0.0) * avail[s] : 0.0 for s in 1:n_sys]
 end
 
 """
@@ -3020,7 +3143,10 @@ and their operating cost that `day_operational_cost` does not see (the
 offer-curve fuel cost of technologies with a `fuel_cost_curve`, the
 curtailment penalty of candidate renewables and the battery technologies'
 maintenance and throughput degradation), unscaled like `day_operational_cost`;
-the callers scale both to the year the same way.
+the callers scale both to the year the same way. With `curtailment`, the
+day's per-system curtailment, renewable output and RE-3c exemption are
+added to the year's with `period_scale` for its annual curtailment limit,
+which the caller adds (`add_curtailment_limit!`).
 
 CRITICAL: This links investment decisions to operational feasibility.
 """
@@ -3045,7 +3171,11 @@ function add_day_operational_constraints!(
     # Share of the existing renewables' energy each system may curtail
     # beyond the curtailment limit to stay under its RE growth cap
     # (re_cap_exemption)
-    re_cap_exempt::Vector{Float64} = Float64[]
+    re_cap_exempt::Vector{Float64} = Float64[],
+    # The year's curtailment limit: the day's terms are added to it with
+    # the day's weight in the year (add_curtailment_limit!)
+    curtailment::Union{Nothing, CurtailmentYear} = nothing,
+    period_scale::Float64 = 1.0
 )
     hours = size(demand, 1)
     n_gen = length(input.generators)
@@ -3337,9 +3467,8 @@ function add_day_operational_constraints!(
     # system_day_demand to the year's (add_day_re!).
 
     # =========================================================================
-    # Maximum Curtailment Constraint — master-specific
-    # Includes BOTH generator curtailment AND technology RE curtailment
-    # (available tech capacity not dispatched)
+    # Curtailment limit — master-specific, annual: the day's curtailment and
+    # renewable output per system go to the year's (add_curtailment_limit!)
     # =========================================================================
     # Accumulator for tech-investment curtailment cost — added to the master
     # objective so the LP trades tech overbuild against storage capex on an
@@ -3350,74 +3479,27 @@ function add_day_operational_constraints!(
     add_to_expression!(tech_day_cost, remainder_premium)
 
     if input.max_curtailment_ratio < 1.0
-        # Build as AffExpr explicitly: when the sum collapses to a single
-        # term (n_nodes=1 ∧ hours=1) `@expression` returns a bare
-        # VariableRef and later add_to_expression!(VarRef, AffExpr) fails.
-        total_curtailment = AffExpr(0.0)
-        for n in 1:n_nodes, t in 1:hours
-            add_to_expression!(total_curtailment, ps_vars.curtailment[n, t])
-        end
-        # Compute total renewable generation across all buses
-        total_renewable = AffExpr(0.0)
-        for g in 1:n_gen
-            gen = input.generators[g]
-            if gen.type == "Renewable"
-                for n in ps_vars.buses_of_gen[g]
-                    for t in 1:hours
-                        add_to_expression!(total_renewable, ps_vars.gen_output[g, n, t])
-                    end
+        # The candidates' curtailment (variable renewables only, as the
+        # dispatch's), cap × avail − output, pays curtailment_cost
+        if tech_output !== nothing && input.curtailment_cost > 0
+            for (tc, tech) in enumerate(input.technologies)
+                is_variable_renewable(tech, 1) || continue
+                for b in 1:n_buses, ts in 1:hours
+                    avail = tech_availability_at(tech, start_hour + ts - 1, b)
+                    add_to_expression!(tech_day_cost,
+                        tech_caps[(tc, b)] * (avail * input.curtailment_cost))
+                    add_to_expression!(tech_day_cost,
+                        -input.curtailment_cost, tech_output[tc, b, ts])
                 end
             end
         end
-        if tech_output !== nothing
-            n_tech_local = length(input.technologies)
-            for tc in 1:n_tech_local
-                tech = input.technologies[tc]
-                if tech.type == "Renewable"
-                    for b in 1:n_buses
-                        for ts in 1:hours
-                            add_to_expression!(total_renewable, tech_output[tc, b, ts])
-                        end
-                    end
-                end
-            end
-        end
-        # Add technology RE curtailment: available - dispatched (variable
-        # renewables only, as the dispatch's curtailment)
-        if tech_output !== nothing
-            n_tech_local = length(input.technologies)
-            for tc in 1:n_tech_local
-                tech = input.technologies[tc]
-                if is_variable_renewable(tech, 1)
-                    for b in 1:n_buses
-                        cumul_cap = tech_caps[(tc, b)]
-                        for ts in 1:hours
-                            avail = tech_availability_at(tech, start_hour + ts - 1, b)
-                            # tech curtailment = cumul_cap × avail - tech_output
-                            add_to_expression!(total_curtailment, cumul_cap * avail)
-                            add_to_expression!(total_curtailment, -1.0, tech_output[tc, b, ts])
-                            # Penalise the same expression in the objective
-                            if input.curtailment_cost > 0
-                                add_to_expression!(tech_day_cost,
-                                    cumul_cap * (avail * input.curtailment_cost))
-                                add_to_expression!(tech_day_cost,
-                                    -input.curtailment_cost, tech_output[tc, b, ts])
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        # Only add constraint if there are renewable terms (avoid forcing
-        # curtailment=0). What the RE growth cap makes the system curtail is
-        # exempt from the limit (add_re_cap_curtailment!).
-        if length(total_renewable.terms) > 0
-            @constraint(model,
-                total_curtailment <= input.max_curtailment_ratio * total_renewable +
-                    add_re_cap_curtailment!(model, input, re_cap_exempt, year_idx,
-                                            start_hour, hours, "y$(year_idx)_d$(day_idx)"),
-                base_name = "max_curtailment_y$(year_idx)_d$(day_idx)")
-        end
+        curtailment === nothing ||
+            add_period_curtailment!(curtailment,
+                system_day_curtailment(ps_vars, tech_output, (tc, b) -> tech_caps[(tc, b)],
+                                       input, start_hour, hours),
+                system_day_renewable(ps_vars, tech_output, input, hours),
+                re_cap_exempt_energy(input, re_cap_exempt, year_idx, start_hour, hours),
+                period_scale)
     end
 
     add_to_expression!(tech_day_cost, tech_curve_cost)
@@ -4026,6 +4108,7 @@ function add_representative_days_validation!(
         re_energy = [AffExpr(0.0) for _ in master_systems(input)]
         re_generation = [AffExpr(0.0) for _ in re_energy]
         re_demand = zeros(length(re_energy))
+        curt_year = CurtailmentYear()
 
         for (day_idx, start_hour) in enumerate(rep_days)
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
@@ -4043,7 +4126,8 @@ function add_representative_days_validation!(
             # Add operational constraints via delegation to power_system.jl
             tech_output, tech_day_cost = add_day_operational_constraints!(
                 model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour;
-                re_cap_exempt = cap_exempt
+                re_cap_exempt = cap_exempt, curtailment = curt_year,
+                period_scale = rep_day_scaling(input, nd)
             )
 
             # Operational cost scaled to the year (candidate technologies' too)
@@ -4067,6 +4151,7 @@ function add_representative_days_validation!(
                         start_hour, hours, rep_day_scaling(input, nd))
         end
 
+        add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx)
         push!(vars.operational_costs[y_idx],
             add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
                 scenario_idx=scenario_idx))
@@ -4179,6 +4264,7 @@ function add_tsam_periods_validation!(
         re_energy = [AffExpr(0.0) for _ in master_systems(input)]
         re_generation = [AffExpr(0.0) for _ in re_energy]
         re_demand = zeros(length(re_energy))
+        curt_year = CurtailmentYear()
 
         # --- Create inter-period SOC boundary variables ---
         if input.tsam_inter_period_linking && n_bat > 0
@@ -4306,7 +4392,9 @@ function add_tsam_periods_validation!(
                 final_soc_targets=soc_final,
                 initial_reservoir_overrides=res_initial,
                 final_reservoir_targets=res_final,
-                re_cap_exempt=cap_exempt
+                re_cap_exempt=cap_exempt,
+                curtailment=curt_year,
+                period_scale=max(1.0, input.temporal_resolution_hours) * weight
             )
 
             # Weighted operational cost (candidate technologies' too)
@@ -4334,6 +4422,7 @@ function add_tsam_periods_validation!(
                         start_hour, hours, tres * weight)
         end
 
+        add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx)
         push!(vars.operational_costs[y_idx],
             add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
                 scenario_idx=scenario_idx))

@@ -46,7 +46,7 @@ class PenaltiesConfig(BaseModel):
     loss_of_reserve_dynamic: float = Field(default=100, description="$/MW dynamic reserve deficit")
     loss_of_inertia: float = Field(default=200, description="$/MW-s inertia deficit")
     transfer_margin: float = Field(default=100, description="$/MW transfer margin violation")
-    max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Max curtailment as fraction of RE generation (0.05 = 5%)")
+    max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Annual cap on curtailment, per system, as a fraction of its RE generation over the year (0.05 = 5%); master only, the dispatch prices curtailment")
     curtailment_cost: float = Field(default=20.0, ge=0, description="$/MWh penalty for curtailed RE energy")
     rooftop_curtailment: float = Field(default=5, description="$/MWh rooftop curtailed")
     co2_cost: float = Field(default=10, description="$/tCO2")

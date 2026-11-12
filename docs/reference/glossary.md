@@ -32,7 +32,7 @@
 :   A single segment in a piecewise-linear cost curve, defined by a power output fraction (0 to 1 of $P_{max}$) and a marginal cost ($/MWh). Multiple blocks form a stepwise non-decreasing offer curve. Used internally after `normalize_cost_curve()` converts any curve type (flat, linear, stepwise, exponential) to a uniform block representation.
 
 **Curtailment**
-:   Deliberate reduction of renewable energy output below available capacity. In the master problem, curtailment is limited to a fraction (`penalties.max_curtailment_ratio`) of renewable generation; the operational dispatch charges `curtailment_cost` per MWh instead.
+:   Deliberate reduction of renewable energy output below available capacity. In the master problem, each system's curtailment over the year is limited to a fraction (`penalties.max_curtailment_ratio`) of its renewable generation over the year; the operational dispatch charges `curtailment_cost` per MWh instead.
 
 ---
 

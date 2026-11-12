@@ -12,7 +12,7 @@ Algorithm:
 2. Iterate:
    a. Solve master → x*, θ*; LB = objective
    b. Fix capacities from x*, solve every year's subproblem → Q_y
-   c. If a subproblem breaks the curtailment limit, add a feasibility cut;
+   c. If a year subproblem breaks its annual curtailment limit, add a feasibility cut;
       otherwise UB = min(UB, first-stage cost(x*) + Σ_y discount_y × Q_y)
    d. Generate one optimality cut per year: θ[y] ≥ intercept + gradient^T × x
    e. Check convergence: (UB - LB) / |UB| < tolerance
@@ -30,9 +30,12 @@ Algorithm:
 # 1e-9 matrix tolerance and was dropped, so the master never saw it.
 const COST_SCALE = 1.0
 
-# Curtailment above the limit (MW summed over the day's steps) below which a
-# subproblem counts as meeting it
-const CURTAILMENT_FEAS_TOL = 1e-6
+# A year subproblem meets a system's curtailment limit when it curtails at
+# most CURTAILMENT_LIMIT_ATOL (MWh/year) + CURTAILMENT_LIMIT_RTOL × the
+# system's renewable generation of the year above it (`curtailment_tolerance`):
+# solver tolerances leave a few MWh/year on a limit of TWh/year
+const CURTAILMENT_LIMIT_RTOL = 1e-6
+const CURTAILMENT_LIMIT_ATOL = 1e-3
 
 # In-out stabilisation: weight of the master's plan in the point the
 # subproblems are solved at (the rest is the previous point solved)
@@ -419,8 +422,9 @@ end
 
 Most power (MW per step) the subproblems can draw at each system's buses
 beyond its load and its batteries' charge: what its lossy lines can lose
-(both flow directions at their full PWL segments, as `add_dc_constraints!`
-allows), and the battery floor's sliver charging. `Inf` with anything else
+(each its PWL loss at full flow in one direction: the loss repair
+`optimize_exact_losses!` leaves no line losing more than the PWL loss of its
+net flow), and the battery floor's sliver charging. `Inf` with anything else
 that draws power (converters, reservoir pumps, electrolyzers of the fuel
 block, a line to another system) or a lossy line the master can expand (its
 last segment is open).
@@ -460,7 +464,7 @@ function benders_power_sink(vars::MasterProblemVariables, input::MasterProblemIn
                              for y in inv_years)
             t.line_capacities[l] >= 0.1 || expandable || continue
             sf === nothing ||
-                (sink[sf] += expandable ? Inf : 2 * sum(pwl.slopes[l] .* pwl.segment_widths[l]))
+                (sink[sf] += expandable ? Inf : sum(pwl.slopes[l] .* pwl.segment_widths[l]))
         end
     end
     return sink
@@ -513,20 +517,21 @@ shed load the subproblem does not (a lower bound above the year's cost).
 The year's RE target or floor on the RE share (renewable over total
 generation; shortfall at `re_shortfall_penalty`) and, with a growth cap,
 the cap on the master's renewable generation of the year before and the
-year's are as in the subproblem (`create_benders_year_subproblem`). So is each day's curtailment
-limit: the variable renewables' pooled available energy left unused is at
-most `max_curtailment_ratio` × the renewable output plus what the growth cap
-lets the day curtail (at its most, `re_cap_exemption`), and supply above
-the load is at most what the subproblem can draw beyond it
-(`benders_power_sink`: line losses; no bound with converters, pumps,
-electrolyzers or links between systems), else renewable output dumped in
-the relaxation would count as used. Without the two the relaxation
-curtailed for free whatever renewable capacity the master built, while the
-subproblem cannot curtail more than the limit, so the master built more
-than a year could absorb. (Where lossy lines can lose more than the
-surplus, as on Cuba, the sink bound does not bind and the cuts carry the
-limit.) Every operation of the subproblem is feasible here at no higher
-cost, so
+year's are as in the subproblem (`create_benders_year_subproblem`). So is
+each system's annual curtailment limit: the variable renewables' pooled
+available energy left unused over the year is at most
+`max_curtailment_ratio` × the year's renewable output plus what the growth
+cap lets the year curtail (`re_cap_exempt_energy`) and the subproblem's
+tolerance (`curtailment_tolerance`), and supply above the load is at most
+what the subproblem can draw beyond it (`benders_power_sink`: line losses;
+no bound with converters, pumps, electrolyzers or links between systems),
+else renewable output dumped in the relaxation would count as used. Without
+the two the relaxation curtailed for free whatever renewable capacity the
+master built, while the subproblem cannot curtail more than the limit, so
+the master built more than a year could absorb. (The sink is every lossy
+line's full-flow loss at once, which on a network of lossy lines, as Cuba's,
+can still exceed the surplus; the cuts then carry the rest of the limit.)
+Every operation of the subproblem is feasible here at no higher cost, so
 
     θ[y] ≥ cost of the relaxation (scaled to the year)       (op_bound_y{y})
 
@@ -576,10 +581,11 @@ function add_benders_operating_bound!(model::Model, vars::MasterProblemVariables
     for y_idx in sort(collect(keys(theta)))
         days = get(rep_days_by_year, y_idx, Int[])
         isempty(days) && continue
-        # Per day, over every system: the variable renewables' available
-        # energy left unused, and the renewable output
-        curt_left = [AffExpr(0.0) for _ in days]
-        re_out = [AffExpr(0.0) for _ in days]
+        # Per system, over the year's days (each stands for as many days):
+        # the variable renewables' available energy left unused, and the
+        # renewable output
+        curt_left = [AffExpr(0.0) for _ in systems]
+        re_out = [AffExpr(0.0) for _ in systems]
         w = rep_day_scaling(input, length(days))
         growth = (1.0 + input.demand_growth)^(y_idx - 1)
         caps = build_cumulative_capacity_expressions(vars, input, y_idx)
@@ -661,13 +667,13 @@ function add_benders_operating_bound!(model::Model, vars::MasterProblemVariables
                         add_to_expression!(generation[s], w, p)
                         is_renewable_unit(gen) || continue
                         add_to_expression!(energy[s], w, p)
-                        add_to_expression!(re_out[d], p)
+                        add_to_expression!(re_out[s], p)
                         # What the subproblem counts as curtailed (a unit
                         # variable at only some buses counts nowhere: less)
                         if all(is_variable_renewable(gen, b) for b in sys_buses(s)
                                if gen.rated_power[b] > 0)
-                            add_to_expression!(curt_left[d], lim)
-                            add_to_expression!(curt_left[d], -1.0, p)
+                            add_to_expression!(curt_left[s], lim)
+                            add_to_expression!(curt_left[s], -1.0, p)
                         end
                     end
                     for (t, tech) in enumerate(input.technologies)
@@ -684,10 +690,10 @@ function add_benders_operating_bound!(model::Model, vars::MasterProblemVariables
                         add_to_expression!(generation[s], w, p)
                         is_renewable_unit(tech) || continue
                         add_to_expression!(energy[s], w, p)
-                        add_to_expression!(re_out[d], p)
+                        add_to_expression!(re_out[s], p)
                         if is_variable_renewable(tech, 1)
-                            add_to_expression!(curt_left[d], lim)
-                            add_to_expression!(curt_left[d], -1.0, p)
+                            add_to_expression!(curt_left[s], lim)
+                            add_to_expression!(curt_left[s], -1.0, p)
                         end
                     end
                     if has_store
@@ -723,20 +729,24 @@ function add_benders_operating_bound!(model::Model, vars::MasterProblemVariables
             @constraint(model, sup >= pool_load[(gi, d, ts)],
                         base_name = "op_bound_balance_y$(y_idx)_g$(gi)_d$(d)_t$(ts)")
         end
-        # Each day's curtailment limit, with the growth cap's exemption at
-        # its most (`add_re_cap_curtailment!`)
-        exempt_share = get(cap_exempt, y_idx, Float64[])
-        for (d, start_hour) in enumerate(days)
-            (curt_limited && !isempty(re_out[d].terms)) || continue
-            hours = min(start_hour + timesteps_per_day - 1, size(D, 1)) - start_hour + 1
-            exempt = 0.0
-            if any(>(0.0), exempt_share)
-                avail = existing_vre_available(input, y_idx, start_hour, hours)
-                exempt = sum(exempt_share[s] * avail[s]
-                             for s in eachindex(exempt_share) if s <= length(avail); init = 0.0)
+        # Each system's annual curtailment limit, with the growth cap's
+        # exemption (`re_cap_exempt_energy`) and the subproblem's tolerance
+        # (`curtailment_tolerance`, in the sum's units: MWh/year / w)
+        if curt_limited
+            exempt = zeros(length(systems))
+            exempt_share = get(cap_exempt, y_idx, Float64[])
+            for start_hour in days
+                hours = min(start_hour + timesteps_per_day - 1, size(D, 1)) - start_hour + 1
+                hours >= 1 || continue
+                exempt .+= re_cap_exempt_energy(input, exempt_share, y_idx, start_hour, hours)
             end
-            @constraint(model, curt_left[d] <= input.max_curtailment_ratio * re_out[d] + exempt,
-                        base_name = "op_bound_curt_y$(y_idx)_d$(d)")
+            for s in eachindex(systems)
+                isempty(re_out[s].terms) && continue
+                @constraint(model, curt_left[s] <=
+                    (input.max_curtailment_ratio + CURTAILMENT_LIMIT_RTOL) * re_out[s] +
+                    exempt[s] + CURTAILMENT_LIMIT_ATOL / w,
+                    base_name = "op_bound_curt_s$(s)_y$(y_idx)")
+            end
         end
         # The year's RE target and growth cap, as the subproblem has them
         # (their slacks in MWh/year, hence / w in the per-step cost)
@@ -1326,25 +1336,6 @@ function create_benders_subproblem(
     remainder_premium = add_day_sectoral_shed_constraints!(sp_model, ps_vars, input,
         demand_slice, start_hour, growth_factor)
 
-    # =========================================================================
-    # Renewable output (all systems; the curtailment limit below caps it)
-    # =========================================================================
-    total_renewable = AffExpr(0.0)
-    for (g, gen) in enumerate(input.generators)
-        gen.type == "Renewable" || continue
-        for n in ps_vars.buses_of_gen[g], t in 1:hours
-            add_to_expression!(total_renewable, ps_vars.gen_output[g, n, t])
-        end
-    end
-    if tech_output !== nothing
-        for (tc, tech) in enumerate(input.technologies)
-            tech.type == "Renewable" || continue
-            for b in 1:n_buses, t in 1:hours
-                add_to_expression!(total_renewable, tech_output[tc, b, t])
-            end
-        end
-    end
-
     # The day's renewable and total generation and demand per system, as
     # the monolithic master counts them (add_day_re!), for the year's RE
     # target and growth cap (create_benders_year_subproblem) and the
@@ -1353,32 +1344,24 @@ function create_benders_subproblem(
                                   system_day_generation(ps_vars, tech_output, input, hours),
                                   system_day_demand(input, year_idx, start_hour, hours))
 
-    # Max curtailment — includes BOTH generator and technology RE curtailment.
-    # Technology curtailment = fixed_cap × avail - tech_output (capacity not dispatched).
-    # Including it here is critical: when something other than the capacity
-    # constraint limits tech dispatch, the capacity dual is 0 and the master
-    # gets no signal about overcapacity.  By including technology curtailment,
-    # the dual of this constraint captures the cost of over-investment and
-    # feeds it into the Benders cuts via extract_subproblem_duals.
-    # An AffExpr even for one node and one step (a bare sum would be a VariableRef)
-    total_curtailment = AffExpr(0.0)
-    for n in 1:n_nodes, t in 1:hours
-        add_to_expression!(total_curtailment, ps_vars.curtailment[n, t])
-    end
-
-    # Add technology RE curtailment: available capacity - dispatched output
-    # tech_avail_sum tracks Σ(fixed_cap × avail) per (tech, bus) for dual extraction
+    # Candidate technologies' curtailment, fixed_cap × avail − tech_output
+    # (variable renewables only, as the monolithic master). The curtailment
+    # limit counts it (`add_benders_curtailment_limits!`): when something
+    # other than the capacity constraint limits tech dispatch, the capacity
+    # dual is 0 and only the limit's dual tells the master about
+    # overcapacity (extract_subproblem_duals). tech_avail_sum tracks
+    # Σ avail per (tech, bus), the capacity's coefficient in it.
     tech_avail_sum = Dict{Tuple{Int,Int}, Float64}()
     # The monolithic master also charges curtailment_cost on it (with a
     # curtailment limit). Its cap × avail part is a constant here, so its
     # gradient, curtailment_cost × Σ avail per MW (scaled to the year, see
     # extract_subproblem_duals), goes into the cut separately.
-    charge_tech_curt = input.max_curtailment_ratio < 1.0 && input.curtailment_cost > 0
+    curt_limited = input.max_curtailment_ratio < 1.0
+    charge_tech_curt = curt_limited && input.curtailment_cost > 0
     tech_curt_grad = Dict{Tuple{Int,Int}, Float64}()
     if tech_output !== nothing
         for tc in 1:n_tech
             tech = input.technologies[tc]
-            # variable renewables only, as the monolithic master
             is_variable_renewable(tech, 1) || continue
             for b in 1:n_buses
                 cumul_cap = get(fixed_caps.tech_capacity, (tc, b), 0.0)
@@ -1393,10 +1376,6 @@ function create_benders_subproblem(
                         add_to_expression!(tech_curve_cost, -input.curtailment_cost,
                                            tech_output[tc, b, ts])
                     end
-                    # tech curtailment = cap × avail - tech_output; also at
-                    # zero capacity, so the cut sees what building adds
-                    add_to_expression!(total_curtailment, cumul_cap * avail)
-                    add_to_expression!(total_curtailment, -1.0, tech_output[tc, b, ts])
                 end
                 tech_avail_sum[(tc, b)] = avail_total
                 if charge_tech_curt && avail_total > 0
@@ -1405,27 +1384,15 @@ function create_benders_subproblem(
             end
         end
     end
-
-    # Hard, as in the monolithic master (and only with renewable output to
-    # cap). Its slack is fixed to zero; `solve_benders_subproblem!` frees it to
-    # measure the violation when the master's capacities cannot meet the
-    # limit, for a feasibility cut.
-    if input.max_curtailment_ratio < 1.0 && !isempty(total_renewable.terms)
-        curt_excess = @variable(sp_model, lower_bound = 0, upper_bound = 0,
-            base_name = "curt_excess_y$(year_idx)_d$(day_idx)")
-        # What the RE growth cap makes the day curtail is exempt, as in the
-        # monolithic master (add_re_cap_curtailment!)
-        cap_curt = add_re_cap_curtailment!(sp_model, input, re_cap_exempt, year_idx,
-                                           start_hour, hours, "y$(year_idx)_d$(day_idx)")
-        curt_cref = @constraint(sp_model,
-            total_curtailment <= input.max_curtailment_ratio * total_renewable +
-                curt_excess + cap_curt,
-            base_name = "max_curt_y$(year_idx)_d$(day_idx)")
-        # Store for dual extraction — needed for Benders cut gradient
-        constraint_store["max_curt"] = (curt_cref, tech_avail_sum)
-        constraint_store["curt_excess"] = curt_excess
-        # Both sides of the limit, for the report of a year that breaks it
-        constraint_store["curt_terms"] = (total_curtailment, total_renewable, cap_curt)
+    # The day's terms of the year's curtailment limit, per system
+    if curt_limited
+        constraint_store["curt_day"] = (
+            system_day_curtailment(ps_vars, tech_output,
+                (tc, b) -> get(fixed_caps.tech_capacity, (tc, b), 0.0),
+                input, start_hour, hours),
+            constraint_store["re_day"][1],
+            re_cap_exempt_energy(input, re_cap_exempt, year_idx, start_hour, hours))
+        constraint_store["tech_avail_sum"] = tech_avail_sum
     end
 
     # =========================================================================
@@ -1458,7 +1425,12 @@ function create_benders_subproblem(
     isempty(copy_fix) || (constraint_store["copy_fix"] = copy_fix)
     constraint_store["day_cost"] = day_cost
 
-    model === nothing && @objective(sp_model, Min, day_cost)
+    if model === nothing
+        # Built alone, the day is its year
+        constraint_store["curt_limits"] = add_benders_curtailment_limits!(sp_model, input,
+            year_idx, [constraint_store], [scaling_factor])
+        @objective(sp_model, Min, day_cost)
+    end
 
     return SubproblemData(
         sp_model, ps_vars,
@@ -1529,6 +1501,10 @@ function create_benders_year_subproblem(
     store = Dict{String, Any}()
     copy_fix = Dict{BendersCopyKey, Any}()
 
+    # The annual curtailment limit of each system
+    store["curt_limits"] = add_benders_curtailment_limits!(model, input, year_idx,
+        [sp.constraint_store for sp in day_sps], [sp.scaling_factor for sp in day_sps])
+
     # CO2 budgets (add_co2_budget_constraints!)
     for (k, grp) in enumerate(input.co2_budget_groups)
         has_co2_budget(grp) || continue
@@ -1583,6 +1559,50 @@ function create_benders_year_subproblem(
 
     @objective(model, Min, cost)
     return BendersYearSubproblem(model, day_sps, store, year_idx)
+end
+
+"""
+    add_benders_curtailment_limits!(model, input, year_idx, stores, scales) -> Vector
+
+The annual curtailment limit (`add_curtailment_limit!`) of each system in a
+year subproblem (or a day subproblem built alone), over its days' terms
+(`stores[d]["curt_day"]`, scaled `scales[d]`), with a slack
+`curt_excess_s{σ}_y{y}` fixed to 0 (`max_curt_s{σ}_y{y}`); a violation is
+measured or priced by freeing it (`solve_benders_subproblem!`). Each day's
+store gets the limits and the capacities' coefficients in them
+(`"max_curt"`, for `extract_subproblem_duals`). Returns one record per
+limit: its slack and constraint, system, the year's curtailment,
+renewable generation and exemption over `scale` (the largest of `scales`,
+the slack's MWh per MWh/year), for `benders_curt_limits`.
+"""
+function add_benders_curtailment_limits!(model::Model, input::MasterProblemInput,
+                                         year_idx::Int, stores::Vector{Dict{String, Any}},
+                                         scales::Vector{Float64})
+    limits = NamedTuple[]
+    input.max_curtailment_ratio < 1.0 || return limits
+    year = CurtailmentYear()
+    for (st, w) in zip(stores, scales)
+        haskey(st, "curt_day") && add_period_curtailment!(year, st["curt_day"]..., w)
+    end
+    curt, re, exempt, smax = curtailment_year_sums(year)
+    crefs = Dict{Int, ConstraintRef}()
+    for s in eachindex(curt)
+        isempty(re[s].terms) && continue
+        x = @variable(model, lower_bound = 0, upper_bound = 0,
+                      base_name = "curt_excess_s$(s)_y$(year_idx)")
+        crefs[s] = @constraint(model,
+            curt[s] <= input.max_curtailment_ratio * re[s] + exempt[s] + x,
+            base_name = "max_curt_s$(s)_y$(year_idx)")
+        push!(limits, (excess = x, cref = crefs[s], system = s, curt = curt[s],
+                       re = re[s], exempt = exempt[s], scale = smax))
+    end
+    bus_sys = master_bus_systems(input)
+    for (st, w) in zip(stores, scales)
+        haskey(st, "tech_avail_sum") || continue
+        st["max_curt"] = (crefs, Dict(k => a * w / smax for (k, a) in st["tech_avail_sum"]),
+                          bus_sys)
+    end
+    return limits
 end
 
 # =============================================================================
@@ -1659,7 +1679,7 @@ function extract_subproblem_duals(
 
     # Curtailment constraint dual contribution to technology gradient.
     # The curtailment constraint includes technology curtailment:
-    #   Σ(curt) + Σ(cap×avail - tech_output) ≤ ratio×renewable + slack
+    #   Σ(curt) + Σ(cap×avail - tech_output) ≤ ratio×renewable + exempt + slack
     # cap (master variable) appears on the LHS with coefficient Σ_ts(avail).
     # The gradient ∂Q/∂cap from this constraint = -dual(curt_cref) × Σ_ts(avail).
     # (negative because cap increases the LHS, tightening a ≤ constraint;
@@ -1667,17 +1687,16 @@ function extract_subproblem_duals(
     # This term is CRITICAL: when something other than the capacity
     # constraint limits tech dispatch, the capacity dual is 0 but the
     # curtailment dual captures the marginal cost of over-investment.
+    # The limit is the system's, annual (add_benders_curtailment_limits!):
+    # `avail_sum` is the day's coefficient in it.
     if haskey(sp.constraint_store, "max_curt")
-        curt_data = sp.constraint_store["max_curt"]
-        curt_cref = curt_data[1]
-        tech_avail_sum = curt_data[2]
-        curt_dual = dual(curt_cref)  # ≤ 0 for ≤ constraint in minimization
-        if abs(curt_dual) > 1e-10
-            for ((tc, b), avail_sum) in tech_avail_sum
-                # -curt_dual × avail_sum is the positive gradient (cost increases with capacity)
-                curt_contribution = -curt_dual * avail_sum
-                tech_duals[(tc, b)] = get(tech_duals, (tc, b), 0.0) + curt_contribution
-            end
+        crefs, tech_avail_sum, bus_sys = sp.constraint_store["max_curt"]
+        curt_duals = Dict(s => dual(c) for (s, c) in crefs)  # ≤ 0 (≤, minimisation)
+        for ((tc, b), avail_sum) in tech_avail_sum
+            curt_dual = get(curt_duals, bus_sys[b], 0.0)
+            abs(curt_dual) > 1e-10 || continue
+            # -curt_dual × avail_sum is the positive gradient (cost increases with capacity)
+            tech_duals[(tc, b)] = get(tech_duals, (tc, b), 0.0) - curt_dual * avail_sum
         end
     end
 
@@ -1907,7 +1926,7 @@ end
 
 Add a Benders feasibility cut `intercept + Σ gradient × investment_variable ≤ 0`,
 built from a subproblem's least curtailment violation (`solve_benders_subproblem!`):
-the capacities must let the day meet its curtailment limit.
+the capacities must let the year meet its curtailment limits.
 """
 function add_feasibility_cut!(
     model::Model,
@@ -1923,17 +1942,42 @@ function add_feasibility_cut!(
 end
 
 """
+    curtailment_tolerance(re) -> Float64
+
+Curtailment (MWh/year) above a system's limit that still counts as within
+it, for its renewable generation `re` (MWh/year): `CURTAILMENT_LIMIT_ATOL` +
+`CURTAILMENT_LIMIT_RTOL` × `re`.
+"""
+curtailment_tolerance(re::Real) = CURTAILMENT_LIMIT_ATOL + CURTAILMENT_LIMIT_RTOL * max(re, 0.0)
+
+"""
+    benders_curt_limits(sp) -> Vector
+
+The annual curtailment limits (`add_benders_curtailment_limits!`) of a year
+subproblem, or of a day subproblem built alone.
+"""
+benders_curt_limits(sp::SubproblemData) = get(sp.constraint_store, "curt_limits", NamedTuple[])
+benders_curt_limits(ysp::BendersYearSubproblem) =
+    get(ysp.constraint_store, "curt_limits", NamedTuple[])
+
+"""
     benders_curt_slacks(sp) -> Vector{VariableRef}
 
-The curtailment-limit slacks (`curt_excess_*`) of a day subproblem, or of
-every day of a year subproblem.
+The curtailment-limit slacks (`curt_excess_*`, one per system) of a year
+subproblem, or of a day subproblem built alone.
 """
-function benders_curt_slacks(sp::SubproblemData)
-    x = get(sp.constraint_store, "curt_excess", nothing)
-    return x === nothing ? VariableRef[] : VariableRef[x]
-end
-benders_curt_slacks(ysp::BendersYearSubproblem) =
-    reduce(vcat, (benders_curt_slacks(sp) for sp in ysp.days); init = VariableRef[])
+benders_curt_slacks(sp::Union{SubproblemData, BendersYearSubproblem}) =
+    VariableRef[l.excess for l in benders_curt_limits(sp)]
+
+"""
+    benders_curt_violated(sp) -> Bool
+
+True when the solution of `sp` curtails more than a system's limit allows,
+beyond `curtailment_tolerance`.
+"""
+benders_curt_violated(sp::Union{SubproblemData, BendersYearSubproblem}) =
+    any(l -> l.scale * value(l.excess) > curtailment_tolerance(l.scale * value(l.re)),
+        benders_curt_limits(sp))
 
 # Cost term of a subproblem variable, from its name without the indices,
 # year, day and system (`benders_cost_terms`)
@@ -1986,27 +2030,27 @@ end
     benders_curtailment_report(ysp, ratio) -> String
 
 Why a year subproblem cannot meet its curtailment limit, at its least
-violation (`solve_benders_subproblem!`): on how many days, and its
-curtailment against the limit (`max_curtailment_ratio` × the renewable
-energy used, plus what the growth cap lets it curtail), in GWh/year.
+violation (`solve_benders_subproblem!`): in how many systems, and the
+year's curtailment against the limit (`max_curtailment_ratio` × the
+renewable energy used, plus what the growth cap lets it curtail), in
+GWh/year, summed over the systems.
 """
 function benders_curtailment_report(ysp::BendersYearSubproblem, ratio::Float64)
     curt = re = exempt = excess = 0.0
     broken = 0
-    for sp in ysp.days
-        terms = get(sp.constraint_store, "curt_terms", nothing)
-        terms === nothing && continue
-        w = sp.scaling_factor / 1000.0   # GWh/year
-        c, r, e = terms
-        x = value(sp.constraint_store["curt_excess"])
-        curt += w * value(c)
-        re += w * value(r)
-        exempt += w * value(e)
-        excess += w * x
-        x > CURTAILMENT_FEAS_TOL && (broken += 1)
+    limits = benders_curt_limits(ysp)
+    for l in limits
+        k = l.scale / 1000.0   # GWh/year
+        x = value(l.excess)
+        curt += k * value(l.curt)
+        re += k * value(l.re)
+        exempt += k * l.exempt
+        excess += k * x
+        l.scale * x > curtailment_tolerance(l.scale * value(l.re)) && (broken += 1)
     end
     f(x) = round(x, digits = 1)
-    return "breaks the curtailment limit on $(broken) of $(length(ysp.days)) days: " *
+    return "breaks the annual curtailment limit" *
+           (length(limits) > 1 ? " in $(broken) of $(length(limits)) systems" : "") * ": " *
            "curtails $(f(curt)) GWh/yr, limit $(f(ratio * re + exempt)) GWh/yr " *
            "($(round(100 * ratio, digits = 2)) % of $(f(re)) GWh/yr of RE used" *
            (exempt > 0 ? " + $(f(exempt)) exempt by the growth cap" : "") *
@@ -2023,12 +2067,9 @@ displaced, battery losses), so a plan that can meet the limit does.
 """
 benders_curtailment_penalty(input::MasterProblemInput) = re_cap_penalty(input)
 
-# The curtailment-limit slacks of `sp` with the year scaling of their day
-benders_weighted_slacks(sp::SubproblemData) =
-    [(x, sp.scaling_factor) for x in benders_curt_slacks(sp)]
-benders_weighted_slacks(ysp::BendersYearSubproblem) =
-    reduce(vcat, (benders_weighted_slacks(sp) for sp in ysp.days);
-           init = Tuple{VariableRef, Float64}[])
+# The curtailment-limit slacks of `sp` with their MWh/year per unit
+benders_weighted_slacks(sp::Union{SubproblemData, BendersYearSubproblem}) =
+    Tuple{VariableRef, Float64}[(l.excess, l.scale) for l in benders_curt_limits(sp)]
 
 """
     solve_benders_subproblem!(sp; penalty=0.0) -> Symbol
@@ -2049,7 +2090,7 @@ function solve_benders_subproblem!(sp::Union{SubproblemData, BendersYearSubprobl
     solved(m) = termination_status(m) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
     slacks = benders_weighted_slacks(sp)
     priced = penalty > 0 && !isempty(slacks)
-    violated() = sum(value(x) for (x, _) in slacks; init = 0.0) > CURTAILMENT_FEAS_TOL
+    violated() = benders_curt_violated(sp)
     if priced
         cost = objective_function(sp.model)
         for (x, w) in slacks
@@ -2065,7 +2106,7 @@ function solve_benders_subproblem!(sp::Union{SubproblemData, BendersYearSubprobl
        termination_status(sp.model) in (MOI.INFEASIBLE, MOI.INFEASIBLE_OR_UNBOUNDED)
         cost = objective_function(sp.model)
         benders_least_violation!(sp) && return :infeasible
-        foreach(xw -> set_upper_bound(xw[1], 0.0), slacks)
+        benders_hold_slacks!(sp)
         @objective(sp.model, Min, cost)
     end
 
@@ -2082,13 +2123,30 @@ function solve_benders_subproblem!(sp::Union{SubproblemData, BendersYearSubprobl
 end
 
 """
+    benders_hold_slacks!(sp)
+
+Make the curtailment limits of `sp` hard again after its least violation
+(`benders_least_violation!`) found them met: each slack is bounded by the
+value it had there (within `curtailment_tolerance`), or 0 when that solve
+failed, so the limits hold as far as they can.
+"""
+function benders_hold_slacks!(sp::Union{SubproblemData, BendersYearSubproblem})
+    ok = termination_status(sp.model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
+         primal_status(sp.model) == MOI.FEASIBLE_POINT
+    for x in benders_curt_slacks(sp)
+        set_upper_bound(x, ok ? max(value(x), 0.0) : 0.0)
+    end
+    return nothing
+end
+
+"""
     benders_solve_hard!(sp, cost) -> Bool
 
-Re-solve `sp` with its curtailment limits hard (their slacks at 0) and
+Re-solve `sp` with its curtailment limits hard (`benders_hold_slacks!`) and
 objective `cost`. True when it solved with duals.
 """
 function benders_solve_hard!(sp::Union{SubproblemData, BendersYearSubproblem}, cost)
-    foreach(x -> set_upper_bound(x, 0.0), benders_curt_slacks(sp))
+    benders_hold_slacks!(sp)
     @objective(sp.model, Min, cost)
     optimize!(sp.model)
     return termination_status(sp.model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
@@ -2100,7 +2158,7 @@ end
 
 Re-solve `sp` for its least curtailment above the limits (their slacks
 freed, their sum minimised), whose duals give a feasibility cut. True when
-it solved with a violation left.
+it solved with a violation left beyond `curtailment_tolerance`.
 """
 function benders_least_violation!(sp::Union{SubproblemData, BendersYearSubproblem})
     slacks = benders_curt_slacks(sp)
@@ -2109,7 +2167,7 @@ function benders_least_violation!(sp::Union{SubproblemData, BendersYearSubproble
     @objective(sp.model, Min, sum(slacks))
     optimize!(sp.model)
     return termination_status(sp.model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
-           has_duals(sp.model) && objective_value(sp.model) > CURTAILMENT_FEAS_TOL
+           has_duals(sp.model) && benders_curt_violated(sp)
 end
 
 """Termination statuses of a solver stopped by a resource limit."""
@@ -2292,11 +2350,11 @@ function run_benders_decomposition(
 
     # Solve year `y_idx`'s subproblem (all its representative days) at
     # capacities `caps` and queue its cut in `cuts` as (kind, year, cut).
-    # Returns the year's operating cost, whether it solved, and whether every
-    # day met its curtailment limit. With `op`, each day's operation of the
-    # existing units is added to it (their NPV); with `re`, each system's
-    # renewable and total generation scaled to the year (its achieved RE
-    # share).
+    # Returns the year's operating cost, whether it solved, and whether it
+    # met its annual curtailment limits (within `curtailment_tolerance`).
+    # With `op`, each day's operation of the existing units is added to it
+    # (their NPV); with `re`, each system's renewable and total generation
+    # scaled to the year (its achieved RE share).
     # With `diag`, the year's outcome for the iteration log: (:optimal |
     # :infeasible | :failed, cost by term, why it broke the limit or failed).
     # The year is solved with its curtailment limits priced; one that breaks
