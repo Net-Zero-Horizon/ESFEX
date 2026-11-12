@@ -242,7 +242,7 @@ Without sectoral demand the \(\text{LOL}\) terms are absent, \(m_{i,t} = 1\) and
 m_{i,t} = \frac{\sum_s \kappa_s D^{\text{sec}}_{s,i,t}}{\sum_s D^{\text{sec}}_{s,i,t}},
 \]
 
-and 1 where no sector has demand at the node. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the ratio cap of the master problem is described in [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
+and 1 where no sector has demand at the node. Curtailment is priced at `penalties.curtailment_cost` (default 20 \$/MWh); there is no hard curtailment cap in the dispatch (the master problem's annual ratio cap is described in [Capacity Expansion](capacity-expansion.md#836-annual-curtailment-limit)). The transfer-margin slack \(\mu\) is always 0 (see §2.3).
 
 ### 3.5 Sectoral Load Shedding Penalties
 
@@ -724,7 +724,7 @@ Curtailment is defined per node as the difference between available and dispatch
 \text{CU}_{i,t} \leq \sum_{n \in i} \sum_{g \in \mathcal{G}^{\text{RE}}_{\text{var}}} \bar{P}^{\text{eff}}_{g,n} \, a_{g,n,t} \quad \forall i, t \tag{CUR-2}
 \]
 
-Curtailment cannot exceed available renewable generation. In the dispatch, curtailment is priced at `curtailment_cost` (OBJ-4a) and not capped; the `max_curtailment_ratio` cap applies only in the master problem's representative days (see [Capacity Expansion](capacity-expansion.md#836-curtailment-limit-per-day)).
+Curtailment cannot exceed available renewable generation. In the dispatch, curtailment is priced at `curtailment_cost` (OBJ-4a) and not capped; the `max_curtailment_ratio` cap applies only in the master problem, over each year (see [Capacity Expansion](capacity-expansion.md#836-annual-curtailment-limit)).
 
 ---
 
