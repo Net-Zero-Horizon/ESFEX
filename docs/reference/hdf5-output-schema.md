@@ -138,6 +138,7 @@ Expandable arrays that grow as each year completes. One row per simulated year.
 | `renewable_penetration` | (num_years,) | float | RE share (0-1): renewable over total generation of the year, energy-weighted; battery discharge is neither |
 | `co2_emissions` | (num_years,) | float | Annual CO2 (tonnes) |
 | `loss_of_load` | (num_years,) | float | Total unserved energy (MWh) |
+| `transmission_losses` | (num_years,) | float | Energy lost on the lines by the DC loss model (MWh); 0 without a loss model (`loss_model: none`) and in ACOPF modes |
 
 Energy and CO2 totals here and in the scenario attributes below are sums of the per-step rates times `temporal_resolution_hours`, so they are MWh and tonnes at any time step.
 | `n1_security_cost` | (num_years,) | float | Cost of N-1 security ($): objective with N-1 minus objective without it, with `n1_security.compute_security_cost: true`; 0 otherwise. The shortfall penalty alone is `n1_security_shortfall_cost` in `cost_breakdown/` |
@@ -237,6 +238,7 @@ Node axes are at node level: when the operational network has buses that differ 
 | `total_generation` | float | Total energy generated (MWh) |
 | `total_demand` | float | Total energy demand (MWh) |
 | `load_shed` | float | Total unserved energy (MWh) |
+| `transmission_losses` | float | Energy lost on the lines (MWh), the sum of `line_losses` × `temporal_resolution_hours` |
 | `master_re_target` | float | RE penetration target from the master problem for this year |
 
 Investment and retirement decisions of the master problem for this year are stored as scalar attributes. Keys use 0-based technology, node and generator *indices*, not names:
@@ -494,6 +496,9 @@ The detailed `demand` is always `(num_nodes, hours)` and carries `dimensions = "
 |---------|-------|-------|-------------|
 | `power_flow` | (num_nodes, num_nodes, hours) | MW | Flow from node i to node j, aggregated from bus-pair flows (all parallel lines summed); lines inside one node are dropped |
 | `transfer_margin` | (num_nodes, num_nodes, hours) | MW | Transfer margin slack, aggregated from bus pairs like `power_flow` |
+| `line_losses` | (num_nodes, hours) | MW | Transmission losses of the DC loss model, per node: half of each line's loss at each of its two end buses (as the bus balances take it), summed over the node's buses, lines inside a node included. Its sum over nodes is the system's loss in each step. Written when the dispatch has a loss model (`loss_model` `pwl` or `linear`); attribute `dimensions = "nodes x hours"` |
+
+Losses are kept per node rather than per line: the file has no stable identity for the operational lines (buses, parallel lines, transformers), and a node-pair array like `power_flow` would add another `(num_nodes, num_nodes, hours)` array to every year. Files written before this version have no `line_losses` and no `transmission_losses`; the energy-flow Sankey then estimates the losses from the nodes' `losses` factors or the flows, as before.
 
 With a rolling horizon, each window contributes only its committed steps (the overlap tail is dropped), as for every other time series.
 
@@ -576,7 +581,7 @@ Written when N-1 security results exist.
 
 | Content | Description |
 |---------|-------------|
-| `global/summary_results/{year, total_cost, renewable_penetration, co2_emissions, loss_of_load, total_generation, total_demand}` | Expandable datasets, one row per year |
+| `global/summary_results/{year, total_cost, renewable_penetration, co2_emissions, loss_of_load, total_generation, total_demand, transmission_losses}` | Expandable datasets, one row per year |
 | `global/cost_breakdown/year_YYYY/` | Same attributes as `/cost_breakdown/year_YYYY/` |
 | `global/demand/year_YYYY_base_demand` | Same array as `/demand/year_YYYY_base_demand`, `(hours, num_nodes)` float32 |
 
@@ -634,6 +639,7 @@ Virtual unit names start with `"Investment "`, followed by the technology's data
 | Prices | `electricity_prices` | (H,) | float64 | $/MWh |
 | Nodal prices | `nodal_electricity_prices` | (N, H) | float64 | $/MWh |
 | Loss of load | `loss_load` | (N, H) | float64 | MW |
+| Line losses | `line_losses` | (N, H) | float64 | MW |
 
 Where **N** = `num_nodes` and **H** = time steps in the year (8760 at hourly resolution, 8760 / `temporal_resolution_hours` otherwise; the unit-commitment horizon in UC mode).
 

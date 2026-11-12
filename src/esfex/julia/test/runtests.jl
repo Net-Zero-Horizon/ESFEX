@@ -1458,6 +1458,8 @@ import Ipopt
                 @test string(termination_status(model)) == "OPTIMAL"
                 res = extract_solution(model, vars, input)
                 @test res.load_shed_total ≈ 0.0 atol = 1e-6
+                # Line losses in the results: none without a loss model
+                @test (res.line_losses === nothing) == (segments == 0)
                 return res.total_generation
             end
             # λ = R = 0.05, half lost at each end: sent f(1 + λ/2), delivered f(1 - λ/2) = 100
@@ -1519,6 +1521,17 @@ import Ipopt
                         exact += m * min(rem, w); rem = max(rem - w, 0.0)
                     end
                     @test value(vars.line_losses[1][t]) ≈ exact rtol = 0.02 atol = 1e-3
+                    # Results: half of the line's loss at each end bus
+                    @test res.line_losses[1, t] ≈ value(vars.line_losses[1][t]) / 2
+                    @test res.line_losses[2, t] ≈ res.line_losses[1, t]
+                end
+                @test res.total_losses ≈ sum(res.line_losses)
+                # A linearised line-step carries its flow on one segment
+                for b in model.ext[:pwl_loss_repair].blocks
+                    b.dir == 0 && continue
+                    seg = b.dir > 0 ? b.dp : b.dn
+                    @test sum(value.(seg[2:end]); init = 0.0) ≈ 0.0 atol = 1e-9
+                    @test value(b.ploss) ≈ b.alpha * abs(value(b.pf)) atol = 1e-6
                 end
                 return res, model, vars
             end
@@ -1543,6 +1556,18 @@ import Ipopt
             @test res.total_curtailment ≈ 0.0 atol = 1e-6
             reg = model.ext[:pwl_loss_repair]
             @test all(b -> b.dir == 0, reg.blocks)
+
+            # A repaired model is re-solved with the LP method of its first
+            # solve: Gurobi and CPLEX ignore the previous basis (which they
+            # would restart from with simplex, even under barrier) unless the
+            # user chose simplex
+            params(m) = name -> Dict("Method" => m, "CPXPARAM_LPMethod" => m)[name]
+            @test ESFEX.lp_warm_start_off("Gurobi", params(-1)) == ("LPWarmStart" => 0)
+            @test ESFEX.lp_warm_start_off("Gurobi", params(2)) == ("LPWarmStart" => 0)
+            @test ESFEX.lp_warm_start_off("Gurobi", params(1)) === nothing
+            @test ESFEX.lp_warm_start_off("CPLEX", params(4)) == ("CPXPARAM_Advance" => 0)
+            @test ESFEX.lp_warm_start_off("CPLEX", params(2)) === nothing
+            @test ESFEX.lp_warm_start_off("HiGHS", params(2)) === nothing
 
             # The master builds the same loss model on each representative
             # day: there too a line loses only the PWL loss of its flow

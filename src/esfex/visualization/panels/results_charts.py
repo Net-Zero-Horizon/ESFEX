@@ -370,6 +370,7 @@ _SLICE_AXIS0_DATASETS = frozenset({
     "demand",
     "CO2_emissions",
     "EV_V2G", "EV_charging", "EV_loss", "EV_soc",
+    "line_losses",
     "loss_load",
     "loss_of_reserve_dynamic", "loss_of_reserve_static",
     "nodal_electricity_prices",
@@ -6450,15 +6451,18 @@ class SankeyEnergyFlowChart(QWidget):
             if "loss_load" in sc:
                 loss_load_total = float(np.sum(sc["loss_load"][:])) * tres / 1000.0
 
-            # Transmission losses from node loss factors
-            if node_losses and "demand" in sc:
+            # Transmission losses: the dispatch's own (line_losses); files
+            # without it are estimated from node loss factors or flows
+            if "line_losses" in sc:
+                tx_loss_total = float(np.sum(sc["line_losses"][:])) * tres / 1000.0
+            elif node_losses and "demand" in sc:
                 dem = _demand_node_hours(sc)
                 for ni in range(dem.shape[0]):
                     if ni < len(node_losses) and node_losses[ni] > 0:
                         node_dem = float(np.sum(dem[ni, :])) * tres / 1000.0
                         tx_loss_total += node_dem * node_losses[ni]
             # Fallback: estimate from power_flow if no loss factors
-            if tx_loss_total < 0.01 and "power_flow" in sc:
+            if "line_losses" not in sc and tx_loss_total < 0.01 and "power_flow" in sc:
                 pf = sc["power_flow"][:]
                 if pf.ndim == 3:
                     total_flow = float(np.sum(np.abs(pf))) * tres / 1000.0

@@ -218,7 +218,7 @@ The `esfex` object wraps the runner, result loading and the standalone workflow 
 | `power_flow[year]` | `[node, node, step]` MW |
 | `curtailment[year]` | `[node, step]` MW |
 | `investments[year]` | `{technology name: MW}`: new generation and battery power capacity built that year, summed over nodes |
-| `summary[year]` | Scalars of the year: `total_cost`, `renewable_penetration`, `co2_emissions`, `loss_of_load`, `load_shed`, `total_generation`, `total_demand`, `solve_time`, `master_re_target`, `feasible`, `n1_security_cost` |
+| `summary[year]` | Scalars of the year: `total_cost`, `renewable_penetration`, `co2_emissions`, `loss_of_load`, `load_shed`, `total_generation`, `total_demand`, `solve_time`, `master_re_target`, `feasible`, `n1_security_cost`, `transmission_losses` (MWh lost on the lines; files from this version on) |
 | `generator_names`, `battery_names` | Dataset names of the units in `generation/` and `battery_soc/` |
 
 For node-level generation or any other dataset, open the file with `h5py`, or use the **Results** dialog.
