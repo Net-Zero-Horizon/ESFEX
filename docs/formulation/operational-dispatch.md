@@ -659,7 +659,7 @@ Implemented in `add_dc_constraints!()` in `transmission_dc.jl`. For multi-bus ne
 - \underbrace{\left( D_{n,t} + \alpha_n S_{n_i,t} + p^{\text{elz}}_{n,t} + \sum_b p^{\text{ch}}_{b,n,t} + \sum_g p^{\text{pump}}_{g,n,t} + \alpha_n p^{\text{ev,ch}}_{n_i,t} + \alpha_n \text{RC}_{n_i,t} \right)}_{\text{demand}} = \sum_{\ell} \left( K_{n,\ell} \, f_{\ell,t} + \tfrac{1}{2} |K_{n,\ell}| \, P^{\text{loss}}_{\ell,t} \right)
 \]
 
-where \(K_{n,\ell}\) is the bus-line incidence matrix element (\(+1\) if line \(\ell\) leaves bus \(n\), \(-1\) if it enters), \(P^{\text{conv}}_{n,t}\) aggregates AC/DC and frequency converter injections at the bus, and \(P^{\text{loss}}_{\ell,t}\) is the loss of line \(\ell\) (piecewise-linear, or linear with `loss_model: linear`): each end supplies half of it. With `loss_model: none` the losses are zero. See [DC Power Flow](dc-power-flow.md) for the loss model.
+where \(K_{n,\ell}\) is the bus-line incidence matrix element (\(+1\) if line \(\ell\) leaves bus \(n\), \(-1\) if it enters), \(P^{\text{conv}}_{n,t}\) aggregates AC/DC and frequency converter injections at the bus, and \(P^{\text{loss}}_{\ell,t}\) is the loss of line \(\ell\) (piecewise-linear, or linear with `loss_model: linear`, and never more than that loss of the line's net flow, see [Exact losses](dc-power-flow.md#exact-losses)): each end supplies half of it. With `loss_model: none` the losses are zero. See [DC Power Flow](dc-power-flow.md) for the loss model.
 
 The constraint reference is stored for dual price extraction.
 

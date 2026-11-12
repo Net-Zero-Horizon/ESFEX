@@ -537,9 +537,9 @@ Pure LP formulation: life extension of a unit past its lifetime is a continuous 
 Piecewise linear approximation of quadratic transmission losses:
 
 ```julia
-# P_loss(f) = g_l * f^2  approximated by N linear segments
-# Marginal slope for segment k: m_k = g_l * (2k-1) * delta_f
-# where delta_f = f_max / N and g_l = R / (R^2 + X^2)
+# P_loss(f) = R_pu * f^2 / S_base  approximated by N linear segments
+# Marginal slope for segment k: m_k = R_pu * (2k-1) * delta_f / S_base
+# where delta_f = f_max / N
 ```
 
-Convexity of the quadratic loss function ensures the PWL approximation is exact at segment boundaries without requiring binary variables.
+`add_dc_constraints!` registers every lossy line-step in `model.ext[:pwl_loss_repair]` and sets `optimize_exact_losses!` as the model's optimize hook, so `optimize!(model)` returns losses that never exceed the PWL loss of each line's net flow (see [Exact losses](../formulation/dc-power-flow.md#exact-losses)).
