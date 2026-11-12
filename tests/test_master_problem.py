@@ -304,7 +304,7 @@ class TestMasterProblemBuild:
         # Check variables were created (master uses tech-based investments)
         assert len(vars.tech_investment) == 2  # 2 years
         assert len(vars.bat_tech_power_investment) == 2
-        assert len(vars.re_penetration_ratio) == 2
+        assert len(vars.re_energy_ratio) == 2
 
         logger.info("MasterProblem model built successfully")
 

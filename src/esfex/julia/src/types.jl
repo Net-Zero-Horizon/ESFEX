@@ -690,6 +690,19 @@ function BatteryConfig(
 end
 
 """
+    is_renewable_unit(unit) -> Bool
+
+The one rule for what counts as renewable generation in an RE share
+(dispatch result and target, master, Benders, stochastic, MGA, runner,
+HDF5): a generator or candidate technology of type "Renewable" (wind, solar,
+hydro, biomass… as the case declares them). Battery discharge never counts,
+as renewable or as generation: a battery may charge from fossil units. The
+RE share is renewable generation over total generation (all generators and
+technologies), so 100 % means no fossil generation.
+"""
+is_renewable_unit(unit) = unit.type == "Renewable"
+
+"""
     storage_availability(availability, t, b) -> Float64
 
 Factor on a battery's (or battery technology's) charge and discharge power
@@ -878,7 +891,7 @@ end
 System targets and constraints.
 
 # Fields
-- `re_penetration_target::Float64`: Renewable energy target (fraction 0-1)
+- `re_penetration_target::Float64`: RE share target (fraction 0-1 of the total generation that is renewable, `is_renewable_unit`)
 - `co2_budget::Float64`: CO2 budget (tonnes)
 - `inertia_limit::Float64`: Minimum system inertia (MWs)
 """
@@ -1816,7 +1829,7 @@ struct PowerSystemResult
     total_generation::Float64
     total_demand::Float64
     total_losses::Float64
-    re_penetration::Float64
+    re_penetration::Float64      # renewable over total generation (is_renewable_unit), committed steps
     total_co2::Float64
     load_shed_total::Float64
 
@@ -2329,6 +2342,13 @@ Input configuration for the Master Problem (capacity expansion planning).
   before the first modelled year (a myopic year: the share achieved the year
   before); empty = each system's initial share (`re_share_anchor`)
 
+## Scheduled outages
+- `gen_outage_factors`, `bat_outage_factors`: the `outage_schedule` windows
+  of the generators (`(g, node)`, node 0 = the whole unit) and batteries
+  (`(bi, 0)`) as an availability factor per master step (the index of a
+  row of `base_demand`), as the dispatch folds them into availability
+  (`master_outage_factor`)
+
 ## Penalties
 - `loss_of_load_penalty::Float64`: VOLL (cost per MWh not served); also prices
   the capacity adequacy slack (`adequacy_slack_penalty`) and the renewable
@@ -2534,6 +2554,12 @@ struct MasterProblemInput
     # same for every year (master_rep_days); empty = chosen from the
     # horizon-mean demand and renewable availability (master_rep_day_offsets)
     rep_day_offsets::Vector{Int}
+    # Scheduled outages (outage_schedule) as availability factors per master
+    # step (index = step, as rows of `base_demand`): `(generator, node)` →
+    # factor, node 0 for all of the unit's buses; `(battery, 0)` → factor.
+    # Empty = no outage (master_outage_factor).
+    gen_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}}
+    bat_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}}
 end
 
 # Constructor with defaults
@@ -2606,7 +2632,9 @@ function MasterProblemInput(;
     primary_energy::Union{Nothing, MasterFuelInput} = nothing,
     npv_retired_units::Vector{RetiredUnit} = RetiredUnit[],
     re_share_anchor::Vector{Float64} = Float64[],
-    rep_day_offsets::Vector{Int} = Int[]
+    rep_day_offsets::Vector{Int} = Int[],
+    gen_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}(),
+    bat_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}()
 )
     return MasterProblemInput(
         years, base_year,
@@ -2640,7 +2668,8 @@ function MasterProblemInput(;
         gen_cost_curves, tech_cost_curves, bat_cost_curves,
         re_target_override,
         co2_budget_groups, unit_commitment,
-        primary_energy, npv_retired_units, re_share_anchor, rep_day_offsets
+        primary_energy, npv_retired_units, re_share_anchor, rep_day_offsets,
+        gen_outage_factors, bat_outage_factors
     )
 end
 
@@ -2660,9 +2689,11 @@ Container for Master Problem decision variables.
 - `bat_life_extension`: MW of discharge power of a battery kept past its lifetime (same)
 
 # RE Tracking (indexed by [(system, year)])
-- `re_penetration_ratio`: the actual RE share of a system in a year (its
-  renewable energy used over its demand, `define_re_share!`; in the Benders
-  master the share it gives the representative days); no upper bound
+- `re_energy_ratio`: a system's renewable generation in a year over its
+  demand (`define_re_share!`; in the Benders master the value it gives the
+  representative days), the link from one year to the next year's growth
+  cap (`add_re_growth_cap!`). NOT the RE share, which is renewable over
+  total generation (`master_re_shares`); no upper bound
 
 # Operational Variables (per representative day)
 - `operational_subproblems`: Dict mapping (year, day) to PowerSystem models
@@ -2695,7 +2726,7 @@ mutable struct MasterProblemVariables
     bat_life_extension::Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}
 
     # RE penetration per (system_idx, year_idx)
-    re_penetration_ratio::Dict{Tuple{Int,Int}, VariableRef}
+    re_energy_ratio::Dict{Tuple{Int,Int}, VariableRef}
 
     # Operational subproblems: (year_idx, day_idx) => (model, vars)
     operational_subproblems::Dict{Tuple{Int,Int}, Tuple{Model, PowerSystemVariables}}
@@ -2809,10 +2840,10 @@ Solution output from the Master Problem.
     CO2-budget violations included; the expected value over the scenarios in
     a stochastic master; the subproblems' cost in Benders. The annual asset
     costs (fixed O&M, life extension, decommissioning) are not included
-- `re_penetration_by_year`: Achieved RE share per year: the renewable energy
-    of the representative days (or TSAM periods) over the demand, both
-    scaled to the year (all systems together; the expected value in a
-    stochastic master)
+- `re_penetration_by_year`: Achieved RE share per year: the renewable
+    generation of the representative days (or TSAM periods) over their total
+    generation (`is_renewable_unit`), both scaled to the year (all systems
+    together; the expected value in a stochastic master)
 - `re_penetration_by_system`: the same per system
 - `cumulative_capacity_by_year`: Cumulative capacity by technology and year
 
