@@ -173,6 +173,7 @@ Extract all variable values from the solved model. Calls `ESFEX.extract_solution
 | `voltage_magnitude`, `reactive_generation` | ACOPF modes only, otherwise `None` |
 | `energy_prices` | Balance-constraint duals, `(bus, hour)` USD/MWh (recovered by a fixed-commitment LP re-solve in UC mode) |
 | `power_flow`, `power_flow_by_line` | Flow per bus pair `{(i, j): array}` and per physical line |
+| `line_losses` | `(bus, hour)` MW: transmission losses of the DC loss model, half of each line's loss at each end bus (present only with a loss model) |
 | `bat_spillage`, `ev_*`, `loss_of_inertia`, `transfer_margin`, `reservoir_*` | Present when the feature is active |
 | `n1_gen_reserve_duals`, `n1_trans_reserve_duals`, `n1_binding_contingencies`, `n1_security_cost` | N-1 security outputs |
 | `unattached_load_shed` | `(node, hour)` MW: the demand of nodes with no load bus, unserved (present only when such nodes exist); it is included in `load_shed_total`, `objective` and `cost_breakdown` |

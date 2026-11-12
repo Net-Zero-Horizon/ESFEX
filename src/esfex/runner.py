@@ -443,6 +443,8 @@ class YearResults:
     co2_emissions: Optional[np.ndarray] = None
     # Network
     power_flow: Optional[dict] = None              # {(from,to): array[hour]}
+    # Line losses [node x hour] (MW): half of each line's loss at each end
+    line_losses: Optional[np.ndarray] = None
     voltage_angle: Optional[np.ndarray] = None     # [node x hour]
     # AC-specific outputs — populated only when power_flow_mode is acopf_*.
     voltage_magnitude: Optional[np.ndarray] = None        # [bus x hour] in p.u.
@@ -499,6 +501,7 @@ class YearResults:
     load_shed: float = 0.0
     total_generation: float = 0.0
     total_demand: float = 0.0
+    transmission_losses: float = 0.0  # MWh lost on the lines (DC loss model)
     master_re_target: float = 0.0  # Master problem RE penetration target for this year
     # Granular cost decomposition (accumulated from operational windows)
     cost_breakdown: Optional[dict] = None
@@ -5783,6 +5786,7 @@ class Orchestrator:
         all_voltage_magnitude = []
         all_reactive_generation = []
         all_power_flow = []
+        all_line_losses = []
         all_bat_spillage = []
         all_ev_charging = []
         all_ev_v2g = []
@@ -5808,6 +5812,7 @@ class Orchestrator:
         total_emissions = 0.0
         total_generation = 0.0
         total_demand_val = 0.0
+        total_losses = 0.0
         accumulated_cost_breakdown: dict[str, float] = {}
         feasible = True
         num_solved = 0
@@ -6031,6 +6036,7 @@ class Orchestrator:
             total_emissions += window_result.get("total_co2", 0.0)
             total_generation += window_result.get("total_generation", 0.0)
             total_demand_val += window_result.get("total_demand", 0.0)
+            total_losses += window_result.get("total_losses", 0.0) or 0.0
 
             wbd = window_result.get("cost_breakdown")
             if wbd:
@@ -6062,6 +6068,8 @@ class Orchestrator:
                 all_loss_reserve_dynamic.append(_trim(window_result["loss_of_reserve_dynamic"], keep_hours))
             if window_result.get("load_shed") is not None:
                 all_load_shed.append(_trim(window_result["load_shed"], keep_hours))
+            if window_result.get("line_losses") is not None:
+                all_line_losses.append(_trim(window_result["line_losses"], keep_hours))
             if window_result.get("unattached_load_shed") is not None:
                 all_unattached_shed.append(_trim(window_result["unattached_load_shed"], keep_hours))
             if window_result.get("co2_emissions") is not None:
@@ -6148,6 +6156,7 @@ class Orchestrator:
         loss_reserve_static = np.concatenate(all_loss_reserve_static, axis=-1) if all_loss_reserve_static else None
         loss_reserve_dynamic = np.concatenate(all_loss_reserve_dynamic, axis=-1) if all_loss_reserve_dynamic else None
         load_shed_arr = np.concatenate(all_load_shed, axis=-1) if all_load_shed else None
+        line_losses_arr = np.concatenate(all_line_losses, axis=-1) if all_line_losses else None
         co2_emissions_arr = np.concatenate(all_co2_emissions, axis=-1) if all_co2_emissions else None
         prices = np.concatenate(all_prices, axis=-1) if all_prices else None
         voltage_angle = np.concatenate(all_voltage_angle, axis=-1) if all_voltage_angle else None
@@ -6197,6 +6206,7 @@ class Orchestrator:
             bat_discharge = self._aggregate_buses_to_nodes(bat_discharge, "sum")
             bat_soc = self._aggregate_buses_to_nodes(bat_soc, "sum")
             load_shed_arr = self._aggregate_buses_to_nodes(load_shed_arr, "sum")
+            line_losses_arr = self._aggregate_buses_to_nodes(line_losses_arr, "sum")
             co2_emissions_arr = self._aggregate_buses_to_nodes(co2_emissions_arr, "sum")
             reserve_static = self._aggregate_buses_to_nodes(reserve_static, "sum")
             reserve_dynamic = self._aggregate_buses_to_nodes(reserve_dynamic, "sum")
@@ -6250,6 +6260,7 @@ class Orchestrator:
             load_shed_array=load_shed_arr,
             co2_emissions=co2_emissions_arr,
             power_flow=combined_power_flow if combined_power_flow else None,
+            line_losses=line_losses_arr,
             voltage_angle=voltage_angle,
             voltage_magnitude=voltage_magnitude,
             reactive_generation=reactive_generation,
@@ -6279,6 +6290,7 @@ class Orchestrator:
             emissions=total_emissions,
             total_generation=total_generation,
             total_demand=total_demand_val,
+            transmission_losses=total_losses,
             n1_gen_reserve_duals=n1_gen_duals_arr,
             n1_trans_reserve_duals=combined_n1_trans_duals if combined_n1_trans_duals else None,
             n1_binding_contingencies=all_n1_binding if all_n1_binding else None,
@@ -7066,6 +7078,7 @@ class Orchestrator:
                 "energy_prices": solution.get('energy_prices'),
                 "power_flow": solution.get('power_flow'),
                 "power_flow_by_line": solution.get('power_flow_by_line'),
+                "line_losses": solution.get('line_losses'),
                 "voltage_angle": solution.get('voltage_angle'),
                 "voltage_magnitude": solution.get('voltage_magnitude'),
                 "reactive_generation": solution.get('reactive_generation'),
@@ -7100,6 +7113,7 @@ class Orchestrator:
                 "total_co2": solution.get('total_co2', 0.0),
                 "total_generation": solution.get('total_generation', 0.0),
                 "total_demand": solution.get('total_demand', 0.0),
+                "total_losses": solution.get('total_losses', 0.0),
                 # Granular cost decomposition (capex/opex/fuel/O&M/penalties).
                 # Built by Julia extract_solution → CostBreakdown and mapped in
                 # converters.py; accumulated across windows and written to the
@@ -8277,6 +8291,7 @@ class Orchestrator:
                 "co2_emissions": result.emissions,
                 "loss_of_load": result.load_shed,
                 "n1_security_cost": result.n1_security_cost,
+                "transmission_losses": result.transmission_losses,
             }
 
             for col, value in summary_data.items():
@@ -8310,6 +8325,7 @@ class Orchestrator:
             scenario.attrs["total_generation"] = result.total_generation
             scenario.attrs["total_demand"] = result.total_demand
             scenario.attrs["load_shed"] = result.load_shed
+            scenario.attrs["transmission_losses"] = result.transmission_losses
             scenario.attrs["master_re_target"] = result.master_re_target
 
             # --- Generation data (per generator) ---
@@ -8590,6 +8606,19 @@ class Orchestrator:
                         "Power flow between nodes (positive = from i to j); "
                         "bus-pair flows aggregated to node-pair via bus_to_node"
                     )
+
+            # --- Line losses [node x hour] ---
+            if result.line_losses is not None:
+                ds = scenario.create_dataset(
+                    "line_losses", data=result.line_losses,
+                    chunks=True, compression="gzip",
+                )
+                ds.attrs["units"] = "MW"
+                ds.attrs["dimensions"] = "nodes x hours"
+                ds.attrs["description"] = (
+                    "Transmission losses of the DC loss model: half of each "
+                    "line's loss at each of its two end nodes"
+                )
 
             # --- Capacity Factor (per generator) ---
             if result.capacity_factor is not None:
@@ -9073,6 +9102,7 @@ class Orchestrator:
                 "loss_of_load": result.load_shed,
                 "total_generation": result.total_generation,
                 "total_demand": result.total_demand,
+                "transmission_losses": result.transmission_losses,
             }
             for col, value in global_summary_data.items():
                 if col in global_sum:

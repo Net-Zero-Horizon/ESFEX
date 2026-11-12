@@ -3996,13 +3996,18 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
     total_demand = sum(@view input.demand[kept, :]) * tres_tot
     total_curt = sum(@view curt[:, kept]) * tres_tot
     total_ls = sum(@view ls[:, kept]) * tres_tot
-    # Transmission losses of the DC loss model (0 when lossless)
+    # Transmission losses of the DC loss model (0 when lossless), per bus:
+    # half of each line's loss at each end, as the bus balances take it
     total_losses = 0.0
+    bus_losses = nothing
     if vars.line_losses !== nothing && has_values(model)
-        for losses in vars.line_losses, t in kept
-            total_losses += value(losses[t])
+        bus_losses = zeros(n_bus, hours)
+        for ((i, j), lines) in vars.pair_lines, ℓ in lines
+            lv = value.(vars.line_losses[ℓ])
+            @views bus_losses[i, :] .+= 0.5 .* lv
+            @views bus_losses[j, :] .+= 0.5 .* lv
         end
-        total_losses *= tres_tot
+        total_losses = sum(@view bus_losses[:, kept]) * tres_tot
     end
 
     # RE share: renewable over total generation (is_renewable_unit)
@@ -4271,5 +4276,6 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
         n1_gen_duals, n1_trans_duals, n1_binding, n1_cost,
         cost_bd,
         elz_power_out, elz_h2_out,
+        bus_losses,
     )
 end

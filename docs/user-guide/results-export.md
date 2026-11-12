@@ -102,6 +102,7 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 | `voltage_magnitude` | (buses, T) | p.u. | ACOPF modes only |
 | `reactive_generation` | (G, buses, T) | MVAr | ACOPF modes only |
 | `power_flow` | (N, N, T) | MW | Inter-node flows aggregated from bus-pair flows |
+| `line_losses` | (N, T) | MW | Transmission losses of the DC loss model: half of each line's loss at each end node (only with `loss_model` `pwl` or `linear`) |
 | `transfer_margin` | (N, N, T) | MW | Transfer margin slack, aggregated from bus pairs |
 | `transfer_investment` | (N, N) | MW | Transmission investment |
 | `loss_of_inertia` | (T,) | GW*s | System inertia deficit |
@@ -114,7 +115,7 @@ Most arrays carry the global node axis as their first dimension; the viewer appl
 | `primary_energy/` | groups | various | Fuel supply chain results (if enabled) |
 | `n1_security/` | group | various | N-1 duals and binding contingencies (if enabled) |
 
-Scenario attributes include `year`, `feasible`, `total_cost`, `renewable_penetration`, `co2_emissions`, `solve_time`, `total_generation`, `total_demand`, `load_shed`, `master_re_target`, and the master problem's investment and retirement decisions as `investment_*` / `retirement_*` attributes (see [HDF5 Output Schema](../reference/hdf5-output-schema.md#detailed_resultsyear_yyyy_threshold_0)).
+Scenario attributes include `year`, `feasible`, `total_cost`, `renewable_penetration`, `co2_emissions`, `solve_time`, `total_generation`, `total_demand`, `load_shed`, `transmission_losses` (MWh lost on the lines), `master_re_target`, and the master problem's investment and retirement decisions as `investment_*` / `retirement_*` attributes (see [HDF5 Output Schema](../reference/hdf5-output-schema.md#detailed_resultsyear_yyyy_threshold_0)).
 
 Where `N` = `num_nodes` and `T` = time steps in the year at `temporal_resolution_hours` cadence (e.g. 2920 for 3-hourly). `/demand/year_YYYY_base_demand` holds the same demand as `(T, N)`. The energy and CO2 attributes (`total_generation`, `total_demand`, `load_shed`, `co2_emissions`) are MWh and tonnes at any step length.
 
@@ -130,6 +131,7 @@ Where `N` = `num_nodes` and `T` = time steps in the year at `temporal_resolution
 | `co2_emissions` | (num_years,) | Annual CO₂ (tonnes) |
 | `loss_of_load` | (num_years,) | Total unserved energy (MWh) |
 | `n1_security_cost` | (num_years,) | N-1 security cost ($) |
+| `transmission_losses` | (num_years,) | Energy lost on the lines (MWh); 0 without a loss model |
 
 ### Virtual Generator/Battery Naming
 

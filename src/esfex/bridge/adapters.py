@@ -749,6 +749,13 @@ def _expand_powersystem_result(
                 a, axis=0,
                 copy_from_neighbour=True,  # leaves inherit, series interpolates
             )
+    # Line losses [bus x hour]: a quantity, kept on the retained buses
+    arr = result.get("line_losses")
+    if arr is not None:
+        a = _np.asarray(arr)
+        if a.ndim == 2 and a.shape[0] == rm.n_reduced_buses:
+            result["line_losses"] = expander.expand_bus_array(
+                a, axis=0, copy_from_neighbour=False)
 
     # ── Per-line flows ──
     # Julia's ``power_flow_by_line`` concatenates transmission lines +

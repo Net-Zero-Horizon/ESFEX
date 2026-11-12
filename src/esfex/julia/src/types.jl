@@ -1866,6 +1866,11 @@ struct PowerSystemResult
     # hydrogen produced (kg/h, see electrolyzer_h2_per_mwh)
     electrolyzer_power::Union{Array{Float64, 3}, Nothing}
     electrolyzer_h2::Union{Array{Float64, 3}, Nothing}
+
+    # Line losses of the DC loss model (bus × hour, MW): half of each line's
+    # loss at each of its two end buses, as the bus balances take it.
+    # Nothing without a loss model (lossless DC, ACOPF)
+    line_losses::Union{Matrix{Float64}, Nothing}
 end
 
 
