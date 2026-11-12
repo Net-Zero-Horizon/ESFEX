@@ -1568,6 +1568,16 @@ import Ipopt
             @test ESFEX.lp_warm_start_off("CPLEX", params(4)) == ("CPXPARAM_Advance" => 0)
             @test ESFEX.lp_warm_start_off("CPLEX", params(2)) === nothing
             @test ESFEX.lp_warm_start_off("HiGHS", params(2)) === nothing
+            # The parameter holds for the re-solves only, and the repaired
+            # solution stays readable (HiGHS stands in for Gurobi)
+            ESFEX.LP_WARM_START_PARAMS["HiGHS"] = ("presolve", "off", "solver", ("simplex",))
+            try
+                res, model, _ = sink_run(3)       # repaired: tests OPTIMAL
+                @test any(b -> b.dir != 0, model.ext[:pwl_loss_repair].blocks)
+                @test ESFEX.JuMP.get_attribute(model, "presolve") == "choose"
+            finally
+                delete!(ESFEX.LP_WARM_START_PARAMS, "HiGHS")
+            end
 
             # The master builds the same loss model on each representative
             # day: there too a line loses only the PWL loss of its flow
