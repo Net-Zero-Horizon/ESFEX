@@ -2575,27 +2575,50 @@ def _line_length_km(state: GuiSystemState, ln) -> float:
     return sum(_haversine_km(*pts[i], *pts[i + 1]) for i in range(len(pts) - 1))
 
 
-def _line_impedance_pu(state: GuiSystemState, ln) -> tuple[float, float, float]:
+def _line_voltage_kv(state: GuiSystemState, ln) -> float:
+    """A line's voltage: its own, else the higher of its end buses (0 when
+    neither is known)."""
+    v = float(ln.voltage_kv or 0.0)
+    if v > 0:
+        return v
+    return max((float(state.buses[e].voltage_kv or 0.0)
+                for e in (ln.from_bus, ln.to_bus) if e in state.buses),
+               default=0.0)
+
+
+def _std_r_to_x(voltage_kv: float) -> float:
+    """R/X of the Grid Builder's standard line type at *voltage_kv*."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_rxb_per_km,
+    )
+    r_km, x_km, _ = estimate_line_rxb_per_km(voltage_kv)
+    return r_km / x_km if x_km > 0 else 0.0
+
+
+def _line_impedance_pu(
+    state: GuiSystemState, ln, length_km: float = 0.0,
+) -> tuple[float, float, float]:
     """(R, X, B) in p.u. of a line, for combining it with other branches.
 
-    A line with a reactance keeps its own values. One without (an OSM line
-    with no voltage tag, a bridge line) gets them from its length and
-    voltage the way the Grid Builder derives the others: the standard line
-    type of its voltage (or its own ``reactance_per_km``), on the system
-    base ``ac_power_flow.base_mva``, divided over its circuits. X stays 0
-    when the length or the voltage is unknown.
+    A line with a reactance keeps its own values; without a resistance it
+    gets the R/X of the standard line type of its voltage. One without a
+    reactance (an OSM line with no voltage tag, a bridge line) gets them
+    from its length and voltage the way the Grid Builder derives the others:
+    the standard line type of its voltage (or its own ``reactance_per_km``),
+    on the system base ``ac_power_flow.base_mva``, divided over its
+    circuits. *length_km* is used when the line has no length of its own
+    and none can be measured from its end buses. X stays 0 when the length
+    or the voltage is unknown.
     """
     r = float(ln.resistance_pu or 0.0)
     x = float(ln.reactance_pu or 0.0)
     b = float(ln.susceptance_pu or 0.0)
+    v = _line_voltage_kv(state, ln)
     if x > 0:
+        if r <= 0 and v > 0:
+            r = x * _std_r_to_x(v)
         return r, x, b
-    v = float(ln.voltage_kv or 0.0)
-    if v <= 0:
-        v = max((float(state.buses[e].voltage_kv or 0.0)
-                 for e in (ln.from_bus, ln.to_bus) if e in state.buses),
-                default=0.0)
-    length = _line_length_km(state, ln)
+    length = _line_length_km(state, ln) or float(length_km or 0.0)
     if v <= 0 or length <= 0:
         return r, 0.0, b
     from esfex.visualization.workflows.grid_mapping_quality import (
@@ -2606,8 +2629,26 @@ def _line_impedance_pu(state: GuiSystemState, ln) -> tuple[float, float, float]:
     own_x_km = float(getattr(ln, "reactance_per_km", None) or 0.0)
     if own_x_km > 0:
         x_est = own_x_km * length / (v * v / base)
+        r_est = x_est * _std_r_to_x(v)
     n = max(1, int(ln.num_circuits or 1))
     return (r if r > 0 else r_est / n), x_est / n, (b if b > 0 else b_est * n)
+
+
+def _parallel_equivalent(
+    branches: list[tuple[float, float, float]],
+) -> tuple[float, float, float]:
+    """(R, X, B) in p.u. of branches (R, X, B) in parallel, each with X > 0.
+
+    ``1/X_eq = Σ 1/X_i``. The DC flow splits as ``f_i = f · X_eq / X_i``,
+    so the branches lose ``Σ R_i f_i² = f² · X_eq² Σ R_i / X_i²``: that is
+    ``R_eq``. It is ``1/R_eq = Σ 1/R_i`` only when every branch has the same
+    R/X; with mixed branches (e.g. a 110 kV line beside a 220 kV one) the
+    latter gives the equivalent the wrong losses. Shunt B adds.
+    """
+    y = sum(1.0 / x for _, x, _ in branches)
+    x_eq = 1.0 / y
+    r_eq = x_eq * x_eq * sum(r / (x * x) for r, x, _ in branches)
+    return r_eq, x_eq, sum(b for _, _, b in branches)
 
 
 def _compute_parallel_impedance(
@@ -2632,22 +2673,14 @@ def _compute_parallel_impedance(
         imp = [(ln.resistance_pu, ln.reactance_pu, ln.susceptance_pu)
                for ln in lines]
 
-    # Parallel reactance: 1/X_eq = sum(1/X_i)
-    inv_x_sum = 0.0
-    for _, x, _ in imp:
-        if x and x > 0:
-            inv_x_sum += 1.0 / x
-    reactance = (1.0 / inv_x_sum) if inv_x_sum > 0 else None
-
-    # Parallel resistance: 1/R_eq = sum(1/R_i)
-    inv_r_sum = 0.0
-    all_have_r = True
-    for r, _, _ in imp:
-        if r and r > 0:
-            inv_r_sum += 1.0 / r
-        else:
-            all_have_r = False
-    resistance = (1.0 / inv_r_sum) if (all_have_r and inv_r_sum > 0) else None
+    # Branches with a reactance in parallel (see _parallel_equivalent); the
+    # resistance is known only when every one of them has one.
+    with_x = [(r or 0.0, x, b or 0.0) for r, x, b in imp if x and x > 0]
+    reactance = resistance = None
+    if with_x:
+        r_eq, reactance, _ = _parallel_equivalent(with_x)
+        if all(r > 0 for r, _, _ in with_x):
+            resistance = r_eq
 
     # Susceptance adds in parallel
     susceptance = None
@@ -5182,8 +5215,12 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     Each node (the Grid Builder cluster carried by ``bus.parent_node``) becomes
     a single bus carrying that node's aggregated generation and demand. Nodes
     are wired to their neighbours by ONE equivalent branch per node-pair,
-    combining every original cross-boundary line/transformer in parallel
-    (thermal capacity summed; series admittance ``1/x_eq = Σ 1/x_i``). Because
+    combining every original cross-boundary line/transformer in parallel:
+    thermal capacity summed, ``1/x_eq = Σ 1/x_i``, the loss-equivalent
+    ``r_eq = x_eq² Σ r_i/x_i²`` and ``b_eq = Σ b_i``, over the same branches
+    (a line without R or X gets them from its length and voltage, see
+    :func:`_line_impedance_pu`). The branch carries the voltage and the
+    total circuits of its lines. Because
     the inter-node adjacency is inherited from the real lines' node-pairs, the
     result is a genuine mesh (not a hub-and-spoke star) and preserves the
     network's transfer capability by construction.
@@ -5287,37 +5324,18 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
         freqs = [getattr(b, "frequency_hz", 50.0) or 50.0 for b in members]
         grp_freq.append(max(set(freqs), key=freqs.count) if freqs else 50.0)
 
-    # Equivalent branches: combine original cross-boundary lines +
-    # transformers per reduced-bus pair (parallel).
-    pair: dict[tuple[int, int], dict] = defaultdict(
-        lambda: {"cap": 0.0, "invx": 0.0, "invr": 0.0, "b": 0.0})
-
-    def _accumulate(ni, nj, cap, x, r, b):
-        if ni is None or nj is None or ni == nj:
-            return
-        p = pair[(min(ni, nj), max(ni, nj))]
-        p["cap"] += max(cap, 0.0)
-        if x > 0:
-            p["invx"] += 1.0 / x
-        if r > 0:
-            p["invr"] += 1.0 / r
-        p["b"] += b
-
-    for ln in state.transmission_lines:
-        if getattr(ln, "decorative", False):
-            continue
-        # A line without a reactance takes the one of its length and
-        # voltage; left out, a pair of such lines fell back to 0.01 p.u.
-        # whatever its length.
-        r, x, b = _line_impedance_pu(state, ln)
-        _accumulate(
-            group_of.get(ln.from_bus), group_of.get(ln.to_bus),
-            float(ln.capacity_mw or 0.0), x, r, b)
-    for tr in state.transformers:
-        _accumulate(
-            group_of.get(tr.from_bus), group_of.get(tr.to_bus),
-            float(getattr(tr, "rated_power_mva", 0.0) or 0.0),
-            float(getattr(tr, "impedance_pu", 0.0) or 0.05), 0.0, 0.0)
+    # Cross-boundary lines and transformers per reduced-bus pair; combined in
+    # parallel once the reduced buses (and the distance between them) exist.
+    crossing: dict[tuple[int, int], list] = defaultdict(list)
+    for is_line, brs in ((True, state.transmission_lines),
+                         (False, state.transformers)):
+        for br in brs:
+            if getattr(br, "decorative", False):
+                continue
+            gi, gj = group_of.get(br.from_bus), group_of.get(br.to_bus)
+            if gi is None or gj is None or gi == gj:
+                continue
+            crossing[(min(gi, gj), max(gi, gj))].append((is_line, br))
 
     # One reduced bus per group. The node's demand is shared between its
     # groups in proportion to the demand its member buses already carried, so
@@ -5368,21 +5386,48 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
         estimate_line_pu_params, system_base_mva,
     )
     base_mva = system_base_mva(state)
+
+    def _branch_pu(is_line, br, dist_km, v_node):
+        """(R, X, B, voltage, circuits) of one crossing branch, X > 0."""
+        if is_line:
+            v = _line_voltage_kv(state, br)
+            n = max(1, int(br.num_circuits or 1))
+            # A line with neither a length nor end-bus coordinates spans
+            # the distance between the two reduced buses.
+            r, x, b = _line_impedance_pu(state, br, dist_km)
+            if x <= 0:
+                # No voltage on the line or its buses: the node buses' one.
+                r_e, x_e, b_e = estimate_line_pu_params(v_node, dist_km, base_mva)
+                x = x_e / n if x_e > 0 else DEFAULT_REACTANCE_PU / n
+                r = r if r > 0 else x * _std_r_to_x(v or v_node)
+                b = b if b > 0 else b_e * n
+            return r, x, b, v, n
+        # Transformer: impedance on the system base; R from its losses, as
+        # the bridge derives it (convert_transformer_data).
+        z = float(getattr(br, "impedance_pu", 0.0) or 0.05)
+        r = float(getattr(br, "losses_fraction", 0.0) or 0.0) * z
+        x = max(z * z - r * r, 1e-12) ** 0.5
+        return r, x, 0.0, 0.0, 0
+
     new_lines: list = []
-    for (gi, gj), p in sorted(pair.items()):
+    for (gi, gj), branches in sorted(crossing.items()):
         bi, bj = new_buses[grp_bus_id[gi]], new_buses[grp_bus_id[gj]]
         length = _haversine_km(bi.latitude, bi.longitude,
                                bj.latitude, bj.longitude)
-        if p["invx"] > 0:
-            xeq = 1.0 / p["invx"]
-            req = (1.0 / p["invr"]) if p["invr"] > 0 else 0.0
-        else:
-            # No branch of the pair has a usable length either: use the
-            # distance between the two node buses at their voltage.
-            req, xeq, _ = estimate_line_pu_params(
-                max(grp_v[gi], grp_v[gj]), length, base_mva)
-            if xeq <= 0:
-                xeq = DEFAULT_REACTANCE_PU
+        # Every branch whose capacity is summed also enters the impedance:
+        # X in parallel, R loss-equivalent, B summed (_parallel_equivalent).
+        # Each p.u. value is on its own voltage base, as the model reads it.
+        parts = [_branch_pu(is_line, br, length, max(grp_v[gi], grp_v[gj]))
+                 for is_line, br in branches]
+        req, xeq, beq = _parallel_equivalent([(r, x, b) for r, x, b, _, _ in parts])
+        cap = sum(max(float((br.capacity_mw if is_line
+                             else getattr(br, "rated_power_mva", 0.0)) or 0.0), 0.0)
+                  for is_line, br in branches)
+        # Labelled with the voltage of its lines, not of the node buses
+        # (a node with a 220 kV bus may be joined by 110 kV lines only).
+        v_eq = max((v for _, _, _, v, _ in parts if v > 0),
+                   default=max(grp_v[gi], grp_v[gj]))
+        circuits = max(1, sum(n for _, _, _, _, n in parts))
         new_lines.append(GuiTransmissionLine(
             # Keeps the historical ``eq_<i>_<j>`` shape for the usual
             # one-bus-per-node case; a split node contributes its suffix.
@@ -5390,8 +5435,8 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
                      f"_{grp_bus_id[gj].removeprefix('node_')}"),
             from_bus=grp_bus_id[gi], to_bus=grp_bus_id[gj],
             from_node=group_node[gi], to_node=group_node[gj],
-            capacity_mw=p["cap"], voltage_kv=max(grp_v[gi], grp_v[gj]),
-            reactance_pu=xeq, resistance_pu=req, susceptance_pu=p["b"],
+            capacity_mw=cap, voltage_kv=v_eq, num_circuits=circuits,
+            reactance_pu=xeq, resistance_pu=req, susceptance_pu=beq,
             length_km=length,
             from_endpoint=EndpointRef("bus", grp_bus_id[gi]),
             to_endpoint=EndpointRef("bus", grp_bus_id[gj]),
