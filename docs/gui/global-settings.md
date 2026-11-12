@@ -227,7 +227,7 @@ Penalty costs on constraint violations. Higher penalties push the optimizer towa
 | Loss Reserve (Dynamic) | 100 | $/MW | Dynamic (frequency response) reserve shortfall |
 | Loss of Inertia | 200 | $/MW·s | Inertia shortfall below the Min. System Inertia |
 | Transfer Margin | 100 | $/MW | Transfer margin violation |
-| Max Curtailment Ratio | 0.05 | fraction | Hard cap on curtailment as a fraction of RE generation, per representative day of the master problem (not enforced in operational dispatch, which charges Curtailment Cost) |
+| Max Curtailment Ratio | 0.05 | fraction | Hard annual cap on curtailment as a fraction of RE generation, per system, in the master problem (single days may curtail more; not enforced in operational dispatch, which charges Curtailment Cost) |
 | Curtailment Cost ($/MWh) | 20 | $/MWh | Cost of each curtailed MWh of RE |
 | Rooftop Curtailment | 5 | $/MWh | Curtailed rooftop PV |
 | CO2 Cost | 10 | $/t | Carbon price on all emissions |

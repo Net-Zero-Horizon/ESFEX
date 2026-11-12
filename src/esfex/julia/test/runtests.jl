@@ -1567,7 +1567,7 @@ import Ipopt
                 representative_days_per_year = 1, min_day_separation = 1,
                 max_curtailment_ratio = 1.0, curtailment_cost = 2e-5,
                 transmission_loss_segments = 2, verbose = false)
-            model, _, _ = create_master_problem(inp; use_representative_days = true)
+            model, mv, _ = create_master_problem(inp; use_representative_days = true)
             optimize!(model)
             @test string(termination_status(model)) == "OPTIMAL"
             reg = model.ext[:pwl_loss_repair]
@@ -1577,6 +1577,15 @@ import Ipopt
                 @test value(b.ploss) ≈ exact rtol = 0.02 atol = 1e-3
                 @test value(b.ploss) < 10.0     # it lost 40 MW (both directions full)
             end
+            # So Benders' operating bound lets the system draw beyond its
+            # load at most the line's loss at full flow in one direction
+            # (C28; it allowed both), on a line the master cannot expand
+            @test ESFEX.benders_power_sink(mv, inp) == [Inf]
+            fixed = ESFEX.with_fields(inp; network = ESFEX.with_fields(net; connections = zeros(2, 2)))
+            _, fv, _ = create_master_problem(fixed; use_representative_days = false)
+            full = ESFEX.with_loss_model(ESFEX.TransmissionDC(net), 2, 100.0).pwl_losses
+            @test ESFEX.benders_power_sink(fv, fixed) ≈
+                  [sum(full.slopes[1] .* full.segment_widths[1])]
         end
 
         @testset "line flow cost is charged on |flow|" begin
@@ -4379,11 +4388,12 @@ import Ipopt
                 min_day_separation = 1, verbose = false)
 
             # The bound holds the limit: the first master plan builds no more
-            # PV than the day can use (it built 200 MW)
+            # PV than the day can use (it built 200 MW), up to the
+            # subproblems' tolerance (`curtailment_tolerance`)
             bm, bvars, targets, _, _ = ESFEX.create_benders_master(inp)
             ESFEX.set_silent(bm)
             optimize!(bm)
-            @test value(bvars.tech_investment[1][1][1]) <= 700 / 13 + 1e-6
+            @test value(bvars.tech_investment[1][1][1]) <= 700 / 13 * (1 + 1e-5)
 
             # A plan above the limit: the priced subproblem curtails no more
             # than it must, and its cut and cost are kept; the least
@@ -4402,7 +4412,7 @@ import Ipopt
             priced = ysp(100.0)
             @test ESFEX.solve_benders_subproblem!(priced; penalty = pen) === :infeasible
             @test sum(value, ESFEX.benders_curt_slacks(priced)) ≈ least rtol = 1e-6
-            @test occursin("breaks the curtailment limit on 1 of 1 days",
+            @test occursin("breaks the annual curtailment limit: curtails",
                            ESFEX.benders_curtailment_report(priced, 0.05))
             @test ESFEX.benders_cost_terms(priced.model)["curtailment above the limit"] ≈
                   pen * least * ESFEX.rep_day_scaling(inp, 1) rtol = 1e-6
@@ -4428,6 +4438,84 @@ import Ipopt
             @test br.objective ≈ objective_value(mono) rtol = 1e-6
             @test br.solution.tech_investment[1][1][1] ≈ value(mvars.tech_investment[1][1][1]) rtol = 1e-6
             @test all(br.lb_history .<= br.ub_history .* (1 + 1e-6))
+        end
+
+        @testset "Curtailment limit: annual, per system, with a tolerance (C28)" begin
+            # The limit held every representative day: Cuba's Benders run
+            # flagged a year curtailing 226.7 GWh against a 580.8 GWh limit
+            # because one of its five days curtailed more than 5 %. It is
+            # annual now. Two days, 50 then 100 MW of load, 60 MW of
+            # existing PV in full sun: day 1 must curtail 10 MW (20 % of its
+            # renewable output), day 2 nothing; the year 240/2640 = 9.1 %,
+            # within an annual 10 %.
+            Hy = 8760
+            dem = vcat(fill(50.0, 24, 1), fill(100.0, Hy - 24, 1))
+            gas = mkgen("Gas", "Non-renewable", "Gas", [150.0], [1.0e-4], ones(Hy, 1);
+                        nb = 1, H = Hy)
+            pvold = mkgen("PVold", "Renewable", "Sun", [60.0], [0.0], ones(Hy, 1);
+                          nb = 1, H = Hy)
+            mk(; kw...) = MasterProblemInput(; years = [2025], network = net1,
+                generators = [gas, pvold], batteries = BatteryConfig[],
+                technologies = TechnologyConfig[], base_demand = dem,
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                max_curtailment_ratio = 0.10, curtailment_cost = 1.0e-5,
+                representative_days_per_year = 2, rep_day_offsets = [0, 24],
+                min_day_separation = 1, verbose = false, kw...)
+            inp = mk()
+            mono, _ = master1(inp)
+            @test constraint_by_name(mono, "max_curtailment_s1_y1") !== nothing
+            curt = sum(value(v) for v in all_variables(mono)
+                       if occursin(r"^op_y1_d\d+_curt\[", name(v)))
+            @test curt ≈ 240.0 atol = 1e-6
+            # Stochastic: per scenario
+            sc = [Scenario("lo", 0.5, ScenarioMultipliers(fuel_cost = 1.0)),
+                  Scenario("hi", 0.5, ScenarioMultipliers(fuel_cost = 2.0))]
+            sm, _, _, _ = create_stochastic_master_problem(StochasticMasterInput(inp, sc, true))
+            ESFEX.set_silent(sm)
+            optimize!(sm)
+            @test string(termination_status(sm)) == "OPTIMAL"
+            @test constraint_by_name(sm, "max_curtailment_sc2_s1_y1") !== nothing
+            # TSAM periods count with their weights: day 1 standing for 65
+            # days curtails 3.1 % of the year's renewable output, for 300
+            # days 15.9 %
+            tsam(w) = mk(use_tsam = true, tsam_period_start_hours = [[1, 25]],
+                         tsam_period_weights = [w], tsam_chronological_order = [[1, 2]])
+            master1(tsam([65.0, 300.0]))
+            tm, _, _ = create_master_problem(tsam([300.0, 65.0]); use_representative_days = true)
+            ESFEX.set_silent(tm)
+            optimize!(tm)
+            @test string(termination_status(tm)) in ("INFEASIBLE", "INFEASIBLE_OR_UNBOUNDED")
+            # Benders: the year is within its limit, same optimum
+            br = run_benders_decomposition(inp; max_iterations = 20, tolerance = 1e-7,
+                                           verbose_benders = false)
+            @test br.objective ≈ objective_value(mono) rtol = 1e-6
+
+            # Tolerance: a year over its limit by 0.05 MWh/yr (2.6e-4 per
+            # day) counts as within it (the slack once had to stay under
+            # 1e-6), up to 1e-3 MWh/yr + 1e-6 × its renewable output
+            @test ESFEX.curtailment_tolerance(1.0e6) ≈ 1e-3 + 1.0
+            bm, bvars, targets, _, _ = ESFEX.create_benders_master(inp)
+            days = ESFEX.benders_rep_days(inp)[1]
+            caps = ESFEX.FixedCapacities(Dict((1, 1) => 150.0, (2, 1) => 60.0),
+                Dict{Tuple{Int,Int}, Float64}(), Dict{Tuple{Int,Int}, Float64}(),
+                Dict{Tuple{Int,Int}, Float64}(), Dict{Tuple{Int,Int}, Float64}(),
+                Dict{Tuple{Int,Int}, Float64}(), Dict{Int, Float64}(), [0.0])
+            tight = mk(max_curtailment_ratio = 240 / 2640 - 1e-7)
+            ysp() = ESFEX.create_benders_year_subproblem(tight, 1, days, caps, bvars, targets)
+            pen = ESFEX.benders_curtailment_penalty(tight)
+            y1 = ysp()
+            @test ESFEX.solve_benders_subproblem!(y1; penalty = pen) === :optimal
+            x = only(ESFEX.benders_curt_slacks(y1))
+            @test 0 < value(x) * ESFEX.rep_day_scaling(tight, 2) < 0.1
+            @test !ESFEX.benders_curt_violated(y1)
+            # Hard: its least violation is within, and the year solves
+            @test ESFEX.solve_benders_subproblem!(ysp()) === :optimal
+            # Well above the limit it is not within
+            far = mk(max_curtailment_ratio = 0.05)
+            y2 = ESFEX.create_benders_year_subproblem(far, 1, days, caps, bvars, targets)
+            @test ESFEX.solve_benders_subproblem!(y2; penalty = pen) === :infeasible
+            @test occursin("breaks the annual curtailment limit: curtails 43.8 GWh/yr",
+                           ESFEX.benders_curtailment_report(y2, 0.05))
         end
 
         @testset "RE share = renewable / total generation everywhere (R27)" begin

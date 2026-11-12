@@ -401,7 +401,7 @@ class PenaltiesConfig(BaseModel):
     loss_of_reserve_dynamic: float = 100
     loss_of_inertia: float = 200
     transfer_margin: float = 100
-    max_curtailment_ratio: float = 0.05        # 0-1
+    max_curtailment_ratio: float = 0.05        # 0-1, annual, per system (master only)
     curtailment_cost: float = 20.0             # $/MWh, operational dispatch
     rooftop_curtailment: float = 5
     co2_cost: float = 10                       # $/tCO2

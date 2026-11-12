@@ -187,7 +187,7 @@ systems:
 | `overlap_hours` | `24` | 24-hour look-ahead so storage sees the next daily peak |
 | `representative_days` | `5` | Master problem uses 5 representative days per year |
 | `TARGET_RE_PENETRATION` | `0.80` | 80% renewable energy target by the final year |
-| `max_curtailment_ratio` | `0.05` | In the master problem, no more than 5% of renewable output can be curtailed on each representative day |
+| `max_curtailment_ratio` | `0.05` | In the master problem, no more than 5% of a year's renewable output can be curtailed over the year (single days may curtail more) |
 | `discount_rate` | `0.08` | 8% discount rate for NPV calculations |
 
 The starting RE share is computed from the existing fleet; there is no key to set it.
@@ -437,7 +437,7 @@ for yr in results:
 
 ### Curtailment Analysis
 
-The 5% curtailment cap is a hard limit on each representative day of the master problem, so the optimizer invests in storage rather than overbuilding renewables. The operational dispatch does not enforce the cap; it charges `curtailment_cost` per MWh instead, so the yearly ratio below can be somewhat above 5%.
+The 5% curtailment cap is a hard annual limit in the master problem, so the optimizer invests in storage rather than overbuilding renewables. The operational dispatch does not enforce the cap; it charges `curtailment_cost` per MWh instead, so the yearly ratio below can be somewhat above 5%.
 
 ```python
 with h5py.File(h5_path, "r") as f:
