@@ -1253,6 +1253,39 @@ Per-release notes are also published on the
   included, and units that share a profile count it once. The log lists the
   weighted mean of each profile on the periods over its annual mean.
 
+- **One RE-share definition everywhere: renewable over total generation.**
+  The RE share (RE penetration) is now the renewable generation over the
+  total generation, energy-weighted over the year, in the RE target and its
+  bounds, every master (perfect foresight, stochastic, MGA, Benders, each
+  year of a myopic run), the myopic anchors and growth caps, the dispatch's
+  RE target and results, the run log, the HDF5 `renewable_penetration` and
+  the dashboard. "Renewable" is one rule: a generator or technology of type
+  `Renewable`; battery discharge is neither renewable nor generation. The
+  share never passes 100 %, and 100 % means no fossil generation. Before,
+  the master measured renewable energy used over demand (a Cuba run
+  reported 102–105 % while fossil units still ran, and load shed counted
+  against the share), the dispatch target asked for renewable energy ≥
+  target × demand, and the year's dispatch share was the plain mean of its
+  rolling windows' shares, however much each window generated.
+  - The target is linear: renewable generation + shortfall ≥ target × total
+    generation. The growth cap (`max_annual_increment`) is exact in year 1
+    and in every myopic year (renewable ≤ (last share + increment) × total
+    generation); from the second year of a multi-year master on it takes
+    generation to grow like demand from one year to the next, which keeps
+    the model linear (exact when losses and load shed are the same share of
+    demand in both years).
+  - The master variable that links one year's renewable generation to the
+    next year's cap is renamed `re_energy_ratio` (renewable generation over
+    demand; it was `re_penetration_ratio`, documented as the share), the
+    Benders copy key `(:re_energy, s, y)`.
+  - The initial share estimate counts the renewables' scheduled outages.
+  - Each `generation/` dataset of the HDF5 now carries `is_renewable`. The
+    dashboard computes its RE share from it (older files fall back to the
+    technology labels, which no longer count nuclear as renewable) and no
+    longer counts battery discharge or load shed as generation in the unit
+    commitment view; the results panel's renewable flags read the stored
+    generator type (they were always false).
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -2792,6 +2825,58 @@ Per-release notes are also published on the
   five iterations). Most of the cost of the early plans was load shed and
   RE shares the master asked for and the network could not deliver, both
   at the value of lost load; the plan now builds engines and has none.
+
+- **Lines no longer lose energy they do not carry.** The PWL (and linear)
+  loss model of the DC power flow let a line carry flow in both directions
+  at once, and fill its steep segments before its flat ones, so the loss
+  could exceed the loss of the line's net flow by up to twice its full-flow
+  loss. Whenever discarding energy paid (curtailment costs
+  `curtailment_cost`, a curtailment limit or an RE target that counts
+  renewable output binds), the solver did exactly that: surplus renewable
+  energy disappeared as "line losses" instead of being curtailed, escaping
+  the curtailment cost and `max_curtailment_ratio`. On the Cuba 25-year
+  myopic run the dispatch "lost" 1.0 TWh in 2030 (4 % of demand) and
+  9.3 TWh in 2049 (32 %), with curtailment at 0, and generation reached
+  38 TWh for 29 TWh of demand. Every solve of a model with line losses (the
+  dispatch, the master problem, the Benders subproblems, MGA) is now
+  repaired: at each step where some line loses more than the PWL loss of
+  its net flow, every lossy line of that step is held in its flow direction
+  with a loss linear in the flow (the PWL secant at that flow, updated until
+  it is within 2 % of the PWL loss) and the model is solved again (at most
+  8 rounds). Steps without such losses keep the PWL model. The surplus is
+  now curtailed, at its cost and within its limits, and reported as
+  curtailment. One week of Cuba 2025 unit commitment with 7.3 GW of PV:
+  before, 45.5 GWh "lost" on the lines (12 % of demand) and no curtailment;
+  now 7.2 GWh of losses (1.9 %) and 38.5 GWh curtailed. The model stays an LP (or the MIP it was); a solve with
+  surplus energy costs one or a few more solves. If the repaired model has
+  no solution (losing energy on the lines was the only way to balance it),
+  the PWL solution is kept and a warning is logged. See *DC Power Flow →
+  Exact losses* in the formulation docs.
+
+- **The master applies scheduled generator and battery outages.** The
+  `outage_schedule` windows of existing generators (per node or the whole
+  unit) and batteries (whole unit) reached only the dispatch; every master
+  now applies them on the representative days or TSAM periods it models,
+  with the dispatch's rules (horizon hours from 1 January of the first
+  planning year, recurring windows every year, a step partly inside a
+  window derated in proportion), also in the capacity-adequacy credit at
+  the peak and in the existing renewables' energy behind the growth cap's
+  curtailment exemption. On the Cuba 2025 case `pv_2025` (729 MW) is out
+  until each park is commissioned (0.58 TWh in the year instead of 1.18 TWh)
+  and `ps_suheyla` from hour 5112; the master counted the full year, so its
+  2025 RE share (15.0 %) was well above the dispatch's (12.1 %).
+  With the outages, the 2025 starting share falls from 5.2 % to 3.6 % and
+  the one-year 2025 master's RE share from 14.7 % to 11.1 % (14.8 % before
+  this release, measured on demand).
+- **Benders: the operating bound is valid with linked systems.** The
+  copper-plate bound on each year's operating cost balanced every system
+  on its own, so a system that imports power over a line or converter in
+  the subproblem had to shed load in the bound, and the lower bound could
+  pass the year's real cost (two linked systems, one without units: a first
+  bound of 4.4·10⁶ M$ against an optimum of 1.1·10⁴ M$). Systems linked by
+  a line or converter now share one balance per step. A lossless line
+  between two systems also left their supply capped at their own load in
+  the bound; it no longer does.
 
 ## [0.3.0] — 2026-08-27
 
