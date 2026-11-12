@@ -327,6 +327,18 @@ Per-release notes are also published on the
   may fail to load or install. The installation troubleshooting guide
   explains how to use one Julia for both (`PYTHON_JULIAPKG_EXE`).
 
+- **Line losses are in the results.** The dispatch's DC loss model loses
+  energy on the lines, but the losses appeared only in the runner's DEBUG
+  window balance. Each year's HDF5 scenario now has `line_losses`
+  `(num_nodes, hours)` in MW (half of each line's loss at each of its two
+  end buses, as the bus balances take it, summed over the node's buses),
+  and the year's total `transmission_losses` (MWh) is in `summary_results/`,
+  `global/summary_results/` and the scenario attributes
+  (`YearResults.line_losses` / `transmission_losses`, `extract_solution`'s
+  `line_losses` per bus). The energy-flow Sankey shows these losses; for
+  older files it still estimates them from the nodes' loss factors or as
+  2 % of the flows.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -1285,6 +1297,25 @@ Per-release notes are also published on the
     longer counts battery discharge or load shed as generation in the unit
     commitment view; the results panel's renewable flags read the stored
     generator type (they were always false).
+
+- **The curtailment limit is annual, per system.** `max_curtailment_ratio`
+  held on every representative day of the master, over all systems
+  together: a year far below its limit was infeasible when one of its days
+  curtailed more (Cuba, Benders: a year curtailing 226.7 GWh against a
+  580.8 GWh limit was rejected because one of its five days curtailed more
+  than 5 %, and the upper bound stopped improving for four iterations). Now
+  each system's curtailment over the year, its representative days or TSAM
+  periods weighted to the year as their cost is, is at most
+  `max_curtailment_ratio` × its renewable generation over the year
+  (`max_curtailment_s{σ}_y{y}`); single days may curtail more. This holds in
+  every master: monolithic (one or many years), TSAM, stochastic (each
+  scenario its own), MGA and the myopic years, and in Benders (the year
+  subproblems, the master's operating bound, the feasibility cuts and the
+  log's "Years: n of N within the curtailment limit", whose report now
+  reads "breaks the annual curtailment limit"). Curtailing existing
+  renewables down to the RE growth cap stays exempt, now as one annual
+  allowance per system. The dispatch is unchanged: it prices curtailment at
+  `curtailment_cost`.
 
 ### Fixed
 
@@ -2877,6 +2908,57 @@ Per-release notes are also published on the
   a line or converter now share one balance per step. A lossless line
   between two systems also left their supply capped at their own load in
   the bound; it no longer does.
+
+- **Benders no longer flags a year a few MWh above its curtailment limit.**
+  A year counted as breaking its limit for any slack above 1e-6, so solver
+  tolerances made years "break" it by "0.0 GWh/yr" (Cuba, 2046), each with a
+  feasibility cut and no upper bound. A year is now within a system's limit
+  when it curtails at most 1e-3 MWh/year + 1e-6 × the system's renewable
+  generation of the year above it; such a year is solved with its slacks
+  held at that least violation, and the master's operating bound allows the
+  same tolerance.
+
+- **Benders' operating bound counts each lossy line's loss once.** The bound
+  let a system's supply exceed its load by what its lossy lines lose with
+  both flow directions at full flow. Since lines lose no more than the PWL
+  loss of their net flow, it is the full-flow loss in one direction: half
+  the room, so the bound curtails less for free.
+
+- **Studio equivalent branches lose what their lines lose.** The level-2
+  Grid Builder reduction (one bus per node) joins two nodes by one branch
+  standing for all the lines and transformers between them. Its resistance
+  was `1/R = Σ 1/R_i` over the lines that had one, so one lossy line beside
+  lossless ones set the branch's R and the branch could lose far more than
+  its lines; transformers entered with R = 0; a line with neither a length
+  nor end-bus coordinates added its capacity but no admittance; and the
+  branch was labelled with the higher node-bus voltage and one circuit. The
+  branch now combines the same set of branches for every value: capacity
+  summed, `1/X = Σ 1/X_i`, the loss-equivalent `R = X² Σ R_i/X_i²` (the
+  losses of the lines at the DC flow split), B summed. A line with a
+  reactance but no resistance gets the R/X of the standard line type of its
+  voltage, a transformer the R of its `losses_fraction`, and a line with no
+  length spans the distance between the two node buses. The branch carries
+  the voltage and the total circuits of its lines. Level-1 merges of
+  parallel lines use the same R rule. Rebuild a reduced network in the
+  Studio to get the new values; saved cases are unchanged.
+
+- **Repaired loss re-solves no longer fall back to simplex.** After the
+  loss repair changes a model, Gurobi (and CPLEX) restarted it from the
+  previous basis with dual/primal simplex whatever `Method` said: with the
+  default `Method -1` / `Crossover -1` a Cuba myopic master whose first
+  solve took 2.5 minutes ran its re-solve for 47+ minutes. The repair's
+  re-solves now ignore the previous basis (Gurobi `LPWarmStart = 0`, CPLEX
+  `CPXPARAM_Advance = 0`, set back afterwards) unless the method is simplex,
+  so they use the first solve's method. A linearised line-step also carries
+  its flow on one segment instead of N identical copies, and a round that
+  would only update the linearised loss slopes is skipped when those losses
+  together miss the PWL losses of their flows by at most 0.1 % of all line
+  losses. On a one-year Cuba master with a high-RE fleet (515k rows, 56
+  over-losing steps), Gurobi `Method -1` / `Crossover -1`: the first re-solve
+  ran 20+ minutes (killed) and now each re-solve takes 1–1.5 minutes (all
+  four solves 15 minutes, 11 of them the unchanged first solve); `Method 2`
+  / `Crossover 0`: 8 solves in 164 s before, 5 solves in 112 s now, same
+  objective (within 1e-6).
 
 ## [0.3.0] — 2026-08-27
 
