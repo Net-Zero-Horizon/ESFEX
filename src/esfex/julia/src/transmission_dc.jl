@@ -383,6 +383,62 @@ const LOSS_REPAIR_TOL_MW = 1e-3      # over-loss (MW) ignored as solver noise
 const LOSS_REPAIR_SECANT_RTOL = 0.02 # linearised loss within 2 % of the PWL loss
 const LOSS_REPAIR_SECANT_TOL_MW = 0.1 # ... or within 0.1 MW
 const LOSS_REPAIR_MAX_RETUNES = 2    # then the line-step keeps its alpha
+# A round only to update alphas runs while the linearised losses, together,
+# miss the PWL losses of their flows by more than 0.1 % of all line losses
+const LOSS_REPAIR_RETUNE_SHARE = 1e-3
+
+# Per solver: the parameter that makes a re-solve ignore the previous basis,
+# its value, and the LP method parameter with its simplex values (for which
+# the previous basis is the method's own warm start)
+const LP_WARM_START_PARAMS = Dict(
+    "Gurobi" => ("LPWarmStart", 0, "Method", (0, 1)),
+    "CPLEX" => ("CPXPARAM_Advance", 0, "CPXPARAM_LPMethod", (1, 2, 3)),
+)
+
+"""
+    lp_warm_start_off(solver, attribute) -> Union{Nothing, Pair{String}}
+
+The parameter (and value) that makes `solver` ignore the previous basis when
+it re-solves an LP, read from `LP_WARM_START_PARAMS`; `nothing` for other
+solvers and when the LP method (`attribute(name)` reads a parameter) is
+simplex, whose own warm start that basis is.
+"""
+function lp_warm_start_off(solver::AbstractString, attribute)
+    spec = get(LP_WARM_START_PARAMS, solver, nothing)
+    spec === nothing && return nothing
+    param, off, method_param, simplex = spec
+    attribute(method_param) in simplex && return nothing
+    return param => off
+end
+
+"""
+    optimize_like_first!(model; kwargs...)
+
+Re-solve a model the loss repair has changed with the LP method of its first
+solve. Gurobi and CPLEX restart a changed LP from the previous basis with
+simplex, whatever method the user set: on a Cuba master that barrier solves
+in 2 minutes, that dual/primal simplex ran 47+ minutes. Unless the user chose
+simplex, the previous basis is ignored for this solve (`lp_warm_start_off`)
+and the parameter is set back afterwards. Other solvers re-solve as they do.
+"""
+function optimize_like_first!(model; kwargs...)
+    restore = nothing
+    try
+        off = lp_warm_start_off(solver_name(model), name -> get_attribute(model, name))
+        if off !== nothing
+            restore = off.first => get_attribute(model, off.first)
+            set_attribute(model, off.first, off.second)
+        end
+    catch
+        restore = nothing   # a solver version without the parameter
+    end
+    try
+        optimize!(model; ignore_optimize_hook = true, kwargs...)
+    finally
+        restore === nothing || set_attribute(model, restore.first, restore.second)
+    end
+    return
+end
 
 """
     pwl_loss_repair!(model) -> PWLLossRepair
@@ -421,38 +477,50 @@ end
 # Loss per MW of a linearised block at flow F: the PWL secant (first slope at 0)
 loss_secant(blk::LossBlock, F::Real) = F > 1e-6 ? pwl_loss_value(blk, F) / F : blk.slopes[1]
 
+# A linearised block carries its whole flow on the first segment of its
+# direction (`ploss = alpha × that segment`)
 function set_block_alpha!(blk::LossBlock, alpha::Float64)
-    for v in (blk.dir > 0 ? blk.dp : blk.dn)
-        set_normalized_coefficient(blk.con, v, -alpha)
-    end
+    set_normalized_coefficient(blk.con, (blk.dir > 0 ? blk.dp : blk.dn)[1], -alpha)
     blk.alpha = alpha
 end
 
 function linearise_block!(blk::LossBlock, dir::Int, alpha::Float64)
-    foreach(v -> set_upper_bound(v, 0.0), dir > 0 ? blk.dn : blk.dp)
+    same, opp = dir > 0 ? (blk.dp, blk.dn) : (blk.dn, blk.dp)
+    foreach(v -> set_upper_bound(v, 0.0), opp)
+    # The other segments would be copies of the first at the same alpha: a
+    # degenerate LP the solvers then wander through
+    foreach(v -> set_upper_bound(v, 0.0), @view same[2:end])
+    if blk.open_last
+        has_upper_bound(same[1]) && delete_upper_bound(same[1])
+    else
+        set_upper_bound(same[1], sum(blk.widths))
+    end
     blk.dir = dir
     blk.retunes = 0
     set_block_alpha!(blk, alpha)
 end
 
 function restore_block!(blk::LossBlock)
-    blk.dir == 0 && return
+    blk.dir == 0 && return false
     same, opp = blk.dir > 0 ? (blk.dp, blk.dn) : (blk.dn, blk.dp)
+    set_normalized_coefficient(blk.con, same[1], -blk.slopes[1])
     N = length(blk.widths)
-    for k in 1:N
-        set_normalized_coefficient(blk.con, same[k], -blk.slopes[k])
+    for k in 1:N, v in (same[k], opp[k])
         if k < N || !blk.open_last
-            set_upper_bound(opp[k], blk.widths[k])
-        else
-            delete_upper_bound(opp[k])
+            set_upper_bound(v, blk.widths[k])
+        elseif has_upper_bound(v)
+            delete_upper_bound(v)
         end
     end
     blk.dir = 0
     blk.alpha = 0.0
     blk.retunes = 0
+    return true
 end
 
-restore_pwl_losses!(reg::PWLLossRepair) = foreach(restore_block!, reg.blocks)
+# Back to the PWL model as built; true if some block was linearised
+restore_pwl_losses!(reg::PWLLossRepair) =
+    foldl((changed, b) -> restore_block!(b) | changed, reg.blocks; init = false)
 
 """
     optimize_exact_losses!(model; kwargs...)
@@ -470,7 +538,14 @@ the PWL loss of the net flow on any line:
    can be lost beyond it). The model is solved again; `alpha` follows the
    new flow until the loss is within 2 % (or 0.1 MW) of the PWL loss, at most
    twice per line-step, and steps that now over-lose are repaired too (at
-   most $(LOSS_REPAIR_MAX_ROUNDS) rounds).
+   most $(LOSS_REPAIR_MAX_ROUNDS) rounds). A round that would only update
+   alphas is skipped when the linearised losses together miss the PWL
+   losses of their flows by at most $(100 * LOSS_REPAIR_RETUNE_SHARE) % of all
+   line losses.
+
+Each re-solve of a changed model uses the LP method of the first solve
+(`optimize_like_first!`): Gurobi and CPLEX would otherwise restart from the
+previous basis with simplex, even under barrier.
 
 The surplus that was lost on the lines is then curtailed (at its cost,
 within its limits), stored or not produced. Steps without over-loss keep the
@@ -485,8 +560,11 @@ function optimize_exact_losses!(model; kwargs...)
     if !(reg isa PWLLossRepair) || isempty(reg.blocks)
         return optimize!(model; ignore_optimize_hook = true, kwargs...)
     end
-    restore_pwl_losses!(reg)
-    optimize!(model; ignore_optimize_hook = true, kwargs...)
+    if restore_pwl_losses!(reg)
+        optimize_like_first!(model; kwargs...)
+    else
+        optimize!(model; ignore_optimize_hook = true, kwargs...)
+    end
     repaired = Set{Int}()
     for r in 1:LOSS_REPAIR_MAX_ROUNDS
         has_values(model) || break
@@ -497,6 +575,7 @@ function optimize_exact_losses!(model; kwargs...)
         over_groups = Set{Int}()
         retune = Int[]
         over_mw = 0.0
+        retune_mw = 0.0
         for (i, b) in enumerate(reg.blocks)
             exact = pwl_loss_value(b, F[i])
             if b.dir == 0
@@ -511,9 +590,11 @@ function optimize_exact_losses!(model; kwargs...)
                 # A flow that keeps moving with alpha (it sits where alpha
                 # decides it) keeps the alpha of its second update
                 push!(retune, i)
+                retune_mw += abs(L[i] - exact)
             end
         end
-        isempty(over_groups) && isempty(retune) && return
+        isempty(over_groups) &&
+            retune_mw <= LOSS_REPAIR_RETUNE_SHARE * sum(L; init = 0.0) && return
         if r == LOSS_REPAIR_MAX_ROUNDS
             isempty(over_groups) && return
             @warn "Line losses: lines still lose $(round(over_mw; digits = 1)) MW·step " *
@@ -523,7 +604,9 @@ function optimize_exact_losses!(model; kwargs...)
         end
         @debug "Line losses: repairing $(length(over_groups)) step(s) losing " *
                "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss, updating " *
-               "$(length(retune)) linearised loss(es) (round $(r))"
+               "$(length(retune)) linearised loss(es) off by " *
+               "$(round(retune_mw; digits = 1)) MW·step (all lines lose " *
+               "$(round(sum(L; init = 0.0); digits = 1)) MW·step; round $(r))"
         for i in retune
             set_block_alpha!(reg.blocks[i], loss_secant(reg.blocks[i], F[i]))
             reg.blocks[i].retunes += 1
@@ -534,14 +617,14 @@ function optimize_exact_losses!(model; kwargs...)
             linearise_block!(b, pf[i] < 0 ? -1 : 1, loss_secant(b, F[i]))
         end
         union!(repaired, over_groups)
-        optimize!(model; ignore_optimize_hook = true, kwargs...)
+        optimize_like_first!(model; kwargs...)
         if !has_values(model)
             @warn "Line losses: the model has no solution once $(length(repaired)) " *
                   "step(s) lose no more than the PWL loss of their flows " *
                   "($(termination_status(model))); keeping the PWL solution, whose " *
                   "lines lose energy beyond their flows' losses"
             restore_pwl_losses!(reg)
-            optimize!(model; ignore_optimize_hook = true, kwargs...)
+            optimize_like_first!(model; kwargs...)
             return
         end
     end
