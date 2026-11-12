@@ -618,7 +618,7 @@ Battery technologies have the same structure (`add_battery_tech_day!`: `bt_dis_c
 The flows follow the DC power flow of the dispatch (flow–angle coupling DC-2). A candidate line of 0 MW is not fixed to zero flow when it can be expanded.
 
 !!! note "Transmission losses in the Master Problem"
-    The master uses `loss_model` like the dispatch, with `pwl_loss_segments_master` segments for `pwl`. Each node link carries the equivalent reactance and resistance of the bus-level lines between its two nodes, so the master's flow split and losses follow the grid. See [DC Power Flow -- Transmission Losses](dc-power-flow.md#transmission-losses).
+    The master uses `loss_model` like the dispatch, with `pwl_loss_segments_master` segments for `pwl`. Each node link carries the equivalent reactance and resistance of the bus-level lines between its two nodes, so the master's flow split and losses follow the grid. As in the dispatch, a line never loses more than the PWL loss of its net flow, so surplus renewable energy is curtailed (and counts toward `max_curtailment_ratio`) rather than lost on the lines. See [DC Power Flow -- Transmission Losses](dc-power-flow.md#transmission-losses) and [Exact losses](dc-power-flow.md#exact-losses).
 
 #### 8.3.5 Renewable Energy of the Day
 

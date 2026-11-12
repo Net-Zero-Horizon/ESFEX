@@ -229,7 +229,7 @@ The slope of the \(k\)-th segment (\(k = 1, \ldots, N\)) is the secant of the qu
 m_k = \frac{R_l \cdot (2k - 1) \cdot \Delta f}{S_{base}} \tag{LOSS-SLOPE}
 \]
 
-Since \(m_1 < m_2 < \cdots < m_N\), the PWL approximation is **convex**: a cost-minimizing LP fills lower-slope segments first, so no binary variables are needed to enforce segment ordering. Branches with \(R_l = 0\), or with a capacity below 0.1 MW that investment cannot expand, are lossless (`ploss_{l}_{t}` fixed to 0). A PWL branch with zero base capacity is lossless too, since its segments have zero width; with the linear model it loses \(\lambda_l\) of its flow like any other branch.
+Since \(m_1 < m_2 < \cdots < m_N\), the PWL approximation is **convex**: while energy has a positive value, a cost-minimizing LP fills lower-slope segments first and runs one direction only, so no binary variables are needed. When energy is worth less than nothing at some bus (surplus renewables whose curtailment has a cost, a binding curtailment limit or RE target), it does not: see [Exact losses](#exact-losses). Branches with \(R_l = 0\), or with a capacity below 0.1 MW that investment cannot expand, are lossless (`ploss_{l}_{t}` fixed to 0). A PWL branch with zero base capacity is lossless too, since its segments have zero width; with the linear model it loses \(\lambda_l\) of its flow like any other branch.
 
 ### Flow Decomposition
 
@@ -270,6 +270,18 @@ Losses are allocated equally between the two endpoint buses of each line. The fl
 \]
 
 The \(+\) sign makes the loss a withdrawal: each end supplies its share of the flow plus half of the line's loss. \(|K_{n,l}|\) charges both endpoint buses regardless of flow direction.
+
+### Exact Losses
+
+LOSS-1 to LOSS-4 allow \(\delta^{+}\) and \(\delta^{-}\) to be positive together, and a steep segment to fill before a flat one. Both raise \(P^{loss}\) above the PWL loss of the net flow \(|f_{l,t}|\), so the LP can discard energy on any lossy line, up to twice its full-flow loss, at no cost. It does so whenever discarding energy pays: curtailment has a cost (`curtailment_cost`), a curtailment limit binds, or an RE target counts renewable output that is then lost. Surplus renewable energy then disappears as "losses" instead of being curtailed. No LP formulation can forbid this, because the set \(\{P^{loss} = \text{PWL}(|f|)\}\) is not convex.
+
+Every solve of a model with PWL or linear losses (the dispatch, the master problem, the Benders subproblems, MGA) is therefore repaired:
+
+1. Solve with LOSS-1 to LOSS-4.
+2. At each step where some branch loses more than \(\text{PWL}(|f_{l,t}|)\) (beyond 0.001 MW), every lossy branch of that step is linearised: its flow is held in the direction it had (\(\delta^{-} = 0\) or \(\delta^{+} = 0\)), and its loss becomes \(P^{loss}_{l,t} = \alpha_{l,t} \, |f_{l,t}|\), with \(\alpha_{l,t} = \text{PWL}(|f^{*}|)/|f^{*}|\) the PWL secant at the flow \(f^{*}\) just found (\(m_1\) at zero flow). A loss that is linear in the flow cannot be inflated.
+3. Solve again. \(\alpha\) follows the new flow until each linearised loss is within 2 % (or 0.1 MW) of the PWL loss of its flow, at most twice per branch-step (a flow that keeps moving with \(\alpha\) keeps its second value). Steps that now over-lose are linearised too. There are at most 8 rounds.
+
+Steps without over-loss keep the PWL model and its marginal losses. The surplus is curtailed (at `curtailment_cost`, within `max_curtailment_ratio` in the master), stored or not generated, and curtailment is reported. Each solve starts again from the PWL model, so a model solved again after a change (Benders iterations, MGA, NPV retirement) is repaired for its new solution. The model stays an LP (or the MIP it was): a step costs one more solve per round, and only when some branch over-loses. If a repaired solve has no solution (losing energy on the lines was the only way to balance the model, e.g. a hard curtailment limit with nothing to build), the PWL solution is kept and a warning is logged.
 
 ### Configuration
 
