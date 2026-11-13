@@ -4475,6 +4475,79 @@ import Ipopt
             @test all(br.lb_history .<= br.ub_history .* (1 + 1e-6))
         end
 
+        @testset "Benders: in-out core within the curtailment limit (S29)" begin
+            # Cuba's 25-year run held its upper bound from iteration 10 to
+            # 50: the core moved to every point solved, also one above the
+            # curtailment limit, so the points between it and a plan within
+            # the limit were above it too and gave no bound. Four one-day
+            # years, load growing at bus 1, the wind cheaper at bus 2 behind
+            # a 30 MW line: the copper-plate bound builds more there than the
+            # line lets the years use within 5 %. The first bound came at
+            # iteration 14 of 18; now at 6 of 10.
+            NY = 4
+            H = 24 * NY
+            buses2 = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                      BusData(2, 2, 220.0, 50.0, "AC", "PQ", "mixed", 1.0)]
+            line = TransmissionLineData("l1", 1, 2, 30.0, 0.1, 0.0, 0.0, 100.0, 220.0, 1,
+                                        50.0, "AC", 0.0)
+            net2 = NetworkConfig(2, 2, buses2, [1, 2], [0 30.0; 30.0 0], zeros(2, 2), 100.0,
+                0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0], [line], TransformerData[],
+                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            o = [0.0, 0.0]
+            l = [1.0, 1.0]
+            sun = repeat(vcat(zeros(6), [0.25, 0.5, 0.75], ones(6), [0.75, 0.5, 0.25],
+                              zeros(6)), NY)
+            wind = repeat(0.5 .+ 0.4 .* sin.(range(0, 2pi, length = 24)), NY)
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [0.001, 0.001], [0.0, 1000.0],
+                hcat(sun, sun), l, l, l, l, o, o, o, o, o, o, o, o, [25.0, 25.0], o, o, 50.0,
+                "AC", false, l)
+            wd = TechnologyConfig("Wind", "Renewable", "Wind", [0.0016, 0.0013],
+                [1000.0, 1000.0], hcat(wind, wind), l, l, l, l, o, o, o, o, o, o, o, o,
+                [25.0, 25.0], o, o, 50.0, "AC", false, l)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0, 0.0], [1.0e-3, 0.0],
+                        ones(H, 2); nb = 2, H = H)
+            inp = MasterProblemInput(years = collect(2025:2024 + NY), network = net2,
+                generators = [gas], batteries = BatteryConfig[], technologies = [pv, wd],
+                base_demand = hcat(vcat([fill(60.0 * (1 + 0.15k), 24) for k in 0:NY-1]...),
+                                   fill(15.0, H)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                max_curtailment_ratio = 0.05, curtailment_cost = 1.0e-5,
+                representative_days_per_year = 1, min_day_separation = 1,
+                hours_per_year = fill(24, NY), rep_day_offsets = [0],
+                transmission_loss_segments = 0, verbose = false)
+            mono, _ = master1(inp)
+            br = run_benders_decomposition(inp; max_iterations = 40, tolerance = 1e-6,
+                                           verbose_benders = false)
+            @test br.gap < 1e-6
+            @test br.objective ≈ objective_value(mono) rtol = 1e-6
+            @test findfirst(isfinite, br.ub_history) <= 8
+            @test br.iterations <= 12
+
+            # The best plan is recovered when a later feasibility cut cuts it
+            # off by more than the solver's tolerance (Cuba aborted there)
+            m = ESFEX.JuMP.Model(ESFEX.HiGHS.Optimizer)
+            ESFEX.JuMP.set_silent(m)
+            ESFEX.JuMP.@variable(m, 0 <= x <= 10)
+            ESFEX.JuMP.@variable(m, t >= 0)
+            ESFEX.JuMP.@constraint(m, t >= 5 - x)
+            ESFEX.JuMP.@constraint(m, 1.0e7 * x <= 1.0e7 * 0.5 - 1.0,
+                                   base_name = "benders_feas_y1_iter2")
+            ESFEX.JuMP.@objective(m, Min, x + t)
+            opt = ESFEX.JuMP.optimizer_with_attributes(ESFEX.HiGHS.Optimizer,
+                                                       "output_flag" => false)
+            @test_logs (:warn, r"without the feasibility cuts") match_mode = :any @test(
+                ESFEX.recover_benders_plan!(m, Dict(x => 0.5), opt))
+            @test value(x) ≈ 0.5 rtol = 1e-5
+            @test value(t) ≈ 4.5 rtol = 1e-5
+            @test ESFEX.JuMP.constraint_by_name(m, "benders_feas_y1_iter2") === nothing
+            # A plan the master holds is fixed as it is
+            m2 = ESFEX.JuMP.Model(ESFEX.HiGHS.Optimizer)
+            ESFEX.JuMP.@variable(m2, 0 <= y <= 10)
+            ESFEX.JuMP.@objective(m2, Min, y)
+            @test ESFEX.recover_benders_plan!(m2, Dict(y => 3.0), opt)
+            @test value(y) == 3.0
+        end
+
         @testset "Curtailment limit: annual, per system, with a tolerance (C28)" begin
             # The limit held every representative day: Cuba's Benders run
             # flagged a year curtailing 226.7 GWh against a 580.8 GWh limit

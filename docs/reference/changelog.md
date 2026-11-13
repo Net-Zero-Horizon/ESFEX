@@ -2961,6 +2961,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   never appeared anywhere. It is now logged at debug level: always in the
   run's log file, and on the console with `--verbose`.
 
+- **Benders upper bound no longer stalls on the curtailment limit.** The
+  in-out stabilisation solved the subproblems between the master's plan and
+  a core point that moved to every point solved, also one that broke the
+  annual curtailment limit. From then on a plan within the limit could give
+  a point above it, and no upper bound: Cuba's 25-year run held its bound
+  from iteration 10 to 35 at a 19.6 % gap while its plans, with the excess
+  priced at the value of lost load, were within about 3 % of the lower
+  bound. The core now moves only to points that meet the limits (and the
+  subproblems are solved at the master's plan until one does).
+- **A Benders master that reaches its 600 s limit is solved again.** A
+  master stopped without a plan ended the run (Cuba, iteration 36: 27
+  million nonzeros); it is now solved again, and so are the later ones,
+  with `solver.time_limit`.
+- **Benders returns its best plan instead of aborting.** The best
+  iteration's plan is extracted by fixing the master to it; a later
+  feasibility cut, or the solver's tolerances on a fixed plan, made that
+  master infeasible and the run aborted after 13 hours with no plan. The
+  feasibility cuts are now dropped and the plan held within 1e-6 if it does
+  not solve, and a master without a plan raises a clear error.
+
 ## [0.3.0] — 2026-08-27
 
 ### Added
