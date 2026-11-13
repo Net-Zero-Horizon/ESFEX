@@ -43,6 +43,11 @@ const BENDERS_INOUT_WEIGHT = 0.5
 # Gap below which the subproblems are solved at the master's plan itself
 const BENDERS_INOUT_GAP = 0.01
 
+# Time limit (s) of a master solve, below `solver.time_limit`: a master that
+# reaches it without a plan is solved again with `solver.time_limit`, and so
+# are the later ones
+const BENDERS_MASTER_TIME_LIMIT = 600.0
+
 # Least battery-technology power (MW) the subproblems see at every bus where
 # one can be built (`benders_battery_floor`), so that their duals price a
 # battery there; the energy is this × the technology's minimum duration
@@ -800,7 +805,7 @@ function create_benders_master(
     model = Model(create_optimizer(
         solver_name=input.solver_name,
         threads=input.threads,
-        time_limit=min(input.time_limit, 600.0),  # master should be fast
+        time_limit=min(input.time_limit, BENDERS_MASTER_TIME_LIMIT),
         gap=input.gap,
         verbose=input.verbose
     ))
@@ -2284,6 +2289,47 @@ function log_benders_plan(vars::MasterProblemVariables, input::MasterProblemInpu
     return nothing
 end
 
+"""
+    recover_benders_plan!(model, values, optimizer) -> Bool
+
+Solve the Benders master `model` with its variables fixed to `values` (a
+plan solved earlier), to extract it. The plan met the curtailment limits
+within `curtailment_tolerance`, and the cuts and the master's constraints
+hold it to the solver's tolerances only: Cuba's master, fixed to the plan
+of iteration 10 after 35, was infeasible in presolve and the run aborted
+with no plan. If it does not solve, the feasibility cuts
+(`benders_feas_*`) are deleted and the variables held within a relative
+1e-6 of `values`. True when the master then holds a plan.
+"""
+function recover_benders_plan!(model::Model, values::AbstractDict{VariableRef, Float64},
+                               optimizer)
+    target(v, x) = is_integer(v) || is_binary(v) ? round(x) : x
+    for (v, x) in values
+        fix(v, target(v, x); force = true)
+    end
+    set_optimizer(model, optimizer)
+    optimize!(model)
+    primal_status(model) == MOI.FEASIBLE_POINT && return true
+    @warn "Benders: the master fixed to the best plan is $(termination_status(model)); " *
+          "solving it without the feasibility cuts, within 1e-6 of the plan."
+    for (F, S) in list_of_constraint_types(model)
+        F <: GenericAffExpr || continue
+        for c in all_constraints(model, F, S)
+            startswith(name(c), "benders_feas_") && delete(model, c)
+        end
+    end
+    for (v, x) in values
+        x = target(v, x)
+        d = 1e-6 * max(1.0, abs(x))
+        unfix(v)
+        set_lower_bound(v, x - d)
+        set_upper_bound(v, x + d)
+    end
+    set_optimizer(model, optimizer)
+    optimize!(model)
+    return primal_status(model) == MOI.FEASIBLE_POINT
+end
+
 # =============================================================================
 # Main Benders Decomposition Loop
 # =============================================================================
@@ -2564,10 +2610,13 @@ function run_benders_decomposition(
     best_re = iter_re
     theta_vars = Set(values(theta))
     # In-out stabilisation: the subproblems are solved at a point between
-    # the master's plan and a core point (the previous point solved), whose
-    # cuts are as valid; after an iteration that did not raise the lower
-    # bound, once the gap is below BENDERS_INOUT_GAP (or with integer master
-    # variables), at the master's plan
+    # the master's plan and a core point, whose cuts are as valid; after an
+    # iteration that did not raise the lower bound, once the gap is below
+    # BENDERS_INOUT_GAP (or with integer master variables), or before any
+    # point met the curtailment limits, at the master's plan. The core is
+    # the last point solved within the limits: the plans that meet them are
+    # a convex set, so a plan within them gives a point within them, and an
+    # upper bound (with a core above them it may not, and the bound stalled)
     continuous_master = num_constraints(master_model, VariableRef, MOI.Integer) +
                         num_constraints(master_model, VariableRef, MOI.ZeroOne) == 0
     core = Dict{VariableRef, Float64}()
@@ -2578,16 +2627,18 @@ function run_benders_decomposition(
     confirming = false
 
     # Create optimizer factory for resetting between iterations
-    master_optimizer = create_optimizer(
+    new_master_optimizer(limit) = create_optimizer(
         solver_name=input.solver_name,
         threads=input.threads,
-        time_limit=min(input.time_limit, 600.0),
+        time_limit=limit,
         gap=input.gap,
         verbose=input.verbose
     )
+    master_optimizer = new_master_optimizer(min(input.time_limit, BENDERS_MASTER_TIME_LIMIT))
 
     # The best iteration's plan: the master as solved if that is the last
     # solve, otherwise re-solved with its variables fixed to the best values
+    # (`recover_benders_plan!`)
     # With record_unit_operation, the plan's unit operation and asset costs
     unit_ops(op) = op === nothing ? UnitOperation[] :
         [add_unit_asset_costs!(op, vars, input, nothing)]
@@ -2597,17 +2648,18 @@ function run_benders_decomposition(
                   "curtailment limit; returning the last master solution."
             set_optimizer(master_model, master_optimizer)
             optimize!(master_model)
+            has_values(master_model) || error("Benders: the master has no plan to " *
+                "return: $(termination_status(master_model)).")
             return extract_master_solution_from_benders(master_model, vars, input,
                                                         year_operational_costs;
                                                         unit_operation = unit_ops(iter_op),
                                                         re_energy = iter_re)
         end
         if best_iter != last_solved_iter || !best_at_master
-            for (v, x) in best_values
-                fix(v, is_integer(v) || is_binary(v) ? round(x) : x; force = true)
-            end
-            set_optimizer(master_model, master_optimizer)
-            optimize!(master_model)
+            recover_benders_plan!(master_model, best_values, master_optimizer) ||
+                error("Benders: the plan of iteration $(best_iter) (the best upper " *
+                      "bound) could not be recovered from the master: " *
+                      "$(termination_status(master_model)).")
         end
         return extract_master_solution_from_benders(master_model, vars, input, best_year_ops;
                                                     objective = best_ub,
@@ -2625,6 +2677,20 @@ function run_benders_decomposition(
         optimize!(master_model)
         master_status = termination_status(master_model)
         master_solved = master_status == MOI.OPTIMAL || master_status == MOI.LOCALLY_SOLVED
+        if !master_solved && master_status in LIMIT_STATUSES &&
+           !limit_with_feasible_point(master_model) &&
+           input.time_limit > BENDERS_MASTER_TIME_LIMIT
+            # The cuts make the master larger every iteration (Cuba: 27M
+            # nonzeros at iteration 36, 600 s did not do)
+            @warn "Benders: the master stopped at $(master_status) at iteration " *
+                  "$(iter) without a plan; solving it again, and the next ones, " *
+                  "with solver.time_limit ($(input.time_limit) s)."
+            master_optimizer = new_master_optimizer(input.time_limit)
+            set_optimizer(master_model, master_optimizer)
+            optimize!(master_model)
+            master_status = termination_status(master_model)
+            master_solved = master_status == MOI.OPTIMAL || master_status == MOI.LOCALLY_SOLVED
+        end
         if !master_solved && limit_with_feasible_point(master_model)
             # A master stopped at a limit (time, iterations…) still holds a
             # feasible plan: evaluate it, but its objective is no lower bound
@@ -2663,7 +2729,6 @@ function run_benders_decomposition(
                 point[v] = weight * x + (1.0 - weight) * get(core, v, x)
             end
         end
-        core = point
         val = v -> point[v]
 
         if verbose_benders
@@ -2694,6 +2759,7 @@ function run_benders_decomposition(
             year_operational_costs[y_idx] = year_cost
             total_operational_cost += discount(y_idx) * year_cost
         end
+        all_subproblems_solved && (core = point)
 
         # ----- Compute upper bound -----
         # UB = first-stage cost (investment + life ext + decomm + slack) + actual operational cost
