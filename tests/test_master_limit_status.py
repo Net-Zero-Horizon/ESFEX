@@ -47,7 +47,7 @@ class FakeESFEX:
         return None
 
     def log_solution_summary(self, *args):
-        pass
+        return "[OBJECTIVE FUNCTION BREAKDOWN - test]"
 
 
 def _solve_master(status, primal, **kw):
@@ -88,6 +88,14 @@ def test_limit_with_infeasible_point_fails():
 def test_optimal_and_infeasible_unchanged():
     assert _solve_master("OPTIMAL", "FEASIBLE_POINT")[0] == 1
     assert _solve_master("INFEASIBLE", "NO_SOLUTION")[0] == -1
+
+
+def test_solution_summary_reaches_the_log(caplog):
+    # The Julia function returns the summary as a string; it was dropped
+    with caplog.at_level(logging.DEBUG, logger="esfex.bridge.adapters"):
+        assert _solve_master("OPTIMAL", "FEASIBLE_POINT")[0] == 1
+    assert any("[OBJECTIVE FUNCTION BREAKDOWN - test]" in r.getMessage()
+               for r in caplog.records if r.levelno == logging.DEBUG)
 
 
 def test_accept_limit_incumbent_rules(caplog):
