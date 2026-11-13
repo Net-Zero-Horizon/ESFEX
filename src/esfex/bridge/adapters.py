@@ -3791,11 +3791,12 @@ class MasterProblemAdapter:
             logger.info(f"MasterProblem objective value: {obj_val:,.2f}")
             ESFEX = get_esfex_module()
             jl_result = None
-            # Log detailed solution summary (costs in M$ internally)
+            # Detailed solution summary (costs in M$ internally): hundreds of
+            # lines per solve, so at debug level (the run log, or -v)
             try:
                 jl_result = ESFEX.extract_master_solution(
                     self._jl_model, self._jl_vars, self._jl_input)
-                ESFEX.log_solution_summary(jl_result, self._jl_input)
+                logger.debug(str(ESFEX.log_solution_summary(jl_result, self._jl_input)))
             except Exception as e:
                 logger.warning(f"log_solution_summary skipped: {e}")
             return 1

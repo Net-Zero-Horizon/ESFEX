@@ -2960,6 +2960,12 @@ Per-release notes are also published on the
   / `Crossover 0`: 8 solves in 164 s before, 5 solves in 112 s now, same
   objective (within 1e-6).
 
+- **The master's solution summary reaches the log.** The adapter called
+  `log_solution_summary` and dropped the string it returns, so the RE
+  target, the investments, the retirements and the cost breakdown per year
+  never appeared anywhere. It is now logged at debug level: always in the
+  run's log file, and on the console with `--verbose`.
+
 ## [0.3.0] — 2026-08-27
 
 ### Added
