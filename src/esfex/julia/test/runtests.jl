@@ -1578,6 +1578,17 @@ import Ipopt
             finally
                 delete!(ESFEX.LP_WARM_START_PARAMS, "HiGHS")
             end
+            # A solve that is not optimal is returned as it is, unrepaired:
+            # Cuba's master on HiGHS ended "no progress" after 12.8 h and its
+            # repair started a re-solve as long from that point
+            res, model, vars = sink_run(3)
+            for (k, v) in (("presolve", "off"), ("solver", "simplex"),
+                           ("simplex_iteration_limit", 1))
+                ESFEX.JuMP.set_attribute(model, k, v)
+            end
+            @test_logs (:warn, r"not repaired, the solve ended ITERATION_LIMIT") match_mode = :any optimize!(model)
+            @test string(termination_status(model)) == "ITERATION_LIMIT"
+            @test all(b -> b.dir == 0, model.ext[:pwl_loss_repair].blocks)
 
             # The master builds the same loss model on each representative
             # day: there too a line loses only the PWL loss of its flow

@@ -556,8 +556,16 @@ PWL model and its marginal losses. Every call starts again from the PWL
 model, so a model re-solved after a change (Benders, MGA, NPV retirement) is
 repaired for its new solution. If a repaired solve finds no solution (only
 discarding energy on the lines kept the model feasible), the PWL solve is
-kept with a warning. The model stays an LP (or the MIP it was).
+kept with a warning. A first solve that is not optimal (stopped at a limit,
+or a solver without an answer, as HiGHS's "no progress") is returned as it
+is, with a warning: its losses mean nothing, and each round re-solves the
+whole model. The model stays an LP (or the MIP it was).
 """
+# An optimal solve, whose losses the repair can start from
+loss_repair_solved(model) =
+    termination_status(model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
+    primal_status(model) == MOI.FEASIBLE_POINT
+
 function optimize_exact_losses!(model; kwargs...)
     reg = get(model.ext, :pwl_loss_repair, nothing)
     if !(reg isa PWLLossRepair) || isempty(reg.blocks)
@@ -567,6 +575,13 @@ function optimize_exact_losses!(model; kwargs...)
         optimize_like_first!(model; kwargs...)
     else
         optimize!(model; ignore_optimize_hook = true, kwargs...)
+    end
+    if has_values(model) && !loss_repair_solved(model)
+        # Cuba on HiGHS: "no progress" after 12.8 h (relative primal-dual
+        # objective gap 1.0), and its repair started another solve as long
+        @warn "Line losses: not repaired, the solve ended " *
+              "$(termination_status(model)) ($(primal_status(model)))"
+        return
     end
     repaired = Set{Int}()
     for r in 1:LOSS_REPAIR_MAX_ROUNDS
@@ -621,8 +636,8 @@ function optimize_exact_losses!(model; kwargs...)
         end
         union!(repaired, over_groups)
         optimize_like_first!(model; kwargs...)
-        if !has_values(model)
-            @warn "Line losses: the model has no solution once $(length(repaired)) " *
+        if !loss_repair_solved(model)
+            @warn "Line losses: the model has no optimal solution once $(length(repaired)) " *
                   "step(s) lose no more than the PWL loss of their flows " *
                   "($(termination_status(model))); keeping the PWL solution, whose " *
                   "lines lose energy beyond their flows' losses"

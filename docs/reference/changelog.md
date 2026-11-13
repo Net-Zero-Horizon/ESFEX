@@ -2981,6 +2981,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   feasibility cuts are now dropped and the plan held within 1e-6 if it does
   not solve, and a master without a plan raises a clear error.
 
+- **Line losses are not repaired from a solve that is not optimal.** The
+  repair of the PWL line losses re-solved the whole model from any solve
+  with values: Cuba's 25-year monolithic master on HiGHS ended "no
+  progress" after 12.8 hours (relative primal-dual objective gap 1.0) and
+  its repair started a second solve as long from that point. Such a solve
+  is now returned as it is, with a warning, for the caller to handle; a
+  repaired re-solve that is not optimal falls back to the PWL solve, as one
+  without a solution did.
+
 ## [0.3.0] — 2026-08-27
 
 ### Added
