@@ -334,6 +334,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   older files it still estimates them from the nodes' loss factors or as
   2 % of the flows.
 
+- **One model clock for every hourly series.** A new key,
+  `temporal.model_clock`, sets the time base of all hourly series of a case:
+  hour 0 is 1 January 00:00 on that clock, a fixed offset from UTC with no
+  daylight saving time, the same instant at every node and in every system
+  (also across inter-system links). `auto` (the default) is the standard
+  offset of the time zone holding the most demand (by node count until
+  demand is known); an IANA zone (`America/Havana`) is used at its standard
+  offset, and `UTC` or a fixed zone such as `Etc/GMT+5` work too. Node time
+  zones come from the node coordinates (new dependency: `timezonefinder`); a
+  node at sea gets the offset of its 15° longitude band, with a warning. The
+  tools that write series resolve `auto`, convert to the clock and record it:
+  the Grid Builder (weather availability and the demand forecast), the
+  Solar PV and Wind workflows and the `availability_generator` plugin
+  (`--update-config` writes the key; the Studio stores it in the global
+  settings, where a new **Model Clock** field shows and edits it). A run
+  logs the clock, and the node time zones when there are several. A case
+  that does not record its clock (every case written before this release)
+  runs as before, with a warning that the time base of its series is
+  unknown; existing files are not converted.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -2989,6 +3009,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   is now returned as it is, with a warning, for the caller to handle; a
   repaired re-solve that is not optimal falls back to the PWL solve, as one
   without a solution did.
+
+- **Weather availability was in UTC while demand was in local time.** The
+  availability generator, the Grid Builder and the Solar PV / Wind workflows
+  saved weather-derived capacity factors on the hour index of the weather
+  download, which is UTC (Open-Meteo, ERA5) or local solar time (NASA
+  POWER's default), while the Grid Builder demand forecast is in each node's
+  local civil time. In a Cuban case PV peaked at hour 17 (solar noon in UTC)
+  against a demand whose hour 12 is local noon: the dispatch saw sun at
+  23 h local and none in the morning, and shed load from 9 to 13 h. Both are
+  now saved on the model clock: weather series are shifted from UTC (NASA
+  POWER from the offset of the 15° longitude band), and the demand forecast
+  is converted from each node's own time zone, daylight saving time
+  included (the hour skipped in spring is dropped, the hour repeated in
+  autumn is used twice). The year wraps: the last hours read the first
+  ones. Cases generated before this release keep their series as they are;
+  regenerate the availability (or the demand) to put them on one clock.
 
 ## [0.3.0] — 2026-08-27
 
