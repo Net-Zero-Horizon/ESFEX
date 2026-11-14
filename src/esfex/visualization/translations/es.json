@@ -877,6 +877,8 @@
     "inv_resolution": "Resolución de Inversión (h):",
     "pe_resolution": "Resolución EP (h):",
     "use_rolling": "Usar Horizonte Móvil:",
+    "model_clock": "Reloj del modelo:",
+    "model_clock_tip": "Base de tiempo de todas las series horarias: la hora 0 es el 1 de enero a las 00:00 en este reloj, un desfase fijo sin horario de verano. \"auto\" = la hora estándar de la zona con más demanda, fijada cuando el Grid Builder o el generador de disponibilidad escriben las series. O una zona IANA usada en su desfase estándar (America/Havana), UTC o Etc/GMT+5 (UTC-5).",
     "solver": "Solver:",
     "threads": "Hilos:",
     "time_limit": "Límite de Tiempo (s):",

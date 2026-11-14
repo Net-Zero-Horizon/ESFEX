@@ -356,7 +356,12 @@ class TemporalConfig(BaseModel):
     investment_resolution: int = 8760     # hours per investment period
     primary_energy_resolution: int = 24
     use_rolling_horizon: bool = True
+    model_clock: str = "auto"            # 'auto', an IANA zone, 'UTC', 'Etc/GMT+5'
 ```
+
+`model_clock` is validated against the IANA time-zone database (`utc` and an
+empty value are normalised to `UTC` and `auto`). See
+[Model clock](../user-guide/configuration.md#model-clock).
 
 ---
 

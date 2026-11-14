@@ -2132,6 +2132,7 @@ def config_to_global_settings(
         g.investment_resolution = getattr(t, 'investment_resolution', HOURS_STD_YEAR)
         g.primary_energy_resolution = getattr(t, 'primary_energy_resolution', 24)
         g.use_rolling_horizon = getattr(t, 'use_rolling_horizon', True)
+        g.model_clock = getattr(t, 'model_clock', 'auto') or 'auto'
 
     if hasattr(config, 'solver') and config.solver:
         sv = config.solver
@@ -2300,6 +2301,7 @@ def global_settings_to_config_dict(
     config_dict["temporal"]["investment_resolution"] = g.investment_resolution
     config_dict["temporal"]["primary_energy_resolution"] = g.primary_energy_resolution
     config_dict["temporal"]["use_rolling_horizon"] = g.use_rolling_horizon
+    config_dict["temporal"]["model_clock"] = g.model_clock
 
     config_dict.setdefault("solver", {})
     config_dict["solver"]["name"] = g.solver_name

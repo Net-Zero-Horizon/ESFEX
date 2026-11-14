@@ -1513,6 +1513,20 @@ class TemporalConfig(BaseModel):
     investment_resolution: int = Field(default=HOURS_STD_YEAR, description="Hours per investment period")
     primary_energy_resolution: int = Field(default=24, description="Hours")
     use_rolling_horizon: bool = True
+    model_clock: str = Field(
+        default="auto",
+        description="Time base of every hourly series (hour 0 = 1 Jan 00:00 on "
+                    "this clock; fixed offset, no daylight saving time): 'auto' "
+                    "(standard offset of the zone with most demand, set when the "
+                    "series are generated), an IANA zone used at its standard "
+                    "offset ('America/Havana'), 'UTC' or 'Etc/GMT+5'.",
+    )
+
+    @field_validator("model_clock", mode="before")
+    @classmethod
+    def _check_model_clock(cls, v):
+        from esfex.utils.model_clock import normalize_clock_setting
+        return normalize_clock_setting(v)
 
     @model_validator(mode="after")
     def _check_overlap(self):
@@ -1906,7 +1920,8 @@ class OutageWindow(BaseModel):
 
     Applies the capacity/availability multiplier ``availability`` to the target
     element over the absolute hour window ``[start_hour, end_hour)`` of the
-    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00; every
+    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00 on the model
+    clock, ``temporal.model_clock``; every
     modelled year is 8760 h, so year ``k`` starts at hour ``k * 8760``). The
     window happens once; with ``recurring`` it repeats every year at the same
     hours of the year. A value of ``0.0`` is a full outage; ``0.5`` a 50 %
