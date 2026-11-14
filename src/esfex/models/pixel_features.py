@@ -18,7 +18,7 @@ Outputs from build_features_for_point():
       log_pop_density: float,   # ln(pop_density_pixel) [hab/km²]
       urbanization: float,      # GHSL SMOD class (10-30), continuous
       latitude, longitude: float,
-      temperature: np.ndarray,  # 8760 hourly values [°C]
+      temperature: np.ndarray,  # 8760 hourly values [°C], local civil time
       hdd: np.ndarray,          # 8760 values
       cdd: np.ndarray,          # 8760 values
       missing: list[str],
@@ -125,22 +125,14 @@ def load_temperature(
     iso3: str, lat: float, lon: float, year: int,
     zone: Optional[str] = None,
 ) -> Optional[np.ndarray]:
-    """Load ERA5 hourly temperature for a country-year.
+    """ERA5 hourly temperature of a country-year (or zone-year), 8760 h on
+    the local civil time of (*lat*, *lon*) like its demand.
 
-    If ``zone`` is given, look up ``era5_{zone}_{year}.npy`` first and
-    fall back to the national file. This allows zonal training samples
-    to carry temperature at the zone centroid, while keeping backwards
-    compatibility for country-level entries.
+    The series' parquet (``{ISO3}_{year}.parquet`` or
+    ``{ISO3}_{zone}_{year}.parquet``) holds it already on that clock. Without
+    one, the UTC ERA5 cache (``era5_utc_{zone}_{year}.npy``, then
+    ``era5_utc_{year}.npy``) is put on the local time of (*lat*, *lon*).
     """
-    candidates = []
-    if zone:
-        candidates.append(ERA5_CACHE / iso3 / f"era5_{zone}_{year}.npy")
-    candidates.append(ERA5_CACHE / iso3 / f"era5_{year}.npy")
-    for era5 in candidates:
-        if era5.exists():
-            arr = np.load(era5)
-            if len(arr) >= 8760:
-                return arr[:8760].astype(np.float64)
     pq_name = (f"{iso3}_{zone}_{year}.parquet" if zone
                else f"{iso3}_{year}.parquet")
     pq = DEMAND_DATASET_DIR / iso3 / pq_name
@@ -151,6 +143,19 @@ def load_temperature(
             t = df['temperature_c'].values.astype(np.float64)
             if not np.isnan(t).all():
                 return t[:8760]
+    candidates = []
+    if zone:
+        candidates.append(ERA5_CACHE / iso3 / f"era5_utc_{zone}_{year}.npy")
+    candidates.append(ERA5_CACHE / iso3 / f"era5_utc_{year}.npy")
+    for era5 in candidates:
+        if era5.exists():
+            from esfex.models.demand_real_data import series_time_zone
+            from esfex.utils.model_clock import utc_year_on_local_time
+            try:
+                return utc_year_on_local_time(
+                    np.load(era5), series_time_zone(lat, lon), year)
+            except ValueError:
+                continue
     return None
 
 

@@ -621,6 +621,8 @@ esfex train-demand-model [OPTIONS]
 
 Downloads hourly electricity demand from public sources plus ERA5 hourly temperature, and writes standardized Parquet files. The first run downloads 5–50 GB depending on the sources (cached).
 
+Each Parquet file holds one year of 8760 hours (29 February dropped) on the local civil time of the series' location, with daylight saving time where its time zone has it: `timestamp` is the local hour (time-zone aware), `demand_mw` the demand and `temperature_c` the ERA5 temperature of the same instant. The sources deliver demand on different clocks (UTC, a fixed offset or local time) and ERA5 comes in UTC; both are converted when the files are written. The demand models are trained on these local hours, the convention their forecasts use. A dataset built by an earlier version mixes clocks: build it again before training (the ERA5 downloads are cached under new names, `era5_utc_*.npy`, so they are fetched again).
+
 ```bash
 esfex build-demand-dataset [OPTIONS]
 ```
