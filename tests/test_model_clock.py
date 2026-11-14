@@ -308,3 +308,55 @@ def test_runner_warns_when_the_case_has_no_clock(caplog):
     assert len(warnings) == 1
     assert "time base of its hourly series is unknown" in warnings[0].getMessage()
     assert log_case_clock("auto") is None
+
+
+# ── Local civil time (round 31: demand-model temperature) ──────────────
+
+
+def test_utc_to_local_time_pairs_each_local_hour_with_its_instant():
+    from esfex.utils.model_clock import utc_to_local_time
+
+    utc = np.arange(8760.0)
+    loc = utc_to_local_time(utc, "America/Havana", 2023)
+    assert loc[0] == 5.0            # 1 Jan 00:00 CST = 05:00 UTC
+    assert loc[-1] == 4.0           # 31 Dec 23:00 CST = 1 Jan 04:00 UTC (wraps)
+    # Summer (CDT, UTC-4): 1 Jul 12:00 local is 16:00 UTC.
+    noon = (31 + 28 + 31 + 30 + 31 + 30) * 24 + 12
+    assert loc[noon] == noon + 4
+    # Tokyo (UTC+9): 1 Jan 09:00 local = 00:00 UTC.
+    assert utc_to_local_time(utc, "Asia/Tokyo", 2023)[9] == 0.0
+
+
+def test_to_local_time_dst_transitions():
+    import pandas as pd
+
+    from esfex.utils.model_clock import to_local_time, utc_to_local_time
+
+    wall = pd.date_range("2023-01-01", periods=8760, freq="h")
+    loc = utc_to_local_time(np.arange(8760.0), "America/Havana", 2023)
+    # 12 Mar 2023 00:00 does not exist in Havana: it holds the hour after it.
+    i = int(np.where(wall == pd.Timestamp("2023-03-12 00:00"))[0][0])
+    assert loc[i] == loc[i + 1] == i + 5
+    # 5 Nov 2023 00:00 occurs twice: its first (CDT) occurrence.
+    j = int(np.where(wall == pd.Timestamp("2023-11-05 00:00"))[0][0])
+    assert loc[j] == j + 4 and loc[j + 1] == j + 1 + 5
+    # A series already on that local time stays as it is (but the skipped hour).
+    same = to_local_time(np.arange(8760.0), "America/Havana", "America/Havana", 2023)
+    changed = np.flatnonzero(same != np.arange(8760.0))
+    assert changed.tolist() == [i]
+
+
+def test_to_local_time_columns_leap_year_and_bad_zone():
+    from esfex.utils.model_clock import to_local_time, utc_to_local_time
+
+    two = np.column_stack([np.arange(8784.0)] * 2)
+    out = utc_to_local_time(two, ["Asia/Tokyo", "Europe/Madrid"], 2024)
+    assert out.shape == (8784, 2)
+    assert out[9, 0] == 0.0 and out[1, 1] == 0.0
+    # A fixed-offset source (EST all year, e.g. IESO) onto Toronto civil time.
+    est = to_local_time(np.arange(8760.0), "Etc/GMT+5", "America/Toronto", 2023)
+    assert est[0] == 0.0
+    noon = (31 + 28 + 31 + 30 + 31 + 30) * 24 + 12
+    assert est[noon] == noon - 1    # 12:00 EDT is 11:00 EST
+    with pytest.raises(Exception):
+        utc_to_local_time(np.arange(8760.0), "Mars/Olympus", 2023)

@@ -24,7 +24,11 @@ Series reach the clock from one of two source time bases:
   read; when they fall back, the repeated local hour is read twice.
 
 The year wraps: clock hours that fall before 1 January or after 31 December of
-the source series read the other end of the same year. A shift by a fraction
+the source series read the other end of the same year.
+
+:func:`to_local_time` is the same conversion onto a DST-aware local civil
+time instead of the clock (UTC temperature onto the local hours of the demand
+models, see :func:`utc_to_local_time`). A shift by a fraction
 of an hour (zones such as UTC+05:30) interpolates linearly between the two
 neighbouring hours. Series of 8760 hours follow ESFEX's calendar without
 29 February; series of 8784 hours keep it.
@@ -227,14 +231,34 @@ def _is_leap(year: int) -> bool:
     return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
-@lru_cache(maxsize=4096)
-def _source_positions(source_zone: str, clock_offset: float, year: int,
-                      n_hours: int) -> np.ndarray:
-    """Where each clock hour of *year* lies in a source series (fractional index).
+def _wall_offsets(zone: str, wall) -> np.ndarray:
+    """UTC offset of *zone* (hours) at each naive local wall time in *wall*.
 
-    Clock hour ``h`` is the instant ``h - clock_offset`` hours after 1 Jan
-    00:00 UTC of the clock's calendar; in the source zone its wall time is
-    ``h + (zone_offset(instant) - clock_offset)``. A 29 February absent from a
+    A wall time skipped when clocks spring forward takes the offset before
+    the change (it is the instant just after it); a wall time repeated when
+    they fall back takes its first occurrence.
+    """
+    import pandas as pd
+
+    if zone == "UTC":
+        return np.zeros(len(wall))
+    utc = (wall.tz_localize(zone, ambiguous=np.ones(len(wall), dtype=bool),
+                            nonexistent="shift_forward")
+           .tz_convert("UTC").tz_localize(None))
+    return np.asarray((wall - utc) / pd.Timedelta(hours=1), dtype=float)
+
+
+@lru_cache(maxsize=4096)
+def _source_positions(source_zone: str, target: Union[float, str], year: int,
+                      n_hours: int) -> np.ndarray:
+    """Where each target hour of *year* lies in a source series (fractional index).
+
+    *target* is the time base of the result: a fixed offset from UTC (hours,
+    the model clock) or a zone whose local civil time (DST-aware) the result
+    is in. Target hour ``h`` is wall time ``h`` hours after 1 Jan 00:00; with
+    its offset ``off_t`` it is the instant ``h - off_t`` after 1 Jan 00:00
+    UTC, and in the source zone that instant reads
+    ``h + (source_offset(instant) - off_t)``. A 29 February absent from a
     8760-h series is skipped in the calendar, so the index runs continuously
     across it.
     """
@@ -243,16 +267,21 @@ def _source_positions(source_zone: str, clock_offset: float, year: int,
     full = _HOURS_LEAP if _is_leap(year) else _HOURS_STD
     if n_hours not in (full, _HOURS_STD):
         raise ValueError(f"{n_hours} hours is not one year ({year})")
-    clock_wall = pd.date_range(f"{year}-01-01", periods=full, freq="h")
+    wall = pd.date_range(f"{year}-01-01", periods=full, freq="h")
     if n_hours < full:            # ESFEX calendar: 29 Feb dropped
-        clock_wall = clock_wall.delete(slice(_FEB29_START, _FEB29_START + 24))
-    if source_zone == "UTC":
-        zone_off = np.zeros(n_hours)
+        wall = wall.delete(slice(_FEB29_START, _FEB29_START + 24))
+    if isinstance(target, str):
+        target_off = _wall_offsets(target, wall)
     else:
-        utc = clock_wall - pd.Timedelta(hours=clock_offset)
+        target_off = np.full(n_hours, float(target))
+    if source_zone == "UTC":
+        source_off = np.zeros(n_hours)
+    else:
+        utc = wall - pd.to_timedelta(target_off, unit="h")
         local = utc.tz_localize("UTC").tz_convert(source_zone).tz_localize(None)
-        zone_off = np.asarray((local - utc) / pd.Timedelta(hours=1), dtype=float)
-    pos = np.arange(n_hours, dtype=float) + zone_off - clock_offset
+        source_off = np.asarray((local - utc) / pd.Timedelta(hours=1),
+                                dtype=float)
+    pos = np.arange(n_hours, dtype=float) + source_off - target_off
     pos = np.mod(pos, n_hours)
     pos.setflags(write=False)
     return pos
@@ -281,6 +310,27 @@ def _year_blocks(n_rows: int, start_year: int) -> list[tuple[int, int, int]]:
         f"(or one 8784-h leap year {start_year})")
 
 
+def _convert(series: np.ndarray, source_zones: Union[str, Sequence[str]],
+             targets: Sequence[Union[float, str]], start_year: int) -> np.ndarray:
+    """*series* (one column per target) from *source_zones* onto *targets*."""
+    arr = np.asarray(series, dtype=float)
+    one_d = arr.ndim == 1
+    mat = arr.reshape(-1, 1) if one_d else arr
+    n_cols = mat.shape[1]
+    zones = ([source_zones] * n_cols if isinstance(source_zones, str)
+             else list(source_zones))
+    if len(zones) != n_cols:
+        raise ValueError(f"{len(zones)} source zones for {n_cols} columns")
+    if len(targets) != n_cols:
+        raise ValueError(f"{len(targets)} target zones for {n_cols} columns")
+    out = np.empty_like(mat)
+    for year, r0, n in _year_blocks(mat.shape[0], start_year):
+        for c in range(n_cols):
+            pos = _source_positions(zones[c], targets[c], year, n)
+            out[r0:r0 + n, c] = _sample(mat[r0:r0 + n, c], pos)
+    return out[:, 0] if one_d else out
+
+
 def to_model_clock(
     series: np.ndarray,
     source_zones: Union[str, Sequence[str]],
@@ -305,20 +355,45 @@ def to_model_clock(
         Calendar year of the first block (it sets the DST dates and leap days).
     """
     clock = as_model_clock(clock)
-    arr = np.asarray(series, dtype=float)
-    one_d = arr.ndim == 1
-    mat = arr.reshape(-1, 1) if one_d else arr
-    n_cols = mat.shape[1]
-    zones = ([source_zones] * n_cols if isinstance(source_zones, str)
-             else list(source_zones))
-    if len(zones) != n_cols:
-        raise ValueError(f"{len(zones)} source zones for {n_cols} columns")
-    out = np.empty_like(mat)
-    for year, r0, n in _year_blocks(mat.shape[0], start_year):
-        for c in range(n_cols):
-            pos = _source_positions(zones[c], clock.offset_hours, year, n)
-            out[r0:r0 + n, c] = _sample(mat[r0:r0 + n, c], pos)
-    return out[:, 0] if one_d else out
+    n_cols = 1 if np.ndim(series) == 1 else np.shape(series)[1]
+    return _convert(series, source_zones, [clock.offset_hours] * n_cols,
+                    start_year)
+
+
+def to_local_time(
+    series: np.ndarray,
+    source_zones: Union[str, Sequence[str]],
+    local_zones: Union[str, Sequence[str]],
+    start_year: int,
+) -> np.ndarray:
+    """Put an hourly series on the local civil time of *local_zones*.
+
+    The counterpart of :func:`to_model_clock` with a DST-aware target: row
+    ``h`` of the result is the wall time ``h`` hours after 1 Jan 00:00 of the
+    local zone (29 February skipped in an 8760-h series) and holds the source
+    value of that instant. A wall hour skipped when clocks spring forward
+    holds the hour after it; a repeated one holds its first occurrence. The
+    year wraps as on the model clock.
+
+    *series*, *source_zones* and *start_year* are as in
+    :func:`to_model_clock`; *local_zones* gives one IANA zone per column (or
+    one for all), e.g. from :func:`node_time_zone`.
+    """
+    n_cols = 1 if np.ndim(series) == 1 else np.shape(series)[1]
+    targets = ([local_zones] * n_cols if isinstance(local_zones, str)
+               else list(local_zones))
+    for z in set(targets):
+        if z != "UTC":
+            ZoneInfo(z)               # unknown zone: fail before converting
+    return _convert(series, source_zones, targets, start_year)
+
+
+def utc_to_local_time(series: np.ndarray,
+                      local_zones: Union[str, Sequence[str]],
+                      start_year: int) -> np.ndarray:
+    """A UTC series (weather data) on the local civil time of *local_zones*:
+    the value paired with local hour ``h`` is that of the same instant."""
+    return to_local_time(series, "UTC", local_zones, start_year)
 
 
 def utc_to_model_clock(series: np.ndarray, clock: Union[ModelClock, str],
