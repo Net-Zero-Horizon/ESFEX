@@ -143,7 +143,7 @@ def test_fetch_then_forecast(ready_step, monkeypatch):
 
     assert calls == ["forecast"]
     assert ready_step._wb_data["population"] == 1234.0
-    assert len(ready_step._era5_data["temperature_hourly"]) == 8760
+    assert len(ready_step._era5_data["temperature_utc"]) == 8760
 
 
 def test_rerun_skips_fetch_when_inputs_unchanged(ready_step, monkeypatch):
@@ -202,3 +202,51 @@ def test_finished_forecast_enables_the_later_steps(step):
     for b in (step._btn_view_demand, step._btn_load_observed,
               step._btn_fetch_bld, step._btn_apply):
         assert b.isEnabled()
+
+
+# ── Base-year temperature on the demand models' local clock (round 31) ──
+# ERA5 comes from Open-Meteo in UTC; the demand models' calendar features are
+# local hours. The temperature fed with local hour h must be that instant's.
+
+
+def test_forecast_temperature_is_on_each_nodes_local_time(ready_step, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from esfex.visualization.workflows import demand_estimation_analysis as dea
+
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    captured = {}
+
+    class _Builder:
+        def __init__(self, cfg):
+            pass
+
+        def build(self, proxy, macro, meteo, progress_callback=None):
+            captured["meteo"] = meteo
+            raise RuntimeError("stop after capturing the inputs")
+
+    monkeypatch.setattr(dea, "DemandProfileBuilder", _Builder)
+    nodes = [SimpleNamespace(centroid_lat=23.13, centroid_lng=-82.38, name="Havana"),
+             SimpleNamespace(centroid_lat=19.43, centroid_lng=-99.13, name="CDMX")]
+    monkeypatch.setattr(ready_step, "_nodes_in_scope", lambda: nodes)
+    ready_step._model = SimpleNamespace(state=object())
+    ready_step._wb_data = {"population": 1.0}
+    utc = np.arange(8760.0)                      # value = UTC hour of 2023
+    ready_step._era5_data = {"temperature_utc": list(utc), "lat": 21.5,
+                             "lon": -79.5, "year": 2023}
+
+    ready_step._run_forecast()
+
+    meteo = captured["meteo"]
+    havana = meteo.node_temperature(0, 8760)
+    cdmx = meteo.node_temperature(1, 8760)
+    assert havana[0] == 5.0           # 00:00 CST (UTC-5) is 05:00 UTC
+    assert cdmx[0] == 6.0             # 00:00 in Mexico City (UTC-6) is 06:00 UTC
+    jul1_noon = 181 * 24 + 12
+    assert havana[jul1_noon] == jul1_noon + 4    # Havana keeps DST: CDT, UTC-4
+    assert cdmx[jul1_noon] == jul1_noon + 6      # Mexico: no DST since 2022
+    assert meteo.temperature_hourly[0] == 5.0    # domain centre: Cuba
+    assert meteo.node_hdd_hourly[0][0] == max(18.0 - 5.0, 0.0)

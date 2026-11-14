@@ -412,6 +412,14 @@ def drop_leap_days(data: np.ndarray, start=None) -> np.ndarray
 
 Remove the Feb 29 rows of an hourly series so every year is 8760 rows. `start` is the timestamp of the first row. Rows on Feb 29 by that calendar are dropped when this leaves a whole number of 8760-row years; a series of exactly 8784 rows is one leap year from 1 January whatever `start` is. Other series are returned unchanged.
 
+### year_series_8760
+
+```python
+def year_series_8760(data: np.ndarray, year: int) -> np.ndarray
+```
+
+One calendar year of an hourly series (from 1 January 00:00) as exactly 8760 rows: the 8784 hours of a leap year lose Feb 29 (`drop_leap_days`), not 31 December; any other length is cut to 8760 rows or zero-padded. The Solar PV and Wind workflows use it on the capacity factors they compute from their own hourly weather.
+
 ### calculate_rolling_horizon_windows
 
 ```python
@@ -475,6 +483,8 @@ The [model clock](../user-guide/configuration.md#model-clock): one fixed-offset 
 | `resolve_model_clock(setting, coords, weights=None)` | A concrete clock; for `auto`, the standard offset with the largest total weight (demand per node, or one per node) |
 | `to_model_clock(series, source_zones, clock, start_year)` | `(hours,)` or `(hours, nodes)`, whole 8,760-h years (or one 8,784-h leap year) from 1 Jan of `start_year`, from `UTC`, a fixed zone or a node's local civil time (one zone per column) onto the clock. The year wraps; fractional shifts interpolate linearly |
 | `utc_to_model_clock`, `local_to_model_clock`, `weather_to_model_clock` | Shortcuts: UTC series; per-node local series (zones from coordinates); weather from a backend (`open_meteo`, `era5_atlite`: UTC; `nasa_power`: local solar time) |
+| `to_local_time(series, source_zones, local_zones, start_year)` | The same conversion onto the local civil time (DST-aware) of an IANA zone per column instead of the clock: row `h` is the local wall time `h` hours after 1 Jan 00:00 and holds the source value of that instant. A wall hour skipped when clocks spring forward holds the hour after it; a repeated one, its first occurrence |
+| `utc_to_local_time(series, local_zones, start_year)` | Shortcut for a UTC series (weather). The demand models use it: their calendar features are local civil time, and the temperature paired with local hour `h` is that of the same instant |
 
 ```python
 from esfex.utils.model_clock import utc_to_model_clock

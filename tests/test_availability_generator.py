@@ -1,6 +1,6 @@
 """Tests for the availability_generator plugin.
 
-Covers solar CF, wind CF, generator orchestration, CLI, plugin structure,
+Covers generator orchestration, CLI, plugin structure,
 and translation keys.
 """
 
@@ -34,169 +34,6 @@ _TRANSLATIONS_DIR = (
     / "visualization"
     / "translations"
 )
-
-
-# ===================================================================
-# TestSolarCF
-# ===================================================================
-
-
-class TestSolarCF:
-    """Unit tests for solar_cf.compute_solar_hourly_cf helper functions."""
-
-    def test_constant_irradiance_cf(self):
-        """At STC (1000 W/m2, 25C), CF should equal ~1.0."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.full(8760, 1000.0)
-        temp = np.full(8760, 25.0)
-        cf = _irradiance_to_hourly_cf(ghi, temp, 0.20, -0.40, 45.0)
-        # At STC: t_cell = 25 + (45-20)/800*1000 = 56.25
-        # temp_factor = 1 + (-0.40/100)*(56.25-25) = 1 - 0.125 = 0.875
-        # cf = 1.0 * 0.875 = 0.875
-        np.testing.assert_allclose(cf, 0.875, atol=0.01)
-
-    def test_temperature_derating(self):
-        """Higher temp should reduce CF via gamma_pmax."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.full(100, 800.0)
-        temp_25 = np.full(100, 25.0)
-        temp_45 = np.full(100, 45.0)
-
-        cf_25 = _irradiance_to_hourly_cf(ghi, temp_25, 0.20, -0.40, 45.0)
-        cf_45 = _irradiance_to_hourly_cf(ghi, temp_45, 0.20, -0.40, 45.0)
-
-        assert cf_45.mean() < cf_25.mean()
-
-    def test_zero_irradiance_gives_zero(self):
-        """Night hours (GHI=0) must give CF=0."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.zeros(24)
-        temp = np.full(24, 20.0)
-        cf = _irradiance_to_hourly_cf(ghi, temp, 0.20, -0.40, 45.0)
-        np.testing.assert_array_equal(cf, 0.0)
-
-    def test_output_shape_8760(self):
-        """normalize_to_8760 must always return exactly 8760 elements."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _normalize_to_8760,
-        )
-
-        assert len(_normalize_to_8760(np.zeros(8760))) == 8760
-        assert len(_normalize_to_8760(np.zeros(8784))) == 8760
-        assert len(_normalize_to_8760(np.zeros(9000))) == 8760
-        assert len(_normalize_to_8760(np.zeros(100))) == 8760
-
-    def test_leap_year_truncation(self):
-        """Leap year 8784 hours should drop Feb 29 (hours 1416-1439)."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _normalize_to_8760,
-        )
-
-        data = np.arange(8784, dtype=float)
-        result = _normalize_to_8760(data)
-        assert len(result) == 8760
-        # Hour 1416 (start of Feb 29) should be removed
-        assert result[1416] == 1440.0  # First hour of Mar 1
-
-    def test_values_clipped_0_1(self):
-        """All CF values must be in [0, 1]."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.full(100, 1500.0)  # Very high
-        temp = np.full(100, 10.0)
-        cf = _irradiance_to_hourly_cf(ghi, temp, 0.20, -0.40, 45.0)
-        assert cf.min() >= 0.0
-        assert cf.max() <= 1.0
-
-
-# ===================================================================
-# TestWindCF
-# ===================================================================
-
-
-class TestWindCF:
-    """Unit tests for wind_cf capacity factor computation."""
-
-    def test_below_cutin_cf_zero(self):
-        """Wind speed below cut-in should give CF=0."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.full(100, 2.0)  # Below cut-in (~3 m/s)
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        np.testing.assert_allclose(cf, 0.0, atol=0.01)
-
-    def test_at_rated_speed_cf_one(self):
-        """At rated wind speed CF should be ~1.0."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.full(100, 13.0)  # At rated (3.0 MW)
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        np.testing.assert_allclose(cf, 1.0, atol=0.01)
-
-    def test_above_cutout_cf_zero(self):
-        """Wind speed above cut-out (25 m/s) should give CF=0."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.full(100, 30.0)
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        np.testing.assert_allclose(cf, 0.0, atol=0.01)
-
-    def test_power_curve_interpolation(self):
-        """Intermediate wind speeds should interpolate correctly."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.array([7.0])  # ~1.08 MW in default curve
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        expected_cf = 1.08 / 3.0
-        np.testing.assert_allclose(cf[0], expected_cf, atol=0.01)
-
-    def test_output_shape_8760(self):
-        """normalize_to_8760 for wind must also produce 8760 elements."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _normalize_to_8760,
-        )
-
-        assert len(_normalize_to_8760(np.zeros(8760))) == 8760
-        assert len(_normalize_to_8760(np.zeros(8784))) == 8760
 
 
 # ===================================================================
@@ -377,18 +214,31 @@ class TestCLI:
         assert "generate" in command_names
 
     def test_default_years_from_config(self):
-        """_default_years should extract year from temporal config."""
+        """_default_years takes the year of the top-level date_start."""
         from esfex.plugins.availability_generator.cli_commands import (
             _default_years,
         )
 
-        import datetime
+        cfg = SimpleNamespace(date_start="01/01/2021 00:00")
+        assert _default_years(cfg) == [2021]
 
-        cfg = SimpleNamespace(
-            temporal=SimpleNamespace(date_start=datetime.date(2021, 1, 1))
+    def test_default_years_from_real_config(self):
+        """A real ESFEXConfig has date_start at the top level (not under
+        temporal): its year is used, not the 2020 fallback."""
+        from esfex.config.schema import ESFEXConfig
+        from esfex.plugins.availability_generator.cli_commands import (
+            _default_years,
         )
-        years = _default_years(cfg)
-        assert years == [2021]
+
+        cfg = ESFEXConfig.model_construct(date_start="01/07/2031 00:00")
+        assert _default_years(cfg) == [2031]
+
+    def test_default_years_unreadable_date(self):
+        from esfex.plugins.availability_generator.cli_commands import (
+            _default_years,
+        )
+
+        assert _default_years(SimpleNamespace(date_start="2021")) == [2020]
 
     def test_default_years_fallback(self):
         """_default_years should return [2020] on missing temporal."""

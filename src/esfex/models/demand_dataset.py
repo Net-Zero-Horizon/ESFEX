@@ -11,6 +11,17 @@ Output structure::
             {ISO3}_{year}.parquet     # timestamp, demand_mw, temperature_c
         metadata.json                 # catalog of all available data
 
+Clock convention: every parquet holds one calendar year of 8760 hours on the
+local civil time of the series' location (its time zone from the
+coordinates, with daylight saving time; 29 February dropped). Row ``h`` is
+the local wall hour ``h`` of the year, the demand models' calendar features;
+``timestamp`` is that hour as a tz-aware local time (a wall hour skipped when
+clocks spring forward is stamped with the hour after it), and
+``temperature_c`` is the ERA5 temperature of the same instant. The fetchers
+deliver demand on different clocks (see
+``demand_real_data.SOURCE_TIME_BASES`` and the zonal fetchers); ERA5 comes in
+UTC. Both are converted here.
+
 Usage::
 
     esfex build-demand-dataset [--sources all] [--cache-dir PATH]
@@ -18,6 +29,7 @@ Usage::
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import time
@@ -31,33 +43,22 @@ from esfex.paths import DEMAND_DATASET_DIR as _DEFAULT_CACHE
 
 logger = logging.getLogger(__name__)
 
-# Capital city coordinates for ERA5 downloads
-_COUNTRY_COORDS: dict[str, tuple[float, float]] = {
-    "AUT": (48.2, 16.4), "BEL": (50.8, 4.4), "BGR": (42.7, 23.3),
-    "CHE": (46.9, 7.4), "CZE": (50.1, 14.4), "DEU": (52.5, 13.4),
-    "DNK": (55.7, 12.6), "EST": (59.4, 24.7), "ESP": (40.4, -3.7),
-    "FIN": (60.2, 24.9), "FRA": (48.9, 2.3), "GBR": (51.5, -0.1),
-    "GRC": (37.9, 23.7), "HRV": (45.8, 16.0), "HUN": (47.5, 19.1),
-    "IRL": (53.3, -6.3), "ITA": (41.9, 12.5), "LTU": (54.7, 25.3),
-    "LUX": (49.6, 6.1), "LVA": (56.9, 24.1), "MNE": (42.4, 19.3),
-    "MKD": (42.0, 21.4), "NLD": (52.4, 4.9), "NOR": (59.9, 10.7),
-    "POL": (52.2, 21.0), "PRT": (38.7, -9.1), "ROU": (44.4, 26.1),
-    "SRB": (44.8, 20.5), "SWE": (59.3, 18.1), "SVN": (46.1, 14.5),
-    "SVK": (48.1, 17.1), "BRA": (-15.8, -47.9), "COL": (4.7, -74.1),
-    "JPN": (35.7, 139.7), "CUB": (23.1, -82.4), "AUS": (-33.9, 151.2),
-    "USA": (38.9, -77.0), "ZAF": (-33.9, 18.4), "MEX": (19.4, -99.1),
-    "KOR": (37.6, 127.0), "IND": (28.6, 77.2), "ARG": (-34.6, -58.4),
-    "CHL": (-33.4, -70.7), "PER": (-12.0, -77.0), "THA": (13.8, 100.5),
-    "IDN": (-6.2, 106.8), "EGY": (30.0, 31.2), "NGA": (9.1, 7.5),
-    "KEN": (-1.3, 36.8), "MAR": (34.0, -6.8), "TUR": (39.9, 32.9),
-}
+from esfex.models.demand_real_data import COUNTRY_COORDS as _COUNTRY_COORDS
 
 
 def _fetch_era5_year(
     lat: float, lon: float, year: int, cache_dir: Path,
+    zone: Optional[str] = None,
 ) -> Optional[np.ndarray]:
-    """Fetch ERA5 hourly temperature for one location and year."""
-    cache_file = cache_dir / f"era5_{year}.npy"
+    """ERA5 hourly temperature for one location and calendar year, in UTC.
+
+    Returns the whole year from 1 Jan 00:00 UTC (8760 hours, 8784 in a leap
+    year), cached as ``era5_utc_{year}.npy`` (``era5_utc_{zone}_{year}.npy``
+    for a zone). The ``era5_{year}.npy`` files of earlier versions held the
+    first 8760 UTC hours (a leap year lost 31 December) and are not read.
+    """
+    name = f"era5_utc_{zone}_{year}.npy" if zone else f"era5_utc_{year}.npy"
+    cache_file = cache_dir / name
     if cache_file.exists():
         return np.load(cache_file)
 
@@ -68,18 +69,62 @@ def _fetch_era5_year(
         f"&start_date={year}-01-01&end_date={year}-12-31"
         "&hourly=temperature_2m&timezone=UTC"
     )
+    full = 8784 if calendar.isleap(year) else 8760
     try:
         resp = requests.get(url, timeout=60)
         resp.raise_for_status()
         temps = resp.json().get("hourly", {}).get("temperature_2m", [])
-        if len(temps) >= 8760:
-            arr = np.array(temps[:8760], dtype=np.float64)
+        if len(temps) >= full:
+            arr = np.array([np.nan if t is None else t for t in temps[:full]],
+                           dtype=np.float64)
             cache_dir.mkdir(parents=True, exist_ok=True)
             np.save(cache_file, arr)
             return arr
     except Exception as exc:
         logger.debug("ERA5 %d (%.1f,%.1f) failed: %s", year, lat, lon, exc)
     return None
+
+
+def local_hour_stamps(year: int, time_zone: str):
+    """The 8760 local wall hours of *year* (29 February dropped) as tz-aware
+    timestamps in *time_zone*. A wall hour skipped when clocks spring forward
+    gets the instant after it; a repeated one its first occurrence."""
+    import pandas as pd
+
+    from esfex.utils.temporal import model_time_index
+    wall = pd.DatetimeIndex(model_time_index(f"{year}-01-01", 8760))
+    return wall.tz_localize(time_zone, ambiguous=np.ones(len(wall), dtype=bool),
+                            nonexistent="shift_forward")
+
+
+def write_series_parquet(
+    pq_path: Path,
+    year: int,
+    time_zone: str,
+    demand_mw: np.ndarray,
+    temperature_utc: Optional[np.ndarray] = None,
+) -> Path:
+    """Write one series-year: demand already on the local civil time of
+    *time_zone* (8760 h), ERA5 temperature in UTC (put on the same local
+    hours here), tz-aware local timestamps."""
+    import pandas as pd
+
+    from esfex.utils.model_clock import utc_year_on_local_time
+
+    df = pd.DataFrame({
+        "timestamp": local_hour_stamps(year, time_zone),
+        "demand_mw": np.asarray(demand_mw, dtype=np.float64)[:8760],
+    })
+    temp = None
+    if temperature_utc is not None and len(temperature_utc) >= 8760:
+        try:
+            temp = utc_year_on_local_time(temperature_utc, time_zone, year)
+        except ValueError:          # no valid hour
+            temp = None
+    df["temperature_c"] = temp if temp is not None else np.nan
+    pq_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(pq_path, index=False)
+    return pq_path
 
 
 def build_dataset(
@@ -192,7 +237,7 @@ def build_dataset(
     # ── Step 3: Write standardized Parquet files ─────────────────────────
     emit(82, "Writing Parquet files...")
 
-    import pandas as pd
+    from esfex.models.demand_real_data import series_time_zone
 
     manifest_entries = []
 
@@ -200,33 +245,26 @@ def build_dataset(
         iso_dir = cache_dir / iso3
         iso_dir.mkdir(parents=True, exist_ok=True)
 
+        meta = all_meta.get(iso3, {})
+        lat, lon = _COUNTRY_COORDS.get(iso3, (0.0, 0.0))
+        lat, lon = meta.get("lat", lat), meta.get("lon", lon)
+        time_zone = meta.get("time_zone") or series_time_zone(lat, lon)
+
         for yr, demand_arr in years_data.items():
             if len(demand_arr) < 8760:
                 continue
 
-            # Build DataFrame
-            timestamps = pd.date_range(
-                f"{yr}-01-01", periods=8760, freq="h", tz="UTC",
-            )
-            df = pd.DataFrame({
-                "timestamp": timestamps,
-                "demand_mw": demand_arr[:8760].astype(np.float64),
-            })
-
-            # Add temperature if available
+            # Demand comes on local civil time (fetch_all_real_load); the
+            # UTC temperature is put on the same local hours.
             temp = era5_data.get(iso3, {}).get(yr)
-            if temp is not None and len(temp) >= 8760:
-                df["temperature_c"] = temp[:8760].astype(np.float64)
-            else:
-                df["temperature_c"] = np.nan
-
-            # Write parquet
-            pq_path = iso_dir / f"{iso3}_{yr}.parquet"
-            df.to_parquet(pq_path, index=False)
+            pq_path = write_series_parquet(
+                iso_dir / f"{iso3}_{yr}.parquet", yr, time_zone,
+                demand_arr[:8760], temp)
 
             manifest_entries.append({
                 "iso3": iso3,
                 "year": yr,
+                "time_zone": time_zone,
                 "file": str(pq_path.relative_to(cache_dir)),
                 "peak_mw": float(demand_arr[:8760].max()),
                 "mean_mw": float(demand_arr[:8760].mean()),
@@ -256,6 +294,8 @@ def build_dataset(
         lat, lon = _COUNTRY_COORDS.get(iso3, (0.0, 0.0))
         meta.setdefault("lat", lat)
         meta.setdefault("lon", lon)
+        if meta["lat"] or meta["lon"]:
+            meta.setdefault("time_zone", series_time_zone(meta["lat"], meta["lon"]))
         meta["years"] = sorted(all_data[iso3].keys())
         meta_path = cache_dir / iso3 / "metadata.json"
         try:
@@ -358,30 +398,32 @@ def iter_manifest_entries(manifest: dict) -> list[dict]:
 def write_zonal_parquet(
     iso3: str, zone: str, year: int,
     demand_mw: np.ndarray,
-    temperature_c: Optional[np.ndarray] = None,
+    temperature_utc: Optional[np.ndarray] = None,
     cache_dir: Optional[Path] = None,
+    *,
+    lat: float,
+    lon: float,
+    time_base: str,
 ) -> Path:
     """Write a zonal parquet file following the {ISO3}_{ZONE}_{YEAR}.parquet
-    convention. Same schema as the national format — timestamp, demand_mw,
-    temperature_c. 8760 hours, UTC.
+    convention. Same schema and clock as the national files: timestamp,
+    demand_mw, temperature_c on the local civil time of the zone centroid
+    (*lat*, *lon*), 8760 hours.
+
+    *demand_mw* is one 8760-h year (29 February dropped) on *time_base*
+    (``"UTC"``, a fixed zone or an IANA zone whose civil time the rows
+    follow); *temperature_utc* is the ERA5 year in UTC.
 
     Returns the path of the written file.
     """
-    import pandas as pd
+    from esfex.models.demand_real_data import series_time_zone
+    from esfex.utils.model_clock import to_local_time
+
     if cache_dir is None:
         cache_dir = _DEFAULT_CACHE
-    iso_dir = cache_dir / iso3
-    iso_dir.mkdir(parents=True, exist_ok=True)
-    timestamps = pd.date_range(
-        f"{year}-01-01", periods=8760, freq="h", tz="UTC")
-    df = pd.DataFrame({
-        "timestamp": timestamps,
-        "demand_mw": demand_mw[:8760].astype(np.float64),
-    })
-    if temperature_c is not None and len(temperature_c) >= 8760:
-        df["temperature_c"] = temperature_c[:8760].astype(np.float64)
-    else:
-        df["temperature_c"] = np.nan
-    pq_path = iso_dir / f"{iso3}_{zone}_{year}.parquet"
-    df.to_parquet(pq_path, index=False)
-    return pq_path
+    time_zone = series_time_zone(lat, lon)
+    demand = to_local_time(np.asarray(demand_mw, dtype=np.float64)[:8760],
+                           time_base, time_zone, year)
+    return write_series_parquet(
+        cache_dir / iso3 / f"{iso3}_{zone}_{year}.parquet", year, time_zone,
+        demand, temperature_utc)

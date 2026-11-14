@@ -367,6 +367,20 @@ def drop_leap_days(
     return data
 
 
+def year_series_8760(data: np.ndarray, year: int) -> np.ndarray:
+    """One calendar year of an hourly series (from 1 Jan 00:00) as 8760 rows.
+
+    A leap year's 8784 hours lose Feb 29 (:func:`drop_leap_days`), not
+    31 December. Any other length is cut to 8760 rows or zero-padded to them.
+    """
+    arr = drop_leap_days(np.asarray(data, dtype=float), f"{year}-01-01")
+    if len(arr) >= HOURS_STD_YEAR:
+        return arr[:HOURS_STD_YEAR]
+    out = np.zeros(HOURS_STD_YEAR)
+    out[:len(arr)] = arr
+    return out
+
+
 def calculate_rolling_horizon_windows(
     total_hours: int,
     window_hours: int,

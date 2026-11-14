@@ -326,6 +326,9 @@ def build_unified_dataset(
         )
         temp = feats.temperature
 
+        # Parquet rows are local wall hours of the series' location
+        # (demand_dataset), and so are the calendar features; the
+        # temperature is that of the same instants.
         n = 8760
         hours = np.arange(n)
         hour_of_day = hours % 24
