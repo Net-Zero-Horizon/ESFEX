@@ -396,6 +396,32 @@ def utc_to_local_time(series: np.ndarray,
     return to_local_time(series, "UTC", local_zones, start_year)
 
 
+def utc_year_on_local_time(values: Iterable, local_zone: str,
+                           year: int) -> np.ndarray:
+    """One calendar year of UTC hourly data as the 8760 local hours of a zone.
+
+    *values* start on 1 Jan 00:00 UTC of *year* (an Open-Meteo ERA5 year, say).
+    Missing values (``None``, NaN) take the mean of the rest; a short series
+    is padded with its last value and a long one cut to the year. The result
+    is on the local civil time of *local_zone* (:func:`utc_to_local_time`)
+    with 29 February dropped.
+    """
+    from esfex.utils.temporal import drop_leap_days
+
+    full = _HOURS_LEAP if _is_leap(year) else _HOURS_STD
+    raw = np.array([np.nan if v is None else v for v in values], dtype=float)
+    if raw.size == 0:
+        raise ValueError(f"no hourly values for {year}")
+    bad = ~np.isfinite(raw)
+    if bad.all():
+        raise ValueError(f"no valid hourly values for {year}")
+    if bad.any():
+        raw[bad] = float(raw[~bad].mean())
+    if raw.size < full:
+        raw = np.pad(raw, (0, full - raw.size), mode="edge")
+    return drop_leap_days(utc_to_local_time(raw[:full], local_zone, year))
+
+
 def utc_to_model_clock(series: np.ndarray, clock: Union[ModelClock, str],
                        start_year: int) -> np.ndarray:
     """A UTC series (weather data) on the model clock."""

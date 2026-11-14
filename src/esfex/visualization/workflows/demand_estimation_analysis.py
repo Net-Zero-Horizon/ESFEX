@@ -196,6 +196,13 @@ class MeteoData:
     be supplied via ``hdd_by_year`` / ``cdd_by_year`` dicts (year → hourly
     list).  If a simulation year is not found in those dicts, the base-year
     data is reused.
+
+    Hourly series are on local civil time, like the demand models' calendar
+    features: index ``h`` is the local hour ``h`` of the year and holds the
+    weather of that instant. ``node_temperature_hourly`` (and the per-node
+    HDD/CDD) give each node its own local time; the system-level fields are
+    on the local time at ``(lat, lon)``. :func:`meteo_from_utc_temperature`
+    builds them from a UTC weather series.
     """
 
     temperature_hourly: list[float] = field(default_factory=list)   # hourly °C
@@ -210,13 +217,78 @@ class MeteoData:
     hdd_by_year: dict[int, list[float]] = field(default_factory=dict)
     cdd_by_year: dict[int, list[float]] = field(default_factory=dict)
 
-    # Per-node base-year climate (node_index → hourly list)
+    # Per-node base-year climate (node_index → hourly list), each node on its
+    # own local civil time
+    node_temperature_hourly: dict[int, list[float]] = field(default_factory=dict)
     node_hdd_hourly: dict[int, list[float]] = field(default_factory=dict)
     node_cdd_hourly: dict[int, list[float]] = field(default_factory=dict)
 
     # Per-node per-year overrides (node_index → {year → hourly list})
     node_hdd_by_year: dict[int, dict[int, list[float]]] = field(default_factory=dict)
     node_cdd_by_year: dict[int, dict[int, list[float]]] = field(default_factory=dict)
+
+    def node_temperature(self, ni: int, hpy: int) -> Optional["np.ndarray"]:
+        """Base-year hourly temperature of node *ni* (its own local time), or
+        the system-level series; None when neither has *hpy* hours."""
+        import numpy as np
+
+        for series in (self.node_temperature_hourly.get(ni),
+                       self.temperature_hourly):
+            if series is not None and len(series) >= hpy:
+                return np.array(series[:hpy], dtype=np.float64)
+        return None
+
+
+def meteo_from_utc_temperature(
+    temperature_utc,
+    year: int,
+    lat: float,
+    lon: float,
+    node_lats: list[float],
+    node_lons: list[float],
+    hdd_base: float = 18.0,
+    cdd_base: float = 24.0,
+) -> MeteoData:
+    """:class:`MeteoData` from one calendar year of UTC hourly temperature.
+
+    *temperature_utc* is the year *year* from 1 Jan 00:00 UTC (ERA5 via
+    Open-Meteo; ``None`` gaps allowed). The demand models read local civil
+    time, so each node gets the series on its own time zone (from its
+    coordinates, DST-aware): the temperature paired with local hour ``h`` is
+    that of the same instant. The system-level fields are on the time zone at
+    (*lat*, *lon*). 29 February is dropped, so every series has 8760 hours.
+    """
+    import numpy as np
+
+    from esfex.utils.model_clock import node_time_zone, utc_year_on_local_time
+
+    values = list(temperature_utc)
+    if not any(v is not None and math.isfinite(v) for v in values):
+        return MeteoData(lat=lat, lon=lon, year=year)
+
+    by_zone: dict[str, tuple] = {}
+
+    def _local(la: float, lo: float) -> tuple:
+        zone = node_time_zone(round(float(la), 4), round(float(lo), 4))
+        if zone not in by_zone:
+            t = utc_year_on_local_time(values, zone, year)
+            by_zone[zone] = (t, np.maximum(hdd_base - t, 0.0),
+                             np.maximum(t - cdd_base, 0.0))
+        return by_zone[zone]
+
+    t_sys, hdd_sys, cdd_sys = _local(lat, lon)
+    meteo = MeteoData(
+        temperature_hourly=t_sys.tolist(),
+        hdd_hourly=hdd_sys.tolist(),
+        cdd_hourly=cdd_sys.tolist(),
+        lat=lat, lon=lon, year=year,
+    )
+    for ni, (la, lo) in enumerate(zip(node_lats, node_lons)):
+        t, hdd, cdd = _local(la, lo)       # one array per zone, shared
+        meteo.node_temperature_hourly[ni] = t
+        meteo.node_hdd_hourly[ni] = hdd
+        meteo.node_cdd_hourly[ni] = cdd
+    return meteo
 
 
 @dataclass
@@ -786,10 +858,7 @@ class DemandProfileBuilder:
 
         # Hourly temperature
         emit(25, "Preparing features…")
-        if len(meteo.temperature_hourly) >= hpy:
-            temp_h = np.array(meteo.temperature_hourly[:hpy], dtype=np.float64)
-        else:
-            temp_h = np.zeros(hpy, dtype=np.float64)
+        temp_default = np.zeros(hpy, dtype=np.float64)
 
         # Per-node ML inference (hourly, no Fourier)
         emit(35, f"ML inference ({model.engine})…")
@@ -800,12 +869,13 @@ class DemandProfileBuilder:
             lat = proxy.node_lats[ni] if ni < len(proxy.node_lats) else 0.0
             lon = proxy.node_lons[ni] if ni < len(proxy.node_lons) else 0.0
 
+            temp_h = meteo.node_temperature(ni, hpy)
             features = build_hourly_features(
                 gdp_per_capita=macro.gdp_per_capita,
                 population=node_pop,
                 urbanization_pct=macro.urbanization_pct,
                 electricity_access_pct=macro.electricity_access_pct,
-                temperature_hourly=temp_h,
+                temperature_hourly=temp_h if temp_h is not None else temp_default,
                 latitude=lat,
                 longitude=lon,
                 base_year=self._cfg.base_year,
@@ -918,10 +988,13 @@ class DemandProfileBuilder:
             for i in range(len(clats))
         ])
 
-        if len(meteo.temperature_hourly) >= hpy:
-            temp_h = np.array(meteo.temperature_hourly[:hpy], dtype=np.float64)
-        else:
-            temp_h = np.full(hpy, 20.0, dtype=np.float64)
+        # Base-year temperature per node (its local time), for the years
+        # CMIP6 does not cover.
+        node_temp = []
+        for nd in range(num_nodes):
+            t = meteo.node_temperature(nd, hpy)
+            node_temp.append(t if t is not None
+                             else np.full(hpy, 20.0, dtype=np.float64))
 
         # ── Active cells (base-year population or GDP) ─────────────
         emit(20, "Sampling population & GDP per cell…")
@@ -1003,7 +1076,7 @@ class DemandProfileBuilder:
                     continue
                 ct = cmip6[nd]
                 temp_ny = (np.asarray(ct[yr], dtype=np.float64)
-                           if (ct and yr in ct) else temp_h)
+                           if (ct and yr in ct) else node_temp[nd])
                 cell_mw = predict_region_cell_demand(
                     model, alat[a], alon[a], aarea[a],
                     lpd[a], lgd[a], lgpc[a],

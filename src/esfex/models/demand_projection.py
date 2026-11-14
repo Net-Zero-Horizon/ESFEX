@@ -240,17 +240,30 @@ def fetch_cmip6_temperature(
 
 # ── ERA5 temperature download ──────────────────────────────────────────
 
+def _era5_cache_file(cache_dir: Path, lat: float, lon: float, year: int) -> Path:
+    """Cache of one location/year of ERA5 temperature on local civil time.
+
+    (The ``era5_{lat}_{lon}_{year}.npy`` files of earlier versions held UTC
+    hours and are not read.)"""
+    return cache_dir / f"era5_local_{lat:.2f}_{lon:.2f}_{year}.npy"
+
+
 def _fetch_era5_temperature(
     lat: float, lon: float, year: int, cache_dir: Path,
 ) -> Optional[np.ndarray]:
     """Download hourly ERA5 temperature for one location/year.
 
-    Returns (8760,) array in °C, or None on failure.
+    Returns an (8760,) array in °C on the local civil time of the location
+    (the demand models' calendar features are local): Open-Meteo is queried
+    in UTC and each local hour gets the temperature of its instant. None on
+    failure.
     """
     import requests
 
+    from esfex.utils.model_clock import node_time_zone, utc_year_on_local_time
+
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"era5_{lat:.2f}_{lon:.2f}_{year}.npy"
+    cache_file = _era5_cache_file(cache_dir, lat, lon, year)
 
     if cache_file.exists():
         return np.load(cache_file)
@@ -266,15 +279,7 @@ def _fetch_era5_temperature(
         resp.raise_for_status()
         data = resp.json()
         temps = data["hourly"]["temperature_2m"]
-        arr = np.array(temps, dtype=np.float64)
-        # Pad/trim to exactly 8760
-        if len(arr) < 8760:
-            arr = np.pad(arr, (0, 8760 - len(arr)), mode="edge")
-        arr = arr[:8760]
-        # Replace NaN with mean
-        mask = np.isnan(arr)
-        if mask.any():
-            arr[mask] = np.nanmean(arr)
+        arr = utc_year_on_local_time(temps, node_time_zone(lat, lon), year)
         np.save(cache_file, arr)
         return arr
     except Exception as e:
@@ -372,7 +377,8 @@ class GlobalDemandProjector:
         # Also ensure ERA5 baseline exists (for countries where CMIP6 fails)
         era5_tasks = []
         for iso3, rec in registry.items():
-            cache_file = era5_dir / f"era5_{rec.latitude:.2f}_{rec.longitude:.2f}_{self.era5_reference_year}.npy"
+            cache_file = _era5_cache_file(era5_dir, rec.latitude, rec.longitude,
+                                          self.era5_reference_year)
             if not cache_file.exists():
                 era5_tasks.append((iso3, rec.latitude, rec.longitude))
 
@@ -404,7 +410,8 @@ class GlobalDemandProjector:
 
         # Fallback: ERA5 repeated for all years
         era5_dir = self.data_dir / "era5"
-        era5_file = era5_dir / f"era5_{rec.latitude:.2f}_{rec.longitude:.2f}_{self.era5_reference_year}.npy"
+        era5_file = _era5_cache_file(era5_dir, rec.latitude, rec.longitude,
+                                     self.era5_reference_year)
         if era5_file.exists():
             era5 = np.load(era5_file)
         else:
