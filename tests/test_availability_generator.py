@@ -377,18 +377,31 @@ class TestCLI:
         assert "generate" in command_names
 
     def test_default_years_from_config(self):
-        """_default_years should extract year from temporal config."""
+        """_default_years takes the year of the top-level date_start."""
         from esfex.plugins.availability_generator.cli_commands import (
             _default_years,
         )
 
-        import datetime
+        cfg = SimpleNamespace(date_start="01/01/2021 00:00")
+        assert _default_years(cfg) == [2021]
 
-        cfg = SimpleNamespace(
-            temporal=SimpleNamespace(date_start=datetime.date(2021, 1, 1))
+    def test_default_years_from_real_config(self):
+        """A real ESFEXConfig has date_start at the top level (not under
+        temporal): its year is used, not the 2020 fallback."""
+        from esfex.config.schema import ESFEXConfig
+        from esfex.plugins.availability_generator.cli_commands import (
+            _default_years,
         )
-        years = _default_years(cfg)
-        assert years == [2021]
+
+        cfg = ESFEXConfig.model_construct(date_start="01/07/2031 00:00")
+        assert _default_years(cfg) == [2031]
+
+    def test_default_years_unreadable_date(self):
+        from esfex.plugins.availability_generator.cli_commands import (
+            _default_years,
+        )
+
+        assert _default_years(SimpleNamespace(date_start="2021")) == [2020]
 
     def test_default_years_fallback(self):
         """_default_years should return [2020] on missing temporal."""
