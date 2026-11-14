@@ -1724,6 +1724,8 @@ class DemandProfileBuilder:
         """
         import numpy as np
 
+        from esfex.utils.temporal import year_row_dates
+
         years, _, n = monthly_mwh.shape
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
@@ -1754,18 +1756,17 @@ class DemandProfileBuilder:
         daily = np.zeros((years, 365, n), dtype=np.float64)
 
         for y in range(years):
-            # Determine day-of-week for January 1 of this year
+            # Real day of week of each of the 365 days (0=Mon; 29 Feb
+            # skipped in a leap year)
             cal_year = self._cfg.base_year + y
-            # Zeller-like: Jan 1 day-of-week (0=Mon)
-            import datetime
-            jan1_dow = datetime.date(cal_year, 1, 1).weekday()
+            dows = year_row_dates(cal_year)[::24].dayofweek
 
             day_idx = 0
             for m in range(12):
                 days_in_m = month_days[m]
                 # Compute raw weights for each day in this month
                 raw = np.array([
-                    dow_factor[(jan1_dow + day_idx + d) % 7]
+                    dow_factor[dows[day_idx + d]]
                     for d in range(days_in_m)
                 ])
                 raw_sum = raw.sum()
@@ -1797,6 +1798,8 @@ class DemandProfileBuilder:
         Returns shape (years, hours_per_year, num_nodes) in MW (power).
         """
         import numpy as np
+
+        from esfex.utils.temporal import year_row_dates
 
         hpy = self._cfg.hours_per_year
         years, _, n = daily_mwh.shape
@@ -1872,16 +1875,15 @@ class DemandProfileBuilder:
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
         for y in range(years):
-            import datetime
             cal_year = self._cfg.base_year + y
-            jan1_dow = datetime.date(cal_year, 1, 1).weekday()
+            dows = year_row_dates(cal_year)[::24].dayofweek
 
             day_idx = 0
             for m in range(12):
                 si = month_to_season[m]
                 for d in range(month_days[m]):
                     global_day = day_idx + d
-                    dow = (jan1_dow + global_day) % 7
+                    dow = dows[global_day]
                     if dow == 5:
                         di = 1
                     elif dow == 6:

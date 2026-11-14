@@ -35,6 +35,7 @@ import pandas as pd
 import torch
 
 from esfex.paths import MODELS_DIR
+from esfex.utils.temporal import year_row_dates
 
 logger = logging.getLogger(__name__)
 
@@ -336,16 +337,13 @@ class TFTSensitivityBackend:
         n_hours = len(t_full)
         time_idx = np.arange(n_hours, dtype=np.int32)
 
-        # Calendar features (Jan 1 starts at index enc)
-        anchor = datetime.datetime(year, 1, 1, 0, 0, 0)
-        hours_of_day = np.zeros(n_hours, dtype=np.int32)
-        dows = np.zeros(n_hours, dtype=np.int32)
-        months = np.zeros(n_hours, dtype=np.int32)
-        for t in range(n_hours):
-            dt = anchor + datetime.timedelta(hours=t - enc)
-            hours_of_day[t] = dt.hour
-            dows[t] = dt.weekday()
-            months[t] = dt.month - 1
+        # Calendar features (Jan 1 starts at index enc): the real date of
+        # each row, 29 Feb skipped like the 8760-h temperature year.
+        stamps = year_row_dates(year - 1)[8760 - enc:].append(
+            year_row_dates(year))
+        hours_of_day = np.asarray(stamps.hour, dtype=np.int32)
+        dows = np.asarray(stamps.dayofweek, dtype=np.int32)
+        months = np.asarray(stamps.month - 1, dtype=np.int32)
         h_sin, h_cos = _cyclical(hours_of_day.astype(float), 24.0)
         d_sin, d_cos = _cyclical(dows.astype(float), 7.0)
         m_sin, m_cos = _cyclical(months.astype(float), 12.0)

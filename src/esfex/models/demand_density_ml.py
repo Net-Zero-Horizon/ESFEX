@@ -18,7 +18,6 @@ Pipeline usage lives in
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import math
@@ -27,6 +26,7 @@ from typing import Optional
 import numpy as np
 
 from esfex.paths import model_path
+from esfex.utils.temporal import year_row_dates
 
 logger = logging.getLogger(__name__)
 
@@ -171,24 +171,15 @@ def build_density_features(
     hdd = np.maximum(hdd_base - temp, 0.0)
     cdd = np.maximum(temp - cdd_base, 0.0)
 
-    hours = np.arange(hpy)
-    hour_of_day = (hours % 24).astype(float)
-    day_of_year = hours // 24
+    stamps = year_row_dates(base_year, hpy)
+    hour_of_day = np.asarray(stamps.hour, dtype=float)
 
     h_sin, h_cos = _cyclical(hour_of_day, 24.0)
 
-    _month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    month_arr = np.zeros(hpy, dtype=int)
-    h = 0
-    for m, md in enumerate(_month_days):
-        month_arr[h:h + md * 24] = m
-        h += md * 24
+    month_arr = np.asarray(stamps.month) - 1
     m_sin, m_cos = _cyclical(month_arr.astype(float), 12.0)
 
-    jan1 = datetime.date(base_year, 1, 1)
-    dow = np.array(
-        [(jan1 + datetime.timedelta(days=int(d))).weekday() for d in day_of_year]
-    )
+    dow = np.asarray(stamps.dayofweek)
     d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
     is_weekend = (dow >= 5).astype(float)
 
@@ -350,16 +341,11 @@ def predict_region_cell_demand(
         temp[_bad] = float(temp[~_bad].mean()) if (~_bad).any() else 20.0
     hdd = np.maximum(hdd_base - temp, 0.0)
     cdd = np.maximum(temp - cdd_base, 0.0)
-    hours = np.arange(hpy)
-    h_sin, h_cos = _cyclical((hours % 24).astype(float), 24.0)
-    _md = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    month_arr = np.zeros(hpy, dtype=int); _h = 0
-    for _m, _d in enumerate(_md):
-        month_arr[_h:_h + _d * 24] = _m; _h += _d * 24
+    stamps = year_row_dates(year, hpy)
+    h_sin, h_cos = _cyclical(np.asarray(stamps.hour, dtype=float), 24.0)
+    month_arr = np.asarray(stamps.month) - 1
     m_sin, m_cos = _cyclical(month_arr.astype(float), 12.0)
-    day_of_year = hours // 24
-    jan1 = datetime.date(year, 1, 1)
-    dow = np.array([(jan1 + datetime.timedelta(days=int(d))).weekday() for d in day_of_year])
+    dow = np.asarray(stamps.dayofweek)
     d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
     is_weekend = (dow >= 5).astype(float)
     try:
