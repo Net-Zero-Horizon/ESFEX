@@ -302,7 +302,7 @@ def test_fetch_era5_cache_hit():
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
         arr = np.arange(8760, dtype=np.float64)
-        np.save(cd / "era5_10.00_20.00_2023.npy", arr)
+        np.save(cd / "era5_local_10.00_20.00_2023.npy", arr)
         r = dp._fetch_era5_temperature(10.0, 20.0, 2023, cd)
     assert r is not None
     assert r.shape == (8760,)
@@ -318,7 +318,7 @@ def test_fetch_era5_success_pads_short_array():
         assert r.shape == (8760,)
         # padded with edge value
         assert r[-1] == 5.0
-        assert (cd / "era5_1.00_2.00_2023.npy").exists()
+        assert (cd / "era5_local_1.00_2.00_2023.npy").exists()
 
 
 def test_fetch_era5_failure_returns_none():
@@ -379,7 +379,7 @@ def test_get_temperature_cmip6_partial_filled_with_era5():
         (cd / "era5").mkdir(parents=True)
         cf = cd / "cmip6" / "cmip6_CMCC_CM2_VHR4_1.00_2.00_2025_2027.npz"
         np.savez_compressed(cf, **{"2025": np.full(8760, 5.0)})  # only 1 year
-        np.save(cd / "era5" / "era5_1.00_2.00_2023.npy", np.full(8760, 9.0))
+        np.save(cd / "era5" / "era5_local_1.00_2.00_2023.npy", np.full(8760, 9.0))
         t = p._get_temperature(rec)
     assert sorted(t.keys()) == [2025, 2026, 2027]
     assert t[2025][0] == 5.0  # from cmip6
@@ -398,7 +398,7 @@ def test_download_temperatures_all_cached_noop():
             cd / "cmip6" / "cmip6_CMCC_CM2_VHR4_1.00_2.00_2025_2025.npz",
             **{"2025": np.ones(8760)},
         )
-        np.save(cd / "era5" / "era5_1.00_2.00_2023.npy", np.ones(8760))
+        np.save(cd / "era5" / "era5_local_1.00_2.00_2023.npy", np.ones(8760))
         # Should not attempt any network; returns None cleanly.
         assert p.download_temperatures({"AAA": rec}) is None
 

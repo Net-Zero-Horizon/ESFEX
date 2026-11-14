@@ -211,8 +211,6 @@ omit = [
     "*/esfex/models/zone_centroids.py",
     "*/esfex/models/download_cmip6.py",
     "*/esfex/models/download_cmip6_subdaily.py",
-    "*/esfex/plugins/availability_generator/wind_cf.py",
-    "*/esfex/plugins/availability_generator/solar_cf.py",
     "*/esfex/plugins/availability_generator/otec_cf.py",
     "*/esfex/plugins/availability_generator/grid_builder_hook.py",
 ]

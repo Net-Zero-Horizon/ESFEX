@@ -4586,8 +4586,10 @@ class GridMappingDemandStep(QWidget):
                 data = resp.json()
                 temp = data.get("hourly", {}).get("temperature_2m", [])
 
+                # Kept in UTC as fetched; the forecast puts it on each node's
+                # local time (meteo_from_utc_temperature).
                 self._era5_data = {
-                    "temperature_hourly": temp[:8760],
+                    "temperature_utc": temp,
                     "lat": lat,
                     "lon": lon,
                     "year": weather_year,
@@ -4636,8 +4638,8 @@ class GridMappingDemandStep(QWidget):
             DemandEstimationConfig,
             DemandProfileBuilder,
             MacroData,
-            MeteoData,
             ProxyData,
+            meteo_from_utc_temperature,
         )
 
         self._btn_fetch_forecast.setEnabled(False)
@@ -4722,21 +4724,14 @@ class GridMappingDemandStep(QWidget):
             logger.warning("SSP growth-rate wiring failed (%s); "
                            "trajectory falls back to scalar rates.", exc)
 
-        # Build meteo data from ERA5 fetch
+        # Build meteo data from the ERA5 fetch (UTC), on each node's local
+        # civil time: the demand models' hours are local.
         era5 = self._era5_data
-        temp_h = era5.get("temperature_hourly", [])
-        hdd_base = 18.0
-        cdd_base = 24.0
-        hdd_h = [max(0.0, hdd_base - t) for t in temp_h] if temp_h else []
-        cdd_h = [max(0.0, t - cdd_base) for t in temp_h] if temp_h else []
-
-        meteo = MeteoData(
-            temperature_hourly=temp_h,
-            hdd_hourly=hdd_h,
-            cdd_hourly=cdd_h,
-            lat=era5.get("lat", 0.0),
-            lon=era5.get("lon", 0.0),
-            year=era5.get("year", 2024),
+        meteo = meteo_from_utc_temperature(
+            era5.get("temperature_utc", []),
+            era5.get("year", 2024),
+            era5.get("lat", 0.0), era5.get("lon", 0.0),
+            proxy.node_lats, proxy.node_lons,
         )
 
         # Run in thread
