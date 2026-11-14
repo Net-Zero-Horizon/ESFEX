@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.utils.temporal import year_series_8760
 from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scale_qss_fonts
 
@@ -1050,13 +1051,7 @@ class _WindProfileWorker(QThread):
                             turbine_key=turbine_key,
                         )
 
-                    cf = np.asarray(cf, dtype=float)
-                    if len(cf) > 8760:
-                        cf = cf[:8760]
-                    elif len(cf) < 8760:
-                        padded = np.zeros(8760)
-                        padded[: len(cf)] = cf
-                        cf = padded
+                    cf = year_series_8760(cf, self._year)
                     if self._clock is not None:
                         from esfex.utils.model_clock import weather_to_model_clock
                         cf = weather_to_model_clock(

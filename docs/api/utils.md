@@ -412,6 +412,14 @@ def drop_leap_days(data: np.ndarray, start=None) -> np.ndarray
 
 Remove the Feb 29 rows of an hourly series so every year is 8760 rows. `start` is the timestamp of the first row. Rows on Feb 29 by that calendar are dropped when this leaves a whole number of 8760-row years; a series of exactly 8784 rows is one leap year from 1 January whatever `start` is. Other series are returned unchanged.
 
+### year_series_8760
+
+```python
+def year_series_8760(data: np.ndarray, year: int) -> np.ndarray
+```
+
+One calendar year of an hourly series (from 1 January 00:00) as exactly 8760 rows: the 8784 hours of a leap year lose Feb 29 (`drop_leap_days`), not 31 December; any other length is cut to 8760 rows or zero-padded. The Solar PV and Wind workflows use it on the capacity factors they compute from their own hourly weather.
+
 ### calculate_rolling_horizon_windows
 
 ```python
