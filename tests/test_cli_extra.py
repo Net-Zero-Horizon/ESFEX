@@ -515,6 +515,42 @@ class TestTrainDemandModel:
         # progress_cb is passed and callable; invoke it to cover on_progress
         kwargs = fake_mod.train_demand_model.call_args.kwargs
         kwargs["progress_cb"](50, "halfway")
+        assert kwargs["engine"] == "xgboost" and kwargs["n_cv_folds"] == 3
+        assert kwargs["dataset_dir"] is None and kwargs["output_path"] is None
+
+    def test_options_reach_training(self, tmp_path):
+        fake_mod = SimpleNamespace(train_demand_model=MagicMock(return_value="model"))
+        with patch.dict(sys.modules, {"esfex.models.demand_training": fake_mod}):
+            result = runner.invoke(app, [
+                "train-demand-model", "--engine", "TFT", "--folds", "2",
+                "--cache-dir", str(tmp_path), "-o", str(tmp_path / "m.ckpt")])
+        assert result.exit_code == 0, result.output
+        kwargs = fake_mod.train_demand_model.call_args.kwargs
+        # Only keywords train_demand_model really uses (no swallowed ones).
+        assert set(kwargs) == {"engine", "dataset_dir", "output_path",
+                               "n_cv_folds", "progress_cb"}
+        assert kwargs["engine"] == "tft" and kwargs["n_cv_folds"] == 2
+        assert kwargs["dataset_dir"] == tmp_path
+        assert kwargs["output_path"] == tmp_path / "m.ckpt"
+
+    @pytest.mark.parametrize("args", [
+        ["--countries", "10"], ["--year-start", "2000"], ["--year-end", "2020"],
+        ["--engine", "lstm"],
+    ])
+    def test_removed_or_invalid_options_are_rejected(self, args):
+        fake_mod = SimpleNamespace(train_demand_model=MagicMock(return_value="model"))
+        with patch.dict(sys.modules, {"esfex.models.demand_training": fake_mod}):
+            result = runner.invoke(app, ["train-demand-model", *args])
+        assert result.exit_code == 2
+        fake_mod.train_demand_model.assert_not_called()
+
+    def test_training_rejects_unknown_keywords(self, tmp_path):
+        from esfex.models.demand_training import train_demand_model
+
+        with pytest.raises(TypeError, match="n_countries"):
+            train_demand_model(dataset_dir=tmp_path, n_countries=200)
+        with pytest.raises(ValueError, match="Unknown engine"):
+            train_demand_model(engine="lstm", dataset_dir=tmp_path)
 
     def test_import_error(self):
         fake_mod = SimpleNamespace(

@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 
 # Time base of each zonal source's rows (see demand_real_data.SOURCE_TIME_BASES);
 # write_zonal_parquet puts them on the local civil time of each zone centroid.
-# - TWN / THA / BRA: naive civil-time stamps, reindexed on that wall clock.
+# - TWN / THA / BRA: naive civil-time stamps, reindexed on that wall clock
+#   (_align_year_8760: a repeated wall hour keeps its first occurrence, a
+#   skipped one holds the hour after; ONS Brazil had DST until 2019).
 # - CHN: an hour index 1..8760 in Beijing time.
 # - AUS NEM: market time, AEST (UTC+10) all year, in every region.
 # - CAN IESO: Eastern Standard Time (UTC-5) all year.
@@ -62,12 +64,28 @@ def _resample_hourly(df: pd.DataFrame, dt_col: str = "datetime") -> pd.DataFrame
     return df.resample("1h", label="left").mean()
 
 
-def _align_year_8760(series: pd.Series, year: int) -> Optional[np.ndarray]:
-    """Clip a datetime-indexed Series to the year, drop Feb 29, pad to 8760."""
+def _align_year_8760(series: pd.Series, year: int,
+                     time_zone: Optional[str] = None) -> Optional[np.ndarray]:
+    """Clip a datetime-indexed Series to the year, drop Feb 29, pad to 8760.
+
+    The index is wall time of the source. A label repeated when clocks fall
+    back keeps its first occurrence (the order the caller gives, sorted
+    stably); with *time_zone*, a wall hour skipped when they spring forward
+    holds the hour after it. That is the convention of
+    ``model_clock.to_local_time``. Other gaps of up to 6 h are filled
+    forward (then backward).
+    """
+    series = series[~series.index.duplicated(keep="first")]
     start = pd.Timestamp(f"{year}-01-01 00:00:00")
     end = pd.Timestamp(f"{year}-12-31 23:00:00")
     hourly_index = pd.date_range(start, end, freq="1h")
     series = series.reindex(hourly_index)
+    if time_zone is not None:
+        skipped = hourly_index.tz_localize(
+            time_zone, nonexistent="NaT",
+            ambiguous=np.ones(len(hourly_index), dtype=bool)).isna()
+        if skipped.any():
+            series = series.where(~skipped, series.shift(-1))
     # Remove Feb 29 for leap years (dataset-wide convention)
     if pd.Timestamp(f"{year}-01-01").is_leap_year:
         mask = ~((hourly_index.month == 2) & (hourly_index.day == 29))
@@ -184,7 +202,7 @@ def fetch_taiwan_zonal(
             series = hourly[zone_id] if zone_id in hourly.columns else None
             if series is None:
                 continue
-            arr = _align_year_8760(series, year)
+            arr = _align_year_8760(series, year, ZONAL_TIME_BASES["TWN"])
             if arr is None or np.nanmean(arr) <= 0:
                 logger.info("TWN %s %d: insufficient data, skipping", zone_id, year)
                 continue
@@ -256,7 +274,7 @@ def fetch_thailand_zonal(
             centroid = centroids.get(zone_id)
             if col not in hourly.columns or centroid is None:
                 continue
-            arr = _align_year_8760(hourly[col], year)
+            arr = _align_year_8760(hourly[col], year, ZONAL_TIME_BASES["THA"])
             if arr is None or np.nanmean(arr) <= 0:
                 logger.info("THA %s %d: insufficient data, skipping",
                             zone_id, year)
@@ -425,8 +443,8 @@ def fetch_brazil_zonal(
                 continue
             # Build hourly series, drop Feb 29 for leap consistency.
             series = (year_df.set_index("din_instante")
-                      ["val_cargaenergiahomwmed"].sort_index())
-            arr = _align_year_8760(series, int(yr))
+                      ["val_cargaenergiahomwmed"].sort_index(kind="stable"))
+            arr = _align_year_8760(series, int(yr), ZONAL_TIME_BASES["BRA"])
             if arr is None or np.nanmean(arr) <= 0:
                 continue
             temp = None
@@ -531,7 +549,7 @@ def fetch_aemo_nem_zonal(
                       ["TOTALDEMAND"].astype(float).sort_index())
             # 5-min → 1h
             hourly = series.resample("1h", label="left").mean()
-            arr = _align_year_8760(hourly, year)
+            arr = _align_year_8760(hourly, year, ZONAL_TIME_BASES["AUS"])
             if arr is None or np.nanmean(arr) <= 0:
                 continue
             temp = None
@@ -637,8 +655,9 @@ def fetch_ieso_ontario_zonal(
             if zone_id not in df.columns:
                 logger.warning("IESO %d: zone %s not in CSV", year, zone_id)
                 continue
-            series = df.set_index("timestamp")[zone_id].astype(float).sort_index()
-            arr = _align_year_8760(series, year)
+            series = (df.set_index("timestamp")[zone_id].astype(float)
+                      .sort_index(kind="stable"))
+            arr = _align_year_8760(series, year, ZONAL_TIME_BASES["CAN"])
             if arr is None or np.nanmean(arr) <= 0:
                 continue
             temp = None

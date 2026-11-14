@@ -404,6 +404,14 @@ idx = model_time_index("2028-01-01", 8760)
 print(idx[1416], idx[-1])  # 2028-03-01 00:00:00 2028-12-31 23:00:00
 ```
 
+### year_row_dates
+
+```python
+def year_row_dates(year: int, n_hours: int = 8760) -> pd.DatetimeIndex
+```
+
+The real date and hour of each row of an hourly year from 1 January 00:00: `model_time_index(f"{year}-01-01", n_hours)`, so an 8760-row year skips Feb 29; only a full 8784-row leap year keeps it. The demand models read every calendar feature (hour, day of week, month, holidays) from these dates, at training and at inference.
+
 ### drop_leap_days
 
 ```python

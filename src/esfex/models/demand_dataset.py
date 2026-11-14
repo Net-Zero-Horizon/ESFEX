@@ -142,8 +142,10 @@ def build_dataset(
         Output directory for parquet files.
     sources : list[str], optional
         Which fetchers to use. None or ["all"] = use all available.
-        Individual: "opsd", "entsoe", "brazil", "colombia", "japan",
-                    "australia", "usa", "rte", "uk", "eskom"
+        Individual: any of ``demand_real_data.DEMAND_SOURCES`` ("opsd",
+        "entsoe", "brazil", "colombia", "japan", "rte", "uk", "eskom",
+        "australia", "usa", "turkey", "chile", "argentina", "mexico",
+        "korea", "taiwan", "peru"); an unknown name raises ``ValueError``.
     local_files : dict
         User-provided demand files (same format as demand_real_data).
     era5_workers : int
@@ -155,6 +157,16 @@ def build_dataset(
     -------
     dict: manifest with dataset statistics.
     """
+    from esfex.models.demand_real_data import DEMAND_SOURCES, fetch_all_real_load
+
+    use = {s.strip().lower() for s in (sources or []) if s.strip()}
+    unknown = sorted(use - set(DEMAND_SOURCES) - {"all"})
+    if unknown:
+        raise ValueError(
+            f"unknown demand source(s) {', '.join(unknown)}; use all or any "
+            f"of: {', '.join(DEMAND_SOURCES)}")
+    use_all = not use or "all" in use
+
     if cache_dir is None:
         cache_dir = _DEFAULT_CACHE
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -164,22 +176,14 @@ def build_dataset(
             progress_cb(pct, msg)
         logger.info("[%d%%] %s", pct, msg)
 
-    use_all = sources is None or "all" in sources
-    use = set(sources or [])
-
     # ── Step 1: Fetch all demand data ────────────────────────────────────
-    emit(5, "Fetching demand data from all sources...")
-
-    from esfex.models.demand_real_data import fetch_all_real_load
+    emit(5, "Fetching demand data from all sources..." if use_all else
+         f"Fetching demand data from {', '.join(sorted(use))}...")
 
     all_data, all_meta = fetch_all_real_load(
         cache_dir=cache_dir / "_raw",
-        include_opsd=use_all or "opsd" in use,
-        include_brazil=use_all or "brazil" in use,
-        include_colombia=use_all or "colombia" in use,
-        include_japan=use_all or "japan" in use,
-        include_australia=use_all or "australia" in use,
-        include_usa=use_all or "usa" in use,
+        **{f"include_{name}": use_all or name in use
+           for name in DEMAND_SOURCES},
         local_files=local_files,
         progress_cb=lambda p, m: emit(int(5 + p * 0.35), m),
     )

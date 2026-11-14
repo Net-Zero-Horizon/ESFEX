@@ -10,7 +10,6 @@ Multiply by the annual average demand (MW) to get absolute MW values.
 
 from __future__ import annotations
 
-import datetime
 import logging
 import math
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Optional
 import numpy as np
 
 from esfex.paths import model_path
+from esfex.utils.temporal import year_row_dates
 
 logger = logging.getLogger(__name__)
 
@@ -97,18 +97,14 @@ def build_hourly_features(
     cdd = np.maximum(temp - cdd_base, 0.0)
 
     # Time features (same for each year, except GDP/pop growth)
+    # Hour and month of the 8760 rows are the same every year (29 Feb is
+    # skipped); the day of week is the real one of each year's rows.
     hours = np.arange(hpy)
     hour_of_day = hours % 24
-    day_of_year = hours // 24
 
     h_sin, h_cos = _cyclical(hour_of_day.astype(float), 24.0)
 
-    _month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    month_arr = np.zeros(hpy, dtype=int)
-    h = 0
-    for m, md in enumerate(_month_days):
-        month_arr[h:h + md * 24] = m
-        h += md * 24
+    month_arr = np.asarray(year_row_dates(base_year, hpy).month) - 1
     m_sin, m_cos = _cyclical(month_arr.astype(float), 12.0)
 
     gdp = gdp_per_capita
@@ -121,9 +117,7 @@ def build_hourly_features(
             gdp *= (1.0 + gdp_growth.get(yr, 0.0))
             pop *= (1.0 + pop_growth.get(yr, 0.0))
 
-        jan1 = datetime.date(yr, 1, 1)
-        dow = np.array([(jan1 + datetime.timedelta(days=int(d))).weekday()
-                         for d in day_of_year])
+        dow = np.asarray(year_row_dates(yr, hpy).dayofweek)
         d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
         is_wknd = (dow >= 5).astype(float)
 

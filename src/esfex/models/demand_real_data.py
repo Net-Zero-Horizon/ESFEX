@@ -43,8 +43,10 @@ RealLoadData = dict[str, dict[int, np.ndarray]]
 # - opsd: the singleindex CSV's index column is utc_timestamp.
 # - entsoe: queried from 1 Jan 00:00 Europe/Brussels; the hourly values are
 #   consecutive instants from that midnight (CET, UTC+1, all year).
-# - rte / uk: rows in French / UK civil time, concatenated: consecutive
-#   instants from local midnight on 1 Jan, i.e. standard time all year.
+# - rte: rows in French civil time, placed at their instants and averaged
+#   per hour of CET (UTC+1 all year; _rte_hourly).
+# - uk: rows in UK civil time, concatenated: consecutive instants from local
+#   midnight on 1 Jan, i.e. standard time all year.
 # - brazil: din_instante, Brasilia civil time (no DST since 2019).
 # - turkey: queried with +03:00 offsets.
 # - chile / mexico: civil time concatenated from 1 Jan, which Chile starts
@@ -70,6 +72,11 @@ SOURCE_TIME_BASES: dict[str, str] = {
     "taiwan": "Asia/Taipei",
     "peru": "America/Lima",
 }
+
+# Every source fetch_all_real_load can fetch (its ``include_<name>`` flags):
+# the names ``build_dataset(sources=...)`` and ``build-demand-dataset
+# --sources`` accept, besides "all".
+DEMAND_SOURCES: tuple[str, ...] = tuple(SOURCE_TIME_BASES)
 
 # Where each country's series is placed (capital city; AUS: Perth, the
 # national AUS series is Western Australia): its ERA5 temperature
@@ -711,13 +718,76 @@ _RTE_URL = (
 )
 
 
+def _rte_wall_times(dates, hours):
+    """Naive wall times from eco2mix ``Date`` and ``Heures`` columns (NaT if unreadable)."""
+    import pandas as pd
+
+    text = dates.astype(str).str.strip() + " " + hours.astype(str).str.strip()
+    best = None
+    for fmt in ("%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M"):
+        wall = pd.to_datetime(text, format=fmt, errors="coerce")
+        if best is None or wall.notna().sum() > best.notna().sum():
+            best = wall
+    return best
+
+
+def _rte_hourly(df, conso_col: str, year: int) -> Optional[np.ndarray]:
+    """Hourly mean consumption of one eco2mix *year* (8760 values) or None.
+
+    eco2mix rows are French civil time (``Date``, ``Heures``) at the file's
+    own step: 15 minutes, or 30 with the quarters in between left empty. The
+    rows are placed at their instants (Europe/Paris with daylight saving
+    time; the hour repeated in October in file order) and averaged per hour
+    of CET, UTC+1 all year (the ``rte`` entry of :data:`SOURCE_TIME_BASES`),
+    whatever the step. Hours without data are interpolated; a year missing
+    more than two days is rejected. A table without the date and hour
+    columns is cut into hours by its number of values per hour.
+    """
+    import pandas as pd
+
+    vals = pd.to_numeric(df[conso_col], errors="coerce")
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    date_col = cols.get("date")
+    hour_col = next((c for k, c in cols.items() if k.startswith("heure")), None)
+    full = 8784 if calendar.isleap(year) else 8760
+    if date_col is None or hour_col is None:
+        v = vals.dropna().to_numpy(dtype=np.float64)
+        step = int(round(len(v) / full))
+        if step > 1:
+            v = v[:len(v) // step * step].reshape(-1, step).mean(axis=1)
+        return _pad_or_trim(v, year=year)
+
+    wall = _rte_wall_times(df[date_col], df[hour_col])
+    ok = (wall.notna() & vals.notna()).to_numpy()
+    wall = pd.DatetimeIndex(wall[ok])
+    vals = vals[ok].to_numpy(dtype=np.float64)
+    try:
+        local = wall.tz_localize("Europe/Paris", ambiguous="infer",
+                                 nonexistent="shift_forward")
+    except Exception:       # the repeated hour appears once: summer time
+        local = wall.tz_localize("Europe/Paris",
+                                 ambiguous=np.ones(len(wall), dtype=bool),
+                                 nonexistent="shift_forward")
+    hour = local.tz_convert("Etc/GMT-1").floor("h")
+    hourly = pd.Series(vals, index=hour).groupby(level=0).mean()
+    grid = pd.date_range(f"{year}-01-01", periods=full, freq="h", tz="Etc/GMT-1")
+    series = hourly.reindex(grid)
+    if series.isna().sum() > 48:
+        logger.debug("RTE France %d: %d hours without data", year,
+                     int(series.isna().sum()))
+        return None
+    series = series.interpolate(limit_direction="both")
+    return _pad_or_trim(series.to_numpy(dtype=np.float64), year=year)
+
+
 def fetch_rte_france(
     cache_dir: Path,
     years: range = range(2012, 2024),
 ) -> RealLoadData:
     """Download RTE eco2mix French national consumption data.
 
-    Each year is a ZIP containing a CSV with half-hourly or hourly consumption.
+    Each year is a ZIP holding a table of consumption at a sub-hourly step
+    (15 or 30 minutes; see :func:`_rte_hourly` for the hourly means).
     Returns {\"FRA\": {year: ndarray(8760)}}.
     """
     import requests
@@ -744,7 +814,9 @@ def fetch_rte_france(
 
             # Extract CSV from ZIP
             zf = zipfile.ZipFile(io.BytesIO(resp.content))
-            csv_names = [n for n in zf.namelist() if n.endswith(".csv") or n.endswith(".CSV")]
+            # The eco2mix archives hold tab-separated text, named .xls.
+            csv_names = [n for n in zf.namelist()
+                         if n.lower().endswith((".csv", ".xls"))]
             if not csv_names:
                 logger.debug("RTE France %d: no CSV in ZIP", yr)
                 continue
@@ -785,14 +857,7 @@ def fetch_rte_france(
                 logger.debug("RTE France %d: no consumption column in %s", yr, list(df.columns)[:10])
                 continue
 
-            vals = pd.to_numeric(df[conso_col], errors="coerce").dropna().values.astype(np.float64)
-
-            # If half-hourly (>10000 points), aggregate to hourly
-            if len(vals) > 10000:
-                n_hours = len(vals) // 2
-                vals = vals[: n_hours * 2].reshape(n_hours, 2).mean(axis=1)
-
-            arr = _pad_or_trim(vals, year=yr)
+            arr = _rte_hourly(df, conso_col, yr)
             if arr is not None and arr.mean() > 0:
                 result["FRA"][yr] = arr
                 np.save(cache_file, arr)
