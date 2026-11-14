@@ -135,6 +135,14 @@ class GlobalSettingsForm(QWidget):
         self._use_rolling.toggled.connect(self._on_changed)
         tl.addRow(tr("global_form.use_rolling"), self._use_rolling)
 
+        # Time base of every hourly series ('auto' until the Grid Builder or
+        # the availability generator resolves it from the nodes).
+        self._model_clock = QLineEdit()
+        self._model_clock.setPlaceholderText("auto")
+        self._model_clock.setToolTip(tr("global_form.model_clock_tip"))
+        self._model_clock.editingFinished.connect(self._on_changed)
+        tl.addRow(tr("global_form.model_clock"), self._model_clock)
+
         content_layout.addWidget(group_temp)
 
         # ── Section 3: Power Flow formulation ──
@@ -807,6 +815,7 @@ class GlobalSettingsForm(QWidget):
         self._inv_resolution.setValue(g.investment_resolution)
         self._pe_resolution.setValue(g.primary_energy_resolution)
         self._use_rolling.setChecked(g.use_rolling_horizon)
+        self._model_clock.setText(g.model_clock)
 
         # Solver – find by key, not display text
         solver_key = g.solver_name.lower()
@@ -1076,6 +1085,12 @@ class GlobalSettingsForm(QWidget):
         g.investment_resolution = self._inv_resolution.value()
         g.primary_energy_resolution = self._pe_resolution.value()
         g.use_rolling_horizon = self._use_rolling.isChecked()
+        from esfex.utils.model_clock import normalize_clock_setting
+        try:
+            g.model_clock = normalize_clock_setting(self._model_clock.text())
+        except ValueError:
+            pass  # not a known zone: keep the previous clock
+        self._model_clock.setText(g.model_clock)
 
         # Solver – store the key, not the display text
         idx = self._solver_name.currentIndex()

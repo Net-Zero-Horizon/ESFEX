@@ -36,6 +36,7 @@ All runtime functionality ships as **core dependencies**; there are no feature e
 | Typer, Rich | Command-line interface and terminal output |
 | juliacall | Python-Julia bridge |
 | NetworkX | Network topology analysis |
+| timezonefinder | Node time zones from coordinates (the [model clock](../user-guide/configuration.md#model-clock)) |
 | OpenPyXL | Excel demand files and Excel export |
 | psutil | System resource information |
 | PySide6, superqt, markdown | The Studio (GUI) |

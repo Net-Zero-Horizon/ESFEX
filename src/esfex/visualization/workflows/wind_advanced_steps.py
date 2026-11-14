@@ -957,8 +957,12 @@ class _WindProfileWorker(QThread):
         output_dir,
         year,
         parent=None,
+        model_clock=None,
     ):
         super().__init__(parent)
+        # Weather comes in UTC (NASA POWER: local solar time): the profiles
+        # are saved on this clock (None: as they come).
+        self._clock = model_clock
         self._gen_groups = gen_groups
         self._hourly_data = hourly_data
         self._wind_config = wind_config
@@ -1053,6 +1057,10 @@ class _WindProfileWorker(QThread):
                         padded = np.zeros(8760)
                         padded[: len(cf)] = cf
                         cf = padded
+                    if self._clock is not None:
+                        from esfex.utils.model_clock import weather_to_model_clock
+                        cf = weather_to_model_clock(
+                            cf, data_source, lon, self._clock, self._year)
 
                     profile_array[:, node] = cf
                     mean_cf = float(np.mean(cf))
@@ -1331,6 +1339,20 @@ class WindAvailabilityStep(QWidget):
         self._progress.setVisible(True)
         self._progress.setValue(0)
 
+        # Save the profiles on the model clock and record it.
+        clock = None
+        g = getattr(self._model, "global_settings", None)
+        if g is not None:
+            from esfex.utils.model_clock import (
+                resolve_for_nodes,
+                resolve_model_clock,
+            )
+            nodes = list(self._model.state.nodes)
+            clock = (resolve_for_nodes(g.model_clock, nodes) if nodes else
+                     resolve_model_clock(g.model_clock,
+                                         [(i["lat"], i["lon"]) for i in selected]))
+            g.model_clock = clock.zone
+
         self._worker = _WindProfileWorker(
             dict(groups),
             self._hourly_data,
@@ -1338,6 +1360,7 @@ class WindAvailabilityStep(QWidget):
             output_dir,
             year,
             parent=self,
+            model_clock=clock,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)

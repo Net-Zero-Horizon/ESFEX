@@ -375,7 +375,7 @@ For each selected generator instance, the wizard:
 1. **Locates the nearest grid cell** -- Matches the generator's geographic position to the nearest cell of the analysis domain (up to 0.5 degrees distance).
 2. **Applies the turbine power curve** -- If hourly wind speed data is available from the analysis, the wizard converts wind speeds to capacity factors using the turbine's power curve (either the custom curve from the configuration panel or a default generic curve). This avoids a redundant API call.
 3. **Falls back to fresh data fetch** -- If no nearby analysis data exists (generator is outside the analysis domain), the wizard downloads hourly wind speed data for the generator's location and year via `windrex.compute_wind_hourly_cf`, then computes capacity factors.
-4. **Writes CSV file** -- Saves an 8,760-row CSV file (one column per node) in the selected output directory. The file is automatically assigned as the generator's `Availability` profile in the model.
+4. **Writes CSV file** -- Saves an 8,760-row CSV file (one column per node) in the selected output directory. The file is automatically assigned as the generator's `Availability` profile in the model. The weather comes in UTC (NASA POWER: local solar time); the profile is saved on the [model clock](../user-guide/configuration.md#model-clock), which is recorded in the project's global settings.
 
 **Generator table columns:**
 

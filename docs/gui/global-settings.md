@@ -41,6 +41,7 @@ One checkbox per system. Only the checked systems are validated and run. If none
 | Investment Resolution (h) | 8760 | Hours per investment period of the master problem. Use 8760 for annual periods. |
 | PE Resolution (h) | 24 | Time step of the fuel supply chain model. Only used when Primary Energy is on. |
 | Use Rolling Horizon | On | When off, each year is dispatched in a single window. |
+| Model Clock | auto | Time base of every hourly series (`temporal.model_clock`): hour 0 = 1 Jan 00:00 on this clock, a fixed offset with no daylight saving time. `auto` is replaced by the zone the Grid Builder, the Solar PV / Wind workflows or the availability generator chose when they write series. Type an IANA zone (`America/Havana`, used at its standard offset), `UTC` or `Etc/GMT+5`; an unknown zone is rejected and the previous value kept. See [Model clock](../user-guide/configuration.md#model-clock). |
 
 **Rolling horizon:** The operational year is solved as overlapping windows. Example with 48-hour windows and 24-hour overlap:
 - Window 1: hours 1-48 (keep hours 1-24).

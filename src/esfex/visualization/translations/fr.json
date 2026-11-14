@@ -880,6 +880,8 @@
     "inv_resolution": "Résolution d'investissement (h) :",
     "pe_resolution": "Résolution PE (h) :",
     "use_rolling": "Utiliser l'horizon glissant :",
+    "model_clock": "Horloge du modèle :",
+    "model_clock_tip": "Base de temps de toutes les séries horaires : l'heure 0 est le 1er janvier à 00:00 sur cette horloge, un décalage fixe sans heure d'été. « auto » = l'heure normale du fuseau ayant le plus de demande, fixée quand le Grid Builder ou le générateur de disponibilité écrit les séries. Ou un fuseau IANA pris à son décalage normal (America/Havana), UTC ou Etc/GMT+5 (UTC-5).",
     "solver": "Solveur :",
     "threads": "Threads :",
     "time_limit": "Limite de temps (s) :",

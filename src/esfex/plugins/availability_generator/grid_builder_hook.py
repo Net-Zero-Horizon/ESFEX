@@ -12,6 +12,9 @@ Wind / solar units use the existing weather-data backends
 (``solarex`` / ``windrex``).  Everything else falls back to the
 synthetic profiles in :mod:`synthetic_cf`, which are cheap (no I/O)
 and good enough for typical screening studies.
+
+Weather-derived profiles come in UTC and are saved on the model clock
+(:mod:`esfex.utils.model_clock`).
 """
 
 from __future__ import annotations
@@ -23,13 +26,19 @@ import random
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import numpy as np
 
 from esfex.plugins.availability_generator.synthetic_cf import (
     compute_synthetic_cf,
     is_synthetic_fuel,
+)
+from esfex.utils.model_clock import (
+    ModelClock,
+    resolve_for_nodes,
+    resolve_model_clock,
+    weather_to_model_clock,
 )
 
 if TYPE_CHECKING:
@@ -107,6 +116,7 @@ def generate_for_grid_build(
     weather_year: int = 2023,
     weather_source: str = "open_meteo",
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    model_clock: Union[ModelClock, str] = "auto",
 ) -> dict[str, Path]:
     """Generate hourly availability CSVs for every generator in *state*.
 
@@ -138,6 +148,11 @@ def generate_for_grid_build(
         Weather backend: ``open_meteo`` / ``nasa_power`` / ``era5_atlite``.
     progress_callback
         Optional ``callback(percent, message)``.
+    model_clock
+        Clock the weather profiles are saved on (they come in UTC). ``auto``
+        resolves it from *state*'s nodes; the caller records the clock used
+        (``temporal.model_clock``). Flat and synthetic profiles have no time
+        of day and are written as they are.
 
     Returns
     -------
@@ -173,6 +188,21 @@ def generate_for_grid_build(
         weather_cache = _prefetch_weather_cfs(
             classified, weather_year, weather_source, progress_callback,
         )
+        nodes = list(getattr(state, "nodes", None) or [])
+        if isinstance(model_clock, ModelClock):
+            clock = model_clock
+        elif nodes:
+            clock = resolve_for_nodes(model_clock, nodes)
+        else:  # no nodes: the generators' own sites decide
+            clock = resolve_model_clock(
+                model_clock, [(g.latitude, g.longitude) for _, g, _, _ in classified])
+        logger.info("Weather availability on the model clock: %s", clock.label)
+        # key = (kind, lat, lng, year, source): one shift per weather cell.
+        weather_cache = {
+            k: weather_to_model_clock(v, weather_source, k[2], clock,
+                                      weather_year)
+            for k, v in weather_cache.items()
+        }
 
     from esfex.plugins.availability_generator.synthetic_cf import (
         compute_constant_cf,

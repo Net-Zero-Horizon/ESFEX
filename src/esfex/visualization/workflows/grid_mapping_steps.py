@@ -3773,7 +3773,9 @@ def fuel_auto_route(
 # =====================================================================
 
 
-def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
+def write_forecast_demand_csvs(nodes, result, out_dir: Path,
+                               model_clock=None,
+                               start_year: Optional[int] = None) -> int:
     """Persist a demand forecast onto the model's nodes.
 
     Writes each node's hourly series (the full multi-year forecast when
@@ -3784,6 +3786,13 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
     ``demand_paths`` and the runner load per-node demand. Returns the number of
     nodes that received demand. The series stays in memory even if a file write
     fails.
+
+    The forecast is in each node's local civil time (its hour of day, weekday
+    and holidays are local calendar features). With *model_clock* (a
+    :class:`~esfex.utils.model_clock.ModelClock`) every node's series is moved
+    from its own time zone (from its centroid, DST-aware) onto that clock;
+    *start_year* (default: the forecast's base year) is the calendar year of
+    the first 8760 h.
     """
     import re
 
@@ -3800,6 +3809,9 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
     except Exception:
         pass
 
+    if model_clock is not None:
+        series = _forecast_on_model_clock(series, nodes, model_clock, result,
+                                          start_year)
     peak_list = list(getattr(result, "peak_mw", []) or [])
     ncols = series.shape[1] if series.ndim > 1 else 1
     used: set[str] = set()
@@ -3833,6 +3845,31 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
         )
         applied += 1
     return applied
+
+
+def _forecast_on_model_clock(series, nodes, clock, result, start_year):
+    """The forecast's node columns moved from local time onto *clock*."""
+    import datetime
+
+    from esfex.utils.model_clock import local_to_model_clock
+
+    arr = np.asarray(series, dtype=float)
+    mat = arr.reshape(-1, 1) if arr.ndim == 1 else arr
+    k = min(mat.shape[1], len(nodes))
+    if start_year is None:
+        start_year = getattr(getattr(result, "config", None), "base_year", None)
+    if start_year is None:
+        start_year = datetime.date.today().year
+    coords = [(float(n.centroid_lat), float(n.centroid_lng)) for n in nodes[:k]]
+    try:
+        moved = local_to_model_clock(mat[:, :k], coords, clock, int(start_year))
+    except ValueError as exc:   # e.g. a resampled (non-hourly) forecast
+        logger.warning("Demand left in local time (not on the model clock): %s",
+                       exc)
+        return series
+    out = mat.copy()
+    out[:, :k] = moved
+    return out[:, 0] if arr.ndim == 1 else out
 
 
 class GridMappingDemandStep(QWidget):
@@ -5456,8 +5493,18 @@ class GridMappingDemandStep(QWidget):
             # availability profiles), else the working directory.
             cfg_path = getattr(self.window(), "_config_path", None)
             out_dir = (Path(cfg_path).parent if cfg_path else Path.cwd()) / "demand"
+            # The forecast is in local time: save it on the model clock (the
+            # one the weather availability already used, else the standard
+            # time of the zone with most forecast demand) and record it.
+            from esfex.utils.model_clock import resolve_for_nodes
+            nodes = self._nodes_in_scope()
+            g = self._model.global_settings
+            clock = resolve_for_nodes(
+                g.model_clock, nodes,
+                weights=list(getattr(self._forecast_result, "annual_gwh", []) or []))
+            g.model_clock = clock.zone
             applied_demand += write_forecast_demand_csvs(
-                self._nodes_in_scope(), self._forecast_result, out_dir)
+                nodes, self._forecast_result, out_dir, model_clock=clock)
 
         # Apply bus fractions, in one batch (one undo step, no per-bus redraw).
         skipped_connection = 0

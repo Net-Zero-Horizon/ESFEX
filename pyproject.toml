@@ -40,6 +40,8 @@ dependencies = [
     "rich>=13.0.0",
     "psutil>=5.9.0",
     "scipy>=1.10.0",
+    # Node time zones from coordinates (the model clock, utils/model_clock.py)
+    "timezonefinder>=6.2.0",
     "windrex>=0.1.0",
     "solarex>=0.1.0",
     "rooftex>=0.1.0",
