@@ -764,32 +764,46 @@ def _register_plugin_cli(args: Optional[list[str]] = None) -> None:
         pass  # A plugin problem must not stop the built-in commands
 
 
+DEMAND_ENGINES: tuple[str, ...] = ("xgboost", "tft")
+
+
+def _check_demand_engine(value: str) -> str:
+    if value.lower() not in DEMAND_ENGINES:
+        raise typer.BadParameter(
+            f"'{value}' is not a demand model; use one of: {', '.join(DEMAND_ENGINES)}")
+    return value.lower()
+
+
 @app.command()
 def train_demand_model(
+    engine: str = typer.Option(
+        "xgboost", "--engine", "-e", callback=_check_demand_engine,
+        help="Model to train: xgboost (hourly shape model) or tft",
+    ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
-        help="Output path for trained model (default: ~/.cache/esfex/models/demand_model.xgb)",
+        help="Where to write the trained model (default: demand_model.xgb or "
+             "demand_tft.ckpt in the ESFEX models directory, where the "
+             "Studio picks it up)",
     ),
     cache_dir: Optional[Path] = typer.Option(
         None, "--cache-dir",
-        help="Directory for caching training data downloads",
+        help="Dataset directory written by build-demand-dataset "
+             "(default: its default directory)",
     ),
-    countries: int = typer.Option(
-        200, "--countries", "-n",
-        help="Number of countries to include in training data",
+    folds: int = typer.Option(
+        3, "--folds", min=1, help="Temporal cross-validation folds (by year)",
     ),
-    year_start: int = typer.Option(1990, "--year-start", help="Start year"),
-    year_end: int = typer.Option(2023, "--year-end", help="End year"),
 ):
-    """Train the demand estimation ML model from World Bank + ERA5 data.
+    """Train a demand model on the dataset of build-demand-dataset.
 
-    Downloads macroeconomic indicators and hourly temperature data for
-    ~200 countries, then trains an XGBoost model that predicts 3-hourly
-    demand shape factors.  The trained model is used automatically by
-    the Demand Estimation workflow.
-
-    First run downloads ~500MB of data (cached for subsequent runs).
-    Training takes ~5-10 minutes on a modern CPU.
+    Reads the hourly Parquet files that ``esfex build-demand-dataset`` wrote
+    (real demand with ERA5 temperature), adds the pixel features at each
+    series' location, validates by temporal cross-validation and saves the
+    model. No demand data is downloaded (raster tiles of the pixel features
+    missing locally are fetched on first use). A model saved in the ESFEX
+    models directory replaces the shipped one in the Demand Estimation
+    workflow.
     """
     from esfex.models.demand_training import train_demand_model as _train
 
@@ -805,11 +819,10 @@ def train_demand_model(
 
         try:
             model = _train(
+                engine=engine,
+                dataset_dir=cache_dir,
                 output_path=output,
-                cache_dir=cache_dir,
-                n_countries=countries,
-                year_start=year_start,
-                year_end=year_end,
+                n_cv_folds=folds,
                 progress_cb=on_progress,
             )
             console.print(
@@ -828,11 +841,25 @@ def train_demand_model(
             raise typer.Exit(code=1)
 
 
+def _check_demand_sources(value: Optional[str]) -> Optional[str]:
+    from esfex.models.demand_real_data import DEMAND_SOURCES
+
+    names = {s.strip().lower() for s in (value or "").split(",") if s.strip()}
+    unknown = sorted(names - set(DEMAND_SOURCES) - {"all"})
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown source(s) {', '.join(unknown)}; use all or any of: "
+            f"{', '.join(DEMAND_SOURCES)}")
+    return value
+
+
 @app.command()
 def build_demand_dataset(
     sources: Optional[str] = typer.Option(
-        "all", "--sources", "-s",
-        help="Comma-separated source names: all, opsd, entsoe, brazil, colombia, japan, australia, usa, rte, uk, eskom",
+        "all", "--sources", "-s", callback=_check_demand_sources,
+        help="Comma-separated source names, or all: opsd, entsoe, brazil, "
+             "colombia, japan, rte, uk, eskom, australia, usa, turkey, chile, "
+             "argentina, mexico, korea, taiwan, peru",
     ),
     cache_dir: Optional[Path] = typer.Option(
         None, "--cache-dir",

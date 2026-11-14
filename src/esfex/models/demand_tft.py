@@ -76,17 +76,14 @@ def build_tft_dataframe(
     shape_factor = demand_mw / annual_mean
 
     # Time indices
-    hours = np.arange(n)
-    hour_of_day = hours % 24
-    day_of_year = hours // 24
-    month = np.array([
-        min(11, max(0, int(d * 12 / 365))) for d in day_of_year
-    ])
+    from esfex.utils.temporal import year_row_dates
 
-    import datetime
-    jan1 = datetime.date(year, 1, 1)
-    dow = np.array([(jan1 + datetime.timedelta(days=int(d))).weekday()
-                     for d in day_of_year])
+    hours = np.arange(n)
+    day_of_year = hours // 24
+    stamps = year_row_dates(year, n)
+    hour_of_day = np.asarray(stamps.hour, dtype=np.int64)
+    month = np.asarray(stamps.month, dtype=np.int64) - 1
+    dow = np.asarray(stamps.dayofweek, dtype=np.int64)
 
     # Cyclical encoding
     hour_sin, hour_cos = cyclical_encode(hour_of_day, 24.0)
@@ -276,7 +273,6 @@ def train_tft_model(
     dropout: float = 0.1,
     learning_rate: float = 0.001,
     progress_cb=None,
-    **kwargs,
 ) -> dict:
     """Train TFT using the unified hourly dataset with temporal CV.
 

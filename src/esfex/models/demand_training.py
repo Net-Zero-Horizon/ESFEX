@@ -7,12 +7,11 @@ multi-resolution validation metrics.
 No synthetic data — models learn exclusively from real demand.
 
 Usage:
-    esfex train-demand-model [--engine xgboost|tft]
+    esfex train-demand-model [--engine xgboost|tft] [--cache-dir PATH]
 """
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import math
@@ -23,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from esfex.paths import DEMAND_DATASET_DIR, MODELS_DIR
+from esfex.utils.temporal import year_row_dates
 
 logger = logging.getLogger(__name__)
 
@@ -95,18 +95,17 @@ def _holiday_features(iso3: str, year: int, hours: int = 8760,
         except (NotImplementedError, KeyError, AttributeError, TypeError):
             continue
 
+    # Each 24-row day is the real date of its rows (29 February skipped in
+    # an 8760-h year); distances count real days.
     n_days = hours // 24
-    jan1 = datetime.date(year, 1, 1)
+    days_arr = np.array([d.toordinal() for d in
+                         year_row_dates(year, n_days * 24)[::24].date])
     is_hday_day = np.zeros(n_days, dtype=np.float32)
     hol_offsets: list[int] = []
     if hol is not None:
-        for d in hol.keys():
-            offset = (d - jan1).days
-            hol_offsets.append(offset)
-            if 0 <= offset < n_days:
-                is_hday_day[offset] = 1.0
+        hol_offsets = [d.toordinal() for d in hol.keys()]
+        is_hday_day[np.isin(days_arr, hol_offsets)] = 1.0
 
-    days_arr = np.arange(n_days)
     if hol_offsets:
         hol_offsets_arr = np.array(sorted(set(hol_offsets)))
         diffs = hol_offsets_arr[None, :] - days_arr[:, None]
@@ -331,19 +330,10 @@ def build_unified_dataset(
         # temperature is that of the same instants.
         n = 8760
         hours = np.arange(n)
-        hour_of_day = hours % 24
-        day_of_year = hours // 24
-
-        jan1 = datetime.date(yr, 1, 1)
-        dow = np.array([(jan1 + datetime.timedelta(days=int(d))).weekday()
-                         for d in day_of_year])
-
-        _month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        month = np.zeros(n, dtype=int)
-        h = 0
-        for m, md in enumerate(_month_days):
-            month[h:h + md * 24] = m
-            h += md * 24
+        stamps = year_row_dates(yr, n)
+        hour_of_day = np.asarray(stamps.hour, dtype=np.int64)
+        dow = np.asarray(stamps.dayofweek, dtype=np.int64)
+        month = np.asarray(stamps.month, dtype=np.int64) - 1
 
         h_sin, h_cos = _cyclical(hour_of_day.astype(float), 24.0)
         d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
@@ -779,8 +769,16 @@ def train_demand_model(
     n_cv_folds : int
         Number of temporal CV folds.
     exclude_country : str, optional
-        ISO3 code to exclude (leave-one-country-out validation).
+        ISO3 code to exclude (leave-one-country-out validation; XGBoost).
+    **kwargs
+        TFT hyper-parameters, passed to ``demand_tft.train_tft_model``.
+        Other engines take none: an unknown keyword raises ``TypeError``.
     """
+    if engine not in ("xgboost", "tft"):
+        raise ValueError(f"Unknown engine: {engine}")
+    if kwargs and engine != "tft":
+        raise TypeError(f"train_demand_model(engine={engine!r}) got unexpected "
+                        f"keyword arguments: {', '.join(sorted(kwargs))}")
     if dataset_dir is None:
         dataset_dir = DEMAND_DATASET_DIR
 
@@ -808,13 +806,12 @@ def train_demand_model(
         if output_path is None:
             output_path = MODELS_DIR / "demand_model.xgb"
         return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit)
-    elif engine == "tft":
-        emit(45, "Launching TFT training...")
-        from esfex.models.demand_tft import train_tft_model
-        return train_tft_model(
-            dataset_dir=dataset_dir,
-            progress_cb=emit,
-            **kwargs,
-        )
-    else:
-        raise ValueError(f"Unknown engine: {engine}")
+    emit(45, "Launching TFT training...")
+    from esfex.models.demand_tft import train_tft_model
+    return train_tft_model(
+        dataset_dir=dataset_dir,
+        output_path=output_path,
+        n_cv_folds=n_cv_folds,
+        progress_cb=emit,
+        **kwargs,
+    )
