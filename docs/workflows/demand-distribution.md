@@ -114,7 +114,7 @@ The results table lists **Node**, **Bus**, **Buildings** (building count for the
 
 **Apply Demand & Fractions**:
 
-- writes each node's forecast hourly series (all forecast years) to `demand_<node>.csv` under `<config_dir>/demand/` (or `./demand/` when no configuration file is loaded) and attaches it to the node, so it is exported as the system's demand path;
+- writes each node's forecast hourly series (all forecast years) to `demand_<node>.csv` under `<config_dir>/demand/` (or `./demand/` when no configuration file is loaded) and attaches it to the node, so it is exported as the system's demand path. The forecast is in each node's local civil time (its hours of the day, weekdays and holidays are local); the files are converted to the [model clock](../user-guide/configuration.md#model-clock), from each node's own time zone with its daylight saving time. When the clock is still `auto`, it becomes the standard time of the zone with the most forecast demand and is recorded in the project's global settings; the chart under **View Demand…** shows the forecast in local time;
 - sets each bus's `demand_fraction`. A bus with role `connection` that receives a non-zero share is promoted to `load`; a `connection` bus with a zero share is left unchanged.
 
 **Tips:**

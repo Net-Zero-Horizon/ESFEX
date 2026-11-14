@@ -46,6 +46,7 @@ Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models 
 | `investment_resolution` | int | `8760` | Hours per investment period: `8760` = one decision per year, `17520` = every two years. Years per period = `max(1, value ÷ 8760)` |
 | `primary_energy_resolution` | int | `24` | Time step of the fuel supply-chain model (hours) |
 | `use_rolling_horizon` | bool | `true` | Split each year into windows. `false` solves the year in one model |
+| `model_clock` | str | `"auto"` | Time base of every hourly series: hour 0 = 1 Jan 00:00 on this clock, a fixed offset from UTC with no daylight saving time. `auto` = the standard offset of the time zone with the most demand, resolved and written here when the Grid Builder or the availability generator writes the series; an IANA zone (`America/Havana`) is used at its standard offset; or `UTC`, or a fixed zone such as `Etc/GMT+5` (UTC-5). See [Model clock](../user-guide/configuration.md#model-clock) |
 
 ---
 

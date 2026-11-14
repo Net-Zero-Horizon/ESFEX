@@ -248,11 +248,22 @@ class GridBuildWorker(QThread):
                 def _avail_progress(_pct, msg):
                     if msg.startswith("Weather"):
                         self.progress.emit(msg)
+                # Weather profiles are saved on the model clock: fix it now
+                # (by node count unless demand is known) and record it, so the
+                # demand written later uses the same clock.
+                clock = "auto"
+                g = getattr(model, "global_settings", None)
+                if p.use_weather and g is not None:
+                    from esfex.utils.model_clock import resolve_for_nodes
+                    clock = resolve_for_nodes(g.model_clock, model.state.nodes)
+                    g.model_clock = clock.zone
+                    island_lines.append(f"Model clock: {clock.label}.")
                 written = self._timed("Availability profiles",
                                       lambda: generate_for_grid_build(
                                           model.state, out_dir,
                                           use_weather_data=p.use_weather,
-                                          progress_callback=_avail_progress))
+                                          progress_callback=_avail_progress,
+                                          model_clock=clock))
                 if written:
                     island_lines.append(
                         f"Generated {len(written)} availability profile(s) "

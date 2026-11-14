@@ -880,6 +880,8 @@
     "inv_resolution": "投資解像度 (h):",
     "pe_resolution": "PE解像度 (h):",
     "use_rolling": "ローリングホライズンを使用:",
+    "model_clock": "モデル時計:",
+    "model_clock_tip": "すべての時系列の時間基準: 0時 = この時計での1月1日 00:00（固定オフセット、夏時間なし）。\"auto\" = 需要が最も大きいタイムゾーンの標準時（Grid Builder または可用性ジェネレーターが系列を書き出すときに設定）。または標準オフセットで使う IANA タイムゾーン (America/Havana)、UTC、Etc/GMT+5 (UTC-5)。",
     "solver": "ソルバー:",
     "threads": "スレッド数:",
     "time_limit": "制限時間 (s):",

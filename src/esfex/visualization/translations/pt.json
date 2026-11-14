@@ -880,6 +880,8 @@
     "inv_resolution": "Resolução de investimento (h):",
     "pe_resolution": "Resolução PE (h):",
     "use_rolling": "Usar horizonte móvel:",
+    "model_clock": "Relógio do modelo:",
+    "model_clock_tip": "Base de tempo de todas as séries horárias: a hora 0 é 1 de janeiro às 00:00 neste relógio, um deslocamento fixo sem horário de verão. \"auto\" = a hora padrão do fuso com mais demanda, definida quando o Grid Builder ou o gerador de disponibilidade grava as séries. Ou um fuso IANA usado no seu deslocamento padrão (America/Havana), UTC ou Etc/GMT+5 (UTC-5).",
     "solver": "Solver:",
     "threads": "Threads:",
     "time_limit": "Limite de tempo (s):",

@@ -255,6 +255,8 @@ The optimizer can produce less than the available amount (curtailment), but neve
 
 ### Using ESFEX Built-in Workflows
 
+Weather data come in UTC. The built-in tools (the Grid Builder, the Solar PV and Wind workflows and the `availability_generator` plugin) save each profile on the case's [model clock](configuration.md#model-clock) and record the clock in `temporal.model_clock`, so that the profiles line up with the demand hour by hour. The plugin's command `esfex availability_generator generate` writes the clock into the configuration with `--update-config`, and otherwise prints the value to set.
+
 The workflow dependencies (`pvlib`, `atlite`, `geopandas`, …) are part of the core install, so `pip install esfex` is all you need.
 
 - **Solar PV**: uses `pvlib` with ERA5 reanalysis data to compute hourly capacity factors.
@@ -274,7 +276,8 @@ You can also generate profiles externally and save them in the required format:
    import pandas as pd
 
    location = pvlib.location.Location(23.0, -82.5, tz='America/Havana')
-   times = pd.date_range('2025-01-01', periods=8760, freq='h')
+   # On the model clock: Cuban standard time, UTC-5 all year (no DST)
+   times = pd.date_range('2025-01-01', periods=8760, freq='h', tz='Etc/GMT+5')
    clearsky = location.get_clearsky(times)
    system = pvlib.pvsystem.PVSystem(
        surface_tilt=23, surface_azimuth=180,
@@ -296,6 +299,7 @@ You can also generate profiles externally and save them in the required format:
 - Annual capacity factors are plausible for the technology and site.
 - No long runs of constant values, which may indicate data errors.
 - 8,760 rows per year, no timestamp column.
+- Rows on the [model clock](configuration.md#model-clock): a solar profile peaks near local solar noon of the clock (about 12:00 for a site near the middle of its time zone), not at the UTC hour of noon.
 
 
 ---

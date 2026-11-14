@@ -51,6 +51,7 @@ requirements:
     - rich >=13.0.0
     - psutil >=5.9.0
     - scipy >=1.10.0
+    - timezonefinder >=6.2.0
     - pyside6 >=6.5.0
     - superqt >=0.6.0
     - markdown >=3.4

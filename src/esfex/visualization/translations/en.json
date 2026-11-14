@@ -880,6 +880,8 @@
     "inv_resolution": "Investment Resolution (h):",
     "pe_resolution": "PE Resolution (h):",
     "use_rolling": "Use Rolling Horizon:",
+    "model_clock": "Model Clock:",
+    "model_clock_tip": "Time base of every hourly series: hour 0 = 1 Jan 00:00 on this clock, a fixed offset with no daylight saving time. \"auto\" = the standard time of the zone with most demand, set when the Grid Builder or the availability generator writes the series. Or an IANA zone used at its standard offset (America/Havana), UTC or Etc/GMT+5 (UTC-5).",
     "solver": "Solver:",
     "threads": "Threads:",
     "time_limit": "Time Limit (s):",

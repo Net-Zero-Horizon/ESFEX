@@ -1946,6 +1946,7 @@ class Orchestrator:
         run_years = [y for y in years_range if ops_only is None or y in ops_only]
 
         logger.info(f"Starting simulation: {run_years[0]} to {run_years[-1] + 1}")
+        self._log_model_clock()
         start_time = time.time()
 
         # Plugin hook: pre_simulation
@@ -2505,6 +2506,21 @@ class Orchestrator:
         logger.info(f"Simulation completed in {total_time/60:.1f} minutes")
 
         return self.results
+
+    def _log_model_clock(self) -> None:
+        """Log the clock the case's hourly series are on (a warning when the
+        case does not record one), and the node time zones when there are
+        several."""
+        from esfex.utils.model_clock import log_case_clock
+
+        coords: list[tuple[float, float]] = []
+        for name in self._system_names:
+            nc = getattr(self.config.systems[name].nodes, "node_coordinates", None)
+            coords.extend((c.latitude, c.longitude) for c in nc or [])
+        try:
+            log_case_clock(self.config.temporal.model_clock, coords)
+        except Exception as exc:  # never block a run on a log line
+            logger.debug(f"Model clock log failed: {exc}")
 
     def _resolve_start_date(self, start_year: Optional[int] = None) -> datetime:
         """Timestamp of hour 0: ``date_start``, moved to ``start_year`` if given."""
