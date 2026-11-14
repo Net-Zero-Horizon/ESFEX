@@ -1332,6 +1332,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   allowance per system. The dispatch is unchanged: it prices curtailment at
   `curtailment_cost`.
 
+- **`esfex train-demand-model` matches what training does.** Its
+  `--cache-dir`, `--countries`, `--year-start` and `--year-end` options were
+  passed to the training and silently ignored, and its help described a
+  World Bank download that no longer happens. The command now trains on the
+  dataset of `esfex build-demand-dataset`: `--cache-dir` is that dataset's
+  directory, and the new `--engine` (`xgboost` or `tft`) and `--folds`
+  (temporal cross-validation folds) options reach the training;
+  `--countries`, `--year-start` and `--year-end` are gone. `--output` is now
+  also honoured by the TFT engine, which wrote to its default path whatever
+  was given. In Python, `train_demand_model` raises `TypeError` for a
+  keyword it does not use instead of ignoring it.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -3077,6 +3089,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 - The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
   (and their tests). Profiles are computed by `solarex` / `windrex` and, in
   the Grid Builder, by `open_meteo_weather`.
+
+- **Demand calendar features in leap years.** Demand and temperature series
+  are 8760 hours with 29 February dropped, but the day of week and the
+  holidays of the demand models were counted in real days from 1 January:
+  in a leap year every hour from 1 March on had the previous day's weekday
+  and holidays (a Saturday read as a Friday, 14 July flagged on 15 July),
+  and the TFT annual forecast labelled 1 March as 29 February. Every
+  calendar feature (hour, day of week, month, holidays and the days to and
+  from them) now comes from the real date of each row
+  (`esfex.utils.temporal.year_row_dates`), in the training dataset, the
+  density and shape models, the TFT and the Grid Builder's archetype
+  demand. Non-leap years are unchanged, and the models receive the same
+  feature columns.
+
+- **`esfex build-demand-dataset --sources` fetches only the named
+  sources.** Only six sources could be switched off: ENTSO-E, RTE, UK,
+  Eskom, Turkey, Chile, Argentina, Mexico, Korea, Taiwan and Peru were
+  always downloaded, whatever `--sources` said. Every source can now be
+  named, and an unknown name is an error (it was ignored).
+
+- **RTE (France) demand with 15-minute data.** The eco2mix consumption was
+  averaged in pairs of rows as if it were half-hourly; with 15-minute data
+  the year became 17,520 "half-hours" cut to 8760, so the first half-year
+  was spread over the whole year at half speed. The hourly means now come
+  from the rows' date and hour, whatever the step (15, 30 or 60 minutes,
+  empty quarter-hours skipped), and a year missing more than two days is
+  rejected. Text tables named `.xls` inside the eco2mix archives are read
+  too.
+
+- **Zonal demand with a daylight-saving fall-back.** Aligning a zonal series
+  stamped in civil time (ONS Brazil, which had daylight saving time until
+  2019) raised an error at the repeated hour of a fall-back. A repeated wall
+  hour now keeps its first occurrence and a wall hour skipped at a
+  spring-forward holds the hour after it, the convention of the demand
+  clock conversion.
 
 ## [0.3.0] — 2026-08-27
 
