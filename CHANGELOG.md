@@ -3031,6 +3031,58 @@ Per-release notes are also published on the
   ones. Cases generated before this release keep their series as they are;
   regenerate the availability (or the demand) to put them on one clock.
 
+- **The Grid Builder's demand forecast pairs each local hour with that
+  hour's temperature.** The demand models read local hours (hour of day, day
+  of week, month, holidays), but the base-year ERA5 temperature came from
+  Open-Meteo in UTC and was used row by row: in Cuba (UTC-5) the temperature
+  given to local hour h was that of local h-5, so the day's warmest hours
+  fell in the evening. Each node now gets the temperature on its own local
+  civil time (its time zone from its coordinates, with daylight saving time),
+  so nodes in different time zones each get theirs, and a leap weather year
+  drops 29 February instead of 31 December. This temperature is used when
+  CMIP6 climate is unavailable (and by the fallback engines); the CMIP6 hourly
+  curve was already on local hours. With the shipped density model, Cuba's
+  forecast on this path moves load from the evening to the middle of the day
+  (about +10 % of the system load around noon and -5 % late in the evening
+  on the average day), its daily peak comes an hour earlier and its yearly
+  peak drops by about 1 %; the yearly energy changes by 0.1 %. The ERA5
+  fallback of the global demand projector does the same; its cache files
+  have a new name (`era5_local_*.npy`), so old ones (UTC) are not reused.
+
+- **The demand training dataset is on one clock.** `esfex
+  build-demand-dataset` labelled every Parquet file UTC, but its sources
+  deliver demand on different clocks (OPSD and EIA in UTC, ENTSO-E and RTE
+  counted from Central European midnight, TEPCO, XM, ONS and AEMO WA in local
+  time, AEMO NEM in Australian Eastern Standard Time and IESO in Eastern
+  Standard Time all year) and the ERA5 temperature came in UTC, while
+  training read every row as a local hour. Each file now holds demand and
+  temperature on the local civil time of the series' location, with
+  time-zone-aware local timestamps; training reads that temperature. Leap
+  years drop 29 February everywhere (the temperature and the national demand
+  lost 31 December, the zonal demand 29 February: a one-day shift from
+  March). Countries such as Turkey, Chile or Mexico now get their ERA5
+  temperature (their coordinates were missing), and the national Australian
+  series (Western Australia) is placed at Perth instead of Sydney. ERA5
+  downloads are cached under new names (`era5_utc_*.npy`); build the dataset
+  again before retraining. The shipped models are unchanged until they are
+  retrained.
+
+- **`esfex availability_generator generate` takes its default year from
+  `date_start`.** Without `--years` it read a `temporal.date_start` that does
+  not exist and always generated 2020; it now uses the year of the
+  configuration's `date_start`.
+
+- **The Solar PV and Wind workflows drop 29 February from a leap year.** Their
+  availability profiles cut a leap year's 8784 hours to the first 8760, so
+  31 December was lost and every day from 1 March was one day early. They now
+  drop 29 February, like the rest of ESFEX (`year_series_8760`).
+
+### Removed
+
+- The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
+  (and their tests). Profiles are computed by `solarex` / `windrex` and, in
+  the Grid Builder, by `open_meteo_weather`.
+
 ## [0.3.0] — 2026-08-27
 
 ### Added
