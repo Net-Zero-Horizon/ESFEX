@@ -33,7 +33,8 @@ def generate(
     ),
     years_str: Optional[str] = typer.Option(
         None, "--years", "-y",
-        help="Comma-separated years (e.g. 2020,2021). Default: from config.",
+        help="Comma-separated years (e.g. 2020,2021). Default: the year of the "
+        "config's date_start.",
     ),
     generators_str: Optional[str] = typer.Option(
         None, "--generators", "-g",
@@ -146,15 +147,11 @@ def generate(
 
 
 def _default_years(cfg) -> list[int]:
-    """Extract default year(s) from config temporal settings."""
+    """The year of the config's ``date_start`` (``DD/MM/YYYY HH:MM``), or
+    2020 when it is missing or unreadable."""
+    from esfex.utils.temporal import parse_date_start
+
     try:
-        temporal = cfg.temporal
-        start = getattr(temporal, "date_start", None)
-        if start:
-            if hasattr(start, "year"):
-                return [start.year]
-            # May be a string like "2020-01-01"
-            return [int(str(start)[:4])]
-    except Exception:
-        pass
-    return [2020]
+        return [parse_date_start(cfg.date_start).year]
+    except (AttributeError, TypeError, ValueError):
+        return [2020]
