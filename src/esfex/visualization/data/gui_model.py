@@ -813,6 +813,9 @@ class GuiGlobalSettings:
     investment_resolution: int = HOURS_STD_YEAR
     primary_energy_resolution: int = 24
     use_rolling_horizon: bool = True
+    # Time base of every hourly series (temporal.model_clock): 'auto' until the
+    # Grid Builder / availability generator resolves it to a zone.
+    model_clock: str = "auto"
     # Solver
     solver_name: str = "highs"
     solver_threads: int = 4

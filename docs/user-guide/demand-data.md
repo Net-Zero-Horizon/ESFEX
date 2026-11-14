@@ -81,6 +81,8 @@ A relative `demand_path` is looked up in the directory of the configuration file
 
 The first data row is the first hour of the simulation. `date_start` (format `DD/MM/YYYY HH:MM`) labels that hour; it does not select rows. The horizon length is set by the run (`esfex run --years N`, default 25). Year labels start at the year of `date_start`; `esfex run --start-year YYYY` relabels them, and the date labels then start on the same day and time of `date_start` in that year. Relabelling never changes the data rows: the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar.
 
+The rows are on the case's [model clock](configuration.md#model-clock) (`temporal.model_clock`): hour 0 is 1 January 00:00 on that clock, a fixed offset from UTC with no daylight saving time, the same at every node. Demand recorded in local time with daylight saving time must be converted to it; the Grid Builder demand forecast is converted for you.
+
 The run needs `years × 8,760` rows:
 
 | Horizon | Rows for distinct years |

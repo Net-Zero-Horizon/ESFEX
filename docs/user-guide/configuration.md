@@ -69,6 +69,7 @@ temporal:
   overlap_hours: 24               # look-ahead appended to each window (< window)
   investment_resolution: 8760     # hours per investment period (8760 = yearly)
   primary_energy_resolution: 24   # fuel-model time step (hours)
+  model_clock: America/Havana     # time base of every hourly series (default auto)
 ```
 
 With the rolling horizon on, each year is solved as a sequence of windows. The overlap gives each window a look-ahead; only the non-overlapping part is kept, and storage state of charge and generator output at the end of that part carry over to the next window. Stored energy has no value at the end of a window, so a window charges storage only for needs it can see: make the overlap long enough to reach the next demand peak (the default 24 h covers a daily cycle), or storage may be empty when a peak arrives just after a window boundary; ESFEX warns when the overlap is shorter than 24 h and the system has storage. The last window of each year must bring batteries back to at least their year-start SOC (soft, within `soc_end_tolerance`), so a year cannot spend its starting stored energy for free. The overlap must be shorter than the window: an explicit `overlap_hours >= rolling_horizon_hours` is rejected, and the default shrinks to half the window when the window is 24 h or shorter. With `use_rolling_horizon: false` each year is one model.
@@ -76,6 +77,29 @@ With the rolling horizon on, each year is solved as a sequence of windows. The o
 `investment_resolution` groups years into investment periods: `8760` allows investment every year, `17520` every two years (years per period = `max(1, investment_resolution ÷ 8760)`).
 
 There are no `battery_soc_resolution`, `ev_resolution` or `reserve_resolution` keys.
+
+### Model clock
+
+Every hourly series of a case (demand, availability) is on one clock, the model clock: the hour index `t` is the same instant at every node, in every system, also across inter-system links. Hour 0 is 1 January 00:00 on that clock. The clock is a fixed offset from UTC with no daylight saving time, so every model day has 24 hours.
+
+| `temporal.model_clock` | Clock |
+|---|---|
+| `auto` (default) | The standard offset (no DST) of the time zone with the largest share of demand. Zones with the same standard offset count together; when demand is not known yet, every node counts once |
+| an IANA zone, e.g. `America/Havana` | That zone's standard offset (UTC-5). A zone with daylight saving time is used at its standard offset all year |
+| `UTC`, or a fixed zone such as `Etc/GMT+5` | That offset. In the `Etc` zones the sign is inverted: `Etc/GMT+5` is UTC-5 |
+
+Each node's time zone comes from its coordinates (`node_coordinates`, or the node's position in the Studio). A node at sea, or outside every zone, gets the fixed offset of its 15° longitude band, with a warning.
+
+The tools that write series put them on the clock and record it in `temporal.model_clock`:
+
+- weather-derived availability (the [Grid Builder](../workflows/grid-auto-mapping.md#availability-profiles), the Solar PV and Wind workflows, the availability generator) comes in UTC and is shifted by the clock's offset (NASA POWER answers in local solar time, the offset of the 15° longitude band, and is shifted from that);
+- the [Grid Builder demand forecast](../workflows/demand-distribution.md) is in each node's local civil time and is converted from the node's own zone, daylight saving time included.
+
+The year wraps: clock hours that fall before 1 January or after 31 December of the source data read the other end of the same year. When a local clock springs forward, the skipped local hour is not used; when it falls back, the repeated local hour is used twice. Zones with a half-hour offset (UTC+05:30) are interpolated linearly between the two neighbouring hours.
+
+`auto` is resolved once, the first time a tool writes a clock-dependent series, and from then on the case keeps that clock (a later demand forecast uses the clock the weather profiles already used). Files you prepare yourself must be on the same clock: set `temporal.model_clock` to it.
+
+A run logs the clock (`Model clock: America/Havana standard time (UTC-05:00), …`) and, when the nodes lie in several zones, the zones found. A case that does not record its clock (`auto`, as every case written before this key existed) runs as before, with a warning that the time base of its series is unknown. ESFEX does not convert existing case files.
 
 ---
 

@@ -490,9 +490,13 @@ class _AvailabilityDialogImpl:
             )
             return
 
-        from .generator import generate_availability_profiles
+        from .generator import config_model_clock, generate_availability_profiles
 
         output_dir = self._resolve_output_dir()
+        # The clock the profiles are saved on; recorded in the project's
+        # global settings when the generation finishes.
+        clock = config_model_clock(cfg)
+        self._pending_clock = clock
 
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(0)
@@ -515,6 +519,7 @@ class _AvailabilityDialogImpl:
                 wind_params=wind_params,
                 generator_filter=generator_filter,
                 profile_type_map=profile_type_map,
+                model_clock=clock,
             ),
         )
         self._worker.moveToThread(self._thread)
@@ -542,6 +547,10 @@ class _AvailabilityDialogImpl:
 
         # Update availability_file on the GUI model generators
         self._apply_paths_to_model(result_map)
+        clock = getattr(self, "_pending_clock", None)
+        g = getattr(getattr(self._parent, "model", None), "global_settings", None)
+        if clock is not None and g is not None and result_map:
+            g.model_clock = clock.zone
 
         msg = "\n".join(
             f"  {k} -> {v}" for k, v in sorted(result_map.items())
