@@ -341,6 +341,20 @@ def model_time_index(
     return idx[~_is_feb29(idx)][:periods]
 
 
+def year_row_dates(year: int, n_hours: int = HOURS_STD_YEAR) -> pd.DatetimeIndex:
+    """Real date and hour of each row of an hourly *year* from 1 Jan 00:00.
+
+    An 8760-h series follows ESFEX's calendar: 29 February is skipped, so in
+    a leap year row 1416 is 1 March 00:00 and the last row is 31 December
+    23:00. Only a full 8784-h leap year keeps 29 February. Every calendar
+    feature of a row (hour, day of week, month, holiday) is read from these
+    stamps, so it describes the row's real date.
+    """
+    if n_hours == 8784 and pd.Timestamp(year=year, month=1, day=1).is_leap_year:
+        return pd.date_range(f"{year}-01-01", periods=n_hours, freq="h")
+    return model_time_index(f"{year}-01-01", n_hours)
+
+
 def drop_leap_days(
     data: np.ndarray,
     start: Optional[Union[str, datetime, pd.Timestamp]] = None,

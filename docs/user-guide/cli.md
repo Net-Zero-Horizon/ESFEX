@@ -599,7 +599,7 @@ Plugins can add their own commands, run as `esfex <plugin name> <command> ...` (
 
 ## `esfex train-demand-model`
 
-Downloads World Bank indicators and ERA5 temperature data and trains the XGBoost model used by the Studio's Demand Estimation workflow. The first run downloads about 500 MB (cached).
+Trains a demand model on the dataset written by [`esfex build-demand-dataset`](#esfex-build-demand-dataset): the hourly demand and ERA5 temperature of each series, plus the pixel features (GDP per capita, population density, urbanization) sampled at the series' location. The model is validated by temporal cross-validation (folds by year) and saved. The command downloads no demand data; raster tiles of the pixel features missing locally are fetched on first use.
 
 ```bash
 esfex train-demand-model [OPTIONS]
@@ -607,11 +607,12 @@ esfex train-demand-model [OPTIONS]
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--output` | `-o` | Path | `~/.cache/esfex/models/demand_model.xgb` | Where to write the trained model |
-| `--cache-dir` | | Path | | Directory for cached downloads |
-| `--countries` | `-n` | Integer | `200` | Number of countries in the training data |
-| `--year-start` | | Integer | `1990` | First year |
-| `--year-end` | | Integer | `2023` | Last year |
+| `--engine` | `-e` | String | `xgboost` | `xgboost` (the hourly shape model) or `tft` (Temporal Fusion Transformer) |
+| `--output` | `-o` | Path | `demand_model.xgb` or `demand_tft.ckpt` in `$ESFEX_DATA_ROOT/data/models` | Where to write the trained model |
+| `--cache-dir` | | Path | `$ESFEX_DATA_ROOT/data/demand_dataset` | Dataset directory (the `--cache-dir` of `build-demand-dataset`) |
+| `--folds` | | Integer | `3` | Temporal cross-validation folds |
+
+A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow.
 
 
 ---
@@ -629,7 +630,7 @@ esfex build-demand-dataset [OPTIONS]
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--sources` | `-s` | String | `all` | Comma-separated: `all`, `opsd`, `entsoe`, `brazil`, `colombia`, `japan`, `australia`, `usa`, `rte`, `uk`, `eskom` |
+| `--sources` | `-s` | String | `all` | Comma-separated: `all`, or any of `opsd`, `entsoe`, `brazil`, `colombia`, `japan`, `rte`, `uk`, `eskom`, `australia`, `usa`, `turkey`, `chile`, `argentina`, `mexico`, `korea`, `taiwan`, `peru`. Only the named sources are fetched; an unknown name is an error |
 | `--cache-dir` | | Path | | Output directory for the dataset |
 
 
