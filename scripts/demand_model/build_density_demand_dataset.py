@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# Provenance: copied from
+# /home/manuel/Dropbox/PhD/Pappers/09_Flexibility/ReFlex/demand_estimation/build_density_demand_dataset.py
+# (modified 2026-06-09 14:17:31 +0900, md5 60dfc51ee5564ec8fecab72b2c096878), the
+# script behind the shipped demand_density_hourly_xgb model (v1). Changes: git log.
 """OPTION B — pixel-transferable HOURLY demand-DENSITY training dataset.
 
 Target (INTENSIVE):  log10(demand_mw / area_km2)  per hour  -> MW/km².

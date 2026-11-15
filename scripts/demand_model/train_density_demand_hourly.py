@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# Provenance: copied from
+# /home/manuel/Dropbox/PhD/Pappers/09_Flexibility/ReFlex/demand_estimation/train_density_demand_hourly.py
+# (modified 2026-06-06 09:49:45 +0900, md5 cee4bea1aba495943b0cd76873579b3d), the
+# script that trained the shipped demand_density_hourly_xgb model (v1). Changes: git log.
 """OPTION B — train the pixel-transferable HOURLY demand-DENSITY model (XGBoost).
 
 Target: log10(demand_mw / area_km2).  Out-of-time hold-out (latest year) +
