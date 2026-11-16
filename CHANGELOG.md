@@ -3130,11 +3130,6 @@ Per-release notes are also published on the
   31 December was lost and every day from 1 March was one day early. They now
   drop 29 February, like the rest of ESFEX (`year_series_8760`).
 
-### Removed
-
-- The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
-  (and their tests). Profiles are computed by `solarex` / `windrex` and, in
-  the Grid Builder, by `open_meteo_weather`.
 
 - **Demand calendar features in leap years.** Demand and temperature series
   are 8760 hours with 29 February dropped, but the day of week and the
@@ -3187,6 +3182,40 @@ Per-release notes are also published on the
   has both new fields (Critical Days, Storage Firm Hours), and
   `min_day_separation` stays editable with TSAM because it also spaces the
   critical days.
+
+- **TSAM periods carry the year's renewable energy.** The TSAM periods
+  (k-medoids, each weighted by its cluster size) rarely hold the year's
+  sun and wind: in the Cuba case with 12 periods they had 8 % more PV and
+  13 % less wind than the year, so the master planned on a sunnier, calmer
+  year than the dispatch then ran. Once the periods are fixed (the critical
+  days and their weights included), every TSAM master (monolithic,
+  stochastic, MGA and each annual master of a myopic run) now rescales each
+  renewable availability profile it reads (renewable generators and
+  renewable candidate technologies, every node, every planning year's
+  block) on the periods so their weighted energy equals the year's: each
+  period keeps its shape, values are capped at full availability, and the
+  energy a capped hour cannot take is spread over the other hours, as the
+  `tsam` library does. The critical days are kept as they are (raising
+  their sun and wind would remove the shortage they stand for); the other
+  periods carry the correction, so the year still matches. Only the
+  master's copy of the period hours changes; the dispatch reads the
+  original profiles. The demand is not rescaled (its periods stay within
+  1 % of the year in the Cuba case). The log gives each profile's ratio
+  before and after the rescaling (1.000 unless the cap stopped a profile,
+  which a separate line names).
+- **The representative-day warning no longer advises TSAM to a TSAM run.**
+  "… misrepresent the year by more than 10 % …; use more days or TSAM" was
+  printed also when TSAM was in use. With representative days it now
+  advises more days (`representative_days`) or TSAM (`use_tsam`). With TSAM
+  it is given only for what is still off after the rescaling (the demand,
+  or a profile held back by the cap), names it, and advises more TSAM
+  periods (`tsam_num_periods`).
+
+### Removed
+
+- The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
+  (and their tests). Profiles are computed by `solarex` / `windrex` and, in
+  the Grid Builder, by `open_meteo_weather`.
 
 ## [0.3.0] — 2026-08-27
 
