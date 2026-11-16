@@ -183,7 +183,7 @@ def run(
     import sys
 
     from esfex.config.loader import load_config, ConfigLoadError
-    from esfex.runner import Orchestrator
+    from esfex.runner import Orchestrator, RunAbortedError
     from esfex.logging_config import setup_console_logging
 
     # Install the (single) console handler at the right verbosity.
@@ -287,9 +287,25 @@ def run(
         orchestrator = Orchestrator(cfg, output_dir=output_dir, config_path=config)
         results = orchestrator.run(years=years, start_year=start_year)
 
+        # A year some of whose dispatch windows failed has hours without a
+        # dispatch: the run is incomplete, not a success
+        incomplete = [r.year for r in results or [] if not getattr(r, "feasible", True)]
+        if incomplete:
+            _safe_console_print(
+                "\nOptimization finished with errors: operational windows of "
+                f"year(s) {', '.join(map(str, incomplete))} failed to solve and "
+                "have no dispatch (see the log).", style="red")
+            _safe_console_print(f"Partial results saved to: {output_dir}")
+            raise typer.Exit(code=1)
         _safe_console_print("\nOptimization completed successfully!", style="green")
         _safe_console_print(f"Results saved to: {output_dir}")
 
+    except typer.Exit:
+        raise
+    except RunAbortedError as e:
+        _force_blocking_stdio()
+        _safe_console_print(f"\nOptimization failed: {e}", style="red")
+        raise typer.Exit(code=1)
     except BlockingIOError as e:
         # Stdout pipe was non-blocking and full (typical when GUI
         # subprocess can't drain stdout fast enough). Try once more

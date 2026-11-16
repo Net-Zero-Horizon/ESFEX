@@ -301,3 +301,29 @@ def test_myopic_small_battery_build_keeps_power_and_energy_together(tmp_path):
     bat = captured[1]["system_config"].batteries["B__li__built_y1"]
     assert bat.MaxChargePower == [0.0, 0.0917] and bat.MaxDischargePower == [0.0, 0.0917]
     assert bat.capacity == [0.0, 0.1833]
+
+
+def test_myopic_carry_drops_solver_noise(tmp_path):
+    """Round 36: a barrier solve without crossover reports capacity it did not
+    build (2e-6 MW at a node) and leaves a limit it reached at e.g. 3e-7 MW.
+    Carried into the next myopic year they became existing units and limits
+    of that size (rows like ``gen <= 2e-9``, bounds of 3e-7) that made the
+    next master numerically fragile. At most MIN_BUILD (1 kW) is noise."""
+    from esfex.runner import MIN_BUILD, master_year_builds, remaining_limit
+
+    assert MIN_BUILD == 1e-3
+    assert master_year_builds({"tech_investment": {
+        "tech_investment_power_1_1": 2e-6, "tech_investment_power_0_0": 5e-4,
+        "tech_investment_power_1_0": 0.02}}) == {"tech_investment_power_1_0": 0.02}
+    assert remaining_limit(500.0, 500.0 - 3e-7) == 0.0
+    assert remaining_limit(500.0, 499.0) == 1.0
+    assert remaining_limit(10.0, 12.0) == 0.0
+
+    orch = _two_systems(tmp_path)
+    built = {"tech": {("B__gas_new", 0): np.array([0.0, 500.0 - 3e-7])},
+             "bat_tech_power": {("B__li", 0): np.array([0.0, 200.0 - 2e-7])},
+             "bat_tech_capacity": {("B__li", 0): np.array([0.0, 800.0 - 4e-7])}}
+    year_sys, _, _ = orch._prepare_system_for_myopic_year(1, built)
+    assert year_sys.technologies["B__gas_new"].invest_max_power == [0.0, 0.0]
+    bt = year_sys.battery_technologies["B__li"]
+    assert bt.invest_max_power == [0.0, 0.0] and bt.invest_max_capacity == [0.0, 0.0]

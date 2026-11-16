@@ -35,7 +35,7 @@ class Orchestrator:
 | `system_name` | `str` | The system names joined with `_` (for example `IslaJuventud_Cuba`) |
 | `state` | `Optional[SimulationState]` | Current simulation state (set during `run()`) |
 | `results` | `list[YearResults]` | Accumulated results across years |
-| `master_solution` | `Optional[dict]` | Master problem decisions after `run(master_only=True)` (`investments`, `retirements`, `cumulative_capacities`, `re_targets`, each keyed by year); `None` otherwise or if the master problem failed |
+| `master_solution` | `Optional[dict]` | Master problem decisions after `run(master_only=True)` (`investments`, `retirements`, `cumulative_capacities`, `re_targets`, each keyed by year); `None` otherwise |
 
 When development zones are configured, `run()` replaces `primary_system` and `master_system` with the zone-expanded systems.
 
@@ -85,7 +85,7 @@ In `unit_commitment` mode only the first year is run, whatever `years` is.
 
 **Failure modes:**
 
-- Returns an empty list if the Master Problem fails.
+- Raises `RunAbortedError` (a `RuntimeError`, in `esfex.runner`) if the Master Problem finds no plan; plugins are torn down and nothing is dispatched. It used to return an empty list, so `esfex run` reported success and exited 0.
 - Raises `RuntimeError` if no operational window of a year solves.
 - Any other exception raised while running a year is logged and re-raised.
 
