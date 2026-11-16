@@ -2785,6 +2785,9 @@ class MasterProblemAdapter:
         tsam_period_weights: Optional[List[List[float]]] = None,
         tsam_chronological_order: Optional[List[List[int]]] = None,
         tsam_inter_period_linking: bool = True,
+        # Periods (0-based indices) kept as they are when the renewable
+        # profiles are rescaled to each year's energy: the critical days
+        tsam_critical_periods: Optional[List[int]] = None,
         # Stochastic parameters
         use_stochastic: bool = False,
         stochastic_scenarios: Optional[List[dict]] = None,
@@ -2873,6 +2876,10 @@ class MasterProblemAdapter:
             tsam_period_weights: Per-year list of period weights
             tsam_chronological_order: Per-year list of chronological period indices (1-indexed)
             tsam_inter_period_linking: Enable inter-period SOC linking
+            tsam_critical_periods: Indices (0-based) of the TSAM periods that
+                are critical days, kept as they are when the renewable
+                profiles are rescaled to each year's energy
+                (``_tsam_energy_matched``)
             use_stochastic: Enable stochastic two-stage optimization
             stochastic_scenarios: List of scenario dicts with name/probability/multipliers
             config_path: Path to config file for resolving relative availability/inflow paths
@@ -2988,6 +2995,7 @@ class MasterProblemAdapter:
         self.tsam_period_weights = tsam_period_weights or []
         self.tsam_chronological_order = tsam_chronological_order or []
         self.tsam_inter_period_linking = tsam_inter_period_linking
+        self.tsam_critical_periods = list(tsam_critical_periods or [])
         self.use_stochastic = use_stochastic
         self.stochastic_scenarios = stochastic_scenarios or []
         self.kwargs = kwargs
@@ -3131,6 +3139,34 @@ class MasterProblemAdapter:
             prof = aggregate_to_resolution(prof, target_hours=self.temporal_resolution_hours)
         return prof
 
+    def _tsam_energy_matched(self, key: str, profile: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Renewable availability *profile* (the master's, ``_master_profile``)
+        with its TSAM periods rescaled so that, in each modelled year, the
+        periods' weighted energy is the year's (``rescale_profile_periods``:
+        shape kept, capped at full availability, the critical periods
+        ``tsam_critical_periods`` kept as they are). Only the rows of the
+        periods change. Unchanged without TSAM periods."""
+        if profile is None or not self.use_tsam or not self.tsam_period_start_hours:
+            return profile
+        from esfex.models.tsam import rescale_profile_periods
+
+        res = max(1, int(self.temporal_resolution_hours))
+        steps = HOURS_STD_YEAR // res
+        years = []
+        for starts, weights in zip(self.tsam_period_start_hours, self.tsam_period_weights):
+            if not starts:
+                continue
+            # 1-based steps of the master's horizon; the year's first row
+            first = (min(starts) - 1) // steps * steps
+            years.append((first, [s - 1 - first for s in starts], list(weights)))
+        out, ratios = rescale_profile_periods(profile, years, 24 // res, steps,
+                                              self.tsam_critical_periods)
+        if np.isfinite(ratios).any():
+            logger.debug("TSAM periods of %s rescaled to the year's energy: weighted mean / "
+                         "annual mean %.4f to %.4f", key, float(np.nanmin(ratios)),
+                         float(np.nanmax(ratios)))
+        return out
+
     def _create_input(self) -> Any:
         """Create the Julia MasterProblemInput struct."""
         ESFEX = get_esfex_module()
@@ -3197,6 +3233,8 @@ class MasterProblemAdapter:
             availability = self._master_profile(
                 self._availability_cache, key, getattr(gen, 'availability_file', None),
                 num_nodes, load_availability_profile)
+            if gen.type == "Renewable":
+                availability = self._tsam_energy_matched(key, availability)
             if availability is not None:
                 logger.debug(f"Availability for {gen.name}: shape={availability.shape}")
 
@@ -3245,6 +3283,8 @@ class MasterProblemAdapter:
             tech_availability = self._master_profile(
                 self._availability_cache, key, tech.availability_file,
                 num_nodes, load_availability_profile)
+            if tech.type == "Renewable":
+                tech_availability = self._tsam_energy_matched(key, tech_availability)
             if tech_availability is not None:
                 logger.debug(f"Availability for tech {tech.name}: shape={tech_availability.shape}")
             jl_tech = convert_technology_config(tech, tech_availability, bus_to_node=b2n_arg)
