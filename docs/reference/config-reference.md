@@ -119,7 +119,7 @@ The reduction removes only passive buses: buses with role `connection` that have
 | `solver_method` | `monolithic` \| `benders` | `"monolithic"` | Master-problem solver: 'monolithic' or 'benders'. |
 | `benders_max_iterations` | int (≥ 1) | `50` | Maximum Benders iterations (benders solver only). |
 | `benders_tolerance` | float (> 0.0) | `0.0001` | Relative optimality-gap tolerance for Benders convergence. |
-| `use_tsam` | bool | `false` | Enable TSAM clustering for representative period selection, once for the horizon (the same periods every year). When true, representative_days is ignored (min_day_separation still spaces the critical days, which are added to the periods). |
+| `use_tsam` | bool | `false` | Enable TSAM clustering for representative period selection, once for the horizon (the same periods every year). When true, representative_days is ignored (min_day_separation still spaces the critical days, which are added to the periods). The master rescales the renewable availability profiles on the periods (not on the critical days) so their weighted energy equals each year's, capped at full availability; the demand is not rescaled. |
 | `tsam_num_periods` | int (2–365) | `10` | Number of representative periods for TSAM clustering. |
 | `tsam_method` | `kmedoids` \| `kmeans` | `"kmedoids"` | Clustering method for TSAM. |
 | `tsam_inter_period_linking` | bool | `true` | Enable inter-period SOC linking for seasonal storage representation. |
