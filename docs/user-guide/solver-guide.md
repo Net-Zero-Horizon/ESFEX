@@ -441,6 +441,12 @@ solver:
 
 5. **Monitor solver output**: Enable `verbose: true` together with `logging.console_level: verbose` (or run with `esfex run -v`) for solver diagnostics. With the default `console_level: basic` the solver log is suppressed.
 
+### Numerical Trouble in a Master Problem
+
+A barrier run without crossover can lose its way on a large master ("Numerical trouble encountered", termination `NUMERICAL_ERROR`) although the model is feasible. When a master solve (every master mode, MGA included; Benders excepted) ends `NUMERICAL_ERROR` with Gurobi, ESFEX solves it once more with Gurobi's homogeneous barrier (`BarHomogeneous = 1`, the solver's own advice), with a WARNING in the log, and sets the parameter back afterwards. Other solvers, and other statuses, keep the result of the first solve.
+
+The master itself avoids the causes found on Cuba's myopic runs: a line's loss segments are bounded unless its corridor can be expanded without limit (unbounded segments let the barrier iterates run to 10⁶ MW, see [DC power flow](../formulation/dc-power-flow.md)); the renewable ratio that links one year's growth cap to the next is not a row with the year's demand (MWh, ~10⁷) as a coefficient; and capacities of at most 10⁻³ MW or MWh that a solve reports are read as 0, so a myopic year does not carry them as existing units into the next year's model (see [Master Problem](master-problem.md)).
+
 
 ---
 

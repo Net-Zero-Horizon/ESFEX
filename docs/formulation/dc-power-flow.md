@@ -251,7 +251,7 @@ with segment width bounds:
 0 \leq \delta^{+}_{l,k,t} \leq \Delta f, \qquad 0 \leq \delta^{-}_{l,k,t} \leq \Delta f \tag{LOSS-3}
 \]
 
-The segments span the base capacity \(F^{base}_l\). On a line that investment can expand (master problem and Benders), the last segment has no upper bound, so flow can use the built capacity at the last slope \(m_N\).
+The segments span the base capacity \(F^{base}_l\). On a line that investment can expand (master problem and Benders), the last segment also spans the most capacity the corridor can gain by that year (the upper bounds of its investment variables; in the master only when that is above 0), so flow can use the built capacity at the last slope \(m_N\); it has no upper bound only when the investment has none (and, in Benders, on every corridor with an investment variable). The master used to leave the last segment open on every line with a corridor variable, even one whose `transference_invest_max` is 0: \(f^+\) and \(f^-\) could then grow together, and on Cuba's masters (no line may be built) the barrier iterates ran to \(10^6\) MW and the solve ended `NUMERICAL_ERROR`.
 
 ### PWL Loss Computation
 

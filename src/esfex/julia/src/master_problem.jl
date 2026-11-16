@@ -19,6 +19,69 @@ using JuMP: lower_bound, upper_bound, set_lower_bound, set_upper_bound
 using JuMP: set_objective_function, set_objective_sense, MAX_SENSE, MIN_SENSE
 using JuMP: objective_function
 
+"""
+Capacities (MW, MWh) a solved master reports at or below this are solver
+noise and read as 0 (`capacity_value`). An interior-point solve without
+crossover leaves such values on capacity it did not mean to build (1e-6 MW at
+a bus, a limit left at 3e-7 MW); carried into the next myopic year or the
+dispatch as existing units, they gave rows like `gen ≤ 2e-9` that made the
+next master numerically fragile (round 36).
+"""
+const CAPACITY_TOL = 1e-3
+
+"""
+    capacity_value(x) -> Float64
+
+`value(x)` of a solved capacity variable or expression, 0 when its magnitude
+is at most `CAPACITY_TOL`.
+"""
+capacity_value(x) = (v = value(x); abs(v) <= CAPACITY_TOL ? 0.0 : v)
+
+# Per solver: the parameters of a second attempt at a master whose solve
+# ended NUMERICAL_ERROR (Gurobi's own advice: "Consider using the
+# homogeneous algorithm (through parameter 'BarHomogeneous')")
+const NUMERICAL_RETRY_PARAMS = Dict{String, Vector{Pair{String, Any}}}(
+    "Gurobi" => ["BarHomogeneous" => 1],
+)
+
+"""
+    optimize_master!(model; retry = NUMERICAL_RETRY_PARAMS[solver])
+
+Solve a master problem. When the solve ends `NUMERICAL_ERROR` and the solver
+has `retry` parameters (`NUMERICAL_RETRY_PARAMS`: Gurobi's homogeneous
+barrier), solve once more with them, with a warning, and set them back
+afterwards. A barrier run can lose its way on a large master (Cuba myopic
+TSAM 2027: `NUMERICAL_ERROR` after 228 iterations; the homogeneous barrier
+solved the same model in 112, and the model read back from a file in another
+order solved in 157), and a myopic run stops at the first year without a
+plan. Other statuses, and solvers without retry parameters, are left as the
+first solve ended.
+"""
+function optimize_master!(model::Model;
+                          retry = get(NUMERICAL_RETRY_PARAMS, JuMP.solver_name(model), nothing))
+    optimize!(model)
+    (termination_status(model) == MOI.NUMERICAL_ERROR && retry !== nothing &&
+     !isempty(retry)) || return
+    previous = Pair{String, Any}[]
+    for (name, val) in retry
+        push!(previous, name => JuMP.get_attribute(model, name))
+        JuMP.set_attribute(model, name, val)
+    end
+    @warn "Master problem: the solve ended NUMERICAL_ERROR; solving again with " *
+          join(("$k = $v" for (k, v) in retry), ", ")
+    try
+        optimize!(model)
+    finally
+        # On the backend: through JuMP the change would mark the solution
+        # just found as out of date (OPTIMIZE_NOT_CALLED)
+        for (name, val) in previous
+            MOI.set(JuMP.backend(model), MOI.RawOptimizerAttribute(name), val)
+        end
+    end
+    @info "Master problem: second solve $(termination_status(model))"
+    return
+end
+
 # =============================================================================
 # Target RE Calculation
 # =============================================================================
@@ -841,7 +904,7 @@ function build_master_variables!(
     # Renewable generation over demand per (system, year), the growth cap's
     # link between years (define_re_share!); with no system_node_ranges,
     # system 1 covers all buses
-    re_energy_ratio = Dict{Tuple{Int,Int}, VariableRef}()
+    re_energy_ratio = Dict{Tuple{Int,Int}, Union{VariableRef, AffExpr}}()
 
     # Slack variables (the RE target's come with the representative days,
     # add_re_target_constraints!)
@@ -1124,6 +1187,27 @@ function transfer_capacity_built(vars::MasterProblemVariables, from::Int, to::In
         end
         cap
     end
+end
+
+"""
+    transfer_expansion_max(vars, from, to, year_idx) -> Float64
+
+The most MW the corridor between buses `from` and `to` can have gained by
+year `year_idx`: the upper bounds of its investment variables at the
+investment-period starts (`Inf` if one has none, 0 without any). It bounds
+the last loss segment of the corridor's lines (`add_dc_constraints!`).
+"""
+function transfer_expansion_max(vars::MasterProblemVariables, from::Int, to::Int,
+                                year_idx::Int)::Float64
+    total = 0.0
+    for y in 1:vars.years_per_inv_period:year_idx
+        inv = get(vars.transfer_investment, y, nothing)
+        inv === nothing && continue
+        v = get(inv, (from, to), get(inv, (to, from), nothing))
+        v === nothing && continue
+        total += has_upper_bound(v) ? max(upper_bound(v), 0.0) : Inf
+    end
+    return total
 end
 
 """
@@ -2068,7 +2152,13 @@ the probability-weighted generation over the weighted demand. It carries a
 year's renewable generation to the next year's growth cap
 (`re_cap_prev_allowance`, the Benders copies); the RE share itself is
 renewable over total generation (`master_re_shares`). A system-year without
-demand is fixed at 0. Nothing for a master without representative days.
+demand gets 0. Nothing for a master without representative days.
+
+The ratio is an expression of the day variables, not a variable with a
+defining row: `demand × ratio == energy` put the year's demand (MWh, ~10⁷
+for a national system) in the matrix next to the day weights, the widest
+coefficient range of the master (round 36). The placeholder variables
+`build_master_variables!` made are deleted.
 """
 function define_re_share!(model::Model, vars::MasterProblemVariables,
                           input::MasterProblemInput)
@@ -2082,14 +2172,14 @@ function define_re_share!(model::Model, vars::MasterProblemVariables,
         add_to_expression!(get!(() -> AffExpr(0.0), energy, (s, y)), e, p)
         demand[(s, y)] = get(demand, (s, y), 0.0) + p * d
     end
-    for ((s, y), v) in vars.re_energy_ratio
-        d = get(demand, (s, y), 0.0)
-        if d > 0
-            @constraint(model, d * v == energy[(s, y)], base_name = "re_energy_ratio_s$(s)_y$(y)")
-        else
-            fix(v, 0.0; force = true)
-        end
+    placeholders = VariableRef[]
+    for key in collect(keys(vars.re_energy_ratio))
+        v = vars.re_energy_ratio[key]
+        v isa VariableRef && push!(placeholders, v)
+        d = get(demand, key, 0.0)
+        vars.re_energy_ratio[key] = d > 0 ? energy[key] / d : AffExpr(0.0)
     end
+    isempty(placeholders) || delete(model, placeholders)
     return nothing
 end
 
@@ -3762,17 +3852,22 @@ function add_day_operational_constraints!(
         # (transmission.lines includes transformers)
         line_cap_override = Dict{Int, Any}()
         expandable = Set{Int}()
+        expansion = Dict{Int, Float64}()
         for (l, (from, to)) in enumerate(transmission.lines)
             cap = AffExpr(transmission.line_capacities[l])
             built = transfer_capacity_built(vars, from, to, year_idx)
-            if built !== nothing
+            # A corridor whose investment limit is 0 is not expandable
+            extra = transfer_expansion_max(vars, from, to, year_idx)
+            if built !== nothing && extra > 0
                 push!(expandable, l)
+                expansion[l] = extra
                 add_to_expression!(cap, built)
             end
             line_cap_override[l] = cap
         end
         add_dc_constraints!(model, transmission, ps_vars, day_input;
-            extra_injections_fn=extra_fn, expandable_lines=expandable)
+            extra_injections_fn=extra_fn, expandable_lines=expandable,
+            expansion_max=expansion)
         add_line_capacity_constraints!(model, transmission, ps_vars, day_input;
             capacity_override=line_cap_override)
         line_flow_cost = add_line_flow_cost!(model, transmission, ps_vars, input, hours)
@@ -4914,7 +5009,7 @@ function extract_master_solution(
                 elseif gen.rated_power[n] > 0
                     life_ext_var = vars.gen_life_extension[y_idx][g][n]
                     if life_ext_var !== nothing
-                        cumul_gen[y_idx][g][n] += value(life_ext_var)
+                        cumul_gen[y_idx][g][n] += capacity_value(life_ext_var)
                     end
                 end
             end
@@ -4930,7 +5025,7 @@ function extract_master_solution(
                     0.0
                 else
                     ub = gen.rated_power[n] * (1.0 - gen.degradation_rate[n]) ^ age_at_year
-                    ub > 0 ? clamp(value(ext) / ub, 0.0, 1.0) : 0.0
+                    ub > 0 ? clamp(capacity_value(ext) / ub, 0.0, 1.0) : 0.0
                 end
             end
         end
@@ -4952,7 +5047,7 @@ function extract_master_solution(
                 elseif bat.max_discharge_power[n] > 0
                     life_ext_var = vars.bat_life_extension[y_idx][b][n]
                     if life_ext_var !== nothing
-                        life_ext_val = value(life_ext_var)
+                        life_ext_val = capacity_value(life_ext_var)
                         cumul_bat_power[y_idx][b][n] += life_ext_val
                         if bat.max_discharge_power[n] > 0
                             ratio = bat.capacity[n] / bat.max_discharge_power[n]
@@ -4970,7 +5065,7 @@ function extract_master_solution(
                 elseif ext === nothing || bat.max_discharge_power[n] <= 0
                     0.0
                 else
-                    clamp(value(ext) / bat.max_discharge_power[n], 0.0, 1.0)
+                    clamp(capacity_value(ext) / bat.max_discharge_power[n], 0.0, 1.0)
                 end
             end
         end
@@ -4981,7 +5076,7 @@ function extract_master_solution(
             tech = input.technologies[t]
             # Investment value: only non-zero at period start, zero otherwise
             if y_idx == yp
-                tech_inv[y_idx][t] = [value(vars.tech_investment[yp][t][n]) for n in 1:n_buses]
+                tech_inv[y_idx][t] = [capacity_value(vars.tech_investment[yp][t][n]) for n in 1:n_buses]
             else
                 tech_inv[y_idx][t] = zeros(n_buses)
             end
@@ -4992,7 +5087,7 @@ function extract_master_solution(
                     inv_age = y_idx - y
                     if inv_age < tech.life_time[n]
                         deg = (1.0 - tech.degradation_rate[n]) ^ inv_age
-                        cumul_tech[y_idx][t][n] += value(vars.tech_investment[y][t][n]) * deg
+                        cumul_tech[y_idx][t][n] += capacity_value(vars.tech_investment[y][t][n]) * deg
                     end
                 end
             end
@@ -5002,8 +5097,8 @@ function extract_master_solution(
         for bt in 1:n_bat_tech
             btech = input.battery_technologies[bt]
             if y_idx == yp
-                bat_tech_pow_inv[y_idx][bt] = [value(vars.bat_tech_power_investment[yp][bt][n]) for n in 1:n_buses]
-                bat_tech_cap_inv[y_idx][bt] = [value(vars.bat_tech_capacity_investment[yp][bt][n]) for n in 1:n_buses]
+                bat_tech_pow_inv[y_idx][bt] = [capacity_value(vars.bat_tech_power_investment[yp][bt][n]) for n in 1:n_buses]
+                bat_tech_cap_inv[y_idx][bt] = [capacity_value(vars.bat_tech_capacity_investment[yp][bt][n]) for n in 1:n_buses]
             else
                 bat_tech_pow_inv[y_idx][bt] = zeros(n_buses)
                 bat_tech_cap_inv[y_idx][bt] = zeros(n_buses)
@@ -5014,8 +5109,8 @@ function extract_master_solution(
                 for y in 1:vars.years_per_inv_period:y_idx
                     inv_age = y_idx - y
                     if inv_age < btech.life_time[n]
-                        cumul_bat_tech_pow[y_idx][bt][n] += value(vars.bat_tech_power_investment[y][bt][n])
-                        cumul_bat_tech_cap[y_idx][bt][n] += value(vars.bat_tech_capacity_investment[y][bt][n])
+                        cumul_bat_tech_pow[y_idx][bt][n] += capacity_value(vars.bat_tech_power_investment[y][bt][n])
+                        cumul_bat_tech_cap[y_idx][bt][n] += capacity_value(vars.bat_tech_capacity_investment[y][bt][n])
                     end
                 end
             end
@@ -5025,7 +5120,7 @@ function extract_master_solution(
         if haskey(vars.transfer_investment, yp)
             for ((i, j), var) in vars.transfer_investment[yp]
                 if y_idx == yp
-                    trans_inv[y_idx][(i, j)] = value(var)
+                    trans_inv[y_idx][(i, j)] = capacity_value(var)
                 else
                     trans_inv[y_idx][(i, j)] = 0.0
                 end
@@ -5044,7 +5139,7 @@ function extract_master_solution(
         res_inv[y_idx] = Dict{Int, Vector{Float64}}()
         for g in 1:n_gen
             if haskey(vars.reservoir_investment[y_idx], g)
-                res_inv[y_idx][g] = [value(vars.reservoir_investment[y_idx][g][n]) for n in 1:n_buses]
+                res_inv[y_idx][g] = [capacity_value(vars.reservoir_investment[y_idx][g][n]) for n in 1:n_buses]
             end
         end
     end
@@ -5054,7 +5149,7 @@ function extract_master_solution(
     for y_idx in 1:num_years
         conv_inv[y_idx] = Dict{Tuple{String,Int}, Float64}()
         for (key, var) in get(vars.converter_investment, y_idx, Dict{Tuple{String,Int}, VariableRef}())
-            conv_inv[y_idx][key] = value(var)
+            conv_inv[y_idx][key] = capacity_value(var)
         end
     end
 

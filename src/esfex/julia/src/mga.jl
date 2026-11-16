@@ -263,7 +263,7 @@ function run_mga_spores(
         input;
         use_representative_days = use_representative_days
     )
-    optimize!(model)
+    optimize_master!(model)
 
     status = termination_status(model)
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
@@ -310,7 +310,7 @@ function run_mga_spores(
         set_spores_objective!(model, vars, input, freq_scores)
 
         # Solve
-        optimize!(model)
+        optimize_master!(model)
 
         status = termination_status(model)
         if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
@@ -707,7 +707,7 @@ function run_spores(
         input;
         use_representative_days = use_representative_days,
     )
-    optimize!(model)
+    optimize_master!(model)
     status = termination_status(model)
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
         error("SPORES: Cost-optimal solve failed: $status")
@@ -747,7 +747,7 @@ function run_spores(
             frequency_scores = freq_scores,
             reference_solution = optimal_solution,
         )
-        optimize!(model)
+        optimize_master!(model)
 
         status = termination_status(model)
         if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
