@@ -231,6 +231,7 @@ class MasterProblemAdapter:
         tsam_period_weights: Optional[List[List[float]]] = None,
         tsam_chronological_order: Optional[List[List[int]]] = None,
         tsam_inter_period_linking: bool = True,
+        tsam_critical_periods: Optional[List[int]] = None,
         use_stochastic: bool = False,
         stochastic_scenarios: Optional[List[dict]] = None,
         system_node_ranges: Optional[List[tuple]] = None,
@@ -271,6 +272,7 @@ class MasterProblemAdapter:
 | `tsam_period_start_hours` | `list[list[int]]` | Per-year start hours for TSAM periods (1-indexed); the runner passes the same days of the year for every year. |
 | `tsam_period_weights` | `list[list[float]]` | Per-year weights for TSAM periods. |
 | `tsam_inter_period_linking` | `bool` | Enable inter-period SOC linking for battery continuity across representative periods. |
+| `tsam_critical_periods` | `list[int] \| None` | Indices (0-based) of the TSAM periods that are critical days. With TSAM, every renewable availability profile the master reads (renewable generators and technologies) is rescaled on the periods so their weighted energy equals each modelled year's (`rescale_profile_periods` in `esfex.models.tsam`: shape kept, capped at full availability, the energy a capped step cannot take spread over the others); these periods are kept as they are and count in that energy. Only the rows of the periods change. |
 | `use_stochastic`, `stochastic_scenarios` | `bool`, `list[dict]` | Build the two-stage stochastic master (`create_stochastic_master_problem`): shared investment, one representative-day operation per scenario. Ignored, with a warning, when `solver_method="benders"`. |
 | `system_node_ranges` | `list[tuple]` | `(name, first_bus, num_buses, initial_re)` per system (1-indexed buses), for per-system RE targets in multi-system runs. |
 | `config_path` | `str` | Path to config file for resolving relative availability file paths. |

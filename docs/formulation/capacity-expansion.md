@@ -801,6 +801,20 @@ C^{op}_y = \sum_{p=1}^{K} w_p \cdot C^{day}_{y,p} \tag{TSAM-COST}
 
 This replaces the uniform \(365/N\) scaling (SCALE-1). Only the scaling differs: each period's \(C^{day}_{y,p}\) is the same cost as for a representative day, including the reserve and inertia shortfall penalties.
 
+#### 8.5.2b Renewable Energy Matching
+
+**Python functions**: `rescale_profile_periods()`, `rescale_periods_to_year()` in `models/tsam.py`; `MasterProblemAdapter._tsam_energy_matched()`
+
+The medoids minimise the clustering distance, not the energy error: weighted by the cluster sizes, the periods can hold more or less sun and wind than the year (Cuba, 12 periods: PV × 1.08, wind × 0.87, demand × 1.003). Once the periods and their weights are fixed (the critical days included, with the weights of CD-2), each renewable availability profile the master reads (renewable generators and renewable candidate technologies; the profile of each node, for each modelled year: the year's block of a multi-year profile, once for a one-year profile) is rescaled on the periods so that its weighted energy is the year's:
+
+\[
+\sum_{p \notin \mathcal{C}} w_p \sum_{t \in p} \min\!\big(s \, \alpha_t,\ \bar{\alpha}\big) + \sum_{c \in \mathcal{C}} w_c \sum_{t \in c} \alpha_t = \frac{\sum_p w_p T_p}{T_{year}} \sum_{t \in year} \alpha_t \tag{TSAM-R}
+\]
+
+with \(\alpha_t\) the original availability, \(\mathcal{C}\) the critical days, \(T_p\) the steps of a period and \(\bar{\alpha}\) the cap: full availability, 1 (or the profile's own maximum where it exceeds 1). \(s\) is found as the `tsam` library does: scale the uncapped steps by one factor, cap those that exceed \(\bar{\alpha}\), spread the energy they cannot take over the remaining uncapped steps, repeat until no further step reaches the cap. The shape of each period is kept (a step at 0 stays 0); only the rows of the periods change, so the dispatch and the rest of the year are untouched. The critical days are not rescaled: they exist to be extreme, and raising their renewable supply to the mean would erase the shortage they represent; the other periods carry their share of the correction, so TSAM-R holds over all periods. When every step of the periods reaches the cap and the year's energy is still not reached, the residual stays and is logged.
+
+The runner logs the weighted mean of each profile on the periods over its annual mean before the rescaling ("TSAM periods (before rescaling the renewable profiles) mean / annual mean: …") and after it ("TSAM periods with the renewable profiles rescaled to the year's energy, mean / annual mean: …", 1.000 unless the cap stopped a profile, named in a separate line). The demand is not rescaled: the demand is the main clustering feature and its periods stay close to the year (Cuba: × 1.003 over the horizon, at most 0.9 % off in any year). A series still off by more than 10 % after the rescaling (the demand, or a profile held back by the cap) gives a warning that advises more TSAM periods (`tsam_num_periods`). The adequacy credit (CAP) reads the same profiles: the minimum of a variable renewable's profile, or a dispatchable renewable's mean over the peak steps, may move slightly when those steps fall on a period.
+
 #### 8.5.3 Inter-Period SOC Linking
 
 To enable seasonal storage representation, inter-period SOC boundary variables are introduced:
