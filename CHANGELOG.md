@@ -3185,8 +3185,8 @@ Per-release notes are also published on the
 
 - **TSAM periods carry the year's renewable energy.** The TSAM periods
   (k-medoids, each weighted by its cluster size) rarely hold the year's
-  sun and wind: in the Cuba case with 12 periods they had 8 % more PV and
-  13 % less wind than the year, so the master planned on a sunnier, calmer
+  sun and wind: in the Cuba case with 12 periods they had 6 % more PV and
+  12 % less wind than the year, so the master planned on a sunnier, calmer
   year than the dispatch then ran. Once the periods are fixed (the critical
   days and their weights included), every TSAM master (monolithic,
   stochastic, MGA and each annual master of a myopic run) now rescales each
