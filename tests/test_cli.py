@@ -357,6 +357,42 @@ class TestRunCommand:
         assert result.exit_code != 0
         assert "solver crashed" in result.output
 
+    def test_aborted_run_exits_nonzero(self, minimal_config_path, mock_esfex_config,
+                                       tmp_path):
+        """A run the master stops (round 36) used to print "Optimization
+        completed successfully!" and exit 0."""
+        from esfex.runner import RunAbortedError
+
+        mock_orch_instance = MagicMock()
+        mock_orch_instance.run.side_effect = RunAbortedError(
+            "the master problem found no plan")
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config), \
+             patch(_PATCH_ORCHESTRATOR, return_value=mock_orch_instance):
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path),
+                      "--output", str(tmp_path / "results")])
+        assert result.exit_code == 1
+        assert "found no plan" in result.output
+        assert "successfully" not in result.output
+
+    def test_failed_windows_exit_nonzero(self, minimal_config_path, mock_esfex_config,
+                                         tmp_path):
+        """A year whose dispatch windows failed is not a successful run."""
+        from esfex.runner import YearResults
+
+        mock_orch_instance = MagicMock()
+        mock_orch_instance.run.return_value = [
+            YearResults(year=2025, objective=1.0, solve_time=0.0, feasible=True),
+            YearResults(year=2026, objective=1.0, solve_time=0.0, feasible=False)]
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config), \
+             patch(_PATCH_ORCHESTRATOR, return_value=mock_orch_instance):
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path),
+                      "--output", str(tmp_path / "results")])
+        assert result.exit_code == 1
+        assert "2026" in result.output and "2025" not in result.output
+        assert "successfully" not in result.output
+
     def test_successful_run(self, minimal_config_path, mock_esfex_config, tmp_path):
         """Successful Orchestrator.run() should exit with code 0."""
         mock_orch_instance = MagicMock()

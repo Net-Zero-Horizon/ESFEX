@@ -945,6 +945,104 @@ import Ipopt
                   fill(4.0, 3) rtol = 1e-6
         end
 
+        @testset "master: conditioning and capacity noise (round 36)" begin
+            # The RE ratio was defined by a row `demand × ratio == energy`:
+            # the year's demand (MWh) as a coefficient next to the day
+            # weights. Cuba: 2.2e7, the widest range of every master.
+            years = [2025, 2026]
+            Hy = length(years) * 8760
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4],
+                        ones(Hy, 1); nb = 1, H = Hy)
+            o = [0.0]
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [1.0], [500.0], ones(Hy, 1),
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            inp = MasterProblemInput(; years = years, network = net, generators = [gas],
+                batteries = BatteryConfig[], technologies = [pv],
+                base_demand = fill(50.0, Hy, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.05,
+                min_re_increment = 0.0, max_re_increment = 0.10,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 0.01, verbose = false)
+            function coef_range(m)
+                lo, hi = Inf, 0.0
+                for (F, S) in list_of_constraint_types(m)
+                    F <: AffExpr || continue
+                    for c in all_constraints(m, F, S), (_, a) in constraint_object(c).func.terms
+                        a == 0 && continue
+                        lo, hi = min(lo, abs(a)), max(hi, abs(a))
+                    end
+                end
+                return lo, hi
+            end
+            m, v, _ = create_master_problem(inp; use_representative_days = true)
+            lo, hi = coef_range(m)
+            # 50 MW all year is 438 000 MWh: that coefficient is gone
+            @test hi < 1.0e3
+            @test !any(startswith(name(x), "re_ratio") for x in all_variables(m))
+            ESFEX.set_silent(m)
+            optimize!(m)
+            res = extract_master_solution(m, v, inp)
+            @test [value(v.re_energy_ratio[(1, y)]) for y in 1:2] ≈
+                  res.re_penetration_by_year atol = 1e-6
+            sm, sv, _, _ = create_stochastic_master_problem(StochasticMasterInput(inp,
+                [Scenario("a", 0.5, ScenarioMultipliers()),
+                 Scenario("b", 0.5, ScenarioMultipliers())], true))
+            @test coef_range(sm)[2] < 1.0e3
+
+            # A barrier solve without crossover leaves capacity it did not
+            # mean to build (1e-6 MW at a bus); carried into the next myopic
+            # year or the dispatch it made rows like `gen ≤ 2e-9`. The
+            # master reports at most CAPACITY_TOL as 0.
+            @test ESFEX.CAPACITY_TOL == 1.0e-3
+            nm, nv, _ = create_master_problem(inp; use_representative_days = true)
+            fix(nv.tech_investment[1][1][1], 5.0e-4; force = true)
+            ESFEX.set_silent(nm)
+            optimize!(nm)
+            nres = extract_master_solution(nm, nv, inp)
+            @test value(nv.tech_investment[1][1][1]) ≈ 5.0e-4
+            @test nres.tech_investment[1][1][1] == 0.0
+            @test nres.cumulative_tech_capacity[1][1][1] == 0.0
+            fix(nv.tech_investment[1][1][1], 5.0e-2; force = true)
+            optimize!(nm)
+            @test extract_master_solution(nm, nv, inp).tech_investment[1][1][1] ≈ 5.0e-2
+        end
+
+        @testset "master: one more solve after NUMERICAL_ERROR (round 36)" begin
+            # Cuba myopic TSAM 2027: Gurobi's barrier ended NUMERICAL_ERROR
+            # and the run stopped. The master is solved once more with the
+            # solver's retry parameters, which are set back afterwards.
+            MOIU = ESFEX.MOI.Utilities
+            mock = MOIU.MockOptimizer(MOIU.UniversalFallback(MOIU.Model{Float64}()))
+            m = ESFEX.JuMP.direct_model(mock)
+            x = ESFEX.JuMP.@variable(m, lower_bound = 0)
+            ESFEX.JuMP.@objective(m, Min, x)
+            P = ESFEX.MOI.RawOptimizerAttribute("P")
+            ESFEX.JuMP.set_attribute(m, "P", 0)
+            during = Ref{Any}(nothing)
+            fail(mk) = MOIU.mock_optimize!(mk, ESFEX.MOI.NUMERICAL_ERROR)
+            ok(mk) = (during[] = ESFEX.MOI.get(mk, P);
+                      MOIU.mock_optimize!(mk, ESFEX.MOI.OPTIMAL,
+                                          (ESFEX.MOI.FEASIBLE_POINT, [0.0])))
+            MOIU.set_mock_optimize!(mock, fail, ok)
+            ESFEX.optimize_master!(m; retry = ["P" => 1])
+            @test termination_status(m) == ESFEX.MOI.OPTIMAL
+            @test during[] == 1
+            @test ESFEX.JuMP.get_attribute(m, "P") == 0
+            @test value(x) == 0.0
+            # No retry parameters (HiGHS, or none given): the status stands
+            MOIU.set_mock_optimize!(mock, fail)
+            ESFEX.optimize_master!(m; retry = nothing)
+            @test termination_status(m) == ESFEX.MOI.NUMERICAL_ERROR
+            @test ESFEX.NUMERICAL_RETRY_PARAMS["Gurobi"] == ["BarHomogeneous" => 1]
+            @test !haskey(ESFEX.NUMERICAL_RETRY_PARAMS, "HiGHS")
+        end
+
         @testset "master: representative days chosen once for every year" begin
             # Year 1 peaks on day 10, year 2 on day 200. Each year picked its
             # own peak days, so the weather sample, and the share existing
@@ -1694,6 +1792,25 @@ import Ipopt
                 @test value(b.ploss) ≈ exact rtol = 0.02 atol = 1e-3
                 @test value(b.ploss) < 10.0     # it lost 40 MW (both directions full)
             end
+            # The line cannot be expanded (transference_invest_max 0), so its
+            # loss segments are bounded both ways. Every line of a master
+            # with a corridor variable got an open last segment: in Cuba's
+            # (no line may be built) f_pos and f_neg ran to 10⁶ MW in the
+            # barrier iterates and the solve ended NUMERICAL_ERROR (round 36)
+            @test all(b -> !b.open_last &&
+                           all(ESFEX.JuMP.has_upper_bound, vcat(b.dp, b.dn)), reg.blocks)
+            w = ESFEX.with_loss_model(ESFEX.TransmissionDC(net), 2, 100.0).pwl_losses.segment_widths[1]
+            xinp = ESFEX.with_fields(inp; network = ESFEX.with_fields(net;
+                transference_invest_max = [50.0, 50.0]))
+            xm, xv, _ = create_master_problem(xinp; use_representative_days = true)
+            @test ESFEX.transfer_expansion_max(xv, 1, 2, 1) == 50.0
+            xb = xm.ext[:pwl_loss_repair].blocks
+            @test length(xb) == 24
+            # An expandable line's last segment spans the MW it can gain
+            @test all(b -> !b.open_last && b.widths[end] ≈ w[end] + 50.0 &&
+                           ESFEX.JuMP.upper_bound(b.dn[end]) ≈ w[end] + 50.0, xb)
+            optimize!(xm)
+            @test string(termination_status(xm)) == "OPTIMAL"
             # So Benders' operating bound lets the system draw beyond its
             # load at most the line's loss at full flow in one direction
             # (C28; it allowed both), on a line the master cannot expand

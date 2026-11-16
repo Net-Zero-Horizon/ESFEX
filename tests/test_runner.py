@@ -1090,3 +1090,29 @@ def test_master_demand_includes_ev_charging(tmp_path, monkeypatch):
         orch.run(years=1)
     assert float(np.mean(seen["demand"])) == pytest.approx(60.0)
     assert float(np.mean(seen["total"])) == pytest.approx(60.0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: a failed master stops the run with an error (round 36)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("failed", [None, (None, None, None, None)])
+def test_master_failure_raises_run_aborted(tmp_path, monkeypatch, failed):
+    """The run used to return ``[]`` when the master found no plan, so
+    ``esfex run`` printed "Optimization completed successfully!" and exited 0."""
+    from esfex.config.schema import TemporalConfig
+    from esfex.runner import RunAbortedError
+
+    demand = tmp_path / "demand.csv"
+    np.savetxt(demand, np.full(8760, 50.0))
+    sysc = _make_system_config(num_nodes=1).model_copy(
+        update={"demand_path": str(demand)})
+    cfg = _make_esfex_config(sysc, simulation_mode="development",
+                             temporal=TemporalConfig(resolution_hours=1))
+    orch = Orchestrator(cfg, output_dir=tmp_path / "out")
+    monkeypatch.setattr(Orchestrator, "_solve_master_problem",
+                        lambda self, *a, **kw: failed)
+    with pytest.raises(RunAbortedError, match="master problem"):
+        orch.run(years=1)
+    with pytest.raises(RunAbortedError):
+        orch.run(years=1, master_only=True)

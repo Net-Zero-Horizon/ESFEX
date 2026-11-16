@@ -206,7 +206,7 @@ Constraints from `custom_constraints` and plugins (`user_constraints.jl`) carry 
 |---------------|--------|-------------|
 | `pf == fpos - fneg` | LOSS-1 | Flow direction decomposition (`fpos_{ℓ}_{t}`, `fneg_{ℓ}_{t}`) |
 | `fpos == sum_k(dp_k)`, `fneg == sum_k(dn_k)` | LOSS-2 | Segment sums |
-| `0 <= dp_k, dn_k <= delta_f` | LOSS-3 | Segment widths, `delta_f = base capacity / N`; the last segment is unbounded on expandable lines |
+| `0 <= dp_k, dn_k <= delta_f` | LOSS-3 | Segment widths, `delta_f = base capacity / N`; on a line the master can expand the last segment also spans the most MW the corridor can gain by that year (unbounded only when its investment has no limit, and on Benders' expandable lines) |
 | `ploss == sum_k(m_k * (dp_k + dn_k))` | LOSS-4 | PWL loss, `m_k = min(R_pu, 50)·(2k−1)·delta_f / S_base` |
 | `net_inj == sum_l(K * pf + 0.5 * abs(K) * ploss)` | LOSS-5 | KCL with half-loss split: each end supplies half the loss |
 
@@ -281,7 +281,6 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `re_target_s{s}_y{y}` | RE-2, RE-3a | Annual renewable generation of system `s` (representative days scaled to the year) + `slack_re_s{s}_y{y}` (MWh, at `fre_penetration_loss` per MWh) >= max(target, initial + y × `min_re_increment`) × its total generation; one per scenario (`_sc{k}`) in a stochastic master |
-| `re_energy_ratio_s{s}_y{y}` | RE-2b | `re_energy_ratio` × demand == renewable generation (probability-weighted in a stochastic master), the growth cap's link between years |
 | `re_max_increment_s{s}_y{y}` | RE-3b | Renewable generation <= what the previous year's actual share allows + `max_re_increment` × total generation + `slack_re_cap_s{s}_y{y}` (MWh, at VOLL); year 1 from the initial share × generation (myopic: last year's achieved share), later years last year's renewable generation × the demand growth; one per scenario (`_sc{k}`) in a stochastic master |
 
 ### Retirement and Life Extension
