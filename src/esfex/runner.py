@@ -400,6 +400,25 @@ def _merge_pe_windows(windows, period_steps: int) -> dict:
 
 
 @dataclass
+class MasterDayPlan:
+    """The days every master of a run models, chosen once
+    (``Orchestrator._master_day_plan``)."""
+
+    # Representative days (first steps, 0-based, within a year); None with TSAM
+    rep_day_offsets: Optional[list[int]]
+    # Critical days (lowest renewable supply against demand), the most
+    # critical first
+    critical_day_offsets: list[int]
+    # Days of the year each representative day and then each critical day
+    # stands for; empty = equal shares of the representative days (or TSAM)
+    rep_day_weights: list[float]
+    # Hours a battery must sustain to count as firm in the adequacy constraint
+    storage_firm_hours: float
+    # TSAM periods with the critical days appended; None without TSAM
+    tsam: Any = None
+
+
+@dataclass
 class SimulationState:
     """Tracks state across simulation years."""
 
@@ -3818,17 +3837,15 @@ class Orchestrator:
                 re_paths = [re_target_trajectory(init, target_re, num_years, min_inc, max_inc)
                             for _, _, _, init in system_node_ranges]
 
-            # The representative days (or TSAM periods), chosen once for the
-            # horizon: every annual master models the same calendar days
-            # with its own year's demand and profiles
+            # The representative days (or TSAM periods) and the critical
+            # days, chosen once for the horizon: every annual master models
+            # the same calendar days with its own year's demand and profiles
             use_tsam = master_cfg.use_tsam if master_cfg else False
             horizon_demand_agg = (aggregate_demand_to_resolution(
                 master_demand[:hours_needed], target_hours=resolution_hours)
                 if resolution_hours > 1 else master_demand[:hours_needed])
-            tsam = (self._master_tsam_periods(horizon_demand_agg, num_years, resolution_hours)
-                    if use_tsam else None)
-            rep_day_offsets = (None if use_tsam else self._master_rep_day_offsets(
-                horizon_demand_agg, num_years, resolution_hours))
+            day_plan = self._master_day_plan(horizon_demand_agg, num_years, resolution_hours)
+            tsam = day_plan.tsam
 
             # Accumulation state
             investments_by_year: dict[int, dict] = {}
@@ -3960,7 +3977,10 @@ class Orchestrator:
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
                     min_day_separation=master_cfg.min_day_separation if master_cfg else 5,
-                    rep_day_offsets=rep_day_offsets,
+                    rep_day_offsets=day_plan.rep_day_offsets,
+                    critical_day_offsets=day_plan.critical_day_offsets,
+                    rep_day_weights=day_plan.rep_day_weights,
+                    storage_firm_hours=day_plan.storage_firm_hours,
                     solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                     benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                     benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
@@ -4106,6 +4126,15 @@ class Orchestrator:
         (``rated_power`` / ``invest_max_power`` > 0; all nodes if none).
         Units with the same profile (same file or same values) share one
         entry, labelled with their keys."""
+        return [entry[:3] for entry in self._master_re_profiles_with_capacity(resolution_hours)]
+
+    def _master_re_profiles_with_capacity(
+            self, resolution_hours: int) -> list[tuple[str, np.ndarray, np.ndarray, float]]:
+        """``_master_re_profiles`` with, for each profile, the renewable
+        capacity behind it (MW): the rated power of the existing units plus
+        the investment limit of the candidate technologies sharing it, over
+        all nodes. It weighs the profile in the renewable supply of the
+        critical days (``master_critical_days``)."""
         cache = self._availability_cache or {}
         groups: dict[bytes, list] = {}
         units = [(k, g.rated_power) for k, g in self.primary_system.generators.items()
@@ -4129,15 +4158,16 @@ class Orchestrator:
             digest = hashlib.blake2b(memoryview(avail).cast("B"),
                                      person=str(avail.shape).encode()[:16]).digest()
             entry = groups.setdefault(digest,
-                                      [[], avail, np.zeros(avail.shape[1], dtype=bool)])
+                                      [[], avail, np.zeros(avail.shape[1], dtype=bool), 0.0])
             entry[0].append(key)
             entry[2] |= mask
+            entry[3] += float(np.clip(cap, 0.0, None).sum())
         out = []
-        for keys, avail, mask in groups.values():
+        for keys, avail, mask, capacity in groups.values():
             label = ", ".join(keys[:3]) + (f" (+{len(keys) - 3})" if len(keys) > 3 else "")
             weights = (mask if mask.any() else np.ones_like(mask)).astype(float)
             series = avail @ (weights / weights.sum())
-            out.append((label, avail, series))
+            out.append((label, avail, series, capacity))
         return out
 
     def _log_rep_day_ratios(self, kind: str, demand_agg: np.ndarray, num_years: int,
@@ -4218,6 +4248,70 @@ class Orchestrator:
                                  list(result.period_start_hours), resolution_hours, profiles,
                                  list(result.period_weights))
         return result
+
+    def _master_day_plan(self, demand_agg: np.ndarray, num_years: int,
+                         resolution_hours: int) -> MasterDayPlan:
+        """The days every master of this run models, chosen ONCE: the
+        representative days (``_master_rep_day_offsets``) or TSAM periods
+        (``_master_tsam_periods``), plus ``master_problem.critical_days``
+        critical days, the days of the horizon with the largest net load
+        (``master_critical_days``: horizon-mean demand against the renewable
+        profiles weighted by the capacity behind each). Each critical day
+        stands for one day of the year; the representative days (TSAM
+        periods) share the rest, reweighted so the year keeps their demand
+        and renewable energy (``master_day_weights``). Also the storage firm
+        hours of the adequacy constraint: ``master_problem.storage_firm_hours``
+        or the longest stretch without solar on the critical days. Logged
+        with their dates."""
+        from esfex.bridge.adapters import master_critical_days, master_day_weights
+        from esfex.models.tsam import TSAMResult
+
+        master_cfg = getattr(self.config, 'master_problem', None)
+        use_tsam = master_cfg.use_tsam if master_cfg else False
+        tsam = rep_offsets = None
+        if use_tsam:
+            tsam = self._master_tsam_periods(demand_agg, num_years, resolution_hours)
+            base, prior = list(tsam.period_start_hours), list(tsam.period_weights)
+        else:
+            rep_offsets = self._master_rep_day_offsets(demand_agg, num_years, resolution_hours)
+            base, prior = rep_offsets, None
+
+        profiles = self._master_re_profiles_with_capacity(resolution_hours)
+        series = [s for _, _, s, _ in profiles]
+        critical, firm_hours = master_critical_days(
+            demand_agg, num_years, master_cfg.critical_days if master_cfg else 3,
+            master_cfg.min_day_separation if master_cfg else 5, resolution_hours,
+            series, [c for _, _, _, c in profiles], exclude=base)
+        weights: list[float] = []
+        if critical:
+            weights = master_day_weights(demand_agg, num_years, base, critical,
+                                         resolution_hours, series, prior)
+            logger.info("Critical days (lowest renewable supply against demand), the same "
+                        "for every planning year, one day of the year each: %s",
+                        self._rep_day_dates(critical, resolution_hours))
+            self._log_rep_day_ratios(
+                "TSAM periods with critical days" if use_tsam else
+                "Representative and critical days", demand_agg, num_years,
+                base + critical, resolution_hours, [p[:3] for p in profiles], weights)
+        configured = master_cfg.storage_firm_hours if master_cfg else None
+        if configured:
+            firm_hours = float(configured)
+        logger.info("Storage firm hours in the capacity adequacy: %.1f h (%s); a battery "
+                    "counts min(power, usable energy / %.1f h)", firm_hours,
+                    "configured" if configured else "longest stretch without solar on "
+                    "the critical days", firm_hours)
+
+        if tsam is not None and critical:
+            starts = base + critical
+            tsam = TSAMResult(
+                period_start_hours=starts,
+                period_weights=weights,
+                chronological_order=sorted(range(len(starts)), key=lambda i: starts[i]),
+                num_periods=len(starts))
+            weights = []
+        return MasterDayPlan(rep_day_offsets=rep_offsets, critical_day_offsets=(
+            [] if use_tsam else critical), rep_day_weights=weights,
+            storage_firm_hours=firm_hours, tsam=tsam)
 
     def _benders_debug_lp_dir(self) -> Optional[str]:
         """The run's ``logs`` folder when ``ESFEX_BENDERS_DEBUG_LP=1``: Benders
@@ -4652,21 +4746,20 @@ class Orchestrator:
             tsam_weights = []
             tsam_order = []
 
+            # The representative days (or TSAM periods) and the critical
+            # days: the same for every year (chosen once)
+            day_plan = self._master_day_plan(master_demand_aggregated, num_years,
+                                             resolution_hours)
             if use_tsam:
-                # The same periods for every year (chosen once), each year
-                # on its own block of the demand and profiles
+                # Each year on its own block of the demand and profiles
                 hours_per_year = HOURS_STD_YEAR // resolution_hours
-                tsam = self._master_tsam_periods(master_demand_aggregated, num_years,
-                                                 resolution_hours)
+                tsam = day_plan.tsam
                 for y_idx in range(num_years):
                     # Absolute position, 1-indexed for Julia
                     tsam_starts.append([s + y_idx * hours_per_year + 1
                                         for s in tsam.period_start_hours])
                     tsam_weights.append(list(tsam.period_weights))
                     tsam_order.append([i + 1 for i in tsam.chronological_order])
-            # The representative days: the same for every year
-            rep_day_offsets = (None if use_tsam else self._master_rep_day_offsets(
-                master_demand_aggregated, num_years, resolution_hours))
 
             # --- Stochastic scenarios (if enabled) ---
             use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -4729,7 +4822,10 @@ class Orchestrator:
                 investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                 representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
                 min_day_separation=master_cfg.min_day_separation if master_cfg else 5,
-                rep_day_offsets=rep_day_offsets,
+                rep_day_offsets=day_plan.rep_day_offsets,
+                critical_day_offsets=day_plan.critical_day_offsets,
+                rep_day_weights=day_plan.rep_day_weights,
+                storage_firm_hours=day_plan.storage_firm_hours,
                 solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                 benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                 benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,

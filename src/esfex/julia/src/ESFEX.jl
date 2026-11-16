@@ -195,7 +195,9 @@ export BendersResult, run_benders_decomposition
 export extract_master_solution_from_benders
 export calculate_target_ratios, select_representative_days
 export representative_day_offsets, representative_day_ratios, select_matching_days,
-       master_rep_day_offsets, master_rep_days, re_cap_exemption
+       master_rep_day_offsets, master_rep_days, re_cap_exemption,
+       critical_day_plan, representative_day_weights, master_day_plan,
+       master_storage_firm_hours
 export build_cumulative_capacity_expressions
 
 # Representative Days Validation (CRITICAL for correct RE investment)

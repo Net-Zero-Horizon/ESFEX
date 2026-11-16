@@ -420,14 +420,31 @@ candidate technologies, each the mean over the buses where the unit has
 capacity (rated power, investment limit), or over all its columns when it
 has none there.
 """
-function master_re_profiles(input::MasterProblemInput)::Vector{Vector{Float64}}
+master_re_profiles(input::MasterProblemInput)::Vector{Vector{Float64}} =
+    first(master_re_profiles_with_capacity(input))
+
+"""
+    master_re_profiles_with_capacity(input) -> (profiles, capacities)
+
+`master_re_profiles` and, for each profile, the renewable capacity behind
+it (MW): the rated power of the existing units plus the investment limit of
+the candidate technologies that share it, over all buses.
+"""
+function master_re_profiles_with_capacity(input::MasterProblemInput)
     out = Vector{Float64}[]
+    caps = Float64[]
     function add!(avail::AbstractMatrix, cap::AbstractVector)
         size(avail, 1) == 0 && return
         cols = [b for b in axes(avail, 2) if b <= length(cap) && cap[b] > 0]
         isempty(cols) && (cols = collect(axes(avail, 2)))
         p = vec(sum(avail[:, cols]; dims = 2)) ./ length(cols)
-        any(==(p), out) || push!(out, p)
+        k = findfirst(==(p), out)
+        if k === nothing
+            push!(out, p)
+            push!(caps, 0.0)
+            k = length(out)
+        end
+        caps[k] += sum(max.(cap, 0.0); init = 0.0)
     end
     for g in input.generators
         g.type == "Renewable" && add!(g.availability, g.rated_power)
@@ -435,7 +452,7 @@ function master_re_profiles(input::MasterProblemInput)::Vector{Vector{Float64}}
     for t in input.technologies
         t.type == "Renewable" && add!(t.availability, t.invest_max)
     end
-    return out
+    return out, caps
 end
 
 """
@@ -469,6 +486,293 @@ function master_rep_days(input::MasterProblemInput, y_idx::Int;
     year_start = (y_idx - 1) * tpy
     year_start < size(input.base_demand, 1) || return Int[]
     return [year_start + o + 1 for o in offsets]
+end
+
+# =============================================================================
+# Critical days and storage firm hours (round 33)
+# =============================================================================
+
+# Storage firm hours when there is no renewable profile to derive them from
+const DEFAULT_STORAGE_FIRM_HOURS = 4.0
+
+"""
+    re_supply_index(profiles, capacities, num_years, timesteps_per_year)
+        -> (index, weights, means)
+
+The renewable supply a system can expect at each step of the year, relative
+to its annual mean (the index has mean 1): the horizon mean of each profile
+(`horizon_mean_profile`) × its capacity (MW, existing plus candidate
+potential, `master_re_profiles_with_capacity`), summed, so each profile
+weighs by the renewable energy it can give. Profiles without capacity (or
+no capacities at all) weigh by their relative availability, equally.
+`weights[p]` is the MW behind profile `p` in the index (0 for a profile
+with no energy), `means[p]` its horizon-mean profile. The index is empty
+when no profile has energy.
+"""
+function re_supply_index(profiles::AbstractVector, capacities::AbstractVector,
+                         num_years::Int, timesteps_per_year::Int)
+    means = Vector{Float64}[]
+    weights = Float64[]
+    for (k, p) in enumerate(profiles)
+        isempty(p) && continue
+        m = horizon_mean_profile(Vector{Float64}(p), num_years, timesteps_per_year)
+        push!(means, m)
+        push!(weights, k <= length(capacities) ? max(Float64(capacities[k]), 0.0) : 0.0)
+    end
+    avg = [sum(m) / length(m) for m in means]
+    if !any(w * a > 1e-12 for (w, a) in zip(weights, avg))
+        weights = [a > 1e-12 ? 1.0 / a : 0.0 for a in avg]   # equal relative weights
+    end
+    energy = sum(w * a for (w, a) in zip(weights, avg); init = 0.0)
+    energy > 1e-12 || return Float64[], zeros(length(means)), means
+    index = sum(w .* m for (w, m) in zip(weights, means)) ./ energy
+    return index, weights, means
+end
+
+# Longest run of `true` in `flags` read cyclically (a day's last step is
+# followed by its first: the master's days are cyclic), at most its length
+function longest_cyclic_run(flags::AbstractVector{Bool})::Int
+    n = length(flags)
+    all(flags) && return n
+    best = run = 0
+    for t in 1:(2 * n)
+        run = flags[mod1(t, n)] ? run + 1 : 0
+        best = max(best, run)
+    end
+    return min(best, n)
+end
+
+# Largest share of the `num_days` days on which `profile` gives at most 1 %
+# of its peak at the same step of the day: about 1 for solar (night), low
+# for wind
+function dark_hour_share(profile::AbstractVector{Float64}, num_days::Int,
+                         timesteps_per_day::Int)::Float64
+    thr = 0.01 * maximum(profile)
+    L = length(profile)
+    return maximum(count(profile[mod1((d - 1) * timesteps_per_day + k, L)] <= thr
+                         for d in 1:num_days) / num_days for k in 1:timesteps_per_day)
+end
+
+"""
+    critical_day_plan(demand, num_years, num_critical, min_separation,
+                      timesteps_per_day, timesteps_per_year;
+                      profiles=Vector{Float64}[], capacities=Float64[],
+                      exclude=Int[]) -> (offsets, firm_hours)
+
+The critical days of a development run, chosen ONCE for the horizon like the
+representative days: the `num_critical` days with the largest net load,
+the day mean of
+
+    demand / annual mean demand − renewable supply index
+
+on the horizon-mean system demand (`horizon_mean_year`) and the horizon-mean
+renewable profiles weighted by the capacity behind them (`re_supply_index`,
+renewable supply scaled to the annual demand): the days on which renewables
+cover the least of the demand. Days already modelled (`exclude`, first steps
+0-based) are skipped, and the critical days are `min_separation` days apart
+when the year allows it (one dark spell gives one day). `offsets` are the
+first steps (0-based, within a year), the most critical first.
+
+`firm_hours` is the length of the critical period storage must cover on
+those days (the worst day when `num_critical` is 0), in hours: the longest
+stretch of a critical day without solar (the steps where the profiles that
+are dark at the same hour on at least 90 % of days, the solar ones, give at
+most 1 % of their peak), read cyclically within the day; with no solar
+profile, the longest stretch whose renewable supply stays below the demand;
+$(DEFAULT_STORAGE_FIRM_HOURS) h without renewable profiles. At least one
+step, at most 24 h.
+"""
+function critical_day_plan(demand::Matrix{Float64}, num_years::Int, num_critical::Int,
+                           min_separation::Int, timesteps_per_day::Int,
+                           timesteps_per_year::Int;
+                           profiles::AbstractVector = Vector{Float64}[],
+                           capacities::AbstractVector = Float64[],
+                           exclude::AbstractVector = Int[])
+    tpd = max(timesteps_per_day, 1)
+    step_h = 24.0 / tpd
+    (size(demand, 1) > 0 && timesteps_per_year > 0) ||
+        return Int[], DEFAULT_STORAGE_FIRM_HOURS
+    mean_year = horizon_mean_year(demand, num_years, timesteps_per_year)
+    D = min(size(mean_year, 1), timesteps_per_year) ÷ tpd
+    D >= 1 || return Int[], DEFAULT_STORAGE_FIRM_HOURS
+    L = D * tpd
+    total = vec(sum(mean_year; dims = 2))[1:L]
+    dbar = sum(total) / L
+    d_rel = dbar > 1e-12 ? total ./ dbar : zeros(L)
+    s, w, means = re_supply_index(profiles, capacities, num_years, timesteps_per_year)
+    s_rel = isempty(s) ? zeros(L) : [s[mod1(t, length(s))] for t in 1:L]
+    net = day_means_of(d_rel .- s_rel, D, tpd)
+
+    # The most critical days, apart from the modelled ones and each other
+    taken = Set(o ÷ tpd + 1 for o in exclude)
+    order = sortperm(net; rev = true)
+    chosen = Int[]
+    for sep in unique([max(min_separation, 1), 1])
+        for d in order
+            length(chosen) >= num_critical && break
+            (d in taken || d in chosen) && continue
+            all(abs(d - c) >= sep for c in chosen) || continue
+            push!(chosen, d)
+        end
+    end
+
+    # The critical period storage must cover on those days
+    firm_days = isempty(chosen) ? [order[1]] : chosen
+    dark = if isempty(s)
+        nothing
+    else
+        solar = [k for (k, m) in enumerate(means)
+                 if w[k] > 0 && maximum(m) > 1e-12 && dark_hour_share(m, D, tpd) >= 0.9]
+        if isempty(solar)
+            s_rel .< d_rel
+        else
+            sol = sum(w[k] .* means[k] for k in solar)
+            sol_rel = [sol[mod1(t, length(sol))] for t in 1:L]
+            sol_rel .<= 0.01 * maximum(sol_rel)
+        end
+    end
+    firm_hours = if dark === nothing
+        DEFAULT_STORAGE_FIRM_HOURS
+    else
+        steps = maximum(longest_cyclic_run(dark[(d - 1) * tpd .+ (1:tpd)]) for d in firm_days)
+        clamp(steps * step_h, step_h, 24.0)
+    end
+    return (chosen .- 1) .* tpd, firm_hours
+end
+
+"""
+    representative_day_weights(demand, num_years, offsets, critical_offsets,
+                               timesteps_per_day, timesteps_per_year;
+                               profiles=Vector{Float64}[], prior=Float64[])
+        -> Vector{Float64}
+
+Days of the year each modelled day stands for: the representative days (or
+TSAM periods) starting at `offsets`, then the critical days starting at
+`critical_offsets` (0-based steps within a year). Each critical day stands
+for itself (1 day). The representative days share the rest of the year:
+their `prior` weights (cluster sizes; equal when empty), scaled to the days
+left, then corrected (least change, a ridge least-squares step with the
+weights' sum kept) so that the year the modelled days stand for has the
+same mean system demand and mean of every renewable profile in `profiles` as
+the representative days alone with their prior weights: adding the critical
+days does not change the year's demand or renewable energy. A weight never
+falls below a fifth of its prior; the correction is dropped if it does not
+lower the mismatch. Without critical days, the prior (or equal) weights.
+"""
+function representative_day_weights(demand::Matrix{Float64}, num_years::Int,
+                                    offsets::AbstractVector{<:Integer},
+                                    critical_offsets::AbstractVector{<:Integer},
+                                    timesteps_per_day::Int, timesteps_per_year::Int;
+                                    profiles::AbstractVector = Vector{Float64}[],
+                                    prior::AbstractVector = Float64[])::Vector{Float64}
+    tpd = max(timesteps_per_day, 1)
+    D = timesteps_per_year ÷ tpd
+    nr, nc = length(offsets), length(critical_offsets)
+    nr >= 1 || return ones(nc)
+    p0 = length(prior) == nr ? Float64.(prior) : ones(nr)
+    sum(p0) > 0 || (p0 = ones(nr))
+    p0 .*= D / sum(p0)                 # the representative days alone: the year
+    nc >= 1 || return p0
+    nc < D || return vcat(fill(1e-9, nr), ones(nc))
+    p = p0 .* ((D - nc) / D)           # the year's days the critical ones leave
+
+    # Relative day means (annual mean = 1) of each series with energy
+    series = Vector{Float64}[vec(sum(horizon_mean_year(demand, num_years,
+                                                       timesteps_per_year); dims = 2))]
+    for q in profiles
+        isempty(q) || push!(series, horizon_mean_profile(Vector{Float64}(q), num_years,
+                                                         timesteps_per_year))
+    end
+    day_rel(sv, o, annual) = sum(sv[mod1(o + t, length(sv))] for t in 1:tpd) / tpd / annual
+    rows_r = Vector{Float64}[]
+    rows_c = Vector{Float64}[]
+    for sv in series
+        annual = sum(sv) / length(sv)
+        annual > 1e-12 || continue
+        push!(rows_r, [day_rel(sv, o, annual) for o in offsets])
+        push!(rows_c, [day_rel(sv, o, annual) for o in critical_offsets])
+    end
+    isempty(rows_r) && return vcat(p, ones(nc))
+    A = permutedims(reduce(hcat, rows_r))      # features × representative days
+    C = permutedims(reduce(hcat, rows_c))      # features × critical days
+    target = A * p0                            # the representative days' year
+    resid(wr) = (A * wr .+ C * ones(nc) .- target) ./ D
+    # δ = p .* z with Σ δ = 0: min ‖resid(p + δ)‖² + λ‖z‖²
+    M = (A .* p') ./ D
+    r = -resid(p)
+    λ = 1e-4
+    K = [M' * M + λ * I  p; p'  0.0]
+    z = try
+        (K \ vcat(M' * r, 0.0))[1:nr]
+    catch
+        zeros(nr)
+    end
+    wr = p .* (1 .+ max.(z, -0.8))
+    wr .*= (D - nc) / sum(wr)
+    if sum(abs2, resid(wr)) >= sum(abs2, resid(p))
+        wr = p
+    end
+    return vcat(wr, ones(nc))
+end
+
+"""
+    master_day_plan(input) -> (offsets, weights, num_rep)
+
+The days the master models in every year (first steps, 0-based, within a
+year) and the days of the year each stands for: the representative days
+(`master_rep_day_offsets`), then the critical days. The critical days are
+`input.critical_day_offsets` when the representative days are given (the
+runner chooses both once for a run), otherwise `input.critical_days` days
+chosen by `critical_day_plan`. The weights are `input.rep_day_weights` when
+they match, otherwise `representative_day_weights` (the year's days shared
+equally by the representative days when there are no critical days).
+`num_rep` is the number of representative days.
+"""
+function master_day_plan(input::MasterProblemInput)
+    rep = master_rep_day_offsets(input)
+    tres = input.temporal_resolution_hours
+    tpd = 24 ÷ tres
+    tpy = (isempty(input.hours_per_year) ? 8760 : input.hours_per_year[1]) ÷ tres
+    ny = length(input.years)
+    crit = if !isempty(input.rep_day_offsets)
+        input.critical_day_offsets
+    elseif input.critical_days > 0
+        profiles, caps = master_re_profiles_with_capacity(input)
+        first(critical_day_plan(input.base_demand, ny, input.critical_days,
+            input.min_day_separation, tpd, tpy; profiles, capacities = caps, exclude = rep))
+    else
+        Int[]
+    end
+    offsets = vcat(rep, crit)
+    weights = if length(input.rep_day_weights) == length(offsets)
+        input.rep_day_weights
+    elseif isempty(crit)
+        fill(tpy / tpd / max(length(rep), 1), length(rep))
+    else
+        representative_day_weights(input.base_demand, ny, rep, crit, tpd, tpy;
+            profiles = master_re_profiles(input))
+    end
+    return offsets, Float64.(weights), length(rep)
+end
+
+"""
+    master_storage_firm_hours(input) -> Float64
+
+Hours a battery must sustain its discharge to count as firm power in the
+capacity adequacy constraint: `input.storage_firm_hours` when positive,
+otherwise derived from the data (`critical_day_plan`: the longest stretch
+without solar on the critical days).
+"""
+function master_storage_firm_hours(input::MasterProblemInput)::Float64
+    input.storage_firm_hours > 0 && return input.storage_firm_hours
+    tres = input.temporal_resolution_hours
+    tpd = 24 ÷ tres
+    tpy = (isempty(input.hours_per_year) ? 8760 : input.hours_per_year[1]) ÷ tres
+    profiles, caps = master_re_profiles_with_capacity(input)
+    return last(critical_day_plan(input.base_demand, length(input.years),
+        max(input.critical_days, length(input.critical_day_offsets), 1),
+        input.min_day_separation, tpd, tpy;
+        profiles, capacities = caps, exclude = master_rep_day_offsets(input)))
 end
 
 # =============================================================================
@@ -1832,6 +2136,16 @@ function firm_capacity_credit(availability::AbstractMatrix, b::Int, peak_steps;
 end
 
 """
+    usable_energy_ratio(bat, b) -> Float64
+
+Energy a battery (or battery technology) delivers at bus `b` from a full
+charge, per MWh of its energy capacity: (soc_max − soc_min) × discharge
+efficiency.
+"""
+usable_energy_ratio(bat::Union{BatteryConfig, BatteryTechnologyConfig}, b::Int)::Float64 =
+    max(bat.soc_max[b] - bat.soc_min[b], 0.0) * bat.discharge_efficiency[b]
+
+"""
     add_capacity_adequacy_constraints!(model, vars, input)
 
 Add capacity adequacy constraints ensuring total capacity meets peak demand.
@@ -1842,7 +2156,12 @@ This is a simplified planning constraint that requires, per node:
 Capacity counts at its firm share (`firm_capacity_credit`) × risk
 coefficient: variable renewables at their capacity credit, every other
 generator, technology and storage unit at its mean availability over the
-node's peak period.
+node's peak period. A battery (existing, life-extended or built from a
+battery technology) counts at most the power its usable energy sustains
+over the critical period, min(power, usable energy / H) with H =
+`master_storage_firm_hours` and usable energy = energy × (soc_max − soc_min)
+× discharge efficiency (`usable_energy_ratio`): a short battery cannot carry
+a long low-renewable night at full power.
 
 Imports between two nodes are limited to the transfer capacity between
 their buses (existing lines plus cumulative transfer investment), so a node
@@ -1862,6 +2181,9 @@ function add_capacity_adequacy_constraints!(
 
     # Reserve margin (require extra capacity above peak, configurable)
     reserve_margin = input.reserve_margin
+    # Hours a battery must sustain its output to count as firm
+    firm_h = n_bat + length(input.battery_technologies) > 0 ?
+        master_storage_firm_hours(input) : DEFAULT_STORAGE_FIRM_HOURS
 
     n_nodes = input.network.num_nodes
     b2n = input.network.bus_to_node
@@ -1938,7 +2260,8 @@ function add_capacity_adequacy_constraints!(
 
                 end
 
-                # Battery power capacity: unified retirement (existing only)
+                # Battery power capacity: unified retirement (existing only),
+                # firm up to its usable energy over the firm hours
                 for b in 1:n_bat
                     bat = input.batteries[b]
                     base_power = bat.max_discharge_power[n]
@@ -1949,14 +2272,18 @@ function add_capacity_adequacy_constraints!(
                     bat_risk = n <= length(bat.risk_coefficient) ? bat.risk_coefficient[n] : 1.0
                     bat_risk *= firm_capacity_credit(bat.availability, n, peak; variable = false,
                         outage = t -> master_outage_factor(input.bat_outage_factors, b, 0, t))
+                    # Firm share of its power: min(1, usable energy / H / power);
+                    # a life-extended battery keeps its energy-to-power ratio
+                    firm_share = base_power > 0 ? min(1.0,
+                        usable_energy_ratio(bat, n) * bat.capacity[n] / base_power / firm_h) : 0.0
 
                     # Existing: active if age < lifetime
                     if age_at_year < lifetime && base_power > 0
-                        add_to_expression!(total_capacity, base_power * bat_risk)
+                        add_to_expression!(total_capacity, base_power * firm_share * bat_risk)
                     elseif base_power > 0
                         life_ext_var = vars.bat_life_extension[y_idx][b][n]
                         if life_ext_var !== nothing
-                            add_to_expression!(total_capacity, life_ext_var, bat_risk)
+                            add_to_expression!(total_capacity, life_ext_var, firm_share * bat_risk)
                         end
                     end
                 end
@@ -1978,18 +2305,22 @@ function add_capacity_adequacy_constraints!(
                     end
                 end
 
-                # Battery technology investments: cumulative power
+                # Battery technology investments: the power built and in
+                # service, firm up to its usable energy over the firm hours:
+                # firm ≤ power, firm ≤ usable energy / H
                 for bt in 1:length(input.battery_technologies)
                     btech = input.battery_technologies[bt]
-                    bt_lifetime = btech.life_time[n]
+                    btech.invest_max_power[n] > 0 || continue
                     btech_risk = n <= length(btech.risk_coefficient) ? btech.risk_coefficient[n] : 1.0
                     btech_risk *= firm_capacity_credit(btech.availability, n, peak; variable = false)
-                    for y in 1:vars.years_per_inv_period:y_idx
-                        inv_age = y_idx - y
-                        if inv_age < bt_lifetime
-                            add_to_expression!(total_capacity, vars.bat_tech_power_investment[y][bt][n], btech_risk)
-                        end
-                    end
+                    firm = @variable(model, lower_bound = 0,
+                        base_name = "bat_tech_firm_y$(y_idx)_bt$(bt)_b$(n)")
+                    @constraint(model, firm <= bat_tech_power_built(vars, input, bt, n, y_idx),
+                        base_name = "bat_tech_firm_power_y$(y_idx)_bt$(bt)_b$(n)")
+                    @constraint(model, firm_h * firm <=
+                        usable_energy_ratio(btech, n) * bat_tech_energy_built(vars, input, bt, n, y_idx),
+                        base_name = "bat_tech_firm_energy_y$(y_idx)_bt$(bt)_b$(n)")
+                    add_to_expression!(total_capacity, firm, btech_risk)
                 end
             end
 
@@ -4064,7 +4395,9 @@ end
 Add operational validation through representative days.
 This is CRITICAL for linking investment decisions to actual generation feasibility.
 
-Exactly mirrors legacy _add_representative_days_validation.
+Every year models the same days of the year (`master_day_plan`): the
+representative days, then the critical days (lowest renewable supply
+against demand), each scaled to the year by the days it stands for.
 """
 function add_representative_days_validation!(
     model::Model,
@@ -4077,8 +4410,11 @@ function add_representative_days_validation!(
     num_years = length(base_input.years)
     timesteps_per_day = 24 ÷ base_input.temporal_resolution_hours
     day_offset = 1000 * scenario_idx   # keeps day names distinct per scenario
-    # The same days of the year for every year (and every scenario)
-    offsets = master_rep_day_offsets(base_input)
+    # The same days of the year for every year (and every scenario): the
+    # representative days, then the critical days, with the days of the
+    # year each stands for
+    offsets, day_weights, n_rep = master_day_plan(base_input)
+    tres = max(1.0, base_input.temporal_resolution_hours)
     # Least RE share the existing renewables leave each system the year
     # before (re_cap_exemption)
     prev_floor = nothing
@@ -4094,11 +4430,10 @@ function add_representative_days_validation!(
             @warn "No representative days selected for year $(input.years[y_idx])"
             continue
         end
-        # Each day stands for the year's days over the days selected
-        nd = length(rep_days)
-        y_idx == 1 && scenario_idx <= 1 && warn_fewer_rep_days(input, nd)
+        # Each day stands for `day_weights` days of the year
+        y_idx == 1 && scenario_idx <= 1 && warn_fewer_rep_days(input, n_rep)
         periods = [(h, min(h + timesteps_per_day - 1, size(input.base_demand, 1)) - h + 1,
-                    rep_day_scaling(input, nd)) for h in rep_days]
+                    tres * day_weights[k]) for (k, h) in enumerate(rep_days)]
         cap_exempt, prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
 
         vars.operational_costs[y_idx] = AffExpr[]
@@ -4119,6 +4454,9 @@ function add_representative_days_validation!(
             end
 
             day_demand = input.base_demand[start_hour:end_hour, :]
+            # Step length × the days of the year this day stands for
+            weight = day_weights[day_idx]
+            scale = tres * weight
 
             # Create PowerSystemVariables for this day
             ps_vars = create_day_ps_vars!(model, input, y_idx, day_idx + day_offset, hours)
@@ -4127,28 +4465,27 @@ function add_representative_days_validation!(
             tech_output, tech_day_cost = add_day_operational_constraints!(
                 model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour;
                 re_cap_exempt = cap_exempt, curtailment = curt_year,
-                period_scale = rep_day_scaling(input, nd)
+                period_scale = scale
             )
 
             # Operational cost scaled to the year (candidate technologies' too)
-            day_cost = calculate_day_operational_cost(ps_vars, input, y_idx, hours;
-                tech_output=tech_output, tech_day_cost=tech_day_cost, ndays=nd)
+            day_cost = calculate_day_operational_cost_tsam(ps_vars, input, y_idx, hours, weight;
+                tech_output=tech_output, tech_day_cost=tech_day_cost)
             # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
             add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
                 extra = k -> master_fuel_capacity(vars, input, y_idx, k)),
-                master_fuel_day_scale(input, nd))
+                weight)
             push!(vars.operational_costs[y_idx], day_cost)
-            record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
-                rep_day_scaling(input, nd))
+            record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours, scale)
 
             # The day's CO2, renewable output and demand, scaled to the
             # year like its cost
             for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
-                add_to_expression!(annual_co2[k], e, rep_day_scaling(input, nd))
+                add_to_expression!(annual_co2[k], e, scale)
             end
             add_day_re!(re_energy, re_generation, re_demand, ps_vars, tech_output, input, y_idx,
-                        start_hour, hours, rep_day_scaling(input, nd))
+                        start_hour, hours, scale)
         end
 
         add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx)

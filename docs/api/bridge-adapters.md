@@ -262,6 +262,10 @@ class MasterProblemAdapter:
 | `temporal_resolution_hours` | `int` | Hours per timestep for representative days (e.g., 24). |
 | `representative_days_per_year` | `int` | Number of representative days per year for operational validation. |
 | `rep_day_offsets` | `list[int] \| None` | First step (0-based, within a year) of each representative day, the same for every year; the runner passes the days it chose once for the run (`master_rep_day_offsets`). `None`: the Julia master chooses them from the horizon-mean demand and its renewable profiles (`master_rep_day_offsets`). |
+| `critical_day_offsets` | `list[int] \| None` | First step (0-based, within a year) of each critical day (`master_critical_days`), modelled with the representative days in every year. |
+| `rep_day_weights` | `list[float] \| None` | Days of the year each representative day and then each critical day stands for (`master_day_weights`); `None`: the year shared equally by the representative days. |
+| `storage_firm_hours` | `float \| None` | Hours a battery must sustain to count as firm in the capacity adequacy (min(power, usable energy / hours)); `None`: derived from the data. |
+| `critical_days` | `int` | Critical days the Julia master chooses itself when `rep_day_offsets` is `None` (default 0). |
 | `investment_resolution_hours` | `int` | Hours per investment period (8760 = one decision per year). |
 | `use_tsam` | `bool` | Use Time Series Aggregation Method (TSAM) clustering instead of peak-day selection. |
 | `tsam_period_start_hours` | `list[list[int]]` | Per-year start hours for TSAM periods (1-indexed); the runner passes the same days of the year for every year. |
@@ -576,6 +580,29 @@ def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
 ```
 
 The representative days of a development run, chosen once: the first step (0-based, within a year) of each day, for every planning year. Calls the Julia `representative_day_offsets` on `demand` (steps × nodes, `num_years` yearly blocks) and `profiles` (1-D renewable availability series at the same resolution, one or several years): the peak day of the horizon-mean demand, then one day per segment of the year such that the days' mean demand and mean of each profile match the annual means. The runner passes the distinct availability profiles of the renewable generators and candidate technologies, logs the dates and the ratios (`master_rep_day_ratios`), and passes the days to every master as `rep_day_offsets`.
+
+### master_critical_days
+
+```python
+def master_critical_days(demand: np.ndarray, num_years: int, num_days: int,
+                         min_separation: int, resolution_hours: int = 1,
+                         profiles: list[np.ndarray] | None = None,
+                         capacities: list[float] | None = None,
+                         exclude: list[int] | None = None) -> tuple[list[int], float]
+```
+
+The critical days of a development run, chosen once (Julia `critical_day_plan`): the `num_days` days with the largest net load, the day mean of the horizon-mean system demand over its annual mean minus the renewable supply (the `profiles`, weighted by the MW behind each, `capacities`) over its annual mean, skipping `exclude` (the representative days or TSAM periods) and `min_separation` days apart; the most critical first, as 0-based steps within a year. Also returns the storage firm hours: the longest stretch without solar on those days.
+
+### master_day_weights
+
+```python
+def master_day_weights(demand: np.ndarray, num_years: int, offsets: list[int],
+                       critical_offsets: list[int], resolution_hours: int = 1,
+                       profiles: list[np.ndarray] | None = None,
+                       prior: list[float] | None = None) -> list[float]
+```
+
+Days of the year each representative day (or TSAM period) and then each critical day stands for (Julia `representative_day_weights`): 1 per critical day; the representative days share the rest from `prior` (equal when `None`, the cluster sizes for TSAM), corrected so the year keeps the demand and renewable energy of the representative days alone.
 
 ### master_rep_day_ratios
 
