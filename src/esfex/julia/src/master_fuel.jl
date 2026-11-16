@@ -524,7 +524,7 @@ function extract_master_fuel_solution(vars::MasterProblemVariables, input::Maste
     out = Dict{String, Any}()
     fv = vars.fuel
     (fv === nothing || !has_master_fuel(input)) && return out
-    vals(d) = Dict(y => Dict(k => Float64[value(x) for x in v] for (k, v) in by)
+    vals(d) = Dict(y => Dict(k => Float64[capacity_value(x) for x in v] for (k, v) in by)
                    for (y, by) in d)
     out["storage"] = vals(fv.storage)
     out["transport"] = vals(fv.transport)
@@ -541,7 +541,7 @@ function extract_master_fuel_solution(vars::MasterProblemVariables, input::Maste
                           for (e, ec) in enumerate(input.primary_energy.electrolyzers))
         for k in master_fuel_keys(input)
             kind, name, i = k
-            v = value(master_fuel_extra_expr(fv, input, y, k))
+            v = capacity_value(master_fuel_extra_expr(fv, input, y, k))
             if kind === :storage
                 sto_cap[y][name][i] = v
             elseif kind === :transport

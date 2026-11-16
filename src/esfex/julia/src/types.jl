@@ -2756,7 +2756,9 @@ mutable struct MasterProblemVariables
     bat_life_extension::Dict{Int, Dict{Int, Vector{Union{VariableRef, Nothing}}}}
 
     # RE penetration per (system_idx, year_idx)
-    re_energy_ratio::Dict{Tuple{Int,Int}, VariableRef}
+    # (a variable in the Benders master, an expression of the representative
+    # days elsewhere: define_re_share!)
+    re_energy_ratio::Dict{Tuple{Int,Int}, Union{VariableRef, AffExpr}}
 
     # Operational subproblems: (year_idx, day_idx) => (model, vars)
     operational_subproblems::Dict{Tuple{Int,Int}, Tuple{Model, PowerSystemVariables}}

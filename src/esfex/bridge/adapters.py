@@ -3890,7 +3890,8 @@ class MasterProblemAdapter:
         verbose_flag = "true" if self._solver.verbose else "false"
         jl.seval(f'set_optimizer_attribute(_mp_model, "output_flag", {verbose_flag})')
         logger.debug(f"Solver output_flag={self._solver.verbose}, calling optimize!...")
-        jl.seval("optimize!(_mp_model)")
+        # NUMERICAL_ERROR: one more solve with the solver's retry parameters
+        jl.seval("ESFEX.optimize_master!(_mp_model)")
 
         status = jl.seval("termination_status(_mp_model)")
         status_str = str(status)

@@ -664,7 +664,8 @@ Bus demand is derived from the parent node's demand scaled by demand_fraction.
 function add_dc_constraints!(model, transmission::TransmissionDC,
                              vars::PowerSystemVariables, input;
                              extra_injections_fn::Union{Nothing, Function} = nothing,
-                             expandable_lines::Set{Int} = Set{Int}())
+                             expandable_lines::Set{Int} = Set{Int}(),
+                             expansion_max::AbstractDict{Int, Float64} = Dict{Int, Float64}())
     n_bus = transmission.num_buses
     n_line = length(transmission.lines)
     hours = input.temporal.hours
@@ -783,15 +784,22 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 
                 # Incremental segment variables with PWL loss accumulation.
                 # Segments span the base capacity; on a line that investment can
-                # expand, the last one is left open so flow can use the built MW.
+                # expand, the last one also spans the MW that can be built
+                # (`expansion_max`), or is left open when that has no limit.
+                # An open segment in both directions lets f_pos and f_neg grow
+                # together: Cuba's masters had one on every line (round 36),
+                # and barrier iterates ran to 10⁶ MW and ended NUMERICAL_ERROR.
                 loss_expr = AffExpr(0.0)
                 fpos_sum = AffExpr(0.0)
                 fneg_sum = AffExpr(0.0)
                 dps = Vector{VariableRef}(undef, N)
                 dns = Vector{VariableRef}(undef, N)
-                open_last = ℓ in expandable_lines
+                widths = copy(pwl.segment_widths[ℓ])
+                extra = ℓ in expandable_lines ? get(expansion_max, ℓ, Inf) : 0.0
+                open_last = !isfinite(extra)
+                open_last || (widths[N] += extra)
                 for k in 1:N
-                    w = pwl.segment_widths[ℓ][k]
+                    w = widths[k]
                     m = pwl.slopes[ℓ][k]
                     dp = @variable(model, lower_bound=0,
                         base_name="dp_$(ℓ)_$(k)_$(t)")
@@ -817,7 +825,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 loss_con = @constraint(model, ploss == loss_expr)
                 pwl_loss_by_line[ℓ][t] = ploss
                 push!(loss_repair.blocks, LossBlock(loss_con, ploss, pf_by_line[ℓ][t],
-                    dps, dns, pwl.segment_widths[ℓ], pwl.slopes[ℓ], open_last,
+                    dps, dns, widths, pwl.slopes[ℓ], open_last,
                     group0 + t, 0, 0.0, 0))
             end
         end

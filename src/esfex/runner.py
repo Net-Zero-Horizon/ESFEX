@@ -399,6 +399,11 @@ def _merge_pe_windows(windows, period_steps: int) -> dict:
     return merged
 
 
+class RunAbortedError(RuntimeError):
+    """A run stopped before it produced its results (e.g. the master problem
+    found no plan): ``esfex run`` reports it and exits with a non-zero code."""
+
+
 @dataclass
 class MasterDayPlan:
     """The days every master of a run models, chosen once
@@ -641,11 +646,22 @@ def technology_unit_fields(tech, rep, rep_curve=None) -> dict:
     }
 
 
-# Master builds (MW, MWh) at or below this are solver noise, not builds.
-# Anything larger is kept in full: the master paid for it, so the dispatch
-# and the later years' fleet see the same capacity (a battery's power and
-# energy always together).
-MIN_BUILD = 1e-6
+# Master builds (MW, MWh) at or below this are solver noise, not builds: the
+# master's CAPACITY_TOL (master_problem.jl), which already reports them as 0.
+# An interior-point solve without crossover leaves values like 1e-6 MW on
+# capacity it did not build; carried into a later myopic year or the dispatch
+# they made rows like `gen <= 2e-9` (round 36). Anything larger is kept in
+# full: the master paid for it, so the dispatch and the later years' fleet
+# see the same capacity (a battery's power and energy always together).
+MIN_BUILD = 1e-3
+
+
+def remaining_limit(limit: float, used: float) -> float:
+    """Room left under an investment limit after *used* was built: 0 when
+    at most :data:`MIN_BUILD` is left (a master that built up to the limit
+    leaves e.g. 3e-7 MW, which the next myopic year must not see as room)."""
+    left = float(limit) - float(used)
+    return left if left > MIN_BUILD else 0.0
 
 _MASTER_BUILD_CATEGORIES = (
     'tech_investment', 'bat_tech_power_investment', 'bat_tech_capacity_investment',
@@ -1908,8 +1924,8 @@ class Orchestrator:
                 the Feb 29 rows dropped are those of the data's own calendar
                 (``date_start``).
             master_only: Stop after step 1 (development mode only). The
-                decisions are left in ``self.master_solution`` (None if the
-                master problem failed) and no year results are returned.
+                decisions are left in ``self.master_solution`` and no year
+                results are returned.
             dispatch_years: Run the operational dispatch only for these years
                 of the horizon (labels); the others are skipped, while every
                 year keeps its own data block (year index x 8760 h) and the
@@ -1920,6 +1936,10 @@ class Orchestrator:
 
         Returns:
             List of YearResults for each simulated year
+
+        Raises:
+            RunAbortedError: the master problem (development mode) found no
+                plan, so nothing was dispatched.
         """
         if master_only and self.config.simulation_mode != "development":
             raise ValueError(
@@ -2257,8 +2277,10 @@ class Orchestrator:
 
             if master_investments is None:
                 logger.error("Master problem failed. Aborting simulation.")
-                console.print("[bold red]Master problem failed. Aborting.[/bold red]")
-                return []
+                self._pm.teardown_all()
+                raise RunAbortedError(
+                    "the master problem found no plan (see the log above); "
+                    "no operational dispatch was run")
 
             total_inv = sum(len(v) for v in master_investments.values())
             total_ret = sum(len(v) for v in master_retirements.values())
@@ -2965,7 +2987,7 @@ class Orchestrator:
                 upd["rated_power"] = [float(r) + _at(added[key], n)
                                       for n, r in enumerate(e.rated_power)]
             if key in used:
-                upd["invest_max_power"] = [max(0.0, float(m) - _at(used[key], n))
+                upd["invest_max_power"] = [remaining_limit(m, _at(used[key], n))
                                            for n, m in enumerate(e.invest_max_power)]
             elz[key] = e.model_copy(update=upd)
         return system_config.model_copy(update={"electrolyzers": elz})
@@ -4501,7 +4523,7 @@ class Orchestrator:
             return _per_node_list(arr, n, default)
 
         def _reduce(limits, used):
-            return [max(0.0, lim - float(used[i])) for i, lim in enumerate(rep(limits))]
+            return [remaining_limit(lim, used[i]) for i, lim in enumerate(rep(limits))]
 
         # *built* arrays are per master bus: one per node on a node-level
         # master, the system's buses otherwise
@@ -4614,7 +4636,7 @@ class Orchestrator:
             convs = getattr(sys, f"{kind}_converters", None) or []
             if idx < len(convs):
                 convs[idx].rated_power_mva += mw
-                convs[idx].invest_max_power = max(0.0, convs[idx].invest_max_power - mw)
+                convs[idx].invest_max_power = remaining_limit(convs[idx].invest_max_power, mw)
 
         # Reservoir capacity built so far, likewise (MWh, at its node)
         gens = list(sys.generators.values())
@@ -4625,7 +4647,7 @@ class Orchestrator:
                 cap = _pad_zeros(gen.reservoir_capacity, n)
                 lim = _pad_zeros(gen.reservoir_invest_max, n)
                 cap[node] += mwh
-                lim[node] = max(0.0, lim[node] - mwh)
+                lim[node] = remaining_limit(lim[node], mwh)
                 gen.reservoir_capacity, gen.reservoir_invest_max = cap, lim
 
         return sys, built_gens, built_bats

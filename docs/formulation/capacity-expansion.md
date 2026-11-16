@@ -65,7 +65,7 @@ Investment variables exist only for period-start years \(y \in \mathcal{Y}^{inv}
 |----------|--------|-------|-------------|------------|
 | \(X_{y,g,n}\) | \([0, \bar{P}_{g,n}(1-\delta_{g,n})^{a}]\) | MW | Capacity of generator \(g\) kept past its lifetime | `gen_life_extension` (`gen_life_ext_*`) |
 | \(X^{bat}_{y,b,n}\) | \([0, \bar{P}^{bat}_{b,n}]\) | MW | Battery power kept past its lifetime | `bat_life_extension` (`bat_life_ext_*`) |
-| \(\rho_{\sigma,y}\) | \(\geq 0\) | -- | Renewable generation of system \(\sigma\) over its demand, the growth cap's link from one year to the next (RE-2b; not the RE share) | `re_energy_ratio[(σ,y)]` |
+| \(\rho_{\sigma,y}\) | \(\geq 0\) | -- | Renewable generation of system \(\sigma\) over its demand, the growth cap's link from one year to the next (RE-2b; not the RE share; an expression of the day variables except in the Benders master) | `re_energy_ratio[(σ,y)]` |
 | \(s^{re}_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Renewable energy missing from system \(\sigma\)'s RE target | `slack_re_target[(0,σ,y)]` (scenario \(\omega\): `[(ω,σ,y)]`) |
 | \(s^{grow}_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Renewable energy system \(\sigma\) uses above its growth cap (RE-3b) | `slack_re_cap_s{σ}_y{y}` (`model.ext[:re_cap_slack]`) |
 | \(s^{cap}_{y,n}\) | \(\mathbb{R}_+\) | MW | Capacity adequacy shortfall per node | `slack_capacity[(y,n)]` |
@@ -472,11 +472,13 @@ E^{RE}_{\sigma,y} = \sum_{d} w_d \sum_{t} \Big( \sum_{g \in \mathcal{G}_{RE}} \s
 
 with \(w_d = \Delta t \, \omega_d\) for a representative or critical day (\(\omega_d = (H_{year}/24)/D_r\) without critical days) and \(\Delta t \, w_p\) for a TSAM period, and \(D_{n,t}\) a bus's share (`demand_fraction`) of its node's demand with the year's growth (`system_day_renewable`, `system_day_generation`, `system_day_demand`). Battery discharge does not count, as in the dispatch. RE-2 is linear: the target is data. The shortfall \(s^{re}_{\sigma,y}\) (MWh/year) is charged at \(c^{fre}\) in the year's operating cost and discounted like it; in a stochastic master each scenario has its own shortfall, priced with its `penalty_fre_penetration` multiplier and weighted by its probability. The target is a planning target: a day rich in sun or wind may make up for a poor one, as over a dispatch window. Each system of a merged run has its own target and its own slack. Earlier versions held the target on every representative day (its shortfall at the same \(c^{fre}\) per MWh), so a day's surplus could not make up for another's, plus a yearly ratio with a fraction-valued slack that never bound.
 
-**RE-2b: Renewable generation over demand** (`re_energy_ratio_s{σ}_y{y}`). \(\rho_{\sigma,y}\) carries a year's renewable generation (after curtailment) to the next year's growth cap (RE-3b) and, in Benders, from one year's subproblem to the next (BEN-RE):
+**RE-2b: Renewable generation over demand** (`re_energy_ratio[(σ,y)]`). \(\rho_{\sigma,y}\) carries a year's renewable generation (after curtailment) to the next year's growth cap (RE-3b) and, in Benders, from one year's subproblem to the next (BEN-RE):
 
 \[
-\rho_{\sigma,y} \, D_{\sigma,y} = E^{RE}_{\sigma,y} \tag{RE-2b}
+\rho_{\sigma,y} = E^{RE}_{\sigma,y} / D_{\sigma,y} \tag{RE-2b}
 \]
+
+In a master with representative days or TSAM periods \(\rho_{\sigma,y}\) is this expression of the day variables, not a variable with a defining row: the row \(\rho_{\sigma,y} D_{\sigma,y} = E^{RE}_{\sigma,y}\) put the year's demand (MWh, about \(2 \times 10^7\) for Cuba) in the matrix next to the day weights, the widest coefficient range of the master. In the Benders master, which has no days, it is a variable.
 
 It is not the RE share (that is \(E^{RE}/G\), a ratio of two decisions) and has no upper bound. In a stochastic master it is the probability-weighted generation over the weighted demand. The reported share (`re_penetration_by_year`, §12) is the achieved \(E^{RE}/G\), probability-weighted in a stochastic master.
 
