@@ -90,7 +90,9 @@ Strategic multi-year capacity expansion planning. See [Master Problem](../user-g
 |-------|---------|-------------|
 | Enable Stochastic | Off | Two-stage stochastic master over the scenarios defined under **Scenarios** in the tree (see [Scenarios](#scenarios)). |
 | Representative Days | 5 | Days per year used to estimate operating cost in the master (1 to 365): the peak-demand day plus days whose mean demand and renewable availability match the year's. Ignored when TSAM is on. |
-| Min Day Separation | 5 | Minimum distance, in **days**, between selected representative days (0 to 365 in the form; the schema requires at least 1). Ignored when TSAM is on. |
+| Min Day Separation | 5 | Minimum distance, in **days**, between selected representative days, and between critical days (0 to 365 in the form; the schema requires at least 1). Stays on with TSAM for the critical days. |
+| Critical Days | 3 | Days with the lowest renewable supply against demand that the master models besides the representative days or TSAM periods, one day of the year each (0 to 365; 0 = none). See [Critical Days](../user-guide/master-problem.md#critical-days). |
+| Storage Firm Hours | Auto | Hours a battery must sustain to count as firm power in the capacity adequacy: it counts min(power, usable energy / hours). Auto (0) = the longest stretch without solar on the critical days. |
 | Solver Method | Monolithic (full model) | `Monolithic (full model)` or `Benders Decomposition` |
 | Max Iterations | 50 | Benders only |
 | Convergence Tolerance | 0.0001 | Benders only: relative gap for convergence |

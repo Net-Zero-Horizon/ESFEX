@@ -113,11 +113,13 @@ The reduction removes only passive buses: buses with role `connection` that have
 |---|---|---|---|
 | `stochastic` | bool | `false` | Use the stochastic master (needs `stochastic_scenarios` in the system; falls back to deterministic if none are defined) |
 | `representative_days` | int (≥ 1) | `5` | Representative days per year, chosen once from the horizon-mean demand and renewable availability: the peak-demand day plus days whose mean demand and mean availability of each renewable profile match the year's. Every year (and every annual master of a myopic run) models the same calendar days (ignored when `use_tsam: true`) |
-| `min_day_separation` | int (≥ 1) | `5` | Minimum separation between representative days, in **days** (ignored when `use_tsam: true`) |
+| `min_day_separation` | int (≥ 1) | `5` | Minimum separation between representative days, in **days** (ignored for them when `use_tsam: true`), and between critical days |
+| `critical_days` | int (≥ 0) | `3` | Critical days the master models besides the representative days (or TSAM periods): the days of the horizon with the largest net load (horizon-mean demand over its mean minus the renewable profiles, weighted by the capacity behind each, over their mean), chosen once for every planning year, each standing for one day of the year; the representative days share the rest, reweighted to keep the year's demand and renewable energy. 0 disables them. Not modelled by Benders |
+| `storage_firm_hours` | float (> 0) or null | `null` | Hours a battery must sustain its output to count as firm power in the master's capacity adequacy constraint: it counts min(power, usable energy / hours). null derives them from the data: the longest stretch without solar on the critical days (without a solar profile, the longest stretch with renewable supply below demand; 4 h without renewable profiles) |
 | `solver_method` | `monolithic` \| `benders` | `"monolithic"` | Master-problem solver: 'monolithic' or 'benders'. |
 | `benders_max_iterations` | int (≥ 1) | `50` | Maximum Benders iterations (benders solver only). |
 | `benders_tolerance` | float (> 0.0) | `0.0001` | Relative optimality-gap tolerance for Benders convergence. |
-| `use_tsam` | bool | `false` | Enable TSAM clustering for representative period selection, once for the horizon (the same periods every year). When true, representative_days and min_day_separation are ignored. |
+| `use_tsam` | bool | `false` | Enable TSAM clustering for representative period selection, once for the horizon (the same periods every year). When true, representative_days is ignored (min_day_separation still spaces the critical days, which are added to the periods). |
 | `tsam_num_periods` | int (2–365) | `10` | Number of representative periods for TSAM clustering. |
 | `tsam_method` | `kmedoids` \| `kmeans` | `"kmedoids"` | Clustering method for TSAM. |
 | `tsam_inter_period_linking` | bool | `true` | Enable inter-period SOC linking for seasonal storage representation. |
