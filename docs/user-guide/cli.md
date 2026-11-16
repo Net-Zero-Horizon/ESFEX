@@ -127,6 +127,8 @@ Optimization completed successfully!
 Results saved to: results
 ```
 
+A run that does not finish its work ends instead with `Optimization failed: …` (for instance when the master problem of a `development` run finds no plan: nothing is dispatched) or, when some operational windows of a year failed to solve, with `Optimization finished with errors: operational windows of year(s) … failed to solve and have no dispatch` (the results of the other hours are saved). Both exit with code 1.
+
 #### Dry-Run Output
 
 `--dry-run` loads the configuration (the same checks as [`esfex validate`](#esfex-validate)) and exits. It does not start Julia and does not compute windows or subproblems. Without `-v` it prints only the closing line; add `-v` to also see the header and summary table:
@@ -140,7 +142,7 @@ Dry run mode - not executing optimization
 | Code | Meaning |
 |------|---------|
 | `0` | Success (or dry run completed) |
-| `1` | Configuration error or optimization failure |
+| `1` | Configuration error or optimization failure: the master problem found no plan, every window of a year failed, or some windows of a year failed (partial results) |
 | `2` | Usage error (missing `-c`, file not found, unknown option) |
 
 

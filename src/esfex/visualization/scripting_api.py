@@ -884,6 +884,12 @@ class ESFEXAPI:
         list[YearResults]
             One result object per simulated year.
 
+        Raises
+        ------
+        esfex.runner.RunAbortedError
+            The master problem (``development`` mode) found no plan; nothing
+            was dispatched.
+
         Example
         -------
         >>> cfg = esfex.load_config("config.yaml")
@@ -968,11 +974,14 @@ class ESFEXAPI:
 
         config, config_path = ESFEXAPI._run_config(
             config, solver, simulation_mode="development")
+        from esfex.runner import RunAbortedError
+
         orch = Orchestrator(config, output_dir=Path(output_dir), config_path=config_path)
-        orch.run(years=years, start_year=start_year, master_only=True)
-        if orch.master_solution is None:
+        try:
+            orch.run(years=years, start_year=start_year, master_only=True)
+        except RunAbortedError as e:
             raise RuntimeError(
-                f"Master problem failed; see the log in {Path(output_dir) / 'logs'}")
+                f"Master problem failed; see the log in {Path(output_dir) / 'logs'}") from e
         return orch.master_solution
 
     @staticmethod
