@@ -2188,6 +2188,8 @@ def config_to_global_settings(
         g.mp_stochastic = getattr(mp, 'stochastic', False)
         g.mp_representative_days = getattr(mp, 'representative_days', 5)
         g.mp_min_day_separation = getattr(mp, 'min_day_separation', 5)
+        g.mp_critical_days = getattr(mp, 'critical_days', 3)
+        g.mp_storage_firm_hours = float(getattr(mp, 'storage_firm_hours', None) or 0.0)
         g.mp_solver_method = getattr(mp, 'solver_method', 'monolithic')
         g.mp_benders_max_iterations = getattr(mp, 'benders_max_iterations', 50)
         g.mp_benders_tolerance = getattr(mp, 'benders_tolerance', 1e-4)
@@ -2334,6 +2336,10 @@ def global_settings_to_config_dict(
     config_dict["master_problem"]["stochastic"] = g.mp_stochastic
     config_dict["master_problem"]["representative_days"] = g.mp_representative_days
     config_dict["master_problem"]["min_day_separation"] = g.mp_min_day_separation
+    config_dict["master_problem"]["critical_days"] = g.mp_critical_days
+    # 0 in the form = derived from the data (None)
+    config_dict["master_problem"]["storage_firm_hours"] = (
+        g.mp_storage_firm_hours if g.mp_storage_firm_hours > 0 else None)
     config_dict["master_problem"]["solver_method"] = g.mp_solver_method
     config_dict["master_problem"]["benders_max_iterations"] = g.mp_benders_max_iterations
     config_dict["master_problem"]["benders_tolerance"] = g.mp_benders_tolerance

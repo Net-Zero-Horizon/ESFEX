@@ -846,6 +846,9 @@ class GuiGlobalSettings:
     mp_stochastic: bool = False
     mp_representative_days: int = 5
     mp_min_day_separation: int = 5
+    mp_critical_days: int = 3
+    # Storage firm hours of the capacity adequacy; 0 = derived from the data
+    mp_storage_firm_hours: float = 0.0
     # Master-problem solver: "monolithic" or "benders" (+ Benders settings)
     mp_solver_method: str = "monolithic"
     mp_benders_max_iterations: int = 50

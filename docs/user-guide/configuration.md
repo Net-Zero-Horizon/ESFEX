@@ -156,7 +156,9 @@ master_problem:
   planning_mode: perfect_foresight   # or: myopic (year by year)
   solver_method: monolithic          # or: benders
   representative_days: 5             # days per year used to check operation
-  min_day_separation: 5              # minimum days between representative days
+  min_day_separation: 5              # minimum days between representative (and critical) days
+  critical_days: 3                   # lowest-renewable days modelled too (0 = none)
+  storage_firm_hours: null           # battery firm hours in the adequacy (null = from data)
   use_tsam: false                    # TSAM clustering instead of representative days
   use_uc_in_dispatch: false          # unit commitment in development-mode dispatch
   stochastic: false                  # needs stochastic_scenarios in the system

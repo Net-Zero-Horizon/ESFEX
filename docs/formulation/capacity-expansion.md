@@ -36,7 +36,7 @@ The master works on a node-level network: when the systems are merged for planni
 | \(\mathcal{B}^{K}\) | Candidate battery technologies | `input.battery_technologies` |
 | \(\mathcal{N} = \{1, \ldots, N\}\) | Buses of the master network (one per node after merging) | `input.network.num_buses` |
 | \(\mathcal{T}_d = \{1, \ldots, H\}\) | Time steps within a representative day | `24 / temporal_resolution_hours` |
-| \(\mathcal{D}_y\) | Representative days for year \(y\): the same days of the year for every \(y\), the peak-demand day plus days whose mean demand and renewable availability match the year's ([Representative Days](../user-guide/master-problem.md#representative-days)) | `master_rep_days()` |
+| \(\mathcal{D}_y\) | Days modelled in year \(y\): the same days of the year for every \(y\), the representative days (the peak-demand day plus days whose mean demand and renewable availability match the year's, [Representative Days](../user-guide/master-problem.md#representative-days)) and the critical days (§8.1b) | `master_day_plan()`, `master_rep_days()` |
 | \(\mathcal{S}\) | Demand sectors | `input.sectoral_demand` |
 | \(\Sigma\) | Systems (for per-system RE targets) | `input.system_node_ranges` |
 
@@ -152,6 +152,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | \(c^{cap}_{y,n}\) | \$/MW | Price of a MW of adequacy shortfall: \(c^{VOLL}\) × the node's peak hours (§5.3) | `adequacy_slack_penalty` |
 | \(\bar{\kappa}\) | [0,1] | Maximum curtailment ratio | `input.max_curtailment_ratio` (default 0.05) |
 | \(D_r\) | -- | Representative days selected per year: `representative_days_per_year`, or fewer when the minimum separation or the data leave no more (a warning says so) | `length(master_rep_day_offsets(input))` |
+| \(\omega_d\) | days | Days of the year modelled day \(d\) stands for: \((H_{year}/24)/D_r\) without critical days; 1 for a critical day, the rest shared by the representative days (§8.1b) | `rep_day_weights`, `master_day_plan` |
 
 ---
 
@@ -222,10 +223,10 @@ Where an existing unit's investment cost is 0 at a node (the Studio default), \(
 Operational costs come from the representative day subproblems, scaled to a year:
 
 \[
-C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{D_r} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{OBJ-4}
+C^{op}_y = \Delta t \sum_{d \in \mathcal{D}_y} \omega_d \, C^{day}_{y,d} \tag{OBJ-4}
 \]
 
-where \(\Delta t\) is `temporal_resolution_hours` and \(H_{year}\) the hours of the first year (`hours_per_year[1]`, always 8760: every modelled year has 8760 h, leap years included). Each day stands for the year's days over the days actually selected (\(D_r\), `rep_day_scaling`); dividing by `representative_days_per_year` when fewer could be selected underweighted every cost and energy of the year. The cost for each representative day is (from `day_operational_cost`):
+where \(\Delta t\) is `temporal_resolution_hours` and \(\omega_d\) the days of the year day \(d\) stands for. Without critical days every representative day stands for \((H_{year}/24)/D_r\) days, with \(H_{year}\) the hours of the first year (`hours_per_year[1]`, always 8760: every modelled year has 8760 h, leap years included) and \(D_r\) the days actually selected (`rep_day_scaling`); dividing by `representative_days_per_year` when fewer could be selected underweighted every cost and energy of the year. A critical day stands for one day and the representative days share the rest (§8.1b). The cost for each representative day is (from `day_operational_cost`):
 
 \[
 \begin{aligned}
@@ -396,7 +397,7 @@ Each corridor is charged once, at the higher of its two ends' `transference_inve
 Firm generation and storage capacity, plus net imports at the peak, must meet peak demand with a reserve margin at each node:
 
 \[
-\sum_{n' \in n} \Big[ \sum_g \alpha^{cc}_{g,n'} \kappa^{risk}_{g,n'} \bar{P}^{cum}_{y,g,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{tech}_{y,k,n'} + \sum_b \alpha^{cc}_{b,n'} \kappa^{risk}_{b,n'} \bar{P}^{bat,cum}_{y,b,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{bt}_{y,k,n'} \Big] + \sum_{m} \left( f^{cap}_{y,m \to n} - f^{cap}_{y,n \to m} \right) + s^{cap}_{y,n} \geq D^{peak}_{y,n} \cdot M_{res} \qquad \forall\, y,\; \text{node } n \tag{CAP-1}
+\sum_{n' \in n} \Big[ \sum_g \alpha^{cc}_{g,n'} \kappa^{risk}_{g,n'} \bar{P}^{cum}_{y,g,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} \bar{P}^{tech}_{y,k,n'} + \sum_b \alpha^{cc}_{b,n'} \kappa^{risk}_{b,n'} \beta_{b,n'} \bar{P}^{bat,cum}_{y,b,n'} + \sum_k \alpha^{cc}_{k,n'} \kappa^{risk}_{k,n'} F^{bt}_{y,k,n'} \Big] + \sum_{m} \left( f^{cap}_{y,m \to n} - f^{cap}_{y,n \to m} \right) + s^{cap}_{y,n} \geq D^{peak}_{y,n} \cdot M_{res} \qquad \forall\, y,\; \text{node } n \tag{CAP-1}
 \]
 
 \[
@@ -419,6 +420,20 @@ The constraint (`cap_adequacy_y{y}_node{n}`) is per node and sums over the node'
 \[
 \alpha^{cc}_{g,n'} = \frac{1}{|T^{peak}_{y,n}|} \sum_{t \in T^{peak}_{y,n}} a_{g,n',t} \qquad \text{(dispatchable units and storage)} \tag{CAP-4}
 \]
+
+**Storage counts up to its energy** (CAP-5). A battery counts at most the power its usable energy sustains over the critical period of \(H^{firm}\) hours, min(power, usable energy / \(H^{firm}\)). For an existing or life-extended battery, whose energy-to-power ratio is fixed,
+
+\[
+\beta_{b,n} = \min\Big(1,\; \frac{\eta^{u}_{b,n} \, E_{b,n}}{P_{b,n} \, H^{firm}}\Big), \qquad \eta^{u}_{b,n} = (\text{SOC}^{max}_{b,n} - \text{SOC}^{min}_{b,n}) \, \eta^{dis}_{b,n} \tag{CAP-5}
+\]
+
+(`usable_energy_ratio`; \(E\) MWh, \(P\) MW of discharge). For a battery technology the firm power is a variable (`bat_tech_firm_y{y}_bt{k}_b{n}`) bounded by the power and the usable energy built and in service that year (`bat_tech_power_built`, `bat_tech_energy_built`):
+
+\[
+0 \leq F^{bt}_{y,k,n} \leq \bar{P}^{bt}_{y,k,n}, \qquad H^{firm} F^{bt}_{y,k,n} \leq \eta^{u}_{k,n} \, \bar{E}^{bt}_{y,k,n} \tag{CAP-5b}
+\]
+
+(`bat_tech_firm_power_…`, `bat_tech_firm_energy_…`; only at buses where the technology may be built). Both are linear. \(H^{firm}\) is `master_problem.storage_firm_hours`, or by default derived from the data (`critical_day_plan`, `master_storage_firm_hours`): the longest stretch of a critical day (§8.1b) without solar, i.e. the steps where the solar profiles (those at most 1 % of their peak at the same step of the day on at least 90 % of days), weighted by the capacity behind them, give at most 1 % of their peak, read cyclically through the day; without a solar profile, the longest stretch whose renewable supply index stays below the relative demand; 4 h without renewable profiles; between one step and 24 h. Cuba: 13 h. Earlier versions counted every battery at its full power whatever its duration, so a 4-hour battery covered a 13-hour low-renewable night on paper and the dispatch shed load at night.
 
 A unit without an availability profile counts fully. Earlier versions counted every non-`Renewable` unit and all storage fully whatever their availability, and `Renewable` dispatchable units (biomass, reservoir hydro) at the minimum of their profile (0 for a seasonal mill). \(\kappa^{risk}\) is the `risk_coefficient` (default 1; see [Risk & Resilience](risk-resilience.md)); life-extended capacity counts at its firm share and risk coefficient, like the unit it extends. \(D^{peak}_{y,n}\) is the maximum of the node's demand over the year's time steps.
 
@@ -455,7 +470,7 @@ E^{RE}_{\sigma,y} + s^{re}_{\sigma,y} \geq \max\!\big(\rho^{target}_{\sigma,y},\
 E^{RE}_{\sigma,y} = \sum_{d} w_d \sum_{t} \Big( \sum_{g \in \mathcal{G}_{RE}} \sum_{n \in \sigma} P^{day}_{g,n,t} + \sum_{k \in \mathcal{K}_{RE}} \sum_{n \in \sigma} P^{tech}_{k,n,t} \Big), \qquad G_{\sigma,y}: \text{ the same over all } g \in \mathcal{G},\ k \in \mathcal{K}, \qquad D_{\sigma,y} = \sum_d w_d \sum_t \sum_{n \in \sigma} D_{n,t}
 \]
 
-with \(w_d = \Delta t \, (H_{year}/24)/D_r\) for a representative day and \(\Delta t \, w_p\) for a TSAM period, and \(D_{n,t}\) a bus's share (`demand_fraction`) of its node's demand with the year's growth (`system_day_renewable`, `system_day_generation`, `system_day_demand`). Battery discharge does not count, as in the dispatch. RE-2 is linear: the target is data. The shortfall \(s^{re}_{\sigma,y}\) (MWh/year) is charged at \(c^{fre}\) in the year's operating cost and discounted like it; in a stochastic master each scenario has its own shortfall, priced with its `penalty_fre_penetration` multiplier and weighted by its probability. The target is a planning target: a day rich in sun or wind may make up for a poor one, as over a dispatch window. Each system of a merged run has its own target and its own slack. Earlier versions held the target on every representative day (its shortfall at the same \(c^{fre}\) per MWh), so a day's surplus could not make up for another's, plus a yearly ratio with a fraction-valued slack that never bound.
+with \(w_d = \Delta t \, \omega_d\) for a representative or critical day (\(\omega_d = (H_{year}/24)/D_r\) without critical days) and \(\Delta t \, w_p\) for a TSAM period, and \(D_{n,t}\) a bus's share (`demand_fraction`) of its node's demand with the year's growth (`system_day_renewable`, `system_day_generation`, `system_day_demand`). Battery discharge does not count, as in the dispatch. RE-2 is linear: the target is data. The shortfall \(s^{re}_{\sigma,y}\) (MWh/year) is charged at \(c^{fre}\) in the year's operating cost and discounted like it; in a stochastic master each scenario has its own shortfall, priced with its `penalty_fre_penetration` multiplier and weighted by its probability. The target is a planning target: a day rich in sun or wind may make up for a poor one, as over a dispatch window. Each system of a merged run has its own target and its own slack. Earlier versions held the target on every representative day (its shortfall at the same \(c^{fre}\) per MWh), so a day's surplus could not make up for another's, plus a yearly ratio with a fraction-valued slack that never bound.
 
 **RE-2b: Renewable generation over demand** (`re_energy_ratio_s{σ}_y{y}`). \(\rho_{\sigma,y}\) carries a year's renewable generation (after curtailment) to the next year's growth cap (RE-3b) and, in Benders, from one year's subproblem to the next (BEN-RE):
 
@@ -534,6 +549,28 @@ greedily one segment at a time, then by moving one day, or two days together, wi
 Every day has the same weight \(\Delta t \cdot H_{year} / (24 D_r)\) (OBJ-4), so RD-1 at 0 means that the demand energy, and the energy per MW of each renewable profile, that the master sees equal the year's. The runner logs, per feature, the mean on the days over the annual mean ("Representative days mean / annual mean: demand 1.002, …", `representative_day_ratios`) and warns when one is off by more than 10 %. With few days a strongly seasonal profile cannot be matched exactly: one that is zero for two thirds of the year is either on 1 of 5 days (0.6 ×) or on 2 (1.2 ×).
 
 The runner chooses the days (`master_rep_day_offsets` in the bridge) and passes them to every master of the run as `rep_day_offsets` (steps within a year): the perfect-foresight, stochastic, MGA and Benders masters and each annual master of a myopic run. The log lists their dates ("Representative days, the same for every planning year: …"). A master built without them (the Julia API) chooses them the same way from its own `base_demand` and the availability of its renewable generators and technologies (`master_re_profiles`). Earlier versions chose each year's own peak days, so the weather sample changed from year to year: in the Cuba myopic run the share the existing renewables gave swung 49 → 59 → 54 → 67 % with no capacity change, and years pushed over the growth cap (RE-3b) paid for it at the value of lost load. They also took the highest-peak day of each segment from the demand alone: where hot days are sunny and windy, the master saw a year with more demand, sun and wind than the real one (Cuba, 5 days: demand × 1.06, PV × 1.14, wind × 1.45; now × 1.002, × 1.000, × 1.007). It then overrated renewable energy (95 % RE in the master against 65 % in the hourly dispatch of the same plan) and retired thermal plants the year still needed.
+
+### 8.1b Critical Days
+
+**Julia functions**: `critical_day_plan(demand, num_years, num_critical, min_separation, timesteps_per_day, timesteps_per_year; profiles, capacities, exclude)`, `re_supply_index(...)`, `representative_day_weights(...)`, `master_day_plan(input)`
+
+Days chosen to match the year's mean energy (RD-1) miss the days on which renewables cover the least of the demand, and with them the energy shortage of a dark, windless day: in the Cuba myopic run the dispatch shed 0.2 to 1.1 % of the yearly demand on such days (at night and early morning, mostly October to December) while every master planned none. Besides the representative days (or TSAM periods), every master (monolithic, TSAM, stochastic, MGA, each annual master of a myopic run) models `critical_days` critical days, chosen once from the same horizon-mean data, so the same days for every year:
+
+\[
+\nu_d = \frac{1}{H}\sum_{t \in d} \Big( \frac{\bar{D}_t}{\langle \bar{D} \rangle} - \frac{\sum_p c_p \, \bar{a}_{p,t}}{\sum_p c_p \langle \bar{a}_p \rangle} \Big) \tag{CD-1}
+\]
+
+with \(\bar{D}_t\) the horizon-mean system demand, \(\bar{a}_{p,t}\) the horizon-mean renewable availability profiles of §8.1 and \(c_p\) the capacity behind each (MW: rated power of the existing renewable units plus `invest_max_power` of the renewable candidate technologies that use it; equal relative weights when there is none), \(\langle \cdot \rangle\) the annual mean. The renewable supply is thus weighted by the energy each profile can give and scaled to the annual demand; \(\nu_d\) is the share of the day's demand that renewables leave uncovered. The critical days are the days with the largest \(\nu_d\), skipping the representative days and at least `min_day_separation` days from each other (relaxed to distinct days when the year leaves too few), the most critical first.
+
+**Weights** (`representative_day_weights`). Each critical day stands for one day (\(\omega_c = 1\)). The representative days start from their prior weights \(p^0\) (equal, or the TSAM cluster sizes) summing to the year's days \(Y\), scaled to \(p = p^0 (Y - N_c)/Y\), then corrected by \(\delta = p \circ z\) with \(\sum \delta = 0\), \(z\) minimising
+
+\[
+\Big\| \frac{1}{Y}\Big( X_r (p + \delta) + X_c \mathbf{1} - X_r p^0 \Big) \Big\|^2 + 10^{-4} \|z\|^2 \tag{CD-2}
+\]
+
+where \(X_r, X_c\) hold each feature's day mean over its annual mean (system demand, each renewable profile) on the representative and critical days. The year the modelled days stand for then keeps the demand and renewable energy of the representative days alone: adding the critical days adds the shortage case without making the year darker. A weight stays at least a fifth of its prior, and the correction is dropped if it does not lower the mismatch. The runner logs the critical days' dates and the weighted mean of each profile on all modelled days over its annual mean.
+
+On a critical day the master runs the same operation as on any other modelled day (storage cyclic over the day, reserves, curtailment, RE accounting, all scaled by \(\Delta t \, \omega_d\)). Benders models the representative days only.
 
 ### 8.2 Operational Variables
 
@@ -723,15 +760,17 @@ The day's fuel cost is already in \$ (fuel amounts per step), so it is scaled to
 Each representative day's operational cost is scaled to approximate annual costs:
 
 \[
-C^{op}_y = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d} \tag{SCALE-1}
+C^{op}_y = \Delta t \sum_{d \in \mathcal{D}_y} \omega_d \, C^{day}_{y,d} \tag{SCALE-1}
 \]
+
+with \(\omega_d = (H_{year}/24)/D_r\) for every day without critical days (§8.1b).
 
 **Julia function**: `add_representative_days_validation!(model, vars, input, targets)` orchestrates the creation of variables, constraints, and cost expressions for all representative days across all years.
 
 ### 8.5 Time-Series Aggregation Method (TSAM)
 
 
-When `use_tsam = true`, the peak-demand-based day selection (Section 8.1) is replaced by data-driven clustering with inter-period SOC linking. As the representative days, the periods are chosen once, by clustering the horizon-mean demand and renewable availability, and every year (and every annual master of a myopic run) uses the same periods and weights with its own demand and profiles.
+When `use_tsam = true`, the peak-demand-based day selection (Section 8.1) is replaced by data-driven clustering with inter-period SOC linking. As the representative days, the periods are chosen once, by clustering the horizon-mean demand and renewable availability, and every year (and every annual master of a myopic run) uses the same periods and weights with its own demand and profiles. The critical days (§8.1b) are added as periods of weight 1, in their chronological place; the cluster weights are scaled down and corrected by CD-2.
 
 **Python function**: `compute_tsam_periods()` in `models/tsam.py`
 **Julia function**: `add_tsam_periods_validation!(model, vars, input, targets)`
@@ -986,7 +1025,7 @@ The subproblems use the configured solver (`solver.name`, its threads and option
 
 The lower bound is the master objective; an iteration whose subproblems all solve within the curtailment limit gives an upper bound, the first-stage cost plus the discounted subproblem costs, in the same units. Each iteration logs how many years met their curtailment limits, each year that did not and by how much (its curtailment against the limit, in GWh/year), and the operating cost by term (generators, load shed, RE target shortfall, RE share below the master's, curtailment above the limit, …); `total_ops` counts a year that broke its limit at its priced cost. At DEBUG it also logs each year's \(\theta\), cost and terms, and what the master builds each year (MW per technology, the capital spent against the budget and its slack, the RE shares). The loop stops when the relative gap is below `benders_tolerance` (default 10⁻⁴) or after `benders_max_iterations` (default 50). Either way, the plan returned is that of the iteration with the best upper bound, with that iteration's operating costs, so the reported objective is what the plan costs. With a growth cap, a run stopped before converging may report a cost that includes \(u\) (a share the master asked for above the actual one). With `ESFEX_BENDERS_DEBUG_LP=1`, a master or subproblem that fails to solve is written as an LP file to the run's `logs` folder.
 
-Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the representative days of §8.1, the same days of the year for every year, as the monolithic master. With `use_tsam` or user investment constraints (`custom_constraints` with `target: investment`), which the Benders master does not model, the runner solves the monolithic master instead and logs a warning saying why.
+Benders does not support stochastic scenarios (they are ignored with a warning). It always uses the representative days of §8.1, the same days of the year for every year, as the monolithic master, but not the critical days of §8.1b (the log says so); its master holds the storage firm credit of CAP-5. With `use_tsam` or user investment constraints (`custom_constraints` with `target: investment`), which the Benders master does not model, the runner solves the monolithic master instead and logs a warning saying why.
 
 ---
 

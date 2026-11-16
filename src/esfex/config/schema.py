@@ -1786,6 +1786,20 @@ class MasterProblemConfig(BaseModel):
     stochastic: bool = False
     representative_days: int = Field(default=5, ge=1)
     min_day_separation: int = Field(default=5, ge=1)
+    critical_days: int = Field(
+        default=3, ge=0,
+        description="Critical days the master models besides the representative days "
+        "(or TSAM periods): the days of the horizon with the largest net load (lowest "
+        "renewable supply against demand), chosen once for every planning year, each "
+        "standing for one day of the year. 0 disables them.",
+    )
+    storage_firm_hours: Optional[float] = Field(
+        default=None, gt=0,
+        description="Hours a battery must sustain its output to count as firm power in "
+        "the master's capacity adequacy constraint: it counts min(power, usable energy / "
+        "hours). None derives them from the data: the longest stretch without solar on "
+        "the critical days.",
+    )
 
     # Master-problem solver method.
     #   "monolithic" — single model coupling investment + representative-day
@@ -1811,7 +1825,8 @@ class MasterProblemConfig(BaseModel):
     use_tsam: bool = Field(
         default=False,
         description="Enable TSAM clustering for representative period selection. "
-        "When true, representative_days and min_day_separation are ignored.",
+        "When true, representative_days is ignored (min_day_separation still spaces "
+        "the critical days, which are added to the TSAM periods).",
     )
     tsam_num_periods: int = Field(
         default=10, ge=2, le=365,

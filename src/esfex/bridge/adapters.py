@@ -2670,6 +2670,57 @@ def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
     return [int(o) for o in offsets]
 
 
+def master_critical_days(demand: np.ndarray, num_years: int, num_days: int,
+                         min_separation: int, resolution_hours: int = 1,
+                         profiles: Optional[List[np.ndarray]] = None,
+                         capacities: Optional[List[float]] = None,
+                         exclude: Optional[List[int]] = None) -> tuple[List[int], float]:
+    """Critical days of a development run, chosen once, and the storage firm
+    hours (Julia ``critical_day_plan``).
+
+    The ``num_days`` days (first steps, 0-based, within a year; the most
+    critical first) with the largest net load, the day mean of the
+    horizon-mean system demand over its annual mean minus the renewable
+    supply over its annual mean (the *profiles*, 1-D at the same
+    resolution, weighted by the MW behind each, *capacities*), skipping the
+    days already modelled (*exclude*) and ``min_separation`` days apart.
+    The hours are the longest stretch without solar on those days (the
+    longest stretch with renewable supply below demand without a solar
+    profile; 4 h without renewable profiles).
+    """
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    offsets, hours = ESFEX.critical_day_plan(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        int(num_days), int(min_separation), 24 // resolution_hours,
+        HOURS_STD_YEAR // resolution_hours, profiles=_julia_profiles(profiles),
+        capacities=py_to_julia_vector([float(c) for c in capacities or []]),
+        exclude=py_to_julia_int_vector([int(o) for o in exclude or []]))
+    return [int(o) for o in offsets], float(hours)
+
+
+def master_day_weights(demand: np.ndarray, num_years: int, offsets: List[int],
+                       critical_offsets: List[int], resolution_hours: int = 1,
+                       profiles: Optional[List[np.ndarray]] = None,
+                       prior: Optional[List[float]] = None) -> List[float]:
+    """Days of the year each representative day (or TSAM period, *offsets*)
+    and then each critical day stands for (Julia
+    ``representative_day_weights``): 1 per critical day; the representative
+    days share the rest, from their *prior* weights (equal when None),
+    corrected so the year keeps the demand and renewable energy of the
+    representative days alone."""
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    weights = ESFEX.representative_day_weights(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        py_to_julia_int_vector([int(o) for o in offsets]),
+        py_to_julia_int_vector([int(o) for o in critical_offsets]),
+        24 // resolution_hours, HOURS_STD_YEAR // resolution_hours,
+        profiles=_julia_profiles(profiles),
+        prior=py_to_julia_vector([float(w) for w in prior or []]))
+    return [float(w) for w in weights]
+
+
 def master_rep_day_ratios(demand: np.ndarray, num_years: int, offsets: List[int],
                           resolution_hours: int = 1,
                           profiles: Optional[List[np.ndarray]] = None,
@@ -2718,6 +2769,15 @@ class MasterProblemAdapter:
         # the same for every year; None: Julia chooses them from the
         # horizon-mean demand and renewable profiles (master_rep_day_offsets)
         rep_day_offsets: Optional[List[int]] = None,
+        # Critical days (master_critical_days), modelled with the
+        # representative days; the days of the year each representative day
+        # and then each critical day stands for (master_day_weights); the
+        # storage firm hours of the adequacy constraint (None: from the
+        # data); the critical days Julia picks when rep_day_offsets is None
+        critical_day_offsets: Optional[List[int]] = None,
+        rep_day_weights: Optional[List[float]] = None,
+        storage_firm_hours: Optional[float] = None,
+        critical_days: int = 0,
         investment_resolution_hours: int = 8760,
         # TSAM parameters
         use_tsam: bool = False,
@@ -2797,6 +2857,17 @@ class MasterProblemAdapter:
                 (``master_rep_day_offsets``); None lets the Julia master
                 choose them from the horizon-mean demand and its renewable
                 availability profiles
+            critical_day_offsets: First step of each critical day within a
+                year (0-based, ``master_critical_days``), modelled with the
+                representative days in every year
+            rep_day_weights: Days of the year each representative day and
+                then each critical day stands for (``master_day_weights``);
+                None = the year shared equally by the representative days
+            storage_firm_hours: Hours a battery must sustain to count as
+                firm power in the capacity adequacy constraint
+                (min(power, usable energy / hours)); None = from the data
+            critical_days: Critical days the Julia master chooses itself
+                when ``rep_day_offsets`` is None
             use_tsam: Enable TSAM clustering
             tsam_period_start_hours: Per-year list of period start hours (1-indexed)
             tsam_period_weights: Per-year list of period weights
@@ -2907,6 +2978,10 @@ class MasterProblemAdapter:
         self.representative_days_per_year = representative_days_per_year
         self.min_day_separation = min_day_separation
         self.rep_day_offsets = [int(o) for o in rep_day_offsets or []]
+        self.critical_day_offsets = [int(o) for o in critical_day_offsets or []]
+        self.rep_day_weights = [float(w) for w in rep_day_weights or []]
+        self.storage_firm_hours = float(storage_firm_hours or 0.0)
+        self.critical_days = int(critical_days)
         self.investment_resolution_hours = investment_resolution_hours
         self.use_tsam = use_tsam
         self.tsam_period_start_hours = tsam_period_start_hours or []
@@ -3277,6 +3352,10 @@ class MasterProblemAdapter:
             min_day_separation=self.min_day_separation,
             rep_day_offsets=(jl.seval("Int[]") if not self.rep_day_offsets else
                              jl.seval("Vector{Int}")(self.rep_day_offsets)),
+            critical_days=self.critical_days,
+            critical_day_offsets=py_to_julia_int_vector(self.critical_day_offsets),
+            rep_day_weights=py_to_julia_vector(self.rep_day_weights),
+            storage_firm_hours=self.storage_firm_hours,
             investment_resolution_hours=self.investment_resolution_hours,
             use_tsam=self.use_tsam,
             tsam_period_start_hours=_py_nested_list_to_julia_vec_vec(jl, self.tsam_period_start_hours, "Int"),
@@ -3417,6 +3496,10 @@ class MasterProblemAdapter:
             # Benders builds its own investment master and per-day subproblems
             # internally during solve(); here we only need the input ready.
             self._benders_use_rep_days = use_representative_days
+            if self.critical_day_offsets:
+                logger.info(
+                    "Benders decomposition models the representative days only, "
+                    "not the critical days; solver_method: monolithic models both.")
             if self.use_stochastic and self.stochastic_scenarios:
                 logger.warning(
                     "Stochastic scenarios are not supported with Benders "

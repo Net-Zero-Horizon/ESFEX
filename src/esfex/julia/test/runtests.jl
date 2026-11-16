@@ -15,7 +15,7 @@
 
 using Test
 using ESFEX
-using JuMP: optimize!, termination_status, value, constraint_by_name, objective_value,
+using JuMP: optimize!, termination_status, value, constraint_by_name, variable_by_name, objective_value,
              coefficient, objective_function, all_variables, name, fix, constant, is_binary,
              list_of_constraint_types, all_constraints, constraint_object, AffExpr
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
@@ -1041,6 +1041,77 @@ import Ipopt
                   representative_day_offsets(inp.base_demand, 1, 5, 5, 24, 8760;
                                              profiles = [pv])
             @test abs(ratio(pv, master_rep_day_offsets(inp)) - 1) < 0.03
+        end
+
+        @testset "master: critical days of lowest renewable supply (round 33)" begin
+            # Days matched to the year's mean energy never include a dark,
+            # windless day, on which the dispatch shed load (Cuba myopic,
+            # Oct-Dec nights) while every master saw no shortage. Each master
+            # now also models the days with the largest net load, one day of
+            # the year each, the representative days reweighted so the year
+            # keeps their demand and renewable energy.
+            a = [((d * 97) % 365) / 364 for d in 0:364]
+            shape = [1.0 + 0.2 * sin(2π * (h - 8) / 24) for h in 0:23]
+            sun = [max(sin(π * (h - 6) / 12), 0.0) for h in 0:23]    # dark 18-6 h
+            dark = 291                                                 # 1-based day
+            level = 0.6 .+ 0.4 .* a; level[dark] = 0.1
+            wlevel = 0.3 .+ 0.4 .* a; wlevel[dark] = 0.02
+            total = reduce(vcat, [100.0 * (1.0 + 0.3x) .* shape for x in a])
+            D = reshape(total, :, 1)
+            pv = reduce(vcat, [0.8l .* sun for l in level])
+            wind = repeat(wlevel; inner = 24)
+
+            crit, hours = critical_day_plan(D, 1, 2, 5, 24, 8760;
+                profiles = [pv, wind], capacities = [100.0, 50.0])
+            @test crit[1] == (dark - 1) * 24 && length(crit) == 2
+            @test abs(crit[2] - crit[1]) >= 5 * 24
+            @test hours == 13.0                   # the night, 18 h to 6 h
+            @test critical_day_plan(D, 1, 1, 5, 24, 8760; profiles = [pv, wind],
+                capacities = [100.0, 50.0], exclude = [(dark - 1) * 24])[1] != [(dark - 1) * 24]
+            @test critical_day_plan(D, 1, 1, 5, 24, 8760; profiles = [wind])[2] == 24.0
+            @test critical_day_plan(D, 1, 1, 5, 24, 8760)[2] == ESFEX.DEFAULT_STORAGE_FIRM_HOURS
+
+            rep = representative_day_offsets(D, 1, 5, 5, 24, 8760; profiles = [pv, wind])
+            w = representative_day_weights(D, 1, rep, crit, 24, 8760; profiles = [pv, wind])
+            @test sum(w) ≈ 365 && w[6:7] == [1.0, 1.0]
+            alone = representative_day_ratios(D, 1, rep, 24, 8760; profiles = [pv, wind])
+            both = representative_day_ratios(D, 1, vcat(rep, crit), 24, 8760;
+                                             profiles = [pv, wind], weights = w)
+            naive = representative_day_ratios(D, 1, vcat(rep, crit), 24, 8760;
+                profiles = [pv, wind], weights = vcat(fill(363 / 5, 5), [1.0, 1.0]))
+            @test maximum(abs.(both .- alone)) < 2e-3
+            @test naive[2] < alone[2] - 1e-3      # equal shares: a darker year
+            @test representative_day_weights(D, 1, rep, Int[], 24, 8760) == fill(73.0, 5)
+
+            # The master models them (Julia picks the days itself here)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            solar = mkgen("Solar", "Renewable", "Sun", [100.0], [0.0],
+                          reshape(pv, :, 1); nb = 1, H = 8760)
+            gas = mkgen("Gas", "Non-renewable", "Gas", [200.0], [1.0e-4],
+                        ones(8760, 1); nb = 1, H = 8760)
+            mk(n) = MasterProblemInput(years = [2025], network = net,
+                generators = [solar, gas], batteries = BatteryConfig[], base_demand = D,
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 5, min_day_separation = 5,
+                critical_days = n, verbose = false)
+            offs, wts, nrep = master_day_plan(mk(1))
+            @test nrep == 5 && length(offs) == 6 && offs[6] == (dark - 1) * 24
+            @test sum(wts) ≈ 365 && wts[6] == 1.0
+            @test master_day_plan(mk(0)) == (master_rep_day_offsets(mk(0)), fill(73.0, 5), 5)
+            m0, _, _ = create_master_problem(mk(0); use_representative_days = true)
+            m1, _, _ = create_master_problem(mk(1); use_representative_days = true)
+            @test length(m1.ext[:master_days]) == 6
+            @test sort([d.scale for d in m1.ext[:master_days]])[1] == 1.0   # Δt × 1 day
+            # The year's demand energy is kept
+            @test m1.ext[:master_re][(0, 1, 1)][3] ≈ m0.ext[:master_re][(0, 1, 1)][3] rtol = 2e-3
+            # Given by the runner: its days and weights are used
+            given = ESFEX.with_fields(mk(0); rep_day_offsets = rep, critical_day_offsets = crit,
+                                      rep_day_weights = w)
+            @test master_day_plan(given) == (vcat(rep, crit), w, 5)
         end
 
         @testset "master: each representative day reads its own inflow" begin
@@ -3935,7 +4006,9 @@ import Ipopt
                 technologies = [gt], base_demand = reshape(demand, H24, 1),
                 target_re_penetration = 0.0, initial_re_penetration = 0.0,
                 representative_days_per_year = 1, min_day_separation = 1,
-                reserve_margin = 1.2, verbose = false)
+                # 4 h: the 20 MW / 100 MWh battery is not energy-limited here
+                # (see "storage counts up to its energy")
+                reserve_margin = 1.2, storage_firm_hours = 4.0, verbose = false)
             @test ESFEX.adequacy_peak_steps(inp, 1, 1) == [18, 19, 20]
             model = ESFEX.Model()
             vars = ESFEX.build_master_variables!(model, inp)
@@ -3944,6 +4017,65 @@ import Ipopt
             # firm: gas 100 × 0.5 + mill 30 × 1 + PV 40 × 0 + battery 20 × 0.5 = 90
             @test ESFEX.normalized_rhs(con) ≈ 1.2 * 100.0 - 90.0
             @test ESFEX.normalized_coefficient(con, vars.tech_investment[1][1][1]) ≈ 0.5
+        end
+
+        @testset "capacity adequacy: storage counts up to its energy (round 33)" begin
+            # 12 dark hours a day; a 20 MW / 80 MWh battery (4 h, 95 %) used to
+            # count its full 20 MW, so it alone "met" a 20 MW peak that lasts
+            # the night. It now counts min(power, usable energy / H), H = the
+            # longest stretch without solar (12 h): 80 × 0.95 / 12 = 6.33 MW.
+            sun = zeros(H24, 1); sun[7:18, 1] .= 1.0
+            pv = mkgen("PV", "Renewable", "Sun", [40.0], [0.0], sun; nb = 1, H = H24)
+            o = [0.0]
+            gt = TechnologyConfig("GT", "Non-renewable", "Gas", [1.0e-3], [50.0], ones(H24, 1),
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            inp = MasterProblemInput(years = [2025], network = net1, generators = [pv],
+                batteries = [mkbat(cap = 80.0)], technologies = [gt],
+                base_demand = fill(20.0, H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 10.0, reserve_margin = 1.0, verbose = false)
+            @test ESFEX.master_storage_firm_hours(inp) == 12.0
+            usable = 80.0 * 0.95
+            model = ESFEX.Model()
+            vars = ESFEX.build_master_variables!(model, inp)
+            ESFEX.add_capacity_adequacy_constraints!(model, vars, inp)
+            con = constraint_by_name(model, "cap_adequacy_y1_node1")
+            @test ESFEX.normalized_rhs(con) ≈ 20.0 - usable / 12
+            # The battery alone no longer meets the peak: the master builds
+            # the firm capacity the night needs (it built none before)
+            m, v, _ = create_master_problem(inp; use_representative_days = false)
+            optimize!(m)
+            @test value(v.tech_investment[1][1][1]) ≈ 20.0 - usable / 12 rtol = 1e-6
+            @test value(v.slack_capacity[(1, 1)]) ≈ 0.0 atol = 1e-6
+            # Configured hours: a 2-hour stretch leaves the battery its 20 MW
+            m2, v2, _ = create_master_problem(ESFEX.with_fields(inp; storage_firm_hours = 2.0);
+                                              use_representative_days = false)
+            optimize!(m2)
+            @test value(v2.tech_investment[1][1][1]) ≈ 0.0 atol = 1e-6
+
+            # Battery technology: firm ≤ power built, H × firm ≤ usable energy built
+            li = BatteryTechnologyConfig("LiNew", [1.0e-3], [1.0e-3], [100.0], [400.0], 4.0, 4.0,
+                                         [0.95], [0.95], o, [15.0], [0.5], [0.0], [1.0],
+                                         o, o, o, false, "AC", o, [1.0])
+            binp = ESFEX.with_fields(inp; batteries = BatteryConfig[],
+                                     battery_technologies = [li], technologies = TechnologyConfig[])
+            cm = ESFEX.Model()
+            cv = ESFEX.build_master_variables!(cm, binp)
+            ESFEX.add_capacity_adequacy_constraints!(cm, cv, binp)
+            ce = constraint_by_name(cm, "bat_tech_firm_energy_y1_bt1_b1")
+            cf = variable_by_name(cm, "bat_tech_firm_y1_bt1_b1")
+            @test ESFEX.normalized_coefficient(ce, cf) ≈ 12.0
+            @test ESFEX.normalized_coefficient(ce, cv.bat_tech_capacity_investment[1][1][1]) ≈ -0.95
+            @test ESFEX.normalized_coefficient(
+                constraint_by_name(cm, "cap_adequacy_y1_node1"), cf) ≈ 1.0
+            bm, bv, _ = create_master_problem(binp; use_representative_days = false)
+            firm = variable_by_name(bm, "bat_tech_firm_y1_bt1_b1")
+            optimize!(bm)
+            # 20 MW firm from 4-hour storage takes 12 / (4 × 0.95) × 20 MW of power
+            @test value(firm) ≈ 20.0 rtol = 1e-6
+            @test value(bv.bat_tech_power_investment[1][1][1]) ≈ 20.0 * 12 / (4 * 0.95) rtol = 1e-6
         end
 
         @testset "battery ramp limits, with the rolling-horizon seam" begin

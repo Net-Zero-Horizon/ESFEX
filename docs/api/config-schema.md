@@ -429,6 +429,8 @@ class MasterProblemConfig(BaseModel):
     stochastic: bool = False
     representative_days: int = 5
     min_day_separation: int = 5                  # days
+    critical_days: int = 3                       # lowest-renewable days, 0 = none
+    storage_firm_hours: Optional[float] = None   # None = derived from the data
     solver_method: Literal["monolithic", "benders"] = "monolithic"
     benders_max_iterations: int = 50
     benders_tolerance: float = 1e-4
