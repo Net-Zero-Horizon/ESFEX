@@ -12,22 +12,23 @@ leave-one-country-out spot checks.  Then the three OPTION-B verifications:
       + Hokkaido (43.5N) winter-peak vs Fukuoka (33.6N) summer-peak,
   (3) industry        — high-gdp-density / low-pop-density pixel -> nonzero density.
 
-Saves data/models/demand_density_hourly_xgb.json (+ .feats.json).
+Saves ``{name}.json`` and ``{name}.ubj`` (the same booster; ESFEX ships the
+binary one), ``{name}.feats.json`` and ``{name}_oot.ubj`` (the model of the
+out-of-time hold-out, for comparisons on a common test year) in ``--out-dir``.
+Same features, hyper-parameters and rounds rule as v1; ``--device`` and
+``--nthread`` only choose the hardware (v1 trained on a GPU).
+
+Usage::
+
+    PYTHONPATH=src python scripts/demand_model/train_density_demand_hourly.py \\
+        --data OUTDIR/density_demand_dataset.parquet --out-dir OUTDIR --nthread 16
 """
 from __future__ import annotations
-import sys, json
+import argparse, json
 from pathlib import Path
 import numpy as np, pandas as pd
 import xgboost as xgb
 from sklearn.metrics import r2_score
-
-HERE = Path("/home/manuel/Dropbox/PhD/Pappers/09_Flexibility/ReFlex/demand_estimation")
-DF = Path("/media/manuel/New Volume/Demand_forecasting")
-DATA = HERE / "ecvi" / "density_demand_dataset.parquet"
-FEAT_NPZ = HERE / "ecvi" / "feature_grids_025.npz"
-POP_NPZ = HERE / "ecvi" / "ecvi_ssp2_2025_2050_tft_84c_fold0.npz"
-MODEL_DIR = DF / "demand_estimation" / "data" / "models"
-MODEL = MODEL_DIR / "demand_density_hourly_xgb.json"
 
 # NOTE: urbanization is DROPPED. It is the one non-intensive feature here — the
 # training value is the country/zone MASK-MEAN of GHSL% (median ~3, max ~72) while
@@ -42,7 +43,7 @@ FEATS = ["log_pop_density", "log_gdp_density", "log_gdp_per_cap",
 
 PARAMS = {"max_depth": 9, "eta": 0.06, "subsample": 0.8, "colsample_bytree": 0.8,
           "min_child_weight": 4, "objective": "reg:squarederror",
-          "tree_method": "hist", "device": "cuda"}
+          "tree_method": "hist", "device": "cuda"}     # device/nthread set by the CLI
 ROUNDS = 600
 
 
@@ -56,9 +57,21 @@ def cal(month, hour, dow):
         days_to_next_holiday=30.0, days_from_prev_holiday=30.0)
 
 
-def main() -> int:
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    df = pd.read_parquet(DATA)
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Train the hourly density demand model.")
+    ap.add_argument("--data", type=Path, required=True, help="density_demand_dataset.parquet")
+    ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--name", default="demand_density_hourly_xgb")
+    ap.add_argument("--device", default="cpu", help="cpu or cuda (v1: cuda)")
+    ap.add_argument("--nthread", type=int, default=16)
+    ap.add_argument("--pop-npz", type=Path, help="population grid for VERIFY 1 (skipped without)")
+    ap.add_argument("--feat-npz", type=Path, help="GDP grid for VERIFY 1 (skipped without)")
+    ap.add_argument("--skip-loco", action="store_true")
+    a = ap.parse_args(argv)
+    PARAMS.update(device=a.device, nthread=a.nthread)
+    a.out_dir.mkdir(parents=True, exist_ok=True)
+    MODEL = a.out_dir / f"{a.name}.json"
+    df = pd.read_parquet(a.data)
     print(f"dataset: {len(df):,} rows | {df.group_id.nunique()} series | "
           f"{df.country.nunique()} countries | years {df.year.min()}-{df.year.max()}")
 
@@ -71,6 +84,7 @@ def main() -> int:
     dva = xgb.DMatrix(va[FEATS], label=va["target"], feature_names=FEATS)
     bst = xgb.train(PARAMS, dtr, num_boost_round=ROUNDS,
                     evals=[(dva, "val")], early_stopping_rounds=40, verbose_eval=100)
+    bst.save_model(str(a.out_dir / f"{a.name}_oot.ubj"))
     pv = bst.predict(dva)
     r2_logden = r2_score(va["target"], pv)
     # back-transform to MW: demand = 10**target * area_km2
@@ -88,7 +102,8 @@ def main() -> int:
     # ── leave-one-country-out spot check (cross-country transfer = pixel proxy) ──
     print("\n[LOCO] leave-one-country-out spot check:")
     spot = ["JPN", "USA", "FIN", "ESP", "RUS", "ISL", "BRA", "DEU"]
-    spot = [c for c in spot if c in df.country.unique()]
+    spot = [c for c in spot if c in df.country.unique() and not a.skip_loco]
+    loco = {}
     for c in spot:
         trc = df[df.country != c]; tec = df[df.country == c]
         if len(trc) > 3_000_000:
@@ -102,6 +117,8 @@ def main() -> int:
         # national hourly
         tt = tec.copy(); tt["mp"] = mp
         n2 = tt.groupby("time_idx").agg(t=("demand_mw", "sum"), p=("mp", "sum"))
+        loco[c] = {"r2_log_density": float(r2d),
+                   "r2_national_hourly": float(r2_score(n2["t"], n2["p"]))}
         print(f"  {c}: R²(log density)={r2d:+.3f} | "
               f"R²(national hourly MW)={r2_score(n2['t'], n2['p']):+.3f} | "
               f"mean log-dens true={tec['target'].mean():.2f} pred={pc.mean():.2f}")
@@ -110,10 +127,15 @@ def main() -> int:
     dall = xgb.DMatrix(df[FEATS], label=df["target"], feature_names=FEATS)
     final = xgb.train(PARAMS, dall, num_boost_round=bst.best_iteration + 1 or ROUNDS)
     final.save_model(str(MODEL))
+    final.save_model(str(MODEL.with_suffix(".ubj")))
     json.dump({"features": FEATS, "target": "log10(demand_mw/area_km2)",
                "r2_log_density": r2_logden, "r2_mw": r2_mw, "r2_national_hourly": r2_nat,
                "n_rows": len(df), "n_series": int(df.group_id.nunique()),
                "n_countries": int(df.country.nunique()),
+               "oot_year": int(ymax), "num_boost_round": int(final.num_boosted_rounds()),
+               "loco": loco,
+               "clock": "local civil time of each series; calendar of the real date "
+                        "(29 Feb skipped); temperature of the same instant",
                "train_ranges": {f: [float(df[f].min()), float(df[f].max())] for f in FEATS}},
               open(MODEL.with_suffix(".feats.json"), "w"), indent=2)
     imp = final.get_score(importance_type="gain")
@@ -124,8 +146,17 @@ def main() -> int:
     # ════════ VERIFICATION 1 — scale transfer (pixel ranges overlap training) ════════
     print("\n" + "=" * 70)
     print("VERIFY 1 — SCALE TRANSFER: pixel intensive-feature ranges vs training")
-    d = np.load(POP_NPZ); lat, lon, pop = d["lat"], d["lon"], d["exposure"]
-    fg = np.load(FEAT_NPZ); gdp = fg["gdp"]
+    if a.pop_npz is None or a.feat_npz is None:
+        print("  skipped (no --pop-npz / --feat-npz)")
+    else:
+        verify_scale(df, a.pop_npz, a.feat_npz)
+    verify_climate_and_industry(df, final)
+    return 0
+
+
+def verify_scale(df, pop_npz, feat_npz):
+    d = np.load(pop_npz); lat, lon, pop = d["lat"], d["lon"], d["exposure"]
+    fg = np.load(feat_npz); gdp = fg["gdp"]
     R, dd = 6371.0, np.deg2rad(0.25)
     area = np.abs(R * R * dd * (np.sin(np.deg2rad(lat + 0.125)) - np.sin(np.deg2rad(lat - 0.125))))
     area2d = area[:, None] * np.ones((1, len(lon)))
@@ -148,6 +179,8 @@ def main() -> int:
     print("  (prior absolute model used log_total_pop/gdp in [6,9]; pixels fell to 0-6,")
     print("   OUT of domain -> flat magnitude. Intensive densities now OVERLAP.)")
 
+
+def verify_climate_and_industry(df, final):
     # ════════ VERIFICATION 2 — balanced climate response (U-curve) ════════
     print("\n" + "=" * 70)
     print("VERIFY 2 — CLIMATE U-CURVE: sweep T at median features (winter noon)")
