@@ -180,3 +180,4 @@ nav:
     - Testing: contributing/testing.md
     - Julia Development: contributing/julia-development.md
     - Plugin Development: contributing/plugin-development.md
+    - Demand Density Model: contributing/demand-density-model.md
