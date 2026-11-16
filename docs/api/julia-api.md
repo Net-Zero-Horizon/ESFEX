@@ -230,6 +230,10 @@ struct MasterProblemInput
     representative_days_per_year::Int
     min_day_separation::Int
     investment_resolution_hours::Int
+    # (further down) rep_day_offsets::Vector{Int}; critical_days::Int (Julia's
+    # own choice when rep_day_offsets is empty); critical_day_offsets::Vector{Int};
+    # rep_day_weights::Vector{Float64} (days each representative, then critical,
+    # day stands for); storage_firm_hours::Float64 (≤ 0 = from the data)
     # TSAM (Time Series Aggregation Method)
     use_tsam::Bool
     tsam_period_start_hours::Vector{Vector{Int}}
@@ -372,11 +376,15 @@ end
 | `representative_day_ratios` | `(demand, num_years, offsets, timesteps_per_day, timesteps_per_year; profiles, weights) -> Vector{Float64}` | Mean on the representative days or periods (weighted) over the annual mean, demand first, then each profile. |
 | `master_rep_day_offsets` | `(input) -> Vector{Int}` | `input.rep_day_offsets` when given (the runner's choice), else `representative_day_offsets` of `input.base_demand` with the distinct availability profiles of the renewable generators and candidate technologies (`master_re_profiles`). |
 | `master_rep_days` | `(input, y_idx; offsets) -> Vector{Int}` | First master step of each representative day of year `y_idx`: the same days of the year in every year's block. Used by the monolithic, stochastic, MGA and Benders masters. |
+| `critical_day_plan` | `(demand, num_years, num_critical, min_separation, timesteps_per_day, timesteps_per_year; profiles, capacities, exclude) -> (offsets, firm_hours)` | The critical days (0-based steps within a year, most critical first): the days with the largest net load, horizon-mean demand over its mean minus the renewable supply index (`re_supply_index`: profiles weighted by the MW behind each) over its mean, skipping `exclude` and `min_separation` days apart. `firm_hours`: the longest stretch without solar on those days (with no solar profile, with renewable supply below demand; 4 h without profiles). |
+| `representative_day_weights` | `(demand, num_years, offsets, critical_offsets, timesteps_per_day, timesteps_per_year; profiles, prior) -> Vector{Float64}` | Days of the year each representative day (or TSAM period) and then each critical day stands for: 1 per critical day; the representative days share the rest from `prior` (equal when empty), corrected so the year keeps the demand and renewable energy of the representative days alone. |
+| `master_day_plan` | `(input) -> (offsets, weights, num_rep)` | The days the monolithic, stochastic and MGA masters model every year: the representative days, then the critical days (`input.critical_day_offsets`, or `input.critical_days` chosen by `critical_day_plan` when Julia picks the days itself), with their weights (`input.rep_day_weights` or `representative_day_weights`). |
+| `master_storage_firm_hours` | `(input) -> Float64` | `input.storage_firm_hours` when positive, otherwise `critical_day_plan`'s firm hours: the H of the battery firm credit min(power, usable energy / H) in `add_capacity_adequacy_constraints!`. |
 | `add_representative_days_validation!` | `(model, vars, input, targets; scenario=nothing, scenario_idx=0)` | Adds operational feasibility constraints on representative days. Creates sub-problem variables and constraints per day per year. With `scenario`, the days run on `scenario_master_input(...)`. The TSAM equivalent is the internal `add_tsam_periods_validation!`. |
 | `create_day_ps_vars!` | `(model, input, year_idx, day_idx, hours) -> PowerSystemVariables` | Operational variables of one representative day. |
 | `add_day_operational_constraints!` | `(model, ps_vars, vars, input, year_idx, day_idx, demand, start_hour; ...)` | Detailed operational constraints for a single representative day: generator dispatch, battery SOC dynamics, power balance, reserves, DC flow. |
-| `calculate_day_operational_cost` | `(ps_vars, input, year_idx, hours; tech_output=nothing) -> AffExpr` | Cost of one representative day, scaled to the year by `resolution × days_per_year / representative_days_per_year`. |
-| `calculate_day_operational_cost_tsam` | `(ps_vars, input, year_idx, hours, weight; tech_output=nothing) -> AffExpr` | Cost of one TSAM period, scaled by `resolution × weight`. Not exported. |
+| `calculate_day_operational_cost` | `(ps_vars, input, year_idx, hours; tech_output=nothing) -> AffExpr` | Cost of one representative day, scaled to the year by `resolution × days_per_year / representative_days_per_year` (Benders). |
+| `calculate_day_operational_cost_tsam` | `(ps_vars, input, year_idx, hours, weight; tech_output=nothing) -> AffExpr` | Cost of one TSAM period, or of one representative or critical day of the monolithic master, scaled by `resolution × weight` (the days it stands for). Not exported. |
 | `build_master_objective!` | `(model, vars, input)` | NPV of investment costs + operational costs from representative days. |
 | `build_investment_cost_expression` | `(vars, input; mult=nothing, discount_rate=input.discount_rate) -> AffExpr` | Discounted investment annuities: each build pays `capital_recovery_factor(discount_rate, life)` × its overnight cost in every year it is in service inside the horizon (`master_investment_terms`, `annuity_years`). `mult` (a `ScenarioMultipliers`) scales unit investment costs for a stochastic scenario (technologies, battery power and energy, transmission, converters, fuel builds). |
 | `capital_recovery_factor` | `(rate, life) -> Float64` | `r(1+r)^L / ((1+r)^L − 1)`, `1/L` at rate 0; a non-positive `life` takes `DEFAULT_ASSET_LIFETIME` (40 years). |

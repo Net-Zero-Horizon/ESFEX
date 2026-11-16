@@ -155,7 +155,7 @@ In `development` mode, generator commitment is relaxed to continuous, keeping th
 
 2. **Perfect foresight within each window.** Demand and renewable availability are known within each rolling horizon window. Cross-year uncertainty is handled through the stochastic extension (see [Stochastic Programming](stochastic-programming.md)).
 
-3. **Hourly resolution.** The default time step is 1 hour, configurable via `temporal.resolution_hours` (whole hours only). The Master Problem uses representative days (typically 24-hour blocks) selected by peak demand ranking or TSAM clustering [**[22]**](../reference/bibliography.md#ref22), [**[23]**](../reference/bibliography.md#ref23).
+3. **Hourly resolution.** The default time step is 1 hour, configurable via `temporal.resolution_hours` (whole hours only). The Master Problem uses representative days (typically 24-hour blocks: the peak-demand day plus days matching the year's demand and renewable energy, or TSAM clusters) and a few critical days of lowest renewable supply against demand [**[22]**](../reference/bibliography.md#ref22), [**[23]**](../reference/bibliography.md#ref23).
 
 4. **Representative days.** The Master Problem approximates annual operational costs from a small set of selected days (typically 3–10) rather than full 8760-hour dispatch. The number of days controls the trade-off between approximation quality and problem size.
 

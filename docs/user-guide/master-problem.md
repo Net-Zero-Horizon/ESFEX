@@ -80,7 +80,7 @@ MGA/SPORES runs only in `perfect_foresight` mode.
 Benders solves the same problem as the monolithic master and reaches the same optimum: the same investment constraints and costs, the same representative-day dispatch with the full loss-of-load penalty, and the same hard annual curtailment limit (`max_curtailment_ratio`), and the same annual RE target, growth cap and CO2 budget. If it stops at `benders_max_iterations`, it returns the plan of its best iteration together with that plan's operating cost, and logs the remaining gap. Each iteration logs its bounds, how many years met the curtailment limit (and by how much each other year broke it) and the operating cost by term (generators, load shed, RE target shortfall, …); `logging.console_level: debug` adds each year's cost and the capacity the master builds each year.
 
 !!! note "Benders: limitations"
-    - Benders always uses the default representative days (the ones the monolithic master uses). With `use_tsam: true`, or with investment-target custom constraints, the run solves the monolithic master instead and logs a warning saying why.
+    - Benders always uses the default representative days (the ones the monolithic master uses), but not the [critical days](#critical-days). With `use_tsam: true`, or with investment-target custom constraints, the run solves the monolithic master instead and logs a warning saying why.
     - Benders ignores `stochastic: true` (with a warning) and solves the master deterministically.
 
 
@@ -100,7 +100,7 @@ The log lists, for the demand and each renewable profile, the mean on the days o
 
 Every planning year then models the **same calendar days**, each with its own demand and its own block of multi-year availability profiles; in `myopic` mode every annual master uses them too. The weather sample is therefore the same from year to year, and the RE share of a fleet that does not change does not swing between years. The log lists the dates ("Representative days, the same for every planning year: …"). Earlier versions chose each year's own peak days.
 
-Each representative day's cost is scaled by (days in the year) / `representative_days`, so the days stand in for the full year. More days give better accuracy but a larger model:
+Each representative day's cost is scaled by (days in the year) / `representative_days`, so the days stand in for the full year (with critical days, see below, the representative days share the days the critical days leave). More days give better accuracy but a larger model:
 
 | Representative days | Use case |
 |---------------------|----------|
@@ -108,9 +108,22 @@ Each representative day's cost is scaled by (days in the year) / `representative
 | 5 (default) | Standard planning studies |
 | 7 to 10 | Final studies |
 
+### Critical Days
+
+Days chosen to match the year's average energy miss the days on which renewables cover the least of the demand: a cloudy, windless day in the dark season. A master that never sees such a day plans too little firm capacity and storage energy, and the hourly dispatch then sheds load on those days (in the Cuba case, 0.2 to 1.1 % of the yearly demand, at night and in the early morning, mostly from October to December, while every master planned no shortage). Each master therefore also models `critical_days` **critical days** (default 3; 0 disables them), besides the representative days or the TSAM periods:
+
+- They are the days with the largest **net load**: on the horizon-mean system demand and renewable profiles (the same data as the representative days, so the same days for every planning year and every annual master in `myopic` mode), the day mean of demand / annual mean demand − renewable supply / annual mean renewable supply. The renewable supply sums the renewable availability profiles (those of the representative days), each weighted by the capacity behind it: the rated power of the existing renewable units plus the `invest_max_power` of the renewable candidate technologies that use it. A profile then weighs by the energy it can give the system the master builds (in Cuba, utility PV about 78 % and wind 22 %). The renewable supply is scaled to the annual demand, so a day ranks by how much of its demand renewables leave uncovered.
+- Days already modelled are skipped, and the critical days are at least `min_day_separation` days apart, so one dark spell gives one day.
+- Each critical day stands for **one day** of the year. The representative days (or TSAM periods) share the remaining days: their weights (equal shares, or the cluster sizes) are scaled down and corrected by a small least-change step so that the year the master sees keeps the demand energy and the energy per MW of every renewable profile of the representative days alone. The critical days therefore add the shortage case without making the year darker.
+- Storage, reserves, curtailment and every other constraint work on a critical day as on any other modelled day; with TSAM inter-period linking the critical days take their place in the chronological chain.
+
+The log lists their dates ("Critical days (lowest renewable supply against demand), the same for every planning year, one day of the year each: …") and the weighted mean of every profile over its annual mean on all modelled days. In the Cuba case (25 years, PV and wind, 1-h resolution) the three most critical days are 20 Mar, 31 May and 20 Oct: daily net loads 0.70, 0.67 and 0.62 against a 99th percentile of 0.53, with PV at 31 to 48 % and wind at 2 to 9 % of their means. The October day sits in the spell on which the dispatch shed most (days 289 to 292).
+
+Benders (`solver_method: benders`) models the representative days only, not the critical days, and says so in the log.
+
 ### TSAM Clustering
 
-With `use_tsam: true`, the default selection is replaced by time-series clustering. In that case `representative_days` and `min_day_separation` are ignored. The daily profiles of demand and of the availability of the renewable generators and renewable candidate technologies (one per distinct profile), averaged over the planning years (each year's block of a multi-year profile, a shorter profile repeating, as in the dispatch), are clustered once into `tsam_num_periods` representative days (`tsam_method: kmedoids` or `kmeans`), and every year (every annual master in `myopic` mode) uses the same days and weights with its own demand and profiles. Each day is weighted by the size of its cluster; the peak-demand day replaces the representative of its cluster. The log lists the weighted mean of each profile on the periods over its annual mean, as for representative days. With `tsam_inter_period_linking: true`, the state of charge of existing batteries (and reservoir levels) is carried across the representative days in chronological order, which lets the model represent seasonal storage.
+With `use_tsam: true`, the default selection is replaced by time-series clustering. In that case `representative_days` is ignored (`min_day_separation` still spaces the critical days, which are added to the periods). The daily profiles of demand and of the availability of the renewable generators and renewable candidate technologies (one per distinct profile), averaged over the planning years (each year's block of a multi-year profile, a shorter profile repeating, as in the dispatch), are clustered once into `tsam_num_periods` representative days (`tsam_method: kmedoids` or `kmeans`), and every year (every annual master in `myopic` mode) uses the same days and weights with its own demand and profiles. Each day is weighted by the size of its cluster; the peak-demand day replaces the representative of its cluster. The log lists the weighted mean of each profile on the periods over its annual mean, as for representative days. With `tsam_inter_period_linking: true`, the state of charge of existing batteries (and reservoir levels) is carried across the representative days in chronological order, which lets the model represent seasonal storage.
 
 
 ### Time Resolution
@@ -296,7 +309,9 @@ systems:
 
 ### Capacity Adequacy
 
-For each node and year, firm capacity must cover the year's peak demand × `reserve_margin` (default 1.15). Firm capacity counts existing generators, life-extended capacity, technology investments and the power of existing and new batteries, each at its firm share times its `risk_coefficient`: variable renewables (sun, wind, ocean, run-of-river hydro) at their **capacity credit**, the minimum of their availability profile (so solar contributes nothing); every other unit (thermal, biomass, reservoir hydro, storage) at its **mean availability over the node's peak period**, the top 10 % demand steps of the year, so derates, outages and seasonal availability count. A unit without an availability profile counts fully. Net imports from neighbouring nodes also count, up to the transfer capacity between them (existing lines plus transfer investment), so a node can rely on a neighbour's surplus. A slack keeps the model feasible; each MW of it costs `loss_of_load` × the hours of that peak period, more than any firm capacity.
+For each node and year, firm capacity must cover the year's peak demand × `reserve_margin` (default 1.15). Firm capacity counts existing generators, life-extended capacity, technology investments and the power of existing and new batteries, each at its firm share times its `risk_coefficient`: variable renewables (sun, wind, ocean, run-of-river hydro) at their **capacity credit**, the minimum of their availability profile (so solar contributes nothing); every other unit (thermal, biomass, reservoir hydro, storage) at its **mean availability over the node's peak period**, the top 10 % demand steps of the year, so derates, outages and seasonal availability count. A unit without an availability profile counts fully.
+
+A battery counts at most the power its energy can sustain over the critical period: **min(power, usable energy / H)**, with usable energy = energy capacity × `max_DoD` × `efficiency_discharge`. This holds for existing batteries, life-extended ones (at their energy-to-power ratio) and the batteries the master builds from every battery technology (a firm-power variable bounded by the power built and by the usable energy built / H, both in service that year). H is `master_problem.storage_firm_hours`; by default it is derived from the data: the longest stretch of a critical day without solar (the steps where the profiles that are dark at the same hour on at least 90 % of days give at most 1 % of their peak, read cyclically through the day). Without a solar profile it is the longest stretch of a critical day whose renewable supply (scaled to the annual demand) stays below the demand; without renewable profiles, 4 h. The log gives H. In the Cuba case H is 13 h (the October to March night), so a 4-hour battery counts 31 % of its power and the master builds the firm capacity the night needs. Earlier versions counted every battery at its full power whatever its duration, so a short battery covered a long low-renewable night on paper. Net imports from neighbouring nodes also count, up to the transfer capacity between them (existing lines plus transfer investment), so a node can rely on a neighbour's surplus. A slack keeps the model feasible; each MW of it costs `loss_of_load` × the hours of that peak period, more than any firm capacity.
 
 
 ### CO₂
@@ -325,6 +340,8 @@ master_problem:
   solver_method: monolithic          # monolithic | benders
   representative_days: 5
   min_day_separation: 5              # days
+  critical_days: 3                   # lowest-renewable days, 0 = none
+  storage_firm_hours: null           # null = derived from the data
   use_tsam: false
   tsam_num_periods: 10
   tsam_method: kmedoids              # kmedoids | kmeans
@@ -351,7 +368,9 @@ temporal:
 | `planning_mode` | `perfect_foresight` | `perfect_foresight` or `myopic` (see [Planning Mode](#planning-mode)) |
 | `solver_method` | `monolithic` | `monolithic` or `benders` |
 | `representative_days` | 5 | Days per year (the peak day plus days matching the year's demand and renewable energy). Ignored when `use_tsam: true` |
-| `min_day_separation` | 5 | Minimum distance, in **days**, between selected days. Ignored when `use_tsam: true` |
+| `min_day_separation` | 5 | Minimum distance, in **days**, between selected representative days, and between critical days |
+| `critical_days` | 3 | Days with the largest net load (lowest renewable supply against demand) modelled besides the representative days or TSAM periods, one day of the year each (see [Critical Days](#critical-days)). 0 disables them |
+| `storage_firm_hours` | null | Hours a battery must sustain to count as firm power in the capacity adequacy: it counts min(power, usable energy / hours). null = the longest stretch without solar on the critical days |
 | `use_tsam` | false | Cluster days instead of the default selection |
 | `tsam_num_periods` | 10 | Number of clustered representative days per year (2 to 365) |
 | `tsam_method` | `kmedoids` | `kmedoids` or `kmeans` |

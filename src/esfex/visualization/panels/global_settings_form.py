@@ -472,6 +472,23 @@ class GlobalSettingsForm(QWidget):
         self._mp_min_sep.editingFinished.connect(self._on_changed)
         mpl.addRow(tr("global_form.mp_min_sep"), self._mp_min_sep)
 
+        self._mp_critical_days = QSpinBox()
+        self._mp_critical_days.setRange(0, 365)
+        self._mp_critical_days.setToolTip(tr("global_form.mp_critical_days_tip"))
+        self._mp_critical_days.editingFinished.connect(self._on_changed)
+        mpl.addRow(tr("global_form.mp_critical_days"), self._mp_critical_days)
+
+        # 0 shows "Auto": derived from the data
+        self._mp_storage_firm_hours = QDoubleSpinBox()
+        self._mp_storage_firm_hours.setDecimals(1)
+        self._mp_storage_firm_hours.setRange(0.0, 8760.0)
+        self._mp_storage_firm_hours.setSuffix(" h")
+        self._mp_storage_firm_hours.setSpecialValueText(
+            tr("global_form.mp_storage_firm_hours_auto"))
+        self._mp_storage_firm_hours.setToolTip(tr("global_form.mp_storage_firm_hours_tip"))
+        self._mp_storage_firm_hours.editingFinished.connect(self._on_changed)
+        mpl.addRow(tr("global_form.mp_storage_firm_hours"), self._mp_storage_firm_hours)
+
         # Master-problem solver method: monolithic (default) or Benders
         # decomposition. The two Benders settings below only apply to "benders".
         self._mp_solver_method = QComboBox()
@@ -864,6 +881,8 @@ class GlobalSettingsForm(QWidget):
         self._mp_stochastic.setChecked(g.mp_stochastic)
         self._mp_rep_days.setValue(g.mp_representative_days)
         self._mp_min_sep.setValue(g.mp_min_day_separation)
+        self._mp_critical_days.setValue(g.mp_critical_days)
+        self._mp_storage_firm_hours.setValue(g.mp_storage_firm_hours)
         _sm_idx = self._mp_solver_method.findData(g.mp_solver_method)
         self._mp_solver_method.setCurrentIndex(_sm_idx if _sm_idx >= 0 else 0)
         self._mp_benders_max_iter.setValue(g.mp_benders_max_iterations)
@@ -967,9 +986,9 @@ class GlobalSettingsForm(QWidget):
         self._mp_tsam_num_periods.setEnabled(enabled)
         self._mp_tsam_method.setEnabled(enabled)
         self._mp_tsam_inter_period_linking.setEnabled(enabled)
-        # Disable legacy rep-days fields when TSAM is active
+        # Disable the representative-day count when TSAM is active (the
+        # separation still spaces the critical days)
         self._mp_rep_days.setEnabled(not enabled)
-        self._mp_min_sep.setEnabled(not enabled)
 
     def _on_mga_toggled(self, checked: bool):
         """Enable/disable MGA-specific fields and trigger change."""
@@ -1135,6 +1154,8 @@ class GlobalSettingsForm(QWidget):
         g.mp_stochastic = self._mp_stochastic.isChecked()
         g.mp_representative_days = self._mp_rep_days.value()
         g.mp_min_day_separation = self._mp_min_sep.value()
+        g.mp_critical_days = self._mp_critical_days.value()
+        g.mp_storage_firm_hours = self._mp_storage_firm_hours.value()
         g.mp_solver_method = self._mp_solver_method.currentData()
         g.mp_benders_max_iterations = self._mp_benders_max_iter.value()
         g.mp_benders_tolerance = self._mp_benders_tol.value()

@@ -271,7 +271,9 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `cap_adequacy_y{y}_node{ni}` | CAP-1 | Firm capacity (firm share × risk coefficient: capacity credit for variable renewables, peak-period mean availability for other units) + net peak imports + slack >= peak demand × reserve margin |
+| `cap_adequacy_y{y}_node{ni}` | CAP-1 | Firm capacity (firm share × risk coefficient: capacity credit for variable renewables, peak-period mean availability for other units; batteries at most min(power, usable energy / storage firm hours), CAP-5) + net peak imports + slack >= peak demand × reserve margin |
+| `bat_tech_firm_power_y{y}_bt{k}_b{b}` | CAP-5b | Firm power `bat_tech_firm_y{y}_bt{k}_b{b}` of battery technology `k` <= its power built and in service |
+| `bat_tech_firm_energy_y{y}_bt{k}_b{b}` | CAP-5b | Storage firm hours × firm power <= its usable energy built and in service |
 | `cap_import_max_y{y}_{m}_{n}` | CAP-3 | Peak import `cap_import_y{y}_{m}_{n}` <= transfer capacity between the nodes |
 
 ### RE Targets

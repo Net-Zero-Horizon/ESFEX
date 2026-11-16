@@ -2369,6 +2369,18 @@ Input configuration for the Master Problem (capacity expansion planning).
   within a year (0-based), the same calendar days for every year
   (`master_rep_days`); empty = chosen from the horizon-mean demand and
   renewable availability (`master_rep_day_offsets`)
+- `critical_days::Int`: critical days (lowest renewable supply against
+  demand, `critical_day_plan`) the master chooses itself, besides the
+  representative days, when `rep_day_offsets` is empty; 0 = none
+- `critical_day_offsets::Vector{Int}`: first step of each critical day within
+  a year (0-based), modelled with the representative days (`master_day_plan`)
+- `rep_day_weights::Vector{Float64}`: days of the year each representative
+  day and then each critical day stands for (`representative_day_weights`);
+  empty = the year's days shared equally by the representative days
+- `storage_firm_hours::Float64`: hours a battery must sustain its output to
+  count as firm in the capacity adequacy constraint, which credits it
+  min(power, usable energy / hours) (`master_storage_firm_hours`); ≤ 0 =
+  derived from the data (`critical_day_plan`)
 
 ## Life Extension
 - `life_extension_cost_factor::Float64`: Fraction of investment cost for annual extension
@@ -2559,6 +2571,14 @@ struct MasterProblemInput
     # same for every year (master_rep_days); empty = chosen from the
     # horizon-mean demand and renewable availability (master_rep_day_offsets)
     rep_day_offsets::Vector{Int}
+    # Critical days (lowest renewable supply against demand) modelled with
+    # the representative days, the days of the year each modelled day stands
+    # for, and the hours a battery must sustain to count as firm
+    # (master_day_plan, master_storage_firm_hours)
+    critical_days::Int
+    critical_day_offsets::Vector{Int}
+    rep_day_weights::Vector{Float64}
+    storage_firm_hours::Float64
     # Scheduled outages (outage_schedule) as availability factors per master
     # step (index = step, as rows of `base_demand`): `(generator, node)` →
     # factor, node 0 for all of the unit's buses; `(battery, 0)` → factor.
@@ -2638,6 +2658,10 @@ function MasterProblemInput(;
     npv_retired_units::Vector{RetiredUnit} = RetiredUnit[],
     re_share_anchor::Vector{Float64} = Float64[],
     rep_day_offsets::Vector{Int} = Int[],
+    critical_days::Int = 0,
+    critical_day_offsets::Vector{Int} = Int[],
+    rep_day_weights::Vector{Float64} = Float64[],
+    storage_firm_hours::Float64 = 0.0,
     gen_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}(),
     bat_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}()
 )
@@ -2674,6 +2698,7 @@ function MasterProblemInput(;
         re_target_override,
         co2_budget_groups, unit_commitment,
         primary_energy, npv_retired_units, re_share_anchor, rep_day_offsets,
+        critical_days, critical_day_offsets, rep_day_weights, storage_firm_hours,
         gen_outage_factors, bat_outage_factors
     )
 end
