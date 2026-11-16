@@ -3991,6 +3991,7 @@ class Orchestrator:
                     tsam_inter_period_linking=(
                         master_cfg.tsam_inter_period_linking if master_cfg else True
                     ),
+                    tsam_critical_periods=tsam.critical_periods if tsam else None,
                     use_stochastic=use_stochastic,
                     stochastic_scenarios=stochastic_scenario_dicts,
                     config_path=str(self.config_path) if self.config_path else None,
@@ -4117,7 +4118,8 @@ class Orchestrator:
         index = model_time_index(self._data_start(), steps, resolution_hours)
         return ", ".join(index[int(o) % steps].strftime("%d %b") for o in offsets)
 
-    def _master_re_profiles(self, resolution_hours: int) -> list[tuple[str, np.ndarray, np.ndarray]]:
+    def _master_re_profiles(self, resolution_hours: int,
+                            transform=None) -> list[tuple[str, np.ndarray, np.ndarray]]:
         """The distinct availability profiles of the renewable generators
         and candidate technologies the master uses (the run's preloaded
         profiles, ``_availability_cache``), at the master's resolution, as
@@ -4125,11 +4127,14 @@ class Orchestrator:
         over the nodes where the units sharing the profile have capacity
         (``rated_power`` / ``invest_max_power`` > 0; all nodes if none).
         Units with the same profile (same file or same values) share one
-        entry, labelled with their keys."""
-        return [entry[:3] for entry in self._master_re_profiles_with_capacity(resolution_hours)]
+        entry, labelled with their keys. *transform*, when given, maps each
+        profile to the one returned (and its series)."""
+        return [entry[:3] for entry in
+                self._master_re_profiles_with_capacity(resolution_hours, transform)]
 
     def _master_re_profiles_with_capacity(
-            self, resolution_hours: int) -> list[tuple[str, np.ndarray, np.ndarray, float]]:
+            self, resolution_hours: int,
+            transform=None) -> list[tuple[str, np.ndarray, np.ndarray, float]]:
         """``_master_re_profiles`` with, for each profile, the renewable
         capacity behind it (MW): the rated power of the existing units plus
         the investment limit of the candidate technologies sharing it, over
@@ -4166,17 +4171,22 @@ class Orchestrator:
         for keys, avail, mask, capacity in groups.values():
             label = ", ".join(keys[:3]) + (f" (+{len(keys) - 3})" if len(keys) > 3 else "")
             weights = (mask if mask.any() else np.ones_like(mask)).astype(float)
+            if transform is not None:
+                avail = transform(avail)
             series = avail @ (weights / weights.sum())
             out.append((label, avail, series, capacity))
         return out
 
     def _log_rep_day_ratios(self, kind: str, demand_agg: np.ndarray, num_years: int,
                             offsets: list[int], resolution_hours: int, profiles: list,
-                            weights: Optional[list[float]] = None) -> None:
+                            weights: Optional[list[float]] = None,
+                            warn: bool = True) -> list[float]:
         """Log, per series, the representative days' (or TSAM periods')
         mean over the annual mean, for the demand and each renewable profile
         (``master_rep_day_ratios``): how far the master's year is from the
-        real one. Warns when one is off by more than 10 %."""
+        real one. Warns (when *warn*) when one is off by more than 10 %,
+        advising more representative days or TSAM. Returns the ratios
+        (demand first)."""
         from esfex.bridge.adapters import master_rep_day_ratios
         ratios = master_rep_day_ratios(demand_agg, num_years, offsets, resolution_hours,
                                        [s for _, _, s in profiles], weights)
@@ -4184,11 +4194,68 @@ class Orchestrator:
         text = ", ".join(f"{n} {r:.3f}" for n, r in zip(names, ratios) if np.isfinite(r))
         logger.info("%s mean / annual mean: %s", kind, text)
         off = [n for n, r in zip(names, ratios) if np.isfinite(r) and abs(r - 1.0) > 0.10]
-        if off:
+        if off and warn:
             logger.warning(
                 "%s misrepresent the year by more than 10 %% for: %s. The master "
-                "sees more or less energy than the year has; use more days or TSAM.",
+                "sees more or less energy than the year has; use more representative "
+                "days (master_problem.representative_days) or TSAM (use_tsam).",
                 kind, ", ".join(off))
+        return ratios
+
+    def _log_tsam_rescaling(self, demand_agg: np.ndarray, num_years: int, tsam,
+                            resolution_hours: int) -> None:
+        """Log what the master's TSAM periods (critical days included) give
+        each series once the renewable profiles are rescaled to each year's
+        energy (``rescale_profile_periods``, as ``MasterProblemAdapter``
+        rescales the master's profiles): the periods' weighted mean of the
+        horizon-mean series over the annual mean of the original one. The
+        residual is ~0 unless the cap at full availability stopped a profile
+        (said which); the demand is not rescaled. Warns, advising more TSAM
+        periods, when a series is still off by more than 10 %."""
+        from esfex.models.tsam import rescale_profile_periods
+
+        res = max(1, resolution_hours)
+        steps, period = HOURS_STD_YEAR // res, 24 // res
+        n_years = max(1, num_years)
+        starts = list(tsam.period_start_hours)
+        weights = np.asarray(tsam.period_weights, dtype=float)
+        years = [(y * steps, starts, list(weights)) for y in range(n_years)]
+
+        def horizon_mean(x: np.ndarray) -> np.ndarray:
+            return np.mean([_profile_year_block(np.asarray(x, dtype=float), y, steps)
+                            for y in range(n_years)], axis=0)
+
+        def ratio(on_periods: np.ndarray, reference: np.ndarray) -> float:
+            annual = float(horizon_mean(reference).mean())
+            if annual <= 1e-12:
+                return float("nan")
+            mean = horizon_mean(on_periods)
+            days = np.array([mean[s:s + period].mean() for s in starts])
+            return float(weights @ days / weights.sum() / annual)
+
+        total = np.asarray(demand_agg, dtype=float).sum(axis=1)
+        names, ratios = ["demand"], [ratio(total, total)]
+        rescaled = self._master_re_profiles(res, transform=lambda avail: (
+            rescale_profile_periods(avail, years, period, steps, tsam.critical_periods)[0]))
+        for (label, _, before), (_, _, after) in zip(self._master_re_profiles(res), rescaled):
+            names.append(label)
+            ratios.append(ratio(after, before))
+        logger.info("TSAM periods with the renewable profiles rescaled to the year's energy, "
+                    "mean / annual mean: %s", ", ".join(
+                        f"{n} {r:.3f}" for n, r in zip(names, ratios) if np.isfinite(r)))
+        capped = [f"{n} {r:.3f}" for n, r in zip(names[1:], ratios[1:])
+                  if np.isfinite(r) and r < 1.0 - 1e-3]
+        if capped:
+            logger.info("The cap at full availability kept the TSAM periods short of the "
+                        "year's energy for: %s", ", ".join(capped))
+        off = [n for n, r in zip(names, ratios) if np.isfinite(r) and abs(r - 1.0) > 0.10]
+        if off:
+            logger.warning(
+                "TSAM periods misrepresent the year by more than 10 %% for: %s, after "
+                "rescaling the renewable profiles to the year's energy (the demand is "
+                "not rescaled; a profile at full availability on the periods cannot "
+                "rise further). Use more TSAM periods (master_problem.tsam_num_periods).",
+                ", ".join(off))
 
     def _master_rep_day_offsets(self, demand_agg: np.ndarray, num_years: int,
                                 resolution_hours: int) -> list[int]:
@@ -4222,7 +4289,9 @@ class Orchestrator:
         technologies (``_master_re_profiles``; the mean over the years of
         each step, each year's block as the dispatch reads it,
         ``_profile_year_block``). Start steps are 0-based within a year.
-        Logged with their dates and their bias per profile."""
+        Logged with their dates and their bias per profile before the
+        renewable profiles are rescaled to the year's energy (the bias
+        that remains is logged by ``_log_tsam_rescaling``)."""
         from esfex.models.tsam import compute_tsam_periods
 
         master_cfg = getattr(self.config, 'master_problem', None)
@@ -4244,9 +4313,10 @@ class Orchestrator:
         )
         logger.info("TSAM periods, the same for every planning year: %s",
                     self._rep_day_dates(result.period_start_hours, resolution_hours))
-        self._log_rep_day_ratios("TSAM periods", demand_agg, num_years,
-                                 list(result.period_start_hours), resolution_hours, profiles,
-                                 list(result.period_weights))
+        self._log_rep_day_ratios("TSAM periods (before rescaling the renewable profiles)",
+                                 demand_agg, num_years, list(result.period_start_hours),
+                                 resolution_hours, profiles, list(result.period_weights),
+                                 warn=False)
         return result
 
     def _master_day_plan(self, demand_agg: np.ndarray, num_years: int,
@@ -4290,9 +4360,10 @@ class Orchestrator:
                         "for every planning year, one day of the year each: %s",
                         self._rep_day_dates(critical, resolution_hours))
             self._log_rep_day_ratios(
-                "TSAM periods with critical days" if use_tsam else
-                "Representative and critical days", demand_agg, num_years,
-                base + critical, resolution_hours, [p[:3] for p in profiles], weights)
+                "TSAM periods with critical days (before rescaling the renewable "
+                "profiles)" if use_tsam else "Representative and critical days",
+                demand_agg, num_years, base + critical, resolution_hours,
+                [p[:3] for p in profiles], weights, warn=not use_tsam)
         configured = master_cfg.storage_firm_hours if master_cfg else None
         if configured:
             firm_hours = float(configured)
@@ -4307,8 +4378,13 @@ class Orchestrator:
                 period_start_hours=starts,
                 period_weights=weights,
                 chronological_order=sorted(range(len(starts)), key=lambda i: starts[i]),
-                num_periods=len(starts))
+                num_periods=len(starts),
+                critical_periods=list(range(len(base), len(starts))))
             weights = []
+        if tsam is not None:
+            # The masters rescale the renewable profiles on the TSAM periods
+            # to each year's energy (MasterProblemAdapter._tsam_energy_matched)
+            self._log_tsam_rescaling(demand_agg, num_years, tsam, resolution_hours)
         return MasterDayPlan(rep_day_offsets=rep_offsets, critical_day_offsets=(
             [] if use_tsam else critical), rep_day_weights=weights,
             storage_firm_hours=firm_hours, tsam=tsam)
@@ -4837,6 +4913,7 @@ class Orchestrator:
                 tsam_inter_period_linking=(
                     master_cfg.tsam_inter_period_linking if master_cfg else True
                 ),
+                tsam_critical_periods=day_plan.tsam.critical_periods if use_tsam else None,
                 # Stochastic parameters
                 use_stochastic=use_stochastic,
                 stochastic_scenarios=stochastic_scenario_dicts,

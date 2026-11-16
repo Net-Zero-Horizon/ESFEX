@@ -14,7 +14,8 @@ References:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -39,6 +40,10 @@ class TSAMResult:
     period_weights: list[float]
     chronological_order: list[int]
     num_periods: int
+    # Indices of the periods modelled as they are (the critical days): the
+    # renewable profiles are rescaled on the other periods only
+    # (``rescale_profile_periods``)
+    critical_periods: list[int] = field(default_factory=list)
 
 
 def compute_tsam_periods(
@@ -173,6 +178,135 @@ def compute_tsam_periods(
         chronological_order=chronological_order,
         num_periods=num_periods,
     )
+
+
+def _scale_capped(values: np.ndarray, weights: np.ndarray, energy: float,
+                  cap: float) -> np.ndarray:
+    """*values* scaled by one factor so their *weights*-weighted sum is
+    *energy*, each capped at *cap*: the energy a capped value cannot take is
+    spread over the uncapped ones, repeated until no further value reaches
+    the cap. Every value at the cap and still short: all at the cap."""
+    out = values.copy()
+    capped = np.zeros(len(values), dtype=bool)
+    for _ in range(len(values) + 1):
+        free = ~capped
+        current = float(weights[free] @ values[free])
+        rest = energy - cap * float(weights[capped].sum())
+        if current <= 1e-15:
+            break
+        trial = values[free] * (max(rest, 0.0) / current)
+        over = trial > cap
+        if not over.any():
+            out[free] = trial
+            break
+        capped[np.flatnonzero(free)[over]] = True
+    out[capped] = cap
+    return out
+
+
+def rescale_periods_to_year(
+    block: np.ndarray,
+    period_starts: Sequence[int],
+    weights: Sequence[float],
+    period_length: int,
+    critical: Iterable[int] = (),
+) -> tuple[np.ndarray, np.ndarray]:
+    """One year of an availability profile (*block*, steps × columns, or
+    1-D) with its representative periods rescaled to the year's energy.
+
+    The periods starting at *period_starts* (``period_length`` steps each)
+    stand for the year with *weights* (days of the year each): their
+    weighted energy should be the year's. The clustering does not ensure it
+    (Cuba, 12 TSAM periods: PV +8 %, wind −13 %). Each column is scaled on
+    the periods not in *critical* (indices into *period_starts*) by one
+    factor so the weighted energy of all periods equals the year's, values
+    capped at full availability (1, or the column's own maximum above 1);
+    the energy a capped step cannot take is spread over the uncapped ones,
+    repeated until no further step reaches the cap (the ``tsam`` library's
+    rescaling). The shape of each period is kept (a step at 0 stays 0). The
+    critical periods, extreme on purpose, are kept as they are and count
+    in the periods' energy. A column with no energy in the year, or none on
+    the periods it may scale, is left as it is.
+
+    Returns the rescaled block (a copy) and, per column, the periods'
+    weighted mean over the year's mean after rescaling: 1.0 when matched,
+    below 1 where the cap kept the periods short, NaN for a column with no
+    energy in the year.
+    """
+    out = np.array(block, dtype=float)
+    flat = out.ndim == 1
+    if flat:
+        out = out[:, None]
+    steps, n_cols = out.shape
+    crit = {int(k) for k in critical}
+    rows = [np.arange(int(s), min(int(s) + int(period_length), steps)) for s in period_starts]
+    w = np.asarray(weights, dtype=float)
+
+    def stacked(keys: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        idx = [rows[k] for k in keys]
+        if not idx:
+            return np.zeros(0, dtype=int), np.zeros(0)
+        return (np.concatenate(idx),
+                np.concatenate([np.full(len(rows[k]), w[k]) for k in keys]))
+
+    free_idx, free_w = stacked([k for k in range(len(rows)) if k not in crit])
+    fixed_idx, fixed_w = stacked([k for k in range(len(rows)) if k in crit])
+    weighted_steps = float(free_w.sum() + fixed_w.sum())
+    annual = out.mean(axis=0)
+    ratios = np.full(n_cols, np.nan)
+    for c in range(n_cols):
+        if annual[c] <= 1e-12 or weighted_steps <= 0:
+            continue
+        target = annual[c] * weighted_steps
+        cap = max(1.0, float(out[:, c].max()))
+        out[free_idx, c] = _scale_capped(out[free_idx, c], free_w,
+                                         target - float(fixed_w @ out[fixed_idx, c]), cap)
+        achieved = float(free_w @ out[free_idx, c] + fixed_w @ out[fixed_idx, c])
+        ratios[c] = achieved / target
+    return (out[:, 0] if flat else out), ratios
+
+
+def rescale_profile_periods(
+    profile: np.ndarray,
+    years: Sequence[tuple[int, Sequence[int], Sequence[float]]],
+    period_length: int,
+    steps_per_year: int,
+    critical: Iterable[int] = (),
+) -> tuple[np.ndarray, np.ndarray]:
+    """``rescale_periods_to_year`` on each modelled year of a profile (steps
+    × columns, or 1-D).
+
+    *years* gives, per modelled year, the first row of its block (rows
+    ``first … first + steps_per_year − 1``, wrapping around a shorter
+    profile, as the master reads a one-year profile every year), its period
+    starts within the year and their weights. Each block is rescaled from
+    the original profile, once (a one-year profile serves every year). A
+    profile that is not a whole number of years is returned unchanged.
+
+    Returns the rescaled profile (a copy) and the ratios of
+    ``rescale_periods_to_year``, one row per entry of *years* (NaN where
+    the profile was left unchanged).
+    """
+    source = np.asarray(profile, dtype=float)
+    flat = source.ndim == 1
+    src = source[:, None] if flat else source
+    n, steps = len(src), int(steps_per_year)
+    out = src.copy()
+    ratios = np.full((len(years), src.shape[1]), np.nan)
+    if n == 0 or steps <= 0 or n % steps:
+        return (out[:, 0] if flat else out), ratios
+    critical = list(critical)
+    done: dict[int, np.ndarray] = {}
+    for i, (first, starts, weights) in enumerate(years):
+        if not len(starts):
+            continue
+        b0 = int(first) % n
+        if b0 not in done:
+            rows = (b0 + np.arange(steps)) % n
+            out[rows], done[b0] = rescale_periods_to_year(
+                src[rows], starts, weights, period_length, critical)
+        ratios[i] = done[b0]
+    return (out[:, 0] if flat else out), ratios
 
 
 def _cluster_kmedoids(

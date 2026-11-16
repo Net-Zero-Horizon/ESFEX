@@ -184,4 +184,5 @@ def test_tsam_clusters_candidate_technology_profiles(tmp_path, caplog, monkeypat
     with caplog.at_level(logging.INFO, logger="esfex.runner"):
         orch._master_tsam_periods(demand, 1, 1)
     assert set(seen["availability"]) == {SOLAR, WIND_NEW}
-    assert any("TSAM periods mean / annual mean" in r.getMessage() for r in caplog.records)
+    assert any("TSAM periods (before rescaling the renewable profiles) mean / annual mean"
+               in r.getMessage() for r in caplog.records)
