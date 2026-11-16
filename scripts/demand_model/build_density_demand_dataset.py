@@ -16,45 +16,69 @@ Features (all INTENSIVE -> same range at country and pixel scale):
   latitude, longitude
 NO demand as input.
 
-Reuses:
-  - build_absolute_demand_dataset's hourly frame (ecvi/absolute_demand_dataset.parquet:
-    demand_mw + temperature/hdd/cdd + calendar, per (country,zone) series).
-  - build_demand_density_model's masking machinery to get per-series
-    area_km2, total pop P, total gdp G, urbanization (admin-0 masks + admin-1 zonal;
-    gridded GPW pop / GDP raster / GHSL).
+Clock convention (ESFEX, rounds 31-32). Every row is one LOCAL CIVIL hour of
+the series' location (its time zone from the population-weighted centroid,
+daylight saving time included; 29 February dropped). The demand and the ERA5
+temperature of a row are those of the same instant, and the calendar
+features describe the row's real local date (``esfex.utils.temporal.
+year_row_dates``). v1 instead used archive row ``h`` as hour ``h`` of the
+year whatever the source's clock, the UTC temperature of hour ``h`` and a
+calendar read from the row index (reflexpy ``build_unified_dataset``, via
+build_absolute_demand_dataset.py). ``clock_audit.py`` establishes the clock
+of every archive series-year (``series_clocks.csv``); years whose clock it
+cannot establish are left out.
 
-Saves ecvi/density_demand_dataset.parquet and a per-series static table
-ecvi/density_series_static.parquet (for inference range checks).
+Inputs (read only): the demand archive (``{ISO3}/*.parquet`` and the UTC
+ERA5 caches in ``_era5``), ``series_clocks.csv`` and a per-series static
+table (``density_series_static.parquet``: area, population, GDP,
+urbanization, population-weighted centroid). ``--rebuild-static`` recomputes
+that table with ``build_series_static`` (cartopy, the 0.25 deg population
+and feature grids and the country-mask helper of the paper's workspace).
+
+Usage::
+
+    PYTHONPATH=src python scripts/demand_model/build_density_demand_dataset.py \\
+        --archive ".../Demand_forecasting/data/demand_dataset" \\
+        --clocks OUTDIR/series_clocks.csv --static ".../ecvi/density_series_static.parquet" \\
+        --out OUTDIR/density_demand_dataset.parquet
 """
 from __future__ import annotations
-import sys, json, glob
+import argparse, sys, json
 from pathlib import Path
 import numpy as np, pandas as pd
 
-HERE = Path("/home/manuel/Dropbox/PhD/Pappers/09_Flexibility/ReFlex/demand_estimation")
-DF = Path("/media/manuel/New Volume/Demand_forecasting")
-sys.path.insert(0, str(HERE))
-POP_NPZ = HERE / "ecvi" / "ecvi_ssp2_2025_2050_tft_84c_fold0.npz"
-FEAT_NPZ = HERE / "ecvi" / "feature_grids_025.npz"
-ABS = HERE / "ecvi" / "absolute_demand_dataset.parquet"
-OUT = HERE / "ecvi" / "density_demand_dataset.parquet"
-STATIC = HERE / "ecvi" / "density_series_static.parquet"
-DS = DF / "data/demand_dataset"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import clocks  # noqa: E402
+
 # zonal countries whose demand series are sub-national (admin-1 footprints)
 ZONAL = {"CHN", "AUS", "CAN", "BRA", "THA", "TWN", "USA", "IND", "JPN",
          "ITA", "NOR", "SWE", "DNK"}
+HDD_BASE, CDD_BASE = 18.0, 24.0          # as v1 (reflexpy pixel_features)
+FEATS = ["log_pop_density", "log_gdp_density", "log_gdp_per_cap", "urbanization",
+         "temperature", "hdd", "cdd", "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+         "month_sin", "month_cos", "is_weekend", "is_holiday",
+         "days_to_next_holiday", "days_from_prev_holiday", "latitude", "longitude"]
+SCOLS = ["log_pop_density", "log_gdp_density", "log_gdp_per_cap",
+         "urbanization", "latitude", "longitude", "area_km2"]
 
 
-def build_series_static():
-    """Per (iso3, zone) series: area_km2, total pop P, total gdp G, urb, lat, lon."""
+def build_series_static(pop_npz: Path, feat_npz: Path, manifest_path: Path,
+                        helper_dir: Path):
+    """Per (iso3, zone) series: area_km2, total pop P, total gdp G, urb, lat, lon.
+
+    *helper_dir* holds ``generate_sensitivity_figures.py`` (its
+    ``_build_country_masks``). Run with ``PYTHONDONTWRITEBYTECODE=1`` when it
+    is a read-only workspace.
+    """
+    sys.path.insert(0, str(helper_dir))
     import generate_sensitivity_figures as g
     import cartopy.io.shapereader as shp
     from shapely.geometry import Point
     from shapely.prepared import prep
 
-    d = np.load(POP_NPZ)
+    d = np.load(pop_npz)
     lat, lon, pop = d["lat"], d["lon"], d["exposure"]
-    fg = np.load(FEAT_NPZ); gdp, urb = fg["gdp"], fg["urb"]
+    fg = np.load(feat_npz); gdp, urb = fg["gdp"], fg["urb"]
     R, dd = 6371.0, np.deg2rad(0.25)
     area = np.abs(R * R * dd * (np.sin(np.deg2rad(lat + 0.125)) - np.sin(np.deg2rad(lat - 0.125))))
     area2d = area[:, None] * np.ones((1, len(lon)))
@@ -64,7 +88,7 @@ def build_series_static():
     a1 = [(prep(r.geometry), r.geometry) for r in shp.Reader(shp.natural_earth(
           resolution="10m", category="cultural", name="admin_1_states_provinces")
           ).records() if r.geometry is not None]
-    manifest = json.load(open(DS / "manifest.json"))
+    manifest = json.load(open(manifest_path))
 
     def mask_from_geom(geom):
         m = np.zeros(lat2d.shape, bool)
@@ -153,52 +177,127 @@ def build_series_static():
     return pd.DataFrame(recs)
 
 
-def main() -> int:
-    print("loading hourly frame (demand+climate+calendar)...")
-    df = pd.read_parquet(ABS)
-    if "zone" not in df.columns:
-        df["zone"] = ""
-    df["zone"] = df["zone"].fillna("").astype(str)
-    df["country"] = df["country"].astype(str)
+def era5_years(archive: Path, country: str, zone: str, years) -> dict[int, np.ndarray]:
+    """The archive's UTC ERA5 years of a series, as v1 read them: the zone's
+    cache first, then the country's (first 8760 UTC hours of each year)."""
+    out = {}
+    for y in years:
+        for name in ([f"era5_{zone}_{y}.npy"] if zone else []) + [f"era5_{y}.npy"]:
+            p = archive / "_era5" / country / name
+            if p.exists():
+                out[int(y)] = np.load(p).astype(float)[:8760]
+                break
+    return out
 
-    print("building per-series static (area/pop/gdp/urb)...")
-    stat = build_series_static()
+
+def parquet_temperature(archive: Path, country: str, zone: str, year: int):
+    """The parquet's ``temperature_c`` (v1's fallback without an ERA5 cache)."""
+    from clock_audit import archive_path
+    t = pd.read_parquet(archive_path(archive, country, zone, year),
+                        columns=["temperature_c"])["temperature_c"].to_numpy(float)[:8760]
+    return None if np.isnan(t).all() else t
+
+
+def series_frame(archive: Path, rows: pd.DataFrame) -> pd.DataFrame:
+    """Hourly frame of one series on its local civil time (kept years only)."""
+    from clock_audit import load_demand
+
+    c, z = rows.country.iat[0], rows.zone.iat[0]
+    local = rows.local_zone.iat[0]
+    years = [int(y) for y in rows.year]
+    dem = {y: load_demand(archive, c, z, y) for y in years}
+    dem_local = clocks.on_local_time(dem, dict(zip(years, rows.clock)),
+                                     dict(zip(years, rows.feb29_kept.astype(bool))), local)
+
+    # temperature at the same instants; neighbouring years cover the hours
+    # a local year shares with them
+    temp = era5_years(archive, c, z, sorted(set(years) | {y - 1 for y in years} | {y + 1 for y in years}))
+    t_clock = {y: "UTC" for y in temp}
+    for y in years:
+        if y not in temp:
+            t = parquet_temperature(archive, c, z, y)
+            if t is not None:
+                temp[y] = t
+                t_clock[y] = clocks.PARQUET_TEMPERATURE_CLOCKS.get((c, z, y), "UTC")
+    temp_local = (clocks.on_local_time(temp, t_clock, {y: True for y in temp}, local, targets=years)
+                  if temp else {})
+
+    parts = []
+    for y in years:
+        if y not in temp:
+            # no temperature of its own (v1 used a constant 20 °C): left out
+            continue
+        t = temp_local[y]
+        parts.append(pd.DataFrame({
+            "group_id": f"{c}_{z}_{y}" if z else f"{c}_{y}",
+            "country": c, "zone": z, "year": y, "time_idx": np.arange(8760),
+            "demand_mw": dem_local[y], "temperature": t,
+            "hdd": np.maximum(HDD_BASE - t, 0.0), "cdd": np.maximum(t - CDD_BASE, 0.0),
+            **clocks.calendar_features(y, c),
+        }))
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def static_features(stat: pd.DataFrame) -> pd.DataFrame:
+    """Intensive static features of each series (as v1)."""
+    stat = stat.copy()
     stat["zone"] = stat["zone"].fillna("").astype(str)
-    stat.to_parquet(STATIC)
-    print(f"saved {STATIC.name} ({len(stat)} series)")
-
-    # intensive static features
     stat["log_pop_density"] = np.log10(stat["tot_pop"] / stat["area_km2"])
     stat["log_gdp_density"] = np.log10(stat["tot_gdp"] / stat["area_km2"])
     stat["log_gdp_per_cap"] = np.log10(stat["tot_gdp"] / stat["tot_pop"])
-    SCOLS = ["log_pop_density", "log_gdp_density", "log_gdp_per_cap",
-             "urbanization", "latitude", "longitude", "area_km2"]
+    return stat
 
-    # join static onto hourly frame (drop absolute-dataset's static dups first)
-    drop = [c for c in ["log_total_pop", "log_total_gdp", "urbanization",
-                        "latitude", "longitude"] if c in df.columns]
-    df = df.drop(columns=drop)
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Density demand training dataset on local civil time.")
+    ap.add_argument("--archive", type=Path, required=True, help="demand archive (read only)")
+    ap.add_argument("--clocks", type=Path, required=True, help="series_clocks.csv (clock_audit.py)")
+    ap.add_argument("--static", type=Path, help="density_series_static.parquet to reuse")
+    ap.add_argument("--rebuild-static", action="store_true",
+                    help="recompute the static table (needs --pop-npz, --feat-npz, --helper-dir)")
+    ap.add_argument("--pop-npz", type=Path)
+    ap.add_argument("--feat-npz", type=Path)
+    ap.add_argument("--helper-dir", type=Path)
+    ap.add_argument("--out", type=Path, required=True, help="output dataset parquet")
+    a = ap.parse_args(argv)
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+
+    if a.rebuild_static:
+        print("building per-series static (area/pop/gdp/urb)...")
+        stat = build_series_static(a.pop_npz, a.feat_npz, a.archive / "manifest.json", a.helper_dir)
+        stat.to_parquet(a.out.with_name("density_series_static.parquet"))
+    else:
+        stat = pd.read_parquet(a.static)
+    stat = static_features(stat)
+    print(f"static table: {len(stat)} series")
+
+    tab = pd.read_csv(a.clocks, keep_default_na=False)
+    tab["zone"] = tab["zone"].astype(str)
+    tab["feb29_kept"] = tab["feb29_kept"].astype(str).str.lower().eq("true")
+    kept = tab[tab.status != "excluded"]
+    print(f"series-years: {len(tab)}, kept {len(kept)}, left out {len(tab) - len(kept)} "
+          "(clock not established)")
+
+    frames = []
+    for i, ((c, z), g) in enumerate(kept.groupby(["country", "zone"], sort=True)):
+        frames.append(series_frame(a.archive, g))
+        if (i + 1) % 20 == 0:
+            print(f"  {i + 1} series")
+    df = pd.concat(frames, ignore_index=True)
     df = df.merge(stat[["country", "zone"] + SCOLS], on=["country", "zone"], how="inner")
 
     df = df[df["demand_mw"] > 0].copy()
     df["target"] = np.log10(df["demand_mw"] / df["area_km2"])
-
-    FEATS = ["log_pop_density", "log_gdp_density", "log_gdp_per_cap", "urbanization",
-             "temperature", "hdd", "cdd", "hour_sin", "hour_cos", "dow_sin", "dow_cos",
-             "month_sin", "month_cos", "is_weekend", "is_holiday",
-             "days_to_next_holiday", "days_from_prev_holiday", "latitude", "longitude"]
-    FEATS = [f for f in FEATS if f in df.columns]
+    n_before = len(df)
     df = df.dropna(subset=FEATS + ["target"])
+    print(f"rows without temperature or demand at their instant: {n_before - len(df):,}")
     keep = ["group_id", "country", "zone", "year", "time_idx",
             "demand_mw", "area_km2", "target"] + FEATS
-    df[keep].to_parquet(OUT)
-    print(f"saved {OUT.name}: {len(df):,} rows | series {df.group_id.nunique()} | "
+    df[keep].to_parquet(a.out)
+    print(f"saved {a.out}: {len(df):,} rows | series {df.group_id.nunique()} | "
           f"countries {df.country.nunique()} | features {len(FEATS)}")
     print(f"  target log10(MW/km²): {df.target.min():.2f} .. "
           f"{df.target.median():.2f} .. {df.target.max():.2f}")
-    print(f"  log_pop_density: {df.log_pop_density.min():.2f} .. {df.log_pop_density.max():.2f}")
-    print(f"  log_gdp_density: {df.log_gdp_density.min():.2f} .. {df.log_gdp_density.max():.2f}")
-    print(f"  log_gdp_per_cap: {df.log_gdp_per_cap.min():.2f} .. {df.log_gdp_per_cap.max():.2f}")
     return 0
 
 
