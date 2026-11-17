@@ -444,6 +444,49 @@ function optimize_like_first!(model; kwargs...)
 end
 
 """
+    retry_worthy(model) -> Bool
+
+The solve ended `NUMERICAL_ERROR`, or `LOCALLY_SOLVED`: on an LP, Gurobi's
+`SUBOPTIMAL` (the barrier stalled short of its tolerances and returned its
+best iterate, neither optimal nor proven so). Another solve with other
+parameters (`NUMERICAL_RETRY_PARAMS`) may finish either.
+"""
+retry_worthy(model) = termination_status(model) in (MOI.NUMERICAL_ERROR, MOI.LOCALLY_SOLVED)
+
+"""
+    solve_retrying!(solve!, model, retry; again = solve!)
+
+Run `solve!()`. When it ends `retry_worthy` and `retry` holds solver
+parameters (`name => value` pairs), set them, run `again()` with a warning,
+and set them back on the backend afterwards (through JuMP the change would
+mark the solution just found as out of date). With no `retry` (`nothing` or
+empty) the first solve stands.
+"""
+function solve_retrying!(solve!, model, retry; again = solve!)
+    solve!()
+    (retry !== nothing && !isempty(retry) && retry_worthy(model)) || return
+    first = termination_status(model)
+    detail = try raw_status(model) catch; "" end
+    previous = Pair{String, Any}[]
+    for (name, val) in retry
+        push!(previous, name => get_attribute(model, name))
+        set_attribute(model, name, val)
+    end
+    @warn "Master problem: the solve ended $(first)" *
+          (isempty(detail) ? "" : " ($(detail))") * "; solving again with " *
+          join(("$k = $v" for (k, v) in retry), ", ")
+    try
+        again()
+    finally
+        for (name, val) in previous
+            MOI.set(backend(model), MOI.RawOptimizerAttribute(name), val)
+        end
+    end
+    @info "Master problem: second solve $(termination_status(model))"
+    return
+end
+
+"""
     pwl_loss_repair!(model) -> PWLLossRepair
 
 The model's loss registry, created (with `optimize_exact_losses!` as its
@@ -560,6 +603,15 @@ kept with a warning. A first solve that is not optimal (stopped at a limit,
 or a solver without an answer, as HiGHS's "no progress") is returned as it
 is, with a warning: its losses mean nothing, and each round re-solves the
 whole model. The model stays an LP (or the MIP it was).
+
+Under `optimize_master!` (which sets `model.ext[:solve_retry]`), each solve
+that ends `NUMERICAL_ERROR` or `LOCALLY_SOLVED` is solved once more with the
+solver's retry parameters (`solve_retrying!`), and a repair round whose
+re-solve is still not `OPTIMAL` is undone (`undo_loss_round!`): the model of
+the round before is solved again and kept, with a warning. The master takes
+only an optimal plan, and an interior point short of optimal runs flow both
+ways on lines the optimum leaves alone, which the next round would read as
+over-loss.
 """
 # An optimal solve, whose losses the repair can start from
 loss_repair_solved(model) =
@@ -571,10 +623,17 @@ function optimize_exact_losses!(model; kwargs...)
     if !(reg isa PWLLossRepair) || isempty(reg.blocks)
         return optimize!(model; ignore_optimize_hook = true, kwargs...)
     end
+    # A master (`optimize_master!` sets the key for the duration of its
+    # solve) takes only an optimal plan; its value holds the solver
+    # parameters for one more attempt at a solve that stalls
+    master = haskey(model.ext, :solve_retry)
+    retry = get(model.ext, :solve_retry, nothing)
+    resolve!() = optimize_like_first!(model; kwargs...)
     if restore_pwl_losses!(reg)
-        optimize_like_first!(model; kwargs...)
+        solve_retrying!(resolve!, model, retry)
     else
-        optimize!(model; ignore_optimize_hook = true, kwargs...)
+        solve_retrying!(() -> optimize!(model; ignore_optimize_hook = true, kwargs...),
+                        model, retry; again = resolve!)
     end
     if has_values(model) && !loss_repair_solved(model)
         # Cuba on HiGHS: "no progress" after 12.8 h (relative primal-dual
@@ -625,28 +684,66 @@ function optimize_exact_losses!(model; kwargs...)
                "$(length(retune)) linearised loss(es) off by " *
                "$(round(retune_mw; digits = 1)) MW·step (all lines lose " *
                "$(round(sum(L; init = 0.0); digits = 1)) MW·step; round $(r))"
+        # (block, dir, alpha, retunes) before this round, to undo it
+        undo = Tuple{LossBlock, Int, Float64, Int}[]
         for i in retune
-            set_block_alpha!(reg.blocks[i], loss_secant(reg.blocks[i], F[i]))
-            reg.blocks[i].retunes += 1
+            b = reg.blocks[i]
+            push!(undo, (b, b.dir, b.alpha, b.retunes))
+            set_block_alpha!(b, loss_secant(b, F[i]))
+            b.retunes += 1
         end
         for (i, b) in enumerate(reg.blocks)
             (b.dir == 0 && b.group in over_groups) || continue
+            push!(undo, (b, 0, 0.0, 0))
             # Held in the direction of its flow (+ at 0)
             linearise_block!(b, pf[i] < 0 ? -1 : 1, loss_secant(b, F[i]))
         end
         union!(repaired, over_groups)
-        optimize_like_first!(model; kwargs...)
+        solve_retrying!(resolve!, model, retry)
         if !loss_repair_solved(model)
             @warn "Line losses: the model has no optimal solution once $(length(repaired)) " *
                   "step(s) lose no more than the PWL loss of their flows " *
                   "($(termination_status(model))); keeping the PWL solution, whose " *
                   "lines lose energy beyond their flows' losses"
             restore_pwl_losses!(reg)
-            optimize_like_first!(model; kwargs...)
+            solve_retrying!(resolve!, model, retry)
+            return
+        end
+        if master && termination_status(model) != MOI.OPTIMAL
+            # A master would end on a status it rejects, and a point short of
+            # optimal (Gurobi's barrier stalled: SUBOPTIMAL, LOCALLY_SOLVED)
+            # is no ground for another round: an interior point, it runs flow
+            # both ways on lines the optimum leaves alone (Cuba 2037: 85
+            # steps "over-losing" after a round that only updated alphas; 0
+            # at the optimum of the same model). The model of the round
+            # before, whose solve was optimal, is solved again. (The
+            # dispatch accepts such a point, and so does its repair.)
+            st = termination_status(model)
+            undo_loss_round!(undo)
+            solve_retrying!(resolve!, model, retry)
+            @warn "Line losses: the solve of repair round $(r + 1) ended $(st), not " *
+                  "proven optimal; keeping the model of round $(r) (solved again: " *
+                  "$(termination_status(model))), whose lines lose " *
+                  "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss of their " *
+                  "flows and whose linearised losses miss it by " *
+                  "$(round(retune_mw; digits = 1)) MW·step"
             return
         end
     end
     return
+end
+
+# Set the blocks a repair round changed back to how they were before it
+# (`undo`: block, dir, alpha, retunes)
+function undo_loss_round!(undo)
+    for (b, dir, alpha, retunes) in undo
+        if dir == 0
+            restore_block!(b)
+        else
+            set_block_alpha!(b, alpha)
+            b.retunes = retunes
+        end
+    end
 end
 
 """
