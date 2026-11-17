@@ -37,8 +37,8 @@ is at most `CAPACITY_TOL`.
 """
 capacity_value(x) = (v = value(x); abs(v) <= CAPACITY_TOL ? 0.0 : v)
 
-# Per solver: the parameters of a second attempt at a master whose solve
-# ended NUMERICAL_ERROR (Gurobi's own advice: "Consider using the
+# Per solver: the parameters of a second attempt at a master solve that ended
+# NUMERICAL_ERROR or SUBOPTIMAL (Gurobi's own advice: "Consider using the
 # homogeneous algorithm (through parameter 'BarHomogeneous')")
 const NUMERICAL_RETRY_PARAMS = Dict{String, Vector{Pair{String, Any}}}(
     "Gurobi" => ["BarHomogeneous" => 1],
@@ -47,38 +47,35 @@ const NUMERICAL_RETRY_PARAMS = Dict{String, Vector{Pair{String, Any}}}(
 """
     optimize_master!(model; retry = NUMERICAL_RETRY_PARAMS[solver])
 
-Solve a master problem. When the solve ends `NUMERICAL_ERROR` and the solver
-has `retry` parameters (`NUMERICAL_RETRY_PARAMS`: Gurobi's homogeneous
-barrier), solve once more with them, with a warning, and set them back
-afterwards. A barrier run can lose its way on a large master (Cuba myopic
-TSAM 2027: `NUMERICAL_ERROR` after 228 iterations; the homogeneous barrier
-solved the same model in 112, and the model read back from a file in another
-order solved in 157), and a myopic run stops at the first year without a
-plan. Other statuses, and solvers without retry parameters, are left as the
-first solve ended.
+Solve a master problem. When a solve ends `NUMERICAL_ERROR` or
+`LOCALLY_SOLVED` (Gurobi's `SUBOPTIMAL`: the barrier stalled and returned an
+iterate short of its tolerances) and the solver has `retry` parameters
+(`NUMERICAL_RETRY_PARAMS`: Gurobi's homogeneous barrier), it is solved once
+more with them, with a warning, and they are set back afterwards
+(`solve_retrying!`). With line losses, that holds for each solve of the loss
+repair (`optimize_exact_losses!`), which also keeps the last optimal round
+when a re-solve still ends short of optimal. A barrier run can lose its way
+on a large master (Cuba myopic TSAM 2027: `NUMERICAL_ERROR` after 228
+iterations, solved by the homogeneous barrier in 112; Cuba myopic 2037: the
+third repair round ended `SUBOPTIMAL`), and a myopic run stops at the first
+year without an optimal plan. Solvers without retry parameters keep the
+status of the solve.
 """
 function optimize_master!(model::Model;
                           retry = get(NUMERICAL_RETRY_PARAMS, JuMP.solver_name(model), nothing))
-    optimize!(model)
-    (termination_status(model) == MOI.NUMERICAL_ERROR && retry !== nothing &&
-     !isempty(retry)) || return
-    previous = Pair{String, Any}[]
-    for (name, val) in retry
-        push!(previous, name => JuMP.get_attribute(model, name))
-        JuMP.set_attribute(model, name, val)
-    end
-    @warn "Master problem: the solve ended NUMERICAL_ERROR; solving again with " *
-          join(("$k = $v" for (k, v) in retry), ", ")
-    try
-        optimize!(model)
-    finally
-        # On the backend: through JuMP the change would mark the solution
-        # just found as out of date (OPTIMIZE_NOT_CALLED)
-        for (name, val) in previous
-            MOI.set(JuMP.backend(model), MOI.RawOptimizerAttribute(name), val)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    if reg isa PWLLossRepair && !isempty(reg.blocks)
+        # Each solve of the loss repair is retried there: retrying the whole
+        # repair would solve every round again
+        model.ext[:solve_retry] = retry
+        try
+            optimize!(model)
+        finally
+            delete!(model.ext, :solve_retry)
         end
+    else
+        solve_retrying!(() -> optimize!(model), model, retry)
     end
-    @info "Master problem: second solve $(termination_status(model))"
     return
 end
 

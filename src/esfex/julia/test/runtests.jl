@@ -1035,6 +1035,16 @@ import Ipopt
             @test during[] == 1
             @test ESFEX.JuMP.get_attribute(m, "P") == 0
             @test value(x) == 0.0
+            # Gurobi's SUBOPTIMAL (LOCALLY_SOLVED: the barrier stalled) is
+            # retried too (round 37)
+            stalled(mk) = MOIU.mock_optimize!(mk, ESFEX.MOI.LOCALLY_SOLVED,
+                                              (ESFEX.MOI.FEASIBLE_POINT, [1.0]))
+            during[] = nothing
+            MOIU.set_mock_optimize!(mock, stalled, ok)
+            ESFEX.optimize_master!(m; retry = ["P" => 1])
+            @test termination_status(m) == ESFEX.MOI.OPTIMAL
+            @test during[] == 1
+            @test ESFEX.JuMP.get_attribute(m, "P") == 0
             # No retry parameters (HiGHS, or none given): the status stands
             MOIU.set_mock_optimize!(mock, fail)
             ESFEX.optimize_master!(m; retry = nothing)
@@ -1820,6 +1830,116 @@ import Ipopt
             full = ESFEX.with_loss_model(ESFEX.TransmissionDC(net), 2, 100.0).pwl_losses
             @test ESFEX.benders_power_sink(fv, fixed) ≈
                   [sum(full.slopes[1] .* full.segment_widths[1])]
+        end
+
+        @testset "loss repair: a stalled re-solve is retried or undone (round 37)" begin
+            # Cuba myopic 2037: the third repair round's barrier stalled
+            # (Gurobi SUBOPTIMAL = LOCALLY_SOLVED) on a model that differed
+            # from the optimal round 2 by 50 loss coefficients. The repair
+            # read 85 "over-losing" steps off that point, the last round
+            # stalled too, and the master (which takes OPTIMAL only) stopped
+            # the run. A mock that solves with HiGHS stands in for Gurobi and
+            # reports the status `status_of(model)` gives.
+            MOI = ESFEX.MOI
+            MOIU = MOI.Utilities
+            BH = MOI.RawOptimizerAttribute("BarHomogeneous")
+            function sink_model(status_of)
+                H, N = 2, 2
+                pvg = mkgen("PV", "Renewable", "Solar", [130.0, 0.0], [0.0, 0.0],
+                            ones(H, N); nb = N, H = H)
+                gas = mkgen("Gas", "Non-renewable", "Gas", [0.0, 200.0],
+                            [3.0e-5, 3.0e-5], ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("L12", 1, 2, 200.0, 0.1, 0.05, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC")
+                net = NetworkConfig(N, N, buses, [1, 2],
+                                    [0.0 200.0; 200.0 0.0], [0.0 100.0; 100.0 0.0],
+                                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                    [line], TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                input = PowerSystemInput(
+                    name = "sink", year = 2025, network = net, generators = [pvg, gas],
+                    batteries = BatteryConfig[], demand = repeat([0.0 100.0], H),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = 3, curtailment_cost = 2e-5)
+                model, vars = create_power_system(input)
+                mock = MOIU.MockOptimizer(MOIU.UniversalFallback(MOIU.Model{Float64}()))
+                solves = MOI.TerminationStatusCode[]
+                mock.optimize! = function (mk)
+                    h = ESFEX.HiGHS.Optimizer()
+                    MOI.set(h, MOI.Silent(), true)
+                    map = MOI.copy_to(h, mk)
+                    MOI.optimize!(h)
+                    xs = MOI.get(mk, MOI.ListOfVariableIndices())
+                    st = status_of(model, mk)
+                    push!(solves, st)
+                    MOIU.mock_optimize!(mk, st, (MOI.FEASIBLE_POINT,
+                        [MOI.get(h, MOI.VariablePrimal(), map[x]) for x in xs]))
+                end
+                ESFEX.JuMP.set_optimizer(model, () -> mock)
+                ESFEX.JuMP.set_attribute(model, "BarHomogeneous", 0)
+                return model, vars, solves
+            end
+            linearised(model) = any(b -> b.dir != 0, model.ext[:pwl_loss_repair].blocks)
+            function exact_losses(model)
+                for b in model.ext[:pwl_loss_repair].blocks
+                    @test value(b.ploss) ≈ ESFEX.pwl_loss_value(b, abs(value(b.pf))) rtol = 0.02 atol = 1e-3
+                end
+            end
+
+            # A repaired model stalls unless solved with BarHomogeneous = 1:
+            # the re-solve is retried with it, the repair finishes optimal and
+            # the parameter is set back
+            model, _, solves = sink_model((m, mk) ->
+                linearised(m) && MOI.get(mk, BH) != 1 ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            @test_logs (:warn, r"ended LOCALLY_SOLVED.*solving again with BarHomogeneous = 1") match_mode = :any ESFEX.optimize_master!(model; retry = ["BarHomogeneous" => 1])
+            @test termination_status(model) == MOI.OPTIMAL
+            @test linearised(model)
+            @test MOI.LOCALLY_SOLVED in solves
+            @test ESFEX.JuMP.get_attribute(model, "BarHomogeneous") == 0
+            exact_losses(model)
+
+            # It stalls whatever the parameters: the round is undone and the
+            # model of the round before (here the PWL model) solved again
+            model, vars, solves = sink_model((m, mk) ->
+                linearised(m) ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            @test_logs (:warn, r"repair round 2 ended LOCALLY_SOLVED, not proven optimal; keeping the model of round 1") match_mode = :any ESFEX.optimize_master!(model; retry = ["BarHomogeneous" => 1])
+            @test termination_status(model) == MOI.OPTIMAL
+            @test !linearised(model)
+            @test solves == [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
+            # Back to the model as built: segments and loss slopes
+            for b in model.ext[:pwl_loss_repair].blocks
+                @test all(k -> ESFEX.JuMP.upper_bound(b.dp[k]) == b.widths[k] &&
+                               ESFEX.JuMP.upper_bound(b.dn[k]) == b.widths[k], 1:length(b.widths))
+                @test ESFEX.JuMP.normalized_coefficient(b.con, b.dp[1]) == -b.slopes[1]
+            end
+
+            # A master without retry parameters (HiGHS) undoes a stalled
+            # round at once
+            model, _, solves = sink_model((m, mk) ->
+                linearised(m) ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            ESFEX.optimize_master!(model; retry = nothing)
+            @test termination_status(model) == MOI.OPTIMAL
+            @test solves == [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
+            # The dispatch accepts a point short of optimal: its repair is
+            # unchanged (no retry, the round kept)
+            model, _, solves = sink_model((m, mk) ->
+                linearised(m) ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            optimize!(model)
+            @test termination_status(model) == MOI.LOCALLY_SOLVED
+            @test linearised(model)
+            @test ESFEX.JuMP.get_attribute(model, "BarHomogeneous") == 0
+
+            # The first solve stalls: retried before any repair
+            model, _, solves = sink_model((m, mk) ->
+                MOI.get(mk, BH) != 1 ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            ESFEX.optimize_master!(model; retry = ["BarHomogeneous" => 1])
+            @test termination_status(model) == MOI.OPTIMAL
+            @test solves[1:2] == [MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
+            exact_losses(model)
+            @test :solve_retry ∉ keys(model.ext)
         end
 
         @testset "line flow cost is charged on |flow|" begin
