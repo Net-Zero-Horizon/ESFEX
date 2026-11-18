@@ -434,6 +434,7 @@ class MasterProblemConfig(BaseModel):
     solver_method: Literal["monolithic", "benders"] = "monolithic"
     benders_max_iterations: int = 50
     benders_tolerance: float = 1e-4
+    solver_options: dict[str, Any] = {}          # merged over solver.options, masters only
     use_tsam: bool = False
     tsam_num_periods: int = 10
     tsam_method: Literal["kmedoids", "kmeans"] = "kmedoids"

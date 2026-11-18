@@ -261,6 +261,38 @@ def _nodes_without_load_bus(buses, num_nodes: int) -> list[int]:
     return [n for n in range(num_nodes) if carried[n] <= 1e-9]
 
 
+def master_solver_options(esfex_config: Any) -> dict:
+    """The solver options of every master solve: ``solver.options`` with
+    ``master_problem.solver_options`` merged over them.
+
+    A master key replaces the same option of ``solver.options`` however it
+    is written there (the Studio key ``method`` or the solver's ``Method``).
+    """
+    if esfex_config is None:
+        return {}
+    solver = getattr(esfex_config, "solver", None)
+    options = dict(getattr(solver, "options", None) or {})
+    mp = getattr(esfex_config, "master_problem", None)
+    override = dict(getattr(mp, "solver_options", None) or {})
+    if not override:
+        return options
+    attr_of: dict[str, str] = {}
+    try:
+        from esfex.config.solver import SOLVER_OPTIONS
+        for opt in SOLVER_OPTIONS.get(str(getattr(solver, "name", "highs")).lower(), []):
+            attr = opt.get("attr", opt.get("key"))
+            for ident in (opt.get("key"), attr):
+                if ident:
+                    attr_of[ident] = attr
+    except Exception:
+        pass
+    replaced = {attr_of.get(str(k), str(k)) for k in override}
+    options = {k: v for k, v in options.items()
+               if attr_of.get(str(k), str(k)) not in replaced}
+    options.update(override)
+    return options
+
+
 def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
     """Convert Python solver options dict to Julia Dict{String, Any}.
 
@@ -3096,6 +3128,7 @@ class MasterProblemAdapter:
 
         # Get solver config
         self._solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
+        self._solver_options = master_solver_options(self.esfex_config)
 
         logger.debug(f"MasterProblemAdapter initialized: {len(years)} years, base_year={base_year}")
 
@@ -3479,7 +3512,7 @@ class MasterProblemAdapter:
             time_limit=float(self._solver.time_limit),
             gap=self._solver.gap,
             verbose=self._solver.verbose,
-            solver_options=_solver_options_to_julia(self._solver.options, self._solver.name),
+            solver_options=_solver_options_to_julia(self._solver_options, self._solver.name),
             # Reserve, inertia, CO2 parameters for operational constraints
             reserve_static_default_ratio=self.reserve_static_default_ratio,
             reserve_static_requirement=_build_reserve_requirement_dict(

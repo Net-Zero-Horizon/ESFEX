@@ -7,7 +7,7 @@ The configuration drives a two-stage decomposition [**[25]**](../reference/bibli
 !!! warning "Unknown keys are ignored, with a warning"
     **Unknown keys are not errors.** A typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` has no effect. The loader logs a warning for each one with its full path (for example `Unknown configuration key systems.island.generators.diesel.min_up_time is ignored`), `esfex validate -c <file>` lists them, and so does the Studio's validation (category *Configuration*).
 
-    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling` and `_geo_assets`, and the free-form `plugins` and `solver.options`. Stochastic scenario multipliers report their own unknown keys.
+    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling` and `_geo_assets`, and the free-form `plugins`, `solver.options` and `master_problem.solver_options`. Stochastic scenario multipliers report their own unknown keys.
 
 ---
 
@@ -114,6 +114,8 @@ solver:
   verbose: false
   options: {}        # solver-specific options
 ```
+
+`master_problem.solver_options` (same format) is merged over `options` for the master solves only; the dispatch keeps `options` (see [Large LP Master Problems](solver-guide.md#large-lp-master-problems)).
 
 `options` is passed to the JuMP optimizer. For HiGHS, the key `solver_method` selects the LP algorithm (`choose`, `simplex`, `ipm`, `ipx`, `hipo`, `pdlp`). Options that apply to one algorithm only are forwarded only when `solver_method` is set explicitly to that algorithm; otherwise they are dropped with a warning. For example, `primal_feasibility_tolerance`, `dual_feasibility_tolerance` and `simplex_scale_strategy` need `solver_method: simplex`, while `ipm_optimality_tolerance` and `run_crossover` need an interior-point method:
 

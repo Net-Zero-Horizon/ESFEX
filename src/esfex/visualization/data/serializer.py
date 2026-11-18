@@ -2193,6 +2193,7 @@ def config_to_global_settings(
         g.mp_solver_method = getattr(mp, 'solver_method', 'monolithic')
         g.mp_benders_max_iterations = getattr(mp, 'benders_max_iterations', 50)
         g.mp_benders_tolerance = getattr(mp, 'benders_tolerance', 1e-4)
+        g.mp_solver_options = dict(getattr(mp, 'solver_options', None) or {})
         g.mp_use_tsam = getattr(mp, 'use_tsam', False)
         g.mp_tsam_num_periods = getattr(mp, 'tsam_num_periods', 10)
         g.mp_tsam_method = getattr(mp, 'tsam_method', 'kmedoids')
@@ -2343,6 +2344,8 @@ def global_settings_to_config_dict(
     config_dict["master_problem"]["solver_method"] = g.mp_solver_method
     config_dict["master_problem"]["benders_max_iterations"] = g.mp_benders_max_iterations
     config_dict["master_problem"]["benders_tolerance"] = g.mp_benders_tolerance
+    if g.mp_solver_options:
+        config_dict["master_problem"]["solver_options"] = dict(g.mp_solver_options)
     config_dict["master_problem"]["use_tsam"] = g.mp_use_tsam
     config_dict["master_problem"]["tsam_num_periods"] = g.mp_tsam_num_periods
     config_dict["master_problem"]["tsam_method"] = g.mp_tsam_method
