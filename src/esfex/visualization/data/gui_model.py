@@ -853,6 +853,9 @@ class GuiGlobalSettings:
     mp_solver_method: str = "monolithic"
     mp_benders_max_iterations: int = 50
     mp_benders_tolerance: float = 1e-4
+    # master_problem.solver_options (merged over solver_specific_options for
+    # the master solves); no form editor, kept so a save keeps them
+    mp_solver_options: dict[str, Any] = field(default_factory=dict)
     mp_use_tsam: bool = False
     mp_tsam_num_periods: int = 10
     mp_tsam_method: str = "kmedoids"

@@ -75,7 +75,7 @@ MGA/SPORES runs only in `perfect_foresight` mode.
 | Method | Description |
 |--------|-------------|
 | `monolithic` (default) | One LP that holds the investment variables and all representative-day dispatch |
-| `benders` | Benders decomposition: an investment-only master with one recourse variable per year, and one dispatch subproblem per year with all its representative days and the year's CO2 budget, RE target and growth cap. The subproblems use the configured solver. Iterates until the relative gap is below `benders_tolerance` or `benders_max_iterations` is reached |
+| `benders` | Benders decomposition: an investment-only master with one recourse variable per year, and one dispatch subproblem per year with all its representative days and the year's CO2 budget, RE target and growth cap. The subproblems use the configured solver, with the master's options (`solver_options`). Iterates until the relative gap is below `benders_tolerance` or `benders_max_iterations` is reached |
 
 Benders solves the same problem as the monolithic master and reaches the same optimum: the same investment constraints and costs, the same representative-day dispatch with the full loss-of-load penalty, the same annual curtailment limit (`max_curtailment_ratio`), and the same annual RE target, growth cap and CO2 budget. Benders holds the curtailment limit as a hard constraint, where the other masters price curtailment above it (see [Configuration](configuration.md)); the two reach the same optimum whenever the limit can be met. If it stops at `benders_max_iterations`, it returns the plan of its best iteration together with that plan's operating cost, and logs the remaining gap. Each iteration logs its bounds, how many years met the curtailment limit (and by how much each other year broke it) and the operating cost by term (generators, load shed, RE target shortfall, …); `logging.console_level: debug` adds each year's cost and the capacity the master builds each year.
 
@@ -352,6 +352,7 @@ master_problem:
   stochastic: false
   benders_max_iterations: 50
   benders_tolerance: 0.0001
+  solver_options: {}                 # merged over solver.options, masters only
   mga:
     enabled: false
     method: mga                      # mga | spores
@@ -381,6 +382,7 @@ temporal:
 | `stochastic` | false | Scenario-weighted objective (see [Stochastic Mode](#stochastic-mode)) |
 | `benders_max_iterations` | 50 | Benders only |
 | `benders_tolerance` | 1e-4 | Benders only: relative gap for convergence |
+| `solver_options` | `{}` | Solver options for the master solves only (Benders subproblems included), merged over `solver.options`; the dispatch keeps `solver.options`. See [Large LP Master Problems](solver-guide.md#large-lp-master-problems) |
 | `mga.enabled` | false | Generate near-optimal alternatives |
 | `mga.method` | `mga` | `mga` runs the HSJ loop \(K\) times; `spores` solves one alternative per declared objective |
 | `mga.slack_fraction` | 0.05 | Accept alternatives up to 5 % more expensive than the optimum (0 to 0.5) |

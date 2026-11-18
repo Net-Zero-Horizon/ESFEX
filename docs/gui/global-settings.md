@@ -216,7 +216,7 @@ The master-problem meaning of the RE target, increments, discount rate and cost 
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Max Annual System Cost ($) | 20e9 | Cap on annual system cost |
+| Max Annual System Cost ($) | 20e9 | Annual investment budget: caps the overnight cost of what the master builds in each investment period (soft). The dispatch also holds each window's operating cost below its share of this value (soft) |
 | Life Extension Cost Factor (x) | 0.20 | Life extension costs `invest_cost × factor` per MW per year |
 
 ### Penalties
