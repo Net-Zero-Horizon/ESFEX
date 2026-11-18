@@ -213,7 +213,9 @@ def main(argv=None) -> int:
         },
         "cross_validation": cv_scores(a.work),
     }
-    (a.out / f"{STEM}.meta.json").write_text(json.dumps(meta, indent=1) + "\n")
+    # source files are recorded relative to the article's work root
+    text = json.dumps(meta, indent=1).replace(str(a.work), "$R1_WORK_ROOT")
+    (a.out / f"{STEM}.meta.json").write_text(text + "\n")
     for f in sorted(a.out.glob(f"{STEM}*")):
         print(f"{f.name:34s} {f.stat().st_size:>11,d} bytes")
     return 0
