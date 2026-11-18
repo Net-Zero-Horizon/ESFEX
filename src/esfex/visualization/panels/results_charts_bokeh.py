@@ -66,7 +66,7 @@ from esfex.visualization.panels.results_charts import (
     _load_bat_tech_configs,
     _load_investment_data,
     _load_decommissioning_data,
-    _parse_invest_cost,
+    _add_legacy_unit_investments,
     _parse_total_mw,
     _demand_node_hours,
     _sum_nodes,
@@ -186,6 +186,7 @@ class GenerationMixChart(BokehChart):
             bp = kw.get("base_prefix", "")
             tres = _get_temporal_res(h5f)
             gen_configs = _load_gen_configs(h5f, bp)
+            bat_configs = _load_bat_configs(h5f, bp)
             tech_configs = _load_tech_configs(h5f, bp)
             bat_tech_configs = _load_bat_tech_configs(h5f, bp)
 
@@ -273,32 +274,11 @@ class GenerationMixChart(BokehChart):
                         cost_per_mw = inv_data.get("bat_tech_costs", {}).get(bt_name, 0)
                         year_cost += float(inv_mw) * cost_per_mw / 1e6
 
-                if "gen_investment_power" in inv_data:
-                    for gi, inv_mw in enumerate(inv_data["gen_investment_power"]):
-                        if inv_mw > 0 and gi < len(gen_configs):
-                            gc = gen_configs[gi]
-                            gn = gc.get("name", f"Gen_{gi}")
-                            if isinstance(gn, bytes):
-                                gn = gn.decode()
-                            gn_canon, _ = _canonical_tech_name(gn)
-                            if gn_canon not in gen_inv_by_tech:
-                                gen_inv_by_tech[gn_canon] = np.zeros(len(scenarios))
-                            gen_inv_by_tech[gn_canon][year_idx] += float(inv_mw) / 1000
-                            if "invest_cost" in gc:
-                                year_cost += float(inv_mw) * _parse_invest_cost(gc["invest_cost"]) / 1e6
-                if "bat_investment_power" in inv_data:
-                    for bi, inv_mw in enumerate(inv_data["bat_investment_power"]):
-                        if inv_mw > 0:
-                            bat_configs = _load_bat_configs(h5f, bp)
-                            if bi < len(bat_configs):
-                                bc = bat_configs[bi]
-                                bn = bc.get("name", f"Battery_{bi}")
-                                if isinstance(bn, bytes):
-                                    bn = bn.decode()
-                                bn_canon, _ = _canonical_tech_name(bn)
-                                if bn_canon not in bat_inv_by_tech:
-                                    bat_inv_by_tech[bn_canon] = np.zeros(len(scenarios))
-                                bat_inv_by_tech[bn_canon][year_idx] += float(inv_mw) / 1000
+                # Per-unit investments, each paired with its own config
+                year_cost += _add_legacy_unit_investments(
+                    inv_data, gen_configs, bat_configs, gen_inv_by_tech,
+                    bat_inv_by_tech, year_idx, len(scenarios),
+                    lambda name: _canonical_tech_name(name)[0])
                 total_cost_by_year.append(year_cost)
 
                 decomm, raw_fracs = _load_decommissioning_data(sc, gen_configs=gen_configs)

@@ -1842,6 +1842,34 @@ def _legacy_unit_investments(inv_data: dict, key: str,
     return out
 
 
+def _add_legacy_unit_investments(inv_data: dict, gen_configs: list[dict],
+                                 bat_configs: list[dict],
+                                 gen_inv_by_tech: dict, bat_inv_by_tech: dict,
+                                 year_idx: int, n_years: int, label) -> float:
+    """Add the per-unit investments of :func:`_legacy_unit_investments`
+    (each unit paired with its own config) to ``gen_inv_by_tech`` /
+    ``bat_inv_by_tech`` in GW at ``year_idx``, under ``label(unit name)``
+    (units whose label is None are left out). Returns their cost in M$
+    (MW × ``invest_cost``)."""
+    cost = 0.0
+    for key, configs, inv_by_tech in (
+            ("gen_investment_power", gen_configs, gen_inv_by_tech),
+            ("bat_investment_power", bat_configs, bat_inv_by_tech)):
+        for uc, inv_mw in _legacy_unit_investments(inv_data, key, configs):
+            un = uc.get("name", "")
+            if isinstance(un, bytes):
+                un = un.decode()
+            u_label = label(un)
+            if u_label is None:
+                continue
+            if u_label not in inv_by_tech:
+                inv_by_tech[u_label] = np.zeros(n_years)
+            inv_by_tech[u_label][year_idx] += inv_mw / 1000
+            if "invest_cost" in uc:
+                cost += inv_mw * _parse_invest_cost(uc["invest_cost"]) / 1e6
+    return cost
+
+
 def _legacy_investment_cost(inv_data: dict, gen_configs: list[dict],
                             bat_configs: list[dict]) -> float:
     """$ of the per-unit investments of :func:`_legacy_unit_investments`:
@@ -2512,22 +2540,12 @@ class GenerationMixChart(QWidget):
                         cost_per_mw = inv_data.get("bat_tech_costs", {}).get(bt_name, 0)
                         year_cost += float(inv_mw) * cost_per_mw / 1e6
 
-                for key, configs, inv_by_tech in (
-                        ("gen_investment_power", gen_configs, gen_inv_by_tech),
-                        ("bat_investment_power", bat_configs, bat_inv_by_tech)):
-                    for uc, inv_mw in _legacy_unit_investments(inv_data, key, configs):
-                        un = uc.get("name", "")
-                        if isinstance(un, bytes):
-                            un = un.decode()
-                        info = _resolve_gen_tech(un, gen_tech_map)
-                        if info is None:
-                            continue
-                        u_canon = info["label"]
-                        if u_canon not in inv_by_tech:
-                            inv_by_tech[u_canon] = np.zeros(len(scenarios))
-                        inv_by_tech[u_canon][year_idx] += inv_mw / 1000
-                        if "invest_cost" in uc:
-                            year_cost += inv_mw * _parse_invest_cost(uc["invest_cost"]) / 1e6
+                def _unit_label(name):
+                    info = _resolve_gen_tech(name, gen_tech_map)
+                    return None if info is None else info["label"]
+                year_cost += _add_legacy_unit_investments(
+                    inv_data, gen_configs, bat_configs, gen_inv_by_tech,
+                    bat_inv_by_tech, year_idx, len(scenarios), _unit_label)
 
                 total_cost_by_year.append(year_cost)
 
