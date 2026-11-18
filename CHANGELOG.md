@@ -380,6 +380,25 @@ Per-release notes are also published on the
   spell where the dispatch shed most. Benders models the representative
   days only (the log says so).
 
+- **Solver options for the master problem only.** The master problems used
+  the dispatch's `solver.options`, so a setting meant for the large master
+  LP (Gurobi barrier without crossover, for example) also applied to every
+  small dispatch window. The new `master_problem.solver_options` (same
+  format) is merged over `solver.options` for every master solve:
+  monolithic, TSAM, stochastic, MGA, myopic, the NPV-retirement re-solves,
+  and the Benders master and subproblems. A key there replaces the same
+  option of `solver.options` however it is written (`method: barrier` or
+  `Method: 2`); the other options still apply. The dispatch keeps
+  `solver.options`. The Studio keeps the key when it opens and saves a
+  case (it has no editor for it).
+
+- **Lines and transformers from a bus to itself are reported.** A branch
+  whose two ends are the same bus carries no flow, and the model drops it;
+  only the Studio validation said so. Loading a configuration now logs one
+  warning per system naming those lines and transformers (an
+  equipment-to-bus link drawn on one bus is not counted, as in the Studio).
+  The Studio still reports them as errors.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -3403,6 +3422,63 @@ Per-release notes are also published on the
   subproblem day). The Studio's *Time Limit* box accepts 0 (shown as *No
   limit*) and limits above a day; it clamped a loaded 0 to 1 s and anything
   above 86 400 s to 86 400 s.
+
+- **`n1_security_cost` covers each window's committed hours.** With a
+  rolling-horizon overlap, the runner took each window's whole-window
+  objective difference (with N-1 minus without) and scaled it by kept
+  hours / window hours, so the overlap tail (solved again by the next
+  window) leaked into the result. Both objectives are now valued over the
+  window's committed steps, as the window's objective already is, and the
+  year's value adds those. Runs without an overlap are unchanged; in a test
+  with a load rising through the year the old value was 2 % too high.
+
+- **The Plotly and Bokeh generation-mix charts show every per-unit
+  investment.** They read only the old index-aligned
+  `gen_investment_power` / `bat_investment_power` arrays; the per-unit
+  datasets (`gen_investment_power/<unit>`, listed alphabetically rather
+  than in configuration order) were ignored, so those investments and their
+  cost were missing from the investments panel, and the Bokeh chart never
+  added the batteries' cost. They now find each unit's configuration by
+  name with the same helper as the matplotlib chart.
+
+### Documentation
+
+- **`max_annual_system_cost` is described as what it is.** The field had no
+  description, and its name reads as a cap on the total annual system
+  cost. It is the annual investment budget: in every master mode it limits
+  the overnight cost of what is built in each investment period (soft, 10 $
+  per $ over it). The dispatch also uses it, scaled to the window, as a soft
+  ceiling on the window's fuel, maintenance and fixed O&M cost. The schema
+  description, the configuration reference and the Studio settings page now
+  say so. The key is not renamed.
+
+- **A node at sea takes the time zone of the nearest land.** A node whose
+  coordinates fall in the sea (an offshore site, or a coastal node placed
+  just off the shoreline) got the fixed zone of its 15° longitude band: an
+  offshore Cuban node ran on `Etc/GMT+5`, with no daylight saving time,
+  instead of `America/Havana`, so its local-time demand was shifted by an
+  hour for half the year. The zone now comes from the nearest land within
+  200 km (rings searched every 2 km around the point; logged at info level).
+  Only a node farther from land keeps the longitude-band zone and its
+  warning.
+
+- **Building the demand dataset no longer overwrites a model's country
+  map.** Every dataset build (also the one TFT training makes) wrote
+  `demand_xgb_country_map.json` into `$ESFEX_DATA_ROOT/data/models`,
+  replacing the ISO3 → `country_id` encoding of the XGBoost model deployed
+  there, even when the new model was saved elsewhere or not at all. The
+  build now writes the map next to the dataset (and keeps it in the frame's
+  `attrs["country_to_id"]`); `train_xgboost` saves it next to the model it
+  writes, and the ECVI XGBoost backend reads the map next to the model it
+  loads.
+
+- **TFT training uses the dataset it was given, without the excluded
+  country.** `train_demand_model(engine="tft", exclude_country=...)` built
+  the dataset and dropped the country, then `train_tft_model` built the
+  whole dataset again from disk: the excluded country leaked into
+  leave-one-country-out training, and the build ran twice. The built
+  dataset is now passed on (`train_tft_model(df=...)`); the XGBoost path
+  also receives the full country map, so the excluded country keeps its id.
 
 ### Removed
 
