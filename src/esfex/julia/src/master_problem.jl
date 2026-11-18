@@ -37,13 +37,6 @@ is at most `CAPACITY_TOL`.
 """
 capacity_value(x) = (v = value(x); abs(v) <= CAPACITY_TOL ? 0.0 : v)
 
-# Per solver: the parameters of a second attempt at a master solve that ended
-# NUMERICAL_ERROR or SUBOPTIMAL (Gurobi's own advice: "Consider using the
-# homogeneous algorithm (through parameter 'BarHomogeneous')")
-const NUMERICAL_RETRY_PARAMS = Dict{String, Vector{Pair{String, Any}}}(
-    "Gurobi" => ["BarHomogeneous" => 1],
-)
-
 """
     optimize_master!(model; retry = NUMERICAL_RETRY_PARAMS[solver])
 
@@ -59,23 +52,14 @@ on a large master (Cuba myopic TSAM 2027: `NUMERICAL_ERROR` after 228
 iterations, solved by the homogeneous barrier in 112; Cuba myopic 2037: the
 third repair round ended `SUBOPTIMAL`), and a myopic run stops at the first
 year without an optimal plan. Solvers without retry parameters keep the
-status of the solve.
+status of the solve. The dispatch solves the same way (`optimize_dispatch!`).
+A solved master that curtails above its annual curtailment limit gets a
+warning per system and year (`warn_curtailment_excess`).
 """
-function optimize_master!(model::Model;
-                          retry = get(NUMERICAL_RETRY_PARAMS, JuMP.solver_name(model), nothing))
-    reg = get(model.ext, :pwl_loss_repair, nothing)
-    if reg isa PWLLossRepair && !isempty(reg.blocks)
-        # Each solve of the loss repair is retried there: retrying the whole
-        # repair would solve every round again
-        model.ext[:solve_retry] = retry
-        try
-            optimize!(model)
-        finally
-            delete!(model.ext, :solve_retry)
-        end
-    else
-        solve_retrying!(() -> optimize!(model), model, retry)
-    end
+function optimize_master!(model::Model; retry = numerical_retry_params(model))
+    optimize_retrying!(model, retry, "Master problem")
+    # The annual curtailment limit is soft: report what passes it
+    warn_curtailment_excess(model)
     return
 end
 
@@ -1814,35 +1798,146 @@ function curtailment_year_sums(year::CurtailmentYear)
 end
 
 """
-    add_curtailment_limit!(model, input, year, y_idx; scenario_idx=0)
-        -> Dict{Int, ConstraintRef}
+Price (M\$ per MWh/year, i.e. 10⁴ \$/MWh) of curtailment above a master's
+annual curtailment limit (`add_curtailment_limit!`): well above the RE
+shortfall price (100 \$/MWh by default) and what avoiding a MWh of
+curtailment usually costs (the limit's dual), so the master pays it only
+where nothing else can hold the limit.
+"""
+const CURTAILMENT_EXCESS_PENALTY = 1.0e-2
+
+"""
+    add_curtailment_limit!(model, input, year, y_idx; scenario_idx=0) -> AffExpr
 
 The curtailment limit (CURT-1) of year `y_idx`, per system: its curtailment
 of existing and candidate variable renewables over the year is at most
 `max_curtailment_ratio` × its renewable generation over the year, plus what
-the RE growth cap forces it to curtail (RE-3c, `re_cap_exempt_energy`):
+the RE growth cap forces it to curtail (RE-3c, `re_cap_exempt_energy`), plus
+an excess `Z_σ` (MWh/year) priced at `CURTAILMENT_EXCESS_PENALTY`:
 
-    Σ_p w_p C_σ,p ≤ κ × Σ_p w_p E_σ,p + Σ_p w_p X_σ,p      (max_curtailment_s{σ}_y{y})
+    Σ_p w_p C_σ,p ≤ κ × Σ_p w_p E_σ,p + Σ_p w_p X_σ,p + Z_σ  (max_curtailment_s{σ}_y{y})
 
 over the year's representative days or TSAM periods `p` with weights `w_p`
 (`year`, `curtailment_year_sums`: divided by the largest weight). Single
-days may curtail more. Only a system with renewable generation to measure
-it on has one, and none when `max_curtailment_ratio` ≥ 1. Returns the
-constraints by system.
+days may curtail more. The excess keeps a master feasible when existing
+renewables must curtail more than the limit allows (a repaired loss model
+whose lines can no longer discard energy, say); `optimize_master!` warns
+about any (`warn_curtailment_excess`). Only a system with renewable
+generation to measure it on has one, and none when
+`max_curtailment_ratio` ≥ 1. Returns the excess's cost, an operating cost
+of the year.
 """
 function add_curtailment_limit!(model::Model, input::MasterProblemInput,
                                 year::CurtailmentYear, y_idx::Int; scenario_idx::Int = 0)
-    out = Dict{Int, ConstraintRef}()
-    input.max_curtailment_ratio < 1.0 || return out
-    curt, re, exempt, _ = curtailment_year_sums(year)
+    cost = AffExpr(0.0)
+    input.max_curtailment_ratio < 1.0 || return cost
+    curt, re, exempt, smax = curtailment_year_sums(year)
     tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
+    record = get!(() -> CurtailmentExcess[], model.ext, :curtailment_excess)
+    systems = master_systems(input)
     for s in eachindex(curt)
         isempty(re[s].terms) && continue
-        out[s] = @constraint(model,
-            curt[s] <= input.max_curtailment_ratio * re[s] + exempt[s],
+        excess = @variable(model, lower_bound = 0,
+            base_name = "curtailment_excess$(tag)_s$(s)_y$(y_idx)")
+        @constraint(model,
+            curt[s] <= input.max_curtailment_ratio * re[s] + exempt[s] + excess / smax,
             base_name = "max_curtailment$(tag)_s$(s)_y$(y_idx)")
+        add_to_expression!(cost, CURTAILMENT_EXCESS_PENALTY, excess)
+        push!(record, CurtailmentExcess(scenario_idx, systems[s].name, input.years[y_idx],
+                                        input.max_curtailment_ratio, excess, re[s], smax))
+    end
+    return cost
+end
+
+# A system-year's curtailment above its limit (`add_curtailment_limit!`):
+# scenario (0 outside a stochastic master), system name, year, the limit's
+# ratio, the excess (MWh/year) and the renewable generation (MWh/year / smax)
+struct CurtailmentExcess
+    scenario::Int
+    system::String
+    year::Int
+    ratio::Float64
+    excess::VariableRef
+    re::AffExpr
+    smax::Float64
+end
+
+"""
+    curtailment_excess(model) -> Vector{NamedTuple}
+
+Curtailment above the annual limit in a solved master
+(`add_curtailment_limit!`): per scenario (0 outside a stochastic master),
+system and year whose excess passes the limit's tolerance
+(`curtailment_tolerance` of its renewable generation), the system's name,
+the year, the limit's ratio, the excess and the renewable generation
+(MWh/year).
+"""
+function curtailment_excess(model::Model)
+    out = NamedTuple{(:scenario, :system, :year, :ratio, :excess_mwh, :re_mwh),
+                     Tuple{Int, String, Int, Float64, Float64, Float64}}[]
+    has_values(model) || return out
+    for e in get(model.ext, :curtailment_excess, CurtailmentExcess[])
+        z = value(e.excess)
+        re_mwh = value(e.re) * e.smax
+        z > curtailment_tolerance(re_mwh) || continue
+        push!(out, (scenario = e.scenario, system = e.system, year = e.year,
+                    ratio = e.ratio, excess_mwh = z, re_mwh = re_mwh))
     end
     return out
+end
+
+"""
+    curtailment_excess_mwh(model) -> Float64
+
+Total curtailment (MWh/year, over systems, years and scenarios) a solved
+master puts above its annual limits (`curtailment_excess`); 0 within them.
+"""
+curtailment_excess_mwh(model::Model) =
+    sum(e.excess_mwh for e in curtailment_excess(model); init = 0.0)
+
+"""
+    excess_grew(before, after) -> Bool
+
+Whether a re-solve curtails more above the annual limits (`after`, MWh/year)
+than the plan before it (`before`), beyond the solver's noise.
+"""
+excess_grew(before::Real, after::Real) = after > before * (1 + 1e-6) + 1e-3
+
+"""
+    warn_curtailment_excess(model)
+
+A warning for each system and year of a solved master that curtails more
+than its annual limit allows (`curtailment_excess`), with the excess and
+the renewable generation the limit is measured on.
+"""
+function warn_curtailment_excess(model::Model)
+    for e in curtailment_excess(model)
+        sc = e.scenario > 0 ? ", scenario $(e.scenario)" : ""
+        @warn "Master problem: system $(e.system), year $(e.year)$(sc) curtails " *
+              "$(round(e.excess_mwh / 1e3; sigdigits = 4)) GWh/yr above its annual " *
+              "curtailment limit (max_curtailment_ratio = $(e.ratio) of " *
+              "$(round(e.re_mwh / 1e3; sigdigits = 4)) GWh/yr of renewable " *
+              "generation), at $(round(Int, CURTAILMENT_EXCESS_PENALTY * 1e6)) \$/MWh: " *
+              "the plan could not keep within it"
+    end
+    return
+end
+
+"""
+    hold_curtailment_excess!(model)
+
+Bound each curtailment excess of a solved master (`add_curtailment_limit!`)
+by its value plus the limit's tolerance (`curtailment_tolerance`). MGA and
+SPORES explore their alternatives under this: they curtail above a limit
+only as far as the cost-optimal plan has to, as under a hard limit, rather
+than buy curtailment above it with the cost slack.
+"""
+function hold_curtailment_excess!(model::Model)
+    for e in get(model.ext, :curtailment_excess, CurtailmentExcess[])
+        set_upper_bound(e.excess, max(value(e.excess), 0.0) +
+                                  curtailment_tolerance(value(e.re) * e.smax))
+    end
+    return
 end
 
 """
@@ -4580,7 +4675,8 @@ function add_representative_days_validation!(
                         start_hour, hours, scale)
         end
 
-        add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx)
+        push!(vars.operational_costs[y_idx],
+            add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx))
         push!(vars.operational_costs[y_idx],
             add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
                 scenario_idx=scenario_idx))
@@ -4851,7 +4947,8 @@ function add_tsam_periods_validation!(
                         start_hour, hours, tres * weight)
         end
 
-        add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx)
+        push!(vars.operational_costs[y_idx],
+            add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx))
         push!(vars.operational_costs[y_idx],
             add_co2_budget_constraints!(model, vars, input, y_idx, annual_co2;
                 scenario_idx=scenario_idx))
@@ -5863,9 +5960,12 @@ retired. `solver = :benders` solves each master by Benders decomposition
 (`run_benders_decomposition` with `benders_kwargs`); `extra_years` is
 passed to `calculate_unit_npv` (a myopic year's master).
 
-When a re-solve is not optimal, the round that led to it is undone: the
+When a re-solve is not optimal, or curtails more above the annual
+curtailment limit than the plan before (`curtailment_excess_mwh`: retiring
+the store that held the limit; the limit was a hard constraint, under which
+such a re-solve was infeasible), the round that led to it is undone: the
 result is the last optimal plan with the retirements made up to it, and a
-warning names the units of the undone round and the solver status.
+warning names the units of the undone round and the reason.
 
 `iterations` counts the master solves; `npv_history` holds, per solve, the
 NPV of every unit evaluated (`"generator_g_bus"` / `"battery_b_bus"`);
@@ -5882,19 +5982,21 @@ function solve_with_npv_iteration(
     benders_kwargs...
 )::NPVIterationResult
     optimal(st) = st in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
-    # (plan or nothing when not optimal, termination status)
+    # (plan or nothing when not optimal, termination status, curtailment
+    # above the annual limits in MWh/yr: Benders holds them hard)
     function solve_once(inp)
         if solver === :benders
             sol = run_benders_decomposition(inp; use_representative_days = use_representative_days,
                                             record_unit_operation = true,
                                             benders_kwargs...).solution
-            return (optimal(sol.status) ? sol : nothing), sol.status
+            return (optimal(sol.status) ? sol : nothing), sol.status, 0.0
         end
         model, vars, _ = create_master_problem(inp; use_representative_days = use_representative_days)
         optimize!(model)
         st = termination_status(model)
-        optimal(st) || return nothing, st
-        return extract_master_solution(model, vars, inp; unit_operation = true), st
+        optimal(st) || return nothing, st, 0.0
+        return extract_master_solution(model, vars, inp; unit_operation = true), st,
+               curtailment_excess_mwh(model)
     end
     describe(units) = join(["$(u.unit_type) $(u.unit_idx) at bus $(u.node) " *
                             "(NPV $(round(u.npv, sigdigits = 4)))" for u in units], ", ")
@@ -5905,20 +6007,25 @@ function solve_with_npv_iteration(
     previous = nothing
     last_round = 0
     iter = 0
+    prev_excess = 0.0
     while true
         iter += 1
-        result, status = solve_once(current)
-        if result === nothing
+        result, status, excess = solve_once(current)
+        if result === nothing || (previous !== nothing && excess_grew(prev_excess, excess))
             previous === nothing &&
                 error("NPV retirement: the first master solve is not optimal ($(status))")
             # Undo the last round: the previous plan still has its units
             undone = retired[end - last_round + 1:end]
+            why = result === nothing ? "is not optimal ($(status))" :
+                "curtails $(round(excess / 1e3; sigdigits = 4)) GWh/yr above the annual " *
+                "curtailment limit (the plan before: " *
+                "$(round(prev_excess / 1e3; sigdigits = 4)))"
             @warn "NPV retirement: the master re-solve after retiring " * describe(undone) *
-                  " is not optimal ($(status)); keeping these units and the last " *
-                  "optimal plan"
+                  " $(why); keeping these units and the last optimal plan"
             return NPVIterationResult(iter, false, previous,
                                       retired[1:end - last_round], history)
         end
+        prev_excess = excess
         npvs = unit_npvs(result, current; npv_threshold = npv_threshold,
                          extra_years = extra_years)
         push!(history, Dict("$(u.unit_type)_$(u.unit_idx)_$(u.node)" => u.npv for u in npvs))

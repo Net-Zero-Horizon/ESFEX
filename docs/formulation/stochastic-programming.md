@@ -176,7 +176,7 @@ For each scenario \(s\) the operational cost comes from that scenario's own repr
 C^{op}_{y,s} = \frac{\Delta t \cdot H_{year}/24}{|\mathcal{D}_y|} \sum_{d \in \mathcal{D}_y} C^{day}_{y,d,s}
 \]
 
-where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment), as scaled by the multipliers of §2.2. \(C^{op}_{y,s}\) also holds the scenario's CO2-budget violation, the renewable energy above its RE growth cap (RE-3b) and its RE-target shortfall: each scenario has its own annual RE constraint (RE-2) over its own renewable and total generation, with its own shortfall priced at `fre_penetration_loss` × `penalty_fre_penetration` (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
+where \(C^{day}_{y,d,s}\) is computed with the scenario's demand, fuel, maintenance and CO2 costs and its penalty coefficients (load shedding, reserve shortfall, curtailment), as scaled by the multipliers of §2.2. \(C^{op}_{y,s}\) also holds the scenario's CO2-budget violation, the renewable energy above its RE growth cap (RE-3b), its curtailment above the annual limit (CURT-1) and its RE-target shortfall: each scenario has its own annual RE constraint (RE-2) over its own renewable and total generation, with its own shortfall priced at `fre_penetration_loss` × `penalty_fre_penetration` (TSAM periods use their weights instead, see [Capacity Expansion](capacity-expansion.md#852-period-weights)).
 
 ### 4.4 Scenario-Adjusted Discount Rate
 

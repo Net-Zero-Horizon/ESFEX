@@ -277,6 +277,8 @@ function run_mga_spores(
 
     # Extract cost-optimal solution
     optimal_solution = extract_master_solution(model, vars, input)
+    # Alternatives curtail above the annual limit no more than this plan
+    hold_curtailment_excess!(model)
 
     @info "MGA/SPORES: Optimal cost = $(optimal_cost)"
     @info "MGA/SPORES: Near-optimal bound = $(optimal_cost * (1 + slack_fraction))"
@@ -716,6 +718,8 @@ function run_spores(
     optimal_cost = objective_value(model)
     total_cost_expr = objective_function(model)
     optimal_solution = extract_master_solution(model, vars, input)
+    # Alternatives curtail above the annual limit no more than this plan
+    hold_curtailment_excess!(model)
 
     @info "SPORES: Optimal cost = $(optimal_cost)"
     @info "SPORES: Near-optimal bound = $(optimal_cost * (1 + slack_fraction))"
