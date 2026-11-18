@@ -614,7 +614,7 @@ esfex train-demand-model [OPTIONS]
 | `--cache-dir` | | Path | `$ESFEX_DATA_ROOT/data/demand_dataset` | Dataset directory (the `--cache-dir` of `build-demand-dataset`) |
 | `--folds` | | Integer | `3` | Temporal cross-validation folds |
 
-A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow. The demand density model that the Grid Builder and the Demand Forecast workflow use is not trained by this command: see [Retraining the Demand Density Model](../contributing/demand-density-model.md).
+A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow. The demand density model that the Grid Builder and the Demand Forecast workflow use is not trained by this command: it is the model of a published article, fitted by the article's own pipeline (see [Demand Density Model](../contributing/demand-density-model.md)).
 
 
 ---
@@ -647,8 +647,8 @@ esfex build-demand-dataset [OPTIONS]
 | `JULIA_DEPOT_PATH` | Julia depot; its first entry also decides where the `esfex_solvers` environment lives |
 | `ESFEX_JULIA_RESOLVE` | Set to `1` to let ESFEX re-resolve its Julia project when `Pkg.instantiate()` cannot install missing packages (off by default; see [Julia Package Errors](../getting-started/installation.md#julia-package-errors)) |
 | `JULIA_NUM_THREADS` | Julia threads; ESFEX sets it to `4` if unset. ESFEX's Julia code is not threaded; solver threads come from `solver.threads` |
-| `ESFEX_DATA_ROOT` | Dataset and cache root (Geofabrik extracts, OSM tiles, CMIP6 subsets, the population and GDP rasters of the demand forecast); default `~/.esfex/data` |
-| `ESFEX_ASSETS_URL` | Where the demand forecast downloads its population and GDP rasters; default the ESFEX data release on GitHub. Any URL Python's `urllib` opens, `file://` included |
+| `ESFEX_DATA_ROOT` | Dataset and cache root (Geofabrik extracts, OSM tiles, CMIP6 subsets, the GDP rasters of the demand forecast, the population and GDP rasters of `train-demand-model`); default `~/.esfex/data` |
+| `ESFEX_ASSETS_URL` | Where the demand forecast and `train-demand-model` download their population and GDP rasters; default the ESFEX data release on GitHub. Any URL Python's `urllib` opens, `file://` included |
 | `GUROBI_HOME`, `GRB_LICENSE_FILE` | Gurobi installation and licence, needed when running `esfex add-solver gurobi` and when solving |
 | `CPLEX_STUDIO_BINARIES` | CPLEX installation, needed when running `esfex add-solver cplex` |
 

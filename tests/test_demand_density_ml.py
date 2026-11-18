@@ -45,7 +45,8 @@ _FEATURE_ORDER = [
     "temperature", "hdd", "cdd",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
     "is_weekend", "is_holiday", "days_to_next_holiday", "days_from_prev_holiday",
-    "latitude", "longitude",
+    "latitude", "longitude", "t_mean", "t_range", "hh_elec_share", "bld_share_elec",
+    "lhour_sin", "lhour_cos", "smonth_sin", "smonth_cos",
 ]
 
 
@@ -236,8 +237,9 @@ class TestDensityFeatures:
             log_pop_density=1.8, log_gdp_density=6.0, log_gdp_per_cap=4.0,
             temperature_hourly=temp, base_year=2025,
             feature_order=_FEATURE_ORDER, country_iso="CU",
+            t_mean=25.0, t_range=6.0, hh_elec_share=0.74, bld_share_elec=0.6,
         )
-        assert X.shape == (8760, 18)
+        assert X.shape == (8760, 26)
         assert not np.isnan(X).any()
         # socio columns are constant; temperature column matches input
         assert np.allclose(X[:, 0], 1.8)
@@ -245,17 +247,15 @@ class TestDensityFeatures:
         # cyclical hour features stay in [-1, 1]
         assert X[:, 6].min() >= -1.0001 and X[:, 6].max() <= 1.0001
 
-    def test_clips_to_training_ranges(self):
-        temp = np.full(8760, 20.0)
+    def test_values_are_not_clipped(self):
+        # As in the article, predictors outside the training range are passed
+        # as they are (a tree model is flat beyond its outermost split).
         X = build_density_features(
-            latitude=21.0, longitude=-80.0,
-            log_pop_density=99.0,   # absurd → clipped
+            latitude=21.0, longitude=-80.0, log_pop_density=5.0,
             log_gdp_density=6.0, log_gdp_per_cap=4.0,
-            temperature_hourly=temp, base_year=2025,
-            feature_order=_FEATURE_ORDER,
-            train_ranges={"log_pop_density": [0.3, 3.85]},
-        )
-        assert X[:, 0].max() <= 3.85 + 1e-9
+            temperature_hourly=np.full(8760, 49.0), base_year=2025,
+            feature_order=_FEATURE_ORDER)
+        assert np.all(X[:, 0] == 5.0) and np.all(X[:, 3] == 49.0)
 
     def test_partial_nan_temperature_scrubbed(self):
         # A full-length temperature array carrying NaN (e.g. the ERA5 fallback
@@ -268,7 +268,7 @@ class TestDensityFeatures:
             log_gdp_density=6.0, log_gdp_per_cap=4.0,
             temperature_hourly=temp, base_year=2025,
             feature_order=_FEATURE_ORDER, country_iso="CU")
-        assert not np.isnan(X).any()
+        assert not np.isnan(X[:, 3:6]).any()
 
     def test_all_nan_temperature_falls_back(self):
         temp = np.full(8760, np.nan)
@@ -277,7 +277,7 @@ class TestDensityFeatures:
             log_gdp_density=6.0, log_gdp_per_cap=4.0,
             temperature_hourly=temp, base_year=2025,
             feature_order=_FEATURE_ORDER, country_iso="CU")
-        assert not np.isnan(X).any()
+        assert not np.isnan(X[:, 3:6]).any()
         assert np.allclose(X[:, 3], 20.0)   # temperature column → 20 °C fallback
 
 
@@ -431,13 +431,13 @@ class TestSSPGdpTrajectory:
 class TestDensityModelEndToEnd:
     def test_model_predicts_positive_density(self):
         model = DemandDensityModel.load_bundled()
-        assert len(model.feature_names) == 18
+        assert len(model.feature_names) == 26
         X = build_density_features(
             latitude=21.0, longitude=-80.0,
             log_pop_density=1.8, log_gdp_density=6.0, log_gdp_per_cap=4.0,
             temperature_hourly=np.full(8760, 28.0), base_year=2025,
             feature_order=model.feature_names, country_iso="CU",
-            train_ranges=model.train_ranges,
+            t_mean=25.0, t_range=6.0, hh_elec_share=0.74, bld_share_elec=0.6,
         )
         dens = model.predict_density_mw_per_km2(X)
         assert dens.shape == (8760,)

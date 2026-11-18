@@ -33,6 +33,8 @@ src/esfex/visualization/data/**/*.py[cod]
 *.pt
 *.pth
 *.npz
+# shipped with the density model (cell inputs on the 0.25° grid)
+!src/esfex/assets/models/*.npz
 
 # ── Optimization / solver outputs ──
 results/

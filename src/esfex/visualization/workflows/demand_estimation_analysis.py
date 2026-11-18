@@ -197,12 +197,14 @@ class MeteoData:
     list).  If a simulation year is not found in those dicts, the base-year
     data is reused.
 
-    Hourly series are on local civil time, like the demand models' calendar
-    features: index ``h`` is the local hour ``h`` of the year and holds the
-    weather of that instant. ``node_temperature_hourly`` (and the per-node
-    HDD/CDD) give each node its own local time; the system-level fields are
-    on the local time at ``(lat, lon)``. :func:`meteo_from_utc_temperature`
-    builds them from a UTC weather series.
+    Hourly series are on local civil time, like the calendar features of the
+    shape-ML and archetype engines: index ``h`` is the local hour ``h`` of the
+    year and holds the weather of that instant. ``node_temperature_hourly``
+    (and the per-node HDD/CDD) give each node its own local time; the
+    system-level fields are on the local time at ``(lat, lon)``.
+    ``temperature_utc_hourly`` keeps the same weather on UTC hours (29 February
+    dropped) for the density model, whose hours are UTC.
+    :func:`meteo_from_utc_temperature` builds them from a UTC weather series.
     """
 
     temperature_hourly: list[float] = field(default_factory=list)   # hourly °C
@@ -227,6 +229,10 @@ class MeteoData:
     node_hdd_by_year: dict[int, dict[int, list[float]]] = field(default_factory=dict)
     node_cdd_by_year: dict[int, dict[int, list[float]]] = field(default_factory=dict)
 
+    # The base weather year on UTC hours (8760, 29 February dropped), as
+    # fetched at (lat, lon): what the density model reads
+    temperature_utc_hourly: list[float] = field(default_factory=list)
+
     def node_temperature(self, ni: int, hpy: int) -> Optional["np.ndarray"]:
         """Base-year hourly temperature of node *ni* (its own local time), or
         the system-level series; None when neither has *hpy* hours."""
@@ -237,6 +243,29 @@ class MeteoData:
             if series is not None and len(series) >= hpy:
                 return np.array(series[:hpy], dtype=np.float64)
         return None
+
+    def node_temperature_utc(self, ni: int, hpy: int, lat: float, lon: float,
+                             year: Optional[int] = None) -> Optional["np.ndarray"]:
+        """Base-year hourly temperature of node *ni* on UTC hours.
+
+        The UTC series when the meteo data has one; else the node's local
+        series (:meth:`node_temperature`) moved from the time zone at
+        (*lat*, *lon*) to UTC (*year*, default ``self.year``, sets the
+        daylight-saving dates). None when there is no series.
+        """
+        import numpy as np
+
+        if len(self.temperature_utc_hourly) >= hpy:
+            return np.array(self.temperature_utc_hourly[:hpy], dtype=np.float64)
+        local = self.node_temperature(ni, hpy)
+        if local is None:
+            return None
+        if hpy != 8760:
+            return local
+        from esfex.utils.model_clock import node_time_zone, to_model_clock
+
+        zone = node_time_zone(round(float(lat), 4), round(float(lon), 4))
+        return to_model_clock(local, zone, "UTC", int(year or self.year or 2025))
 
 
 def meteo_from_utc_temperature(
@@ -256,7 +285,9 @@ def meteo_from_utc_temperature(
     time, so each node gets the series on its own time zone (from its
     coordinates, DST-aware): the temperature paired with local hour ``h`` is
     that of the same instant. The system-level fields are on the time zone at
-    (*lat*, *lon*). 29 February is dropped, so every series has 8760 hours.
+    (*lat*, *lon*); ``temperature_utc_hourly`` keeps the UTC hours (gaps
+    filled), for the density model. 29 February is dropped, so every series
+    has 8760 hours.
     """
     import numpy as np
 
@@ -282,6 +313,7 @@ def meteo_from_utc_temperature(
         hdd_hourly=hdd_sys.tolist(),
         cdd_hourly=cdd_sys.tolist(),
         lat=lat, lon=lon, year=year,
+        temperature_utc_hourly=utc_year_on_local_time(values, "UTC", year).tolist(),
     )
     for ni, (la, lo) in enumerate(zip(node_lats, node_lons)):
         t, hdd, cdd = _local(la, lo)       # one array per zone, shared
@@ -940,14 +972,24 @@ class DemandProfileBuilder:
         The trajectory comes from re-running the model each year with that
         year's gridded SSP GDP (nearest 5-year step, no interpolation); the
         level is the raw model integral, optionally anchored to a national
-        demand override."""
+        demand override.
+
+        The model's hours are UTC (its temperature is read on UTC hours); each
+        node's result is then put on the node's local civil time, like the
+        other engines' forecasts."""
         import numpy as np
+
         from esfex.models.demand_density_ml import (
             DemandDensityModel,
-            region_cells_025,
-            sample_cells_socio,
-            predict_region_cell_demand,
             fetch_cmip6_node_temps,
+            place_predictors,
+            predict_region_cell_demand,
+            region_cells_025,
+        )
+        from esfex.utils.model_clock import (
+            node_time_zones,
+            to_local_time,
+            to_model_clock,
         )
 
         def emit(pct: int, msg: str) -> None:
@@ -970,7 +1012,7 @@ class DemandProfileBuilder:
 
         # ── 0.25° grid cells over the study region ─────────────────
         emit(12, "Enumerating 0.25° grid cells…")
-        clats, clons, careas = region_cells_025(
+        clats, clons, _cell_areas = region_cells_025(
             polygon_latlon=poly, bounds=bnds,
             node_lats=list(proxy.node_lats), node_lons=list(proxy.node_lons))
         if len(clats) == 0:
@@ -988,30 +1030,39 @@ class DemandProfileBuilder:
             for i in range(len(clats))
         ])
 
-        # Base-year temperature per node (its local time), for the years
-        # CMIP6 does not cover.
+        # Each node's time zone: the model reads UTC hours, the forecast is
+        # returned on each node's local civil time.
+        node_coords = [
+            (float(proxy.node_lats[nd]), float(proxy.node_lons[nd]))
+            if nd < min(len(proxy.node_lats), len(proxy.node_lons))
+            else (float(meteo.lat), float(meteo.lon))
+            for nd in range(num_nodes)]
+        zones = node_time_zones(node_coords)
+
+        # Base-year temperature per node on UTC hours, for the years CMIP6
+        # does not cover.
+        weather_year = int(meteo.year or base_year - 1)
         node_temp = []
         for nd in range(num_nodes):
-            t = meteo.node_temperature(nd, hpy)
+            t = meteo.node_temperature_utc(nd, hpy, *node_coords[nd], year=weather_year)
             node_temp.append(t if t is not None
                              else np.full(hpy, 20.0, dtype=np.float64))
 
-        # ── Active cells (base-year population or GDP) ─────────────
+        # ── Cell population and land area (the article's grids) ────
+        # Densities are per km² of LAND and the predicted density covers the
+        # cell's land, as in the training table and the article's maps.
         emit(20, "Sampling population & GDP per cell…")
         from esfex.models.demand_density_ml import _ssp_gdp_total_nearest
-        log_pd0, _gd0, _gpc0, keep = sample_cells_socio(
-            clats, clons, careas, base_year, ssp)
-        idx = np.where(keep)[0]
+        pop0, land0 = model.context.population_and_land(clats, clons)
+        idx = np.where((pop0 > 0) & (land0 > 0))[0]
         if idx.size == 0:
-            raise ValueError("No populated/economic cells in the study region.")
-        alat = clats[idx]; alon = clons[idx]; aarea = careas[idx]
-        a_node = cell_node[idx]
-        base_pd = np.power(10.0, log_pd0[idx])           # people/km² (spatial)
+            raise ValueError("No populated cells in the study region.")
 
-        # Per-cell GDP density (USD/km²) at each 5-year SSP step spanning the
-        # horizon → geometrically interpolated per year (GDP compounds; smooth
-        # so the model isn't whipped across XGBoost split thresholds by 5-yr
-        # jumps). GDP AND population are the demand-trend drivers.
+        # Per-cell GDP density (USD per km² of land) at each 5-year SSP step
+        # spanning the horizon → geometrically interpolated per year (GDP
+        # compounds; smooth so the model isn't whipped across XGBoost split
+        # thresholds by 5-yr jumps). GDP AND population are the demand-trend
+        # drivers.
         def _floor5(yv):
             return (yv // 5) * 5
         last_year = base_year + max(years - 1, 0)
@@ -1020,16 +1071,16 @@ class DemandProfileBuilder:
         for st in step_years:
             st_c = min(max(st, 2025), 2100)
             arr = np.zeros(idx.size, dtype=np.float64)
-            for k in range(idx.size):
-                gt = _ssp_gdp_total_nearest(float(alat[k]), float(alon[k]), st_c, ssp)
-                arr[k] = (gt / max(float(aarea[k]), 1e-6)) if gt else 0.0
+            for k, c in enumerate(idx):
+                gt = _ssp_gdp_total_nearest(float(clats[c]), float(clons[c]), st_c, ssp)
+                arr[k] = (gt / land0[c]) if gt else 0.0
             gdp_step[st] = arr
 
         def _gdp_dens_year(yv):
             lo = _floor5(yv); hi = lo + 5
             a = gdp_step.get(lo); b = gdp_step.get(hi)
             if a is None and b is None:
-                return np.zeros(idx.size)
+                return np.zeros(len(next(iter(gdp_step.values()))))
             if a is None:
                 return b.copy()
             if b is None:
@@ -1041,6 +1092,16 @@ class DemandProfileBuilder:
             only_b = (a <= 0) & (b > 0)
             out[only_b] = b[only_b]
             return out
+
+        # A cell has predictors where it has people, land and GDP (s08).
+        has_gdp = _gdp_dens_year(base_year) > 0
+        idx = idx[has_gdp]
+        gdp_step = {k: v[has_gdp] for k, v in gdp_step.items()}
+        if idx.size == 0:
+            raise ValueError("No populated cells with GDP in the study region.")
+        alat = clats[idx]; alon = clons[idx]; aarea = land0[idx]
+        a_node = cell_node[idx]
+        base_pd = pop0[idx] / aarea                      # people per km² of land
 
         # Population growth (SSP / UN WPP per-year rates from the projection
         # table) applied to the base spatial population.
@@ -1060,10 +1121,32 @@ class DemandProfileBuilder:
         n_cmip6 = sum(1 for c in cmip6 if c)
         cells_by_node = [np.where(a_node == nd)[0] for nd in range(num_nodes)]
 
+        def _temp_utc(nd, yr):
+            """Node *nd*'s temperature of year *yr* on UTC hours: CMIP6 (a
+            curve on the node's local time) when it covers the year, else the
+            base weather year."""
+            ct = cmip6[nd]
+            if ct and yr in ct:
+                t = np.asarray(ct[yr], dtype=np.float64)
+                if len(t) == 8760:
+                    return to_model_clock(t, zones[nd], "UTC", yr)
+                return t
+            return node_temp[nd]
+
         # ── Per-year, per-node: per-cell density inference → node demand ──
         emit(32, "Per-cell density inference (per year, GDP+pop+CMIP6)…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
         cell_annual = np.zeros(idx.size, dtype=np.float64)   # base-year MWh/cell
+        # Climate normals, electricity-use context and local-date offset of
+        # every cell: fixed over the horizon (present-day, as in the article).
+        places = {}
+        for nd in range(num_nodes):
+            a = cells_by_node[nd]
+            if a.size:
+                places[nd] = place_predictors(
+                    model, alat[a], alon[a], macro.country_iso,
+                    fallback_temperature_utc=_temp_utc(nd, base_year),
+                    fallback_year=base_year)
         for y in range(years):
             yr = base_year + y
             pd_y = np.maximum(base_pd * pop_factor[y], 1e-6)     # population evolves
@@ -1074,19 +1157,26 @@ class DemandProfileBuilder:
                 a = cells_by_node[nd]
                 if a.size == 0:
                     continue
-                ct = cmip6[nd]
-                temp_ny = (np.asarray(ct[yr], dtype=np.float64)
-                           if (ct and yr in ct) else node_temp[nd])
                 cell_mw = predict_region_cell_demand(
                     model, alat[a], alon[a], aarea[a],
                     lpd[a], lgd[a], lgpc[a],
-                    temp_ny, yr, country_iso=macro.country_iso,
-                    hdd_base=self._cfg.hdd_base_temp, cdd_base=self._cfg.cdd_base_temp,
-                )                                            # (n_cells_nd, hpy) MW
+                    _temp_utc(nd, yr), yr, country_iso=macro.country_iso,
+                    places=places[nd],
+                )                                            # (n_cells_nd, hpy) MW, UTC
                 hourly_all[y, :, nd] = cell_mw.sum(axis=0)
                 if y == 0:
                     cell_annual[a] = cell_mw.sum(axis=1)     # MWh per cell, base yr
             emit(32 + int(58 * (y + 1) / years), f"Year {yr}: {idx.size} cells")
+
+        # UTC hours → each node's local civil time (the forecast's time base;
+        # the saved demand is then put on the model clock).
+        if hpy == 8760:
+            hourly_all = to_local_time(
+                hourly_all.reshape(-1, num_nodes), "UTC", zones, base_year,
+            ).reshape(years, hpy, num_nodes)
+        else:
+            logger.warning("Density forecast left on UTC hours: %d hours per "
+                           "year is not an 8760-h calendar.", hpy)
 
         # ── Anchoring: scale to a national override if set, else raw model ─
         base_gwh = float(hourly_all[0].sum()) / 1000.0
