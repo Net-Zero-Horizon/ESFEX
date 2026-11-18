@@ -196,35 +196,39 @@ function _committed_share(cs::CommittedSteps, v::VariableRef)
     return parse(Int, m.captures[1]) <= cs.keep ? 1.0 : 0.0
 end
 
-_committed_var_value(cs::CommittedSteps, v::VariableRef) = value(get(cs.end_level, v, v))
+_committed_var_value(cs::CommittedSteps, v::VariableRef, val = value) =
+    val(get(cs.end_level, v, v))
 
 """
-    committed_value(cs, ex) -> Float64
+    committed_value(cs, ex; val = value) -> Float64
 
 Value of the solved expression `ex` over the committed steps: each term
-weighted by its variable's share, constants by `keep / hours`.
+weighted by its variable's share, constants by `keep / hours`. `val` gives a
+variable's value (default: the model's solution); another solution of the
+same variables, such as a re-solved copy's, can be valued with it.
 """
-function committed_value(cs::CommittedSteps, ex::GenericAffExpr)
+function committed_value(cs::CommittedSteps, ex::GenericAffExpr; val = value)
     total = ex.constant * cs.keep / cs.hours
     for (v, c) in ex.terms
-        total += c * _committed_share(cs, v) * _committed_var_value(cs, v)
+        total += c * _committed_share(cs, v) * _committed_var_value(cs, v, val)
     end
     return total
 end
 
-function committed_value(cs::CommittedSteps, ex::GenericQuadExpr)
-    total = committed_value(cs, ex.aff)
+function committed_value(cs::CommittedSteps, ex::GenericQuadExpr; val = value)
+    total = committed_value(cs, ex.aff; val = val)
     for (pair, c) in ex.terms
         total += c * _committed_share(cs, pair.a) *
-                 _committed_var_value(cs, pair.a) * _committed_var_value(cs, pair.b)
+                 _committed_var_value(cs, pair.a, val) * _committed_var_value(cs, pair.b, val)
     end
     return total
 end
 
-committed_value(cs::CommittedSteps, v::VariableRef) =
-    _committed_share(cs, v) * _committed_var_value(cs, v)
+committed_value(cs::CommittedSteps, v::VariableRef; val = value) =
+    _committed_share(cs, v) * _committed_var_value(cs, v, val)
 
-committed_value(cs::CommittedSteps, x::Real) = Float64(x) * cs.keep / cs.hours
+committed_value(cs::CommittedSteps, x::Real; val = value) = Float64(x) * cs.keep / cs.hours
 
 # Any other expression (e.g. nonlinear): the window's share
-committed_value(cs::CommittedSteps, ex) = value(ex) * cs.keep / cs.hours
+committed_value(cs::CommittedSteps, ex; val = value) =
+    (val === value ? value(ex) : value(val, ex)) * cs.keep / cs.hours

@@ -2707,6 +2707,49 @@ import Ipopt
             @test c == 0.0 && stored == 0.0
         end
 
+        @testset "N-1 security cost over a window's committed steps" begin
+            # A rolling window keeps its first `keep` steps. The cost of N-1
+            # was the whole-window difference, which the runner scaled by
+            # keep / H; it is now both objectives over the kept steps.
+            H, keep = 4, 1
+            function ngen4(name, rated, fcost)
+                z = zeros(1)
+                GeneratorConfig(
+                    name, "Non-renewable", "Gas", [rated], [0.0],
+                    [0.5], [0.4], [1.0], [1.0], z, z, [0.0],
+                    [fcost], z, z, z, z, ones(H, 1), true,
+                    [30.0], z, z, z, 50.0, "AC",
+                    z, z, z, z, zeros(H, 1), z, z, z, z, false, z, z, z,
+                )
+            end
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            # Losing A leaves B's 30 MW: 20 MW short at 50 MW, none at 20 MW
+            input = PowerSystemInput(;
+                name = "n1", year = 2025, network = net,
+                generators = [ngen4("A", 100.0, 1.0e-5), ngen4("B", 30.0, 1.0e-4)],
+                batteries = BatteryConfig[], demand = reshape([50.0, 20.0, 20.0, 50.0], H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                reserve_static_default_ratio = 0.0, loss_of_reserve_static = 1.0,
+                loss_of_load_penalty = 100.0,
+                n1_security_enabled = true, n1_generation_enabled = true,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            optimize!(model)
+            @test compute_n1_security_cost!(model, input) ≈ 40.0 rtol = 1e-6
+            @test extract_solution(model, vars, input).n1_security_cost ≈ 40.0 rtol = 1e-6
+            cs = ESFEX.committed_steps(vars, H, keep)
+            part = extract_solution(model, vars, input; committed = cs)
+            @test part.n1_security_cost ≈ 20.0 rtol = 1e-6     # was 40 (× 1/4 = 10)
+            @test part.n1_security_cost ≈ part.cost_breakdown.n1_security_shortfall_cost rtol = 1e-6
+            cs3 = ESFEX.committed_steps(vars, H, 3)
+            @test extract_solution(model, vars, input; committed = cs3).n1_security_cost ≈
+                  20.0 rtol = 1e-6
+        end
+
         @testset "ACOPF line limits follow scheduled outages" begin
             # The AC thermal limits ignored the outage masks (and investment)
             # that the DC limits apply. Line at 20 % in step 1: 20 MVA of 50 MW.
