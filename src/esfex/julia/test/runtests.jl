@@ -210,6 +210,26 @@ import Ipopt
               ESFEX.MOI.OptimizerWithAttributes
         # Unknown solver names are rejected.
         @test_throws ErrorException create_optimizer(solver_name = "no_such_solver")
+
+        # solver.time_limit 0 = no limit: a model solves instead of stopping
+        # at once (HiGHS read 0 s as stop now: TIME_LIMIT on this LP)
+        m = ESFEX.Model(create_optimizer(solver_name = "highs", time_limit = 0.0))
+        x = ESFEX.JuMP.@variable(m, [1:200], lower_bound = 0, upper_bound = 10)
+        ESFEX.JuMP.@constraint(m, [i in 1:199], x[i] + 2x[i+1] >= 1 + mod(i, 7))
+        ESFEX.JuMP.@objective(m, Min, sum((1 + mod(i, 5)) * x[i] for i in 1:200))
+        optimize!(m)
+        @test termination_status(m) == ESFEX.MOI.OPTIMAL
+        attrs(o) = Dict(p.first.name => p.second for p in o.params
+                        if p.first isa ESFEX.MOI.RawOptimizerAttribute)
+        @test !haskey(attrs(create_optimizer(solver_name = "highs", time_limit = 0.0)),
+                      "time_limit")
+        @test attrs(create_optimizer(solver_name = "highs", time_limit = 60.0))["time_limit"] == 60.0
+        @test !ESFEX.has_time_limit(0.0) && !ESFEX.has_time_limit(Inf)
+        @test ESFEX.has_time_limit(1.0)
+        # Limits ESFEX sets below solver.time_limit (Benders) keep their cap
+        @test ESFEX.capped_time_limit(0.0, 600.0) == 600.0
+        @test ESFEX.capped_time_limit(100.0, 600.0) == 100.0
+        @test ESFEX.capped_time_limit(7200.0, 600.0) == 600.0
     end
 
     @testset "_compute_year_target" begin

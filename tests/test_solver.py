@@ -490,6 +490,19 @@ class TestGetJuliaOptimizerString:
         assert '"THREADS" => 6' in result
         assert '"OUTPUTLOG" => 0' in result
 
+    @pytest.mark.parametrize("name,key", [
+        ("highs", "time_limit"), ("gurobi", "TimeLimit"),
+        ("cplex", "CPXPARAM_TimeLimit"), ("glpk", "tm_lim"),
+        ("cbc", "seconds"), ("scip", "limits/time"), ("xpress", "MAXTIME"),
+    ])
+    def test_time_limit_zero_sets_no_limit(self, name, key):
+        """time_limit 0 (= unlimited) leaves the solver's limit out, a
+        positive one sets it."""
+        assert f'"{key}"' not in get_julia_optimizer_string(
+            SolverConfig(name=name, time_limit=0))
+        assert f'"{key}"' in get_julia_optimizer_string(
+            SolverConfig(name=name, time_limit=60))
+
     def test_verbose_flag_highs(self):
         """HiGHS verbose flag is lowercase boolean string."""
         cfg = SolverConfig(name="highs", verbose=True)

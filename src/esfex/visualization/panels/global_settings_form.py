@@ -305,7 +305,9 @@ class GlobalSettingsForm(QWidget):
         svl.addRow(tr("global_form.threads"), self._solver_threads)
 
         self._solver_time = QSpinBox()
-        self._solver_time.setRange(1, 86400)
+        # 0 = no limit (solver.time_limit); the YAML may hold more than a day
+        self._solver_time.setRange(0, 10_000_000)
+        self._solver_time.setSpecialValueText(tr("global_form.time_limit_none"))
         self._solver_time.editingFinished.connect(self._on_changed)
         svl.addRow(tr("global_form.time_limit"), self._solver_time)
 
