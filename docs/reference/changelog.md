@@ -1414,6 +1414,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   the Caribbean case was made by the earlier model and is not changed;
   forecast it again to use the new one.
 
+- **The master's annual curtailment limit is priced above the cap.**
+  `max_curtailment_ratio` was a hard constraint in every master (monolithic,
+  TSAM, stochastic, MGA, myopic). When existing renewables had to curtail
+  more than it allows, the master was infeasible; with line losses, the loss
+  repair then kept the PWL solution, whose lines lose more than the PWL loss
+  of their flows. Curtailment above the limit is now a slack
+  (`curtailment_excess_s{σ}_y{y}`, MWh/yr) priced at 10⁴ $/MWh
+  (`CURTAILMENT_EXCESS_PENALTY`), an operating cost of the year, and a
+  WARNING names each system and year that curtails above its limit, with the
+  excess in GWh/yr and its renewable generation. When the limit can be met
+  the plan and the objective are unchanged. MGA and SPORES alternatives may
+  not curtail above the limit more than the cost-optimal plan does, so the
+  cost slack cannot buy curtailment. NPV-based retirement undoes a round
+  whose re-solve curtails more above the limit than the plan before (as it
+  undid the then infeasible re-solve: retiring the store that held the
+  limit). Benders keeps the hard limit.
+
+- **Dispatch windows are solved like the master.** A Gurobi dispatch solve
+  that ends `NUMERICAL_ERROR` or `SUBOPTIMAL` (`LOCALLY_SOLVED`) is solved
+  once more with the homogeneous barrier (`BarHomogeneous = 1`), each solve
+  of the line-loss repair too, and a repair round whose re-solve is still
+  not optimal is undone (the round before solved again), as the master does
+  since round 37 (`ESFEX.optimize_dispatch!`). The dispatch used to accept a
+  suboptimal point silently and repair its losses from it. A window still
+  `LOCALLY_SOLVED` after the retry keeps its feasible point with a WARNING
+  that names the window, its year and first hour (Ipopt's `LOCALLY_SOLVED`
+  on the AC models stays silent); one still `LOCALLY_SOLVED` without a
+  feasible point is now a failed window.
+
 ### Fixed
 
 - **Myopic planning remembers earlier years.** Each one-year master in
@@ -3319,6 +3348,56 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   previous day's temperature. It now drops 29 February, like every 8760-h
   year in ESFEX. Open-Meteo CMIP6 downloads are cached under a new name
   (`..._8760.npz`), so the old files are not reused.
+
+- **An enlarged reservoir is used at its full size in the master.** The
+  master's reservoir builds raised the level band of each representative day,
+  but the day still started (and, being cyclic, ended) at
+  `reservoir_initial_level` × the existing capacity, the TSAM boundary levels
+  that carry water from one period to the next were bounded by the existing
+  capacity, and the head fraction of `reservoir_head_min_factor` measured the
+  level from the existing minimum. Water could not be carried across TSAM
+  periods in the capacity built, and the master started the day lower than
+  the dispatch does with the same reservoir. All of them now use the
+  in-service capacity (existing plus built so far). The head fraction's span
+  keeps the existing capacity, so the bound stays linear: it is exact at the
+  minimum level of an enlarged reservoir and overstates the head above it.
+  A master that enlarges a reservoir may build a different amount than
+  before (the start level now grows with the reservoir).
+
+- **`fuels.<f>.price_growth_rate` grows the fuel price in every mode.** It
+  used to act only on the primary-energy fuel balance: the `fuel_cost` the
+  loader derives from the fuels block (and any unit burning a fuel of that
+  block) stayed at the first year's price in the dispatch and in every
+  master. A generator or candidate technology whose `fuel` is a key of
+  `fuels` now pays `fuel_cost` × (1 + rate)^(year − first planning year) in
+  the dispatch, the perfect-foresight, TSAM, stochastic and MGA masters and
+  each myopic year's master (which grows from the run's first year, not its
+  own), and in the LCOE and the unit NPV's years past the horizon. A
+  `fuel_cost` of a unit whose fuel is not in `fuels`, and offer curves
+  (`fuel_cost_curve`), stay as given. A stochastic scenario's
+  `fuel_price_growth` multiplies the grown price (each growth counted once).
+  Benders subproblems still charge the first year's price.
+
+- **Grid Builder: a line whose rating parameter inference raises keeps a
+  matching impedance.** Inference raised a line's `capacity_mw` to the flow
+  it must carry (up to the SIL of its voltage) and left the R, X and B of
+  the smaller line, so the raised line drew too little of the flow in the DC
+  power flow. The raised line now counts as extra parallel circuits of its
+  type: R and X are divided and B multiplied by the rating ratio (the
+  convention of the simplification's equivalent lines). A line without a
+  reactance first gets the one the builder derives from its length and
+  voltage; one whose impedance cannot be derived is named in the result.
+  The build result shows a new *Parameter Inference* section with the counts.
+
+- **`solver.time_limit: 0` means no limit.** The schema documents 0 as
+  unlimited, but the value was passed to the solver as is, and most solvers
+  read a 0-second limit as "stop now" (HiGHS ends `TIME_LIMIT` before
+  solving). A limit of 0 now leaves the solver's time limit unset for every
+  solver and every model (dispatch windows, masters, MGA); Benders keeps its
+  own caps (600 s per master solve until one has no plan, 300 s per
+  subproblem day). The Studio's *Time Limit* box accepts 0 (shown as *No
+  limit*) and limits above a day; it clamped a loaded 0 to 1 s and anything
+  above 86 400 s to 86 400 s.
 
 ### Removed
 
