@@ -627,6 +627,38 @@ class TestConvertSystem:
         assert "node(s) [1]" in caplog.text
         assert "demand is dropped" in caplog.text
 
+    def test_self_loop_branches_are_reported_once(self, minimal_system_data, caplog):
+        # A line or transformer from a bus to itself was dropped by the model
+        # (TransmissionDC) with no word; only the Studio validation flagged it.
+        minimal_system_data["transmission_lines_geo"] = [
+            {"line_id": "ok", "from_node": 0, "to_node": 1, "from_bus": 0, "to_bus": 1},
+            {"line_id": "loop_a", "from_node": 0, "to_node": 0, "from_bus": 0, "to_bus": 0},
+            {"line_id": "loop_b", "from_node": 0, "to_node": 1, "from_bus": 1, "to_bus": 1},
+            # Equipment-to-bus link on one bus: not a self-loop (Studio rule)
+            {"line_id": "link", "from_node": 0, "to_node": 0, "from_bus": 0, "to_bus": 0,
+             "from_endpoint_type": "generator", "from_endpoint_id": "g1",
+             "to_endpoint_type": "bus", "to_endpoint_id": "b0"},
+        ]
+        minimal_system_data["transformers"] = [
+            {"name": "T1", "from_node": 1, "to_node": 1, "from_voltage_kv": 220.0,
+             "to_voltage_kv": 110.0, "rated_power_mva": 100.0},
+        ]
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        msgs = [r.getMessage() for r in caplog.records if "connect a bus to itself" in r.getMessage()]
+        assert len(msgs) == 1
+        assert "3 branch(es)" in msgs[0] and "ignored" in msgs[0]
+        assert "line loop_a" in msgs[0] and "line loop_b" in msgs[0]
+        assert "transformer T1" in msgs[0]
+        assert "line ok" not in msgs[0] and "line link" not in msgs[0]
+
+    def test_no_self_loop_warning_without_self_loops(self, minimal_system_data, caplog):
+        minimal_system_data["transmission_lines_geo"] = [
+            {"line_id": "ok", "from_node": 0, "to_node": 1, "from_bus": 0, "to_bus": 1}]
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        assert "connect a bus to itself" not in caplog.text
+
     def test_all_penalties_are_read(self, minimal_system_data):
         minimal_system_data["penalties"] = {
             "SOC_violation": 5.0e5, "non_electric_demand_loss": 1.0e4,

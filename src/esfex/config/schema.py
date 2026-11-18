@@ -1835,6 +1835,14 @@ class MasterProblemConfig(BaseModel):
         default=1e-4, gt=0.0,
         description="Relative optimality-gap tolerance for Benders convergence.",
     )
+    solver_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Solver-specific options for the master problem only, in the "
+        "format of solver.options and merged over them (a key here replaces the "
+        "same key there). Every master solve uses them (monolithic, TSAM, "
+        "stochastic, MGA, myopic, NPV re-solves, Benders master and subproblems); "
+        "the dispatch keeps solver.options.",
+    )
 
     # TSAM (Time-Series Aggregation Method)
     use_tsam: bool = Field(
@@ -2034,7 +2042,16 @@ class SystemConfig(BaseModel):
     target_re_penetration: float = Field(default=1.0, ge=0, le=1, alias="TARGET_RE_PENETRATION")
     min_annual_increment: float = Field(default=0.01, ge=0, alias="MIN_ANNUAL_INCREMENT")
     max_annual_increment: float = Field(default=0.10, ge=0, alias="MAX_ANNUAL_INCREMENT")
-    max_annual_system_cost: float = Field(default=20e9, alias="MAX_ANNUAL_SYSTEM_COST")
+    max_annual_system_cost: float = Field(
+        default=20e9, alias="MAX_ANNUAL_SYSTEM_COST",
+        description="Annual investment budget ($), not a cap on the total "
+                    "annual system cost: in every master mode it limits the "
+                    "overnight cost of the technologies, battery technologies, "
+                    "transmission and reservoirs built in each investment "
+                    "period (soft, 10 $ per $ over it). The dispatch also uses "
+                    "it, scaled to the window, as a soft ceiling on the "
+                    "window's fuel, maintenance and fixed O&M cost",
+    )
     discount_rate: float = Field(default=0.05, ge=0, le=1)
     base_lcoe: float = Field(
         default=93.0, ge=0,

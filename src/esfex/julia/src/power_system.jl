@@ -3685,14 +3685,17 @@ user constraints) and the copy is re-solved with the N-1 shortfall and
 overload slacks free of charge, which makes every N-1 constraint inactive
 (all of them are soft). The original model and its solution are untouched.
 
-Stores the value in `model.ext[:n1_security_cost]` (read by
-`extract_solution`) and returns it, in solver cost units. Returns 0.0 when
-N-1 is off, the model has no solution, or the re-solve fails (with a
-warning). Both solves stop at the solver's gap, so in a MIP the difference
-is exact only up to that gap.
+Stores the value in `model.ext[:n1_security_cost]` and returns it, in
+solver cost units; it also keeps the re-solve's solution
+(`model.ext[:n1_security_resolve]`) so that `extract_solution` of a
+rolling-horizon window values both solves over the committed steps only
+([`n1_security_cost`](@ref)). Returns 0.0 when N-1 is off, the model has no
+solution, or the re-solve fails (with a warning). Both solves stop at the
+solver's gap, so in a MIP the difference is exact only up to that gap.
 """
 function compute_n1_security_cost!(model, input::PowerSystemInput)
     model.ext[:n1_security_cost] = 0.0
+    delete!(model.ext, :n1_security_resolve)
     input.n1_security_enabled || return 0.0
     has_values(model) || return 0.0
     ce = get(model.ext, :cost_expressions, Dict{Symbol, Any}())
@@ -3703,11 +3706,15 @@ function compute_n1_security_cost!(model, input::PowerSystemInput)
     copied === nothing && return 0.0
     new_model, reference_map = copied
     tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
-    free = AffExpr(0.0)
+    free = AffExpr(0.0)        # the N-1 penalty terms, in the original's variables
     for (v, c) in n1_cost.terms
-        add_to_expression!(free, tres * c, reference_map[v])
+        add_to_expression!(free, tres * c, v)
     end
-    @objective(new_model, Min, objective_function(new_model) - free)
+    free_copy = AffExpr(0.0)
+    for (v, c) in free.terms
+        add_to_expression!(free_copy, c, reference_map[v])
+    end
+    @objective(new_model, Min, objective_function(new_model) - free_copy)
     try
         optimize!(new_model)
     catch e
@@ -3721,7 +3728,30 @@ function compute_n1_security_cost!(model, input::PowerSystemInput)
     end
     cost = objective_value(model) - objective_value(new_model)
     model.ext[:n1_security_cost] = cost
+    model.ext[:n1_security_resolve] = (
+        values = Dict{VariableRef, Float64}(v => value(reference_map[v])
+                                            for v in all_variables(model)),
+        free = free)
     return cost
+end
+
+"""
+    n1_security_cost(model, committed = nothing) -> Float64
+
+The window's cost of N-1 security computed by
+[`compute_n1_security_cost!`](@ref) (0.0 when it did not run). With
+`committed` (a [`CommittedSteps`](@ref)), the objectives with and without
+N-1 are both valued over the committed steps, as `extract_solution` values
+the window's objective, instead of the whole window.
+"""
+function n1_security_cost(model, committed = nothing)
+    cost = Float64(get(model.ext, :n1_security_cost, 0.0))
+    resolve = get(model.ext, :n1_security_resolve, nothing)
+    (committed === nothing || resolve === nothing) && return cost
+    obj = objective_function(model)
+    without = committed_value(committed, obj - resolve.free;
+                              val = v -> resolve.values[v])
+    return committed_value(committed, obj) - without
 end
 
 """
@@ -4205,8 +4235,9 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
 
         n1_binding = isempty(binding_names) ? nothing : binding_names
     end
-    # Objective with N-1 minus without (compute_n1_security_cost!; 0 when not run)
-    n1_cost = Float64(get(model.ext, :n1_security_cost, 0.0))
+    # Objective with N-1 minus without, over the committed steps
+    # (compute_n1_security_cost!; 0 when not run)
+    n1_cost = n1_security_cost(model, committed)
 
     # ── Extract granular cost breakdown ──
     cost_bd = nothing
