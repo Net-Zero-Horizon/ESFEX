@@ -4,7 +4,8 @@ The demand models' calendar features (hour of day, day of week, month,
 holidays) are the local civil time of the series' location. ERA5 temperature
 comes from Open-Meteo in UTC, so it was paired index by index with the wrong
 hour: for Cuba (UTC-5) the temperature fed with local hour h was that of local
-h-5. The temperature paired with local hour h is now that instant's.
+h-5. The temperature paired with local hour h is now that instant's. The
+density model (round 38) is on UTC hours instead: it reads the UTC series.
 """
 
 from __future__ import annotations
@@ -99,19 +100,18 @@ def test_projector_era5_fallback_is_on_local_time(tmp_path):
 def _rasters_available() -> bool:
     try:
         from esfex.models.demand_density_ml import DemandDensityModel, gdp_density_point
-        from esfex.models.pixel_features import sample_pop_density
         return (DemandDensityModel.is_available()
-                and gdp_density_point(23.1, -82.4, 2030, "ssp2") is not None
-                and sample_pop_density(23.1, -82.4, 2020) is not None)
+                and gdp_density_point(23.1, -82.4, 2030, "ssp2") is not None)
     except Exception:
         return False
 
 
 @pytest.mark.skipif(not _rasters_available(),
-                    reason="needs the population and SSP GDP rasters on disk")
-def test_density_engine_uses_each_nodes_local_temperature(monkeypatch):
-    """Without CMIP6, the density engine runs on the base-year temperature
-    of each node (its local time), not one shared series."""
+                    reason="needs the SSP GDP rasters on disk")
+def test_density_engine_reads_each_nodes_temperature_on_utc(monkeypatch):
+    """Without CMIP6, the density engine runs on the base-year temperature of
+    each node, not one shared series. The model's hours are UTC (round 38):
+    a node's local series is moved to UTC, and a UTC series is used as is."""
     from esfex.models import demand_density_ml as ddm
     from esfex.visualization.workflows.demand_estimation_analysis import (
         DemandEstimationConfig, DemandProfileBuilder, MacroData, MeteoData,
@@ -124,13 +124,15 @@ def test_density_engine_uses_each_nodes_local_temperature(monkeypatch):
     real = ddm.predict_region_cell_demand
 
     def _spy(model, lats, lons, areas, lpd, lgd, lgpc, temp, *a, **k):
-        seen.append(float(np.asarray(temp)[0]))
+        seen.append(np.asarray(temp)[:6].tolist())
         return real(model, lats, lons, areas, lpd, lgd, lgpc, temp, *a, **k)
 
     monkeypatch.setattr(ddm, "predict_region_cell_demand", _spy)
+    hours = np.arange(8760.0)
     meteo = MeteoData(
         temperature_hourly=list(np.full(8760, 20.0)),
-        node_temperature_hourly={0: np.full(8760, 26.0), 1: np.full(8760, 28.0)})
+        node_temperature_hourly={0: 26.0 + hours / 1e4, 1: np.full(8760, 28.0)},
+        year=2024)
     cfg = DemandEstimationConfig(base_year=2025, simulation_years=1, num_nodes=2)
     proxy = ProxyData(node_lats=[23.1, 20.3], node_lons=[-82.4, -77.0],
                       node_names=["W", "E"], bounds=(19.8, -85.0, 23.3, -74.0))
@@ -138,4 +140,7 @@ def test_density_engine_uses_each_nodes_local_temperature(monkeypatch):
                       population=11_000_000.0)
     res = DemandProfileBuilder(cfg).build(proxy, macro, meteo)
     assert res.demand_source == "ml_density"
-    assert sorted(set(seen)) == [26.0, 28.0]
+    # node 0 (UTC-5): UTC 05:00 holds its local midnight; the year wraps
+    west = next(t for t in seen if t[0] != 28.0)
+    assert west[5] == pytest.approx(26.0) and west[0] == pytest.approx(26.0 + 8755 / 1e4)
+    assert [28.0] * 6 in seen
