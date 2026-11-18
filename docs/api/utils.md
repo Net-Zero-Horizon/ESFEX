@@ -487,7 +487,7 @@ The [model clock](../user-guide/configuration.md#model-clock): one fixed-offset 
 | `ModelClock(zone, offset_hours)` | A resolved clock. `ModelClock.from_zone("America/Havana")` → offset `-5.0`; `.label` → `America/Havana standard time (UTC-05:00)` |
 | `normalize_clock_setting(value)` | Validates a `temporal.model_clock` value: `auto`, `UTC` or an IANA zone |
 | `standard_offset_hours(zone)` | The zone's offset outside daylight saving time (the smaller of its 1 January and 1 July offsets) |
-| `node_time_zone(lat, lon)` | IANA zone of the land at a point (`timezonefinder`); at sea, the fixed zone of the 15° longitude band (`nominal_zone`), with a warning |
+| `node_time_zone(lat, lon)` | IANA zone of the land at a point (`timezonefinder`); at sea, the zone of the nearest land within 200 km (`nearest_land_zone`, rings searched every 2 km); farther out, the fixed zone of the 15° longitude band (`nominal_zone`), with a warning |
 | `resolve_model_clock(setting, coords, weights=None)` | A concrete clock; for `auto`, the standard offset with the largest total weight (demand per node, or one per node) |
 | `to_model_clock(series, source_zones, clock, start_year)` | `(hours,)` or `(hours, nodes)`, whole 8,760-h years (or one 8,784-h leap year) from 1 Jan of `start_year`, from `UTC`, a fixed zone or a node's local civil time (one zone per column) onto the clock. The year wraps; fractional shifts interpolate linearly |
 | `utc_to_model_clock`, `local_to_model_clock`, `weather_to_model_clock` | Shortcuts: UTC series; per-node local series (zones from coordinates); weather from a backend (`open_meteo`, `era5_atlite`: UTC; `nasa_power`: local solar time) |

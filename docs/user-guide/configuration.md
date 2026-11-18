@@ -88,7 +88,7 @@ Every hourly series of a case (demand, availability) is on one clock, the model 
 | an IANA zone, e.g. `America/Havana` | That zone's standard offset (UTC-5). A zone with daylight saving time is used at its standard offset all year |
 | `UTC`, or a fixed zone such as `Etc/GMT+5` | That offset. In the `Etc` zones the sign is inverted: `Etc/GMT+5` is UTC-5 |
 
-Each node's time zone comes from its coordinates (`node_coordinates`, or the node's position in the Studio). A node at sea, or outside every zone, gets the fixed offset of its 15° longitude band, with a warning.
+Each node's time zone comes from its coordinates (`node_coordinates`, or the node's position in the Studio). A node at sea (offshore, or just off the coastline) gets the zone of the nearest land within 200 km, daylight saving time included; only a node farther out, or outside every zone, gets the fixed offset of its 15° longitude band, with a warning.
 
 The tools that write series put them on the clock and record it in `temporal.model_clock`:
 
