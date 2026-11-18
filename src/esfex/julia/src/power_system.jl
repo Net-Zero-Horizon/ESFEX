@@ -2108,20 +2108,28 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
             head_min_factor_b = b <= length(gen.reservoir_head_min_factor) ?
                 gen.reservoir_head_min_factor[b] : 1.0
             rated_b = gen.rated_power[b]
-            # Usable storage span (constant; reservoir investment is not folded
-            # into the head fraction to keep the bound linear).
-            head_span = (max_level_frac - min_level_frac) * res_cap
 
-            # Total reservoir capacity (the master's: existing + investment)
+            # In-service reservoir capacity: the existing one, or the caller's
+            # existing + built expression (master, Benders). The level bounds,
+            # the initial/end level and the head fraction all use it. (The
+            # dispatch receives the master's builds as existing capacity.)
             total_res_cap = capacity_override !== nothing && haskey(capacity_override, (g, b)) ?
                 capacity_override[(g, b)] : res_cap
+            # Usable storage span, the head fraction's denominator. With built
+            # capacity as a decision the fraction (level - min·cap)/((max -
+            # min)·cap) is not linear, so the span stays at the existing
+            # capacity: exact without builds; for an enlarged reservoir it is
+            # exact at the minimum level (fraction 0) and overstates the head
+            # above it (the fraction passes 1 before the top, where `rated`
+            # binds anyway).
+            head_span = (max_level_frac - min_level_frac) * res_cap
 
             # Initial level. Precedence: TSAM seasonal boundary variable >
             # rolling-horizon seam value > configured initial fraction.
             seasonal_init = initial_reservoir_overrides === nothing ? nothing :
                 get(initial_reservoir_overrides, (g, b), nothing)
             prev_level = get(get(input.reservoir_level_prev, g, Dict{Int,Float64}()), b, NaN)
-            initial_level_energy = isnan(prev_level) ? initial_level_frac * res_cap : prev_level
+            initial_level_energy = isnan(prev_level) ? initial_level_frac * total_res_cap : prev_level
             if seasonal_init !== nothing
                 @constraint(model,
                     vars.reservoir_level[g, b, 1] == seasonal_init,
@@ -2220,7 +2228,7 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
                         vars.gen_output[g, b, t] <=
                         rated_b * head_min_factor_b +
                         rated_b * (1.0 - head_min_factor_b) *
-                        (vars.reservoir_level[g, b, t] - min_level_frac * res_cap) /
+                        (vars.reservoir_level[g, b, t] - min_level_frac * total_res_cap) /
                         head_span,
                         base_name = "res_head_limit_g$(g)_b$(b)_t$(t)")
                 end

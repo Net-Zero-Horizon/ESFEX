@@ -138,7 +138,7 @@ Implemented in `build_objective!()`. A few terms are added to the objective by t
 Z^{\text{op}} = \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} \tag{OBJ-1}
 \]
 
-where \(c^{\text{fuel}}_{g,n}\) and \(c^{\text{maint}}_{g,n}\) are the per-MWh fuel and maintenance (variable O&M) costs. The sums are restricted to buses where \(\bar{P}_{g,n} > 0\).
+where \(c^{\text{fuel}}_{g,n}\) and \(c^{\text{maint}}_{g,n}\) are the per-MWh fuel and maintenance (variable O&M) costs. The sums are restricted to buses where \(\bar{P}_{g,n} > 0\). A unit whose `fuel` is a key of the `fuels` block pays its `fuel_cost` grown to the window's year at that fuel's `price_growth_rate`: \(c^{\text{fuel}}_{g,n} = \texttt{fuel\_cost}_{g,n}\,(1 + g^{price}_f)^{y - y_0}\), with \(y_0\) the first planning year, as the master charges it. Offer curves (§3.1.1) are not grown.
 
 #### 3.1a Generator Fixed O&M
 

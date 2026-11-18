@@ -33,6 +33,7 @@ from esfex.config.schema import (
     CostCurveConfig,
     ESFEXConfig,
     SystemConfig,
+    fuel_price_factor,
     is_committed_unit,
 )
 from esfex.bridge.adapters import (
@@ -2912,6 +2913,12 @@ class Orchestrator:
             outage_schedule=getattr(system_config, "outage_schedule", None),
         )
 
+    def _fuel_price_base_year(self, first_year: int) -> int:
+        """Year the ``fuels`` prices hold for, from which ``price_growth_rate``
+        grows them: the run's first year (``state.base_year``; *first_year*
+        when no run has started)."""
+        return self.state.base_year if self.state is not None else first_year
+
     def _master_fuel_kwargs(self, system_config, last_year: int,
                             cumulative: Optional[dict] = None) -> Optional[dict]:
         """``primary_energy`` argument of ``MasterProblemAdapter``: the fuel
@@ -3995,6 +4002,8 @@ class Orchestrator:
                     system_node_ranges=year_sys_ranges,
                     re_target_override=year_targets,
                     re_share_anchor=share_anchor,
+                    # Fuel prices grow from the run's first year, not this one
+                    fuel_price_base_year=self._fuel_price_base_year(years_range[0]),
                     temporal_resolution_hours=resolution_hours,
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
@@ -4915,6 +4924,7 @@ class Orchestrator:
                 min_re_increment=getattr(primary, 'min_annual_increment', 0.0),
                 max_re_increment=getattr(primary, 'max_annual_increment', 0.10),
                 system_node_ranges=foresight_sys_ranges,
+                fuel_price_base_year=self._fuel_price_base_year(years_range[0]),
                 # Use configured temporal resolution (e.g., 6 hours reduces model size 6x)
                 temporal_resolution_hours=resolution_hours,
                 investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
@@ -6545,6 +6555,7 @@ class Orchestrator:
             generators.append(SimpleNamespace(
                 name=vdata.get("name", key),
                 type=vdata.get("type", "Renewable"),
+                fuel=vdata.get("fuel", "None"),
                 rated_power=rp,
                 fuel_cost=vdata.get("fuel_cost", [0.0] * len(rp)),
                 fixed_cost=vdata.get("fixed_cost", [0.0] * len(rp)),
@@ -6627,6 +6638,9 @@ class Orchestrator:
             for g, gen in enumerate(generators):
                 if g >= n_gen:
                     break
+                # The fuel price of this year, as the dispatch charged it
+                growth = fuel_price_factor(sys_fuels, getattr(gen, 'fuel', None), result.year,
+                                           self._fuel_price_base_year(result.year))
                 for n in range(min(n_nodes, len(gen.fuel_cost))):
                     output = result.gen_output[g, n, :]
                     mask = output > 1e-6
@@ -6635,6 +6649,7 @@ class Orchestrator:
                     fc = gen.fuel_cost[n]
                     if fc <= 0:
                         fc = _fuel_based_cost(gen, n)
+                    fc *= growth
                     mc = gen.maintenance_cost[n]
                     # Fixed O&M ($/MW·yr) of the rated power over these
                     # hours, spread over the energy produced in them
