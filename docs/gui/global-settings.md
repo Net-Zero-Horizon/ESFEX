@@ -166,7 +166,7 @@ Settings stored in the `risk:` block of the YAML. The fields are greyed out unti
 |-------|---------|-------------|
 | Solver | `highs` | Only solvers whose Julia package is installed in ESFEX's Julia environment are listed. Bundled: HiGHS, GLPK, Ipopt, SCS, Clarabel. Gurobi, CPLEX, CBC, SCIP and Xpress appear after `esfex add-solver` (commercial solvers also need their own license). Solvers incompatible with the Power Flow Mode are greyed out. See [Solver Guide](../user-guide/solver-guide.md). |
 | Threads | 4 | Number of parallel solver threads (1 to 128) |
-| Time Limit (s) | 10800 (YAML), 3600 (new project) | Maximum solve time per optimization problem |
+| Time Limit (s) | 10800 (YAML), 3600 (new project) | Maximum solve time per optimization problem; 0 (shown as *No limit*) = no limit |
 | Gap (frac) | 0.01 (YAML), 0.001 (new project) | Relative MIP optimality gap. Only relevant for MIP problems (unit commitment). |
 | Verbose | Off | Print the full solver log in the Run Output tab |
 

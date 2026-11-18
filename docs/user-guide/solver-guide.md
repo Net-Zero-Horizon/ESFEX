@@ -64,7 +64,7 @@ solver:
 |-------|------|---------|-------------|
 | `name` | string | `"highs"` | One of `highs`, `gurobi`, `cplex`, `xpress`, `cbc`, `glpk`, `scip`, `clarabel`, `scs`, `ipopt` |
 | `threads` | int | `4` | Threads for the solver. Ignored by GLPK, Clarabel, SCS and Ipopt; for SCIP it only affects concurrent mode. |
-| `time_limit` | int | `10800` | Maximum solve time per model, in seconds. Ignored by SCS. |
+| `time_limit` | int | `10800` | Maximum solve time per model, in seconds; `0` = no limit (every solver, every model: dispatch windows and master problems). Ignored by SCS. Benders also keeps its own caps with `0`: 300 s per subproblem day, and 600 s per master solve until a master reaches them without a plan (that master and the later ones then get `time_limit`). |
 | `gap` | float | `0.01` | MIP relative optimality gap (0.01 = 1%). Ignored for pure LP. Not passed to GLPK (set `mip_gap` in `options`). For Ipopt, the value is passed as its convergence tolerance `tol`. |
 | `verbose` | bool | `false` | Print the solver log. Overridden by `logging.console_level` (`basic` turns it off, `debug` turns it on) and by `esfex run -v`. |
 | `options` | dict | `{}` | Solver-specific options (see [Advanced Solver Options](#advanced-solver-options)) |

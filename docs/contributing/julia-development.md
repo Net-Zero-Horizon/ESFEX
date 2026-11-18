@@ -422,7 +422,7 @@ create_optimizer(; solver_name="highs", threads=4, time_limit=3600.0,
                  gap=0.01, verbose=false, solver_options=Dict{String,Any}())
 ```
 
-`create_optimizer` dispatches on `solver_name` (highs, gurobi, cplex, xpress, scip, cbc, glpk, ipopt, clarabel, scs) and maps threads, time limit, gap and verbosity to each solver's own attribute names. For HiGHS it sets `threads`, `time_limit`, `mip_rel_gap` and `output_flag`, then applies `solver_options` on top; it sets no presolve or parallel options. Pinning `"solver" => "simplex"` also turns crossover off.
+`create_optimizer` dispatches on `solver_name` (highs, gurobi, cplex, xpress, scip, cbc, glpk, ipopt, clarabel, scs) and maps threads, time limit, gap and verbosity to each solver's own attribute names. A `time_limit` of 0 (or less, or `Inf`) sets no time limit: the attribute is left out (`has_time_limit`); a limit ESFEX sets below `solver.time_limit` (the Benders master and subproblems) uses `capped_time_limit`, which keeps the cap when `solver.time_limit` is 0. For HiGHS it sets `threads`, `time_limit`, `mip_rel_gap` and `output_flag`, then applies `solver_options` on top; it sets no presolve or parallel options. Pinning `"solver" => "simplex"` also turns crossover off.
 
 
 ---

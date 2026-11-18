@@ -885,6 +885,7 @@
     "solver": "ソルバー:",
     "threads": "スレッド数:",
     "time_limit": "制限時間 (s):",
+    "time_limit_none": "制限なし",
     "gap": "ギャップ (frac):",
     "n1_trans": "送電:",
     "n1_trans_reserve": "送電予備係数 (frac):",

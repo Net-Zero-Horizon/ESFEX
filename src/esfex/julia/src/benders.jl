@@ -805,7 +805,7 @@ function create_benders_master(
     model = Model(create_optimizer(
         solver_name=input.solver_name,
         threads=input.threads,
-        time_limit=min(input.time_limit, BENDERS_MASTER_TIME_LIMIT),
+        time_limit=capped_time_limit(input.time_limit, BENDERS_MASTER_TIME_LIMIT),
         gap=input.gap,
         verbose=input.verbose
     ))
@@ -1026,10 +1026,10 @@ Optimizer of the Benders subproblems: the configured solver (its threads
 and `solver_options`), so a commercial solver also solves the large
 operational LPs; HiGHS single-threaded, which avoids its intermittent
 OTHER_ERROR of multi-threaded runs on these LPs. At most `time_limit`
-seconds (and the input's).
+seconds (and the input's, when it sets one: `capped_time_limit`).
 """
 function benders_subproblem_optimizer(input::MasterProblemInput; time_limit::Float64 = 300.0)
-    limit = min(input.time_limit, time_limit)
+    limit = capped_time_limit(input.time_limit, time_limit)
     if lowercase(input.solver_name) == "highs"
         return () -> begin
             opt = HiGHS.Optimizer()
@@ -2634,7 +2634,8 @@ function run_benders_decomposition(
         gap=input.gap,
         verbose=input.verbose
     )
-    master_optimizer = new_master_optimizer(min(input.time_limit, BENDERS_MASTER_TIME_LIMIT))
+    master_optimizer = new_master_optimizer(
+        capped_time_limit(input.time_limit, BENDERS_MASTER_TIME_LIMIT))
 
     # The best iteration's plan: the master as solved if that is the last
     # solve, otherwise re-solved with its variables fixed to the best values
@@ -2679,12 +2680,15 @@ function run_benders_decomposition(
         master_solved = master_status == MOI.OPTIMAL || master_status == MOI.LOCALLY_SOLVED
         if !master_solved && master_status in LIMIT_STATUSES &&
            !limit_with_feasible_point(master_model) &&
-           input.time_limit > BENDERS_MASTER_TIME_LIMIT
+           (!has_time_limit(input.time_limit) ||
+            input.time_limit > BENDERS_MASTER_TIME_LIMIT)
             # The cuts make the master larger every iteration (Cuba: 27M
             # nonzeros at iteration 36, 600 s did not do)
+            limit_text = has_time_limit(input.time_limit) ?
+                "$(input.time_limit) s" : "0 = no limit"
             @warn "Benders: the master stopped at $(master_status) at iteration " *
                   "$(iter) without a plan; solving it again, and the next ones, " *
-                  "with solver.time_limit ($(input.time_limit) s)."
+                  "with solver.time_limit ($(limit_text))."
             master_optimizer = new_master_optimizer(input.time_limit)
             set_optimizer(master_model, master_optimizer)
             optimize!(master_model)

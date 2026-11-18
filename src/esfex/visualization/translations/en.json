@@ -885,6 +885,7 @@
     "solver": "Solver:",
     "threads": "Threads:",
     "time_limit": "Time Limit (s):",
+    "time_limit_none": "No limit",
     "gap": "Gap (frac):",
     "n1_trans": "Transmission:",
     "n1_trans_reserve": "Trans. Reserve Factor (frac):",
