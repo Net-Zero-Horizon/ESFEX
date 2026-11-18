@@ -137,25 +137,81 @@ def _finder():
     return TimezoneFinder()
 
 
+# A point at sea takes the zone of the nearest land within this distance.
+SEA_ZONE_SEARCH_KM = 200.0
+_SEA_SEARCH_STEP_KM = 2.0
+_EARTH_RADIUS_KM = 6371.0
+
+
+def _land_zone_at(lat: float, lon: float) -> Optional[str]:
+    try:
+        return _finder().timezone_at_land(lng=float(lon), lat=float(lat))
+    except Exception as exc:  # out-of-range coordinates
+        logger.debug("timezonefinder failed at (%s, %s): %s", lat, lon, exc)
+        return None
+
+
+def _destination(lat: float, lon: float, km: float,
+                 bearing: float) -> tuple[float, float]:
+    """Point *km* from (*lat*, *lon*) along *bearing* (radians), on a sphere."""
+    d = km / _EARTH_RADIUS_KM
+    p1, l1 = math.radians(lat), math.radians(lon)
+    p2 = math.asin(math.sin(p1) * math.cos(d)
+                   + math.cos(p1) * math.sin(d) * math.cos(bearing))
+    l2 = l1 + math.atan2(math.sin(bearing) * math.sin(d) * math.cos(p1),
+                         math.cos(d) - math.sin(p1) * math.sin(p2))
+    lon2 = (math.degrees(l2) + 180.0) % 360.0 - 180.0
+    return math.degrees(p2), lon2
+
+
+def nearest_land_zone(lat: float, lon: float,
+                      max_km: float = SEA_ZONE_SEARCH_KM
+                      ) -> Optional[tuple[str, float]]:
+    """Zone of the land nearest to (*lat*, *lon*) within *max_km*.
+
+    Searches rings around the point every 2 km (points 2 km apart on each
+    ring); on the first ring that reaches land, the zone with the most hits
+    wins (ties: the first found). Returns ``(zone, distance_km)``, or None
+    when no land lies within *max_km*.
+    """
+    steps = int(math.floor(max_km / _SEA_SEARCH_STEP_KM + 1e-9))
+    for k in range(1, steps + 1):
+        km = k * _SEA_SEARCH_STEP_KM
+        n = max(8, int(math.ceil(2.0 * math.pi * km / _SEA_SEARCH_STEP_KM)))
+        hits: dict[str, int] = {}
+        for i in range(n):
+            zone = _land_zone_at(*_destination(lat, lon, km, 2.0 * math.pi * i / n))
+            if zone:
+                hits[zone] = hits.get(zone, 0) + 1
+        if hits:
+            return max(hits, key=lambda z: hits[z]), km
+    return None
+
+
 @lru_cache(maxsize=65536)
 def node_time_zone(lat: float, lon: float) -> str:
     """IANA time zone of the land at (*lat*, *lon*).
 
-    A point at sea or outside every zone gets the nominal zone of its
-    longitude band (:func:`nominal_zone`, no daylight saving time), with a
-    warning.
+    A point at sea (an offshore node, a coastal node just off the shoreline)
+    gets the zone of the nearest land within :data:`SEA_ZONE_SEARCH_KM`
+    (:func:`nearest_land_zone`), with DST if that zone has it. Farther out, or
+    outside every zone, it gets the nominal zone of its longitude band
+    (:func:`nominal_zone`, no daylight saving time), with a warning.
     """
-    zone = None
-    try:
-        zone = _finder().timezone_at_land(lng=float(lon), lat=float(lat))
-    except Exception as exc:  # out-of-range coordinates
-        logger.debug("timezonefinder failed at (%s, %s): %s", lat, lon, exc)
+    zone = _land_zone_at(lat, lon)
     if zone:
+        return zone
+    near = nearest_land_zone(float(lat), float(lon))
+    if near is not None:
+        zone, km = near
+        logger.info(
+            "No land time zone at (%.4f, %.4f) (at sea?): using %s, the zone of "
+            "the nearest land (about %.0f km away).", lat, lon, zone, km)
         return zone
     zone = nominal_zone(lon)
     logger.warning(
-        "No land time zone at (%.4f, %.4f) (at sea?): using %s (%s, no "
-        "daylight saving time).", lat, lon, zone,
+        "No land time zone at (%.4f, %.4f) or within %.0f km (at sea?): using "
+        "%s (%s, no daylight saving time).", lat, lon, SEA_ZONE_SEARCH_KM, zone,
         format_offset(standard_offset_hours(zone)))
     return zone
 

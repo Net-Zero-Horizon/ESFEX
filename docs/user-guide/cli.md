@@ -614,7 +614,7 @@ esfex train-demand-model [OPTIONS]
 | `--cache-dir` | | Path | `$ESFEX_DATA_ROOT/data/demand_dataset` | Dataset directory (the `--cache-dir` of `build-demand-dataset`) |
 | `--folds` | | Integer | `3` | Temporal cross-validation folds |
 
-A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow. The demand density model that the Grid Builder and the Demand Forecast workflow use is not trained by this command: it is the model of a published article, fitted by the article's own pipeline (see [Demand Density Model](../contributing/demand-density-model.md)).
+A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow. The XGBoost model's country encoding (ISO3 → `country_id`) is saved next to the model as `demand_xgb_country_map.json`; the dataset directory keeps its own copy. A model trained to another `--output` leaves the files in `$ESFEX_DATA_ROOT/data/models` untouched. The demand density model that the Grid Builder and the Demand Forecast workflow use is not trained by this command: it is the model of a published article, fitted by the article's own pipeline (see [Demand Density Model](../contributing/demand-density-model.md)).
 
 
 ---

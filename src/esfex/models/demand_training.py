@@ -56,6 +56,28 @@ FEATURE_COLS = [
 ]
 TARGET_COL = "shape_factor"
 
+# ISO3 → country_id encoding of a dataset build. It is written next to the
+# dataset and, when a model is saved, next to that model (the file ECVI's
+# XGBoost backend reads next to the model it loads).
+COUNTRY_MAP_FILENAME = "demand_xgb_country_map.json"
+
+
+def write_country_map(directory: Path, country_to_id: dict) -> Optional[Path]:
+    """Write *country_to_id* as ``directory/COUNTRY_MAP_FILENAME``.
+
+    Returns the path, or None (with a warning) when the directory cannot be
+    written.
+    """
+    path = Path(directory) / COUNTRY_MAP_FILENAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(country_to_id, f)
+    except OSError as exc:
+        logger.warning("Could not write the country map %s: %s", path, exc)
+        return None
+    return path
+
 
 # ── Holiday features ────────────────────────────────────────────────────────
 
@@ -214,6 +236,11 @@ def build_unified_dataset(
     Returns DataFrame with columns:
         group_id, year, time_idx, shape_factor,
         + all FEATURE_COLS (pixel-aware, 22 features as of 2026-04-16)
+
+    The ISO3 → ``country_id`` map is in ``df.attrs["country_to_id"]`` and is
+    written next to the dataset (``dataset_dir/demand_xgb_country_map.json``),
+    never into MODELS_DIR: the model trainer writes it next to the model it
+    saves.
     """
     from esfex.models.demand_dataset import (
         load_manifest, iter_manifest_entries)
@@ -447,13 +474,10 @@ def build_unified_dataset(
     country_to_id = {c: i for i, c in enumerate(country_codes)}
     full["country_id"] = full["country"].map(country_to_id).astype(np.float32)
 
-    # Persist the mapping alongside the model so inference can encode new countries
-    import json as _json
-    from esfex.paths import MODELS_DIR
-    _country_map_path = MODELS_DIR / "demand_xgb_country_map.json"
-    _country_map_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(_country_map_path, "w") as _f:
-        _json.dump(country_to_id, _f)
+    # The map belongs to this dataset: keep it with the dataset and the frame.
+    # A model saved from it gets its own copy (train_xgboost), so building a
+    # dataset never replaces the map of a model already in MODELS_DIR.
+    write_country_map(dataset_dir, country_to_id)
 
     # Sample weighting: inverse of n_zones(country) clipped to [0.3, 1.0]
     # so that countries with many zones (e.g. USA 60+ BAs, CHN 31 provs) do
@@ -470,6 +494,7 @@ def build_unified_dataset(
         len(full), full["group_id"].nunique(), full["country"].nunique(),
         int((full["zone"] != "").sum()),
     )
+    full.attrs["country_to_id"] = dict(country_to_id)
     return full
 
 
@@ -630,8 +655,13 @@ def train_xgboost(
     output_path: Optional[Path] = None,
     n_cv_folds: int = 3,
     progress_cb: Optional[Callable[[int, str], None]] = None,
+    country_to_id: Optional[dict] = None,
 ) -> dict:
     """Train XGBoost on unified hourly dataset with temporal CV.
+
+    *country_to_id* is the dataset's ISO3 → ``country_id`` map (default:
+    ``df.attrs["country_to_id"]``, else rebuilt from the frame's columns); it
+    is saved next to the model as ``demand_xgb_country_map.json``.
 
     Returns dict with model, metrics, and CV results.
     """
@@ -721,6 +751,14 @@ def train_xgboost(
     emit(90, "Saving model...")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     final_booster.save_model(str(output_path))
+    if country_to_id is None:
+        country_to_id = df.attrs.get("country_to_id")
+    if country_to_id is None and {"country", "country_id"} <= set(df.columns):
+        country_to_id = {
+            str(c): int(i) for c, i in
+            df.groupby("country")["country_id"].first().items()}
+    if country_to_id is not None:
+        write_country_map(output_path.parent, country_to_id)
 
     metrics = {
         "engine": "xgboost",
@@ -769,7 +807,8 @@ def train_demand_model(
     n_cv_folds : int
         Number of temporal CV folds.
     exclude_country : str, optional
-        ISO3 code to exclude (leave-one-country-out validation; XGBoost).
+        ISO3 code to exclude (leave-one-country-out validation). The dataset
+        is built once; both engines train on it without that country.
     **kwargs
         TFT hyper-parameters, passed to ``demand_tft.train_tft_model``.
         Other engines take none: an unknown keyword raises ``TypeError``.
@@ -796,6 +835,10 @@ def train_demand_model(
     emit(40, f"Dataset: {len(df):,} rows, {df['country'].nunique()} countries, "
          f"{df['group_id'].nunique()} country-years")
 
+    # The full map, taken before the exclusion: the excluded country keeps its
+    # id, so it cannot be mistaken for another one at inference.
+    country_to_id = df.attrs.get("country_to_id")
+
     # Exclude country if requested
     if exclude_country:
         n_before = len(df)
@@ -805,11 +848,13 @@ def train_demand_model(
     if engine == "xgboost":
         if output_path is None:
             output_path = MODELS_DIR / "demand_model.xgb"
-        return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit)
+        return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit,
+                             country_to_id=country_to_id)
     emit(45, "Launching TFT training...")
     from esfex.models.demand_tft import train_tft_model
     return train_tft_model(
         dataset_dir=dataset_dir,
+        df=df,
         output_path=output_path,
         n_cv_folds=n_cv_folds,
         progress_cb=emit,
