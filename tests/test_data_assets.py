@@ -93,8 +93,11 @@ def test_bundled_manifest_lists_population_tiles_and_gdp():
 
 def test_models_ship_with_the_package(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "MODELS_DIR", tmp_path)        # no local dataset
-    for name, bundled in [("demand_density_hourly_xgb.json", "demand_density_hourly_xgb.ubj"),
-                          ("demand_density_hourly_xgb.feats.json", None),
+    for name, bundled in [("demand_density_v2.json", "demand_density_v2.ubj"),
+                          ("demand_density_v2.level.ubj", None),
+                          ("demand_density_v2.meta.json", None),
+                          ("demand_density_v2.grids.npz", None),
+                          ("demand_density_v2.countries.csv", None),
                           ("demand_model.xgb", "demand_model.ubj")]:
         p = paths.model_path(name, bundled)
         assert p.parent == paths.BUNDLED_MODELS_DIR and p.exists()
@@ -109,4 +112,19 @@ def test_bundled_density_model_loads(tmp_path, monkeypatch):
     from esfex.models.demand_density_ml import DemandDensityModel
     assert DemandDensityModel.is_available()
     m = DemandDensityModel.load_bundled()
-    assert len(m.feature_names) == 18
+    assert len(m.feature_names) == 26 and len(m.level_features) == 9
+    assert m.context is not None
+
+
+def test_density_model_copy_replaces_the_shipped_one_only_whole(tmp_path, monkeypatch):
+    import shutil
+
+    from esfex.models import demand_density_ml as ddm
+    monkeypatch.setattr(paths, "MODELS_DIR", tmp_path)
+    shutil.copy(paths.BUNDLED_MODELS_DIR / "demand_density_v2.ubj",
+                tmp_path / "demand_density_v2.json")
+    # without its level round and meta file the copy is ignored
+    assert ddm._model_files()[0].parent == paths.BUNDLED_MODELS_DIR
+    for f in ("demand_density_v2.level.ubj", "demand_density_v2.meta.json"):
+        shutil.copy(paths.BUNDLED_MODELS_DIR / f, tmp_path / f)
+    assert [p.parent for p in ddm._model_files()] == [tmp_path] * 3
