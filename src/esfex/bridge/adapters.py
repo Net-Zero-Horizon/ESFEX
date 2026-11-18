@@ -2346,13 +2346,15 @@ class PowerSystemAdapter:
         jl.seval("global _ps_model")
         jl._ps_model = self._jl_model
 
-        # Solve using JuMP. No retries, no fallbacks: if the configured solver
-        # cannot prove optimality, that is a real formulation/conditioning bug
-        # and must be surfaced — masking it with a simplex fallback hides
-        # silent errors that are extremely hard to debug later.
+        # Solve as the master is solved: a Gurobi solve that ends
+        # NUMERICAL_ERROR or SUBOPTIMAL is solved once more with the
+        # homogeneous barrier, and a loss-repair round still short of optimal
+        # is undone (ESFEX.optimize_dispatch!). No fallback to another
+        # solver or method.
         jl.seval("using JuMP")
         t0 = _time.perf_counter()
-        jl.seval("optimize!(_ps_model)")
+        jl.seval("(m, label) -> ESFEX.optimize_dispatch!(m; label = label)")(
+            self._jl_model, self._window_label())
         t_solve = _time.perf_counter() - t0
         logger.info(f"⏱ PowerSystem solve: {t_solve:.2f}s")
 
@@ -2413,10 +2415,23 @@ class PowerSystemAdapter:
         return bool(n1 is not None and n1.enabled and n1.compute_security_cost
                     and self.run_mode in n1.apply_to_modes)
 
+    def _window_label(self) -> str:
+        """This dispatch window in log messages: its number (when the runner
+        gives one), year and first hour."""
+        window = self.kwargs.get("window")
+        where = f"{self.year}, from hour {self.start_hour}"
+        return (f"Dispatch window {window} ({where})" if window is not None
+                else f"Dispatch ({where})")
+
     def _map_termination_status(self, jl) -> int:
         """Map JuMP termination status to PuLP-compatible code.
 
-        ``OPTIMAL`` / ``LOCALLY_SOLVED`` return success. A solver that stops at
+        ``OPTIMAL`` / ``LOCALLY_SOLVED`` return success. ``LOCALLY_SOLVED``
+        from an LP or MIP solver (Gurobi's ``SUBOPTIMAL``: the barrier
+        stalled short of its tolerances) is what remains after the retry of
+        ``optimize_dispatch!``: its feasible point is kept with a warning that
+        names the window; it is the normal answer of a local NLP solver
+        (Ipopt), kept without one. A solver that stops at
         a resource LIMIT (time / nodes / iterations) but holds a FEASIBLE primal
         point is also accepted: an operational dispatch that meets demand is a
         valid result, and discarding it turns a slow-but-solved window into a
@@ -2430,7 +2445,7 @@ class PowerSystemAdapter:
         status_str = str(status)
         logger.info(f"Solve completed with status: {status_str}")
 
-        if "OPTIMAL" in status_str or "LOCALLY_SOLVED" in status_str:
+        if "OPTIMAL" in status_str:
             return 1
         elif "DUAL_INFEASIBLE" in status_str or "UNBOUNDED" in status_str:
             return -2
@@ -2438,11 +2453,25 @@ class PowerSystemAdapter:
             self._dump_iis_if_requested(jl, "_ps_model")
             return -1
 
-        # Accept a feasible incumbent found before a resource limit was hit.
         try:
             primal_status = str(jl.seval("primal_status(_ps_model)"))
         except Exception:
             primal_status = "NO_SOLUTION"
+        if ("LOCALLY_SOLVED" in status_str
+                and primal_status.split(".")[-1] == "FEASIBLE_POINT"):
+            try:
+                local_solver = str(jl.seval("solver_name(_ps_model)")) == "Ipopt"
+            except Exception:
+                local_solver = False
+            if not local_solver:
+                logger.warning(
+                    f"{self._window_label()}: the solver stopped short of optimal "
+                    f"({status_str}, Gurobi's SUBOPTIMAL) after one more solve; "
+                    "keeping its feasible point, whose cost may lie above the "
+                    "optimum.")
+            return 1
+
+        # Accept a feasible incumbent found before a resource limit was hit.
         if _accept_limit_incumbent(
             jl, "_ps_model", status_str, primal_status, "The dispatch solver",
             "loosen solver.gap or raise solver.time_limit to close the gap.",
@@ -3804,11 +3833,14 @@ class MasterProblemAdapter:
         it or after ``npv_retirement_max_iterations`` rounds. Each retired
         unit is added to ``npv_retirements`` with its NPV and round.
 
-        A re-solve that is not optimal (or fails) undoes its round: the last
+        A re-solve that is not optimal (or fails), or that curtails more
+        above the annual curtailment limit than the plan before (retiring
+        the store that held the limit: under the hard limit of earlier
+        versions such a re-solve was infeasible), undoes its round: the last
         optimal model and its retirements are kept, a warning names the
-        units of the undone round and the solver status, and the iteration
-        stops (the run goes on with that plan). Returns the status of the
-        plan kept."""
+        units of the undone round and the reason, and the iteration stops
+        (the run goes on with that plan). Returns the status of the plan
+        kept."""
         rounds = 0
         while status == 1:
             npvs = self._unit_npvs()
@@ -3833,6 +3865,7 @@ class MasterProblemAdapter:
                 + ", ".join(f"{u['name']} at node {u['node']} (NPV ${u['npv']:,.0f})"
                             for u in flagged))
             kept = {a: getattr(self, a) for a in self._SOLVED_STATE}
+            excess_before = self._curtailment_excess_mwh()
             n_before = len(self.npv_retirements)
             for u in flagged:
                 u = dict(u, iteration=rounds)
@@ -3843,6 +3876,13 @@ class MasterProblemAdapter:
                 status = self._solve_once()
             except Exception as e:  # noqa: BLE001 — a failed re-solve is undone
                 status, self._last_status = 0, f"error: {e}"
+            why = f"is not optimal ({self._last_status})"
+            if status == 1:
+                excess = self._curtailment_excess_mwh()
+                if excess > excess_before * (1 + 1e-6) + 1e-3:
+                    status = 0
+                    why = (f"curtails {excess / 1e3:,.4g} GWh/yr above the annual "
+                           f"curtailment limit (the plan before: {excess_before / 1e3:,.4g})")
             if status != 1:
                 undone = self.npv_retirements[n_before:]
                 del self.npv_retirements[n_before:]
@@ -3851,10 +3891,20 @@ class MasterProblemAdapter:
                 logger.warning(
                     f"NPV retirement, round {rounds}: the master re-solve after retiring "
                     + ", ".join(f"{u['name']} at node {u['node']}" for u in undone)
-                    + f" is not optimal ({self._last_status}); keeping these units and "
-                    "the last optimal plan")
+                    + f" {why}; keeping these units and the last optimal plan")
                 return 1
         return status
+
+    def _curtailment_excess_mwh(self) -> float:
+        """MWh/yr the solved master curtails above its annual curtailment
+        limits (Julia ``curtailment_excess_mwh``); 0 without a model or
+        under Benders (its limit is hard)."""
+        if self._jl_model is None:
+            return 0.0
+        try:
+            return float(get_esfex_module().curtailment_excess_mwh(self._jl_model))
+        except Exception:  # noqa: BLE001 — a Benders result, or no values
+            return 0.0
 
     def solve(self) -> int:
         """

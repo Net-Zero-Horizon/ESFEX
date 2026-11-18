@@ -166,13 +166,13 @@ Battery discharge from energy originally produced by renewable sources counts to
 
 ## Curtailment
 
-Curtailment is available renewable energy that goes unused because demand is already met or the network cannot absorb it. Rather than relying on cost penalties alone, the master problem limits each system's curtailment over the year through a hard constraint:
+Curtailment is available renewable energy that goes unused because demand is already met or the network cannot absorb it. Rather than relying on cost penalties alone, the master problem limits each system's curtailment over the year through a constraint:
 
 ```
 curtailment over the year <= max_curtailment_ratio * renewable generation over the year
 ```
 
-Single days may curtail more, as long as the year stays within the limit.
+Single days may curtail more, as long as the year stays within the limit. Curtailment above the limit costs 10⁴ $/MWh, so the master only goes over it when it cannot do otherwise (existing renewables that must curtail more), and the log warns when it does.
 
 `max_curtailment_ratio` is set under `penalties:` and defaults to 0.05 (5%). When the system approaches this limit, the optimizer has to invest in storage or other flexibility to absorb excess renewable production instead of overbuilding renewables. In addition, curtailed energy is charged at `penalties.curtailment_cost`.
 
