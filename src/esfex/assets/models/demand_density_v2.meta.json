@@ -1,0 +1,255 @@
+{
+ "name": "demand_density_v2",
+ "target": "log10(demand_mw / area_km2)",
+ "features": [
+  "log_pop_density",
+  "log_gdp_density",
+  "log_gdp_per_cap",
+  "temperature",
+  "hdd",
+  "cdd",
+  "hour_sin",
+  "hour_cos",
+  "dow_sin",
+  "dow_cos",
+  "month_sin",
+  "month_cos",
+  "is_weekend",
+  "is_holiday",
+  "days_to_next_holiday",
+  "days_from_prev_holiday",
+  "latitude",
+  "longitude",
+  "t_mean",
+  "t_range",
+  "hh_elec_share",
+  "bld_share_elec",
+  "lhour_sin",
+  "lhour_cos",
+  "smonth_sin",
+  "smonth_cos"
+ ],
+ "level_features": [
+  "log_pop_density",
+  "log_gdp_density",
+  "log_gdp_per_cap",
+  "latitude",
+  "longitude",
+  "t_mean",
+  "t_range",
+  "hh_elec_share",
+  "bld_share_elec"
+ ],
+ "clock": "UTC: hour_sin/cos and month are the UTC hour and month of the row, temperature is that instant's; dow and holidays are on the local date at the standard offset of the country's time zone nearest to the longitude; lhour_sin/cos is local solar time (longitude/15 h), smonth_sin/cos the month shifted by six in the southern hemisphere",
+ "hdd_base": 18.0,
+ "cdd_base": 24.0,
+ "static_range": {
+  "log_pop_density": [
+   0.2077773954677614,
+   3.8216973368849008
+  ],
+  "log_gdp_density": [
+   4.580835406373091,
+   8.833638177661076
+  ],
+  "log_gdp_per_cap": [
+   3.4821972083061565,
+   5.011940840776174
+  ],
+  "latitude": [
+   -42.072653168202,
+   68.37630882286535
+  ],
+  "longitude": [
+   -122.52780955670472,
+   174.25385534930237
+  ],
+  "t_mean": [
+   2.5932223796844482,
+   29.0313777923584
+  ],
+  "t_range": [
+   1.9569514989852905,
+   45.64767837524414
+  ],
+  "hh_elec_share": [
+   0.0412422542911104,
+   0.8858563386883551
+  ],
+  "bld_share_elec": [
+   0.1390271268414896,
+   0.9293872060429531
+  ]
+ },
+ "temperature_range": [
+  -42.4713249206543,
+  46.900001525878906
+ ],
+ "rounds": 300,
+ "params": {
+  "max_depth": 9,
+  "eta": 0.06,
+  "subsample": 0.8,
+  "colsample_bytree": 0.8,
+  "min_child_weight": 4,
+  "objective": "reg:squarederror",
+  "tree_method": "hist",
+  "seed": 0
+ },
+ "level_params": {
+  "max_depth": 3
+ },
+ "n_hours": 9041858,
+ "n_series": 166,
+ "n_series_years": 1033,
+ "n_countries": 83,
+ "gain_share": {
+  "level": {
+   "log_gdp_density": 0.7663912193418558,
+   "log_pop_density": 0.08657803136865437,
+   "hh_elec_share": 0.03561926671006709,
+   "t_mean": 0.03374057136896701,
+   "latitude": 0.025239054400474692,
+   "log_gdp_per_cap": 0.017608330081455202,
+   "t_range": 0.01502662305437349,
+   "longitude": 0.014949382631579624,
+   "bld_share_elec": 0.004847521042572668
+  },
+  "hourly": {
+   "lhour_sin": 0.11670519675589514,
+   "lhour_cos": 0.11365857014825768,
+   "temperature": 0.09804058099357744,
+   "hdd": 0.08054081491789292,
+   "longitude": 0.06885523510457348,
+   "dow_sin": 0.04960072579665317,
+   "t_mean": 0.04820844474996085,
+   "latitude": 0.04628175333760883,
+   "hh_elec_share": 0.043134480670146934,
+   "cdd": 0.041721729486051164,
+   "log_pop_density": 0.03325559382035372,
+   "hour_cos": 0.03219898065491624,
+   "t_range": 0.032010970016280706,
+   "bld_share_elec": 0.031996741249584494,
+   "log_gdp_per_cap": 0.03105463276304867,
+   "smonth_cos": 0.02888979032077668,
+   "log_gdp_density": 0.022305865038426822,
+   "month_cos": 0.016105048629697395,
+   "hour_sin": 0.015945219131330877,
+   "is_weekend": 0.012896059934721319,
+   "is_holiday": 0.008643713985913239,
+   "month_sin": 0.007617694008222541,
+   "days_to_next_holiday": 0.007157959707105465,
+   "days_from_prev_holiday": 0.005195010265567831,
+   "smonth_sin": 0.005042458003325867,
+   "dow_cos": 0.0029367305101105183
+  }
+ },
+ "provenance": {
+  "article": "Global map of electricity demand sensitivity to warming learned from observed hourly load (Nature Communications, revision R1)",
+  "spec": "level_geo_two_shallow",
+  "fitted": "2026-11-17T17:53:40+09:00",
+  "fitted_on": "GPU (device=cuda); ESFEX predicts on the CPU",
+  "boosters": {
+   "hourly": {
+    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/models/level_geo_two_shallow.json",
+    "modified": "2026-11-17T17:53:40+09:00",
+    "sha256": "89f3d5f7b94d0007c708f906ff78a1906f678da19ae885ea6872646f4220343e"
+   },
+   "level": {
+    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/models/level_geo_two_shallow.level.json",
+    "modified": "2026-11-17T17:53:39+09:00",
+    "sha256": "9117d1ca4a647e7cdafe65794da5f7872d9cbfcd84e7529067edd9cc5cfd4559"
+   }
+  },
+  "grids": {
+   "normals": {
+    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/eta/present.npz",
+    "modified": "2026-11-17T18:54:10+09:00"
+   },
+   "energy_context": {
+    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/energy_context_025.npz",
+    "modified": "2026-11-13T15:43:46+09:00"
+   },
+   "land": {
+    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/countries_025.npz",
+    "modified": "2026-11-13T09:23:43+09:00"
+   },
+   "population": {
+    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/population_2020_025.npz",
+    "modified": "2026-11-13T09:17:04+09:00"
+   }
+  },
+  "countries": {
+   "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/energy_context.csv",
+   "modified": "2026-11-13T15:43:44+09:00"
+  },
+  "normals": "t_mean, t_range: mean and 5-95 % spread of daily mean temperature of each cell, NEX-GDDP-CMIP6 (GFDL-ESM4, IPSL-CM6A-LR, MPI-ESM1-2-HR) x SSP1-2.6/2-4.5/3-7.0/5-8.5, 2025-2029 pooled (s08_sensitivity.normals)",
+  "energy_context": "UN Energy Balances 2015-2021 by country; Statistics Canada 25-10-0029 and EIA SEDS by province and state (s12_energy_context)",
+  "land_km2": "land area of each cell: Natural Earth 10m admin-0 rasterized at 0.025 degree (s02_static_grids)",
+  "pop_2020": "WorldPop 2020 1 km population counts summed per cell (s01_population_grid, pop_worldpop)"
+ },
+ "cross_validation": {
+  "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/cv/summary.csv",
+  "modified": "2026-11-17T17:53:01+09:00",
+  "columns": {
+   "r2_hourly": "R2 of hourly log10 demand density on held-out data",
+   "rmse_dex": "RMSE of hourly log10 demand density (dex)",
+   "r2_level": "R2 of the mean log10 density of each held-out series",
+   "level_err_dex": "mean error of that level (dex)",
+   "r2_shape": "R2 of the hourly anomalies about each series' mean",
+   "fe_r": "correlation of the model's and the observed sensitivity to +1 C (fixed-effects estimate on held-out predictions)"
+  },
+  "shipped": {
+   "series_year": {
+    "r2_hourly": 0.9835737523765838,
+    "rmse_dex": 0.0842225253582,
+    "r2_level": 0.9629850529644792,
+    "level_err_dex": 0.0011100063932737,
+    "r2_shape": 0.5298040797755252,
+    "fe_r": 0.9426905853641276
+   },
+   "country": {
+    "r2_hourly": 0.8286386451397587,
+    "rmse_dex": 0.2720292210578918,
+    "r2_level": 0.8150417643710703,
+    "level_err_dex": 0.1414003854453389,
+    "r2_shape": 0.4413884919292486,
+    "fe_r": 0.8600178147635108
+   },
+   "region": {
+    "r2_hourly": 0.7183153043126793,
+    "rmse_dex": 0.3487712740898132,
+    "r2_level": 0.7372201281081134,
+    "level_err_dex": 0.1906957931594285,
+    "r2_shape": 0.3372877628139491,
+    "fe_r": 0.7976211221214438
+   }
+  },
+  "submitted_design": {
+   "series_year": {
+    "r2_hourly": 0.9828551050201626,
+    "rmse_dex": 0.0860451683402061,
+    "r2_level": 0.9593522612862122,
+    "level_err_dex": 0.0008939850759752,
+    "r2_shape": 0.5233768337004605,
+    "fe_r": 0.9352653373769148
+   },
+   "country": {
+    "r2_hourly": 0.7875770290519923,
+    "rmse_dex": 0.3028724789619446,
+    "r2_level": 0.799152962331575,
+    "level_err_dex": 0.1818488990250969,
+    "r2_shape": 0.292047195478729,
+    "fe_r": 0.7561289155669167
+   },
+   "region": {
+    "r2_hourly": 0.6033599746609111,
+    "rmse_dex": 0.4138637185096741,
+    "r2_level": 0.6306059150227876,
+    "level_err_dex": 0.2370773258988404,
+    "r2_shape": 0.0061263330252486,
+    "fe_r": 0.7360737913864726
+   }
+  }
+ }
+}
