@@ -4007,10 +4007,13 @@ import Ipopt
 
         @testset "master reservoir builds raise the reservoir's level bounds" begin
             # 50 MW hydro with 25 MWh/h of inflow and a 100 MWh reservoir
-            # (starts and ends at 50 MWh); no load for 12 h, then 50 MW for
-            # 12 h, with diesel at 1e-3 as the alternative. Storing the
-            # first half's 300 MWh needs 350 MWh: the master builds 250. The
-            # build used to be charged but never added to the reservoir.
+            # that starts and ends half full; no load for 12 h, then 50 MW
+            # for 12 h, with diesel at 1e-3 as the alternative. Storing the
+            # first half's 300 MWh on top of the half-full start needs 600
+            # MWh: the master builds 500. The build used to be charged but
+            # never added to the reservoir; then the start level stayed at
+            # half the existing 100 MWh (a 350 MWh reservoir, 250 built),
+            # while the dispatch starts half the in-service capacity full.
             hydro = ESFEX.with_fields(
                 mkgen("Hydro", "Renewable", "Water", [50.0], [0.0], ones(H24, 1);
                       nb = 1, H = H24);
@@ -4031,12 +4034,118 @@ import Ipopt
                 hours_per_year = [24, 24], verbose = false)
             model, mvars = master1(inp)
             res = extract_master_solution(model, mvars, inp)
-            @test res.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-6
+            @test res.reservoir_investment[1][1][1] ≈ 500.0 rtol = 1e-6
             # Built once: year 2 already has it
             @test get(res.reservoir_investment[2], 1, [0.0])[1] ≈ 0.0 atol = 1e-6
-            @test res.total_investment_by_year[1] ≈ 250.0 * 1.0e-6 rtol = 1e-6
+            @test res.total_investment_by_year[1] ≈ 500.0 * 1.0e-6 rtol = 1e-6
             # Year 2 still has it: the hydro covers all 600 MWh of the load
             @test sum(mvals(model, "op_y2_d1_gen[1,")) ≈ 600.0 rtol = 1e-6
+            # The day starts half the in-service 600 MWh full
+            @test mvals(model, "op_y1_d1_res_level[1,1,1]")[1] ≈ 300.0 rtol = 1e-6
+        end
+
+        @testset "TSAM reservoir boundaries and head fraction use the in-service capacity" begin
+            # Two chained TSAM periods: day 1 has no load and 600 MWh of
+            # inflow, day 2 needs 1200 MWh from the 50 MW hydro. Carrying the
+            # 600 MWh across the period boundary needs a 600 MWh reservoir,
+            # 500 more than the 100 it has. The boundary levels were bounded
+            # by the existing 100 MWh, so the build was useless (none made)
+            # and diesel served 500 MWh of day 2.
+            hydro(; kw...) = ESFEX.with_fields(
+                mkgen("Hydro", "Renewable", "Water", [50.0], [0.0], ones(2 * H24, 1);
+                      nb = 1, H = 2 * H24);
+                reservoir_capacity = [100.0], reservoir_initial_level = [0.5],
+                reservoir_min_level = [0.0], reservoir_max_level = [1.0],
+                reservoir_inflow = fill(25.0, 2 * H24, 1), reservoir_turbine_efficiency = [1.0],
+                reservoir_evaporation_rate = [0.0], reservoir_pump_capacity = [0.0],
+                reservoir_pump_efficiency = [1.0], reservoir_spillage_allowed = true,
+                reservoir_invest_cost = [1.0e-6], reservoir_invest_max = [1000.0], kw...)
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                           ones(2 * H24, 1); nb = 1, H = 2 * H24)
+            tinp(h) = MasterProblemInput(
+                years = [2025], network = net1, generators = [h, diesel],
+                batteries = BatteryConfig[],
+                base_demand = reshape(vcat(zeros(H24), fill(50.0, H24)), 2 * H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                use_tsam = true, tsam_inter_period_linking = true,
+                tsam_period_start_hours = [[1, H24 + 1]], tsam_period_weights = [[1.0, 1.0]],
+                tsam_chronological_order = [[1, 2]], verbose = false)
+            inp = tinp(hydro())
+            model, mvars = master1(inp)
+            res = extract_master_solution(model, mvars, inp)
+            @test res.reservoir_investment[1][1][1] ≈ 500.0 rtol = 1e-6
+            @test sum(mvals(model, "op_y1_d2_gen[2,")) ≈ 0.0 atol = 1e-6
+            @test value(mvars.inter_period_reservoir[1][(1, 1, 1)]) ≈ 600.0 rtol = 1e-6
+
+            # Head fraction (level - min·cap)/span: its minimum is the
+            # in-service minimum level, so the build enters the numerator
+            # (the span stays at the existing 80 MWh: linear). With min level
+            # 0.2 and head_min_factor 0.3 the 50 MW unit's limit reads
+            # gen ≤ 15 + 35·(level - 0.2·(100 + built))/80.
+            hinp = tinp(hydro(reservoir_min_level = [0.2], reservoir_head_min_factor = [0.3]))
+            hm, _, _ = create_master_problem(hinp; use_representative_days = true)
+            built = variable_by_name(hm, "cap_res_y1_g1_b1")   # built up to year 1
+            con = first(c for c in all_constraints(hm; include_variable_in_set_constraints = false)
+                        if name(c) == "res_head_limit_g1_b1_t1")
+            @test ESFEX.JuMP.normalized_coefficient(con, built) ≈ 35.0 * 0.2 / 80.0
+            @test ESFEX.JuMP.normalized_rhs(con) ≈ 15.0 - 35.0 * 0.2 * 100.0 / 80.0
+        end
+
+        @testset "fuels' price_growth_rate grows the units' fuel_cost by year" begin
+            # Gas grows 10 %/year from 2025; diesel's fuel is not in the
+            # fuels block (flat). The candidate OCGT burns gas too. The
+            # master charged every year the base price.
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4], ones(H24, 1);
+                        nb = 1, H = H24)
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [2.0e-4],
+                           ones(H24, 1); nb = 1, H = H24)
+            o = [0.0]
+            ocgt = TechnologyConfig("OCGT", "Non-renewable", "Gas", [1.0], [50.0],
+                                    ones(H24, 1), [1.0], [1.0], [1.0], [1.0], o, o, o,
+                                    [3.0e-4], o, o, o, o, [25.0], o, o, 50.0, "AC", false, [1.0])
+            mk(; years = [2025, 2026], kw...) = MasterProblemInput(;
+                years = years, network = net1, generators = [gas, diesel],
+                batteries = BatteryConfig[], technologies = [ocgt],
+                base_demand = fill(50.0, H24 * length(years), 1),
+                hours_per_year = fill(24, length(years)),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                verbose = false, kw...)
+            # Objective coefficient of the first variable whose name matches
+            function coefs(inp; mult = nothing)
+                model = mult === nothing ?
+                    create_master_problem(inp; use_representative_days = true)[1] :
+                    create_stochastic_master_problem(StochasticMasterInput(
+                        inp, [Scenario("s", 1.0, mult)], true))[1]
+                obj = objective_function(model)
+                return re -> coefficient(obj, first(v for v in all_variables(model)
+                                                    if occursin(re, name(v))))
+            end
+            gas_y(y) = Regex("^op_y$(y)_d\\d+_gen\\[1,1,1\\]")
+            diesel_y(y) = Regex("^op_y$(y)_d\\d+_gen\\[2,1,1\\]")
+            tech_y(y) = Regex("^tech_out_y$(y)_d\\d+\\[1,1,1\\]")
+            growth = Dict("Gas" => 0.1)
+            flat = coefs(mk())
+            grown = coefs(mk(fuel_price_growth = growth))
+            @test grown(gas_y(1)) ≈ flat(gas_y(1)) rtol = 1e-12
+            @test grown(gas_y(2)) ≈ 1.1 * flat(gas_y(2)) rtol = 1e-12
+            @test grown(diesel_y(2)) ≈ flat(diesel_y(2)) rtol = 1e-12
+            @test grown(tech_y(2)) ≈ 1.1 * flat(tech_y(2)) rtol = 1e-12
+            # A myopic year's master (one year, 2027) grows from the run's
+            # first year, not its own
+            flat1 = coefs(mk(years = [2027]))
+            grown1 = coefs(mk(years = [2027], fuel_price_growth = growth,
+                              fuel_price_base_year = 2025))
+            @test grown1(gas_y(1)) ≈ 1.21 * flat1(gas_y(1)) rtol = 1e-12
+            @test grown1(tech_y(1)) ≈ 1.21 * flat1(tech_y(1)) rtol = 1e-12
+            # A stochastic scenario's fuel_price_growth multiplies the grown
+            # price (each counted once)
+            sflat = coefs(mk(); mult = ScenarioMultipliers())
+            sgrown = coefs(mk(fuel_price_growth = growth);
+                           mult = ScenarioMultipliers(fuel_price_growth = 1.05))
+            @test sgrown(gas_y(2)) ≈ 1.1 * 1.05 * sflat(gas_y(2)) rtol = 1e-12
+            @test sgrown(diesel_y(2)) ≈ 1.05 * sflat(diesel_y(2)) rtol = 1e-12
+            @test ESFEX.fuel_price_factor(0.1, 2027, 2025) ≈ 1.21
         end
 
         @testset "total_investment_by_year counts transmission builds" begin
@@ -5337,8 +5446,9 @@ import Ipopt
             @test bend.cumulative_gen_capacity[1][1][1] ≈ 50.0 atol = 1e-4
 
             # Reservoir build: storing the dry half-day's 300 MWh of inflow
-            # needs 350 MWh of reservoir, 250 more than the 100 it has (see
-            # "master reservoir builds raise the reservoir's level bounds")
+            # on top of the half-full start needs 600 MWh of reservoir, 500
+            # more than the 100 it has (see "master reservoir builds raise
+            # the reservoir's level bounds")
             hydro = ESFEX.with_fields(
                 mkgen("Hydro", "Renewable", "Water", [50.0], [0.0], ones(H24, 1);
                       nb = 1, H = H24);
@@ -5355,8 +5465,8 @@ import Ipopt
                 target_re_penetration = 0.0, initial_re_penetration = 0.0,
                 representative_days_per_year = 1, min_day_separation = 1,
                 hours_per_year = [24, 24], verbose = false))
-            @test mono.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-6
-            @test bend.reservoir_investment[1][1][1] ≈ 250.0 rtol = 1e-4
+            @test mono.reservoir_investment[1][1][1] ≈ 500.0 rtol = 1e-6
+            @test bend.reservoir_investment[1][1][1] ≈ 500.0 rtol = 1e-4
 
             # Curtailment cost on candidate PV: at 2e-5 per MWh curtailed the
             # 16.7 MW that would saturate the peak hours no longer pay off.

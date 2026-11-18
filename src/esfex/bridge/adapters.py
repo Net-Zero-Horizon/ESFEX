@@ -22,6 +22,7 @@ from esfex.config.schema import (
     SolverConfig,
     SystemConfig,
     TemporalConfig,
+    fuel_price_factor,
 )
 
 if TYPE_CHECKING:
@@ -548,6 +549,18 @@ def _build_gen_q_limits(sys) -> "Any":
         vals = ", ".join(str(x) for x in v)
         pairs.append(f"{int(k)} => Float64[{vals}]")
     return jl.seval(f"Dict{{Int64, Vector{{Float64}}}}({', '.join(pairs)})")
+
+
+def _fuel_price_growth(sys) -> "Any":
+    """``price_growth_rate`` of each fuel of the ``fuels`` block that grows,
+    as the Julia ``Dict{String, Float64}`` the master input takes."""
+    jl = get_julia()
+    rates = jl.seval("Dict{String, Float64}()")
+    setindex = jl.seval("setindex!")
+    for key, fuel in (getattr(sys, "fuels", None) or {}).items():
+        if fuel.price_growth_rate:
+            setindex(rates, float(fuel.price_growth_rate), str(key))
+    return rates
 
 
 def _build_gen_q_limits_min(sys) -> "Any":
@@ -1392,6 +1405,18 @@ class PowerSystemAdapter:
 
         logger.debug(f"PowerSystemAdapter initialized: {hours}h, {num_nodes} nodes, mode={mode}")
 
+    def _grown_fuel_cost(self, gen: GeneratorConfig) -> GeneratorConfig:
+        """*gen* with its ``fuel_cost`` grown to this window's year at the
+        ``price_growth_rate`` of its fuel in the ``fuels`` block, from the
+        run's first year (``fuel_price_factor``, as the master charges it).
+        A unit whose fuel is not in ``fuels`` keeps its ``fuel_cost``; offer
+        curves stay as given."""
+        f = fuel_price_factor(getattr(self.system_config, "fuels", None), gen.fuel,
+                              self.year, self.base_year)
+        if f == 1.0:
+            return gen
+        return gen.model_copy(update={"fuel_cost": [c * f for c in gen.fuel_cost]})
+
     def _slice_availability(self, cached: np.ndarray, resolution_hours: int) -> Optional[np.ndarray]:
         """Slice a cached hourly profile (availability, inflow) to this window.
 
@@ -1687,6 +1712,7 @@ class PowerSystemAdapter:
                 gen_dict = gen_to_convert.model_dump()
                 gen_dict['fuel_cost'] = fuel_adjustments[key]
                 gen_to_convert = GeneratorConfig(**gen_dict)
+            gen_to_convert = self._grown_fuel_cost(gen_to_convert)
 
             # Reservoir inflow profile
             inflow = None
@@ -1778,6 +1804,7 @@ class PowerSystemAdapter:
                 # unit as the master did (flat fuel_cost otherwise).
                 fuel_cost_curve=vdata.get("fuel_cost_curve"),
             )
+            vgen = self._grown_fuel_cost(vgen)
 
             # Load availability profile for virtual generator
             v_avail = None
@@ -2801,6 +2828,9 @@ class MasterProblemAdapter:
         # one value) the year before the first modelled year, from which the
         # maximum annual increment is measured (myopic: last year's share)
         re_share_anchor: Optional[List[float]] = None,
+        # Year the fuels block's prices are given for (the run's first
+        # planning year; a myopic year's master has a later base_year)
+        fuel_price_base_year: Optional[int] = None,
         # Config path for resolving relative file paths (availability, inflow)
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
@@ -2848,6 +2878,9 @@ class MasterProblemAdapter:
                 first modelled year, from which max_re_increment caps the
                 growth (myopic mode: the share the previous year achieved);
                 None = each system's initial share
+            fuel_price_base_year: year the ``fuels`` prices are given for,
+                from which ``price_growth_rate`` grows them (default
+                ``base_year``)
             life_extension_cost_factor: Cost factor for life extension
                 (default: the system's life_extension_cost_factor)
             decommissioning_cost_factor: Cost factor for decommissioning
@@ -2932,6 +2965,8 @@ class MasterProblemAdapter:
         self.system_node_ranges = system_node_ranges or []
         self.re_target_override = re_target_override or {}
         self.re_share_anchor = [float(a) for a in (re_share_anchor or [])]
+        self.fuel_price_base_year = int(fuel_price_base_year if fuel_price_base_year is not None
+                                        else base_year)
         self.life_extension_cost_factor = life_extension_cost_factor
         self.decommissioning_cost_factor = decommissioning_cost_factor
 
@@ -3455,6 +3490,10 @@ class MasterProblemAdapter:
             primary_energy=jl_fuel,
             gen_outage_factors=jl_gen_outages,
             bat_outage_factors=jl_bat_outages,
+            # Each fuel's price growth: the master grows the fuel_cost of the
+            # units burning it per year (year_master_input), as the dispatch
+            fuel_price_growth=_fuel_price_growth(sys),
+            fuel_price_base_year=self.fuel_price_base_year,
         )
 
         return jl_input

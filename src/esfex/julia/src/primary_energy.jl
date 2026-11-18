@@ -206,8 +206,8 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
     # Adjusted fuel prices
     adjusted_prices = Dict{String, Float64}()
     for fuel in input.fuels
-        price = fuel.price_base * (1 + fuel.price_growth_rate)^years_diff
-        adjusted_prices[fuel.name] = price
+        adjusted_prices[fuel.name] = fuel.price_base *
+            fuel_price_factor(fuel.price_growth_rate, input.year, input.base_year)
     end
 
     # Max supply per period (scaled from annual availability)

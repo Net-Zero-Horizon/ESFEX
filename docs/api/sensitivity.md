@@ -139,7 +139,7 @@ Run config-level Sobol analysis. Creates modified YAML configs and runs full ESF
 | `demand_growth` | Multiplies `demand_scale` of each system (1.0 when absent): the level of the whole demand, not a growth rate. A deterministic run has no demand growth to vary. |
 | `carbon_price` | Multiplies `penalties.co2_cost` (any key case, e.g. `CO2_cost`); when absent, the schema default (10 $/t) is scaled. |
 
-A parameter key not in this table raises `ValueError` (`fuel_price_growth` is one: generator fuel costs do not escalate by year in a run, so there is nothing to scale). The fields follow the [stochastic scenario multipliers](../formulation/stochastic-programming.md), except `demand_growth`.
+A parameter key not in this table raises `ValueError` (`fuel_price_growth` is one: fuel prices escalate by each fuel's `price_growth_rate`, a rate rather than a level to scale). The fields follow the [stochastic scenario multipliers](../formulation/stochastic-programming.md), except `demand_growth`.
 
 ---
 

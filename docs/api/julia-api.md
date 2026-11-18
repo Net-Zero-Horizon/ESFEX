@@ -265,6 +265,8 @@ struct MasterProblemInput
     npv_annual_return_rate::Float64                # Battery NPV revenue / power investment cost, per year
     npv_retired_units::Vector{RetiredUnit}         # Retired by retire_units: decommissioned in year 1
     re_share_anchor::Vector{Float64}               # Actual RE share per system before year 1 (myopic: last year's); empty = initial
+    fuel_price_growth::Dict{String, Float64}       # fuels.<f>.price_growth_rate per fuel (year_master_input)
+    fuel_price_base_year::Int                      # Year the fuel prices hold for: the run's first year (default years[1])
     # ... additional fields (sectoral demand, primary energy, cost curves)
 end
 ```
@@ -380,6 +382,8 @@ end
 | `representative_day_weights` | `(demand, num_years, offsets, critical_offsets, timesteps_per_day, timesteps_per_year; profiles, prior) -> Vector{Float64}` | Days of the year each representative day (or TSAM period) and then each critical day stands for: 1 per critical day; the representative days share the rest from `prior` (equal when empty), corrected so the year keeps the demand and renewable energy of the representative days alone. |
 | `master_day_plan` | `(input) -> (offsets, weights, num_rep)` | The days the monolithic, stochastic and MGA masters model every year: the representative days, then the critical days (`input.critical_day_offsets`, or `input.critical_days` chosen by `critical_day_plan` when Julia picks the days itself), with their weights (`input.rep_day_weights` or `representative_day_weights`). |
 | `master_storage_firm_hours` | `(input) -> Float64` | `input.storage_firm_hours` when positive, otherwise `critical_day_plan`'s firm hours: the H of the battery firm credit min(power, usable energy / H) in `add_capacity_adequacy_constraints!`. |
+| `year_master_input` | `(input, year_idx) -> MasterProblemInput` | The input of year `year_idx`: every generator and candidate technology whose `fuel` is in `input.fuel_price_growth` pays `fuel_cost × fuel_price_factor(rate, year, input.fuel_price_base_year)`; the others, and offer curves, as given. Each representative day and TSAM period runs on it (a scenario on `scenario_master_input` of it). |
+| `fuel_price_factor` | `(growth_rate, year, base_year) -> Float64` | (1 + `growth_rate`)^(`year` − `base_year`): the growth of a fuel's price, for the fuel balance (primary energy) and the units' `fuel_cost`. |
 | `add_representative_days_validation!` | `(model, vars, input, targets; scenario=nothing, scenario_idx=0)` | Adds operational feasibility constraints on representative days. Creates sub-problem variables and constraints per day per year. With `scenario`, the days run on `scenario_master_input(...)`. The TSAM equivalent is the internal `add_tsam_periods_validation!`. |
 | `create_day_ps_vars!` | `(model, input, year_idx, day_idx, hours) -> PowerSystemVariables` | Operational variables of one representative day. |
 | `add_day_operational_constraints!` | `(model, ps_vars, vars, input, year_idx, day_idx, demand, start_hour; ...)` | Detailed operational constraints for a single representative day: generator dispatch, battery SOC dynamics, power balance, reserves, DC flow. |

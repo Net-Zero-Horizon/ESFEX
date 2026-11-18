@@ -112,7 +112,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | \(a^0_{g,n}\) | years | Initial age of an existing unit | `gen.initial_age[n]` |
 | \(\delta_{g,n}\), \(\delta_{k,n}\) | [0,1] | Annual degradation rate | `degradation_rate[n]` |
 | \(\alpha_{g,t,n}\) | [0,1] | Availability factor | `availability[t,n]` |
-| \(c^{fuel}_{g,n}\) | \$/MWh | Fuel cost; with primary energy on, fuel-coupled units pay the fuel price through the fuel balance instead (§8.3.12) | `gen.fuel_cost[n]` |
+| \(c^{fuel}_{g,n}\) | \$/MWh | Fuel cost in year \(y\): `fuel_cost` × \((1 + g^{price}_f)^{y - y_0}\) when the unit's `fuel` \(f\) is in the `fuels` block (its `price_growth_rate`, from the run's first year \(y_0\), also for a myopic year's master; candidate technologies alike), else `fuel_cost`. With primary energy on, fuel-coupled units pay the fuel price through the fuel balance instead (§8.3.12) | `year_master_input(input, y).generators[g].fuel_cost[n]` |
 | \(c^{fix}_{g,n}\), \(c^{fix}_{k,n}\) | \$/MW/year | Fixed O&M cost, on the power in service (OBJ-3b) | `fixed_cost[n]` |
 | \(c^{maint}_{g,n}\) | \$/MWh | Maintenance cost | `gen.maintenance_cost[n]` |
 | \(c^{CO_2}_g\) | \$/MWh | Carbon cost: `co2_cost` × the emission factor of the unit's fuel (per MWh of fuel) / the unit's rated efficiency | `co2_cost_per_mwh(input, gen, n)` |
@@ -905,7 +905,7 @@ A unit with \(\text{NPV} <\) `npv_retirement_threshold` (\$, default 0) is retir
 \text{NPV}^{+}_{g,n} = \sum_{k} \frac{\delta^k E_{y_0} p^{LCOE} - \delta^k \left( C^{op}_{y_0} - F_{y_0} + F_{y_0} \gamma^k \right) - c^{fix}_{g,n} \bar{P}_{g,n} (1-d)^{a_{y_0}+k}}{(1+r)^{k}} \tag{NPV-3}
 \]
 
-with \(\delta = 1-d\) the capacity degradation, \(F_{y_0}\) the fuel part of the operating cost and \(\gamma\) its yearly growth (the primary-energy fuel's `price_growth_rate`, a stochastic scenario's `fuel_price_growth`; flat `fuel_cost` and the CO2 price have no path in the master). A battery keeps its yearly revenue, operating cost and fixed O&M. No life extension is assumed: in the first year past its `life_time` (the first later year for a unit the master life-extended) the unit pays its decommissioning on the capacity it had, discounted to that year, and nothing after. In a stochastic master each scenario uses its own multipliers and discount rate.
+with \(\delta = 1-d\) the capacity degradation, \(F_{y_0}\) the fuel part of the operating cost and \(\gamma\) its yearly growth (1 + the `price_growth_rate` of the fuel it burns, from the `fuels` block or the primary-energy tank, times a stochastic scenario's `fuel_price_growth`; an offer curve and the CO2 price have no path in the master). A battery keeps its yearly revenue, operating cost and fixed O&M. No life extension is assumed: in the first year past its `life_time` (the first later year for a unit the master life-extended) the unit pays its decommissioning on the capacity it had, discounted to that year, and nothing after. In a stochastic master each scenario uses its own multipliers and discount rate.
 
 ### 9.3 Retirement
 

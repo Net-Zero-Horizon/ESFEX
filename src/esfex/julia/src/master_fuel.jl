@@ -363,7 +363,8 @@ function master_fuel_unit_price(input::MasterProblemInput, g::Int, b::Int, year_
     fm === nothing && return nothing
     fuel, mwhe = fm
     pe = input.primary_energy.pe
-    price = fuel.price_base * (1 + fuel.price_growth_rate)^(input.years[year_idx] - pe.base_year)
+    price = fuel.price_base * fuel_price_factor(fuel.price_growth_rate,
+                                                input.years[year_idx], pe.base_year)
     return price / mwhe
 end
 
