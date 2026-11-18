@@ -25,6 +25,8 @@ def _bus(role="load", voltage_kv=110.0, parent_node=0, demand_fraction=0.0):
         voltage_kv=voltage_kv,
         parent_node=parent_node,
         demand_fraction=demand_fraction,
+        latitude=0.0,
+        longitude=0.0,
     )
 
 
@@ -40,12 +42,20 @@ def _node(index, peak_mw):
     return SimpleNamespace(index=index, demand=SimpleNamespace(peak_mw=peak_mw))
 
 
-def _line(from_bus, to_bus, voltage_kv=0.0, capacity_mw=0.0):
+def _line(from_bus, to_bus, voltage_kv=0.0, capacity_mw=0.0, **impedance):
     return SimpleNamespace(
+        line_id=f"{from_bus}-{to_bus}",
         from_bus=from_bus,
         to_bus=to_bus,
         voltage_kv=voltage_kv,
         capacity_mw=capacity_mw,
+        length_km=impedance.get("length_km"),
+        reactance_pu=impedance.get("reactance_pu"),
+        resistance_pu=impedance.get("resistance_pu"),
+        susceptance_pu=impedance.get("susceptance_pu"),
+        reactance_per_km=None,
+        num_circuits=impedance.get("num_circuits", 1),
+        waypoints=[],
     )
 
 
@@ -301,6 +311,62 @@ def test_infer_line_bumped_when_existing_below_needed():
     assert rep.lines_capacity_bumped == 1
     assert rep.lines_capacity_set == 0
     assert state.transmission_lines[0].capacity_mw == pytest.approx(50.0)
+
+
+def _bumped_line_state(**impedance):
+    """40 MW from a to b over a line of 10 MW: raised to 50 MW (× 5)."""
+    return _state(
+        buses={
+            "a": _bus(role="gen", voltage_kv=110.0, parent_node=0),
+            "b": _bus(role="load", voltage_kv=110.0, parent_node=0,
+                      demand_fraction=1.0),
+        },
+        generators={"g": _gen("a", 40.0)},
+        nodes=[_node(0, 40.0)],
+        transmission_lines=[_line("a", "b", capacity_mw=10.0, **impedance)],
+    )
+
+
+def test_infer_bumped_line_is_parallel_circuits():
+    """A raised capacity is k circuits of the line's type in parallel: R and
+    X ÷ k, B × k. The impedance used to stay that of the small line."""
+    state = _bumped_line_state(reactance_pu=0.1, resistance_pu=0.02,
+                               susceptance_pu=0.001)
+    rep = gmi.infer_electrical_params(state)
+    ln = state.transmission_lines[0]
+    assert ln.capacity_mw == pytest.approx(50.0)
+    assert ln.reactance_pu == pytest.approx(0.02)
+    assert ln.resistance_pu == pytest.approx(0.004)
+    assert ln.susceptance_pu == pytest.approx(0.005)
+    assert ln.num_circuits == 1  # descriptive; the values hold every circuit
+    assert rep.lines_impedance_scaled == 1
+    assert "1 with R, X ÷ and B × the capacity ratio, as parallel circuits" in rep.summary()
+
+
+def test_infer_bumped_line_without_reactance_scales_the_derived_one():
+    """A line with no reactance gets the one the Grid Builder derives from
+    its length and voltage, for the raised capacity."""
+    from esfex.visualization.data.validation import _line_impedance_pu
+
+    state = _bumped_line_state(length_km=40.0)
+    r1, x1, b1 = _line_impedance_pu(state, state.transmission_lines[0])
+    assert x1 > 0
+    rep = gmi.infer_electrical_params(state)
+    ln = state.transmission_lines[0]
+    assert ln.reactance_pu == pytest.approx(x1 / 5)
+    assert ln.resistance_pu == pytest.approx(r1 / 5)
+    assert ln.susceptance_pu == pytest.approx(b1 * 5)
+    assert rep.lines_impedance_scaled == 1 and rep.notes == []
+
+
+def test_infer_bumped_line_with_unknown_impedance_is_reported():
+    state = _bumped_line_state()  # no reactance, no length, no coordinates
+    rep = gmi.infer_electrical_params(state)
+    ln = state.transmission_lines[0]
+    assert ln.capacity_mw == pytest.approx(50.0)
+    assert ln.reactance_pu is None
+    assert rep.lines_impedance_scaled == 0
+    assert len(rep.notes) == 1 and "not rescaled" in rep.notes[0]
 
 
 def test_infer_line_not_reduced_when_already_high():

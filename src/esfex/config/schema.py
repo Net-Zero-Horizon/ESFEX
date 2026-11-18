@@ -35,7 +35,22 @@ class FuelConfig(BaseModel):
     # A ge=0 floor here rejected such configs on load/import.
     price_base: float = Field(description="Base price (USD/unit; may be negative, "
                               "e.g. waste-to-energy tipping fees)")
-    price_growth_rate: float = Field(default=0, description="Annual price growth rate")
+    price_growth_rate: float = Field(
+        default=0,
+        description="Annual price growth rate from the first planning year (0.02 = +2 %/year); "
+                    "scales the fuel balance price and the fuel_cost of every unit burning "
+                    "this fuel")
+
+
+def fuel_price_factor(fuels: Optional[dict[str, FuelConfig]], fuel: Optional[str],
+                      year: int, base_year: int) -> float:
+    """Growth of *fuel*'s price from *base_year* (the run's first planning
+    year) to *year*: ``(1 + price_growth_rate) ** (year - base_year)`` of
+    ``fuels[fuel]``; 1 when *fuels* has no such fuel. Same rule as Julia's
+    ``fuel_price_factor`` (primary energy and the master)."""
+    entry = (fuels or {}).get(fuel) if fuel else None
+    rate = float(entry.price_growth_rate) if entry is not None else 0.0
+    return (1.0 + rate) ** (year - base_year) if rate else 1.0
 
 
 class PenaltiesConfig(BaseModel):

@@ -96,7 +96,8 @@ class GridBuildWorker(QThread):
         )
 
         model, p = self._model, self._p
-        out: dict = {"build_summary": "", "simplify_summary": "", "island_summary": ""}
+        out: dict = {"build_summary": "", "inference_summary": "",
+                     "simplify_summary": "", "island_summary": ""}
         island_lines: list[str] = []
 
         with model.suspend_checkpoints():
@@ -132,8 +133,10 @@ class GridBuildWorker(QThread):
 
             # ── Parameter inference ──
             self.progress.emit("Inferring electrical parameters…")
-            self._timed("Parameter inference",
-                        lambda: infer_electrical_params(model.state))
+            inference = self._timed("Parameter inference",
+                                    lambda: infer_electrical_params(model.state))
+            out["inference_summary"] = "\n".join([inference.summary(), *inference.notes])
+            logger.info("Grid build parameter inference: %s", out["inference_summary"])
             if self._cancelled:
                 return out
 

@@ -828,7 +828,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `emission_factor` | float (≥ 0) | required by schema; loader default: 0.0 | CO₂ emissions per MWh of fuel energy (t/MWh), e.g. IPCC values. Generator output is divided by the unit's `eff_at_rated`; non-electric demand uses `energy_content`. The loader defaults it to 0 when omitted |
 | `energy_content` | float \| null (≥ 0) | `null` | MWh per unit; used to derive generator `fuel_cost` |
 | `price_base` | float | required by schema; loader default: 0.0 | Price per unit ($/unit). May be negative (tipping fees). The loader defaults it to 0 when omitted |
-| `price_growth_rate` | float | `0` | Annual price growth |
+| `price_growth_rate` | float | `0` | Annual price growth from the first planning year (0.02 = +2 %/year): the fuel's price in year \(y\) is `price_base` × (1 + rate)^(y − first year). It grows the fuel balance price (primary energy) and the `fuel_cost` of every generator and technology whose `fuel` is this key, in the dispatch and in every master (myopic years included). A `fuel_cost` of a unit whose fuel is not in `fuels`, and offer curves (`fuel_cost_curve`), stay as given |
 
 ---
 
@@ -1017,7 +1017,7 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `maintenance_cost` | float | `1` | Multiplier on the maintenance cost of generators, batteries, technologies and battery technologies in the scenario's operation |
 | `discount_rate` | float | `1` | Multiplier on the discount rate used for the scenario's costs |
 | `demand_growth` | float | `1` | Annual demand factor: the scenario's demand in year *y* is the base demand × `demand_growth`^(y−1). 1.02 = +2 %/year relative to the base case |
-| `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost and fuel prices × `fuel_price_growth`^(y−1) |
+| `fuel_price_growth` | float | `1` | Annual fuel price factor: fuel cost and fuel prices × `fuel_price_growth`^(y−1), on top of the growth of `fuels.<f>.price_growth_rate` (1 = that growth only) |
 | `carbon_price` | float | `1` | Multiplier on `co2_cost` in the scenario's operation |
 | `gen_fixed_cost` | float | `1` | Multiplier on the fixed O&M ($/MW/year) of generators, technologies, batteries and battery technologies |
 | `gen_decommissioning_cost` | float | `1` | Multiplier on the decommissioning cost of existing generators |

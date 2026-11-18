@@ -41,7 +41,7 @@ The `ScenarioMultipliers` struct defines multiplicative factors applied to the b
 |-----------|-----------|-------|
 | `demand_growth` | Demand: \(D_{y,n,t} \cdot m^{dem}_s{}^{\,(y-1)}\). An annual factor: 1.02 = +2 %/year relative to the base case, compounding | Scenario operation |
 | `fuel_cost` | Fuel cost of generators (piecewise fuel-cost curves included) and candidate technologies, and the fuel prices of the master's fuel balance (which fuel-coupled units pay instead of their `fuel_cost`) | Scenario operation |
-| `fuel_price_growth` | Extra annual fuel price escalation: fuel cost and fuel prices × \(m^{fpg}_s{}^{\,(y-1)}\) | Scenario operation |
+| `fuel_price_growth` | Extra annual fuel price escalation: fuel cost and fuel prices × \(m^{fpg}_s{}^{\,(y-1)}\), on top of each fuel's `price_growth_rate` (applied once, before the scenario's factors) | Scenario operation |
 | `fuel_import_cost` | Per-node fuel import cost of the fuel balance | Scenario operation |
 | `fuel_transport_cost` | Route transport cost (per unit·km) and route capacity investment | Scenario operation and investment cost |
 | `penalty_loss_of_fuel_supply` | Fuel shortfall and excess-supply penalty (`loss_of_fuel_supply`) | Scenario operation |

@@ -36,8 +36,9 @@ KPI_NAMES = [
 # Config-level parameter definitions. Keys follow ScenarioMultipliers; see
 # _apply_config_multipliers for the fields each one scales. demand_growth
 # scales the demand level (demand_scale): a deterministic run has no demand
-# growth to vary. fuel_price_growth has no counterpart (generator fuel costs
-# do not escalate by year), so it is not offered.
+# growth to vary. fuel_price_growth has no counterpart (fuel prices escalate
+# by each fuel's price_growth_rate, a rate rather than a level to scale), so
+# it is not offered.
 CONFIG_PARAMETERS = [
     ("invest_cost_renewables", "RE Investment Cost", (0.5, 2.0)),
     ("invest_cost_storage", "Storage Investment Cost", (0.5, 2.0)),

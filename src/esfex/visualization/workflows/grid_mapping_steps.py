@@ -1772,6 +1772,9 @@ class GridMappingBuildStep(QWidget):
         sections = []
         if res.get("build_summary"):
             sections.append(res["build_summary"])
+        if res.get("inference_summary"):
+            sections.append(
+                "\u2500\u2500 Parameter Inference \u2500\u2500\n" + res["inference_summary"])
         if res.get("simplify_summary"):
             sections.append(
                 "\u2500\u2500 Simplification \u2500\u2500\n" + res["simplify_summary"])

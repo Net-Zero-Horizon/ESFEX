@@ -1929,6 +1929,17 @@ struct FuelConfig
     disruption_availability::Float64
 end
 
+"""
+    fuel_price_factor(growth_rate, year, base_year) -> Float64
+
+Factor by which a fuel's price has grown from `base_year` (the year its
+`price_base` is given for, the run's first planning year) to `year`:
+(1 + `growth_rate`)^(`year` − `base_year`). The fuel balance (primary
+energy) and the units' `fuel_cost` derived from the fuels block both use it.
+"""
+fuel_price_factor(growth_rate::Real, year::Integer, base_year::Integer) =
+    (1.0 + growth_rate)^(year - base_year)
+
 # Backward-compatible constructors. Older call sites pass fewer positional args;
 # the newer fields take neutral defaults (transit = 0 instantaneous; no
 # disruption). Dispatch is by argument count (12 / 13 / full 16).
@@ -2354,6 +2365,14 @@ Input configuration for the Master Problem (capacity expansion planning).
   row of `base_demand`), as the dispatch folds them into availability
   (`master_outage_factor`)
 
+## Fuel price growth
+- `fuel_price_growth::Dict{String,Float64}`: annual `price_growth_rate` of
+  each fuel of the `fuels` block (fuel name → rate); a generator or candidate
+  technology burning one of them pays its `fuel_cost` ×
+  `fuel_price_factor(rate, year, fuel_price_base_year)` (`year_master_input`)
+- `fuel_price_base_year::Int`: the year the fuel prices are given for, the
+  run's first planning year (a myopic year's master keeps the run's)
+
 ## Penalties
 - `loss_of_load_penalty::Float64`: VOLL (cost per MWh not served); also prices
   the capacity adequacy slack (`adequacy_slack_penalty`) and the renewable
@@ -2585,6 +2604,9 @@ struct MasterProblemInput
     # Empty = no outage (master_outage_factor).
     gen_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}}
     bat_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}}
+    # Fuel price growth of the fuels block (year_master_input)
+    fuel_price_growth::Dict{String, Float64}
+    fuel_price_base_year::Int
 end
 
 # Constructor with defaults
@@ -2663,7 +2685,9 @@ function MasterProblemInput(;
     rep_day_weights::Vector{Float64} = Float64[],
     storage_firm_hours::Float64 = 0.0,
     gen_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}(),
-    bat_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}()
+    bat_outage_factors::Dict{Tuple{Int,Int}, Vector{Float64}} = Dict{Tuple{Int,Int}, Vector{Float64}}(),
+    fuel_price_growth::Dict{String, Float64} = Dict{String, Float64}(),
+    fuel_price_base_year::Int = years[1]
 )
     return MasterProblemInput(
         years, base_year,
@@ -2699,7 +2723,8 @@ function MasterProblemInput(;
         co2_budget_groups, unit_commitment,
         primary_energy, npv_retired_units, re_share_anchor, rep_day_offsets,
         critical_days, critical_day_offsets, rep_day_weights, storage_firm_hours,
-        gen_outage_factors, bat_outage_factors
+        gen_outage_factors, bat_outage_factors,
+        fuel_price_growth, fuel_price_base_year
     )
 end
 
@@ -2819,8 +2844,9 @@ master's cost unit:
 - `asset_cost`: its share of `build_annual_asset_cost`: fixed O&M on the
   capacity in service, life extension and decommissioning;
 - `fuel_cost`: the fuel part of a generator's `operating_cost`, and
-  `fuel_growth` its yearly growth factor in the master (the primary-energy
-  fuel's `price_growth_rate`, a scenario's `fuel_price_growth`), for the
+  `fuel_growth` its yearly growth factor in the master (the
+  `price_growth_rate` of the fuel it burns, from the fuels block or the
+  primary-energy tank, × a scenario's `fuel_price_growth`), for the
   years past the modelled ones (`calculate_unit_npv`'s `extra_years`).
 `discount_rate` is the scenario's (base rate × its multiplier),
 `multipliers` its `ScenarioMultipliers` (`nothing` when deterministic).
