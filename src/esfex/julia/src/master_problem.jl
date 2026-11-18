@@ -1224,6 +1224,22 @@ reservoir_capacity_built(vars::MasterProblemVariables, g::Int, b::Int, year_idx:
     end
 
 """
+    reservoir_in_service(vars, gen, g, b, year_idx) -> Union{Float64, AffExpr}
+
+In-service reservoir capacity (MWh) of generator `gen` (index `g`) at bus `b`
+in year `year_idx`: the existing capacity plus, when the reservoir can be
+enlarged, the capacity built so far. Every master constraint that scales with
+the reservoir size (level bounds, TSAM boundary levels, head fraction,
+initial/end level) uses this one.
+"""
+function reservoir_in_service(vars::MasterProblemVariables, gen, g::Int, b::Int, year_idx::Int)
+    cap = gen.reservoir_capacity[b]
+    (cap > 0 && b <= length(gen.reservoir_invest_max) && gen.reservoir_invest_max[b] > 0) ||
+        return cap
+    return cap + reservoir_capacity_built(vars, g, b, year_idx)
+end
+
+"""
     converter_capacity(vars, conv, key, year_idx)
 
 Converter capacity in year `year_idx`: its rated power plus the MW built at
@@ -3786,8 +3802,7 @@ function add_day_operational_constraints!(
     res_cap = Dict{Tuple{Int,Int}, Any}()
     for (g, gen) in enumerate(input.generators), b in 1:n_buses
         gen.reservoir_capacity[b] > 0 && gen.reservoir_invest_max[b] > 0 || continue
-        res_cap[(g, b)] = gen.reservoir_capacity[b] +
-                          reservoir_capacity_built(vars, g, b, year_idx)
+        res_cap[(g, b)] = reservoir_in_service(vars, gen, g, b, year_idx)
     end
     add_reservoir_constraints!(model, ps_vars, day_input;
         initial_reservoir_overrides=initial_reservoir_overrides,
@@ -4512,9 +4527,11 @@ function add_representative_days_validation!(
     prev_floor = nothing
 
     for y_idx in 1:num_years
-        # A stochastic scenario operates on its own demand and costs
-        input = scenario === nothing ? base_input :
-            scenario_master_input(base_input, scenario.multipliers, y_idx)
+        # The year's fuel prices; a stochastic scenario operates on its own
+        # demand and costs
+        input = year_master_input(base_input, y_idx)
+        scenario === nothing ||
+            (input = scenario_master_input(input, scenario.multipliers, y_idx))
 
         rep_days = master_rep_days(input, y_idx; offsets)
 
@@ -4672,8 +4689,9 @@ function add_tsam_periods_validation!(
     prev_floor = nothing   # re_cap_exemption
 
     for y_idx in 1:num_years
-        input = scenario === nothing ? base_input :
-            scenario_master_input(base_input, scenario.multipliers, y_idx)
+        input = year_master_input(base_input, y_idx)
+        scenario === nothing ||
+            (input = scenario_master_input(input, scenario.multipliers, y_idx))
         period_starts = input.tsam_period_start_hours[y_idx]
         period_weights = input.tsam_period_weights[y_idx]
         chrono_order = input.tsam_chronological_order[y_idx]
@@ -4736,24 +4754,32 @@ function add_tsam_periods_validation!(
 
         # --- Create inter-period reservoir-level boundary variables ---
         # One chronological chain of energy levels per reservoir gen-node, so
-        # water can be moved across seasons. Bounded by the existing reservoir
-        # capacity (investment expansion is not reflected at the boundary, the
-        # same simplification used for batteries above).
+        # water can be moved across seasons. Bounded by the in-service
+        # reservoir capacity (existing + built so far), as the period's levels.
         if input.tsam_inter_period_linking && has_reservoir
             vars.inter_period_reservoir[y_idx] = Dict{Tuple{Int,Int,Int}, VariableRef}()
 
             for g in 1:length(input.generators)
                 gen = input.generators[g]
                 for n in 1:n_buses
-                    res_cap = gen.reservoir_capacity[n]
-                    res_cap > 0 || continue
+                    gen.reservoir_capacity[n] > 0 || continue
+                    res_cap = reservoir_in_service(vars, gen, g, n, y_idx)
                     lo = gen.reservoir_min_level[n] * res_cap
                     hi = gen.reservoir_max_level[n] * res_cap
 
                     for p in 0:K
-                        v = @variable(model,
-                            lower_bound = lo, upper_bound = hi,
-                            base_name = "reslvl_bnd$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                        if res_cap isa Real
+                            v = @variable(model,
+                                lower_bound = lo, upper_bound = hi,
+                                base_name = "reslvl_bnd$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                        else
+                            v = @variable(model, lower_bound = 0,
+                                base_name = "reslvl_bnd$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                            @constraint(model, v >= lo,
+                                base_name = "reslvl_bnd_min$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                            @constraint(model, v <= hi,
+                                base_name = "reslvl_bnd_max$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
+                        end
                         vars.inter_period_reservoir[y_idx][(g, n, p)] = v
                     end
 
@@ -5373,6 +5399,30 @@ function with_fields(x::T; kw...) where T
 end
 
 """
+    year_master_input(input, year_idx) -> MasterProblemInput
+
+The master input of year `year_idx`: each generator and candidate technology
+burning a fuel of the fuels block pays its `fuel_cost` grown at that fuel's
+`price_growth_rate` from `fuel_price_base_year` (`fuel_price_factor`), as
+the dispatch charges it that year. A unit with no fuel there keeps its
+`fuel_cost`; offer curves (`fuel_cost_curve`) stay as given. `input` itself
+when no fuel grows. A stochastic scenario builds on it
+(`scenario_master_input`), so its `fuel_price_growth` multiplies the grown
+price.
+"""
+function year_master_input(input::MasterProblemInput, year_idx::Int)::MasterProblemInput
+    rates = input.fuel_price_growth
+    any(!iszero, values(rates)) || return input
+    year = input.years[year_idx]
+    grown(u) = (r = get(rates, u.fuel, 0.0); iszero(r) ? u :
+        with_fields(u; fuel_cost = u.fuel_cost .* fuel_price_factor(r, year,
+                                                                   input.fuel_price_base_year)))
+    return with_fields(input;
+        generators = GeneratorConfig[grown(g) for g in input.generators],
+        technologies = TechnologyConfig[grown(t) for t in input.technologies])
+end
+
+"""
     scenario_master_input(input, mult, year_idx)
 
 The master input a stochastic scenario operates on in year `year_idx`:
@@ -5541,8 +5591,9 @@ function add_unit_day_operation!(op::UnitOperation, ps_vars::PowerSystemVariable
         end
         c = value(cost)
         # The fuel part (flat fuel_cost or offer curve; tank fuel below) and
-        # its yearly growth: a scenario's fuel_price_growth, the tank
-        # fuel's price_growth_rate
+        # its yearly growth: a scenario's fuel_price_growth, times the
+        # price_growth_rate of the flat fuel_cost's fuel (year_master_input)
+        # or of the tank fuel
         fpg = op.multipliers === nothing ? 1.0 : op.multipliers.fuel_price_growth
         has_curve = haskey(ps_vars.gen_seg_output, (g, n))
         fuel = has_curve ? c - (gen.maintenance_cost[n] + co2_cost_per_mwh(input, gen, n)) * out :
@@ -5561,7 +5612,8 @@ function add_unit_day_operation!(op::UnitOperation, ps_vars::PowerSystemVariable
         op.fuel_cost[key] = get(op.fuel_cost, key, 0.0) + scale * (fuel + tank)
         if fuel + tank > 0
             growth = tank > 0 ? master_fuel_unit_growth(input, g, n) * fpg : fpg
-            op.fuel_growth[key] = (fuel * fpg + tank * growth) / (fuel + tank)
+            flat = has_curve ? fpg : fpg * (1.0 + get(input.fuel_price_growth, gen.fuel, 0.0))
+            op.fuel_growth[key] = (fuel * flat + tank * growth) / (fuel + tank)
         end
     end
     for b in eachindex(input.batteries), n in ps_vars.buses_of_bat[b]

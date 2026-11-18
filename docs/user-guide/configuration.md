@@ -462,7 +462,7 @@ All keys above except `name`, `type`, `bus_id_per_node`, `ramp_up`, `ramp_down` 
         price_growth_rate: 0.0     # per year
 ```
 
-The fuel key must match the generators' `fuel` value exactly; it drives the fuel-cost linking and the non-fuel O&M adder described under [Generators](#generators). The adder recognises a fuel by its key or its `name`, ignoring case, spaces, `_` and `-` (`Natural_gas`, `Natural Gas` and `NG` are all gas). `emission_factor` and `price_base` default to 0 when omitted.
+The fuel key must match the generators' `fuel` value exactly; it drives the fuel-cost linking and the non-fuel O&M adder described under [Generators](#generators). `price_growth_rate` grows the fuel's price every year from the first planning year, in every mode: a generator or technology burning the fuel pays its `fuel_cost` × (1 + rate)^(year − first year), whether the loader derived that cost from `price_base` or you set it, and so does the fuel balance when primary energy is on. A unit whose `fuel` is not a key of `fuels` keeps its `fuel_cost` flat, and offer curves (`fuel_cost_curve`) are not grown. Benders decomposition does not grow the units' `fuel_cost` yet. Earlier versions grew only the primary-energy fuel balance. The adder recognises a fuel by its key or its `name`, ignoring case, spaces, `_` and `-` (`Natural_gas`, `Natural Gas` and `NG` are all gas). `emission_factor` and `price_base` default to 0 when omitted.
 
 ### Penalties
 
