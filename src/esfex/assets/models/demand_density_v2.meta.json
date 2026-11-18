@@ -151,36 +151,36 @@
   "fitted_on": "GPU (device=cuda); ESFEX predicts on the CPU",
   "boosters": {
    "hourly": {
-    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/models/level_geo_two_shallow.json",
+    "file": "$R1_WORK_ROOT/models/level_geo_two_shallow.json",
     "modified": "2026-11-17T17:53:40+09:00",
     "sha256": "89f3d5f7b94d0007c708f906ff78a1906f678da19ae885ea6872646f4220343e"
    },
    "level": {
-    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/models/level_geo_two_shallow.level.json",
+    "file": "$R1_WORK_ROOT/models/level_geo_two_shallow.level.json",
     "modified": "2026-11-17T17:53:39+09:00",
     "sha256": "9117d1ca4a647e7cdafe65794da5f7872d9cbfcd84e7529067edd9cc5cfd4559"
    }
   },
   "grids": {
    "normals": {
-    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/eta/present.npz",
+    "file": "$R1_WORK_ROOT/eta/present.npz",
     "modified": "2026-11-17T18:54:10+09:00"
    },
    "energy_context": {
-    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/energy_context_025.npz",
+    "file": "$R1_WORK_ROOT/grids/energy_context_025.npz",
     "modified": "2026-11-13T15:43:46+09:00"
    },
    "land": {
-    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/countries_025.npz",
+    "file": "$R1_WORK_ROOT/grids/countries_025.npz",
     "modified": "2026-11-13T09:23:43+09:00"
    },
    "population": {
-    "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/population_2020_025.npz",
+    "file": "$R1_WORK_ROOT/grids/population_2020_025.npz",
     "modified": "2026-11-13T09:17:04+09:00"
    }
   },
   "countries": {
-   "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/grids/energy_context.csv",
+   "file": "$R1_WORK_ROOT/grids/energy_context.csv",
    "modified": "2026-11-13T15:43:44+09:00"
   },
   "normals": "t_mean, t_range: mean and 5-95 % spread of daily mean temperature of each cell, NEX-GDDP-CMIP6 (GFDL-ESM4, IPSL-CM6A-LR, MPI-ESM1-2-HR) x SSP1-2.6/2-4.5/3-7.0/5-8.5, 2025-2029 pooled (s08_sensitivity.normals)",
@@ -189,7 +189,7 @@
   "pop_2020": "WorldPop 2020 1 km population counts summed per cell (s01_population_grid, pop_worldpop)"
  },
  "cross_validation": {
-  "file": "/media/manuel/New Volume/Demand_forecasting/r1_revision/cv/summary.csv",
+  "file": "$R1_WORK_ROOT/cv/summary.csv",
   "modified": "2026-11-17T17:53:01+09:00",
   "columns": {
    "r2_hourly": "R2 of hourly log10 demand density on held-out data",
