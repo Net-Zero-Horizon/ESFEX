@@ -7088,6 +7088,8 @@ class Orchestrator:
                 availability_cache=self._availability_cache,
                 inflow_cache=getattr(self, "_inflow_cache", None),
                 start_hour=start_hour,
+                # Names the window in the solver warnings
+                window=window,
                 boundary_conditions=boundary_conditions,
                 units_config=units_config,
                 sectoral_demand=sectoral_demand or {},

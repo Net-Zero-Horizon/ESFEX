@@ -214,6 +214,30 @@ def test_failed_resolve_keeps_the_last_optimal_plan(tmp_path, monkeypatch, caplo
 
 
 @pytest.mark.julia
+def test_resolve_above_the_curtailment_limit_is_undone(tmp_path, monkeypatch, caplog):
+    """Round 39: the annual curtailment limit is priced, not hard, so
+    retiring the store that held it no longer makes the re-solve infeasible.
+    A re-solve that curtails more above the limit than the plan before is
+    undone like an infeasible one (here the excess is mocked: 500 MWh/yr
+    once units are retired)."""
+    import logging
+
+    from esfex.bridge.adapters import MasterProblemAdapter
+
+    monkeypatch.setattr(MasterProblemAdapter, "_curtailment_excess_mwh",
+                        lambda self: 500.0 if self.npv_retirements else 0.0)
+    with caplog.at_level(logging.WARNING):
+        orch, results, h5 = _run(tmp_path, "excess", npv=True)
+    assert orch._npv_retirements == []
+    warnings = [r.getMessage() for r in caplog.records
+                if "NPV retirement" in r.getMessage() and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "curtails 0.5 GWh/yr above the annual curtailment limit" in warnings[0]
+    assert "Peaker" in warnings[0] and "Bat" in warnings[0]
+    _check_results_file(h5, [r.year for r in results], retired=False)
+
+
+@pytest.mark.julia
 def test_stochastic_master_retires(tmp_path):
     orch, _, _ = _run(tmp_path, "stochastic", npv=True, stochastic=True)
     assert _retired(orch) == {("generator", "peaker"), ("battery", "bat")}

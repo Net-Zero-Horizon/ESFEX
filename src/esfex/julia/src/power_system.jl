@@ -16,6 +16,21 @@ using JuMP: value, dual, has_values, has_duals, AffExpr, VariableRef
 using JuMP: objective_value, termination_status, solve_time, optimizer_with_attributes
 using JuMP: add_to_expression!, constraint_object
 
+"""
+    optimize_dispatch!(model; retry = NUMERICAL_RETRY_PARAMS[solver], label = "Dispatch")
+
+Solve a dispatch window as `optimize_master!` solves a master
+(`optimize_retrying!`): a solve that ends `NUMERICAL_ERROR` or
+`LOCALLY_SOLVED` (Gurobi's `SUBOPTIMAL`) is solved once more with the
+solver's retry parameters (Gurobi's homogeneous barrier), each solve of the
+loss repair too, and a repair round whose re-solve is still not `OPTIMAL` is
+undone. A window still `LOCALLY_SOLVED` keeps its feasible point (the Python
+adapter warns, naming the window: `label`).
+"""
+optimize_dispatch!(model::Model; retry = numerical_retry_params(model),
+                   label::AbstractString = "Dispatch") =
+    optimize_retrying!(model, retry, label)
+
 # =============================================================================
 # CO2 intensity
 # =============================================================================

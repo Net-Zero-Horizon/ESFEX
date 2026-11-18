@@ -184,7 +184,7 @@ export add_investment_constraints!, add_budget_constraints!
 export add_retirement_cascade_constraints!, add_re_target_constraints!
 export add_re_growth_cap!, define_re_share!
 export add_capacity_adequacy_constraints!, add_transmission_symmetry_constraints!
-export build_master_objective!, extract_master_solution, optimize_master!
+export build_master_objective!, extract_master_solution, optimize_master!, optimize_dispatch!
 
 # Fuel block of the master (#89)
 export MasterFuelInput, MasterFuelVariables, add_master_fuel_day!
@@ -243,7 +243,8 @@ Create a configured optimizer with specified parameters.
 # Arguments
 - `solver_name::String="highs"`: Solver name (highs, scip, xpress, gurobi, cplex, cbc, glpk)
 - `threads::Int=4`: Number of solver threads
-- `time_limit::Float64=3600.0`: Maximum solve time in seconds
+- `time_limit::Float64=3600.0`: Maximum solve time in seconds; 0 (or less,
+  or `Inf`) sets no limit (`solver.time_limit: 0`)
 - `gap::Float64=0.01`: MIP optimality gap tolerance
 - `verbose::Bool=false`: Enable solver output
 
@@ -256,15 +257,17 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
                           solver_options::Dict{String, Any}=Dict{String, Any}())
     name = lowercase(solver_name)
     OptimizerType = _get_solver_optimizer(name)
+    # No time limit: the attribute is left at the solver's default (none)
+    limited = has_time_limit(time_limit)
 
     if name == "highs"
         # Base attributes
         attrs = Pair{String,Any}[
             "threads" => threads,
-            "time_limit" => time_limit,
             "mip_rel_gap" => gap,
             "output_flag" => verbose,
         ]
+        limited && push!(attrs, "time_limit" => time_limit)
         # Apply user-provided solver_options (override defaults)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
@@ -283,7 +286,6 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "scip"
         attrs = Pair{String,Any}[
-            "limits/time" => time_limit,
             "limits/gap" => gap,
             "display/verblevel" => (verbose ? 4 : 0),
             # Thread count for SCIP's concurrent solver. Note: SCIP's default
@@ -291,6 +293,7 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
             # takes effect when SCIP runs in concurrent mode.
             "parallel/maxnthreads" => threads,
         ]
+        limited && push!(attrs, "limits/time" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -298,10 +301,11 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "xpress"
         attrs = Pair{String,Any}[
             "THREADS" => threads,
-            "MAXTIME" => round(Int, time_limit),
             "MIPRELSTOP" => gap,
             "OUTPUTLOG" => (verbose ? 1 : 0),
         ]
+        # At least 1 s: Xpress reads MAXTIME 0 as no limit
+        limited && push!(attrs, "MAXTIME" => max(round(Int, time_limit), 1))
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -309,10 +313,10 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "gurobi"
         attrs = Pair{String,Any}[
             "Threads" => threads,
-            "TimeLimit" => time_limit,
             "MIPGap" => gap,
             "OutputFlag" => (verbose ? 1 : 0),
         ]
+        limited && push!(attrs, "TimeLimit" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -320,9 +324,9 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "cplex"
         attrs = Pair{String,Any}[
             "CPXPARAM_Threads" => threads,
-            "CPXPARAM_TimeLimit" => time_limit,
             "CPXPARAM_MIP_Tolerances_MIPGap" => gap,
         ]
+        limited && push!(attrs, "CPXPARAM_TimeLimit" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -330,9 +334,9 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "cbc"
         attrs = Pair{String,Any}[
             "threads" => threads,
-            "seconds" => time_limit,
             "ratioGap" => gap,
         ]
+        limited && push!(attrs, "seconds" => time_limit)
         if !verbose
             push!(attrs, "logLevel" => 0)
         end
@@ -342,28 +346,29 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "glpk"
         attrs = Pair{String,Any}[
-            "tm_lim" => round(Int, time_limit * 1000),  # GLPK uses milliseconds
             "msg_lev" => (verbose ? 3 : 0),  # GLP_MSG_OFF=0, GLP_MSG_ALL=3
         ]
+        # GLPK uses milliseconds
+        limited && push!(attrs, "tm_lim" => max(round(Int, time_limit * 1000), 1))
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "ipopt"
         attrs = Pair{String,Any}[
-            "max_cpu_time" => time_limit,
             "tol" => gap,
             "print_level" => (verbose ? 5 : 0),
         ]
+        limited && push!(attrs, "max_cpu_time" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "clarabel"
         attrs = Pair{String,Any}[
-            "time_limit" => time_limit,
             "verbose" => verbose,
         ]
+        limited && push!(attrs, "time_limit" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -383,6 +388,23 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
         error("Unsupported solver: $name")
     end
 end
+
+"""
+    has_time_limit(time_limit) -> Bool
+
+Whether `time_limit` (seconds) limits a solve: `solver.time_limit: 0` (or
+less, or `Inf`) means no limit.
+"""
+has_time_limit(time_limit::Real) = time_limit > 0 && isfinite(time_limit)
+
+"""
+    capped_time_limit(time_limit, cap) -> Float64
+
+The smaller of `time_limit` and `cap`; `cap` when `time_limit` sets no limit
+(`has_time_limit`). For solves ESFEX limits below `solver.time_limit`.
+"""
+capped_time_limit(time_limit::Real, cap::Real) =
+    Float64(has_time_limit(time_limit) ? min(time_limit, cap) : cap)
 
 """
     version()

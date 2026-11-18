@@ -210,6 +210,26 @@ import Ipopt
               ESFEX.MOI.OptimizerWithAttributes
         # Unknown solver names are rejected.
         @test_throws ErrorException create_optimizer(solver_name = "no_such_solver")
+
+        # solver.time_limit 0 = no limit: a model solves instead of stopping
+        # at once (HiGHS read 0 s as stop now: TIME_LIMIT on this LP)
+        m = ESFEX.Model(create_optimizer(solver_name = "highs", time_limit = 0.0))
+        x = ESFEX.JuMP.@variable(m, [1:200], lower_bound = 0, upper_bound = 10)
+        ESFEX.JuMP.@constraint(m, [i in 1:199], x[i] + 2x[i+1] >= 1 + mod(i, 7))
+        ESFEX.JuMP.@objective(m, Min, sum((1 + mod(i, 5)) * x[i] for i in 1:200))
+        optimize!(m)
+        @test termination_status(m) == ESFEX.MOI.OPTIMAL
+        attrs(o) = Dict(p.first.name => p.second for p in o.params
+                        if p.first isa ESFEX.MOI.RawOptimizerAttribute)
+        @test !haskey(attrs(create_optimizer(solver_name = "highs", time_limit = 0.0)),
+                      "time_limit")
+        @test attrs(create_optimizer(solver_name = "highs", time_limit = 60.0))["time_limit"] == 60.0
+        @test !ESFEX.has_time_limit(0.0) && !ESFEX.has_time_limit(Inf)
+        @test ESFEX.has_time_limit(1.0)
+        # Limits ESFEX sets below solver.time_limit (Benders) keep their cap
+        @test ESFEX.capped_time_limit(0.0, 600.0) == 600.0
+        @test ESFEX.capped_time_limit(100.0, 600.0) == 100.0
+        @test ESFEX.capped_time_limit(7200.0, 600.0) == 600.0
     end
 
     @testset "_compute_year_target" begin
@@ -1923,8 +1943,8 @@ import Ipopt
             ESFEX.optimize_master!(model; retry = nothing)
             @test termination_status(model) == MOI.OPTIMAL
             @test solves == [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
-            # The dispatch accepts a point short of optimal: its repair is
-            # unchanged (no retry, the round kept)
+            # A plain optimize! (what the dispatch ran until round 39) keeps
+            # the stalled round: no retry, no undo
             model, _, solves = sink_model((m, mk) ->
                 linearised(m) ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
             optimize!(model)
@@ -1940,6 +1960,107 @@ import Ipopt
             @test solves[1:2] == [MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
             exact_losses(model)
             @test :solve_retry ∉ keys(model.ext)
+        end
+
+        @testset "dispatch: a stalled solve is retried, a stalled repair round undone (round 39)" begin
+            # The dispatch accepted Gurobi's SUBOPTIMAL (LOCALLY_SOLVED) and
+            # repaired its line losses from it; it now solves as the master
+            # (round 37): one more solve with BarHomogeneous = 1, and a
+            # repair round still short of optimal is undone. A HiGHS-backed
+            # mock stands in for Gurobi, as in the master's testset.
+            MOI = ESFEX.MOI
+            MOIU = MOI.Utilities
+            BH = MOI.RawOptimizerAttribute("BarHomogeneous")
+            function lossy_window(status_of)
+                H, N = 2, 2
+                pvg = mkgen("PV", "Renewable", "Solar", [130.0, 0.0], [0.0, 0.0],
+                            ones(H, N); nb = N, H = H)
+                gas = mkgen("Gas", "Non-renewable", "Gas", [0.0, 200.0],
+                            [3.0e-5, 3.0e-5], ones(H, N); nb = N, H = H)
+                buses = [BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0),
+                         BusData(2, 2, 220.0, 50.0, "AC", "PQ", "load", 1.0)]
+                line = TransmissionLineData("L12", 1, 2, 200.0, 0.1, 0.05, 0.0,
+                                            100.0, 220.0, 1, 50.0, "AC")
+                net = NetworkConfig(N, N, buses, [1, 2],
+                                    [0.0 200.0; 200.0 0.0], [0.0 100.0; 100.0 0.0],
+                                    100.0, 0.4, 220.0, 0.6, 1, [0.0, 0.0], [0.0, 0.0],
+                                    [line], TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                input = PowerSystemInput(
+                    name = "window", year = 2025, network = net, generators = [pvg, gas],
+                    batteries = BatteryConfig[], demand = repeat([0.0 100.0], H),
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = 3, curtailment_cost = 2e-5)
+                model, _ = create_power_system(input)
+                mock = MOIU.MockOptimizer(MOIU.UniversalFallback(MOIU.Model{Float64}()))
+                solves = MOI.TerminationStatusCode[]
+                mock.optimize! = function (mk)
+                    h = ESFEX.HiGHS.Optimizer()
+                    MOI.set(h, MOI.Silent(), true)
+                    map = MOI.copy_to(h, mk)
+                    MOI.optimize!(h)
+                    xs = MOI.get(mk, MOI.ListOfVariableIndices())
+                    st = status_of(model, mk)
+                    push!(solves, st)
+                    MOIU.mock_optimize!(mk, st, (MOI.FEASIBLE_POINT,
+                        [MOI.get(h, MOI.VariablePrimal(), map[x]) for x in xs]))
+                end
+                ESFEX.JuMP.set_optimizer(model, () -> mock)
+                ESFEX.JuMP.set_attribute(model, "BarHomogeneous", 0)
+                return model, solves
+            end
+            linearised(model) = any(b -> b.dir != 0, model.ext[:pwl_loss_repair].blocks)
+            gurobi = ["BarHomogeneous" => 1]
+
+            # A repair round stalls unless solved with BarHomogeneous = 1: retried
+            model, solves = lossy_window((m, mk) ->
+                linearised(m) && MOI.get(mk, BH) != 1 ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            @test_logs (:warn, r"^Dispatch window 3: the solve ended LOCALLY_SOLVED.*solving again with BarHomogeneous = 1") match_mode = :any ESFEX.optimize_dispatch!(model; retry = gurobi, label = "Dispatch window 3")
+            @test termination_status(model) == MOI.OPTIMAL
+            @test linearised(model)
+            @test ESFEX.JuMP.get_attribute(model, "BarHomogeneous") == 0
+            for b in model.ext[:pwl_loss_repair].blocks
+                @test value(b.ploss) ≈ ESFEX.pwl_loss_value(b, abs(value(b.pf))) rtol = 0.02 atol = 1e-3
+            end
+            @test :solve_retry ∉ keys(model.ext) && :solve_label ∉ keys(model.ext)
+
+            # It stalls whatever the parameters: the round is undone (plain
+            # optimize! kept it, LOCALLY_SOLVED and linearised, above)
+            model, solves = lossy_window((m, mk) ->
+                linearised(m) ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            @test_logs (:warn, r"repair round 2 ended LOCALLY_SOLVED, not proven optimal; keeping the model of round 1") match_mode = :any ESFEX.optimize_dispatch!(model; retry = gurobi)
+            @test termination_status(model) == MOI.OPTIMAL
+            @test !linearised(model)
+            @test solves == [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
+            # Without retry parameters (HiGHS) the stalled round is undone at once
+            model, solves = lossy_window((m, mk) ->
+                linearised(m) ? MOI.LOCALLY_SOLVED : MOI.OPTIMAL)
+            ESFEX.optimize_dispatch!(model; retry = nothing)
+            @test solves == [MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.OPTIMAL]
+            @test termination_status(model) == MOI.OPTIMAL
+
+            # The first solve stalls whatever the parameters: retried once,
+            # then its feasible point is what the window has (the adapter
+            # keeps it with a warning naming the window)
+            model, solves = lossy_window((m, mk) -> MOI.LOCALLY_SOLVED)
+            ESFEX.optimize_dispatch!(model; retry = gurobi)
+            @test solves[1:2] == [MOI.LOCALLY_SOLVED, MOI.LOCALLY_SOLVED]
+            @test termination_status(model) == MOI.LOCALLY_SOLVED
+            @test ESFEX.JuMP.primal_status(model) == MOI.FEASIBLE_POINT
+
+            # A window without line losses: one more solve, as the master
+            mock = MOIU.MockOptimizer(MOIU.UniversalFallback(MOIU.Model{Float64}()))
+            m = ESFEX.JuMP.direct_model(mock)
+            x = ESFEX.JuMP.@variable(m, lower_bound = 0)
+            ESFEX.JuMP.@objective(m, Min, x)
+            ESFEX.JuMP.set_attribute(m, "BarHomogeneous", 0)
+            stalled(mk) = MOIU.mock_optimize!(mk, MOI.LOCALLY_SOLVED, (MOI.FEASIBLE_POINT, [1.0]))
+            ok(mk) = MOIU.mock_optimize!(mk, MOI.OPTIMAL, (MOI.FEASIBLE_POINT, [0.0]))
+            MOIU.set_mock_optimize!(mock, stalled, ok)
+            @test_logs (:warn, r"^Dispatch: the solve ended LOCALLY_SOLVED") match_mode = :any ESFEX.optimize_dispatch!(m; retry = gurobi)
+            @test termination_status(m) == MOI.OPTIMAL
+            @test value(x) == 0.0
         end
 
         @testset "line flow cost is charged on |flow|" begin
@@ -4969,10 +5090,52 @@ import Ipopt
             tsam(w) = mk(use_tsam = true, tsam_period_start_hours = [[1, 25]],
                          tsam_period_weights = [w], tsam_chronological_order = [[1, 2]])
             master1(tsam([65.0, 300.0]))
+            # Day 1 standing for 300 days curtails 72 000 MWh/yr against a
+            # limit of 45 360 (10 % of 453 600 MWh/yr): the existing PV
+            # cannot be held within it. The master was INFEASIBLE (a hard
+            # limit; a loss-repaired master then kept its PWL solution). The
+            # excess is priced now (round 39): the master solves, pays the
+            # 26 640 MWh/yr above the limit and warns
             tm, _, _ = create_master_problem(tsam([300.0, 65.0]); use_representative_days = true)
             ESFEX.set_silent(tm)
+            @test_logs (:warn, r"system global, year 2025 curtails 26\.64 GWh/yr above its annual curtailment limit \(max_curtailment_ratio = 0\.1 of 453\.6 GWh/yr") match_mode = :any ESFEX.optimize_master!(tm)
+            @test string(termination_status(tm)) == "OPTIMAL"
+            ex = only(ESFEX.curtailment_excess(tm))
+            @test ex.excess_mwh ≈ 26640.0 rtol = 1e-6
+            @test ex.re_mwh ≈ 453600.0 rtol = 1e-6
+            @test (ex.system, ex.year, ex.scenario) == ("global", 2025, 0)
+            exc = only(tm.ext[:curtailment_excess]).excess
+            @test name(exc) == "curtailment_excess_s1_y1"
+            # Priced in the objective at CURTAILMENT_EXCESS_PENALTY (10⁴ $/MWh)
+            obj = objective_value(tm)
+            fix(exc, 26640.0 + 1000.0; force = true)
             optimize!(tm)
-            @test string(termination_status(tm)) in ("INFEASIBLE", "INFEASIBLE_OR_UNBOUNDED")
+            @test objective_value(tm) - obj ≈ 1000.0 * ESFEX.CURTAILMENT_EXCESS_PENALTY rtol = 1e-6
+            # MGA / SPORES alternatives curtail above it no more than the
+            # cost-optimal plan (as under a hard limit)
+            ESFEX.JuMP.unfix(exc)
+            ESFEX.JuMP.set_lower_bound(exc, 0.0)
+            optimize!(tm)
+            ESFEX.hold_curtailment_excess!(tm)
+            @test ESFEX.JuMP.upper_bound(exc) ≈ 26640.0 + ESFEX.curtailment_tolerance(453600.0) rtol = 1e-6
+            mga = ESFEX.run_mga_spores(tsam([300.0, 65.0]); num_alternatives = 1,
+                                       slack_fraction = 0.05)
+            @test length(mga.alternatives) == 2
+            # Stochastic: per scenario, named in the warning
+            ssm, _, _, _ = create_stochastic_master_problem(StochasticMasterInput(
+                tsam([300.0, 65.0]), sc, true))
+            ESFEX.set_silent(ssm)
+            @test_logs (:warn, r"year 2025, scenario 2 curtails 26\.64 GWh/yr") match_mode = :any ESFEX.optimize_master!(ssm)
+            @test string(termination_status(ssm)) == "OPTIMAL"
+            @test [e.scenario for e in ESFEX.curtailment_excess(ssm)] == [1, 2]
+            @test constraint_by_name(ssm, "max_curtailment_sc2_s1_y1") !== nothing
+            # Within the limit nothing changes: no excess, and the objective
+            # of the hard limit (the excess fixed at 0)
+            @test isempty(ESFEX.curtailment_excess(mono))
+            mobj = objective_value(mono)
+            foreach(e -> fix(e.excess, 0.0; force = true), mono.ext[:curtailment_excess])
+            optimize!(mono)
+            @test objective_value(mono) ≈ mobj rtol = 1e-9
             # Benders: the year is within its limit, same optimum
             br = run_benders_decomposition(inp; max_iterations = 20, tolerance = 1e-7,
                                            verbose_benders = false)
@@ -6108,12 +6271,15 @@ import Ipopt
             fuel_only = uop.energy[(:gen, 1, 1, 1)] * (3.0e-5 + 2.0e-6)
             @test uop.operating_cost[(:gen, 1, 1, 1)] - fuel_only > 1e-6
 
-            # A re-solve that is not optimal undoes its round. Solar (12 h a
-            # day) and a store that takes its surplus serve the load; the
-            # store's fixed O&M ($1M/MW·yr) and the idle gas make both NPVs
-            # negative, but without the store the surplus breaks the master's
-            # 5 % curtailment limit (a hard constraint): infeasible. The
-            # iteration used to stop there with nothing returned to keep.
+            # A re-solve that breaks the curtailment limit undoes its round.
+            # Solar (12 h a day) and a store that takes its surplus serve the
+            # load; the store's fixed O&M ($1M/MW·yr) and the idle gas make
+            # both NPVs negative, but without the store the surplus breaks
+            # the master's 5 % curtailment limit. That limit was a hard
+            # constraint (the re-solve was infeasible, and the iteration
+            # used to stop there with nothing returned to keep); it is
+            # priced now (round 39), and a re-solve that curtails more above
+            # it than the plan before is undone like an infeasible one.
             day_sun = reshape(vcat(ones(12), zeros(12)), H, 1)
             solar = mkgen("Solar", "Renewable", "Sun", [100.0], [0.0], day_sun; nb = 1, H = H)
             store = wf(BatteryConfig("Store", [700.0], [60.0], [60.0], [1.0], [1.0],
@@ -6134,8 +6300,10 @@ import Ipopt
             fm, _, _ = create_master_problem(retire_units(cinp, flagged))
             ESFEX.set_silent(fm)
             optimize!(fm)
-            @test string(termination_status(fm)) == "INFEASIBLE"
-            cit = @test_logs (:warn, r"not optimal \(INFEASIBLE\); keeping these units") match_mode = :any solve_with_npv_iteration(cinp)
+            @test string(termination_status(fm)) == "OPTIMAL"
+            @test ESFEX.curtailment_excess_mwh(fm) > 100.0
+            @test ESFEX.curtailment_excess_mwh(cmodel) == 0.0
+            cit = @test_logs (:warn, r"curtails [0-9.]+ GWh/yr above the annual curtailment limit \(the plan before: 0\.0\); keeping these units") match_mode = :any solve_with_npv_iteration(cinp)
             @test !cit.converged && cit.iterations == 2
             @test isempty(cit.forced_retirements)
             @test cit.final_result.objective ≈ objective_value(cmodel) rtol = 1e-9

@@ -108,3 +108,71 @@ def test_accept_limit_incumbent_rules(caplog):
                                        "INFEASIBLE_POINT", "X", "advice")
     assert not _accept_limit_incumbent(jl, "_mp_model", "NUMERICAL_ERROR",
                                        "FEASIBLE_POINT", "X", "advice")
+
+
+# --- Dispatch windows (round 39) -------------------------------------------
+# The dispatch ran a plain optimize! and accepted Gurobi's SUBOPTIMAL
+# (LOCALLY_SOLVED) silently. It now solves as the master
+# (ESFEX.optimize_dispatch!: one more solve with BarHomogeneous = 1, a
+# stalled loss-repair round undone); a window still LOCALLY_SOLVED keeps its
+# feasible point with a warning that names it.
+
+def _window(window=4):
+    from esfex.bridge.adapters import PowerSystemAdapter
+
+    ps = PowerSystemAdapter.__new__(PowerSystemAdapter)
+    ps.year, ps.start_hour, ps.hours = 2030, 96, 48
+    ps.kwargs = {} if window is None else {"window": window}
+    ps.esfex_config = None
+    return ps
+
+
+class FakeDispatchJulia(FakeJulia):
+    def __init__(self, status, primal, solver="Gurobi"):
+        super().__init__(status, primal)
+        self.answers["solver_name(_ps_model)"] = solver
+        self.calls = []
+
+    def seval(self, code):
+        if "optimize_dispatch!" in code:
+            return lambda model, label: self.calls.append((code, label))
+        self.calls.append((code, None))
+        return super().seval(code)
+
+
+def test_dispatch_locally_solved_kept_with_window_warning(caplog):
+    ps = _window()
+    with caplog.at_level(logging.WARNING, logger="esfex.bridge.adapters"):
+        assert ps._map_termination_status(
+            FakeDispatchJulia("LOCALLY_SOLVED", "FEASIBLE_POINT")) == 1
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "Dispatch window 4 (2030, from hour 96)" in msg
+    assert "short of optimal" in msg and "LOCALLY_SOLVED" in msg
+
+
+def test_dispatch_locally_solved_rules(caplog):
+    # Ipopt's normal answer: kept without a warning
+    with caplog.at_level(logging.WARNING, logger="esfex.bridge.adapters"):
+        assert _window()._map_termination_status(
+            FakeDispatchJulia("LOCALLY_SOLVED", "FEASIBLE_POINT", solver="Ipopt")) == 1
+    assert not caplog.records
+    # Without a feasible point it is no dispatch (INFEASIBLE_POINT contains
+    # the text FEASIBLE_POINT)
+    assert _window()._map_termination_status(
+        FakeDispatchJulia("LOCALLY_SOLVED", "INFEASIBLE_POINT")) == 0
+    assert _window()._map_termination_status(
+        FakeDispatchJulia("OPTIMAL", "FEASIBLE_POINT")) == 1
+    assert _window(None)._window_label() == "Dispatch (2030, from hour 96)"
+
+
+def test_dispatch_solves_through_optimize_dispatch():
+    ps = _window(7)
+    ps._jl_model = object()
+    ps._jl_vars = None
+    jl = FakeDispatchJulia("OPTIMAL", "FEASIBLE_POINT")
+    with patch("esfex.bridge.adapters.get_julia", return_value=jl):
+        assert ps.solve() == 1
+    solves = [(c, label) for c, label in jl.calls if "optimize" in c]
+    assert len(solves) == 1
+    assert "ESFEX.optimize_dispatch!" in solves[0][0]
+    assert solves[0][1] == "Dispatch window 7 (2030, from hour 96)"

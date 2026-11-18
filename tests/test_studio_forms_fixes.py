@@ -236,6 +236,21 @@ def test_n1_apply_modes_round_trip_form(qapp):
         "unit_commitment", "economic_dispatch", "development"}
 
 
+@pytest.mark.parametrize("limit", [0, 3600, 100_000])
+def test_solver_time_limit_round_trips_form(qapp, limit):
+    """solver.time_limit 0 (= no limit) and limits above a day survive the
+    form (the spin box clamped them to 1..86400 s)."""
+    from esfex.visualization.panels.global_settings_form import GlobalSettingsForm
+
+    model = GuiModel()
+    model.global_settings.solver_time_limit = limit
+    form = GlobalSettingsForm(model)
+    form.load_element()
+    assert form._solver_time.value() == limit
+    form._on_changed()
+    assert model.global_settings.solver_time_limit == limit
+
+
 @pytest.mark.parametrize("lang", ["en", "es", "fr", "pt", "ja"])
 def test_degradation_labels_are_fractions(lang):
     from pathlib import Path
