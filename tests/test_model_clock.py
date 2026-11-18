@@ -21,6 +21,7 @@ from esfex.utils.model_clock import (
     format_offset,
     local_to_model_clock,
     log_case_clock,
+    nearest_land_zone,
     nominal_zone,
     node_time_zone,
     normalize_clock_setting,
@@ -114,14 +115,29 @@ def test_studio_nodes_weigh_by_their_demand():
     assert resolve_for_nodes("auto", nodes).zone == "America/Mexico_City"
 
 
-def test_sea_point_falls_back_to_nominal_offset(caplog):
+def test_sea_point_far_from_land_falls_back_to_nominal_offset(caplog):
     with caplog.at_level(logging.WARNING, logger="esfex.utils.model_clock"):
-        zone = node_time_zone(30.0, -40.0)   # mid-Atlantic
+        zone = node_time_zone(30.0, -40.0)   # mid-Atlantic, > 200 km from land
     assert zone == "Etc/GMT+3"               # UTC-3, no DST
     assert "No land time zone" in caplog.text
     assert node_time_zone(*HAVANA) == "America/Havana"
     assert nominal_zone(0.0) == "UTC" and nominal_zone(-82.4) == "Etc/GMT+5"
     assert nominal_zone(8.0) == "Etc/GMT-1"
+
+
+def test_sea_point_near_land_takes_nearest_land_zone(caplog):
+    # An offshore node south of Cuba (~35 km from the coast) keeps Cuba's zone,
+    # with its daylight saving time, not the nominal Etc/GMT+5 of its band.
+    node_time_zone.cache_clear()
+    with caplog.at_level(logging.INFO, logger="esfex.utils.model_clock"):
+        assert node_time_zone(21.0, -82.0) == "America/Havana"
+    assert "nearest land" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    zone, km = nearest_land_zone(21.0, -82.0)
+    assert zone == "America/Havana" and 20.0 <= km <= 50.0
+    # Within the search radius only.
+    assert nearest_land_zone(21.0, -82.0, max_km=10.0) is None
+    assert nearest_land_zone(30.0, -40.0) is None
 
 
 def test_clock_setting_validation():

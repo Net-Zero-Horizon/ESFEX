@@ -262,6 +262,7 @@ class DemandTFTModel:
 def train_tft_model(
     dataset_dir: Optional[Path] = None,
     output_path: Optional[Path] = None,
+    df: Optional["pd.DataFrame"] = None,
     n_cv_folds: int = 3,
     max_epochs: int = 50,
     batch_size: int = 64,
@@ -277,7 +278,9 @@ def train_tft_model(
     """Train TFT using the unified hourly dataset with temporal CV.
 
     Uses the same ``build_unified_dataset()`` as XGBoost for fair comparison.
-    Temporal cross-validation by year (expanding window).
+    Temporal cross-validation by year (expanding window). *df* is a dataset
+    already built (``train_demand_model`` passes it, with any excluded
+    country removed); without it the dataset is built from *dataset_dir*.
 
     Returns dict with metrics and CV results.
     """
@@ -312,13 +315,16 @@ def train_tft_model(
         logger.info("[%d%%] %s", pct, msg)
 
     # ── Step 1: Build unified dataset (same as XGBoost) ──────────────────
-    emit(5, "Building unified hourly dataset...")
     from esfex.models.demand_training import build_unified_dataset, temporal_cv_splits
 
-    full_df = build_unified_dataset(dataset_dir)
+    if df is not None:
+        full_df = df
+    else:
+        emit(5, "Building unified hourly dataset...")
+        full_df = build_unified_dataset(dataset_dir)
     # TFT needs 'country' column and consistent group_id
     if "country" not in full_df.columns:
-        full_df["country"] = full_df["group_id"].str[:3]
+        full_df = full_df.assign(country=full_df["group_id"].str[:3])
 
     emit(20, f"Dataset: {len(full_df):,} rows, {full_df['country'].nunique()} countries")
 
