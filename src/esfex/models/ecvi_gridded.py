@@ -243,12 +243,16 @@ class GriddedECVI:
         # Load XGBoost model + country encoding map
         from esfex.models.demand_ml import FEATURE_COLS
         import xgboost as xgb
-        from esfex.models.demand_ml import DemandMLModel
-        from esfex.paths import MODELS_DIR
+        from esfex.models.demand_ml import DemandMLModel, _XGB_BUNDLED, _XGB_FILENAME
+        from esfex.models.demand_training import COUNTRY_MAP_FILENAME
+        from esfex.paths import model_path
         model = DemandMLModel.load_bundled(engine="xgboost")
         booster = model._model
 
-        _country_map_path = MODELS_DIR / "demand_xgb_country_map.json"
+        # The map saved with the loaded model (train_xgboost writes it next
+        # to the model), not one left by some other dataset build.
+        _country_map_path = (model_path(_XGB_FILENAME, _XGB_BUNDLED).parent
+                             / COUNTRY_MAP_FILENAME)
         country_to_id: dict = {}
         if _country_map_path.exists():
             with open(_country_map_path) as _f:
