@@ -709,7 +709,45 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
         **system_data,
     )
     _warn_demandless_nodes(system)
+    _warn_self_loop_branches(system)
     return system
+
+
+def self_loop_branches(system: SystemConfig) -> list[str]:
+    """Lines and transformers of *system* whose two ends are the same bus.
+    The models drop them (``TransmissionDC``).
+
+    As in the Studio validation, a line from a bus to itself whose two
+    endpoint references name different elements (an equipment-to-bus link)
+    is not counted. A transformer end is its bus, else its node (as the
+    bridge resolves it).
+    """
+    def linked_elements_differ(ln) -> bool:
+        ft, tt = ln.from_endpoint_type, ln.to_endpoint_type
+        return bool(ft and tt) and (ft != tt or ln.from_endpoint_id != ln.to_endpoint_id)
+
+    out = [f"line {ln.line_id or f'#{i}'}"
+           for i, ln in enumerate(system.transmission_lines_geo or [])
+           if ln.from_bus is not None and ln.from_bus == ln.to_bus
+           and not linked_elements_differ(ln)]
+    out += [f"transformer {tr.name}" for tr in system.transformers or []
+            if (tr.from_node if tr.from_bus is None else tr.from_bus)
+            == (tr.to_node if tr.to_bus is None else tr.to_bus)]
+    return out
+
+
+def _warn_self_loop_branches(system: SystemConfig) -> None:
+    """One warning naming the branches that connect a bus to itself: they
+    carry no flow, so the dispatch and the master ignore them."""
+    loops = self_loop_branches(system)
+    if loops:
+        log.warning(
+            "System %r: %d branch(es) connect a bus to itself (from_bus == "
+            "to_bus) and are ignored by the model: %s. Connect them to two "
+            "different buses or remove them.",
+            system.name, len(loops),
+            ", ".join(loops[:10]) + (f" … (+{len(loops) - 10} more)" if len(loops) > 10 else ""),
+        )
 
 
 def _warn_demandless_nodes(system: SystemConfig) -> None:
