@@ -534,7 +534,7 @@ With `compute_security_cost: true`, every operational window that has N-1 constr
 C^{\text{N-1}} = z^{\text{with N-1}} - z^{\text{without N-1}}
 \]
 
-is the window's `n1_security_cost`: the re-dispatch, commitment and shortfall cost that security adds. A whole-window objective difference cannot be split by step, so the year's value adds each window's difference times its committed share (kept steps / window steps). In unit commitment both solves stop at the solver's `gap`, so the difference is exact only up to that gap. The extra solve roughly doubles the solve time; with the option off, `n1_security_cost` is 0.
+is the window's `n1_security_cost`: the re-dispatch, commitment and shortfall cost that security adds. In a rolling horizon both objectives are valued over the window's committed steps only, as the window's objective is (each cost term for the hours it belongs to, the overlap tail left to the next window), and the year's value adds those differences. In unit commitment both solves stop at the solver's `gap`, so the difference is exact only up to that gap. The extra solve roughly doubles the solve time; with the option off, `n1_security_cost` is 0.
 
 ### Computational Impact
 

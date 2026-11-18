@@ -1141,7 +1141,7 @@ Results from all windows are concatenated to form the full-year dispatch, keepin
 
 where the last window may have fewer than \(K\) kept hours (remainder of the year).
 
-The year's totals are stitched the same way: the objective, the cost breakdown, generation, demand, curtailment, load shedding and CO2 add up each window's first \(K\) hours only (the overlap tail is solved again by the next window). A cost term counts for the hours it belongs to; a term without an hour (investment annuities, the CO2-budget slack) counts for the window's share \(K / H_w\); a primary-energy period counts for the share of its hours among the first \(K\); and fuel drawn from a tank is valued from the window's start to the end of hour \(K\). `n1_security_cost` is the exception: it is a whole-window figure and counts for \(K / H_w\).
+The year's totals are stitched the same way: the objective, the cost breakdown, generation, demand, curtailment, load shedding and CO2 add up each window's first \(K\) hours only (the overlap tail is solved again by the next window). A cost term counts for the hours it belongs to; a term without an hour (investment annuities, the CO2-budget slack) counts for the window's share \(K / H_w\); a primary-energy period counts for the share of its hours among the first \(K\); and fuel drawn from a tank is valued from the window's start to the end of hour \(K\). `n1_security_cost` is valued the same way: the objectives with and without N-1 both over the first \(K\) hours.
 
 ### 10.5 Time Resolution
 
