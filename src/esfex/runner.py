@@ -6249,8 +6249,6 @@ class Orchestrator:
             # generation, both over the committed steps
             total_re_generation += (window_result.get("re_penetration", 0.0)
                                     * window_result.get("total_generation", 0.0))
-            window_hours_total = end_hour - start_hour
-            kept_fraction = keep_hours / window_hours_total if window_hours_total > 0 else 1.0
             total_objective += window_result.get("objective", 0.0)
             total_load_shed += window_result.get("load_shed_total", 0.0)
             total_curtailment += window_result.get("total_curtailment", 0.0)
@@ -6345,7 +6343,8 @@ class Orchestrator:
                     if bc not in all_n1_binding:
                         all_n1_binding.append(bc)
             all_n1_trans_duals.append((window_result.get("n1_trans_reserve_duals") or {}, keep_hours))
-            total_n1_security_cost += (window_result.get("n1_security_cost") or 0.0) * kept_fraction
+            # Over the committed steps, like the objective (extract_solution)
+            total_n1_security_cost += window_result.get("n1_security_cost") or 0.0
 
         # No window solved: the whole year produced no dispatch. Surface the
         # underlying solver/model error instead of exporting an empty result

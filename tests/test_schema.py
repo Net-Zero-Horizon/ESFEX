@@ -1840,3 +1840,15 @@ class TestRooftopSolarConfigOptional:
 
         cfg = RooftopSolarConfig(adoption_scenario="high", simulation_seed=1)
         assert cfg.systems_per_node is None and cfg.max_adoption is None
+
+
+class TestMaxAnnualSystemCostDescription:
+    def test_description_says_it_is_the_investment_budget(self):
+        # It had no description, and its name reads as a cap on the total
+        # annual system cost; the masters use it as the budget for each build
+        # year's overnight investment (add_budget_constraints!).
+        from esfex.config.schema import SystemConfig
+
+        desc = SystemConfig.model_fields["max_annual_system_cost"].description
+        assert desc and "overnight" in desc and "investment period" in desc
+        assert "not a cap on the total annual system cost" in desc

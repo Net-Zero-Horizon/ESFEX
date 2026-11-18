@@ -7,7 +7,7 @@ The configuration drives a two-stage decomposition [**[25]**](../reference/bibli
 !!! warning "Unknown keys are ignored, with a warning"
     **Unknown keys are not errors.** A typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` has no effect. The loader logs a warning for each one with its full path (for example `Unknown configuration key systems.island.generators.diesel.min_up_time is ignored`), `esfex validate -c <file>` lists them, and so does the Studio's validation (category *Configuration*).
 
-    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling` and `_geo_assets`, and the free-form `plugins` and `solver.options`. Stochastic scenario multipliers report their own unknown keys.
+    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling` and `_geo_assets`, and the free-form `plugins`, `solver.options` and `master_problem.solver_options`. Stochastic scenario multipliers report their own unknown keys.
 
 ---
 
@@ -114,6 +114,8 @@ solver:
   verbose: false
   options: {}        # solver-specific options
 ```
+
+`master_problem.solver_options` (same format) is merged over `options` for the master solves only; the dispatch keeps `options` (see [Large LP Master Problems](solver-guide.md#large-lp-master-problems)).
 
 `options` is passed to the JuMP optimizer. For HiGHS, the key `solver_method` selects the LP algorithm (`choose`, `simplex`, `ipm`, `ipx`, `hipo`, `pdlp`). Options that apply to one algorithm only are forwarded only when `solver_method` is set explicitly to that algorithm; otherwise they are dropped with a warning. For example, `primal_feasibility_tolerance`, `dual_feasibility_tolerance` and `simplex_scale_strategy` need `solver_method: simplex`, while `ipm_optimality_tolerance` and `run_crossover` need an interior-point method:
 
@@ -271,7 +273,7 @@ How demand and equipment are placed:
 - When the bus list is exactly one bus per node in node order, no mapping is needed and per-node arrays are used directly.
 - A node with no bus cannot serve its demand or host capacity. When there are fewer buses than nodes, the bridge logs a warning naming the bus-less nodes.
 
-**Lines.** A `transmission_lines_geo` entry enters the operational model only if both bus indices are known, through `from_bus`/`to_bus` or a bus endpoint reference (`from_endpoint_type: bus`, `from_endpoint_id: <bus_id>`). A line with only `from_node`/`to_node` is skipped with a warning. When any lines are listed, the bus network is built from them alone and `nodes_connections` does not add operational capacity; without lines and with one bus per node, `nodes_connections` is the network. Missing line reactance is derived from `length_km × dc_power_flow.reactance_per_km / Z_base`, with `Z_base = V² / ac_power_flow.base_mva` and `V` the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. if there is no length. Per-unit values are on the `ac_power_flow.base_mva` power base, which the DC flow and losses use too.
+**Lines.** A `transmission_lines_geo` entry enters the operational model only if both bus indices are known, through `from_bus`/`to_bus` or a bus endpoint reference (`from_endpoint_type: bus`, `from_endpoint_id: <bus_id>`). A line with only `from_node`/`to_node` is skipped with a warning. A line or transformer whose two ends are the same bus carries no flow and is ignored by the model; loading the configuration logs one warning per system that names them (the Studio validation reports them as errors). When any lines are listed, the bus network is built from them alone and `nodes_connections` does not add operational capacity; without lines and with one bus per node, `nodes_connections` is the network. Missing line reactance is derived from `length_km × dc_power_flow.reactance_per_km / Z_base`, with `Z_base = V² / ac_power_flow.base_mva` and `V` the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. if there is no length. Per-unit values are on the `ac_power_flow.base_mva` power base, which the DC flow and losses use too.
 
 Bus `bus_id` values must be unique within a system. Transformers, AC/DC converters and frequency converters also take `from_bus`/`to_bus`; see the [reference](../reference/config-reference.md#transformerconfig).
 

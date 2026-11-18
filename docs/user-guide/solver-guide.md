@@ -234,12 +234,15 @@ solver:
   name: gurobi
   threads: 16
   time_limit: 21600
-  options:
+master_problem:
+  solver_options:
     Method: 2        # barrier (method: barrier)
     Crossover: 0     # no crossover (crossover: off)
 ```
 
-Without crossover the solution is the barrier's interior point, accurate to `bar_conv_tol` (default 1e-8): investments and costs are reliable, but the solution is not a vertex, so more units can be partly built or dispatched than in a simplex solution. Keep `method: auto` (concurrent) when you need a vertex solution or when barrier struggles numerically. The solver options apply to every solve of the run, the dispatch windows too, where the default method is often faster on the small window LPs.
+Without crossover the solution is the barrier's interior point, accurate to `bar_conv_tol` (default 1e-8): investments and costs are reliable, but the solution is not a vertex, so more units can be partly built or dispatched than in a simplex solution. Keep `method: auto` (concurrent) when you need a vertex solution or when barrier struggles numerically.
+
+`solver.options` apply to every solve of the run, the dispatch windows too, where the default method is often faster on the small window LPs. `master_problem.solver_options` apply to the master solves only (monolithic, TSAM, stochastic, MGA, myopic, the NPV-retirement re-solves, and the Benders master and subproblems), merged over `solver.options`: a key in both takes the master's value, the other keys of `solver.options` still apply. The dispatch windows keep `solver.options`. `name`, `threads`, `time_limit`, `gap` and `verbose` are shared.
 
 ### LP Method Selection
 
