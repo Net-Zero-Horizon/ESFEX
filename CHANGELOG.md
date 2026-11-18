@@ -380,26 +380,6 @@ Per-release notes are also published on the
   spell where the dispatch shed most. Benders models the representative
   days only (the log says so).
 
-- **The demand density model can be rebuilt from the repository.** The
-  scripts that built the training set and trained the shipped
-  `demand_density_hourly_xgb` model lived outside ESFEX. They are now in
-  `scripts/demand_model/` (with their provenance), adapted to ESFEX's clock
-  convention: every training row is a local civil hour of its series, with
-  the demand and the ERA5 temperature of the same instant and the calendar
-  of the real date (29 February skipped). The model shipped so far used each
-  source's row `h` as hour `h` of the year whatever its clock, so for series
-  recorded on local time the temperature came from another instant (8 h
-  away in China, 13 h in New Zealand), and series recorded in UTC got UTC
-  hours and weekdays. A new `clock_audit.py` establishes the clock of every
-  training series-year (OPSD anchor for European years, daylight-saving and
-  profile tests) and records it in `scripts/demand_model/series_clocks.csv`;
-  years whose clock cannot be established are left out, and so are the five
-  that had no temperature (the old model trained them at a constant 20 °C).
-  The training script takes paths, device and thread count on the command
-  line and writes the booster as `.json` and `.ubj`. The shipped model is
-  unchanged; a retrained candidate is to be compared before it replaces it.
-  New page: *Contributing → Demand Density Model*.
-
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -1389,6 +1369,55 @@ Per-release notes are also published on the
   also honoured by the TFT engine, which wrote to its default path whatever
   was given. In Python, `train_demand_model` raises `TypeError` for a
   keyword it does not use instead of ignoring it.
+
+- **The Grid Builder's demand forecast uses the final model of the demand
+  article.** The density model shipped so far (`demand_density_hourly_xgb`)
+  was the design of the article's first submission: 18 predictors, trained
+  on series whose clocks had not been checked. It is replaced by the model
+  of the revision (`demand_density_v2`, specification
+  `level_geo_two_shallow`), fitted on 9.0 million hours of 166 series in 83
+  countries, every series audited onto UTC. It adds the long-run climate of
+  the place (mean and 5-95 % spread of its daily mean temperature), how
+  electricity is used there (electric share of household energy, share of
+  electricity used in buildings; by state in the USA and by province in
+  Canada), local solar time and the month shifted by half a year in the
+  southern hemisphere, and it is trained in two rounds (a shallow model of
+  the level of each place, then the hourly model starting from it). On the
+  article's cross-validation it explains hourly demand density in withheld
+  countries with R² 0.83 (0.79 for the first design) and in withheld
+  regions with R² 0.72 (0.60); its sensitivity to temperature tracks the
+  observed one with r 0.86 in withheld countries (0.76). ESFEX builds every
+  predictor as the article's training table does; on 1.15 million hours of
+  that table its predictions are identical to the article's.
+- **The density model works on UTC hours.** Its hour of the day and month
+  are UTC, its weekday and holidays those of the local date, and the
+  temperature of each hour that instant's: ERA5 is read in UTC, and the
+  CMIP6 curve, built on each node's local time, is moved to UTC. Each
+  node's forecast is then put on its local civil time, as before, and the
+  saved demand on the model clock. Where the zone has daylight saving time,
+  the autumn hour that local time repeats reads the hour before it.
+- **Density per km² of land, from each cell's population.** The forecast
+  sampled the population density of one 30-arc-second pixel at the centre
+  of each 0.25° cell, divided the cell's GDP by its whole area and
+  multiplied the predicted density by the whole area, sea included. It now
+  uses each cell's population (WorldPop 2020, summed per cell) and land
+  area, as the model was trained and as the article maps it: population and
+  GDP per km² of land, density times land area, and a cell needs people,
+  land and GDP to get demand. Population, land, climate normals and
+  electricity-use context of every cell ship with the model (about 3 MB);
+  the GPW population tiles are no longer downloaded for the forecast.
+- **Effect on Cuba** (the 136 nodes of the Caribbean case, base year 2025,
+  SSP2, same temperature for both models): with the case's CMIP6 climate
+  the yearly demand goes from 21.4 to 21.7 TWh and the peak from 3,249 to
+  3,219 MW; with the ERA5 weather year, from 20.9 to 20.5 TWh and from
+  3,292 to 3,175 MW. The daily peak moves from 17:00 to 18:00 local time
+  (to 21:00 on most days with CMIP6), the evening is above midday (it was
+  level), the yearly peak moves from 14:00 to 16:00 (ERA5) or 21:00
+  (CMIP6), and the
+  mean day is closer to Cuba's observed load of 2015-2019 (correlation 0.89
+  against 0.82 with ERA5), whose evening peak is at 18:00. Cuba's demand in
+  the Caribbean case was made by the earlier model and is not changed;
+  forecast it again to use the new one.
 
 ### Fixed
 
@@ -3290,11 +3319,28 @@ Per-release notes are also published on the
   losses are from the PWL losses of their flows. The dispatch, which accepts
   a point short of optimal, is unchanged.
 
+- **CMIP6 temperature in leap years.** The hourly CMIP6 curve of a leap year
+  kept 29 February and lost 31 December, so from 1 March every day read the
+  previous day's temperature. It now drops 29 February, like every 8760-h
+  year in ESFEX. Open-Meteo CMIP6 downloads are cached under a new name
+  (`..._8760.npz`), so the old files are not reused.
+
 ### Removed
 
 - The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
   (and their tests). Profiles are computed by `solarex` / `windrex` and, in
   the Grid Builder, by `open_meteo_weather`.
+
+- The previous density model files (`demand_density_hourly_xgb.ubj`,
+  `.feats.json`) and the scripts that retrained it on local civil time
+  (`scripts/demand_model/clock_audit.py`, `clocks.py`,
+  `series_clocks.csv`, `build_density_demand_dataset.py`,
+  `train_density_demand_hourly.py`). The shipped model is fitted by the
+  article's own pipeline; `scripts/demand_model/` now holds a copy of the
+  article's model code, the provenance of every shipped file and
+  `export_esfex_assets.py`, which writes them from the article's outputs.
+- Clipping of the density model's inputs to their training range (a tree
+  model is flat beyond its outermost split; the article does not clip).
 
 ## [0.3.0] — 2026-08-27
 
