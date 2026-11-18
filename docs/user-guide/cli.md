@@ -614,7 +614,7 @@ esfex train-demand-model [OPTIONS]
 | `--cache-dir` | | Path | `$ESFEX_DATA_ROOT/data/demand_dataset` | Dataset directory (the `--cache-dir` of `build-demand-dataset`) |
 | `--folds` | | Integer | `3` | Temporal cross-validation folds |
 
-A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow. The demand density model that the Grid Builder and the Demand Forecast workflow use is not trained by this command: see [Retraining the Demand Density Model](../contributing/demand-density-model.md).
+A model saved at the default path replaces the one shipped with ESFEX in the Studio's Demand Estimation workflow. The demand density model that the Grid Builder and the Demand Forecast workflow use is not trained by this command: it is the model of a published article, fitted by the article's own pipeline (see [Demand Density Model](../contributing/demand-density-model.md)).
 
 
 ---

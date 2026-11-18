@@ -410,7 +410,7 @@ print(idx[1416], idx[-1])  # 2028-03-01 00:00:00 2028-12-31 23:00:00
 def year_row_dates(year: int, n_hours: int = 8760) -> pd.DatetimeIndex
 ```
 
-The real date and hour of each row of an hourly year from 1 January 00:00: `model_time_index(f"{year}-01-01", n_hours)`, so an 8760-row year skips Feb 29; only a full 8784-row leap year keeps it. The demand models read every calendar feature (hour, day of week, month, holidays) from these dates, at training and at inference.
+The real date and hour of each row of an hourly year from 1 January 00:00: `model_time_index(f"{year}-01-01", n_hours)`, so an 8760-row year skips Feb 29; only a full 8784-row leap year keeps it. The demand models read every calendar feature (hour, day of week, month, holidays) from these dates, at training and at inference; for the density model the rows are UTC hours (see [Demand Density Model](../contributing/demand-density-model.md#clock)).
 
 ### drop_leap_days
 
@@ -492,7 +492,7 @@ The [model clock](../user-guide/configuration.md#model-clock): one fixed-offset 
 | `to_model_clock(series, source_zones, clock, start_year)` | `(hours,)` or `(hours, nodes)`, whole 8,760-h years (or one 8,784-h leap year) from 1 Jan of `start_year`, from `UTC`, a fixed zone or a node's local civil time (one zone per column) onto the clock. The year wraps; fractional shifts interpolate linearly |
 | `utc_to_model_clock`, `local_to_model_clock`, `weather_to_model_clock` | Shortcuts: UTC series; per-node local series (zones from coordinates); weather from a backend (`open_meteo`, `era5_atlite`: UTC; `nasa_power`: local solar time) |
 | `to_local_time(series, source_zones, local_zones, start_year)` | The same conversion onto the local civil time (DST-aware) of an IANA zone per column instead of the clock: row `h` is the local wall time `h` hours after 1 Jan 00:00 and holds the source value of that instant. A wall hour skipped when clocks spring forward holds the hour after it; a repeated one, its first occurrence |
-| `utc_to_local_time(series, local_zones, start_year)` | Shortcut for a UTC series (weather). The demand models use it: their calendar features are local civil time, and the temperature paired with local hour `h` is that of the same instant |
+| `utc_to_local_time(series, local_zones, start_year)` | Shortcut for a UTC series (weather). The shape and archetype demand models use it (their calendar features are local civil time, and the temperature paired with local hour `h` is that of the same instant), and the density engine to put its UTC result on each node's local time |
 
 ```python
 from esfex.utils.model_clock import utc_to_model_clock
