@@ -303,7 +303,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |
 | `lol_sec_sum_y{y}_d{d}_n{n}_t{t}`, `lol_sec_residual_y{y}_d{d}_n{n}_t{t}` | OP-5 | Bus load shed minus sectoral LOL is in [0, bus demand not covered by any sector] (the sectoral LOL is part of the load shed) |
-| `max_curtailment_s{σ}_y{y}` | CURT-1 | Annual, per system: curtailment (existing + technologies) over the year <= `max_curtailment_ratio` × RE generation over the year (+ the RE-3c exemption); a stochastic scenario's `max_curtailment_sc{k}_s{σ}_y{y}` |
+| `max_curtailment_s{σ}_y{y}` | CURT-1 | Annual, per system: curtailment (existing + technologies) over the year <= `max_curtailment_ratio` × RE generation over the year (+ the RE-3c exemption) + the excess `curtailment_excess_s{σ}_y{y}` (MWh/yr, at 10⁴ $/MWh); a stochastic scenario's `max_curtailment_sc{k}_s{σ}_y{y}` |
 
 ### TSAM Inter-Period Linking
 

@@ -453,16 +453,28 @@ parameters (`NUMERICAL_RETRY_PARAMS`) may finish either.
 """
 retry_worthy(model) = termination_status(model) in (MOI.NUMERICAL_ERROR, MOI.LOCALLY_SOLVED)
 
+# Per solver: the parameters of a second attempt at a solve that ended
+# NUMERICAL_ERROR or SUBOPTIMAL (Gurobi's own advice: "Consider using the
+# homogeneous algorithm (through parameter 'BarHomogeneous')")
+const NUMERICAL_RETRY_PARAMS = Dict{String, Vector{Pair{String, Any}}}(
+    "Gurobi" => ["BarHomogeneous" => 1],
+)
+
+# The model's solver's retry parameters (`nothing` without any)
+numerical_retry_params(model) = get(NUMERICAL_RETRY_PARAMS, JuMP.solver_name(model), nothing)
+
 """
-    solve_retrying!(solve!, model, retry; again = solve!)
+    solve_retrying!(solve!, model, retry; again = solve!, label)
 
 Run `solve!()`. When it ends `retry_worthy` and `retry` holds solver
-parameters (`name => value` pairs), set them, run `again()` with a warning,
-and set them back on the backend afterwards (through JuMP the change would
-mark the solution just found as out of date). With no `retry` (`nothing` or
-empty) the first solve stands.
+parameters (`name => value` pairs), set them, run `again()` with a warning
+that starts with `label` (the model solved: "Master problem", a dispatch
+window), and set them back on the backend afterwards (through JuMP the
+change would mark the solution just found as out of date). With no `retry`
+(`nothing` or empty) the first solve stands.
 """
-function solve_retrying!(solve!, model, retry; again = solve!)
+function solve_retrying!(solve!, model, retry; again = solve!,
+                         label = get(model.ext, :solve_label, "Master problem"))
     solve!()
     (retry !== nothing && !isempty(retry) && retry_worthy(model)) || return
     first = termination_status(model)
@@ -472,7 +484,7 @@ function solve_retrying!(solve!, model, retry; again = solve!)
         push!(previous, name => get_attribute(model, name))
         set_attribute(model, name, val)
     end
-    @warn "Master problem: the solve ended $(first)" *
+    @warn "$(label): the solve ended $(first)" *
           (isempty(detail) ? "" : " ($(detail))") * "; solving again with " *
           join(("$k = $v" for (k, v) in retry), ", ")
     try
@@ -482,7 +494,36 @@ function solve_retrying!(solve!, model, retry; again = solve!)
             MOI.set(backend(model), MOI.RawOptimizerAttribute(name), val)
         end
     end
-    @info "Master problem: second solve $(termination_status(model))"
+    @info "$(label): second solve $(termination_status(model))"
+    return
+end
+
+"""
+    optimize_retrying!(model, retry, label)
+
+Solve a master problem (`optimize_master!`) or a dispatch window
+(`optimize_dispatch!`): a solve that ends `retry_worthy` is solved once more
+with the solver's `retry` parameters (`solve_retrying!`). With line losses
+each solve of the loss repair is retried there (`optimize_exact_losses!`),
+and a repair round whose re-solve is still not `OPTIMAL` is undone.
+`label` names the model in the warnings.
+"""
+function optimize_retrying!(model, retry, label::AbstractString)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    if reg isa PWLLossRepair && !isempty(reg.blocks)
+        # Each solve of the loss repair is retried there: retrying the whole
+        # repair would solve every round again
+        model.ext[:solve_retry] = retry
+        model.ext[:solve_label] = label
+        try
+            optimize!(model)
+        finally
+            delete!(model.ext, :solve_retry)
+            delete!(model.ext, :solve_label)
+        end
+    else
+        solve_retrying!(() -> optimize!(model), model, retry; label = label)
+    end
     return
 end
 
@@ -604,14 +645,15 @@ or a solver without an answer, as HiGHS's "no progress") is returned as it
 is, with a warning: its losses mean nothing, and each round re-solves the
 whole model. The model stays an LP (or the MIP it was).
 
-Under `optimize_master!` (which sets `model.ext[:solve_retry]`), each solve
-that ends `NUMERICAL_ERROR` or `LOCALLY_SOLVED` is solved once more with the
-solver's retry parameters (`solve_retrying!`), and a repair round whose
-re-solve is still not `OPTIMAL` is undone (`undo_loss_round!`): the model of
-the round before is solved again and kept, with a warning. The master takes
-only an optimal plan, and an interior point short of optimal runs flow both
-ways on lines the optimum leaves alone, which the next round would read as
-over-loss.
+Under `optimize_master!` or `optimize_dispatch!` (`optimize_retrying!`,
+which sets `model.ext[:solve_retry]`), each solve that ends `NUMERICAL_ERROR`
+or `LOCALLY_SOLVED` is solved once more with the solver's retry parameters
+(`solve_retrying!`), and a repair round whose re-solve is still not
+`OPTIMAL` is undone (`undo_loss_round!`): the model of the round before is
+solved again and kept, with a warning. The master takes only an optimal
+plan, and an interior point short of optimal runs flow both ways on lines
+the optimum leaves alone, which the next round would read as over-loss. A
+plain `optimize!` neither retries nor undoes a round.
 """
 # An optimal solve, whose losses the repair can start from
 loss_repair_solved(model) =
@@ -623,10 +665,10 @@ function optimize_exact_losses!(model; kwargs...)
     if !(reg isa PWLLossRepair) || isempty(reg.blocks)
         return optimize!(model; ignore_optimize_hook = true, kwargs...)
     end
-    # A master (`optimize_master!` sets the key for the duration of its
-    # solve) takes only an optimal plan; its value holds the solver
-    # parameters for one more attempt at a solve that stalls
-    master = haskey(model.ext, :solve_retry)
+    # A master or a dispatch window (`optimize_retrying!` sets the key for
+    # the duration of its solve) repairs only from optimal rounds; its value
+    # holds the solver parameters for one more attempt at a solve that stalls
+    retrying = haskey(model.ext, :solve_retry)
     retry = get(model.ext, :solve_retry, nothing)
     resolve!() = optimize_like_first!(model; kwargs...)
     if restore_pwl_losses!(reg)
@@ -709,15 +751,15 @@ function optimize_exact_losses!(model; kwargs...)
             solve_retrying!(resolve!, model, retry)
             return
         end
-        if master && termination_status(model) != MOI.OPTIMAL
+        if retrying && termination_status(model) != MOI.OPTIMAL
             # A master would end on a status it rejects, and a point short of
             # optimal (Gurobi's barrier stalled: SUBOPTIMAL, LOCALLY_SOLVED)
             # is no ground for another round: an interior point, it runs flow
             # both ways on lines the optimum leaves alone (Cuba 2037: 85
             # steps "over-losing" after a round that only updated alphas; 0
             # at the optimum of the same model). The model of the round
-            # before, whose solve was optimal, is solved again. (The
-            # dispatch accepts such a point, and so does its repair.)
+            # before, whose solve was optimal, is solved again. The dispatch
+            # does the same (round 39).
             st = termination_status(model)
             undo_loss_round!(undo)
             solve_retrying!(resolve!, model, retry)

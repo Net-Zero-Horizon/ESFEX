@@ -882,6 +882,7 @@
     "solver": "Solver:",
     "threads": "Hilos:",
     "time_limit": "Límite de Tiempo (s):",
+    "time_limit_none": "Sin límite",
     "gap": "Gap (frac):",
     "n1_trans": "Transmisión:",
     "n1_trans_reserve": "Factor Reserva Trans. (frac):",

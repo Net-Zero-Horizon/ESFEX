@@ -895,7 +895,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `loss_of_reserve_dynamic` | float | `100` | $/MW dynamic reserve deficit |
 | `loss_of_inertia` | float | `200` | $/MW-s inertia deficit |
 | `transfer_margin` | float | `100` | Transfer-margin violation ($/MW). YAML also accepts `TransferMargin` |
-| `max_curtailment_ratio` | float (0–1) | `0.05` | Annual cap on RE curtailment as a fraction of RE generation, per system: the year's curtailment (its representative days or TSAM periods weighted to the year) is at most this share of the year's renewable generation; single days may curtail more. Master problem only (monolithic, TSAM, stochastic, MGA, myopic and Benders), as a hard constraint; the dispatch prices curtailment at `curtailment_cost` instead |
+| `max_curtailment_ratio` | float (0–1) | `0.05` | Annual cap on RE curtailment as a fraction of RE generation, per system: the year's curtailment (its representative days or TSAM periods weighted to the year) is at most this share of the year's renewable generation; single days may curtail more. Master problem only (monolithic, TSAM, stochastic, MGA, myopic and Benders). Curtailment above it costs 10⁴ $/MWh and is reported with a WARNING (system, year, GWh/yr); Benders holds it as a hard constraint. The dispatch prices curtailment at `curtailment_cost` instead |
 | `curtailment_cost` | float (≥ 0) | `20` | Cost of curtailed RE in operational dispatch ($/MWh) |
 | `rooftop_curtailment` | float | `5` | $/MWh rooftop curtailed |
 | `co2_cost` | float | `10` | $/tCO2 |

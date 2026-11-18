@@ -57,7 +57,7 @@ The currently implemented sector coupling modules are:
 - **MGA and SPORES** [**[7]**](reference/bibliography.md#ref7), [**[8]**](reference/bibliography.md#ref8) — Two distinct methods for near-optimal alternative generation under a shared cost-slack envelope. MGA runs the classical Hop-Skip-Jump diversity loop; SPORES solves one alternative per *named objective* (minimum build, technology equity, regional equity, evolutionary distance). See the [tutorial](tutorials/mga.md) for the dual workflow.
 - **Stochastic programming** [**[9]**](reference/bibliography.md#ref9), [**[10]**](reference/bibliography.md#ref10) — Scenario-based capacity expansion with probability-weighted costs, shared investment variables across scenarios (EVPI/VSS analysis).
 - **Sobol sensitivity analysis** [**[11]**](reference/bibliography.md#ref11), [**[12]**](reference/bibliography.md#ref12) — Global sensitivity indices for quantifying how input parameter uncertainty (costs, demand growth, availability) propagates to investment decisions and system cost.
-- **Progressive RE targets** — Linear interpolation from initial to target RE penetration with annual increment bounds. Constraint-based curtailment limits (not just penalty-based).
+- **Progressive RE targets** — Linear interpolation from initial to target RE penetration with annual increment bounds. Annual curtailment limits per system (a constraint whose excess is priced at 10⁴ $/MWh, not just a curtailment cost).
 
 ### Tools and Interface
 
