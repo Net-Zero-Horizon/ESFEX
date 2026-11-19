@@ -28,13 +28,13 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No power flow data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.charts.inter_node_flows.no_data"), false);
             return;
         }
         if (!data.nodes || data.nodes.length === 0) {
-            _ucClearPlot(); showStatus("No power flow data", false);
+            _ucClearPlot(); showStatus(_t("web.charts.inter_node_flows.no_data"), false);
             return;
         }
         try {
@@ -42,14 +42,14 @@ function refresh() {
                 renderFlowsUC(data);
             } else {
                 if (!data.years || data.years.length === 0) {
-                    _ucClearPlot(); showStatus("No power flow data", false);
+                    _ucClearPlot(); showStatus(_t("web.charts.inter_node_flows.no_data"), false);
                     return;
                 }
                 renderFlows(data);
             }
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[inter_node_flows.js] render threw:", e);
         }
     });
@@ -68,13 +68,13 @@ function renderFlowsUC(data) {
         name: names[i],
         line: { color: node.color, width: 2 },
         hovertemplate:
-            "Hour %{x}: %{y:,.1f} MW<extra>" + node.label + "</extra>",
+            _t("web.charts.inter_node_flows.hover_hour") + "<extra>" + node.label + "</extra>",
     }));
     const layout = {
         margin: { t: 70, r: 30, b: 60, l: 80 },
         showlegend: true,
         annotations: [
-            { text: "Positive = net importing &nbsp;|&nbsp; Negative = net exporting",
+            { text: _t("web.charts.inter_node_flows.note_positive") + " &nbsp;|&nbsp; " + _t("web.charts.inter_node_flows.note_negative"),
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.04, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
@@ -85,8 +85,8 @@ function renderFlowsUC(data) {
               x0: 0, x1: 1, y0: 0, y1: 0,
               line: { color: "#000000", width: 1 } },
         ],
-        xaxis: { title: "<b>Hour</b>" },
-        yaxis: { title: "<b>Net flow (MW)</b>" },
+        xaxis: { title: "<b>" + _t("web.charts.inter_node_flows.axis_hour") + "</b>" },
+        yaxis: { title: "<b>" + _t("web.charts.inter_node_flows.axis_net_flow") + "</b>" },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", traces, layout, {
@@ -128,7 +128,7 @@ function renderFlows(data) {
             marker: { color: node.color, opacity: 0.85 },
             offsetgroup: "flows",
             hovertemplate:
-                "%{x}: %{y:,.1f} GWh<extra>" + node.label + " · imports</extra>",
+                "%{x}: %{y:,.1f} GWh<extra>" + _t("web.charts.inter_node_flows.extra_imports", { node: node.label }) + "</extra>",
         });
         // Exports — negative bars (same colour, lower opacity)
         const neg = (node.exports_gwh || []).map(v => -Math.abs(v || 0));
@@ -142,7 +142,7 @@ function renderFlows(data) {
             offsetgroup: "flows",
             customdata: node.exports_gwh,
             hovertemplate:
-                "%{x}: %{customdata:,.1f} GWh<extra>" + node.label + " · exports</extra>",
+                "%{x}: %{customdata:,.1f} GWh<extra>" + _t("web.charts.inter_node_flows.extra_exports", { node: node.label }) + "</extra>",
         });
     });
 
@@ -174,11 +174,11 @@ function renderFlows(data) {
             domain: [0, 0.87],
             type: "category",
             tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.inter_node_flows.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis: {
-            title: "<b>Energy (GWh)</b>",
+            title: "<b>" + _t("web.charts.inter_node_flows.axis_energy") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
             zeroline: false,
         },

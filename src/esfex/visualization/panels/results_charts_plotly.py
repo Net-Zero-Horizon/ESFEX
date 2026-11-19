@@ -753,9 +753,13 @@ class BatteryOperationChart(PlotlyChart):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(QLabel(tr("results_charts.resolution")))
         cb = QComboBox()
-        cb.addItems(["daily", "monthly", "yearly"])
-        cb.setCurrentText("daily")
-        cb.currentTextChanged.connect(lambda v: setattr(self, "_resolution", v))
+        for value, key in (("daily", "results_charts.res_daily"),
+                           ("monthly", "results_charts.res_monthly"),
+                           ("yearly", "results_charts.res_yearly")):
+            cb.addItem(tr(key), value)
+        cb.setCurrentIndex(0)
+        cb.currentIndexChanged.connect(
+            lambda _i, c=cb: setattr(self, "_resolution", c.currentData()))
         lay.addWidget(cb)
         lay.addStretch()
         return w

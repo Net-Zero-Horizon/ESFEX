@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.otec_studio import economics as eco
 from esfex.visualization.workflows.otec_studio.project import StudioConfig
 from esfex.visualization.workflows.otec_studio.workers import EconomicsWorker
@@ -53,36 +54,39 @@ class EconomicsPanel(QWidget):
     def _build_ui(self):
         root = QHBoxLayout(self)
 
-        ctrl = QGroupBox("Economics")
+        ctrl = QGroupBox(tr("otec_studio.eco_group"))
         ctrl.setMaximumWidth(320)
         form = QFormLayout(ctrl)
 
         self._t_ww = self._spin(0, 40, 26.0, " °C")
         self._t_cw = self._spin(0, 40, 5.0, " °C")
         self._dist = self._spin(0, 1000, 20.0, " km")
-        form.addRow("Warm-water T:", self._t_ww)
-        form.addRow("Cold-water T:", self._t_cw)
-        form.addRow("Distance to shore:", self._dist)
+        form.addRow(tr("otec_studio.warm_water_t"), self._t_ww)
+        form.addRow(tr("otec_studio.cold_water_t"), self._t_cw)
+        form.addRow(tr("otec_studio.distance_to_shore"), self._dist)
 
         self._combo_cost = QComboBox()
-        self._combo_cost.addItems(["low_cost", "high_cost"])
-        form.addRow("Cost level:", self._combo_cost)
+        for key in ("low_cost", "high_cost"):
+            self._combo_cost.addItem(tr(f"otec_studio.eco_cost_{key}"), key)
+        form.addRow(tr("otec_studio.eco_cost_level"), self._combo_cost)
 
         self._combo_deg = QComboBox()
-        self._combo_deg.addItems(["constant", "logistic"])
+        for key in ("constant", "logistic"):
+            self._combo_deg.addItem(tr(f"otec_studio.eco_deg_{key}"), key)
         self._combo_deg.currentIndexChanged.connect(self._on_deg_changed)
-        form.addRow("Degradation:", self._combo_deg)
+        form.addRow(tr("otec_studio.eco_degradation"), self._combo_deg)
 
         self._rate = self._spin(0, 0.1, 0.005, "", decimals=4, step=0.001)
-        form.addRow("Annual rate:", self._rate)
+        form.addRow(tr("otec_studio.eco_annual_rate"), self._rate)
         self._log_L = self._spin(0, 1, 0.30, "", decimals=2, step=0.05)
         self._log_k = self._spin(0, 2, 0.30, "", decimals=2, step=0.05)
         self._log_t0 = self._spin(0, 40, 15.0, " yr", decimals=0, step=1.0)
-        self._row_L = form.addRow("Logistic L:", self._log_L) or self._log_L
-        form.addRow("Logistic k:", self._log_k)
-        form.addRow("Logistic t₀:", self._log_t0)
+        self._row_L = form.addRow(
+            tr("otec_studio.eco_logistic_param", param="L"), self._log_L) or self._log_L
+        form.addRow(tr("otec_studio.eco_logistic_param", param="k"), self._log_k)
+        form.addRow(tr("otec_studio.eco_logistic_param", param="t₀"), self._log_t0)
 
-        self._btn = QPushButton("Analyze economics")
+        self._btn = QPushButton(tr("otec_studio.eco_analyze"))
         self._btn.setStyleSheet(
             "background-color: #2980b9; color: white; font-weight: bold; padding: 8px;"
         )
@@ -105,20 +109,20 @@ class EconomicsPanel(QWidget):
         summ = QWidget()
         sl = QVBoxLayout(summ)
         sl.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._lbl_summary = QLabel("Run an analysis to see results.")
+        self._lbl_summary = QLabel(tr("otec_studio.eco_run_hint"))
         self._lbl_summary.setTextFormat(Qt.TextFormat.RichText)
         sl.addWidget(self._lbl_summary)
-        self._tabs.addTab(summ, "Summary")
+        self._tabs.addTab(summ, tr("otec_studio.eco_summary"))
 
         self._fig_capex = Figure(figsize=(5, 4), dpi=100, layout="constrained")
         self._canvas_capex = FigureCanvasQTAgg(self._fig_capex)
         self._ax_capex = self._fig_capex.add_subplot(111)
-        self._tabs.addTab(self._canvas_capex, "CAPEX breakdown")
+        self._tabs.addTab(self._canvas_capex, tr("otec_studio.eco_capex_breakdown"))
 
         self._fig_deg = Figure(figsize=(5, 4), dpi=100, layout="constrained")
         self._canvas_deg = FigureCanvasQTAgg(self._fig_deg)
         self._ax_deg = self._fig_deg.add_subplot(111)
-        self._tabs.addTab(self._canvas_deg, "Power over life")
+        self._tabs.addTab(self._canvas_deg, tr("otec_studio.eco_power_over_life"))
 
         root.addWidget(self._tabs, 1)
 
@@ -134,7 +138,7 @@ class EconomicsPanel(QWidget):
         return s
 
     def _on_deg_changed(self, *_):
-        is_log = self._combo_deg.currentText() == "logistic"
+        is_log = self._combo_deg.currentData() == "logistic"
         for w in (self._log_L, self._log_k, self._log_t0):
             w.setEnabled(is_log)
 
@@ -145,7 +149,7 @@ class EconomicsPanel(QWidget):
     def on_scenario_changed(self, scenario, project):
         self._project = project
         cfg = scenario.config
-        idx = self._combo_cost.findText(cfg.cost_level)
+        idx = self._combo_cost.findData(cfg.cost_level)
         if idx >= 0:
             self._combo_cost.setCurrentIndex(idx)
         # Prefer the optimized SiteContext, else the project's shared resource
@@ -164,15 +168,15 @@ class EconomicsPanel(QWidget):
         if self._project is not None:
             cfg = self._project.active.config
             from dataclasses import replace
-            return replace(cfg, cost_level=self._combo_cost.currentText())
-        return StudioConfig(cost_level=self._combo_cost.currentText())
+            return replace(cfg, cost_level=self._combo_cost.currentData())
+        return StudioConfig(cost_level=self._combo_cost.currentData())
 
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
 
     def _run(self):
-        model = self._combo_deg.currentText()
+        model = self._combo_deg.currentData()
         deg_kw = {}
         if model == "logistic":
             deg_kw = {
@@ -182,7 +186,7 @@ class EconomicsPanel(QWidget):
             }
         self._btn.setEnabled(False)
         self._progress.setVisible(True)
-        self._status.setText("Running on-design + degradation…")
+        self._status.setText(tr("otec_studio.eco_running"))
         self._worker = EconomicsWorker(
             self._config(), self._t_ww.value(), self._t_cw.value(),
             self._dist.value(), model, self._rate.value(), deg_kw,
@@ -194,26 +198,27 @@ class EconomicsPanel(QWidget):
     def _on_done(self, out):
         self._progress.setVisible(False)
         self._btn.setEnabled(True)
-        self._status.setText("Done.")
+        self._status.setText(tr("otec_studio.done"))
         self._status.setStyleSheet("color: #2ecc71;")
 
         premium = (out["lcoe_npv"] - out["lcoe_nominal"])
         pct = 100 * premium / out["lcoe_nominal"] if out["lcoe_nominal"] else 0
+        rows = [
+            ("eco_nominal_lcoe", f"{out['lcoe_nominal']:.3f}"),
+            ("eco_npv_lcoe", f"{out['lcoe_npv']:.3f}"),
+            ("eco_degradation_premium", f"+{premium:.3f} ({pct:.1f}%)"),
+            ("eco_capex_total", f"${out['capex_total'] / 1e6:,.1f} M"),
+            ("eco_opex_per_year", f"${(out['opex'] or 0) / 1e6:,.2f} M"),
+            ("eco_net_power_nameplate",
+             f"{abs(out['p_net_nom']) / 1000:,.1f} MW"),
+            ("eco_lifetime",
+             tr("otec_studio.eco_years", years=out["lifetime"])),
+        ]
         self._lbl_summary.setText(
-            f"<table cellpadding=4>"
-            f"<tr><td><b>Nominal LCOE</b></td><td>{out['lcoe_nominal']:.3f}</td></tr>"
-            f"<tr><td><b>NPV LCOE (with degradation)</b></td>"
-            f"<td>{out['lcoe_npv']:.3f}</td></tr>"
-            f"<tr><td><b>Degradation premium</b></td>"
-            f"<td>+{premium:.3f} ({pct:.1f}%)</td></tr>"
-            f"<tr><td><b>CAPEX total</b></td>"
-            f"<td>${out['capex_total'] / 1e6:,.1f} M</td></tr>"
-            f"<tr><td><b>OPEX / yr</b></td>"
-            f"<td>${(out['opex'] or 0) / 1e6:,.2f} M</td></tr>"
-            f"<tr><td><b>Net power (nameplate)</b></td>"
-            f"<td>{abs(out['p_net_nom']) / 1000:,.1f} MW</td></tr>"
-            f"<tr><td><b>Lifetime</b></td><td>{out['lifetime']} yr</td></tr>"
-            f"</table>"
+            "<table cellpadding=4>"
+            + "".join(f"<tr><td><b>{tr('otec_studio.' + k)}</b></td>"
+                      f"<td>{v}</td></tr>" for k, v in rows)
+            + "</table>"
         )
 
         self._draw_capex(out["capex_components"])
@@ -228,7 +233,7 @@ class EconomicsPanel(QWidget):
     def _on_error(self, msg):
         self._progress.setVisible(False)
         self._btn.setEnabled(True)
-        self._status.setText(f"Error: {msg}")
+        self._status.setText(tr("otec_studio.error_msg", error=msg))
         self._status.setStyleSheet("color: #e74c3c;")
 
     def _draw_capex(self, comps):
@@ -241,8 +246,9 @@ class EconomicsPanel(QWidget):
         ax.set_yticks(range(len(names)))
         ax.set_yticklabels(names, fontsize=8)
         ax.invert_yaxis()
-        ax.set_xlabel("CAPEX ($M)")
-        ax.set_title("CAPEX breakdown", fontsize=11, fontweight="bold")
+        ax.set_xlabel(tr("otec_studio.eco_axis_capex"))
+        ax.set_title(tr("otec_studio.eco_capex_breakdown"), fontsize=11,
+                     fontweight="bold")
         ax.grid(axis="x", alpha=0.3)
         self._canvas_capex.draw()
 
@@ -253,10 +259,11 @@ class EconomicsPanel(QWidget):
         ax.fill_between(years, p_by_year, alpha=0.2, color="#e67e22")
         ax.plot(years, p_by_year, "o-", color="#e67e22", ms=3, lw=1.5)
         ax.axhline(p_by_year[0], color="#555", lw=0.6, ls="--",
-                   label="nameplate")
-        ax.set_xlabel("Year")
-        ax.set_ylabel("Net power (MW)")
-        ax.set_title("Net power over plant life", fontsize=11, fontweight="bold")
+                   label=tr("otec_studio.eco_nameplate"))
+        ax.set_xlabel(tr("otec_studio.axis_year"))
+        ax.set_ylabel(tr("otec_studio.axis_net_power_mw"))
+        ax.set_title(tr("otec_studio.eco_power_over_life_title"), fontsize=11,
+                     fontweight="bold")
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
         self._canvas_deg.draw()

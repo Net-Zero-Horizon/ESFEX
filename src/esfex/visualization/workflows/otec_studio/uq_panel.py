@@ -32,12 +32,39 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.otec_studio import uq
 from esfex.visualization.workflows.otec_studio.project import StudioConfig
 from esfex.visualization.workflows.otec_studio.workers import UQWorker
 from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
+
+
+def _metric_label(metric: str) -> str:
+    """Translated label of an output metric (lcoe, net_power, capex, opex)."""
+    key = f"otec_studio.uq_metric_{metric}"
+    text = tr(key)
+    return metric if text == key else text
+
+
+def _dist_label(dist: str) -> str:
+    """Translated name of a distribution (normal, uniform, ...)."""
+    key = f"otec_studio.uq_dist_{dist}"
+    text = tr(key)
+    return dist if text == key else text
+
+
+def _param_label(name: str) -> str:
+    """Translated label of an OTEX uncertain parameter (raw name if unknown)."""
+    key = f"otec_studio.uq_param_{name}"
+    text = tr(key)
+    return name if text == key else text
+
+
+def _fill_metric_combo(combo: QComboBox, metrics) -> None:
+    for m in metrics:
+        combo.addItem(_metric_label(m), m)
 
 
 class UncertaintyPanel(QWidget):
@@ -59,10 +86,10 @@ class UncertaintyPanel(QWidget):
         root = QVBoxLayout(self)
 
         site = QHBoxLayout()
-        site.addWidget(QLabel("Warm T:"))
+        site.addWidget(QLabel(tr("otec_studio.uq_warm_t")))
         self._t_ww = self._spin(0, 40, 26.0, " °C")
         site.addWidget(self._t_ww)
-        site.addWidget(QLabel("Cold T:"))
+        site.addWidget(QLabel(tr("otec_studio.uq_cold_t")))
         self._t_cw = self._spin(0, 40, 5.0, " °C")
         site.addWidget(self._t_cw)
         site.addStretch()
@@ -72,24 +99,26 @@ class UncertaintyPanel(QWidget):
         root.addWidget(splitter, 1)
 
         # ── Left: editable parameter distributions ──
-        pgrp = QGroupBox("Uncertain parameters (editable bounds)")
+        pgrp = QGroupBox(tr("otec_studio.uq_params_group"))
         pl = QVBoxLayout(pgrp)
         self._table = QTableWidget()
         self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["Parameter", "Dist", "P1", "P2"])
+        self._table.setHorizontalHeaderLabels(
+            [tr("otec_studio.uq_col_parameter"), tr("otec_studio.uq_col_dist"),
+             "P1", "P2"])
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
         pl.addWidget(self._table)
-        hint = QLabel("P1/P2 = (mean, std) for normal · (low, high) for uniform")
+        hint = QLabel(tr("otec_studio.uq_params_hint"))
         hint.setStyleSheet(scale_qss_fonts("color: #888; font-size: 10px;"))
         pl.addWidget(hint)
         splitter.addWidget(pgrp)
 
         # ── Right: analysis sub-tabs ──
         self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_mc_tab(), "Monte Carlo")
-        self._tabs.addTab(self._build_tornado_tab(), "Tornado")
-        self._tabs.addTab(self._build_sobol_tab(), "Sobol")
+        self._tabs.addTab(self._build_mc_tab(), tr("otec_studio.uq_monte_carlo"))
+        self._tabs.addTab(self._build_tornado_tab(), tr("otec_studio.uq_tornado"))
+        self._tabs.addTab(self._build_sobol_tab(), tr("otec_studio.uq_sobol"))
         splitter.addWidget(self._tabs)
         splitter.setSizes([380, 640])
 
@@ -97,17 +126,18 @@ class UncertaintyPanel(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
         ctrl = QHBoxLayout()
-        ctrl.addWidget(QLabel("Samples:"))
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_samples")))
         self._mc_n = QSpinBox(); self._mc_n.setRange(50, 5000); self._mc_n.setValue(500)
         self._mc_n.setSingleStep(50)
         ctrl.addWidget(self._mc_n)
-        ctrl.addWidget(QLabel("Seed:"))
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_seed")))
         self._mc_seed = QSpinBox(); self._mc_seed.setRange(0, 99999); self._mc_seed.setValue(42)
         ctrl.addWidget(self._mc_seed)
-        ctrl.addWidget(QLabel("Metric:"))
-        self._mc_metric = QComboBox(); self._mc_metric.addItems(uq.MC_METRICS)
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_metric")))
+        self._mc_metric = QComboBox()
+        _fill_metric_combo(self._mc_metric, uq.MC_METRICS)
         ctrl.addWidget(self._mc_metric)
-        self._mc_btn = QPushButton("Run Monte Carlo")
+        self._mc_btn = QPushButton(tr("otec_studio.uq_run_mc"))
         self._mc_btn.clicked.connect(lambda: self._run("mc"))
         ctrl.addWidget(self._mc_btn)
         ctrl.addStretch()
@@ -125,13 +155,14 @@ class UncertaintyPanel(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
         ctrl = QHBoxLayout()
-        ctrl.addWidget(QLabel("Variation ±%:"))
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_variation")))
         self._tor_pct = QSpinBox(); self._tor_pct.setRange(1, 50); self._tor_pct.setValue(10)
         ctrl.addWidget(self._tor_pct)
-        ctrl.addWidget(QLabel("Output:"))
-        self._tor_out = QComboBox(); self._tor_out.addItems(uq.SENS_OUTPUTS)
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_output")))
+        self._tor_out = QComboBox()
+        _fill_metric_combo(self._tor_out, uq.SENS_OUTPUTS)
         ctrl.addWidget(self._tor_out)
-        self._tor_btn = QPushButton("Run Tornado")
+        self._tor_btn = QPushButton(tr("otec_studio.uq_run_tornado"))
         self._tor_btn.clicked.connect(lambda: self._run("tornado"))
         ctrl.addWidget(self._tor_btn)
         ctrl.addStretch()
@@ -147,14 +178,15 @@ class UncertaintyPanel(QWidget):
         w = QWidget()
         lay = QVBoxLayout(w)
         ctrl = QHBoxLayout()
-        ctrl.addWidget(QLabel("Samples:"))
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_samples")))
         self._sob_n = QSpinBox(); self._sob_n.setRange(16, 2048); self._sob_n.setValue(256)
         self._sob_n.setSingleStep(16)
         ctrl.addWidget(self._sob_n)
-        ctrl.addWidget(QLabel("Output:"))
-        self._sob_out = QComboBox(); self._sob_out.addItems(uq.SENS_OUTPUTS)
+        ctrl.addWidget(QLabel(tr("otec_studio.uq_output")))
+        self._sob_out = QComboBox()
+        _fill_metric_combo(self._sob_out, uq.SENS_OUTPUTS)
         ctrl.addWidget(self._sob_out)
-        self._sob_btn = QPushButton("Run Sobol")
+        self._sob_btn = QPushButton(tr("otec_studio.uq_run_sobol"))
         self._sob_btn.clicked.connect(lambda: self._run("sobol"))
         ctrl.addWidget(self._sob_btn)
         ctrl.addStretch()
@@ -184,9 +216,10 @@ class UncertaintyPanel(QWidget):
     def _fill_param_table(self):
         self._table.setRowCount(len(self._params))
         for r, p in enumerate(self._params):
-            name = QTableWidgetItem(p["name"])
+            name = QTableWidgetItem(_param_label(p["name"]))
+            name.setToolTip(p["name"])
             name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            dist = QTableWidgetItem(p["distribution"])
+            dist = QTableWidgetItem(_dist_label(p["distribution"]))
             dist.setFlags(dist.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._table.setItem(r, 0, name)
             self._table.setItem(r, 1, dist)
@@ -238,10 +271,10 @@ class UncertaintyPanel(QWidget):
             opts = {"n_samples": self._mc_n.value(), "seed": self._mc_seed.value()}
         elif kind == "tornado":
             opts = {"variation_pct": float(self._tor_pct.value()),
-                    "output": self._tor_out.currentText()}
+                    "output": self._tor_out.currentData()}
         else:
             opts = {"n_samples": self._sob_n.value(),
-                    "output": self._sob_out.currentText()}
+                    "output": self._sob_out.currentData()}
         btn.setEnabled(False)
         prog.setVisible(True)
         worker = UQWorker(
@@ -281,7 +314,7 @@ class UncertaintyPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _draw_mc(self, out):
-        metric = self._mc_metric.currentText()
+        metric = self._mc_metric.currentData()
         df = out["df"]
         if metric not in df.columns:
             return
@@ -295,18 +328,21 @@ class UncertaintyPanel(QWidget):
         ax.clear()
         ax.hist(samples, bins=min(40, len(samples) // 2 + 1),
                 color="#2980b9", alpha=0.75, edgecolor="white")
-        for val, c, lbl in [(mean, "#27ae60", "mean"),
+        for val, c, lbl in [(mean, "#27ae60", tr("otec_studio.uq_mean")),
                             (p5, "#e74c3c", "p5"), (p95, "#e67e22", "p95")]:
             if val is not None:
                 ax.axvline(val, color=c, lw=1.5, ls="--", label=f"{lbl}={val:.3g}")
-        ax.set_xlabel(metric); ax.set_ylabel("Frequency")
-        ax.set_title(f"Monte Carlo — {metric}", fontsize=11, fontweight="bold")
+        ax.set_xlabel(_metric_label(metric))
+        ax.set_ylabel(tr("otec_studio.uq_frequency"))
+        ax.set_title(tr("otec_studio.uq_mc_title", metric=_metric_label(metric)),
+                     fontsize=11, fontweight="bold")
         ax.legend(fontsize=8); ax.grid(alpha=0.3)
         self._mc_canvas.draw()
         cv = st.get(f"{metric}_cv")
         self._mc_stats.setText(
-            f"mean={mean:.4g}  ·  std={st.get(f'{metric}_std', float('nan')):.4g}"
-            f"  ·  CV={cv:.3f}  ·  p5–p95=[{p5:.3g}, {p95:.3g}]"
+            tr("otec_studio.uq_mc_stats", mean=f"{mean:.4g}",
+               std=f"{st.get(f'{metric}_std', float('nan')):.4g}",
+               cv=f"{cv:.3f}", p5=f"{p5:.3g}", p95=f"{p95:.3g}")
             if mean is not None else ""
         )
 
@@ -318,9 +354,12 @@ class UncertaintyPanel(QWidget):
         swings = [float(r[1]) for r in ranking][:10][::-1]
         ax.barh(range(len(names)), swings, color="#e74c3c", edgecolor="white")
         ax.set_yticks(range(len(names)))
-        ax.set_yticklabels(names, fontsize=8)
-        ax.set_xlabel(f"{out['output']} swing")
-        ax.set_title(f"Tornado — {out['output']}", fontsize=11, fontweight="bold")
+        ax.set_yticklabels([_param_label(n) for n in names], fontsize=8)
+        ax.set_xlabel(tr("otec_studio.uq_swing",
+                         metric=_metric_label(out["output"])))
+        ax.set_title(tr("otec_studio.uq_tornado_title",
+                        metric=_metric_label(out["output"])),
+                     fontsize=11, fontweight="bold")
         ax.grid(axis="x", alpha=0.3)
         self._tor_canvas.draw()
 
@@ -334,11 +373,14 @@ class UncertaintyPanel(QWidget):
         ax = self._sob_ax
         ax.clear()
         y = np.arange(len(names))
-        ax.barh(y - 0.2, s1v, height=0.4, color="#2ecc71", label="S1 (first order)")
-        ax.barh(y + 0.2, stv, height=0.4, color="#9b59b6", label="ST (total)")
-        ax.set_yticks(y); ax.set_yticklabels(names, fontsize=8)
+        ax.barh(y - 0.2, s1v, height=0.4, color="#2ecc71", label=tr("otec_studio.uq_s1"))
+        ax.barh(y + 0.2, stv, height=0.4, color="#9b59b6", label=tr("otec_studio.uq_st"))
+        ax.set_yticks(y)
+        ax.set_yticklabels([_param_label(n) for n in names], fontsize=8)
         ax.invert_yaxis()
-        ax.set_xlabel("Sobol index")
-        ax.set_title(f"Sobol — {out['output']}", fontsize=11, fontweight="bold")
+        ax.set_xlabel(tr("otec_studio.uq_sobol_index"))
+        ax.set_title(tr("otec_studio.uq_sobol_title",
+                        metric=_metric_label(out["output"])),
+                     fontsize=11, fontweight="bold")
         ax.legend(fontsize=8); ax.grid(axis="x", alpha=0.3)
         self._sob_canvas.draw()

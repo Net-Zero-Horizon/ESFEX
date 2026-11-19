@@ -58,6 +58,10 @@ _SCRIPT = textwrap.dedent(r'''
     data = json.dumps(build_elk_graph(st))
 
     app = QApplication([])
+    # The page's texts come through the translation channel, as in the Studio.
+    from esfex.visualization import i18n, web_i18n
+    i18n.init_i18n("en")
+    web_i18n.install()
     view = QWebEngineView()
     view.resize(1200, 800)
     view.show()

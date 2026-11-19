@@ -25,9 +25,9 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try {
             currentData = data;
@@ -35,7 +35,7 @@ function refresh() {
             render(currentData, currentCmap);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true); console.error(e);
+            showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e);
         }
     });
 }
@@ -107,7 +107,7 @@ function findHeatmapTraceIdx() {
 function render(data, cmap) {
     const s = data.similarity;
     if (!s || !s.distance || s.distance.length < 2) {
-        showStatus("Need at least two alternatives to compute similarity.", false);
+        showStatus(_t("web.charts.mga_similarity.no_data"), false);
         return;
     }
     const n = s.alt_ids.length;
@@ -116,7 +116,7 @@ function render(data, cmap) {
     // Reorder the matrix and labels by the dendrogram's leaf order.
     const z = order.map(i => order.map(j => s.distance[i][j]));
     const labels = order.map(i =>
-        (s.is_optimal[i] ? "★ " : "") + "Alt " + s.alt_ids[i]);
+        (s.is_optimal[i] ? "★ " : "") + _t("web.charts.mga_similarity.alt_label", { id: s.alt_ids[i] }));
     const idx = labels.map((_, i) => i);          // numeric col/row index
     const clustersReordered = order.map(i => s.clusters[i]);
 
@@ -163,14 +163,14 @@ function render(data, cmap) {
         z: z, x: idx, y: idx,
         xaxis: "x", yaxis: "y",
         colorscale: resolveColorscale(cmap), reversescale: false,
-        colorbar: { title: { text: "Distance", side: "right" },
+        colorbar: { title: { text: _t("web.charts.mga_similarity.colorbar_distance"), side: "right" },
                     thickness: 12, len: 0.65, y: 0.32, yanchor: "middle" },
         // 2-D customdata so the hover shows the readable row + column
         // labels instead of the numeric indices the axes now use.
         customdata: idx.map(i => idx.map(j => [labels[i], labels[j]])),
         hovertemplate:
             "<b>%{customdata[0]} ↔ %{customdata[1]}</b><br>" +
-            "distance = %{z:,.1f}<extra></extra>",
+            _t("web.charts.mga_similarity.hover_distance") + "<extra></extra>",
     };
 
     const traces = [...dendroTraces, heatmap];
@@ -179,7 +179,7 @@ function render(data, cmap) {
     // y  (heatmap) takes the lower 65%, y2 (dendro) the top ~22%.
     const layout = {
         margin: { l: 90, r: 30, t: 50, b: 90 },
-        title: { text: "<span style='font-size:11px;color:#7f8c8d'>Euclidean distance in decision space · rows / columns reordered by the dendrogram above</span>",
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" + _t("web.charts.mga_similarity.subtitle") + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         xaxis:  { domain: [0.0, 1.0],

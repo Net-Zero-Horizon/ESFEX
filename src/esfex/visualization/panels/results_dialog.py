@@ -111,13 +111,24 @@ for _cat, _names in _CHART_CATEGORIES.items():
     for _n in _names:
         _CLASS_TO_CATEGORY[_n] = _cat
 
-# Export format filter strings
+# Sidebar category headers (translation keys)
+_CATEGORY_KEYS = {
+    "Generation": "results_dialog.cat_generation",
+    "Storage": "results_dialog.cat_storage",
+    "Economics": "results_dialog.cat_economics",
+    "System": "results_dialog.cat_system",
+    "UC Operations": "results_dialog.cat_uc_operations",
+    "Near-Optimal": "results_dialog.cat_near_optimal",
+    "Custom": "results_dialog.cat_custom",
+}
+
+# Export format filter strings (translation keys)
 _EXPORT_FILTERS = {
-    "PNG": "PNG Image (*.png)",
-    "SVG": "SVG Vector (*.svg)",
-    "PDF": "PDF Document (*.pdf)",
-    "JPG": "JPEG Image (*.jpg)",
-    "TIFF": "TIFF Image (*.tiff)",
+    "PNG": "results_dialog.filter_png",
+    "SVG": "results_dialog.filter_svg",
+    "PDF": "results_dialog.filter_pdf",
+    "JPG": "results_dialog.filter_jpg",
+    "TIFF": "results_dialog.filter_tiff",
 }
 
 
@@ -164,7 +175,7 @@ class _BusyOverlay(QWidget):
         vbox.setContentsMargins(24, 18, 24, 18)
         vbox.setSpacing(10)
 
-        self._label = QLabel("Loading charts...")
+        self._label = QLabel(tr("results_dialog.loading_charts"))
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(scale_qss_fonts("color: #2C3E50; font-size: 13px; background: transparent;"))
         vbox.addWidget(self._label)
@@ -207,9 +218,9 @@ class _BusyOverlay(QWidget):
         except RuntimeError:
             pass
 
-    def start(self, message: str = "Loading charts...", total: int = 100):
+    def start(self, message: str = "", total: int = 100):
         self._restyle()
-        self._label.setText(message)
+        self._label.setText(message or tr("results_dialog.loading_charts"))
         self._progress.setRange(0, total)
         self._progress.setValue(0)
         self._sync_geometry()
@@ -398,7 +409,7 @@ class ResultsDialog(QDialog):
         self._system_combo.currentTextChanged.connect(self._on_system_changed)
 
         # -- Chart list --
-        lbl_charts = QLabel("Charts")
+        lbl_charts = QLabel(tr("results_dialog.tab_charts"))
         lbl_charts.setObjectName("sidebarLabel")
         sb.addWidget(lbl_charts)
 
@@ -425,7 +436,7 @@ class ResultsDialog(QDialog):
             logger.exception("DashboardView could not be constructed: %s", exc)
 
         if self._dashboard_view is not None:
-            dash_header = QListWidgetItem("  DASHBOARD")
+            dash_header = QListWidgetItem(f"  {tr('results_dialog.dashboard').upper()}")
             dash_header.setFlags(Qt.ItemFlag.NoItemFlags)
             fnt = dash_header.font(); fnt.setBold(True)
             if fnt.pointSize() > 1:  # -1 when the base font is pixel-defined
@@ -434,7 +445,7 @@ class ResultsDialog(QDialog):
             dash_header.setSizeHint(QSize(0, 24))
             self._chart_list.addItem(dash_header)
 
-            dash_item = QListWidgetItem("    Overview")
+            dash_item = QListWidgetItem(f"    {tr('results_dialog.overview')}")
             dash_item.setSizeHint(QSize(0, 28))
             # Sentinel: lets the selection handler recognise this
             # entry without relying on a fragile index.
@@ -472,7 +483,8 @@ class ResultsDialog(QDialog):
             # Category header
             cat = _CLASS_TO_CATEGORY.get(cls.__name__, "")
             if cat and cat != prev_category:
-                header = QListWidgetItem(f"  {cat.upper()}")
+                cat_label = tr(_CATEGORY_KEYS[cat]) if cat in _CATEGORY_KEYS else cat
+                header = QListWidgetItem(f"  {cat_label.upper()}")
                 header.setFlags(Qt.ItemFlag.NoItemFlags)
                 header.setForeground(
                     self._chart_list.palette().color(
@@ -571,7 +583,7 @@ class ResultsDialog(QDialog):
         # params widget. ``QRangeSlider`` (superqt) gives two handles on a
         # single track; default is the full range so nothing is filtered
         # out until the user narrows it.
-        self._year_label = QLabel("Years:")
+        self._year_label = QLabel(tr("results_dialog.years"))
         self._year_label.setObjectName("yearSliderLabel")
         tb_layout.addWidget(self._year_label)
 
@@ -607,7 +619,7 @@ class ResultsDialog(QDialog):
         # Plotly chart in the dialog via the `setFontScale` JS helper.
         # Matplotlib charts ignore it (no JS bridge) — they're being
         # phased out as we migrate to interactive Plotly versions.
-        tb_layout.addWidget(QLabel("Font:"))
+        tb_layout.addWidget(QLabel(tr("results_dialog.font")))
         self._font_slider = QSlider(Qt.Orientation.Horizontal)
         self._font_slider.setObjectName("fontSlider")
         self._font_slider.setFixedWidth(140)
@@ -632,7 +644,7 @@ class ResultsDialog(QDialog):
         self._export_format.setFixedWidth(90)
         tb_layout.addWidget(self._export_format)
 
-        self._export_btn = QPushButton("Export")
+        self._export_btn = QPushButton(tr("results_dialog.export"))
         self._export_btn.setObjectName("exportButton")
         self._export_btn.clicked.connect(self._on_export)
         tb_layout.addWidget(self._export_btn)
@@ -726,7 +738,7 @@ class ResultsDialog(QDialog):
         if self._is_dashboard_item(item):
             # Dashboard always sits at stack index 0 when present.
             self._current_chart_idx = -1
-            self._chart_title_label.setText("Dashboard")
+            self._chart_title_label.setText(tr("results_dialog.dashboard"))
             self._params_stack.setCurrentIndex(0)
             self._fit_params_height()
             self._chart_stack.setCurrentIndex(0)
@@ -798,7 +810,7 @@ class ResultsDialog(QDialog):
             return
 
         total = len(self._charts)
-        self._overlay.start("Rendering charts...", total)
+        self._overlay.start(tr("results_dialog.rendering_charts"), total)
         # Dim + lock the dialog while the batch runs. The sidebar holds
         # the only non-WebView interactive controls (chart list, system
         # combo, MGA table) — disabling it greys them out and blocks
@@ -824,7 +836,8 @@ class ResultsDialog(QDialog):
                 self._render_dashboard_in_batch()
                 for i, chart in enumerate(self._charts):
                     title = tr(chart.TR_KEY) if chart.TR_KEY else chart.TITLE
-                    self._overlay.update_progress(i, f"Rendering: {title}")
+                    self._overlay.update_progress(
+                        i, tr("results_dialog.rendering", title=title))
                     # Make the chart's QWebEngineView the visible page in
                     # the stack so its size is well-defined when Plotly
                     # measures. Keep the overlay on top so the user only
@@ -879,7 +892,7 @@ class ResultsDialog(QDialog):
             # Always re-enable + drop the overlay, even if a render
             # raised, so the dialog never gets stuck dimmed/locked.
             self._sidebar.setEnabled(True)
-            self._overlay.update_progress(total, "Done")
+            self._overlay.update_progress(total, tr("results_dialog.done"))
             self._overlay.finish()
 
         # Push the current GUI theme to every chart so the first render
@@ -902,7 +915,8 @@ class ResultsDialog(QDialog):
         if dv is None or self._closing:
             return
         shim = SimpleNamespace(_view=dv)
-        self._overlay.update_progress(0, "Rendering: Dashboard")
+        self._overlay.update_progress(
+            0, tr("results_dialog.rendering", title=tr("results_dialog.dashboard")))
         # Bring the dashboard (stack index 0) to front so its webview is
         # sized when Plotly measures; keep the overlay on top.
         self._chart_stack.setCurrentIndex(0)
@@ -1117,23 +1131,25 @@ class ResultsDialog(QDialog):
     def _on_export(self):
         """Export the current chart to the selected format."""
         if self._current_chart_idx < 0 or self._current_chart_idx >= len(self._charts):
-            QMessageBox.information(self, "Export", "No chart to export.")
+            QMessageBox.information(self, tr("results_dialog.export"),
+                                    tr("results_dialog.no_chart"))
             return
 
         chart = self._charts[self._current_chart_idx]
         if not chart._loaded:
-            QMessageBox.information(self, "Export", "No chart to export.")
+            QMessageBox.information(self, tr("results_dialog.export"),
+                                    tr("results_dialog.no_chart"))
             return
 
         fmt = self._export_format.currentText()
         ext = fmt.lower()
 
-        filter_str = _EXPORT_FILTERS.get(fmt, "All files (*)")
+        filter_str = tr(_EXPORT_FILTERS.get(fmt, "results_dialog.filter_all"))
         default_name = (chart.TITLE or "chart").replace(" ", "_").lower()
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Chart",
+            tr("results_dialog.export_chart"),
             str(Path.home() / f"{default_name}.{ext}"),
             filter_str,
         )
@@ -1148,14 +1164,17 @@ class ResultsDialog(QDialog):
             elif hasattr(chart, "export_image"):
                 chart.export_image(file_path)
             else:
-                QMessageBox.warning(self, "Export", "Export not supported for this chart type.")
+                QMessageBox.warning(self, tr("results_dialog.export"),
+                                    tr("results_dialog.export_unsupported"))
                 return
             QMessageBox.information(
-                self, "Export", f"Chart exported to:\n{file_path}"
+                self, tr("results_dialog.export"),
+                tr("results_dialog.exported", path=file_path),
             )
         except Exception as e:
             QMessageBox.warning(
-                self, "Export Error", f"Failed to export chart:\n{e}"
+                self, tr("results_dialog.export_error"),
+                tr("results_dialog.export_failed", error=e),
             )
 
     # ------------------------------------------------------------------

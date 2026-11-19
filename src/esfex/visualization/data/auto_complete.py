@@ -48,6 +48,9 @@ class ConnectionPlan:
     transformer_lv_kv: float
     line_capacity_mw: float
     reason: str = ""
+    # English summary used in the names of auto-created elements, so element
+    # names do not depend on the Studio language ("" = equipment_summary).
+    name_summary: str = ""
     # Positions along the pattern (gen → LV → TR → HV)
     equip_lat: float = 0.0
     equip_lng: float = 0.0
@@ -127,6 +130,8 @@ def _find_disconnected(state: GuiSystemState) -> list[_Equip]:
 # ── Public API ─────────────────────────────────────────────────────
 
 def plan_auto_complete(state: GuiSystemState) -> list[ConnectionPlan]:
+    from esfex.visualization.i18n import tr  # lazy: this module is Qt-free
+
     disconnected = _find_disconnected(state)
     if not disconnected:
         return []
@@ -199,21 +204,28 @@ def plan_auto_complete(state: GuiSystemState) -> list[ConnectionPlan]:
         bat_n = sum(1 for e in group if e.etype == "battery")
         ely_n = sum(1 for e in group if e.etype == "electrolyzer")
         parts: list[str] = []
+        name_parts: list[str] = []
         if gen_n:
             mw = sum(e.rated_mw for e in group if e.etype == "generator")
-            parts.append(f"{gen_n} gen ({mw:.0f} MW)")
+            parts.append(tr("validation.ac_summary_gen", n=gen_n, mw=f"{mw:.0f}"))
+            name_parts.append(f"{gen_n} gen ({mw:.0f} MW)")
         if bat_n:
             mw = sum(e.rated_mw for e in group if e.etype == "battery")
-            parts.append(f"{bat_n} bat ({mw:.0f} MW)")
+            parts.append(tr("validation.ac_summary_bat", n=bat_n, mw=f"{mw:.0f}"))
+            name_parts.append(f"{bat_n} bat ({mw:.0f} MW)")
         if ely_n:
-            parts.append(f"{ely_n} elec")
-        summary = ", ".join(parts) or "equipment"
+            parts.append(tr("validation.ac_summary_elec", n=ely_n))
+            name_parts.append(f"{ely_n} elec")
+        summary = (tr("validation.list_sep").join(parts)
+                   or tr("validation.ac_summary_equipment"))
+        name_summary = ", ".join(name_parts) or "equipment"
 
         plans.append(ConnectionPlan(
             isolated_bus_id=bus_id,
             target_bus_id=best_id,
             distance_km=best_dist,
             equipment_summary=summary,
+            name_summary=name_summary,
             total_capacity_mw=total_mw,
             transformer_capacity_mva=tr_cap,
             transformer_hv_kv=tgt.voltage_kv,
@@ -601,7 +613,7 @@ def apply_auto_complete(
             # ── 1. Create LV bus ──
             new_lv = model.add_bus(
                 parent_node=equip_node,
-                name=f"Auto LV ({plan.equipment_summary[:25]})",
+                name=f"Auto LV ({(plan.name_summary or plan.equipment_summary)[:25]})",
                 voltage_kv=plan.transformer_lv_kv,
                 latitude=plan.lv_lat,
                 longitude=plan.lv_lng,

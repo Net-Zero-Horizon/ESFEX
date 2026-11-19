@@ -24,20 +24,20 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false);
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.years || data.years.length === 0) {
-            showStatus("No data", false);
+            showStatus(_t("web.common.no_data"), false);
             return;
         }
         try {
             renderFuelSupply(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[fuel_supply.js] render threw:", e);
         }
     });
@@ -102,24 +102,24 @@ function renderFuelSupply(data) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: years, y: data.total_gen_gwh,
-            name: "Total Generation",
+            name: _t("web.charts.fuel_supply.total_generation"),
             line: { color: "#2C3E50", width: 2.5 },
             marker: { color: "#2C3E50", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x", yaxis: "y",
-            hovertemplate: "%{x}: %{y:,.1f} GWh<extra>Total</extra>",
+            hovertemplate: "%{x}: %{y:,.1f} GWh<extra>" + _t("web.charts.fuel_supply.extra_total") + "</extra>",
         });
     }
     if (data.total_cost_musd && data.total_cost_musd.length) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: years, y: data.total_cost_musd,
-            name: "Total Fuel Cost",
+            name: _t("web.charts.fuel_supply.total_fuel_cost"),
             line: { color: "#2C3E50", width: 2.5 },
             marker: { color: "#2C3E50", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x2", yaxis: "y2",
-            hovertemplate: "%{x}: %{y:,.2f} M$<extra>Total</extra>",
+            hovertemplate: "%{x}: %{y:,.2f} M$<extra>" + _t("web.charts.fuel_supply.extra_total") + "</extra>",
         });
     }
 
@@ -132,11 +132,11 @@ function renderFuelSupply(data) {
         showlegend: true,
         barmode: "relative",
         annotations: [
-            { text: "<b>a) Generation by Fuel Type</b>",
+            { text: "<b>" + _t("web.charts.fuel_supply.title_a") + "</b>",
               x: 0.435, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Fuel Cost by Type</b>",
+            { text: "<b>" + _t("web.charts.fuel_supply.title_b") + "</b>",
               x: 0.435, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -159,19 +159,19 @@ function renderFuelSupply(data) {
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
-            title: "<b>Generation (GWh)</b>",
+            title: "<b>" + _t("web.charts.fuel_supply.axis_generation") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         xaxis2: {
             domain: [0, 0.87], anchor: "y2",
             type: "category",
             tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.fuel_supply.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis2: {
             domain: [0.0, 0.44], anchor: "x2",
-            title: "<b>Fuel Cost (M$)</b>",
+            title: "<b>" + _t("web.charts.fuel_supply.axis_fuel_cost") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
     };

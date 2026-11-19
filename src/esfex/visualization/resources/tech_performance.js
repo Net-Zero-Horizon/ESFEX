@@ -26,20 +26,20 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No CF/LCOE data", false);
+            showStatus(data && data.error ? data.error : _t("web.charts.tech_performance.no_data"), false);
             return;
         }
         if (!data.techs || data.techs.length === 0) {
-            showStatus("No CF/LCOE data", false);
+            showStatus(_t("web.charts.tech_performance.no_data"), false);
             return;
         }
         try {
             renderTechPerf(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[tech_perf.js] render threw:", e);
         }
     });
@@ -90,7 +90,7 @@ function _scatterTrace(points, valueKey, opts, yearScale) {
         if (opts.showscale) {
             marker.showscale = true;
             marker.colorbar = {
-                title: { text: "Year", side: "right" },
+                title: { text: _t("web.charts.tech_performance.colorbar_year"), side: "right" },
                 thickness: 12, len: 0.85,
                 x: 0.96, xanchor: "left",
             };
@@ -108,9 +108,7 @@ function _scatterTrace(points, valueKey, opts, yearScale) {
         marker: marker,
         xaxis: opts.xaxis, yaxis: opts.yaxis,
         customdata: points.map(p => [p.tech, p.year]),
-        hovertemplate:
-            "<b>%{customdata[0]}</b><br>Year %{customdata[1]}<br>" +
-            opts.unit + ": %{y:.2f}<extra></extra>",
+        hovertemplate: _t("web.charts.tech_performance.hover_point", { unit: opts.unit }),
     };
 }
 
@@ -124,15 +122,15 @@ function renderTechPerf(data) {
     // ── Subplot (a) — KDE silhouettes + CF markers ──
     (data.cf_kdes || []).forEach((curve, i) => {
         traces.push(_kdeTrace(curve, {
-            name: "CF Distribution",
+            name: _t("web.charts.tech_performance.trace_cf_dist"),
             fillcolor: "rgba(107,107,107,0.4)",
             xaxis: "x", yaxis: "y",
             showlegend: i === 0,    // only the first carries a legend entry
         }));
     });
     const cfScatter = _scatterTrace(data.cf_points, "cf", {
-        name: "Capacity Factor", symbol: "circle",
-        unit: "CF (%)", showscale: true,
+        name: _t("web.charts.tech_performance.trace_cf"), symbol: "circle",
+        unit: _t("web.charts.tech_performance.unit_cf"), showscale: true,
         flatColor: "#555555",
         xaxis: "x", yaxis: "y",
     }, yearScale);
@@ -141,7 +139,7 @@ function renderTechPerf(data) {
     // ── Subplot (b) — LCOE KDEs (blue) + VALCOE KDEs (red) + markers ──
     (data.lcoe_kdes || []).forEach((curve, i) => {
         traces.push(_kdeTrace(curve, {
-            name: "LCOE Distribution",
+            name: _t("web.charts.tech_performance.trace_lcoe_dist"),
             fillcolor: "rgba(74,144,226,0.4)",
             xaxis: "x2", yaxis: "y2",
             showlegend: i === 0,
@@ -149,7 +147,7 @@ function renderTechPerf(data) {
     });
     (data.vallcoe_kdes || []).forEach((curve, i) => {
         traces.push(_kdeTrace(curve, {
-            name: "VALCOE Distribution",
+            name: _t("web.charts.tech_performance.trace_vallcoe_dist"),
             fillcolor: "rgba(231,76,60,0.4)",
             xaxis: "x2", yaxis: "y2",
             showlegend: i === 0,
@@ -157,21 +155,21 @@ function renderTechPerf(data) {
     });
     const lcoeScatter = _scatterTrace(data.lcoe_points, "lcoe", {
         name: "LCOE", symbol: "triangle-up",
-        unit: "LCOE ($/MWh)",
+        unit: _t("web.charts.tech_performance.unit_lcoe"),
         flatColor: "#4A90E2",
         xaxis: "x2", yaxis: "y2",
     }, yearScale);
     if (lcoeScatter) traces.push(lcoeScatter);
     const vallcoeScatter = _scatterTrace(data.vallcoe_points, "vallcoe", {
         name: "VALCOE", symbol: "square",
-        unit: "VALCOE ($/MWh)",
+        unit: _t("web.charts.tech_performance.unit_vallcoe"),
         flatColor: "#E74C3C",
         xaxis: "x2", yaxis: "y2",
     }, yearScale);
     if (vallcoeScatter) traces.push(vallcoeScatter);
 
     if (traces.length === 0) {
-        showStatus("No CF/LCOE data", false);
+        showStatus(_t("web.charts.tech_performance.no_data"), false);
         return;
     }
 
@@ -202,11 +200,11 @@ function renderTechPerf(data) {
         showlegend: true,
         annotations: [
             // Super-title removed per user request; subtitles only.
-            { text: "<b>a) Capacity Factor by Technology</b>",
+            { text: "<b>" + _t("web.charts.tech_performance.title_a") + "</b>",
               x: 0.465, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) LCOE and VALCOE by Technology</b>",
+            { text: "<b>" + _t("web.charts.tech_performance.title_b") + "</b>",
               x: 0.465, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -234,7 +232,7 @@ function renderTechPerf(data) {
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
-            title: "<b>Capacity Factor (%)</b>",
+            title: "<b>" + _t("web.charts.tech_performance.axis_cf") + "</b>",
             range: [0, 100],
             gridcolor: "rgba(0,0,0,0.08)",
         },
@@ -243,12 +241,12 @@ function renderTechPerf(data) {
             tickvals: tickvals, ticktext: ticktext,
             range: [-0.8, N - 0.2],
             tickangle: -45,
-            title: "<b>Technology</b>",
+            title: "<b>" + _t("web.charts.tech_performance.axis_technology") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis2: {
             domain: [0.0, 0.44], anchor: "x2",
-            title: "<b>LCOE / VALCOE ($/MWh)</b>",
+            title: "<b>" + _t("web.charts.tech_performance.axis_cost") + "</b>",
             // Matplotlib version put max cost at the bottom; we keep
             // the convention so the two charts read identically.
             range: [data.max_cost || 500, 0],

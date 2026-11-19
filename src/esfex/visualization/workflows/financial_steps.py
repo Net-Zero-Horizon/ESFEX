@@ -68,6 +68,7 @@ from esfex.visualization.workflows.financial_charts import (
     WaterfallChart,
     PriceDurationCurve,
 )
+from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
@@ -154,8 +155,66 @@ def _pct_or_na(value, decimals: int = 1) -> str:
     """
     import math
     if value is None or (isinstance(value, float) and math.isnan(value)):
-        return "N/A"
+        return tr("wizard_financial.na")
     return f"{value:.{decimals}%}"
+
+
+def _years_or_na(value: float, long: bool = False) -> str:
+    """Format a payback period in years, or 'N/A' when it never pays back."""
+    if value >= 100:
+        return tr("wizard_financial.na")
+    key = "wizard_financial.years_long" if long else "wizard_financial.years_short"
+    return tr(key, value=f"{value:.1f}")
+
+
+def _display_width(text: str) -> int:
+    """Terminal-style width: East Asian wide/full-width characters count 2."""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in text)
+
+
+def _pad(text: str, width: int) -> str:
+    """Left-justify *text* to *width* display columns (CJK-aware)."""
+    return text + " " * max(1, width - _display_width(text))
+
+
+def _report_line(key: str, value: str) -> str:
+    """One ``label: value`` row of the plain-text report, label translated."""
+    return "  " + _pad(tr(f"wizard_financial.{key}"), 20) + value
+
+
+# Cash-flow DataFrame column -> translation key (table headers only; the CSV
+# export keeps the raw column names).
+_CF_COLUMN_KEYS = {
+    "year": "cf_year",
+    "revenue": "cf_revenue",
+    "fuel_cost": "cf_fuel_cost",
+    "om_cost": "cf_om_cost",
+    "insurance": "cf_insurance",
+    "carbon_cost": "cf_carbon_cost",
+    "penalties": "cf_penalties",
+    "capex": "cf_capex",
+    "depreciation": "cf_depreciation",
+    "tax": "cf_tax",
+    "ptc_benefit": "cf_ptc_benefit",
+    "itc_benefit": "cf_itc_benefit",
+    "debt_service": "cf_debt_service",
+    "net_cash_flow": "cf_net_cash_flow",
+    "equity_cash_flow": "cf_equity_cash_flow",
+    "cumulative_npv": "cf_cumulative_npv",
+    "dscr": "cf_dscr",
+}
+
+# Sensitivity variable (FinancialAssumptions field) -> translation key
+_SENSITIVITY_VAR_KEYS = {
+    "discount_rate": "var_discount_rate",
+    "ppa_price": "var_ppa_price",
+    "carbon_price": "var_carbon_price",
+    "debt_fraction": "var_debt_fraction",
+    "cost_of_debt": "var_cost_of_debt",
+    "tax_rate": "var_tax_rate",
+}
 
 
 def _metric_card(label: str, value: str, color: str = "#2980b9") -> QGroupBox:
@@ -201,11 +260,11 @@ class LoadResultsStep(QWidget):
 
         # File picker
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("Results HDF5:"))
-        self._lbl_path = QLabel("(no file selected)")
+        file_row.addWidget(QLabel(tr("wizard_financial.results_hdf5")))
+        self._lbl_path = QLabel(tr("wizard_financial.no_file_selected"))
         self._lbl_path.setStyleSheet("color: #888;")
         file_row.addWidget(self._lbl_path, 1)
-        btn_browse = QPushButton("Browse...")
+        btn_browse = QPushButton(tr("common.browse"))
         btn_browse.clicked.connect(self._browse)
         file_row.addWidget(btn_browse)
         layout.addLayout(file_row)
@@ -219,49 +278,51 @@ class LoadResultsStep(QWidget):
         # ── Left column ──
         left = QVBoxLayout()
 
-        cap_group = QGroupBox("Capital Structure")
+        cap_group = QGroupBox(tr("wizard_financial.grp_capital"))
         cap_form = QFormLayout(cap_group)
         self._spin_debt_frac = self._pct_spin(0.60)
-        cap_form.addRow("Debt fraction:", self._spin_debt_frac)
+        cap_form.addRow(tr("wizard_financial.debt_fraction"), self._spin_debt_frac)
         self._spin_cost_debt = self._pct_spin(0.05)
-        cap_form.addRow("Cost of debt:", self._spin_cost_debt)
+        cap_form.addRow(tr("wizard_financial.cost_of_debt"), self._spin_cost_debt)
         self._spin_cost_equity = self._pct_spin(0.12)
-        cap_form.addRow("Cost of equity:", self._spin_cost_equity)
+        cap_form.addRow(tr("wizard_financial.cost_of_equity"), self._spin_cost_equity)
         self._spin_debt_tenor = QSpinBox()
         self._spin_debt_tenor.setRange(1, 40)
         self._spin_debt_tenor.setValue(15)
-        cap_form.addRow("Debt tenor (years):", self._spin_debt_tenor)
+        cap_form.addRow(tr("wizard_financial.debt_tenor"), self._spin_debt_tenor)
         left.addWidget(cap_group)
 
-        tax_group = QGroupBox("Tax & Depreciation")
+        tax_group = QGroupBox(tr("wizard_financial.grp_tax"))
         tax_form = QFormLayout(tax_group)
         self._spin_tax_rate = self._pct_spin(0.25)
-        tax_form.addRow("Tax rate:", self._spin_tax_rate)
+        tax_form.addRow(tr("wizard_financial.tax_rate"), self._spin_tax_rate)
         self._combo_depreciation = QComboBox()
-        self._combo_depreciation.addItems(["straight_line", "macrs"])
-        tax_form.addRow("Depreciation:", self._combo_depreciation)
+        self._combo_depreciation.addItem(
+            tr("wizard_financial.dep_straight_line"), "straight_line")
+        self._combo_depreciation.addItem(tr("wizard_financial.dep_macrs"), "macrs")
+        tax_form.addRow(tr("wizard_financial.depreciation"), self._combo_depreciation)
         self._spin_dep_years = QSpinBox()
         self._spin_dep_years.setRange(1, 40)
         self._spin_dep_years.setValue(20)
-        tax_form.addRow("Depreciation years:", self._spin_dep_years)
+        tax_form.addRow(tr("wizard_financial.depreciation_years"), self._spin_dep_years)
         self._spin_itc = self._pct_spin(0.0)
-        tax_form.addRow("ITC rate:", self._spin_itc)
+        tax_form.addRow(tr("wizard_financial.itc_rate"), self._spin_itc)
         self._spin_ptc = QDoubleSpinBox()
         self._spin_ptc.setRange(0, 100)
         self._spin_ptc.setDecimals(2)
         self._spin_ptc.setSuffix(" $/MWh")
-        tax_form.addRow("PTC rate:", self._spin_ptc)
+        tax_form.addRow(tr("wizard_financial.ptc_rate"), self._spin_ptc)
         left.addWidget(tax_group)
 
-        env_group = QGroupBox("Environmental")
+        env_group = QGroupBox(tr("wizard_financial.grp_environmental"))
         env_form = QFormLayout(env_group)
         self._spin_carbon = QDoubleSpinBox()
         self._spin_carbon.setRange(0, 500)
         self._spin_carbon.setDecimals(1)
         self._spin_carbon.setSuffix(" $/tCO2")
-        env_form.addRow("Carbon price:", self._spin_carbon)
+        env_form.addRow(tr("wizard_financial.carbon_price"), self._spin_carbon)
         self._spin_carbon_esc = self._pct_spin(0.02)
-        env_form.addRow("Carbon price escalation:", self._spin_carbon_esc)
+        env_form.addRow(tr("wizard_financial.carbon_escalation"), self._spin_carbon_esc)
         left.addWidget(env_group)
 
         left.addStretch()
@@ -270,36 +331,36 @@ class LoadResultsStep(QWidget):
         # ── Right column ──
         right = QVBoxLayout()
 
-        rev_group = QGroupBox("Revenue Assumptions")
+        rev_group = QGroupBox(tr("wizard_financial.grp_revenue"))
         rev_form = QFormLayout(rev_group)
         self._spin_ppa = QDoubleSpinBox()
         self._spin_ppa.setRange(0, 500)
         self._spin_ppa.setDecimals(1)
         self._spin_ppa.setSuffix(" $/MWh")
-        self._spin_ppa.setToolTip("0 = use nodal prices from optimization results")
-        rev_form.addRow("PPA price (0=nodal):", self._spin_ppa)
+        self._spin_ppa.setToolTip(tr("wizard_financial.ppa_price_tip"))
+        rev_form.addRow(tr("wizard_financial.ppa_price"), self._spin_ppa)
         self._spin_ppa_esc = self._pct_spin(0.02)
-        rev_form.addRow("PPA escalation:", self._spin_ppa_esc)
+        rev_form.addRow(tr("wizard_financial.ppa_escalation"), self._spin_ppa_esc)
         self._spin_cap_pay = QDoubleSpinBox()
         self._spin_cap_pay.setRange(0, 500000)
         self._spin_cap_pay.setDecimals(0)
         self._spin_cap_pay.setSuffix(" $/MW-yr")
-        rev_form.addRow("Capacity payment:", self._spin_cap_pay)
+        rev_form.addRow(tr("wizard_financial.capacity_payment"), self._spin_cap_pay)
         self._spin_rec = QDoubleSpinBox()
         self._spin_rec.setRange(0, 200)
         self._spin_rec.setDecimals(1)
         self._spin_rec.setSuffix(" $/MWh")
-        rev_form.addRow("REC price:", self._spin_rec)
+        rev_form.addRow(tr("wizard_financial.rec_price"), self._spin_rec)
         right.addWidget(rev_group)
 
-        other_group = QGroupBox("Other")
+        other_group = QGroupBox(tr("wizard_financial.grp_other"))
         other_form = QFormLayout(other_group)
         self._spin_insurance = self._pct_spin(0.005)
-        other_form.addRow("Insurance rate:", self._spin_insurance)
+        other_form.addRow(tr("wizard_financial.insurance_rate"), self._spin_insurance)
         self._spin_salvage = self._pct_spin(0.05)
-        other_form.addRow("Salvage fraction:", self._spin_salvage)
+        other_form.addRow(tr("wizard_financial.salvage_fraction"), self._spin_salvage)
         self._spin_discount = self._pct_spin(0.08)
-        other_form.addRow("Discount rate:", self._spin_discount)
+        other_form.addRow(tr("wizard_financial.discount_rate"), self._spin_discount)
         right.addWidget(other_group)
 
         right.addStretch()
@@ -310,7 +371,7 @@ class LoadResultsStep(QWidget):
 
         # Analysis button + progress
         btn_row = QHBoxLayout()
-        self._btn_analyze = QPushButton("Load && Analyze")
+        self._btn_analyze = QPushButton(tr("wizard_financial.load_analyze"))
         self._btn_analyze.setStyleSheet(
             "background-color: #2980b9; color: white; font-weight: bold; "
             "padding: 8px 16px; border-radius: 4px;"
@@ -335,7 +396,8 @@ class LoadResultsStep(QWidget):
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Results HDF5", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+            self, tr("wizard_financial.open_results"), "",
+            tr("wizard_financial.filter_hdf5"),
         )
         if path:
             self._h5_path = path
@@ -349,7 +411,7 @@ class LoadResultsStep(QWidget):
             cost_of_equity=self._spin_cost_equity.value(),
             debt_tenor=self._spin_debt_tenor.value(),
             tax_rate=self._spin_tax_rate.value(),
-            depreciation_method=self._combo_depreciation.currentText(),
+            depreciation_method=self._combo_depreciation.currentData(),
             depreciation_years=self._spin_dep_years.value(),
             itc_rate=self._spin_itc.value(),
             ptc_rate=self._spin_ptc.value(),
@@ -366,12 +428,15 @@ class LoadResultsStep(QWidget):
 
     def _run_analysis(self):
         if not self._h5_path:
-            QMessageBox.warning(self, "No File", "Please select an HDF5 results file first.")
+            QMessageBox.warning(
+                self, tr("wizard_financial.no_file_title"),
+                tr("wizard_financial.no_file_msg"),
+            )
             return
         self._assumptions = self._collect_assumptions()
         self._btn_analyze.setEnabled(False)
         self._progress.setVisible(True)
-        self._lbl_status.setText("Analyzing...")
+        self._lbl_status.setText(tr("wizard_financial.analyzing"))
 
         self._worker = _FinancialWorker(self._h5_path, self._assumptions)
         self._worker.finished.connect(self._on_finished)
@@ -383,16 +448,16 @@ class LoadResultsStep(QWidget):
         self._tech_financials = tf
         self._progress.setVisible(False)
         self._btn_analyze.setEnabled(True)
-        self._lbl_status.setText("Analysis complete!")
+        self._lbl_status.setText(tr("wizard_financial.analysis_done"))
         self._lbl_status.setStyleSheet("color: #2ecc71; font-weight: bold;")
         self.analysisFinished.emit()
 
     def _on_error(self, msg):
         self._progress.setVisible(False)
         self._btn_analyze.setEnabled(True)
-        self._lbl_status.setText(f"Error: {msg}")
+        self._lbl_status.setText(tr("wizard_financial.error_status", e=msg))
         self._lbl_status.setStyleSheet("color: #e74c3c;")
-        QMessageBox.critical(self, "Analysis Error", msg)
+        QMessageBox.critical(self, tr("wizard_financial.analysis_error_title"), msg)
 
     def is_valid(self) -> bool:
         return self._system_financials is not None
@@ -427,37 +492,40 @@ class CostDecompositionStep(QWidget):
         self._tabs = QTabWidget()
 
         self._waterfall = WaterfallChart()
-        self._tabs.addTab(self._waterfall, "NPV Waterfall")
+        self._tabs.addTab(self._waterfall, tr("wizard_financial.tab_waterfall"))
 
         self._stacked = StackedBarChart()
-        self._tabs.addTab(self._stacked, "Annual Cash Flows")
+        self._tabs.addTab(self._stacked, tr("wizard_financial.tab_annual_cf"))
 
         self._pie = CostPieChart()
-        self._tabs.addTab(self._pie, "Cost Breakdown")
+        self._tabs.addTab(self._pie, tr("wizard_financial.tab_cost_breakdown"))
 
         layout.addWidget(self._tabs)
 
     def set_inputs(self, sf: SystemFinancials):
         # Waterfall — components must include Tax so the running sum lands on
         # the Net NPV total bar (see WaterfallChart.update_chart).
-        labels = [
-            "Revenue", "Fuel", "O&M", "CAPEX", "Penalties",
-            "Tax", "Tax Benefits", "Salvage", "Net NPV",
-        ]
+        labels = [tr(f"wizard_financial.{k}") for k in (
+            "wf_revenue", "wf_fuel", "wf_om", "wf_capex", "wf_penalties",
+            "wf_tax", "wf_tax_benefits", "wf_salvage", "wf_net_npv",
+        )]
         values = [
             sf.npv_revenue, -sf.npv_fuel, -sf.npv_om, -sf.npv_capex,
             -sf.npv_penalties, -sf.npv_tax, sf.npv_tax_benefits,
             sf.npv_salvage, sf.npv_total,
         ]
-        self._waterfall.update_chart(labels, values)
+        self._waterfall.update_chart(
+            labels, values, title=tr("wizard_financial.chart_waterfall"))
 
         # Stacked bar
-        self._stacked.update_chart(sf.cash_flows)
+        self._stacked.update_chart(
+            sf.cash_flows, title=tr("wizard_financial.tab_annual_cf"))
 
         # Pie
-        pie_labels = ["Fuel", "O&M", "CAPEX", "Penalties"]
+        pie_labels = [tr(f"wizard_financial.{k}") for k in (
+            "wf_fuel", "wf_om", "wf_capex", "wf_penalties")]
         pie_values = [sf.npv_fuel, sf.npv_om, sf.npv_capex, sf.npv_penalties]
-        self._pie.update_chart(pie_labels, pie_values, title="NPV Cost Composition")
+        self._pie.update_chart(pie_labels, pie_values, title=tr("wizard_financial.chart_cost_pie"))
 
     def is_valid(self) -> bool:
         return True
@@ -482,20 +550,20 @@ class TechnologyEconomicsStep(QWidget):
         # Table tab
         self._table = QTableWidget()
         self._table.setColumnCount(8)
-        self._table.setHorizontalHeaderLabels([
-            "Technology", "Type", "Installed MW", "Generation GWh",
-            "CF %", "LCOE $/MWh", "Revenue $M", "ROI %",
-        ])
+        self._table.setHorizontalHeaderLabels([tr(f"wizard_financial.{k}") for k in (
+            "col_technology", "col_type", "col_installed", "col_generation",
+            "col_cf", "col_lcoe", "col_revenue", "col_roi",
+        )])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._tabs.addTab(self._table, "Metrics Table")
+        self._tabs.addTab(self._table, tr("wizard_financial.tab_metrics_table"))
 
         # Bubble chart tab
         self._bubble = BubbleChart()
-        self._tabs.addTab(self._bubble, "CF vs LCOE")
+        self._tabs.addTab(self._bubble, tr("wizard_financial.tab_cf_lcoe"))
 
         # Revenue vs Cost tab
         self._rev_cost = TechRevenueVsCostChart()
-        self._tabs.addTab(self._rev_cost, "Revenue vs Cost")
+        self._tabs.addTab(self._rev_cost, tr("wizard_financial.tab_rev_cost"))
 
         layout.addWidget(self._tabs)
 
@@ -509,7 +577,7 @@ class TechnologyEconomicsStep(QWidget):
             self._table.setItem(i, 2, QTableWidgetItem(f"{tf.installed_mw:.1f}"))
             self._table.setItem(i, 3, QTableWidgetItem(f"{tf.generation_mwh/1e3:.1f}"))
             self._table.setItem(i, 4, QTableWidgetItem(f"{tf.capacity_factor*100:.1f}"))
-            lcoe_str = f"{tf.lcoe:.1f}" if tf.lcoe < 1000 else "N/A"
+            lcoe_str = f"{tf.lcoe:.1f}" if tf.lcoe < 1000 else tr("wizard_financial.na")
             self._table.setItem(i, 5, QTableWidgetItem(lcoe_str))
             self._table.setItem(i, 6, QTableWidgetItem(f"{tf.revenue_total/1e6:.2f}"))
             self._table.setItem(i, 7, QTableWidgetItem(f"{tf.roi*100:.1f}"))
@@ -541,10 +609,10 @@ class MarketAnalysisStep(QWidget):
         self._tabs = QTabWidget()
 
         self._price_curve = PriceDurationCurve()
-        self._tabs.addTab(self._price_curve, "Price Duration Curve")
+        self._tabs.addTab(self._price_curve, tr("wizard_financial.tab_price_duration"))
 
         self._cum_npv = CumulativeNPVChart()
-        self._tabs.addTab(self._cum_npv, "Cumulative NPV")
+        self._tabs.addTab(self._cum_npv, tr("wizard_financial.tab_cum_npv"))
 
         layout.addWidget(self._tabs)
 
@@ -580,9 +648,9 @@ class CashFlowStep(QWidget):
         # Charts
         chart_tabs = QTabWidget()
         self._cum_chart = CumulativeNPVChart()
-        chart_tabs.addTab(self._cum_chart, "Cumulative NPV")
+        chart_tabs.addTab(self._cum_chart, tr("wizard_financial.tab_cum_npv"))
         self._dscr_chart = DSCRTimeline()
-        chart_tabs.addTab(self._dscr_chart, "DSCR")
+        chart_tabs.addTab(self._dscr_chart, tr("wizard_financial.tab_dscr"))
         splitter.addWidget(chart_tabs)
 
         splitter.setSizes([300, 300])
@@ -596,7 +664,10 @@ class CashFlowStep(QWidget):
         # Table
         cols = list(cf.columns)
         self._table.setColumnCount(len(cols))
-        self._table.setHorizontalHeaderLabels(cols)
+        self._table.setHorizontalHeaderLabels([
+            tr(f"wizard_financial.{_CF_COLUMN_KEYS[c]}") if c in _CF_COLUMN_KEYS else str(c)
+            for c in cols
+        ])
         self._table.setRowCount(len(cf))
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
@@ -632,9 +703,7 @@ class InvestmentMetricsStep(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<b>Key Investment Metrics</b>"
-        ))
+        layout.addWidget(QLabel(tr("wizard_financial.key_metrics_header")))
 
         self._cards_layout = QHBoxLayout()
         layout.addLayout(self._cards_layout)
@@ -643,9 +712,10 @@ class InvestmentMetricsStep(QWidget):
         layout.addLayout(self._cards_layout_2)
 
         layout.addWidget(QLabel(
-            "<b>New-Investment Economics</b> "
-            "<span style='color:#888;'>(built capacity only — excludes "
-            "revenue from existing sunk-cost plants)</span>"
+            "<b>{}</b> <span style='color:#888;'>{}</span>".format(
+                tr("wizard_financial.new_investment_header"),
+                tr("wizard_financial.new_investment_note"),
+            )
         ))
         self._cards_layout_3 = QHBoxLayout()
         layout.addLayout(self._cards_layout_3)
@@ -662,59 +732,58 @@ class InvestmentMetricsStep(QWidget):
 
         # Row 1
         self._cards_layout.addWidget(
-            _metric_card("NPV", f"${sf.npv_total/1e6:,.1f}M",
+            _metric_card(tr("wizard_financial.card_npv"), f"${sf.npv_total/1e6:,.1f}M",
                          "#27ae60" if sf.npv_total > 0 else "#e74c3c")
         )
         self._cards_layout.addWidget(
-            _metric_card("Project IRR", _pct_or_na(sf.project_irr), "#2980b9")
+            _metric_card(tr("wizard_financial.card_project_irr"), _pct_or_na(sf.project_irr), "#2980b9")
         )
         self._cards_layout.addWidget(
-            _metric_card("Equity IRR", _pct_or_na(sf.equity_irr), "#16a085")
+            _metric_card(tr("wizard_financial.card_equity_irr"), _pct_or_na(sf.equity_irr), "#16a085")
         )
         self._cards_layout.addWidget(
-            _metric_card("MIRR", _pct_or_na(sf.mirr), "#8e44ad")
+            _metric_card(tr("wizard_financial.card_mirr"), _pct_or_na(sf.mirr), "#8e44ad")
         )
 
         # Row 2
-        pb_str = f"{sf.payback_simple:.1f} yr" if sf.payback_simple < 100 else "N/A"
-        self._cards_layout_2.addWidget(_metric_card("Simple Payback", pb_str, "#e67e22"))
+        pb_str = _years_or_na(sf.payback_simple)
+        self._cards_layout_2.addWidget(_metric_card(tr("wizard_financial.card_simple_payback"), pb_str, "#e67e22"))
 
-        dpb_str = f"{sf.payback_discounted:.1f} yr" if sf.payback_discounted < 100 else "N/A"
-        self._cards_layout_2.addWidget(_metric_card("Discounted Payback", dpb_str, "#f39c12"))
+        dpb_str = _years_or_na(sf.payback_discounted)
+        self._cards_layout_2.addWidget(_metric_card(tr("wizard_financial.card_discounted_payback"), dpb_str, "#f39c12"))
 
         self._cards_layout_2.addWidget(
-            _metric_card("WACC", f"{sf.wacc:.2%}", "#2c3e50")
+            _metric_card(tr("wizard_financial.card_wacc"), f"{sf.wacc:.2%}", "#2c3e50")
         )
 
         dscr_str = f"{sf.dscr_min:.2f}×" if sf.dscr_min < 100 else "∞"
         dscr_color = "#27ae60" if sf.dscr_min >= 1.2 else "#e74c3c"
-        self._cards_layout_2.addWidget(_metric_card("Min DSCR", dscr_str, dscr_color))
+        self._cards_layout_2.addWidget(_metric_card(tr("wizard_financial.card_min_dscr"), dscr_str, dscr_color))
 
         self._cards_layout_2.addWidget(
-            _metric_card("System LCOE", f"${sf.lcoe_system:.1f}/MWh", "#2980b9")
+            _metric_card(tr("wizard_financial.card_system_lcoe"), f"${sf.lcoe_system:.1f}/MWh", "#2980b9")
         )
 
         # Row 3 — new-investment economics
         self._cards_layout_3.addWidget(
-            _metric_card("Investment NPV", f"${sf.investment_npv/1e6:,.1f}M",
+            _metric_card(tr("wizard_financial.card_inv_npv"), f"${sf.investment_npv/1e6:,.1f}M",
                          "#27ae60" if sf.investment_npv > 0 else "#e74c3c")
         )
         self._cards_layout_3.addWidget(
-            _metric_card("Investment IRR", _pct_or_na(sf.investment_irr), "#2980b9")
+            _metric_card(tr("wizard_financial.card_inv_irr"), _pct_or_na(sf.investment_irr), "#2980b9")
         )
-        inv_pb = (f"{sf.investment_payback:.1f} yr"
-                  if sf.investment_payback < 100 else "N/A")
+        inv_pb = _years_or_na(sf.investment_payback)
         self._cards_layout_3.addWidget(
-            _metric_card("Investment Payback", inv_pb, "#e67e22")
+            _metric_card(tr("wizard_financial.card_inv_payback"), inv_pb, "#e67e22")
         )
         self._cards_layout_3.addWidget(
-            _metric_card("Investment CAPEX", f"${sf.investment_capex/1e6:,.1f}M",
+            _metric_card(tr("wizard_financial.card_inv_capex"), f"${sf.investment_capex/1e6:,.1f}M",
                          "#2c3e50")
         )
         inv_lcoe = (f"${sf.investment_lcoe:.1f}/MWh"
-                    if sf.investment_lcoe < 1e4 else "N/A")
+                    if sf.investment_lcoe < 1e4 else tr("wizard_financial.na"))
         self._cards_layout_3.addWidget(
-            _metric_card("Investment LCOE", inv_lcoe, "#16a085")
+            _metric_card(tr("wizard_financial.card_inv_lcoe"), inv_lcoe, "#16a085")
         )
 
     def is_valid(self) -> bool:
@@ -745,13 +814,13 @@ class SensitivityStep(QWidget):
         controls = QHBoxLayout()
 
         # Variable checkboxes
-        var_group = QGroupBox("Sensitivity Variables")
+        var_group = QGroupBox(tr("wizard_financial.grp_sensitivity_vars"))
         var_lay = QVBoxLayout(var_group)
         self._var_checks: dict[str, QCheckBox] = {}
         default_vars = ["discount_rate", "ppa_price", "carbon_price",
                         "debt_fraction", "cost_of_debt", "tax_rate"]
         for var in default_vars:
-            cb = QCheckBox(var.replace("_", " ").title())
+            cb = QCheckBox(tr(f"wizard_financial.{_SENSITIVITY_VAR_KEYS[var]}"))
             cb.setChecked(True)
             cb.setProperty("var_name", var)
             self._var_checks[var] = cb
@@ -763,10 +832,10 @@ class SensitivityStep(QWidget):
         self._spin_points = QSpinBox()
         self._spin_points.setRange(3, 21)
         self._spin_points.setValue(7)
-        btn_col.addWidget(QLabel("Sweep points:"))
+        btn_col.addWidget(QLabel(tr("wizard_financial.sweep_points")))
         btn_col.addWidget(self._spin_points)
 
-        self._btn_sensitivity = QPushButton("Run Sensitivity")
+        self._btn_sensitivity = QPushButton(tr("wizard_financial.run_sensitivity"))
         self._btn_sensitivity.setStyleSheet(
             "background-color: #2980b9; color: white; font-weight: bold; padding: 6px;"
         )
@@ -778,10 +847,10 @@ class SensitivityStep(QWidget):
         self._spin_mc_samples.setRange(50, 10000)
         self._spin_mc_samples.setValue(500)
         self._spin_mc_samples.setSingleStep(100)
-        btn_col.addWidget(QLabel("Monte Carlo samples:"))
+        btn_col.addWidget(QLabel(tr("wizard_financial.mc_samples")))
         btn_col.addWidget(self._spin_mc_samples)
 
-        self._btn_mc = QPushButton("Run Monte Carlo")
+        self._btn_mc = QPushButton(tr("wizard_financial.run_mc"))
         self._btn_mc.setStyleSheet(
             "background-color: #e67e22; color: white; font-weight: bold; padding: 6px;"
         )
@@ -799,13 +868,13 @@ class SensitivityStep(QWidget):
         # Charts
         self._chart_tabs = QTabWidget()
         self._tornado = TornadoDiagram()
-        self._chart_tabs.addTab(self._tornado, "Tornado")
+        self._chart_tabs.addTab(self._tornado, tr("wizard_financial.tab_tornado"))
         self._spider = SpiderPlot()
-        self._chart_tabs.addTab(self._spider, "Spider Plot")
+        self._chart_tabs.addTab(self._spider, tr("wizard_financial.tab_spider"))
         self._npv_hist = NPVHistogram()
-        self._chart_tabs.addTab(self._npv_hist, "NPV Distribution")
+        self._chart_tabs.addTab(self._npv_hist, tr("wizard_financial.tab_npv_dist"))
         self._irr_hist = IRRHistogram()
-        self._chart_tabs.addTab(self._irr_hist, "IRR Distribution")
+        self._chart_tabs.addTab(self._irr_hist, tr("wizard_financial.tab_irr_dist"))
         layout.addWidget(self._chart_tabs, 1)
 
     def set_inputs(self, h5_path: str, assumptions: FinancialAssumptions, sf: SystemFinancials):
@@ -825,7 +894,10 @@ class SensitivityStep(QWidget):
             return
         variables = self._get_selected_vars()
         if not variables:
-            QMessageBox.warning(self, "No Variables", "Select at least one variable.")
+            QMessageBox.warning(
+                self, tr("wizard_financial.no_vars_title"),
+                tr("wizard_financial.no_vars_msg"),
+            )
             return
 
         self._progress.setVisible(True)
@@ -870,7 +942,7 @@ class SensitivityStep(QWidget):
         self._progress.setVisible(False)
         self._btn_sensitivity.setEnabled(True)
         self._btn_mc.setEnabled(True)
-        QMessageBox.critical(self, "Error", msg)
+        QMessageBox.critical(self, tr("common.error"), msg)
 
     def is_valid(self) -> bool:
         return True
@@ -901,7 +973,7 @@ class ReportStep(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("<b>Executive Summary & Export</b>"))
+        layout.addWidget(QLabel(tr("wizard_financial.report_header")))
 
         self._report = QTextEdit()
         self._report.setReadOnly(True)
@@ -910,10 +982,10 @@ class ReportStep(QWidget):
 
         # Export buttons
         btn_row = QHBoxLayout()
-        btn_csv = QPushButton("Export CSV")
+        btn_csv = QPushButton(tr("wizard_financial.export_csv"))
         btn_csv.clicked.connect(self._export_csv)
         btn_row.addWidget(btn_csv)
-        btn_txt = QPushButton("Export Report (TXT)")
+        btn_txt = QPushButton(tr("wizard_financial.export_txt"))
         btn_txt.clicked.connect(self._export_txt)
         btn_row.addWidget(btn_txt)
         btn_row.addStretch()
@@ -937,58 +1009,59 @@ class ReportStep(QWidget):
         if sf is None:
             return
 
+        L = _report_line
         lines = []
         lines.append("=" * 60)
-        lines.append("  FINANCIAL ANALYSIS — EXECUTIVE SUMMARY")
+        lines.append("  " + tr("wizard_financial.rpt_title"))
         lines.append("=" * 60)
         lines.append("")
 
-        lines.append("--- KEY METRICS ---")
-        lines.append(f"  NPV:                ${sf.npv_total:>15,.0f}")
-        lines.append(f"  Project IRR:        {_pct_or_na(sf.project_irr, 2):>15}")
-        lines.append(f"  Equity IRR:         {_pct_or_na(sf.equity_irr, 2):>15}")
-        lines.append(f"  MIRR:               {_pct_or_na(sf.mirr, 2):>15}")
-        lines.append(f"  WACC:               {sf.wacc:>15.2%}")
-        pb = f"{sf.payback_simple:.1f} years" if sf.payback_simple < 100 else "N/A"
-        lines.append(f"  Simple Payback:     {pb:>15}")
-        dpb = f"{sf.payback_discounted:.1f} years" if sf.payback_discounted < 100 else "N/A"
-        lines.append(f"  Discounted Payback: {dpb:>15}")
-        lines.append(f"  System LCOE:        ${sf.lcoe_system:>14.2f}/MWh")
+        lines.append(f"--- {tr('wizard_financial.rpt_key_metrics')} ---")
+        lines.append(L("rpt_npv", f"${sf.npv_total:>15,.0f}"))
+        lines.append(L("rpt_project_irr", f"{_pct_or_na(sf.project_irr, 2):>15}"))
+        lines.append(L("rpt_equity_irr", f"{_pct_or_na(sf.equity_irr, 2):>15}"))
+        lines.append(L("rpt_mirr", f"{_pct_or_na(sf.mirr, 2):>15}"))
+        lines.append(L("rpt_wacc", f"{sf.wacc:>15.2%}"))
+        pb = _years_or_na(sf.payback_simple, long=True)
+        lines.append(L("rpt_simple_payback", f"{pb:>15}"))
+        dpb = _years_or_na(sf.payback_discounted, long=True)
+        lines.append(L("rpt_discounted_payback", f"{dpb:>15}"))
+        lines.append(L("rpt_system_lcoe", f"${sf.lcoe_system:>14.2f}/MWh"))
         dscr = f"{sf.dscr_min:.2f}×" if sf.dscr_min < 100 else "∞"
-        lines.append(f"  Min DSCR:           {dscr:>15}")
-        lines.append(f"  LLCR:               {sf.llcr:>15.2f}")
-        lines.append(f"  Profitability Idx:  {sf.profitability_index:>15.2f}")
+        lines.append(L("rpt_min_dscr", f"{dscr:>15}"))
+        lines.append(L("rpt_llcr", f"{sf.llcr:>15.2f}"))
+        lines.append(L("rpt_profitability_idx", f"{sf.profitability_index:>15.2f}"))
         lines.append("")
 
-        lines.append("--- NEW-INVESTMENT ECONOMICS (built capacity only) ---")
-        lines.append(f"  Investment NPV:     ${sf.investment_npv:>15,.0f}")
-        lines.append(f"  Investment IRR:     {_pct_or_na(sf.investment_irr, 2):>15}")
-        inv_pb = (f"{sf.investment_payback:.1f} years"
-                  if sf.investment_payback < 100 else "N/A")
-        lines.append(f"  Investment Payback: {inv_pb:>15}")
-        lines.append(f"  Investment CAPEX:   ${sf.investment_capex:>15,.0f}")
+        lines.append(f"--- {tr('wizard_financial.rpt_new_investment')} ---")
+        lines.append(L("rpt_inv_npv", f"${sf.investment_npv:>15,.0f}"))
+        lines.append(L("rpt_inv_irr", f"{_pct_or_na(sf.investment_irr, 2):>15}"))
+        inv_pb = _years_or_na(sf.investment_payback, long=True)
+        lines.append(L("rpt_inv_payback", f"{inv_pb:>15}"))
+        lines.append(L("rpt_inv_capex", f"${sf.investment_capex:>15,.0f}"))
         inv_lcoe = (f"${sf.investment_lcoe:.2f}/MWh"
-                    if sf.investment_lcoe < 1e4 else "N/A")
-        lines.append(f"  Investment LCOE:    {inv_lcoe:>15}")
+                    if sf.investment_lcoe < 1e4 else tr("wizard_financial.na"))
+        lines.append(L("rpt_inv_lcoe", f"{inv_lcoe:>15}"))
         lines.append("")
 
-        lines.append("--- NPV DECOMPOSITION ---")
-        lines.append(f"  Revenue:            ${sf.npv_revenue:>15,.0f}")
-        lines.append(f"  Fuel Cost:          ${sf.npv_fuel:>15,.0f}")
-        lines.append(f"  O&M Cost:           ${sf.npv_om:>15,.0f}")
-        lines.append(f"  CAPEX:              ${sf.npv_capex:>15,.0f}")
-        lines.append(f"  Penalties:          ${sf.npv_penalties:>15,.0f}")
-        lines.append(f"  Tax Benefits:       ${sf.npv_tax_benefits:>15,.0f}")
-        lines.append(f"  Salvage:            ${sf.npv_salvage:>15,.0f}")
-        lines.append(f"  Net NPV:            ${sf.npv_total:>15,.0f}")
+        lines.append(f"--- {tr('wizard_financial.rpt_npv_decomposition')} ---")
+        lines.append(L("rpt_revenue", f"${sf.npv_revenue:>15,.0f}"))
+        lines.append(L("rpt_fuel_cost", f"${sf.npv_fuel:>15,.0f}"))
+        lines.append(L("rpt_om_cost", f"${sf.npv_om:>15,.0f}"))
+        lines.append(L("rpt_capex", f"${sf.npv_capex:>15,.0f}"))
+        lines.append(L("rpt_penalties", f"${sf.npv_penalties:>15,.0f}"))
+        lines.append(L("rpt_tax_benefits", f"${sf.npv_tax_benefits:>15,.0f}"))
+        lines.append(L("rpt_salvage", f"${sf.npv_salvage:>15,.0f}"))
+        lines.append(L("rpt_net_npv", f"${sf.npv_total:>15,.0f}"))
         lines.append("")
 
         if self._tf:
-            lines.append("--- TECHNOLOGY ECONOMICS ---")
-            lines.append(f"  {'Technology':<20} {'MW':>8} {'GWh':>8} {'CF%':>6} {'LCOE':>8} {'ROI%':>6}")
+            lines.append(f"--- {tr('wizard_financial.rpt_tech_economics')} ---")
+            tech_hdr = _pad(tr("wizard_financial.col_technology"), 21)
+            lines.append(f"  {tech_hdr}{'MW':>8} {'GWh':>8} {'CF%':>6} {'LCOE':>8} {'ROI%':>6}")
             lines.append("  " + "-" * 58)
             for name, tf in self._tf.items():
-                lcoe_s = f"{tf.lcoe:.1f}" if tf.lcoe < 1000 else "N/A"
+                lcoe_s = f"{tf.lcoe:.1f}" if tf.lcoe < 1000 else tr("wizard_financial.na")
                 lines.append(
                     f"  {name:<20} {tf.installed_mw:>8.1f} "
                     f"{tf.generation_mwh/1e3:>8.1f} {tf.capacity_factor*100:>5.1f} "
@@ -997,15 +1070,15 @@ class ReportStep(QWidget):
             lines.append("")
 
         if self._mc:
-            lines.append("--- MONTE CARLO RESULTS ---")
-            lines.append(f"  Samples:            {self._mc.n_samples:>15,}")
-            lines.append(f"  NPV Mean:           ${self._mc.npv_mean:>15,.0f}")
-            lines.append(f"  NPV Std Dev:        ${self._mc.npv_std:>15,.0f}")
-            lines.append(f"  NPV 5th %ile:       ${self._mc.npv_p5:>15,.0f}")
-            lines.append(f"  NPV 95th %ile:      ${self._mc.npv_p95:>15,.0f}")
-            lines.append(f"  VaR (5%):           ${self._mc.npv_var_5:>15,.0f}")
-            lines.append(f"  CVaR (5%):          ${self._mc.npv_cvar_5:>15,.0f}")
-            lines.append(f"  IRR Mean:           {_pct_or_na(self._mc.irr_mean, 2):>15}")
+            lines.append(f"--- {tr('wizard_financial.rpt_mc_results')} ---")
+            lines.append(L("rpt_mc_samples", f"{self._mc.n_samples:>15,}"))
+            lines.append(L("rpt_mc_npv_mean", f"${self._mc.npv_mean:>15,.0f}"))
+            lines.append(L("rpt_mc_npv_std", f"${self._mc.npv_std:>15,.0f}"))
+            lines.append(L("rpt_mc_npv_p5", f"${self._mc.npv_p5:>15,.0f}"))
+            lines.append(L("rpt_mc_npv_p95", f"${self._mc.npv_p95:>15,.0f}"))
+            lines.append(L("rpt_mc_var5", f"${self._mc.npv_var_5:>15,.0f}"))
+            lines.append(L("rpt_mc_cvar5", f"${self._mc.npv_cvar_5:>15,.0f}"))
+            lines.append(L("rpt_mc_irr_mean", f"{_pct_or_na(self._mc.irr_mean, 2):>15}"))
             lines.append("")
 
         lines.append("=" * 60)
@@ -1015,22 +1088,28 @@ class ReportStep(QWidget):
         if self._sf is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Cash Flows CSV", "financial_analysis.csv",
-            "CSV Files (*.csv);;All Files (*)",
+            self, tr("wizard_financial.export_csv_title"), "financial_analysis.csv",
+            tr("wizard_financial.filter_csv"),
         )
         if path:
             self._sf.cash_flows.to_csv(path, index=False, float_format="%.2f")
-            QMessageBox.information(self, "Export", f"Saved to {path}")
+            QMessageBox.information(
+                self, tr("wizard_financial.export_title"),
+                tr("wizard_financial.saved_to", path=path),
+            )
 
     def _export_txt(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Report", "financial_report.txt",
-            "Text Files (*.txt);;All Files (*)",
+            self, tr("wizard_financial.export_report_title"), "financial_report.txt",
+            tr("wizard_financial.filter_txt"),
         )
         if path:
             with open(path, "w") as f:
                 f.write(self._report.toPlainText())
-            QMessageBox.information(self, "Export", f"Saved to {path}")
+            QMessageBox.information(
+                self, tr("wizard_financial.export_title"),
+                tr("wizard_financial.saved_to", path=path),
+            )
 
     def is_valid(self) -> bool:
         return True

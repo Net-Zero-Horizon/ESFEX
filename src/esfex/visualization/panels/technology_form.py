@@ -23,9 +23,16 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 
 
 _CATEGORY_OPTIONS = ["Renewable", "Non-renewable", "Storage", "Electrolyzer"]
+_CATEGORY_KEYS = {
+    "Renewable": "technology_form.category_renewable",
+    "Non-renewable": "technology_form.category_nonrenewable",
+    "Storage": "technology_form.category_storage",
+    "Electrolyzer": "technology_form.category_electrolyzer",
+}
 
 
 class TechnologyForm(QWidget):
@@ -60,8 +67,9 @@ class TechnologyForm(QWidget):
         id_layout.addRow(tr("generator_form.name"), self._name)
 
         self._category = QComboBox()
-        self._category.addItems(_CATEGORY_OPTIONS)
-        self._category.currentTextChanged.connect(self._on_category_changed)
+        add_choices(self._category,
+                    [(c, tr(_CATEGORY_KEYS[c])) for c in _CATEGORY_OPTIONS])
+        self._category.currentIndexChanged.connect(self._on_category_changed)
         id_layout.addRow(tr("technology_form.category"), self._category)
 
         self._fuel = QComboBox()
@@ -80,7 +88,7 @@ class TechnologyForm(QWidget):
         )
         self._color_btn.setFixedHeight(self._name.sizeHint().height())
         self._color_btn.setFixedWidth(max(24, self._name.sizeHint().width() // 4))
-        self._color_btn.setToolTip("Chart display color")
+        self._color_btn.setToolTip(tr("technology_form.color_tooltip"))
         self._color_btn.clicked.connect(self._on_color_pick)
         self._color_value: str = ""
         self._update_color_btn_style("")
@@ -89,7 +97,7 @@ class TechnologyForm(QWidget):
         _color_row_lay.setContentsMargins(0, 0, 0, 0)
         _color_row_lay.addWidget(self._color_btn)
         _color_row_lay.addStretch(1)
-        id_layout.addRow("Color", _color_row)
+        id_layout.addRow(tr("technology_form.color"), _color_row)
 
         outer.addWidget(id_grp)
 
@@ -187,9 +195,7 @@ class TechnologyForm(QWidget):
             f"{self._model.state.name}  |  {tech.tech_id}"
         )
         self._name.setText(tech.name)
-        idx = self._category.findText(tech.category)
-        if idx >= 0:
-            self._category.setCurrentIndex(idx)
+        select_value(self._category, tech.category)
 
         # Populate fuel combo from system fuels
         self._fuel.blockSignals(True)
@@ -228,12 +234,12 @@ class TechnologyForm(QWidget):
 
     def _on_color_pick(self):
         initial = QColor(self._color_value) if self._color_value else QColor("#808080")
-        color = QColorDialog.getColor(initial, self, "Technology Color")
+        color = QColorDialog.getColor(initial, self, tr("technology_form.color_dialog"))
         if color.isValid():
             self._update_color_btn_style(color.name())
             self._on_changed()
 
-    def _on_category_changed(self, _text: str):
+    def _on_category_changed(self, _index: int):
         if not self._updating:
             self._on_changed()
 
@@ -254,7 +260,7 @@ class TechnologyForm(QWidget):
                 if attr == "fuel":
                     kwargs[attr] = w.currentData() or ""
                 else:
-                    kwargs[attr] = w.currentText()
+                    kwargs[attr] = combo_value(w)
             else:
                 kwargs[attr] = w.value()
 

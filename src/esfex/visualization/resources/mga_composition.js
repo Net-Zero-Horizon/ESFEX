@@ -17,12 +17,12 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try { render(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(text, isError) {
@@ -36,20 +36,38 @@ function hideStatus() {
     const p = document.getElementById("plot"); if (p) p.style.display = "";
 }
 
-// Same colour palette the pathway chart uses for category leaves.
+// Same colour palette the pathway chart uses for category leaves
+// (keyed by mgaCatSlug of the category id).
 const CAT_COLOR = {
-    "Solar":    "#F4D03F",
-    "Wind":     "#5DADE2",
-    "Other RE": "#27AE60",
-    "Storage":  "#8E44AD",
-    "Thermal":  "#7F8C8D",
-    "Other":    "#BDC3C7",
+    solar:    "#F4D03F",
+    wind:     "#5DADE2",
+    other_re: "#27AE60",
+    storage:  "#8E44AD",
+    thermal:  "#7F8C8D",
+    other:    "#BDC3C7",
 };
+
+// MGA technology categories, as _mga_category (results_charts.py) names
+// them: Solar / Wind / Other RE / Storage / Thermal / Other, and "All"
+// for the treemap root. The ids stay in the data; only the shown text
+// is translated.
+function mgaCatSlug(cat) {
+    return String(cat).toLowerCase().replace(/\s+/g, "_");
+}
+function mgaCategoryLabel(cat) {
+    const names = {
+        solar: _t("web.charts.helpers.mga_cat_solar"), wind: _t("web.charts.helpers.mga_cat_wind"),
+        other_re: _t("web.charts.helpers.mga_cat_other_re"), storage: _t("web.charts.helpers.mga_cat_storage"),
+        thermal: _t("web.charts.helpers.mga_cat_thermal"), other: _t("web.charts.helpers.mga_cat_other"),
+        all: _t("web.charts.helpers.mga_cat_all"),
+    };
+    return names[mgaCatSlug(cat)] || cat;
+}
 
 function render(data) {
     const alts = data.composition;
     if (!alts || alts.length === 0) {
-        showStatus("No composition data.", false); return;
+        showStatus(_t("web.charts.mga_composition.no_data"), false); return;
     }
     const cols = 4, rows = Math.ceil(alts.length / cols);
     const xGap = 0.018, yGap = 0.10;
@@ -68,12 +86,17 @@ function render(data) {
         const colors = a.labels.map((lab, i) => {
             const par = a.parents[i];
             if (lab === "All") return "#ECF0F1";
-            if (par === "All") return CAT_COLOR[lab] || "#bdc3c7";
-            return CAT_COLOR[par] || "#bdc3c7";
+            if (par === "All") return CAT_COLOR[mgaCatSlug(lab)] || "#bdc3c7";
+            return CAT_COLOR[mgaCatSlug(par)] || "#bdc3c7";
         });
         traces.push({
             type: "treemap",
-            labels: a.labels, parents: a.parents, values: a.values,
+            // ids keep the category ids (parents refer to them); the
+            // shown labels translate the root and the categories.
+            ids: a.labels,
+            labels: a.labels.map((lab, i) =>
+                (lab === "All" || a.parents[i] === "All") ? mgaCategoryLabel(lab) : lab),
+            parents: a.parents, values: a.values,
             branchvalues: "total",
             textinfo: "label",
             textfont: { size: 9 },
@@ -81,8 +104,9 @@ function render(data) {
             hovertemplate: "<b>%{label}</b><br>%{value:,.0f} MW<extra></extra>",
             domain: { x: [xS, xE], y: [yS, yE] },
         });
+        const altName = _t("web.charts.mga_composition.alt_label", { id: a.id });
         annotations.push({
-            text: a.is_optimal ? `<b>Alt ${a.id} ★</b>` : `Alt ${a.id}`,
+            text: a.is_optimal ? "<b>" + altName + " ★</b>" : altName,
             x: (xS + xE) / 2, y: yE + 0.012,
             xref: "paper", yref: "paper",
             xanchor: "center", yanchor: "bottom",
@@ -92,7 +116,7 @@ function render(data) {
     });
     const layout = {
         margin: { l: 8, r: 8, t: 50, b: 28 },
-        title: { text: "<span style='font-size:11px;color:#7f8c8d'>tile area = MW added · grouped by category then technology</span>",
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" + _t("web.charts.mga_composition.subtitle") + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         annotations: annotations,

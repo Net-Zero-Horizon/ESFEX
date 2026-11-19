@@ -183,8 +183,9 @@ def test_risk_workbench_opens_with_saved_settings(tmp_path, qapp, monkeypatch):
         assert [s["name"] for s in st.hazard_scenarios] == ["quake"]
         assert [s["name"] for s in st.climate_scenarios] == ["SSP5-8.5"]
         dash = wb._panels[0]._dashboard
-        assert dash._combo_measure.currentText() == "CVaR"
-        assert dash._combo_method.currentText() == "Copula"
+        # the combos show translated labels; their item data is the RiskConfig value
+        assert dash._combo_measure.currentData() == "cvar"
+        assert dash._combo_method.currentData() == "copula"
         assert dash._spin_alpha.value() == pytest.approx(0.9)
         assert dash._spin_lambda.value() == pytest.approx(0.3)
 

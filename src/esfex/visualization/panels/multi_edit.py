@@ -6,6 +6,8 @@ from typing import Any, Sequence
 
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLineEdit, QSpinBox
 
+from esfex.visualization.i18n import tr
+
 
 _MIXED = object()  # Sentinel indicating values differ across elements
 
@@ -39,6 +41,37 @@ def is_mixed(val: Any) -> bool:
     return val is _MIXED
 
 
+# ── Combo boxes with internal values ──────────────────────────────
+
+
+def add_choices(combo: QComboBox, choices) -> None:
+    """Add ``(value, label)`` items: *label* is shown, *value* kept as item data."""
+    for value, label in choices:
+        combo.addItem(label, value)
+
+
+def combo_value(combo: QComboBox) -> Any:
+    """Internal value of the current item: its item data, else its text."""
+    data = combo.currentData()
+    return combo.currentText() if data is None else data
+
+
+def find_value(combo: QComboBox, value: Any) -> int:
+    """Index of the item whose data (or, failing that, text) is *value*."""
+    if value is None:
+        return -1
+    idx = combo.findData(value)
+    return idx if idx >= 0 else combo.findText(str(value))
+
+
+def select_value(combo: QComboBox, value: Any) -> bool:
+    """Select the item for *value* (see :func:`find_value`); False if absent."""
+    idx = find_value(combo, value)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+    return idx >= 0
+
+
 # ── Widget setters ────────────────────────────────────────────────
 
 
@@ -59,32 +92,25 @@ def set_widget_value(widget, val: Any) -> None:
             widget.setValue(widget.minimum())
     elif isinstance(widget, QComboBox):
         _clear_mixed_combo(widget)
-        if isinstance(val, int):
-            idx = widget.findData(val)
-            if idx < 0:
-                idx = widget.findText(str(val))
-        else:
-            idx = widget.findText(str(val))
-        if idx >= 0:
-            widget.setCurrentIndex(idx)
+        select_value(widget, val)
 
 
 def set_mixed(widget) -> None:
     """Put *widget* into 'mixed values' display state."""
     if isinstance(widget, QLineEdit):
         widget.clear()
-        widget.setPlaceholderText("-- mixed values --")
+        widget.setPlaceholderText(tr("multi_edit.mixed_values"))
     elif isinstance(widget, (QDoubleSpinBox, QSpinBox)):
         if widget.property("_real_min") is None:
             widget.setProperty("_real_min", widget.minimum())
-        widget.setSpecialValueText("-- mixed --")
+        widget.setSpecialValueText(tr("multi_edit.mixed"))
         real_min = widget.property("_real_min")
         widget.setMinimum(real_min - 1)
         widget.setValue(widget.minimum())
     elif isinstance(widget, QComboBox):
         if not widget.property("_has_mixed"):
             widget.blockSignals(True)
-            widget.insertItem(0, "-- mixed --")
+            widget.insertItem(0, tr("multi_edit.mixed"))
             widget.setProperty("_has_mixed", True)
             widget.blockSignals(False)
         widget.blockSignals(True)
@@ -118,7 +144,7 @@ def widget_is_mixed(widget) -> bool:
     if isinstance(widget, QLineEdit):
         return (
             widget.text() == ""
-            and widget.placeholderText() == "-- mixed values --"
+            and widget.placeholderText() == tr("multi_edit.mixed_values")
         )
     if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
         return (

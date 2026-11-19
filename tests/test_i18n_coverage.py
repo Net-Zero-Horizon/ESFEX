@@ -53,6 +53,18 @@ def _catalogue_keys():
     keys += [f"preferences_actions.{k}" for k in DEFAULT_SHORTCUTS]
     keys += [c.TR_KEY for c in vars(results_charts).values()
              if isinstance(c, type) and getattr(c, "TR_KEY", "")]
+    rc = results_charts
+    keys += [f"results_charts.{k}" for k in rc._SERIES_LABEL_KEYS.values()]
+    keys += [f"results_charts.{k}" for k in rc._MGA_CATEGORY_KEYS.values()]
+    keys += [f"results_charts.mga_obj_{o}" for o in rc._MGA_OBJECTIVE_COLORS]
+    keys += [f"results_charts.month_short_{m}" for m in range(1, 13)]
+    keys += [f"results_charts.metric_{k}" for k, _ in rc.SystemMetricsEvolutionChart._METRICS]
+    keys += [f"results_charts.metric_cat_{c}"
+             for c in rc.SystemMetricsEvolutionChart._CATEGORY_COLORS]
+    keys += [f"results_charts.{k}" for _, k, _, _ in rc._CUSTOM_STD_VARS]
+    cfg = rc._CustomConfigWidget
+    keys += [k for items in (cfg._TYPES, cfg._STATS, cfg._TRANSFORMS, cfg._AGGS, cfg._SCALES)
+             for _, k in items]
     return keys
 
 

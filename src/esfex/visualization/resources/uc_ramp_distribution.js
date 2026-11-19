@@ -32,11 +32,11 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
-        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false); return; }
-        if (!data.techs || !data.techs.length) { _ucClearPlot(); showStatus("No ramp data", false); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
+        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return; }
+        if (!data.techs || !data.techs.length) { _ucClearPlot(); showStatus(_t("web.charts.uc_ramp_distribution.no_data"), false); return; }
         try { renderRamps(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(t, e) { const s = document.getElementById("status"); s.textContent = t; s.style.display = "block"; s.style.color = e ? "#c0392b" : "#7F8C8D"; }
@@ -70,7 +70,7 @@ function renderRamps(data) {
             name: "P95",
             marker: { symbol: "diamond", size: 12, color: "#922B21",
                       line: { color: "#000", width: 1 } },
-            hovertemplate: "%{x} P95: %{y:,.1f} MW<extra></extra>",
+            hovertemplate: _t("web.charts.uc_ramp_distribution.hover_p95") + "<extra></extra>",
         });
     }
 
@@ -78,16 +78,16 @@ function renderRamps(data) {
         margin: { t: 70, r: 30, b: 20, l: 70 },
         showlegend: true,
         annotations: [
-            { text: "Hour-to-hour |ΔP|, MW &nbsp;|&nbsp; red diamond = P95",
+            { text: _t("web.charts.uc_ramp_distribution.note_metric") + " &nbsp;|&nbsp; " + _t("web.charts.uc_ramp_distribution.note_p95"),
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.04, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
         ],
         legend: { font: { size: 10 } },
-        xaxis: Object.assign({ title: "<b>Technology</b>" },
+        xaxis: Object.assign({ title: "<b>" + _t("web.charts.uc_ramp_distribution.axis_technology") + "</b>" },
             labelAxis({ axis: "xaxis", labels: data.techs, fontSize: 11,
                         fraction: 0.25, maxChars: 24, angle: -25 })),
-        yaxis: { title: "<b>|ΔP| per hour (MW)</b>", rangemode: "tozero" },
+        yaxis: { title: "<b>" + _t("web.charts.uc_ramp_distribution.axis_ramp") + "</b>", rangemode: "tozero" },
         boxmode: "group",
     };
     Plotly.purge("plot");

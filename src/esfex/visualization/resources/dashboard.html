@@ -170,14 +170,13 @@
 
   <!-- ── FILTER BAR ─────────────────────────────────────────── -->
   <div class="filterbar">
-    <label for="system-select">System</label>
+    <label for="system-select" data-i18n="web.dashboard.system">System</label>
     <select id="system-select"></select>
 
-    <label for="year-range">Year range</label>
+    <label for="year-range" data-i18n="web.dashboard.year_range">Year range</label>
     <span id="year-range" class="range-display">—</span>
-    <button id="reset-range" class="reset-btn" title="Clear brush and show all years">
-      Reset range
-    </button>
+    <button id="reset-range" class="reset-btn" data-i18n="web.dashboard.reset_range"
+            data-i18n-title="web.dashboard.reset_range_tip">Reset range</button>
 
     <span style="flex:1"></span>
 
@@ -188,27 +187,27 @@
   <div class="kpibar" id="kpibar">
     <!-- KPIs are populated by renderKpis(); start with placeholders -->
     <div class="kpi" data-key="cost">
-      <div class="label">Total Cost</div>
+      <div class="label" data-i18n="web.dashboard.kpi_total_cost">Total Cost</div>
       <div class="value">—</div>
       <div class="delta"></div>
     </div>
     <div class="kpi" data-key="re_share">
-      <div class="label">RE Share</div>
+      <div class="label" data-i18n="web.dashboard.kpi_re_share">RE Share</div>
       <div class="value">—</div>
       <div class="delta"></div>
     </div>
     <div class="kpi" data-key="co2">
-      <div class="label">CO₂ Emissions</div>
+      <div class="label" data-i18n="web.dashboard.kpi_co2">CO₂ Emissions</div>
       <div class="value">—</div>
       <div class="delta"></div>
     </div>
     <div class="kpi" data-key="load_shed">
-      <div class="label">Load Shed</div>
+      <div class="label" data-i18n="web.dashboard.kpi_load_shed">Load Shed</div>
       <div class="value">—</div>
       <div class="delta"></div>
     </div>
     <div class="kpi" data-key="investment">
-      <div class="label">New Capacity</div>
+      <div class="label" data-i18n="web.dashboard.kpi_new_capacity">New Capacity</div>
       <div class="value">—</div>
       <div class="delta"></div>
     </div>
@@ -219,8 +218,8 @@
 
     <div class="card">
       <div class="card-header">
-        System Trajectory
-        <span class="hint">Brush horizontally to filter • Click a point for year detail</span>
+        <span class="card-title" data-i18n="web.dashboard.trajectory_title">System Trajectory</span>
+        <span class="hint" data-i18n="web.dashboard.trajectory_hint">Brush horizontally to filter • Click a point for year detail</span>
       </div>
       <div id="trajectory" class="plot tall"></div>
     </div>
@@ -231,9 +230,9 @@
          chart you just clicked. -->
     <div id="year-detail" class="card" style="display:none">
       <div class="card-header">
-        <span>Year <span id="year-detail-label">—</span> — Hourly dispatch</span>
-        <button id="year-detail-close" class="reset-btn"
-                title="Close the year drill-down panel">Close ✕</button>
+        <span id="year-detail-title"></span>
+        <button id="year-detail-close" class="reset-btn" data-i18n="web.dashboard.close"
+                data-i18n-title="web.dashboard.close_tip">Close ✕</button>
       </div>
       <div id="year-detail-kpis" style="display:flex; gap:8px;
                                         padding:8px 14px;
@@ -245,16 +244,16 @@
 
     <div class="card">
       <div class="card-header">
-        Generation Mix Evolution
-        <span class="hint">Click a technology in the legend to toggle</span>
+        <span class="card-title" data-i18n="web.dashboard.mix_title">Generation Mix Evolution</span>
+        <span class="hint" data-i18n="web.dashboard.mix_hint">Click a technology in the legend to toggle</span>
       </div>
       <div id="mix" class="plot tall"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        Cost Composition
-        <span class="hint" id="cost-hint">Breakdown of the total system cost</span>
+        <span class="card-title" data-i18n="web.dashboard.cost_title">Cost Composition</span>
+        <span class="hint" id="cost-hint" data-i18n="web.dashboard.cost_hint">Breakdown of the total system cost</span>
       </div>
       <div id="cost" class="plot tall"></div>
     </div>

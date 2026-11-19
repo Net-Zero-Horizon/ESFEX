@@ -222,14 +222,14 @@ class DataSourcesStep(QWidget):
         if gdf is not None and "height" in gdf.columns:
             n_height = gdf["height"].notna().sum()
         self._bldg_status.setText(
-            f"Loaded {n} buildings ({n_height} with height data)"
+            tr("wizard_solar.loaded_buildings", n=n, n_height=n_height)
         )
         self._bldg_progress.setValue(100)
         self._check_ready()
 
     def _on_bldg_error(self, msg):
         self._btn_fetch_bldg.setEnabled(True)
-        self._bldg_status.setText(f"Error: {msg}")
+        self._bldg_status.setText(tr("wizard_solar.error_msg", msg=msg))
         self._bldg_progress.setValue(0)
 
     def _fetch_solar(self):
@@ -267,13 +267,13 @@ class DataSourcesStep(QWidget):
         self._btn_fetch_solar.setEnabled(True)
         src = result.get("source", "Unknown")
         n = len(result.get("data", []))
-        self._solar_status.setText(f"Loaded {n} hourly records from {src}")
+        self._solar_status.setText(tr("wizard_solar.loaded_solar", n=n, src=src))
         self._solar_progress.setValue(100)
         self._check_ready()
 
     def _on_solar_error(self, msg):
         self._btn_fetch_solar.setEnabled(True)
-        self._solar_status.setText(f"Error: {msg}")
+        self._solar_status.setText(tr("wizard_solar.error_msg", msg=msg))
         self._solar_progress.setValue(0)
 
     def _check_ready(self):
@@ -359,7 +359,7 @@ class ConfigStep(QWidget):
         self._spin_tilt = QDoubleSpinBox()
         self._spin_tilt.setRange(0, 60)
         self._spin_tilt.setValue(0)
-        self._spin_tilt.setToolTip("0 = auto from latitude")
+        self._spin_tilt.setToolTip(tr("wizard_solar.tilt_auto_tip"))
         self._spin_tilt.setSuffix("°")
         rf.addRow(tr("wizard_solar.default_tilt"), self._spin_tilt)
 
@@ -461,14 +461,15 @@ class AnalysisStep(QWidget):
 
         n = len(buildings_gdf) if buildings_gdf is not None else 0
         src = solar_data.get("source", "?") if solar_data else "?"
-        self._summary_label.setText(
-            f"Ready to analyze {n} buildings using solar data from {src}.\n"
-            f"Panel: {config.module_power_w:.0f}W, eff={config.module_efficiency:.0%}, "
-            f"PR={config.performance_ratio:.0%}, losses={config.system_losses:.0%}\n"
-            f"Roof: {config.suitable_fraction:.0%} suitable, "
-            f"min area={config.min_building_area_m2:.0f} m², "
-            f"shading={'ON' if config.enable_shading else 'OFF'}"
-        )
+        self._summary_label.setText(tr(
+            "wizard_solar.ready_summary",
+            n=n, src=src, power=config.module_power_w,
+            eff=config.module_efficiency, pr=config.performance_ratio,
+            losses=config.system_losses, suitable=config.suitable_fraction,
+            min_area=config.min_building_area_m2,
+            shading=tr("wizard_solar.shading_on" if config.enable_shading
+                       else "wizard_solar.shading_off"),
+        ))
 
     def set_input_provider(self, fn):
         """Callable returning set_inputs() args (consolidated layout).
@@ -515,19 +516,19 @@ class AnalysisStep(QWidget):
         self._btn_run.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._progress.setValue(100)
-        self._log.append(
-            f"\nAnalysis complete!\n"
-            f"  Suitable buildings: {summary.suitable_buildings}/{summary.total_buildings}\n"
-            f"  Total capacity: {summary.total_capacity_kwp:.1f} kWp\n"
-            f"  Annual yield: {summary.total_annual_yield_mwh:.1f} MWh/yr\n"
-            f"  Avg capacity factor: {summary.avg_capacity_factor:.1f}%"
-        )
+        self._log.append(tr(
+            "wizard_solar.analysis_complete",
+            suitable=summary.suitable_buildings, total=summary.total_buildings,
+            capacity=summary.total_capacity_kwp,
+            **{"yield": summary.total_annual_yield_mwh},
+            cf=summary.avg_capacity_factor,
+        ))
         self.analysisFinished.emit()
 
     def _on_error(self, msg):
         self._btn_run.setEnabled(True)
         self._btn_cancel.setEnabled(False)
-        self._log.append(f"\nERROR: {msg}")
+        self._log.append("\n" + tr("wizard_solar.error_label", msg=msg))
 
     def get_summary(self):
         return self._summary
@@ -603,9 +604,11 @@ class ResultsStep(QWidget):
         self._lbl_suitable.setText(str(summary.suitable_buildings))
         self._lbl_area.setText(f"{summary.total_usable_area_m2:,.0f} m²")
         self._lbl_capacity.setText(f"{summary.total_capacity_kwp:,.1f} kWp")
-        self._lbl_yield.setText(f"{summary.total_annual_yield_mwh:,.1f} MWh/yr")
+        self._lbl_yield.setText(tr("wizard_solar.yield_value",
+                                   v=f"{summary.total_annual_yield_mwh:,.1f}"))
         self._lbl_cf.setText(f"{summary.avg_capacity_factor:.1f}%")
-        self._lbl_sy.setText(f"{summary.avg_specific_yield:,.0f} kWh/kWp/yr")
+        self._lbl_sy.setText(tr("wizard_solar.specific_yield_value",
+                                v=f"{summary.avg_specific_yield:,.0f}"))
 
     def _show_on_map(self):
         if self._buildings_gdf is None or self._summary is None:

@@ -20,9 +20,9 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try {
             currentData = data;
@@ -30,7 +30,7 @@ function refresh() {
             render(currentData, currentMethod);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true); console.error(e);
+            showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e);
         }
     });
 }
@@ -55,12 +55,12 @@ function setMethod(method) {
 
 function render(data, method) {
     const proj = data.projections;
-    if (!proj) { showStatus("No projection data.", false); return; }
+    if (!proj) { showStatus(_t("web.charts.mga_projection.no_projection"), false); return; }
     const block = (method === "tsne") ? proj.tsne : proj.pca;
     if (!block) {
         showStatus(method === "tsne"
-            ? "t-SNE unavailable (install scikit-learn)."
-            : "Projection unavailable.", false);
+            ? _t("web.charts.mga_projection.tsne_unavailable")
+            : _t("web.charts.mga_projection.projection_unavailable"), false);
         return;
     }
     const ids = proj.alt_ids;
@@ -76,15 +76,19 @@ function render(data, method) {
     const labelMap = h.objective_labels || {};
 
     // Hover text per point.
-    const text = ids.map((id, i) => (
-        `<b>Alt ${id}${isOpt[i] ? " (Optimal)" : ""}</b><br>` +
-        `Cost: $${cost[i].toFixed(2)}B (+${costPct[i].toFixed(2)}% vs opt)<br>` +
-        `Diversity: ${div[i].toFixed(1)}<br>` +
-        (isSpores
-            ? `Objective: ${labelMap[objective[i]] || objective[i]}<br>`
-            : "") +
-        `Peak RE: ${reP[i].toFixed(1)}%`
-    ));
+    const text = ids.map((id, i) => [
+        "<b>" + (isOpt[i]
+            ? _t("web.charts.mga_projection.hover_alt_optimal", { id: id })
+            : _t("web.charts.mga_projection.hover_alt", { id: id })) + "</b>",
+        _t("web.charts.mga_projection.hover_cost", {
+            cost: cost[i].toFixed(2), pct: costPct[i].toFixed(2) }),
+        _t("web.charts.mga_projection.hover_diversity", { value: div[i].toFixed(1) }),
+        ...(isSpores
+            ? [_t("web.charts.mga_projection.hover_objective",
+                  { objective: labelMap[objective[i]] || objective[i] })]
+            : []),
+        _t("web.charts.mga_projection.hover_peak_re", { pct: reP[i].toFixed(1) }),
+    ].join("<br>"));
 
     const idxOpt  = ids.map((_, i) => i).filter(i =>  isOpt[i]);
     const traces = [];
@@ -129,12 +133,12 @@ function render(data, method) {
             text: idxNorm.map(i => String(ids[i])),
             textposition: "top center",
             textfont: { size: 10, color: "#7f8c8d" },
-            name: "Alternative",
+            name: _t("web.charts.mga_projection.trace_alternative"),
             marker: {
                 size: 14,
                 color: idxNorm.map(i => cost[i]),
                 colorscale: "Viridis", showscale: true,
-                colorbar: { title: { text: "Cost ($B)", side: "right" },
+                colorbar: { title: { text: _t("web.charts.mga_projection.colorbar_cost"), side: "right" },
                             thickness: 12, len: 0.85 },
                 line: { color: "#FFF", width: 1 },
             },
@@ -152,7 +156,7 @@ function render(data, method) {
         textposition: "top center",
         textfont: { size: 11, color: colorMap["cost_optimal"] || "#E74C3C",
                     weight: 700 },
-        name: "Optimal",
+        name: _t("web.charts.mga_projection.trace_optimal"),
         marker: { symbol: "star", size: 22,
                   color: colorMap["cost_optimal"] || "#E74C3C",
                   line: { color: "#FFF", width: 1.5 } },
@@ -161,15 +165,19 @@ function render(data, method) {
     });
 
     const isP = (method !== "tsne");
-    const xTitle = isP ? `PC1  (${(proj.pca.var_pc1*100).toFixed(1)}% var)`
-                       : "t-SNE dim 1";
-    const yTitle = isP ? `PC2  (${(proj.pca.var_pc2*100).toFixed(1)}% var)`
-                       : "t-SNE dim 2";
-    const methodLabel = isP ? "Principal Component Analysis"
-                            : "t-distributed Stochastic Neighbour Embedding";
+    const xTitle = isP
+        ? _t("web.charts.mga_projection.axis_pc1", { pct: (proj.pca.var_pc1*100).toFixed(1) })
+        : _t("web.charts.mga_projection.axis_tsne1");
+    const yTitle = isP
+        ? _t("web.charts.mga_projection.axis_pc2", { pct: (proj.pca.var_pc2*100).toFixed(1) })
+        : _t("web.charts.mga_projection.axis_tsne2");
+    const methodLabel = isP ? _t("web.charts.mga_projection.method_pca")
+                            : _t("web.charts.mga_projection.method_tsne");
     const layout = {
         margin: { l: 70, r: 30, t: 50, b: 80 },
-        title: { text: `<span style='font-size:11px;color:#7f8c8d'>${methodLabel} — each alternative as a point in technology × node investment space</span>`,
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" +
+                       _t("web.charts.mga_projection.subtitle", { method: methodLabel }) +
+                       "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         xaxis: { title: xTitle, gridcolor: "rgba(0,0,0,0.08)",
