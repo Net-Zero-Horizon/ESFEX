@@ -43,7 +43,7 @@ All four sources are enabled by default. Combining them (OSM topology, plant dat
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
-| Min voltage | 10 -- 750 kV | 66 kV | Substations and lines with a known voltage below this value are excluded at fetch time. After the build, buses that ended up below the floor are collapsed into the nearest bus at or above it (see [Build pipeline](#build-pipeline)). The 66 kV default keeps the sub-transmission layer that holds regional grids together; a higher floor can split a regional grid into disconnected islands. |
+| Min voltage | 10 -- 750 kV | 66 kV | Substations and lines with a known voltage below this value are excluded at fetch time, as are substations tagged `substation=distribution` without a voltage when the floor is above 60 kV. After the build, buses that ended up below the floor are collapsed into the nearest bus at or above it (see [Build pipeline](#build-pipeline)). The 66 kV default keeps the sub-transmission layer that holds regional grids together; a higher floor can split a regional grid into disconnected islands. |
 | Min gen capacity | 0 -- 10,000 MW | 0.3 MW per kV of Min voltage (20 MW at 66 kV) | Generator capacity floor. The default follows Min voltage (0.3 MW/kV, rounded) until you edit the value by hand, which pins it. When the value is above 0, the build drops every generator below it, **including generators with unknown capacity** (0 MW in the source). Set it to 0 to include every generator. |
 
 **Element types to import:**
@@ -179,21 +179,38 @@ Levels 3 and 4 of earlier versions ran the same reduction as level 2 and are no 
 
 | Phase | Input | Result |
 |-------|-------|--------|
+| 0. Voltage tags | `substation`, `transformer`, `line` | Station voltages are checked against the lines (see [Voltages](#voltages)). |
 | 1. Substations | `substation` | Buses (one per voltage level or per substation, depending on the strategy). In per-voltage mode, transformers between the levels. |
 | 1.5. Fuels & technologies | Generator fuels | `GuiFuel` and `GuiTechnology` objects (see [Fuel & Technology Mapping](#fuel-technology-mapping)). |
 | 2. Generators | `generator` | Generators with mapped fuel, technology, capacity and initial age (from the commissioning year). Generators below Min gen capacity are dropped first. |
 | 3. Batteries | `battery` | Batteries with power rating and energy capacity (explicit, or a 4-hour default duration). |
 | 4. Lines | `line` | OSM segments are merged into contiguous lines and split where a substation sits on them. Endpoints share a bus only when they coincide (0.05 km); GridFinder endpoints snap within 2 km. Capacity from tags or the standard-line-type estimate (see [Line Capacity Estimation](#line-capacity-estimation)). Self-loops are skipped. |
-| 5. Transformers | `transformer` | Transformers with HV and LV buses. |
+| 5. Transformers | `transformer` | Transformers with HV and LV buses. A side with no voltage tag snaps to the nearest bus of any voltage; when that is the other side's bus, the transformer is skipped (the station's levels are tied by its auto-transformer instead). |
 | 6. Converters | `converter` | AC/DC converters with AC-side and DC-side buses. |
 | 7. Fuel entries | `fuel_entry` | Fuel entry points with mapped fuel type. |
 | 8. Fuel storage | `fuel_storage` | Fuel storage facilities with mapped fuel type. |
-| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance (from the length measured at phase 4, for all the line's circuits together) are recomputed. Anything still unresolved (an all-untagged pocket) falls back to 220 kV. |
-| 8.5. Voltage floor | Buses below Min voltage | Generators and batteries on sub-floor buses move to the nearest bus at or above the floor; the sub-floor buses and their lines and transformers are removed. |
+| 8.4. Voltage propagation | Buses and lines with no voltage tag | An untagged bus takes the voltage of the lines and neighbouring buses it touches (fixed-point relaxation); untagged lines take the voltage of their endpoints, and their rating and impedance (from the length measured at phase 4, for all the line's circuits together) are recomputed. A bus no tagged line reaches gets medium voltage (see [Voltages](#voltages)). Transformer and converter voltages follow their buses. |
+| 8.5. Voltage floor | Buses below Min voltage | Generators and batteries on sub-floor buses move to the nearest bus at or above the floor; the sub-floor buses and their lines and transformers are removed. Buses not connected to any tagged voltage (an island's grid, a loose plant) are kept. |
 | 9. Fuel consistency | All generators | Every generator fuel exists in the catalog and is supplied. |
 | Station clustering | All buses | Same-voltage buses within the station merge radius are merged; internal self-loops are dropped. |
 | Co-located voltage levels | Buses of different voltage at one station | A transformer is inserted between voltage levels that sit within the station merge radius. |
 | Frequency consistency | All buses | Missing frequencies are filled from the location (50/60 Hz: coarse outlines of the 60 Hz countries, which follow the borders with their 50 Hz neighbours, e.g. Brazil/Peru 60 Hz but Bolivia, Paraguay, Argentina, Uruguay and Chile 50 Hz, Saudi Arabia 60 Hz but the other Gulf states 50 Hz, Jamaica and most of the Lesser Antilles 50 Hz, Japan split at the Fossa Magna), each AC-connected area gets one frequency, and equipment and AC lines are aligned with their bus. Features without a frequency tag (GridFinder lines, WRI/GEM plants, untagged OSM elements) take the frequency of their location; earlier versions gave GridFinder lines 50 Hz, so on a sparsely mapped 60 Hz grid such as Cuba their buses outvoted the substations and the whole network was built at 50 Hz. On save, the system's `frequency_nominal` becomes the frequency its AC buses run at (see [Frequency Stability](../formulation/frequency-stability.md)). |
+
+#### Voltages
+
+The builder takes voltages from the data and never fills a gap with a fixed number. A substation, transformer or converter without a `voltage` tag enters the build with an unknown voltage (earlier versions read 220 kV off `substation=transmission`, 110 kV off `sub_transmission` and 33 kV off `distribution`, and gave an untagged transformer secondary 110 kV and an untagged converter 220 kV, the same numbers in every country). Unknown voltages are then resolved in this order:
+
+1. **From the lines.** A bus takes the voltage of the tagged lines it touches, and the value flows along untagged lines (phase 8.4).
+2. **Medium voltage.** A bus no tagged line reaches gets the medium-voltage level (10 to 60 kV) that the fetched data tags most often, or 33 kV at 50 Hz and 34.5 kV at 60 Hz when it tags none. OSM tags nearly every transmission line (94 % of the Cuban lines), so what stays untagged and unreached is distribution or an insular grid. Where a bus's whole component (over lines, transformers and converters) knows no voltage, the voltage floor keeps it: an island has no HV grid to fold into. Earlier versions set these buses to 220 kV, so Isla de la Juventud, a 34.5 kV system, became a 220 kV one.
+
+Before any bus is created, station tags that the lines contradict are corrected, at high voltage (60 kV and above) only:
+
+- **Line consensus.** A substation or transformer tagged with one level, whose own lines (at least two, each end counted for the nearest station within the station merge radius) all carry another single level and none carries its own, takes the lines' level.
+- **Off-standard level.** A level no line in the data carries is snapped to the nearest level the lines do carry, when within 30 %: in Cuba, whose lines are 220 and 110 kV, stations tagged 132 or 138 kV become 110 kV. Levels the lines carry are never changed.
+
+Medium voltage is left as tagged: generator terminals and distribution levels legitimately have no lines in a transmission fetch.
+
+Every voltage assigned or corrected is listed in the build summary under **Voltage decisions**: corrections station by station with the old and new level and the reason, medium-voltage assignments grouped by node, and inference from tagged lines as a count. `build_grid_from_features` returns the same list as `ParseResult.voltage_decisions` (one dict per decision: `element`, `id`, `name`, `node`, `lat`, `lng`, `kv`, `was`, `rule`, `detail`), with `rule` one of `inferred_from_lines`, `isolated_mv`, `unreached_mv`, `line_consensus` or `off_standard_level`.
 
 The build worker then runs:
 

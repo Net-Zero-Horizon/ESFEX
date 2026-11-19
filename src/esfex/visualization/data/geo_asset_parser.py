@@ -50,6 +50,9 @@ class ParseResult:
     fuels_created: int = 0
     technologies_created: int = 0
     warnings: list[str] = field(default_factory=list)
+    # Every voltage the builder inferred, assigned or corrected, as dicts:
+    # element, id, name, lat, lng, kv, was (0 = untagged), rule, detail.
+    voltage_decisions: list[dict] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -85,7 +88,58 @@ class ParseResult:
         if self.warnings:
             msg += f"\n\nWarnings ({len(self.warnings)}):\n"
             msg += "\n".join(f"  - {w}" for w in self.warnings)
+        if self.voltage_decisions:
+            msg += "\n\n" + self.voltage_summary()
         return msg
+
+    # Rules that change or invent a tagged value are listed one by one; the
+    # routine inference from tagged lines is only counted.
+    _VOLTAGE_RULES = {
+        "line_consensus": "Station tag overruled by its lines",
+        "off_standard_level": "Level no line carries, snapped to a line level",
+        "isolated_mv": ("Not connected to any tagged voltage (isolated grid "
+                        "or loose element), set to MV; kept below the floor"),
+        "unreached_mv": "Under a tagged grid but no tagged line reaches it, "
+                        "set to MV",
+    }
+
+    def voltage_summary(self) -> str:
+        """The voltage decisions as text: corrections and defaults listed,
+        inference from tagged lines counted."""
+        from collections import Counter
+        d = self.voltage_decisions
+        inferred = sum(1 for x in d if x.get("rule") == "inferred_from_lines")
+        lines = [f"Voltage decisions ({len(d)}):"]
+        if inferred:
+            lines.append(f"  {inferred} bus(es) took the voltage of their "
+                         f"tagged lines.")
+        for rule, title in self._VOLTAGE_RULES.items():
+            items = [x for x in d if x.get("rule") == rule]
+            if not items:
+                continue
+            levels = Counter(f"{x['kv']:g} kV" for x in items)
+            lines.append(f"  {title}: {len(items)} "
+                         f"({', '.join(f'{k} ×{n}' for k, n in levels.items())})")
+            if rule.endswith("_mv"):
+                # Often hundreds of lone buses: one line per node.
+                by_node: dict[str, list] = {}
+                for x in items:
+                    by_node.setdefault(x.get("node") or "?", []).append(x)
+                for node, xs in sorted(by_node.items()):
+                    names = [x.get("name") or x.get("id") for x in xs]
+                    more = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+                    lines.append(f"    - {node}: {len(xs)} bus(es) at "
+                                 f"{xs[0]['kv']:g} kV: "
+                                 f"{', '.join(names[:3])}{more}")
+                continue
+            for x in items:
+                was = f"{x['was']:g} kV → " if x.get("was") else ""
+                where = (f" ({x['lat']:.3f}, {x['lng']:.3f})"
+                         if x.get("lat") is not None else "")
+                extra = f"; {x['detail']}" if x.get("detail") else ""
+                lines.append(f"    - {x.get('name') or x.get('id')}{where}: "
+                             f"{was}{x['kv']:g} kV{extra}")
+        return "\n".join(lines)
 
 
 # ── GeoJSON property extraction ──────────────────────────────────
