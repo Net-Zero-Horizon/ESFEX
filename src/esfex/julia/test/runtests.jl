@@ -998,9 +998,8 @@ import Ipopt
             # year's spending. Investment scope: 40 M$ buys 40 MW in 2025, the
             # other 10 MW in 2026. Total scope: 50 MW at once (50 M$ and no
             # fuel, the least the year can spend), 10 M$ over the budget. No
-            # static reserve: its shortfall (no unit here is reservable)
-            # would be part of the year's operating cost as the master
-            # values it.
+            # static reserve here (no unit is reservable); with it, below,
+            # its shortfall stays out of the budget row.
             gas200 = mkgen("Gas", "Non-renewable", "Gas", [100.0], [2.0e-4],
                            ones(Hy, 1); nb = 1, H = Hy)
             tb(total; kw...) = g20(max_re_increment = 1.0, max_annual_investment = 40.0,
@@ -1021,6 +1020,23 @@ import Ipopt
             @test normalized_coefficient(constraint_by_name(tbm, "budget_y1"), gv) ≈
                   coefficient(objective_function(tbm), gv) rtol = 1e-9
             @test coefficient(objective_function(tbm), gv) > 0
+            # Only money in the budget row: with the static reserve on (no
+            # unit here is reservable, so it is short all year) and a CO2
+            # price, the reserve shortfall and the carbon price are in the
+            # objective but not in the row; the fuel is
+            pinp = tb(true; reserve_static_default_ratio = 0.15, co2_cost = 1.0e-4,
+                      fuel_co2 = Dict("Gas" => 0.2))
+            pm, _, _ = solve_g20(pinp)
+            row = constraint_by_name(pm, "budget_y1")
+            rl = first(v for v in all_variables(pm) if startswith(name(v), "op_y1_d1_rs_loss"))
+            @test value(rl) > 0
+            @test coefficient(objective_function(pm), rl) > 0
+            @test normalized_coefficient(row, rl) == 0.0
+            pg = first(v for v in all_variables(pm) if startswith(name(v), "op_y1_d1_gen"))
+            @test normalized_coefficient(row, pg) > 0
+            @test normalized_coefficient(row, pg) < coefficient(objective_function(pm), pg)
+            @test normalized_coefficient(row, pg) ≈
+                  coefficient(objective_function(tbm), gv) rtol = 1e-9   # fuel only
             # TSAM periods and stochastic scenarios too
             _, _, tbtres = solve_g20(tb(true; use_tsam = true,
                 tsam_period_start_hours = [[1], [8761], [17521]],

@@ -973,7 +973,7 @@ Implemented in `add_operating_budget!()` (the runner adds it to each window once
 \Delta t \sum_{g,n,\, t \leq K} \left( c^{\text{fuel}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} + \frac{K \Delta t}{H_{\text{year}}} \left( Z^{\text{fix}} + Z^{\text{bat,fix}} \right) + Z^{\text{PE,fuel}}_{\leq K} - s^{\text{bud}} \leq B_w \tag{COST-1}
 \]
 
-over the window's committed steps \(t \leq K\) (the overlap tail is solved again by the next window). \(Z^{\text{PE,fuel}}\) is the fuel bought and transported in the primary-energy block (a fuel-coupled unit pays its fuel there, not in \(c^{\text{fuel}}\)). The window's budget is its share of what is left of the year's:
+over the window's committed steps \(t \leq K\) (the overlap tail is solved again by the next window). The left side is the money the window pays (`OPERATING_BUDGET_COSTS`); the formula shows its main terms, and the start-ups, battery maintenance, electrolyzer, converter and line-flow costs count too. \(Z^{\text{PE,fuel}}\) is the fuel bought and transported in the primary-energy block (a fuel-coupled unit pays its fuel there, not in \(c^{\text{fuel}}\)). Modelling penalties (unserved energy, reserve, inertia and N-1 shortfalls, curtailment, RE shortfall, SOC and spillage, fuel shortfall), battery degradation and the CO2 price (a transfer to the state) are not spending. The master's `budget_scope: total` budget (BUD-2) counts the same categories. The window's budget is its share of what is left of the year's:
 
 \[
 B_w = \max\!\left(0,\; B^{op} - \sum_{w' < w} \left( S_{w'} - s^{\text{bud}}_{w'} \right) \right) \cdot \frac{D_w}{D^{rest}_w}

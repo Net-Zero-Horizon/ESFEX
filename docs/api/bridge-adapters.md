@@ -268,7 +268,7 @@ class MasterProblemAdapter:
 | `demand_growth` | `float` | Extra annual growth applied on top of each year's block (default `0.0`; the runner always passes 0). |
 | `discount_rate` | `float` | Discount rate for NPV calculations (e.g., 0.05 = 5%). |
 | `max_annual_investment` | `float` | Maximum annual investment budget in $ (the system's `max_annual_investment`). |
-| `budget_scope` | `str` | `"investment"`: the budget caps each build year's overnight investment; `"total"`: that investment plus the year's operating cost as the master values it. With `"total"`, `solver_method: benders` solves the monolithic master instead (warning). |
+| `budget_scope` | `str` | `"investment"`: the budget caps each build year's overnight investment; `"total"`: that investment plus the money the year spends on operation (no modelling penalty, no CO2 price; BUD-2). With `"total"`, `solver_method: benders` solves the monolithic master instead (warning). |
 | `target_re_penetration` | `float` | Target RE penetration ratio by the final year (0-1). |
 | `initial_re_penetration` | `float` | Starting RE penetration ratio (auto-calculated from existing RE capacity). |
 | `temporal_resolution_hours` | `int` | Hours per timestep for representative days (e.g., 24). |

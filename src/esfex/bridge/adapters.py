@@ -2952,7 +2952,8 @@ class MasterProblemAdapter:
             max_annual_investment: Maximum annual investment budget
             budget_scope: "investment" (the budget caps each build year's
                 overnight investment) or "total" (that investment plus the
-                year's operating cost as the master values it)
+                money the year spends on operation, no penalties and no
+                CO2 price; ``budget_operating_cost``)
             target_re_penetration: Target RE penetration ratio
             initial_re_penetration: Initial RE penetration ratio
             min_re_increment: Minimum annual RE penetration increment

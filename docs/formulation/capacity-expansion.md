@@ -375,11 +375,13 @@ The budget \(\bar{B}\) is the system's `max_annual_investment` (\$/yr; files may
 
 The budget limits the capital committed in the build year, not the annuities of OBJ-2. Converters and primary-energy investment are not part of it.
 
-With `budget_scope: total` the same row also holds the year's operating cost as the master values it (`budget_operating_cost`): the representative days' or TSAM periods' operating cost scaled to the year, \(C^{op}_y\) of OBJ-5 without the yearly penalties (RE-target shortfall, growth cap, curtailment above the limit, CO2-budget violation), plus the year's asset costs \(C^{asset}_y\) (fixed O&M, life extension, decommissioning):
+With `budget_scope: total` the same row also holds the money the year spends on operation (`budget_operating_cost`): \(S^{op}_y\), what the representative days or TSAM periods pay, scaled to the year like their cost (`day_operating_spend`, `year_day_spend`), plus the year's asset costs \(C^{asset}_y\) (`build_annual_asset_cost`: fixed O&M, life extension and decommissioning, which are payments of the year too):
 
 \[
-\text{(left side of BUD-1)} + C^{op,days}_y + C^{asset}_y \leq \bar{B} + s^{bud}_y \tag{BUD-2}
+\text{(left side of BUD-1)} + S^{op}_y + C^{asset}_y \leq \bar{B} + s^{bud}_y \tag{BUD-2}
 \]
+
+\(S^{op}_y\) counts the categories of the dispatch's operating budget (COST-1): the fuel (or offer-curve segments) and maintenance of existing generators and candidate technologies, the maintenance of batteries and battery technologies, start-ups, converter and line-flow costs and, with primary energy, the fuel bought and transported and the electrolyzers' cost. It leaves out every modelling penalty (unserved energy at VOLL, reserve, inertia and N-1 shortfalls, curtailment cost, RE-target shortfall and growth cap, SOC and spillage penalties, fuel shortfall and excess, slacks), battery throughput degradation, and the CO2 price and CO2-budget violations: a carbon price is a transfer to the state, not a cost of operating the system.
 
 One row per budget year, with the same slack and price. A build that lowers the year's fuel bill by more than its overnight cost then makes room in the budget, and one that does not uses it up. In a stochastic master the row holds the scenarios' operating costs weighted by their probabilities (each with its own multipliers). The default, `budget_scope: investment`, is BUD-1 alone. The Benders master has no operating cost: with `total`, the run solves the monolithic master instead (with a warning). The dispatch has its own, separate operating budget, `max_annual_operating_cost` ([COST-1](operational-dispatch.md#annual-operating-budget)).
 

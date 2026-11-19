@@ -2066,8 +2066,10 @@ class SystemConfig(BaseModel):
         default="investment",
         description="What max_annual_investment covers in the master: "
                     "'investment' (the overnight investment of each build "
-                    "year) or 'total' (that investment plus the year's "
-                    "operating cost as the master values it). Benders "
+                    "year) or 'total' (that investment plus the money the "
+                    "year spends on operation: fuel, maintenance, start-ups, "
+                    "fixed O&M, life extension, decommissioning; no modelling "
+                    "penalty and no CO2 price). Benders "
                     "decomposition supports 'investment' only (with 'total' "
                     "the monolithic master is solved)",
     )

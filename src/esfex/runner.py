@@ -244,9 +244,10 @@ def _merged_budget_scope(systems) -> str:
 
 def operating_spend(breakdown: Optional[dict]) -> float:
     """What a dispatch window spent for the operating budget
-    (``max_annual_operating_cost``), from its cost breakdown: fuel,
-    maintenance, fixed O&M and, with primary energy, the fuel bought and
-    transported (the Julia ``OPERATING_BUDGET_COSTS``)."""
+    (``max_annual_operating_cost``), from its cost breakdown: the money it
+    paid (fuel, maintenance, start-ups, fixed O&M, electrolyzer, converter
+    and line-flow costs, primary-energy fuel bought and transported; the
+    Julia ``OPERATING_BUDGET_COSTS``), no modelling penalty."""
     if not breakdown:
         return 0.0
     return float(sum(breakdown.get(k, 0.0) for k in OPERATING_BUDGET_COSTS))
