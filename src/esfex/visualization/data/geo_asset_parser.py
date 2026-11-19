@@ -97,6 +97,8 @@ class ParseResult:
     _VOLTAGE_RULES = {
         "line_consensus": "Station tag overruled by its lines",
         "off_standard_level": "Level no line carries, snapped to a line level",
+        "name_level": "Level no line carries, taken from the station's name",
+        "decimal_slip": "Level no line carries, misplaced decimal corrected",
         "isolated_mv": ("Not connected to any tagged voltage (isolated grid "
                         "or loose element), set to MV; kept below the floor"),
         "unreached_mv": "Under a tagged grid but no tagged line reaches it, "
