@@ -736,7 +736,7 @@ def train_xgboost(
 
         # Save fold predictions for parity plots
         preds_dir = output_path.parent / "cv_predictions"
-        preds_dir.mkdir(exist_ok=True)
+        preds_dir.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             preds_dir / f"xgboost_fold{fold_i}.npz",
             y_true=y_va, y_pred=y_pred,
