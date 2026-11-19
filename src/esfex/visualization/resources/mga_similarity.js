@@ -32,8 +32,8 @@ function refresh() {
         try {
             currentData = data;
             currentCmap = data.colormap || "Viridis";
+            hideStatus();                       // render() may show its own empty state
             render(currentData, currentCmap);
-            hideStatus();
         } catch (e) {
             showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e);
         }
