@@ -59,8 +59,6 @@ class DemandEstimationConfig:
     reference_profile: str = "tropical_island"
 
     # Climate parameters
-    hdd_base_temp: float = 18.0    # °C base for heating degree-hours
-    cdd_base_temp: float = 24.0    # °C base for cooling degree-hours
     heating_sensitivity: float = 0.0    # MW / degree-hour (tropical → 0)
     cooling_sensitivity: float = 0.02   # MW / degree-hour
 
@@ -785,9 +783,10 @@ class DemandProfileBuilder:
 
     Call `build()` to produce a `DemandEstimationResult`.
 
-    Two engines available:
-      - **ML** (default if trained model exists): XGBoost 3h envelope +
-        Fourier harmonic reconstruction to hourly.
+    Three engines, tried in this order:
+      - **Density** (default): spatial demand-density model per node.
+      - **ML** (fallback without the density model): the national XGBoost
+        model of hourly shape factors (``demand_ml``).
       - **Archetype** (fallback): hierarchical decomposition using
         regional archetype shapes + HDD/CDD corrections.
     """
@@ -888,32 +887,22 @@ class DemandProfileBuilder:
         base_annual_mwh = self._calibrate_annual(base_annual_mwh)
         annual_traj = self._compute_annual_trajectory(base_annual_mwh, macro, proxy)
 
-        # Hourly temperature
-        emit(25, "Preparing features…")
-        temp_default = np.zeros(hpy, dtype=np.float64)
-
-        # Per-node ML inference (hourly, no Fourier)
+        # Per-node ML inference (hourly, no Fourier). The features are those
+        # the model was trained on: the static ones sampled at each node,
+        # degree hours on the model's own 18/24 °C bases.
         emit(35, f"ML inference ({model.engine})…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
 
         for ni in range(num_nodes):
-            node_pop = macro.population * w_spatial[ni]
             lat = proxy.node_lats[ni] if ni < len(proxy.node_lats) else 0.0
             lon = proxy.node_lons[ni] if ni < len(proxy.node_lons) else 0.0
 
-            temp_h = meteo.node_temperature(ni, hpy)
             features = build_hourly_features(
-                gdp_per_capita=macro.gdp_per_capita,
-                population=node_pop,
-                urbanization_pct=macro.urbanization_pct,
-                electricity_access_pct=macro.electricity_access_pct,
-                temperature_hourly=temp_h if temp_h is not None else temp_default,
-                latitude=lat,
-                longitude=lon,
+                macro.country_iso,
+                meteo.node_temperature(ni, hpy),
+                lat, lon,
                 base_year=self._cfg.base_year,
                 simulation_years=years,
-                hdd_base=self._cfg.hdd_base_temp,
-                cdd_base=self._cfg.cdd_base_temp,
                 gdp_growth_by_year=macro.gdp_growth_by_year or None,
                 pop_growth_by_year=macro.pop_growth_by_year or None,
             )

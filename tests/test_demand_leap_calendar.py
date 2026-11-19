@@ -78,9 +78,10 @@ def test_hourly_features_weekday_per_simulation_year():
     from esfex.models.demand_ml import FEATURE_COLS, build_hourly_features
 
     X = build_hourly_features(
-        gdp_per_capita=10_000.0, population=1e6, urbanization_pct=60.0,
-        electricity_access_pct=100.0, temperature_hourly=np.full(8760, 20.0),
-        latitude=0.0, longitude=0.0, base_year=2023, simulation_years=2)
+        "FRA", np.full(8760, 20.0), 0.0, 0.0, base_year=2023,
+        simulation_years=2, country_id=0.0,
+        static_features={"log_gdp_per_cap": 10.0, "log_pop_density": 4.0,
+                         "urbanization": 20.0})
     dow = X[:, FEATURE_COLS.index("day_of_week")]
     assert dow[MAR1] == 2                        # 1 Mar 2023: Wednesday
     assert dow[8760 + MAR1] == FRI               # 1 Mar 2024: Friday

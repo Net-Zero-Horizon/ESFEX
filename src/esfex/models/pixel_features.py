@@ -159,6 +159,45 @@ def load_temperature(
     return None
 
 
+def static_features_for_point(
+    lat: float, lon: float, year: int,
+) -> tuple[float, float, float, list[str]]:
+    """The static features at (*lat*, *lon*) for *year*:
+    ``(log_gdp_per_cap, log_pop_density, urbanization, missing)``.
+
+    ``log_gdp_per_cap`` and ``log_pop_density`` are NaN when their raster has
+    no value there; ``urbanization`` is 10 (rural) without the GHSL SMOD
+    raster. ``missing`` names what could not be sampled. The training dataset
+    and the inference of the national shape model (``demand_ml``) both use it.
+    """
+    missing: list[str] = []
+
+    gdp_total = sample_gdp_total(lat, lon, year)
+    pop_dens = sample_pop_density(lat, lon, year)
+    if gdp_total is None:
+        missing.append('gdp_total')
+    if pop_dens is None:
+        missing.append('pop_density')
+
+    if gdp_total is not None and pop_dens is not None and pop_dens > 0.1:
+        pixel_km2 = (0.25 ** 2) * np.cos(np.radians(lat)) * 111.0 ** 2
+        pop_count = pop_dens * pixel_km2
+        log_gdp = float(np.log(max(gdp_total / pop_count, 1.0))) if pop_count > 1 else np.nan
+        if np.isnan(log_gdp):
+            missing.append('gdp_per_cap_division')
+    else:
+        log_gdp = np.nan
+
+    log_pop_density = float(np.log(max(pop_dens, 0.01))) if pop_dens is not None else np.nan
+
+    urbanization = sample_ghsl_smod(lat, lon, year)
+    if urbanization is None:
+        urbanization = 10.0
+        missing.append('urbanization')
+
+    return log_gdp, log_pop_density, urbanization, missing
+
+
 @dataclass
 class PixelFeatures:
     lat: float
@@ -195,30 +234,8 @@ def build_features_for_point(
         effect on static raster sampling — the lat/lon already encode the
         zone's geographic location.
     """
-    missing: list[str] = []
-
-    gdp_total = sample_gdp_total(lat, lon, year)
-    pop_dens = sample_pop_density(lat, lon, year)
-    if gdp_total is None:
-        missing.append('gdp_total')
-    if pop_dens is None:
-        missing.append('pop_density')
-
-    if gdp_total is not None and pop_dens is not None and pop_dens > 0.1:
-        pixel_km2 = (0.25 ** 2) * np.cos(np.radians(lat)) * 111.0 ** 2
-        pop_count = pop_dens * pixel_km2
-        log_gdp = float(np.log(max(gdp_total / pop_count, 1.0))) if pop_count > 1 else np.nan
-        if np.isnan(log_gdp):
-            missing.append('gdp_per_cap_division')
-    else:
-        log_gdp = np.nan
-
-    log_pop_density = float(np.log(max(pop_dens, 0.01))) if pop_dens is not None else np.nan
-
-    urbanization = sample_ghsl_smod(lat, lon, year)
-    if urbanization is None:
-        urbanization = 10.0
-        missing.append('urbanization')
+    log_gdp, log_pop_density, urbanization, missing = static_features_for_point(
+        lat, lon, year)
 
     temp = load_temperature(iso3, lat, lon, year, zone=zone)
     if temp is None:
