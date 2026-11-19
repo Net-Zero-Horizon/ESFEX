@@ -44,6 +44,7 @@ from esfex.visualization.data.gui_model import (
     GuiTransmissionLine,
     VisualStyle,
 )
+from esfex.visualization.i18n import tr as _tr  # ``tr`` names transformers here
 from esfex.visualization.workflows.grid_mapping_fetchers import GridFeature
 from esfex.visualization.workflows.grid_mapping_quality import (
     estimate_battery_efficiencies,
@@ -426,10 +427,9 @@ def _enforce_min_voltage(state, min_voltage_kv: float, result,
           for bid, b in state.buses.items()
           if (b.voltage_kv or 0) >= min_voltage_kv]
     if not hv:
-        result.warnings.append(
-            f"Min voltage {min_voltage_kv:.0f} kV: no bus at or above the "
-            f"floor — skipped distribution collapse to avoid emptying the grid."
-        )
+        result.warnings.append(_tr(
+            "grid_builder.report_min_voltage_no_bus",
+            kv=f"{min_voltage_kv:.0f}"))
         return {}
 
     def _nearest_hv(lat, lng):
@@ -533,10 +533,9 @@ def build_grid_from_features(
         ]
         n_dropped = n_before - len(generators)
         if n_dropped:
-            result.warnings.append(
-                f"Min gen capacity: dropped {n_dropped} generator(s) below "
-                f"{min_capacity_mw:g} MW (including unknown-capacity units)."
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_min_gen_dropped", count=n_dropped,
+                mw=f"{min_capacity_mw:g}"))
     lines = [f for f in active if f.feature_type == "line"]
     transformers = [f for f in active if f.feature_type == "transformer"]
     converters = [f for f in active if f.feature_type == "converter"]
@@ -569,7 +568,8 @@ def build_grid_from_features(
             if sub.osm_id:
                 substation_buses[sub.osm_id] = buses_created
         except Exception as exc:
-            result.warnings.append(f"Substation '{sub.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_substation",
+                                       name=sub.name, error=exc))
 
     # ── Phase 1.5: Auto-create fuels & technologies ────────────────
     fuel_remap, tech_remap = _create_fuels_and_technologies(
@@ -586,7 +586,8 @@ def build_grid_from_features(
                 fuel_remap, tech_remap,
             )
         except Exception as exc:
-            result.warnings.append(f"Generator '{gen.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_generator",
+                                       name=gen.name, error=exc))
 
     # ── Phase 3: Batteries → GuiBatteryInstance ────────────────────
 
@@ -597,7 +598,8 @@ def build_grid_from_features(
                 result, centroids, target_node,
             )
         except Exception as exc:
-            result.warnings.append(f"Battery '{bat.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_battery",
+                                       name=bat.name, error=exc))
 
     # ── Phase 4: Lines → GuiTransmissionLine ──────────────────────
     # Capture real topology first (#16): split any line where a substation
@@ -616,10 +618,9 @@ def build_grid_from_features(
         n_segments = len(lines)
         lines = merge_contiguous_line_segments(lines)
         if len(lines) != n_segments:
-            result.warnings.append(
-                f"Topology: merged {n_segments} segments → "
-                f"{len(lines)} contiguous lines."
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_topology_merged", segments=n_segments,
+                lines=len(lines)))
         # 2) Split the merged lines where a substation sits on them.
         sub_buses = [
             (bid, b.latitude, b.longitude, b.voltage_kv)
@@ -628,10 +629,9 @@ def build_grid_from_features(
         n_before_split = len(lines)
         lines = split_lines_at_substations(lines, sub_buses)
         if len(lines) != n_before_split:
-            result.warnings.append(
-                f"Topology: split overpassing lines "
-                f"({n_before_split} → {len(lines)} segments)."
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_topology_split", before=n_before_split,
+                after=len(lines)))
     except Exception as exc:
         logger.warning("Line topology pre-processing skipped (non-fatal): %s", exc)
 
@@ -656,7 +656,8 @@ def build_grid_from_features(
                 result, centroids, target_node,
             )
         except Exception as exc:
-            result.warnings.append(f"Line '{line.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_line",
+                                       name=line.name, error=exc))
 
     # ── Phase 5: Transformers → GuiTransformer ─────────────────────
 
@@ -667,7 +668,8 @@ def build_grid_from_features(
                 result, centroids, target_node,
             )
         except Exception as exc:
-            result.warnings.append(f"Transformer '{tr.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_transformer",
+                                       name=tr.name, error=exc))
 
     # ── Phase 6: Converters → GuiACDCConverter ─────────────────────
 
@@ -678,7 +680,8 @@ def build_grid_from_features(
                 result, centroids, target_node,
             )
         except Exception as exc:
-            result.warnings.append(f"Converter '{conv.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_converter",
+                                       name=conv.name, error=exc))
 
     # ── Phase 7: Fuel Entries → GuiFuelEntryPoint ─────────────────
 
@@ -689,7 +692,8 @@ def build_grid_from_features(
                 result, centroids, target_node,
             )
         except Exception as exc:
-            result.warnings.append(f"Fuel Entry '{fe.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_fuel_entry",
+                                       name=fe.name, error=exc))
 
     # ── Phase 8: Fuel Storage → GuiFuelStorage ────────────────────
 
@@ -700,7 +704,8 @@ def build_grid_from_features(
                 result, centroids, target_node,
             )
         except Exception as exc:
-            result.warnings.append(f"Fuel Storage '{fs.name}': {exc}")
+            result.warnings.append(_tr("grid_builder.report_error_fuel_storage",
+                                       name=fs.name, error=exc))
 
     # ── Phase 8.4: Propagate voltage to untagged buses/lines ──────────────
     # Must run BEFORE the voltage floor: an untagged bus that inherits its real
@@ -711,12 +716,11 @@ def build_grid_from_features(
         vc = _propagate_voltage(model.state, mv_level_kv,
                                 result.voltage_decisions)
         if vc:
-            result.warnings.append(
-                f"Voltage inference: assigned {vc} untagged bus/line "
-                f"voltage(s) (see Voltage decisions)."
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_voltage_inference_assigned", count=vc))
     except Exception as exc:
-        result.warnings.append(f"Voltage inference: {exc}")
+        result.warnings.append(_tr(
+            "grid_builder.report_voltage_inference_error", error=exc))
     # Isolated systems (an island's grid) have no HV layer above them for the
     # floor to collapse them into; they stay.
     floor_exempt = {d["id"] for d in result.voltage_decisions
@@ -733,14 +737,12 @@ def build_grid_from_features(
         mv = _enforce_min_voltage(model.state, min_voltage_kv, result,
                                   exempt=floor_exempt)
         if mv.get("buses_removed"):
-            result.warnings.append(
-                f"Voltage floor {min_voltage_kv:.0f} kV: collapsed "
-                f"{mv['buses_removed']} sub-floor distribution bus(es) "
-                f"(moved {mv['generators_moved']} gen / {mv['batteries_moved']} "
-                f"battery to the nearest transmission bus; removed "
-                f"{mv['lines_removed']} line(s), {mv['transformers_removed']} "
-                f"transformer(s))"
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_voltage_floor_collapsed",
+                kv=f"{min_voltage_kv:.0f}", buses=mv["buses_removed"],
+                generators=mv["generators_moved"],
+                batteries=mv["batteries_moved"], lines=mv["lines_removed"],
+                transformers=mv["transformers_removed"]))
 
     # ── Phase 9: Fuel/tech catalog + supply consistency ───────────
     # Backstop: even if a generator was created with a fuel that didn't
@@ -759,7 +761,8 @@ def build_grid_from_features(
         result.fuels_created += fc.get("fuels_added", 0)
         result.technologies_created += fc.get("techs_added", 0)
     except Exception as exc:
-        result.warnings.append(f"Fuel/bus consistency repair: {exc}")
+        result.warnings.append(_tr(
+            "grid_builder.report_fuel_consistency_error", error=exc))
 
     # ── Topology finalize: cluster same-station buses ─────────────────────
     # Merge buses that are the same physical node (coincident junctions, a line
@@ -772,13 +775,12 @@ def build_grid_from_features(
         cl = cluster_nearby_buses(
             model.state, tol_m=station_radius_km * 1000.0)
         if cl.get("merged"):
-            result.warnings.append(
-                f"Topology: clustered {cl['merged']} bus(es) into their "
-                f"station, removed {cl.get('selfloops_dropped', 0)} "
-                f"internal self-loop line(s)."
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_topology_clustered", buses=cl["merged"],
+                selfloops=cl.get("selfloops_dropped", 0)))
     except Exception as exc:
-        result.warnings.append(f"Bus clustering: {exc}")
+        result.warnings.append(_tr(
+            "grid_builder.report_bus_clustering_error", error=exc))
 
     # Tie co-located voltage levels with a transformer. This is NOT the
     # star-coupling fabrication (which reaches across a whole node): it only
@@ -791,12 +793,11 @@ def build_grid_from_features(
             model.state, result, station_radius_km,
         )
         if vt:
-            result.warnings.append(
-                f"Voltage consistency: inserted {vt} auto-transformer(s) "
-                f"between co-located voltage levels at substations"
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_voltage_coupling_inserted", count=vt))
     except Exception as exc:
-        result.warnings.append(f"Co-located voltage coupling: {exc}")
+        result.warnings.append(_tr(
+            "grid_builder.report_voltage_coupling_error", error=exc))
 
     # Bounded reconnection of isolated components (opt-in). A substation
     # within reconnect_max_km of the backbone is physically tied to it — the
@@ -810,14 +811,13 @@ def build_grid_from_features(
                 snap_km=station_radius_km,
             )
             if rc.get("tapped") or rc.get("linked"):
-                result.warnings.append(
-                    f"Connectivity: reconnected isolated components within "
-                    f"{reconnect_max_km:.0f} km — tapped {rc['tapped']} onto "
-                    f"nearby lines, linked {rc['linked']} to the nearest "
-                    f"same-voltage bus."
-                )
+                result.warnings.append(_tr(
+                    "grid_builder.report_reconnected",
+                    km=f"{reconnect_max_km:.0f}", tapped=rc["tapped"],
+                    linked=rc["linked"]))
         except Exception as exc:
-            result.warnings.append(f"Bounded reconnection: {exc}")
+            result.warnings.append(_tr(
+                "grid_builder.report_reconnection_error", error=exc))
 
         # Absorb whatever remains dysfunctional (gen XOR demand) into the
         # connected grid: move its gen/demand to the nearest kept bus and
@@ -825,16 +825,13 @@ def build_grid_from_features(
         try:
             ab = _absorb_dysfunctional_islands(model.state, result)
             if ab.get("islands_absorbed"):
-                result.warnings.append(
-                    f"Connectivity: absorbed {ab['islands_absorbed']} "
-                    f"dysfunctional island(s) — moved {ab['gens_moved']} "
-                    f"generator(s) and {ab['demand_moved']} demand bus(es) "
-                    f"to the nearest connected bus, removed "
-                    f"{ab['buses_removed']} dead bus(es). Functional "
-                    f"(gen+demand) islands kept."
-                )
+                result.warnings.append(_tr(
+                    "grid_builder.report_islands_absorbed",
+                    islands=ab["islands_absorbed"], generators=ab["gens_moved"],
+                    demand=ab["demand_moved"], buses=ab["buses_removed"]))
         except Exception as exc:
-            result.warnings.append(f"Island absorption: {exc}")
+            result.warnings.append(_tr(
+                "grid_builder.report_island_absorption_error", error=exc))
 
     # ── Frequency consistency ─────────────────────────────────────────────
     # Every bus must carry a valid mains frequency. OSM tags it on only a
@@ -849,14 +846,11 @@ def build_grid_from_features(
     try:
         n_freq = _repair_frequency_consistency(model.state)
         if n_freq:
-            result.warnings.append(
-                f"Frequency consistency: unified the mains frequency of "
-                f"{n_freq} bus(es) with their AC-connected area (backfilled "
-                f"missing values and cleared 50/60 Hz boundary noise); "
-                f"aligned equipment to its bus."
-            )
+            result.warnings.append(_tr(
+                "grid_builder.report_frequency_unified", count=n_freq))
     except Exception as exc:
-        result.warnings.append(f"Frequency consistency: {exc}")
+        result.warnings.append(_tr(
+            "grid_builder.report_frequency_error", error=exc))
 
     return result
 
@@ -1042,25 +1036,25 @@ def _resolve_uncarried_level(st, v: float, others, carried,
     if named:
         n = min(named, key=lambda x: abs(math.log(x / v)))
         return ("name_level", n,
-                f"no line in the data carries this level; the station's name "
-                f"gives {n:g} kV")
+                _tr("grid_builder.voltage_detail_name_level", kv=f"{n:g}"))
     corroborated = any(_same_level(n, v) for n in names)
     role = (getattr(st, "raw_tags", None) or {}).get("substation", "")
     mv_role = role in ("distribution", "minor_distribution")
     if not corroborated and (mv_role or not is_standard_kv(v)):
         for w in (v / 10.0, v * 10.0):
             if is_standard_kv(w) and any(_same_level(w, d) for d in data_levels):
-                why = (f"tagged substation={role}" if mv_role
-                       else f"{v:g} kV is not a standard voltage")
-                return ("decimal_slip", round(w, 3),
-                        f"misplaced decimal: {w:g} kV is a standard level the "
-                        f"data uses; {why}")
+                detail = (
+                    _tr("grid_builder.voltage_detail_decimal_slip_role",
+                        kv=f"{w:g}", role=role) if mv_role
+                    else _tr("grid_builder.voltage_detail_decimal_slip_off_standard",
+                             kv=f"{w:g}", tagged=f"{v:g}"))
+                return ("decimal_slip", round(w, 3), detail)
     best = min(carried, key=lambda c: abs(math.log(c / v)))
     if max(best, v) / min(best, v) <= _OFF_STANDARD_RATIO:
         return ("off_standard_level", best,
-                "no line in the data carries this level; lines carry "
-                + ", ".join(f"{c:g}" for c in sorted(carried, reverse=True))
-                + " kV")
+                _tr("grid_builder.voltage_detail_off_standard_level",
+                    levels=", ".join(f"{c:g}"
+                                     for c in sorted(carried, reverse=True))))
     return "", v, ""
 
 
@@ -1145,7 +1139,9 @@ def _reconcile_station_voltages(stations, lines, station_radius_km: float,
                     w = next(iter(sets))[0]
                     if not _same_level(v, w, 1.10):
                         rule, nv = "line_consensus", w
-                        detail = f"{len(ks)} line(s) at {w:g} kV end here"
+                        detail = _tr(
+                            "grid_builder.voltage_detail_line_consensus",
+                            count=len(ks), kv=f"{w:g}")
             if not rule and not any(_same_level(v, c) for c in carried):
                 others = [x for j, x in enumerate(levels) if j != i]
                 rule, nv, detail = _resolve_uncarried_level(
@@ -1280,7 +1276,8 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
                 kv = mv_level_kv or mv_default_kv(b.frequency_hz)
                 b.voltage_kv = kv
                 _note(x, kv, "isolated_mv" if isolated else "unreached_mv",
-                      f"{len(comp)} bus(es) in its component")
+                      _tr("grid_builder.voltage_detail_component",
+                          count=len(comp)))
                 changed += 1
 
     # Resolve untagged line voltages from their endpoints and recompute the
@@ -1638,7 +1635,8 @@ def _create_line(
 ) -> None:
     """Create a transmission line from a GridFeature."""
     if not line.line_coords or len(line.line_coords) < 2:
-        result.warnings.append(f"Line '{line.name}': no geometry, skipped")
+        result.warnings.append(_tr("grid_builder.report_line_no_geometry",
+                                   name=line.name))
         return
 
     lat1, lng1 = line.line_coords[0]
@@ -1690,9 +1688,8 @@ def _create_line(
     )
 
     if from_bus == to_bus:
-        result.warnings.append(
-            f"Line '{line.name}': endpoints snap to same bus ({from_bus}), skipped"
-        )
+        result.warnings.append(_tr("grid_builder.report_line_same_bus",
+                                   name=line.name, bus=from_bus))
         return
 
     # Intermediate waypoints (skip first and last, those are endpoints)
@@ -2182,13 +2179,10 @@ def _create_transformer(
         # side's voltage is unknown, so its snap is voltage-agnostic and
         # finds the other side's bus). A transformer with both terminals
         # on the same bus is electrically meaningless.
-        why = (" (one side's voltage is untagged; the station's levels are "
-               "tied by its auto-transformer instead)"
-               if v_high <= 0 or v_low <= 0 else "")
-        result.warnings.append(
-            f"Transformer '{tr.name}': both sides snapped to "
-            f"{from_bus}, skipped (self-loop){why}"
-        )
+        key = ("grid_builder.report_transformer_selfloop_untagged"
+               if v_high <= 0 or v_low <= 0
+               else "grid_builder.report_transformer_selfloop")
+        result.warnings.append(_tr(key, name=tr.name, bus=from_bus))
         return
 
     cap = tr.capacity_mw if tr.capacity_mw > 0 else 100.0
@@ -2245,10 +2239,8 @@ def _create_converter(
     )
 
     if ac_bus == dc_bus:
-        result.warnings.append(
-            f"AC/DC converter '{conv.name}': both sides snapped to "
-            f"{ac_bus}, skipped (self-loop)"
-        )
+        result.warnings.append(_tr("grid_builder.report_converter_selfloop",
+                                   name=conv.name, bus=ac_bus))
         return
 
     cap = conv.capacity_mw if conv.capacity_mw > 0 else 100.0

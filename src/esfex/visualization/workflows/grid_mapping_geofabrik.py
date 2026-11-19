@@ -20,6 +20,8 @@ import logging
 import os
 from pathlib import Path
 
+from esfex.visualization.i18n import tr
+
 from .geo_domain import as_rings
 from .grid_mapping_fetchers import (
     GridFeature,
@@ -103,7 +105,7 @@ class GeofabrikGridFetcher(OSMGridFetcher):
             )
 
         domain = self._domain_polygon()
-        self.progress.emit(2, "Resolving Geofabrik region for the study area...")
+        self.progress.emit(2, tr("grid_builder.progress_geofabrik_resolving"))
         region_id, pbf_url = self._resolve_region(domain)
         logger.info("Geofabrik region resolved: %s (%s)", region_id, pbf_url)
 
@@ -111,16 +113,18 @@ class GeofabrikGridFetcher(OSMGridFetcher):
         if self._cancelled:
             return []
 
-        self.progress.emit(60, f"Reading OSM extract '{region_id}' locally...")
+        self.progress.emit(60, tr("grid_builder.progress_geofabrik_reading",
+                                  region=region_id))
         feats = self._stream_pbf(pbf_path, domain)
         if self._cancelled:
             return []
 
         feats = self._prune_roads(feats)
-        self.progress.emit(
-            92, f"Filtering (voltage >= {self.min_voltage_kv} kV)...")
+        self.progress.emit(92, tr("grid_builder.progress_filtering_voltage",
+                                  kv=self.min_voltage_kv))
         feats = self._apply_filters(feats)
-        self.progress.emit(100, f"OSM: {len(feats)} features found")
+        self.progress.emit(100, tr("grid_builder.progress_osm_found",
+                                   count=len(feats)))
         return feats
 
     # ── Domain polygon ───────────────────────────────────────────────
@@ -202,7 +206,7 @@ class GeofabrikGridFetcher(OSMGridFetcher):
         if not fresh:
             import requests
 
-            self.progress.emit(4, "Downloading Geofabrik region index...")
+            self.progress.emit(4, tr("grid_builder.progress_geofabrik_index"))
             r = requests.get(GEOFABRIK_INDEX_URL, timeout=120)
             r.raise_for_status()
             cache.parent.mkdir(parents=True, exist_ok=True)
@@ -225,13 +229,15 @@ class GeofabrikGridFetcher(OSMGridFetcher):
         dest = GEOFABRIK_DIR / f"{region_id.replace('/', '_')}-latest.osm.pbf"
         if dest.exists() and (_time.time() - dest.stat().st_mtime) < 30 * 86400:
             logger.info("Using cached Geofabrik extract: %s", dest)
-            self.progress.emit(58, f"Using cached extract '{region_id}'.")
+            self.progress.emit(58, tr("grid_builder.progress_geofabrik_cached",
+                                      region=region_id))
             return dest
 
         import requests
 
         tmp = dest.with_suffix(".part")
-        self.progress.emit(6, f"Downloading Geofabrik extract '{region_id}'...")
+        self.progress.emit(6, tr("grid_builder.progress_geofabrik_downloading",
+                                 region=region_id))
         with requests.get(pbf_url, stream=True, timeout=120) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length", 0))
@@ -248,8 +254,9 @@ class GeofabrikGridFetcher(OSMGridFetcher):
                         pct = 6 + int(50 * done / total)
                         self.progress.emit(
                             min(pct, 56),
-                            f"Downloading '{region_id}': "
-                            f"{done / 1e9:.2f}/{total / 1e9:.2f} GB",
+                            tr("grid_builder.progress_geofabrik_download_bytes",
+                               region=region_id, done=f"{done / 1e9:.2f}",
+                               total=f"{total / 1e9:.2f}"),
                         )
         os.replace(tmp, dest)
         return dest
@@ -331,8 +338,8 @@ class GeofabrikGridFetcher(OSMGridFetcher):
             if n % 5_000_000 == 0:
                 self.progress.emit(
                     min(60 + int(n / 1_000_000) % 30, 90),
-                    f"Scanning extract ({n // 1_000_000}M elements, "
-                    f"{len(feats)} kept)...",
+                    tr("grid_builder.progress_geofabrik_scanning",
+                       millions=n // 1_000_000, kept=len(feats)),
                 )
             t = obj.tags
             if not self._pbf_relevant(t):

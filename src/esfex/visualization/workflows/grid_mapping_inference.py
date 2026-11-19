@@ -51,15 +51,17 @@ class InferenceReport:
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
-            f"Lines: {self.lines_capacity_set} new caps, "
-            f"{self.lines_capacity_bumped} bumped "
-            f"({self.lines_impedance_scaled} with R, X ÷ and B × the capacity "
-            f"ratio, as parallel circuits). "
-            f"Transformers: {self.transformers_mva_set} new MVA, "
-            f"{self.transformers_mva_bumped} bumped, "
-            f"{self.transformers_impedance_set} impedances re-derived."
-        )
+        from esfex.visualization.i18n import tr
+        return " ".join((
+            tr("grid_builder.report_inference_lines",
+               set=self.lines_capacity_set,
+               bumped=self.lines_capacity_bumped,
+               scaled=self.lines_impedance_scaled),
+            tr("grid_builder.report_inference_transformers",
+               set=self.transformers_mva_set,
+               bumped=self.transformers_mva_bumped,
+               impedance=self.transformers_impedance_set),
+        ))
 
 
 # Floor for capacity even when no gen/demand sits on either side —
@@ -343,10 +345,11 @@ def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
             if _scale_line_as_parallel_circuits(state, ln, needed / current):
                 rep.lines_impedance_scaled += 1
             else:
-                rep.notes.append(
-                    f"Line {getattr(ln, 'line_id', '?')}: capacity raised from "
-                    f"{current:g} to {needed:g} MW; its impedance is unknown "
-                    f"(no voltage or length) and was not rescaled.")
+                from esfex.visualization.i18n import tr as _tr
+                rep.notes.append(_tr(
+                    "grid_builder.report_inference_not_rescaled",
+                    line=getattr(ln, "line_id", "?"), old=f"{current:g}",
+                    new=f"{needed:g}"))
 
     # ── Transformers ──────────────────────────────────────────────
     # Lazy import so the inference module can be used without Qt loaded.
