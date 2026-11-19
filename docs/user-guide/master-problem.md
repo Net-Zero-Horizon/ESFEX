@@ -63,6 +63,8 @@ Each year's objective holds that year's operating cost and one year of annuities
 
 A model stopped by the solver's `time_limit` (or another limit) with a feasible plan is used, with a WARNING giving the gap (see [Solver Guide](solver-guide.md#time-limits)). A Gurobi solve that ends `NUMERICAL_ERROR` or stalls short of optimal (`SUBOPTIMAL`, reported as `LOCALLY_SOLVED`) is first solved once more with the homogeneous barrier ([Solver Guide](solver-guide.md#numerical-trouble-in-a-master-problem)). If a year's model is not optimal otherwise, the myopic run stops with an error that names the year, the solver status and, for an infeasible model with a solver that can compute one (HiGHS and Gurobi can), the constraints that cannot hold together. Later years would otherwise plan from a fleet without that year's builds, and no dispatch is run on the partial plan; `esfex run` then reports the failure and exits with code 1.
 
+A myopic run keeps a checkpoint after every year it plans and every year it dispatches: an interrupted run (killed, a crash, a lost licence, a time limit; also a year whose model was not optimal, once the case is fixed with `--force-resume`) continues from the first year it did not complete with `esfex run -c CASE --resume` (see [Resuming an Interrupted Run](cli.md#resuming-an-interrupted-run)). Perfect foresight solves the horizon in one model and cannot be resumed.
+
 The two modes treat the RE target differently. See [RE Penetration Trajectory](#re-penetration-trajectory).
 
 MGA/SPORES runs only in `perfect_foresight` mode.
