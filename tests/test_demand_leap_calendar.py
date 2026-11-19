@@ -88,19 +88,6 @@ def test_hourly_features_weekday_per_simulation_year():
     assert dow[-1] == 1                          # 31 Dec 2024: Tuesday
 
 
-def test_tft_dataframe_calendar_in_leap_year():
-    from esfex.models.demand_tft import build_tft_dataframe
-
-    df = build_tft_dataframe(
-        np.ones(8760), None, "FRA", 2024, 46.0, 2.0, 1e4, 1e6, 80.0, 100.0)
-    assert df["is_weekend"].iloc[MAR1] == 0.0
-    assert df["is_weekend"].iloc[MAR1 + 24] == 1.0
-    month = np.rint(np.arctan2(df["month_sin"], df["month_cos"])
-                    % (2 * np.pi) * 12 / (2 * np.pi)).astype(int) % 12
-    assert month.iloc[MAR1 - 1] == 1 and month.iloc[MAR1] == 2
-    assert month.iloc[-1] == 11
-
-
 def test_training_rows_carry_real_dates_in_leap_year(tmp_path):
     from esfex.models import demand_training
 
@@ -141,37 +128,3 @@ def test_grid_builder_daily_split_uses_real_weekday():
     # 1 Mar 2024 (row-day 59) is a Friday, 2 March a Saturday.
     assert d[60] < d[59]
     assert d[61] < d[60]                         # Sunday
-
-
-def test_tft_annual_inference_calendar_in_leap_year():
-    pytest.importorskip("torch")
-    from esfex.models.tft_inference import TFTSensitivityBackend
-
-    class _Stop(Exception):
-        pass
-
-    captured = {}
-
-    def _from_parameters(_params, df, **_kw):
-        captured["df"] = df
-        raise _Stop
-
-    backend = TFTSensitivityBackend.__new__(TFTSensitivityBackend)
-    backend.encoder_length, backend.prediction_length = 72, 24
-    backend._gdp_col, backend._pop_col = "log_gdp_per_cap", "log_pop_density"
-    backend._need_elec_access = False
-    backend.ds_params = {}
-    backend._TSDClass = SimpleNamespace(from_parameters=_from_parameters)
-    with pytest.raises(_Stop):
-        backend.predict_annual_shape("FRA", 46.0, 2.0, 10.0, 4.0, 0.8,
-                                     np.full(8760, 15.0), 2024)
-    df = captured["df"]
-    enc = 72
-    assert len(df) == 8760 + enc
-    # The encoder prefix is the end of 2023; row enc is 1 Jan 2024 00:00.
-    assert df["day_of_week"].iloc[0] == 4        # 29 Dec 2023: Friday
-    assert df["day_of_week"].iloc[enc] == 0      # 1 Jan 2024: Monday
-    assert df["day_of_week"].iloc[enc + MAR1] == FRI
-    assert df["month"].iloc[enc + MAR1] == 2
-    assert df["month"].iloc[-1] == 11 and df["hour_of_day"].iloc[-1] == 23
-    assert df["day_of_week"].iloc[-1] == 1       # 31 Dec 2024: Tuesday

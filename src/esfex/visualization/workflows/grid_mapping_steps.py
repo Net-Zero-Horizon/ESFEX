@@ -3973,7 +3973,6 @@ class GridMappingDemandStep(QWidget):
 
         config_grid.addWidget(QLabel(tr("grid_builder.ml_engine")), 3, 0)
         self._combo_engine = QComboBox()
-        # TFT disabled for now \u2014 forward per-node generation uses XGBoost.
         self._combo_engine.addItem("Auto (XGBoost)", "auto")
         self._combo_engine.addItem("XGBoost", "xgboost")
         self._combo_engine.addItem("Archetype (no ML)", "archetype")
