@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+from esfex.visualization.workflows import place_naming as pn
 from esfex.visualization.workflows.place_naming import (
     name_positions_by_region,
     place_from_address,
@@ -150,3 +151,25 @@ def test_docs_give_the_admin1_shapefile_location():
     assert "bundled Natural Earth admin-1" not in page
     rel = paths.ADMIN1_SHP.relative_to(paths.DATA_ROOT).as_posix()
     assert f"$ESFEX_DATA_ROOT/{rel}" in page
+
+
+def test_missing_admin1_shapefile_is_reported_once_and_not_retried(monkeypatch, tmp_path, caplog):
+    """Without the (user-provided) admin-1 shapefile the offline fallback warns
+    once with the path to put it at, and later nodes do not try to read it
+    again (round 44)."""
+    import logging
+
+    import geopandas as gpd
+
+    from esfex import paths
+
+    monkeypatch.setattr(paths, "ADMIN1_SHP", tmp_path / "missing" / "admin1.shp")
+    monkeypatch.setattr(pn, "_ADMIN1_INDEX", None)
+    reads = []
+    monkeypatch.setattr(gpd, "read_file", lambda *a, **k: reads.append(a) or None)
+    with caplog.at_level(logging.WARNING, logger=pn.__name__):
+        for i in range(5):
+            assert pn.reverse_geocode_admin1_offline(21.0 + i, -80.0) is None
+    msgs = [r.getMessage() for r in caplog.records if "admin-1 shapefile" in r.getMessage()]
+    assert len(msgs) == 1 and str(tmp_path / "missing" / "admin1.shp") in msgs[0]
+    assert reads == []
