@@ -212,7 +212,7 @@ export scenario_master_input, build_stochastic_objective!
 # NPV Iteration and Retirement
 export UnitNPV, NPVIterationResult, UnitOperation, RetiredUnit
 export calculate_unit_npv, get_units_with_negative_npv, unit_npvs
-export extract_unit_operation, retire_units, solve_with_npv_iteration
+export extract_unit_operation, retire_units, solve_with_npv_iteration, npv_round_reference_cost
 
 # MGA / SPORES
 export MGAResult
