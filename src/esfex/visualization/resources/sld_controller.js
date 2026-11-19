@@ -275,6 +275,7 @@ function render(data, layouted) {
                 color: props.color || T.edgeLine,
                 voltageKv: props.voltageKv || 0,
                 label: props.label || bid,
+                elementId: props.elementId || bid,
                 junction: !!props.junction,
                 equipCenter: props.equipCenter,
                 parentNode: props.parentNode,
@@ -1055,12 +1056,12 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
     // ── Common: interaction ──
     busG.on('click', function(event) {
         event.stopPropagation();
-        _selectElement('bus', bid, busG);
+        _selectElement('bus', bl.elementId, busG);
     }).on('mouseenter', function(event) {
         _showTooltip(event, bl.label, bl.voltageKv ? bl.voltageKv + ' kV' : '');
     }).on('mouseleave', _hideTooltip);
 
-    elementRegistry['bus:' + bid] = { group: busG, props: bl };
+    elementRegistry['bus:' + bl.elementId] = { group: busG, props: bl };
 }
 
 /**
