@@ -4121,10 +4121,12 @@ class MasterProblemAdapter:
         jl._mp_model = self._jl_model
 
         jl.seval("using JuMP")
-        # Set solver verbose from config
-        verbose_flag = "true" if self._solver.verbose else "false"
-        jl.seval(f'set_optimizer_attribute(_mp_model, "output_flag", {verbose_flag})')
-        logger.debug(f"Solver output_flag={self._solver.verbose}, calling optimize!...")
+        # Solver output from config, through MOI.Silent: every solver has it,
+        # while a raw parameter name ("output_flag") is HiGHS's own and GLPK
+        # rejects it
+        jl.seval("unset_silent(_mp_model)" if self._solver.verbose
+                 else "set_silent(_mp_model)")
+        logger.debug(f"Solver verbose={self._solver.verbose}, calling optimize!...")
         # NUMERICAL_ERROR: one more solve with the solver's retry parameters
         jl.seval("ESFEX.optimize_master!(_mp_model)")
         self.loss_repair = loss_repair_bounds(self._jl_model)

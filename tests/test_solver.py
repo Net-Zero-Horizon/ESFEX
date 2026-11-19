@@ -624,3 +624,35 @@ class TestCheckJuliaSolverAvailable:
         sig = inspect.signature(check_julia_solver_available)
         default = sig.parameters["solver_name"].default
         assert default == "highs"
+
+
+@pytest.mark.julia
+def test_development_run_solves_with_glpk(tmp_path):
+    """The master set its solver output through HiGHS's own parameter name
+    ("output_flag"), so every master solve with GLPK failed at once
+    (UnsupportedAttribute) and the run aborted (round 45)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+    import yaml
+
+    repo = Path(__file__).resolve().parents[1]
+    data = yaml.safe_load((repo / "tests" / "fixtures" / "studio_export_island.yaml").read_text())
+    sysname = next(iter(data["systems"]))
+    np.savetxt(tmp_path / "demand.csv", np.full((8760, 2), 5.0), delimiter=",")
+    data["systems"][sysname]["demand_path"] = "demand.csv"
+    data["simulation_mode"] = "development"
+    data["temporal"].update(resolution_hours=24, rolling_horizon_hours=8760, overlap_hours=0)
+    data["enable_primary_energy"] = False
+    (tmp_path / "case.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    env = {**os.environ, "PYTHONPATH": str(repo / "src")}
+    out = subprocess.run(
+        [sys.executable, "-m", "esfex.cli", "run", "-c", "case.yaml", "-o", "out", "-y", "1",
+         "--solver", "glpk", "--json"],
+        cwd=tmp_path, capture_output=True, text=True, env=env, timeout=1200)
+    doc = json.loads(out.stdout)
+    assert out.returncode == 0 and doc["status"] == "complete", (doc, out.stderr[-3000:])
