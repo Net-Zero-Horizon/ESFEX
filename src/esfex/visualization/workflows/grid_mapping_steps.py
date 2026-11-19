@@ -108,16 +108,18 @@ class GridMappingSourceFetchStep(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
 
-        layout.addWidget(QLabel(
-            tr("grid_builder.b_step_1_region_fetch_b")
-        ))
+        # Wrapped, like every long text here: an unwrapped label sets the
+        # page's minimum width, and the page then ran past the wizard.
+        intro = QLabel(tr("grid_builder.b_step_1_region_fetch_b"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         # ── Region ──
         region_group = QGroupBox(tr("grid_builder.region"))
         region_lay = QVBoxLayout(region_group)
-        region_lay.addWidget(QLabel(
-            tr("grid_builder.define_the_extraction_area_draw_a")
-        ))
+        region_hint = QLabel(tr("grid_builder.define_the_extraction_area_draw_a"))
+        region_hint.setWordWrap(True)
+        region_lay.addWidget(region_hint)
         # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
         from esfex.visualization.workflows._domain_definition import (
             DomainDefinitionWidget,
@@ -131,32 +133,33 @@ class GridMappingSourceFetchStep(QWidget):
         layout.addWidget(region_group)
 
         # ── Data Sources ──
-        # Laid out in a single row: all four are enabled by default because
-        # combining them (authoritative OSM topology + plant databases +
-        # GridFinder gap-filling) gives the most complete network in general.
+        # Two columns (a single row overflowed the wizard in longer
+        # languages): all four are enabled by default because combining them
+        # (authoritative OSM topology + plant databases + GridFinder
+        # gap-filling) gives the most complete network in general.
         src_group = QGroupBox(tr("grid_builder.data_sources"))
-        src_lay = QHBoxLayout(src_group)
+        src_lay = QGridLayout(src_group)
 
         self._chk_osm = QCheckBox(tr("grid_builder.openstreetmap_overpass_api"))
         self._chk_osm.setChecked(True)
         self._chk_osm.setToolTip(
             tr("grid_builder.substations_generators_transmission_lines_transf")
         )
-        src_lay.addWidget(self._chk_osm)
+        src_lay.addWidget(self._chk_osm, 0, 0)
 
         self._chk_wri = QCheckBox(tr("grid_builder.wri_global_power_plant_database"))
         self._chk_wri.setChecked(True)
         self._chk_wri.setToolTip(
             tr("grid_builder.30_000_power_plants_worldwide_with")
         )
-        src_lay.addWidget(self._chk_wri)
+        src_lay.addWidget(self._chk_wri, 0, 1)
 
         self._chk_gem = QCheckBox(tr("grid_builder.gem_global_power_plants_2025"))
         self._chk_gem.setChecked(True)
         self._chk_gem.setToolTip(
             tr("grid_builder.global_energy_monitor_power_plant_database")
         )
-        src_lay.addWidget(self._chk_gem)
+        src_lay.addWidget(self._chk_gem, 1, 0)
 
         # GridFinder — ML-predicted transmission/distribution line routes. It
         # carries geometry only (no voltage/capacity); the builder derives those
@@ -169,14 +172,16 @@ class GridMappingSourceFetchStep(QWidget):
         self._chk_gridfinder.setToolTip(
             tr("grid_builder.gridfinder_tooltip")
         )
-        src_lay.addWidget(self._chk_gridfinder)
+        src_lay.addWidget(self._chk_gridfinder, 1, 1)
 
         layout.addWidget(src_group)
 
-        # ── Settings (Filters + Element Types + Bus Strategy in 4 cols) ──
+        # ── Settings: Filters | Bus strategy, then Element types (2 cols) ──
+        # Two columns: four side by side overflowed the wizard in longer
+        # languages (834 px in Spanish).
         settings_group = QGroupBox(tr("grid_builder.settings"))
         settings_grid = QGridLayout(settings_group)
-        for c in range(4):
+        for c in range(2):
             settings_grid.setColumnStretch(c, 1)
 
         _hdr_style = "font-weight: bold; padding-bottom: 2px;"
@@ -226,10 +231,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._spin_min_voltage.valueChanged.connect(self._on_min_voltage_changed)
         settings_grid.addWidget(filter_widget, 1, 0)
 
-        # Columns 2–3 — Element Types (4+4 split)
+        # Rows 2–3 — Element Types (4+4 split)
         col_elem_hdr = QLabel(tr("grid_builder.element_types"))
         col_elem_hdr.setStyleSheet(_hdr_style)
-        settings_grid.addWidget(col_elem_hdr, 0, 1, 1, 2)
+        settings_grid.addWidget(col_elem_hdr, 2, 0, 1, 2)
 
         self._chk_substations = QCheckBox(tr("grid_builder.substations_buses"))
         self._chk_substations.setChecked(True)
@@ -266,13 +271,13 @@ class GridMappingSourceFetchStep(QWidget):
         elem_a_widget.setLayout(elem_a)
         elem_b_widget = QWidget()
         elem_b_widget.setLayout(elem_b)
-        settings_grid.addWidget(elem_a_widget, 1, 1)
-        settings_grid.addWidget(elem_b_widget, 1, 2)
+        settings_grid.addWidget(elem_a_widget, 3, 0)
+        settings_grid.addWidget(elem_b_widget, 3, 1)
 
-        # Column 4 — Bus Creation Strategy
+        # Column 2 — Bus Creation Strategy
         col_bus_hdr = QLabel(tr("grid_builder.bus_creation_strategy"))
         col_bus_hdr.setStyleSheet(_hdr_style)
-        settings_grid.addWidget(col_bus_hdr, 0, 3)
+        settings_grid.addWidget(col_bus_hdr, 0, 1)
 
         bus_widget = QWidget()
         bus_lay = QVBoxLayout(bus_widget)
@@ -287,10 +292,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._radio_per_substation = QRadioButton(tr("grid_builder.one_bus_per_substation"))
         bus_lay.addWidget(self._radio_per_substation)
         bus_lay.addStretch()
-        settings_grid.addWidget(bus_widget, 1, 3)
+        settings_grid.addWidget(bus_widget, 1, 1)
 
         # Top-aligned content rows
-        settings_grid.setRowStretch(2, 1)
+        settings_grid.setRowStretch(4, 1)
 
         layout.addWidget(settings_group)
 

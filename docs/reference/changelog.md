@@ -1554,6 +1554,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **The Grid Builder's steps fit the wizard.** Step 1 laid out its four data
+  sources in one row and its settings in four columns, and steps 1 and 2 had
+  unwrapped intro text, so a step's page was wider than the wizard (step 1:
+  834 px in Spanish, step 2: 1245 px in English) and scrolled sideways, with
+  the build progress bar running past the window's edge. The sources and
+  settings now take two columns and the texts wrap.
+
 - **OSM voltage tags with units are read.** The Grid Builder read only plain
   numbers in the `voltage` tag, so `110 kV`, `13.8kV`, `220/110 kV`,
   `220000/110000` or `2x220000` counted as untagged. It now accepts units
