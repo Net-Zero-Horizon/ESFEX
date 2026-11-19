@@ -442,7 +442,8 @@ class GlobalDemandProjector:
           - 'annual_gwh': dict[int, float]
           - 'peak_mw': dict[int, float]
         """
-        from esfex.models.demand_ml import build_hourly_features
+        from esfex.models.demand_ml import (
+            build_hourly_features, country_id_for, static_features_at)
 
         self._load_model()
 
@@ -481,6 +482,8 @@ class GlobalDemandProjector:
         # Track evolving GDP/pop for feature construction
         gdp = rec.gdp_per_capita
         pop = rec.population
+        gdp_ratio = pop_ratio = 1.0         # relative to the base year
+        statics0 = cid = None
 
         for year in range(self.base_year, self.end_year + 1):
             # Get temperature for this specific year
@@ -505,17 +508,20 @@ class GlobalDemandProjector:
                     year=year,
                 )
             else:
-                # Legacy XGBoost path.
+                # Legacy XGBoost path: the static features sampled at the
+                # country's point as in training, moved each year by the
+                # GDP per capita and population growth.
+                if statics0 is None:
+                    statics0 = static_features_at(
+                        rec.latitude, rec.longitude, self.base_year)
+                    cid = country_id_for(rec.iso3)
+                statics = dict(statics0)
+                statics["log_gdp_per_cap"] += math.log(gdp_ratio)
+                statics["log_pop_density"] += math.log(pop_ratio)
                 features = build_hourly_features(
-                    gdp_per_capita=gdp,
-                    population=pop,
-                    urbanization_pct=rec.urbanization_pct,
-                    electricity_access_pct=rec.electricity_access_pct,
-                    temperature_hourly=temp,
-                    latitude=rec.latitude,
-                    longitude=rec.longitude,
-                    base_year=year,
-                    simulation_years=1,
+                    rec.iso3, temp, rec.latitude, rec.longitude,
+                    base_year=year, simulation_years=1,
+                    static_features=statics, country_id=cid,
                 )
                 raw_sf = self._model.predict_raw(features)
             raw_mean = raw_sf.mean()
@@ -533,8 +539,12 @@ class GlobalDemandProjector:
             annual[year] = annual_gwh  # update with climate correction
 
             # Evolve GDP/pop for next year
-            gdp *= (1.0 + gdp_growth.get(year + 1, 0.02))
-            pop *= (1.0 + pop_growth.get(year + 1, 0.01))
+            g = 1.0 + gdp_growth.get(year + 1, 0.02)
+            p = 1.0 + pop_growth.get(year + 1, 0.01)
+            gdp *= g
+            pop *= p
+            gdp_ratio *= g
+            pop_ratio *= p
 
         return {"hourly": hourly, "annual_gwh": annual, "peak_mw": peaks}
 
