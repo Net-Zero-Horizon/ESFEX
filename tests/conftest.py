@@ -52,3 +52,15 @@ def qapp():
     elif not isinstance(app, QApplication):
         pytest.fail("A test created a QCoreApplication; use the qapp fixture instead.")
     return app
+
+
+@pytest.fixture(autouse=True)
+def _studio_language_back_to_english():
+    """Every test starts in English: a test that switches the Studio's
+    language (init_i18n("es")) must not leak it into the tests after it,
+    whose messages now go through tr()."""
+    yield
+    import sys
+    i18n = sys.modules.get("esfex.visualization.i18n")
+    if i18n is not None and i18n.get_language() != "en":
+        i18n.init_i18n("en")

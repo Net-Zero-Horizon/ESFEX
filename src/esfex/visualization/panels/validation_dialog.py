@@ -52,6 +52,41 @@ if TYPE_CHECKING:
     from esfex.visualization.data.gui_model import GuiModel
 
 # Category display labels (translation keys)
+# Issue categories as validation.py writes them (also the grouping key).
+_ISSUE_CATEGORY_KEYS: dict[str, str] = {
+    "Inter-System": "validation.issue_cat_inter_system",
+    "Fuel Network": "validation.issue_cat_fuel_network",
+    "Topology Audit": "validation.issue_cat_topology_audit",
+    "Bus": "validation.issue_cat_bus",
+    "Generator": "validation.issue_cat_generator",
+    "Battery": "validation.issue_cat_battery",
+    "Transformer": "validation.issue_cat_transformer",
+    "Line": "validation.issue_cat_line",
+    "Freq. Converter": "validation.issue_cat_freq_converter",
+    "Demand": "validation.issue_cat_demand",
+    "AC/DC Converter": "validation.issue_cat_acdc_converter",
+    "Realism": "validation.issue_cat_realism",
+    "Generation": "validation.issue_cat_generation",
+    "Node": "validation.issue_cat_node",
+    "Connectivity": "validation.issue_cat_connectivity",
+    "Configuration": "validation.issue_cat_configuration",
+    "Fuel Entry": "validation.issue_cat_fuel_entry",
+}
+# SimplificationAction.action_type values.
+_ACTION_KEYS: dict[str, str] = {
+    "remove_bus": "validation.action_remove_bus",
+    "remove_line": "validation.action_remove_line",
+    "remove_fuel_entry": "validation.action_remove_fuel_entry",
+    "remove_fuel_storage": "validation.action_remove_fuel_storage",
+    "remove_fuel_route": "validation.action_remove_fuel_route",
+}
+
+
+def _issue_category_label(category: str) -> str:
+    key = _ISSUE_CATEGORY_KEYS.get(category)
+    return tr(key) if key else category
+
+
 _CATEGORY_LABELS: dict[str, str] = {
     "structural": "validation.category_structural",
     "configuration": "validation.category_configuration",
@@ -514,7 +549,8 @@ class ValidationDialog(QDialog):
             if len(by_cat) > 1:
                 # Multiple categories — add sub-group node
                 cat_node = QTreeWidgetItem(
-                    root, [f"{cat_name} ({len(cat_issues)})", ""],
+                    root,
+                    [f"{_issue_category_label(cat_name)} ({len(cat_issues)})", ""],
                 )
                 cat_node.setForeground(0, color)
                 cat_node.setExpanded(expanded)
@@ -550,7 +586,11 @@ class ValidationDialog(QDialog):
         root.setExpanded(True)
         for action in self._simplification_actions:
             item = QTreeWidgetItem(root, [
-                f"{action.action_type}: {action.reason}",
+                tr("validation.action_line",
+                   action=(tr(_ACTION_KEYS[action.action_type])
+                           if action.action_type in _ACTION_KEYS
+                           else action.action_type),
+                   reason=action.reason),
                 action.element_id,
             ])
             item.setForeground(0, color)
