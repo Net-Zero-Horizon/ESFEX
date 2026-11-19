@@ -4146,6 +4146,12 @@ Per-release notes are also published on the
   the missing file again. ESFEX now logs a warning once, with the path to put the
   shapefile at, and the file is not looked for again.
 
+- **Runs with GLPK work.** Every master solve set the solver output through
+  `output_flag`, a parameter name only HiGHS has, so with
+  `solver.name: glpk` the first master solve failed (`UnsupportedAttribute`)
+  and the run aborted. The master now uses JuMP's solver-independent silent
+  switch, as set from `solver.verbose`.
+
 ### Removed
 
 - **The Bokeh and Plotly results-chart modules.** `results_charts_bokeh.py`
