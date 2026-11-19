@@ -762,6 +762,31 @@ def units_in_service(num_units: int, rated_mw: float, power_mw: float,
     return min(n, max(1, math.ceil(n * power_mw / ref - 1e-6)))
 
 
+def rated_bat_tech_power(builds, y_idx: int, lifetimes: list[float]) -> dict[int, np.ndarray]:
+    """Rated (not degraded) MW of each battery technology in service in
+    master year *y_idx*: the sum of its builds of the years ``y ≤ y_idx``
+    still within the technology's lifetime (``y_idx − y < lifetime``).
+
+    *builds* maps a build year to ``{technology index (1-based): MW per
+    master bus}``, as the master's ``bat_tech_power_investment``;
+    *lifetimes* lists the technologies' lifetimes in that order. The
+    master's ``cumulative_bat_tech_power`` holds the same builds degraded
+    by age; the fixed O&M stays on this rated power (round 12).
+    """
+    out: dict[int, np.ndarray] = {}
+    for y, by_tech in builds.items():
+        y = int(y)
+        if y > y_idx:
+            continue
+        for bt, mw in by_tech.items():
+            bt = int(bt)
+            if not 1 <= bt <= len(lifetimes) or y_idx - y >= lifetimes[bt - 1]:
+                continue
+            mw = np.asarray(mw, dtype=float)
+            out[bt] = out[bt] + mw if bt in out else mw.copy()
+    return out
+
+
 def battery_technology_unit_fields(bat_tech, rep) -> dict:
     """Operating parameters of a battery built from battery technology *bat_tech*.
 
@@ -4148,7 +4173,7 @@ class Orchestrator:
 
                 # 10. Capacity in service this year, for the dispatch
                 cumulative_caps_by_year[year] = self._myopic_year_caps(
-                    result, built_gens, built_bats)
+                    result, built_gens, built_bats, built, y_idx)
 
                 # 11. Accumulate investments for next year
                 self._accumulate_myopic_investments(year_inv, y_idx, built)
@@ -4562,8 +4587,8 @@ class Orchestrator:
           their technology's parameters (:func:`technology_unit_fields`), at
           the nodes where it was built, one unit per technology and build
           year, aged from the build year with the technology's degradation
-          (none for a battery technology) and retired at its lifetime, as
-          perfect foresight counts its investments. On a bus-level master (a system with buses: one node,
+          and retired at its lifetime, as perfect foresight counts its
+          investments. On a bus-level master (a system with buses: one node,
           or development zones) each bus with capacity gets its own unit,
           pinned to that bus (``bus_id_per_node``); the adapter would place a
           node-level unit at the node's first bus;
@@ -4683,10 +4708,9 @@ class Orchestrator:
                     rated_power=pow_list,
                     life_time=[bat_tech.lifetime] * n,
                     initial_age=[age] * n,
-                    # Perfect foresight does not degrade battery-technology
-                    # builds (only existing batteries degrade, in the master
-                    # and the dispatch), so neither does a later year
-                    degradation_rate=zeros,
+                    # Degraded from its build year, as perfect foresight
+                    # degrades a battery technology's builds
+                    degradation_rate=rep(bat_tech.degradation_rate),
                     # Life extension is priced like a new build
                     invest_cost=rep(bat_tech.invest_cost_power),
                     invest_max_power=zeros,
@@ -4727,6 +4751,8 @@ class Orchestrator:
         result: dict,
         built_gens: list[tuple[str, str]],
         built_bats: list[tuple[str, str]],
+        built: Optional[dict] = None,
+        y_idx: int = 0,
     ) -> dict[str, dict]:
         """Capacity in service in a one-year myopic master, for the dispatch.
 
@@ -4734,7 +4760,10 @@ class Orchestrator:
         entries (read by :meth:`_build_config_from_cumulative`): the original
         units under ``gen`` / ``bat`` / ``bat_power``, and per technology the
         capacity built this year plus what is left (degraded, not yet
-        retired) of the units built from it in earlier years.
+        retired) of the units built from it in earlier years. With *built*
+        (the earlier years' builds, see :meth:`_accumulate_myopic_investments`)
+        and the year index *y_idx*, ``bat_tech_power_rated`` holds the same
+        battery power undegraded, for its fixed O&M.
         """
         n_gen0 = len(self.master_system.generators)
         n_bat0 = len(self.master_system.batteries)
@@ -4770,6 +4799,16 @@ class Orchestrator:
         for b, (_, bt_key) in enumerate(built_bats, start=n_bat0 + 1):
             _add(caps['bat_tech_power'], bt_idx[bt_key], cumul_bat_pow.get(b))
             _add(caps['bat_tech_capacity'], bt_idx[bt_key], cumul_bat.get(b))
+        if built is not None:
+            # This year's builds (build year y_idx) and the earlier ones
+            builds = {y_idx: _year('bat_tech_power_investment')}
+            for (bt_key, build_y), mw in built["bat_tech_power"].items():
+                if bt_key in bt_idx:
+                    by = builds.setdefault(build_y, {})
+                    _add(by, bt_idx[bt_key], mw)
+            caps['bat_tech_power_rated'] = rated_bat_tech_power(
+                builds, y_idx,
+                [bt.lifetime for bt in self.master_system.battery_technologies.values()])
         return caps
 
     def _accumulate_myopic_investments(
@@ -5130,6 +5169,7 @@ class Orchestrator:
             cumul_tech = result.get('cumulative_tech_capacity', {})
             cumul_bat_tech_pow = result.get('cumulative_bat_tech_power', {})
             cumul_bat_tech_cap = result.get('cumulative_bat_tech_capacity', {})
+            bt_lifetimes = [bt.lifetime for bt in self.master_system.battery_technologies.values()]
             for year in years_range:
                 y_idx = years_range.index(year)
                 year_key = y_idx + 1  # Julia 1-based
@@ -5140,6 +5180,9 @@ class Orchestrator:
                     'tech': cumul_tech.get(year_key, {}),
                     'bat_tech_power': cumul_bat_tech_pow.get(year_key, {}),
                     'bat_tech_capacity': cumul_bat_tech_cap.get(year_key, {}),
+                    # Rated, for the fixed O&M (the two above are degraded)
+                    'bat_tech_power_rated': rated_bat_tech_power(
+                        result.get('bat_tech_power_investment', {}), year_key, bt_lifetimes),
                 }
 
             # Extract RE penetration targets per year from master solution
@@ -8046,7 +8089,12 @@ class Orchestrator:
             base_units_config: Original units config (for structure/metadata)
             year_caps: {'gen': {julia_g_idx: np.array(per_bus)},
                         'bat': {julia_b_idx: np.array(per_bus)},
-                        'bat_power': {julia_b_idx: np.array(per_bus)}}
+                        'bat_power': {julia_b_idx: np.array(per_bus)},
+                        'tech' / 'bat_tech_power' / 'bat_tech_capacity':
+                            {julia_t_idx: np.array(per_bus)}, in service
+                            (each build degraded by its age),
+                        'bat_tech_power_rated' (optional): the battery
+                            power undegraded, its fixed O&M base}
             year_offset: Years since the first planning year (the dispatch's
                 ``year - base_year``). With it, an existing battery past its
                 lifetime gets the power and energy the master keeps.
@@ -8124,7 +8172,7 @@ class Orchestrator:
                 updated[unit_key]["reservoir_capacity"] = cap
 
         # Existing batteries within their lifetime keep the dispatch's own
-        # degradation (the master does not degrade them); past it they hold
+        # degradation (the master degrades them alike); past it they hold
         # what the master keeps (_apply_master_battery_life).
 
         # Create virtual generators from technology investments
@@ -8240,6 +8288,7 @@ class Orchestrator:
         # master ran on a node-level network.
         bat_tech_pow_caps = year_caps.get('bat_tech_power', {})
         bat_tech_cap_caps = year_caps.get('bat_tech_capacity', {})
+        bat_tech_rated_caps = year_caps.get('bat_tech_power_rated', {})
         bat_tech_keys = list(self.primary_system.battery_technologies.keys())
         bat_master_per_node = bus_to_node is not None and not self._master_on_buses()
         if bat_master_per_node and first_bus_of_node is None:
@@ -8303,7 +8352,7 @@ class Orchestrator:
                     "capacity": bus_cap,
                     "MaxChargePower": bus_pow,
                     "MaxDischargePower": bus_pow,
-                    # Already degraded by master problem
+                    # Already degraded by the master (each build by its age)
                     "degradation_rate": [0.0] * num_buses,
                     "initial_age": [0] * num_buses,
                     "life_time": [999] * num_buses,
@@ -8312,6 +8361,23 @@ class Orchestrator:
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }
+                rated = bat_tech_rated_caps.get(bt_jl)
+                if rated is not None:
+                    # Fixed O&M on the rated power built, as the master
+                    # charges it: the power above is degraded, so its
+                    # fixed_cost is scaled by rated / degraded at each
+                    # master location (a bus's node on a node-level master)
+                    rated = np.asarray(rated, dtype=float)
+
+                    def _om_scale(b_idx):
+                        loc = bus_to_node[b_idx] if bat_master_per_node else b_idx
+                        deg = float(pow_arr[loc]) if loc < len(pow_arr) else 0.0
+                        rat = float(rated[loc]) if loc < len(rated) else 0.0
+                        return rat / deg if deg > 0 and rat > 0 else 1.0
+
+                    unit = updated[vbat_key]
+                    unit["fixed_cost"] = [float(fc) * _om_scale(b_idx)
+                                          for b_idx, fc in enumerate(unit["fixed_cost"])]
                 # DEBUG: emitted per bus → noisy at INFO. The aggregate
                 # "Year X investments" log a few lines up covers the
                 # milestone view.

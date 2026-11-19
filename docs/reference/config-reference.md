@@ -649,7 +649,7 @@ Existing storage units, under `batteries: {<key>: {...}}` or as legacy `bat_<n>`
 | `soc_initial` | list[float] | required | Initial state of charge per node (fraction) |
 | `max_DoD` | list[float] | required | Maximum depth of discharge per node (fraction) |
 | `capacity` | list[float] | required | Energy capacity per node (MWh) |
-| `MaxChargePower` | list[float] | required | Maximum charge power per node (MW) |
+| `MaxChargePower` | list[float] | required | Maximum charge power per node (MW), degraded and life-extended like `MaxDischargePower`; the master problem bounds the charge by it as the dispatch does |
 | `MaxDischargePower` | list[float] | required | Maximum discharge power per node (MW) |
 | `current_type` | `AC` \| `DC` | `"DC"` | `AC` or `DC` |
 | `Availability` / `availability_file` | str \| null | `null` | Availability profile file ([Availability Profiles](../user-guide/availability-profiles.md)): each hour's factor (0–1) multiplies the charge and discharge power, and the power the battery offers as reserve |
@@ -780,7 +780,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `max_duration_hours` | float (≥ 0) | `24` | Max energy-to-power ratio (hours) |
 | `efficiency_charge` | list[float] | required | Charge efficiency per node (0-1) |
 | `efficiency_discharge` | list[float] | required | Discharge efficiency per node (0-1) |
-| `degradation_rate` | list[float] | required | Degradation per node (fraction/year) |
+| `degradation_rate` | list[float] | required | Degradation per node (fraction/year): the power and energy of each build shrink by `(1 - degradation_rate)^age`, age counted from the build year, in the master and in the dispatch (fixed O&M stays on the power built) |
 | `lifetime` | int | required | Economic lifetime (years, scalar) |
 | `soc_initial` | list[float] | `[0.5]` | Initial SOC fraction per node |
 | `max_DoD` | list[float] | `[0.9]` | Max depth of discharge per node |
@@ -793,7 +793,7 @@ Candidate storage technology, under `battery_technologies: {<key>: {...}}`. Ever
 | `risk_coefficient` | list[float] | `[1.0]` | Per-node geographic risk derating (0-1). Reduces effective capacity credit to account for hazard exposure. |
 | `ramp_up` | list[float] | `[0.0]` | Ramp-up limit of the batteries it builds (fraction of the power built per hour; 0 = no limit), as [BatteryConfig](#batteryconfig) |
 | `ramp_down` | list[float] | `[0.0]` | Ramp-down limit, likewise |
-| `fixed_cost` | list[float] | `[0.0]` | Fixed O&M ($ per MW of power built per year), charged every year the build is in service |
+| `fixed_cost` | list[float] | `[0.0]` | Fixed O&M ($ per MW of power built per year), charged every year the build is in service, on the power built (not degraded) |
 | `reservable` | bool | `true` | The batteries it builds hold reserve in the dispatch (the master's candidate technologies hold none) |
 | `Availability` / `availability_file` | str \| null | `null` | Availability profile: factor on the charge and discharge power of what it builds, in the master and in the dispatch |
 | `color` | str \| null | `null` | Display color hex code (e.g. '#FF0000') for results visualization |
