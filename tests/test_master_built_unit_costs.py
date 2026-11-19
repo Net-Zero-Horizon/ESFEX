@@ -197,6 +197,116 @@ def test_built_power_summed_from_buses_to_nodes(tmp_path):
     assert orch._unit_power_by_node({}, [1.0, 2.0]) == [1.0, 2.0]
 
 
+# ── fuel price growth and build records (round 44, M44) ───────────────
+
+def _two_year_file(path, *, growth=True, builds=True):
+    """2025 and 2035, no cost breakdown. A Gas CC unit and a Li battery the
+    master built in 2025 (10 MW; 5 MW / 20 MWh) keep the same MW in service
+    in 2035, where the master built 2 MW and 0.5 MW / 2 MWh more to replace
+    what retired or degraded. Gas grows 3 %/yr from 2025; coal is flat."""
+    with h5py.File(path, "w") as f:
+        f.attrs["temporal_resolution_hours"] = 1
+        f.create_dataset("summary_results/year", data=[2025, 2035])
+        sc = f.create_group("system_configuration")
+        gens = sc.create_group("generators")
+        gens.attrs["num_generators"] = 1
+        gens.create_group("generator_0").attrs.update(
+            name="coal", fuel="Coal", fuel_cost=50.0, fixed_cost=0.0,
+            maintenance_cost=0.0, rated_power=100.0)
+        techs = sc.create_group("technologies")
+        techs.attrs["num_technologies"] = 1
+        techs.create_group("technology_0").attrs.update(
+            name="Gas CC", fuel="Gas", type="Non-renewable", invest_cost="[100.0]",
+            fuel_cost="[3.0]", fixed_cost="[0.0]", maintenance_cost="[0.0]",
+            start_up_cost="[0.0]")
+        bts = sc.create_group("battery_technologies")
+        bts.attrs["num_battery_technologies"] = 1
+        bts.create_group("battery_technology_0").attrs.update(
+            name="Li", invest_cost_power="[20.0]", invest_cost_energy="[5.0]",
+            maintenance_cost="[0.0]", fixed_cost="[0.0]")
+        if growth:
+            fg = sc.create_group("fuel_price_growth")
+            fg.attrs.update(base_year=2025, Gas=0.03, Coal=0.0)
+        for year, (tech, bat_p, bat_e) in ((2025, (10.0, 5.0, 20.0)),
+                                           (2035, (2.0, 0.5, 2.0))):
+            y = f.create_group(f"detailed_results/year_{year}_threshold_0")
+            y.attrs["year"] = year
+            y.create_dataset("generation/coal", data=np.full((1, 24), 1.0))
+            ds = y.create_dataset("generation/Investment Gas CC",
+                                  data=np.full((1, 24), 4.0))
+            ds.attrs["rated_power"] = np.array([10.0])
+            ds = y.create_dataset("battery_discharge/Investment Li",
+                                  data=np.full((1, 24), 1.0))
+            ds.attrs["rated_power"] = np.array([5.0])
+            y.create_dataset("battery_charge/Investment Li", data=np.full((1, 24), 0.5))
+            y.create_dataset("battery_soc/Investment Li", data=np.full((1, 24), 20.0))
+            if builds:
+                y.attrs["investment_tech_investment_power_0_0"] = tech
+                y.attrs["investment_bat_tech_investment_power_0_0"] = bat_p
+                y.attrs["investment_bat_tech_investment_capacity_0_0"] = bat_e
+    return path
+
+
+def test_fuel_valued_at_the_year_price_of_its_growing_fuel(tmp_path, caplog):
+    """The financial analysis valued fuel at the flat fuel_cost: a fuel of
+    the fuels block that grows 3 %/yr cost in 2035 what it cost in 2025.
+    It grows as the dispatch charges it, (1 + rate)^(year - base year)."""
+    path = _two_year_file(tmp_path / "res.h5")
+    tf = fa.compute_technology_financials(path)
+    gas_2035 = 96 * 3.0 * 1.03 ** 10
+    np.testing.assert_allclose(tf["Investment Gas CC"].annual_generation, [96.0, 96.0])
+    assert tf["Investment Gas CC"].fuel_cost_total == pytest.approx(96 * 3.0 + gas_2035)
+    assert tf["coal"].fuel_cost_total == pytest.approx(2 * 24 * 50.0)
+    sf = fa.compute_system_financials(path)
+    np.testing.assert_allclose(sf.cash_flows["fuel_cost"],
+                               [24 * 50.0 + 96 * 3.0, 24 * 50.0 + gas_2035])
+    # A file written before the growth was recorded: flat, with a note
+    old = _two_year_file(tmp_path / "old.h5", growth=False)
+    with caplog.at_level("INFO", logger=fa.__name__):
+        tf = fa.compute_technology_financials(old)
+    assert tf["Investment Gas CC"].fuel_cost_total == pytest.approx(2 * 96 * 3.0)
+    assert "does not record the fuel price growth" in caplog.text
+
+
+def test_capex_of_builds_from_the_build_records(tmp_path):
+    """Capex was booked on the growth of the built units' MW in service: a
+    build that only replaced retired or degraded capacity (the 2035 builds,
+    same MW in service) cost nothing. It is booked on what the master
+    built each year now."""
+    path = _two_year_file(tmp_path / "res.h5")
+    sf = fa.compute_system_financials(path)
+    gas = [10.0 * 100.0, 2.0 * 100.0]
+    li = [5.0 * 20.0 + 20.0 * 5.0, 0.5 * 20.0 + 2.0 * 5.0]
+    np.testing.assert_allclose(sf.cash_flows["capex"], np.add(gas, li))
+    assert sf.investment_capex == pytest.approx(sum(gas) + sum(li))
+    tf = fa.compute_technology_financials(path)
+    assert tf["Investment Gas CC"].capex_total == pytest.approx(sum(gas))
+    assert tf["Investment Li"].capex_total == pytest.approx(sum(li))
+    # Files without build records: the growth of the MW in service
+    old = fa.compute_system_financials(_two_year_file(tmp_path / "old.h5", builds=False))
+    np.testing.assert_allclose(old.cash_flows["capex"], [gas[0] + li[0], 0.0])
+
+
+def test_export_records_fuel_price_growth(tmp_path):
+    from esfex.config.schema import FuelConfig
+    from tests.test_runner import _create_orchestrator
+
+    orch = _create_orchestrator(tmp_path=tmp_path)
+    orch.primary_system = orch.primary_system.model_copy(update={"fuels": {
+        "Gas": FuelConfig(name="Gas", emission_factor=0.2, price_base=10.0,
+                          price_growth_rate=0.03)}})
+    orch._num_nodes = 1
+    orch._rebuild_unit_names({})
+    orch._bus_to_node = None
+    path = tmp_path / "out.h5"
+    orch._initialize_hdf5(path, num_nodes=1, num_years=1, start_year=2025, end_year=2026)
+    info = fa._load_system_from_h5(path)
+    assert info["fuel_price_base_year"] == 2025
+    assert info["fuel_price_growth"] == {"Gas": pytest.approx(0.03)}
+    assert fa._fuel_price_factor(info, "Gas", 2035) == pytest.approx(1.03 ** 10)
+    assert fa._fuel_price_factor(info, "Coal", 2035) == 1.0
+
+
 # ── electrolyzer water cost label ─────────────────────────────────────
 
 @pytest.mark.parametrize("lang", ["en", "es", "fr", "pt", "ja"])

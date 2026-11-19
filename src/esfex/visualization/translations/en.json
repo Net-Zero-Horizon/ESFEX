@@ -1096,7 +1096,6 @@
     "sim_default_pe": "Enable primary energy by default",
     "sim_default_log_level": "Default log level:",
     "sim_log_to_file": "Write simulation log to file",
-    "sim_default_output_dir": "Default output directory:",
     "chart_backend": "Chart backend:",
     "export_dpi": "Export DPI:",
     "default_export_format": "Default export format:",
@@ -1116,7 +1115,6 @@
     "cache_preload": "Preload (all at startup)",
     "cache_lazy": "Lazy (on demand)",
     "debug_mode": "Debug mode",
-    "cache_dir": "Cache directory:",
     "telemetry_opt_out": "Telemetry opt-out",
     "reset_all": "Reset All Preferences",
     "reset_all_confirm_title": "Reset Preferences",
@@ -1199,12 +1197,6 @@
     "infra_applied_msg": "Applied {n} simplification(s). Re-run validation to see updated results.",
     "infra_none_checked": "No suggestions checked. Check the ones you want to apply.",
     "infra_no_groups": "No mergeable groups found at this scope."
-  },
-  "simulation": {
-    "title": "ESFEX Simulation",
-    "preparing": "Preparing simulation...",
-    "cancel_btn": "Cancel",
-    "close_btn": "Close"
   },
   "sensitivity": {
     "title": "Global Sensitivity Analysis (Sobol)",
@@ -1497,7 +1489,6 @@
     "hour_mismatch_title": "Hour count mismatch",
     "hour_mismatch_msg": "Loaded file has {n1} hours but node '{name}' (index {idx}) already has {n2} hours.\nAll nodes must share the same number of hours.",
     "validating": "Validating system configuration...",
-    "running_sim": "Running simulation...",
     "no_year_data": "No detailed results for year {year}.",
     "no_gen_data": "No generation data.",
     "node_no_centroid": "This node has no centroid set. Use 'Place' to set it on the map first."

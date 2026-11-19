@@ -13,6 +13,7 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │   ├── nodes/                     # Node data (datasets + attributes)
 │   ├── technologies/              # Investment technologies (if any)
 │   ├── battery_technologies/      # Battery investment technologies (if any)
+│   ├── fuel_price_growth/         # Fuel price growth of the fuels block (attributes)
 │   ├── transmission_lines/        # Line geometry (if transmission_lines_geo is set)
 │   └── fuel_routes/               # Fuel route geometry (if any)
 ├── summary_results/               # Per-year scalars (expandable datasets)
@@ -114,6 +115,10 @@ Attributes `key`, `name`, `type`, `fuel`, `invest_cost`, the operating costs `fu
 ### system_configuration/battery_technologies/battery_technology_{i}/
 
 Attributes `key`, `name`, `invest_cost_power`, `invest_cost_energy`, `maintenance_cost`, `fixed_cost` (string-encoded per-node lists) and `color` (if set). Group attribute `num_battery_technologies`.
+
+### system_configuration/fuel_price_growth/
+
+Attribute `base_year` (the run's first year, which the `fuels` prices hold for) and one attribute per fuel of the `fuels` block, named after the fuel, with its `price_growth_rate`. The dispatch charges a unit burning that fuel `fuel_cost × (1 + rate)^(year − base_year)`; the financial analysis values fuel the same way. Files written before this group existed value fuel at the flat `fuel_cost`.
 
 ### system_configuration/transmission_lines/line_{i}/
 
@@ -262,7 +267,7 @@ The node index `n` (and `i`, `j`) is always a node: when the master solves on bu
 
 Datasets inside per-unit groups are named after the unit's `name`, with `/` replaced by ` - ` (so `Cuba/Solar PV` becomes `Cuba - Solar PV`). A name already used by another generator (or, in battery groups, another battery; in electrolyzer groups, another electrolyzer) gets a ` (1)`, ` (2)`, ... suffix: two units named `Gas` are written as `Gas` and `Gas (1)`. A unit has the same dataset name in every per-unit group (`generation/`, `lcoe/`, `technology_selling_prices/`, ...; `battery_soc/`, `battery_charge/`, ...). Readers that look up a unit's configuration by name (financial analysis, results charts) strip the suffix.
 
-Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `is_renewable` (the unit is of type `Renewable`, what the RE share counts as renewable), `shape`, `units` and `rated_power`: the unit's MW in service in the year, per node, the capacity the dispatch charges fixed O&M on. For an existing unit this is its rated power after the master's retirements and life extension (development runs), or, without a master, its rated power degraded with age and 0 past its `life_time`; for a unit the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)), its built capacity in service. `battery_discharge/{name}` carries the battery's discharge power in service the same way (not degraded; 0 past its `life_time` unless the master keeps it). The results dashboard, the results charts (installed capacity, reserve margin) and the financial analysis read it; for files written before this version, where only the units the master built carry it, they use the configured `rated_power` (`MaxDischargePower`) of the other units.
+Each `generation/{name}` dataset carries the attributes `fuel` (declared fuel, `""` if none), `is_renewable` (the unit is of type `Renewable`, what the RE share counts as renewable), `shape`, `units` and `rated_power`: the unit's MW in service in the year, per node, the capacity the dispatch charges fixed O&M on. For an existing unit this is its rated power after the master's retirements and life extension (development runs), or, without a master, its rated power degraded with age and 0 past its `life_time`; for a unit the master built (see [Virtual Generator and Battery Datasets](#virtual-generator-and-battery-datasets)), its built capacity in service. `battery_discharge/{name}` carries the battery's discharge power in service the same way (not degraded; 0 past its `life_time` unless the master keeps it); for a battery the master built, its rated power (the master degrades the power it dispatches, but fixed O&M stays on the power built; older files hold the degraded power). The results dashboard, the results charts (installed capacity, reserve margin) and the financial analysis read it; for files written before this version, where only the units the master built carry it, they use the configured `rated_power` (`MaxDischargePower`) of the other units.
 
 ### Generation Data
 

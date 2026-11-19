@@ -56,7 +56,9 @@ _ADMIN1_INDEX = None
 
 def reverse_geocode_admin1_offline(lat: float, lng: float) -> str | None:
     """Admin-1 region (state / province / prefecture) containing the point, from
-    the bundled Natural Earth shapefile — offline and instant.
+    the Natural Earth admin-1 shapefile at ``paths.ADMIN1_SHP`` (under
+    ``ESFEX_DATA_ROOT``; not shipped, the user provides it) — offline and
+    instant. ``None`` when the shapefile is missing.
 
     Nominatim's ~1 request/second policy does not scale to a country-scale grid
     (hundreds of nodes), so most nodes would otherwise keep a generic "Node i"

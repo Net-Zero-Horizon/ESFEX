@@ -1977,13 +1977,34 @@ function curtailment_year_sums(year::CurtailmentYear)
 end
 
 """
-Price (M\$ per MWh/year, i.e. 10⁴ \$/MWh) of curtailment above a master's
-annual curtailment limit (`add_curtailment_limit!`): well above the RE
-shortfall price (100 \$/MWh by default) and what avoiding a MWh of
-curtailment usually costs (the limit's dual), so the master pays it only
-where nothing else can hold the limit.
+Floor of the price (M\$ per MWh/year, i.e. 10⁴ \$/MWh) of curtailment above
+a master's annual curtailment limit (`curtailment_excess_penalty`).
 """
 const CURTAILMENT_EXCESS_PENALTY = 1.0e-2
+
+"""
+How many times the dearest per-MWh price the curtailment excess must beat
+(`curtailment_excess_penalty`): 100, the floor's margin over the default RE
+shortfall price.
+"""
+const CURTAILMENT_EXCESS_FACTOR = 100.0
+
+"""
+    curtailment_excess_penalty(input) -> Float64
+
+Price (M\$ per MWh/year) of curtailment above a master's annual curtailment
+limit (`add_curtailment_limit!`): `CURTAILMENT_EXCESS_PENALTY` (10⁴ \$/MWh),
+and at least `CURTAILMENT_EXCESS_FACTOR` × the RE shortfall price
+(`re_shortfall_penalty`) and the curtailment cost, with a stochastic
+scenario's multipliers. A fixed price was beaten by a shortfall price above
+it: the master then curtailed above the limit to meet its RE target. Well
+above them and what avoiding a MWh of curtailment usually costs (the
+limit's dual), the master pays it only where nothing else can hold the
+limit.
+"""
+curtailment_excess_penalty(input::MasterProblemInput) =
+    max(CURTAILMENT_EXCESS_PENALTY,
+        CURTAILMENT_EXCESS_FACTOR * max(re_shortfall_penalty(input), input.curtailment_cost))
 
 """
     add_curtailment_limit!(model, input, year, y_idx; scenario_idx=0) -> AffExpr
@@ -1992,7 +2013,7 @@ The curtailment limit (CURT-1) of year `y_idx`, per system: its curtailment
 of existing and candidate variable renewables over the year is at most
 `max_curtailment_ratio` × its renewable generation over the year, plus what
 the RE growth cap forces it to curtail (RE-3c, `re_cap_exempt_energy`), plus
-an excess `Z_σ` (MWh/year) priced at `CURTAILMENT_EXCESS_PENALTY`:
+an excess `Z_σ` (MWh/year) priced at `curtailment_excess_penalty`:
 
     Σ_p w_p C_σ,p ≤ κ × Σ_p w_p E_σ,p + Σ_p w_p X_σ,p + Z_σ  (max_curtailment_s{σ}_y{y})
 
@@ -2014,6 +2035,7 @@ function add_curtailment_limit!(model::Model, input::MasterProblemInput,
     tag = scenario_idx > 0 ? "_sc$(scenario_idx)" : ""
     record = get!(() -> CurtailmentExcess[], model.ext, :curtailment_excess)
     systems = master_systems(input)
+    price = curtailment_excess_penalty(input)
     for s in eachindex(curt)
         isempty(re[s].terms) && continue
         excess = @variable(model, lower_bound = 0,
@@ -2021,16 +2043,17 @@ function add_curtailment_limit!(model::Model, input::MasterProblemInput,
         @constraint(model,
             curt[s] <= input.max_curtailment_ratio * re[s] + exempt[s] + excess / smax,
             base_name = "max_curtailment$(tag)_s$(s)_y$(y_idx)")
-        add_to_expression!(cost, CURTAILMENT_EXCESS_PENALTY, excess)
+        add_to_expression!(cost, price, excess)
         push!(record, CurtailmentExcess(scenario_idx, systems[s].name, input.years[y_idx],
-                                        input.max_curtailment_ratio, excess, re[s], smax))
+                                        input.max_curtailment_ratio, excess, re[s], smax, price))
     end
     return cost
 end
 
 # A system-year's curtailment above its limit (`add_curtailment_limit!`):
 # scenario (0 outside a stochastic master), system name, year, the limit's
-# ratio, the excess (MWh/year) and the renewable generation (MWh/year / smax)
+# ratio, the excess (MWh/year), the renewable generation (MWh/year / smax)
+# and the excess's price (M$/MWh, curtailment_excess_penalty)
 struct CurtailmentExcess
     scenario::Int
     system::String
@@ -2039,6 +2062,7 @@ struct CurtailmentExcess
     excess::VariableRef
     re::AffExpr
     smax::Float64
+    price::Float64
 end
 
 """
@@ -2049,18 +2073,18 @@ Curtailment above the annual limit in a solved master
 system and year whose excess passes the limit's tolerance
 (`curtailment_tolerance` of its renewable generation), the system's name,
 the year, the limit's ratio, the excess and the renewable generation
-(MWh/year).
+(MWh/year), and the excess's price (M\$/MWh, `curtailment_excess_penalty`).
 """
 function curtailment_excess(model::Model)
-    out = NamedTuple{(:scenario, :system, :year, :ratio, :excess_mwh, :re_mwh),
-                     Tuple{Int, String, Int, Float64, Float64, Float64}}[]
+    out = NamedTuple{(:scenario, :system, :year, :ratio, :excess_mwh, :re_mwh, :price),
+                     Tuple{Int, String, Int, Float64, Float64, Float64, Float64}}[]
     has_values(model) || return out
     for e in get(model.ext, :curtailment_excess, CurtailmentExcess[])
         z = value(e.excess)
         re_mwh = value(e.re) * e.smax
         z > curtailment_tolerance(re_mwh) || continue
         push!(out, (scenario = e.scenario, system = e.system, year = e.year,
-                    ratio = e.ratio, excess_mwh = z, re_mwh = re_mwh))
+                    ratio = e.ratio, excess_mwh = z, re_mwh = re_mwh, price = e.price))
     end
     return out
 end
@@ -2096,7 +2120,7 @@ function warn_curtailment_excess(model::Model)
               "$(round(e.excess_mwh / 1e3; sigdigits = 4)) GWh/yr above its annual " *
               "curtailment limit (max_curtailment_ratio = $(e.ratio) of " *
               "$(round(e.re_mwh / 1e3; sigdigits = 4)) GWh/yr of renewable " *
-              "generation), at $(round(Int, CURTAILMENT_EXCESS_PENALTY * 1e6)) \$/MWh: " *
+              "generation), at $(round(Int, e.price * 1e6)) \$/MWh: " *
               "the plan could not keep within it"
     end
     return

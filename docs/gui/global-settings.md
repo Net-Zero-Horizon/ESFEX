@@ -10,7 +10,7 @@ Two levels: **Global Settings** apply to the entire simulation; **System Setting
 
 Click **Global Settings** in the Element Tree. These parameters apply to all systems. The form has these groups, top to bottom: Systems to Simulate, Simulation, Temporal, Power Flow, Master Problem, N-1 Security, Risk & Resilience, Solver Options and Visual Scaling.
 
-**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s, gap 0.001, verbose off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
+**Defaults for new projects.** A new project takes its simulation and solver defaults from **File > Preferences… > Solver & Simulation**. With unchanged preferences these are: mode `development`, resolution 6 h, rolling horizon 48 h, overlap 24 h, Primary Energy off, solver HiGHS, 4 threads, time limit 3600 s (0 shows as "No limit"), gap 0.001, verbose off. When a YAML file is opened, keys missing from the file take the schema defaults listed in the tables below.
 
 ### Systems to Simulate
 
