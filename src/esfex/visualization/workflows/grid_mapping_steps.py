@@ -80,6 +80,20 @@ def suggested_min_capacity_mw(min_voltage_kv: float) -> float:
 
 
 
+# Display label of each fetched feature type (the fetch summary).
+_FEATURE_TYPE_KEYS = {
+    "substation": "grid_builder.type_substations",
+    "generator": "grid_builder.type_generators",
+    "battery": "grid_builder.type_batteries",
+    "line": "grid_builder.type_lines",
+    "transformer": "grid_builder.type_transformers",
+    "converter": "grid_builder.type_converters",
+    "fuel_entry": "grid_builder.type_fuel_entries",
+    "fuel_storage": "grid_builder.type_fuel_storage",
+    "road": "grid_builder.type_roads",
+}
+
+
 class GridMappingSourceFetchStep(QWidget):
     """Define region, configure data sources, and fetch in one step."""
 
@@ -108,16 +122,18 @@ class GridMappingSourceFetchStep(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
 
-        layout.addWidget(QLabel(
-            tr("grid_builder.b_step_1_region_fetch_b")
-        ))
+        # Wrapped, like every long text here: an unwrapped label sets the
+        # page's minimum width, and the page then ran past the wizard.
+        intro = QLabel(tr("grid_builder.b_step_1_region_fetch_b"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         # ── Region ──
         region_group = QGroupBox(tr("grid_builder.region"))
         region_lay = QVBoxLayout(region_group)
-        region_lay.addWidget(QLabel(
-            tr("grid_builder.define_the_extraction_area_draw_a")
-        ))
+        region_hint = QLabel(tr("grid_builder.define_the_extraction_area_draw_a"))
+        region_hint.setWordWrap(True)
+        region_lay.addWidget(region_hint)
         # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
         from esfex.visualization.workflows._domain_definition import (
             DomainDefinitionWidget,
@@ -131,32 +147,33 @@ class GridMappingSourceFetchStep(QWidget):
         layout.addWidget(region_group)
 
         # ── Data Sources ──
-        # Laid out in a single row: all four are enabled by default because
-        # combining them (authoritative OSM topology + plant databases +
-        # GridFinder gap-filling) gives the most complete network in general.
+        # Two columns (a single row overflowed the wizard in longer
+        # languages): all four are enabled by default because combining them
+        # (authoritative OSM topology + plant databases + GridFinder
+        # gap-filling) gives the most complete network in general.
         src_group = QGroupBox(tr("grid_builder.data_sources"))
-        src_lay = QHBoxLayout(src_group)
+        src_lay = QGridLayout(src_group)
 
         self._chk_osm = QCheckBox(tr("grid_builder.openstreetmap_overpass_api"))
         self._chk_osm.setChecked(True)
         self._chk_osm.setToolTip(
             tr("grid_builder.substations_generators_transmission_lines_transf")
         )
-        src_lay.addWidget(self._chk_osm)
+        src_lay.addWidget(self._chk_osm, 0, 0)
 
         self._chk_wri = QCheckBox(tr("grid_builder.wri_global_power_plant_database"))
         self._chk_wri.setChecked(True)
         self._chk_wri.setToolTip(
             tr("grid_builder.30_000_power_plants_worldwide_with")
         )
-        src_lay.addWidget(self._chk_wri)
+        src_lay.addWidget(self._chk_wri, 0, 1)
 
         self._chk_gem = QCheckBox(tr("grid_builder.gem_global_power_plants_2025"))
         self._chk_gem.setChecked(True)
         self._chk_gem.setToolTip(
             tr("grid_builder.global_energy_monitor_power_plant_database")
         )
-        src_lay.addWidget(self._chk_gem)
+        src_lay.addWidget(self._chk_gem, 1, 0)
 
         # GridFinder — ML-predicted transmission/distribution line routes. It
         # carries geometry only (no voltage/capacity); the builder derives those
@@ -169,14 +186,16 @@ class GridMappingSourceFetchStep(QWidget):
         self._chk_gridfinder.setToolTip(
             tr("grid_builder.gridfinder_tooltip")
         )
-        src_lay.addWidget(self._chk_gridfinder)
+        src_lay.addWidget(self._chk_gridfinder, 1, 1)
 
         layout.addWidget(src_group)
 
-        # ── Settings (Filters + Element Types + Bus Strategy in 4 cols) ──
+        # ── Settings: Filters | Bus strategy, then Element types (2 cols) ──
+        # Two columns: four side by side overflowed the wizard in longer
+        # languages (834 px in Spanish).
         settings_group = QGroupBox(tr("grid_builder.settings"))
         settings_grid = QGridLayout(settings_group)
-        for c in range(4):
+        for c in range(2):
             settings_grid.setColumnStretch(c, 1)
 
         _hdr_style = "font-weight: bold; padding-bottom: 2px;"
@@ -201,7 +220,7 @@ class GridMappingSourceFetchStep(QWidget):
         self._spin_min_voltage.setToolTip(
             tr("grid_builder.minimum_voltage_for_substations_and_lines")
         )
-        filter_form.addRow("Min voltage:", self._spin_min_voltage)
+        filter_form.addRow(tr("grid_builder.min_voltage_label"), self._spin_min_voltage)
 
         self._spin_min_capacity = QDoubleSpinBox()
         self._spin_min_capacity.setRange(0.0, 10000.0)
@@ -215,7 +234,7 @@ class GridMappingSourceFetchStep(QWidget):
         self._spin_min_capacity.setToolTip(
             tr("grid_builder.minimum_generator_capacity_set_to_0")
         )
-        filter_form.addRow("Min gen capacity:", self._spin_min_capacity)
+        filter_form.addRow(tr("grid_builder.min_gen_capacity_label"), self._spin_min_capacity)
 
         # Keep the capacity floor proportional to the voltage floor until the
         # user overrides it by hand: raising Min voltage (a more transmission-
@@ -226,10 +245,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._spin_min_voltage.valueChanged.connect(self._on_min_voltage_changed)
         settings_grid.addWidget(filter_widget, 1, 0)
 
-        # Columns 2–3 — Element Types (4+4 split)
+        # Rows 2–3 — Element Types (4+4 split)
         col_elem_hdr = QLabel(tr("grid_builder.element_types"))
         col_elem_hdr.setStyleSheet(_hdr_style)
-        settings_grid.addWidget(col_elem_hdr, 0, 1, 1, 2)
+        settings_grid.addWidget(col_elem_hdr, 2, 0, 1, 2)
 
         self._chk_substations = QCheckBox(tr("grid_builder.substations_buses"))
         self._chk_substations.setChecked(True)
@@ -266,13 +285,13 @@ class GridMappingSourceFetchStep(QWidget):
         elem_a_widget.setLayout(elem_a)
         elem_b_widget = QWidget()
         elem_b_widget.setLayout(elem_b)
-        settings_grid.addWidget(elem_a_widget, 1, 1)
-        settings_grid.addWidget(elem_b_widget, 1, 2)
+        settings_grid.addWidget(elem_a_widget, 3, 0)
+        settings_grid.addWidget(elem_b_widget, 3, 1)
 
-        # Column 4 — Bus Creation Strategy
+        # Column 2 — Bus Creation Strategy
         col_bus_hdr = QLabel(tr("grid_builder.bus_creation_strategy"))
         col_bus_hdr.setStyleSheet(_hdr_style)
-        settings_grid.addWidget(col_bus_hdr, 0, 3)
+        settings_grid.addWidget(col_bus_hdr, 0, 1)
 
         bus_widget = QWidget()
         bus_lay = QVBoxLayout(bus_widget)
@@ -287,10 +306,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._radio_per_substation = QRadioButton(tr("grid_builder.one_bus_per_substation"))
         bus_lay.addWidget(self._radio_per_substation)
         bus_lay.addStretch()
-        settings_grid.addWidget(bus_widget, 1, 3)
+        settings_grid.addWidget(bus_widget, 1, 1)
 
         # Top-aligned content rows
-        settings_grid.setRowStretch(2, 1)
+        settings_grid.setRowStretch(4, 1)
 
         layout.addWidget(settings_group)
 
@@ -620,7 +639,7 @@ class GridMappingSourceFetchStep(QWidget):
         self._errors.append(f"{source.upper()}: {error_msg}")
         bar, status = self._get_widgets(source)
         if status:
-            status.setText(f"Error: {error_msg}")
+            status.setText(tr("grid_builder.error_msg", error=error_msg))
             status.setStyleSheet("color: red;")
         self._pending -= 1
         if self._pending <= 0:
@@ -668,7 +687,8 @@ class GridMappingSourceFetchStep(QWidget):
                        "fuel_storage", "road"]:
             c = counts.get(ftype, 0)
             if c:
-                parts.append(f"{c} {ftype}(s)")
+                parts.append(tr("grid_builder.type_count",
+                                type=tr(_FEATURE_TYPE_KEYS[ftype]), count=c))
 
         elapsed = getattr(self, "_fetch_elapsed", 0.0)
         logger.info(
@@ -678,8 +698,8 @@ class GridMappingSourceFetchStep(QWidget):
 
         if parts:
             self._summary_label.setText(
-                f"Found {len(self._features)} features: " + ", ".join(parts)
-                + f"  (fetch {elapsed:.0f}s)"
+                tr("grid_builder.features_found", count=len(self._features),
+                   parts=", ".join(parts), seconds=f"{elapsed:.0f}")
             )
         else:
             self._summary_label.setText(
@@ -720,11 +740,10 @@ class GridMappingReviewStep(QWidget):
         filter_row.addWidget(QLabel(tr("grid_builder.filter_by_type")))
 
         self._filter_combo = QComboBox()
-        self._filter_combo.addItems([
-            "All Types", "Substations", "Generators", "Batteries",
-            "Lines", "Transformers", "Converters",
-            "Fuel Entries", "Fuel Storage",
-        ])
+        self._filter_combo.addItems([tr(f"grid_builder.{k}") for k in (
+            "filter_all_types", "type_substations", "type_generators",
+            "type_batteries", "type_lines", "type_transformers",
+            "type_converters", "type_fuel_entries", "type_fuel_storage")])
         self._filter_combo.currentIndexChanged.connect(self._apply_table_filter)
         filter_row.addWidget(self._filter_combo)
 
@@ -743,10 +762,9 @@ class GridMappingReviewStep(QWidget):
         # ── Feature table ──
         self._table = QTableWidget()
         self._table.setColumnCount(7)
-        self._table.setHorizontalHeaderLabels([
-            "Include", "Source", "Type", "Name",
-            "Voltage (kV)", "Capacity (MW)", "Fuel",
-        ])
+        self._table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_include", "col_source", "col_type", "col_name",
+            "col_voltage_kv", "col_capacity_mw", "col_fuel")])
         self._table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
         )
@@ -901,7 +919,7 @@ class GridMappingReviewStep(QWidget):
         total = len(self._features)
         selected = sum(1 for f in self._features if f.include)
         self._summary_label.setText(
-            f"{selected} of {total} features selected for import"
+            tr("grid_builder.features_selected", selected=selected, total=total)
         )
 
     def get_features(self) -> list:
@@ -1051,13 +1069,13 @@ class GridMappingBuildStep(QWidget):
         self._spin_min_nodes.setRange(1, 5000)
         self._spin_min_nodes.setValue(2)
         self._spin_min_nodes.setToolTip(tr("grid_builder.minimum_number_of_nodes_to_create"))
-        node_form.addRow("Minimum nodes:", self._spin_min_nodes)
+        node_form.addRow(tr("grid_builder.min_nodes_label"), self._spin_min_nodes)
 
         self._spin_max_nodes = QSpinBox()
         self._spin_max_nodes.setRange(1, 5000)
         self._spin_max_nodes.setValue(20)
         self._spin_max_nodes.setToolTip(tr("grid_builder.maximum_number_of_nodes_to_create"))
-        node_form.addRow("Maximum nodes:", self._spin_max_nodes)
+        node_form.addRow(tr("grid_builder.max_nodes_label"), self._spin_max_nodes)
         node_left.addLayout(node_form)
         node_left.addStretch()
 
@@ -1104,7 +1122,9 @@ class GridMappingBuildStep(QWidget):
             tr("grid_builder.define_nodes_by_clicking_the_map")
         ))
         self._node_table = QTableWidget(0, 3)
-        self._node_table.setHorizontalHeaderLabels(["Name", "Lat", "Lng"])
+        self._node_table.setHorizontalHeaderLabels(
+            [tr("grid_builder.col_name"), tr("grid_builder.col_lat"),
+             tr("grid_builder.col_lng")])
         self._node_table.horizontalHeader().setStretchLastSection(True)
         self._node_table.setMaximumHeight(180)
         self._node_table.itemChanged.connect(self._on_node_table_changed)
@@ -1226,7 +1246,7 @@ class GridMappingBuildStep(QWidget):
         self._combo_simplify.setToolTip(
             tr("grid_builder.simplification_applied_after_build_auto_connect")
         )
-        simp_form.addRow("Simplification level:", self._combo_simplify)
+        simp_form.addRow(tr("grid_builder.simplification_level_label"), self._combo_simplify)
 
         # Drop tiny isolated subgraphs (single-bus substations from OSM
         # that no line joins to the grid). The largest component is always
@@ -1238,7 +1258,7 @@ class GridMappingBuildStep(QWidget):
         self._spin_min_component.setToolTip(
             tr("grid_builder.drop_isolated_subgraphs_smaller_than_this")
         )
-        simp_form.addRow("Drop isolated <", self._spin_min_component)
+        simp_form.addRow(tr("grid_builder.drop_isolated_label"), self._spin_min_component)
         build_right.addLayout(simp_form)
         build_right.addStretch()
 
@@ -1337,7 +1357,8 @@ class GridMappingBuildStep(QWidget):
         from PySide6.QtWidgets import QInputDialog
 
         name, ok = QInputDialog.getText(
-            self, "New System", "Enter the new system name:",
+            self, tr("grid_builder.new_system_title"),
+            tr("grid_builder.new_system_prompt"),
         )
         if not ok or not name.strip():
             return
@@ -1345,8 +1366,8 @@ class GridMappingBuildStep(QWidget):
 
         if name in self._all_states:
             QMessageBox.warning(
-                self, "Duplicate Name",
-                f"A system named '{name}' already exists.",
+                self, tr("grid_builder.duplicate_name_title"),
+                tr("grid_builder.duplicate_name_msg", name=name),
             )
             return
 
@@ -1582,8 +1603,8 @@ class GridMappingBuildStep(QWidget):
         # Validate system selection
         if not self._combo_system.currentText():
             QMessageBox.warning(
-                self, "No System",
-                "Select a target system or create a new one.",
+                self, tr("grid_builder.no_system_title"),
+                tr("grid_builder.no_system_msg"),
             )
             return
 
@@ -1603,9 +1624,8 @@ class GridMappingBuildStep(QWidget):
             # Build directly — nodes must pre-exist
             if not self._model.state.nodes:
                 QMessageBox.warning(
-                    self, "No Nodes",
-                    "No nodes exist in the system. Enable auto-create "
-                    "nodes or create nodes manually before building.",
+                    self, tr("grid_builder.no_nodes_title"),
+                    tr("grid_builder.no_nodes_msg"),
                 )
                 self._btn_build.setEnabled(True)
                 return
@@ -1625,8 +1645,8 @@ class GridMappingBuildStep(QWidget):
         ]
         if not selected:
             QMessageBox.warning(
-                self, "No Criterion",
-                "Select at least one clustering criterion.",
+                self, tr("grid_builder.no_criterion_title"),
+                tr("grid_builder.no_criterion_msg"),
             )
             self._btn_build.setEnabled(True)
             return
@@ -1674,14 +1694,15 @@ class GridMappingBuildStep(QWidget):
         # Studio for tens of minutes here).
         self._cluster_progress.setValue(100)
         self._lbl_cluster_status.setText(
-            f"Created {result.n_clusters} nodes via "
-            f"{result.criterion_used} clustering."
+            tr("grid_builder.clustering_done", count=result.n_clusters,
+               criterion=result.criterion_used)
         )
         self._start_build(result.node_positions)
 
     def _on_clustering_error(self, error_msg: str):
         self._cluster_progress.setVisible(False)
-        self._lbl_cluster_status.setText(f"Clustering error: {error_msg}")
+        self._lbl_cluster_status.setText(
+            tr("grid_builder.clustering_error", error=error_msg))
         self._btn_build.setEnabled(True)
 
     def _start_build(self, node_positions):
@@ -1811,7 +1832,7 @@ class GridMappingBuildStep(QWidget):
             self._model.stateLoaded.emit()
         except Exception:
             pass
-        self._lbl_build_status.setText(f"Error: {msg}")
+        self._lbl_build_status.setText(tr("grid_builder.error_msg", error=msg))
         self._restore_build_button()
 
 
@@ -3973,9 +3994,9 @@ class GridMappingDemandStep(QWidget):
 
         config_grid.addWidget(QLabel(tr("grid_builder.ml_engine")), 3, 0)
         self._combo_engine = QComboBox()
-        self._combo_engine.addItem("Auto (XGBoost)", "auto")
+        self._combo_engine.addItem(tr("grid_builder.engine_auto"), "auto")
         self._combo_engine.addItem("XGBoost", "xgboost")
-        self._combo_engine.addItem("Archetype (no ML)", "archetype")
+        self._combo_engine.addItem(tr("grid_builder.engine_archetype"), "archetype")
         config_grid.addWidget(self._combo_engine, 3, 1)
 
         config_grid.addWidget(QLabel(tr("grid_builder.national_demand_gwh")), 4, 0)
@@ -3983,7 +4004,7 @@ class GridMappingDemandStep(QWidget):
         self._spin_national_gwh.setRange(0.0, 9_999_999.0)
         self._spin_national_gwh.setDecimals(1)
         self._spin_national_gwh.setValue(0.0)
-        self._spin_national_gwh.setSpecialValueText("Auto-estimate")
+        self._spin_national_gwh.setSpecialValueText(tr("grid_builder.auto_estimate"))
         self._spin_national_gwh.setToolTip(
             tr("grid_builder.override_total_national_demand_0_auto")
         )
@@ -4055,9 +4076,8 @@ class GridMappingDemandStep(QWidget):
         rg = QVBoxLayout(results_group)
 
         self._forecast_table = QTableWidget(0, 4)
-        self._forecast_table.setHorizontalHeaderLabels([
-            "Node", "Peak (MW)", "Annual (GWh)", "Load Factor",
-        ])
+        self._forecast_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_node", "col_peak_mw", "col_annual_gwh", "col_load_factor")])
         self._forecast_table.horizontalHeader().setStretchLastSection(True)
         self._forecast_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers,
@@ -4101,9 +4121,9 @@ class GridMappingDemandStep(QWidget):
         vg.addLayout(imp_row)
 
         self._obs_metrics_table = QTableWidget(0, 6)
-        self._obs_metrics_table.setHorizontalHeaderLabels([
-            "Node", "MAPE %", "RMSE (MW)", "Peak err %", "Energy err %", "Corr",
-        ])
+        self._obs_metrics_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_node", "col_mape", "col_rmse_mw", "col_peak_err",
+            "col_energy_err", "col_corr")])
         self._obs_metrics_table.horizontalHeader().setStretchLastSection(True)
         self._obs_metrics_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
@@ -4185,10 +4205,8 @@ class GridMappingDemandStep(QWidget):
 
         # Classification rules table
         self._rules_table = QTableWidget(0, 4)
-        self._rules_table.setHorizontalHeaderLabels([
-            "Type Name", "Area Min (m\u00b2)", "Area Max (m\u00b2)",
-            "Weight/m\u00b2",
-        ])
+        self._rules_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_type_name", "col_area_min", "col_area_max", "col_weight_m2")])
         self._rules_table.horizontalHeader().setStretchLastSection(True)
         self._rules_table.setMinimumHeight(100)
         _fo.addWidget(self._rules_table)
@@ -4239,9 +4257,9 @@ class GridMappingDemandStep(QWidget):
 
         # Results table (bus fractions)
         self._results_table = QTableWidget(0, 5)
-        self._results_table.setHorizontalHeaderLabels([
-            "Node", "Bus", "Buildings", "Old Fraction", "New Fraction",
-        ])
+        self._results_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_node", "col_bus", "col_buildings", "col_old_fraction",
+            "col_new_fraction")])
         self._results_table.horizontalHeader().setStretchLastSection(True)
         self._results_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers,
@@ -4416,10 +4434,11 @@ class GridMappingDemandStep(QWidget):
             if len(countries) == 1:
                 c = countries[0]
                 self._lbl_forecast_status.setText(
-                    f"Country: {c['name']} ({c['iso3']})")
+                    tr("grid_builder.country_detected", name=c["name"],
+                       iso3=c["iso3"]))
             else:
                 self._lbl_forecast_status.setText(
-                    f"{len(countries)} countries detected — select one")
+                    tr("grid_builder.countries_detected", count=len(countries)))
             self._btn_detect_country.setEnabled(True)
 
         def _do_detect():
@@ -4457,7 +4476,7 @@ class GridMappingDemandStep(QWidget):
             except Exception as exc:
                 self._ui_call.emit(lambda e=exc: (
                     self._lbl_forecast_status.setText(
-                        f"Country detection failed: {e}"),
+                        tr("grid_builder.country_detection_failed", error=e)),
                     self._btn_detect_country.setEnabled(True),
                 ))
 
@@ -4563,9 +4582,9 @@ class GridMappingDemandStep(QWidget):
                 self._ui_call.emit(lambda wb=wb: (
                     self._forecast_progress.setValue(40),
                     self._lbl_forecast_status.setText(
-                        f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                        f"Pop={wb.get('population', 0):,.0f}. "
-                        f"Fetching ERA5 temperature..."
+                        tr("grid_builder.wb_fetching_era5",
+                           gdp=f"{wb.get('gdp_per_capita', 0):,.0f}",
+                           pop=f"{wb.get('population', 0):,.0f}")
                     ),
                 ))
 
@@ -4601,11 +4620,11 @@ class GridMappingDemandStep(QWidget):
                 def _fetched(wb=wb, temp=temp, weather_year=weather_year):
                     self._forecast_progress.setValue(60)
                     self._lbl_forecast_status.setText(
-                        f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                        f"Pop={wb.get('population', 0):,.0f}, "
-                        "kWh/cap="
-                        f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}. "
-                        f"ERA5: {len(temp)} hours ({weather_year})."
+                        tr("grid_builder.wb_era5_done",
+                           gdp=f"{wb.get('gdp_per_capita', 0):,.0f}",
+                           pop=f"{wb.get('population', 0):,.0f}",
+                           kwh=f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}",
+                           hours=len(temp), year=weather_year)
                     )
                     if on_done is not None:
                         on_done()  # keeps the button busy until it finishes
@@ -4615,7 +4634,8 @@ class GridMappingDemandStep(QWidget):
 
             except Exception as exc:
                 self._ui_call.emit(lambda e=exc: (
-                    self._lbl_forecast_status.setText(f"Fetch error: {e}"),
+                    self._lbl_forecast_status.setText(
+                        tr("grid_builder.fetch_error", error=e)),
                     self._btn_fetch_forecast.setEnabled(True),
                     self._forecast_progress.setValue(0),
                 ))
@@ -4760,7 +4780,8 @@ class GridMappingDemandStep(QWidget):
             except Exception as exc:
                 logger.exception("Demand forecast failed")
                 self._ui_call.emit(lambda e=exc: (
-                    self._lbl_forecast_status.setText(f"Forecast error: {e}"),
+                    self._lbl_forecast_status.setText(
+                        tr("grid_builder.forecast_error", error=e)),
                     self._forecast_progress.setValue(0),
                 ))
             self._ui_call.emit(lambda: self._btn_fetch_forecast.setEnabled(True))
@@ -4790,10 +4811,7 @@ class GridMappingDemandStep(QWidget):
             self._forecast_table.setItem(i, 3, QTableWidgetItem(f"{lf:.3f}"))
 
         self._lbl_forecast_summary.setText(
-            f"<b>System total:</b> Peak={result.total_peak_mw:.1f} MW, "
-            f"Annual={result.total_annual_gwh:.1f} GWh, "
-            f"LF={result.total_load_factor:.3f} "
-            f"&mdash; Source: {result.demand_source}"
+            GridMappingDemandStep._system_total_text(result)
         )
         self._lbl_forecast_summary.setStyleSheet("color: #27ae60; padding: 4px;")
         self._forecast_progress.setValue(100)
@@ -4823,6 +4841,15 @@ class GridMappingDemandStep(QWidget):
         # exists (spatial becomes runnable; a footprint proxy already was).
         self._update_distribute_enabled()
         self._btn_apply.setEnabled(True)
+
+    @staticmethod
+    def _system_total_text(result) -> str:
+        """The forecast's system-total line (peak, energy, load factor)."""
+        return tr("grid_builder.forecast_system_total",
+                  peak=f"{result.total_peak_mw:.1f}",
+                  annual=f"{result.total_annual_gwh:.1f}",
+                  lf=f"{result.total_load_factor:.3f}",
+                  source=result.demand_source)
 
     @staticmethod
     def _density_model_missing_text(result):
@@ -4907,8 +4934,8 @@ class GridMappingDemandStep(QWidget):
             return
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load observed demand CSV", "",
-            "Demand files (*.csv *.xlsx *.xls);;All files (*)")
+            self, tr("grid_builder.load_observed_title"), "",
+            tr("grid_builder.demand_file_filter"))
         if not path:
             return
         try:
@@ -4920,8 +4947,8 @@ class GridMappingDemandStep(QWidget):
             series = df.iloc[:, 0].astype(float)   # one series = selected node
             data = [float(x) for x in series.tolist()]
         except Exception as exc:
-            QMessageBox.warning(self, "Load failed",
-                                f"Could not read the file:\n{exc}")
+            QMessageBox.warning(self, tr("grid_builder.load_failed_title"),
+                                tr("grid_builder.load_failed_msg", error=exc))
             return
         from esfex.visualization.data.gui_model import GuiNodeDemand
         self._observed[idx] = GuiNodeDemand(
@@ -4985,8 +5012,7 @@ class GridMappingDemandStep(QWidget):
             for c, v in enumerate(vals):
                 self._obs_metrics_table.setItem(r, c, QTableWidgetItem(str(v)))
         self._lbl_validation_status.setText(
-            f"{len(rows)} node(s) with observed data — metrics compare the "
-            "base year against your series.")
+            tr("grid_builder.observed_nodes", count=len(rows)))
 
     def _on_apply_correction_toggled(self, checked: bool):
         if self._forecast_result is None or self._forecast_result_raw is None:
@@ -5020,7 +5046,7 @@ class GridMappingDemandStep(QWidget):
         self._forecast_result.demand_multi_year = corrected
         self._recompute_node_stats(corrected)
         self._lbl_validation_status.setText(
-            f"Correction applied to {n_applied} node(s); growth preserved.")
+            tr("grid_builder.correction_applied", count=n_applied))
 
     def _recompute_node_stats(self, multi_year):
         """Refresh per-node peak/GWh/LF + the results table + system total."""
@@ -5055,10 +5081,7 @@ class GridMappingDemandStep(QWidget):
             result.total_load_factor = (
                 float(sys_base.mean() / sp) if sp > 0 else 0.0)
         self._lbl_forecast_summary.setText(
-            f"<b>System total:</b> Peak={result.total_peak_mw:.1f} MW, "
-            f"Annual={result.total_annual_gwh:.1f} GWh, "
-            f"LF={result.total_load_factor:.3f} "
-            f"&mdash; Source: {result.demand_source}")
+            GridMappingDemandStep._system_total_text(result))
 
     # ==================================================================
     # Section 2: Eligible nodes detection (for bus distribution)
@@ -5180,7 +5203,7 @@ class GridMappingDemandStep(QWidget):
         self._buildings_gdf = gdf
         n = len(gdf) if gdf is not None else 0
         self._lbl_bld_status.setText(
-            f"Loaded {n:,} building footprints. Classifying..."
+            tr("grid_builder.buildings_loaded", count=f"{n:,}")
         )
         self._bld_progress.setValue(50)
         if n > 0:
@@ -5190,7 +5213,7 @@ class GridMappingDemandStep(QWidget):
 
     def _on_bld_error(self, msg):
         self._btn_fetch_bld.setEnabled(True)
-        self._lbl_bld_status.setText(f"Error: {msg}")
+        self._lbl_bld_status.setText(tr("grid_builder.error_msg", error=msg))
         self._bld_progress.setValue(0)
 
     def _load_default_rules(self):
@@ -5300,7 +5323,7 @@ class GridMappingDemandStep(QWidget):
             self._lbl_status.setText(msg)
 
     def _on_classify_dist_error(self, msg):
-        self._lbl_status.setText(f"Classification failed: {msg}")
+        self._lbl_status.setText(tr("grid_builder.classification_failed", error=msg))
         self._progress.setValue(0)
         self._btn_run.setEnabled(True)
 
@@ -5311,9 +5334,10 @@ class GridMappingDemandStep(QWidget):
         cls_lines = []
         for _, r in summary.iterrows():
             cls_lines.append(
-                f"{r['building_type']}: {int(r['count']):,} bldg, "
-                f"{r['total_area_m2']:,.0f} m\u00b2, "
-                f"w={r['total_weight']:.1f}"
+                tr("grid_builder.building_class_line", type=r["building_type"],
+                   count=f"{int(r['count']):,}",
+                   area=f"{r['total_area_m2']:,.0f}",
+                   weight=f"{r['total_weight']:.1f}")
             )
 
         self._render_assignments_table()
@@ -5322,9 +5346,9 @@ class GridMappingDemandStep(QWidget):
         total_bld = int(summary["count"].sum()) if not summary.empty else 0
         total_w = summary["total_weight"].sum() if not summary.empty else 0.0
         self._lbl_status.setText(
-            f"Classified {total_bld:,} buildings "
-            f"({'; '.join(cls_lines)}; total weight: {total_w:.1f}). "
-            f"Assigned to {len(self._assignments)} buses."
+            tr("grid_builder.classified_buildings", count=f"{total_bld:,}",
+               classes="; ".join(cls_lines), weight=f"{total_w:.1f}",
+               buses=len(self._assignments))
         )
         self._btn_run.setEnabled(True)
         self._btn_apply.setEnabled(len(self._assignments) > 0)
@@ -5467,9 +5491,9 @@ class GridMappingDemandStep(QWidget):
         self._btn_apply.setEnabled(
             len(self._assignments) > 0 or self._forecast_result is not None)
         self._lbl_bld_status.setText(
-            f"Demand distribution: {len(self._assignments)} bus fraction(s) "
-            f"across {n_nodes} multi-bus + {n_single} single-bus node(s) from "
-            f"{len(res.cell_lats)} demand cells.")
+            tr("grid_builder.demand_distribution_done",
+               fractions=len(self._assignments), multi=n_nodes,
+               single=n_single, cells=len(res.cell_lats)))
 
     def _apply_all(self):
         """Apply forecast demand to nodes + bus fractions to model."""

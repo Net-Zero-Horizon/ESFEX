@@ -348,7 +348,9 @@ def build_elk_graph(
             "height": bus_h,
             "properties": {
                 "elementType": "bus",
-                "elementId": gid,
+                # The model's bus id (the node id is the layout key
+                # ``bus_<id>``): a click must open this bus's form.
+                "elementId": group_to_buses[gid][0],
                 "voltageKv": meta["voltage_kv"],
                 "color": meta["color"],
                 "label": meta["name"],
