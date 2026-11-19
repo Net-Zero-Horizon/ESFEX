@@ -60,16 +60,16 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No price data", false);
+            showStatus(data && data.error ? data.error : _t("web.charts.electricity_cost.no_data"), false);
             return;
         }
         try {
             renderCost(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[electricity_cost.js] render threw:", e);
         }
     });
@@ -85,6 +85,16 @@ function showStatus(text, isError) {
 function hideStatus() {
     const s = document.getElementById("status");
     if (s) s.style.display = "none";
+}
+
+// Abbreviated month name (0 = January) in the Studio's language.
+function monthShort(m) {
+    try {
+        return new Intl.DateTimeFormat(window.ESFEX_LANG || "en", { month: "short" })
+            .format(new Date(2001, m, 15));
+    } catch (e) {
+        return String(m + 1);
+    }
 }
 
 function renderCost(data) {
@@ -117,8 +127,7 @@ function renderCost(data) {
                 y: 0.78, yanchor: "middle",
             },
             xaxis: "x", yaxis: "y",
-            hovertemplate:
-                "%{x} – Day %{y}<br>Price: %{z:.2f} $/MWh<extra></extra>",
+            hovertemplate: _t("web.charts.electricity_cost.hover_contour"),
             showlegend: false,
         });
     }
@@ -144,8 +153,8 @@ function renderCost(data) {
                 color: "#FFFFFF", size: 8,
                 line: { color: "#000000", width: 1.5 },
             },
-            name: "Annual Avg Price",
-            hovertemplate: "%{x}: %{y:.2f} $/MWh<extra>Annual Avg</extra>",
+            name: _t("web.charts.electricity_cost.trace_annual_avg"),
+            hovertemplate: _t("web.charts.electricity_cost.hover_annual_avg"),
             xaxis: "x", yaxis: "y2",
         });
     }
@@ -163,9 +172,9 @@ function renderCost(data) {
                      size: (data.hist_hi - data.hist_lo) / 100 },
             marker: { color: "#D62728" },
             opacity: 0.55,
-            name: "Non-Renewable",
+            name: _t("web.charts.electricity_cost.trace_nonren"),
             xaxis: "x3", yaxis: "y3",
-            hovertemplate: "%{x:.1f} $/MWh<br>%{y:,.1f} GWh<extra>Non-Ren.</extra>",
+            hovertemplate: _t("web.charts.electricity_cost.hover_nonren"),
         });
     }
     if (hasRE) {
@@ -178,9 +187,9 @@ function renderCost(data) {
                      size: (data.hist_hi - data.hist_lo) / 100 },
             marker: { color: "#2CA02C" },
             opacity: 0.55,
-            name: "Renewable",
+            name: _t("web.charts.electricity_cost.trace_ren"),
             xaxis: "x3", yaxis: "y3",
-            hovertemplate: "%{x:.1f} $/MWh<br>%{y:,.1f} GWh<extra>Renewable</extra>",
+            hovertemplate: _t("web.charts.electricity_cost.hover_ren"),
         });
     }
     // Vertical dashed lines for the weighted means.
@@ -193,7 +202,8 @@ function renderCost(data) {
         annotations.push({
             xref: "x3", yref: "y3 domain",
             x: data.mean_nonren, y: 0.95, xanchor: "left", yanchor: "top",
-            text: `<b>Avg Non-Ren: $${data.mean_nonren.toFixed(1)}/MWh</b>`,
+            text: "<b>" + _t("web.charts.electricity_cost.avg_nonren",
+                             { value: data.mean_nonren.toFixed(1) }) + "</b>",
             showarrow: false, font: { color: "#D62728", size: 10 },
             bgcolor: "rgba(255,255,255,0.75)",
         });
@@ -207,7 +217,8 @@ function renderCost(data) {
         annotations.push({
             xref: "x3", yref: "y3 domain",
             x: data.mean_ren, y: 0.85, xanchor: "left", yanchor: "top",
-            text: `<b>Avg Ren: $${data.mean_ren.toFixed(1)}/MWh</b>`,
+            text: "<b>" + _t("web.charts.electricity_cost.avg_ren",
+                             { value: data.mean_ren.toFixed(1) }) + "</b>",
             showarrow: false, font: { color: "#2CA02C", size: 10 },
             bgcolor: "rgba(255,255,255,0.75)",
         });
@@ -215,19 +226,19 @@ function renderCost(data) {
 
     // Month-anchored y ticks for the contour (Jan at bottom, Dec at top
     // — same convention as the matplotlib chart's origin="lower").
-    const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    // Month names in the Studio's language, from the browser's locale data.
+    const monthLabels = Array.from({ length: 12 }, (_, m) => monthShort(m));
     const monthTickvals = monthLabels.map((_, m) => (m + 0.5) * (365 / 12));
 
     const layout = {
         margin: { t: 60, r: 100, b: 80, l: 70 },
         showlegend: true,
         annotations: annotations.concat([
-            { text: "<b>a) Daily Electricity Price Evolution</b>",
+            { text: "<b>" + _t("web.charts.electricity_cost.title_a") + "</b>",
               x: 0.46, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Generation-Weighted Price Distribution</b>",
+            { text: "<b>" + _t("web.charts.electricity_cost.title_b") + "</b>",
               x: 0.46, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -248,13 +259,13 @@ function renderCost(data) {
         xaxis: {
             domain: [0, 0.93], anchor: "y",
             type: "category",
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.electricity_cost.axis_year") + "</b>",
             tickangle: -45,
         },
         yaxis: {
             domain: [0.55, 0.98], anchor: "x",
             tickvals: monthTickvals, ticktext: monthLabels,
-            title: "<b>Month</b>",
+            title: "<b>" + _t("web.charts.electricity_cost.axis_month") + "</b>",
             // Pin the range exactly to the data extents so Plotly's
             // default ~5% axis padding doesn't add empty bands above
             // and below the heatmap.
@@ -264,20 +275,20 @@ function renderCost(data) {
         yaxis2: {
             domain: [0.55, 0.98], anchor: "x",
             overlaying: "y", side: "right",
-            title: { text: "<b>Annual Avg ($/MWh)</b>",
+            title: { text: "<b>" + _t("web.charts.electricity_cost.axis_annual_avg") + "</b>",
                      font: { size: 10 } },
             showgrid: false, tickfont: { size: 9 },
         },
         // Subplot b — histogram
         xaxis3: {
             domain: [0, 0.93], anchor: "y3",
-            title: "<b>Price ($/MWh)</b>",
+            title: "<b>" + _t("web.charts.electricity_cost.axis_price") + "</b>",
             range: [data.hist_lo, data.hist_hi],
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis3: {
             domain: [0.0, 0.45], anchor: "x3",
-            title: "<b>Generation (GWh)</b>",
+            title: "<b>" + _t("web.charts.electricity_cost.axis_generation") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
     };
