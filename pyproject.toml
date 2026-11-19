@@ -94,12 +94,8 @@ dependencies = [
     "xarray>=2023.1.0",
     "gcsfs>=2023.1.0",
     "zarr>=2.14.0",
-    # Demand estimation — classical ML (former [ml]):
+    # Demand estimation (former [ml]):
     "xgboost>=2.0.0",
-    # Demand estimation — deep learning (former [dl]; heavy: torch):
-    "torch>=2.0.0",
-    "pytorch-lightning>=2.0.0",
-    "pytorch-forecasting>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -207,17 +203,13 @@ omit = [
     "*/esfex/models/demand_real_data.py",
     "*/esfex/models/demand_training.py",
     "*/esfex/models/demand_zonal_fetchers.py",
-    "*/esfex/models/ecvi_gridded.py",
     "*/esfex/models/demand_dataset.py",
     "*/esfex/models/demand_ml.py",
-    "*/esfex/models/demand_tft.py",
-    "*/esfex/models/tft_inference.py",
     "*/esfex/models/tsam.py",
     "*/esfex/models/climate_profiles.py",
     "*/esfex/models/pixel_features.py",
     "*/esfex/models/zone_centroids.py",
     "*/esfex/models/download_cmip6.py",
-    "*/esfex/models/download_cmip6_subdaily.py",
     "*/esfex/plugins/availability_generator/otec_cf.py",
     "*/esfex/plugins/availability_generator/grid_builder_hook.py",
 ]

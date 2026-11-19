@@ -3,8 +3,8 @@
 - ``build_unified_dataset`` writes the ISO3 → country_id map next to the
   dataset, never over the map of a model already in MODELS_DIR.
 - ``train_xgboost`` saves the map next to the model it saves.
-- ``train_demand_model(engine="tft")`` hands the dataset it built (with
-  ``exclude_country`` applied) to ``train_tft_model``: no second build, no
+- ``train_demand_model`` builds the dataset once and hands it (with
+  ``exclude_country`` applied) to ``train_xgboost``: no second build, no
   leak of the excluded country.
 """
 
@@ -94,7 +94,7 @@ def test_train_xgboost_saves_the_map_next_to_its_model(tmp_path, models_dir):
         "DEPLOYED": 0}
 
 
-def test_tft_training_reuses_the_dataset_without_the_excluded_country(
+def test_xgboost_training_keeps_the_excluded_country_in_the_map(
         tmp_path, models_dir):
     dataset = tmp_path / "dataset"
     dataset.mkdir()
@@ -106,33 +106,17 @@ def test_tft_training_reuses_the_dataset_without_the_excluded_country(
         builds.append(args)
         return real_build(*args, **kwargs)
 
-    fake_tft = mock.MagicMock(return_value={"engine": "tft"})
+    fake_xgb = mock.MagicMock(return_value={"engine": "xgboost"})
     with mock.patch("esfex.models.pixel_features.build_features_for_point",
                     return_value=_feats()), \
             mock.patch.object(demand_training, "build_unified_dataset",
                               side_effect=counting_build), \
-            mock.patch("esfex.models.demand_tft.train_tft_model", fake_tft):
-        demand_training.train_demand_model(
-            engine="tft", dataset_dir=dataset, exclude_country="FRA")
-
-    assert len(builds) == 1
-    df = fake_tft.call_args.kwargs["df"]
-    assert set(df["country"]) == {"CUB"}
-
-
-def test_xgboost_training_keeps_the_excluded_country_in_the_map(
-        tmp_path, models_dir):
-    dataset = tmp_path / "dataset"
-    dataset.mkdir()
-    _write_dataset(dataset)
-    fake_xgb = mock.MagicMock(return_value={"engine": "xgboost"})
-    with mock.patch("esfex.models.pixel_features.build_features_for_point",
-                    return_value=_feats()), \
             mock.patch.object(demand_training, "train_xgboost", fake_xgb):
         demand_training.train_demand_model(
-            engine="xgboost", dataset_dir=dataset, exclude_country="CUB",
+            dataset_dir=dataset, exclude_country="CUB",
             output_path=tmp_path / "m.xgb")
 
+    assert len(builds) == 1
     df = fake_xgb.call_args.args[0]
     assert set(df["country"]) == {"FRA"}
     assert fake_xgb.call_args.kwargs["country_to_id"] == {"CUB": 0, "FRA": 1}

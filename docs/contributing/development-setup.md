@@ -43,7 +43,7 @@ Install in development mode:
 pip install -e ".[dev]"
 ```
 
-All runtime dependencies are core dependencies in `pyproject.toml`; there are no optional extras besides `dev`. They include the numerical stack (numpy, pandas, scipy, h5py, pydantic, pyyaml), juliacall, typer and rich, the Studio (PySide6, which bundles Qt WebEngine, and superqt), plotting (matplotlib, plotly, kaleido), SALib, benchmarking tools (pypsa, pandapower), the GIS and resource-assessment stack (geopandas, shapely, pvlib, atlite, rasterio, osmium, xarray, …) and demand-model libraries (xgboost, torch, pytorch-lightning). The install is large (several GB).
+All runtime dependencies are core dependencies in `pyproject.toml`; there are no optional extras besides `dev`. They include the numerical stack (numpy, pandas, scipy, h5py, pydantic, pyyaml), juliacall, typer and rich, the Studio (PySide6, which bundles Qt WebEngine, and superqt), plotting (matplotlib, plotly, kaleido), SALib, benchmarking tools (pypsa, pandapower), the GIS and resource-assessment stack (geopandas, shapely, pvlib, atlite, rasterio, osmium, xarray, …) and the demand-model library (xgboost). The install is large (several GB).
 
 The `dev` extra adds pytest, pytest-cov, black, ruff and mypy.
 

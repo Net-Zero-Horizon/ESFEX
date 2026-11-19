@@ -780,27 +780,12 @@ def _register_plugin_cli(args: Optional[list[str]] = None) -> None:
         pass  # A plugin problem must not stop the built-in commands
 
 
-DEMAND_ENGINES: tuple[str, ...] = ("xgboost", "tft")
-
-
-def _check_demand_engine(value: str) -> str:
-    if value.lower() not in DEMAND_ENGINES:
-        raise typer.BadParameter(
-            f"'{value}' is not a demand model; use one of: {', '.join(DEMAND_ENGINES)}")
-    return value.lower()
-
-
 @app.command()
 def train_demand_model(
-    engine: str = typer.Option(
-        "xgboost", "--engine", "-e", callback=_check_demand_engine,
-        help="Model to train: xgboost (hourly shape model) or tft",
-    ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
-        help="Where to write the trained model (default: demand_model.xgb or "
-             "demand_tft.ckpt in the ESFEX models directory, where the "
-             "Studio picks it up)",
+        help="Where to write the trained model (default: demand_model.xgb "
+             "in the ESFEX models directory, where the Studio picks it up)",
     ),
     cache_dir: Optional[Path] = typer.Option(
         None, "--cache-dir",
@@ -811,7 +796,7 @@ def train_demand_model(
         3, "--folds", min=1, help="Temporal cross-validation folds (by year)",
     ),
 ):
-    """Train a demand model on the dataset of build-demand-dataset.
+    """Train the XGBoost demand model on the dataset of build-demand-dataset.
 
     Reads the hourly Parquet files that ``esfex build-demand-dataset`` wrote
     (real demand with ERA5 temperature), adds the pixel features at each
@@ -835,7 +820,6 @@ def train_demand_model(
 
         try:
             model = _train(
-                engine=engine,
                 dataset_dir=cache_dir,
                 output_path=output,
                 n_cv_folds=folds,
