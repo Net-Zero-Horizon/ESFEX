@@ -22,7 +22,7 @@ Load and validate a complete ESFEX configuration file.
 
 **Returns:** a validated `ESFEXConfig`. Keys the models do not define are dropped without an error.
 
-**Raises:** `ConfigLoadError` for a missing file, invalid YAML, a Pydantic validation error (`"Configuration validation failed:\n..."`) or any other conversion error, including a missing required unit key (`"Failed to load configuration: 'min_up'"`).
+**Raises:** `ConfigLoadError` for a missing file, invalid YAML, a Pydantic validation error (`"Configuration validation failed at systems.Cuba.generators.gas_1:\n..."`) or any other conversion error, including a missing required unit key (`"Failed to load configuration: systems.Cuba.generators.gas_1.min_up: Required key 'min_up' is missing"`). Its `issues` give each problem's YAML key path.
 
 **Processing steps:**
 
@@ -182,8 +182,10 @@ The loader logs (INFO) each unit that receives the adder, with the resulting `ma
 
 ```python
 class ConfigLoadError(Exception):
-    """Exception raised when configuration loading fails."""
+    issues: list[dict]   # one per problem: key, type, message, input
 ```
+
+`issues` lists what is wrong, one dict per problem: `key`, the dotted path in the YAML (`systems.Cuba.generators.pv.rated_power`, `temporal.resolution_hours`; `""` when there is no single place), `type` (Pydantic's error type such as `list_type` or `less_than_equal`; `missing` for a required key; `file_not_found`, `yaml` or `load` otherwise), `message`, and `input` (the offending value when it is a scalar, else `None`). [`esfex validate --json`](../user-guide/scripts-and-agents.md#esfex-validate-json) reports them.
 
 Raised by `load_config()` when:
 

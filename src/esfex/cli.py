@@ -100,6 +100,74 @@ SOLVER_NAMES: tuple[str, ...] = typing.get_args(
     _SolverConfig.model_fields["name"].annotation)
 
 
+# ── --json output ────────────────────────────────────────────────────────
+#
+# A --json command prints exactly one JSON object on stdout; everything
+# else (progress, rich tables, Julia and solver output) goes to stderr.
+
+
+def _flush_c_stdio() -> None:
+    """Flush the C library's stdio buffers (a solver's printf output to a
+    pipe sits there until exit, which would put it after the JSON)."""
+    try:
+        import ctypes
+
+        libc = ctypes.cdll.msvcrt if sys.platform == "win32" else ctypes.CDLL(None)
+        libc.fflush(None)
+    except Exception:
+        pass
+
+
+class _StdoutToStderr:
+    """Inside the block, writes to stdout land on stderr: Python's
+    ``sys.stdout`` and the process's file descriptor 1 (so what Julia and
+    the solvers print follows). :func:`_write_json` then prints the
+    document on the real stdout."""
+
+    def __enter__(self):
+        import os
+
+        self._real = sys.stdout
+        self._saved_fd = None
+        for stream in (sys.stdout, sys.__stdout__):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        _flush_c_stdio()
+        try:
+            os.fstat(1)
+            os.fstat(2)
+            self._saved_fd = os.dup(1)
+            os.dup2(2, 1)
+        except OSError:  # no console (pythonw): Python-level only
+            self._saved_fd = None
+        sys.stdout = sys.stderr
+        return self
+
+    def __exit__(self, *exc):
+        import os
+
+        for stream in (sys.stderr, sys.__stdout__):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        _flush_c_stdio()
+        sys.stdout = self._real
+        if self._saved_fd is not None:
+            os.dup2(self._saved_fd, 1)
+            os.close(self._saved_fd)
+        return False
+
+
+def _write_json(doc: dict) -> None:
+    import json
+
+    sys.stdout.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
 def _check_mode(value: Optional[str]) -> Optional[str]:
     if value is not None and value not in SIMULATION_MODES:
         raise typer.BadParameter(
@@ -172,16 +240,89 @@ def run(
         "--dry-run",
         help="Validate config and show plan without running optimization",
     ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="At the end print one JSON object (schema esfex.run/1) on stdout: status, "
+             "output file, wall time, warnings, summary of the last year. Everything "
+             "else goes to stderr",
+    ),
 ):
     """
     Run the ESFEX optimization model.
 
     Executes capacity expansion and operational dispatch optimization
-    based on the provided configuration file.
+    based on the provided configuration file. Exit code 0 on success, 1 if
+    the configuration is invalid or the run failed or is incomplete.
     """
+    import time
+
+    from esfex.api.diagnostics import collect_warnings
+
+    state: dict = {"status": None, "errors": [], "output_dir": None,
+                   "orchestrator": None, "case": None}
+    args = (config, mode, solver, output, years, start_year, verbose, dry_run)
+    if not json_out:
+        with collect_warnings():
+            _run_command(state, *args)
+        return
+
+    t0 = time.time()
+    code = 0
+    with collect_warnings() as collector, _StdoutToStderr():
+        try:
+            _run_command(state, *args)
+        except typer.Exit as e:
+            code = int(e.exit_code or 0)
+        except Exception as e:  # never leave the caller without its JSON
+            code = 1
+            state["status"] = state["status"] or "failed"
+            state["errors"].append(_run_error("run_error", f"{type(e).__name__}: {e}"))
+        doc = _run_json_doc(state, code, time.time() - t0, collector, config)
+    _write_json(doc)
+    raise typer.Exit(code=code)
+
+
+def _run_error(code: str, message: str, key: str = "", fix: str = ""):
+    from esfex.api import ApiError
+
+    return ApiError(code=code, message=message, key=key, fix=fix)
+
+
+def _run_json_doc(state: dict, code: int, wall: float, collector, config: Path) -> dict:
+    """The ``esfex.run/1`` document of a finished (or failed) ``run --json``."""
+    from esfex.api import envelope
+    from esfex.api import summary as _summary
+
+    orch = state.get("orchestrator")
+    out_file = getattr(orch, "_hdf5_path", None) if orch is not None else None
+    wsum = getattr(orch, "warnings_summary", None) if orch is not None else None
+    if wsum is None:
+        wsum = collector.summary()
+    status = state.get("status") or ("complete" if code == 0 else "failed")
+    years = [r.year for r in (getattr(orch, "results", None) or [])]
+    last_year = None
+    if out_file is not None and Path(out_file).exists() and years:
+        try:
+            last_year = _summary(out_file, years=[years[-1]]).last_year()
+        except Exception as e:
+            state["errors"].append(_run_error("summary_error", f"{type(e).__name__}: {e}",
+                                              key=str(out_file)))
+    return envelope(
+        "run", code == 0, errors=state["errors"], status=status, exit_code=code,
+        config=str(config), output_dir=state.get("output_dir"),
+        output_file=None if out_file is None else str(Path(out_file).resolve()),
+        wall_time_s=round(wall, 3), years=years, warnings=wsum.to_dict(),
+        last_year=last_year, case=state.get("case"))
+
+
+def _run_command(state: dict, config: Path, mode: Optional[str], solver: Optional[str],
+                 output: Optional[Path], years: Optional[int], start_year: Optional[int],
+                 verbose: bool, dry_run: bool) -> None:
+    """Body of ``esfex run``; records the outcome in *state* for ``--json``."""
     import logging
     import sys
 
+    from esfex.api.cases import config_issue_error, case_summary, missing_data_files
     from esfex.config.loader import load_config, ConfigLoadError
     from esfex.runner import Orchestrator, RunAbortedError
     from esfex.logging_config import setup_console_logging
@@ -211,6 +352,9 @@ def run(
             cfg = load_config(config)
     except ConfigLoadError as e:
         console.print(f"[red]Configuration error:[/red] {e}")
+        state["status"] = "invalid_config"
+        state["errors"] = [config_issue_error(i) for i in (getattr(e, "issues", None) or [
+            {"key": "", "type": "load", "message": str(e), "input": None}])]
         raise typer.Exit(code=1)
 
     # Override config values from CLI
@@ -250,13 +394,27 @@ def run(
     if verbose:
         _show_config_summary(cfg)
 
+    try:
+        state["case"] = case_summary(cfg)
+    except Exception:  # a mocked or partial config: the run decides
+        state["case"] = None
+
     if dry_run:
+        state["status"] = "dry_run"
+        missing = missing_data_files(cfg, config.parent)
+        if missing:
+            state["errors"] = missing
+            console.print(f"[red]{len(missing)} data file(s) the run reads cannot be found:[/red]")
+            for err in missing:
+                console.print(f"  {err.key}: {err.message}", markup=False)
+            raise typer.Exit(code=1)
         console.print("\n[yellow]Dry run mode - not executing optimization[/yellow]")
         raise typer.Exit(code=0)
 
     # Create output directory
     output_dir = output or Path("./results")
     output_dir.mkdir(parents=True, exist_ok=True)
+    state["output_dir"] = str(output_dir.resolve())
 
     def _safe_console_print(msg: str, *, style: str = "") -> None:
         """Print via rich, but if stdout is in non-blocking mode and the
@@ -285,6 +443,7 @@ def run(
     # Run optimization
     try:
         orchestrator = Orchestrator(cfg, output_dir=output_dir, config_path=config)
+        state["orchestrator"] = orchestrator
         results = orchestrator.run(years=years, start_year=start_year)
 
         # A year some of whose dispatch windows failed has hours without a
@@ -296,7 +455,13 @@ def run(
                 f"year(s) {', '.join(map(str, incomplete))} failed to solve and "
                 "have no dispatch (see the log).", style="red")
             _safe_console_print(f"Partial results saved to: {output_dir}")
+            state["status"] = "failed_windows"
+            state["errors"].append(_run_error(
+                "failed_windows", f"Operational windows of year(s) "
+                f"{', '.join(map(str, incomplete))} failed to solve and have no dispatch",
+                fix="See the log for the windows' solver status."))
             raise typer.Exit(code=1)
+        state["status"] = "complete"
         _safe_console_print("\nOptimization completed successfully!", style="green")
         _safe_console_print(f"Results saved to: {output_dir}")
 
@@ -305,6 +470,8 @@ def run(
     except RunAbortedError as e:
         _force_blocking_stdio()
         _safe_console_print(f"\nOptimization failed: {e}", style="red")
+        state["status"] = "aborted"
+        state["errors"].append(_run_error("aborted", str(e)))
         raise typer.Exit(code=1)
     except BlockingIOError as e:
         # Stdout pipe was non-blocking and full (typical when GUI
@@ -320,10 +487,14 @@ def run(
             sys.__stderr__.flush()
         except Exception:
             pass
+        state["status"] = "failed"
+        state["errors"].append(_run_error("stdout_pipe_full", str(e)))
         raise typer.Exit(code=1)
     except Exception as e:
         _force_blocking_stdio()
         _safe_console_print(f"\nOptimization failed: {e}", style="red")
+        state["status"] = "failed"
+        state["errors"].append(_run_error("run_error", f"{type(e).__name__}: {e}"))
         if verbose:
             import traceback
             _safe_console_print(traceback.format_exc())
@@ -342,18 +513,42 @@ def validate(
         dir_okay=False,
         readable=True,
     ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Print one JSON object (schema esfex.validate/1) on stdout instead of text",
+    ),
 ):
     """
     Validate a configuration file.
 
-    Checks that the configuration is valid and all required files exist.
+    Checks that the configuration loads and that the demand and
+    availability files it names exist. Exit code 0 if valid, 1 if not.
     """
+    if json_out:
+        from esfex.api import envelope, validate_case
+
+        with _StdoutToStderr():
+            report = validate_case(config)
+        _write_json(envelope("validate", report.ok, errors=report.errors,
+                             path=report.path, warnings=report.warnings,
+                             case=report.summary))
+        raise typer.Exit(code=0 if report.ok else 1)
+
     from esfex.config.loader import load_config, ConfigLoadError
+    from esfex.api.cases import missing_data_files
 
     console.print(f"Validating: {config}")
 
     try:
         cfg = load_config(config)
+        missing = missing_data_files(cfg, config.parent)
+        if missing:
+            console.print(f"[red]Validation failed:[/red] {len(missing)} data file(s) "
+                          "the run reads cannot be found:")
+            for err in missing:
+                console.print(f"  {err.key}: {err.message}", markup=False)
+            console.print(f"  ({missing[0].fix})", markup=False)
+            raise typer.Exit(code=1)
         console.print("[green]Configuration is valid![/green]")
         if cfg.unknown_keys:
             console.print(f"[yellow]{len(cfg.unknown_keys)} unknown key(s) are ignored "
@@ -421,6 +616,198 @@ def export(
     except Exception as e:
         console.print(f"[red]Export failed:[/red] {e}")
         raise typer.Exit(code=1)
+
+
+def _split_sections(value: Optional[list[str]]) -> Optional[list[str]]:
+    from esfex.api.results import SECTIONS
+
+    if not value:
+        return None
+    out = [s.strip().lower() for v in value for s in v.split(",") if s.strip()]
+    unknown = [s for s in out if s not in SECTIONS]
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown section(s) {', '.join(unknown)}; use any of: {', '.join(SECTIONS)}")
+    return out
+
+
+@app.command()
+def summary(
+    results: Path = typer.Argument(
+        ..., help="HDF5 results file written by `esfex run`",
+        exists=True, file_okay=True, dir_okay=False, readable=True,
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Print one JSON object (schema esfex.summary/1) on stdout instead of tables",
+    ),
+    year: Optional[list[int]] = typer.Option(
+        None, "--year", help="Only this year (repeat for several; default: all years)",
+    ),
+    section: Optional[list[str]] = typer.Option(
+        None, "--section", callback=_split_sections,
+        help="Only these sections (repeat or comma-separate): costs, re, shedding, "
+             "curtailment, emissions, builds, capacity, storage, losses, warnings, binding",
+    ),
+):
+    """
+    Summarise a results file: per-year costs, RE share, shedding, builds, warnings.
+
+    Reads only the attributes and the few small datasets it needs, so it is
+    quick on large files. Exit code 0 when the file was read (whatever the
+    run's outcome: see metadata.status and checks), 1 when it is not an
+    ESFEX results file.
+    """
+    from esfex.api import ApiError, ResultsFileError, envelope
+    from esfex.api import summary as _summary
+
+    def _fail(err: ApiError):
+        if json_out:
+            _write_json(envelope("summary", False, errors=[err], path=str(results)))
+        else:
+            console.print(f"[red]Cannot summarise {results}:[/red] {err.message}", markup=True)
+        raise typer.Exit(code=1)
+
+    try:
+        if json_out:
+            with _StdoutToStderr():
+                s = _summary(results, years=year, sections=section)
+        else:
+            s = _summary(results, years=year, sections=section)
+    except ResultsFileError as e:
+        _fail(e.error)
+    except Exception as e:
+        _fail(ApiError("read_error", f"{type(e).__name__}: {e}", key=str(results)))
+
+    if json_out:
+        _write_json(envelope("summary", True, **s.to_dict()))
+        return
+    _show_summary(s)
+
+
+def _fmt(v, spec: str = ",.0f", none: str = "-") -> str:
+    if v is None:
+        return none
+    try:
+        return format(v, spec)
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _show_summary(s) -> None:
+    """Rich tables of an :class:`esfex.api.RunSummary`."""
+    m = s.metadata
+    console.print(f"[bold]{s.path}[/bold]", markup=True, highlight=False)
+    console.print(
+        f"ESFEX {m.get('esfex_version') or '?'} · {m.get('simulation_mode') or '?'} · "
+        f"solver {m.get('solver') or '?'} · years {m.get('years_range') or '?'} · "
+        f"{m.get('num_nodes') or '?'} nodes · status {m.get('status')}",
+        markup=False, highlight=False)
+    secs = set(s.sections)
+    if s.years:
+        t = Table(title="Per year")
+        t.add_column("Year", justify="right")
+        if "costs" in secs:
+            t.add_column("Cost (M$)", justify="right")
+        if "re" in secs:
+            t.add_column("RE share / target", justify="right")
+        if "shedding" in secs:
+            t.add_column("Shed MWh (h)", justify="right")
+        if "curtailment" in secs:
+            t.add_column("Curtailed", justify="right")
+        if "emissions" in secs:
+            t.add_column("CO2 (kt)", justify="right")
+        if "builds" in secs:
+            t.add_column("Built MW", justify="right")
+        if "losses" in secs:
+            t.add_column("Losses MWh", justify="right")
+        for y in s.years:
+            row = [str(y["year"]) + ("" if y.get("feasible", True) else " !")]
+            if "costs" in secs:
+                c = y.get("costs") or {}
+                tot = c.get("total")
+                row.append(_fmt(None if tot is None else tot / 1e6, ",.2f"))
+            if "re" in secs:
+                r = y.get("re") or {}
+                share = _fmt(r.get("share"), ".1%")
+                tgt = r.get("target")
+                row.append(share + (f" / {tgt:.1%}" if tgt else ""))
+            if "shedding" in secs:
+                sh = y.get("shedding") or {}
+                row.append(f"{_fmt(sh.get('energy_mwh'), ',.1f')} ({_fmt(sh.get('hours'), ',.0f')})")
+            if "curtailment" in secs:
+                cu = y.get("curtailment") or {}
+                row.append(_fmt(cu.get("share"), ".1%"))
+            if "emissions" in secs:
+                e = (y.get("emissions") or {}).get("co2_t")
+                row.append(_fmt(None if e is None else e / 1e3, ",.1f"))
+            if "builds" in secs:
+                b = (y.get("builds") or {}).get("generation_mw") or {}
+                row.append(_fmt(sum(b.values()), ",.1f"))
+            if "losses" in secs:
+                row.append(_fmt((y.get("losses") or {}).get("energy_mwh"), ",.0f"))
+            t.add_row(*row)
+        console.print(t)
+
+    last = s.years[-1] if s.years else None
+    if last and "costs" in secs and (last.get("costs") or {}).get("components"):
+        c = last["costs"]
+        t = Table(title=f"Cost components, {last['year']} (M$)")
+        t.add_column("Component")
+        t.add_column("M$", justify="right")
+        for k, v in c["components"].items():
+            if abs(v) >= 0.5:
+                t.add_row(k, _fmt(v / 1e6, ",.3f"))
+        chk = c.get("check") or {}
+        t.add_row("[bold]total[/bold]", f"[bold]{_fmt(c['total'] / 1e6, ',.3f')}[/bold]"
+                  + ("" if chk.get("ok", True) else " [red](≠ sum)[/red]"))
+        console.print(t)
+    if last and "builds" in secs and last.get("builds"):
+        # Builds are per year: summed over the years shown. Retirements are
+        # cumulative: the last year's.
+        built: dict[tuple, float] = {}
+        for y in s.years:
+            for kind, unit in (("generation_mw", "MW"), ("storage_mw", "MW"),
+                               ("storage_mwh", "MWh")):
+                for k, v in ((y.get("builds") or {}).get(kind) or {}).items():
+                    built[(k, unit)] = built.get((k, unit), 0.0) + v
+        rows = [(k, f"{v:,.1f} {unit}") for (k, unit), v in built.items()]
+        rows += [(k, f"retired {r['share']:.0%}")
+                 for k, r in (last["builds"].get("retired") or {}).items()]
+        if rows:
+            span = (f"{s.years[0]['year']}-{last['year']}" if len(s.years) > 1
+                    else str(last["year"]))
+            t = Table(title=f"Built ({span}) and retired (by {last['year']})")
+            t.add_column("Unit / technology")
+            t.add_column("Amount", justify="right")
+            for r in rows:
+                t.add_row(*r)
+            console.print(t)
+    if "warnings" in secs and s.warnings:
+        w = s.warnings
+        console.print(f"\n[bold]Warnings:[/bold] {w['total']} in {w['kinds']} kinds")
+        for g in w["groups"][:10]:
+            msg = str(g.get("message", "")).splitlines()[0][:110]
+            console.print(f"  {g.get('count')}× [{g.get('level')}] {g.get('logger')}: {msg}",
+                          markup=False, highlight=False)
+    if "binding" in secs and s.master:
+        console.print("\n[bold]Master: binding constraints and paid slacks[/bold]")
+        for yk, entry in s.master.items():
+            fams = [b for b in entry.get("binding", []) if int(b.get("count_binding", 0) or 0) > 0]
+            fams.sort(key=lambda b: -float(b.get("sum_abs_dual", 0) or 0))
+            text = ", ".join(
+                f"{b.get('family')} ({b.get('count_binding')}/{b.get('count_total')}, "
+                f"max |dual| {_fmt(b.get('max_abs_dual'), ',.3g')} {b.get('units', '')})"
+                for b in fams[:6]) or "none"
+            console.print(f"  {yk}: {text}", markup=False, highlight=False)
+            for sl in entry.get("slacks", [])[:5]:
+                console.print(f"    slack {sl.get('name')}: {_fmt(sl.get('value'), ',.3g')} "
+                              f"(cost {_fmt(sl.get('cost'), ',.0f')} $)",
+                              markup=False, highlight=False)
+    for chk in s.checks:
+        console.print(f"[red]Check:[/red] {chk['message']}")
+    for note in s.notes:
+        console.print(f"[dim]Note: {note}[/dim]")
 
 
 @app.command()
@@ -669,10 +1056,34 @@ def precompile(
 
 
 @app.command()
-def info():
+def info(
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Print one JSON object (schema esfex.info/1) on stdout instead of text",
+    ),
+    probe: Optional[bool] = typer.Option(
+        None, "--probe/--no-probe",
+        help="Start Julia and load each installed solver (default: on for the text "
+             "output, off with --json, where solvers are found from the Julia "
+             "project files)",
+    ),
+):
     """
     Show ESFEX version and system information.
     """
+    if json_out:
+        from esfex.api import envelope, system_info
+
+        with _StdoutToStderr():
+            data = system_info(probe=bool(probe))
+        _write_json(envelope("info", True, **data))
+        return
+    if probe is False:
+        from esfex.api import system_info
+
+        _show_system_info(system_info(probe=False))
+        return
+
     import sys
     from esfex import __version__
 
@@ -716,6 +1127,29 @@ def info():
         _check_julia_solver("CPLEX")
     else:
         console.print("  [yellow]Julia not available - cannot check solvers[/yellow]")
+
+
+def _show_system_info(data: dict) -> None:
+    """Text view of :func:`esfex.api.system_info` without probing Julia."""
+    console.print(f"[bold blue]ESFEX[/bold blue] version {data['esfex']['version']}")
+    console.print(f"Python: {data['python']['version']} ({data['python']['executable']})")
+    jl = data["julia"]
+    console.print("Julia: " + ("juliacall installed" if jl["juliacall_installed"]
+                               else "[yellow]juliacall not installed[/yellow]")
+                  + (f", julia at {jl['julia_on_path']}" if jl["julia_on_path"] else ""))
+    si = jl.get("sysimage")
+    console.print("Sysimage: " + ("[yellow]Not built[/yellow]" if not si else
+                                  f"{'[yellow]STALE[/yellow]' if si['stale'] else 'up to date'} "
+                                  f"({si['path']}, {si['size_mb']} MB)"))
+    table = Table(title="Solvers (from the Julia project files)")
+    for col in ("Solver", "Installed", "Licensed", "Type"):
+        table.add_column(col)
+    for s in data["solvers"]:
+        table.add_row(s["name"], "yes" if s["installed"] else "no",
+                      "yes" if s["licensed"] else "no", s["kind"])
+    console.print(table)
+    d = data["data"]
+    console.print(f"Data root: {d['data_root']}" + ("" if d["data_root_exists"] else " (missing)"))
 
 
 def _check_julia_solver(name: str):

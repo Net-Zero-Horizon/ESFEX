@@ -2026,7 +2026,49 @@ class Orchestrator:
         Raises:
             RunAbortedError: the master problem (development mode) found no
                 plan, so nothing was dispatched.
+
+        The WARNING and ERROR records logged meanwhile (Julia's ``@warn``
+        included) are grouped by kind: at the end, also after a failure,
+        a summary is logged, kept in ``self.warnings_summary``
+        (:class:`esfex.api.diagnostics.WarningsSummary`) and written to
+        ``/diagnostics/warnings`` of the results file.
         """
+        from esfex.api.diagnostics import collect_warnings
+
+        self._hdf5_path = None
+        self.warnings_summary = None
+        with collect_warnings() as collector:
+            try:
+                return self._run(years=years, start_year=start_year,
+                                 master_only=master_only, dispatch_years=dispatch_years)
+            finally:
+                self._finish_warnings(collector)
+
+    def _finish_warnings(self, collector) -> None:
+        """The run's warnings: summary logged (a milestone, so the basic
+        console, which hides warnings, shows it), kept on
+        ``self.warnings_summary`` and written to the results file."""
+        from esfex.api.diagnostics import write_warnings
+
+        summary = collector.summary()
+        self.warnings_summary = summary
+        path = getattr(self, "_hdf5_path", None)
+        if path is not None and Path(path).exists():
+            try:
+                write_warnings(path, summary)
+            except Exception as exc:  # never fail a run over its diagnostics
+                logger.debug(f"Could not write /diagnostics/warnings to {path}: {exc}")
+        if summary.total:
+            logger.info(f"The run logged {summary.text()}", extra={"milestone": True})
+
+    def _run(
+        self,
+        years: Optional[int] = None,
+        start_year: Optional[int] = None,
+        master_only: bool = False,
+        dispatch_years: Optional[Iterable[int]] = None,
+    ) -> list[YearResults]:
+        """Body of :meth:`run`."""
         if master_only and self.config.simulation_mode != "development":
             raise ValueError(
                 "master_only needs simulation_mode 'development' "
@@ -8513,6 +8555,15 @@ class Orchestrator:
             f.attrs["export_complete"] = False
             f.attrs["simulation_mode"] = self.config.simulation_mode
             f.attrs["years_range"] = f"{start_year}-{end_year - 1}"
+            # What produced the file, for readers such as `esfex summary`
+            try:
+                from esfex import __version__ as _esfex_version
+            except ImportError:
+                _esfex_version = "unknown"
+            f.attrs["esfex_version"] = str(_esfex_version)
+            f.attrs["solver"] = str(self.config.solver.name)
+            f.attrs["config_file"] = (str(Path(self.config_path).resolve())
+                                      if self.config_path else "")
             if hasattr(self.config, "re_target"):
                 f.attrs["target_re"] = self.config.re_target
 

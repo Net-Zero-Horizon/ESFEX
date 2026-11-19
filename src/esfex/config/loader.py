@@ -6,6 +6,7 @@ Supports both single-file and multi-file configurations.
 """
 
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -62,9 +63,67 @@ from esfex.config.unknown_keys import find_unknown_keys, find_unknown_system_key
 
 
 class ConfigLoadError(Exception):
-    """Exception raised when configuration loading fails."""
+    """Exception raised when configuration loading fails.
 
-    pass
+    ``issues`` lists what is wrong, one dict per problem with ``key`` (the
+    dotted path in the YAML, e.g. ``systems.Cuba.generators.pv.rated_power``;
+    ``""`` when the problem has no single place), ``type`` (pydantic's error
+    type, or ``missing``, ``file_not_found``, ``yaml``, ``load``),
+    ``message`` and ``input`` (the offending value when it is a scalar, else
+    ``None``).
+    """
+
+    def __init__(self, message: str = "", issues: Optional[list[dict]] = None):
+        super().__init__(message)
+        self.issues: list[dict] = list(issues or [])
+
+
+# Where in the YAML a validation error happened: the converters below build
+# the nested models one by one, so pydantic's own ``loc`` is relative to the
+# model that failed. Each converter wraps its piece in ``_at(key, ...)``,
+# which prepends that key to the exception's ``_esfex_loc``; the exception
+# itself is re-raised unchanged, so callers that catch ValidationError keep
+# working.
+_LOC_ATTR = "_esfex_loc"
+
+
+@contextmanager
+def _at(*keys):
+    try:
+        yield
+    except (ValidationError, KeyError) as e:
+        try:
+            setattr(e, _LOC_ATTR, tuple(str(k) for k in keys) + getattr(e, _LOC_ATTR, ()))
+        except Exception:
+            pass
+        raise
+
+
+def _dotted(parts) -> str:
+    return ".".join(str(p) for p in parts)
+
+
+def _error_issues(e: Exception) -> list[dict]:
+    """The ``issues`` of a ValidationError or KeyError raised under
+    :func:`_at`, with full key paths."""
+    prefix = tuple(getattr(e, _LOC_ATTR, ()))
+    if isinstance(e, ValidationError):
+        out = []
+        for err in e.errors():
+            inp = err.get("input")
+            out.append({
+                "key": _dotted(prefix + tuple(err.get("loc") or ())),
+                "type": str(err.get("type", "")),
+                "message": str(err.get("msg", "")),
+                # A model-level error's input is the whole model's dict
+                "input": inp if isinstance(inp, (str, int, float, bool, type(None))) else None,
+            })
+        return out
+    if isinstance(e, KeyError):
+        missing = e.args[0] if e.args else ""
+        return [{"key": _dotted(prefix + (missing,)), "type": "missing",
+                 "message": f"Required key {missing!r} is missing", "input": None}]
+    return []
 
 
 class SavedConfigInvalidError(ConfigLoadError):
@@ -99,15 +158,21 @@ def load_yaml(path: Union[str, Path]) -> dict[str, Any]:
     path = Path(path)
 
     if not path.exists():
-        raise ConfigLoadError(f"Configuration file not found: {path}")
+        raise ConfigLoadError(f"Configuration file not found: {path}", [{
+            "key": "", "type": "file_not_found", "message": f"File not found: {path}",
+            "input": str(path)}])
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = yaml.safe_load(f)
     except yaml.YAMLError as e:
-        raise ConfigLoadError(f"Invalid YAML in {path}: {e}")
+        raise ConfigLoadError(f"Invalid YAML in {path}: {e}", [{
+            "key": "", "type": "yaml", "message": f"Invalid YAML in {path}: {e}",
+            "input": None}])
     except IOError as e:
-        raise ConfigLoadError(f"Cannot read {path}: {e}")
+        raise ConfigLoadError(f"Cannot read {path}: {e}", [{
+            "key": "", "type": "load", "message": f"Cannot read {path}: {e}",
+            "input": str(path)}])
 
     if content is None:
         content = {}
@@ -138,14 +203,15 @@ def _convert_fuels(fuels_data: dict[str, dict]) -> dict[str, FuelConfig]:
     """Convert fuel definitions to FuelConfig objects."""
     result = {}
     for name, data in fuels_data.items():
-        result[name] = FuelConfig(
-            name=data.get("name", name),
-            unit=data.get("unit"),
-            emission_factor=data.get("emission_factor", 0.0),
-            energy_content=data.get("energy_content"),
-            price_base=data.get("price_base", 0.0),
-            price_growth_rate=data.get("price_growth_rate", 0.0),
-        )
+        with _at(name):
+            result[name] = FuelConfig(
+                name=data.get("name", name),
+                unit=data.get("unit"),
+                emission_factor=data.get("emission_factor", 0.0),
+                energy_content=data.get("energy_content"),
+                price_base=data.get("price_base", 0.0),
+                price_growth_rate=data.get("price_growth_rate", 0.0),
+            )
     return result
 
 
@@ -439,15 +505,16 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
         if is_legacy_unit_key(key, value):
             unit_type = canonical_unit_type(value.get("type", "Unknown"))
             value["type"] = unit_type
-            if unit_type == "Storage":
-                batteries[key] = _convert_battery(key, value)
-            elif unit_type in _valid_gen_types:
-                generators[key] = _convert_generator(key, value)
-            else:
-                # Sanitize unknown types (e.g. "Thermal") to "Non-renewable"
-                log.warning("Generator %s has unknown type '%s', treating as Non-renewable", key, unit_type)
-                value["type"] = "Non-renewable"
-                generators[key] = _convert_generator(key, value)
+            with _at(key):
+                if unit_type == "Storage":
+                    batteries[key] = _convert_battery(key, value)
+                elif unit_type in _valid_gen_types:
+                    generators[key] = _convert_generator(key, value)
+                else:
+                    # Sanitize unknown types (e.g. "Thermal") to "Non-renewable"
+                    log.warning("Generator %s has unknown type '%s', treating as Non-renewable", key, unit_type)
+                    value["type"] = "Non-renewable"
+                    generators[key] = _convert_generator(key, value)
             # Remove from system_data to avoid passing to SystemConfig
             del system_data[key]
 
@@ -461,13 +528,15 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
                 if gt not in ("Renewable", "Non-renewable", "Storage", "Electrolyzer"):
                     log.warning("Generator %s has unknown type '%s', treating as Non-renewable", key, gt)
                     value["type"] = "Non-renewable"
-                generators[key] = _convert_generator(key, value)
+                with _at("generators", key):
+                    generators[key] = _convert_generator(key, value)
         del system_data["generators"]
 
     if "batteries" in system_data and isinstance(system_data["batteries"], dict):
         for key, value in system_data["batteries"].items():
             if isinstance(value, dict):
-                batteries[key] = _convert_battery(key, value)
+                with _at("batteries", key):
+                    batteries[key] = _convert_battery(key, value)
         del system_data["batteries"]
 
     _clamp_generator_fractions(generators)
@@ -475,22 +544,26 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
 
     # Convert fuels
     if "fuels" in system_data and isinstance(system_data["fuels"], dict):
-        system_data["fuels"] = _convert_fuels(system_data["fuels"])
+        with _at("fuels"):
+            system_data["fuels"] = _convert_fuels(system_data["fuels"])
 
     # Convert DC power flow
-    system_data["dc_power_flow"] = _convert_dc_power_flow(system_data)
+    with _at("dc_power_flow"):
+        system_data["dc_power_flow"] = _convert_dc_power_flow(system_data)
 
     # Convert primary energy sources
     if "primary_energy_sources" in system_data:
         pes = {}
         for name, data in system_data["primary_energy_sources"].items():
             if isinstance(data, dict):
-                pes[name] = _convert_primary_energy_source(name, data)
+                with _at("primary_energy_sources", name):
+                    pes[name] = _convert_primary_energy_source(name, data)
         system_data["primary_energy_sources"] = pes
 
     # Convert nodes
     if "nodes" in system_data and isinstance(system_data["nodes"], dict):
-        system_data["nodes"] = NodeConfig(**system_data["nodes"])
+        with _at("nodes"):
+            system_data["nodes"] = NodeConfig(**system_data["nodes"])
 
     # Convert penalties
     if "penalties" in system_data and isinstance(system_data["penalties"], dict):
@@ -501,18 +574,21 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             if field in PenaltiesConfig.model_fields and (
                     field not in pen_data or str(key).lower() == field):
                 pen_data[field] = value
-        system_data["penalties"] = PenaltiesConfig(**pen_data)
+        with _at("penalties"):
+            system_data["penalties"] = PenaltiesConfig(**pen_data)
 
     # Convert CO2 budget
     if "co2_budget" in system_data and isinstance(system_data["co2_budget"], dict):
-        system_data["co2_budget"] = CO2BudgetConfig(**system_data["co2_budget"])
+        with _at("co2_budget"):
+            system_data["co2_budget"] = CO2BudgetConfig(**system_data["co2_budget"])
 
     # Convert electric demand sectors
     if "electric_demand" in system_data and isinstance(system_data["electric_demand"], dict):
         ed = {}
         for sector, data in system_data["electric_demand"].items():
             if isinstance(data, dict):
-                ed[sector] = DemandSectorConfig(**data)
+                with _at("electric_demand", sector):
+                    ed[sector] = DemandSectorConfig(**data)
         system_data["electric_demand"] = ed
 
     # Convert EV categories
@@ -520,21 +596,25 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
         ev = {}
         for cat, data in system_data["ev_categories"].items():
             if isinstance(data, dict):
-                ev[cat] = EVCategoryConfig(**data)
+                with _at("ev_categories", cat):
+                    ev[cat] = EVCategoryConfig(**data)
         system_data["ev_categories"] = ev
 
     # Convert rooftop solar config
     if "rooftop_solar_config" in system_data and isinstance(system_data["rooftop_solar_config"], dict):
-        system_data["rooftop_solar_config"] = RooftopSolarConfig(**system_data["rooftop_solar_config"])
+        with _at("rooftop_solar_config"):
+            system_data["rooftop_solar_config"] = RooftopSolarConfig(**system_data["rooftop_solar_config"])
 
     # Convert stochastic scenarios
     if "stochastic_scenarios" in system_data and isinstance(system_data["stochastic_scenarios"], list):
         scenarios = []
-        for sc in system_data["stochastic_scenarios"]:
+        for i, sc in enumerate(system_data["stochastic_scenarios"]):
             if isinstance(sc, dict):
-                if "multipliers" in sc and isinstance(sc["multipliers"], dict):
-                    sc["multipliers"] = ScenarioMultipliers(**sc["multipliers"])
-                scenarios.append(StochasticScenarioConfig(**sc))
+                with _at("stochastic_scenarios", i):
+                    if "multipliers" in sc and isinstance(sc["multipliers"], dict):
+                        with _at("multipliers"):
+                            sc["multipliers"] = ScenarioMultipliers(**sc["multipliers"])
+                    scenarios.append(StochasticScenarioConfig(**sc))
         system_data["stochastic_scenarios"] = scenarios
 
     # Convert candidate technologies for new investment
@@ -544,7 +624,8 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             if isinstance(data, dict):
                 if "name" not in data:
                     data["name"] = key
-                techs[key] = TechnologyConfig(**data)
+                with _at("technologies", key):
+                    techs[key] = TechnologyConfig(**data)
         system_data["technologies"] = techs
 
     if "battery_technologies" in system_data and isinstance(system_data["battery_technologies"], dict):
@@ -553,7 +634,8 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
             if isinstance(data, dict):
                 if "name" not in data:
                     data["name"] = key
-                bat_techs[key] = BatteryTechnologyConfig(**data)
+                with _at("battery_technologies", key):
+                    bat_techs[key] = BatteryTechnologyConfig(**data)
         system_data["battery_technologies"] = bat_techs
 
     # Remove DC_ prefixed keys (already converted into dc_power_flow)
@@ -568,14 +650,16 @@ def _convert_system(system_data: dict[str, Any]) -> SystemConfig:
     if SINGLE_ELECTROLYZER_KEY in system_data:
         el_data = system_data.pop(SINGLE_ELECTROLYZER_KEY)
         if isinstance(el_data, dict):
-            electrolyzers["electrolyzer"] = ElectrolyzerConfig(**el_data)
+            with _at(SINGLE_ELECTROLYZER_KEY):
+                electrolyzers["electrolyzer"] = ElectrolyzerConfig(**el_data)
     # Handle plural "electrolyzers" dict
     if "electrolyzers" in system_data:
         el_dict = system_data.pop("electrolyzers")
         if isinstance(el_dict, dict):
             for key, val in el_dict.items():
                 if isinstance(val, dict):
-                    electrolyzers[key] = ElectrolyzerConfig(**val)
+                    with _at("electrolyzers", key):
+                        electrolyzers[key] = ElectrolyzerConfig(**val)
                 elif isinstance(val, ElectrolyzerConfig):
                     electrolyzers[key] = val
 
@@ -819,44 +903,56 @@ def load_config(path: Union[str, Path]) -> ESFEXConfig:
         if isinstance(systems_raw, dict):
             for sys_name, sys_data in list(systems_raw.items()):
                 if isinstance(sys_data, str):
-                    systems_raw[sys_name] = load_yaml(path.parent / sys_data)
+                    try:
+                        systems_raw[sys_name] = load_yaml(path.parent / sys_data)
+                    except ConfigLoadError as e:
+                        for issue in e.issues:
+                            issue["key"] = issue["key"] or f"systems.{sys_name}"
+                        raise
 
         # Before the converters below consume the dicts.
         unknown = find_unknown_keys(raw_config)
         _warn_unknown_keys(unknown)
 
         if isinstance(systems_raw, dict):
-            raw_config["systems"] = {
-                sys_name: _convert_system(sys_data)
-                for sys_name, sys_data in systems_raw.items()
-            }
+            converted = {}
+            for sys_name, sys_data in systems_raw.items():
+                with _at("systems", sys_name):
+                    converted[sys_name] = _convert_system(sys_data)
+            raw_config["systems"] = converted
 
         # Convert temporal config
         if "temporal" in raw_config and isinstance(raw_config["temporal"], dict):
-            raw_config["temporal"] = TemporalConfig(**raw_config["temporal"])
+            with _at("temporal"):
+                raw_config["temporal"] = TemporalConfig(**raw_config["temporal"])
 
         # Convert solver config
         if "solver" in raw_config and isinstance(raw_config["solver"], dict):
-            raw_config["solver"] = SolverConfig(**raw_config["solver"])
+            with _at("solver"):
+                raw_config["solver"] = SolverConfig(**raw_config["solver"])
 
         # Convert N-1 security config
         if "n1_security" in raw_config and isinstance(raw_config["n1_security"], dict):
-            raw_config["n1_security"] = N1SecurityConfig(**raw_config["n1_security"])
+            with _at("n1_security"):
+                raw_config["n1_security"] = N1SecurityConfig(**raw_config["n1_security"])
 
         # Convert master problem config
         if "master_problem" in raw_config and isinstance(raw_config["master_problem"], dict):
-            raw_config["master_problem"] = MasterProblemConfig(**raw_config["master_problem"])
+            with _at("master_problem"):
+                raw_config["master_problem"] = MasterProblemConfig(**raw_config["master_problem"])
 
         # Convert meta_network config
         if "meta_network" in raw_config and isinstance(raw_config["meta_network"], dict):
             mn = raw_config["meta_network"]
             if "systems_links" in mn and isinstance(mn["systems_links"], list):
                 links = []
-                for link_data in mn["systems_links"]:
+                for i, link_data in enumerate(mn["systems_links"]):
                     if isinstance(link_data, dict):
-                        links.append(SystemLinkConfig(**link_data))
+                        with _at("meta_network", "systems_links", i):
+                            links.append(SystemLinkConfig(**link_data))
                 mn["systems_links"] = links
-            raw_config["meta_network"] = MetaNetworkConfig(**mn)
+            with _at("meta_network"):
+                raw_config["meta_network"] = MetaNetworkConfig(**mn)
 
         # Validate with Pydantic
         config = ESFEXConfig(**raw_config)
@@ -864,10 +960,23 @@ def load_config(path: Union[str, Path]) -> ESFEXConfig:
         _warn_ineffective_multipliers(config)
         return config
 
+    except ConfigLoadError:
+        raise
     except ValidationError as e:
-        raise ConfigLoadError(f"Configuration validation failed:\n{e}")
+        where = _dotted(getattr(e, _LOC_ATTR, ()))
+        raise ConfigLoadError(
+            f"Configuration validation failed{f' at {where}' if where else ''}:\n{e}",
+            _error_issues(e))
+    except KeyError as e:
+        if not hasattr(e, _LOC_ATTR):  # not a unit's required key
+            raise ConfigLoadError(f"Failed to load configuration: {e}", [{
+                "key": "", "type": "load", "message": str(e), "input": None}])
+        issues = _error_issues(e)
+        raise ConfigLoadError(f"Failed to load configuration: {issues[0]['key']}: "
+                              f"{issues[0]['message']}", issues)
     except Exception as e:
-        raise ConfigLoadError(f"Failed to load configuration: {e}")
+        raise ConfigLoadError(f"Failed to load configuration: {e}", [{
+            "key": "", "type": "load", "message": str(e), "input": None}])
 
 
 def load_system_config(path: Union[str, Path]) -> SystemConfig:
