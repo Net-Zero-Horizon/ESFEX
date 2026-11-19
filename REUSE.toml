@@ -47,6 +47,25 @@ SPDX-FileCopyrightText = [
 ]
 SPDX-License-Identifier = "Apache-2.0 AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
 
+# Test fixture: predictors of Cuban cells derived from the same datasets as the
+# grids above, plus ERA5 temperature and gridded GDP (both CC-BY-4.0); not
+# shipped in the wheel.
+[[annotations]]
+path = "tests/fixtures/demand_density_v2_rows.csv"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Manuel Soto Calvo and Han Soo Lee",
+    "NASA Earth Exchange, NEX-GDDP-CMIP6 (Thrasher et al. 2022), and the CMIP6 modelling groups",
+    "2018 WorldPop, University of Southampton, and CIESIN, Columbia University",
+    "Copernicus Climate Change Service, ERA5 (hourly temperature)",
+    "Wang and Sun (2022), gridded GDP",
+    "Natural Earth",
+    "United Nations Statistics Division (UNdata)",
+    "Statistics Canada",
+    "U.S. Energy Information Administration",
+]
+SPDX-License-Identifier = "Apache-2.0 AND CC0-1.0 AND CC-BY-4.0 AND LicenseRef-NaturalEarth-PublicDomain AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
+
 # ── Studio base map: country outlines ────────────────────────────────────────
 # Country polygons and names of Natural Earth admin-0 (public domain).
 [[annotations]]
@@ -100,10 +119,17 @@ SPDX-License-Identifier = "MIT"
 
 # plotly.js 2.35.2
 [[annotations]]
-path = "src/esfex/visualization/resources/plotly.min.js"
+path = [
+    "src/esfex/visualization/resources/plotly.min.js",
+    "src/esfex/visualization/resources/plotly.min.js.LICENSE.txt",
+]
 precedence = "override"
-SPDX-FileCopyrightText = "2012-2024 Plotly, Inc."
-SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = [
+    "2012-2024 Plotly, Inc.",
+    "The authors of the bundled dependencies listed in plotly.min.js.LICENSE.txt (polybooljs, object-assign, buffer, is-buffer, pad-left, repeat-string, native-promise-only, ieee754, safe-buffer, MapLibre GL JS)",
+]
+# plotly.js is MIT; its bundle includes BSD-3-Clause code (ieee754, MapLibre GL JS).
+SPDX-License-Identifier = "MIT AND BSD-3-Clause"
 
 # xterm.js and its fit add-on
 [[annotations]]
