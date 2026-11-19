@@ -1573,8 +1573,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   connected to any tagged voltage, such as an island's grid. Station tags
   are checked against the lines at 60 kV and above: a station whose own
   lines all carry another single level takes it, and a level no line
-  carries is snapped to the nearest line level within 30 %. Every decision is
-  listed in the build summary and returned as `ParseResult.voltage_decisions`.
+  carries is resolved against the standard nominal voltages (IEC 60038,
+  ANSI C84.1): the level the station's name states, else a misplaced decimal
+  for a distribution station whose corrected level is standard and used in
+  the data, else the nearest line level within 30 % ("Taguasco 13.8 kV",
+  tagged 138 kV, becomes 13.8 kV; Ciudad Libertad, tagged 138 kV, 110 kV).
+  The default medium voltage is the standard level the data tags most.
+  Every decision is listed in the build summary and returned as
+  `ParseResult.voltage_decisions`.
 
 - **Myopic planning remembers earlier years.** Each one-year master in
   `planning_mode: myopic` planned from the base-year fleet: the aged units
