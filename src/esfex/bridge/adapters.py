@@ -247,6 +247,49 @@ def _accept_limit_incumbent(jl, model_var: str, status_str: str,
     return True
 
 
+# A loss-repair gap above this share is logged at INFO (below, at DEBUG)
+LOSS_REPAIR_GAP_INFO = 1e-3
+
+
+def loss_repair_bounds(jl_model) -> Optional[dict]:
+    """The bounds of the last line-loss repair of a solved Julia model
+    (``ESFEX.loss_repair_bounds``), costs in $: ``lower_bound`` (the first
+    solve, with the PWL loss model: lines may lose more than the PWL loss of
+    their flow, a relaxation of the model with exact PWL losses),
+    ``objective`` (the repaired solve: an upper bound of it), ``gap`` =
+    (objective − lower_bound) / |objective|, ``rounds``, ``linearised`` and
+    ``released`` (line-steps). ``None`` for a model without PWL losses, an
+    unoptimal first solve, or any bridge error."""
+    try:
+        bounds = get_esfex_module().loss_repair_bounds(jl_model)
+        if bounds is None:
+            return None
+        out = {str(k): float(v) for k, v in bounds.items()}
+    except Exception as exc:  # diagnostics only: never fail a solve on them
+        logger.debug(f"No line-loss repair bounds: {exc}")
+        return None
+    for key in ("lower_bound", "objective"):
+        out[key] *= COST_UNSCALE
+    for key in ("rounds", "linearised", "released"):
+        out[key] = int(out[key])
+    return out
+
+
+def log_loss_repair_bounds(what: str, bounds: Optional[dict]) -> None:
+    """Log a solve's loss-repair bounds (:func:`loss_repair_bounds`): at
+    INFO when the gap exceeds ``LOSS_REPAIR_GAP_INFO``, else at DEBUG."""
+    if not bounds or bounds["rounds"] == 0:
+        return
+    level = logging.INFO if bounds["gap"] > LOSS_REPAIR_GAP_INFO else logging.DEBUG
+    logger.log(
+        level,
+        f"{what} line losses: PWL solve ${bounds['lower_bound']:,.0f} (lower bound, "
+        f"lines may lose beyond their flows' losses), repaired "
+        f"${bounds['objective']:,.0f} (gap {bounds['gap']:.2%}; "
+        f"{bounds['rounds']} repair round(s), {bounds['linearised']} line-step(s) "
+        f"held in one direction, {bounds['released']} released)")
+
+
 def _nodes_without_load_bus(buses, num_nodes: int) -> list[int]:
     """Nodes (0-indexed) whose demand no bus of the dispatch carries.
 
@@ -2415,6 +2458,11 @@ class PowerSystemAdapter:
             self._jl_model, self._window_label())
         t_solve = _time.perf_counter() - t0
         logger.info(f"⏱ PowerSystem solve: {t_solve:.2f}s")
+        # Bounds of the window's line-loss repair: the runner sums them per
+        # year and logs the year (each window only at DEBUG)
+        self.loss_repair = loss_repair_bounds(self._jl_model)
+        if self.loss_repair and self.loss_repair["rounds"]:
+            logger.debug(f"{self._window_label()}: line-loss repair {self.loss_repair}")
 
         status_code = self._map_termination_status(jl)
 
@@ -4058,6 +4106,8 @@ class MasterProblemAdapter:
     def _solve_once(self) -> int:
         """Solve the built master problem once."""
         jl = get_julia()
+        # Bounds of this solve's line-loss repair (none under Benders)
+        self.loss_repair = None
 
         if self.solver_method == "benders":
             return self._solve_benders()
@@ -4077,6 +4127,8 @@ class MasterProblemAdapter:
         logger.debug(f"Solver output_flag={self._solver.verbose}, calling optimize!...")
         # NUMERICAL_ERROR: one more solve with the solver's retry parameters
         jl.seval("ESFEX.optimize_master!(_mp_model)")
+        self.loss_repair = loss_repair_bounds(self._jl_model)
+        log_loss_repair_bounds("Master problem", self.loss_repair)
 
         status = jl.seval("termination_status(_mp_model)")
         status_str = str(status)
