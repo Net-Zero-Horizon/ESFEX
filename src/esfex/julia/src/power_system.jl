@@ -223,9 +223,6 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
     add_sectoral_demand_constraints!(model, vars, input)
     t_sectoral = time() - t0
 
-    # Add max annual system cost constraint (B15)
-    add_max_annual_system_cost!(model, vars, input)
-
     # Add N-1 security constraints
     t0 = time()
     if input.n1_scopf_enabled
@@ -1977,6 +1974,10 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
                         penalty = input.bat_soc_end_penalty > 0 ? input.bat_soc_end_penalty :
                             0.1 * input.loss_of_load_penalty / tres
                         JuMP.set_objective_coefficient(model, shortfall, penalty)
+                        # In the breakdown with the other SOC penalties (an
+                        # energy entry there, × step length at extraction)
+                        add_to_expression!(model.ext[:cost_expressions][:soc_violation_cost],
+                                           penalty / tres, shortfall)
                     end
                 end
 
@@ -3428,58 +3429,67 @@ function demand_shift_net(vars)
 end
 
 """
-    add_max_annual_system_cost!(model, vars::PowerSystemVariables, input::PowerSystemInput)
-
-B15: Maximum annual system cost constraint.
+Price of each \$ a dispatch window spends above its operating budget
+(`add_operating_budget!`): 1000 \$ per \$. Above the budget a MWh from a unit
+with variable cost c costs c × 1001, so shedding the load (at VOLL) is
+cheaper for every unit with c > VOLL / 1001, i.e. above 1 \$/MWh at a VOLL of
+1000 \$/MWh: fuel the budget cannot pay for becomes unserved energy, as a
+fuel shortage would. A ratio, so the cost scaling (M\$) leaves it as it is;
+any higher would only widen the objective's coefficient range.
 """
-function add_max_annual_system_cost!(model, vars::PowerSystemVariables, input::PowerSystemInput)
-    if isinf(input.max_annual_system_cost) || input.max_annual_system_cost <= 0
-        return
+const OPERATING_BUDGET_PENALTY = 1000.0
+
+"""
+The dispatch's operating spending for the operating budget: the money it
+pays, as entries of `model.ext[:cost_expressions]` (with `true` for a
+per-step energy cost, × step length): the generators' fuel, maintenance and
+start-ups, the batteries' maintenance, the window's share of the fixed O&M,
+the electrolyzers' cost, converter and line-flow costs and, with primary
+energy, the fuel bought and its transport (a fuel-coupled unit pays its
+fuel there, not in `fuel_cost`). The master's `budget_scope: total` budget
+counts the same categories (`day_operating_spend`). Modelling penalties
+(unserved energy, reserve, inertia, N-1, curtailment, RE shortfall, SOC,
+spillage, fuel shortfall), battery degradation and the CO2 price (a
+transfer to the state) are not spending.
+"""
+const OPERATING_BUDGET_COSTS = ((:fuel_cost, true), (:maintenance_cost, true),
+                                (:startup_cost, false), (:battery_maintenance_cost, true),
+                                (:fixed_om_cost, false), (:electrolyzer_cost, true),
+                                (:converter_cost, true), (:line_flow_cost, true),
+                                (:pe_supply_cost, false), (:pe_transport_cost, false))
+
+"""
+    add_operating_budget!(model, budget; committed=nothing) -> VariableRef
+
+COST-1: the window's operating spending (`OPERATING_BUDGET_COSTS`) stays
+within `budget` (solver cost units), plus the excess
+`operating_budget_excess`, priced at `OPERATING_BUDGET_PENALTY` per unit.
+With `committed` (a [`CommittedSteps`](@ref)) the spending is that of the
+window's committed steps only: the runner gives each window its share of
+what is left of `max_annual_operating_cost` for the year and carries what
+the committed steps spent. Call it once the objective is complete (after the
+primary-energy coupling). The excess and its penalty go to the cost
+breakdown (`operating_budget_excess`, `operating_budget_penalty`).
+"""
+function add_operating_budget!(model, budget::Real; committed = nothing)
+    ce = model.ext[:cost_expressions]
+    tres = get(model.ext, :temporal_resolution_hours, 1.0)
+    spend = AffExpr(0.0)
+    for (sym, is_energy) in OPERATING_BUDGET_COSTS
+        ex = get(ce, sym, nothing)
+        ex === nothing || add_to_expression!(spend, ex, is_energy ? tres : 1.0)
     end
-
-    n_gen = length(input.generators)
-    n_bat = length(input.batteries)
-    n_bus = input.network.num_buses
-    hours = input.temporal.hours
-    tres = input.temporal.resolution_hours > 0 ? input.temporal.resolution_hours : 1
-
-    # Scale annual cost limit to window fraction to avoid huge RHS values
-    # that cause numerical issues in the LP solver
-    window_hours = hours * tres
-    annual_hours = Float64(input.hours_per_year)
-    window_fraction = annual_hours > 0 ? window_hours / annual_hours : 1.0
-    scaled_cost_limit = input.max_annual_system_cost * window_fraction
-
-    # Operating cost: fuel + maintenance per MWh — sparse iteration; costs
-    # are per-MWh × MW (power), scale by tres to get energy-based cost —
-    # plus the window's share of the annual fixed O&M
-    operating_cost = AffExpr(0.0)
-    for g in 1:n_gen
-        gen = input.generators[g]
-        for b in vars.buses_of_gen[g], t in 1:hours
-            total_var_cost = gen.fuel_cost[b] + gen.maintenance_cost[b]
-            add_to_expression!(operating_cost, total_var_cost * tres, vars.gen_output[g, b, t])
-        end
-    end
-    add_to_expression!(operating_cost, fixed_om_annual_cost(vars, input), window_fraction)
-
-    # Add slack variable to guarantee feasibility; penalize violation in objective
-    cost_violation = @variable(model, base_name = "cost_violation", lower_bound = 0.0)
-    @constraint(model, operating_cost - cost_violation <= scaled_cost_limit,
-        base_name = "max_annual_system_cost")
-
-    # Penalize cost violation at 10× the max generator variable cost to discourage it
-    max_var_cost = 1.0
-    for g in 1:n_gen
-        gen = input.generators[g]
-        for b in vars.buses_of_gen[g]
-            total_var_cost = gen.fuel_cost[b] + gen.maintenance_cost[b]
-            max_var_cost = max(max_var_cost, total_var_cost)
-        end
-    end
-    penalty_coeff = max_var_cost * 10.0
-    obj = objective_function(model)
-    @objective(model, Min, obj + penalty_coeff * cost_violation)
+    committed === nothing || (spend = committed_expression(committed, spend))
+    # Named as a variable of step 1, so a committed valuation (CommittedSteps)
+    # counts it in full: it is the excess of the committed steps
+    excess = @variable(model, lower_bound = 0.0, base_name = "operating_budget_excess_t1")
+    @constraint(model, spend - excess <= max(Float64(budget), 0.0),
+        base_name = "operating_budget")
+    set_objective_function(model,
+        objective_function(model) + OPERATING_BUDGET_PENALTY * excess)
+    ce[:operating_budget_excess] = 1.0 * excess
+    ce[:operating_budget_penalty] = OPERATING_BUDGET_PENALTY * excess
+    return excess
 end
 
 """
@@ -4285,6 +4295,8 @@ function extract_solution(model, vars::PowerSystemVariables, input::PowerSystemI
             # N-1 reliability-shortfall: same $/MWh scale as load shed (× tres).
             _v(:n1_security_shortfall_cost),
             _v(:line_flow_cost),
+            _v(:operating_budget_excess, false),
+            _v(:operating_budget_penalty, false),
             obj,
         )
     end

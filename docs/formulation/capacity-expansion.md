@@ -139,7 +139,7 @@ Reservoir level, spillage and pumping variables are added for reservoir units.
 | Symbol | Units | Description | Julia field |
 |--------|-------|-------------|-------------|
 | \(r\) | [0,1] | Discount rate | `input.discount_rate` |
-| \(\bar{B}\) | \$ | Max investment budget per investment period | `input.max_annual_investment` |
+| \(\bar{B}\) | \$ | Max investment budget per investment period (`max_annual_investment`); with `budget_scope: total` it also covers the year's operating cost (BUD-2) | `input.max_annual_investment`, `input.budget_total` |
 | \(\rho^{target}\) | [0,1] | Target RE penetration (final year) | `input.target_re_penetration` |
 | \(\rho^{init}_\sigma\) | [0,1] | Initial RE penetration of system \(\sigma\) | `initial_re_penetration` / `system_node_ranges[σ].initial_re` |
 | \(\Delta\rho^{min}\), \(\Delta\rho^{max}\) | [0,1] | Minimum and maximum annual RE increment | `input.min_re_increment`, `input.max_re_increment` |
@@ -365,15 +365,25 @@ h^{min}_{k} \, I^{bat,P}_{y,k,n} \leq I^{bat,E}_{y,k,n} \leq h^{max}_{k} \, I^{b
 ### 7.2 Budget Constraint (BUD)
 
 
-**Julia function**: `add_budget_constraints!(model, vars, input)`
+**Julia function**: `add_budget_constraints!(model, vars, input; operating)`
 
-For each investment-period start year, the overnight cost of that year's builds must not exceed the budget (with slack, priced at \(\pi^{bud}\) in OBJ-7), `budget_y{y}`:
+The budget \(\bar{B}\) is the system's `max_annual_investment` (\$/yr; files may still call it `max_annual_system_cost`). For each investment-period start year, the overnight cost of that year's builds must not exceed it (with slack, priced at \(\pi^{bud}\) in OBJ-7), `budget_y{y}`:
 
 \[
 \sum_{k,n} c^{inv}_{k,n} I^{tech}_{y,k,n} + \sum_{k,n} \left( c^{inv,P}_{k,n} I^{bat,P}_{y,k,n} + c^{inv,E}_{k,n} I^{bat,E}_{y,k,n} \right) + \sum_{\{i,j\}} \max(c^{tr}_i, c^{tr}_j) I^{tr}_{y,\{i,j\}} + \sum_{g,n} c^{res}_{g,n} I^{res}_{y,g,n} \leq \bar{B} + s^{bud}_y \tag{BUD-1}
 \]
 
 The budget limits the capital committed in the build year, not the annuities of OBJ-2. Converters and primary-energy investment are not part of it.
+
+With `budget_scope: total` the same row also holds the money the year spends on operation (`budget_operating_cost`): \(S^{op}_y\), what the representative days or TSAM periods pay, scaled to the year like their cost (`day_operating_spend`, `year_day_spend`), plus the year's asset costs \(C^{asset}_y\) (`build_annual_asset_cost`: fixed O&M, life extension and decommissioning, which are payments of the year too):
+
+\[
+\text{(left side of BUD-1)} + S^{op}_y + C^{asset}_y \leq \bar{B} + s^{bud}_y \tag{BUD-2}
+\]
+
+\(S^{op}_y\) counts the categories of the dispatch's operating budget (COST-1): the fuel (or offer-curve segments) and maintenance of existing generators and candidate technologies, the maintenance of batteries and battery technologies, start-ups, converter and line-flow costs and, with primary energy, the fuel bought and transported and the electrolyzers' cost. It leaves out every modelling penalty (unserved energy at VOLL, reserve, inertia and N-1 shortfalls, curtailment cost, RE-target shortfall and growth cap, SOC and spillage penalties, fuel shortfall and excess, slacks), battery throughput degradation, and the CO2 price and CO2-budget violations: a carbon price is a transfer to the state, not a cost of operating the system.
+
+One row per budget year, with the same slack and price. A build that lowers the year's fuel bill by more than its overnight cost then makes room in the budget, and one that does not uses it up. In a stochastic master the row holds the scenarios' operating costs weighted by their probabilities (each with its own multipliers). The default, `budget_scope: investment`, is BUD-1 alone. The Benders master has no operating cost: with `total`, the run solves the monolithic master instead (with a warning). The dispatch has its own, separate operating budget, `max_annual_operating_cost` ([COST-1](operational-dispatch.md#annual-operating-budget)).
 
 ### 7.3 Transmission Symmetry (TXN)
 
@@ -1113,7 +1123,7 @@ create_master_problem(input)
   |-- calculate_target_ratios(input)             # RE-1
   |-- build_master_variables!(model, input)       # All variables (Sec. 3)
   |-- add_investment_constraints!()               # TECH-1 to TECH-4
-  |-- add_budget_constraints!()                   # BUD-1
+  |-- add_budget_constraints!()                   # BUD-1 (BUD-2 after the days with budget_scope: total)
   |-- add_retirement_cascade_constraints!()       # RET-2
   |-- add_capacity_adequacy_constraints!()        # CAP-1, CAP-3
   |-- add_transmission_symmetry_constraints!()    # TXN-1

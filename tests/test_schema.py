@@ -1844,11 +1844,14 @@ class TestRooftopSolarConfigOptional:
 
 class TestMaxAnnualSystemCostDescription:
     def test_description_says_it_is_the_investment_budget(self):
-        # It had no description, and its name reads as a cap on the total
-        # annual system cost; the masters use it as the budget for each build
-        # year's overnight investment (add_budget_constraints!).
+        # The investment budget (formerly max_annual_system_cost, whose name
+        # read as a cap on the total annual system cost) caps each build
+        # year's overnight investment (add_budget_constraints!); the
+        # dispatch's operating budget is a key of its own.
         from esfex.config.schema import SystemConfig
 
-        desc = SystemConfig.model_fields["max_annual_system_cost"].description
+        desc = SystemConfig.model_fields["max_annual_investment"].description
         assert desc and "overnight" in desc and "investment period" in desc
-        assert "not a cap on the total annual system cost" in desc
+        assert "max_annual_system_cost" in desc
+        desc = SystemConfig.model_fields["max_annual_operating_cost"].description
+        assert desc and "fuel" in desc and "Off" in desc

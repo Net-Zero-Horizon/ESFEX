@@ -17,7 +17,8 @@ using Test
 using ESFEX
 using JuMP: optimize!, termination_status, value, constraint_by_name, variable_by_name, objective_value,
              coefficient, objective_function, all_variables, name, fix, constant, is_binary,
-             list_of_constraint_types, all_constraints, constraint_object, AffExpr
+             list_of_constraint_types, all_constraints, constraint_object, AffExpr,
+             normalized_coefficient
 # Pre-import Ipopt into Main so create_optimizer's lazy ("ipopt") path resolves
 # the optimizer type without the world-age @eval import (see _load_solver_module).
 import Ipopt
@@ -488,6 +489,33 @@ import Ipopt
             @test res.load_shed_total ≈ 0.0 atol = 1e-6      # nothing shed
             @test isfinite(res.objective) && res.objective > 0
             @test size(res.gen_output) == (1, 1, H)
+
+            # Operating budget (COST-1) over the committed step 1 only: half
+            # of its fuel (50 MW × 30 $/MWh). A MWh over the budget would
+            # cost 30 × 1001 $ against a VOLL of 10 000 $/MWh, so half the
+            # load is shed; step 2 (the overlap tail) is not capped.
+            bmodel, bvars = create_power_system(input)
+            cs = ESFEX.committed_steps(bvars, H, 1)
+            add_operating_budget!(bmodel, 0.5 * 50.0 * 3.0e-5; committed = cs)
+            optimize!(bmodel)
+            bres = extract_solution(bmodel, bvars, input; committed = cs)
+            @test bres.gen_output[1, 1, :] ≈ [25.0, 60.0] atol = 1e-6
+            @test bres.cost_breakdown.operating_budget_excess ≈ 0.0 atol = 1e-12
+            @test bres.cost_breakdown.fuel_cost ≈ 0.5 * 50.0 * 3.0e-5 rtol = 1e-9
+            # A budget below what cannot be avoided: the excess is reported
+            # and priced, and the objective is the sum of the components
+            fmodel, fvars = create_power_system(input)
+            add_operating_budget!(fmodel, -1.0)   # clamped to 0
+            fix(fvars.gen_output[1, 1, 1], 10.0; force = true)
+            optimize!(fmodel)
+            fres = extract_solution(fmodel, fvars, input)
+            cb = fres.cost_breakdown
+            @test cb.operating_budget_excess ≈ 10.0 * 3.0e-5 rtol = 1e-9
+            @test cb.operating_budget_penalty ≈ ESFEX.OPERATING_BUDGET_PENALTY * 10.0 * 3.0e-5 rtol = 1e-9
+            parts = sum(getfield(cb, f) for f in fieldnames(typeof(cb))
+                        if f ∉ (:total, :pe_electrolyzer_cost, :v2g_compensation,
+                                 :operating_budget_excess))
+            @test parts ≈ cb.total rtol = 1e-9
         end
 
         @testset "units retire at the end of life_time, degraded or not" begin
@@ -963,6 +991,65 @@ import Ipopt
             optimize!(bsm)
             @test extract_master_solution(bsm, bsv, binp).total_investment_by_year ≈
                   fill(4.0, 3) rtol = 1e-6
+
+            # budget_scope total (round 41): the year's operating cost counts
+            # against the same budget. Gas at 200 $/MWh: a MW of PV (1 M$)
+            # saves 1.75 M$ of fuel in its first year, so building lowers the
+            # year's spending. Investment scope: 40 M$ buys 40 MW in 2025, the
+            # other 10 MW in 2026. Total scope: 50 MW at once (50 M$ and no
+            # fuel, the least the year can spend), 10 M$ over the budget. No
+            # static reserve here (no unit is reservable); with it, below,
+            # its shortfall stays out of the budget row.
+            gas200 = mkgen("Gas", "Non-renewable", "Gas", [100.0], [2.0e-4],
+                           ones(Hy, 1); nb = 1, H = Hy)
+            tb(total; kw...) = g20(max_re_increment = 1.0, max_annual_investment = 40.0,
+                                   budget_total = total, generators = [gas200],
+                                   reserve_static_default_ratio = 0.0; kw...)
+            ibm, ibv, ibres = solve_g20(tb(false))
+            @test ibres.total_investment_by_year ≈ [40.0, 10.0, 0.0] atol = 1e-6
+            @test all(value(ibv.slack_budget[y]) < 1e-6 for y in 1:3)
+            tbm, tbv, tbres = solve_g20(tb(true))
+            @test tbres.total_investment_by_year ≈ [50.0, 0.0, 0.0] atol = 1e-6
+            @test value(tbv.slack_budget[1]) ≈ 10.0 atol = 1e-6
+            op = ESFEX.budget_operating_cost(tbm, tbv, tb(true))
+            @test value(op[1]) ≈ 0.0 atol = 1e-6
+            @test objective_value(tbm) > objective_value(ibm)
+            # The budget row holds the year's operating cost as the objective
+            # values it (2025 is undiscounted)
+            gv = first(v for v in all_variables(tbm) if startswith(name(v), "op_y1_d1_gen"))
+            @test normalized_coefficient(constraint_by_name(tbm, "budget_y1"), gv) ≈
+                  coefficient(objective_function(tbm), gv) rtol = 1e-9
+            @test coefficient(objective_function(tbm), gv) > 0
+            # Only money in the budget row: with the static reserve on (no
+            # unit here is reservable, so it is short all year) and a CO2
+            # price, the reserve shortfall and the carbon price are in the
+            # objective but not in the row; the fuel is
+            pinp = tb(true; reserve_static_default_ratio = 0.15, co2_cost = 1.0e-4,
+                      fuel_co2 = Dict("Gas" => 0.2))
+            pm, _, _ = solve_g20(pinp)
+            row = constraint_by_name(pm, "budget_y1")
+            rl = first(v for v in all_variables(pm) if startswith(name(v), "op_y1_d1_rs_loss"))
+            @test value(rl) > 0
+            @test coefficient(objective_function(pm), rl) > 0
+            @test normalized_coefficient(row, rl) == 0.0
+            pg = first(v for v in all_variables(pm) if startswith(name(v), "op_y1_d1_gen"))
+            @test normalized_coefficient(row, pg) > 0
+            @test normalized_coefficient(row, pg) < coefficient(objective_function(pm), pg)
+            @test normalized_coefficient(row, pg) ≈
+                  coefficient(objective_function(tbm), gv) rtol = 1e-9   # fuel only
+            # TSAM periods and stochastic scenarios too
+            _, _, tbtres = solve_g20(tb(true; use_tsam = true,
+                tsam_period_start_hours = [[1], [8761], [17521]],
+                tsam_period_weights = [[365.0], [365.0], [365.0]],
+                tsam_chronological_order = [[1], [1], [1]]))
+            @test tbtres.total_investment_by_year ≈ [50.0, 0.0, 0.0] atol = 1e-6
+            tsm, tsv, _, _ = create_stochastic_master_problem(StochasticMasterInput(tb(true), sc, true))
+            ESFEX.set_silent(tsm)
+            optimize!(tsm)
+            @test extract_master_solution(tsm, tsv, tb(true)).total_investment_by_year ≈
+                  [50.0, 0.0, 0.0] atol = 1e-6
+            @test count(c -> startswith(name(c), "budget_y"),
+                        all_constraints(tsm; include_variable_in_set_constraints = false)) == 3
         end
 
         @testset "master: conditioning and capacity noise (round 36)" begin
@@ -2150,6 +2237,14 @@ import Ipopt
             short = solve_floor(52.0; bat_soc_end_min = Dict(1 => Dict(1 => 40.0)))
             @test short.load_shed_total ≈ 0.0 atol = 1e-6
             @test short.bat_soc[1, 1, end] ≈ 20.0 + 4 * 2.0 * 0.95 atol = 1e-4
+            # The shortfall's penalty is in the breakdown (soc_violation_cost):
+            # the total is the sum of the components
+            cb = short.cost_breakdown
+            short_mwh = 40.0 * 0.95 - short.bat_soc[1, 1, end]
+            @test cb.soc_violation_cost ≈ short_mwh * 0.1 * 0.01 rtol = 1e-6
+            @test sum(getfield(cb, f) for f in fieldnames(typeof(cb))
+                      if f ∉ (:total, :pe_electrolyzer_cost, :v2g_compensation,
+                               :operating_budget_excess)) ≈ cb.total rtol = 1e-9
         end
 
         @testset "battery SOC carried in MWh" begin

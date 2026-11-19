@@ -219,6 +219,7 @@ struct MasterProblemInput
     demand_growth::Float64                      # Extra growth on top (default 0.0)
     discount_rate::Float64
     max_annual_investment::Float64
+    budget_total::Bool                          # budget_scope: total (BUD-2)
     # RE targets
     target_re_penetration::Float64
     initial_re_penetration::Float64
@@ -349,6 +350,7 @@ end
 | `add_n1_security_constraints!` | `(model, vars, input)` | N-1 contingency constraints for transmission and generation. |
 | `extract_solution` | `(model, vars, input; committed=nothing) -> PowerSystemResult` | Extract all variable values into a structured result. With `committed` (from `committed_steps`), the objective, scalar totals and cost breakdown cover only a rolling window's kept steps. |
 | `committed_steps` | `(ps_vars, hours, keep; pe_vars, pe_temporal) -> CommittedSteps` | Share of each variable in a window's first `keep` steps (1 / 0 per step, period share for primary-energy periods, `keep / hours` for variables without a step). `committed_value(cs, expr)` values a solved expression over those steps. |
+| `add_operating_budget!` | `(model, budget; committed=nothing) -> VariableRef` | COST-1: the window's operating spending (`OPERATING_BUDGET_COSTS`: fuel, maintenance, fixed O&M, primary-energy fuel bought and transported), over the committed steps with `committed` (`committed_expression`), at most `budget` (solver units) plus the excess `operating_budget_excess`, priced at `OPERATING_BUDGET_PENALTY` (1000) per unit. Call it after the objective is complete; the excess and its penalty go to the cost breakdown. |
 | `recover_uc_duals_via_copy` | `(model, vars, input) -> Union{Matrix, Nothing}` | UC only: on a copy of the solved model, fix the commitment binaries to their rounded values and re-solve as an LP so balance duals (prices) exist; returns the `[bus x hour]` price matrix in M$/MWh, or `nothing`. The model itself is not changed. Used by `PowerSystemAdapter`. |
 | `compute_n1_security_cost!` | `(model, input) -> Float64` | Re-solve a copy of the solved model with the N-1 slacks free of charge and store objective(with) − objective(without) in `model.ext[:n1_security_cost]`, which `extract_solution` reports as `n1_security_cost` (solver cost units); the re-solve's solution is kept in `model.ext[:n1_security_resolve]` so that, with `committed`, both objectives are valued over the committed steps (`n1_security_cost(model, committed)`). Used by `PowerSystemAdapter` when `n1_security.compute_security_cost` is on. |
 
@@ -360,7 +362,8 @@ end
 | `calculate_target_ratios` | `(input::MasterProblemInput) -> Dict{Tuple{Int,Int}, Float64}` | RE target per `(system_idx, year_idx)`: linear interpolation from the initial to the target penetration, clipped by the min/max annual increments. |
 | `build_master_variables!` | `(model, input) -> MasterProblemVariables` | Investment variables, keyed by year index: `tech_investment[y][t]` and `bat_tech_power_investment[y][bt]` / `bat_tech_capacity_investment[y][bt]` (vectors per bus), `transfer_investment[y][(i,j)]`, plus life-extension, RE ratio and slack variables. |
 | `add_investment_constraints!` | `(model, vars, input)` | Cumulative investment limits per technology per bus. |
-| `add_budget_constraints!` | `(model, vars, input)` | Annual budget on the overnight cost of each investment period's builds (technologies, battery technologies, transmission, reservoirs), with a slack at `BUDGET_SLACK_PENALTY` (10) per unit over it. |
+| `add_budget_constraints!` | `(model, vars, input; operating=nothing)` | Annual budget on the overnight cost of each investment period's builds (technologies, battery technologies, transmission, reservoirs), with a slack at `BUDGET_SLACK_PENALTY` (10) per unit over it. With `operating` (year index => expression) the year's operating cost counts against it too (`budget_scope: total`, BUD-2). |
+| `budget_operating_cost` | `(model, vars, input; scenarios=nothing) -> Dict{Int, AffExpr}` | Each year's operating money for BUD-2: what the representative days (or TSAM periods) pay, scaled to the year (`day_operating_spend` and the fuel block's `master_fuel_day_spend`, recorded by `record_year_operating_cost!`: fuel, maintenance, start-ups, converter and line-flow costs, primary-energy fuel and electrolyzers), plus `build_annual_asset_cost`; no modelling penalty, no battery degradation and no CO2 price. With stochastic `scenarios`, probability-weighted, each with its multipliers. `create_master_problem` adds BUD-2 itself (`defer_budget = true` leaves it to the stochastic master). |
 | `add_retirement_cascade_constraints!` | `(model, vars, input)` | Life-extension capacity of a unit can only decrease from one year to the next, so a retirement is not reversed. |
 | `add_capacity_adequacy_constraints!` | `(model, vars, input)` | Ensures installed capacity meets peak demand plus reserve margin. |
 | `add_transmission_symmetry_constraints!` | `(model, vars, input)` | Holds `transfer_investment[i,j] == transfer_investment[j,i]` where both directions exist. |

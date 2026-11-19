@@ -23,6 +23,7 @@ from esfex.config.legacy_keys import (
     flat_dc_field,
     is_flat_dc_key,
     is_legacy_unit_key,
+    legacy_system_field,
     penalty_field,
 )
 from esfex.config.schema import (
@@ -144,7 +145,7 @@ def _walk_system(data: dict[str, Any], prefix: str, out: list[str]) -> None:
             if flat_dc_field(name) is None:
                 out.append(path)
             continue
-        field = _field_for(SystemConfig, name)
+        field = _field_for(SystemConfig, legacy_system_field(name) or name)
         if field is None:
             out.append(path)
             continue

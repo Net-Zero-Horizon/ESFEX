@@ -180,7 +180,7 @@ The dispatch builds nothing, so it has no investment limits (the master's are un
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `max_annual_system_cost` | COST-1 | `Δt·operating_cost + window fraction * fixed O&M - cost_violation <= MAX_ANNUAL_SYSTEM_COST * window fraction` (operating cost: fuel and maintenance per MWh; fixed O&M: $/MW·yr of the generators and batteries in service); `cost_violation` priced at 10× the largest variable cost |
+| `operating_budget` | COST-1 | Only with `max_annual_operating_cost`: `operating spending of the committed steps - operating_budget_excess_t1 <= window budget` (spending: fuel and maintenance per MWh, the committed steps' share of the fixed O&M, primary-energy fuel bought and transported; window budget: what is left of the year's, × the window's share of the remaining demand); the excess priced at `OPERATING_BUDGET_PENALTY` (1000 $/$) |
 
 `transfer_margin_{i}_{j}` is a slack variable created only when the network has no transmission lines; it appears in no constraint and is always 0.
 

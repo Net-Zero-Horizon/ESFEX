@@ -246,7 +246,7 @@ systems:
     demand_scale: 1.0
     discount_rate: 0.05
     TARGET_RE_PENETRATION: 0.60
-    MAX_ANNUAL_SYSTEM_COST: 500000000.0
+    max_annual_investment: 500000000.0
 
     nodes:
       nodes_connections: [0.0, 100.0, 75.0,

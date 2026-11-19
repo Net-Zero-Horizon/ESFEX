@@ -544,7 +544,11 @@ class GuiSystemSettings:
     target_re_penetration: float = 1.0
     min_annual_increment: float = 0.01
     max_annual_increment: float = 0.10
-    max_annual_system_cost: float = 20e9
+    # Annual investment budget ($/yr); "total" scope adds the year's operation
+    max_annual_investment: float = 20e9
+    budget_scope: str = "investment"
+    # Annual operating budget of the dispatch ($/yr); None = off
+    max_annual_operating_cost: Optional[float] = None
     life_extension_cost_factor: float = 0.20
     inertia_limit_threshold: float = 0.1
     sim_rooftop: bool = False

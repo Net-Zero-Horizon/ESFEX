@@ -162,7 +162,7 @@ Despite the name, this is the same total demand array as `detailed_results/.../d
 
 ## cost_breakdown/
 
-Granular decomposition of the annual system cost into 35 components. Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, summed over the rolling-horizon windows. Each window counts only its committed steps (the overlap tail is solved again by the next window); costs with no time step (investment annuities, CO2-budget slack) count for the committed share of the window.
+Granular decomposition of the annual system cost into the components below; `total` is the sum of every entry except `pe_electrolyzer_cost`, `v2g_compensation` and `operating_budget_excess` (reporting entries). Each year's costs are stored as attributes on a `/cost_breakdown/year_YYYY/` group, summed over the rolling-horizon windows. Each window counts only its committed steps (the overlap tail is solved again by the next window); costs with no time step (investment annuities, CO2-budget slack) count for the committed share of the window.
 
 This group is present when the optimizer exports per-component cost data. The [Financial Analysis](../api/models-financial-analysis.md) module reads this group directly; when it is absent, costs are recalculated from generation output and system configuration.
 
@@ -183,9 +183,9 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `co2_emission_cost` | float | $ | Carbon emission cost |
 | `fre_penetration_cost` | float | $ | RE penetration shortfall penalty |
 | `inertia_cost` | float | $ | System inertia deficit penalty |
-| `soc_violation_cost` | float | $ | Battery SOC violation penalty |
+| `soc_violation_cost` | float | $ | Battery SOC violation penalty, the year-end SOC shortfall (BAT-5) included |
 | `transfer_margin_cost` | float | $ | Transfer margin deficit penalty |
-| `v2g_compensation` | float | $ | V2G compensation (negative = credit) |
+| `v2g_compensation` | float | $ | V2G payment to EV owners: a transfer between agents, reported only, not part of `total` |
 | `electrolyzer_cost` | float | $ | Electrolyzer variable and water cost, and the window's share of its fixed O&M |
 | `converter_cost` | float | $ | AC/DC converter cost |
 | `spillage_cost` | float | $ | Battery spillage penalty |
@@ -200,7 +200,9 @@ This group is present when the optimizer exports per-component cost data. The [F
 | `pe_electrolyzer_cost` | float | $ | The electrolyzers' cost (`electrolyzer_cost`) when their hydrogen fills the primary-energy `Hydrogen` tank, 0 otherwise. The same money as `electrolyzer_cost`, not an extra cost: do not add both |
 | `n1_security_shortfall_cost` | float | $ | N-1 security shortfall penalty |
 | `line_flow_cost` | float | $ | Flow cost of lines with a `cost_per_mw_km` (inter-system links: length × `cost_per_mw_km` × MWh carried) |
-| `total` | float | $ | Objective value of the dispatch. Reporting-only entries such as `pe_electrolyzer_cost` (a view of `electrolyzer_cost`) are not part of it |
+| `operating_budget_excess` | float | $ | Operating spending above the dispatch's operating budget (`max_annual_operating_cost`, COST-1). Money already in `fuel_cost`, `maintenance_cost`, `fixed_om_cost` and the primary-energy fuel costs, not an extra cost: not part of `total`. 0 without an operating budget |
+| `operating_budget_penalty` | float | $ | Penalty on that excess (1000 $ per $), part of `total` |
+| `total` | float | $ | Objective value of the dispatch, the sum of the other entries. Reporting-only entries, `pe_electrolyzer_cost` (a view of `electrolyzer_cost`), `v2g_compensation` (a transfer) and `operating_budget_excess` (money already in the costs), are not part of it |
 
 ### Reading Cost Breakdown
 

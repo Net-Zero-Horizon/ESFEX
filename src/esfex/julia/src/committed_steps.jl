@@ -224,6 +224,24 @@ function committed_value(cs::CommittedSteps, ex::GenericQuadExpr; val = value)
     return total
 end
 
+"""
+    committed_expression(cs, ex) -> AffExpr
+
+`ex` over the committed steps, as an expression of the model's variables:
+each term weighted by its variable's share, a state level at the window's
+end replaced by the level after step `keep`, the constant by `keep / hours`.
+Its value is `committed_value(cs, ex)`; it lets a constraint cover the
+committed steps only (`add_operating_budget!`).
+"""
+function committed_expression(cs::CommittedSteps, ex::GenericAffExpr)
+    out = AffExpr(ex.constant * cs.keep / cs.hours)
+    for (v, c) in ex.terms
+        s = _committed_share(cs, v)
+        s == 0 || add_to_expression!(out, c * s, get(cs.end_level, v, v))
+    end
+    return out
+end
+
 committed_value(cs::CommittedSteps, v::VariableRef; val = value) =
     _committed_share(cs, v) * _committed_var_value(cs, v, val)
 
