@@ -27,7 +27,7 @@ from esfex.config.schema import (  # noqa: E402
 
 
 def _config(tmp_path, *, npv: bool, method="monolithic", planning="perfect_foresight",
-            stochastic=False):
+            stochastic=False, peaker_decommissioning=1000.0):
     demand = tmp_path / "demand.csv"
     np.savetxt(demand, np.full(8760, 60.0))
     # Diesel serves the load at $50/MWh (base_lcoe $93/MWh: it pays);
@@ -38,7 +38,8 @@ def _config(tmp_path, *, npv: bool, method="monolithic", planning="perfect_fores
                              degradation_rate=[0.0], fuel_cost=[50.0], min_power=[0.0])
     peaker = _make_generator("Peaker", "Non-renewable", "Diesel", [40.0],
                              degradation_rate=[0.0], fuel_cost=[500.0], min_power=[0.0],
-                             fixed_cost=[20000.0], decommissioning_cost=[1000.0])
+                             fixed_cost=[20000.0],
+                             decommissioning_cost=[peaker_decommissioning])
     bat = _make_battery("Bat", 1).model_copy(update={"fixed_cost": [1000.0],
                                                      "degradation_rate": [0.0]})
     sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)],
@@ -235,6 +236,37 @@ def test_resolve_above_the_curtailment_limit_is_undone(tmp_path, monkeypatch, ca
     assert "curtails 0.5 GWh/yr above the annual curtailment limit" in warnings[0]
     assert "Peaker" in warnings[0] and "Bat" in warnings[0]
     _check_results_file(h5, [r.year for r in results], retired=False)
+
+
+@pytest.mark.julia
+def test_resolve_that_raises_the_total_cost_is_undone(tmp_path, caplog):
+    """A re-solve whose total cost is above the plan before's undoes its
+    round (any optimal re-solve used to be kept). Decommissioning the peaker
+    costs $30,000/MW, more than the $20,000/MW of fixed O&M a one-year plan
+    saves: retiring it and the battery raises the cost by about $375,000."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        orch, results, h5 = _run(tmp_path, "dear", npv=True, peaker_decommissioning=30000.0)
+    assert orch._npv_retirements == []
+    warnings = [r.getMessage() for r in caplog.records
+                if "NPV retirement" in r.getMessage() and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "raises the plan's total cost to $" in warnings[0]
+    assert "Peaker" in warnings[0] and "Bat" in warnings[0]
+    _check_results_file(h5, [r.year for r in results], retired=False)
+
+
+@pytest.mark.julia
+def test_myopic_total_cost_counts_the_later_years(tmp_path):
+    """The same units in the first year of a two-year myopic run: its
+    one-year master pays the decommissioning, but the NPV also counts the
+    second year's fixed O&M retiring them saves ($800,000 + $50,000,
+    discounted), which the comparison counts too: the retirement is kept."""
+    orch, results, _ = _run(tmp_path, "myopic_dear", years=2, npv=True, planning="myopic",
+                            peaker_decommissioning=30000.0)
+    assert _retired(orch) == {("generator", "peaker"), ("battery", "bat")}
+    assert {r["year"] for r in orch._npv_retirements} == {results[0].year}
 
 
 @pytest.mark.julia

@@ -6456,10 +6456,64 @@ import Ipopt
             @test string(termination_status(fm)) == "OPTIMAL"
             @test ESFEX.curtailment_excess_mwh(fm) > 100.0
             @test ESFEX.curtailment_excess_mwh(cmodel) == 0.0
-            cit = @test_logs (:warn, r"curtails [0-9.]+ GWh/yr above the annual curtailment limit \(the plan before: 0\.0\); keeping these units") match_mode = :any solve_with_npv_iteration(cinp)
+            # The iteration solves with optimize_master! (its retry, and its
+            # warning on the re-solve's curtailment above the limit; it used
+            # plain optimize!)
+            cit = @test_logs (:warn, r"Master problem: system .* curtails [0-9.]+ GWh/yr above its annual curtailment limit") (:warn, r"curtails [0-9.]+ GWh/yr above the annual curtailment limit \(the plan before: 0\.0\); keeping these units") match_mode = :any solve_with_npv_iteration(cinp)
             @test !cit.converged && cit.iterations == 2
             @test isempty(cit.forced_retirements)
             @test cit.final_result.objective ≈ objective_value(cmodel) rtol = 1e-9
+
+            # A re-solve that costs more than the plan before undoes its
+            # round (any optimal re-solve used to be kept). At a base_lcoe of
+            # $10/MWh gas ($32/MWh) has a negative NPV, but without it the
+            # $200/MWh peaker serves the load.
+            idle = wf(peaker; rated_power = [200.0], fixed_cost = [0.0])
+            linp = mkinput(; generators = [gas, idle], batteries = BatteryConfig[],
+                           base_lcoe = 1.0e-5)
+            lmodel, _, lres = solve(linp)
+            @test [(u.unit_type, u.unit_idx) for u in get_units_with_negative_npv(lres, linp)] ==
+                  [("generator", 1)]
+            @test npv_round_reference_cost(lres, linp, get_units_with_negative_npv(lres, linp)) ==
+                  objective_value(lmodel)
+            lm, _, _ = solve(retire_units(linp, get_units_with_negative_npv(lres, linp)))
+            # The peaker's $200/MWh for gas's $32/MWh, less gas's fixed O&M
+            @test objective_value(lm) - objective_value(lmodel) ≈
+                  (24 * 50.0 * (2.0e-4 - 3.2e-5) - 200.0 * 1.0e-5) * (1 + 1 / (1 + r)) rtol = 1e-6
+            lit = @test_logs (:warn, r"retiring generator 1 at bus 1 .* raises the plan's total cost to [0-9.e-]+ M\$ \(the plan before: [0-9.e-]+ M\$\); keeping these units") match_mode = :any solve_with_npv_iteration(linp)
+            @test !lit.converged && lit.iterations == 2
+            @test isempty(lit.forced_retirements)
+            @test lit.final_result.objective ≈ objective_value(lmodel) rtol = 1e-9
+            # Within the solver's noise (relative 1e-6) it is not a rise
+            @test !ESFEX.cost_grew(1.0, 1.0 + 1e-7) && ESFEX.cost_grew(1.0, 1.0 + 1e-5)
+            @test !ESFEX.cost_grew(-1.0, -1.0 + 1e-7) && ESFEX.cost_grew(-1.0, -1.0 + 1e-5)
+            # (retiring the $1000/MW·yr peaker above lowers it: kept, `it`)
+            @test it.final_result.objective < objective_value(model)
+
+            # The comparison counts what the objective leaves out. An idle
+            # peaker with $1000/MW·yr of fixed O&M and a $1500/MW
+            # decommissioning cost: in a one-year master retiring it costs
+            # $500/MW more than keeping it (undone), but a myopic year's
+            # master whose NPV covers two more years (extra_years) counts
+            # the fixed O&M it saves in them: kept.
+            dpk = wf(peaker; decommissioning_cost = [1.5e-3])
+            yinp = mkinput(; years = [2025], base_demand = fill(50.0, H, 1),
+                           hours_per_year = [24], generators = [gas, dpk],
+                           batteries = BatteryConfig[])
+            ymodel, _, yres = solve(yinp)
+            ypk = only(get_units_with_negative_npv(yres, yinp))
+            ym, _, _ = solve(retire_units(yinp, [ypk]))
+            @test objective_value(ym) ≈ objective_value(ymodel) + 50.0 * (1.5e-3 - 1.0e-3) rtol = 1e-9
+            yit = @test_logs (:warn, r"raises the plan's total cost") match_mode = :any solve_with_npv_iteration(yinp)
+            @test isempty(yit.forced_retirements)
+            later = 50.0 * 1.0e-3 * (1 / (1 + r) + 1 / (1 + r)^2)
+            ypk2 = only(get_units_with_negative_npv(yres, yinp; extra_years = 2))
+            @test npv_round_reference_cost(yres, yinp, [ypk2]; extra_years = 2) ≈
+                  objective_value(ymodel) + later rtol = 1e-9
+            yit2 = solve_with_npv_iteration(yinp; extra_years = 2)
+            @test yit2.converged
+            @test [(u.unit_type, u.unit_idx) for u in yit2.forced_retirements] == [("generator", 2)]
+            @test yit2.final_result.objective ≈ objective_value(ym) rtol = 1e-9
 
             # Myopic: a one-year master's NPV can cover the unit's later
             # years in the horizon (extra_years), its operation held. With

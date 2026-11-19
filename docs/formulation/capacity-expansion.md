@@ -872,12 +872,21 @@ With `npv_retirement` on, a `development` run checks after the master solve whet
    b. Units with NPV < npv_retirement_threshold: none → stop (converged)
    c. max_iterations rounds of retirements done → stop (they are kept)
    d. Retire them for the whole horizon (9.3) and solve the master again
-   e. Re-solve not optimal, or curtailing more above the annual curtailment
-      limit than the plan before → undo this round and stop: the last optimal
-      plan and its retirements are kept
+   e. Re-solve not optimal, curtailing more above the annual curtailment
+      limit than the plan before, or costing more in total than the plan
+      before (NPV-4) → undo this round and stop: the last optimal plan and
+      its retirements are kept
 ```
 
-A retired unit stays retired in the next rounds. The log lists each round's retired units with their NPV. When a re-solve is not optimal (retiring the units made the master infeasible, for instance), or curtails more above the annual curtailment limit than the plan before (retiring the store that held the limit, which the master pays at 10⁴ \$/MWh, §8.3.6; under the hard limit of earlier versions such a re-solve was infeasible), a warning names the units of the undone round and the reason, and the run goes on with the last optimal plan; the results list only the retirements applied.
+A retired unit stays retired in the next rounds. The log lists each round's retired units with their NPV. When a re-solve is not optimal (retiring the units made the master infeasible, for instance), or curtails more above the annual curtailment limit than the plan before (retiring the store that held the limit, which the master pays at 10⁴ \$/MWh, §8.3.6; under the hard limit of earlier versions such a re-solve was infeasible), a warning names the units of the undone round and the reason, and the run goes on with the last optimal plan; the results list only the retirements applied. The iteration solves each master with `optimize_master!` (the solver's numerical retry, and the warning for curtailment above the limit), as the run's master solve does.
+
+**Total cost.** A round is also undone when the re-solve costs more than the plan before: a unit can have a negative NPV at `base_lcoe` and still be the cheapest way to serve its load, so that retiring it makes the plan dearer. The master's objective (OBJ-1) holds every cost of an existing unit over the modelled years: its operating cost, and in OBJ-3b its fixed O&M on the capacity in service, life extension and decommissioning (at the end of its life, or, retired, in the first year). So the costs a retired unit avoids, and the decommissioning it pays, are already in the re-solve's objective \(Z'\). What the objective leaves out is the years past its horizon: a myopic year's master models that year only, while the NPV also values the unit's later years (NPV-3). Those years count as the NPV values them. The round \(R\) is undone when
+
+\[
+Z' > \left( Z - \sum_{u \in R} \text{NPV}^{+}_{u} \right) + 10^{-6} \left| Z - \sum_{u \in R} \text{NPV}^{+}_{u} \right| \tag{NPV-4}
+\]
+
+with \(Z\) the objective of the plan before and \(\text{NPV}^{+}_{u}\) the part of unit \(u\)'s NPV after the modelled years (0 outside myopic mode, where the comparison is between the two objectives). Keeping a unit that loses money in the later years makes the plan before dearer by that loss, and a unit that would pay there makes it cheaper. Both objectives include the master's penalties (RE-target shortfall, curtailment above the limit, budget and adequacy slacks), so a retirement that buys its saving with a penalty is undone too. Julia: `npv_round_reference_cost(result, input, units; extra_years)` (the right-hand side without the tolerance) and `cost_grew(before, after)`.
 
 ### 9.2 Unit NPV
 
