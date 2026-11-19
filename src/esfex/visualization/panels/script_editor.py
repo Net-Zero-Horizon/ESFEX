@@ -415,12 +415,12 @@ class ScriptEditor(QWidget):
 
     def _on_new(self):
         self._tab_counter += 1
-        self._add_tab(f"untitled_{self._tab_counter}")
+        self._add_tab(tr("script_editor.untitled_n", n=self._tab_counter))
 
     def _on_open(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Python Script", "",
-            "Python Files (*.py);;All Files (*)",
+            self, tr("script_editor.open_title"), "",
+            tr("script_editor.py_filter"),
         )
         if not path:
             return
@@ -441,8 +441,8 @@ class ScriptEditor(QWidget):
 
     def _on_save_as(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Python Script", "",
-            "Python Files (*.py);;All Files (*)",
+            self, tr("script_editor.save_title"), "",
+            tr("script_editor.py_filter"),
         )
         if not path:
             return

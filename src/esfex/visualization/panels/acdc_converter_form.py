@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 from esfex.visualization.theme import current_theme
 
@@ -47,7 +48,7 @@ class ACDCConverterForm(QWidget):
         id_layout.addRow(tr("acdc_form.name_label"), self._name)
 
         self._converter_type = QComboBox()
-        self._converter_type.addItems(["VSC", "LCC"])
+        add_choices(self._converter_type, [("VSC", "VSC"), ("LCC", "LCC")])
         self._converter_type.currentIndexChanged.connect(self._on_changed)
         id_layout.addRow(tr("acdc_form.type_label"), self._converter_type)
 
@@ -247,9 +248,7 @@ class ACDCConverterForm(QWidget):
         self._model.propagate_bus_to_element("acdc_converter", raw_id)
 
         self._name.setText(conv.name)
-        ct_idx = self._converter_type.findText(conv.converter_type)
-        if ct_idx >= 0:
-            self._converter_type.setCurrentIndex(ct_idx)
+        select_value(self._converter_type, conv.converter_type)
 
         # Query and display connections
         connections = self._model.get_connected_elements("acdc_converter", raw_id)
@@ -408,7 +407,7 @@ class ACDCConverterForm(QWidget):
             if isinstance(w, QLineEdit):
                 val = w.text()
             elif isinstance(w, QComboBox):
-                val = w.currentText()
+                val = combo_value(w)
             else:
                 val = w.value()
             for inst in instances:

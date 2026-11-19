@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import VisualStyle
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 
 
 class VisualStyleWidget(QWidget):
@@ -73,7 +74,7 @@ class VisualStyleWidget(QWidget):
             self._size_spin = QSpinBox()
             self._size_spin.setRange(0, 100)
             self._size_spin.setValue(0)
-            self._size_spin.setSpecialValueText("Auto")
+            self._size_spin.setSpecialValueText(tr("visual_style.auto"))
             self._size_spin.setToolTip(tr("visual_style.size_auto_tip"))
             self._size_spin.valueChanged.connect(self._on_changed)
             form.addRow(tr("visual_style.size"), self._size_spin)
@@ -82,13 +83,18 @@ class VisualStyleWidget(QWidget):
         self._shape_combo: QComboBox | None = None
         if show_shape:
             self._shape_combo = QComboBox()
-            self._shape_combo.addItems([
-                "circle", "square", "diamond",
-                "triangle-up", "triangle-down",
-                "hexagon", "pentagon",
-                "horizontal-bar", "star",
+            add_choices(self._shape_combo, [
+                ("circle", tr("visual_style.shape_circle")),
+                ("square", tr("visual_style.shape_square")),
+                ("diamond", tr("visual_style.shape_diamond")),
+                ("triangle-up", tr("visual_style.shape_triangle_up")),
+                ("triangle-down", tr("visual_style.shape_triangle_down")),
+                ("hexagon", tr("visual_style.shape_hexagon")),
+                ("pentagon", tr("visual_style.shape_pentagon")),
+                ("horizontal-bar", tr("visual_style.shape_horizontal_bar")),
+                ("star", tr("visual_style.shape_star")),
             ])
-            self._shape_combo.currentTextChanged.connect(self._on_changed)
+            self._shape_combo.currentIndexChanged.connect(self._on_changed)
             form.addRow(tr("visual_style.shape"), self._shape_combo)
 
         # -- Opacity spin --
@@ -108,7 +114,7 @@ class VisualStyleWidget(QWidget):
             self._width_spin = QSpinBox()
             self._width_spin.setRange(0, 20)
             self._width_spin.setValue(0)
-            self._width_spin.setSpecialValueText("Auto")
+            self._width_spin.setSpecialValueText(tr("visual_style.auto"))
             self._width_spin.setToolTip(tr("visual_style.width_auto_tip"))
             self._width_spin.valueChanged.connect(self._on_changed)
             form.addRow(tr("visual_style.width"), self._width_spin)
@@ -143,9 +149,7 @@ class VisualStyleWidget(QWidget):
             self._size_spin.setValue(int(style.size) if style.size else 0)
 
         if self._shape_combo is not None and style.icon_shape:
-            idx = self._shape_combo.findText(style.icon_shape)
-            if idx >= 0:
-                self._shape_combo.setCurrentIndex(idx)
+            select_value(self._shape_combo, style.icon_shape)
 
         if self._opacity_spin is not None and style.opacity is not None:
             self._opacity_spin.setValue(style.opacity)
@@ -166,7 +170,7 @@ class VisualStyleWidget(QWidget):
             color=self._current_color if self._color_btn is not None else None,
             size=float(size_val) if size_val > 0 else None,
             icon_shape=(
-                self._shape_combo.currentText()
+                combo_value(self._shape_combo)
                 if self._shape_combo is not None
                 else None
             ),

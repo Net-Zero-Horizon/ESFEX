@@ -84,7 +84,9 @@ class SplashScreen(QWidget):
         layout.addSpacing(7)
 
         # Status text
-        self._status_label = QLabel("Starting...")
+        # Empty until the first set_progress(): the splash is shown before
+        # the translations are loaded, so tr() is not available yet.
+        self._status_label = QLabel("")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._status_label)
 

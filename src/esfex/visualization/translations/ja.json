@@ -95,7 +95,12 @@
     "trusted_no": "いいえ（起動時にスキップ）",
     "trust": "信頼する",
     "confirm_trust_title": "プラグインを信頼",
-    "confirm_trust": "プラグイン「{name}」を現在の状態で信頼しますか？ファイルとプロセスへの完全なアクセス権で実行されます。内容を把握しているコードのみ信頼してください。"
+    "confirm_trust": "プラグイン「{name}」を現在の状態で信頼しますか？ファイルとプロセスへの完全なアクセス権で実行されます。内容を把握しているコードのみ信頼してください。",
+    "zip_filter": "ZIP ファイル (*.zip)",
+    "overwrite_prompt": "{error}\n\n上書きしますか？",
+    "git_url": "Git URL:",
+    "untrusted_host": "git ホスト {host} は既定の信頼済みリスト (github, gitlab, bitbucket, codeberg, sourcehut) にありません。攻撃者が管理するホストからインストールすると、プラグインの __init__.py がプロセスの全権限で実行されます。\n\nこの URL を信頼できる場合にのみ続行してください。",
+    "installed": "インストールしました: {name}"
   },
   "toolbar": {
     "select": "選択",
@@ -205,7 +210,8 @@
     "geo_assets": "地理資産",
     "search_placeholder": "要素を検索...",
     "header_element": "要素",
-    "header_info": "情報"
+    "header_info": "情報",
+    "system_info": "システム"
   },
   "tree_ctx": {
     "delete_system": "システムを削除",
@@ -359,7 +365,14 @@
     "select_availability_file": "利用可能性CSVを選択",
     "availability_browse_tooltip": "利用可能性CSVを参照(時間別プロファイル, 値 0-1)",
     "availability_clear_tooltip": "利用可能性パスをクリア",
-    "reservoir_inflow_placeholder": "時間別流入量のCSV (MW換算)"
+    "reservoir_inflow_placeholder": "時間別流入量のCSV (MW換算)",
+    "risk_coefficient_tooltip": "地理的リスクによる出力低減係数 (0-1)。Risk Workbench でハザードへの曝露と機器の脆弱性から計算されます。1.0 = 低減なし。",
+    "curve_flat": "一定",
+    "curve_linear": "線形",
+    "curve_stepwise": "階段状",
+    "curve_exponential": "指数",
+    "current_ac_dc": "AC/DC (AC_DC)",
+    "csv_filter": "CSV (*.csv);;すべて (*)"
   },
   "battery_form": {
     "group_id": "識別",
@@ -414,7 +427,12 @@
     "add_block": "+ ブロック",
     "remove_block": "- ブロック",
     "base_price": "基準価格 ($/MWh):",
-    "scale_factor": "スケール係数:"
+    "scale_factor": "スケール係数:",
+    "risk_coefficient_tooltip": "地理的リスクによる出力低減係数 (0-1)。Risk Workbench でハザードへの曝露と機器の脆弱性から計算されます。1.0 = 低減なし。",
+    "curve_flat": "一定",
+    "curve_linear": "線形",
+    "curve_stepwise": "階段状",
+    "curve_exponential": "指数"
   },
   "line_form": {
     "reactance_per_km_tip": "この線路のkmあたり直列リアクタンス。リアクタンス (pu) が空のとき、長さと合わせてリアクタンスを算出します (x = 長さ × X/km ÷ (V² / S_base))。既定値 = システムのDC潮流のkmあたりリアクタンス。",
@@ -438,7 +456,20 @@
     "n_selected": "{n} 本の送電線を選択中",
     "endpoints": "端子バス",
     "from_bus": "送り側バス:",
-    "to_bus": "受け側バス:"
+    "to_bus": "受け側バス:",
+    "type_overhead": "架空",
+    "type_underground": "地中",
+    "type_submarine": "海底",
+    "auto": "自動",
+    "default": "既定",
+    "global": "全体設定",
+    "not_applicable": "該当なし",
+    "group_economic": "経済",
+    "investment_cost": "投資費用",
+    "max_investment": "最大投資",
+    "operational_cost": "運用費用",
+    "loss_factor": "損失係数",
+    "bus_with_voltage": "{bus}  ({kv} kV)"
   },
   "zone_form": {
     "name": "名前:",
@@ -474,7 +505,8 @@
     "confirm_delete_title": "ゾーンを削除",
     "confirm_delete_msg": "ゾーン '{name}' を削除しますか？\nこの操作は元に戻せません。",
     "system_label": "システム: {name}",
-    "node_combo_fmt": "ノード {idx} - {name}"
+    "node_combo_fmt": "ノード {idx} - {name}",
+    "bus_combo_fmt": "母線 {bus} (ノード {node})"
   },
   "transformer_form": {
     "system": "システム:",
@@ -591,7 +623,12 @@
     "demand_fraction": "需要配分 (frac):",
     "multi_selection": "（複数）",
     "slack_warn_title": "スラック母線が複数あります",
-    "slack_warn_body": "すでにスラックとして指定された母線があります：「{names}」。電力系統では基準（スラック）母線は1つだけ使用します。複数のままにすると、ソルバーは最初に見つかったものだけを使用します。他方を PQ または PV に変更してください。"
+    "slack_warn_body": "すでにスラックとして指定された母線があります：「{names}」。電力系統では基準（スラック）母線は1つだけ使用します。複数のままにすると、ソルバーは最初に見つかったものだけを使用します。他方を PQ または PV に変更してください。",
+    "bus_type_slack": "スラック",
+    "role_connection": "接続",
+    "role_load": "負荷",
+    "role_mixed": "混合",
+    "n_selected": "システム: {count} 個の母線を選択"
   },
   "fuel_entry_form": {
     "group_identity": "識別",
@@ -629,7 +666,8 @@
     "transport_cost": "輸送コスト ($/単位/km):",
     "losses": "損失 (frac):",
     "length": "長さ (km):",
-    "n_selected": "{n} 件の燃料ルートを選択中"
+    "n_selected": "{n} 件の燃料ルートを選択中",
+    "auto": "自動"
   },
   "fuel_form": {
     "group_properties": "プロパティ",
@@ -642,7 +680,8 @@
     "energy_content": "エネルギー含有量 (MWh/単位):",
     "price_base": "基準価格 ($/単位):",
     "price_growth": "価格上昇率 (frac/年):",
-    "n_selected": "{n} 種の燃料を選択中"
+    "n_selected": "{n} 種の燃料を選択中",
+    "energy_content_na": "該当なし (再生可能)"
   },
   "technology_form": {
     "group_identity": "識別",
@@ -656,7 +695,14 @@
     "eff_at_min": "最小出力効率:",
     "n_selected": "{n} 件の技術を選択中",
     "confirm_delete_title": "技術を削除しますか？",
-    "confirm_delete_msg": "この技術を削除してもよろしいですか？"
+    "confirm_delete_msg": "この技術を削除してもよろしいですか？",
+    "category_renewable": "再生可能",
+    "category_nonrenewable": "非再生可能",
+    "category_storage": "貯蔵",
+    "category_electrolyzer": "電解槽",
+    "color": "色:",
+    "color_tooltip": "グラフの表示色",
+    "color_dialog": "技術の色"
   },
   "investment_form": {
     "group_identity": "識別",
@@ -958,7 +1004,10 @@
     "vs_transform_log": "対数 (裾の重い分布)",
     "vs_line_min": "線路最小幅 (px):",
     "vs_line_max": "線路最大幅 (px):",
-    "group_systems": "シミュレーション対象システム"
+    "group_systems": "シミュレーション対象システム",
+    "enable_uc": "UC を有効化:",
+    "model_clock_auto": "自動",
+    "solver_options_group": "ソルバーオプション"
   },
   "stochastic_form": {
     "group_scenarios": "シナリオ",
@@ -1134,7 +1183,10 @@
     "lang_restart_title": "言語が変更されました",
     "lang_restart_msg": "言語の変更はアプリケーション再起動後に反映されます。",
     "browse_title": "参照",
-    "cat_solver_sim": "ソルバー & シミュレーション"
+    "cat_solver_sim": "ソルバー & シミュレーション",
+    "theme_light": "ライト",
+    "log_level_basic": "基本",
+    "log_level_high": "詳細"
   },
   "preferences_actions": {
     "file.import": "設定をインポート",
@@ -1204,13 +1256,53 @@
     "infra_applied_title": "インフラ簡略化完了",
     "infra_applied_msg": "{n} 件の簡略化を適用しました。更新結果を確認するには再検証してください。",
     "infra_none_checked": "提案がチェックされていません。適用する項目をチェックしてください。",
-    "infra_no_groups": "このスコープで統合可能なグループは見つかりませんでした。"
+    "infra_no_groups": "このスコープで統合可能なグループは見つかりませんでした。",
+    "category_structural": "構造 (ノード、線路)",
+    "category_configuration": "設定 (不明な YAML キー)",
+    "category_electrical": "電気 (母線、機器の参照)",
+    "category_demand": "需要 (負荷データ、カバー率)",
+    "category_generation": "発電 (供給力、可用性ファイル)",
+    "category_fuel_network": "燃料ネットワーク (サプライチェーンの整合性)",
+    "category_connectivity": "接続性 (孤立した構成要素)",
+    "category_realism": "現実性 (重複発電所、予備率、送電可能性)",
+    "category_topology_audit": "トポロジー監査 (GUI とソルバーの一致)",
+    "category_risk": "リスクとレジリエンス (ハザード曝露、脆弱性曲線)",
+    "topo_parallel_line_merge": "並行線路の統合",
+    "topo_radial_prune": "放射状分岐の削除",
+    "topo_series_eliminate": "直列母線の消去 (Kron)",
+    "topo_voltage_collapse": "電圧階級の集約",
+    "topo_full_node_collapse": "ノードの完全集約",
+    "topo_small_gen_absorb": "小規模発電機の吸収",
+    "analyzing_network": "ネットワークを解析中 (レベル {level})...",
+    "network_reduction": "ネットワーク縮約 (レベル)",
+    "network_reduction_tip": "機器の統合、並行線路の統合、母線の消去、トポロジーの縮約を解析して提案します。",
+    "level_1": "L1: 機器 + 並行線路",
+    "level_2": "L2: 放射状・直列母線の消去",
+    "level_3": "L3: ノード内母線の集約",
+    "level_4": "L4: ノードの完全集約",
+    "level_tip": "簡略化レベル (累積):\nL1 — 機器の集約 + 並行線路\nL2 — L1 + 放射状・直列母線の消去\nL3 — L2 + ノード内電圧階級の集約\nL4 — L3 + ノードの完全集約 + 小規模発電機の吸収",
+    "select_all": "すべて選択",
+    "select_all_tip": "すべての簡略化の提案にチェックを入れます。",
+    "apply_tip": "行き止まり要素の整理とチェックしたネットワーク縮約を適用します。",
+    "summary_n_infra": "{n} 件の簡略化 (-{removed} 要素)",
+    "infra_root": "ネットワーク簡略化 ({n} 件の操作)",
+    "equipment_aggregation": "機器の集約",
+    "equipment_detail": "{type} | {power} MW",
+    "topo_detail": "L{level} | -{removed} 要素",
+    "apply_level_msg": "レベル {level} の簡略化を自動修復付きで {count} 個のシステムに適用しますか？\n\nネットワークが安定し構造的に有効になるまでアルゴリズムが反復します。",
+    "level_done_issues_title": "簡略化完了 — 問題が残っています",
+    "level_done_issues_msg": "{count} 個のシステムに {n} 件の問題が残っています:\n\n{detail}\n\n詳細を確認するには再検証してください。",
+    "level_done_title": "簡略化完了",
+    "level_done_msg": "{count} 個のシステムを正常に簡略化しました。\n\n{log}"
   },
   "simulation": {
     "title": "ESFEXシミュレーション",
     "preparing": "シミュレーションを準備中...",
     "cancel_btn": "キャンセル",
-    "close_btn": "閉じる"
+    "close_btn": "閉じる",
+    "window": "ウィンドウ {current}/{total}",
+    "year_window": "{year}年 — ウィンドウ {current}/{total}",
+    "dispatch_year": "運用給電 — {year}年 ({current}/{total})"
   },
   "sensitivity": {
     "title": "グローバル感度分析 (Sobol)",
@@ -1243,14 +1335,60 @@
     "exported_msg": "Sobol指標を保存しました:\n{path}",
     "years_per_run": "実行あたりの年数:",
     "no_indices": "指標なし: {total} 回中 {n} 回の評価が失敗",
-    "failed_summary": "指標なし（評価失敗）: {kpis}"
+    "failed_summary": "指標なし（評価失敗）: {kpis}",
+    "kpi_total_cost": "総コスト",
+    "kpi_inv_gen_total": "発電機投資",
+    "kpi_inv_bat_total": "蓄電池投資",
+    "kpi_curtailment": "出力抑制",
+    "kpi_load_shedding": "負荷遮断",
+    "legend_s1": "S1 (一次)",
+    "legend_st": "ST (総合)",
+    "axis_sobol_index": "Sobol 指標",
+    "chart_title": "グローバル感度: {kpi}",
+    "chart_empty": "結果を表示するには分析を実行してください",
+    "mode_lp": "LP レベル (高速)",
+    "mode_config": "設定レベル (完全再実行)",
+    "select_lp_title": "LP ファイルを選択",
+    "lp_filter": "LP ファイル (*.lp);;すべてのファイル (*)",
+    "csv_filter": "CSV ファイル (*.csv)",
+    "starting": "開始しています...",
+    "cancelling": "キャンセルしています...",
+    "done": "完了。評価 {evaluations} 回、パラメータ {parameters} 個。"
   },
   "results_dialog": {
     "title": "結果ビューア",
     "tab_charts": "チャート",
     "tab_mga": "MGA",
     "group_selection": "選択",
-    "close_btn": "閉じる"
+    "close_btn": "閉じる",
+    "cat_generation": "発電",
+    "cat_storage": "貯蔵",
+    "cat_economics": "経済性",
+    "cat_system": "システム",
+    "cat_uc_operations": "UC 運用",
+    "cat_near_optimal": "準最適",
+    "cat_custom": "カスタム",
+    "filter_png": "PNG 画像 (*.png)",
+    "filter_svg": "SVG ベクター (*.svg)",
+    "filter_pdf": "PDF 文書 (*.pdf)",
+    "filter_jpg": "JPEG 画像 (*.jpg)",
+    "filter_tiff": "TIFF 画像 (*.tiff)",
+    "filter_all": "すべてのファイル (*)",
+    "loading_charts": "グラフを読み込んでいます...",
+    "rendering_charts": "グラフを描画しています...",
+    "rendering": "描画中: {title}",
+    "done": "完了",
+    "dashboard": "ダッシュボード",
+    "overview": "概要",
+    "years": "年:",
+    "font": "フォント:",
+    "export": "エクスポート",
+    "export_chart": "グラフをエクスポート",
+    "no_chart": "エクスポートするグラフがありません。",
+    "export_unsupported": "この種類のグラフはエクスポートできません。",
+    "exported": "グラフのエクスポート先:\n{path}",
+    "export_error": "エクスポートエラー",
+    "export_failed": "グラフのエクスポートに失敗しました:\n{error}"
   },
   "results_panel": {
     "title": "マップ結果",
@@ -1260,7 +1398,38 @@
     "no_results": "（結果が見つかりません）",
     "alternative": "代替案:",
     "screenshot_btn": "スクリーンショット",
-    "screenshot_saved": "スクリーンショットを {path} に保存しました"
+    "screenshot_saved": "スクリーンショットを {path} に保存しました",
+    "n_selected": "{n} 件選択",
+    "var_installed_capacity_mix": "設備容量構成",
+    "var_generation_mix": "発電構成",
+    "var_re_vs_nonre": "再エネ vs 非再エネ",
+    "var_total_generation": "総発電量",
+    "var_re_penetration": "再エネ導入率",
+    "var_nodal_prices": "ノード価格 (LMP)",
+    "var_load_shedding": "負荷遮断",
+    "var_co2_emissions": "CO2 排出量",
+    "var_curtailment": "出力抑制",
+    "var_gen_investment": "発電投資",
+    "var_bat_investment": "蓄電池投資",
+    "var_power_flow": "潮流",
+    "var_fuel_transport_flow": "燃料輸送フロー",
+    "var_risk_coefficient": "リスク係数",
+    "var_expected_annual_loss": "年間期待損失",
+    "var_composite_risk": "複合リスク",
+    "alt_none": "-- なし --",
+    "alt_cost_optimal": "コスト最適 (0)",
+    "alt_n": "代替案 {n}",
+    "mga_legend_optimal": "{variable} — 最適 ({year})",
+    "mga_legend_alt": "{variable} — 代替案 {n} ({year})",
+    "screenshot_filter": "PNG (*.png);;JPEG (*.jpg);;すべてのファイル (*)",
+    "screenshot_failed": "スクリーンショットを保存できませんでした。",
+    "risk_tooltip": "<b>{value}</b><br/><b>主要ハザード:</b> {hazard}<br/><b>要素:</b> {elements}",
+    "risk_low": "低",
+    "risk_medium": "中",
+    "risk_high": "高",
+    "risk_very_high": "非常に高い",
+    "node_year": "ノード {node} — {year}",
+    "node": "ノード {node}"
   },
   "results_charts": {
     "select_chart": "チャート:",
@@ -1307,7 +1476,30 @@
     "mga_decision_factors": "決定要因",
     "mga_investment_composition": "投資構成",
     "mga_pairwise_similarity": "ペア類似度",
-    "num_days": "日数:"
+    "num_days": "日数:",
+    "no_summary_data": "サマリーデータがありません",
+    "axis_year": "年",
+    "axis_total_cost": "総コスト (M$)",
+    "title_cost_evolution": "システムコストの推移",
+    "axis_re_penetration": "再エネ導入率 (%)",
+    "axis_co2_mt": "CO2 排出量 (Mt)",
+    "title_emissions_vs_re": "排出量と再エネ導入率",
+    "res_hourly": "時間別",
+    "res_daily": "日別",
+    "res_monthly": "月別",
+    "res_yearly": "年別",
+    "colormap": "カラーマップ",
+    "year": "年:",
+    "net_load_a": "a) 正味負荷",
+    "ramp_b": "b) ランプ",
+    "method": "手法:",
+    "granularity": "粒度",
+    "granularity_tech": "技術",
+    "granularity_tech_node": "技術 × ノード",
+    "discount_rate": "割引率 (%)",
+    "voll": "VOLL ($/MWh)",
+    "chart_error": "エラー: {error}",
+    "no_generation_data": "発電データがありません"
   },
   "custom_chart": {
     "x_axis": "X:",
@@ -1350,7 +1542,11 @@
     "save_as_tip": "現在のスクリプトを新しいファイルに保存",
     "run_tip": "現在のスクリプトを実行 (Ctrl+Enter)",
     "file_menu_tip": "ファイル操作（新規、開く、保存、名前を付けて保存）",
-    "untitled": "無題"
+    "untitled": "無題",
+    "open_title": "Python スクリプトを開く",
+    "save_title": "Python スクリプトを保存",
+    "py_filter": "Python ファイル (*.py);;すべてのファイル (*)",
+    "untitled_n": "無題_{n}"
   },
   "visual_style": {
     "group_appearance": "外観",
@@ -1361,7 +1557,17 @@
     "width": "幅 (px):",
     "choose_color": "マーカーの色を選択",
     "size_auto_tip": "0 = 自動（グローバルマーカースケーリング使用）",
-    "width_auto_tip": "0 = 自動（グローバルラインスケーリング使用）"
+    "width_auto_tip": "0 = 自動（グローバルラインスケーリング使用）",
+    "auto": "自動",
+    "shape_circle": "円",
+    "shape_square": "四角形",
+    "shape_diamond": "ひし形",
+    "shape_triangle_up": "上向き三角形",
+    "shape_triangle_down": "下向き三角形",
+    "shape_hexagon": "六角形",
+    "shape_pentagon": "五角形",
+    "shape_horizontal_bar": "横棒",
+    "shape_star": "星"
   },
   "geo_parse": {
     "title": "地理資産を解析: {name}",
@@ -1377,7 +1583,8 @@
     "target_system": "対象システム:",
     "auto_nearest": "自動（最寄り）",
     "select_system_title": "対象システムの選択",
-    "select_system_prompt": "解析された要素をどのシステムに追加しますか？"
+    "select_system_prompt": "解析された要素をどのシステムに追加しますか？",
+    "header": "<b>{name}</b> — {count} 個の地物"
   },
   "common": {
     "add": "追加",
@@ -1415,7 +1622,9 @@
     "remove_term": "項を削除",
     "add": "追加",
     "edit": "編集",
-    "remove": "削除"
+    "remove": "削除",
+    "target_operational": "運用",
+    "target_investment": "投資"
   },
   "geo_domain": {
     "group": "インポートした領域をドメインとして使用",
@@ -2141,7 +2350,25 @@
     "generate": "生成",
     "close": "閉じる",
     "done_title": "生成完了",
-    "done_message": "可用性プロファイルを正常に生成しました:"
+    "done_message": "可用性プロファイルを正常に生成しました:",
+    "plugins_menu": "プラグイン",
+    "source_open_meteo": "Open-Meteo (ERA5、API キー不要)",
+    "source_nasa_power": "NASA POWER (MERRA-2、API キー不要)",
+    "source_atlite": "atlite 経由の ERA5 (CDS API キーが必要)",
+    "year_to": "～",
+    "tilt_optimal": "緯度に基づく最適値",
+    "tilt_custom": "カスタム",
+    "tracking_none": "なし",
+    "tracking_horizontal": "水平軸",
+    "tracking_vertical": "垂直軸",
+    "tracking_dual": "2軸",
+    "turbine_default": "{name} (既定)",
+    "profile_solar": "太陽光",
+    "profile_wind": "風力",
+    "no_generators_selected": "プロファイル種別が太陽光または風力の発電機が選択されていません。",
+    "no_model_loaded": "モデルが読み込まれていません。先に設定を読み込んでください。",
+    "export_failed": "設定のエクスポートに失敗しました: {error}",
+    "done_status": "完了しました。{count} 件のプロファイルを生成しました。"
   },
   "electrical": {
     "inherited_from_bus": "（母線から継承）",
@@ -2368,7 +2595,8 @@
     "mode_label": "分析モード:",
     "mode_dc": "DC潮流計算",
     "mode_ac": "AC潮流計算",
-    "mode_sc": "短絡計算"
+    "mode_sc": "短絡計算",
+    "summary": "発電: {gen} MW | 需要: {demand} MW | 収支: {balance} MW"
   },
   "overlay": {
     "deleting": "{n} 要素を削除中...",
@@ -3437,5 +3665,14 @@
     "uq_param_capex_structure_factor": "構造物 CAPEX 係数",
     "uq_param_opex_factor": "OPEX 係数",
     "uq_param_discount_rate": "割引率"
+  },
+  "multi_edit": {
+    "mixed_values": "-- 複数の値 --",
+    "mixed": "-- 混在 --"
+  },
+  "python_console": {
+    "banner": "Python コンソール - ESFEX Studio\n利用可能: model, state, config, window, esfex, np\nスクリプト API リファレンスは esfex.help() と入力してください。",
+    "process_running": "[エラー] サブプロセスはすでに実行中です。先に Ctrl+C でキャンセルしてください。",
+    "clear": "コンソールをクリア"
   }
 }

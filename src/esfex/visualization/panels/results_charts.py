@@ -2202,7 +2202,8 @@ class ResultsChartBase(FigureCanvasQTAgg):
             logger.warning(f"Chart {self.TITLE} failed: {e}")
             if hasattr(self, "ax"):
                 self.ax.clear()
-                self.ax.text(0.5, 0.5, f"Error: {e}", transform=self.ax.transAxes,
+                self.ax.text(0.5, 0.5, tr("results_charts.chart_error", error=e),
+                             transform=self.ax.transAxes,
                              ha="center", va="center", fontsize=10, color="red")
             self.draw()
 
@@ -2750,7 +2751,8 @@ class SummaryMetricsChart(ResultsChartBase):
             bp = kw.get("base_prefix", "")
             sg = _open_summary_results(h5f, bp)
             if sg is None:
-                ax1.text(0.5, 0.5, "No summary data", transform=ax1.transAxes, ha="center")
+                ax1.text(0.5, 0.5, tr("results_charts.no_summary_data"),
+                         transform=ax1.transAxes, ha="center")
                 self.draw()
                 return
             yrs = sg["year"][:] if "year" in sg else np.array([])
@@ -2761,16 +2763,16 @@ class SummaryMetricsChart(ResultsChartBase):
         if len(yrs) > 0 and len(cost) > 0:
             idx = np.argsort(yrs)
             ax1.plot(yrs[idx], cost[idx] / 1e6, "o-", linewidth=2, markersize=5, color="#2980b9")
-            ax1.set_xlabel("Year", fontweight="bold")
-            ax1.set_ylabel("Total Cost (M$)", fontweight="bold")
-            ax1.set_title("System Cost Evolution", fontweight="bold")
+            ax1.set_xlabel(tr("results_charts.axis_year"), fontweight="bold")
+            ax1.set_ylabel(tr("results_charts.axis_total_cost"), fontweight="bold")
+            ax1.set_title(tr("results_charts.title_cost_evolution"), fontweight="bold")
             ax1.grid(True, alpha=0.3)
 
         if len(re_pen) > 0 and len(co2) > 0:
             ax2.scatter(re_pen * 100, co2 / 1e6, s=50, alpha=0.7, c="#27ae60")
-            ax2.set_xlabel("RE Penetration (%)", fontweight="bold")
-            ax2.set_ylabel("CO2 Emissions (Mt)", fontweight="bold")
-            ax2.set_title("Emissions vs RE Penetration", fontweight="bold")
+            ax2.set_xlabel(tr("results_charts.axis_re_penetration"), fontweight="bold")
+            ax2.set_ylabel(tr("results_charts.axis_co2_mt"), fontweight="bold")
+            ax2.set_title(tr("results_charts.title_emissions_vs_re"), fontweight="bold")
             ax2.grid(True, alpha=0.3)
 
         self.fig.tight_layout()
@@ -2867,7 +2869,7 @@ class BatteryHeatmapChart(QWidget):
         sp.valueChanged.connect(self._on_sigma_changed)
         wl.addWidget(sp)
 
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -3105,9 +3107,14 @@ class BatteryOperationChart(QWidget):
         wl.setContentsMargins(0, 0, 0, 0)
         wl.addWidget(QLabel(tr("results_charts.resolution")))
         cb = QComboBox()
-        cb.addItems(["hourly", "daily", "monthly", "yearly"])
-        cb.setCurrentText(self._resolution)
-        cb.currentTextChanged.connect(self._on_resolution_changed)
+        for value, key in (("hourly", "results_charts.res_hourly"),
+                           ("daily", "results_charts.res_daily"),
+                           ("monthly", "results_charts.res_monthly"),
+                           ("yearly", "results_charts.res_yearly")):
+            cb.addItem(tr(key), value)
+        cb.setCurrentIndex(max(0, cb.findData(self._resolution)))
+        cb.currentIndexChanged.connect(
+            lambda _i, c=cb: self._on_resolution_changed(c.currentData()))
         wl.addWidget(cb)
         self._resolution_combo = cb
         wl.addStretch()
@@ -3146,7 +3153,7 @@ class BatteryOperationChart(QWidget):
                     cb = getattr(self, "_resolution_combo", None)
                     if cb is not None:
                         cb.blockSignals(True)
-                        cb.setCurrentText("hourly")
+                        cb.setCurrentIndex(max(0, cb.findData("hourly")))
                         cb.blockSignals(False)
         except Exception:
             logger.debug(
@@ -3384,7 +3391,7 @@ class NetLoadHeatmapChart(QWidget):
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
 
-        wl.addWidget(QLabel("Year:"))
+        wl.addWidget(QLabel(tr("results_charts.year")))
         yc = QComboBox()
         yc.addItems([str(y) for y in self._available_years])
         if self._available_years:
@@ -3411,12 +3418,12 @@ class NetLoadHeatmapChart(QWidget):
             cb.setStyleSheet("QComboBox { combobox-popup: 0; }")
             return cb
 
-        wl.addWidget(QLabel("a) Net Load"))
+        wl.addWidget(QLabel(tr("results_charts.net_load_a")))
         cb_a = _make_cmap_combo(self._colormap_a)
         cb_a.currentTextChanged.connect(self._on_colormap_a_changed)
         wl.addWidget(cb_a)
 
-        wl.addWidget(QLabel("b) Ramp"))
+        wl.addWidget(QLabel(tr("results_charts.ramp_b")))
         cb_b = _make_cmap_combo(self._colormap_b)
         cb_b.currentTextChanged.connect(self._on_colormap_b_changed)
         wl.addWidget(cb_b)
@@ -4084,7 +4091,7 @@ class ElectricityCostChart(QWidget):
         sp.valueChanged.connect(self._on_sigma_changed)
         wl.addWidget(sp)
 
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -5654,7 +5661,7 @@ class MGASpatialChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -5700,7 +5707,7 @@ class MGAProjectionChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Method:"))
+        wl.addWidget(QLabel(tr("results_charts.method")))
         cb = QComboBox()
         for d, lab in (("pca", "PCA"), ("tsne", "t-SNE")):
             cb.addItem(lab, d)
@@ -5756,8 +5763,8 @@ class MGADecisionFactorsChart(_MGAChartBase):
     # decision (one column per (technology, node) cell that any
     # alternative actually used > 1 MW).
     _GRANULARITIES = [
-        ("tech",      "Tech"),
-        ("tech_node", "Tech × Node"),
+        ("tech",      "results_charts.granularity_tech"),
+        ("tech_node", "results_charts.granularity_tech_node"),
     ]
 
     def __init__(self):
@@ -5769,10 +5776,10 @@ class MGADecisionFactorsChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Granularity"))
+        wl.addWidget(QLabel(tr("results_charts.granularity")))
         gb = QComboBox()
-        for value, label in self._GRANULARITIES:
-            gb.addItem(label, value)
+        for value, key in self._GRANULARITIES:
+            gb.addItem(tr(key), value)
         # Match selection to the saved key, not the display label.
         idx = next((i for i, (v, _) in enumerate(self._GRANULARITIES)
                     if v == self._granularity), 0)
@@ -5782,7 +5789,7 @@ class MGADecisionFactorsChart(_MGAChartBase):
         )
         wl.addWidget(gb)
         wl.addSpacing(12)
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -5886,7 +5893,7 @@ class MGASimilarityChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -6198,7 +6205,7 @@ class SankeyEnergyFlowChart(QWidget):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Year:"))
+        wl.addWidget(QLabel(tr("results_charts.year")))
         cb = QComboBox()
         cb.addItems([str(y) for y in self._available_years])
         if self._available_years:
@@ -6490,7 +6497,7 @@ class SankeyEnergyFlowChart(QWidget):
         if not gen_by_tech:
             self.fig.clf()
             ax = self.fig.add_axes([0, 0, 1, 1])
-            ax.text(0.5, 0.5, "No generation data available",
+            ax.text(0.5, 0.5, tr("results_charts.no_generation_data"),
                     ha="center", va="center", fontsize=14, color="#888")
             ax.set_axis_off()
             self.draw()
@@ -7346,7 +7353,7 @@ class CashFlowChart(QWidget):
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
 
-        wl.addWidget(QLabel("Discount rate (%)"))
+        wl.addWidget(QLabel(tr("results_charts.discount_rate")))
         sp_d = QDoubleSpinBox()
         sp_d.setRange(0.0, 30.0)
         sp_d.setSingleStep(0.5)
@@ -7354,7 +7361,7 @@ class CashFlowChart(QWidget):
         sp_d.valueChanged.connect(self._on_discount_changed)
         wl.addWidget(sp_d)
 
-        wl.addWidget(QLabel("VOLL ($/MWh)"))
+        wl.addWidget(QLabel(tr("results_charts.voll")))
         sp_v = QDoubleSpinBox()
         sp_v.setRange(0.0, 100000.0)
         sp_v.setSingleStep(500.0)

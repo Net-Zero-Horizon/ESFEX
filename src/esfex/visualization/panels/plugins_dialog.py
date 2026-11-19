@@ -195,7 +195,7 @@ class PluginsDialog(QDialog):
             self,
             tr("plugins_dialog.install_zip"),
             "",
-            "ZIP Files (*.zip)",
+            tr("plugins_dialog.zip_filter"),
         )
         if not path:
             return
@@ -204,7 +204,8 @@ class PluginsDialog(QDialog):
         except ValueError as exc:
             if "already exists" in str(exc):
                 reply = QMessageBox.question(
-                    self, tr("common.warning"), str(exc) + "\n\nOverwrite?",
+                    self, tr("common.warning"),
+                    tr("plugins_dialog.overwrite_prompt", error=exc),
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
@@ -225,13 +226,14 @@ class PluginsDialog(QDialog):
         self._pm.discover()
         self._populate_table()
         self._hot_load_plugin(installed)
-        QMessageBox.information(self, tr("common.info"), f"Installed: {installed}")
+        QMessageBox.information(self, tr("common.info"),
+                                tr("plugins_dialog.installed", name=installed))
 
     def _on_install_git(self) -> None:
         url, ok = QInputDialog.getText(
             self,
             tr("plugins_dialog.install_git"),
-            "Git URL:",
+            tr("plugins_dialog.git_url"),
         )
         if not ok or not url.strip():
             return
@@ -245,11 +247,7 @@ class PluginsDialog(QDialog):
         def _prompt_untrusted_host(host: str) -> bool:
             reply = QMessageBox.question(
                 self, tr("common.warning"),
-                f"The git host {host!r} is not in the default trusted "
-                "list (github, gitlab, bitbucket, codeberg, sourcehut). "
-                "Installing from an attacker-controlled host runs the "
-                "plugin's __init__.py with full process privileges.\n\n"
-                "Proceed only if you trust this URL.",
+                tr("plugins_dialog.untrusted_host", host=repr(host)),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -261,7 +259,8 @@ class PluginsDialog(QDialog):
             msg = str(exc)
             if "already exists" in msg:
                 reply = QMessageBox.question(
-                    self, tr("common.warning"), msg + "\n\nOverwrite?",
+                    self, tr("common.warning"),
+                    tr("plugins_dialog.overwrite_prompt", error=msg),
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
@@ -293,7 +292,8 @@ class PluginsDialog(QDialog):
         self._pm.discover()
         self._populate_table()
         self._hot_load_plugin(installed)
-        QMessageBox.information(self, tr("common.info"), f"Installed: {installed}")
+        QMessageBox.information(self, tr("common.info"),
+                                tr("plugins_dialog.installed", name=installed))
 
     def _on_trust(self) -> None:
         """Record the selected plugin's current files as trusted and load it."""

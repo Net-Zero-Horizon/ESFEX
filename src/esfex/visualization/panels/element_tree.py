@@ -261,7 +261,7 @@ class ElementTreePanel(QWidget):
         if name in self._system_items:
             return
 
-        sys_item = QTreeWidgetItem(self.tree, [name, "system"])
+        sys_item = QTreeWidgetItem(self.tree, [name, tr("tree.system_info")])
         sys_item.setData(0, 100, ("system", name))
         font = sys_item.font(0)
         font.setBold(True)
