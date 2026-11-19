@@ -355,7 +355,8 @@
     "scale_factor": "Factor de Escala:",
     "select_availability_file": "Seleccionar CSV de Disponibilidad",
     "availability_browse_tooltip": "Buscar un CSV de disponibilidad (perfil horario, valores 0-1)",
-    "availability_clear_tooltip": "Borrar ruta de disponibilidad"
+    "availability_clear_tooltip": "Borrar ruta de disponibilidad",
+    "reservoir_inflow_placeholder": "CSV de caudales horarios (MW equivalentes)"
   },
   "battery_form": {
     "group_id": "Identificación",
@@ -703,7 +704,8 @@
     "fixed_cost": "Costo Fijo ($/MW/año):",
     "variable_cost": "Costo Variable ($/MWh):",
     "water_cost": "Costo del Agua ($/kg H₂):",
-    "lifetime": "Vida Útil (años):"
+    "lifetime": "Vida Útil (años):",
+    "multi_selected": "{count} electrolizadores seleccionados"
   },
   "ev_form": {
     "group_categories": "Categorías",
@@ -1156,7 +1158,8 @@
     "tool.results": "Ver Resultados",
     "tool.risk": "Riesgo y Resiliencia",
     "tool": {
-      "fuel_entry": "Fuente de Combustible"
+      "fuel_entry": "Fuente de Combustible",
+      "fuel_route": "Ruta de Combustible"
     }
   },
   "validation": {
@@ -1300,7 +1303,8 @@
     "mga_cluster_tree": "Árbol Clusters",
     "mga_decision_factors": "Factores Decisión",
     "mga_investment_composition": "Composición Inversión",
-    "mga_pairwise_similarity": "Similaridad Pareada"
+    "mga_pairwise_similarity": "Similaridad Pareada",
+    "num_days": "Días:"
   },
   "custom_chart": {
     "x_axis": "X:",
@@ -1500,7 +1504,8 @@
     "running_sim": "Ejecutando simulación...",
     "no_year_data": "No hay resultados detallados para el año {year}.",
     "no_gen_data": "No hay datos de generación.",
-    "node_no_centroid": "Este nodo no tiene centroide definido. Usa 'Colocar' para fijarlo en el mapa primero."
+    "node_no_centroid": "Este nodo no tiene centroide definido. Usa 'Colocar' para fijarlo en el mapa primero.",
+    "invalid_line_msg": "Una línea no puede conectar un elemento {from_type} con uno {to_type}."
   },
   "wizard_solar": {
     "title": "Análisis Solar de Tejados",
@@ -1989,7 +1994,18 @@
     "avail_preview": "Vista Previa del Perfil",
     "avail_done_title": "Perfiles Generados",
     "avail_done_msg": "Se generaron {n} perfil(es) de disponibilidad y se actualizó el modelo.",
-    "avail_error_title": "Error en Generación"
+    "avail_error_title": "Error en Generación",
+    "mean_ghi": "GHI medio",
+    "peak_sun_hours": "Horas solares pico",
+    "performance_ratio": "Relación de rendimiento",
+    "clearness_index": "Índice de claridad",
+    "mean_cell_temp": "Temperatura media de celda",
+    "lcoe": "LCOE",
+    "npv": "VAN",
+    "irr": "TIR",
+    "payback": "Período de recuperación",
+    "annual_gen": "Generación anual",
+    "net_efficiency": "Eficiencia neta"
   },
   "wizard_common": {
     "draw_on_map": "Dibujar en Mapa",

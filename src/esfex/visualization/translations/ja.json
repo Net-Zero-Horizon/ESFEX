@@ -355,7 +355,8 @@
     "scale_factor": "スケール係数:",
     "select_availability_file": "利用可能性CSVを選択",
     "availability_browse_tooltip": "利用可能性CSVを参照(時間別プロファイル, 値 0-1)",
-    "availability_clear_tooltip": "利用可能性パスをクリア"
+    "availability_clear_tooltip": "利用可能性パスをクリア",
+    "reservoir_inflow_placeholder": "時間別流入量のCSV (MW換算)"
   },
   "battery_form": {
     "group_id": "識別",
@@ -703,7 +704,8 @@
     "fixed_cost": "固定費 ($/MW/年):",
     "variable_cost": "可変費 ($/MWh):",
     "water_cost": "水コスト ($/kg H₂):",
-    "lifetime": "寿命 (年):"
+    "lifetime": "寿命 (年):",
+    "multi_selected": "{count} 台の電解装置を選択中"
   },
   "ev_form": {
     "group_categories": "カテゴリ",
@@ -1156,7 +1158,8 @@
     "tool.results": "結果を表示",
     "tool.risk": "リスク & レジリエンス",
     "tool": {
-      "fuel_entry": "燃料ソース"
+      "fuel_entry": "燃料ソース",
+      "fuel_route": "燃料ルート"
     }
   },
   "validation": {
@@ -1300,7 +1303,8 @@
     "mga_cluster_tree": "クラスター樹形図",
     "mga_decision_factors": "決定要因",
     "mga_investment_composition": "投資構成",
-    "mga_pairwise_similarity": "ペア類似度"
+    "mga_pairwise_similarity": "ペア類似度",
+    "num_days": "日数:"
   },
   "custom_chart": {
     "x_axis": "X:",
@@ -1500,7 +1504,8 @@
     "running_sim": "シミュレーション実行中...",
     "no_year_data": "{year} 年の詳細結果がありません。",
     "no_gen_data": "発電データがありません。",
-    "node_no_centroid": "このノードには重心が設定されていません。まず「配置」でマップ上に設定してください。"
+    "node_no_centroid": "このノードには重心が設定されていません。まず「配置」でマップ上に設定してください。",
+    "invalid_line_msg": "線路で {from_type} と {to_type} を接続することはできません。"
   },
   "wizard_solar": {
     "title": "太陽光屋根上分析",
@@ -1989,7 +1994,18 @@
     "avail_preview": "プロファイルプレビュー",
     "avail_done_title": "プロファイル生成完了",
     "avail_done_msg": "{n} 件の可用性プロファイルを生成し、モデルを更新しました。",
-    "avail_error_title": "生成エラー"
+    "avail_error_title": "生成エラー",
+    "mean_ghi": "平均GHI",
+    "peak_sun_hours": "ピーク日照時間",
+    "performance_ratio": "パフォーマンスレシオ",
+    "clearness_index": "晴天指数",
+    "mean_cell_temp": "平均セル温度",
+    "lcoe": "LCOE",
+    "npv": "NPV",
+    "irr": "IRR",
+    "payback": "回収期間",
+    "annual_gen": "年間発電量",
+    "net_efficiency": "正味効率"
   },
   "wizard_common": {
     "draw_on_map": "マップ上で描画",

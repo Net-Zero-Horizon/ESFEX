@@ -355,7 +355,8 @@
     "scale_factor": "Facteur d'échelle :",
     "select_availability_file": "Sélectionner le CSV de disponibilité",
     "availability_browse_tooltip": "Parcourir pour un CSV de disponibilité (profil horaire, valeurs 0-1)",
-    "availability_clear_tooltip": "Effacer le chemin de disponibilité"
+    "availability_clear_tooltip": "Effacer le chemin de disponibilité",
+    "reservoir_inflow_placeholder": "CSV des apports horaires (MW équivalents)"
   },
   "battery_form": {
     "group_id": "Identification",
@@ -703,7 +704,8 @@
     "fixed_cost": "Coût fixe ($/MW/an) :",
     "variable_cost": "Coût variable ($/MWh) :",
     "water_cost": "Coût de l'eau ($/kg H₂) :",
-    "lifetime": "Durée de vie (années) :"
+    "lifetime": "Durée de vie (années) :",
+    "multi_selected": "{count} électrolyseurs sélectionnés"
   },
   "ev_form": {
     "group_categories": "Catégories",
@@ -1156,7 +1158,8 @@
     "tool.results": "Afficher les résultats",
     "tool.risk": "Risque et résilience",
     "tool": {
-      "fuel_entry": "Source de combustible"
+      "fuel_entry": "Source de combustible",
+      "fuel_route": "Itinéraire de combustible"
     }
   },
   "validation": {
@@ -1300,7 +1303,8 @@
     "mga_cluster_tree": "Arbre de regroupement",
     "mga_decision_factors": "Facteurs de décision",
     "mga_investment_composition": "Composition des investissements",
-    "mga_pairwise_similarity": "Similarité par paires"
+    "mga_pairwise_similarity": "Similarité par paires",
+    "num_days": "Jours :"
   },
   "custom_chart": {
     "x_axis": "X :",
@@ -1500,7 +1504,8 @@
     "running_sim": "Exécution de la simulation...",
     "no_year_data": "Aucun résultat détaillé pour l'année {year}.",
     "no_gen_data": "Aucune donnée de production.",
-    "node_no_centroid": "Ce nœud n'a pas de centroïde défini. Utilisez « Placer » pour le définir sur la carte d'abord."
+    "node_no_centroid": "Ce nœud n'a pas de centroïde défini. Utilisez « Placer » pour le définir sur la carte d'abord.",
+    "invalid_line_msg": "Une ligne ne peut pas relier un élément {from_type} à un élément {to_type}."
   },
   "wizard_solar": {
     "title": "Analyse du solaire en toiture",
@@ -1989,7 +1994,18 @@
     "avail_preview": "Aperçu du profil",
     "avail_done_title": "Profils générés",
     "avail_done_msg": "{n} profil(s) de disponibilité généré(s) et modèle mis à jour.",
-    "avail_error_title": "Erreur de génération"
+    "avail_error_title": "Erreur de génération",
+    "mean_ghi": "GHI moyen",
+    "peak_sun_hours": "Heures d'ensoleillement de pointe",
+    "performance_ratio": "Ratio de performance",
+    "clearness_index": "Indice de clarté",
+    "mean_cell_temp": "Température moyenne des cellules",
+    "lcoe": "LCOE",
+    "npv": "VAN",
+    "irr": "TRI",
+    "payback": "Délai de récupération",
+    "annual_gen": "Production annuelle",
+    "net_efficiency": "Rendement net"
   },
   "wizard_common": {
     "draw_on_map": "Dessiner sur la carte",
