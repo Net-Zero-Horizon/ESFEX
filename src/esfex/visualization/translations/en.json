@@ -355,7 +355,8 @@
     "scale_factor": "Scale Factor:",
     "select_availability_file": "Select Availability CSV",
     "availability_browse_tooltip": "Browse for an availability CSV (hourly profile, values 0-1)",
-    "availability_clear_tooltip": "Clear availability path"
+    "availability_clear_tooltip": "Clear availability path",
+    "reservoir_inflow_placeholder": "CSV of hourly inflows (MW-equivalent)"
   },
   "battery_form": {
     "group_id": "Identification",
@@ -703,7 +704,8 @@
     "fixed_cost": "Fixed Cost ($/MW/yr):",
     "variable_cost": "Variable Cost ($/MWh):",
     "water_cost": "Water Cost ($/kg H₂):",
-    "lifetime": "Lifetime (years):"
+    "lifetime": "Lifetime (years):",
+    "multi_selected": "{count} electrolyzers selected"
   },
   "ev_form": {
     "group_categories": "Categories",
@@ -1156,7 +1158,8 @@
     "tool.results": "View Results",
     "tool.risk": "Risk & Resilience",
     "tool": {
-      "fuel_entry": "Fuel Source"
+      "fuel_entry": "Fuel Source",
+      "fuel_route": "Fuel Route"
     }
   },
   "validation": {
@@ -1300,7 +1303,8 @@
     "mga_cluster_tree": "Cluster Tree",
     "mga_decision_factors": "Decision Factors",
     "mga_investment_composition": "Investment Composition",
-    "mga_pairwise_similarity": "Pairwise Similarity"
+    "mga_pairwise_similarity": "Pairwise Similarity",
+    "num_days": "Days:"
   },
   "custom_chart": {
     "x_axis": "X:",
@@ -1500,7 +1504,8 @@
     "running_sim": "Running simulation...",
     "no_year_data": "No detailed results for year {year}.",
     "no_gen_data": "No generation data.",
-    "node_no_centroid": "This node has no centroid set. Use 'Place' to set it on the map first."
+    "node_no_centroid": "This node has no centroid set. Use 'Place' to set it on the map first.",
+    "invalid_line_msg": "A line cannot connect a {from_type} to a {to_type}."
   },
   "wizard_solar": {
     "title": "Solar Rooftop Analysis",
@@ -1989,7 +1994,18 @@
     "avail_preview": "Profile Preview",
     "avail_done_title": "Profiles Generated",
     "avail_done_msg": "Generated {n} availability profile(s) and updated the model.",
-    "avail_error_title": "Generation Error"
+    "avail_error_title": "Generation Error",
+    "mean_ghi": "Mean GHI",
+    "peak_sun_hours": "Peak sun hours",
+    "performance_ratio": "Performance ratio",
+    "clearness_index": "Clearness index",
+    "mean_cell_temp": "Mean cell temperature",
+    "lcoe": "LCOE",
+    "npv": "NPV",
+    "irr": "IRR",
+    "payback": "Payback period",
+    "annual_gen": "Annual generation",
+    "net_efficiency": "Net efficiency"
   },
   "wizard_common": {
     "draw_on_map": "Draw on Map",

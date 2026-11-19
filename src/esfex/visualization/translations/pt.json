@@ -355,7 +355,8 @@
     "scale_factor": "Fator de escala:",
     "select_availability_file": "Selecionar CSV de disponibilidade",
     "availability_browse_tooltip": "Procurar um CSV de disponibilidade (perfil horário, valores 0-1)",
-    "availability_clear_tooltip": "Limpar caminho de disponibilidade"
+    "availability_clear_tooltip": "Limpar caminho de disponibilidade",
+    "reservoir_inflow_placeholder": "CSV de afluências horárias (MW equivalentes)"
   },
   "battery_form": {
     "group_id": "Identificação",
@@ -703,7 +704,8 @@
     "fixed_cost": "Custo fixo ($/MW/ano):",
     "variable_cost": "Custo variável ($/MWh):",
     "water_cost": "Custo da água ($/kg H₂):",
-    "lifetime": "Vida útil (anos):"
+    "lifetime": "Vida útil (anos):",
+    "multi_selected": "{count} eletrolisadores selecionados"
   },
   "ev_form": {
     "group_categories": "Categorias",
@@ -1156,7 +1158,8 @@
     "tool.results": "Ver resultados",
     "tool.risk": "Risco e resiliência",
     "tool": {
-      "fuel_entry": "Fonte de combustível"
+      "fuel_entry": "Fonte de combustível",
+      "fuel_route": "Rota de combustível"
     }
   },
   "validation": {
@@ -1300,7 +1303,8 @@
     "mga_cluster_tree": "Árvore de Agrupamento",
     "mga_decision_factors": "Fatores de Decisão",
     "mga_investment_composition": "Composição do Investimento",
-    "mga_pairwise_similarity": "Similaridade aos Pares"
+    "mga_pairwise_similarity": "Similaridade aos Pares",
+    "num_days": "Dias:"
   },
   "custom_chart": {
     "x_axis": "X:",
@@ -1500,7 +1504,8 @@
     "running_sim": "A executar a simulação...",
     "no_year_data": "Sem resultados detalhados para o ano {year}.",
     "no_gen_data": "Sem dados de geração.",
-    "node_no_centroid": "Este nó não tem centroide definido. Use 'Colocar' para defini-lo no mapa primeiro."
+    "node_no_centroid": "Este nó não tem centroide definido. Use 'Colocar' para defini-lo no mapa primeiro.",
+    "invalid_line_msg": "Uma linha não pode ligar um elemento {from_type} a um elemento {to_type}."
   },
   "wizard_solar": {
     "title": "Análise de solar em telhado",
@@ -1989,7 +1994,18 @@
     "avail_preview": "Pré-visualização do perfil",
     "avail_done_title": "Perfis gerados",
     "avail_done_msg": "{n} perfil(is) de disponibilidade gerado(s) e modelo atualizado.",
-    "avail_error_title": "Erro de geração"
+    "avail_error_title": "Erro de geração",
+    "mean_ghi": "GHI médio",
+    "peak_sun_hours": "Horas de sol pleno",
+    "performance_ratio": "Rácio de desempenho",
+    "clearness_index": "Índice de claridade",
+    "mean_cell_temp": "Temperatura média da célula",
+    "lcoe": "LCOE",
+    "npv": "VAL",
+    "irr": "TIR",
+    "payback": "Período de retorno",
+    "annual_gen": "Geração anual",
+    "net_efficiency": "Eficiência líquida"
   },
   "wizard_common": {
     "draw_on_map": "Desenhar no mapa",

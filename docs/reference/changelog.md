@@ -1554,6 +1554,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **No raw translation keys in the Studio.** Sixteen texts showed their key
+  instead of a translation, in every language: the advanced Solar PV
+  wizard's resource and financial results (`wizard_solar_pv.lcoe`, `.npv`,
+  `.irr`, `.mean_ghi`, ...), the invalid-line message, the reservoir inflow
+  file hint, the multi-electrolyzer header, the results charts' day count and
+  the fuel-route action in Preferences. They now have translations in all
+  five languages, and a test checks that every key the Studio uses exists and
+  that no new untranslated text is added (the texts still hard-coded in
+  English are listed in `tests/i18n_untranslated_baseline.json`).
+
 - **The Grid Builder's steps fit the wizard.** Step 1 laid out its four data
   sources in one row and its settings in four columns, and steps 1 and 2 had
   unwrapped intro text, so a step's page was wider than the wizard (step 1:
