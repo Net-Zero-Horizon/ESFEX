@@ -3,7 +3,8 @@ Key translations the loader applies before Pydantic validation.
 
 Older files and the Studio write some keys under names the schema does not
 declare: flat ``dc_*`` system keys, ``unit_*``/``bat_*`` units, a single
-``electrolyzer`` block, penalties in any case. The loader
+``electrolyzer`` block, penalties in any case, renamed system keys
+(``max_annual_system_cost``; ``SystemConfig`` renames those itself). The loader
 (:mod:`esfex.config.loader`) reads them through these helpers, and the
 unknown-key walker (:mod:`esfex.config.unknown_keys`) uses the same helpers
 to decide which keys are consumed, so the two cannot drift apart.
@@ -11,7 +12,10 @@ to decide which keys are consumed, so the two cannot drift apart.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
+
+log = logging.getLogger(__name__)
 
 # ``DCPowerFlowConfig`` fields that may be given as flat system keys
 # ``dc_<field>`` (any capitalisation, e.g. ``DC_SLACK_BUS``).
@@ -24,6 +28,13 @@ LEGACY_UNIT_PREFIXES = ("unit_", "bat_")
 
 # System key holding a single electrolyzer (legacy / Studio format).
 SINGLE_ELECTROLYZER_KEY = "electrolyzer"
+
+# System keys renamed since: old name → field name. A file may still use
+# the old one; it is read as the new field.
+LEGACY_SYSTEM_KEYS = {
+    "max_annual_system_cost": "max_annual_investment",
+    "MAX_ANNUAL_SYSTEM_COST": "max_annual_investment",
+}
 
 # Penalty keys are read case-insensitively; the keys here are legacy
 # spellings of a ``PenaltiesConfig`` field.
@@ -54,3 +65,30 @@ def penalty_field(key: Any) -> str:
     """The ``PenaltiesConfig`` field name a penalties key maps to."""
     name = str(key).lower()
     return PENALTY_ALIASES.get(name, name)
+
+
+def legacy_system_field(key: Any) -> Optional[str]:
+    """The ``SystemConfig`` field an old system key now names, or None."""
+    return LEGACY_SYSTEM_KEYS.get(str(key))
+
+
+def rename_legacy_system_keys(data: dict[str, Any]) -> dict[str, Any]:
+    """*data* (a system's keys) with each old key of ``LEGACY_SYSTEM_KEYS``
+    under its field name, with one info line. When the field is also given
+    by its own name, that one is kept (a warning if the values differ)."""
+    old = [k for k in data if str(k) in LEGACY_SYSTEM_KEYS]
+    if not old:
+        return data
+    data = dict(data)
+    for key in old:
+        field = LEGACY_SYSTEM_KEYS[str(key)]
+        value = data.pop(key)
+        if field in data:
+            if data[field] != value:
+                log.warning("System %r: both %s (%r) and %s (%r) are set; using %s.",
+                            data.get("name"), field, data[field], key, value, field)
+            continue
+        data[field] = value
+        log.info("System %r: %s is read as %s (the annual investment budget).",
+                 data.get("name"), key, field)
+    return data

@@ -111,7 +111,9 @@ class SystemConfig(BaseModel):
     demand_scale: float = 1.0                    # > 0
     target_re_penetration: float = 1.0           # alias TARGET_RE_PENETRATION
     discount_rate: float = 0.05
-    max_annual_system_cost: float = 20e9         # alias MAX_ANNUAL_SYSTEM_COST
+    max_annual_investment: float = 20e9          # old key max_annual_system_cost / MAX_ANNUAL_SYSTEM_COST
+    budget_scope: Literal["investment", "total"] = "investment"
+    max_annual_operating_cost: Optional[float] = None   # dispatch operating budget, off when None
     power_flow_mode: Literal["dcopf", "dcopf_ac_verify", "acopf_soc", "acopf_qc",
                              "acopf_sdp", "acopf_polar", "acopf_rect"] = "dcopf"
     nodes: NodeConfig                            # required
@@ -124,7 +126,7 @@ class SystemConfig(BaseModel):
     ...
 ```
 
-Legacy uppercase aliases: `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `MAX_ANNUAL_SYSTEM_COST`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`.
+Legacy uppercase aliases: `SIM_ROOFTOP`, `TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `INERTIA_LIMIT_THRESHOLD`, `EV_initial_soc`, and the Studio metadata `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`. Renamed key: `max_annual_system_cost` (and `MAX_ANNUAL_SYSTEM_COST`) is read as `max_annual_investment`.
 
 **Properties:**
 

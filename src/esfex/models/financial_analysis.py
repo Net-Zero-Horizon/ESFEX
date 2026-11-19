@@ -1017,6 +1017,7 @@ def compute_system_financials(
                 + cbd.get("reservoir_spillage_cost", 0.0)
                 + cbd.get("rooftop_curtailment_cost", 0.0)
                 + cbd.get("transfer_margin_cost", 0.0)
+                + cbd.get("operating_budget_penalty", 0.0)
             )
         else:
             # Fallback: recalculate from generation × config

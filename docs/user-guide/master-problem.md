@@ -145,7 +145,7 @@ $$
 - \(C^{ext}_y\): life-extension cost of existing units kept beyond their lifetime.
 - \(C^{dec}_y\): decommissioning cost of existing units when they retire.
 - \(C^{op}_y\): representative-day operating cost scaled to the year. It includes fuel, fixed and maintenance cost of existing units and new technologies, plus the penalty terms of the dispatch (unserved energy, curtailment, reserve and inertia shortfall), the RE-target shortfall at `FRE_penetration_loss` per MWh, the renewable energy above the RE growth cap that cannot be curtailed at `loss_of_load` per MWh and the CO2-budget violation.
-- \(C^{slack}_y\): the investment over `MAX_ANNUAL_SYSTEM_COST`, at 10 \$ per \$ exceeded, and the capacity-adequacy shortfall, at `loss_of_load` (VOLL) per MWh for each hour of the node's peak period. Neither makes the model infeasible. The budget binds unless a build over it saves more than ten times its overnight cost: a MW that avoids load shed at VOLL for many hours a year can, so a plan short of firm capacity may still go over the budget (the diagnostics report `budget_y*`).
+- \(C^{slack}_y\): the investment over `max_annual_investment` (with `budget_scope: total`, the investment plus the year's operating cost), at 10 \$ per \$ exceeded, and the capacity-adequacy shortfall, at `loss_of_load` (VOLL) per MWh for each hour of the node's peak period. Neither makes the model infeasible. The budget binds unless a build over it saves more than ten times its overnight cost: a MW that avoids load shed at VOLL for many hours a year can, so a plan short of firm capacity may still go over the budget (the diagnostics report `budget_y*`).
 
 `r` is the system's `discount_rate` (default 0.05). A higher rate favours deferring capital-intensive investment.
 
@@ -302,7 +302,8 @@ systems:
     MAX_ANNUAL_INCREMENT: 0.10
     discount_rate: 0.05
     life_extension_cost_factor: 0.2
-    MAX_ANNUAL_SYSTEM_COST: 20000000000.0
+    max_annual_investment: 20000000000.0
+    budget_scope: investment
     reserve_margin: 1.15
     penalties:
       FRE_penetration_loss: 100.0
@@ -389,7 +390,7 @@ temporal:
 | `mga.num_alternatives` | 10 | MGA only (1 to 100) |
 | `mga.objectives` | `[]` | SPORES objective menu, see [SporesObjective](../api/config-schema.md#sporesobjective). Must be non-empty for SPORES and empty for MGA |
 
-The system-level keys that shape the plan (`TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `discount_rate`, `life_extension_cost_factor`, `MAX_ANNUAL_SYSTEM_COST`, `reserve_margin`) are described in the [Configuration guide](configuration.md); the NPV-based retirement keys [above](#npv-based-retirement) and in the [Configuration Reference](../reference/config-reference.md).
+The system-level keys that shape the plan (`TARGET_RE_PENETRATION`, `MIN_ANNUAL_INCREMENT`, `MAX_ANNUAL_INCREMENT`, `discount_rate`, `life_extension_cost_factor`, `max_annual_investment`, `budget_scope`, `reserve_margin`) are described in the [Configuration guide](configuration.md); the NPV-based retirement keys [above](#npv-based-retirement) and in the [Configuration Reference](../reference/config-reference.md).
 
 
 ### Demand Seen by the Master

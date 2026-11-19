@@ -15,6 +15,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from esfex.config.legacy_keys import rename_legacy_system_keys
 from esfex.utils.temporal import HOURS_STD_YEAR
 
 
@@ -2042,15 +2043,33 @@ class SystemConfig(BaseModel):
     target_re_penetration: float = Field(default=1.0, ge=0, le=1, alias="TARGET_RE_PENETRATION")
     min_annual_increment: float = Field(default=0.01, ge=0, alias="MIN_ANNUAL_INCREMENT")
     max_annual_increment: float = Field(default=0.10, ge=0, alias="MAX_ANNUAL_INCREMENT")
-    max_annual_system_cost: float = Field(
-        default=20e9, alias="MAX_ANNUAL_SYSTEM_COST",
-        description="Annual investment budget ($), not a cap on the total "
-                    "annual system cost: in every master mode it limits the "
-                    "overnight cost of the technologies, battery technologies, "
-                    "transmission and reservoirs built in each investment "
-                    "period (soft, 10 $ per $ over it). The dispatch also uses "
-                    "it, scaled to the window, as a soft ceiling on the "
-                    "window's fuel, maintenance and fixed O&M cost",
+    max_annual_investment: float = Field(
+        default=20e9,
+        description="Annual investment budget ($/yr): in every master mode "
+                    "it limits the overnight cost of the technologies, battery "
+                    "technologies, transmission and reservoirs built in each "
+                    "investment period (soft, 10 $ per $ over it). With "
+                    "budget_scope 'total' the year's operating cost counts "
+                    "against it too. The old key max_annual_system_cost "
+                    "(MAX_ANNUAL_SYSTEM_COST) is read as this one",
+    )
+    max_annual_operating_cost: Optional[float] = Field(
+        default=None, gt=0,
+        description="Annual operating budget of the dispatch ($/yr): fuel, "
+                    "maintenance and fixed O&M of each year. The year's "
+                    "windows share it in proportion to their demand, what a "
+                    "window leaves unspent stays available to the next ones, "
+                    "and spending above it costs 1000 $ per $, so unaffordable "
+                    "fuel becomes unserved energy. Off (no cap) when unset",
+    )
+    budget_scope: Literal["investment", "total"] = Field(
+        default="investment",
+        description="What max_annual_investment covers in the master: "
+                    "'investment' (the overnight investment of each build "
+                    "year) or 'total' (that investment plus the year's "
+                    "operating cost as the master values it). Benders "
+                    "decomposition supports 'investment' only (with 'total' "
+                    "the monolithic master is solved)",
     )
     discount_rate: float = Field(default=0.05, ge=0, le=1)
     base_lcoe: float = Field(
@@ -2244,6 +2263,15 @@ class SystemConfig(BaseModel):
     @property
     def num_buses(self) -> int:
         return len(self.buses) if self.buses else self.num_nodes
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rename_legacy_keys(cls, data: Any) -> Any:
+        """Read the keys older files use for a field under their new name
+        (``max_annual_system_cost`` → ``max_annual_investment``)."""
+        if isinstance(data, dict):
+            return rename_legacy_system_keys(data)
+        return data
 
     @model_validator(mode='after')
     def _ensure_buses(self) -> 'SystemConfig':

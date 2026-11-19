@@ -217,7 +217,7 @@ Higher discount rates favor technologies with lower upfront costs (diesel) over 
 ### Investment Budget Constraints
 
 ```yaml
-    MAX_ANNUAL_SYSTEM_COST: 500000000.0   # $500M/year cap
+    max_annual_investment: 500000000.0   # $500M/year cap
 ```
 
 This caps the master problem's investment cost per investment period (a soft cap: excess spending is allowed through a penalised slack). Lower budgets spread deployments over time and delay the RE transition, but may be more realistic for constrained economies.
@@ -269,7 +269,7 @@ systems:
     demand_scale: 1.0
     TARGET_RE_PENETRATION: 0.60
     discount_rate: 0.05
-    MAX_ANNUAL_SYSTEM_COST: 500000000.0
+    max_annual_investment: 500000000.0
 
     nodes:
       nodes_connections: [0.0, 100.0, 75.0,
@@ -370,28 +370,28 @@ scenarios = {
         "systems.island.TARGET_RE_PENETRATION": 0.30,
         "systems.island.demand_path": "demand_3pct.csv",
         "systems.island.penalties.co2_cost": 0.0,
-        "systems.island.MAX_ANNUAL_SYSTEM_COST": 200000000.0,
+        "systems.island.max_annual_investment": 200000000.0,
         "systems.island.discount_rate": 0.08,
     },
     "green": {
         "systems.island.TARGET_RE_PENETRATION": 0.80,
         "systems.island.demand_path": "demand_2pct.csv",
         "systems.island.penalties.co2_cost": 50.0,
-        "systems.island.MAX_ANNUAL_SYSTEM_COST": 500000000.0,
+        "systems.island.max_annual_investment": 500000000.0,
         "systems.island.discount_rate": 0.05,
     },
     "conservative": {
         "systems.island.TARGET_RE_PENETRATION": 0.50,
         "systems.island.demand_path": "demand_1pct.csv",
         "systems.island.penalties.co2_cost": 10.0,
-        "systems.island.MAX_ANNUAL_SYSTEM_COST": 300000000.0,
+        "systems.island.max_annual_investment": 300000000.0,
         "systems.island.discount_rate": 0.06,
     },
     "aggressive": {
         "systems.island.TARGET_RE_PENETRATION": 1.00,
         "systems.island.demand_path": "demand_4pct.csv",
         "systems.island.penalties.co2_cost": 100.0,
-        "systems.island.MAX_ANNUAL_SYSTEM_COST": 800000000.0,
+        "systems.island.max_annual_investment": 800000000.0,
         "systems.island.discount_rate": 0.04,
     },
 }

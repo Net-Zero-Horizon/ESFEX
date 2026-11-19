@@ -158,6 +158,7 @@ export add_curtailment_constraints!, add_renewable_constraint!, add_co2_constrai
 export extract_solution
 export recover_uc_duals_via_copy
 export compute_n1_security_cost!
+export add_operating_budget!
 
 # EV types
 export EVConfig, EVVariables, EVResult

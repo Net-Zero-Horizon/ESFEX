@@ -711,7 +711,9 @@ class TestGuiSystemSettings:
         assert ss.target_re_penetration == 1.0
         assert ss.min_annual_increment == 0.01
         assert ss.max_annual_increment == 0.10
-        assert ss.max_annual_system_cost == 20e9
+        assert ss.max_annual_investment == 20e9
+        assert ss.max_annual_operating_cost is None
+        assert ss.budget_scope == "investment"
         assert not hasattr(ss, "max_npv_penalty_per_mw")
         assert not hasattr(ss, "force_replacement")
         assert ss.life_extension_cost_factor == 0.20
