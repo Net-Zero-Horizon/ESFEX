@@ -5915,6 +5915,50 @@ function get_units_with_negative_npv(
                             extra_years = extra_years))
 end
 
+"""
+    npv_round_reference_cost(result, input, units; extra_years=0) -> Float64
+
+The total cost a master re-solve that retires `units` (`UnitNPV`) is
+compared with, in the objective's units: the objective of the solved plan
+`result` (for `input`, extracted with `unit_operation`), less the units' NPV
+over the `extra_years` past the master's horizon (`extra_unit_npv`,
+probability-weighted over the scenarios; `extra_years` as for
+`calculate_unit_npv`).
+
+The objective holds every cost of an existing unit over the modelled years
+(its operation, and in `build_annual_asset_cost` its fixed O&M on the
+capacity in service, life extension and decommissioning, at the end of its
+life or, retired, in the first year), so the costs a retired unit avoids
+are in the re-solve's objective. It stops at the master's horizon: a
+myopic year's master models that year only, so the units' later years (what
+keeping them earns and costs there, as their NPV values them) are counted
+here. With `extra_years = 0` it is `result.objective`.
+"""
+function npv_round_reference_cost(result::MasterProblemResult, input::MasterProblemInput,
+                                  units::AbstractVector{UnitNPV};
+                                  extra_years::Int = 0)::Float64
+    cost = result.objective
+    extra_years > 0 || return cost
+    Y = length(input.years)
+    for u in units
+        kind = u.unit_type == "generator" ? :gen : :bat
+        cap_last = unit_capacity_by_year(result, kind, u.unit_idx, u.node, Y)[end]
+        for op in result.unit_operation
+            cost -= op.probability *
+                    extra_unit_npv(op, input, kind, u.unit_idx, u.node, cap_last, extra_years)[1]
+        end
+    end
+    return cost
+end
+
+"""
+    cost_grew(before, after) -> Bool
+
+Whether a re-solve's total cost (`after`) is above `before` beyond the
+solver's noise (relative 1e-6).
+"""
+cost_grew(before::Real, after::Real) = after > before + 1e-6 * abs(before)
+
 # Copy of `v` with entry `n` set to 0
 _zero_at(v::AbstractVector, n::Int) = (w = copy(v); n <= length(w) && (w[n] = 0.0); w)
 
@@ -5973,12 +6017,16 @@ retired. `solver = :benders` solves each master by Benders decomposition
 (`run_benders_decomposition` with `benders_kwargs`); `extra_years` is
 passed to `calculate_unit_npv` (a myopic year's master).
 
-When a re-solve is not optimal, or curtails more above the annual
-curtailment limit than the plan before (`curtailment_excess_mwh`: retiring
-the store that held the limit; the limit was a hard constraint, under which
-such a re-solve was infeasible), the round that led to it is undone: the
-result is the last optimal plan with the retirements made up to it, and a
-warning names the units of the undone round and the reason.
+Each master is solved with `optimize_master!` (a retry with the solver's
+numerical parameters, a warning for curtailment above the annual limits).
+When a re-solve is not optimal, curtails more above the annual curtailment
+limit than the plan before (`curtailment_excess_mwh`: retiring the store
+that held the limit; the limit was a hard constraint, under which such a
+re-solve was infeasible), or costs more in total than the plan before
+(`cost_grew` of its objective over `npv_round_reference_cost`: retiring the
+units saved less than it cost elsewhere), the round that led to it is
+undone: the result is the last optimal plan with the retirements made up to
+it, and a warning names the units of the undone round and the reason.
 
 `iterations` counts the master solves; `npv_history` holds, per solve, the
 NPV of every unit evaluated (`"generator_g_bus"` / `"battery_b_bus"`);
@@ -6005,7 +6053,7 @@ function solve_with_npv_iteration(
             return (optimal(sol.status) ? sol : nothing), sol.status, 0.0
         end
         model, vars, _ = create_master_problem(inp; use_representative_days = use_representative_days)
-        optimize!(model)
+        optimize_master!(model)
         st = termination_status(model)
         optimal(st) || return nothing, st, 0.0
         return extract_master_solution(model, vars, inp; unit_operation = true), st,
@@ -6021,18 +6069,26 @@ function solve_with_npv_iteration(
     last_round = 0
     iter = 0
     prev_excess = 0.0
+    prev_cost = 0.0
     while true
         iter += 1
         result, status, excess = solve_once(current)
-        if result === nothing || (previous !== nothing && excess_grew(prev_excess, excess))
+        why = if result === nothing
             previous === nothing &&
                 error("NPV retirement: the first master solve is not optimal ($(status))")
+            "is not optimal ($(status))"
+        elseif previous !== nothing && excess_grew(prev_excess, excess)
+            "curtails $(round(excess / 1e3; sigdigits = 4)) GWh/yr above the annual " *
+            "curtailment limit (the plan before: $(round(prev_excess / 1e3; sigdigits = 4)))"
+        elseif previous !== nothing && cost_grew(prev_cost, result.objective)
+            "raises the plan's total cost to $(round(result.objective; sigdigits = 8)) M\$ " *
+            "(the plan before: $(round(prev_cost; sigdigits = 8)) M\$)"
+        else
+            nothing
+        end
+        if why !== nothing
             # Undo the last round: the previous plan still has its units
             undone = retired[end - last_round + 1:end]
-            why = result === nothing ? "is not optimal ($(status))" :
-                "curtails $(round(excess / 1e3; sigdigits = 4)) GWh/yr above the annual " *
-                "curtailment limit (the plan before: " *
-                "$(round(prev_excess / 1e3; sigdigits = 4)))"
             @warn "NPV retirement: the master re-solve after retiring " * describe(undone) *
                   " $(why); keeping these units and the last optimal plan"
             return NPVIterationResult(iter, false, previous,
@@ -6056,6 +6112,7 @@ function solve_with_npv_iteration(
               describe(flagged)
         append!(retired, flagged)
         last_round = length(flagged)
+        prev_cost = npv_round_reference_cost(result, current, flagged; extra_years = extra_years)
         current = retire_units(current, flagged)
         previous = result
     end

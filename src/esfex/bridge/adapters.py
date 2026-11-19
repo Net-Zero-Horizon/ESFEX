@@ -3859,18 +3859,21 @@ class MasterProblemAdapter:
                 [(r["kind"], r["key"], r["bus"]) for r in self.npv_retirements]))
         return jl_input
 
-    def _unit_npvs(self) -> List[Dict[str, Any]]:
-        """NPV ($) of each existing unit in the solved plan (Julia
-        ``unit_npvs``), as dicts with kind, key, name, bus (1-based, the
-        master's location), node (0-based), npv and retire (below the
+    def _npv_result(self) -> Any:
+        """The solved plan (Julia ``MasterProblemResult``) with the units'
+        operation, for their NPV."""
+        if self.solver_method == "benders":
+            return self._benders_solution
+        return get_esfex_module().extract_master_solution(
+            self._jl_model, self._jl_vars, self._jl_input, unit_operation=True)
+
+    def _unit_npvs(self, result: Any) -> List[Dict[str, Any]]:
+        """NPV ($) of each existing unit in the solved plan *result*
+        (Julia ``unit_npvs``), as dicts with kind, key, name, bus (1-based,
+        the master's location), node (0-based), npv and retire (below the
         threshold)."""
         jl = get_julia()
         ESFEX = get_esfex_module()
-        if self.solver_method == "benders":
-            result = self._benders_solution
-        else:
-            result = ESFEX.extract_master_solution(
-                self._jl_model, self._jl_vars, self._jl_input, unit_operation=True)
         npvs = ESFEX.unit_npvs(result, self._jl_input,
                                npv_threshold=scale_cost(self.npv_threshold),
                                extra_years=self.npv_extra_years)
@@ -3905,17 +3908,21 @@ class MasterProblemAdapter:
         it or after ``npv_retirement_max_iterations`` rounds. Each retired
         unit is added to ``npv_retirements`` with its NPV and round.
 
-        A re-solve that is not optimal (or fails), or that curtails more
+        A re-solve that is not optimal (or fails), that curtails more
         above the annual curtailment limit than the plan before (retiring
         the store that held the limit: under the hard limit of earlier
-        versions such a re-solve was infeasible), undoes its round: the last
-        optimal model and its retirements are kept, a warning names the
-        units of the undone round and the reason, and the iteration stops
-        (the run goes on with that plan). Returns the status of the plan
-        kept."""
+        versions such a re-solve was infeasible), or whose total cost is
+        above the plan before's (relative 1e-6: retiring the units saved
+        less than it cost elsewhere; Julia ``npv_round_reference_cost``)
+        undoes its round: the last optimal model and its retirements are
+        kept, a warning names the units of the undone round and the reason,
+        and the iteration stops (the run goes on with that plan). Returns
+        the status of the plan kept."""
+        ESFEX = get_esfex_module()
         rounds = 0
         while status == 1:
-            npvs = self._unit_npvs()
+            result = self._npv_result()
+            npvs = self._unit_npvs(result)
             for u in npvs:
                 logger.debug(f"  NPV {u['kind']} {u['name']} (node {u['node']}, "
                              f"bus {u['bus']}): ${u['npv']:,.0f}")
@@ -3938,6 +3945,12 @@ class MasterProblemAdapter:
                             for u in flagged))
             kept = {a: getattr(self, a) for a in self._SOLVED_STATE}
             excess_before = self._curtailment_excess_mwh()
+            # The plan before's total cost, past the horizon of a myopic
+            # year's master the units' later years as their NPV counts them
+            cost_before = float(ESFEX.npv_round_reference_cost(
+                result, self._jl_input,
+                self._jl_units([(u["kind"], u["key"], u["bus"]) for u in flagged]),
+                extra_years=self.npv_extra_years))
             n_before = len(self.npv_retirements)
             for u in flagged:
                 u = dict(u, iteration=rounds)
@@ -3955,6 +3968,13 @@ class MasterProblemAdapter:
                     status = 0
                     why = (f"curtails {excess / 1e3:,.4g} GWh/yr above the annual "
                            f"curtailment limit (the plan before: {excess_before / 1e3:,.4g})")
+                else:
+                    cost = self._plan_cost()
+                    if bool(ESFEX.cost_grew(cost_before, cost)):
+                        status = 0
+                        why = (f"raises the plan's total cost to "
+                               f"${cost * COST_UNSCALE:,.0f} (the plan before: "
+                               f"${cost_before * COST_UNSCALE:,.0f})")
             if status != 1:
                 undone = self.npv_retirements[n_before:]
                 del self.npv_retirements[n_before:]
@@ -3966,6 +3986,12 @@ class MasterProblemAdapter:
                     + f" {why}; keeping these units and the last optimal plan")
                 return 1
         return status
+
+    def _plan_cost(self) -> float:
+        """Objective (M$) of the solved master: the plan's total cost."""
+        if self.solver_method == "benders":
+            return float(self._benders_solution.objective)
+        return float(get_julia().seval("objective_value")(self._jl_model))
 
     def _curtailment_excess_mwh(self) -> float:
         """MWh/yr the solved master curtails above its annual curtailment
