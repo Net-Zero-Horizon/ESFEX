@@ -309,7 +309,7 @@ The days reuse the dispatch constraints above (generators with capacity override
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `soc_bnd_y{y}_b{b}_n{n}_p{p}`, `soc_bnd_cap_y{y}_b{b}_n{n}_p{p}` | TSAM-SOC | SOC boundary chain and capacity bound |
+| `soc_bnd_y{y}_b{b}_n{n}_p{p}`, `soc_bnd_cap_y{y}_b{b}_n{n}_p{p}` | TSAM-SOC | SOC boundary chain and capacity bound (the battery's energy in service that year, life-extended energy included, as the period's SOC bound) |
 | `soc_year_cyclic_y{y}_b{b}_n{n}` | TSAM-CYC | Year-end SOC boundary equals year start |
 | `reslvl_bnd_y{y}_g{g}_n{n}_p{p}` | TSAM-RES | Reservoir level boundary chain |
 | `reslvl_year_cyclic_y{y}_g{g}_n{n}` | TSAM-RCYC | Year-cyclic reservoir level |

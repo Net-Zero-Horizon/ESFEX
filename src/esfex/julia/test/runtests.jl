@@ -4744,6 +4744,55 @@ import Ipopt
             @test sum(mvals(m, "op_y1_d1_rs_loss")) ≈ 5.0 * H24 atol = 1e-6
         end
 
+        @testset "TSAM boundary SOC of a battery uses its in-service energy" begin
+            # Two chained TSAM periods: day 1 has no load and 4 h of 20 MW
+            # PV, day 2 needs 60 MWh that only the battery (charged on day 1)
+            # or 1e-3 diesel can serve. The battery is past its life_time;
+            # the master may extend it. The boundary SOC was bounded by the
+            # existing energy within lifetime only (0 here), so even the
+            # life-extended battery could not carry energy across periods.
+            H2 = 2 * H24
+            pv_av = zeros(H2, 1); pv_av[1:4, 1] .= 1.0
+            pv = mkgen("PV", "Renewable", "Solar", [20.0], [0.0], pv_av; nb = 1, H = H2)
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                           ones(H2, 1); nb = 1, H = H2)
+            tinp(bat) = MasterProblemInput(
+                years = [2025], network = net1, generators = [pv, diesel],
+                batteries = [bat],
+                base_demand = reshape(vcat(zeros(H24), fill(2.5, H24)), H2, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                loss_of_load_penalty = 0.01, reserve_margin = 0.0,
+                reserve_static_default_ratio = 0.0,
+                use_tsam = true, tsam_inter_period_linking = true,
+                tsam_period_start_hours = [[1, H24 + 1]], tsam_period_weights = [[1.0, 1.0]],
+                tsam_chronological_order = [[1, 2]], verbose = false)
+            old = ESFEX.with_fields(mkbat(); life_time = [5.0], initial_age = [10.0],
+                                    invest_cost_power = [1.0e-7])
+            model, mvars = master1(tinp(old))
+            ext = only(v for v in all_variables(model) if startswith(name(v), "bat_life_ext"))
+            @test value(ext) > 1.0
+            @test sum(mvals(model, "op_y1_d2_gen[2,")) ≈ 0.0 atol = 1e-6
+            # 60 MWh discharged at 95 %: day 2 starts with at least 63.2 MWh
+            # carried across the boundary (it was held at 0)
+            @test value(mvars.inter_period_soc[1][(1, 1, 1)]) >= 60.0 / 0.95 - 1e-6
+            # The boundary bound is the period's SOC bound: life-extended MW
+            # at the battery's 100 MWh / 20 MW ratio
+            cap_con(m) = first(c for c in all_constraints(m; include_variable_in_set_constraints = false)
+                               if name(c) == "soc_bnd_cap_y1_b1_n1_p1")
+            @test ESFEX.JuMP.normalized_coefficient(cap_con(model), ext) ≈ -5.0
+
+            # Within its lifetime, with degradation: the boundary bound is the
+            # rated 100 MWh the period's SOC bound uses (the master does not
+            # degrade batteries), not anything else.
+            young = ESFEX.with_fields(mkbat(); degradation_rate = [0.05], initial_age = [4.0])
+            ym, _, _ = create_master_problem(tinp(young); use_representative_days = true)
+            @test ESFEX.JuMP.normalized_rhs(cap_con(ym)) ≈ 100.0
+            soc = variable_by_name(ym, "op_y1_d1_bat_soc[1,1,2]")
+            soc_cap = only(c for c in all_constraints(ym, AffExpr, ESFEX.JuMP.MOI.LessThan{Float64})
+                           if collect(keys(constraint_object(c).func.terms)) == [soc])
+            @test ESFEX.JuMP.normalized_rhs(soc_cap) ≈ 100.0
+        end
+
         @testset "battery technologies: fixed cost, ramp and availability (master, Benders)" begin
             o = [0.0]
             function li(; fixed = 0.0, ramp = 0.0, avail = zeros(0, 1))
