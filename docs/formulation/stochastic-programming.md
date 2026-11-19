@@ -318,7 +318,7 @@ Solution time scales roughly linearly with the number of scenarios for LP proble
 
 All scenarios share the same representative-day selection (from the base-case demand profile). Each scenario builds its own dispatch on those days.
 
-When TSAM is enabled (`use_tsam: true`), TSAM periods and weights are computed once from the base case and shared across all scenarios. Each scenario has its own inter-period storage and reservoir chains; the first scenario's chains are the ones reported.
+When TSAM is enabled (`use_tsam: true`), TSAM periods and weights are computed once from the base case and shared across all scenarios. Each scenario has its own inter-day storage and reservoir states (§8.5.3 of the capacity expansion); the first scenario's are the ones reported.
 
 ---
 

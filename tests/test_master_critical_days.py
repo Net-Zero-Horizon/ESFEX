@@ -175,9 +175,17 @@ def test_tsam_periods_include_the_critical_days(tmp_path):
     assert plan.rep_day_offsets is None and plan.critical_day_offsets == []
     assert tsam.num_periods == 7 and tsam.period_start_hours[-1] == DARK * DAY
     assert tsam.period_weights[-1] == 1.0
-    assert sum(tsam.period_weights) == pytest.approx(N_DAYS)
-    starts = tsam.period_start_hours
-    assert [starts[i] for i in tsam.chronological_order] == sorted(starts)
+    assert sum(tsam.period_weights) == N_DAYS
+    # Every day of the year is in one period, the critical day in its own:
+    # each weight is the period's count of days (K44: the seasonal storage
+    # runs through the year on this map, so it must count each period as
+    # often as its cost and energy do; the weights used to be reweighted
+    # fractions)
+    assert len(tsam.day_period) == N_DAYS
+    assert tsam.day_period[DARK] == 6
+    assert np.bincount(tsam.day_period, minlength=7).tolist() == tsam.period_weights
+    for k, start in enumerate(tsam.period_start_hours):
+        assert tsam.day_period[start // DAY] == k
 
 
 @pytest.mark.julia

@@ -99,7 +99,7 @@ Strategic multi-year capacity expansion planning. See [Master Problem](../user-g
 | Enable TSAM Clustering | Off | Replace peak-day selection with time-series clustering |
 | TSAM Periods | 10 | Number of clustered representative days per year (2 to 365) |
 | Clustering Method | `kmedoids` | `kmedoids` or `kmeans` |
-| Inter-Period Storage Linking (Battery + Hydro) | On | Chain storage state of charge across clustered days |
+| Inter-Period Storage Linking (Battery + Hydro) | On | Seasonal storage: battery and reservoir levels carried through every day of the year across the clustered days |
 
 ### MGA / SPORES (Near-Optimal Alternative Exploration)
 

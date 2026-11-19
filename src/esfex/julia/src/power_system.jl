@@ -2046,10 +2046,10 @@ Cyclic constraint ensures end-of-horizon level matches initial level (within tol
 """
 function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
     # TSAM seasonal hydro linking: when present, the reservoir starts a period
-    # at the boundary level handed in (initial_reservoir_overrides[(g,b)]) and
-    # ends it exactly at the next boundary (final_reservoir_targets[(g,b)]),
-    # forming a chronological chain across representative periods instead of
-    # being cyclic within the period.
+    # at the level handed in (initial_reservoir_overrides[(g,b)]) and ends it
+    # exactly at the expression handed in (final_reservoir_targets[(g,b)]),
+    # the period's start and end in the master's seasonal storage
+    # (add_tsam_periods_validation!), instead of being cyclic within the period.
     initial_reservoir_overrides::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
     final_reservoir_targets::Union{Nothing, Dict{Tuple{Int,Int}, Any}} = nothing,
     # Total reservoir capacity (MWh) per (g, b) where the caller adds its own
@@ -2145,7 +2145,7 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
             # binds anyway).
             head_span = (max_level_frac - min_level_frac) * res_cap
 
-            # Initial level. Precedence: TSAM seasonal boundary variable >
+            # Initial level. Precedence: TSAM seasonal start level >
             # rolling-horizon seam value > configured initial fraction.
             seasonal_init = initial_reservoir_overrides === nothing ? nothing :
                 get(initial_reservoir_overrides, (g, b), nothing)
@@ -2256,7 +2256,7 @@ function add_reservoir_constraints!(model, vars::PowerSystemVariables, input;
             end
 
             # End level. With TSAM seasonal linking the period end is pinned to
-            # the next chronological boundary variable (water carries over);
+            # the target handed in (start + the period's change: water carries over);
             # otherwise the reservoir is cyclic within the period (end ≈ start).
             seasonal_final = final_reservoir_targets === nothing ? nothing :
                 get(final_reservoir_targets, (g, b), nothing)

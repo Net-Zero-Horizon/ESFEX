@@ -103,6 +103,8 @@ This section provides the full bibliography for the ESFEX documentation. Referen
 
 <a id="ref37"></a>**[37]** Nahmmacher P, Schmid E, Hirth L, Knopf B. Carpe diem: A novel approach to select representative days for long-term power system planning. *Energy* 2016;112:430–442. [doi:10.1016/j.energy.2016.06.081](https://doi.org/10.1016/j.energy.2016.06.081)
 
+<a id="ref85"></a>**[85]** Kotzur L, Markewitz P, Robinius M, Stolten D. Time series aggregation for energy system design: Modeling seasonal storage. *Applied Energy* 2018;213:123–135. [doi:10.1016/j.apenergy.2018.01.023](https://doi.org/10.1016/j.apenergy.2018.01.023)
+
 ## Capacity Expansion Planning
 
 <a id="ref24"></a>**[24]** Koltsaklis NE, Dagoumas AS. State-of-the-art generation expansion planning: A review. *Applied Energy* 2018;230:563–589. [doi:10.1016/j.apenergy.2018.08.087](https://doi.org/10.1016/j.apenergy.2018.08.087)
