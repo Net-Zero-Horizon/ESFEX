@@ -28,10 +28,11 @@ from esfex.visualization.workflows.grid_mapping_steps import (
     GridMappingSourceFetchStep,
 )
 
+# Translation keys of the step names (resolved when the wizard is built).
 _STEP_NAMES = [
-    "Region & Fetch",
-    "Build & Connect",
-    "Demand",
+    "grid_builder.step_region_fetch",
+    "grid_builder.step_build_connect",
+    "grid_builder.step_demand",
 ]
 
 
@@ -49,7 +50,7 @@ class GridMappingWizard(QDialog):
         geo_assets_provider=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Grid Builder")
+        self.setWindowTitle(tr("grid_builder.wizard_title"))
         self.setMinimumSize(800, 806)
         self.resize(950, 910)
         self.setModal(False)
@@ -83,7 +84,7 @@ class GridMappingWizard(QDialog):
         self._indicator_bar = QHBoxLayout()
         self._step_labels: list[QLabel] = []
         for i, name in enumerate(_STEP_NAMES):
-            lbl = QLabel(f"  {i + 1}. {name}  ")
+            lbl = QLabel(f"  {i + 1}. {tr(name)}  ")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet(
                 self._step_style(is_current=(i == 0), is_done=False)
@@ -133,17 +134,17 @@ class GridMappingWizard(QDialog):
         # Button row
         btn_layout = QHBoxLayout()
 
-        self._btn_cancel = QPushButton("Cancel")
+        self._btn_cancel = QPushButton(tr("common.cancel"))
         self._btn_cancel.clicked.connect(self._on_cancel)
         btn_layout.addWidget(self._btn_cancel)
 
         btn_layout.addStretch()
 
-        self._btn_back = QPushButton("Back")
+        self._btn_back = QPushButton(tr("wizard_common.back"))
         self._btn_back.clicked.connect(self._go_back)
         btn_layout.addWidget(self._btn_back)
 
-        self._btn_next = QPushButton("Next")
+        self._btn_next = QPushButton(tr("wizard_common.next"))
         self._btn_next.clicked.connect(self._go_next)
         btn_layout.addWidget(self._btn_next)
 
@@ -215,14 +216,14 @@ class GridMappingWizard(QDialog):
         self._btn_back.setVisible(idx > 0)
 
         if idx == n - 1:
-            self._btn_next.setText("Close")
+            self._btn_next.setText(tr("wizard_common.close"))
             try:
                 self._btn_next.clicked.disconnect()
             except RuntimeError:
                 pass
             self._btn_next.clicked.connect(self.accept)
         else:
-            self._btn_next.setText("Next")
+            self._btn_next.setText(tr("wizard_common.next"))
             try:
                 self._btn_next.clicked.disconnect()
             except RuntimeError:

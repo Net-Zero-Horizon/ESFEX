@@ -2364,6 +2364,32 @@ class TestVoltagesFromTheData:
             lat=0.5, lng=0.5, osm_id="way/1")
         assert feat.voltage_kv == 0.0
 
+    @pytest.mark.parametrize("tag,levels", [
+        ("220000", [220.0]),
+        ("220000;110000", [220.0, 110.0]),
+        ("400000,220000", [400.0, 220.0]),
+        ("33000; 13200", [33.0, 13.2]),
+        # forms PyPSA's OSM cleaning also accepts
+        ("110 kV", [110.0]),
+        ("13.8kV", [13.8]),
+        ("13,8 kV", [13.8]),
+        ("33,11 kV", [33.0, 11.0]),
+        ("220/110 kV", [220.0, 110.0]),
+        ("220000/110000", [220.0, 110.0]),
+        ("400 kV; 220 kV", [400.0, 220.0]),
+        ("220000V", [220.0]),
+        ("2x220000", [220.0]),
+        ("2*220000", [220.0]),
+        ("220000;220000", [220.0]),
+        # words stay unknown: the builder infers the level
+        ("medium", []), ("high", []), ("", []),
+    ])
+    def test_voltage_tag_forms(self, tag, levels):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            _parse_voltage_tag,
+        )
+        assert _parse_voltage_tag(tag) == levels
+
     def test_untagged_transformer_secondary_and_converter_stay_unknown(self):
         f = self._fetcher()
         tr = f._process_element(tags={"power": "transformer",
@@ -2415,6 +2441,59 @@ class TestVoltagesFromTheData:
         assert odd.voltage_kv == 132.0                  # input untouched
         assert [(n["name"], n["was"], n["kv"], n["rule"]) for n in notes] == [
             ("PCC", 132.0, 110.0, "off_standard_level")]
+
+    @pytest.mark.parametrize("name,levels", [
+        ("Taguasco 13.8 kV", [13.8]), ("Sub 220/110 kV", [220.0, 110.0]),
+        ("El Rubi", []), ("T 34,5kV", [34.5])])
+    def test_name_levels(self, name, levels):
+        assert gmb._name_levels(name) == levels
+
+    def test_levels_no_line_carries_resolved_like_cuba(self):
+        # Cuba's lines are 220/110 kV and its data tags 13.8 and 13.2 kV
+        # somewhere. The four stations tagged 132/138 kV, as OSM has them:
+        lines = [self._line("L1", (21.0, -82.0), (21.5, -82.0), 110.0),
+                 self._line("L2", (21.5, -82.0), (22.0, -82.0), 220.0)]
+        mdist = {"substation": "minor_distribution"}
+        stations = [
+            # name gives another level: the tag has a zero too many
+            _feat("substation", name="Taguasco 13.8 kV", lat=22.0, lng=-79.26,
+                  voltage_kv=138.0, raw_tags=mdist, osm_id="way/30"),
+            # name repeats the tag: an HV level was meant (it is 110 kV)
+            _feat("substation", name="Ciudad Libertad 138 kV", lat=23.09,
+                  lng=-82.42, voltage_kv=138.0, raw_tags=mdist, osm_id="way/31"),
+            # distribution role, no name: misplaced decimal
+            _feat("substation", name="Subestación La Mambisa", lat=20.31,
+                  lng=-76.88, voltage_kv=132.0, raw_tags=mdist, osm_id="way/32"),
+            # no role, no name: nearest line level
+            _feat("substation", name="San Jose PCC", lat=22.96, lng=-82.15,
+                  voltage_kv=132.0, osm_id="way/33"),
+        ]
+        notes = []
+        out = gmb._reconcile_station_voltages(
+            stations, lines, 1.0, notes, data_levels={220.0, 110.0, 13.8, 13.2})
+        assert [s.voltage_kv for s in out] == [13.8, 110.0, 13.2, 110.0]
+        assert [n["rule"] for n in notes] == [
+            "name_level", "off_standard_level", "decimal_slip",
+            "off_standard_level"]
+
+    def test_decimal_slip_needs_the_level_in_the_data(self):
+        # 138 kV is standard (ANSI C84.1, IEC 60038): a distribution station
+        # tagged 138 kV becomes 13.8 kV only where the data uses 13.8 kV.
+        lines = [self._line("L1", (21.0, -82.0), (21.5, -82.0), 110.0)]
+        st = _feat("substation", name="S", lat=23.0, lng=-82.0,
+                   voltage_kv=138.0, osm_id="way/40",
+                   raw_tags={"substation": "distribution"})
+        out = gmb._reconcile_station_voltages([st], lines, 1.0, [],
+                                              data_levels={110.0, 34.5})
+        assert out[0].voltage_kv == 110.0
+
+    def test_standard_voltages(self):
+        from esfex.visualization.workflows.voltage_standards import (
+            is_standard_kv, mv_default_kv,
+        )
+        assert all(is_standard_kv(v) for v in (13.8, 34.5, 110, 132, 138, 220))
+        assert not any(is_standard_kv(v) for v in (1380, 125, 13.5))
+        assert (mv_default_kv(50), mv_default_kv(60)) == (33.0, 34.5)
 
     def test_station_tag_overruled_when_its_lines_agree(self):
         st = (20.3, -76.9)

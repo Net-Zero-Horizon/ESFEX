@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -544,10 +545,15 @@ def build_grid_from_features(
 
     # Station tags the lines contradict, and levels no line carries, are
     # corrected before any bus exists (see _reconcile_station_voltages).
+    data_levels = {round(v, 2) for f in active
+                   if f.feature_type in ("line", "substation", "transformer")
+                   for v in _tag_levels(f)}
     substations = _reconcile_station_voltages(
-        substations, lines, station_radius_km, result.voltage_decisions)
+        substations, lines, station_radius_km, result.voltage_decisions,
+        data_levels)
     transformers = _reconcile_station_voltages(
-        transformers, lines, station_radius_km, result.voltage_decisions)
+        transformers, lines, station_radius_km, result.voltage_decisions,
+        data_levels)
     mv_level_kv = _country_mv_level(active)
 
     # ── Phase 1: Substations → Buses ──────────────────────────────
@@ -971,27 +977,96 @@ def _tag_levels(feat: GridFeature) -> list[float]:
     return levels
 
 
+_NAME_KV = re.compile(
+    r"((?:\d+(?:[.,]\d+)?\s*/\s*)*\d+(?:[.,]\d+)?)\s*kV\b", re.IGNORECASE)
+
+
+def _name_levels(name: str) -> list[float]:
+    """Voltage levels a feature's name states, e.g. "Taguasco 13.8 kV" →
+    [13.8], "Sub 220/110 kV" → [220, 110]."""
+    out = []
+    for m in _NAME_KV.finditer(name or ""):
+        for part in m.group(1).split("/"):
+            try:
+                v = float(part.strip().replace(",", "."))
+            except ValueError:
+                continue
+            if v > 0:
+                out.append(v)
+    return out
+
+
 def _same_level(a: float, b: float, ratio: float = _SAME_LEVEL_RATIO) -> bool:
     return a > 0 and b > 0 and max(a, b) / min(a, b) <= ratio
 
 
 def _country_mv_level(features) -> float:
-    """The medium-voltage level the fetched data uses most (lines, stations,
-    transformers), or 0 when it tags none."""
+    """The standard medium-voltage level the fetched data uses most (lines,
+    stations, transformers), or 0 when it tags none."""
     from collections import Counter
 
     from esfex.visualization.workflows.grid_mapping_fetchers import _MV_CEILING_KV
+    from esfex.visualization.workflows.voltage_standards import is_standard_kv
     counts: Counter = Counter()
     for f in features:
         if f.feature_type in ("line", "substation", "transformer"):
             for v in _tag_levels(f):
-                if 10.0 <= v < _MV_CEILING_KV:
+                if 10.0 <= v < _MV_CEILING_KV and is_standard_kv(v):
                     counts[round(v, 1)] += 1
     return counts.most_common(1)[0][0] if counts else 0.0
 
 
+def _resolve_uncarried_level(st, v: float, others, carried,
+                             data_levels) -> tuple[str, float, str]:
+    """Resolve a station's HV level ``v`` that no line in the data carries.
+
+    In order:
+
+    1. **name_level**: the station's name states another level ("Taguasco
+       13.8 kV" tagged 138 kV): the tag is mistyped, the name wins;
+    2. a name that repeats the tag ("Ciudad Libertad 138 kV") means an HV
+       level was intended, so no decimal slip: go to 4;
+    3. **decimal_slip**: ``v`` / 10 (or × 10) is a standard nominal voltage
+       the data uses, and the station is tagged ``distribution`` /
+       ``minor_distribution`` or ``v`` itself is not a standard voltage;
+    4. **off_standard_level**: the nearest level the lines carry, within
+       30 %.
+
+    Returns ``(rule, kv, detail)``, with an empty rule when nothing applies.
+    """
+    from esfex.visualization.workflows.voltage_standards import is_standard_kv
+
+    names = _name_levels(st.name)
+    named = [n for n in names if not _same_level(n, v)
+             and not any(_same_level(n, x) for x in others)]
+    if named:
+        n = min(named, key=lambda x: abs(math.log(x / v)))
+        return ("name_level", n,
+                f"no line in the data carries this level; the station's name "
+                f"gives {n:g} kV")
+    corroborated = any(_same_level(n, v) for n in names)
+    role = (getattr(st, "raw_tags", None) or {}).get("substation", "")
+    mv_role = role in ("distribution", "minor_distribution")
+    if not corroborated and (mv_role or not is_standard_kv(v)):
+        for w in (v / 10.0, v * 10.0):
+            if is_standard_kv(w) and any(_same_level(w, d) for d in data_levels):
+                why = (f"tagged substation={role}" if mv_role
+                       else f"{v:g} kV is not a standard voltage")
+                return ("decimal_slip", round(w, 3),
+                        f"misplaced decimal: {w:g} kV is a standard level the "
+                        f"data uses; {why}")
+    best = min(carried, key=lambda c: abs(math.log(c / v)))
+    if max(best, v) / min(best, v) <= _OFF_STANDARD_RATIO:
+        return ("off_standard_level", best,
+                "no line in the data carries this level; lines carry "
+                + ", ".join(f"{c:g}" for c in sorted(carried, reverse=True))
+                + " kV")
+    return "", v, ""
+
+
 def _reconcile_station_voltages(stations, lines, station_radius_km: float,
-                                decisions: list) -> list:
+                                decisions: list,
+                                data_levels: set[float] | None = None) -> list:
     """Make substations' and transformers' HV levels agree with the lines.
 
     Lines are the most numerous and most consistently tagged OSM power
@@ -1001,9 +1076,9 @@ def _reconcile_station_voltages(stations, lines, station_radius_km: float,
       (at least two whose end lies within ``station_radius_km`` and nearer to
       it than to any other station) all carry another single level, none of
       them its own, takes the lines' level;
-    * **off-standard level**: an HV level no line in the data carries (e.g.
-      132 kV in a 220/110 kV country) is snapped to the nearest level lines
-      do carry, when within 30 %.
+    * **level no line carries** (e.g. 132 or 138 kV in a 220/110 kV
+      country): see :func:`_resolve_uncarried_level`; ``data_levels`` are the
+      levels tagged anywhere in the data (default: the lines' and stations').
 
     Medium voltage (below 60 kV) is left as tagged: generator terminals and
     distribution levels legitimately have no lines in a transmission fetch.
@@ -1027,6 +1102,9 @@ def _reconcile_station_voltages(stations, lines, station_radius_km: float,
             carried.update(lv)
     if not carried:
         return list(stations)
+    if data_levels is None:
+        data_levels = {round(v, 2) for f in list(lines) + list(stations)
+                       for v in _tag_levels(f)}
 
     # Each line end belongs to the nearest station within the radius, so a
     # 110 kV station does not borrow the 220 kV lines of the station next door.
@@ -1049,10 +1127,6 @@ def _reconcile_station_voltages(stations, lines, station_radius_km: float,
             if best is not None:
                 lines_of[best].add(k)
 
-    def _nearest_carried(v):
-        best = min(carried, key=lambda c: abs(math.log(c / v)))
-        return best if max(best, v) / min(best, v) <= _OFF_STANDARD_RATIO else 0.0
-
     out = []
     for si, st in enumerate(stations):
         levels = [v for v in (st.voltage_kv, st.voltage_kv_secondary)
@@ -1073,13 +1147,9 @@ def _reconcile_station_voltages(stations, lines, station_radius_km: float,
                         rule, nv = "line_consensus", w
                         detail = f"{len(ks)} line(s) at {w:g} kV end here"
             if not rule and not any(_same_level(v, c) for c in carried):
-                w = _nearest_carried(v)
-                if w:
-                    rule, nv = "off_standard_level", w
-                    detail = ("no line in the data carries this level; lines "
-                              "carry " + ", ".join(
-                                  f"{c:g}" for c in sorted(carried, reverse=True))
-                              + " kV")
+                others = [x for j, x in enumerate(levels) if j != i]
+                rule, nv, detail = _resolve_uncarried_level(
+                    st, v, others, carried, data_levels)
             if rule:
                 new_levels[i] = nv
                 decisions.append({
@@ -1113,7 +1183,8 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
     resolved has its rating and impedance recomputed to match.
 
     A bus no tagged line reaches gets medium voltage (``mv_level_kv``, the
-    country's most common MV level, else 33 kV at 50 Hz / 34.5 kV at 60 Hz):
+    country's most common standard MV level, else the standard default for
+    its frequency: 33 kV at 50 Hz, 34.5 kV at 60 Hz):
     OSM tags nearly every transmission line (94 % in Cuba), so what stays
     untagged and unreached is distribution, or an insular grid such as an
     island's. Where its whole component (lines, transformers, converters)
@@ -1128,6 +1199,7 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
     from esfex.visualization.workflows.grid_mapping_quality import (
         estimate_line_capacity_mw,
     )
+    from esfex.visualization.workflows.voltage_standards import mv_default_kv
 
     buses = state.buses
     notes = decisions if decisions is not None else []
@@ -1205,8 +1277,7 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
                 b = buses[x]
                 if (b.voltage_kv or 0) > 0:
                     continue
-                kv = mv_level_kv or (34.5 if round(b.frequency_hz or 50) == 60
-                                     else 33.0)
+                kv = mv_level_kv or mv_default_kv(b.frequency_hz)
                 b.voltage_kv = kv
                 _note(x, kv, "isolated_mv" if isolated else "unreached_mv",
                       f"{len(comp)} bus(es) in its component")
@@ -1219,7 +1290,8 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
             continue
         ev = [buses[e].voltage_kv for e in (ln.from_bus, ln.to_bus)
               if e in buses and (buses[e].voltage_kv or 0) > 0]
-        v = max(ev) if ev else (mv_level_kv or 33.0)
+        v = max(ev) if ev else (mv_level_kv or mv_default_kv(
+            getattr(ln, "frequency_hz", 50) or 50))
         ln.voltage_kv = v
         ln.capacity_mw = estimate_line_capacity_mw(
             v, getattr(ln, "num_circuits", 1) or 1)

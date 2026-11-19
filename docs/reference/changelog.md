@@ -1554,6 +1554,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **The Grid Builder is translated.** About 60 of its texts were written in
+  English in the code (the step tabs, the Back/Next/Cancel buttons, the
+  filter labels, every table header, the warnings and the status messages),
+  so they stayed English in every language. The fetch summary also listed the
+  feature types by their internal names (`fuel_entry(s)`). All are now
+  translated in the five languages.
+
+- **No raw translation keys in the Studio.** Sixteen texts showed their key
+  instead of a translation, in every language: the advanced Solar PV
+  wizard's resource and financial results (`wizard_solar_pv.lcoe`, `.npv`,
+  `.irr`, `.mean_ghi`, ...), the invalid-line message, the reservoir inflow
+  file hint, the multi-electrolyzer header, the results charts' day count and
+  the fuel-route action in Preferences. They now have translations in all
+  five languages, and a test checks that every key the Studio uses exists and
+  that no new untranslated text is added (the texts still hard-coded in
+  English are listed in `tests/i18n_untranslated_baseline.json`).
+
+- **The Grid Builder's steps fit the wizard.** Step 1 laid out its four data
+  sources in one row and its settings in four columns, and steps 1 and 2 had
+  unwrapped intro text, so a step's page was wider than the wizard (step 1:
+  834 px in Spanish, step 2: 1245 px in English) and scrolled sideways, with
+  the build progress bar running past the window's edge. The sources and
+  settings now take two columns and the texts wrap.
+
+- **OSM voltage tags with units are read.** The Grid Builder read only plain
+  numbers in the `voltage` tag, so `110 kV`, `13.8kV`, `220/110 kV`,
+  `220000/110000` or `2x220000` counted as untagged. It now accepts units
+  (applied to a whole list), the `/` separator, a decimal comma before `kV`,
+  circuit prefixes and repeated levels, as PyPSA-Eur and PyPSA-Earth do.
+  Words such as `medium` stay unknown, for the builder to infer.
+
+- **Clicking a bus in the single-line diagram opens its form.** The SLD
+  sent its layout key (`bus_<id>`) instead of the bus id, so the bus form
+  opened empty (no system, bus ID, name or parent node), and selecting a bus
+  in the element tree never highlighted its bar in the SLD.
+
 - **Grid Builder voltages come from the data, not fixed numbers.** The OSM
   reader filled a missing `voltage` tag from the substation role
   (`transmission` 220 kV, `sub_transmission` 110 kV, `distribution` 33 kV),
@@ -1568,8 +1604,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   connected to any tagged voltage, such as an island's grid. Station tags
   are checked against the lines at 60 kV and above: a station whose own
   lines all carry another single level takes it, and a level no line
-  carries is snapped to the nearest line level within 30 %. Every decision is
-  listed in the build summary and returned as `ParseResult.voltage_decisions`.
+  carries is resolved against the standard nominal voltages (IEC 60038,
+  ANSI C84.1): the level the station's name states, else a misplaced decimal
+  for a distribution station whose corrected level is standard and used in
+  the data, else the nearest line level within 30 % ("Taguasco 13.8 kV",
+  tagged 138 kV, becomes 13.8 kV; Ciudad Libertad, tagged 138 kV, 110 kV).
+  The default medium voltage is the standard level the data tags most.
+  Every decision is listed in the build summary and returned as
+  `ParseResult.voltage_decisions`.
 
 - **Myopic planning remembers earlier years.** Each one-year master in
   `planning_mode: myopic` planned from the base-year fleet: the aged units
