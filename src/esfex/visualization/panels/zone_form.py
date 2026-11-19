@@ -273,7 +273,8 @@ class ZoneForm(QWidget):
         self._target_bus_combo.addItem(tr("zone_form.auto_nearest"), -1)
         for bus in self._model.state.buses.values():
             self._target_bus_combo.addItem(
-                f"Bus {bus.bus_id} (Node {bus.parent_node})", bus.parent_node,
+                tr("zone_form.bus_combo_fmt", bus=bus.bus_id, node=bus.parent_node),
+                bus.parent_node,
             )
         if zone.target_bus_override is not None:
             combo_idx = self._target_bus_combo.findData(zone.target_bus_override)

@@ -1473,16 +1473,16 @@ function _drawEdge(layer, edge, busH) {
     }
 
     // Interaction
-    var typeNames = {
-        'transmission': 'Line', 'transformer': 'Transformer',
-        'converter': (props.elementType === 'acdc_converter' ? 'AC/DC Converter' : 'Freq. Converter'),
-    };
     g.on('click', function(event) {
         event.stopPropagation();
         if (props.elementType) _selectElement(props.elementType, props.elementId, g);
     }).on('mouseenter', function(event) {
-        _showTooltip(event, (typeNames[edgeType] || 'Edge') + ' ' + (props.elementId || ''),
-                     (props.label || '') + (stub ? (props.label ? ' \u2014 ' : '') + 'to ' + stub.stubName : ''));
+        var sub = props.label || '';
+        if (stub) {
+            var to = _t('web.sld.tt_to_site', {name: stub.stubName});
+            sub = sub ? sub + ' \u2014 ' + to : to;
+        }
+        _showTooltip(event, _edgeTitle(edgeType, props), sub);
     }).on('mouseleave', _hideTooltip);
 
     if (props.elementType) {
@@ -1499,22 +1499,48 @@ function _drawEdge(layer, edge, busH) {
 // Legend (fixed overlay — does not zoom/pan)
 // ══════════════════════════════════════════════════════════════════
 
-/** Readable labels for equipment symbol types. */
-var _equipLabels = {
-    'gen-renewable':    'Renewable Gen.',
-    'gen-nonrenewable': 'Non-Renew. Gen.',
-    'battery':          'Battery',
-    'load':             'Load',
-    'electrolyzer':     'Electrolyzer',
-    'acdc-converter':   'AC/DC Converter',
-    'freq-converter':   'Freq. Converter',
-};
+/** Tooltip title of a line, transformer or converter: its type and id.
+ *  The type ids (edgeType / elementType) stay as they are for Python. */
+function _edgeTitle(edgeType, props) {
+    var id = props.elementId || '';
+    if (edgeType === 'transmission') return _t('web.sld.tt_line', {id: id});
+    if (edgeType === 'transformer') return _t('web.sld.tt_transformer', {id: id});
+    if (edgeType === 'converter') {
+        return props.elementType === 'acdc_converter'
+            ? _t('web.sld.tt_acdc_converter', {id: id})
+            : _t('web.sld.tt_freq_converter', {id: id});
+    }
+    return _t('web.sld.tt_edge', {id: id});
+}
 
-/** Readable labels and visual specs for edge types. */
+/** Readable label of an equipment symbol type (the legend's rows). */
+function _equipLabel(sym) {
+    switch (sym) {
+        case 'gen-renewable':    return _t('web.sld.equip_gen_renewable');
+        case 'gen-nonrenewable': return _t('web.sld.equip_gen_nonrenewable');
+        case 'battery':          return _t('web.sld.equip_battery');
+        case 'load':             return _t('web.sld.equip_load');
+        case 'electrolyzer':     return _t('web.sld.equip_electrolyzer');
+        case 'acdc-converter':   return _t('web.sld.equip_acdc_converter');
+        case 'freq-converter':   return _t('web.sld.equip_freq_converter');
+        default:                 return sym;
+    }
+}
+
+/** Readable label of an edge type (the legend's connection rows). */
+function _edgeLabel(type) {
+    switch (type) {
+        case 'transformer': return _t('web.sld.edge_transformer');
+        case 'converter':   return _t('web.sld.edge_converter');
+        default:            return _t('web.sld.edge_transmission');
+    }
+}
+
+/** Visual specs for edge types. */
 var _edgeSpecs = {
-    'transmission': { label: 'Transmission Line', dash: 'none', sw: 2.5, sym: null },
-    'transformer':  { label: 'Transformer',       dash: 'none', sw: 2,   sym: 'trafo' },
-    'converter':    { label: 'Converter',          dash: '6,3',  sw: 2,   sym: 'conv' },
+    'transmission': { dash: 'none', sw: 2.5, sym: null },
+    'transformer':  { dash: 'none', sw: 2,   sym: 'trafo' },
+    'converter':    { dash: '6,3',  sw: 2,   sym: 'conv' },
 };
 
 /**
@@ -1569,7 +1595,13 @@ function _drawLegend(data) {
     var rowH = 18;
     var padX = 10, padY = 8;
     var symColW = 32;       // width reserved for symbol/swatch column
-    var textColW = 100;     // width for label text
+    var textColW = 100;     // width for label text (wider for longer translations)
+    equipTypes.forEach(function(et) {
+        textColW = Math.max(textColW, _textWidth(_equipLabel(et.sym), 9) + 6);
+    });
+    edgeTypes.forEach(function(et) {
+        textColW = Math.max(textColW, _textWidth(_edgeLabel(et.type), 9) + 6);
+    });
     var legendW = padX + symColW + 4 + textColW + padX;
     var cw = svg.node().clientWidth || 800;
 
@@ -1608,7 +1640,7 @@ function _drawLegend(data) {
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '10px').attr('font-weight', '700')
         .attr('fill', T.groupTitle)
-        .text('Legend');
+        .text(_t('web.sld.legend'));
 
     var curY = titleH + padY;
 
@@ -1626,7 +1658,7 @@ function _drawLegend(data) {
 
     // ── Section: Equipment ──
     if (hasEquip) {
-        _sectionHeader('Equipment');
+        _sectionHeader(_t('web.sld.legend_equipment'));
         equipTypes.forEach(function(et) {
             var symCx = padX + symColW / 2;
             var symCy = curY + rowH / 2;
@@ -1649,7 +1681,7 @@ function _drawLegend(data) {
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                 .attr('font-size', '9px')
                 .attr('fill', T.labelText)
-                .text(_equipLabels[et.sym] || et.sym);
+                .text(_equipLabel(et.sym));
 
             curY += rowH;
         });
@@ -1657,7 +1689,7 @@ function _drawLegend(data) {
 
     // ── Section: Connections ──
     if (hasEdges) {
-        _sectionHeader('Connections');
+        _sectionHeader(_t('web.sld.legend_connections'));
         edgeTypes.forEach(function(et) {
             var spec = _edgeSpecs[et.type] || _edgeSpecs['transmission'];
             var lx1 = padX + 2;
@@ -1695,7 +1727,7 @@ function _drawLegend(data) {
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                 .attr('font-size', '9px')
                 .attr('fill', T.labelText)
-                .text(spec.label);
+                .text(_edgeLabel(et.type));
 
             curY += rowH;
         });
@@ -1703,7 +1735,7 @@ function _drawLegend(data) {
 
     // ── Section: Voltage Levels ──
     if (hasVolts) {
-        _sectionHeader('Voltage Levels');
+        _sectionHeader(_t('web.sld.legend_voltage_levels'));
         voltages.forEach(function(v) {
             var lx1 = padX + 4;
             var lx2 = padX + symColW - 4;
@@ -2633,6 +2665,16 @@ function updateTheme(json) {
     } catch(e) {}
 }
 
+/** Language changed (web_i18n): the diagram's own text is data (names,
+ *  ratings); the legend and the results overlays are redrawn in the new
+ *  language. Static HTML is refilled by _applyI18n. */
+window.onEsfexLanguageChanged = function() {
+    if (!svg || !currentData || !currentLayouted) return;
+    var sd = _site ? _siteData(_site.key) : null;
+    _drawLegend(sd ? sd.data : currentData);
+    _redrawOverlays();
+};
+
 
 // ══════════════════════════════════════════════════════════════════
 // Helpers
@@ -3013,7 +3055,7 @@ function _drawEquipmentOverlay(gOps, ops) {
                     .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
                     .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                     .attr('font-size', '8px').attr('font-weight', '700')
-                    .attr('fill', '#2C3E50').text('OFF');
+                    .attr('fill', '#2C3E50').text(_t('web.sld.gen_off'));
                 barData = null;  // Don't draw utilization bar for offline generators
             } else if (g.is_startup) {
                 // Startup: green upward arrow
@@ -3032,14 +3074,14 @@ function _drawEquipmentOverlay(gOps, ops) {
             var b = bats[eId];
             var net = b.discharge_mw - b.charge_mw;
             var socRatio = b.capacity_mwh > 0 ? b.soc_mwh / b.capacity_mwh : 0;
-            var lbl = net > 0.1 ? '+' + _fmtMW(net) : net < -0.1 ? _fmtMW(net) : 'Idle';
+            var lbl = net > 0.1 ? '+' + _fmtMW(net) : net < -0.1 ? _fmtMW(net) : _t('web.sld.battery_idle');
             barData = { ratio: socRatio, label: lbl + ' (' + (socRatio * 100).toFixed(0) + '%)', color: _utilColor(1 - socRatio) };
         } else if (eType === 'load' && loads[eId]) {
             var l = loads[eId];
             barData = { ratio: 1, label: _fmtMW(l.demand_mw), color: '#E67E22' };
             if (l.shed_mw > 0.1) {
                 barData.color = '#E74C3C';
-                barData.label += ' (shed: ' + _fmtMW(l.shed_mw) + ')';
+                barData.label = _t('web.sld.load_with_shed', {demand: _fmtMW(l.demand_mw), shed: _fmtMW(l.shed_mw)});
             }
         }
 
@@ -3225,7 +3267,7 @@ function _drawReserveBadges(gOps, ops) {
 
         var hasLoss = (nd.reserve_static_loss_mw || 0) > 0.1 || (nd.reserve_dynamic_loss_mw || 0) > 0.1;
         var bgColor = hasLoss ? '#E74C3C' : '#27AE60';
-        var label = 'R: ' + resStatic.toFixed(0) + '/' + resDynamic.toFixed(0) + ' MW';
+        var label = _t('web.sld.reserve_badge', {static: resStatic.toFixed(0), dynamic: resDynamic.toFixed(0)});
         var tw = label.length * 5 + 10;
 
         gOps.append('rect')
@@ -3340,10 +3382,10 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '10px').attr('font-weight', '700')
         .attr('fill', T.groupTitle)
-        .text('Frequency (' + fNom.toFixed(0) + ' Hz)');
+        .text(_t('web.sld.freq_title', {f: fNom.toFixed(0)}));
 
     // ── Status indicator on title row ──
-    var statusLabel = freq.is_stable ? 'STABLE' : 'UNSTABLE';
+    var statusLabel = freq.is_stable ? _t('web.sld.freq_stable') : _t('web.sld.freq_unstable');
     fg.append('text')
         .attr('x', gw - padX).attr('y', titleH - 4)
         .attr('text-anchor', 'end')
@@ -3408,7 +3450,7 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '8px').attr('font-weight', '600')
         .attr('fill', nadirColor)
-        .text('Nadir: ' + freq.nadir_hz.toFixed(2) + ' Hz');
+        .text(_t('web.sld.nadir', {hz: freq.nadir_hz.toFixed(2)}));
 
     // ── Metric rows (below bar section) ──
     var curY = titleH + barSectionH + padY;
@@ -3435,7 +3477,7 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('dominant-baseline', 'central')
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '9px').attr('fill', T.labelText)
-        .text('Inertia H');
+        .text(_t('web.sld.inertia_h'));
     fg.append('text')
         .attr('x', gw - padX).attr('y', curY + rowH / 2 + 1)
         .attr('text-anchor', 'end').attr('dominant-baseline', 'central')
@@ -3451,7 +3493,7 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('dominant-baseline', 'central')
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '9px').attr('fill', T.labelText)
-        .text('\u0394P loss');
+        .text(_t('web.sld.delta_p_loss'));
     fg.append('text')
         .attr('x', gw - padX).attr('y', curY + rowH / 2 + 1)
         .attr('text-anchor', 'end').attr('dominant-baseline', 'central')
@@ -3531,7 +3573,7 @@ function updateContingencyData(jsonStr) {
         if (pathNode && pathNode.getTotalLength) {
             var totalLen = pathNode.getTotalLength();
             var lblPt = pathNode.getPointAtLength(totalLen * 0.6);
-            var olLabel = 'OVERLOAD +' + ol.overload_pct.toFixed(0) + '%';
+            var olLabel = _t('web.sld.overload_badge', {pct: ol.overload_pct.toFixed(0)});
             var tw = olLabel.length * 5.5 + 10;
 
             gCtg.append('rect')
@@ -3566,7 +3608,7 @@ function updateContingencyData(jsonStr) {
 
         var px = bl.x + bl.barLen / 2;
         var py = bl.y + 24;
-        var label = 'Shed: ' + _fmtMW(shedMW);
+        var label = _t('web.sld.shed_badge', {power: _fmtMW(shedMW)});
         var tw = label.length * 5.5 + 10;
 
         gCtg.append('rect')
@@ -3628,39 +3670,43 @@ function updateContingencyData(jsonStr) {
         var worstOL = overloaded.reduce(function(a, b) {
             return (a.overload_pct || 0) > (b.overload_pct || 0) ? a : b;
         });
-        detailLines.push('Overloads: ' + overloaded.length + ' line(s), worst +'
-            + (worstOL.overload_pct || 0).toFixed(0) + '%'
-            + (worstOL.line_id ? ' (' + worstOL.line_id + ')' : ''));
+        var olArgs = {n: overloaded.length, pct: (worstOL.overload_pct || 0).toFixed(0),
+                      line: worstOL.line_id};
+        detailLines.push(worstOL.line_id ? _t('web.sld.ctg_overloads_line', olArgs)
+                                         : _t('web.sld.ctg_overloads', olArgs));
     }
     if (totalShed > 0.1) {
-        detailLines.push('Load shedding: ' + totalShed.toFixed(1) + ' MW');
+        detailLines.push(_t('web.sld.ctg_load_shedding', {mw: totalShed.toFixed(1)}));
     }
     if (voltViol.length > 0) {
         var worstV = voltViol.reduce(function(a, b) {
             return Math.abs(a.vm_pu - 1.0) > Math.abs(b.vm_pu - 1.0) ? a : b;
         });
-        detailLines.push('V violations: ' + voltViol.length + ' bus(es), worst '
-            + worstV.vm_pu.toFixed(3) + ' pu (' + worstV.bus_id + ')');
+        detailLines.push(_t('web.sld.ctg_voltage_violations',
+            {n: voltViol.length, pu: worstV.vm_pu.toFixed(3), bus: worstV.bus_id}));
     }
     // Integrated N-1 assessment fields (frequency, severity)
     if (ctg.has_frequency_violation) {
-        var freqLine = 'Frequency: ROCOF=' + (ctg.rocof_hz_per_s || 0).toFixed(2) + ' Hz/s'
-            + ', Nadir=' + (ctg.nadir_hz || 0).toFixed(2) + ' Hz';
-        detailLines.push(freqLine);
+        detailLines.push(_t('web.sld.ctg_frequency', {rocof: (ctg.rocof_hz_per_s || 0).toFixed(2),
+                                                      nadir: (ctg.nadir_hz || 0).toFixed(2)}));
     }
     if (ctg.severity_score !== undefined && ctg.severity_score > 0) {
-        var bindStr = ctg.binding_constraint ? ' [' + ctg.binding_constraint + ']' : '';
-        detailLines.push('Severity: ' + ctg.severity_score.toFixed(1) + bindStr);
+        var score = ctg.severity_score.toFixed(1);
+        detailLines.push(ctg.binding_constraint
+            ? _t('web.sld.ctg_severity_binding',
+                 {score: score, constraint: _bindingLabel(ctg.binding_constraint)})
+            : _t('web.sld.ctg_severity', {score: score}));
     }
     // Use integrated is_n1_secure if present, otherwise fall back to is_secure
     var isSecure = (ctg.is_n1_secure !== undefined) ? ctg.is_n1_secure : ctg.is_secure;
     if (isSecure) {
-        detailLines.push('No overloads, no load shedding');
+        detailLines.push(_t('web.sld.ctg_secure_detail'));
     }
 
     var statusColor = isSecure ? '#27AE60' : '#E74C3C';
-    var statusText = isSecure ? 'N-1 SECURE' : 'N-1 INSECURE';
-    var bw = 340;
+    var statusText = isSecure ? _t('web.sld.n1_secure') : _t('web.sld.n1_insecure');
+    var bw = 340;            // wider when a translation needs it
+    detailLines.forEach(function(s) { bw = Math.max(bw, _textWidth(s, 9) + 24); });
     var lineH = 13;
     var bh = 32 + detailLines.length * lineH;
     var bx = (cw - bw) / 2;  // centered horizontally
@@ -3689,6 +3735,17 @@ function updateContingencyData(jsonStr) {
             .attr('font-family', 'Segoe UI, Roboto, sans-serif')
             .attr('font-size', '9px').attr('fill', dColor)
             .text(detailLines[di]);
+    }
+}
+
+/** Readable name of an N-1 binding constraint id (n1_assessment.py). */
+function _bindingLabel(id) {
+    switch (id) {
+        case 'thermal':   return _t('web.sld.binding_thermal');
+        case 'frequency': return _t('web.sld.binding_frequency');
+        case 'voltage':   return _t('web.sld.binding_voltage');
+        case 'none':      return _t('web.sld.binding_none');
+        default:          return id;
     }
 }
 
@@ -3823,7 +3880,7 @@ function _drawLineLossLabels(gOps, ops) {
 
         var totalLen = pathNode.getTotalLength();
         var lblPt = pathNode.getPointAtLength(totalLen * 0.55);
-        var label = 'Loss: ' + pLoss.toFixed(2) + ' MW';
+        var label = _t('web.sld.line_loss', {mw: pLoss.toFixed(2)});
         var tw = label.length * 5.5 + 8;
         var color = '#E67E22';  // orange
 
@@ -3907,13 +3964,14 @@ function _drawPowerFlowStatusBadge(ops) {
 
     var statusColor = pf.converged ? '#27AE60' : '#E74C3C';
     var statusText = pf.converged
-        ? 'AC PF: Converged (' + (pf.iterations || 0) + ' iter)'
-        : 'AC PF: DIVERGED';
+        ? _t('web.sld.pf_converged', {n: pf.iterations || 0})
+        : _t('web.sld.pf_diverged');
     var detailItems = [];
-    if (pf.total_losses_mw > 0) detailItems.push('Losses: ' + pf.total_losses_mw.toFixed(2) + ' MW');
+    if (pf.total_losses_mw > 0) detailItems.push(_t('web.sld.losses', {mw: pf.total_losses_mw.toFixed(2)}));
     var nViol = (pf.voltage_violations || []).length;
-    if (nViol > 0) detailItems.push('V violations: ' + nViol);
+    if (nViol > 0) detailItems.push(_t('web.sld.v_violations', {n: nViol}));
     var detailText = detailItems.join(' | ');
+    bw = Math.max(bw, _textWidth(statusText, 10, true) + 20, _textWidth(detailText, 8) + 20);
 
     gBadge.append('rect')
         .attr('x', bx).attr('y', by)
@@ -3946,31 +4004,31 @@ function _drawSystemInfoBar(ops) {
     var ch = svg.node().clientHeight || 600;
 
     var items = [];
-    if (sys.year) items.push('Year ' + sys.year);
-    if (sys.hour !== undefined) items.push('Hour ' + sys.hour);
-    if (sys.re_penetration) items.push('RE: ' + (sys.re_penetration * 100).toFixed(1) + '%');
-    if (sys.total_demand_mw) items.push('Demand: ' + _fmtMW(sys.total_demand_mw));
-    if (sys.total_gen_mw) items.push('Gen: ' + _fmtMW(sys.total_gen_mw));
+    if (sys.year) items.push(_t('web.sld.info_year', {year: sys.year}));
+    if (sys.hour !== undefined) items.push(_t('web.sld.info_hour', {hour: sys.hour}));
+    if (sys.re_penetration) items.push(_t('web.sld.info_re', {pct: (sys.re_penetration * 100).toFixed(1)}));
+    if (sys.total_demand_mw) items.push(_t('web.sld.info_demand', {power: _fmtMW(sys.total_demand_mw)}));
+    if (sys.total_gen_mw) items.push(_t('web.sld.info_gen', {power: _fmtMW(sys.total_gen_mw)}));
     if (sys.co2_tons) items.push('CO\u2082: ' + sys.co2_tons.toFixed(1) + ' t');
 
     // AC Power flow metrics
     var pf = sys.power_flow;
     if (pf && pf.converged) {
-        if (pf.total_losses_mw > 0) items.push('Losses: ' + pf.total_losses_mw.toFixed(2) + ' MW');
+        if (pf.total_losses_mw > 0) items.push(_t('web.sld.losses', {mw: pf.total_losses_mw.toFixed(2)}));
         var nViol = (pf.voltage_violations || []).length;
-        if (nViol > 0) items.push('V viol: ' + nViol);
+        if (nViol > 0) items.push(_t('web.sld.info_v_viol', {n: nViol}));
     }
 
     // Frequency metrics (Level 3)
     var freq = sys.frequency;
     if (freq) {
         if (freq.rocof_hz_s !== undefined) items.push('ROCOF: ' + freq.rocof_hz_s.toFixed(2) + ' Hz/s');
-        if (freq.nadir_hz !== undefined) items.push('Nadir: ' + freq.nadir_hz.toFixed(2) + ' Hz');
+        if (freq.nadir_hz !== undefined) items.push(_t('web.sld.nadir', {hz: freq.nadir_hz.toFixed(2)}));
         if (freq.h_total_mws !== undefined) items.push('H: ' + freq.h_total_mws.toFixed(0) + ' MW\u00B7s');
     }
 
     var text = items.join('  |  ');
-    var barW = text.length * 7 + 40;
+    var barW = Math.max(text.length * 7, _textWidth(text, 11) * 1.15) + 40;
     var barH = 26;
     var bx = (cw - barW) / 2;
     var by = ch - barH - 8;

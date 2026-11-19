@@ -10,12 +10,12 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try { render(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(text, isError) {
@@ -32,7 +32,7 @@ function hideStatus() {
 function render(data) {
     const pc = data.parcoords;
     if (!pc || !pc.dim_labels || pc.dim_labels.length === 0) {
-        showStatus("No parallel-coordinates data.", false); return;
+        showStatus(_t("web.charts.mga_parcoords.no_data"), false); return;
     }
     const colors = pc.is_optimal.map(v => v ? 1 : 0);
     const dims = pc.dim_labels.map((label, i) => ({
@@ -48,7 +48,7 @@ function render(data) {
     };
     const layout = {
         margin: { l: 60, r: 40, t: 70, b: 40 },
-        title: { text: "<span style='font-size:11px;color:#7f8c8d'>each line = one alternative · red = optimal · drag axes to brush</span>",
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" + _t("web.charts.mga_parcoords.subtitle") + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top", font: { size: 13 } }
     };
     Plotly.purge("plot");

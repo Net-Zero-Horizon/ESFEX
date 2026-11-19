@@ -60,11 +60,12 @@ class _GeneralPage(QWidget):
         form = QFormLayout(appearance)
 
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(
-            ["Light", "GitHub Light", "VS Code Dark+", "Dracula", "One Dark Pro"]
-        )
+        # Theme names are proper names except the plain light theme.
+        self.theme_combo.addItem(tr("preferences.theme_light"), "Light")
+        for name in ("GitHub Light", "VS Code Dark+", "Dracula", "One Dark Pro"):
+            self.theme_combo.addItem(name, name)
         current_theme = gen.get("theme", "GitHub Light")
-        idx = self.theme_combo.findText(current_theme)
+        idx = self.theme_combo.findData(current_theme)
         if idx >= 0:
             self.theme_combo.setCurrentIndex(idx)
         form.addRow(tr("preferences.theme"), self.theme_combo)
@@ -144,7 +145,7 @@ class _GeneralPage(QWidget):
         idx = self.language_combo.currentIndex()
         lang = self._lang_codes[idx] if idx >= 0 else "en"
         return {
-            "theme": self.theme_combo.currentText(),
+            "theme": self.theme_combo.currentData(),
             "font_size": self.font_size_spin.value(),
             "language": lang,
             "auto_save": self.auto_save.isChecked(),
@@ -169,9 +170,16 @@ class _MapPage(QWidget):
         form = QFormLayout(group)
 
         self.basemap_combo = QComboBox()
-        self.basemap_combo.addItems(["OpenStreetMap", "Satellite", "Terrain", "Dark", "Offline"])
+        for value, key in (
+            ("OpenStreetMap", "basemaps.osm"),
+            ("Satellite", "basemaps.satellite"),
+            ("Terrain", "basemaps.terrain"),
+            ("Dark", "basemaps.dark"),
+            ("Offline", "basemaps.offline"),
+        ):
+            self.basemap_combo.addItem(tr(key), value)
         current = m.get("default_basemap", "OpenStreetMap")
-        idx = self.basemap_combo.findText(current)
+        idx = self.basemap_combo.findData(current)
         if idx >= 0:
             self.basemap_combo.setCurrentIndex(idx)
         form.addRow(tr("preferences.default_basemap"), self.basemap_combo)
@@ -206,7 +214,7 @@ class _MapPage(QWidget):
 
     def collect(self) -> dict[str, Any]:
         return {
-            "default_basemap": self.basemap_combo.currentText(),
+            "default_basemap": self.basemap_combo.currentData(),
             "default_zoom": self.default_zoom.value(),
             "default_lat": self.default_lat.value(),
             "default_lng": self.default_lng.value(),
@@ -229,9 +237,9 @@ class _SolverSimulationPage(QWidget):
         sform = QFormLayout(solver_group)
 
         self.solver_combo = QComboBox()
-        self.solver_combo.addItems(
-            ["HiGHS", "Gurobi", "CPLEX", "SCIP", "Xpress", "CBC", "GLPK"]
-        )
+        # Solver names are proper names: shown and saved as they are.
+        for name in ("HiGHS", "Gurobi", "CPLEX", "SCIP", "Xpress", "CBC", "GLPK"):
+            self.solver_combo.addItem(name)
         current = s.get("default_solver", "HiGHS")
         idx = self.solver_combo.findText(current, Qt.MatchFlag.MatchFixedString)
         if idx >= 0:
@@ -304,8 +312,8 @@ class _SolverSimulationPage(QWidget):
         mform.addRow(self.default_primary_energy)
 
         self.default_log_level = QComboBox()
-        self.default_log_level.addItem("Basic", "basic")
-        self.default_log_level.addItem("High", "high")
+        self.default_log_level.addItem(tr("preferences.log_level_basic"), "basic")
+        self.default_log_level.addItem(tr("preferences.log_level_high"), "high")
         current_log = sim.get("default_log_level", "basic")
         for i in range(self.default_log_level.count()):
             if self.default_log_level.itemData(i) == current_log:

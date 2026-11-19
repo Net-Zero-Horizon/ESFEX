@@ -30,20 +30,20 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No cash flow data", false);
+            showStatus(data && data.error ? data.error : _t("web.charts.cash_flow.no_data"), false);
             return;
         }
         if (!data.years || data.years.length === 0) {
-            showStatus("No cash flow data", false);
+            showStatus(_t("web.charts.cash_flow.no_data"), false);
             return;
         }
         try {
             renderCashFlow(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[cash_flow.js] render threw:", e);
         }
     });
@@ -100,12 +100,12 @@ function renderCashFlow(data) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: years, y: data.net_musd,
-            name: "Net Cash Flow",
+            name: _t("web.charts.cash_flow.trace_net"),
             line: { color: "#2C3E50", width: 2.5 },
             marker: { color: "#2C3E50", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x", yaxis: "y",
-            hovertemplate: "%{x}: %{y:,.2f} M$<extra>Net CF</extra>",
+            hovertemplate: _t("web.charts.cash_flow.hover_net"),
         });
     }
 
@@ -132,7 +132,7 @@ function renderCashFlow(data) {
             x: yearsN, y: cumPos,
             fill: "tozeroy", fillcolor: "rgba(39,174,96,0.18)",
             xaxis: "x2", yaxis: "y2",
-            name: "Recovery zone",
+            name: _t("web.charts.cash_flow.trace_recovery"),
             legendgroup: "recovery_pos",
             hoverinfo: "skip",
             connectgaps: false,
@@ -142,7 +142,7 @@ function renderCashFlow(data) {
             x: yearsN, y: cumNeg,
             fill: "tozeroy", fillcolor: "rgba(231,76,60,0.18)",
             xaxis: "x2", yaxis: "y2",
-            name: "In-the-red zone",
+            name: _t("web.charts.cash_flow.trace_in_red"),
             legendgroup: "recovery_neg",
             hoverinfo: "skip",
             connectgaps: false,
@@ -153,10 +153,10 @@ function renderCashFlow(data) {
         traces.push({
             type: "scatter", mode: "lines",
             x: yearsN, y: data.cumulative_revenue_musd,
-            name: "Cumulative Revenue",
+            name: _t("web.charts.cash_flow.trace_cum_revenue"),
             line: { color: "#27AE60", width: 1.5, dash: "dot" },
             xaxis: "x2", yaxis: "y2",
-            hovertemplate: "%{x}: %{y:,.2f} M$<extra>Σ Revenue</extra>",
+            hovertemplate: _t("web.charts.cash_flow.hover_cum_revenue"),
         });
     }
     if (data.cumulative_cost_musd && data.cumulative_cost_musd.length) {
@@ -167,11 +167,11 @@ function renderCashFlow(data) {
         traces.push({
             type: "scatter", mode: "lines",
             x: yearsN, y: negCost,
-            name: "Cumulative Cost",
+            name: _t("web.charts.cash_flow.trace_cum_cost"),
             line: { color: "#C0392B", width: 1.5, dash: "dot" },
             xaxis: "x2", yaxis: "y2",
             customdata: data.cumulative_cost_musd,
-            hovertemplate: "%{x}: %{customdata:,.2f} M$<extra>Σ Cost</extra>",
+            hovertemplate: _t("web.charts.cash_flow.hover_cum_cost"),
         });
     }
 
@@ -179,12 +179,12 @@ function renderCashFlow(data) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: yearsN, y: cum,
-            name: "Cumulative Net (undisc.)",
+            name: _t("web.charts.cash_flow.trace_cum_net"),
             line: { color: "#2C3E50", width: 2.8 },
             marker: { color: "#2C3E50", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x2", yaxis: "y2",
-            hovertemplate: "%{x}: %{y:,.2f} M$<extra>Net Σ</extra>",
+            hovertemplate: _t("web.charts.cash_flow.hover_cum_net"),
         });
     }
     if (data.cumulative_npv_musd && data.cumulative_npv_musd.length) {
@@ -192,12 +192,12 @@ function renderCashFlow(data) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: yearsN, y: data.cumulative_npv_musd,
-            name: `Cumulative NPV (${rate.toFixed(1)}%)`,
+            name: _t("web.charts.cash_flow.trace_cum_npv", { rate: rate.toFixed(1) }),
             line: { color: "#16A085", width: 2.5, dash: "dash" },
             marker: { color: "#16A085", size: 6,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x2", yaxis: "y2",
-            hovertemplate: "%{x}: %{y:,.2f} M$<extra>NPV</extra>",
+            hovertemplate: _t("web.charts.cash_flow.hover_npv"),
         });
     }
 
@@ -226,7 +226,7 @@ function renderCashFlow(data) {
             xref: "x2", yref: "y2 domain",
             x: pyN, y: 1.0,
             xanchor: "left", yanchor: "top",
-            text: `<b>Payback: ${data.payback_year}</b>`,
+            text: "<b>" + _t("web.charts.cash_flow.payback", { year: data.payback_year }) + "</b>",
             showarrow: false, font: { color: "#E67E22", size: 10 },
             bgcolor: "rgba(255,255,255,0.8)",
         });
@@ -239,13 +239,13 @@ function renderCashFlow(data) {
         showlegend: true,
         barmode: "relative",
         annotations: annotations.concat([
-            { text: "<b>a) Annual Cash Flow Composition</b>",
+            { text: "<b>" + _t("web.charts.cash_flow.title_a") + "</b>",
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Cumulative Cash Flow</b>" +
+            { text: "<b>" + _t("web.charts.cash_flow.title_b") + "</b>" +
                     (data.payback_year == null
-                        ? "  <i>(not yet recovered)</i>" : ""),
+                        ? "  <i>" + _t("web.charts.cash_flow.not_recovered") + "</i>" : ""),
               x: 0.5, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -265,12 +265,12 @@ function renderCashFlow(data) {
         xaxis: {
             domain: [0, 1], anchor: "y",
             type: "category", tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.cash_flow.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
-            title: "<b>Annual (M$)</b>",
+            title: "<b>" + _t("web.charts.cash_flow.axis_annual") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         // Numeric (linear) axis for subplot b — see comment near the
@@ -282,12 +282,12 @@ function renderCashFlow(data) {
             range: yearsN.length
                 ? [yearsN[0] - 0.5, yearsN[yearsN.length - 1] + 0.5]
                 : undefined,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.cash_flow.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis2: {
             domain: [0.0, 0.44], anchor: "x2",
-            title: "<b>Cumulative (M$)</b>",
+            title: "<b>" + _t("web.charts.cash_flow.axis_cumulative") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
     };

@@ -23,7 +23,7 @@ def add_availability_menu_item(menu_bar, main_window) -> None:
     plugins_menu = getattr(main_window, "_plugins_menu", None)
     if plugins_menu is None:
         # Fallback: add to menu bar directly
-        plugins_menu = menu_bar.addMenu("Plugins")
+        plugins_menu = menu_bar.addMenu(tr("availability_generator.plugins_menu"))
 
     act = QAction(tr("availability_generator.menu_action"), main_window)
     act.triggered.connect(lambda: _open_dialog(main_window))
@@ -112,9 +112,9 @@ class _AvailabilityDialogImpl:
         # ── Data source ──
         ds_group = QGroupBox(tr("availability_generator.data_source"))
         ds_layout = QVBoxLayout(ds_group)
-        self._radio_om = QRadioButton("Open-Meteo (ERA5, no API key)")
-        self._radio_np = QRadioButton("NASA POWER (MERRA-2, no API key)")
-        self._radio_at = QRadioButton("ERA5 via atlite (requires CDS API key)")
+        self._radio_om = QRadioButton(tr("availability_generator.source_open_meteo"))
+        self._radio_np = QRadioButton(tr("availability_generator.source_nasa_power"))
+        self._radio_at = QRadioButton(tr("availability_generator.source_atlite"))
         self._radio_om.setChecked(True)
         ds_layout.addWidget(self._radio_om)
         ds_layout.addWidget(self._radio_np)
@@ -128,7 +128,7 @@ class _AvailabilityDialogImpl:
         self._year_from.setRange(1979, 2025)
         self._year_from.setValue(2020)
         year_layout.addWidget(self._year_from)
-        year_layout.addWidget(QLabel("to"))
+        year_layout.addWidget(QLabel(tr("availability_generator.year_to")))
         self._year_to = QSpinBox()
         self._year_to.setRange(1979, 2025)
         self._year_to.setValue(2020)
@@ -146,7 +146,9 @@ class _AvailabilityDialogImpl:
         sf.addRow(tr("availability_generator.efficiency"), self._efficiency)
 
         self._tilt_combo = QComboBox()
-        self._tilt_combo.addItems(["Latitude-optimal", "Custom"])
+        # Read by index: 0 = latitude-optimal, 1 = custom tilt.
+        self._tilt_combo.addItem(tr("availability_generator.tilt_optimal"))
+        self._tilt_combo.addItem(tr("availability_generator.tilt_custom"))
         sf.addRow(tr("availability_generator.tilt"), self._tilt_combo)
 
         self._tilt_value = QDoubleSpinBox()
@@ -164,7 +166,13 @@ class _AvailabilityDialogImpl:
         sf.addRow(tr("availability_generator.azimuth"), self._azimuth)
 
         self._tracking = QComboBox()
-        self._tracking.addItems(["none", "horizontal", "vertical", "dual"])
+        for value, key in (
+            ("none", "availability_generator.tracking_none"),
+            ("horizontal", "availability_generator.tracking_horizontal"),
+            ("vertical", "availability_generator.tracking_vertical"),
+            ("dual", "availability_generator.tracking_dual"),
+        ):
+            self._tracking.addItem(tr(key), value)
         sf.addRow(tr("availability_generator.tracking"), self._tracking)
         layout.addWidget(self._solar_group)
 
@@ -173,7 +181,7 @@ class _AvailabilityDialogImpl:
         wf = QFormLayout(self._wind_group)
 
         self._turbine_combo = QComboBox()
-        self._turbine_combo.addItem("Vestas_V112_3MW (default)")
+        self._turbine_combo.addItem(self._default_turbine_label())
         wf.addRow(tr("availability_generator.turbine"), self._turbine_combo)
 
         self._hub_height = QSpinBox()
@@ -226,6 +234,11 @@ class _AvailabilityDialogImpl:
 
     _SOLAR_HINTS = {"solar", "pv", "fotovoltaic", "photovoltaic", "sun"}
     _WIND_HINTS = {"wind", "eolic", "eólic", "turbine", "aerogenerador"}
+
+    def _default_turbine_label(self) -> str:
+        """Label of the no-data turbine item (the generator's default turbine)."""
+        return self._tr("availability_generator.turbine_default",
+                        name="Vestas_V112_3MW")
 
     def _guess_profile_type(self, fuel: str) -> str:
         """Guess Solar/Wind from fuel name; return '--' if unknown."""
@@ -285,12 +298,14 @@ class _AvailabilityDialogImpl:
 
             # Profile type dropdown (Solar / Wind / --)
             combo = QComboBox()
-            combo.addItems(["--", "Solar", "Wind"])
+            combo.addItem("--", "--")
+            combo.addItem(self._tr("availability_generator.profile_solar"), "Solar")
+            combo.addItem(self._tr("availability_generator.profile_wind"), "Wind")
             guess = self._guess_profile_type(fuel)
-            idx = combo.findText(guess)
+            idx = combo.findData(guess)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
-            combo.currentTextChanged.connect(self._on_profile_type_changed)
+            combo.currentIndexChanged.connect(self._on_profile_type_changed)
             self._gen_table.setCellWidget(row, 3, combo)
 
             # Node
@@ -301,7 +316,7 @@ class _AvailabilityDialogImpl:
 
         self._update_param_visibility()
 
-    def _on_profile_type_changed(self, _text: str):
+    def _on_profile_type_changed(self, _index: int):
         """Update Solar/Wind parameter visibility when user changes a combo."""
         self._update_param_visibility()
 
@@ -313,7 +328,7 @@ class _AvailabilityDialogImpl:
             combo = self._gen_table.cellWidget(row, 3)
             if combo is None:
                 continue
-            pt = combo.currentText()
+            pt = combo.currentData()
             if pt == "Solar":
                 has_solar = True
             elif pt == "Wind":
@@ -336,11 +351,11 @@ class _AvailabilityDialogImpl:
                 label = f"{t.key} ({t.rated_power_mw:.1f} MW)"
                 self._turbine_combo.addItem(label, t.key)
             if not turbines:
-                self._turbine_combo.addItem("Vestas_V112_3MW (default)")
+                self._turbine_combo.addItem(self._default_turbine_label())
             self._turbines_loaded = True
         except Exception:
             self._turbine_combo.clear()
-            self._turbine_combo.addItem("Vestas_V112_3MW (default)")
+            self._turbine_combo.addItem(self._default_turbine_label())
 
     # ------------------------------------------------------------------
     # Output directory resolution
@@ -405,7 +420,7 @@ class _AvailabilityDialogImpl:
             "t_noct": 45.0,
             "tilt": tilt,
             "azimuth": self._azimuth.value(),
-            "tracking": self._tracking.currentText(),
+            "tracking": self._tracking.currentData(),
         }
 
         turbine_key = None
@@ -428,7 +443,7 @@ class _AvailabilityDialogImpl:
                 continue
             gen_key = self._gen_table.item(row, 1).text()
             combo = self._gen_table.cellWidget(row, 3)
-            pt = combo.currentText() if combo else "--"
+            pt = combo.currentData() if combo else "--"
             if pt in ("Solar", "Wind"):
                 full_key = f"{sys_name}/{gen_key}"
                 profile_type_map[full_key] = pt
@@ -436,8 +451,8 @@ class _AvailabilityDialogImpl:
 
         if not profile_type_map:
             QMessageBox.warning(
-                self._dlg, "Warning",
-                "No generators selected with a Solar or Wind profile type.",
+                self._dlg, self._tr("common.warning"),
+                self._tr("availability_generator.no_generators_selected"),
             )
             return
 
@@ -445,8 +460,8 @@ class _AvailabilityDialogImpl:
         all_states = getattr(self._parent, "_all_states", {})
         if not all_states:
             QMessageBox.warning(
-                self._dlg, "Error",
-                "No model loaded. Please load a configuration first.",
+                self._dlg, self._tr("common.error"),
+                self._tr("availability_generator.no_model_loaded"),
             )
             return
 
@@ -485,8 +500,8 @@ class _AvailabilityDialogImpl:
             tmp.unlink(missing_ok=True)
         except Exception as exc:
             QMessageBox.critical(
-                self._dlg, "Error",
-                f"Failed to export config: {exc}",
+                self._dlg, self._tr("common.error"),
+                self._tr("availability_generator.export_failed", error=exc),
             )
             return
 
@@ -541,9 +556,8 @@ class _AvailabilityDialogImpl:
 
         self._btn_generate.setEnabled(True)
         self._progress_bar.setValue(100)
-        self._status_label.setText(
-            f"Done! Generated {len(result_map)} profile(s)."
-        )
+        self._status_label.setText(self._tr(
+            "availability_generator.done_status", count=len(result_map)))
 
         # Update availability_file on the GUI model generators
         self._apply_paths_to_model(result_map)
@@ -593,4 +607,4 @@ class _AvailabilityDialogImpl:
 
         self._btn_generate.setEnabled(True)
         self._progress_bar.setVisible(False)
-        QMessageBox.critical(self._dlg, "Error", error_msg)
+        QMessageBox.critical(self._dlg, self._tr("common.error"), error_msg)

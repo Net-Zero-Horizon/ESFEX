@@ -25,12 +25,12 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try { render(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(text, isError) {
@@ -49,10 +49,10 @@ function render(data) {
     const tr   = data.tech_range;
     const h    = data.header || {};
     if (!alts || alts.length === 0) {
-        showStatus("No alternatives to display.", false); return;
+        showStatus(_t("web.charts.mga_robustness_frontier.no_alternatives"), false); return;
     }
     if (!tr || !tr.labels || tr.labels.length === 0) {
-        showStatus("No technology investments to compare.", false); return;
+        showStatus(_t("web.charts.mga_robustness_frontier.no_techs"), false); return;
     }
 
     // ── Top: cost ↔ diversity scatter ──
@@ -96,15 +96,20 @@ function render(data) {
         if (group.length === 0) continue;
         const xs = group.map(xOf);
         const ys = group.map(a => a.cost_busd);
-        const texts = group.map(a =>
-            `<b>Alt ${a.id}</b><br>` +
-            `Cost: $${a.cost_busd.toFixed(2)}B ` +
-            `(+${a.cost_pct_above_optimal.toFixed(2)}% vs opt)<br>` +
-            `Distance from optimum: ${xOf(a).toFixed(3)}<br>` +
-            (isSpores
-                ? `Objective: ${labelMap[obj] || obj}<br>`
-                : "") +
-            `Peak RE: ${a.re_peak_pct.toFixed(1)}%`);
+        const texts = group.map(a => [
+            "<b>" + _t("web.charts.mga_robustness_frontier.hover_alt", { id: a.id }) + "</b>",
+            _t("web.charts.mga_robustness_frontier.hover_cost", {
+                cost: a.cost_busd.toFixed(2),
+                pct: a.cost_pct_above_optimal.toFixed(2) }),
+            _t("web.charts.mga_robustness_frontier.hover_distance",
+               { distance: xOf(a).toFixed(3) }),
+            ...(isSpores
+                ? [_t("web.charts.mga_robustness_frontier.hover_objective",
+                      { objective: labelMap[obj] || obj })]
+                : []),
+            _t("web.charts.mga_robustness_frontier.hover_peak_re",
+               { pct: a.re_peak_pct.toFixed(1) }),
+        ].join("<br>"));
         frontierTraces.push({
             type: "scatter", mode: "markers+text",
             x: xs, y: ys,
@@ -120,7 +125,8 @@ function render(data) {
             // Single combined trace when MGA so the legend stays clean;
             // one trace per objective when SPORES so each objective gets
             // its own legend entry.
-            name: isSpores ? (labelMap[obj] || obj) : "Alternative",
+            name: isSpores ? (labelMap[obj] || obj)
+                           : _t("web.charts.mga_robustness_frontier.trace_alternative"),
             showlegend: true,
             hovertext: texts, hoverinfo: "text",
         });
@@ -134,8 +140,8 @@ function render(data) {
             marker: { symbol: "star", size: 20,
                       color: colorMap["cost_optimal"] || "#E74C3C",
                       line: { color: "#FFF", width: 1 } },
-            name: "Optimal",
-            hovertemplate: "<b>Optimal</b><br>$%{y:,.2f}B<extra></extra>",
+            name: _t("web.charts.mga_robustness_frontier.trace_optimal"),
+            hovertemplate: _t("web.charts.mga_robustness_frontier.hover_optimal"),
         });
     }
 
@@ -158,15 +164,15 @@ function render(data) {
           xaxis: "x2", yaxis: "y2",
           marker: { symbol: "diamond", color: "#34495e", size: 9,
                     line: { color: "#fff", width: 1 } },
-          name: "Median (tech)", text: tr.labels, legendgroup: "tech",
-          hovertemplate: "%{text}<br>Median: %{x:,.1f} MW<extra></extra>" },
+          name: _t("web.charts.mga_robustness_frontier.trace_median"), text: tr.labels, legendgroup: "tech",
+          hovertemplate: _t("web.charts.mga_robustness_frontier.hover_median") },
         { type: "scatter", mode: "markers",
           x: tr.optimal_mw, y: rowY,
           xaxis: "x2", yaxis: "y2",
           marker: { symbol: "star", size: 13, color: "#E74C3C",
                     line: { color: "#fff", width: 1 } },
-          name: "Optimal (tech)", text: tr.labels, legendgroup: "tech",
-          hovertemplate: "%{text}<br>Optimal: %{x:,.1f} MW<extra></extra>" },
+          name: _t("web.charts.mga_robustness_frontier.trace_optimal_tech"), text: tr.labels, legendgroup: "tech",
+          hovertemplate: _t("web.charts.mga_robustness_frontier.hover_optimal_tech") },
     ];
 
     // CV annotations sit at the right end of each Robustness bar so the
@@ -176,7 +182,8 @@ function render(data) {
         xref: "x2", yref: "y2",
         x: tr.max_mw[i], y: i,
         xanchor: "left", yanchor: "middle",
-        text: ` CV ${Math.round((tr.cv[i] || 0) * 100)}%`,
+        text: " " + _t("web.charts.mga_robustness_frontier.cv",
+                       { pct: Math.round((tr.cv[i] || 0) * 100) }),
         showarrow: false,
         font: { size: 9, color: "#7f8c8d" }, xshift: 6,
     }));
@@ -187,13 +194,15 @@ function render(data) {
     // to them unambiguously. The muted-grey subtitle below the heading
     // lets the panel be read without a chart-level intro.
     const subplotTitles = [
-        { text: "<b>a)  Cost ↔ Distance Frontier</b><br>" +
-                "<span style='font-size:10px;color:#7f8c8d'>each dot = one alternative · x = normalised L1 distance from the cost-optimal · green band = cost slack envelope · ★ = optimal</span>",
+        { text: "<b>" + _t("web.charts.mga_robustness_frontier.title_a") + "</b><br>" +
+                "<span style='font-size:10px;color:#7f8c8d'>" +
+                _t("web.charts.mga_robustness_frontier.subtitle_a") + "</span>",
           xref: "paper", yref: "paper",
           x: 0.5, y: 0.93, xanchor: "center", yanchor: "bottom",
           showarrow: false, font: { size: 12, color: "#2C3E50" } },
-        { text: "<b>b)  Decision Robustness</b><br>" +
-                "<span style='font-size:10px;color:#7f8c8d'>min↔max invested MW per technology across the MGA set · sorted by CV (must-build at bottom, swappable at top)</span>",
+        { text: "<b>" + _t("web.charts.mga_robustness_frontier.title_b") + "</b><br>" +
+                "<span style='font-size:10px;color:#7f8c8d'>" +
+                _t("web.charts.mga_robustness_frontier.subtitle_b") + "</span>",
           xref: "paper", yref: "paper",
           x: 0.5, y: 0.50, xanchor: "center", yanchor: "bottom",
           showarrow: false, font: { size: 12, color: "#2C3E50" } },
@@ -226,13 +235,13 @@ function render(data) {
         // ── Top subplot: Frontier ──
         xaxis: {
             domain: [0.0, 1.0], anchor: "y",
-            title: { text: "Distance from cost-optimal (norm.)",
+            title: { text: _t("web.charts.mga_robustness_frontier.axis_distance"),
                      font: { size: 11 } },
             gridcolor: "rgba(0,0,0,0.08)", rangemode: "tozero",
         },
         yaxis: {
             domain: [0.58, 0.90], anchor: "x",
-            title: { text: "System cost ($B)", font: { size: 11 } },
+            title: { text: _t("web.charts.mga_robustness_frontier.axis_cost"), font: { size: 11 } },
             gridcolor: "rgba(0,0,0,0.08)",
         },
         // ── Bottom subplot: Robustness ──

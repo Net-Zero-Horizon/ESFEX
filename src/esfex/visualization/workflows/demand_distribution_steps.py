@@ -116,7 +116,8 @@ class TargetSelectionStep(QWidget):
                 buses = _load_buses_of_node(state, node.index)
                 peak = node.demand.peak_mw if node.demand else 0.0
                 node_item = QTreeWidgetItem(sys_item)
-                node_item.setText(0, f"{node.name} (Node {node.index})")
+                node_item.setText(0, tr("wizard_demand.node_item",
+                                        name=node.name, index=node.index))
                 node_item.setText(1, f"{peak:.1f} MW")
                 node_item.setText(2, str(len(buses)))
                 node_item.setFlags(
@@ -149,10 +150,11 @@ class TargetSelectionStep(QWidget):
         lines = []
         for t in targets:
             n_buses = len(t["buses"])
-            lines.append(
-                f"  {t['system_name']} / {t['node_name']}: "
-                f"{t['peak_mw']:.1f} MW, {n_buses} buses"
-            )
+            lines.append(tr(
+                "wizard_demand.target_line",
+                system=t["system_name"], node=t["node_name"],
+                mw=f"{t['peak_mw']:.1f}", buses=n_buses,
+            ))
         self._summary_label.setText("\n".join(lines))
 
     def get_selected_targets(self) -> list[dict]:
@@ -295,7 +297,7 @@ class DomainFetchStep(QWidget):
 
     def _on_error(self, msg):
         self._btn_fetch.setEnabled(True)
-        self._status.setText(f"Error: {msg}")
+        self._status.setText(tr("wizard_demand.error_status", msg=msg))
         self._progress.setValue(0)
 
     def get_buildings(self):
@@ -423,7 +425,7 @@ class ClassificationStep(QWidget):
     def _add_empty_rule(self):
         row = self._rules_table.rowCount()
         self._rules_table.insertRow(row)
-        self._rules_table.setItem(row, 0, QTableWidgetItem("New Type"))
+        self._rules_table.setItem(row, 0, QTableWidgetItem(tr("wizard_demand.new_rule_name")))
         self._rules_table.setItem(row, 1, QTableWidgetItem("0"))
         self._rules_table.setItem(row, 2, QTableWidgetItem("∞"))
         self._rules_table.setItem(row, 3, QTableWidgetItem("0.05"))
@@ -450,12 +452,13 @@ class ClassificationStep(QWidget):
         summary = compute_classification_summary(self._classified_gdf)
         lines = []
         for _, row in summary.iterrows():
-            lines.append(
-                f"  {row['building_type']}: {int(row['count'])} buildings, "
-                f"{row['total_area_m2']:.0f} m², weight={row['total_weight']:.1f}"
-            )
+            lines.append(tr(
+                "wizard_demand.class_line",
+                type=row["building_type"], count=int(row["count"]),
+                area=f"{row['total_area_m2']:.0f}", weight=f"{row['total_weight']:.1f}",
+            ))
         total_w = summary["total_weight"].sum()
-        lines.append(f"\n  {tr('wizard_demand.total_weight')}: {total_w:.1f}")
+        lines.append(tr("wizard_demand.total_weight_line", w=f"{total_w:.1f}"))
         self._preview_label.setText("\n".join(lines))
         self.classificationReady.emit()
 
@@ -533,7 +536,9 @@ class ClusteringStep(QWidget):
         self._spin_agg_k.setValue(3)
         agg_form.addRow(tr("wizard_demand.n_clusters"), self._spin_agg_k)
         self._combo_linkage = QComboBox()
-        self._combo_linkage.addItems(["ward", "complete", "average"])
+        self._combo_linkage.addItem(tr("wizard_demand.linkage_ward"), "ward")
+        self._combo_linkage.addItem(tr("wizard_demand.linkage_complete"), "complete")
+        self._combo_linkage.addItem(tr("wizard_demand.linkage_average"), "average")
         agg_form.addRow(tr("wizard_demand.linkage"), self._combo_linkage)
         algo_lay.addWidget(self._agg_widget)
         self._agg_widget.hide()
@@ -591,7 +596,7 @@ class ClusteringStep(QWidget):
         elif algo == "kmeans":
             return {"n_clusters": self._spin_k.value()}
         elif algo == "agglomerative":
-            return {"n_clusters": self._spin_agg_k.value(), "linkage": self._combo_linkage.currentText()}
+            return {"n_clusters": self._spin_agg_k.value(), "linkage": self._combo_linkage.currentData()}
         return {}
 
     def _run_clustering(self):
@@ -642,7 +647,7 @@ class ClusteringStep(QWidget):
 
     def _on_error(self, msg):
         self._btn_run.setEnabled(True)
-        self._status.setText(f"Error: {msg}")
+        self._status.setText(tr("wizard_demand.error_status", msg=msg))
         self._progress.setValue(0)
 
     def _show_clusters_on_map(self):
@@ -792,7 +797,8 @@ class ReviewApplyStep(QWidget):
             for i, bus in enumerate(buses):
                 frac = bus_fractions[i] if i < len(bus_fractions) else 0.0
                 cluster_name = (
-                    f"Cluster {int(sorted_clusters.iloc[i]['cluster_id'])}"
+                    tr("wizard_demand.cluster_label",
+                       id=int(sorted_clusters.iloc[i]["cluster_id"]))
                     if i < len(sorted_clusters) else "—"
                 )
                 assignment = {
@@ -867,7 +873,7 @@ class ReviewApplyStep(QWidget):
             self,
             tr("wizard_demand.export_csv_title"),
             "demand_distribution.csv",
-            "CSV Files (*.csv)",
+            tr("wizard_demand.csv_files_filter"),
         )
         if not path:
             return

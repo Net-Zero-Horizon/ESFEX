@@ -101,7 +101,7 @@ class _CheckableComboBox(QComboBox):
         elif len(rows) == 1:
             self.lineEdit().setText(m.item(rows[0]).text())
         else:
-            self.lineEdit().setText(f"{len(rows)} selected")
+            self.lineEdit().setText(tr("results_panel.n_selected", n=len(rows)))
 
 # ── Variable registry ─────────────────────────────────────────────
 
@@ -130,6 +130,34 @@ _RISK_VARIABLES = [
     ("Expected Annual Loss", "risk", "eal", "risk_overlay"),
     ("Composite Risk", "risk", "composite_risk", "risk_overlay"),
 ]
+
+# Display name (kept in English: it also selects the map gradient) →
+# translation key of the label shown in the GUI.
+_VARIABLE_KEYS: dict[str, str] = {
+    "Installed Capacity Mix": "results_panel.var_installed_capacity_mix",
+    "Generation Mix": "results_panel.var_generation_mix",
+    "RE vs Non-RE": "results_panel.var_re_vs_nonre",
+    "Total Generation": "results_panel.var_total_generation",
+    "RE Penetration": "results_panel.var_re_penetration",
+    "Nodal Prices (LMP)": "results_panel.var_nodal_prices",
+    "Load Shedding": "results_panel.var_load_shedding",
+    "CO2 Emissions": "results_panel.var_co2_emissions",
+    "Curtailment": "results_panel.var_curtailment",
+    "Gen. Investment": "results_panel.var_gen_investment",
+    "Bat. Investment": "results_panel.var_bat_investment",
+    "Power Flow": "results_panel.var_power_flow",
+    "Fuel Transport Flow": "results_panel.var_fuel_transport_flow",
+    "Risk Coefficient": "results_panel.var_risk_coefficient",
+    "Expected Annual Loss": "results_panel.var_expected_annual_loss",
+    "Composite Risk": "results_panel.var_composite_risk",
+}
+
+
+def _variable_label(display_name: str) -> str:
+    """Translated label of a results variable (plugin variables as they are)."""
+    key = _VARIABLE_KEYS.get(display_name)
+    return tr(key) if key else display_name
+
 
 _RENEWABLE_KEYWORDS = {"solar", "wind", "biomass", "hydro", "hydroelectric", "otec", "renewable"}
 
@@ -388,7 +416,7 @@ class ResultsPanel(QWidget):
         self._alt_label = QLabel(tr("results_panel.alternative"))
         self._alt_row.addWidget(self._alt_label)
         self._alt_combo = QComboBox()
-        self._alt_combo.currentTextChanged.connect(self._on_alt_changed)
+        self._alt_combo.currentIndexChanged.connect(self._on_alt_changed)
         self._alt_row.addWidget(self._alt_combo, stretch=1)
         self._alt_widget = QWidget()
         self._alt_widget.setLayout(self._alt_row)
@@ -445,7 +473,8 @@ class ResultsPanel(QWidget):
             req = _VARIABLE_REQUIREMENTS.get(display_name, set())
             if capabilities is not None and not req.issubset(capabilities):
                 continue
-            self._var_combo.add_checkable_item(display_name, data=viz_type)
+            self._var_combo.add_checkable_item(_variable_label(display_name),
+                                               data=viz_type)
             self._visible_var_indices.append(i)
 
         # Restore prior selection where the variable is still visible.
@@ -489,6 +518,9 @@ class ResultsPanel(QWidget):
         self._year_label.setText(tr("results_panel.year"))
         self._alt_label.setText(tr("results_panel.alternative"))
         self._var_label.setText(tr("results_panel.variable"))
+        # The map's legends and tooltips are text sent from here: redraw
+        # them in the new language (no-op while the panel is hidden).
+        self._schedule_render()
 
     # ------------------------------------------------------------------
     # Public API
@@ -533,6 +565,8 @@ class ResultsPanel(QWidget):
 
         import math
 
+        from esfex.visualization.workflows.risk_charts import hazard_label
+
         circles = []
         for d in self._risk_data:
             lat, lng = d.get("lat", 0), d.get("lng", 0)
@@ -546,7 +580,7 @@ class ResultsPanel(QWidget):
             elif metric == "eal":
                 value = d.get("eal", 0)
                 risk_idx = min(1.0, math.log10(max(value, 1)) / 6)  # 0-1M range
-                label_val = f"EAL = ${value:,.0f}/yr"
+                label_val = tr("map_legends.eal_value", value=f"{value:,.0f}")
             else:  # composite_risk
                 value = d.get("composite_risk", 0)
                 risk_idx = min(1.0, value * 3)
@@ -554,10 +588,10 @@ class ResultsPanel(QWidget):
 
             radius = max(6, min(25, 6 + 4 * math.log10(max(d.get("eal", 1), 1))))
 
-            tooltip = (
-                f"<b>{label_val}</b><br/>"
-                f"<b>Dominant:</b> {d.get('dominant_hazard', '').replace('_', ' ').title()}<br/>"
-                f"<b>Elements:</b> {d.get('elements', '')}"
+            tooltip = tr(
+                "results_panel.risk_tooltip", value=label_val,
+                hazard=hazard_label(d.get('dominant_hazard', '')),
+                elements=d.get('elements', ''),
             )
             circles.append({
                 "lat": lat, "lng": lng,
@@ -569,13 +603,15 @@ class ResultsPanel(QWidget):
 
         if circles:
             self._map_widget.add_risk_circles(circles)
+            display = next((v[0] for v in _RISK_VARIABLES if v[2] == metric),
+                           metric.replace("_", " ").title())
             self._map_widget.add_risk_legend(
-                metric.replace("_", " ").title(),
+                _variable_label(display),
                 [
-                    {"label": "Low", "color": "#27ae60"},
-                    {"label": "Medium", "color": "#f1c40f"},
-                    {"label": "High", "color": "#e67e22"},
-                    {"label": "Very High", "color": "#e74c3c"},
+                    {"label": tr("results_panel.risk_low"), "color": "#27ae60"},
+                    {"label": tr("results_panel.risk_medium"), "color": "#f1c40f"},
+                    {"label": tr("results_panel.risk_high"), "color": "#e67e22"},
+                    {"label": tr("results_panel.risk_very_high"), "color": "#e74c3c"},
                 ],
             )
 
@@ -774,7 +810,7 @@ class ResultsPanel(QWidget):
     def _load_mga_alternatives(self):
         """Populate alternative combo from /mga/ group in main HDF5."""
         self._alt_combo.clear()
-        self._alt_combo.addItem("-- None --")
+        self._alt_combo.addItem(tr("results_panel.alt_none"), -1)
         if not self._mga_h5_path or not self._mga_h5_path.exists():
             return
         try:
@@ -788,13 +824,14 @@ class ResultsPanel(QWidget):
                     grp_key = f"alternative_{k}"
                     if grp_key in mga:
                         if k == 0:
-                            self._alt_combo.addItem("Cost-Optimal (0)")
+                            self._alt_combo.addItem(tr("results_panel.alt_cost_optimal"), 0)
                         else:
-                            self._alt_combo.addItem(f"Alternative {k}")
+                            self._alt_combo.addItem(
+                                tr("results_panel.alt_n", n=k), k)
         except Exception:
             pass
 
-    def _on_alt_changed(self, text: str):
+    def _on_alt_changed(self, _index: int):
         self._schedule_render()
 
     def _on_year_changed(self, year_str: str):
@@ -946,7 +983,7 @@ class ResultsPanel(QWidget):
         save_path, _ = QFileDialog.getSaveFileName(
             self, tr("results_panel.screenshot_btn"),
             "map_results.png",
-            "PNG (*.png);;JPEG (*.jpg);;All Files (*)",
+            tr("results_panel.screenshot_filter"),
         )
         if not save_path:
             return
@@ -1009,7 +1046,7 @@ class ResultsPanel(QWidget):
         else:
             QMessageBox.warning(
                 self, tr("common.error"),
-                "Failed to save screenshot.",
+                tr("results_panel.screenshot_failed"),
             )
 
     @staticmethod
@@ -1130,15 +1167,8 @@ class ResultsPanel(QWidget):
         """Return the selected MGA alternative index, or -1 if none."""
         if not self._alt_widget.isVisible():
             return -1
-        text = self._alt_combo.currentText()
-        if not text or text.startswith("--"):
-            return -1
-        if "0" in text and "Optimal" in text:
-            return 0
-        try:
-            return int(text.split()[-1])
-        except (ValueError, IndexError):
-            return -1
+        alt = self._alt_combo.currentData()
+        return alt if isinstance(alt, int) else -1
 
     def _apply_mga_investment(self, alt_idx: int, year: int,
                               hdf5_key: str, display_name: str):
@@ -1177,7 +1207,12 @@ class ResultsPanel(QWidget):
 
                 alt_label = "Optimal" if alt_idx == 0 else f"Alt {alt_idx}"
                 title = f"{display_name} — {alt_label} ({year})"
-                self._render_node_circles(node_values, title)
+                legend = tr(
+                    "results_panel.mga_legend_optimal" if alt_idx == 0
+                    else "results_panel.mga_legend_alt",
+                    variable=_variable_label(display_name), n=alt_idx, year=year,
+                )
+                self._render_node_circles(node_values, title, legend)
 
         except Exception:
             import traceback
@@ -1773,10 +1808,12 @@ class ResultsPanel(QWidget):
             segs = []
             if re_total[ni] > 0.01:
                 segs.append({"value": round(float(re_total[ni]), 2),
-                             "color": re_color, "label": "Renewable"})
+                             "color": re_color,
+                             "label": tr("map_legends.renewable")})
             if nonre_total[ni] > 0.01:
                 segs.append({"value": round(float(nonre_total[ni]), 2),
-                             "color": nonre_color, "label": "Non-Renewable"})
+                             "color": nonre_color,
+                             "label": tr("map_legends.non_renewable")})
             if segs:
                 node_data[ni] = segs
 
@@ -1805,7 +1842,7 @@ class ResultsPanel(QWidget):
                 "lng": lng,
                 "segments": segs,
                 "size": round(sz),
-                "title": f"Node {i} — {year}",
+                "title": tr("results_panel.node_year", node=i, year=year),
             })
 
         if not self._accumulate:
@@ -1823,7 +1860,7 @@ class ResultsPanel(QWidget):
             for lbl, clr in seen.items()
         ]
         self._map_widget.add_results_pie_legend(
-            f"{title} — {year}", legend_entries,
+            f"{_variable_label(title)} — {year}", legend_entries,
         )
 
     @staticmethod
@@ -1922,7 +1959,7 @@ class ResultsPanel(QWidget):
             self._map_widget.clear_results_flows()
         self._map_widget.add_results_flow_lines(lines)
         self._map_widget.add_results_legend(
-            title, 0.0, max_flow, pf_min, pf_max,
+            _variable_label(title), 0.0, max_flow, pf_min, pf_max,
         )
 
     def _render_fuel_flow_lines(self, scenario: Any, root: Any, title: str):
@@ -1992,7 +2029,8 @@ class ResultsPanel(QWidget):
             weight = 2 + 8 * mag / max_flow
             color = _color_interp(mag, 0, max_flow, fl_min, fl_max)
             meta = route_meta[r_idx] if r_idx < len(route_meta) else {}
-            lbl = f"Route {meta.get('from', '?')}\u2192{meta.get('to', '?')}"
+            lbl = tr("map_legends.fuel_route",
+                     src=meta.get('from', '?'), dst=meta.get('to', '?'))
             lines.append({
                 "coords": route_geoms[r_idx],
                 "weight": round(weight, 1),
@@ -2005,10 +2043,11 @@ class ResultsPanel(QWidget):
             self._map_widget.clear_results_flows()
         self._map_widget.add_results_flow_lines(lines)
         self._map_widget.add_results_legend(
-            title, 0.0, max_flow, fl_min, fl_max,
+            _variable_label(title), 0.0, max_flow, fl_min, fl_max,
         )
 
-    def _render_node_circles(self, values: np.ndarray, title: str):
+    def _render_node_circles(self, values: np.ndarray, title: str,
+                             legend_title: str | None = None):
         coords = self._get_coords()
         if not coords:
             return
@@ -2035,12 +2074,13 @@ class ResultsPanel(QWidget):
             circles.append({
                 "lat": lat, "lng": lng,
                 "radius": r, "color": color,
-                "label": f"Node {i}", "value": round(val, 2),
+                "label": tr("results_panel.node", node=i), "value": round(val, 2),
             })
 
         if not self._accumulate:
             self._map_widget.clear_results_nodes()
         self._map_widget.add_results_node_circles(circles)
         self._map_widget.add_results_legend(
-            title, min_val, max_val, color_min, color_max,
+            legend_title or _variable_label(title), min_val, max_val,
+            color_min, color_max,
         )

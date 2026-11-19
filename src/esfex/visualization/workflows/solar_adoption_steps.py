@@ -42,6 +42,19 @@ from esfex.visualization.i18n import tr
 
 logger = logging.getLogger(__name__)
 
+_METHOD_KEYS = {
+    "logistic": "wizard_solar.adopt_method_logistic",
+    "bass": "wizard_solar.adopt_method_bass",
+    "techno_economic": "wizard_solar.adopt_method_techno",
+    "abm": "wizard_solar.adopt_method_abm",
+}
+
+
+def _method_label(method: str) -> str:
+    """Display name of an adoption method (exports keep the internal id)."""
+    key = _METHOD_KEYS.get(method)
+    return tr(key) if key else method
+
 
 # =====================================================================
 # Step 6: Macroeconomic Data
@@ -69,7 +82,7 @@ class MacroDataStep(QWidget):
         self._lbl_country = QLabel(tr("wizard_solar.macro_not_detected"))
         country_lay.addWidget(self._lbl_country)
         self._edit_iso = QLineEdit()
-        self._edit_iso.setPlaceholderText("ISO-3 (e.g. CUB, USA)")
+        self._edit_iso.setPlaceholderText(tr("wizard_solar.macro_iso_placeholder"))
         self._edit_iso.setMaximumWidth(120)
         country_lay.addWidget(self._edit_iso)
         self._btn_detect = QPushButton(tr("wizard_solar.macro_detect"))
@@ -357,7 +370,8 @@ class _AdoptionWorker(QThread):
 
             for i, method in enumerate(self._methods):
                 pct = int((i / total) * 100)
-                self.progress.emit(pct, f"Running {method}...")
+                self.progress.emit(
+                    pct, tr("wizard_solar.adopt_running", method=_method_label(method)))
 
                 p = self._params.get(method, {})
                 if method == "logistic":
@@ -402,7 +416,7 @@ class _AdoptionWorker(QThread):
                     continue
                 curves.append(c)
 
-            self.progress.emit(100, "All models complete.")
+            self.progress.emit(100, tr("wizard_solar.adopt_all_complete"))
             self.finished.emit(curves)
 
         except Exception as exc:
@@ -570,11 +584,11 @@ class AdoptionModelStep(QWidget):
         ]
         self._validation_data.append(vd)
         self._update_validation_label()
-        self._log.append(f"IRENA: loaded {len(vd.capacity_mw)} data points.")
+        self._log.append(tr("wizard_solar.adopt_irena_loaded", n=len(vd.capacity_mw)))
 
     def _on_irena_cap_error(self, msg: str):
         self._btn_fetch_irena.setEnabled(True)
-        self._log.append(f"IRENA error: {msg}")
+        self._log.append(tr("wizard_solar.adopt_irena_error", msg=msg))
 
     def _import_csv(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -603,7 +617,7 @@ class AdoptionModelStep(QWidget):
             if not years:
                 QMessageBox.warning(
                     self, tr("wizard_solar.adopt_warn_title"),
-                    "CSV must have 'year' and 'capacity_mw' columns.",
+                    tr("wizard_solar.adopt_csv_columns"),
                 )
                 return
 
@@ -615,7 +629,8 @@ class AdoptionModelStep(QWidget):
             )
             self._validation_data.append(vd)
             self._update_validation_label()
-            self._log.append(f"CSV: loaded {len(years)} points from {Path(path).name}.")
+            self._log.append(tr("wizard_solar.adopt_csv_loaded",
+                                n=len(years), file=Path(path).name))
 
         except Exception as exc:
             QMessageBox.warning(
@@ -633,7 +648,9 @@ class AdoptionModelStep(QWidget):
         lay.addWidget(QLabel(tr("wizard_solar.adopt_manual_instruction")))
 
         table = QTableWidget(10, 2)
-        table.setHorizontalHeaderLabels(["Year", "Capacity (MW)"])
+        table.setHorizontalHeaderLabels([
+            tr("wizard_solar.adopt_col_year"), tr("wizard_solar.adopt_col_capacity"),
+        ])
         table.horizontalHeader().setStretchLastSection(True)
         lay.addWidget(table)
 
@@ -669,14 +686,14 @@ class AdoptionModelStep(QWidget):
             return
 
         vd = ValidationData(
-            label="Manual",
+            label=tr("wizard_solar.adopt_manual_label"),
             years=years,
             capacity_mw=capacity,
             source="manual",
         )
         self._validation_data.append(vd)
         self._update_validation_label()
-        self._log.append(f"Manual: added {len(years)} data points.")
+        self._log.append(tr("wizard_solar.adopt_manual_added", n=len(years)))
 
     def _get_selected_methods(self) -> list[str]:
         methods = []
@@ -761,20 +778,19 @@ class AdoptionModelStep(QWidget):
         self._curves = curves
         self._btn_run.setEnabled(True)
         self._progress.setValue(100)
-        self._log.append(
-            f"\n{tr('wizard_solar.adopt_complete')}\n"
-            f"  {len(curves)} method(s) computed."
-        )
+        self._log.append("\n" + tr("wizard_solar.adopt_complete"))
+        self._log.append(tr("wizard_solar.adopt_methods_computed", n=len(curves)))
         for c in curves:
             final_mw = c.capacity_mw[-1] if c.capacity_mw else 0
-            self._log.append(
-                f"  {c.method}: {final_mw:.1f} MW by {c.years[-1]}"
-            )
+            self._log.append(tr(
+                "wizard_solar.adopt_curve_line", method=_method_label(c.method),
+                mw=f"{final_mw:.1f}", year=c.years[-1],
+            ))
         self.modelsFinished.emit()
 
     def _on_error(self, msg: str):
         self._btn_run.setEnabled(True)
-        self._log.append(f"\nERROR: {msg}")
+        self._log.append("\n" + tr("wizard_solar.error_label", msg=msg))
 
     def get_curves(self) -> list:
         return self._curves
@@ -889,7 +905,7 @@ class ScenarioComparisonStep(QWidget):
             color = colors[i % len(colors)]
             ax.plot(
                 curve.years, curve.capacity_mw,
-                label=curve.method, color=color, linewidth=2,
+                label=_method_label(curve.method), color=color, linewidth=2,
             )
 
             # Confidence band for ABM (convert penetration bounds → MW)
@@ -913,9 +929,9 @@ class ScenarioComparisonStep(QWidget):
                 label=vd.label, edgecolors="black", linewidths=0.5,
             )
 
-        ax.set_xlabel("Year", color="black")
-        ax.set_ylabel("Installed Capacity (MW)", color="black")
-        ax.set_title("Solar PV Adoption Scenarios", color="black")
+        ax.set_xlabel(tr("wizard_solar.adopt_col_year"), color="black")
+        ax.set_ylabel(tr("wizard_solar.compare_axis_capacity"), color="black")
+        ax.set_title(tr("wizard_solar.compare_chart_title"), color="black")
         ax.legend(
             facecolor="white", edgecolor="#ccc", labelcolor="black",
             fontsize=8, loc="upper left",
@@ -940,10 +956,11 @@ class ScenarioComparisonStep(QWidget):
 
         for i, curve in enumerate(self._curves):
             final_mw = curve.capacity_mw[-1] if curve.capacity_mw else 0
-            radio = QRadioButton(
-                f"{curve.method} — {final_mw:.1f} MW by "
-                f"{curve.years[-1] if curve.years else '?'}"
-            )
+            radio = QRadioButton(tr(
+                "wizard_solar.compare_curve_option",
+                method=_method_label(curve.method), mw=f"{final_mw:.1f}",
+                year=curve.years[-1] if curve.years else "?",
+            ))
             if i == 0:
                 radio.setChecked(True)
             radio.toggled.connect(lambda checked, idx=i: self._on_radio(checked, idx))
@@ -958,7 +975,7 @@ class ScenarioComparisonStep(QWidget):
         if not self._curves:
             return
 
-        methods = [c.method for c in self._curves]
+        methods = [_method_label(c.method) for c in self._curves]
         years = self._curves[0].years if self._curves else []
 
         # Show every 5th year
@@ -1121,12 +1138,12 @@ class IntegrationStep(QWidget):
         if selected_curve:
             final = selected_curve.penetration[-1] if selected_curve.penetration else 0
             final_mw = selected_curve.capacity_mw[-1] if selected_curve.capacity_mw else 0
-            self._lbl_summary.setText(
-                f"Selected: {selected_curve.method}\n"
-                f"Period: {selected_curve.years[0]}–{selected_curve.years[-1]}\n"
-                f"Final penetration: {final:.1%}\n"
-                f"Final installed capacity: {final_mw:.1f} MW"
-            )
+            self._lbl_summary.setText(tr(
+                "wizard_solar.integ_selected_summary",
+                method=_method_label(selected_curve.method),
+                start=selected_curve.years[0], end=selected_curve.years[-1],
+                pen=f"{final:.1%}", mw=f"{final_mw:.1f}",
+            ))
         else:
             self._lbl_summary.setText(tr("wizard_solar.integ_no_curve"))
 
@@ -1194,7 +1211,7 @@ class IntegrationStep(QWidget):
 
         except Exception as exc:
             logger.exception("Failed to apply adoption to model")
-            self._apply_status.setText(f"Error: {exc}")
+            self._apply_status.setText(tr("wizard_solar.error_msg", msg=exc))
             self._apply_status.setStyleSheet("color: #e74c3c;")
 
     def _export_curves_csv(self):

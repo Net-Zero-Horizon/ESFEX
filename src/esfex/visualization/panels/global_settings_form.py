@@ -78,7 +78,7 @@ class GlobalSettingsForm(QWidget):
 
         self._enable_uc_in_dispatch = QCheckBox(tr("common.enable"))
         self._enable_uc_in_dispatch.toggled.connect(self._on_changed)
-        sl.addRow("Enable UC", self._enable_uc_in_dispatch)
+        sl.addRow(tr("global_form.enable_uc"), self._enable_uc_in_dispatch)
 
         self._date_start = QLineEdit()
         self._date_start.setPlaceholderText(tr("global_form.date_placeholder"))
@@ -138,7 +138,7 @@ class GlobalSettingsForm(QWidget):
         # Time base of every hourly series ('auto' until the Grid Builder or
         # the availability generator resolves it from the nodes).
         self._model_clock = QLineEdit()
-        self._model_clock.setPlaceholderText("auto")
+        self._model_clock.setPlaceholderText(tr("global_form.model_clock_auto"))
         self._model_clock.setToolTip(tr("global_form.model_clock_tip"))
         self._model_clock.editingFinished.connect(self._on_changed)
         tl.addRow(tr("global_form.model_clock"), self._model_clock)
@@ -275,12 +275,7 @@ class GlobalSettingsForm(QWidget):
         # the solver-specific sub-group below them. The user-facing label
         # reflects the unification — "Solver Options" instead of two
         # separate "Solver" + "Solver-Specific Options" panels.
-        group_solver = QGroupBox(tr("global_form.solver_options")
-                                  if hasattr(tr("global_form.solver_options"), "__class__")
-                                  else "Solver Options")
-        # tr() returns a str always; the conditional above is defensive
-        # in case the key is missing — fall back to literal "Solver Options".
-        group_solver.setTitle("Solver Options")
+        group_solver = QGroupBox(tr("global_form.solver_options_group"))
         svl = QFormLayout(group_solver)
         svl.setContentsMargins(6, 6, 6, 6)
         svl.setSpacing(4)
@@ -525,7 +520,9 @@ class GlobalSettingsForm(QWidget):
         mpl.addRow(tr("global_form.mp_tsam_num_periods"), self._mp_tsam_num_periods)
 
         self._mp_tsam_method = QComboBox()
-        self._mp_tsam_method.addItems(["kmedoids", "kmeans"])
+        # Method names (tsam identifiers) are shown as they are.
+        for method in ("kmedoids", "kmeans"):
+            self._mp_tsam_method.addItem(method, method)
         self._mp_tsam_method.currentIndexChanged.connect(self._on_changed)
         mpl.addRow(tr("global_form.mp_tsam_method"), self._mp_tsam_method)
 
@@ -892,7 +889,7 @@ class GlobalSettingsForm(QWidget):
         self._update_benders_enabled()
         self._mp_use_tsam.setChecked(g.mp_use_tsam)
         self._mp_tsam_num_periods.setValue(g.mp_tsam_num_periods)
-        idx = self._mp_tsam_method.findText(g.mp_tsam_method)
+        idx = self._mp_tsam_method.findData(g.mp_tsam_method)
         if idx >= 0:
             self._mp_tsam_method.setCurrentIndex(idx)
         self._mp_tsam_inter_period_linking.setChecked(g.mp_tsam_inter_period_linking)
@@ -1163,7 +1160,7 @@ class GlobalSettingsForm(QWidget):
         g.mp_benders_tolerance = self._mp_benders_tol.value()
         g.mp_use_tsam = self._mp_use_tsam.isChecked()
         g.mp_tsam_num_periods = self._mp_tsam_num_periods.value()
-        g.mp_tsam_method = self._mp_tsam_method.currentText()
+        g.mp_tsam_method = self._mp_tsam_method.currentData()
         g.mp_tsam_inter_period_linking = self._mp_tsam_inter_period_linking.isChecked()
 
         # MGA / SPORES

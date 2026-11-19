@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Added
 
+- **Translations for the web views.** The map, the single-line diagram,
+  the dashboard and the result charts are web pages, and had no way to show
+  translated text. `esfex.visualization.web_i18n` gives every page the
+  strings of the `web` section of the translation files: scripts call
+  `_t("web.<page>.<key>", {params})`, and static HTML marks text with
+  `data-i18n="web.<key>"`. A language change reaches pages already open.
+  `tests/test_js_i18n_coverage.py` checks that the keys exist and lists the
+  texts still written in English in the pages
+  (`tests/js_untranslated_baseline.json`, which may only shrink).
+
 - **Electrolyzer hydrogen fills the hydrogen tank.** With the primary-energy
   model on and a fuel source named `Hydrogen`, the hydrogen of every
   dispatch electrolyzer now flows into that fuel's tank at its node (in
@@ -1553,6 +1563,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   directory).
 
 ### Fixed
+
+- **The map, single-line diagram, dashboard and result charts are
+  translated.** These web views showed English in every language. Their text
+  now comes from the `web` section of the translation files (about 570 new
+  keys): map popups, drawing hints and the Leaflet.draw tooltips; the SLD
+  legend, tooltips, symbols and results overlays; the dashboard's cards, KPIs
+  and year detail; the interruptions editor; and the titles, axes, legends and
+  hover texts of the 36 result chart pages. Month names follow the language.
+  The map, SLD, dashboard and interruptions editor relabel themselves when
+  the language changes; an open result chart takes the new language on its
+  next refresh. Labels that the Python side still sends in English inside the
+  chart data (cash-flow components, Sankey nodes, error messages) are not
+  covered yet.
+
+- **The whole Studio is translated.** About 760 texts outside the Grid
+  Builder were written in English in the code, so they stayed English in
+  every language: the main window (console, SLD bar, dialogs, status bar),
+  the risk workbench, the financial wizard, the OTEC Studio, the wind, solar,
+  EV and demand wizards, and the element forms, panels and dialogs (around
+  1,340 new keys in each of the five languages). Combo boxes that showed
+  internal values (`straight_line`, `onshore`, `circle`, `ac`, `cvar`, ...)
+  now show translated names; the model still receives the same values.
+  Spanish now says costo, VPN and usted throughout, and Portuguese VAL.
+  Charts draw Japanese text: a CJK font installed on the system backs up
+  matplotlib's default font (`esfex.visualization.plot_fonts`). A test opens
+  the main windows and forms in Spanish and Japanese and fails on any raw
+  translation key on screen.
 
 - **The Grid Builder is translated.** About 60 of its texts were written in
   English in the code (the step tabs, the Back/Next/Cancel buttons, the

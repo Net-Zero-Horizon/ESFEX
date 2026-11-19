@@ -629,6 +629,44 @@ function _hideContextMenu() {
     _ctxMenuId = null;
 }
 
+// ── Translations ──────────────────────────────────────────────────
+
+// _t() comes from web_i18n.install(); without it (a bare QWebEngineView)
+// the map still works and shows the keys.
+if (typeof window._t !== 'function') {
+    window._t = function(key) { return key; };
+}
+
+// Leaflet.draw's own tooltips, for the handlers the Studio uses
+// (L.Draw.Polygon, L.Draw.Rectangle; no draw/edit toolbar).
+function _applyDrawLocal() {
+    if (typeof L === 'undefined' || !L.drawLocal) return;
+    var h = L.drawLocal.draw.handlers;
+    h.polygon.tooltip.start = _t('web.map.draw_polygon_start');
+    h.polygon.tooltip.cont = _t('web.map.draw_polygon_cont');
+    h.polygon.tooltip.end = _t('web.map.draw_polygon_end');
+    h.polyline.error = _t('web.map.draw_error_edges_cross');
+    h.rectangle.tooltip.start = _t('web.map.draw_rectangle_start');
+    h.simpleshape.tooltip.end = _t('web.map.draw_release_to_finish');
+    // Handlers already created copied some texts when constructed.
+    [drawControl, domainPolygonDrawControl].forEach(function(c) {
+        if (c && c.options && c.options.drawError) c.options.drawError.message = h.polyline.error;
+    });
+    if (rectDrawControl) {
+        rectDrawControl._initialLabelText = h.rectangle.tooltip.start;
+        rectDrawControl._endLabelText = h.simpleshape.tooltip.end;
+    }
+}
+_applyDrawLocal();
+
+// Called by the Studio after a language change (see web_i18n.py). Popups
+// and tooltips with words are built when opened; this redraws the text
+// that stays on screen.
+window.onEsfexLanguageChanged = function() {
+    _applyDrawLocal();
+    if (_modeHintKey) _setModeHint(_modeHintKey);
+};
+
 // ── Initialization ────────────────────────────────────────────────
 function startApp() {
     if (typeof QWebChannel === 'undefined' || typeof qt === 'undefined') {
@@ -679,24 +717,24 @@ function initializeMap() {
 
     // Base map layers
     baseMaps = {
-        'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        OpenStreetMap: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19, noWrap: true, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }),
-        'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        Satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
             maxZoom: 18, noWrap: true, attribution: '&copy; Esri'
         }),
-        'Terrain': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        Terrain: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
             maxZoom: 17, noWrap: true, subdomains: 'abc', attribution: '&copy; OpenTopoMap'
         }),
-        'Dark': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        Dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
             maxZoom: 19, noWrap: true, subdomains: 'abcd', attribution: '&copy; CartoDB'
         }),
         // Offline: vector world countries (Natural Earth 1:110m) bundled
         // locally. No network requests, just country polygons over a
         // water-blue background. Geometry only, ~260 KB.
-        'Offline': _createOfflineBaseMap()
+        Offline: _createOfflineBaseMap()
     };
-    currentBaseMap = baseMaps['OpenStreetMap'];
+    currentBaseMap = baseMaps.OpenStreetMap;
     currentBaseMap.addTo(map);
 
     // Fix black-map on resize: observe container size changes and
@@ -852,28 +890,38 @@ function setMode(mode) {
             + 'font-size:13px;z-index:9999;pointer-events:none;display:none;font-family:sans-serif;';
         document.body.appendChild(indicator);
     }
-    var labels = {
-        'add_line': 'Click an element to start drawing a transmission line (ESC to cancel)',
-        'add_fuel_route': 'Click a fuel source or storage to start drawing a fuel route (ESC to cancel)',
-        'add_generator': 'Click on map to place generators (ESC to stop)',
-        'add_battery': 'Click on map to place energy storage units (ESC to stop)',
-        'add_transformer': 'Click on map to place transformers (ESC to stop)',
-        'add_fuel_entry': 'Click on map to place fuel entries (ESC to stop)',
-        'add_fuel_storage': 'Click on map to place fuel storages (ESC to stop)',
-        'add_electrolyzer': 'Click on map to place electrolyzers (ESC to stop)',
-        'add_bus': 'Click on map to place buses (ESC to stop)',
-        'add_acdc_converter': 'Click on map to place AC/DC converters (ESC to stop)',
-        'add_freq_converter': 'Click on map to place frequency converters (ESC to stop)',
-        'pick_centroid': 'Click on map to set node centroid (ESC to cancel)',
-        'draw_zone': 'Click to draw a development zone polygon',
-        'draw_rectangle': 'Click and drag to draw the analysis domain',
-    };
-    if (labels[mode]) {
-        indicator.textContent = labels[mode];
+    if (_MODE_HINT_KEYS[mode]) {
+        _setModeHint(_MODE_HINT_KEYS[mode]);
         indicator.style.display = 'block';
     } else {
+        _modeHintKey = null;
         indicator.style.display = 'none';
     }
+}
+
+// Hint shown in the mode indicator for each mode.
+var _MODE_HINT_KEYS = {
+    'add_line':           'web.map.mode_add_line',
+    'add_fuel_route':     'web.map.mode_add_fuel_route',
+    'add_generator':      'web.map.mode_add_generator',
+    'add_battery':        'web.map.mode_add_battery',
+    'add_transformer':    'web.map.mode_add_transformer',
+    'add_fuel_entry':     'web.map.mode_add_fuel_entry',
+    'add_fuel_storage':   'web.map.mode_add_fuel_storage',
+    'add_electrolyzer':   'web.map.mode_add_electrolyzer',
+    'add_bus':            'web.map.mode_add_bus',
+    'add_acdc_converter': 'web.map.mode_add_acdc_converter',
+    'add_freq_converter': 'web.map.mode_add_freq_converter',
+    'pick_centroid':      'web.map.mode_pick_centroid',
+    'draw_zone':          'web.map.mode_draw_zone',
+    'draw_rectangle':     'web.map.mode_draw_rectangle',
+};
+var _modeHintKey = null;   // key of the text shown, redrawn on a language change
+
+function _setModeHint(key) {
+    _modeHintKey = key;
+    var indicator = document.getElementById('mode-indicator');
+    if (indicator) indicator.textContent = _t(key);
 }
 
 function enablePolygonDraw() {
@@ -981,15 +1029,19 @@ function showRooftopResults(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>Building</b><br>'
-                + 'Capacity: ' + (p.capacity_kw || 0).toFixed(1) + ' kWp<br>'
-                + 'Annual yield: ' + (p.annual_kwh || 0).toFixed(0) + ' kWh<br>'
-                + 'Specific yield: ' + (p.specific_yield || 0).toFixed(0) + ' kWh/kWp<br>'
-                + 'Roof area: ' + (p.usable_roof_area || 0).toFixed(0) + ' m²';
-            if (p.shading_loss !== undefined) {
-                tip += '<br>Shading loss: ' + (p.shading_loss * 100).toFixed(1) + '%';
-            }
-            layer.bindPopup(tip);
+            // Built when opened, so it follows the current language.
+            layer.bindPopup(function() {
+                var tip = '<b>' + _t('web.map.popup_building') + '</b><br>'
+                    + _t('web.map.popup_capacity_kwp', {value: (p.capacity_kw || 0).toFixed(1)}) + '<br>'
+                    + _t('web.map.popup_annual_yield', {value: (p.annual_kwh || 0).toFixed(0)}) + '<br>'
+                    + _t('web.map.popup_specific_yield', {value: (p.specific_yield || 0).toFixed(0)}) + '<br>'
+                    + _t('web.map.popup_roof_area', {value: (p.usable_roof_area || 0).toFixed(0)});
+                if (p.shading_loss !== undefined) {
+                    tip += '<br>' + _t('web.map.popup_shading_loss',
+                                       {value: (p.shading_loss * 100).toFixed(1)});
+                }
+                return tip;
+            });
         }
     }).addTo(map);
 }
@@ -1042,15 +1094,16 @@ function showOTECResults(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>OTEC Site</b><br>'
-                + 'LCOE: <b>' + (p.lcoe ? p.lcoe.toFixed(3) : '?') + ' $/kWh</b><br>'
-                + 'Net Power: ' + (p.net_power ? (p.net_power/1000).toFixed(1) : '?') + ' MW<br>'
-                + 'Cap. Factor: ' + (p.capacity_factor ? (p.capacity_factor*100).toFixed(1) : '?') + '%<br>'
-                + 'T<sub>warm</sub>: ' + (p.t_warm ? p.t_warm.toFixed(1) : '?') + ' °C<br>'
-                + 'T<sub>cold</sub>: ' + (p.t_cold ? p.t_cold.toFixed(1) : '?') + ' °C<br>'
-                + 'ΔT: ' + (p.delta_t ? p.delta_t.toFixed(1) : '?') + ' °C<br>'
-                + 'Depth: ' + (p.depth ? p.depth.toFixed(0) : '?') + ' m';
-            layer.bindPopup(tip);
+            layer.bindPopup(function() {
+                return '<b>' + _t('web.map.popup_otec_site') + '</b><br>'
+                    + _t('web.map.popup_lcoe', {value: '<b>' + (p.lcoe ? p.lcoe.toFixed(3) : '?') + ' $/kWh</b>'}) + '<br>'
+                    + _t('web.map.popup_net_power', {value: p.net_power ? (p.net_power/1000).toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_cap_factor', {value: p.capacity_factor ? (p.capacity_factor*100).toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_t_warm', {value: p.t_warm ? p.t_warm.toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_t_cold', {value: p.t_cold ? p.t_cold.toFixed(1) : '?'}) + '<br>'
+                    + 'ΔT: ' + (p.delta_t ? p.delta_t.toFixed(1) : '?') + ' °C<br>'
+                    + _t('web.map.popup_depth', {value: p.depth ? p.depth.toFixed(0) : '?'});
+            });
         }
     }).addTo(map);
 }
@@ -1077,13 +1130,14 @@ function showOTECDevZones(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>' + (p.zone_id || 'OTEC Zone') + '</b><br>'
-                + 'Area: ' + (p.area_km2 ? p.area_km2.toFixed(1) : '?') + ' km²<br>'
-                + 'Sites: ' + (p.num_sites || '?') + '<br>'
-                + 'Avg LCOE: ' + (p.avg_lcoe ? p.avg_lcoe.toFixed(3) : '?') + ' $/kWh<br>'
-                + 'Min LCOE: ' + (p.min_lcoe ? p.min_lcoe.toFixed(3) : '?') + ' $/kWh<br>'
-                + 'Capacity: ' + (p.total_capacity_mw ? p.total_capacity_mw.toFixed(1) : '?') + ' MW';
-            layer.bindPopup(tip);
+            layer.bindPopup(function() {
+                return '<b>' + (p.zone_id || _t('web.map.popup_otec_zone')) + '</b><br>'
+                    + _t('web.map.popup_area_km2', {value: p.area_km2 ? p.area_km2.toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_sites', {n: p.num_sites || '?'}) + '<br>'
+                    + _t('web.map.popup_avg_lcoe', {value: p.avg_lcoe ? p.avg_lcoe.toFixed(3) : '?'}) + '<br>'
+                    + _t('web.map.popup_min_lcoe', {value: p.min_lcoe ? p.min_lcoe.toFixed(3) : '?'}) + '<br>'
+                    + _t('web.map.popup_capacity_mw', {value: p.total_capacity_mw ? p.total_capacity_mw.toFixed(1) : '?'});
+            });
         }
     }).addTo(map);
 }
@@ -1142,14 +1196,15 @@ function showWindResults(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>Wind Site</b><br>'
-                + 'MCDA Score: <b>' + (p.mcda_score != null ? p.mcda_score.toFixed(3) : '?') + '</b><br>'
-                + 'Cap. Factor: ' + (p.capacity_factor != null ? (p.capacity_factor*100).toFixed(1) : '?') + '%<br>'
-                + 'Elevation: ' + (p.elevation != null ? p.elevation.toFixed(0) : '?') + ' m<br>'
-                + 'Slope: ' + (p.slope != null ? p.slope.toFixed(1) : '?') + '°<br>'
-                + 'LULC Score: ' + (p.lulc_score != null ? p.lulc_score.toFixed(2) : '?') + '<br>'
-                + 'Dist. to Grid: ' + (p.dist_grid_km != null ? p.dist_grid_km.toFixed(1) : '?') + ' km';
-            layer.bindPopup(tip);
+            layer.bindPopup(function() {
+                return '<b>' + _t('web.map.popup_wind_site') + '</b><br>'
+                    + _t('web.map.popup_mcda_score', {value: '<b>' + (p.mcda_score != null ? p.mcda_score.toFixed(3) : '?') + '</b>'}) + '<br>'
+                    + _t('web.map.popup_cap_factor', {value: p.capacity_factor != null ? (p.capacity_factor*100).toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_elevation', {value: p.elevation != null ? p.elevation.toFixed(0) : '?'}) + '<br>'
+                    + _t('web.map.popup_slope', {value: p.slope != null ? p.slope.toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_lulc_score', {value: p.lulc_score != null ? p.lulc_score.toFixed(2) : '?'}) + '<br>'
+                    + _t('web.map.popup_dist_grid', {value: p.dist_grid_km != null ? p.dist_grid_km.toFixed(1) : '?'});
+            });
         }
     }).addTo(map);
 }
@@ -1176,13 +1231,14 @@ function showWindDevZones(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>' + (p.zone_id || 'Wind Zone') + '</b><br>'
-                + 'Area: ' + (p.area_km2 ? p.area_km2.toFixed(1) : '?') + ' km²<br>'
-                + 'Sites: ' + (p.num_sites || '?') + '<br>'
-                + 'Avg CF: ' + (p.avg_cf ? (p.avg_cf*100).toFixed(1) : '?') + '%<br>'
-                + 'Avg MCDA: ' + (p.avg_mcda ? p.avg_mcda.toFixed(3) : '?') + '<br>'
-                + 'Capacity: ' + (p.total_capacity_mw ? p.total_capacity_mw.toFixed(1) : '?') + ' MW';
-            layer.bindPopup(tip);
+            layer.bindPopup(function() {
+                return '<b>' + (p.zone_id || _t('web.map.popup_wind_zone')) + '</b><br>'
+                    + _t('web.map.popup_area_km2', {value: p.area_km2 ? p.area_km2.toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_sites', {n: p.num_sites || '?'}) + '<br>'
+                    + _t('web.map.popup_avg_cf', {value: p.avg_cf ? (p.avg_cf*100).toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_avg_mcda', {value: p.avg_mcda ? p.avg_mcda.toFixed(3) : '?'}) + '<br>'
+                    + _t('web.map.popup_capacity_mw', {value: p.total_capacity_mw ? p.total_capacity_mw.toFixed(1) : '?'});
+            });
         }
     }).addTo(map);
 }
@@ -1241,15 +1297,16 @@ function showSolarPVResults(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>Solar PV Site</b><br>'
-                + 'MCDA Score: <b>' + (p.mcda_score != null ? p.mcda_score.toFixed(3) : '?') + '</b><br>'
-                + 'Cap. Factor: ' + (p.capacity_factor != null ? (p.capacity_factor*100).toFixed(1) : '?') + '%<br>'
-                + 'GHI: ' + (p.ghi_kwh_m2 != null ? p.ghi_kwh_m2.toFixed(0) : '?') + ' kWh/m²/yr<br>'
-                + 'Elevation: ' + (p.elevation != null ? p.elevation.toFixed(0) : '?') + ' m<br>'
-                + 'Slope: ' + (p.slope != null ? p.slope.toFixed(1) : '?') + '°<br>'
-                + 'LULC Score: ' + (p.lulc_score != null ? p.lulc_score.toFixed(2) : '?') + '<br>'
-                + 'Dist. to Grid: ' + (p.dist_grid_km != null ? p.dist_grid_km.toFixed(1) : '?') + ' km';
-            layer.bindPopup(tip);
+            layer.bindPopup(function() {
+                return '<b>' + _t('web.map.popup_solar_site') + '</b><br>'
+                    + _t('web.map.popup_mcda_score', {value: '<b>' + (p.mcda_score != null ? p.mcda_score.toFixed(3) : '?') + '</b>'}) + '<br>'
+                    + _t('web.map.popup_cap_factor', {value: p.capacity_factor != null ? (p.capacity_factor*100).toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_ghi', {value: p.ghi_kwh_m2 != null ? p.ghi_kwh_m2.toFixed(0) : '?'}) + '<br>'
+                    + _t('web.map.popup_elevation', {value: p.elevation != null ? p.elevation.toFixed(0) : '?'}) + '<br>'
+                    + _t('web.map.popup_slope', {value: p.slope != null ? p.slope.toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_lulc_score', {value: p.lulc_score != null ? p.lulc_score.toFixed(2) : '?'}) + '<br>'
+                    + _t('web.map.popup_dist_grid', {value: p.dist_grid_km != null ? p.dist_grid_km.toFixed(1) : '?'});
+            });
         }
     }).addTo(map);
 }
@@ -1276,13 +1333,14 @@ function showSolarPVDevZones(geojsonStr) {
         },
         onEachFeature: function(feature, layer) {
             var p = feature.properties;
-            var tip = '<b>' + (p.zone_id || 'Solar PV Zone') + '</b><br>'
-                + 'Area: ' + (p.area_km2 ? p.area_km2.toFixed(1) : '?') + ' km²<br>'
-                + 'Sites: ' + (p.num_sites || '?') + '<br>'
-                + 'Avg CF: ' + (p.avg_cf ? (p.avg_cf*100).toFixed(1) : '?') + '%<br>'
-                + 'Avg MCDA: ' + (p.avg_mcda ? p.avg_mcda.toFixed(3) : '?') + '<br>'
-                + 'Capacity: ' + (p.total_capacity_mw ? p.total_capacity_mw.toFixed(1) : '?') + ' MW';
-            layer.bindPopup(tip);
+            layer.bindPopup(function() {
+                return '<b>' + (p.zone_id || _t('web.map.popup_solar_zone')) + '</b><br>'
+                    + _t('web.map.popup_area_km2', {value: p.area_km2 ? p.area_km2.toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_sites', {n: p.num_sites || '?'}) + '<br>'
+                    + _t('web.map.popup_avg_cf', {value: p.avg_cf ? (p.avg_cf*100).toFixed(1) : '?'}) + '<br>'
+                    + _t('web.map.popup_avg_mcda', {value: p.avg_mcda ? p.avg_mcda.toFixed(3) : '?'}) + '<br>'
+                    + _t('web.map.popup_capacity_mw', {value: p.total_capacity_mw ? p.total_capacity_mw.toFixed(1) : '?'});
+            });
         }
     }).addTo(map);
 }
@@ -1323,9 +1381,11 @@ function showDemandClusters(pointsJson) {
             color: '#333',
             weight: 0.5,
             fillOpacity: 0.8
-        }).bindPopup(
-            '<b>Cluster ' + p.cluster_id + '</b>'
-        ).addTo(demandClustersLayer);
+        }).bindPopup((function(cid) {
+            return function() {
+                return '<b>' + _t('web.map.popup_cluster', {id: cid}) + '</b>';
+            };
+        })(p.cluster_id)).addTo(demandClustersLayer);
     }
     demandClustersLayer.addTo(map);
 }
@@ -1422,9 +1482,8 @@ function startPolylineTrace(elemType, elemId, marker) {
     }).addTo(map);
 
     // Update mode indicator
-    var indicator = document.getElementById('mode-indicator');
-    if (indicator) {
-        indicator.textContent = 'Click to add waypoints, click a magnetic element to finish (ESC to cancel)';
+    if (document.getElementById('mode-indicator')) {
+        _setModeHint('web.map.trace_add_waypoints');
     }
 }
 
@@ -1502,9 +1561,8 @@ function _cleanupTrace() {
 
     // Reset mode indicator if still in add_line mode
     if (currentMode === 'add_line') {
-        var indicator = document.getElementById('mode-indicator');
-        if (indicator) {
-            indicator.textContent = 'Click a magnetic element to start drawing a line (ESC to cancel)';
+        if (document.getElementById('mode-indicator')) {
+            _setModeHint('web.map.trace_start_line');
         }
     }
 }
@@ -3208,7 +3266,7 @@ function _buildPieTooltip(title, segments) {
             + '</tr>';
     }
     html += '<tr style="border-top:1px solid #ccc;font-weight:bold">'
-        + '<td></td><td style="padding:2px 4px">Total</td>'
+        + '<td></td><td style="padding:2px 4px">' + _t('web.map.pie_total') + '</td>'
         + '<td style="padding:2px 4px;text-align:right">' + total.toFixed(1) + ' MW</td>'
         + '<td></td></tr>';
     html += '</table>';
@@ -3238,7 +3296,12 @@ function addResultsPieCharts(dataJson) {
             interactive: true,
             zIndexOffset: 800,
         });
-        var tip = _buildPieTooltip(d.title || 'Generation', segs);
+        // Built when shown, so it follows the current language.
+        var tip = (function(title, segments) {
+            return function() {
+                return _buildPieTooltip(title || _t('web.map.pie_default_title'), segments);
+            };
+        })(d.title, segs);
         marker.bindTooltip(tip, { sticky: false, direction: 'top', offset: [0, -sz / 2] });
         marker.addTo(layers.resultsNodes);
     }
@@ -3360,7 +3423,11 @@ function addRiskCircles(dataJson) {
             circle.bindTooltip(d.tooltip, { sticky: true });
         }
         if (d.label) {
-            circle.bindPopup('<b>' + d.label + '</b><br/>Risk: ' + ri.toFixed(3));
+            circle.bindPopup((function(label, value) {
+                return function() {
+                    return '<b>' + label + '</b><br/>' + _t('web.map.popup_risk', {value: value});
+                };
+            })(d.label, ri.toFixed(3)));
         }
         circle.addTo(layer);
     }

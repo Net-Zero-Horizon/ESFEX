@@ -51,18 +51,63 @@ from esfex.visualization.i18n import tr
 if TYPE_CHECKING:
     from esfex.visualization.data.gui_model import GuiModel
 
-# Category display labels
+# Category display labels (translation keys)
+# Issue categories as validation.py writes them (also the grouping key).
+_ISSUE_CATEGORY_KEYS: dict[str, str] = {
+    "Inter-System": "validation.issue_cat_inter_system",
+    "Fuel Network": "validation.issue_cat_fuel_network",
+    "Topology Audit": "validation.issue_cat_topology_audit",
+    "Bus": "validation.issue_cat_bus",
+    "Generator": "validation.issue_cat_generator",
+    "Battery": "validation.issue_cat_battery",
+    "Transformer": "validation.issue_cat_transformer",
+    "Line": "validation.issue_cat_line",
+    "Freq. Converter": "validation.issue_cat_freq_converter",
+    "Demand": "validation.issue_cat_demand",
+    "AC/DC Converter": "validation.issue_cat_acdc_converter",
+    "Realism": "validation.issue_cat_realism",
+    "Generation": "validation.issue_cat_generation",
+    "Node": "validation.issue_cat_node",
+    "Connectivity": "validation.issue_cat_connectivity",
+    "Configuration": "validation.issue_cat_configuration",
+    "Fuel Entry": "validation.issue_cat_fuel_entry",
+}
+# SimplificationAction.action_type values.
+_ACTION_KEYS: dict[str, str] = {
+    "remove_bus": "validation.action_remove_bus",
+    "remove_line": "validation.action_remove_line",
+    "remove_fuel_entry": "validation.action_remove_fuel_entry",
+    "remove_fuel_storage": "validation.action_remove_fuel_storage",
+    "remove_fuel_route": "validation.action_remove_fuel_route",
+}
+
+
+def _issue_category_label(category: str) -> str:
+    key = _ISSUE_CATEGORY_KEYS.get(category)
+    return tr(key) if key else category
+
+
 _CATEGORY_LABELS: dict[str, str] = {
-    "structural": "Structural (nodes, lines)",
-    "configuration": "Configuration (unknown YAML keys)",
-    "electrical": "Electrical (buses, equipment references)",
-    "demand": "Demand (load data, coverage)",
-    "generation": "Generation (adequacy, availability files)",
-    "fuel_network": "Fuel Network (supply chain integrity)",
-    "connectivity": "Connectivity (isolated components)",
-    "realism": "Realism (duplicate plants, reserve margin, deliverability)",
-    "topology_audit": "Topology Audit (GUI vs solver agreement)",
-    "risk": "Risk & Resilience (hazard exposure, fragility curves)",
+    "structural": "validation.category_structural",
+    "configuration": "validation.category_configuration",
+    "electrical": "validation.category_electrical",
+    "demand": "validation.category_demand",
+    "generation": "validation.category_generation",
+    "fuel_network": "validation.category_fuel_network",
+    "connectivity": "validation.category_connectivity",
+    "realism": "validation.category_realism",
+    "topology_audit": "validation.category_topology_audit",
+    "risk": "validation.category_risk",
+}
+
+# Topology operation labels (translation keys)
+_TOPO_LABELS: dict[str, str] = {
+    "parallel_line_merge": "validation.topo_parallel_line_merge",
+    "radial_prune": "validation.topo_radial_prune",
+    "series_eliminate": "validation.topo_series_eliminate",
+    "voltage_collapse": "validation.topo_voltage_collapse",
+    "full_node_collapse": "validation.topo_full_node_collapse",
+    "small_gen_absorb": "validation.topo_small_gen_absorb",
 }
 
 # Custom data roles for storing element references on tree items
@@ -137,7 +182,8 @@ class _ValidationWorker(QThread):
             if self._infra_level:
                 self.progress.emit(
                     step_offset, total,
-                    prefix + f"Analyzing network (Level {self._infra_level})...",
+                    prefix + tr("validation.analyzing_network",
+                                level=self._infra_level),
                 )
                 plan = find_simplifications_for_level(
                     state, level=self._infra_level,
@@ -202,7 +248,7 @@ class ValidationDialog(QDialog):
         cat_layout = QVBoxLayout(cat_group)
         self._cat_checks: dict[str, QCheckBox] = {}
         for key in CATEGORY_ORDER:
-            label = _CATEGORY_LABELS.get(key, key)
+            label = tr(_CATEGORY_LABELS[key]) if key in _CATEGORY_LABELS else key
             cb = QCheckBox(label)
             cb.setChecked(True)
             self._cat_checks[key] = cb
@@ -213,25 +259,16 @@ class ValidationDialog(QDialog):
 
         # Network simplification (levels)
         infra_row = QHBoxLayout()
-        self._infra_check = QCheckBox("Network reduction (levels)")
+        self._infra_check = QCheckBox(tr("validation.network_reduction"))
         self._infra_check.setChecked(False)
-        self._infra_check.setToolTip(
-            "Analyze and suggest equipment merges, parallel line "
-            "consolidation, bus elimination, and topology reduction."
-        )
+        self._infra_check.setToolTip(tr("validation.network_reduction_tip"))
         infra_row.addWidget(self._infra_check)
         self._combo_infra_level = QComboBox()
-        self._combo_infra_level.addItem("L1: Equipment + Parallel Lines", 1)
-        self._combo_infra_level.addItem("L2: Radial & Series Bus Elim.", 2)
-        self._combo_infra_level.addItem("L3: Intra-Node Bus Collapse", 3)
-        self._combo_infra_level.addItem("L4: Full Node Collapse", 4)
-        self._combo_infra_level.setToolTip(
-            "Simplification level (cumulative):\n"
-            "L1 — Equipment aggregation + parallel lines\n"
-            "L2 — L1 + radial/series bus elimination\n"
-            "L3 — L2 + intra-node voltage collapse\n"
-            "L4 — L3 + full node collapse + small gen absorption"
-        )
+        self._combo_infra_level.addItem(tr("validation.level_1"), 1)
+        self._combo_infra_level.addItem(tr("validation.level_2"), 2)
+        self._combo_infra_level.addItem(tr("validation.level_3"), 3)
+        self._combo_infra_level.addItem(tr("validation.level_4"), 4)
+        self._combo_infra_level.setToolTip(tr("validation.level_tip"))
         self._combo_infra_level.setEnabled(False)
         self._infra_check.toggled.connect(self._combo_infra_level.setEnabled)
         infra_row.addWidget(self._combo_infra_level)
@@ -284,11 +321,9 @@ class ValidationDialog(QDialog):
 
         btn_layout.addStretch()
 
-        self._select_all_btn = QPushButton("Select All")
+        self._select_all_btn = QPushButton(tr("validation.select_all"))
         self._select_all_btn.setEnabled(False)
-        self._select_all_btn.setToolTip(
-            "Check all simplification suggestions."
-        )
+        self._select_all_btn.setToolTip(tr("validation.select_all_tip"))
         self._select_all_btn.clicked.connect(self._on_select_all_infra)
         btn_layout.addWidget(self._select_all_btn)
 
@@ -296,11 +331,9 @@ class ValidationDialog(QDialog):
         # than it solved. The library helper (validation.auto_fix_errors) is
         # kept for programmatic use; only the UI entry point is gone.
 
-        self._apply_btn = QPushButton("Apply")
+        self._apply_btn = QPushButton(tr("common.apply"))
         self._apply_btn.setEnabled(False)
-        self._apply_btn.setToolTip(
-            "Apply dead-end cleanup and checked network reductions."
-        )
+        self._apply_btn.setToolTip(tr("validation.apply_tip"))
         self._apply_btn.clicked.connect(self._on_apply_all)
         btn_layout.addWidget(self._apply_btn)
 
@@ -426,7 +459,8 @@ class ValidationDialog(QDialog):
                     getattr(s, "reduction", 0) or getattr(s, "elements_removed", 0)
                     for s in self._infra_suggestions
                 )
-                parts.append(f"{n_infra} simplification(s) (-{total_red} elements)")
+                parts.append(tr("validation.summary_n_infra", n=n_infra,
+                                removed=total_red))
             text = "  |  ".join(parts)
             worst = (
                 _sev_color("error") if n_err
@@ -515,7 +549,8 @@ class ValidationDialog(QDialog):
             if len(by_cat) > 1:
                 # Multiple categories — add sub-group node
                 cat_node = QTreeWidgetItem(
-                    root, [f"{cat_name} ({len(cat_issues)})", ""],
+                    root,
+                    [f"{_issue_category_label(cat_name)} ({len(cat_issues)})", ""],
                 )
                 cat_node.setForeground(0, color)
                 cat_node.setExpanded(expanded)
@@ -551,7 +586,11 @@ class ValidationDialog(QDialog):
         root.setExpanded(True)
         for action in self._simplification_actions:
             item = QTreeWidgetItem(root, [
-                f"{action.action_type}: {action.reason}",
+                tr("validation.action_line",
+                   action=(tr(_ACTION_KEYS[action.action_type])
+                           if action.action_type in _ACTION_KEYS
+                           else action.action_type),
+                   reason=action.reason),
                 action.element_id,
             ])
             item.setForeground(0, color)
@@ -566,23 +605,13 @@ class ValidationDialog(QDialog):
         total_count = len(self._infra_suggestions)
         root = QTreeWidgetItem(
             self._results_tree,
-            [f"Network Simplification ({total_count} operation(s))", ""],
+            [tr("validation.infra_root", n=total_count), ""],
         )
         root.setForeground(0, color)
         font = root.font(0)
         font.setBold(True)
         root.setFont(0, font)
         root.setExpanded(True)
-
-        # Group by category
-        _TOPO_LABELS = {
-            "parallel_line_merge": "Parallel Line Consolidation",
-            "radial_prune": "Radial Branch Pruning",
-            "series_eliminate": "Series Bus Elimination (Kron)",
-            "voltage_collapse": "Voltage Level Collapse",
-            "full_node_collapse": "Full Node Collapse",
-            "small_gen_absorb": "Small Generator Absorption",
-        }
 
         # Separate infra and topo suggestions
         infra_items = []
@@ -596,13 +625,14 @@ class ValidationDialog(QDialog):
 
         # Equipment merges
         if infra_items:
-            cat_item = QTreeWidgetItem(root, ["Equipment Aggregation", ""])
+            cat_item = QTreeWidgetItem(root, [tr("validation.equipment_aggregation"), ""])
             cat_item.setForeground(0, color)
             cat_item.setExpanded(True)
             for idx, s in infra_items:
                 item = QTreeWidgetItem(cat_item, [
                     s.description,
-                    f"{s.equipment_type} | {s.total_rated_power:.1f} MW",
+                    tr("validation.equipment_detail", type=s.equipment_type,
+                       power=f"{s.total_rated_power:.1f}"),
                 ])
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -611,12 +641,14 @@ class ValidationDialog(QDialog):
 
         # Topology operations by type
         for action_type, items in topo_groups.items():
-            label = _TOPO_LABELS.get(action_type, action_type)
+            label = (tr(_TOPO_LABELS[action_type]) if action_type in _TOPO_LABELS
+                     else action_type)
             cat_item = QTreeWidgetItem(root, [label, ""])
             cat_item.setForeground(0, color)
             cat_item.setExpanded(True)
             for idx, ts in items:
-                detail = f"L{ts.level} | -{ts.elements_removed} elem"
+                detail = tr("validation.topo_detail", level=ts.level,
+                            removed=ts.elements_removed)
                 item = QTreeWidgetItem(cat_item, [ts.description, detail])
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -662,11 +694,9 @@ class ValidationDialog(QDialog):
             states_to_apply = {active_name: self._model.state}
 
         reply = QMessageBox.question(
-            self, "Apply Simplification",
-            f"Apply Level {level} simplification with auto-repair to "
-            f"{len(states_to_apply)} system(s)?\n\n"
-            "The algorithm will iterate until the network is stable "
-            "and structurally valid.",
+            self, tr("validation.apply_simplification"),
+            tr("validation.apply_level_msg", level=level,
+               count=len(states_to_apply)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -708,16 +738,15 @@ class ValidationDialog(QDialog):
         if n_remaining:
             detail = "\n".join(all_logs[-15:])
             QMessageBox.warning(
-                self, "Simplification Complete — Issues Remain",
-                f"{n_remaining} issue(s) remain across "
-                f"{len(states_to_apply)} system(s):\n\n{detail}\n\n"
-                "Re-run validation to see full details.",
+                self, tr("validation.level_done_issues_title"),
+                tr("validation.level_done_issues_msg", n=n_remaining,
+                   count=len(states_to_apply), detail=detail),
             )
         else:
             QMessageBox.information(
-                self, "Simplification Complete",
-                f"Simplified {len(states_to_apply)} system(s) successfully.\n\n"
-                + "\n".join(all_logs[-10:]),
+                self, tr("validation.level_done_title"),
+                tr("validation.level_done_msg", count=len(states_to_apply),
+                   log="\n".join(all_logs[-10:])),
             )
         self.simplificationApplied.emit()
 

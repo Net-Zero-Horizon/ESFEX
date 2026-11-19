@@ -52,6 +52,19 @@ from evrex import (
 
 logger = logging.getLogger(__name__)
 
+_METHOD_KEYS = {
+    "logistic": "wizard_ev.method_logistic",
+    "bass": "wizard_ev.method_bass",
+    "tco_parity": "wizard_ev.method_tco",
+    "policy_driven": "wizard_ev.method_policy",
+}
+
+
+def _method_label(method: str) -> str:
+    """Display name of an EV adoption method (exports keep the internal id)."""
+    key = _METHOD_KEYS.get(method)
+    return tr(key) if key else method.replace("_", " ").title()
+
 
 # =====================================================================
 # Step 1: Transport Context (Domain + Fleet Data)
@@ -138,6 +151,7 @@ class EVDomainStep(QWidget):
 
         # -- OSM results --
         self._osm_results: dict = {}
+        self._detect_found: dict = {}
 
     def get_polygon(self) -> list[tuple[float, float]]:
         return self._domain.get_polygon()
@@ -156,6 +170,7 @@ class EVDomainStep(QWidget):
         self._btn_fetch.setEnabled(False)
         self._detect_progress.setValue(0)
         self._pending_fetches = 2
+        self._detect_found: dict = {}
 
         self._cs_fetcher = OSMChargingStationFetcher(bounds, parent=self)
         self._cs_fetcher.progress.connect(
@@ -175,29 +190,42 @@ class EVDomainStep(QWidget):
 
     def _on_cs_finished(self, data: dict):
         self._osm_results.update(data)
+        self._detect_found.update(data)
         self._pending_fetches -= 1
-        cs = data.get("charging_stations", 0)
-        pk = data.get("parking_areas", 0)
-        self._detect_status.setText(
-            f"{cs} charging stations, {pk} parking areas"
-        )
+        self._show_detect_status()
         if self._pending_fetches <= 0:
             self._btn_fetch.setEnabled(True)
             self._detect_progress.setValue(100)
 
     def _on_road_finished(self, data: dict):
         self._osm_results.update(data)
+        self._detect_found.update(data)
         self._pending_fetches -= 1
-        rd = data.get("road_density_km2", 0)
-        txt = self._detect_status.text()
-        self._detect_status.setText(f"{txt}, road density: {rd:.1f} km/km²")
+        self._show_detect_status()
         if self._pending_fetches <= 0:
             self._btn_fetch.setEnabled(True)
             self._detect_progress.setValue(100)
 
+    def _show_detect_status(self):
+        """Summarise what this fetch's OSM queries returned so far."""
+        res = self._detect_found
+        has_cs = "charging_stations" in res or "parking_areas" in res
+        rd = res.get("road_density_km2")
+        if has_cs and rd is not None:
+            text = tr("wizard_ev.detect_cs_road", cs=res.get("charging_stations", 0),
+                      pk=res.get("parking_areas", 0), rd=f"{rd:.1f}")
+        elif has_cs:
+            text = tr("wizard_ev.detect_cs", cs=res.get("charging_stations", 0),
+                      pk=res.get("parking_areas", 0))
+        elif rd is not None:
+            text = tr("wizard_ev.detect_road", rd=f"{rd:.1f}")
+        else:
+            return
+        self._detect_status.setText(text)
+
     def _on_fetch_error(self, msg: str):
         self._pending_fetches -= 1
-        self._detect_status.setText(f"Error: {msg}")
+        self._detect_status.setText(tr("wizard_ev.error_status", msg=msg))
         if self._pending_fetches <= 0:
             self._btn_fetch.setEnabled(True)
 
@@ -509,7 +537,8 @@ class _EVAdoptionWorker(QThread):
             total = len(self._methods)
             for i, method in enumerate(self._methods):
                 pct = int((i / total) * 100)
-                self.progress.emit(pct, f"Running {method}...")
+                self.progress.emit(
+                    pct, tr("wizard_ev.running_method", method=_method_label(method)))
 
                 if method == "logistic":
                     curve = run_ev_logistic_adoption(
@@ -542,7 +571,7 @@ class _EVAdoptionWorker(QThread):
 
                 results.append(curve)
 
-            self.progress.emit(100, "All methods complete.")
+            self.progress.emit(100, tr("wizard_ev.all_methods_complete"))
             self.finished.emit(results)
 
         except Exception as exc:
@@ -705,7 +734,8 @@ class EVAdoptionModelStep(QWidget):
 
         for c in curves:
             final_pen = c.penetration[-1] * 100 if c.penetration else 0
-            self._log.append(f"  {c.method}: {final_pen:.1f}% by {c.years[-1]}")
+            self._log.append(tr("wizard_ev.curve_line", method=_method_label(c.method),
+                                pct=f"{final_pen:.1f}", year=c.years[-1]))
 
         self.modelsFinished.emit()
 
@@ -723,7 +753,8 @@ class EVAdoptionModelStep(QWidget):
 
         fetcher = IEAEVDataFetcher(self._macro.country_iso, parent=self)
         fetcher.finished.connect(self._on_iea_finished)
-        fetcher.error.connect(lambda m: self._log.append(f"IEA error: {m}"))
+        fetcher.error.connect(
+            lambda m: self._log.append(tr("wizard_ev.iea_error", msg=m)))
         fetcher.start()
 
     def _on_iea_finished(self, data: dict):
@@ -740,14 +771,14 @@ class EVAdoptionModelStep(QWidget):
             ]
             self._validation_data.append(vd)
             self._lbl_validation.setText(
-                f"IEA: {len(vd.years)} years loaded"
+                tr("wizard_ev.iea_loaded", n=len(vd.years))
             )
         else:
-            self._lbl_validation.setText("No IEA data for this country")
+            self._lbl_validation.setText(tr("wizard_ev.iea_no_data"))
 
     def _import_csv(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, tr("wizard_ev.import_csv"), "", "CSV Files (*.csv)",
+            self, tr("wizard_ev.import_csv"), "", tr("wizard_ev.csv_files_filter"),
         )
         if not path:
             return
@@ -766,9 +797,9 @@ class EVAdoptionModelStep(QWidget):
                 years=years, ev_stock=stock, source="user_csv",
             )
             self._validation_data.append(vd)
-            self._lbl_validation.setText(f"CSV: {len(years)} rows loaded")
+            self._lbl_validation.setText(tr("wizard_ev.csv_rows_loaded", n=len(years)))
         except Exception as exc:
-            QMessageBox.warning(self, "CSV Error", str(exc))
+            QMessageBox.warning(self, tr("wizard_ev.csv_error_title"), str(exc))
 
     def get_curves(self) -> list[EVAdoptionCurve]:
         return self._curves
@@ -832,7 +863,7 @@ class EVFleetResultsStep(QWidget):
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
         except ImportError:
-            self._chart_container.addWidget(QLabel("matplotlib not available"))
+            self._chart_container.addWidget(QLabel(tr("wizard_ev.no_matplotlib")))
             return
 
         # Clear previous
@@ -852,9 +883,9 @@ class EVFleetResultsStep(QWidget):
         for curve in self._curves:
             c = colors.get(curve.method, "#7f8c8d")
             ax1.plot(curve.years, [p * 100 for p in curve.penetration],
-                     label=curve.method.replace("_", " ").title(), color=c, linewidth=2)
+                     label=_method_label(curve.method), color=c, linewidth=2)
             ax2.plot(curve.years, curve.energy_demand_gwh,
-                     label=curve.method.replace("_", " ").title(), color=c, linewidth=2)
+                     label=_method_label(curve.method), color=c, linewidth=2)
 
         # Validation overlay
         for vd in self._validation_data:
@@ -862,15 +893,15 @@ class EVFleetResultsStep(QWidget):
                 ax1_twin = ax1  # plot stock on same axis as count
                 # Convert to approximate penetration (skip if no fleet total)
 
-        ax1.set_xlabel("Year")
-        ax1.set_ylabel("EV Fleet Share (%)")
-        ax1.set_title("Fleet Electrification")
+        ax1.set_xlabel(tr("wizard_ev.axis_year"))
+        ax1.set_ylabel(tr("wizard_ev.axis_fleet_share"))
+        ax1.set_title(tr("wizard_ev.chart_fleet_electrification"))
         ax1.legend(fontsize=8)
         ax1.grid(True, alpha=0.3)
 
-        ax2.set_xlabel("Year")
-        ax2.set_ylabel("Energy Demand (GWh)")
-        ax2.set_title("EV Energy Demand")
+        ax2.set_xlabel(tr("wizard_ev.axis_year"))
+        ax2.set_ylabel(tr("wizard_ev.axis_energy_demand"))
+        ax2.set_title(tr("wizard_ev.chart_ev_energy"))
         ax2.legend(fontsize=8)
         ax2.grid(True, alpha=0.3)
 
@@ -889,7 +920,7 @@ class EVFleetResultsStep(QWidget):
         self._table.setRowCount(len(self._curves))
         self._table.setColumnCount(len(year_labels))
         self._table.setHorizontalHeaderLabels(year_labels)
-        self._table.setVerticalHeaderLabels([c.method.replace("_", " ").title() for c in self._curves])
+        self._table.setVerticalHeaderLabels([_method_label(c.method) for c in self._curves])
 
         for row, curve in enumerate(self._curves):
             for col, yi in enumerate(year_indices):
@@ -906,14 +937,16 @@ class EVFleetResultsStep(QWidget):
     def _export_png(self):
         if self._fig is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Chart", "ev_fleet_evolution.png", "PNG (*.png)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("wizard_ev.export_chart_title"), "ev_fleet_evolution.png", "PNG (*.png)")
         if path:
             self._fig.savefig(path, dpi=150, bbox_inches="tight")
 
     def _export_csv(self):
         if not self._curves:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Data", "ev_fleet_data.csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("wizard_ev.export_data_title"), "ev_fleet_data.csv", "CSV (*.csv)")
         if not path:
             return
 
@@ -977,7 +1010,8 @@ class EVScenarioSelectionStep(QWidget):
         for i, curve in enumerate(self._curves):
             final_pct = curve.penetration[-1] * 100 if curve.penetration else 0
             final_yr = curve.years[-1] if curve.years else "?"
-            label = f"{curve.method.replace('_', ' ').title()} — {final_pct:.0f}% by {final_yr}"
+            label = tr("wizard_ev.curve_option", method=_method_label(curve.method),
+                       pct=f"{final_pct:.0f}", year=final_yr)
             radio = QRadioButton(label)
             if i == 0:
                 radio.setChecked(True)
@@ -993,14 +1027,18 @@ class EVScenarioSelectionStep(QWidget):
         if not self._curves:
             return
 
-        headers = ["Method", "Final %", "Total EVs", "Energy (GWh)", "Peak (MW)"]
+        headers = [
+            tr("wizard_ev.col_method"), tr("wizard_ev.col_final_pct"),
+            tr("wizard_ev.col_total_evs"), tr("wizard_ev.col_energy_gwh"),
+            tr("wizard_ev.col_peak_mw"),
+        ]
         self._summary_table.setRowCount(len(self._curves))
         self._summary_table.setColumnCount(len(headers))
         self._summary_table.setHorizontalHeaderLabels(headers)
 
         for row, c in enumerate(self._curves):
             vals = [
-                c.method.replace("_", " ").title(),
+                _method_label(c.method),
                 f"{c.penetration[-1]*100:.1f}%" if c.penetration else "—",
                 str(c.total_fleet_ev[-1]) if c.total_fleet_ev else "—",
                 f"{c.energy_demand_gwh[-1]:.1f}" if c.energy_demand_gwh else "—",

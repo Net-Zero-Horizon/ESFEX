@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from esfex.visualization.i18n import tr
+
 
 class NodeDemandForecastDialog(QDialog):
     """Forecast (and optionally distribute) demand for a single node."""
@@ -23,8 +25,9 @@ class NodeDemandForecastDialog(QDialog):
     def __init__(self, model, node_index: int, parent=None):
         super().__init__(parent)
         node = model.get_node(node_index)
-        name = node.name if node is not None else f"node {node_index}"
-        self.setWindowTitle(f"Demand forecast — {name}")
+        name = (node.name if node is not None
+                else tr("wizard_demand.forecast_node_fallback", index=node_index))
+        self.setWindowTitle(tr("wizard_demand.forecast_dialog_title", name=name))
         self.resize(900, 820)
 
         # Import here to avoid a heavy import at module load / circular imports.
@@ -40,7 +43,7 @@ class NodeDemandForecastDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr("common.close"))
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
