@@ -31,15 +31,14 @@ from esfex.visualization.i18n import tr
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
 
-def _polygon_area_km2(polygon) -> float:
-    """Approximate polygon area on Earth's surface (km²).
-
-    Uses the shoelace formula on spherical coordinates (surveyor's formula).
-    """
-    if len(polygon) < 3:
+def _ring_area_km2(ring) -> float:
+    """Area (km²) on Earth's surface of a simple ring of ``(lng, lat)``
+    degrees: the shoelace formula on spherical coordinates (surveyor's
+    formula)."""
+    if len(ring) < 3:
         return 0.0
     R = 6371.0
-    coords = [(math.radians(p.lat), math.radians(p.lng)) for p in polygon]
+    coords = [(math.radians(lat), math.radians(lng)) for lng, lat in ring]
     n = len(coords)
     area = 0.0
     for i in range(n):
@@ -47,6 +46,36 @@ def _polygon_area_km2(polygon) -> float:
         k = (i + 2) % n
         area += (coords[k][1] - coords[i][1]) * math.sin(coords[j][0])
     return abs(area * R * R / 2.0)
+
+
+def _polygon_area_km2(polygon) -> float:
+    """Approximate area (km²) of a drawn polygon (points with ``lat`` /
+    ``lng``).
+
+    A self-crossing ("bowtie") outline is repaired first (shapely
+    ``make_valid``, as the demand cells' domain clip does) and its parts'
+    areas added: the shoelace formula on the raw outline lets the lobes
+    cancel (a symmetric bowtie had area 0).
+    """
+    if len(polygon) < 3:
+        return 0.0
+    pts = [(float(p.lng), float(p.lat)) for p in polygon]
+    try:
+        import shapely
+        from shapely.geometry import Polygon
+    except Exception:  # shapely is a declared dependency; be defensive
+        return _ring_area_km2(pts)
+    geom = Polygon(pts)
+    if geom.is_valid:
+        return _ring_area_km2(pts)
+    geom = shapely.make_valid(geom)
+    parts = [g for g in getattr(geom, "geoms", [geom]) if g.geom_type == "Polygon"]
+    parts += [p for g in getattr(geom, "geoms", []) if g.geom_type == "MultiPolygon"
+              for p in g.geoms]
+    return sum(
+        _ring_area_km2(list(p.exterior.coords)[:-1])
+        - sum(_ring_area_km2(list(r.coords)[:-1]) for r in p.interiors)
+        for p in parts)
 
 
 class ZoneForm(QWidget):
