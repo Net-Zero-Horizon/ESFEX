@@ -498,12 +498,12 @@ class _WorkflowsNamespace:
 
     @staticmethod
     def tsam_cluster(demand, n_periods=10, method="kmedoids"):
-        """Cluster demand into representative periods.
+        """Cluster demand into representative days (24-h periods).
 
         Parameters
         ----------
-        demand : array (n_hours,) or (n_days, 24)
-            Demand time series.
+        demand : array (n_hours,) or (n_hours, n_nodes)
+            Hourly demand: one series, or one column per node.
         n_periods : int
             Number of representative periods.
         method : str
@@ -512,13 +512,18 @@ class _WorkflowsNamespace:
         Returns
         -------
         TSAMResult
-            ``.representative_days``, ``.weights``, ``.mapping``.
+            ``.period_start_hours`` (first hour of each representative
+            day), ``.period_weights`` (days each one stands for),
+            ``.day_period`` (the representative period of each day of the
+            year, in calendar order), ``.num_periods`` and
+            ``.critical_periods``.
         """
         from esfex.models.tsam import compute_tsam_periods
         import numpy as np
-        return compute_tsam_periods(
-            np.asarray(demand), n_periods=n_periods, method=method,
-        )
+        demand = np.asarray(demand, dtype=float)
+        if demand.ndim == 1:
+            demand = demand.reshape(-1, 1)
+        return compute_tsam_periods(demand, num_periods=n_periods, method=method)
 
     @staticmethod
     def help():
