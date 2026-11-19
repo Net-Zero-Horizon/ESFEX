@@ -399,6 +399,71 @@ Per-release notes are also published on the
   equipment-to-bus link drawn on one bus is not counted, as in the Studio).
   The Studio still reports them as errors.
 
+- **An annual operating budget for the dispatch,
+  `max_annual_operating_cost`.** A new, optional system key ($/yr, off by
+  default) caps the money the dispatch pays to operate in a year: fuel,
+  maintenance, start-ups, fixed O&M, electrolyzer, converter and line-flow
+  costs (with primary energy, the fuel bought and transported); modelling
+  penalties, battery degradation and the CO2 price are not spending. The runner
+  gives each rolling window what is left of the year's budget in proportion
+  to the demand of its committed hours, and carries what those hours spent,
+  so a window that spends less leaves more to the next ones. Spending above
+  the budget costs 1000 $ per $ (`OPERATING_BUDGET_PENALTY`): above it, a
+  unit with a variable cost above VOLL / 1001 is dearer than shedding the
+  load, so fuel the budget cannot pay for becomes unserved energy, as in a
+  fuel shortage. The excess (money) and its penalty are reported in the cost
+  breakdown and the HDF5 file (`operating_budget_excess`,
+  `operating_budget_penalty`, per year), and the runner warns for each year
+  that goes over the budget. The Studio's system form has a field for it
+  (0 = off).
+
+- **`budget_scope: total` for the master's budget.** With the new system key
+  `budget_scope` set to `total` (default `investment`), each build year's
+  budget row in the master holds the overnight investment plus the money
+  that year spends on operation: what the representative days or TSAM
+  periods pay, scaled to the year (fuel, maintenance, start-ups, converter
+  and line-flow costs, primary-energy fuel and electrolyzers), plus fixed
+  O&M, life extension and decommissioning. Modelling penalties (unserved
+  energy, reserve, inertia and N-1 shortfalls, curtailment, RE shortfall,
+  SOC and spillage, fuel shortfall, slacks), battery degradation and the CO2
+  price (a transfer to the state) are not in it. Same slack at 10 $ per $. A build that cuts the year's fuel bill by more than its cost
+  then makes room in the budget. Monolithic, TSAM, stochastic (scenarios
+  weighted by probability), MGA and myopic masters support it; Benders does
+  not, so with `total` the monolithic master is solved instead, with a
+  warning. The Studio's system form has a *Budget Scope* choice.
+
+
+- **Data sources and licences.** A new `DATA_SOURCES.md` at the top of the
+  repository, and the documentation page *Reference → Data Sources &
+  Licences*, list the third-party data and code shipped with ESFEX, with the
+  licence of each and the attribution and citation its terms ask for: the
+  demand density model's grids (NEX-GDDP-CMIP6 climate normals, CC0;
+  WorldPop 2020 population counts, CC BY 4.0; Natural Earth land area,
+  public domain; UN energy balances from UNdata, Statistics Canada table
+  25-10-0029-01 and EIA SEDS for the electricity-use context), Studio's
+  Natural Earth country outlines, the GPW v4 and gridded-GDP rasters
+  downloaded from the ESFEX data release, and the JavaScript libraries
+  bundled with Studio (D3, elkjs, Leaflet, Leaflet.draw, plotly.js,
+  xterm.js). The README, the documentation home page, the Demand Density
+  Model page and the Demand Forecast workflow page link to it.
+
+
+- **Projects remember their results.** The Studio saves the project's last
+  results file (from its last successful run, or the one opened with
+  File > Load Results…) as the top-level key `_last_results`, relative to the
+  configuration's folder when the file lies under it. Only the Studio reads
+  it; `esfex run` ignores it without reporting an unknown key. Opening a
+  project whose results file still exists enables **Results** and
+  **Sensitivity** and offers, without blocking, to open the results; nothing
+  is loaded until you accept, since a results file can be several GB. A
+  results file that no longer exists is forgotten without an error.
+
+- **Export Project can include the results.** When the project has a results
+  file, Export Project asks whether to include it (off by default; the dialog
+  shows the file size). Included results go into the bundle's `results/`
+  folder, uncompressed, and Import Project restores them together with the
+  remembered file.
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -1466,6 +1531,31 @@ Per-release notes are also published on the
   that names the window, its year and first hour (Ipopt's `LOCALLY_SOLVED`
   on the AC models stays silent); one still `LOCALLY_SOLVED` without a
   feasible point is now a failed window.
+
+- **`max_annual_system_cost` is now `max_annual_investment`, and the
+  dispatch no longer uses it.** The key had two meanings: the master's cap on
+  each build year's overnight investment, and, prorated to each dispatch
+  window by its hours, a soft cap on the window's fuel, maintenance and fixed
+  O&M. With its fleet fixed, the dispatch could not meet it and paid a
+  penalty (10 × the largest variable cost per $) instead of representing any
+  real scarcity, so the budget was counted twice. The key is now
+  `max_annual_investment` and caps only the master's investment, as before;
+  the dispatch has its own optional operating budget (above). Files with
+  `max_annual_system_cost` or `MAX_ANNUAL_SYSTEM_COST` still load: the old
+  key is read as `max_annual_investment` (one info line), it is not reported
+  as unknown, and the Studio saves it under the new name. A run that relied
+  on the old dispatch cap now dispatches without it; set
+  `max_annual_operating_cost` for an operating budget.
+
+
+- **Studio runs write their results into the project's folder.** A run
+  started from the Studio wrote to `results` relative to the directory the
+  Studio was launched from, so a project opened from another directory (or in
+  another session) found no results. Runs now write to `results` next to the
+  saved configuration; a project that was never saved writes to
+  `~/.cache/esfex/studio_results`, and the status bar says where when the run
+  starts. `esfex run` keeps its default (`./results` relative to the current
+  directory).
 
 ### Fixed
 
@@ -3479,6 +3569,106 @@ Per-release notes are also published on the
   leave-one-country-out training, and the build ran twice. The built
   dataset is now passed on (`train_tft_model(df=...)`); the XGBoost path
   also receives the full country map, so the excluded country keeps its id.
+
+- **The cost breakdown's total is the sum of its components.** The penalty
+  of the dispatch cost ceiling was in the objective and the breakdown's
+  `total` but in no component (Cuba 2025: total 2450.4 M$ against 2080.6 M$
+  of components), and so was the battery year-end SOC shortfall (BAT-5). The
+  ceiling is gone (above), the operating-budget penalty has its own entry,
+  and the SOC shortfall is now in `soc_violation_cost`. The reporting entries
+  `pe_electrolyzer_cost`, `v2g_compensation` and `operating_budget_excess`
+  stay outside the total (`COST_BREAKDOWN_NON_COMPONENTS`). In a primary-energy
+  run the old ceiling also counted the fuel-coupled units' `fuel_cost`, which
+  they do not pay there; the operating budget counts the fuel bought instead.
+
+- **The national demand model gets the features it was trained on.** The
+  feature builder of ESFEX's national demand model (`demand_ml`, the XGBoost
+  model the Studio's Demand Estimation falls back to without the density
+  model, and the `xgboost` engine of the global demand projection) filled
+  its 29 columns by position from an older 19-column layout: the country
+  code held ln(GDP per capita), the GDP column held ln(total population)
+  where the model expects ln(population density), urbanization held the
+  World Bank percentage instead of the GHSL settlement class, the coordinates
+  landed in the holiday columns, and the holiday distances, coordinates and
+  daily temperature statistics stayed 0. The model's forecasts rested on
+  inputs it had never seen. The features are now filled by name by the same
+  code that builds the training dataset (`demand_training.hourly_feature_columns`):
+  the country's code from the model's own country encoding (now shipped with
+  the model as `demand_xgb_country_map.json`; a country the model was not
+  trained on gets an unseen code, with a log message), its public holidays,
+  the node's coordinates, the temperature with its daily maximum, minimum,
+  range and 1-, 7- and 30-day means, degree hours on the model's 18/24 °C
+  bases, and GDP per capita, population density and settlement class
+  sampled at the node from the training rasters (the 2020 rasters for a
+  later base year), moved over the forecast years by the GDP and population
+  growth rates. A node whose GDP or population cannot be sampled, or whose
+  temperature series has gaps, is an error (the Studio then falls back to the Archetype method); a missing
+  temperature series is 20 °C and a missing settlement raster is class 10,
+  as in the training data. The unused `hdd_base_temp` / `cdd_base_temp`
+  fields of the Demand Estimation configuration are removed.
+
+- **`esfex.workflows.estimate_demand` works again.** The scripting function
+  imported helpers of a removed 3-hourly model and always failed with an
+  `ImportError`. It now wraps the national demand model:
+  `estimate_demand(iso3, latitude, longitude, year, temperatures_hourly=None,
+  annual_demand_mwh=None, static_features=None)` returns the site's 8,760-h
+  profile, in MW summing to `annual_demand_mwh` when given, else as shape
+  factors with mean 1. The old arguments (GDP per capita, population,
+  urbanization, `base_temp`, `beta_cdd`, `beta_hdd`) are gone.
+
+- **Licensing of third-party data and libraries.** `REUSE.toml` declared
+  every file in the repository, including the data derived from third-party
+  datasets and the bundled JavaScript libraries, as Apache-2.0 by the ESFEX
+  authors. Those files now carry their own copyright holders and licences
+  (CC0-1.0, CC-BY-4.0, EPL-2.0, MIT, BSD-2-Clause, ISC, and `LicenseRef-`
+  entries for Natural Earth's public domain, the UNdata terms of use, the
+  Statistics Canada Open Licence and US-Government public domain), whose
+  texts are in `LICENSES/`. The licence texts and `DATA_SOURCES.md` are
+  now installed with the package (in its `.dist-info/licenses/` folder),
+  included in the source distribution, and listed in the conda recipe next
+  to `LICENSE`. ESFEX's own code and models stay Apache-2.0.
+
+- **Package licence metadata names every shipped licence.** `pyproject.toml`
+  declares an SPDX expression (`Apache-2.0 AND MIT AND BSD-2-Clause AND
+  BSD-3-Clause AND ISC AND EPL-2.0 AND CC-BY-4.0 AND CC0-1.0 AND LicenseRef-…`)
+  instead of `Apache-2.0` alone (PEP 639, setuptools ≥ 77), and so does the conda
+  recipe. plotly.js now ships with `plotly.min.js.LICENSE.txt`, the licences of
+  the dependencies it bundles (two of them BSD-3-Clause).
+
+- **NPV retirement no longer keeps a round that makes the plan dearer.**
+  A unit can have a negative NPV at `base_lcoe` and still be the cheapest
+  way to serve its load. The NPV iteration kept any optimal re-solve, so
+  retiring such a unit could raise the plan's total cost (a $32/MWh gas
+  unit at a `base_lcoe` of $10/MWh, replaced by a $200/MWh peaker). A
+  round is now undone, with a warning naming its units and both costs,
+  when the re-solve's total cost is above the plan before's (relative
+  tolerance 1e-6). The total cost is the master's objective, which already
+  holds every existing unit's operating cost, fixed O&M, life extension and
+  decommissioning over the modelled years. A myopic year's master models
+  only that year, so the comparison also counts the retired units' later
+  years as their NPV values them. Retiring a unit there can cost more in its
+  own year (the decommissioning) and still be kept for the fixed O&M it
+  saves later. The infeasible and curtailment-excess guards are unchanged.
+  This applies to both `esfex run` (`MasterProblemAdapter`) and the Julia
+  `solve_with_npv_iteration`. The Julia function also solves each master
+  with `optimize_master!` now (the solver's numerical retry, and the warning
+  for curtailment above the limit) instead of plain `optimize!`. New Julia
+  helpers: `npv_round_reference_cost` and `cost_grew`.
+
+- **A life-extended battery carries energy across TSAM periods.** With
+  TSAM inter-period linking, the state of charge at each period boundary
+  was bounded by the battery's rated energy only while the battery was
+  within its `life_time`. A battery the master kept in service past its
+  lifetime (life extension) could still charge and discharge inside each
+  period, but its boundary SOC was held at 0, so it could not move energy
+  from one period to the next (seasonal storage), and the master
+  undervalued extending it. The boundary SOC is now bounded by the same
+  energy in service as the period's own SOC: the rated energy within the
+  lifetime, afterwards the life-extended MW at the battery's
+  energy-to-power ratio. The master's day model, the TSAM chain and the
+  capacity expressions now share one helper for an existing battery's
+  power and energy in service. As before, the master does not degrade
+  batteries.
 
 ### Removed
 
