@@ -16,14 +16,14 @@ from esfex.models.demand_density_ml import (
     DemandDensityModel,
     allocate_demand_capacitated,
     build_density_features,
-    gdp_density_point,
+    _ssp_gdp_total_nearest,
     _normalize_ssp,
 )
 
 
 def _gdp_ssp_available() -> bool:
     try:
-        return gdp_density_point(23.1, -82.4, 2030, "ssp2") is not None
+        return _ssp_gdp_total_nearest(23.1, -82.4, 2030, "ssp2") is not None
     except Exception:
         return False
 
@@ -342,13 +342,15 @@ class TestSSPNormalization:
 class TestSSPGdpTrajectory:
     _CUBA = (19.8, -85.0, 23.3, -74.0)
 
-    def test_gdp_density_increases_and_interpolates(self):
-        v25 = gdp_density_point(23.1, -82.4, 2025, "ssp2")
-        v27 = gdp_density_point(23.1, -82.4, 2027, "ssp2")
-        v30 = gdp_density_point(23.1, -82.4, 2030, "ssp2")
-        # SSP2 GDP grows; an interpolated year sits between its bracketing steps.
-        assert v25 < v30
-        assert v25 < v27 < v30
+    def test_cell_gdp_grows_and_steps_to_the_nearest_ssp_year(self):
+        g25 = _ssp_gdp_total_nearest(23.1, -82.4, 2025, "ssp2")
+        g27 = _ssp_gdp_total_nearest(23.1, -82.4, 2027, "ssp2")
+        g28 = _ssp_gdp_total_nearest(23.1, -82.4, 2028, "ssp2")
+        g30 = _ssp_gdp_total_nearest(23.1, -82.4, 2030, "ssp2")
+        # SSP2 GDP grows; a year between steps takes the nearest step's value
+        # (the demand estimation interpolates between steps itself).
+        assert g25 < g30
+        assert g27 == g25 and g28 == g30
 
     @pytest.mark.skipif(
         not DemandDensityModel.is_available(), reason="density model not present")
@@ -529,5 +531,5 @@ def test_unused_node_samplers_removed():
 
     for name in ("compute_node_areas_km2", "sample_node_densities",
                  "sample_node_pop_density", "sample_node_gdp_density",
-                 "sample_node_pop_and_area"):
+                 "sample_node_pop_and_area", "gdp_density_point"):
         assert not hasattr(ddm, name), name
