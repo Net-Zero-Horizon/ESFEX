@@ -246,21 +246,45 @@ def run(
              "output file, wall time, warnings, summary of the last year. Everything "
              "else goes to stderr",
     ),
+    resume: bool = typer.Option(
+        False, "--resume",
+        help="Continue an interrupted myopic development run from the first year it did "
+             "not complete, appending to its results file (RESULTS, default: the newest "
+             "results file of this case in the output directory)",
+    ),
+    force_resume: bool = typer.Option(
+        False, "--force-resume",
+        help="With --resume: continue although the case, its input files or the ESFEX "
+             "version changed since the run started (each difference is logged as a warning)",
+    ),
+    results: Optional[Path] = typer.Argument(
+        None, metavar="[RESULTS.h5]",
+        help="With --resume: the results file of the run to continue",
+        dir_okay=False,
+    ),
 ):
     """
     Run the ESFEX optimization model.
 
     Executes capacity expansion and operational dispatch optimization
     based on the provided configuration file. Exit code 0 on success, 1 if
-    the configuration is invalid or the run failed or is incomplete.
+    the configuration is invalid, the run failed or is incomplete, or a
+    --resume was refused.
     """
     import time
 
     from esfex.api.diagnostics import collect_warnings
 
+    if results is not None and not resume:
+        raise typer.BadParameter("a results file is only read with --resume",
+                                 param_hint="RESULTS.h5")
+    if force_resume and not resume:
+        raise typer.BadParameter("--force-resume needs --resume", param_hint="--force-resume")
     state: dict = {"status": None, "errors": [], "output_dir": None,
-                   "orchestrator": None, "case": None}
-    args = (config, mode, solver, output, years, start_year, verbose, dry_run)
+                   "orchestrator": None, "case": None, "resume": None,
+                   "resume_requested": resume}
+    args = (config, mode, solver, output, years, start_year, verbose, dry_run,
+            resume, force_resume, results)
     if not json_out:
         with collect_warnings():
             _run_command(state, *args)
@@ -300,6 +324,13 @@ def _run_json_doc(state: dict, code: int, wall: float, collector, config: Path) 
         wsum = collector.summary()
     status = state.get("status") or ("complete" if code == 0 else "failed")
     years = [r.year for r in (getattr(orch, "results", None) or [])]
+    plan = (getattr(orch, "resume_plan", None)
+            if orch is not None and state.get("resume_requested") else None)
+    if plan is not None:
+        # The years the interrupted run had dispatched are in the file too
+        years = sorted(set(plan.dispatch_years) | set(years))
+    # --resume: where the run resumed (or, with --dry-run, would resume)
+    resume = plan.to_dict() if plan is not None else state.get("resume")
     last_year = None
     if out_file is not None and Path(out_file).exists() and years:
         try:
@@ -312,18 +343,21 @@ def _run_json_doc(state: dict, code: int, wall: float, collector, config: Path) 
         config=str(config), output_dir=state.get("output_dir"),
         output_file=None if out_file is None else str(Path(out_file).resolve()),
         wall_time_s=round(wall, 3), years=years, warnings=wsum.to_dict(),
-        last_year=last_year, case=state.get("case"))
+        last_year=last_year, case=state.get("case"),
+        resumed_from=None if resume is None else resume["resumed_from"], resume=resume)
 
 
 def _run_command(state: dict, config: Path, mode: Optional[str], solver: Optional[str],
                  output: Optional[Path], years: Optional[int], start_year: Optional[int],
-                 verbose: bool, dry_run: bool) -> None:
+                 verbose: bool, dry_run: bool, resume: bool = False,
+                 force_resume: bool = False, results_file: Optional[Path] = None) -> None:
     """Body of ``esfex run``; records the outcome in *state* for ``--json``."""
     import logging
     import sys
 
     from esfex.api.cases import config_issue_error, case_summary, missing_data_files
     from esfex.config.loader import load_config, ConfigLoadError
+    from esfex.io.checkpoint import ResumeError, newest_results_file
     from esfex.runner import Orchestrator, RunAbortedError
     from esfex.logging_config import setup_console_logging
 
@@ -408,11 +442,48 @@ def _run_command(state: dict, config: Path, mode: Optional[str], solver: Optiona
             for err in missing:
                 console.print(f"  {err.key}: {err.message}", markup=False)
             raise typer.Exit(code=1)
+        if resume:
+            # Would --resume be accepted? (The same checks as the run's.)
+            from esfex.io.checkpoint import check_resume
+
+            target = results_file or newest_results_file(output or Path("./results"), config)
+            try:
+                if target is None:
+                    raise ResumeError([_run_error(
+                        "results_not_found", f"No results file of {config.stem} in "
+                        f"{(output or Path('./results')).resolve()}", key=str(output or ""),
+                        fix="Pass the file: esfex run -c CASE --resume FILE.h5")])
+                plan = check_resume(target, cfg, config, years=years, start_year=start_year,
+                                    force=force_resume)
+            except ResumeError as e:
+                state["status"] = "resume_refused"
+                state["errors"] = e.errors
+                for err in e.errors:
+                    console.print(f"[red]Cannot resume:[/red] {err.message}", markup=True)
+                raise typer.Exit(code=1)
+            state["resume"] = plan.to_dict()
+            at = plan.resume_year if plan.resume_year is not None else "the end"
+            console.print(f"{target.name} can be resumed at {at}")
         console.print("\n[yellow]Dry run mode - not executing optimization[/yellow]")
         raise typer.Exit(code=0)
 
     # Create output directory
     output_dir = output or Path("./results")
+    if resume:
+        # The run goes on in its own file (and its directory)
+        if results_file is None:
+            results_file = newest_results_file(output_dir, config)
+            if results_file is None:
+                console.print(f"[red]Nothing to resume:[/red] no results file of "
+                              f"{config.stem} in {output_dir}")
+                state["status"] = "resume_refused"
+                state["errors"] = [_run_error(
+                    "results_not_found",
+                    f"No results file of {config.stem} in {output_dir.resolve()}",
+                    key=str(output_dir), fix="Pass the file: esfex run -c CASE --resume FILE.h5, "
+                                             "or the run's --output directory.")]
+                raise typer.Exit(code=1)
+        output_dir = results_file.parent
     output_dir.mkdir(parents=True, exist_ok=True)
     state["output_dir"] = str(output_dir.resolve())
 
@@ -444,11 +515,17 @@ def _run_command(state: dict, config: Path, mode: Optional[str], solver: Optiona
     try:
         orchestrator = Orchestrator(cfg, output_dir=output_dir, config_path=config)
         state["orchestrator"] = orchestrator
-        results = orchestrator.run(years=years, start_year=start_year)
+        resume_kw = (dict(resume_from=results_file, force_resume=force_resume)
+                     if resume else {})
+        results = orchestrator.run(years=years, start_year=start_year, **resume_kw)
 
         # A year some of whose dispatch windows failed has hours without a
-        # dispatch: the run is incomplete, not a success
-        incomplete = [r.year for r in results or [] if not getattr(r, "feasible", True)]
+        # dispatch: the run is incomplete, not a success (a resumed run: also
+        # the years the interrupted run dispatched)
+        plan = getattr(orchestrator, "resume_plan", None) if resume else None
+        earlier = ([r["year"] for r in plan.doc.get("dispatch", {}).get("completed", [])
+                    if not r.get("feasible", True)] if plan is not None else [])
+        incomplete = earlier + [r.year for r in results or [] if not getattr(r, "feasible", True)]
         if incomplete:
             _safe_console_print(
                 "\nOptimization finished with errors: operational windows of "
@@ -467,6 +544,16 @@ def _run_command(state: dict, config: Path, mode: Optional[str], solver: Optiona
 
     except typer.Exit:
         raise
+    except ResumeError as e:
+        _force_blocking_stdio()
+        _safe_console_print("\nCannot resume:", style="red")
+        for err in e.errors:
+            _safe_console_print(f"  {err.message}")
+            if err.fix:
+                _safe_console_print(f"    {err.fix}")
+        state["status"] = "resume_refused"
+        state["errors"].extend(e.errors)
+        raise typer.Exit(code=1)
     except RunAbortedError as e:
         _force_blocking_stdio()
         _safe_console_print(f"\nOptimization failed: {e}", style="red")

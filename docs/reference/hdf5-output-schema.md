@@ -76,6 +76,8 @@ A group can be present and empty, for example the battery groups in a run withou
 | `export_type` | string | `"incremental_results"` |
 | `temporal_resolution_hours` | int | Time step (hours) |
 | `simulation_mode` | string | `"development"` or `"unit_commitment"` |
+| `planning_mode` | string | `development` runs: `master_problem.planning_mode` (`"perfect_foresight"` or `"myopic"`) |
+| `checkpoint` | string | Myopic `development` runs: file name of the [checkpoint](#checkpoint-of-a-myopic-run) next to this file |
 | `years_range` | string | `"YYYY-ZZZZ"`, first and last simulated year |
 | `esfex_version` | string | ESFEX version that wrote the file |
 | `solver` | string | `solver.name` of the run |
@@ -88,7 +90,7 @@ A group can be present and empty, for example the battery groups in a run withou
 | `last_update` | string | ISO 8601 timestamp of the last year written |
 | `export_timestamp` | string | ISO 8601 timestamp of finalization |
 
-`esfex_version`, `solver` and `config_file` are missing in files written before ESFEX 0.4.
+`esfex_version`, `solver`, `config_file`, `planning_mode` and `checkpoint` are missing in files written before ESFEX 0.4.
 
 The `subsystem_*` attributes are written for single-system runs too. Readers use them to slice a system's nodes out of the global node axis.
 
@@ -792,6 +794,26 @@ for name, g in groups.items():
     for s in g["slacks"]:
         print(name, s["label"], s["value"], s["value_units"], s["cost"])
 ```
+
+## Checkpoint of a Myopic Run
+
+Not part of the HDF5 file: a myopic `development` run keeps its checkpoint in a JSON file beside it, `<results stem>.checkpoint.json` (named in the root attribute `checkpoint`), for [`esfex run --resume`](../user-guide/cli.md#resuming-an-interrupted-run). It is a sidecar rather than a group so that it can be replaced in one step after every year (written aside, then renamed; HDF5 can neither replace a group atomically nor give back a deleted group's space) and so that it can be read without h5py. Schema `esfex.checkpoint/1`:
+
+| Field | Meaning |
+|-------|---------|
+| `status` | `running` or `complete` |
+| `phase` | Where the run is: `master` (planning the years one by one), `dispatch` (every year planned, dispatching them) or `complete` |
+| `resume_at` | `{"phase", "year"}`: the first year a resume solves (`null`: none left) |
+| `last_completed_year` | Last dispatched year, `null` before the dispatch |
+| `master.completed_years` | Master years solved |
+| `dispatch.completed` | Dispatched years: `year`, `feasible` (every window solved), `objective` ($) |
+| `run` | `years`, `start_year`, `dispatch_years` (`null`: all) of the run; a resume keeps them |
+| `case` | `esfex_version`, `config_hash` (SHA-256 of the configuration but `logging` and the solver's `verbose`, `threads`, `time_limit`), `data_files` (`size` and `sha256` of each input file the configuration names) |
+| `warnings` | The run's warnings so far, as [`/diagnostics/warnings`](#diagnosticswarnings) holds them |
+| `resumes` | One entry per resume: `time`, `from_year`, `phase`, `forced` (the differences `--force-resume` let through) |
+| `state` | What the next year starts from: in phase `master` the myopic loop's state (builds per technology and build year, retirements, capacity in service per year, NPV retirements, fuel capacity, RE shares, annuities, yearly costs, master diagnostics, the representative days), in phase `dispatch` the master plan of every year and the carry-over of the last dispatched year (fuel tank levels, fuel in transit); `null` once complete |
+
+Arrays, tuples, sets and dictionaries with keys that are not strings are tagged in `state` (`{"__nd__": dtype, "shape", "data"}`, `{"__tuple__": [...]}`, `{"__set__": [...]}`, `{"__dict__": [[key, value], ...]}`, non-finite numbers `{"__float__": "inf"}`) so that `esfex.io.checkpoint.read_checkpoint` gives them back exactly; the file is strict JSON. When a resume starts, it deletes from the results file the `year_YYYY…` members of `detailed_results/`, `cost_breakdown/`, `demand/`, `global/` and `inter_system/` and the `summary_results` rows of the years the checkpoint does not list as dispatched, and sets `export_complete` to `False` until the run ends.
 
 ## MGA/SPORES Results
 

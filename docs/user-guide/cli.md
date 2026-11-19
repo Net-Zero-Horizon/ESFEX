@@ -31,6 +31,7 @@ All commands are accessed through the `esfex` entry point, built with [Typer](ht
 
 ```bash
 esfex run -c CONFIG [OPTIONS]
+esfex run -c CONFIG --resume [RESULTS.h5] [--force-resume]
 ```
 
 ### Options
@@ -46,6 +47,8 @@ esfex run -c CONFIG [OPTIONS]
 | `--verbose` | `-v` | Flag | off | Debug-level console logging, solver output on, and the configuration summary table |
 | `--dry-run` | | Flag | off | Load and validate the configuration and check that its data files exist, then exit without starting Julia |
 | `--json` | | Flag | off | At the end print one JSON object on stdout (status, results file, wall time, warnings, KPIs of the last year); everything else goes to stderr. See [Using ESFEX from Scripts and Agents](scripts-and-agents.md#esfex-run-json) |
+| `--resume` | | Flag | off | Continue an interrupted myopic run from the first year it did not complete, in its own results file: `RESULTS.h5` when given, otherwise the newest results file of this configuration in the output directory. See [Resuming an Interrupted Run](#resuming-an-interrupted-run) |
+| `--force-resume` | | Flag | off | With `--resume`: continue although the configuration, its input files or the ESFEX version changed since the run started. Each difference is logged as a warning |
 
 `--mode` and `--solver` must be one of the values listed (the solver name is case-insensitive); anything else stops the command with exit code 2 before the configuration is loaded. The CLI does not check that the solver is installed: one that is not (see [`list-solvers`](#esfex-list-solvers)) fails when the first model is solved.
 
@@ -66,14 +69,21 @@ esfex run -c my_system.yaml --dry-run -v
 
 # Unit commitment mode (MIP with binary commitment variables)
 esfex run -c my_system.yaml -m unit_commitment
+
+# Continue the newest myopic run of my_system in ./results after a crash
+esfex run -c my_system.yaml --resume
+
+# ... or a given results file; --dry-run only says whether (and where) it would resume
+esfex run -c my_system.yaml --resume results/my_system_29102026_1430.h5 --dry-run
 ```
 
 ### Output
 
 Everything is written into the output directory (`./results` by default):
 
-- **HDF5 results**: `<config_stem>_<ddmmyyyy>_<HHMM>.h5`, e.g. `my_system_29102026_1430.h5` for `my_system.yaml` started at 14:30 on 29 October 2026. Each run creates a new file. The layout is described in the [HDF5 Output Schema](../reference/hdf5-output-schema.md).
+- **HDF5 results**: `<config_stem>_<ddmmyyyy>_<HHMM>.h5`, e.g. `my_system_29102026_1430.h5` for `my_system.yaml` started at 14:30 on 29 October 2026. Each run creates a new file (a run continued with [`--resume`](#resuming-an-interrupted-run) appends to its own). The layout is described in the [HDF5 Output Schema](../reference/hdf5-output-schema.md).
 - **MGA / SPORES alternatives**: when `master_problem.mga.enabled` is true, the alternatives go into the same HDF5 file, under the `mga/` group.
+- **Checkpoint** (myopic `development` runs): `<config_stem>_<ddmmyyyy>_<HHMM>.checkpoint.json` next to the results file, for [`--resume`](#resuming-an-interrupted-run).
 - **Log file**: `logs/optimization_<YYYYmmdd_HHMMSS>.log`, always at DEBUG level.
 
 How much appears on the console is set by `logging.console_level` in the configuration:
@@ -146,18 +156,50 @@ A run that does not finish its work ends instead with `Optimization failed: …`
 
 #### Dry-Run Output
 
-`--dry-run` loads the configuration and checks its data files (the same checks as [`esfex validate`](#esfex-validate)) and exits, with code 1 if a data file is missing. It does not start Julia and does not compute windows or subproblems. Without `-v` it prints only the closing line; add `-v` to also see the header and summary table:
+`--dry-run` loads the configuration and checks its data files (the same checks as [`esfex validate`](#esfex-validate)) and exits, with code 1 if a data file is missing. With `--resume` it also runs the resume checks below and prints the year the run would continue from (`… can be resumed at 2031`), or exits with code 1 and the reasons. It does not start Julia and does not compute windows or subproblems. Without `-v` it prints only the closing line; add `-v` to also see the header and summary table:
 
 ```
 Dry run mode - not executing optimization
 ```
+
+### Resuming an Interrupted Run
+
+A `development` run with `master_problem.planning_mode: myopic` solves one master problem per year, each starting from the fleet the earlier years built, and then dispatches the years one by one. A 25-year run of a large system takes hours; when it is killed, crashes, loses its solver licence or the machine reboots, `--resume` continues it instead of starting over.
+
+After every completed step (a master year, then a dispatched year) the run rewrites a checkpoint next to its results file: `my_system_29102026_1430.checkpoint.json` beside `my_system_29102026_1430.h5`. It holds what the next year starts from (the capacity each year built per technology and build year, the retirements, the NPV-based retirements, the fuel capacity, the master's RE trajectory state and yearly costs, the master plan once every year is planned, the fuel tank levels carried into the next year), the warnings logged so far, and a fingerprint of the case. The file is replaced in one step (written aside, then renamed), so a kill while it is written leaves the previous checkpoint. Keep it with the results file: without it the run cannot be resumed.
+
+`esfex run -c CONFIG --resume [RESULTS.h5]`:
+
+1. checks the run can be resumed, and otherwise exits with code 1 and the reason (with `--json`, in `errors`; the codes are listed below);
+2. drops from the results file what the interrupted run had written of the year it did not finish;
+3. restores the state and continues with that year (a master year, or the first dispatch year not completed), with the run's own `--years` and `--start-year` (leave them out, or give the same values), appending to the same results file. The log goes to the results file's directory; `--output` only says where to look for the newest file.
+
+The resumed run gives the results the uninterrupted run would have given, and its `/diagnostics/warnings` counts the warnings of every invocation (the configuration's load warnings once per invocation).
+
+| Error code | Meaning |
+|------------|---------|
+| `results_not_found` | No such results file, or no results file of the configuration in the output directory |
+| `checkpoint_missing` | The results file has no checkpoint next to it (a run of ESFEX before 0.4, or the file was moved without it) |
+| `checkpoint_unreadable` | The checkpoint cannot be read, or another ESFEX version wrote it in another format |
+| `not_resumable` | The run or the configuration is not a myopic `development` run: perfect foresight and the operations modes solve the horizon in one go and keep no checkpoint |
+| `run_complete` | The run already completed |
+| `results_unreadable` | The results file cannot be opened (damaged by the interruption) |
+| `years_mismatch` | `--years` or `--start-year` differ from the run's |
+| `config_changed` | A model-relevant setting changed since the run started (all of the configuration counts except `logging` and the solver's `verbose`, `threads` and `time_limit`) |
+| `data_changed` | An input file the configuration names (demand, availability, inflow, …) changed size or content |
+| `version_changed` | Another ESFEX version started the run |
+| `day_plan_changed` | The master's representative days came out different from the interrupted run's (the master year is not solved) |
+
+`config_changed`, `data_changed` and `version_changed` are the differences `--force-resume` lets through: the years already solved keep the results of the case as it was, the rest use the case as it is now, which mixes two cases in one file; use it to raise a time limit that stopped the run, after moving the case, or when you know the change does not matter. Each difference is logged as a warning.
+
+The Studio has no resume button yet: resume a run started from the Studio with the command above, giving its results file.
 
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success (or dry run completed) |
-| `1` | Configuration error (or, with `--dry-run`, a missing data file) or optimization failure: the master problem found no plan, every window of a year failed, or some windows of a year failed (partial results) |
+| `1` | Configuration error (or, with `--dry-run`, a missing data file), a refused `--resume`, or optimization failure: the master problem found no plan, every window of a year failed, or some windows of a year failed (partial results) |
 | `2` | Usage error (missing `-c`, file not found, unknown option) |
 
 
