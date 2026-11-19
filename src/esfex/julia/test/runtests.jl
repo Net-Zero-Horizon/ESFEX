@@ -1839,6 +1839,10 @@ import Ipopt
             @test res.total_curtailment ≈ 0.0 atol = 1e-6
             reg = model.ext[:pwl_loss_repair]
             @test all(b -> b.dir == 0, reg.blocks)
+            # ... and its bounds meet: no round, no gap
+            bounds = loss_repair_bounds(model)
+            @test bounds["rounds"] == 0 && bounds["gap"] == 0.0
+            @test bounds["lower_bound"] == bounds["objective"] == objective_value(model)
 
             # A repaired model is re-solved with the LP method of its first
             # solve: Gurobi and CPLEX ignore the previous basis (which they
@@ -1934,6 +1938,93 @@ import Ipopt
             full = ESFEX.with_loss_model(ESFEX.TransmissionDC(net), 2, 100.0).pwl_losses
             @test ESFEX.benders_power_sink(fv, fixed) ≈
                   [sum(full.slopes[1] .* full.segment_widths[1])]
+        end
+
+        @testset "loss repair: a direction held at zero flow is released (L44)" begin
+            # Three buses in a triangle of 50 MW lines, linear losses (5 %),
+            # 500 MW of PV for 50 MW of load, curtailment priced. The PWL
+            # solve loses the surplus on the lines; the repair held each line
+            # in the direction that solve gave it (+ at zero flow), where the
+            # repaired model leaves all three at zero flow, while the best
+            # model with exact losses runs all three the other way: the
+            # repair ended at 0.084 against 0.08393 (P28: the same path
+            # dependence put 4.4 % between two Gurobi methods on Cuba's
+            # master). The direction check releases them, all at once:
+            # released one line at a time, they ended where they started.
+            function triangle(; segments = -1)
+                N, H = 3, 1
+                pvg = mkgen("PV", "Renewable", "Solar", [300.0, 100.0, 100.0], zeros(N),
+                            ones(H, N); nb = N, H = H)
+                gas = mkgen("Gas", "Non-renewable", "Gas", [300.0, 300.0, 0.0],
+                            fill(3.0e-5, N), ones(H, N); nb = N, H = H)
+                buses = [BusData(i, i, 220.0, 50.0, "AC", i == 1 ? "slack" : "PQ",
+                                 "mixed", 1.0) for i in 1:N]
+                caps = [50.0, 50.0, 50.0]
+                ends = [(1, 2), (2, 3), (1, 3)]
+                conn = zeros(N, N)
+                lines = TransmissionLineData[]
+                for (k, ((i, j), c)) in enumerate(zip(ends, caps))
+                    push!(lines, TransmissionLineData("L$k", i, j, c, 0.1, 0.05, 0.0,
+                                                      100.0, 220.0, 1, 50.0, "AC"))
+                    conn[i, j] = conn[j, i] = c
+                end
+                net = NetworkConfig(N, N, buses, collect(1:N), conn, conn ./ 2,
+                                    100.0, 0.4, 220.0, 0.6, 1, zeros(N), zeros(N),
+                                    lines, TransformerData[], ACDCConverterData[],
+                                    FrequencyConverterData[], 0.1)
+                input = PowerSystemInput(
+                    name = "triangle", year = 2025, network = net, generators = [pvg, gas],
+                    batteries = BatteryConfig[], demand = [50.0 0.0 0.0],
+                    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                    mode = "economic_dispatch", solver_name = "highs", verbose = false,
+                    pwl_loss_segments = segments, curtailment_cost = 2e-5)
+                return create_power_system(input)
+            end
+            model, vars = triangle()
+            optimize!(model)
+            @test termination_status(model) == ESFEX.MOI.OPTIMAL
+            obj = objective_value(model)
+            reg = model.ext[:pwl_loss_repair]
+            @test length(reg.blocks) == 3
+            # Lines lose exactly the loss of their net flow
+            for b in reg.blocks
+                @test value(b.ploss) ≈ 0.05 * abs(value(b.pf)) atol = 1e-6
+                @test b.releases <= ESFEX.LOSS_REPAIR_MAX_RELEASES
+            end
+            # The exact-loss optimum: with one loss segment, each pattern of
+            # held directions is an LP with exact losses; the best of the 8
+            em, _ = triangle()
+            ereg = em.ext[:pwl_loss_repair]
+            exact = Inf
+            for mask in 0:7
+                ESFEX.restore_pwl_losses!(ereg)
+                for (k, b) in enumerate(ereg.blocks)
+                    ESFEX.linearise_block!(b, isodd(mask >> (k - 1)) ? 1 : -1, b.slopes[1])
+                end
+                optimize!(em; ignore_optimize_hook = true)
+                termination_status(em) == ESFEX.MOI.OPTIMAL &&
+                    (exact = min(exact, objective_value(em)))
+            end
+            @test obj ≈ exact rtol = 1e-7
+            @test exact < 0.08395      # the held directions cost 0.084
+
+            # The bounds of the solve: the PWL solve (over-loss allowed, a
+            # relaxation) below, the repaired one above
+            bounds = loss_repair_bounds(model)
+            @test bounds["objective"] ≈ obj
+            @test bounds["lower_bound"] < bounds["objective"]
+            @test bounds["gap"] ≈ (obj - bounds["lower_bound"]) / obj
+            @test bounds["released"] >= 1
+            @test bounds["rounds"] >= 2
+            @test bounds["linearised"] == count(b -> b.dir != 0, reg.blocks)
+            # Re-solving starts again from the PWL model, to the same end
+            optimize!(model)
+            @test objective_value(model) ≈ obj rtol = 1e-7
+            @test loss_repair_bounds(model)["lower_bound"] ≈ bounds["lower_bound"]
+            # No loss model: nothing to repair, no bounds
+            model, _ = triangle(segments = 0)
+            optimize!(model)
+            @test loss_repair_bounds(model) === nothing
         end
 
         @testset "loss repair: a stalled re-solve is retried or undone (round 37)" begin

@@ -345,7 +345,9 @@ end
 One lossy line at one step, as `add_dc_constraints!` builds it: the loss
 constraint `ploss == Σ m_k (dp_k + dn_k)`, the flow and its segments, and the
 repair state (`dir` 0 = PWL; ±1 = linearised, flow held in that direction
-and `ploss = alpha × |pf|`; `retunes`, times `alpha` was updated).
+and `ploss = alpha × |pf|`; `retunes`, times `alpha` was updated;
+`releases`, times the direction check released it in this solve, and
+`prefer`, the direction it is held in when linearised again, 0 for none).
 """
 mutable struct LossBlock
     con::ConstraintRef
@@ -360,6 +362,8 @@ mutable struct LossBlock
     dir::Int
     alpha::Float64
     retunes::Int           # times alpha followed the flow in this solve
+    releases::Int          # times released by the direction check in this solve
+    prefer::Int            # direction to hold it in when linearised again (0: its flow's)
 end
 
 """
@@ -378,8 +382,15 @@ end
 # A copy (copy_model) gets no registry: the hook then solves it as it stands
 JuMP.copy_extension_data(::PWLLossRepair, ::JuMP.AbstractModel, ::JuMP.AbstractModel) = nothing
 
-const LOSS_REPAIR_MAX_ROUNDS = 8
+# Rounds of the repair, the ones that release directions included (was 8
+# before the direction check; Cuba's one-year master settles in ~20)
+const LOSS_REPAIR_MAX_ROUNDS = 20
 const LOSS_REPAIR_TOL_MW = 1e-3      # over-loss (MW) ignored as solver noise
+# A line-step released twice by the direction check stays held (no cycling)
+const LOSS_REPAIR_MAX_RELEASES = 2
+# A held line-step is released when reversing it would save more than this
+# share of the objective (first-order: its reduced cost × its first segment)
+const LOSS_REPAIR_REVERSE_RTOL = 1e-7
 const LOSS_REPAIR_SECANT_RTOL = 0.02 # linearised loss within 2 % of the PWL loss
 const LOSS_REPAIR_SECANT_TOL_MW = 0.1 # ... or within 0.1 MW
 const LOSS_REPAIR_MAX_RETUNES = 2    # then the line-step keeps its alpha
@@ -624,11 +635,24 @@ the PWL loss of the net flow on any line:
    the PWL secant at that flow (a linear function of the flow, so nothing
    can be lost beyond it). The model is solved again; `alpha` follows the
    new flow until the loss is within 2 % (or 0.1 MW) of the PWL loss, at most
-   twice per line-step, and steps that now over-lose are repaired too (at
-   most $(LOSS_REPAIR_MAX_ROUNDS) rounds). A round that would only update
-   alphas is skipped when the linearised losses together miss the PWL
-   losses of their flows by at most $(100 * LOSS_REPAIR_RETUNE_SHARE) % of all
-   line losses.
+   twice per line-step, and steps that now over-lose are repaired too. A
+   round that would only update alphas is skipped when the linearised
+   losses together miss the PWL losses of their flows by at most
+   $(100 * LOSS_REPAIR_RETUNE_SHARE) % of all line losses.
+3. Direction check (`reversible_blocks`): once the losses are settled, a
+   held line-step whose flow sits at zero and whose opposite direction
+   would lower the objective (reduced cost of that direction's first
+   segment, held at 0) is released back to the PWL model and the repair
+   goes on from step 2; if it over-loses again it is held in the direction
+   its reduced cost asked for. The direction an over-losing PWL solve
+   happens to put on a line was otherwise kept for the whole solve, and the
+   end point depended on it (Cuba's one-year master: 4.4 % between two
+   Gurobi methods; with the check, 4.3 % lower under barrier).
+   A line-step is released at most $(LOSS_REPAIR_MAX_RELEASES) times per
+   solve, and the repair runs at most $(LOSS_REPAIR_MAX_ROUNDS) rounds. It
+   ends on the round without over-loss of lowest objective: when a later
+   round ends higher (or still over-losing), that model is solved again.
+   Needs duals: a MIP (unit commitment) skips the check.
 
 Each re-solve of a changed model uses the LP method of the first solve
 (`optimize_like_first!`): Gurobi and CPLEX would otherwise restart from the
@@ -645,6 +669,13 @@ or a solver without an answer, as HiGHS's "no progress") is returned as it
 is, with a warning: its losses mean nothing, and each round re-solves the
 whole model. The model stays an LP (or the MIP it was).
 
+The bounds of the solve are recorded in `model.ext[:loss_repair_bounds]`
+(`loss_repair_bounds`): the objective of the first (PWL) solve, a lower
+bound of the model with exact PWL losses (the PWL model with over-loss
+allowed relaxes it), the final objective (a feasible point of it, up to the
+2 % tolerance of the linearised losses: an upper bound), their gap, the
+repair rounds, the line-steps linearised at the end and the releases.
+
 Under `optimize_master!` or `optimize_dispatch!` (`optimize_retrying!`,
 which sets `model.ext[:solve_retry]`), each solve that ends `NUMERICAL_ERROR`
 or `LOCALLY_SOLVED` is solved once more with the solver's retry parameters
@@ -660,17 +691,28 @@ loss_repair_solved(model) =
     termination_status(model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
     primal_status(model) == MOI.FEASIBLE_POINT
 
+# Re-solves and releases of one repair
+mutable struct LossRepairStats
+    rounds::Int
+    released::Int
+end
+
 function optimize_exact_losses!(model; kwargs...)
     reg = get(model.ext, :pwl_loss_repair, nothing)
     if !(reg isa PWLLossRepair) || isempty(reg.blocks)
         return optimize!(model; ignore_optimize_hook = true, kwargs...)
     end
+    delete!(model.ext, :loss_repair_bounds)
     # A master or a dispatch window (`optimize_retrying!` sets the key for
     # the duration of its solve) repairs only from optimal rounds; its value
     # holds the solver parameters for one more attempt at a solve that stalls
     retrying = haskey(model.ext, :solve_retry)
     retry = get(model.ext, :solve_retry, nothing)
     resolve!() = optimize_like_first!(model; kwargs...)
+    for b in reg.blocks
+        b.releases = 0
+        b.prefer = 0
+    end
     if restore_pwl_losses!(reg)
         solve_retrying!(resolve!, model, retry)
     else
@@ -684,7 +726,19 @@ function optimize_exact_losses!(model; kwargs...)
               "$(termination_status(model)) ($(primal_status(model)))"
         return
     end
+    has_values(model) || return
+    lower = objective_value(model)
+    stats = LossRepairStats(0, 0)
+    repair_losses!(model, reg, resolve!, retry, retrying, stats)
+    record_loss_repair_bounds!(model, reg, lower, stats)
+    return
+end
+
+# The rounds of `optimize_exact_losses!` after its first (PWL) solve
+function repair_losses!(model, reg::PWLLossRepair, resolve!, retry, retrying,
+                        stats::LossRepairStats)
     repaired = Set{Int}()
+    best = nothing      # (objective, state) of the best settled round
     for r in 1:LOSS_REPAIR_MAX_ROUNDS
         has_values(model) || break
         # Read the whole solution before touching the model
@@ -712,35 +766,65 @@ function optimize_exact_losses!(model; kwargs...)
                 retune_mw += abs(L[i] - exact)
             end
         end
-        isempty(over_groups) &&
-            retune_mw <= LOSS_REPAIR_RETUNE_SHARE * sum(L; init = 0.0) && return
-        if r == LOSS_REPAIR_MAX_ROUNDS
-            isempty(over_groups) && return
-            @warn "Line losses: lines still lose $(round(over_mw; digits = 1)) MW·step " *
-                  "beyond the PWL loss of their flows after " *
-                  "$(LOSS_REPAIR_MAX_ROUNDS) repair rounds"
-            return
+        settled = isempty(over_groups) &&
+                  retune_mw <= LOSS_REPAIR_RETUNE_SHARE * sum(L; init = 0.0)
+        release = Int[]
+        if settled
+            obj = objective_value(model)
+            if best === nothing || obj < best[1]
+                best = (obj, loss_repair_state(reg))
+            end
+            # A release needs two more rounds: its solve, and the repair of
+            # the steps that over-lose again
+            r + 2 <= LOSS_REPAIR_MAX_ROUNDS && (release = reversible_blocks(model, reg, F, obj))
+            isempty(release) && return keep_best_round!(model, best, obj, resolve!, retry)
+        elseif r == LOSS_REPAIR_MAX_ROUNDS
+            if !isempty(over_groups)
+                msg = "Line losses: lines still lose $(round(over_mw; digits = 1)) MW·step " *
+                      "beyond the PWL loss of their flows after " *
+                      "$(LOSS_REPAIR_MAX_ROUNDS) repair rounds"
+                # With a settled round to go back to, the result is repaired
+                best === nothing ? @warn(msg) :
+                    @debug(msg * "; keeping the best earlier round without over-loss")
+            end
+            return keep_best_round!(model, best, nothing, resolve!, retry)
         end
-        @debug "Line losses: repairing $(length(over_groups)) step(s) losing " *
-               "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss, updating " *
-               "$(length(retune)) linearised loss(es) off by " *
-               "$(round(retune_mw; digits = 1)) MW·step (all lines lose " *
-               "$(round(sum(L; init = 0.0); digits = 1)) MW·step; round $(r))"
         # (block, dir, alpha, retunes) before this round, to undo it
         undo = Tuple{LossBlock, Int, Float64, Int}[]
-        for i in retune
-            b = reg.blocks[i]
-            push!(undo, (b, b.dir, b.alpha, b.retunes))
-            set_block_alpha!(b, loss_secant(b, F[i]))
-            b.retunes += 1
+        if !isempty(release)
+            @debug "Line losses: releasing $(length(release)) linearised line-step(s) " *
+                   "held at zero flow whose reversal would lower the objective (round $(r))"
+            for i in release
+                b = reg.blocks[i]
+                push!(undo, (b, b.dir, b.alpha, b.retunes))
+                b.prefer = -b.dir
+                b.releases += 1
+                restore_block!(b)
+            end
+            stats.released += length(release)
+        else
+            @debug "Line losses: repairing $(length(over_groups)) step(s) losing " *
+                   "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss, updating " *
+                   "$(length(retune)) linearised loss(es) off by " *
+                   "$(round(retune_mw; digits = 1)) MW·step (all lines lose " *
+                   "$(round(sum(L; init = 0.0); digits = 1)) MW·step; round $(r))"
+            for i in retune
+                b = reg.blocks[i]
+                push!(undo, (b, b.dir, b.alpha, b.retunes))
+                set_block_alpha!(b, loss_secant(b, F[i]))
+                b.retunes += 1
+            end
+            for (i, b) in enumerate(reg.blocks)
+                (b.dir == 0 && b.group in over_groups) || continue
+                push!(undo, (b, 0, 0.0, 0))
+                # Held in the direction of its flow (+ at 0), or, released
+                # by the direction check, in the one its reduced cost asked for
+                dir = b.prefer != 0 ? b.prefer : (pf[i] < 0 ? -1 : 1)
+                linearise_block!(b, dir, loss_secant(b, F[i]))
+            end
+            union!(repaired, over_groups)
         end
-        for (i, b) in enumerate(reg.blocks)
-            (b.dir == 0 && b.group in over_groups) || continue
-            push!(undo, (b, 0, 0.0, 0))
-            # Held in the direction of its flow (+ at 0)
-            linearise_block!(b, pf[i] < 0 ? -1 : 1, loss_secant(b, F[i]))
-        end
-        union!(repaired, over_groups)
+        stats.rounds += 1
         solve_retrying!(resolve!, model, retry)
         if !loss_repair_solved(model)
             @warn "Line losses: the model has no optimal solution once $(length(repaired)) " *
@@ -775,17 +859,120 @@ function optimize_exact_losses!(model; kwargs...)
     return
 end
 
-# Set the blocks a repair round changed back to how they were before it
-# (`undo`: block, dir, alpha, retunes)
+"""
+    reversible_blocks(model, reg, F, obj) -> Vector{Int}
+
+The linearised line-steps (indices into `reg.blocks`, `F` their flows)
+whose held direction costs the model: the flow sits at zero (within
+$(LOSS_REPAIR_TOL_MW) MW) and the first segment of the opposite direction,
+held at 0, has a negative reduced cost, worth more than
+$(LOSS_REPAIR_REVERSE_RTOL) of the objective `obj` over that segment's width.
+
+At zero flow that segment is exactly the PWL model's first segment in the
+other direction (loss slope `m_1`, nothing flowing the held way), so its
+reduced cost is the first-order change of the objective of the exact-loss
+model when the flow starts to reverse: negative, reversing pays. Each
+reduced cost holds for one line moving, the others adjusting (the lines of
+a step are tied by KVL); all of them are released at once all the same. On
+Cuba's one-year master that settled in a few cycles (2377 releases, then
+fewer each cycle) where releasing only the best line of each step moved
+~190 per cycle and was still far from it after 30 rounds; in small meshed
+cases (300 random 3-4 bus cases) it left 64 of the 97 that ended above the
+best direction pattern there, against 50 one line per step at a time.
+A held flow above zero is a local optimum of its direction (moving it is
+free at the margin) and is not checked; neither is a line-step released
+$(LOSS_REPAIR_MAX_RELEASES) times already. Needs the solve's duals (a
+barrier without crossover has them): a MIP, or a solve without duals,
+checks nothing, with a debug note.
+"""
+function reversible_blocks(model, reg::PWLLossRepair, F, obj)
+    held = [i for (i, b) in enumerate(reg.blocks)
+            if b.dir != 0 && b.releases < LOSS_REPAIR_MAX_RELEASES &&
+               F[i] <= LOSS_REPAIR_TOL_MW]
+    isempty(held) && return Int[]
+    if !has_duals(model)
+        @debug "Line losses: the solve has no duals (a MIP, or none returned); the " *
+               "directions of $(length(held)) linearised line-step(s) at zero flow " *
+               "are not checked"
+        return Int[]
+    end
+    tol = max(LOSS_REPAIR_REVERSE_RTOL * abs(obj), 1e-12)
+    return filter(held) do i
+        b = reg.blocks[i]
+        rc = reduced_cost((b.dir > 0 ? b.dn : b.dp)[1])
+        -rc * max(b.widths[1], LOSS_REPAIR_TOL_MW) > tol
+    end
+end
+
+# Every block's (block, dir, alpha, retunes), as `undo_loss_round!` takes it
+loss_repair_state(reg::PWLLossRepair) =
+    [(b, b.dir, b.alpha, b.retunes) for b in reg.blocks]
+
+# End the repair on the best settled round (`best`: its objective and
+# state): the current round is kept when it is settled (`obj`, its
+# objective) and no worse; otherwise the best round's model is solved again
+function keep_best_round!(model, best, obj, resolve!, retry)
+    best === nothing && return
+    obj !== nothing && obj <= best[1] + 1e-9 * abs(best[1]) && return
+    @debug "Line losses: the repair ends on its best round without over-loss " *
+           "(objective $(best[1])$(obj === nothing ? "" : ", not $(obj)")), solved again"
+    undo_loss_round!(best[2])
+    solve_retrying!(resolve!, model, retry)
+    return
+end
+
+# Set blocks back to an earlier state (`undo`: block, dir, alpha, retunes),
+# the round before (`undo_loss_round!`) or the best round (`keep_best_round!`)
 function undo_loss_round!(undo)
     for (b, dir, alpha, retunes) in undo
         if dir == 0
             restore_block!(b)
-        else
-            set_block_alpha!(b, alpha)
-            b.retunes = retunes
+            continue
         end
+        if b.dir != dir
+            # Released, or held the other way: back to PWL, then held again
+            restore_block!(b)
+            linearise_block!(b, dir, alpha)
+        elseif b.alpha != alpha
+            set_block_alpha!(b, alpha)
+        end
+        b.retunes = retunes
     end
+end
+
+# `model.ext[:loss_repair_bounds]` of a repaired solve (`lower`: the
+# objective of its first, PWL, solve)
+function record_loss_repair_bounds!(model, reg::PWLLossRepair, lower::Float64,
+                                    stats::LossRepairStats)
+    final = has_values(model) ? objective_value(model) : NaN
+    gap = final == lower ? 0.0 : (final - lower) / max(abs(final), 1e-12)
+    linearised = count(b -> b.dir != 0, reg.blocks)
+    model.ext[:loss_repair_bounds] = (lower_bound = lower, objective = final, gap = gap,
+        rounds = stats.rounds, linearised = linearised, released = stats.released)
+    stats.rounds > 0 && @debug "Line losses: PWL solve $(lower) (lower bound), repaired " *
+        "$(final): gap $(round(100 * gap; digits = 3)) % after $(stats.rounds) round(s), " *
+        "$(linearised) line-step(s) linearised, $(stats.released) released"
+    return
+end
+
+"""
+    loss_repair_bounds(model) -> Union{Nothing, Dict{String, Float64}}
+
+The bounds of the model's last loss-repaired solve (`optimize_exact_losses!`):
+`lower_bound`, the objective of the first solve with the PWL loss model
+(over-loss allowed: a relaxation of the model whose lines lose exactly the
+PWL loss of their net flow, so a lower bound of it); `objective`, the final
+objective (losses repaired: an upper bound, within the 2 % tolerance of the
+linearised losses); `gap` = (objective − lower_bound) / |objective|;
+`rounds` (repair rounds, one re-solve each), `linearised` (line-steps held in a direction at the
+end) and `released` (by the direction check). `nothing` for a model without
+PWL losses or whose first solve was not optimal. Model units (M\$ in the
+master and the dispatch).
+"""
+function loss_repair_bounds(model)
+    nt = get(model.ext, :loss_repair_bounds, nothing)
+    nt === nothing && return nothing
+    return Dict{String, Float64}(string(k) => Float64(v) for (k, v) in pairs(nt))
 end
 
 """
@@ -965,7 +1152,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 pwl_loss_by_line[ℓ][t] = ploss
                 push!(loss_repair.blocks, LossBlock(loss_con, ploss, pf_by_line[ℓ][t],
                     dps, dns, widths, pwl.slopes[ℓ], open_last,
-                    group0 + t, 0, 0.0, 0))
+                    group0 + t, 0, 0.0, 0, 0, 0))
             end
         end
 

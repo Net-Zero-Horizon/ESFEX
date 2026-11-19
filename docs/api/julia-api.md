@@ -563,4 +563,4 @@ Piecewise linear approximation of quadratic transmission losses:
 # where delta_f = f_max / N
 ```
 
-`add_dc_constraints!` registers every lossy line-step in `model.ext[:pwl_loss_repair]` and sets `optimize_exact_losses!` as the model's optimize hook, so `optimize!(model)` returns losses that never exceed the PWL loss of each line's net flow (see [Exact losses](../formulation/dc-power-flow.md#exact-losses)).
+`add_dc_constraints!` registers every lossy line-step in `model.ext[:pwl_loss_repair]` and sets `optimize_exact_losses!` as the model's optimize hook, so `optimize!(model)` returns losses that never exceed the PWL loss of each line's net flow (see [Exact losses](../formulation/dc-power-flow.md#exact-losses)). `loss_repair_bounds(model)` returns the bounds of the last such solve as a `Dict{String, Float64}` (`nothing` without PWL losses, or when the first solve was not optimal): `lower_bound` (the first, PWL, solve), `objective` (the repaired one), `gap`, `rounds`, `linearised` and `released`, in model units (M\$); see [Bounds of the repair](../formulation/dc-power-flow.md#bounds-of-the-repair).
