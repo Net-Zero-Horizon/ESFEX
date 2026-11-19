@@ -7943,8 +7943,12 @@ class Orchestrator:
             if not cap or (max(cap) < 0.01 and max(charge_pow) < 0.01):
                 continue
             bat_names.append(vdata.get("name", key))
+            # Fixed O&M is on the rated power (as for the original
+            # batteries): a built battery's power is degraded by the master
+            # (_build_config_from_cumulative keeps the rated power)
             bat_in_service.append(self._unit_power_by_node(
-                vdata, vdata.get("MaxDischargePower", charge_pow)))
+                vdata, vdata.get("_rated_discharge_power")
+                or vdata.get("MaxDischargePower", charge_pow)))
 
         # Homonyms get a " (N)" suffix (HDF5 needs unique dataset names);
         # order and length are kept, so the fuel list stays index-aligned.
@@ -8379,6 +8383,10 @@ class Orchestrator:
                     unit = updated[vbat_key]
                     unit["fixed_cost"] = [float(fc) * _om_scale(b_idx)
                                           for b_idx, fc in enumerate(unit["fixed_cost"])]
+                    # The rated power per bus, recorded in the results as
+                    # the battery's power for fixed O&M (_rebuild_unit_names)
+                    unit["_rated_discharge_power"] = [
+                        float(p) * _om_scale(b_idx) for b_idx, p in enumerate(bus_pow)]
                 # DEBUG: emitted per bus → noisy at INFO. The aggregate
                 # "Year X investments" log a few lines up covers the
                 # milestone view.
@@ -8586,6 +8594,14 @@ class Orchestrator:
                         btg.attrs[k] = str(list(getattr(bt, k)))
                     if bt.color:
                         btg.attrs["color"] = bt.color
+
+            # Fuel price growth of the fuels block: the dispatch charges a
+            # unit's fuel_cost × (1 + rate)^(year − base_year) (see
+            # fuel_price_factor); the financial analysis does the same
+            fg_group = config_group.create_group("fuel_price_growth")
+            fg_group.attrs["base_year"] = self._fuel_price_base_year(start_year)
+            for fuel_name, fuel in (getattr(self.primary_system, "fuels", None) or {}).items():
+                fg_group.attrs[str(fuel_name)] = float(fuel.price_growth_rate or 0.0)
 
             # Store transmission line geometry for results visualization
             sys = self.primary_system

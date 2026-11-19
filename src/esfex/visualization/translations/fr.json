@@ -1096,7 +1096,6 @@
     "sim_default_pe": "Activer l'énergie primaire par défaut",
     "sim_default_log_level": "Niveau de journalisation par défaut :",
     "sim_log_to_file": "Écrire le journal de simulation dans un fichier",
-    "sim_default_output_dir": "Répertoire de sortie par défaut :",
     "chart_backend": "Moteur de graphiques :",
     "export_dpi": "DPI d'exportation :",
     "default_export_format": "Format d'exportation par défaut :",
@@ -1116,7 +1115,6 @@
     "cache_preload": "Précharger (tout au démarrage)",
     "cache_lazy": "Différé (à la demande)",
     "debug_mode": "Mode débogage",
-    "cache_dir": "Répertoire de cache :",
     "telemetry_opt_out": "Désactiver la télémétrie",
     "reset_all": "Réinitialiser toutes les préférences",
     "reset_all_confirm_title": "Réinitialiser les préférences",
@@ -1199,12 +1197,6 @@
     "infra_applied_msg": "{n} simplification(s) appliquée(s). Relancez la validation pour voir les résultats mis à jour.",
     "infra_none_checked": "Aucune suggestion cochée. Cochez celles que vous souhaitez appliquer.",
     "infra_no_groups": "Aucun groupe fusionnable trouvé à cette portée."
-  },
-  "simulation": {
-    "title": "Simulation ESFEX",
-    "preparing": "Préparation de la simulation...",
-    "cancel_btn": "Annuler",
-    "close_btn": "Fermer"
   },
   "sensitivity": {
     "title": "Analyse de sensibilité globale (Sobol)",
@@ -1497,7 +1489,6 @@
     "hour_mismatch_title": "Décalage du nombre d'heures",
     "hour_mismatch_msg": "Le fichier chargé comporte {n1} heures mais le nœud « {name} » (indice {idx}) en a déjà {n2}.\nTous les nœuds doivent avoir le même nombre d'heures.",
     "validating": "Validation de la configuration du système...",
-    "running_sim": "Exécution de la simulation...",
     "no_year_data": "Aucun résultat détaillé pour l'année {year}.",
     "no_gen_data": "Aucune donnée de production.",
     "node_no_centroid": "Ce nœud n'a pas de centroïde défini. Utilisez « Placer » pour le définir sur la carte d'abord."

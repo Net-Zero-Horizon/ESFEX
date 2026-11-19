@@ -458,6 +458,15 @@ def test_perfect_foresight_dispatch_gets_degraded_battery_and_rated_om_base(tmp_
     assert bat["capacity"] == pytest.approx([39.6])
     assert bat["degradation_rate"] == [0.0]
     assert bat["fixed_cost"][0] * bat["MaxDischargePower"][0] == pytest.approx(1000.0 * 10.0)
+    # The results record the rated power as the battery's, the base of the
+    # financial analysis' fixed O&M (round 44, M44: it got the degraded MW)
+    assert bat["_rated_discharge_power"] == pytest.approx([10.0])
+    orch._num_nodes = 1
+    orch._rebuild_unit_names({"inv_li": bat})
+    assert orch._bat_in_service_mw[-1] == pytest.approx([10.0])
     # Without the rated power the fixed cost is the technology's
     caps0 = {k: v for k, v in caps[2026].items() if k != "bat_tech_power_rated"}
-    assert orch._build_config_from_cumulative({}, caps0)["inv_li"]["fixed_cost"] == [1000.0]
+    bat0 = orch._build_config_from_cumulative({}, caps0)["inv_li"]
+    assert bat0["fixed_cost"] == [1000.0]
+    orch._rebuild_unit_names({"inv_li": bat0})
+    assert orch._bat_in_service_mw[-1] == pytest.approx([9.9])

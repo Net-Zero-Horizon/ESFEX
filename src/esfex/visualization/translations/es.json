@@ -1096,7 +1096,6 @@
     "sim_default_pe": "Habilitar energía primaria por defecto",
     "sim_default_log_level": "Nivel de registro por defecto:",
     "sim_log_to_file": "Escribir registro de simulación a archivo",
-    "sim_default_output_dir": "Directorio de salida por defecto:",
     "chart_backend": "Motor de gráficos:",
     "export_dpi": "DPI de exportación:",
     "default_export_format": "Formato de exportación por defecto:",
@@ -1116,7 +1115,6 @@
     "cache_preload": "Precarga (todo al inicio)",
     "cache_lazy": "Diferido (bajo demanda)",
     "debug_mode": "Modo de depuración",
-    "cache_dir": "Directorio de caché:",
     "telemetry_opt_out": "No enviar telemetría",
     "reset_all": "Restablecer Todas las Preferencias",
     "reset_all_confirm_title": "Restablecer Preferencias",
@@ -1199,12 +1197,6 @@
     "infra_applied_msg": "Se aplicaron {n} simplificación(es). Ejecute la validación nuevamente para ver los resultados actualizados.",
     "infra_none_checked": "No hay sugerencias marcadas. Marque las que desea aplicar.",
     "infra_no_groups": "No se encontraron grupos fusionables en este ámbito."
-  },
-  "simulation": {
-    "title": "Simulación ESFEX",
-    "preparing": "Preparando simulación...",
-    "cancel_btn": "Cancelar",
-    "close_btn": "Cerrar"
   },
   "sensitivity": {
     "title": "Análisis de Sensibilidad Global (Sobol)",
@@ -1497,7 +1489,6 @@
     "hour_mismatch_title": "Horas no coinciden",
     "hour_mismatch_msg": "El archivo tiene {n1} horas pero el nodo '{name}' (índice {idx}) ya tiene {n2} horas.\nTodos los nodos deben tener la misma cantidad de horas.",
     "validating": "Validando configuración del sistema...",
-    "running_sim": "Ejecutando simulación...",
     "no_year_data": "No hay resultados detallados para el año {year}.",
     "no_gen_data": "No hay datos de generación.",
     "node_no_centroid": "Este nodo no tiene centroide definido. Usa 'Colocar' para fijarlo en el mapa primero."

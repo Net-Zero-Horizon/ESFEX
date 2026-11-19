@@ -94,6 +94,26 @@ def test_train_xgboost_saves_the_map_next_to_its_model(tmp_path, models_dir):
         "DEPLOYED": 0}
 
 
+def test_train_xgboost_creates_a_missing_output_directory(tmp_path, models_dir):
+    """The fold predictions went to ``cv_predictions`` next to the model
+    with a plain mkdir: an output directory that did not exist yet
+    (FileNotFoundError) stopped the training (round 44, M44)."""
+    pytest.importorskip("xgboost")
+    n = 48
+    df = pd.DataFrame({c: np.linspace(0.0, 1.0, n)
+                       for c in demand_training.FEATURE_COLS})
+    df["country_id"] = 0.0
+    df["country"] = "CUB"
+    df["group_id"] = "CUB_2023"
+    df[demand_training.TARGET_COL] = np.linspace(0.5, 1.5, n)
+    out = tmp_path / "new" / "nested" / "model.xgb"
+    with mock.patch.object(demand_training, "temporal_cv_splits",
+                           return_value=[(df, df, 2023)]):
+        demand_training.train_xgboost(df, out)
+    assert out.exists()
+    assert (out.parent / "cv_predictions" / "xgboost_fold0.npz").exists()
+
+
 def test_xgboost_training_keeps_the_excluded_country_in_the_map(
         tmp_path, models_dir):
     dataset = tmp_path / "dataset"
