@@ -2892,7 +2892,7 @@ Solution output from the Master Problem.
     the (degraded) capacity the master could keep (0.0 = retired). Not MW: the
     capacity is in `cumulative_gen_capacity`
 - `bat_life_extension`: the same share for batteries [year, bat, node]
-    (life-extended MW over the discharge power)
+    (life-extended MW over the degraded discharge power)
 
 ## Summary Metrics
 - `total_investment_by_year`: overnight cost of the builds of each year (\$,
