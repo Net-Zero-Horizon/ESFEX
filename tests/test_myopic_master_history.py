@@ -102,6 +102,11 @@ def test_year_system_holds_aged_units_builds_and_reduced_limits(tmp_path):
     bat = year_sys.batteries["B__li__built_y1"]
     assert bat.MaxDischargePower == [0.0, 10.0] and bat.capacity == [0.0, 40.0]
     assert bat.initial_age == [2, 2] and bat.life_time == [15, 15]
+    # Not degraded, as perfect foresight counts a battery technology's
+    # builds; the master degrades existing batteries, so the technology's
+    # 1 %/yr would have shrunk this one in later myopic years only
+    assert base.battery_technologies["B__li"].degradation_rate == [0.0, 0.01]
+    assert bat.degradation_rate == [0.0, 0.0]
     bt = year_sys.battery_technologies["B__li"]
     assert bt.invest_max_power == [0.0, 190.0]
     assert bt.invest_max_capacity == [0.0, 760.0]

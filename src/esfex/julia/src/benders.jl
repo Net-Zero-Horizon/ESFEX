@@ -872,8 +872,8 @@ end
     existing_capacities(input, year_idx, life_ext) -> (gen, bat_power, bat_energy)
 
 Capacity of the existing generators and batteries in year `year_idx`, as
-`build_cumulative_capacity_expressions` has it: the rated power (degraded,
-for generators) while a unit is within its lifetime, and past it
+`build_cumulative_capacity_expressions` has it: the rated power and energy
+degraded by age while a unit is within its lifetime, and past it
 `life_ext(kind, i, b, full)`, the life-extended MW of generator
 (`kind = :gen`) or battery (`:bat`) `i` at bus `b`, whose most is `full`.
 Battery energy scales with the life-extended power.
@@ -895,10 +895,11 @@ function existing_capacities(input::MasterProblemInput, year_idx::Int, life_ext:
     for (bi, bat) in enumerate(input.batteries), b in 1:n_buses
         base_power = max(bat.max_discharge_power[b], 0.0)
         base_cap = max(bat.capacity[b], 0.0)
+        deg = battery_degradation_factor(bat, b, year_idx)
         if bat.initial_age[b] + (year_idx - 1) < bat.life_time[b]
-            pow, en = base_power, base_cap
+            pow, en = base_power * deg, base_cap * deg
         elseif base_power > 0
-            pow = life_ext(:bat, bi, b, base_power)
+            pow = life_ext(:bat, bi, b, base_power * deg)
             en = pow * base_cap / base_power
         else
             pow, en = 0.0, 0.0

@@ -4877,15 +4877,112 @@ import Ipopt
             @test ESFEX.JuMP.normalized_coefficient(cap_con(model), ext) ≈ -5.0
 
             # Within its lifetime, with degradation: the boundary bound is the
-            # rated 100 MWh the period's SOC bound uses (the master does not
-            # degrade batteries), not anything else.
+            # degraded energy the period's SOC bound uses, 100 × 0.95^4 MWh
+            # (round 43: it was the rated 100 MWh, the master did not
+            # degrade batteries)
             young = ESFEX.with_fields(mkbat(); degradation_rate = [0.05], initial_age = [4.0])
             ym, _, _ = create_master_problem(tinp(young); use_representative_days = true)
-            @test ESFEX.JuMP.normalized_rhs(cap_con(ym)) ≈ 100.0
+            @test ESFEX.JuMP.normalized_rhs(cap_con(ym)) ≈ 100.0 * 0.95^4
             soc = variable_by_name(ym, "op_y1_d1_bat_soc[1,1,2]")
             soc_cap = only(c for c in all_constraints(ym, AffExpr, ESFEX.JuMP.MOI.LessThan{Float64})
                            if collect(keys(constraint_object(c).func.terms)) == [soc])
-            @test ESFEX.JuMP.normalized_rhs(soc_cap) ≈ 100.0
+            @test ESFEX.JuMP.normalized_rhs(soc_cap) ≈ 100.0 * 0.95^4
+        end
+
+        @testset "master degrades existing batteries as the dispatch (round 43)" begin
+            # A 20 MW / 100 MWh battery aged 10, 5 %/yr: the dispatch holds
+            # it at 0.95^10 of its ratings; the master held it at its rated
+            # power and energy, so the plan counted on storage the dispatch
+            # of the same year did not have.
+            f = 0.95^10
+            aged = ESFEX.with_fields(mkbat(); degradation_rate = [0.05], initial_age = [10.0],
+                                     life_time = [30.0])
+            @test ESFEX.battery_degradation_factor(aged, 1, 1) ≈ f
+            @test ESFEX.battery_degradation_factor(aged, 1, 3) ≈ 0.95^12
+            @test ESFEX.battery_degradation_factor(mkbat(), 1, 3) == 1.0
+            # Master year y and the dispatch y − 1 years after its base year
+            for (y, year) in ((1, 2025), (3, 2027))
+                lim = ESFEX.battery_power_limits(aged, 1, (; year = year, base_year = 2025))
+                inp = bat_master([aged], spike)
+                inp = ESFEX.with_fields(inp; years = collect(2025:2024 + y))
+                vars = ESFEX.build_master_variables!(ESFEX.Model(), inp)
+                p = ESFEX.battery_power_in_service(vars, aged, 1, 1, y)
+                e = ESFEX.battery_energy_in_service(vars, aged, 1, 1, y)
+                @test ESFEX.JuMP.constant(p) ≈ lim[3] ≈ 20.0 * 0.95^(9 + y)
+                @test ESFEX.JuMP.constant(e) ≈ lim[1] ≈ 100.0 * 0.95^(9 + y)
+            end
+
+            # The day model's charge, discharge and SOC bounds are the
+            # dispatch's for the same year
+            model, mvars, _ = create_master_problem(bat_master([aged], spike);
+                                                    use_representative_days = true)
+            bound(m, v) = ESFEX.JuMP.normalized_rhs(only(
+                c for c in all_constraints(m, AffExpr, ESFEX.JuMP.MOI.LessThan{Float64})
+                if collect(keys(constraint_object(c).func.terms)) == [v]))
+            @test bound(model, variable_by_name(model, "op_y1_d1_bat_ch[1,1,13]")) ≈ 20.0 * f
+            @test bound(model, variable_by_name(model, "op_y1_d1_bat_dch[1,1,13]")) ≈ 20.0 * f
+            @test bound(model, variable_by_name(model, "op_y1_d1_bat_soc[1,1,2]")) ≈ 100.0 * f
+
+            # Same day, same cost: what ageing the battery costs the master
+            # is 365 × what it costs the dispatch (it covered the 60 MW spike
+            # in full; at 12 MW the 40 MW gas leaves load unserved)
+            d0, _, _ = bat_dispatch([mkbat()], spike)
+            d1, _, _ = bat_dispatch([aged], spike)
+            m0, _ = master1(bat_master([mkbat()], spike))
+            m1, _ = master1(bat_master([aged], spike))
+            dd = objective_value(d1) - objective_value(d0)
+            @test dd > 1e-6
+            @test objective_value(m1) - objective_value(m0) ≈ 365 * dd rtol = 1e-6
+
+            # Firm capacity: the 40 MW gas and the battery's degraded power
+            # (4 firm hours: not energy-limited)
+            inp = bat_master([aged], spike; reserve_margin = 1.0, storage_firm_hours = 4.0)
+            am = ESFEX.Model()
+            avars = ESFEX.build_master_variables!(am, inp)
+            ESFEX.add_capacity_adequacy_constraints!(am, avars, inp)
+            @test ESFEX.normalized_rhs(constraint_by_name(am, "cap_adequacy_y1_node1")) ≈
+                  60.0 - 40.0 - 20.0 * f
+
+            # Past its lifetime the master keeps at most the degraded power;
+            # cheap life extension keeps all of it, the energy at 5 h, and
+            # pays no decommissioning
+            old(dc) = ESFEX.with_fields(aged; life_time = [5.0], invest_cost_power = [1.0e-7],
+                                        decommissioning_cost = [dc])
+            ext_of(m) = only(v for v in all_variables(m) if startswith(name(v), "bat_life_ext"))
+            em, evars = master1(bat_master([old(0.0)], spike))
+            @test ESFEX.JuMP.upper_bound(ext_of(em)) ≈ 20.0 * f
+            @test value(ext_of(em)) ≈ 20.0 * f rtol = 1e-6
+            @test value(ESFEX.battery_energy_in_service(evars, old(0.0), 1, 1, 1)) ≈
+                  100.0 * f rtol = 1e-6
+            res = ESFEX.extract_master_solution(em, evars, bat_master([old(0.0)], spike))
+            @test res.cumulative_bat_power[1][1][1] ≈ 20.0 * f rtol = 1e-6
+            @test res.bat_life_extension[1][1][1] ≈ 1.0 rtol = 1e-6
+            dm, _ = master1(bat_master([old(1.0e-3)], spike))
+            @test objective_value(dm) ≈ objective_value(em) rtol = 1e-9
+            # Within its lifetime the reported capacity is degraded too
+            rm, rvars = master1(bat_master([aged], spike))
+            r = ESFEX.extract_master_solution(rm, rvars, bat_master([aged], spike))
+            @test r.cumulative_bat_power[1][1][1] ≈ 20.0 * f
+            @test r.cumulative_bat_capacity[1][1][1] ≈ 100.0 * f
+        end
+
+        @testset "battery NPV: degraded revenue and retirement, fixed O&M on rated" begin
+            f = 0.95^10
+            bat = ESFEX.with_fields(mkbat(); degradation_rate = [0.05], initial_age = [10.0],
+                                    life_time = [30.0], invest_cost_power = [1000.0],
+                                    fixed_cost = [2.0], decommissioning_cost = [3.0])
+            inp = bat_master([bat], spike; npv_annual_return_rate = 0.1)
+            # Two later years of a myopic year's master (no discounting):
+            # revenue on the power degraded on from the last year, fixed O&M
+            # on the rated 20 MW as the master charges it
+            op = ESFEX.UnitOperation(1.0, 0.0)
+            v, years = ESFEX.extra_unit_npv(op, inp, :bat, 1, 1, 20.0 * f, 2)
+            @test years == 2
+            @test v ≈ sum(0.1 * 1000.0 * 20.0 * f * 0.95^k - 2.0 * 20.0 for k in 1:2)
+            # Retired: decommissioned on its degraded power in the first year
+            u = ESFEX.UnitNPV("battery", 1, 1, "", -1.0, 1.0, true)
+            @test only(ESFEX.retire_units(inp, [u]).npv_retired_units).decommissioned_mw ≈
+                  20.0 * f
         end
 
         @testset "battery technologies: fixed cost, ramp and availability (master, Benders)" begin

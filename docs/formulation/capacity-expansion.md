@@ -298,11 +298,13 @@ The conditions on age are evaluated at model construction time, so no binary var
 ### 6.3 Batteries
 
 
-Existing batteries are not degraded in the master; past their lifetime their power is the life-extension variable and their energy keeps the original energy-to-power ratio:
+Existing batteries degrade as the operational dispatch degrades them in the same year (BAT-1 of the [Operational Dispatch](operational-dispatch.md)): power and energy by \((1 - \delta_{b,n})^{a_{y,b,n}}\), with the age \(a_{y,b,n} = a^0_{b,n} + y - 1\) of CUM-1. Past their lifetime their power is the life-extension variable, at most the degraded power, \(0 \leq X^{bat}_{y,b,n} \leq \bar{P}^{bat}_{b,n} (1 - \delta_{b,n})^{a_{y,b,n}}\), and their energy keeps the original energy-to-power ratio:
 
 \[
-\bar{P}^{bat,cum}_{y,b,n} = \begin{cases} \bar{P}^{bat}_{b,n} & a_{y,b,n} < \tau_{b,n} \\ X^{bat}_{y,b,n} & \text{otherwise} \end{cases}, \qquad \bar{E}^{cum}_{y,b,n} = \begin{cases} \bar{E}_{b,n} & a_{y,b,n} < \tau_{b,n} \\ X^{bat}_{y,b,n} \, \bar{E}_{b,n} / \bar{P}^{bat}_{b,n} & \text{otherwise} \end{cases} \tag{CUM-2}
+\bar{P}^{bat,cum}_{y,b,n} = \begin{cases} \bar{P}^{bat}_{b,n} (1 - \delta_{b,n})^{a_{y,b,n}} & a_{y,b,n} < \tau_{b,n} \\ X^{bat}_{y,b,n} & \text{otherwise} \end{cases}, \qquad \bar{E}^{cum}_{y,b,n} = \begin{cases} \bar{E}_{b,n} (1 - \delta_{b,n})^{a_{y,b,n}} & a_{y,b,n} < \tau_{b,n} \\ X^{bat}_{y,b,n} \, \bar{E}_{b,n} / \bar{P}^{bat}_{b,n} & \text{otherwise} \end{cases} \tag{CUM-2}
 \]
+
+`battery_power_in_service` and `battery_energy_in_service` hold CUM-2, and every master row on an existing battery's size uses them: the day's (or TSAM period's) charge, discharge and SOC bounds, the TSAM boundary SOC, the firm capacity (CAP-5), the reserve headroom and the reported capacity. The fixed O&M stays on the rated `MaxDischargePower` within the lifetime, as the dispatch charges it (OBJ-3c). Earlier versions did not degrade existing batteries in the master, so the plan counted on more storage than the dispatch of the same year had.
 
 Battery technologies accumulate their investments without degradation:
 
@@ -434,7 +436,7 @@ The constraint (`cap_adequacy_y{y}_node{n}`) is per node and sums over the node'
 \alpha^{cc}_{g,n'} = \frac{1}{|T^{peak}_{y,n}|} \sum_{t \in T^{peak}_{y,n}} a_{g,n',t} \qquad \text{(dispatchable units and storage)} \tag{CAP-4}
 \]
 
-**Storage counts up to its energy** (CAP-5). A battery counts at most the power its usable energy sustains over the critical period of \(H^{firm}\) hours, min(power, usable energy / \(H^{firm}\)). For an existing or life-extended battery, whose energy-to-power ratio is fixed,
+**Storage counts up to its energy** (CAP-5). A battery counts at most the power its usable energy sustains over the critical period of \(H^{firm}\) hours, min(power, usable energy / \(H^{firm}\)). For an existing or life-extended battery, whose energy-to-power ratio is fixed (degradation shrinks both alike),
 
 \[
 \beta_{b,n} = \min\Big(1,\; \frac{\eta^{u}_{b,n} \, E_{b,n}}{P_{b,n} \, H^{firm}}\Big), \qquad \eta^{u}_{b,n} = (\text{SOC}^{max}_{b,n} - \text{SOC}^{min}_{b,n}) \, \eta^{dis}_{b,n} \tag{CAP-5}
@@ -930,7 +932,7 @@ A unit with \(\text{NPV} <\) `npv_retirement_threshold` (\$, default 0) is retir
 \text{NPV}^{+}_{g,n} = \sum_{k} \frac{\delta^k E_{y_0} p^{LCOE} - \delta^k \left( C^{op}_{y_0} - F_{y_0} + F_{y_0} \gamma^k \right) - c^{fix}_{g,n} \bar{P}_{g,n} (1-d)^{a_{y_0}+k}}{(1+r)^{k}} \tag{NPV-3}
 \]
 
-with \(\delta = 1-d\) the capacity degradation, \(F_{y_0}\) the fuel part of the operating cost and \(\gamma\) its yearly growth (1 + the `price_growth_rate` of the fuel it burns, from the `fuels` block or the primary-energy tank, times a stochastic scenario's `fuel_price_growth`; an offer curve and the CO2 price have no path in the master). A battery keeps its yearly revenue, operating cost and fixed O&M. No life extension is assumed: in the first year past its `life_time` (the first later year for a unit the master life-extended) the unit pays its decommissioning on the capacity it had, discounted to that year, and nothing after. In a stochastic master each scenario uses its own multipliers and discount rate.
+with \(\delta = 1-d\) the capacity degradation, \(F_{y_0}\) the fuel part of the operating cost and \(\gamma\) its yearly growth (1 + the `price_growth_rate` of the fuel it burns, from the `fuels` block or the primary-energy tank, times a stochastic scenario's `fuel_price_growth`; an offer curve and the CO2 price have no path in the master). A battery's revenue and operating cost scale with its degraded power (\(\delta^k\)); its fixed O&M stays on its rated power, as the master charges it. No life extension is assumed: in the first year past its `life_time` (the first later year for a unit the master life-extended) the unit pays its decommissioning on the capacity it had, discounted to that year, and nothing after. In a stochastic master each scenario uses its own multipliers and discount rate.
 
 ### 9.3 Retirement
 
@@ -1083,7 +1085,7 @@ After optimization, the following quantities are extracted into a `MasterProblem
 | `tech_investment[y][k]` | Technology investment per period-start year and bus (MW) |
 | `bat_tech_power_investment[y][k]`, `bat_tech_capacity_investment[y][k]` | Battery-technology investment (MW, MWh) |
 | `transfer_investment[y][(i,j)]` | Transmission investment (MW) |
-| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Per node, the share of the existing unit in service: 1 within its original `life_time`; past it, the MW kept by life extension over the most it could keep (the degraded rated power; the discharge power for a battery), 0 when it retires. A share, not MW: the capacity is in the cumulative capacities below. The retirement reports (`retirement_gen_{g}` in the HDF5 file, the log tables) are 1 − this share |
+| `gen_life_extension[y][g]`, `bat_life_extension[y][b]` | Per node, the share of the existing unit in service: 1 within its original `life_time`; past it, the MW kept by life extension over the most it could keep (the degraded rated power; the degraded discharge power for a battery), 0 when it retires. A share, not MW: the capacity is in the cumulative capacities below. The retirement reports (`retirement_gen_{g}` in the HDF5 file, the log tables) are 1 − this share |
 | `cumulative_gen_capacity`, `cumulative_bat_capacity`, `cumulative_bat_power` | Capacity of existing units per year (CUM-1, CUM-2) |
 | `cumulative_tech_capacity`, `cumulative_bat_tech_power`, `cumulative_bat_tech_capacity` | Cumulative technology capacity per year (CUM-1b, CUM-3) |
 | `re_penetration_by_year`, `re_penetration_by_system` | Achieved RE share \(E^{RE}_{\sigma,y}/D_{\sigma,y}\) (RE-2) per year, all systems together, and per system; the expected value over the scenarios in a stochastic master, the subproblems' in Benders. It was the credited ratio \(\rho\) |
