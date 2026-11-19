@@ -385,68 +385,56 @@ class _WorkflowsNamespace:
     # ── Demand Estimation ─────────────────────────────────────
 
     @staticmethod
-    def estimate_demand(gdp_per_capita, population, urbanization_pct,
-                        temperatures_hourly, latitude, longitude,
-                        base_temp=21.0, beta_cdd=0.0, beta_hdd=0.0):
-        """Estimate hourly demand using the ML+econometric model.
+    def estimate_demand(iso3, latitude, longitude, year,
+                        temperatures_hourly=None, annual_demand_mwh=None,
+                        static_features=None):
+        """Hourly demand profile of a site from ESFEX's national XGBoost
+        demand model (the Demand Estimation workflow's fallback model).
 
-        Requires xgboost, which ships with the core esfex install.
+        The features are built as the model was trained: the calendar and
+        holidays of *iso3*, the temperature and its daily statistics, and GDP
+        per capita, population density and urbanization sampled at the site.
 
         Parameters
         ----------
-        gdp_per_capita : float
-            USD per capita.
-        population : int
-            Total population.
-        urbanization_pct : float
-            0-100.
-        temperatures_hourly : array
-            Hourly temperatures (°C), length = n_days × 24.
+        iso3 : str
+            Country code (holidays and the model's country encoding).
         latitude, longitude : float
             Site coordinates.
+        year : int
+            Calendar year of the profile (8760 h, 29 February dropped).
+        temperatures_hourly : array, optional
+            8760 hourly temperatures (°C) on the site's local time. None
+            uses 20 °C, as the model's training data do without a series.
+        annual_demand_mwh : float, optional
+            Annual energy. Given: the profile is in MW and sums to it.
+            None: dimensionless shape factors with mean 1.
+        static_features : dict, optional
+            ``log_gdp_per_cap``, ``log_pop_density`` and ``urbanization`` (as
+            in the training data) instead of sampling them at the site, which
+            downloads the GDP and population rasters on first use.
 
         Returns
         -------
         np.ndarray
-            Hourly demand estimate (MW), same length as temperatures.
+            8760 hourly values (MW, or shape factors).
         """
-        import numpy as np
-        from esfex.models.demand_ml import (
-            DemandMLModel, build_inference_features, harmonic_reconstruct,
-            aggregate_to_3h, compute_hdd_cdd_3h,
-        )
+        from esfex.models.demand_ml import DemandMLModel, build_hourly_features
 
-        if not DemandMLModel.is_available():
+        if not DemandMLModel.is_available("xgboost"):
             raise RuntimeError(
                 "Demand ML model not available. xgboost ships with esfex; "
                 "reinstall with: pip install --upgrade --force-reinstall esfex"
             )
 
-        model = DemandMLModel.load_bundled()
-        temps = np.asarray(temperatures_hourly)
-        n_days = len(temps) // 24
-        temps_daily = temps[:n_days * 24].reshape(n_days, 24)
-        temps_3h = aggregate_to_3h(temps_daily)
-        hdd_3h, cdd_3h = compute_hdd_cdd_3h(temps_3h, base_temp)
-
-        # Predict 3-hourly shape factors
-        demand_3h = np.zeros((n_days, 8))
-        for d in range(n_days):
-            for h in range(8):
-                features = build_inference_features(
-                    gdp_per_capita, population, urbanization_pct,
-                    100.0,  # electricity_access
-                    temps_3h[d, h], hdd_3h[d, h], cdd_3h[d, h],
-                    h * 3, (d % 365) // 30 + 1, d % 7,
-                    latitude, longitude,
-                )
-                demand_3h[d, h] = model.predict(features)[0]
-
-        # Reconstruct hourly
-        hourly = harmonic_reconstruct(
-            demand_3h, temps_daily, beta_cdd, beta_hdd, base_temp,
-        )
-        return hourly.ravel()
+        model = DemandMLModel.load_bundled(engine="xgboost")
+        features = build_hourly_features(
+            iso3, temperatures_hourly, latitude, longitude, int(year),
+            static_features=static_features)
+        shape = model.predict(features)
+        if annual_demand_mwh is None:
+            return shape
+        return shape * (float(annual_demand_mwh) / len(shape))
 
     # ── Climate Profiles ──────────────────────────────────────
 
@@ -558,7 +546,7 @@ class _WorkflowsNamespace:
     esfex.workflows.ev_profiles(...)               → DataFrame (MW/h)
 
   Demand:
-    esfex.workflows.estimate_demand(...)            → hourly MW array
+    esfex.workflows.estimate_demand(iso3, lat, lon, year) → 8760 h profile
     esfex.workflows.climate_demand_adjustment(...)  → adjusted MW array
 
   OTEC:
@@ -1158,7 +1146,7 @@ class ESFEXAPI:
   esfex.workflows.hazard_screening(coords)        → Multi-hazard screen
   esfex.workflows.risk_assessment(maps, comps)    → Composite risk
   esfex.workflows.ev_profiles(...)                → EV demand (MW/h)
-  esfex.workflows.estimate_demand(...)            → ML demand estimate
+  esfex.workflows.estimate_demand(...)            → Site demand profile
   esfex.workflows.climate_demand_adjustment(...)  → HDD/CDD scaling
   esfex.workflows.otec_capacity_factors(tw, tc)   → OTEC daily CFs
   esfex.workflows.tsam_cluster(demand, n)         → Representative days

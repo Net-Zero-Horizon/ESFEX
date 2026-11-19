@@ -77,14 +77,21 @@ class _FakeModel:
 
 
 @pytest.fixture
-def patch_build_features():
-    """Replace build_hourly_features so project_country's legacy path runs."""
-    orig = demand_ml.build_hourly_features
-    demand_ml.build_hourly_features = lambda **kw: np.zeros((8760, 1))
-    try:
-        yield
-    finally:
-        demand_ml.build_hourly_features = orig
+def patch_build_features(monkeypatch):
+    """Replace build_hourly_features (and the raster sampling and country map
+    it needs) so project_country's legacy path runs offline. Yields the
+    keyword arguments of each build_hourly_features call."""
+    calls = []
+
+    def fake_build(*args, **kw):
+        calls.append(kw)
+        return np.zeros((8760, 1))
+
+    monkeypatch.setattr(demand_ml, "build_hourly_features", fake_build)
+    monkeypatch.setattr(demand_ml, "static_features_at", lambda lat, lon, year: {
+        "log_gdp_per_cap": 9.0, "log_pop_density": 5.0, "urbanization": 20.0})
+    monkeypatch.setattr(demand_ml, "country_id_for", lambda iso3: 3.0)
+    yield calls
 
 
 # ── SSP / interpolation helpers ─────────────────────────────────────────
@@ -444,6 +451,25 @@ def test_project_country_legacy_path(patch_build_features):
     # flat shape → peak == average MW
     avg_mw = res["annual_gwh"][2025] * 1000.0 / 8760.0
     assert res["peak_mw"][2025] == pytest.approx(avg_mw, rel=1e-5)
+
+
+def test_project_country_legacy_static_features(patch_build_features):
+    # The static features are the sampled ones (training units), moved each
+    # year by GDP-per-capita and population growth; the country's model id.
+    p = dp.GlobalDemandProjector(base_year=2025, end_year=2026, ml_engine="xgboost")
+    p._model = _FakeModel()
+    p.gdp_growth = {2026: 0.10}
+    rec = _country_record(pop_projections={2025: 1000.0, 2026: 1020.0})
+    p.project_country(rec, {2025: np.full(8760, 20.0), 2026: np.full(8760, 21.0)})
+    first, second = patch_build_features
+    assert first["static_features"] == {
+        "log_gdp_per_cap": 9.0, "log_pop_density": 5.0, "urbanization": 20.0}
+    assert first["country_id"] == 3.0
+    assert second["static_features"]["log_gdp_per_cap"] == pytest.approx(
+        9.0 + np.log(1.10))
+    assert second["static_features"]["log_pop_density"] == pytest.approx(
+        5.0 + np.log(1.02))
+    assert second["base_year"] == 2026
 
 
 def test_project_country_uses_pop_projections(patch_build_features):
