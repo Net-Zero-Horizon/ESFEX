@@ -25,20 +25,20 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false);
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.years || data.years.length === 0) {
-            showStatus("No data", false);
+            showStatus(_t("web.common.no_data"), false);
             return;
         }
         try {
             renderCarbon(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[carbon_penalty.js] render threw:", e);
         }
     });
@@ -65,33 +65,35 @@ function renderCarbon(data) {
         traces.push({
             type: "bar",
             x: years, y: data.co2_mt,
-            name: "CO₂ Emissions",
+            name: _t("web.charts.carbon_penalty.trace_co2"),
             marker: { color: "#7F8C8D",
                       line: { color: "#FFFFFF", width: 0.5 } },
             xaxis: "x", yaxis: "y",
-            hovertemplate: "%{x}: %{y:,.3f} Mt<extra>CO₂</extra>",
+            hovertemplate: _t("web.charts.carbon_penalty.hover_co2"),
         });
     }
     if (data.co2_intensity_g_per_kwh && data.co2_intensity_g_per_kwh.length) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: years, y: data.co2_intensity_g_per_kwh,
-            name: "CO₂ Intensity",
+            name: _t("web.charts.carbon_penalty.trace_intensity"),
             line: { color: "#E67E22", width: 2.5 },
             marker: { color: "#E67E22", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x", yaxis: "y2",
-            hovertemplate: "%{x}: %{y:,.1f} g/kWh<extra>Intensity</extra>",
+            hovertemplate: _t("web.charts.carbon_penalty.hover_intensity"),
         });
     }
 
     // ── Subplot (b): penalty quantities (stacked bars) ──
     const series = [
-        { key: "loss_load_mwh", label: "Loss of Load",
+        { key: "loss_load_mwh", label: _t("web.charts.carbon_penalty.series_loss_load"),
           color: "#E74C3C" },
-        { key: "reserve_dynamic_violation_mwh", label: "Reserve viol. (dynamic)",
+        { key: "reserve_dynamic_violation_mwh",
+          label: _t("web.charts.carbon_penalty.series_res_dynamic"),
           color: "#9B59B6" },
-        { key: "reserve_static_violation_mwh", label: "Reserve viol. (static)",
+        { key: "reserve_static_violation_mwh",
+          label: _t("web.charts.carbon_penalty.series_res_static"),
           color: "#3498DB" },
     ];
     let anyPenalty = false;
@@ -107,7 +109,7 @@ function renderCarbon(data) {
                       line: { color: "#FFFFFF", width: 0.5 } },
             xaxis: "x2", yaxis: "y3",
             offsetgroup: "pen",
-            hovertemplate: "%{x}: %{y:,.2f} MWh<extra>" + s.label + "</extra>",
+            hovertemplate: _t("web.charts.carbon_penalty.hover_penalty", { label: s.label }),
         });
     }
 
@@ -116,12 +118,13 @@ function renderCarbon(data) {
         showlegend: true,
         barmode: "relative",
         annotations: [
-            { text: "<b>a) CO₂ Emissions & Intensity</b>",
+            { text: "<b>" + _t("web.charts.carbon_penalty.title_a") + "</b>",
               x: 0.435, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Reliability & Reserve Penalties</b>" +
-                    (anyPenalty ? "" : "  <i>(none — operationally feasible)</i>"),
+            { text: "<b>" + _t("web.charts.carbon_penalty.title_b") + "</b>" +
+                    (anyPenalty ? ""
+                        : "  <i>" + _t("web.charts.carbon_penalty.no_penalties") + "</i>"),
               x: 0.435, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -144,14 +147,14 @@ function renderCarbon(data) {
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
-            title: "<b>Emissions (Mt CO₂)</b>",
+            title: "<b>" + _t("web.charts.carbon_penalty.axis_emissions") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
             rangemode: "tozero",
         },
         yaxis2: {
             domain: [0.54, 0.98], anchor: "x",
             overlaying: "y", side: "right",
-            title: { text: "<b>Intensity (g CO₂/kWh)</b>",
+            title: { text: "<b>" + _t("web.charts.carbon_penalty.axis_intensity") + "</b>",
                      font: { color: "#E67E22" } },
             tickfont: { color: "#E67E22" },
             showgrid: false,
@@ -161,12 +164,12 @@ function renderCarbon(data) {
             domain: [0, 0.87], anchor: "y3",
             type: "category",
             tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.carbon_penalty.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis3: {
             domain: [0.0, 0.44], anchor: "x2",
-            title: "<b>Penalty quantity (MWh)</b>",
+            title: "<b>" + _t("web.charts.carbon_penalty.axis_penalty") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
             rangemode: "tozero",
         },

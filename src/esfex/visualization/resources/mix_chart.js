@@ -32,23 +32,23 @@ function refresh() {
         let data = null;
         try { data = JSON.parse(rawJson); }
         catch (e) {
-            showStatus("Bad payload: " + e.message, true);
+            showStatus(_t("web.common.bad_payload", { error: e.message }), true);
             return;
         }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false);
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.year_list || data.year_list.length === 0
             || !data.total_months) {
-            showStatus("No generation data", false);
+            showStatus(_t("web.charts.mix_chart.no_data"), false);
             return;
         }
         try {
             renderMix(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error(e);
         }
     });
@@ -114,9 +114,9 @@ function renderMix(data) {
             x: monthX, y: data.demand_gwh,
             type: "scatter", mode: "lines",
             line: { color: "#000000", width: 2.5, dash: "dash" },
-            name: "Total Demand",
+            name: _t("web.charts.mix_chart.trace_demand"),
             xaxis: "x", yaxis: "y",
-            hovertemplate: "%{y:,.1f} GWh<extra>Demand</extra>",
+            hovertemplate: _t("web.charts.mix_chart.hover_demand"),
         });
     }
 
@@ -126,9 +126,9 @@ function renderMix(data) {
             x: monthX, y: data.operational_re_pct,
             type: "scatter", mode: "lines",
             line: { color: "#E74C3C", width: 2.5, dash: "dash" },
-            name: "Operational RE (%)",
+            name: _t("web.charts.mix_chart.trace_op_re"),
             xaxis: "x", yaxis: "y2",
-            hovertemplate: "%{y:.1f}%<extra>Op. RE</extra>",
+            hovertemplate: _t("web.charts.mix_chart.hover_op_re"),
         });
     }
 
@@ -139,9 +139,9 @@ function renderMix(data) {
             x: monthX, y: data.re_target_pct,
             type: "scatter", mode: "lines",
             line: { color: "#1F3A93", width: 2, shape: "hv" },
-            name: "RE Target (%)",
+            name: _t("web.charts.mix_chart.trace_re_target"),
             xaxis: "x", yaxis: "y2",
-            hovertemplate: "%{y:.1f}%<extra>RE Target</extra>",
+            hovertemplate: _t("web.charts.mix_chart.hover_re_target"),
         });
     }
 
@@ -168,7 +168,7 @@ function renderMix(data) {
             marker: { color: s.color, opacity: 0.85 },
             xaxis: "x2", yaxis: "y3",
             offsetgroup: "invret",     // keep inv+ret bars at same x slot
-            hovertemplate: "%{x}: %{y:,.2f} GW<extra>%{fullData.name}</extra>",
+            hovertemplate: _t("web.charts.mix_chart.hover_investment"),
             legendgroup: s.label,
             showlegend: false,
         });
@@ -199,7 +199,7 @@ function renderMix(data) {
             xaxis: "x2", yaxis: "y3",
             offsetgroup: "invret",
             customdata: s.values_gw,
-            hovertemplate: "%{x}: %{customdata:,.2f} GW retired<extra>%{fullData.name}</extra>",
+            hovertemplate: _t("web.charts.mix_chart.hover_retired"),
             legendgroup: parentLabel,
             showlegend: false,
         });
@@ -212,9 +212,9 @@ function renderMix(data) {
             type: "scatter", mode: "lines+markers",
             line: { color: "#27AE60", width: 2.5 },
             marker: { color: "#27AE60", size: 6 },
-            name: "Investment Cost",
+            name: _t("web.charts.mix_chart.trace_inv_cost"),
             xaxis: "x2", yaxis: "y4",
-            hovertemplate: "%{x}: %{y:,.1f} M$<extra>Cost</extra>",
+            hovertemplate: _t("web.charts.mix_chart.hover_inv_cost"),
         });
     }
 
@@ -230,8 +230,9 @@ function renderMix(data) {
         : [0, 1];
 
     const subTitleA = yearList.length
-        ? `a) Generation Mix Evolution [${yearList[0]}–${yearList[yearList.length - 1]}]`
-        : "a) Generation Mix Evolution";
+        ? _t("web.charts.mix_chart.title_a_range",
+             { start: yearList[0], end: yearList[yearList.length - 1] })
+        : _t("web.charts.mix_chart.title_a");
 
     const layout = {
         // Wide right margin to host the vertical legend outside both
@@ -249,7 +250,7 @@ function renderMix(data) {
               x: 0.415, xref: "paper", xanchor: "center",
               y: 1.02, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 15 } },
-            { text: "<b>b) Annual Capacity Investments &amp; Retirements</b>",
+            { text: "<b>" + _t("web.charts.mix_chart.title_b") + "</b>",
               x: 0.415, xref: "paper", xanchor: "center",
               y: 0.42, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 15 } },
@@ -286,12 +287,12 @@ function renderMix(data) {
         },
         yaxis: {
             domain: [0.50, 1.0], anchor: "x",
-            title: "<b>Energy (GWh)</b>",
+            title: "<b>" + _t("web.charts.mix_chart.axis_energy") + "</b>",
         },
         yaxis2: {
             domain: [0.50, 1.0], anchor: "x",
             overlaying: "y", side: "right",
-            title: { text: "<b>RE (%)</b>",
+            title: { text: "<b>" + _t("web.charts.mix_chart.axis_re") + "</b>",
                      font: { color: "#E74C3C" } },
             tickfont: { color: "#E74C3C" },
             range: [0, 105], tickvals: [0, 20, 40, 60, 80, 100],
@@ -300,17 +301,17 @@ function renderMix(data) {
         xaxis2: {
             domain: [0, 0.83], anchor: "y3",
             type: "category",
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.mix_chart.axis_year") + "</b>",
             tickangle: -45,
         },
         yaxis3: {
             domain: [0.0, 0.40], anchor: "x2",
-            title: "<b>Capacity (GW)</b>",
+            title: "<b>" + _t("web.charts.mix_chart.axis_capacity") + "</b>",
         },
         yaxis4: {
             domain: [0.0, 0.40], anchor: "x2",
             overlaying: "y3", side: "right",
-            title: { text: "<b>Inv. Cost (M$)</b>",
+            title: { text: "<b>" + _t("web.charts.mix_chart.axis_inv_cost") + "</b>",
                      font: { color: "#27AE60" } },
             tickfont: { color: "#27AE60" },
             showgrid: false,
