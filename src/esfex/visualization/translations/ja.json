@@ -3943,5 +3943,13 @@
     "banner": "Python コンソール - ESFEX Studio\n利用可能: model, state, config, window, esfex, np\nスクリプト API リファレンスは esfex.help() と入力してください。",
     "process_running": "[エラー] サブプロセスはすでに実行中です。先に Ctrl+C でキャンセルしてください。",
     "clear": "コンソールをクリア"
+  },
+  "web": {
+    "common": {
+      "loading": "読み込み中…",
+      "no_data": "データなし",
+      "render_error": "描画エラー: {error}",
+      "bad_payload": "不正なデータ: {error}"
+    }
   }
 }

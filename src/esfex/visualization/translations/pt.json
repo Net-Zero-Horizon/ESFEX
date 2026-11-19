@@ -3943,5 +3943,13 @@
     "banner": "Consola Python - ESFEX Studio\nDisponíveis: model, state, config, window, esfex, np\nEscreva esfex.help() para ver a referência da API de scripting.",
     "process_running": "[erro] Já está em execução um subprocesso. Use Ctrl+C para o cancelar primeiro.",
     "clear": "Limpar consola"
+  },
+  "web": {
+    "common": {
+      "loading": "A carregar…",
+      "no_data": "Sem dados",
+      "render_error": "Erro ao desenhar: {error}",
+      "bad_payload": "Dados inválidos: {error}"
+    }
   }
 }

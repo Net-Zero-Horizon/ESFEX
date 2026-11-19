@@ -106,6 +106,9 @@ def run_studio(config=None, system: str | None = None,
     # Charts must draw Japanese text and CJK node names in any language.
     from esfex.visualization.plot_fonts import configure_cjk_fallback
     configure_cjk_fallback()
+    # Web views (map, SLD, dashboard, charts) read their texts from web.*.
+    from esfex.visualization import web_i18n
+    web_i18n.install()
     splash.set_progress(25, tr("splash.init_translations"))
 
     theme_name = prefs.get("general", {}).get("theme", "GitHub Light")

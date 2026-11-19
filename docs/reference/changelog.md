@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Added
 
+- **Translations for the web views.** The map, the single-line diagram,
+  the dashboard and the result charts are web pages, and had no way to show
+  translated text. `esfex.visualization.web_i18n` gives every page the
+  strings of the `web` section of the translation files: scripts call
+  `_t("web.<page>.<key>", {params})`, and static HTML marks text with
+  `data-i18n="web.<key>"`. A language change reaches pages already open.
+  `tests/test_js_i18n_coverage.py` checks that the keys exist and lists the
+  texts still written in English in the pages
+  (`tests/js_untranslated_baseline.json`, which may only shrink).
+
 - **Electrolyzer hydrogen fills the hydrogen tank.** With the primary-energy
   model on and a fuel source named `Hydrogen`, the hydrogen of every
   dispatch electrolyzer now flows into that fuel's tank at its node (in
