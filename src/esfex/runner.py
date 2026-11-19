@@ -37,6 +37,7 @@ from esfex.config.schema import (
     is_committed_unit,
 )
 from esfex.bridge.adapters import (
+    LOSS_REPAIR_GAP_INFO,
     MasterProblemAdapter,
     PowerSystemAdapter,
     PrimaryEnergyAdapter,
@@ -583,6 +584,10 @@ class YearResults:
     total_demand: float = 0.0
     transmission_losses: float = 0.0  # MWh lost on the lines (DC loss model)
     master_re_target: float = 0.0  # Master problem RE penetration target for this year
+    # Line-loss repair bounds ($): of the master solve that planned this
+    # year, and of the year's dispatch windows summed (adapters.loss_repair_bounds)
+    master_loss_repair: Optional[dict] = None
+    dispatch_loss_repair: Optional[dict] = None
     # Granular cost decomposition (accumulated from operational windows)
     cost_breakdown: Optional[dict] = None
 
@@ -617,6 +622,30 @@ def re_share(renewable_generation: float, total_generation: float) -> float:
     no fossil generation."""
     total = float(total_generation)
     return float(renewable_generation) / total if total > 0 else 0.0
+
+
+def sum_loss_repairs(windows: list[dict]) -> Optional[dict]:
+    """A year's dispatch line-loss repair from its windows' bounds
+    (``adapters.loss_repair_bounds``): ``lower_bound`` and ``objective``
+    summed ($, whole windows, look-ahead included), ``gap`` of the sums,
+    ``gap_max`` (the largest window gap), ``rounds``, ``linearised`` and
+    ``released`` summed, ``windows`` and ``windows_repaired`` (with at
+    least one repair round). ``None`` without any window bounds."""
+    if not windows:
+        return None
+    lower = sum(w["lower_bound"] for w in windows)
+    final = sum(w["objective"] for w in windows)
+    return {
+        "lower_bound": lower,
+        "objective": final,
+        "gap": 0.0 if final == lower else (final - lower) / max(abs(final), 1e-12),
+        "gap_max": max(w["gap"] for w in windows),
+        "rounds": sum(w["rounds"] for w in windows),
+        "linearised": sum(w["linearised"] for w in windows),
+        "released": sum(w["released"] for w in windows),
+        "windows": len(windows),
+        "windows_repaired": sum(1 for w in windows if w["rounds"] > 0),
+    }
 
 
 def myopic_re_anchor(initial: float, min_inc: float, y_idx: int) -> float:
@@ -954,6 +983,8 @@ class Orchestrator:
         # Initialize state
         self.state: Optional[SimulationState] = None
         self.results: list[YearResults] = []
+        # Line-loss repair bounds of the master solve, per planned year
+        self._master_loss_repair: dict[int, dict] = {}
         self.master_solution: Optional[dict] = None  # set by run(master_only=True)
         # Myopic runs: {year: {"objective", "earlier_annuities", "total"}} ($)
         self.myopic_year_costs: dict = {}
@@ -2561,6 +2592,7 @@ class Orchestrator:
                     year_result.investments = year_investments
                     year_result.retirements = master_retirements.get(year, {})
                     year_result.master_re_target = year_re_target
+                    year_result.master_loss_repair = self._master_loss_repair.get(year)
 
                     self.results.append(year_result)
 
@@ -3841,6 +3873,7 @@ class Orchestrator:
         planning_mode = getattr(master_cfg, 'planning_mode', 'perfect_foresight')
 
         self._npv_retirements = []
+        self._master_loss_repair = {}
         solve = (self._solve_master_problem_myopic if planning_mode == "myopic"
                  else self._solve_master_problem_foresight)
         result = solve(years_range, demand, hours, num_nodes,
@@ -4138,6 +4171,8 @@ class Orchestrator:
                     return None, None, None, None
 
                 result = master.get_solution_values()
+                if isinstance(getattr(master, "loss_repair", None), dict):
+                    self._master_loss_repair[year] = master.loss_repair
                 self._report_myopic_year_cost(year, y_idx, result, annuity_streams)
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
                 for r in self._record_npv_retirements(master, year):
@@ -5111,6 +5146,9 @@ class Orchestrator:
 
                 # Extract investment decisions for each year
                 result = master.get_solution_values()
+                # One solve plans every year (MGA's alternatives record none)
+                if isinstance(getattr(master, "loss_repair", None), dict):
+                    self._master_loss_repair = dict.fromkeys(years_range, master.loss_repair)
 
             # Use the legacy-compatible solution structure keyed by actual year
             solution = result.get('solution', {})
@@ -6156,6 +6194,7 @@ class Orchestrator:
         total_generation = 0.0
         total_demand_val = 0.0
         total_losses = 0.0
+        window_loss_repairs: list[dict] = []
         accumulated_cost_breakdown: dict[str, float] = {}
         feasible = True
         num_solved = 0
@@ -6395,6 +6434,8 @@ class Orchestrator:
             total_generation += window_result.get("total_generation", 0.0)
             total_demand_val += window_result.get("total_demand", 0.0)
             total_losses += window_result.get("total_losses", 0.0) or 0.0
+            if isinstance(window_result.get("loss_repair"), dict):
+                window_loss_repairs.append(window_result["loss_repair"])
 
             wbd = window_result.get("cost_breakdown")
             if wbd:
@@ -6608,6 +6649,15 @@ class Orchestrator:
 
         logger.debug(f"Year {year} dispatch: obj=${total_objective:,.0f}, "
                       f"RE={avg_re:.1%}, CO2={total_emissions:.0f}t, time={total_solve_time:.1f}s")
+        dispatch_loss_repair = sum_loss_repairs(window_loss_repairs)
+        if dispatch_loss_repair and dispatch_loss_repair["windows_repaired"]:
+            r = dispatch_loss_repair
+            logger.log(
+                logging.INFO if r["gap"] > LOSS_REPAIR_GAP_INFO else logging.DEBUG,
+                f"Year {year} dispatch line losses: PWL solves ${r['lower_bound']:,.0f} "
+                f"(lower bound), repaired ${r['objective']:,.0f} (gap {r['gap']:.2%}, "
+                f"largest window {r['gap_max']:.2%}; {r['windows_repaired']} of "
+                f"{r['windows']} windows repaired, {r['released']} line-step(s) released)")
 
         year_result = YearResults(
             year=year,
@@ -6659,6 +6709,7 @@ class Orchestrator:
             total_generation=total_generation,
             total_demand=total_demand_val,
             transmission_losses=total_losses,
+            dispatch_loss_repair=dispatch_loss_repair,
             n1_gen_reserve_duals=n1_gen_duals_arr,
             n1_trans_reserve_duals=combined_n1_trans_duals if combined_n1_trans_duals else None,
             n1_binding_contingencies=all_n1_binding if all_n1_binding else None,
@@ -7438,6 +7489,9 @@ class Orchestrator:
                 "window": window,
                 "objective": solution.get('objective', 0.0),
                 "solve_time": time.time() - solve_start,
+                # Bounds of the window's line-loss repair (whole window,
+                # look-ahead included), or None
+                "loss_repair": getattr(ps, "loss_repair", None),
                 "status": solution.get('status', 'Unknown'),
                 "boundary_conditions": new_boundary,
                 # Generation arrays [gen x node x hour]
@@ -8735,6 +8789,12 @@ class Orchestrator:
             scenario.attrs["load_shed"] = result.load_shed
             scenario.attrs["transmission_losses"] = result.transmission_losses
             scenario.attrs["master_re_target"] = result.master_re_target
+            # Line-loss repair bounds: the first (PWL) solve, a lower bound,
+            # and the repaired one ($), when the solves had PWL losses
+            for prefix, bounds in (("master", result.master_loss_repair),
+                                   ("dispatch", result.dispatch_loss_repair)):
+                for key, val in (bounds or {}).items():
+                    scenario.attrs[f"{prefix}_loss_repair_{key}"] = val
 
             # --- Generation data (per generator) ---
             if result.gen_output is not None:
