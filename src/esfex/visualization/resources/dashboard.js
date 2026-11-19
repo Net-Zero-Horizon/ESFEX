@@ -27,18 +27,22 @@ const state = {                   // current filter selection
     system: null,
     yearRange: null,              // [min, max] or null for all
 };
+// Last data drawn, redrawn in the new language by onEsfexLanguageChanged.
+let lastOverview = null;          // {payload, mode}
+let lastDetail = null;            // {year, detail} of the open year panel
+let lastStatus = { key: "", params: null };
 
 // ─────────────────────────────────────────────────────────────────
 // QWebChannel bootstrap
 // ─────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {
-    setStatus("Connecting…");
+    setStatus("web.dashboard.connecting");
     new QWebChannel(qt.webChannelTransport, channel => {
         bridge = channel.objects.loader;
         bootstrap().catch(err => {
             console.error("bootstrap failed", err);
-            setStatus("Connection error: " + (err && err.message || err));
+            setStatus("web.dashboard.connection_error", { error: (err && err.message || err) });
         });
     });
 });
@@ -56,7 +60,7 @@ async function bootstrap() {
 
     meta = JSON.parse(await call(bridge.get_meta));
     if (!meta || !meta.systems || meta.systems.length === 0) {
-        setStatus("No results loaded");
+        setStatus("web.dashboard.no_results");
         return;
     }
 
@@ -155,35 +159,55 @@ async function bootstrap() {
 
 async function refresh() {
     if (!bridge || !state.system) return;
-    setStatus("Loading…");
+    setStatus("web.common.loading");
     try {
         const payload = JSON.parse(await call(
             bridge.get_overview, JSON.stringify(state)
         ));
         const mode = payload.mode || (meta && meta.simulation_mode === "unit_commitment" ? "uc" : "planning");
-        // UC and planning share the same DOM slots but render entirely
-        // different content. Re-label the KPI cards and rebuild the
-        // trajectory + mix panels each time so a system switch between
-        // UC and planning swaps cleanly.
-        applyKpiSchema(mode);
-        renderKpis(payload.kpis || {});
+        lastOverview = { payload: payload, mode: mode };
+        renderOverview(payload, mode);
         if (mode === "uc") {
-            renderHourlyLmp(payload.trajectory || null);
-            renderHourlyDispatch(payload.mix || null);
             // Year-detail drill-down only makes sense for multi-year
             // runs — hide it in UC.
             closeYearDetail();
-        } else {
-            renderTrajectory(payload.trajectory || null);
-            renderMix(payload.mix || null);
         }
-        renderCost(payload.cost || null);
         setStatus("");
     } catch (err) {
         console.error("refresh failed", err);
-        setStatus("Refresh error: " + (err && err.message || err));
+        setStatus("web.dashboard.refresh_error", { error: (err && err.message || err) });
     }
 }
+
+function renderOverview(payload, mode) {
+    // UC and planning share the same DOM slots but render entirely
+    // different content. Re-label the KPI cards and rebuild the
+    // trajectory + mix panels each time so a system switch between
+    // UC and planning swaps cleanly.
+    applyKpiSchema(mode);
+    renderKpis(payload.kpis || {});
+    if (mode === "uc") {
+        renderHourlyLmp(payload.trajectory || null);
+        renderHourlyDispatch(payload.mix || null);
+    } else {
+        renderTrajectory(payload.trajectory || null);
+        renderMix(payload.mix || null);
+    }
+    renderCost(payload.cost || null);
+}
+
+// Language changed (web_i18n): the static labels are refilled by
+// _applyI18n; the texts drawn here are redrawn from the last data.
+window.onEsfexLanguageChanged = function () {
+    setStatus(lastStatus.key, lastStatus.params);
+    updateRangeDisplay();
+    if (lastOverview) renderOverview(lastOverview.payload, lastOverview.mode);
+    if (lastDetail) {
+        setYearDetailTitle(lastDetail.year);
+        renderYearKpis(lastDetail.detail.kpis || {});
+        renderYearDispatch(lastDetail.detail.dispatch || null);
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────
 // KPI schema — relabels cards in-place depending on the run mode.
@@ -193,20 +217,35 @@ async function refresh() {
 // against the right payload keys without a fork.
 // ─────────────────────────────────────────────────────────────────
 
+// ``label`` is the web.* key of the card's title.
 const _UC_KPI_SCHEMA = [
-    { key: "cost",            label: "System Cost" },
-    { key: "avg_lmp",         label: "Avg LMP" },
-    { key: "ens",             label: "Unserved Energy" },
-    { key: "re_share",        label: "RE Share" },
-    { key: "battery_cycles",  label: "Battery Cycles" },
+    { key: "cost",            label: "web.dashboard.kpi_system_cost" },
+    { key: "avg_lmp",         label: "web.dashboard.kpi_avg_lmp" },
+    { key: "ens",             label: "web.dashboard.kpi_unserved_energy" },
+    { key: "re_share",        label: "web.dashboard.kpi_re_share" },
+    { key: "battery_cycles",  label: "web.dashboard.kpi_battery_cycles" },
 ];
 const _PLANNING_KPI_SCHEMA = [
-    { key: "cost",       label: "Total Cost" },
-    { key: "re_share",   label: "RE Share" },
-    { key: "co2",        label: "CO₂ Emissions" },
-    { key: "load_shed",  label: "Load Shed" },
-    { key: "investment", label: "New Capacity" },
+    { key: "cost",       label: "web.dashboard.kpi_total_cost" },
+    { key: "re_share",   label: "web.dashboard.kpi_re_share" },
+    { key: "co2",        label: "web.dashboard.kpi_co2" },
+    { key: "load_shed",  label: "web.dashboard.kpi_load_shed" },
+    { key: "investment", label: "web.dashboard.kpi_new_capacity" },
 ];
+
+// Set an element's text from a web.* key, and mark it so a language
+// change refills it.
+function setKeyText(el, key) {
+    if (!el) return;
+    el.setAttribute("data-i18n", key);
+    el.textContent = _t(key);
+}
+
+function setHeader(hdr, titleKey, hintKey) {
+    if (!hdr) return;
+    setKeyText(hdr.querySelector(".card-title"), titleKey);
+    setKeyText(hdr.querySelector(".hint"), hintKey);
+}
 
 function applyKpiSchema(mode) {
     const schema = (mode === "uc") ? _UC_KPI_SCHEMA : _PLANNING_KPI_SCHEMA;
@@ -215,8 +254,7 @@ function applyKpiSchema(mode) {
         const card = cards[i];
         if (!card) return;
         card.dataset.key = spec.key;
-        const labelEl = card.querySelector(".label");
-        if (labelEl) labelEl.textContent = spec.label;
+        setKeyText(card.querySelector(".label"), spec.label);
     });
     // Update the section headers too — the planning labels would be
     // misleading in UC mode.
@@ -226,19 +264,13 @@ function applyKpiSchema(mode) {
     const mixHdr = document.querySelector("#mix")?.previousElementSibling;
     const costHint = document.getElementById("cost-hint");
     if (mode === "uc") {
-        if (trajHdr) trajHdr.innerHTML =
-            "Hourly LMP <span class='hint'>System-average locational marginal price + hourly load shedding</span>";
-        if (mixHdr) mixHdr.innerHTML =
-            "Hourly Dispatch <span class='hint'>Generation by technology, battery flows, curtailment, load shed</span>";
-        if (costHint) costHint.textContent =
-            "Operational cost breakdown for the UC horizon";
+        setHeader(trajHdr, "web.dashboard.lmp_title", "web.dashboard.lmp_hint");
+        setHeader(mixHdr, "web.dashboard.dispatch_title", "web.dashboard.dispatch_hint");
+        setKeyText(costHint, "web.dashboard.cost_hint_uc");
     } else {
-        if (trajHdr) trajHdr.innerHTML =
-            "System Trajectory <span class='hint'>Brush horizontally to filter • Click a point for year detail</span>";
-        if (mixHdr) mixHdr.innerHTML =
-            "Generation Mix Evolution <span class='hint'>Click a technology in the legend to toggle</span>";
-        if (costHint) costHint.textContent =
-            "Breakdown of the total system cost";
+        setHeader(trajHdr, "web.dashboard.trajectory_title", "web.dashboard.trajectory_hint");
+        setHeader(mixHdr, "web.dashboard.mix_title", "web.dashboard.mix_hint");
+        setKeyText(costHint, "web.dashboard.cost_hint");
     }
 }
 
@@ -276,7 +308,7 @@ function renderKpis(kpis) {
 function renderTrajectory(data) {
     const div = document.getElementById("trajectory");
     if (!data || !data.years || data.years.length === 0) {
-        div.innerHTML = '<div class="empty">No trajectory data</div>';
+        showEmpty(div, "web.dashboard.no_trajectory");
         return;
     }
 
@@ -284,21 +316,21 @@ function renderTrajectory(data) {
         {
             x: data.years, y: data.cost_musd,
             type: "scatter", mode: "lines+markers",
-            name: "Total Cost (M$)",
+            name: _t("web.dashboard.trace_total_cost"),
             line: { color: "#f4b942", width: 2 },
             yaxis: "y",
         },
         {
             x: data.years, y: data.re_pct,
             type: "scatter", mode: "lines+markers",
-            name: "RE Share (%)",
+            name: _t("web.dashboard.trace_re_share"),
             line: { color: "#2ecc71", width: 2 },
             yaxis: "y2",
         },
         {
             x: data.years, y: data.co2_mt,
             type: "scatter", mode: "lines+markers",
-            name: "CO₂ (Mt)",
+            name: _t("web.dashboard.co2_mt"),
             line: { color: "#e74c3c", width: 2 },
             yaxis: "y3",
         },
@@ -307,16 +339,16 @@ function renderTrajectory(data) {
     const layout = themedLayout({
         margin: { t: 30, r: 60, b: 40, l: 60 },
         xaxis: {
-            title: "Year",
+            title: _t("web.dashboard.axis_year"),
             // ``range`` lets us reflect the brushed window into the
             // chart's own visualisation. When state.yearRange is null
             // we let plotly auto-range.
             range: state.yearRange ? [state.yearRange[0], state.yearRange[1]] : undefined,
         },
-        yaxis:  { title: "Cost (M$)",  side: "left",  color: "#f4b942" },
-        yaxis2: { title: "RE (%)",     side: "right", overlaying: "y", color: "#2ecc71" },
+        yaxis:  { title: _t("web.dashboard.axis_cost_musd"), side: "left",  color: "#f4b942" },
+        yaxis2: { title: _t("web.dashboard.axis_re_pct"), side: "right", overlaying: "y", color: "#2ecc71" },
         yaxis3: {
-            title: "CO₂ (Mt)",
+            title: _t("web.dashboard.co2_mt"),
             side: "right", overlaying: "y", anchor: "free",
             position: 0.96, color: "#e74c3c", showgrid: false,
         },
@@ -355,25 +387,31 @@ function onTrajectoryClick(evt) {
 async function openYearDetail(year) {
     if (!bridge || !state.system) return;
     const panel = document.getElementById("year-detail");
-    const label = document.getElementById("year-detail-label");
-    label.textContent = String(year);
+    setYearDetailTitle(year);
+    lastDetail = null;
     panel.style.display = "";
     // Scroll the panel into view so the user sees the drill-down
     // result without hunting for it.
     panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    setStatus("Loading year " + year + "…");
+    setStatus("web.dashboard.loading_year", { year: year });
 
     try {
         const detail = JSON.parse(await call(
             bridge.get_year_detail, state.system, year
         ));
+        lastDetail = { year: year, detail: detail };
         renderYearKpis(detail.kpis || {});
         renderYearDispatch(detail.dispatch || null);
         setStatus("");
     } catch (err) {
         console.error("year detail failed", err);
-        setStatus("Year detail error: " + (err && err.message || err));
+        setStatus("web.dashboard.year_detail_error", { error: (err && err.message || err) });
     }
+}
+
+function setYearDetailTitle(year) {
+    const el = document.getElementById("year-detail-title");
+    if (el) el.textContent = _t("web.dashboard.year_detail_title", { year: year });
 }
 
 function renderYearKpis(kpis) {
@@ -381,17 +419,24 @@ function renderYearKpis(kpis) {
     host.innerHTML = "";
     // Same five metrics as the top KPI bar, rendered as compact chips.
     const order = [
-        ["cost", "Cost"], ["re_share", "RE"], ["co2", "CO₂"],
-        ["load_shed", "Load Shed"], ["investment", "New Cap."],
+        ["cost", _t("web.dashboard.chip_cost")],
+        ["re_share", _t("web.dashboard.chip_re")],
+        ["co2", _t("web.dashboard.chip_co2")],
+        ["load_shed", _t("web.dashboard.chip_load_shed")],
+        ["investment", _t("web.dashboard.chip_new_cap")],
     ];
     for (const [key, title] of order) {
         const k = kpis[key];
         const chip = document.createElement("div");
         chip.className = "mini-kpi";
-        const val = (k && k.value != null) ? k.value : "—";
-        chip.innerHTML =
-            '<div class="label">' + title + '</div>' +
-            '<div class="value">' + val + '</div>';
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = title;
+        const value = document.createElement("div");
+        value.className = "value";
+        value.textContent = (k && k.value != null) ? k.value : "—";
+        chip.appendChild(label);
+        chip.appendChild(value);
         host.appendChild(chip);
     }
 }
@@ -400,7 +445,7 @@ function renderYearDispatch(dispatch) {
     const div = document.getElementById("year-detail-dispatch");
     if (!dispatch || !dispatch.hours || dispatch.hours.length === 0
         || !dispatch.series || dispatch.series.length === 0) {
-        div.innerHTML = '<div class="empty">No hourly dispatch for this year</div>';
+        showEmpty(div, "web.dashboard.no_year_dispatch");
         return;
     }
     const traces = dispatch.series.map(s => ({
@@ -411,12 +456,12 @@ function renderYearDispatch(dispatch) {
         stackgroup: "dispatch",
         name: s.label,
         fillcolor: s.color || undefined,
-        hovertemplate: "h%{x}: %{y:,.0f} MW<extra>%{fullData.name}</extra>",
+        hovertemplate: _t("web.dashboard.hover_h_mw") + "<extra>%{fullData.name}</extra>",
     }));
     const layout = themedLayout({
         margin: { t: 20, r: 30, b: 40, l: 70 },
-        xaxis: { title: "Hour of year" },
-        yaxis: { title: "Dispatch (MW)" },
+        xaxis: { title: _t("web.dashboard.axis_hour_of_year") },
+        yaxis: { title: _t("web.dashboard.axis_dispatch_mw") },
         legend: { orientation: "v", x: 1.02, y: 1 },
         showlegend: true,
     });
@@ -430,6 +475,7 @@ function renderYearDispatch(dispatch) {
 function closeYearDetail() {
     const panel = document.getElementById("year-detail");
     panel.style.display = "none";
+    lastDetail = null;
     // Purge the embedded plot so a stale figure doesn't flash on the
     // next open before fresh data arrives.
     const div = document.getElementById("year-detail-dispatch");
@@ -470,7 +516,7 @@ function onTrajectoryRelayout(evt) {
 function renderMix(data) {
     const div = document.getElementById("mix");
     if (!data || !data.years || data.years.length === 0 || !data.series || data.series.length === 0) {
-        div.innerHTML = '<div class="empty">No generation data</div>';
+        showEmpty(div, "web.dashboard.no_generation");
         return;
     }
 
@@ -487,8 +533,8 @@ function renderMix(data) {
 
     const layout = themedLayout({
         margin: { t: 30, r: 30, b: 40, l: 70 },
-        xaxis: { title: "Year" },
-        yaxis: { title: "Generation (GWh)" },
+        xaxis: { title: _t("web.dashboard.axis_year") },
+        yaxis: { title: _t("web.dashboard.axis_generation_gwh") },
         legend: { orientation: "v", x: 1.02, y: 1 },
         showlegend: true,
     });
@@ -508,17 +554,16 @@ function renderCost(data) {
     const div = document.getElementById("cost");
     const hint = document.getElementById("cost-hint");
     if (!data || !data.steps || data.steps.length === 0) {
-        div.innerHTML = '<div class="empty">No cost breakdown for this run</div>';
-        if (hint) hint.textContent = "Breakdown of the total system cost";
+        showEmpty(div, "web.dashboard.no_cost");
+        setKeyText(hint, "web.dashboard.cost_hint");
         return;
     }
     if (hint) {
         const ys = data.years || [];
-        const span = ys.length === 0 ? ""
-            : (ys.length === 1 ? "Year " + ys[0]
-               : "Years " + ys[0] + "–" + ys[ys.length - 1]);
-        hint.textContent = (span ? span + " — " : "") +
-            "components stack up to the total";
+        hint.textContent = ys.length === 0 ? _t("web.dashboard.cost_hint_stack")
+            : (ys.length === 1
+               ? _t("web.dashboard.cost_hint_year", { year: ys[0] })
+               : _t("web.dashboard.cost_hint_years", { first: ys[0], last: ys[ys.length - 1] }));
     }
 
     // Build the waterfall: one "relative" step per cost component,
@@ -531,7 +576,7 @@ function renderCost(data) {
     const values   = data.steps.map(s => s.value);
     const measures = data.steps.map(() => "relative");
 
-    labels.push("Total");
+    labels.push(_t("web.dashboard.cost_total"));
     values.push(data.total);
     measures.push("total");
 
@@ -554,7 +599,7 @@ function renderCost(data) {
     const layout = themedLayout({
         margin: { t: 20, r: 20, b: 110, l: 80 },
         xaxis: { title: "", tickangle: -40, automargin: true },
-        yaxis: { title: "Cost (USD)" },
+        yaxis: { title: _t("web.dashboard.axis_cost_usd") },
         showlegend: false,
     });
 
@@ -616,9 +661,20 @@ function themedLayout(overrides) {
     }, overrides);
 }
 
-function setStatus(text) {
+// Status line: ``key`` is a web.* key ("" clears it), kept so a language
+// change can redraw it.
+function setStatus(key, params) {
+    lastStatus = { key: key, params: params || null };
     const el = document.getElementById("status");
-    if (el) el.textContent = text;
+    if (el) el.textContent = key ? _t(key, params) : "";
+}
+
+function showEmpty(div, key) {
+    div.innerHTML = "";
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = _t(key);
+    div.appendChild(e);
 }
 
 function updateRangeDisplay() {
@@ -628,7 +684,7 @@ function updateRangeDisplay() {
         el.textContent = `${state.yearRange[0]} – ${state.yearRange[1]}`;
     } else if (meta && meta.years && meta.years.length) {
         const first = meta.years[0], last = meta.years[meta.years.length - 1];
-        el.textContent = `${first} – ${last} (all)`;
+        el.textContent = _t("web.dashboard.range_all", { first: first, last: last });
     } else {
         el.textContent = "—";
     }
@@ -658,7 +714,7 @@ function renderHourlyLmp(data) {
     const div = document.getElementById("trajectory");
     try { Plotly.purge("trajectory"); } catch (e) {}
     if (!data || !data.hours || data.hours.length === 0) {
-        div.innerHTML = '<div class="empty">No LMP data</div>';
+        showEmpty(div, "web.dashboard.no_lmp");
         return;
     }
     const x = data.hours;
@@ -669,14 +725,15 @@ function renderHourlyLmp(data) {
             line: { color: theme && theme.accent ? theme.accent : "#2C3E50",
                     width: 2 },
             xaxis: "x", yaxis: "y",
-            hovertemplate: "Hour %{x}: %{y:,.2f} USD/MWh<extra></extra>",
+            hovertemplate: _t("web.dashboard.hover_hour_usd_mwh") + "<extra></extra>",
         },
         {
             x: x, y: data.load_shed_mw, type: "bar",
-            name: "Load shed (MW)",
+            name: _t("web.dashboard.load_shed_mw"),
             marker: { color: "rgba(231, 76, 60, 0.80)" },
             xaxis: "x", yaxis: "y2",
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Load shed</extra>",
+            hovertemplate: _t("web.dashboard.hover_hour_mw")
+                + "<extra>" + _t("web.dashboard.load_shed") + "</extra>",
         },
     ];
     const layout = {
@@ -684,9 +741,9 @@ function renderHourlyLmp(data) {
         showlegend: true,
         legend: { orientation: "h", x: 0.5, xanchor: "center",
                   y: 1.10, yanchor: "bottom", font: { size: 10 } },
-        xaxis: { title: "<b>Hour</b>" },
-        yaxis: { title: "<b>LMP (USD/MWh)</b>", rangemode: "tozero" },
-        yaxis2: { title: "<b>Load shed (MW)</b>",
+        xaxis: { title: "<b>" + _t("web.dashboard.axis_hour") + "</b>" },
+        yaxis: { title: "<b>" + _t("web.dashboard.axis_lmp") + "</b>", rangemode: "tozero" },
+        yaxis2: { title: "<b>" + _t("web.dashboard.load_shed_mw") + "</b>",
                   overlaying: "y", side: "right",
                   rangemode: "tozero", showgrid: false },
     };
@@ -700,7 +757,7 @@ function renderHourlyDispatch(data) {
     const div = document.getElementById("mix");
     try { Plotly.purge("mix"); } catch (e) {}
     if (!data || !data.hours || data.hours.length === 0) {
-        div.innerHTML = '<div class="empty">No dispatch data</div>';
+        showEmpty(div, "web.dashboard.no_dispatch");
         return;
     }
     const x = data.hours;
@@ -715,7 +772,7 @@ function renderHourlyDispatch(data) {
             stackgroup: "pos", name: s.label,
             fillcolor: s.color,
             hovertemplate:
-                "Hour %{x}: %{y:,.1f} MW<extra>" + s.label + "</extra>",
+                _t("web.dashboard.hover_hour_mw") + "<extra>" + s.label + "</extra>",
         });
     }
     // Negative stack: battery charge + curtailment (drawn below 0).
@@ -728,15 +785,16 @@ function renderHourlyDispatch(data) {
             fillcolor: s.color,
             customdata: s.values,
             hovertemplate:
-                "Hour %{x}: %{customdata:,.1f} MW<extra>" + s.label + "</extra>",
+                _t("web.dashboard.hover_hour_customdata_mw") + "<extra>" + s.label + "</extra>",
         });
     }
     // Demand line on top.
     if (data.demand_mw && data.demand_mw.length) {
         traces.push({
             x: x, y: data.demand_mw, type: "scatter", mode: "lines",
-            name: "Demand", line: { color: "#000000", width: 2 },
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Demand</extra>",
+            name: _t("web.dashboard.demand"), line: { color: "#000000", width: 2 },
+            hovertemplate: _t("web.dashboard.hover_hour_mw")
+                + "<extra>" + _t("web.dashboard.demand") + "</extra>",
         });
     }
     const layout = {
@@ -749,8 +807,8 @@ function renderHourlyDispatch(data) {
               x0: 0, x1: 1, y0: 0, y1: 0,
               line: { color: "#000000", width: 1 } },
         ],
-        xaxis: { title: "<b>Hour</b>" },
-        yaxis: { title: "<b>Power (MW)</b>" },
+        xaxis: { title: "<b>" + _t("web.dashboard.axis_hour") + "</b>" },
+        yaxis: { title: "<b>" + _t("web.dashboard.axis_power_mw") + "</b>" },
     };
     Plotly.newPlot("mix", traces, layout, {
         responsive: true, displaylogo: false,
