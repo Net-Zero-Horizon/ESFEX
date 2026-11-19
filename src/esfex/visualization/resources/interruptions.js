@@ -7,7 +7,7 @@
 var LEFT = 172, ROW_H = 22, HDR_H = 18, TOP = 26, PAD_R = 16;
 var baseYear = 2025, horizon = 8760, plotW = 900, contentH = 0;
 var rows = [], rowOf = {}, schedule = [], selected = null, uidSeq = 1;
-var x, svg, gBars, I = {};
+var x, svg, gBars;
 
 // Model calendar: every modelled year has 8760 h and no Feb 29 (the data are
 // 8760-h blocks; see esfex.utils.temporal). Hour h is in year
@@ -65,7 +65,6 @@ function applyTheme(t) {
 function boot(data) {
     baseYear = data.base_year || 2025;
     horizon = data.horizon_hours || 8760;
-    I = data.i18n || {};
     if (data.theme) applyTheme(data.theme);
     // Flatten groups → rows (a header row per category, then element rows).
     rows = [];
@@ -80,20 +79,35 @@ function boot(data) {
     schedule = (data.schedule || []).map(function (o) {
         var c = Object.assign({ _uid: uidSeq++ }, o); return c;
     });
-    // Static labels
-    document.getElementById("tb-title").textContent = document.title = I.title || "Interruptions";
-    document.getElementById("tb-hint").textContent = I.empty || "";
-    document.getElementById("side-placeholder").textContent = I.empty || "";
-    document.getElementById("lbl-start").textContent = I.start || "Start";
-    document.getElementById("lbl-end").textContent = I.end || "End";
-    document.getElementById("lbl-avail").textContent = I.availability || "Availability";
-    document.getElementById("lbl-label").textContent = I.label || "Note";
-    document.getElementById("lbl-recurring").textContent = I.recurring || "Repeat every year";
-    document.getElementById("btn-delete").textContent = I.delete || "Delete";
+    applyLabels();
     wireForm();
     render();
     if (data.focus) focusRow(data.focus.element_type, data.focus.element_id);
 }
+
+// Static labels (web.interruptions.*; the category headers come translated
+// from Python with the data).
+function applyLabels() {
+    var text = {
+        "tb-title": _t("web.interruptions.title"),
+        "tb-hint": _t("web.interruptions.empty_hint"),
+        "side-placeholder": _t("web.interruptions.empty_hint"),
+        "lbl-start": _t("web.interruptions.start"),
+        "lbl-end": _t("web.interruptions.end"),
+        "lbl-avail": _t("web.interruptions.availability"),
+        "lbl-label": _t("web.interruptions.note"),
+        "lbl-recurring": _t("web.interruptions.recurring"),
+        "btn-delete": _t("web.interruptions.delete"),
+    };
+    for (var id in text) document.getElementById(id).textContent = text[id];
+    document.title = text["tb-title"];
+}
+
+// Language changed (web_i18n): labels and month names in the new language.
+window.onEsfexLanguageChanged = function () {
+    applyLabels();
+    if (rows.length) render();
+};
 
 function focusRow(cat, id) {
     var r = rowOf[cat + " " + id];
@@ -138,7 +152,8 @@ function render() {
                 gGrid.append("text").attr("class", "axis-label")
                     .attr("x", x(h) + 4).attr("y", 16)
                     .text(new Date(Date.UTC(2025, mo, 1))
-                          .toLocaleString("default", { month: "short", timeZone: "UTC" }));
+                          .toLocaleString(window.ESFEX_LANG || "default",
+                                          { month: "short", timeZone: "UTC" }));
             }
         }
     } else {
