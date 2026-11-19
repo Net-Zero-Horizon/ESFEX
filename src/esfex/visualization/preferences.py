@@ -100,7 +100,6 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "default_primary_energy": False,
         "default_log_level": "basic",
         "log_to_file": False,
-        "default_output_dir": "",
     },
     "results": {
         "chart_backend": "matplotlib",
@@ -118,7 +117,6 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "max_workers": 1,
         "cache_strategy": "preload",
         "debug_mode": False,
-        "cache_dir": str(Path.home() / ".cache" / "esfex"),
         "telemetry_opt_out": False,
     },
 }

@@ -1096,7 +1096,6 @@
     "sim_default_pe": "Ativar energia primária por predefinição",
     "sim_default_log_level": "Nível de registo predefinido:",
     "sim_log_to_file": "Escrever registo da simulação num ficheiro",
-    "sim_default_output_dir": "Diretório de saída predefinido:",
     "chart_backend": "Motor de gráficos:",
     "export_dpi": "DPI de exportação:",
     "default_export_format": "Formato de exportação predefinido:",
@@ -1116,7 +1115,6 @@
     "cache_preload": "Pré-carregar (tudo ao iniciar)",
     "cache_lazy": "Diferido (a pedido)",
     "debug_mode": "Modo de depuração",
-    "cache_dir": "Diretório de cache:",
     "telemetry_opt_out": "Desativar telemetria",
     "reset_all": "Repor todas as preferências",
     "reset_all_confirm_title": "Repor preferências",
@@ -1199,12 +1197,6 @@
     "infra_applied_msg": "{n} simplificação(ões) aplicada(s). Execute novamente a validação para ver os resultados atualizados.",
     "infra_none_checked": "Nenhuma sugestão selecionada. Selecione as que pretende aplicar.",
     "infra_no_groups": "Nenhum grupo fundível encontrado neste âmbito."
-  },
-  "simulation": {
-    "title": "Simulação ESFEX",
-    "preparing": "A preparar a simulação...",
-    "cancel_btn": "Cancelar",
-    "close_btn": "Fechar"
   },
   "sensitivity": {
     "title": "Análise de Sensibilidade Global (Sobol)",
@@ -1497,7 +1489,6 @@
     "hour_mismatch_title": "Incompatibilidade no número de horas",
     "hour_mismatch_msg": "O ficheiro carregado tem {n1} horas mas o nó \"{name}\" (índice {idx}) já tem {n2} horas.\nTodos os nós têm de partilhar o mesmo número de horas.",
     "validating": "A validar a configuração do sistema...",
-    "running_sim": "A executar a simulação...",
     "no_year_data": "Sem resultados detalhados para o ano {year}.",
     "no_gen_data": "Sem dados de geração.",
     "node_no_centroid": "Este nó não tem centroide definido. Use 'Colocar' para defini-lo no mapa primeiro."
