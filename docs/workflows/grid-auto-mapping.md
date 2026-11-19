@@ -127,7 +127,7 @@ The number of clusters is chosen with the elbow method (see [GM-3](#gm-3-elbow-m
 **Node naming:** clustered nodes are named after the place they fall in:
 
 1. Nominatim (OpenStreetMap) reverse geocoding, at about one request per 1.1 s and stopping after 80 calls or 30 s.
-2. For the remaining nodes, an offline point-in-polygon lookup in the Natural Earth admin-1 boundaries (state, province, prefecture). They are not shipped with ESFEX nor downloaded on demand: put the 1:10m *Admin 1 – States, Provinces* shapefile from [naturalearthdata.com](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/) at `$ESFEX_DATA_ROOT/data/gridded/shapefiles/ne_10m_admin_1/ne_10m_admin_1_states_provinces.shp` (with its `.shx`, `.dbf` and `.prj`; `ESFEX_DATA_ROOT` defaults to `~/.esfex/data`). Without it this step is skipped.
+2. For the remaining nodes, an offline point-in-polygon lookup in the Natural Earth admin-1 boundaries (state, province, prefecture). They are not shipped with ESFEX nor downloaded on demand: put the 1:10m *Admin 1 – States, Provinces* shapefile from [naturalearthdata.com](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/) at `$ESFEX_DATA_ROOT/data/gridded/shapefiles/ne_10m_admin_1/ne_10m_admin_1_states_provinces.shp` (with its `.shx`, `.dbf` and `.prj`; `ESFEX_DATA_ROOT` defaults to `~/.esfex/data`). Without it this step is skipped, and ESFEX logs a warning once with that path.
 3. Otherwise "Node i".
 
 Repeated names get a numeric suffix ("Springfield", "Springfield 2").

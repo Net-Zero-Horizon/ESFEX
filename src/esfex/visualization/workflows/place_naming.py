@@ -10,6 +10,10 @@ usage policy.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Address fields from most to least specific. The first present one wins.
 _PLACE_KEYS = (
     "city", "town", "village", "municipality", "hamlet", "suburb",
@@ -50,7 +54,8 @@ def reverse_geocode_place(lat: float, lng: float, *, timeout: float = 5.0) -> st
         return None
 
 
-# Cached (STRtree, geometries, names) for the bundled admin-1 polygons.
+# Cached (STRtree, geometries, names) for the admin-1 polygons; False once the
+# shapefile is found missing or unreadable, so later nodes do not retry it.
 _ADMIN1_INDEX = None
 
 
@@ -64,15 +69,32 @@ def reverse_geocode_admin1_offline(lat: float, lng: float) -> str | None:
     (hundreds of nodes), so most nodes would otherwise keep a generic "Node i"
     name. A point-in-polygon lookup against the admin-1 boundaries gives every
     node a real region name with no network and no rate limit. Returns ``None``
-    for points outside all admin polygons (e.g. open ocean)."""
+    for points outside all admin polygons (e.g. open ocean). A missing or
+    unreadable shapefile is reported once and not read again."""
     global _ADMIN1_INDEX
+    if _ADMIN1_INDEX is False:
+        return None
     try:
         if _ADMIN1_INDEX is None:
+            from esfex.paths import ADMIN1_SHP
+            if not ADMIN1_SHP.is_file():
+                _ADMIN1_INDEX = False
+                logger.warning(
+                    "Node names: no Natural Earth admin-1 shapefile at %s, so nodes "
+                    "Nominatim did not name keep a generic name. Download "
+                    "ne_10m_admin_1_states_provinces from naturalearthdata.com and "
+                    "put it there to name them offline.", ADMIN1_SHP)
+                return None
             import geopandas as gpd
             from shapely.strtree import STRtree
 
-            from esfex.paths import ADMIN1_SHP
-            gdf = gpd.read_file(ADMIN1_SHP)
+            try:
+                gdf = gpd.read_file(ADMIN1_SHP)
+            except Exception as exc:
+                _ADMIN1_INDEX = False
+                logger.warning("Node names: could not read the admin-1 shapefile "
+                               "%s (%s); nodes keep a generic name.", ADMIN1_SHP, exc)
+                return None
             namecol = next(
                 (c for c in ("name", "name_en", "gn_name", "woe_name",
                              "NAME", "name_local")
