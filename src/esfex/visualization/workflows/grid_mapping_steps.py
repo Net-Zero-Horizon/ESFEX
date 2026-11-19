@@ -1790,33 +1790,38 @@ class GridMappingBuildStep(QWidget):
         self._model.stateLoaded.emit()
 
         # Assemble the result text.
+        def _header(key):
+            return f"\u2500\u2500 {tr(key)} \u2500\u2500\n"
+
         sections = []
         if res.get("build_summary"):
             sections.append(res["build_summary"])
         if res.get("inference_summary"):
-            sections.append(
-                "\u2500\u2500 Parameter Inference \u2500\u2500\n" + res["inference_summary"])
+            sections.append(_header("grid_builder.report_section_inference")
+                            + res["inference_summary"])
         if res.get("simplify_summary"):
-            sections.append(
-                "\u2500\u2500 Simplification \u2500\u2500\n" + res["simplify_summary"])
+            sections.append(_header("grid_builder.report_section_simplification")
+                            + res["simplify_summary"])
         if res.get("island_summary"):
-            sections.append(
-                "\u2500\u2500 Isolated Cleanup \u2500\u2500\n" + res["island_summary"])
+            sections.append(_header("grid_builder.report_section_cleanup")
+                            + res["island_summary"])
         if self._phase_timings:
             total_s = sum(dt for _, dt in self._phase_timings)
-            timing_lines = [f"  {label}: {dt:.1f}s" for label, dt in self._phase_timings]
-            timing_lines.append(f"  Total: {total_s:.1f}s")
-            sections.append(
-                "\u2500\u2500 Timing \u2500\u2500\n" + "\n".join(timing_lines))
+            timing_lines = ["  " + tr("grid_builder.report_timing_line",
+                                      label=label, seconds=f"{dt:.1f}")
+                            for label, dt in self._phase_timings]
+            timing_lines.append("  " + tr("grid_builder.report_timing_total",
+                                          seconds=f"{total_s:.1f}"))
+            sections.append(_header("grid_builder.report_section_timing")
+                            + "\n".join(timing_lines))
         self._result_text.setPlainText("\n\n".join(sections))
 
         if res.get("cancelled"):
             self._lbl_build_status.setText(tr("grid_builder.build_cancelled_partial_network_shown"))
         else:
             level = res.get("simplify_level", 0)
-            head = "Network built"
-            head += (f"; simplified at level {level}." if level > 0
-                     else "; cleanup pass applied.")
+            head = (tr("grid_builder.report_built_simplified", level=level)
+                    if level > 0 else tr("grid_builder.report_built_cleanup"))
             self._lbl_build_status.setText(head)
 
         self._built = True

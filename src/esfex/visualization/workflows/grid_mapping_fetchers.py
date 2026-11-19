@@ -21,6 +21,8 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QThread, Signal
 
+from esfex.visualization.i18n import tr
+
 logger = logging.getLogger(__name__)
 
 # Voltage tag parsing (see _parse_voltage_tag).
@@ -878,7 +880,8 @@ def deduplicate_features(
         if progress is not None and items:
             progress(msg)
 
-    _emit(generators, f"Merging {len(generators)} generators…")
+    _emit(generators, tr("grid_builder.progress_merging_generators",
+                         count=len(generators)))
     # OSM-authoritative: drop within-source plant aggregates, then keep every
     # OSM generator and add another source's generator only where OSM has none
     # nearby. Never merges co-located units, so real multi-unit plants survive.
@@ -887,23 +890,26 @@ def deduplicate_features(
             _drop_plant_aggregates(generators), gen_gap_km,
         )
     )
-    _emit(batteries, f"Merging {len(batteries)} batteries…")
+    _emit(batteries, tr("grid_builder.progress_merging_batteries",
+                        count=len(batteries)))
     kept_bats = _proximity_dedup(
         batteries, proximity_km, capacity_check=True,
     )
     # For static infrastructure, capacity is rarely populated; rely
     # on proximity alone.
-    _emit(substations, f"Merging {len(substations)} substations…")
+    _emit(substations, tr("grid_builder.progress_merging_substations",
+                          count=len(substations)))
     kept_subs = _proximity_dedup(
         substations, proximity_km, capacity_check=False,
     )
-    _emit(transformers, f"Merging {len(transformers)} transformers…")
+    _emit(transformers, tr("grid_builder.progress_merging_transformers",
+                           count=len(transformers)))
     kept_trs = _proximity_dedup(
         transformers, proximity_km * 0.5, capacity_check=False,
     )
 
     # --- Line dedup with cross-source enrichment ---
-    _emit(lines, f"Matching {len(lines)} transmission lines across sources…")
+    _emit(lines, tr("grid_builder.progress_matching_lines", count=len(lines)))
     osm_lines = [l for l in lines if l.source == "osm"]
     gf_lines = [l for l in lines if l.source == "gridfinder"]
     kept_lines: list[GridFeature] = list(osm_lines)
@@ -952,8 +958,8 @@ class FetchFinalizeWorker(QThread):
         feats = self._features
 
         if feats and self._polygon:
-            self.progress.emit(
-                f"Clipping {len(feats)} features to the selected region…")
+            self.progress.emit(tr("grid_builder.progress_clipping",
+                                  count=len(feats)))
             t0 = _time.perf_counter()
             before = len(feats)
             feats = filter_features_by_polygon(feats, self._polygon)
@@ -966,7 +972,7 @@ class FetchFinalizeWorker(QThread):
                 feats, progress=lambda msg: self.progress.emit(msg))
             timings["deduplicate"] = _time.perf_counter() - t0
 
-        self.progress.emit("Summarizing results…")
+        self.progress.emit(tr("grid_builder.progress_summarizing"))
         counts: dict[str, int] = {}
         for f in feats:
             counts[f.feature_type] = counts.get(f.feature_type, 0) + 1
@@ -1069,7 +1075,7 @@ class OSMGridFetcher(QThread):
         import overpy
         import requests
 
-        self.progress.emit(5, "Connecting to Overpass API...")
+        self.progress.emit(5, tr("grid_builder.progress_overpass_connecting"))
         api = overpy.Overpass(url=self._OVERPASS_ENDPOINTS[0])
         # Overpass rejects urllib's default User-Agent with HTTP 406, so bypass
         # overpy's urlopen-based transport and POST via requests with an
@@ -1085,10 +1091,7 @@ class OSMGridFetcher(QThread):
         n_tiles = len(tiles)
         if n_tiles > 1:
             self.progress.emit(
-                10,
-                f"Large region: splitting into {n_tiles} tiles to stay "
-                "under the Overpass server timeout...",
-            )
+                10, tr("grid_builder.progress_overpass_tiles", count=n_tiles))
 
         features: list[GridFeature] = []
         seen_ids: set[str] = set()
@@ -1214,9 +1217,10 @@ class OSMGridFetcher(QThread):
                         base = 15 + int(70 * done / max(total_est, 1))
                         self.progress.emit(
                             min(base, 85),
-                            f"Querying Overpass tile {done}/{total_est}..."
+                            tr("grid_builder.progress_overpass_tile",
+                               done=done, total=total_est)
                             if total_est > 1
-                            else "Querying Overpass API (this may take a while)...",
+                            else tr("grid_builder.progress_overpass_query"),
                         )
                         if kind == "ok":
                             _merge_result(payload)
@@ -1265,7 +1269,7 @@ class OSMGridFetcher(QThread):
         # reported as genuinely missing.
         if failed and not self._cancelled:
             self.progress.emit(
-                86, f"Retrying {len(failed)} failed tile(s) after a pause...")
+                86, tr("grid_builder.progress_overpass_retry", count=len(failed)))
             logger.warning(
                 "Retrying %d failed OSM tile(s) after a %ds recovery pause...",
                 len(failed), self._RETRY_PAUSE_S,
@@ -1307,7 +1311,8 @@ class OSMGridFetcher(QThread):
                 "timeout", subdivided,
             )
 
-        self.progress.emit(90, f"Filtering (voltage >= {self.min_voltage_kv} kV)...")
+        self.progress.emit(90, tr("grid_builder.progress_filtering_voltage",
+                                  kv=self.min_voltage_kv))
         features = self._apply_filters(features)
 
         # Best-effort fuel-routing roads: a SEPARATE, bounded pass that runs
@@ -1323,12 +1328,11 @@ class OSMGridFetcher(QThread):
 
         if failed_tiles:
             self.progress.emit(
-                100,
-                f"OSM: {len(features)} features — WARNING: {failed_tiles} "
-                f"tile(s) failed after retry, data is INCOMPLETE",
-            )
+                100, tr("grid_builder.progress_osm_incomplete",
+                        count=len(features), failed=failed_tiles))
         else:
-            self.progress.emit(100, f"OSM: {len(features)} features found")
+            self.progress.emit(100, tr("grid_builder.progress_osm_found",
+                                       count=len(features)))
         return features
 
     # ── Tiling + query helpers ───────────────────────────────────
@@ -1540,10 +1544,7 @@ class OSMGridFetcher(QThread):
             return []
 
         self.progress.emit(
-            92,
-            f"Fetching fuel-routing roads over {len(road_tiles)} tile(s) "
-            "(best-effort)...",
-        )
+            92, tr("grid_builder.progress_roads", count=len(road_tiles)))
         out: list = []
         seen: set = set()
         t0 = time.time()
@@ -1559,7 +1560,8 @@ class OSMGridFetcher(QThread):
                     out.append(rf)
             self.progress.emit(
                 min(92 + int(6 * (k + 1) / len(road_tiles)), 98),
-                f"Fuel-routing roads: tile {k + 1}/{len(road_tiles)}...",
+                tr("grid_builder.progress_roads_tile", done=k + 1,
+                   total=len(road_tiles)),
             )
         return out
 
@@ -2398,7 +2400,7 @@ class WRIGridFetcher(QThread):
     def _fetch(self) -> list[GridFeature]:
         import pandas as pd
 
-        self.progress.emit(10, "Downloading WRI power plant database...")
+        self.progress.emit(10, tr("grid_builder.progress_wri_download"))
         resp = _http_get_with_retry(
             self._CSV_URL, timeout=60,
             cancelled_cb=lambda: self._cancelled,
@@ -2407,7 +2409,7 @@ class WRIGridFetcher(QThread):
         if self._cancelled:
             return []
 
-        self.progress.emit(40, "Parsing CSV...")
+        self.progress.emit(40, tr("grid_builder.progress_parsing_csv"))
         df = pd.read_csv(io.StringIO(resp.text), low_memory=False)
 
         # Filter by bbox
@@ -2422,7 +2424,8 @@ class WRIGridFetcher(QThread):
         if self._cancelled:
             return []
 
-        self.progress.emit(60, f"Processing {len(df)} power plants...")
+        self.progress.emit(60, tr("grid_builder.progress_wri_processing",
+                                  count=len(df)))
 
         # Capacity filter
         if "capacity_mw" in df.columns:
@@ -2492,7 +2495,8 @@ class WRIGridFetcher(QThread):
                 },
             ))
 
-        self.progress.emit(100, f"WRI: {len(features)} power plants found")
+        self.progress.emit(100, tr("grid_builder.progress_wri_found",
+                                   count=len(features)))
         return features
 
 
@@ -2582,7 +2586,7 @@ class GEMGridFetcher(QThread):
     def _fetch(self) -> list[GridFeature]:
         import pandas as pd
 
-        self.progress.emit(10, "Downloading GEM power plant database (~24 MB)...")
+        self.progress.emit(10, tr("grid_builder.progress_gem_download"))
         resp = _http_get_with_retry(
             self._XLSX_URL, timeout=180,
             cancelled_cb=lambda: self._cancelled,
@@ -2591,7 +2595,7 @@ class GEMGridFetcher(QThread):
         if self._cancelled:
             return []
 
-        self.progress.emit(40, "Parsing Excel file...")
+        self.progress.emit(40, tr("grid_builder.progress_parsing_excel"))
         df = pd.read_excel(
             io.BytesIO(resp.content),
             engine="openpyxl",
@@ -2620,7 +2624,8 @@ class GEMGridFetcher(QThread):
         if self._cancelled:
             return []
 
-        self.progress.emit(60, f"Processing {len(df)} GEM power plants...")
+        self.progress.emit(60, tr("grid_builder.progress_gem_processing",
+                                  count=len(df)))
 
         # Capacity filter
         if "Capacity (MW)" in df.columns:
@@ -2729,10 +2734,13 @@ class GEMGridFetcher(QThread):
                 raw_tags=raw_tags,
             ))
 
-        skip_note = (f" ({skipped_status} non-operating skipped)"
-                     if skipped_status else "")
-        self.progress.emit(
-            100, f"GEM: {len(features)} operating power plants found{skip_note}")
+        if skipped_status:
+            done_msg = tr("grid_builder.progress_gem_found_skipped",
+                          count=len(features), skipped=skipped_status)
+        else:
+            done_msg = tr("grid_builder.progress_gem_found",
+                          count=len(features))
+        self.progress.emit(100, done_msg)
         return features
 
 
@@ -2791,7 +2799,7 @@ class GridFinderFetcher(QThread):
         intersect the bounding box (paginated), returning them as line
         ``GridFeature``s with geometry only — the builder derives their
         electrical metadata from the network they connect."""
-        self.progress.emit(5, "Querying GridFinder (predicted lines) by region...")
+        self.progress.emit(5, tr("grid_builder.progress_gridfinder_query"))
 
         base = {
             "where": "source='gridfinder'",   # predicted only; OSM copies dropped
@@ -2824,14 +2832,16 @@ class GridFinderFetcher(QThread):
             offset += len(page)
             self.progress.emit(
                 min(90, 10 + offset // 100),
-                f"GridFinder: {len(features)} predicted line(s)...")
+                tr("grid_builder.progress_gridfinder_page",
+                   count=len(features)))
             # Last page: fewer than a full page AND server didn't flag more.
             if (len(page) < self._PAGE
                     and not gj.get("properties", {}).get("exceededTransferLimit")):
                 break
 
         self.progress.emit(
-            100, f"GridFinder: {len(features)} predicted line segment(s)")
+            100, tr("grid_builder.progress_gridfinder_done",
+                    count=len(features)))
         return features
 
     def _parse_geojson(self, geojson: dict) -> list[GridFeature]:

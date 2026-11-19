@@ -54,74 +54,72 @@ class ParseResult:
     # element, id, name, lat, lng, kv, was (0 = untagged), rule, detail.
     voltage_decisions: list[dict] = field(default_factory=list)
 
+    # (counter attribute, translation key of its "{count} …(s)" text), in
+    # report order.
+    _SUMMARY_COUNTS = (
+        ("buses_added", "grid_builder.report_count_buses"),
+        ("generators_added", "grid_builder.report_count_generators"),
+        ("batteries_added", "grid_builder.report_count_batteries"),
+        ("lines_added", "grid_builder.report_count_lines"),
+        ("fuel_entries_added", "grid_builder.report_count_fuel_entries"),
+        ("fuel_routes_added", "grid_builder.report_count_fuel_routes"),
+        ("zones_added", "grid_builder.report_count_zones"),
+        ("electrolyzers_added", "grid_builder.report_count_electrolyzers"),
+        ("transformers_added", "grid_builder.report_count_transformers"),
+        ("acdc_converters_added", "grid_builder.report_count_acdc_converters"),
+        ("freq_converters_added", "grid_builder.report_count_freq_converters"),
+        ("fuel_storages_added", "grid_builder.report_count_fuel_storages"),
+        ("fuels_created", "grid_builder.report_count_fuels"),
+        ("technologies_created", "grid_builder.report_count_technologies"),
+    )
+
     def summary(self) -> str:
-        parts = []
-        if self.buses_added:
-            parts.append(f"{self.buses_added} bus(es)")
-        if self.generators_added:
-            parts.append(f"{self.generators_added} generator(s)")
-        if self.batteries_added:
-            parts.append(f"{self.batteries_added} battery(ies)")
-        if self.lines_added:
-            parts.append(f"{self.lines_added} transmission line(s)")
-        if self.fuel_entries_added:
-            parts.append(f"{self.fuel_entries_added} fuel entry(ies)")
-        if self.fuel_routes_added:
-            parts.append(f"{self.fuel_routes_added} fuel route(s)")
-        if self.zones_added:
-            parts.append(f"{self.zones_added} development zone(s)")
-        if self.electrolyzers_added:
-            parts.append(f"{self.electrolyzers_added} electrolyzer(s)")
-        if self.transformers_added:
-            parts.append(f"{self.transformers_added} transformer(s)")
-        if self.acdc_converters_added:
-            parts.append(f"{self.acdc_converters_added} AC/DC converter(s)")
-        if self.freq_converters_added:
-            parts.append(f"{self.freq_converters_added} freq. converter(s)")
-        if self.fuel_storages_added:
-            parts.append(f"{self.fuel_storages_added} fuel storage(s)")
-        if self.fuels_created:
-            parts.append(f"{self.fuels_created} fuel(s)")
-        if self.technologies_created:
-            parts.append(f"{self.technologies_created} technology(ies)")
-        msg = "Created: " + ", ".join(parts) if parts else "No elements created."
+        from esfex.visualization.i18n import tr
+        parts = [tr(key, count=getattr(self, attr))
+                 for attr, key in self._SUMMARY_COUNTS if getattr(self, attr)]
+        msg = (tr("grid_builder.report_created", items=", ".join(parts))
+               if parts else tr("grid_builder.report_no_elements"))
         if self.warnings:
-            msg += f"\n\nWarnings ({len(self.warnings)}):\n"
+            msg += "\n\n" + tr("grid_builder.report_warnings_header",
+                               count=len(self.warnings)) + "\n"
             msg += "\n".join(f"  - {w}" for w in self.warnings)
         if self.voltage_decisions:
             msg += "\n\n" + self.voltage_summary()
         return msg
 
     # Rules that change or invent a tagged value are listed one by one; the
-    # routine inference from tagged lines is only counted.
+    # routine inference from tagged lines is only counted. Values: the
+    # translation key of the rule's title.
     _VOLTAGE_RULES = {
-        "line_consensus": "Station tag overruled by its lines",
-        "off_standard_level": "Level no line carries, snapped to a line level",
-        "name_level": "Level no line carries, taken from the station's name",
-        "decimal_slip": "Level no line carries, misplaced decimal corrected",
-        "isolated_mv": ("Not connected to any tagged voltage (isolated grid "
-                        "or loose element), set to MV; kept below the floor"),
-        "unreached_mv": "Under a tagged grid but no tagged line reaches it, "
-                        "set to MV",
+        "line_consensus": "grid_builder.voltage_rule_line_consensus",
+        "off_standard_level": "grid_builder.voltage_rule_off_standard_level",
+        "name_level": "grid_builder.voltage_rule_name_level",
+        "decimal_slip": "grid_builder.voltage_rule_decimal_slip",
+        "isolated_mv": "grid_builder.voltage_rule_isolated_mv",
+        "unreached_mv": "grid_builder.voltage_rule_unreached_mv",
     }
 
     def voltage_summary(self) -> str:
         """The voltage decisions as text: corrections and defaults listed,
         inference from tagged lines counted."""
         from collections import Counter
+
+        from esfex.visualization.i18n import tr
         d = self.voltage_decisions
         inferred = sum(1 for x in d if x.get("rule") == "inferred_from_lines")
-        lines = [f"Voltage decisions ({len(d)}):"]
+        lines = [tr("grid_builder.report_voltage_header", count=len(d))]
         if inferred:
-            lines.append(f"  {inferred} bus(es) took the voltage of their "
-                         f"tagged lines.")
-        for rule, title in self._VOLTAGE_RULES.items():
+            lines.append("  " + tr("grid_builder.report_voltage_inferred",
+                                   count=inferred))
+        for rule, title_key in self._VOLTAGE_RULES.items():
             items = [x for x in d if x.get("rule") == rule]
             if not items:
                 continue
             levels = Counter(f"{x['kv']:g} kV" for x in items)
-            lines.append(f"  {title}: {len(items)} "
-                         f"({', '.join(f'{k} ×{n}' for k, n in levels.items())})")
+            lines.append("  " + tr(
+                "grid_builder.report_voltage_rule_row", title=tr(title_key),
+                count=len(items),
+                levels=", ".join(f"{k} ×{n}" for k, n in levels.items())))
             if rule.endswith("_mv"):
                 # Often hundreds of lone buses: one line per node.
                 by_node: dict[str, list] = {}
@@ -129,10 +127,15 @@ class ParseResult:
                     by_node.setdefault(x.get("node") or "?", []).append(x)
                 for node, xs in sorted(by_node.items()):
                     names = [x.get("name") or x.get("id") for x in xs]
-                    more = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
-                    lines.append(f"    - {node}: {len(xs)} bus(es) at "
-                                 f"{xs[0]['kv']:g} kV: "
-                                 f"{', '.join(names[:3])}{more}")
+                    fmt = dict(node=node, count=len(xs),
+                               kv=f"{xs[0]['kv']:g}",
+                               names=", ".join(names[:3]))
+                    if len(names) > 3:
+                        row = tr("grid_builder.report_voltage_node_row_more",
+                                 more=len(names) - 3, **fmt)
+                    else:
+                        row = tr("grid_builder.report_voltage_node_row", **fmt)
+                    lines.append("    - " + row)
                 continue
             for x in items:
                 was = f"{x['was']:g} kV → " if x.get("was") else ""
