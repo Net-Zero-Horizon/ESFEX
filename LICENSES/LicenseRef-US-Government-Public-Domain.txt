@@ -1,0 +1,18 @@
+U.S. Government works — public domain
+
+Sources:
+- 17 U.S.C. § 105: copyright protection is not available for any work of the
+  United States Government.
+- U.S. Energy Information Administration, Copyrights and Reuse:
+  https://www.eia.gov/about/copyrights_reuse.php
+
+EIA: "U.S. government publications are in the public domain and are not subject
+to copyright protection. You may use and/or distribute any of our data, files,
+databases, reports, graphs, charts, and other information products." EIA asks
+for an acknowledgment that includes the publication date, such as
+"Source: U.S. Energy Information Administration (Oct 2008)."
+
+Acknowledgment used by ESFEX: Source: U.S. Energy Information Administration,
+State Energy Data System (SEDS) (see DATA_SOURCES.md).
+
+This file is a summary for REUSE purposes; the terms on the pages above prevail.

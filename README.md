@@ -440,3 +440,7 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for th
 ## License
 
 ESFEX is released under the **Apache License 2.0** — see [LICENSE](LICENSE) for the full text.
+Third-party data shipped with ESFEX (the demand model's climate, population, land and
+energy-statistics grids) and the JavaScript libraries bundled with Studio keep their own
+licences; [DATA_SOURCES.md](DATA_SOURCES.md) lists them with the attributions and citations
+their terms ask for, and [LICENSES/](LICENSES) holds the licence texts.

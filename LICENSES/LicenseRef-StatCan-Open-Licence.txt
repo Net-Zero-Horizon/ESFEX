@@ -1,0 +1,35 @@
+Statistics Canada Open Licence
+
+Full text: https://www.statcan.gc.ca/en/terms-conditions/open-licence
+
+Summary of the terms:
+
+- Grant: Statistics Canada grants a worldwide, royalty-free, non-exclusive
+  licence to use, reproduce, publish, distribute and sell the Information and
+  value-added products made from it, and to sublicense those rights, provided
+  that the Information is reproduced accurately, Statistics Canada's endorsement
+  is not implied, the source is not misrepresented, and the Information is not
+  used to identify individuals or organizations.
+- Attribution: where the Information is used as-is, keep the notice
+  "Source: Statistics Canada, name of product, reference date."; where it is
+  part of a value-added product, the product carries
+  "Adapted from Statistics Canada, name of product, reference date." and
+  "This does not constitute an endorsement by Statistics Canada of this product."
+- Rights in value-added products belong to their makers; Statistics Canada and
+  third parties keep their rights in the Information.
+- Statistics Canada and Government of Canada names, logos and symbols may not be
+  used without written authorization.
+- The Information is provided "as is", without warranty; Statistics Canada is
+  not liable for errors or losses.
+- The licence ends automatically on breach. It is governed by the laws of
+  Ontario and the applicable federal laws of Canada.
+
+Notice for the ESFEX files that use Statistics Canada data:
+
+    Adapted from Statistics Canada, Table 25-10-0029-01 Supply and demand of
+    primary and secondary energy in terajoules, annual, reference period 2015 to
+    2021. This does not constitute an endorsement by Statistics Canada of this
+    product.
+
+This file is a summary for REUSE purposes; the full licence at the address
+above prevails.

@@ -175,6 +175,7 @@ nav:
     - Glossary: reference/glossary.md
     - Changelog: reference/changelog.md
     - Bibliography: reference/bibliography.md
+    - Data Sources & Licences: reference/data-sources.md
   - Contributing:
     - Development Setup: contributing/development-setup.md
     - Testing: contributing/testing.md
