@@ -1,13 +1,13 @@
 """Unified training pipeline for demand estimation models.
 
 Builds a single hourly dataset from real demand data (Parquet files),
-trains XGBoost or TFT using temporal cross-validation, and reports
-multi-resolution validation metrics.
+trains the XGBoost shape model using temporal cross-validation, and
+reports multi-resolution validation metrics.
 
 No synthetic data — models learn exclusively from real demand.
 
 Usage:
-    esfex train-demand-model [--engine xgboost|tft] [--cache-dir PATH]
+    esfex train-demand-model [--cache-dir PATH] [--folds N] [--output PATH]
 """
 
 from __future__ import annotations
@@ -46,19 +46,16 @@ FEATURE_COLS = [
     "latitude", "longitude",
     # Temperature lag/memory features (daily-resolution, broadcast to hours).
     # Training: computed from ERA5 hourly.
-    # Inference (ECVI): precomputed from CMIP6 3hr subdaily data.
     "temp_1d_lag", "temp_7d_mean", "temp_30d_mean", "temp_trend_7d",
     "temp_daily_max", "temp_daily_min", "temp_diurnal_range",
-    # Demand-shape autoregressive lags: DISABLED for ECVI-compatible model
-    # (no past demand available at grid pixels). The 32-feat parity variant
-    # ("demand_model_ar.xgb") keeps them for TFT comparison only.
-    # "shape_lag_1h", "shape_lag_24h", "shape_lag_168h",
+    # No demand-shape autoregressive lags: forward per-node generation has
+    # no past demand to seed them.
 ]
 TARGET_COL = "shape_factor"
 
 # ISO3 → country_id encoding of a dataset build. It is written next to the
-# dataset and, when a model is saved, next to that model (the file ECVI's
-# XGBoost backend reads next to the model it loads).
+# dataset and, when a model is saved, next to that model (the file
+# demand_ml.load_country_map reads next to the model it loads).
 COUNTRY_MAP_FILENAME = "demand_xgb_country_map.json"
 
 
@@ -164,8 +161,7 @@ def _temperature_lag_features(temp_hourly: np.ndarray) -> dict[str, np.ndarray]:
         Hourly temperature in °C (typically n=8760).
 
     Returns dict with arrays of same length as ``temp_hourly``. Features live
-    at daily resolution (constant within each 24h block) so they match the
-    CMIP6 3hr-derived features used at ECVI inference time.
+    at daily resolution (constant within each 24h block).
     """
     n = len(temp_hourly)
     n_days = (n + 23) // 24
@@ -460,10 +456,9 @@ def build_unified_dataset(
 
     # Impute static-feature NaNs. When the GDP or population raster misses a
     # zone/country (small islands, remote peninsulas) `build_features_for_point`
-    # returns NaN for log_gdp_per_cap / log_pop_density. TimeSeriesDataSet
-    # refuses to train on NaN; fill with per-country median, falling back to
-    # the global median. This keeps the sample and leaves the rest of its
-    # features intact.
+    # returns NaN for log_gdp_per_cap / log_pop_density. Fill with the
+    # per-country median, falling back to the global median. This keeps the
+    # sample and leaves the rest of its features intact.
     for col in ("log_gdp_per_cap", "log_pop_density", "urbanization"):
         if col not in full.columns:
             continue
@@ -493,20 +488,7 @@ def build_unified_dataset(
         if full[col].isna().any():
             full[col] = full[col].fillna(full[col].median(skipna=True))
 
-    # Demand-shape autoregressive lags (1h, 24h, 168h) within each group_id.
-    # Matches TFT's time_varying_unknown_real access to shape_factor in the
-    # encoder window. Fills NaN at the start of each group with the per-group
-    # median (so first 168h remain usable). Only usable for training-time
-    # model comparison — inference on arbitrary pixels has no past demand.
     full = full.sort_values(["group_id", "time_idx"]).reset_index(drop=True)
-    for lag_h, col in [(1, "shape_lag_1h"), (24, "shape_lag_24h"),
-                        (168, "shape_lag_168h")]:
-        full[col] = full.groupby("group_id")[TARGET_COL].shift(lag_h)
-        # Fallback for initial NaN: per-group median (reasonable since shape
-        # has mean ≈ 1.0 already)
-        grp_med = full.groupby("group_id")[TARGET_COL].transform("median")
-        full[col] = full[col].fillna(grp_med)
-        full[col] = full[col].astype(np.float32)
 
     # country_id: stable integer encoding of ISO3 (sorted alphabetically so
     # new countries get a unique id and can be mapped to -1/unknown at inference)
@@ -826,20 +808,16 @@ def train_xgboost(
 
 
 def train_demand_model(
-    engine: str = "xgboost",
     dataset_dir: Optional[Path] = None,
     output_path: Optional[Path] = None,
     n_cv_folds: int = 3,
     exclude_country: Optional[str] = None,
     progress_cb: Optional[Callable[[int, str], None]] = None,
-    **kwargs,
 ) -> dict:
-    """Train demand model from the unified Parquet dataset.
+    """Train the XGBoost demand model from the unified Parquet dataset.
 
     Parameters
     ----------
-    engine : str
-        'xgboost' or 'tft'.
     dataset_dir : Path
         Path to Parquet dataset (from build-demand-dataset).
     output_path : Path
@@ -848,16 +826,8 @@ def train_demand_model(
         Number of temporal CV folds.
     exclude_country : str, optional
         ISO3 code to exclude (leave-one-country-out validation). The dataset
-        is built once; both engines train on it without that country.
-    **kwargs
-        TFT hyper-parameters, passed to ``demand_tft.train_tft_model``.
-        Other engines take none: an unknown keyword raises ``TypeError``.
+        is built once and the model trains on it without that country.
     """
-    if engine not in ("xgboost", "tft"):
-        raise ValueError(f"Unknown engine: {engine}")
-    if kwargs and engine != "tft":
-        raise TypeError(f"train_demand_model(engine={engine!r}) got unexpected "
-                        f"keyword arguments: {', '.join(sorted(kwargs))}")
     if dataset_dir is None:
         dataset_dir = DEMAND_DATASET_DIR
 
@@ -885,18 +855,7 @@ def train_demand_model(
         df = df[df["country"] != exclude_country].reset_index(drop=True)
         emit(42, f"Excluded {exclude_country}: {n_before - len(df):,} rows removed")
 
-    if engine == "xgboost":
-        if output_path is None:
-            output_path = MODELS_DIR / "demand_model.xgb"
-        return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit,
-                             country_to_id=country_to_id)
-    emit(45, "Launching TFT training...")
-    from esfex.models.demand_tft import train_tft_model
-    return train_tft_model(
-        dataset_dir=dataset_dir,
-        df=df,
-        output_path=output_path,
-        n_cv_folds=n_cv_folds,
-        progress_cb=emit,
-        **kwargs,
-    )
+    if output_path is None:
+        output_path = MODELS_DIR / "demand_model.xgb"
+    return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit,
+                         country_to_id=country_to_id)

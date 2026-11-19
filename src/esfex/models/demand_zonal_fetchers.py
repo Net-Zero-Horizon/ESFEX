@@ -1,7 +1,7 @@
 """Zonal demand fetchers (Option B, Phase 1 greenfield).
 
 These fetchers produce **per-zone** hourly load data instead of a single
-national total. Each zone becomes its own TFT training sample with
+national total. Each zone becomes its own training sample with
 features sampled at the zone's population-weighted centroid.
 
 Output: zonal Parquet files at

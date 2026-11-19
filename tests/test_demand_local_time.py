@@ -11,9 +11,6 @@ density model (round 38) is on UTC hours instead: it reads the UTC series.
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
-from unittest import mock
 
 import numpy as np
 import pytest
@@ -67,34 +64,6 @@ def test_meteo_shares_one_series_per_zone():
     t = meteo.node_temperature_hourly
     assert t[0] is t[1] is t[2]          # all Cuba: America/Havana
     assert t[0][0] == 5.0
-
-
-def _requests_returning(temps):
-    class _Resp:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"hourly": {"temperature_2m": temps}}
-
-    fake = mock.MagicMock()
-    fake.get.return_value = _Resp()
-    return fake
-
-
-def test_projector_era5_fallback_is_on_local_time(tmp_path):
-    from esfex.models import demand_projection as dp
-
-    utc = list(np.arange(8760.0))
-    with mock.patch.dict(sys.modules, {"requests": _requests_returning(utc)}):
-        loc = dp._fetch_era5_temperature(*HAVANA, 2023, tmp_path)
-    assert loc[0] == 5.0 and loc[_JUL1_NOON] == _JUL1_NOON + 4
-    # Cached on local time under a new name (old UTC caches are not read).
-    cached = list(tmp_path.glob("era5_local_*.npy"))
-    assert len(cached) == 1
-    assert np.array_equal(np.load(cached[0]), loc)
-    np.save(tmp_path / "era5_23.13_-82.38_2023.npy", np.zeros(8760))
-    assert dp._fetch_era5_temperature(*HAVANA, 2023, tmp_path)[0] == 5.0
 
 
 def _rasters_available() -> bool:

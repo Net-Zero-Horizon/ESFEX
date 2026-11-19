@@ -1,6 +1,6 @@
 """Zone centroid helpers for zonal demand refactor (Option B).
 
-For each zonal training sample the TFT model needs a (lat, lon) point at
+For each zonal training sample the demand model needs a (lat, lon) point at
 which to sample pixel features. A geometric centroid biases toward remote
 regions of a zone; a population-weighted centroid lands where demand
 actually lives. This module provides both, falling back to the geometric
