@@ -125,9 +125,8 @@ class ParseGeoAssetDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Header
-        header = QLabel(
-            f"<b>{asset_name}</b> — {len(self._features)} feature(s)"
-        )
+        header = QLabel(tr("geo_parse.header", name=asset_name,
+                           count=len(self._features)))
         layout.addWidget(header)
 
         # System selector (only if multiple systems)

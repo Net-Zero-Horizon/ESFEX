@@ -162,13 +162,14 @@ class SimulationDialog(QDialog):
             win_current = int(match.group(1))
             win_total = int(match.group(2))
             # Update status with window info, keep year context
-            year_match = _YEAR_RE.search(self._status_label.text())
-            year_str = ""
-            if year_match:
-                year_str = f"Year {year_match.group(1)} — "
-            elif hasattr(self, "_current_year"):
-                year_str = f"Year {self._current_year} — "
-            self._status_label.setText(f"{year_str}Window {win_current}/{win_total}")
+            year = getattr(self, "_current_year", None)
+            if year:
+                status = tr("simulation.year_window", year=year,
+                            current=win_current, total=win_total)
+            else:
+                status = tr("simulation.window", current=win_current,
+                            total=win_total)
+            self._status_label.setText(status)
             self._progress.setRange(0, win_total)
             self._progress.setValue(win_current)
             return
@@ -179,7 +180,8 @@ class SimulationDialog(QDialog):
             current = int(match.group(2))
             total = int(match.group(3))
             self._current_year = year
-            self._status_label.setText(f"Operational Dispatch — Year {year} ({current}/{total})")
+            self._status_label.setText(tr("simulation.dispatch_year", year=year,
+                                          current=current, total=total))
             self._progress.setRange(0, total)
             self._progress.setValue(current - 1)  # will fill when year completes
             return

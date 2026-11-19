@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
 
@@ -59,12 +60,14 @@ class BusForm(QWidget):
         layout.addRow(tr("bus_form.frequency"), self._frequency_hz)
 
         self._current_type = QComboBox()
-        self._current_type.addItems(["AC", "DC"])
+        add_choices(self._current_type, [("AC", "AC"), ("DC", "DC")])
         self._current_type.currentIndexChanged.connect(self._on_changed)
         layout.addRow(tr("bus_form.current_type"), self._current_type)
 
         self._bus_type = QComboBox()
-        self._bus_type.addItems(["PQ", "PV", "slack"])
+        add_choices(self._bus_type, [
+            ("PQ", "PQ"), ("PV", "PV"), ("slack", tr("bus_form.bus_type_slack")),
+        ])
         self._bus_type.currentIndexChanged.connect(self._on_bus_type_changed)
         layout.addRow(tr("bus_form.bus_type"), self._bus_type)
 
@@ -72,7 +75,11 @@ class BusForm(QWidget):
         # KCL terms (load_shed, reserves, demand). Connection buses force
         # demand_fraction = 0.
         self._role = QComboBox()
-        self._role.addItems(["connection", "load", "mixed"])
+        add_choices(self._role, [
+            ("connection", tr("bus_form.role_connection")),
+            ("load", tr("bus_form.role_load")),
+            ("mixed", tr("bus_form.role_mixed")),
+        ])
         self._role.currentIndexChanged.connect(self._on_role_changed)
         layout.addRow(tr("bus_form.role"), self._role)
 
@@ -123,17 +130,9 @@ class BusForm(QWidget):
         self._voltage_kv.setValue(bus.voltage_kv)
         self._frequency_hz.setValue(bus.frequency_hz)
 
-        ct_idx = self._current_type.findText(bus.current_type)
-        if ct_idx >= 0:
-            self._current_type.setCurrentIndex(ct_idx)
-
-        bt_idx = self._bus_type.findText(bus.bus_type)
-        if bt_idx >= 0:
-            self._bus_type.setCurrentIndex(bt_idx)
-
-        role_idx = self._role.findText(bus.role)
-        if role_idx >= 0:
-            self._role.setCurrentIndex(role_idx)
+        select_value(self._current_type, bus.current_type)
+        select_value(self._bus_type, bus.bus_type)
+        select_value(self._role, bus.role)
 
         self._demand_fraction.setValue(bus.demand_fraction)
         # Connection buses cannot carry demand — disable the field
@@ -151,7 +150,7 @@ class BusForm(QWidget):
             return
         self._multi_ids = element_ids
         self._current_id = element_ids[0]
-        self._system_label.setText(tr("bus_form.system_label", name=f"{len(element_ids)} buses selected"))
+        self._system_label.setText(tr("bus_form.n_selected", count=len(element_ids)))
         self._bus_id_label.setText(tr("bus_form.multi_selection"))
         self._updating = True
         # Populate parent_node combo (needed for combo matching)
@@ -169,7 +168,7 @@ class BusForm(QWidget):
         # A role picked here is the user's: the save-time role repair
         # (repair_bus_roles_and_demand) must keep it.
         self._role_edited = True
-        new_role = self._role.currentText()
+        new_role = combo_value(self._role)
         if new_role == "connection":
             self._updating = True
             self._demand_fraction.setValue(0.0)
@@ -187,7 +186,7 @@ class BusForm(QWidget):
 
     def _warn_if_duplicate_slack(self):
         """Inform the user when another bus is already designated as slack."""
-        if self._bus_type.currentText() != "slack":
+        if combo_value(self._bus_type) != "slack":
             return
         edited = set(self._multi_ids) if self._multi_ids else (
             {self._current_id} if self._current_id is not None else set()
@@ -231,7 +230,7 @@ class BusForm(QWidget):
             if isinstance(w, QLineEdit):
                 val = w.text()
             elif isinstance(w, QComboBox):
-                val = w.currentText()
+                val = combo_value(w)
             else:
                 val = w.value()
             for inst in instances:

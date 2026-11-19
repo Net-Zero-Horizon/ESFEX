@@ -95,7 +95,12 @@
     "trusted_no": "Não (ignorado ao iniciar)",
     "trust": "Confiar",
     "confirm_trust_title": "Confiar no plugin",
-    "confirm_trust": "Confiar no plugin \"{name}\" no estado atual? Ele será executado com acesso total aos seus arquivos e processos. Confie apenas em código que você conhece."
+    "confirm_trust": "Confiar no plugin \"{name}\" no estado atual? Ele será executado com acesso total aos seus arquivos e processos. Confie apenas em código que você conhece.",
+    "zip_filter": "Ficheiros ZIP (*.zip)",
+    "overwrite_prompt": "{error}\n\nSubstituir?",
+    "git_url": "URL do Git:",
+    "untrusted_host": "O servidor git {host} não está na lista de confiança predefinida (github, gitlab, bitbucket, codeberg, sourcehut). Instalar a partir de um servidor controlado por um atacante executa o __init__.py do plugin com todos os privilégios do processo.\n\nContinue apenas se confiar neste URL.",
+    "installed": "Instalado: {name}"
   },
   "toolbar": {
     "select": "Selecionar",
@@ -205,7 +210,8 @@
     "geo_assets": "Ativos geo",
     "search_placeholder": "Pesquisar elementos...",
     "header_element": "Elemento",
-    "header_info": "Info"
+    "header_info": "Info",
+    "system_info": "sistema"
   },
   "tree_ctx": {
     "delete_system": "Excluir sistema",
@@ -359,7 +365,14 @@
     "select_availability_file": "Selecionar CSV de disponibilidade",
     "availability_browse_tooltip": "Procurar um CSV de disponibilidade (perfil horário, valores 0-1)",
     "availability_clear_tooltip": "Limpar caminho de disponibilidade",
-    "reservoir_inflow_placeholder": "CSV de afluências horárias (MW equivalentes)"
+    "reservoir_inflow_placeholder": "CSV de afluências horárias (MW equivalentes)",
+    "risk_coefficient_tooltip": "Fator de redução por risco geográfico (0-1). Calculado a partir da exposição a perigos e da fragilidade dos componentes no Risk Workbench. 1.0 = sem redução.",
+    "curve_flat": "constante",
+    "curve_linear": "linear",
+    "curve_stepwise": "por escalões",
+    "curve_exponential": "exponencial",
+    "current_ac_dc": "CA/CC (AC_DC)",
+    "csv_filter": "CSV (*.csv);;Todos (*)"
   },
   "battery_form": {
     "group_id": "Identificação",
@@ -414,7 +427,12 @@
     "add_block": "+ Bloco",
     "remove_block": "- Bloco",
     "base_price": "Preço base ($/MWh):",
-    "scale_factor": "Fator de escala:"
+    "scale_factor": "Fator de escala:",
+    "risk_coefficient_tooltip": "Fator de redução por risco geográfico (0-1). Calculado a partir da exposição a perigos e da fragilidade dos componentes no Risk Workbench. 1.0 = sem redução.",
+    "curve_flat": "constante",
+    "curve_linear": "linear",
+    "curve_stepwise": "por escalões",
+    "curve_exponential": "exponencial"
   },
   "line_form": {
     "reactance_per_km_tip": "Reatância série desta linha por km. Com o comprimento, dá a reatância quando Reatância (pu) está vazia (x = comprimento × X/km ÷ (V² / S_base)). Padrão = reatância por km do fluxo DC do sistema.",
@@ -438,7 +456,20 @@
     "n_selected": "{n} linhas selecionadas",
     "endpoints": "Extremidades do barramento",
     "from_bus": "Barramento de origem:",
-    "to_bus": "Barramento de destino:"
+    "to_bus": "Barramento de destino:",
+    "type_overhead": "aérea",
+    "type_underground": "subterrânea",
+    "type_submarine": "submarina",
+    "auto": "Auto",
+    "default": "Predefinido",
+    "global": "Global",
+    "not_applicable": "N/D",
+    "group_economic": "Económico",
+    "investment_cost": "Custo de investimento",
+    "max_investment": "Investimento máximo",
+    "operational_cost": "Custo operacional",
+    "loss_factor": "Fator de perdas",
+    "bus_with_voltage": "{bus}  ({kv} kV)"
   },
   "zone_form": {
     "name": "Nome:",
@@ -474,7 +505,8 @@
     "confirm_delete_title": "Eliminar zona",
     "confirm_delete_msg": "Eliminar a zona «{name}»?\nEsta ação não pode ser desfeita.",
     "system_label": "Sistema: {name}",
-    "node_combo_fmt": "Nó {idx} - {name}"
+    "node_combo_fmt": "Nó {idx} - {name}",
+    "bus_combo_fmt": "Barramento {bus} (Nó {node})"
   },
   "transformer_form": {
     "system": "Sistema:",
@@ -591,7 +623,12 @@
     "demand_fraction": "Fração de procura (frac):",
     "multi_selection": "(múltiplos)",
     "slack_warn_title": "Vários barramentos de referência",
-    "slack_warn_body": "Um barramento já está designado como referência (slack): \"{names}\". Uma rede elétrica usa um único barramento de referência (slack). Se mantiver mais do que um, o solver usará apenas o primeiro que encontrar. Considere alterar o outro para PQ ou PV."
+    "slack_warn_body": "Um barramento já está designado como referência (slack): \"{names}\". Uma rede elétrica usa um único barramento de referência (slack). Se mantiver mais do que um, o solver usará apenas o primeiro que encontrar. Considere alterar o outro para PQ ou PV.",
+    "bus_type_slack": "referência (slack)",
+    "role_connection": "ligação",
+    "role_load": "carga",
+    "role_mixed": "misto",
+    "n_selected": "Sistema: {count} barramentos selecionados"
   },
   "fuel_entry_form": {
     "group_identity": "Identidade",
@@ -629,7 +666,8 @@
     "transport_cost": "Custo de transporte ($/unidade/km):",
     "losses": "Perdas (frac):",
     "length": "Comprimento (km):",
-    "n_selected": "{n} rotas de combustível selecionadas"
+    "n_selected": "{n} rotas de combustível selecionadas",
+    "auto": "Auto"
   },
   "fuel_form": {
     "group_properties": "Propriedades",
@@ -642,7 +680,8 @@
     "energy_content": "Conteúdo energético (MWh/unidade):",
     "price_base": "Preço base ($/unidade):",
     "price_growth": "Taxa de crescimento do preço (frac/ano):",
-    "n_selected": "{n} combustíveis selecionados"
+    "n_selected": "{n} combustíveis selecionados",
+    "energy_content_na": "N/D (renovável)"
   },
   "technology_form": {
     "group_identity": "Identidade",
@@ -656,7 +695,14 @@
     "eff_at_min": "Eficiência no mínimo:",
     "n_selected": "{n} tecnologias selecionadas",
     "confirm_delete_title": "Eliminar tecnologia?",
-    "confirm_delete_msg": "Tem a certeza de que pretende eliminar esta tecnologia?"
+    "confirm_delete_msg": "Tem a certeza de que pretende eliminar esta tecnologia?",
+    "category_renewable": "Renovável",
+    "category_nonrenewable": "Não renovável",
+    "category_storage": "Armazenamento",
+    "category_electrolyzer": "Eletrolisador",
+    "color": "Cor:",
+    "color_tooltip": "Cor de apresentação nos gráficos",
+    "color_dialog": "Cor da tecnologia"
   },
   "investment_form": {
     "group_identity": "Identidade",
@@ -958,7 +1004,10 @@
     "vs_transform_log": "Log (cauda pesada)",
     "vs_line_min": "Largura mín. da linha (px):",
     "vs_line_max": "Largura máx. da linha (px):",
-    "group_systems": "Sistemas a simular"
+    "group_systems": "Sistemas a simular",
+    "enable_uc": "Ativar UC:",
+    "model_clock_auto": "auto",
+    "solver_options_group": "Opções do solver"
   },
   "stochastic_form": {
     "group_scenarios": "Cenários",
@@ -1134,7 +1183,10 @@
     "conflict_title": "Conflitos de atalhos",
     "conflict_msg": "Resolva estes conflitos:",
     "lang_restart_title": "Idioma alterado",
-    "lang_restart_msg": "A alteração do idioma terá efeito após reiniciar a aplicação."
+    "lang_restart_msg": "A alteração do idioma terá efeito após reiniciar a aplicação.",
+    "theme_light": "Claro",
+    "log_level_basic": "Básico",
+    "log_level_high": "Alto"
   },
   "preferences_actions": {
     "file.import": "Importar configuração",
@@ -1204,13 +1256,53 @@
     "infra_applied_title": "Infraestrutura simplificada",
     "infra_applied_msg": "{n} simplificação(ões) aplicada(s). Execute novamente a validação para ver os resultados atualizados.",
     "infra_none_checked": "Nenhuma sugestão selecionada. Selecione as que pretende aplicar.",
-    "infra_no_groups": "Nenhum grupo fundível encontrado neste âmbito."
+    "infra_no_groups": "Nenhum grupo fundível encontrado neste âmbito.",
+    "category_structural": "Estrutural (nós, linhas)",
+    "category_configuration": "Configuração (chaves YAML desconhecidas)",
+    "category_electrical": "Elétrica (barramentos, referências de equipamentos)",
+    "category_demand": "Procura (dados de carga, cobertura)",
+    "category_generation": "Produção (adequação, ficheiros de disponibilidade)",
+    "category_fuel_network": "Rede de combustível (integridade da cadeia de abastecimento)",
+    "category_connectivity": "Conectividade (componentes isolados)",
+    "category_realism": "Realismo (centrais duplicadas, margem de reserva, capacidade de entrega)",
+    "category_topology_audit": "Auditoria de topologia (concordância interface/solver)",
+    "category_risk": "Risco e resiliência (exposição a perigos, curvas de fragilidade)",
+    "topo_parallel_line_merge": "Consolidação de linhas paralelas",
+    "topo_radial_prune": "Poda de ramos radiais",
+    "topo_series_eliminate": "Eliminação de barramentos em série (Kron)",
+    "topo_voltage_collapse": "Fusão de níveis de tensão",
+    "topo_full_node_collapse": "Fusão completa de nós",
+    "topo_small_gen_absorb": "Absorção de geradores pequenos",
+    "analyzing_network": "A analisar a rede (nível {level})...",
+    "network_reduction": "Redução da rede (níveis)",
+    "network_reduction_tip": "Analisa e sugere fusões de equipamentos, consolidação de linhas paralelas, eliminação de barramentos e redução da topologia.",
+    "level_1": "N1: Equipamentos + linhas paralelas",
+    "level_2": "N2: Elim. de barramentos radiais e em série",
+    "level_3": "N3: Fusão de barramentos no nó",
+    "level_4": "N4: Fusão completa de nós",
+    "level_tip": "Nível de simplificação (cumulativo):\nN1 — Agregação de equipamentos + linhas paralelas\nN2 — N1 + eliminação de barramentos radiais/em série\nN3 — N2 + fusão de tensões no nó\nN4 — N3 + fusão completa de nós + absorção de geradores pequenos",
+    "select_all": "Selecionar tudo",
+    "select_all_tip": "Marca todas as sugestões de simplificação.",
+    "apply_tip": "Aplica a limpeza de elementos sem saída e as reduções de rede marcadas.",
+    "summary_n_infra": "{n} simplificação(ões) (-{removed} elementos)",
+    "infra_root": "Simplificação da rede ({n} operação(ões))",
+    "equipment_aggregation": "Agregação de equipamentos",
+    "equipment_detail": "{type} | {power} MW",
+    "topo_detail": "N{level} | -{removed} elem.",
+    "apply_level_msg": "Aplicar a simplificação de nível {level} com reparação automática a {count} sistema(s)?\n\nO algoritmo itera até a rede ficar estável e estruturalmente válida.",
+    "level_done_issues_title": "Simplificação concluída — subsistem problemas",
+    "level_done_issues_msg": "Subsistem {n} problema(s) em {count} sistema(s):\n\n{detail}\n\nExecute novamente a validação para ver todos os detalhes.",
+    "level_done_title": "Simplificação concluída",
+    "level_done_msg": "{count} sistema(s) simplificado(s) com sucesso.\n\n{log}"
   },
   "simulation": {
     "title": "Simulação ESFEX",
     "preparing": "A preparar a simulação...",
     "cancel_btn": "Cancelar",
-    "close_btn": "Fechar"
+    "close_btn": "Fechar",
+    "window": "Janela {current}/{total}",
+    "year_window": "Ano {year} — Janela {current}/{total}",
+    "dispatch_year": "Despacho operacional — Ano {year} ({current}/{total})"
   },
   "sensitivity": {
     "title": "Análise de Sensibilidade Global (Sobol)",
@@ -1243,14 +1335,60 @@
     "exported_msg": "Índices de Sobol guardados em:\n{path}",
     "years_per_run": "Anos por execução:",
     "no_indices": "Sem índices: {n} de {total} avaliações falharam",
-    "failed_summary": "Sem índices (avaliações com falha): {kpis}"
+    "failed_summary": "Sem índices (avaliações com falha): {kpis}",
+    "kpi_total_cost": "Custo total",
+    "kpi_inv_gen_total": "Investimento em geradores",
+    "kpi_inv_bat_total": "Investimento em baterias",
+    "kpi_curtailment": "Corte de produção",
+    "kpi_load_shedding": "Deslastre de carga",
+    "legend_s1": "S1 (primeira ordem)",
+    "legend_st": "ST (ordem total)",
+    "axis_sobol_index": "Índice de Sobol",
+    "chart_title": "Sensibilidade global: {kpi}",
+    "chart_empty": "Execute a análise para ver os resultados",
+    "mode_lp": "Nível LP (rápido)",
+    "mode_config": "Nível de configuração (nova execução completa)",
+    "select_lp_title": "Selecionar ficheiro LP",
+    "lp_filter": "Ficheiros LP (*.lp);;Todos os ficheiros (*)",
+    "csv_filter": "Ficheiros CSV (*.csv)",
+    "starting": "A iniciar...",
+    "cancelling": "A cancelar...",
+    "done": "Concluído. {evaluations} avaliações, {parameters} parâmetros."
   },
   "results_dialog": {
     "title": "Visualizador de Resultados",
     "tab_charts": "Gráficos",
     "tab_mga": "MGA",
     "group_selection": "Seleção",
-    "close_btn": "Fechar"
+    "close_btn": "Fechar",
+    "cat_generation": "Produção",
+    "cat_storage": "Armazenamento",
+    "cat_economics": "Economia",
+    "cat_system": "Sistema",
+    "cat_uc_operations": "Operação UC",
+    "cat_near_optimal": "Quase ótimas",
+    "cat_custom": "Personalizados",
+    "filter_png": "Imagem PNG (*.png)",
+    "filter_svg": "Vetor SVG (*.svg)",
+    "filter_pdf": "Documento PDF (*.pdf)",
+    "filter_jpg": "Imagem JPEG (*.jpg)",
+    "filter_tiff": "Imagem TIFF (*.tiff)",
+    "filter_all": "Todos os ficheiros (*)",
+    "loading_charts": "A carregar gráficos...",
+    "rendering_charts": "A gerar gráficos...",
+    "rendering": "A gerar: {title}",
+    "done": "Concluído",
+    "dashboard": "Painel",
+    "overview": "Visão geral",
+    "years": "Anos:",
+    "font": "Tipo de letra:",
+    "export": "Exportar",
+    "export_chart": "Exportar gráfico",
+    "no_chart": "Não há nenhum gráfico para exportar.",
+    "export_unsupported": "A exportação não é suportada para este tipo de gráfico.",
+    "exported": "Gráfico exportado para:\n{path}",
+    "export_error": "Erro de exportação",
+    "export_failed": "Não foi possível exportar o gráfico:\n{error}"
   },
   "results_panel": {
     "title": "Resultados no Mapa",
@@ -1260,7 +1398,38 @@
     "no_results": "(nenhum resultado encontrado)",
     "alternative": "Alternativa:",
     "screenshot_btn": "Captura de ecrã",
-    "screenshot_saved": "Captura de ecrã guardada em {path}"
+    "screenshot_saved": "Captura de ecrã guardada em {path}",
+    "n_selected": "{n} selecionadas",
+    "var_installed_capacity_mix": "Mix de capacidade instalada",
+    "var_generation_mix": "Mix de produção",
+    "var_re_vs_nonre": "ER vs não ER",
+    "var_total_generation": "Produção total",
+    "var_re_penetration": "Penetração ER",
+    "var_nodal_prices": "Preços nodais (LMP)",
+    "var_load_shedding": "Deslastre de carga",
+    "var_co2_emissions": "Emissões de CO2",
+    "var_curtailment": "Corte de produção",
+    "var_gen_investment": "Investimento em ger.",
+    "var_bat_investment": "Investimento em bat.",
+    "var_power_flow": "Fluxo de potência",
+    "var_fuel_transport_flow": "Fluxo de transporte de combustível",
+    "var_risk_coefficient": "Coeficiente de risco",
+    "var_expected_annual_loss": "Perda anual esperada",
+    "var_composite_risk": "Risco composto",
+    "alt_none": "-- Nenhuma --",
+    "alt_cost_optimal": "Ótima em custo (0)",
+    "alt_n": "Alternativa {n}",
+    "mga_legend_optimal": "{variable} — Ótima ({year})",
+    "mga_legend_alt": "{variable} — Alt. {n} ({year})",
+    "screenshot_filter": "PNG (*.png);;JPEG (*.jpg);;Todos os ficheiros (*)",
+    "screenshot_failed": "Não foi possível guardar a captura de ecrã.",
+    "risk_tooltip": "<b>{value}</b><br/><b>Dominante:</b> {hazard}<br/><b>Elementos:</b> {elements}",
+    "risk_low": "Baixo",
+    "risk_medium": "Médio",
+    "risk_high": "Alto",
+    "risk_very_high": "Muito alto",
+    "node_year": "Nó {node} — {year}",
+    "node": "Nó {node}"
   },
   "results_charts": {
     "select_chart": "Gráfico:",
@@ -1307,7 +1476,30 @@
     "mga_decision_factors": "Fatores de Decisão",
     "mga_investment_composition": "Composição do Investimento",
     "mga_pairwise_similarity": "Similaridade aos Pares",
-    "num_days": "Dias:"
+    "num_days": "Dias:",
+    "no_summary_data": "Sem dados de resumo",
+    "axis_year": "Ano",
+    "axis_total_cost": "Custo total (M$)",
+    "title_cost_evolution": "Evolução do custo do sistema",
+    "axis_re_penetration": "Penetração ER (%)",
+    "axis_co2_mt": "Emissões de CO2 (Mt)",
+    "title_emissions_vs_re": "Emissões vs penetração ER",
+    "res_hourly": "horária",
+    "res_daily": "diária",
+    "res_monthly": "mensal",
+    "res_yearly": "anual",
+    "colormap": "Mapa de cores",
+    "year": "Ano:",
+    "net_load_a": "a) Carga líquida",
+    "ramp_b": "b) Rampa",
+    "method": "Método:",
+    "granularity": "Granularidade",
+    "granularity_tech": "Tecnologia",
+    "granularity_tech_node": "Tecnologia × nó",
+    "discount_rate": "Taxa de desconto (%)",
+    "voll": "VOLL ($/MWh)",
+    "chart_error": "Erro: {error}",
+    "no_generation_data": "Não há dados de produção disponíveis"
   },
   "custom_chart": {
     "x_axis": "X:",
@@ -1350,7 +1542,11 @@
     "save_as_tip": "Guardar o script atual num novo ficheiro",
     "run_tip": "Executar o script atual (Ctrl+Enter)",
     "file_menu_tip": "Ações de ficheiro (Novo, Abrir, Guardar, Guardar Como)",
-    "untitled": "sem título"
+    "untitled": "sem título",
+    "open_title": "Abrir script Python",
+    "save_title": "Guardar script Python",
+    "py_filter": "Ficheiros Python (*.py);;Todos os ficheiros (*)",
+    "untitled_n": "sem título {n}"
   },
   "visual_style": {
     "group_appearance": "Aparência",
@@ -1361,7 +1557,17 @@
     "width": "Largura (px):",
     "choose_color": "Escolher a cor do marcador",
     "size_auto_tip": "0 = auto (usa o dimensionamento global dos marcadores)",
-    "width_auto_tip": "0 = auto (usa o dimensionamento global das linhas)"
+    "width_auto_tip": "0 = auto (usa o dimensionamento global das linhas)",
+    "auto": "Auto",
+    "shape_circle": "círculo",
+    "shape_square": "quadrado",
+    "shape_diamond": "losango",
+    "shape_triangle_up": "triângulo para cima",
+    "shape_triangle_down": "triângulo para baixo",
+    "shape_hexagon": "hexágono",
+    "shape_pentagon": "pentágono",
+    "shape_horizontal_bar": "barra horizontal",
+    "shape_star": "estrela"
   },
   "geo_parse": {
     "title": "Analisar Ativo Geográfico: {name}",
@@ -1377,7 +1583,8 @@
     "target_system": "Sistema alvo:",
     "auto_nearest": "Auto (mais próximo)",
     "select_system_title": "Selecionar Sistema Alvo",
-    "select_system_prompt": "Que sistema deve receber os elementos analisados?"
+    "select_system_prompt": "Que sistema deve receber os elementos analisados?",
+    "header": "<b>{name}</b> — {count} elemento(s)"
   },
   "common": {
     "add": "Adicionar",
@@ -1415,7 +1622,9 @@
     "remove_term": "Remover Termo",
     "add": "Adicionar",
     "edit": "Editar",
-    "remove": "Remover"
+    "remove": "Remover",
+    "target_operational": "operacional",
+    "target_investment": "investimento"
   },
   "geo_domain": {
     "group": "Usar a área importada como domínio",
@@ -2141,7 +2350,25 @@
     "generate": "Gerar",
     "close": "Fechar",
     "done_title": "Geração concluída",
-    "done_message": "Perfis de disponibilidade gerados com sucesso:"
+    "done_message": "Perfis de disponibilidade gerados com sucesso:",
+    "plugins_menu": "Plugins",
+    "source_open_meteo": "Open-Meteo (ERA5, sem chave de API)",
+    "source_nasa_power": "NASA POWER (MERRA-2, sem chave de API)",
+    "source_atlite": "ERA5 via atlite (requer chave de API do CDS)",
+    "year_to": "a",
+    "tilt_optimal": "Ótima segundo a latitude",
+    "tilt_custom": "Personalizada",
+    "tracking_none": "nenhum",
+    "tracking_horizontal": "horizontal",
+    "tracking_vertical": "vertical",
+    "tracking_dual": "duplo eixo",
+    "turbine_default": "{name} (predefinida)",
+    "profile_solar": "Solar",
+    "profile_wind": "Eólica",
+    "no_generators_selected": "Não há geradores selecionados com um tipo de perfil Solar ou Eólica.",
+    "no_model_loaded": "Nenhum modelo carregado. Carregue primeiro uma configuração.",
+    "export_failed": "Não foi possível exportar a configuração: {error}",
+    "done_status": "Concluído! Foram gerados {count} perfil(is)."
   },
   "electrical": {
     "inherited_from_bus": "(do barramento)",
@@ -2368,7 +2595,8 @@
     "mode_label": "Modo de análise:",
     "mode_dc": "Fluxo de potência CC",
     "mode_ac": "Fluxo de potência CA",
-    "mode_sc": "Curto-circuito"
+    "mode_sc": "Curto-circuito",
+    "summary": "Ger.: {gen} MW | Procura: {demand} MW | Balanço: {balance} MW"
   },
   "overlay": {
     "deleting": "A eliminar {n} elementos…",
@@ -3437,5 +3665,14 @@
     "uq_param_capex_structure_factor": "Fator de CAPEX da estrutura",
     "uq_param_opex_factor": "Fator de OPEX",
     "uq_param_discount_rate": "Taxa de desconto"
+  },
+  "multi_edit": {
+    "mixed_values": "-- valores mistos --",
+    "mixed": "-- misto --"
+  },
+  "python_console": {
+    "banner": "Consola Python - ESFEX Studio\nDisponíveis: model, state, config, window, esfex, np\nEscreva esfex.help() para ver a referência da API de scripting.",
+    "process_running": "[erro] Já está em execução um subprocesso. Use Ctrl+C para o cancelar primeiro.",
+    "clear": "Limpar consola"
   }
 }

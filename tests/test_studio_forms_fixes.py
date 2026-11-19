@@ -148,7 +148,8 @@ def test_bus_form_marks_role_as_user_set(qapp):
     form._name.setText("renamed")
     form._on_changed()  # editing another field does not fix the role
     assert model.state.buses["bus_0"].role_user_set is False
-    form._role.setCurrentText("load")
+    # The combo shows a translated label; the role is the item data.
+    form._role.setCurrentIndex(form._role.findData("load"))
     bus = model.state.buses["bus_0"]
     assert bus.role == "load" and bus.role_user_set is True
 

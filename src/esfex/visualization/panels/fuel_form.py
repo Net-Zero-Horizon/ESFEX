@@ -66,7 +66,7 @@ class FuelForm(QWidget):
         self._energy_content = QDoubleSpinBox()
         self._energy_content.setRange(0, 1e6)
         self._energy_content.setDecimals(4)
-        self._energy_content.setSpecialValueText("N/A (renewable)")
+        self._energy_content.setSpecialValueText(tr("fuel_form.energy_content_na"))
         self._energy_content.editingFinished.connect(self._on_changed)
         layout.addRow(tr("fuel_form.energy_content"), self._energy_content)
 

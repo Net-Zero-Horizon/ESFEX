@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.data.gui_model import (
     GuiCustomConstraint,
     GuiCustomConstraintTerm,
@@ -42,6 +43,15 @@ _OPERATIONAL_VARS = [
 _INVESTMENT_VARS = [
     "tech_investment", "bat_tech_power_investment", "transfer_investment",
 ]
+_TARGETS = ("operational", "investment")
+
+
+def _target_label(target: str) -> str:
+    """Translated name of a constraint target (unknown targets as they are)."""
+    return {
+        "operational": tr("custom_constraints.target_operational"),
+        "investment": tr("custom_constraints.target_investment"),
+    }.get(target, target)
 
 
 def _parse_index(text: str) -> list:
@@ -81,9 +91,9 @@ class _ConstraintEditor(QDialog):
         form.addRow(tr("custom_constraints.name"), self._name)
 
         self._target = QComboBox()
-        self._target.addItems(["operational", "investment"])
-        self._target.setCurrentText(self._cc.target)
-        self._target.currentTextChanged.connect(self._refresh_var_choices)
+        add_choices(self._target, [(t, _target_label(t)) for t in _TARGETS])
+        select_value(self._target, self._cc.target)
+        self._target.currentIndexChanged.connect(self._refresh_var_choices)
         form.addRow(tr("custom_constraints.target"), self._target)
 
         self._sense = QComboBox()
@@ -135,7 +145,7 @@ class _ConstraintEditor(QDialog):
         layout.addWidget(bb)
 
     def _var_choices(self) -> list[str]:
-        return (_INVESTMENT_VARS if self._target.currentText() == "investment"
+        return (_INVESTMENT_VARS if combo_value(self._target) == "investment"
                 else _OPERATIONAL_VARS)
 
     def _add_term_row(self, term: GuiCustomConstraintTerm | None = None):
@@ -186,7 +196,7 @@ class _ConstraintEditor(QDialog):
         return GuiCustomConstraint(
             name=self._name.text().strip() or "constraint",
             type=self._cc.type,
-            target=self._target.currentText(),
+            target=combo_value(self._target),
             sense=self._sense.currentText(),
             rhs=self._rhs.value(),
             terms=terms,
@@ -256,7 +266,7 @@ class CustomConstraintsDialog(QDialog):
             r = self._table.rowCount()
             self._table.insertRow(r)
             self._table.setItem(r, 0, QTableWidgetItem(cc.name))
-            self._table.setItem(r, 1, QTableWidgetItem(cc.target))
+            self._table.setItem(r, 1, QTableWidgetItem(_target_label(cc.target)))
             self._table.setItem(r, 2, QTableWidgetItem(self._summary(cc)))
             self._table.setItem(r, 3, QTableWidgetItem(f"{cc.rhs:g}"))
 

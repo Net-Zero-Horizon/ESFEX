@@ -46,13 +46,18 @@ from esfex.visualization.theme import current_theme
 
 logger = logging.getLogger(__name__)
 
-_KPI_DISPLAY = {
-    "total_cost": "Total Cost",
-    "inv_gen_total": "Generator Investment",
-    "inv_bat_total": "Battery Investment",
-    "curtailment": "Curtailment",
-    "load_shedding": "Load Shedding",
+_KPI_KEYS = {
+    "total_cost": "sensitivity.kpi_total_cost",
+    "inv_gen_total": "sensitivity.kpi_inv_gen_total",
+    "inv_bat_total": "sensitivity.kpi_inv_bat_total",
+    "curtailment": "sensitivity.kpi_curtailment",
+    "load_shedding": "sensitivity.kpi_load_shedding",
 }
+
+
+def _kpi_label(kpi: str) -> str:
+    """Translated KPI name (unknown KPIs as they are)."""
+    return tr(_KPI_KEYS[kpi]) if kpi in _KPI_KEYS else kpi
 
 
 class SobolChart(FigureCanvasQTAgg):
@@ -84,20 +89,20 @@ class SobolChart(FigureCanvasQTAgg):
         c = current_theme().colors
         self.ax.barh(
             y_pos - bar_h / 2, s1, bar_h,
-            xerr=s1_conf, label="S1 (First-order)",
+            xerr=s1_conf, label=tr("sensitivity.legend_s1"),
             color=c.status_info, ecolor=c.text_primary, capsize=3, alpha=0.85,
         )
         self.ax.barh(
             y_pos + bar_h / 2, st, bar_h,
-            xerr=st_conf, label="ST (Total-order)",
+            xerr=st_conf, label=tr("sensitivity.legend_st"),
             color=c.status_error, ecolor=c.text_primary, capsize=3, alpha=0.85,
         )
 
         self.ax.set_yticks(y_pos)
         self.ax.set_yticklabels(params, fontsize=9)
-        self.ax.set_xlabel("Sobol Index")
-        display = _KPI_DISPLAY.get(kpi_name, kpi_name)
-        self.ax.set_title(f"Global Sensitivity: {display}", fontsize=11, fontweight="bold")
+        self.ax.set_xlabel(tr("sensitivity.axis_sobol_index"))
+        self.ax.set_title(tr("sensitivity.chart_title", kpi=_kpi_label(kpi_name)),
+                          fontsize=11, fontweight="bold")
         self.ax.legend(loc="lower right", fontsize=9)
         self.ax.set_xlim(left=-0.05)
         self.ax.axvline(x=0, color="gray", linewidth=0.5)
@@ -116,7 +121,7 @@ class SobolChart(FigureCanvasQTAgg):
 
     def clear_chart(self):
         self.ax.clear()
-        self.ax.set_title("Run analysis to see results")
+        self.ax.set_title(tr("sensitivity.chart_empty"))
         self.draw()
 
 
@@ -159,7 +164,9 @@ class SensitivityDialog(QDialog):
         mode_group = QGroupBox(tr("sensitivity.group_mode"))
         mode_lay = QVBoxLayout(mode_group)
         self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["LP-Level (fast)", "Config-Level (full re-run)"])
+        # Read by index: 0 = LP level, 1 = config level.
+        self._mode_combo.addItem(tr("sensitivity.mode_lp"))
+        self._mode_combo.addItem(tr("sensitivity.mode_config"))
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_lay.addWidget(self._mode_combo)
 
@@ -235,8 +242,8 @@ class SensitivityDialog(QDialog):
         kpi_group = QGroupBox(tr("sensitivity.group_kpis"))
         kpi_lay = QVBoxLayout(kpi_group)
         self._kpi_checks: dict[str, QCheckBox] = {}
-        for kpi_key, kpi_display in _KPI_DISPLAY.items():
-            cb = QCheckBox(kpi_display)
+        for kpi_key in _KPI_KEYS:
+            cb = QCheckBox(_kpi_label(kpi_key))
             cb.setChecked(True)
             self._kpi_checks[kpi_key] = cb
             kpi_lay.addWidget(cb)
@@ -275,8 +282,8 @@ class SensitivityDialog(QDialog):
         kpi_sel_lay = QHBoxLayout()
         kpi_sel_lay.addWidget(QLabel(tr("sensitivity.display_kpi")))
         self._kpi_display_combo = QComboBox()
-        for kpi_key, kpi_display in _KPI_DISPLAY.items():
-            self._kpi_display_combo.addItem(kpi_display, kpi_key)
+        for kpi_key in _KPI_KEYS:
+            self._kpi_display_combo.addItem(_kpi_label(kpi_key), kpi_key)
         self._kpi_display_combo.currentIndexChanged.connect(self._on_kpi_display_changed)
         kpi_sel_lay.addWidget(self._kpi_display_combo, 1)
         right_layout.addLayout(kpi_sel_lay)
@@ -385,9 +392,9 @@ class SensitivityDialog(QDialog):
 
     def _on_browse_lp(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select LP File",
+            self, tr("sensitivity.select_lp_title"),
             str(Path(self._output_dir) / "logs"),
-            "LP Files (*.lp);;All Files (*)",
+            tr("sensitivity.lp_filter"),
         )
         if path:
             self._lp_path = path
@@ -436,7 +443,7 @@ class SensitivityDialog(QDialog):
         self._cancel_btn.setEnabled(True)
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(0)
-        self._progress_label.setText("Starting...")
+        self._progress_label.setText(tr("sensitivity.starting"))
         self._export_btn.setEnabled(False)
 
         self._worker.start()
@@ -445,7 +452,7 @@ class SensitivityDialog(QDialog):
         if self._worker:
             self._worker.cancel()
         self._cancel_btn.setEnabled(False)
-        self._progress_label.setText("Cancelling...")
+        self._progress_label.setText(tr("sensitivity.cancelling"))
 
     def _on_progress(self, current: int, total: int, msg: str):
         self._progress_bar.setMaximum(total)
@@ -458,9 +465,9 @@ class SensitivityDialog(QDialog):
         self._cancel_btn.setEnabled(False)
         self._export_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
-        text = (f"Done. {result.n_evaluations} evaluations, "
-                f"{len(result.parameters)} parameters.")
-        failed = [_KPI_DISPLAY.get(k, k) for k, n in result.n_failed.items() if n]
+        text = tr("sensitivity.done", evaluations=result.n_evaluations,
+                  parameters=len(result.parameters))
+        failed = [_kpi_label(k) for k, n in result.n_failed.items() if n]
         if failed:
             text += "\n" + tr("sensitivity.failed_summary").replace("{kpis}", ", ".join(failed))
         self._progress_label.setText(text)
@@ -492,7 +499,7 @@ class SensitivityDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self, tr("sensitivity.export_csv"),
             str(Path(self._output_dir) / "sobol_indices.csv"),
-            "CSV Files (*.csv)",
+            tr("sensitivity.csv_filter"),
         )
         if path:
             self._result.to_csv(path)
