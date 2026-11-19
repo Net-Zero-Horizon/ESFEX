@@ -36,6 +36,7 @@ UNTRANSLATED_OK = {
     "ESFEX", "ESFEX Studio", "OTEC Studio", "OpenStreetMap", "GridFinder",
     "ERA5", "NASA POWER", "PyPSA", "HDF5", "CSV", "SVG", "PNG", "JSON", "YAML",
     "LCOE", "NPV", "IRR", "MW", "MWh", "GWh", "kV", "Hz", "AC", "DC",
+    "IM", "LHS",
 }
 # Calls whose later positional arguments are data, not text.
 _TEXT_ARG_ONLY = {"addItem": 0, "insertItem": 1, "addRow": 0}
