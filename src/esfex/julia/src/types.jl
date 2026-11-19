@@ -1277,9 +1277,6 @@ struct PowerSystemInput
     reserve_static_requirement::Dict{Int, Float64}
     reserve_dynamic_requirement::Dict{Int, Float64}
 
-    # Demand constraints
-    max_annual_system_cost::Float64
-
     # Configurable parameters (previously hardcoded)
     soc_end_tolerance::Float64              # Battery end-of-horizon SOC tolerance (±fraction)
     cyclic_end_soc::Bool                    # If true, force end-of-window SOC == initial (cyclic)
@@ -1407,8 +1404,6 @@ function PowerSystemInput(;
     # Reserve requirements per bus from config
     reserve_static_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
     reserve_dynamic_requirement::Dict{Int, Float64} = Dict{Int, Float64}(),
-    # Demand constraints
-    max_annual_system_cost::Float64 = Inf,
     # Configurable parameters (previously hardcoded)
     soc_end_tolerance::Float64 = 0.05,
     cyclic_end_soc::Bool = true,
@@ -1486,7 +1481,6 @@ function PowerSystemInput(;
         co2_budget_violation_penalty,
         reserve_static_requirement,
         reserve_dynamic_requirement,
-        max_annual_system_cost,
         soc_end_tolerance,
         cyclic_end_soc,
         bat_soc_end_min,
@@ -1769,6 +1763,11 @@ struct CostBreakdown
     n1_security_shortfall_cost::Float64
     # Flow cost of lines with a flow_cost (inter-system links, × |flow|).
     line_flow_cost::Float64
+    # Operating budget (add_operating_budget!): the spending above the
+    # window's budget (money, not a cost of its own: it is already in the
+    # fuel, maintenance and fixed O&M) and its penalty (a cost).
+    operating_budget_excess::Float64
+    operating_budget_penalty::Float64
     total::Float64
 end
 
@@ -2346,6 +2345,9 @@ Input configuration for the Master Problem (capacity expansion planning).
 ## Economic Parameters
 - `discount_rate::Float64`: Discount rate for NPV calculations
 - `max_annual_investment::Float64`: Maximum annual investment budget (\$)
+- `budget_total::Bool`: The budget also covers each budget year's operating
+  cost (`budget_scope: total`, `budget_operating_cost`), not only its
+  overnight investment
 
 ## Targets
 - `target_re_penetration::Float64`: Target RE penetration (final year)
@@ -2474,6 +2476,7 @@ struct MasterProblemInput
     # Economic
     discount_rate::Float64
     max_annual_investment::Float64
+    budget_total::Bool
 
     # Targets
     target_re_penetration::Float64
@@ -2623,6 +2626,7 @@ function MasterProblemInput(;
     demand_growth::Float64 = 0.0,
     discount_rate::Float64 = 0.05,
     max_annual_investment::Float64 = 1e4,
+    budget_total::Bool = false,
     target_re_penetration::Float64 = 1.0,
     initial_re_penetration::Float64 = 0.0,
     min_re_increment::Float64 = 0.0,
@@ -2694,7 +2698,7 @@ function MasterProblemInput(;
         system_name, network, generators, batteries,
         technologies, battery_technologies,
         base_demand, demand_growth,
-        discount_rate, max_annual_investment,
+        discount_rate, max_annual_investment, budget_total,
         target_re_penetration, initial_re_penetration,
         min_re_increment, max_re_increment,
         system_node_ranges,

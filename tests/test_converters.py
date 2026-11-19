@@ -762,6 +762,8 @@ class TestConvertPowerSystemResult:
         cb.pe_electrolyzer_cost = 0.0
         cb.n1_security_shortfall_cost = 0.0
         cb.line_flow_cost = 0.0
+        cb.operating_budget_excess = 0.0
+        cb.operating_budget_penalty = 0.0
         cb.total = 179450.0
         return cb
 
@@ -796,6 +798,7 @@ class TestConvertPowerSystemResult:
             "pe_transport_cost", "pe_investment_cost",
             "pe_electrolyzer_cost",
             "n1_security_shortfall_cost", "line_flow_cost",
+            "operating_budget_excess", "operating_budget_penalty",
             "total",
         }
         assert set(cb.keys()) == expected_keys

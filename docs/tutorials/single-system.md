@@ -174,7 +174,7 @@ systems:
 
     TARGET_RE_PENETRATION: 0.80
     discount_rate: 0.08
-    MAX_ANNUAL_SYSTEM_COST: 500000000.0
+    max_annual_investment: 500000000.0
 ```
 
 ### Key Parameters

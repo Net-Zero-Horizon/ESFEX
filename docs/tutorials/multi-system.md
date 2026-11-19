@@ -217,7 +217,7 @@ systems:
 
     TARGET_RE_PENETRATION: 0.80
     discount_rate: 0.08
-    MAX_ANNUAL_SYSTEM_COST: 500000000.0
+    max_annual_investment: 500000000.0
 
   # --- System B: Small Island (1 node) ---
   small_island:
@@ -314,7 +314,7 @@ systems:
       fre_penetration_loss: 600.0
 
     TARGET_RE_PENETRATION: 0.70
-    MAX_ANNUAL_SYSTEM_COST: 100000000.0
+    max_annual_investment: 100000000.0
 ```
 
 ### How the Systems Are Combined
@@ -326,7 +326,9 @@ System-level settings are combined as follows:
 | Setting | Merged value |
 |---------|--------------|
 | `TARGET_RE_PENETRATION` | The lowest of the systems' targets, applied to the whole network |
-| `MAX_ANNUAL_SYSTEM_COST` | Sum over the systems |
+| `max_annual_investment` | Sum over the systems |
+| `max_annual_operating_cost` | Sum over the systems when every system sets it; when only some do, none is applied (with a warning), since the merged dispatch has one operating budget |
+| `budget_scope` | The first system's (a warning when the systems differ) |
 | `co2_budget` and `penalties.co2_budget_violation` | Kept per system: the dispatch adds one CO2 budget constraint per system, over that system's nodes (development-zone nodes included, by the bus they connect to), with its own budget and violation penalty |
 | Other `penalties` | The highest value of each penalty across the systems |
 | `discount_rate`, `stochastic_scenarios`, frequency and reserve settings | Taken from the first (primary) system |

@@ -5,9 +5,10 @@ one-step day broke the subproblem's curtailment expression, and the
 subproblems capped renewable output at the master's RE ratio, so with a 0 %
 target no renewable could be used and none was built.
 
-The Benders master has neither TSAM periods nor user investment constraints;
-with either, the runner solves the monolithic master instead (Benders used to
-drop the user constraints silently).
+The Benders master has neither TSAM periods, user investment constraints nor
+the years' operating cost (``budget_scope: total``); with any of them, the
+runner solves the monolithic master instead (Benders used to drop the user
+constraints silently).
 """
 
 import logging
@@ -27,7 +28,7 @@ from esfex.config.schema import (  # noqa: E402
 FALLBACK = "Benders decomposition does not support"
 
 
-def _solar_built(tmp_path, method, *, cap=None, use_tsam=False, max_inc=1.0):
+def _solar_built(tmp_path, method, *, cap=None, use_tsam=False, max_inc=1.0, **sys_update):
     from esfex.runner import Orchestrator
 
     demand = tmp_path / f"demand_{method}.csv"
@@ -41,7 +42,7 @@ def _solar_built(tmp_path, method, *, cap=None, use_tsam=False, max_inc=1.0):
     # max_inc: the RE growth cap (1.0 = off; the default 0.10 caps solar
     # at 10 % of the load in year 1)
     update = {"demand_path": str(demand), "penalties": PenaltiesConfig(loss_of_load=10000.0),
-              "max_annual_increment": max_inc}
+              "max_annual_increment": max_inc, **sys_update}
     if cap is not None:
         # At most `cap` MW of solar may be built
         update["custom_constraints"] = [CustomConstraintConfig(
@@ -54,7 +55,7 @@ def _solar_built(tmp_path, method, *, cap=None, use_tsam=False, max_inc=1.0):
         temporal=TemporalConfig(resolution_hours=24, rolling_horizon_hours=720, overlap_hours=0),
         master_problem=MasterProblemConfig(solver_method=method, use_tsam=use_tsam,
                                            tsam_num_periods=2))
-    tag = f"{method}_{cap}_{use_tsam}_{max_inc}"
+    tag = f"{method}_{cap}_{use_tsam}_{max_inc}_{'_'.join(map(str, sys_update.values()))}"
     results = Orchestrator(cfg, output_dir=tmp_path / tag).run(years=1)
     return results[0].investments.get("tech_investment_power_0_0", 0.0)
 
@@ -95,4 +96,17 @@ def test_benders_with_tsam_solves_the_monolithic_master(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert _solar_built(tmp_path, "benders", use_tsam=True) == pytest.approx(mono, abs=1e-6)
     assert any(FALLBACK in r.getMessage() and "use_tsam" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.julia
+def test_benders_with_total_budget_solves_the_monolithic_master(tmp_path, caplog):
+    """budget_scope total puts the year's operating cost in the budget row,
+    which the Benders master does not have: the monolithic master is solved
+    (and plans as it does without Benders)."""
+    mono = _solar_built(tmp_path, "monolithic", budget_scope="total")
+    with caplog.at_level(logging.WARNING):
+        assert _solar_built(tmp_path, "benders", budget_scope="total") == \
+            pytest.approx(mono, abs=1e-6)
+    assert any(FALLBACK in r.getMessage() and "budget_scope" in r.getMessage()
                for r in caplog.records)

@@ -11,6 +11,7 @@ import numpy as np
 import yaml
 
 from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.config.legacy_keys import LEGACY_SYSTEM_KEYS
 from esfex.config.schema import (
     ESFEXConfig,
     RiskConfig,
@@ -1132,7 +1133,9 @@ def _system_to_gui_state(sys: SystemConfig,
         target_re_penetration=getattr(sys, 'target_re_penetration', 1.0),
         min_annual_increment=getattr(sys, 'min_annual_increment', 0.01),
         max_annual_increment=getattr(sys, 'max_annual_increment', 0.10),
-        max_annual_system_cost=getattr(sys, 'max_annual_system_cost', 20e9),
+        max_annual_investment=getattr(sys, 'max_annual_investment', 20e9),
+        budget_scope=getattr(sys, 'budget_scope', 'investment'),
+        max_annual_operating_cost=getattr(sys, 'max_annual_operating_cost', None),
         life_extension_cost_factor=getattr(sys, 'life_extension_cost_factor', 0.20),
         inertia_limit_threshold=getattr(sys, 'inertia_limit_threshold', 0.1),
         sim_rooftop=getattr(sys, 'sim_rooftop', False),
@@ -3596,7 +3599,15 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     sys_dict["target_re_penetration"] = s.target_re_penetration
     sys_dict["min_annual_increment"] = s.min_annual_increment
     sys_dict["max_annual_increment"] = s.max_annual_increment
-    sys_dict["max_annual_system_cost"] = s.max_annual_system_cost
+    sys_dict["max_annual_investment"] = s.max_annual_investment
+    sys_dict["budget_scope"] = s.budget_scope
+    if s.max_annual_operating_cost:
+        sys_dict["max_annual_operating_cost"] = s.max_annual_operating_cost
+    else:
+        sys_dict.pop("max_annual_operating_cost", None)   # off
+    # Saved under the new name only (max_annual_system_cost is read as it)
+    for old_key in LEGACY_SYSTEM_KEYS:
+        sys_dict.pop(old_key, None)
     sys_dict["life_extension_cost_factor"] = s.life_extension_cost_factor
     sys_dict["inertia_limit_threshold"] = s.inertia_limit_threshold
     sys_dict["sim_rooftop"] = s.sim_rooftop

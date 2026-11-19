@@ -2294,7 +2294,6 @@ class PowerSystemAdapter:
             rooftop_curtailment_penalty=scale_cost(float(getattr(sys.penalties, 'rooftop_curtailment', 5.0))),
             co2_budget_violation_penalty=scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
             # Demand constraints — load shedding bounded to fraction of demand
-            max_annual_system_cost=scale_cost(float(getattr(sys, 'max_annual_system_cost', float('inf')))),
             # Electricity price for time-varying V2G compensation and flex demand benefit
             electricity_price=py_to_julia_vector(
                 [p * COST_SCALE for p in self.kwargs.get('electricity_price', [])[:self.hours]]
@@ -2597,6 +2596,34 @@ class PowerSystemAdapter:
         except Exception as e:
             logger.error(f"Failed to dump IIS: {e}")
 
+    def _committed_steps(self, keep_steps: Optional[int],
+                         primary_energy: Optional["PrimaryEnergyAdapter"] = None):
+        """The Julia ``CommittedSteps`` of the window's first *keep_steps*
+        steps (primary-energy variables included), or None for the whole
+        window."""
+        n_steps = int(self._jl_input.temporal.hours)
+        if keep_steps is None or not 0 < int(keep_steps) < n_steps:
+            return None
+        return get_esfex_module().committed_steps(
+            self._jl_vars, n_steps, int(keep_steps),
+            pe_vars=getattr(primary_energy, "_jl_vars", None),
+            pe_temporal=getattr(primary_energy, "_jl_temporal", None))
+
+    def add_operating_budget(self, budget: float, keep_steps: Optional[int] = None,
+                             primary_energy: Optional["PrimaryEnergyAdapter"] = None,
+                             ) -> None:
+        """Cap the operating spending of the window's committed steps at
+        *budget* ($): fuel, maintenance, fixed O&M and, with
+        *primary_energy* (already integrated), the fuel bought and
+        transported. Spending above it is penalised (COST-1,
+        ``ESFEX.add_operating_budget!``). Call after ``build_model`` and the
+        primary-energy integration, before ``solve``."""
+        if self._jl_model is None:
+            raise RuntimeError("Model not built. Call build_model() first.")
+        get_julia().seval("(m, b, c) -> ESFEX.add_operating_budget!(m, b; committed = c)")(
+            self._jl_model, scale_cost(float(budget)),
+            self._committed_steps(keep_steps, primary_energy))
+
     def get_solution_values(self, keep_steps: Optional[int] = None,
                             primary_energy: Optional["PrimaryEnergyAdapter"] = None,
                             ) -> Dict[str, Any]:
@@ -2620,14 +2647,7 @@ class PowerSystemAdapter:
         if self._jl_model is None:
             raise RuntimeError("Model not built. Call build_model() first.")
 
-        committed = None
-        n_steps = int(self._jl_input.temporal.hours)
-        if keep_steps is not None and 0 < int(keep_steps) < n_steps:
-            pe_vars = getattr(primary_energy, "_jl_vars", None)
-            pe_temporal = getattr(primary_energy, "_jl_temporal", None)
-            committed = ESFEX.committed_steps(
-                self._jl_vars, n_steps, int(keep_steps),
-                pe_vars=pe_vars, pe_temporal=pe_temporal)
+        committed = self._committed_steps(keep_steps, primary_energy)
 
         # Extract solution using Julia function
         t0 = _time.perf_counter()
@@ -2844,6 +2864,7 @@ class MasterProblemAdapter:
         demand_growth: float = 0.0,
         discount_rate: float = 0.05,
         max_annual_investment: float = 1e9,
+        budget_scope: str = "investment",
         target_re_penetration: float = 0.5,
         initial_re_penetration: float = 0.1,
         min_re_increment: float = 0.0,
@@ -2929,6 +2950,9 @@ class MasterProblemAdapter:
                 demand (default 0: the demand array already holds every year)
             discount_rate: Discount rate for NPV
             max_annual_investment: Maximum annual investment budget
+            budget_scope: "investment" (the budget caps each build year's
+                overnight investment) or "total" (that investment plus the
+                year's operating cost as the master values it)
             target_re_penetration: Target RE penetration ratio
             initial_re_penetration: Initial RE penetration ratio
             min_re_increment: Minimum annual RE penetration increment
@@ -3019,6 +3043,7 @@ class MasterProblemAdapter:
         self.demand_growth = demand_growth
         self.discount_rate = discount_rate
         self.max_annual_investment = max_annual_investment
+        self.budget_scope = budget_scope
         self.target_re_penetration = target_re_penetration
         self.initial_re_penetration = initial_re_penetration
         self.min_re_increment = min_re_increment
@@ -3475,6 +3500,7 @@ class MasterProblemAdapter:
             demand_growth=self.demand_growth,
             discount_rate=self.discount_rate,
             max_annual_investment=scale_cost(self.max_annual_investment),
+            budget_total=self.budget_scope == "total",
             target_re_penetration=self.target_re_penetration,
             initial_re_penetration=self.initial_re_penetration,
             min_re_increment=self.min_re_increment,
@@ -3618,13 +3644,16 @@ class MasterProblemAdapter:
         )
 
         if self.solver_method == "benders":
-            # The Benders master has neither TSAM periods nor user
-            # constraints: solve the monolithic master instead of dropping them
+            # The Benders master has neither TSAM periods, user constraints
+            # nor the year's operating cost (for budget_scope: total): solve
+            # the monolithic master instead of dropping them
             unsupported = []
             if self.use_tsam:
                 unsupported.append("TSAM periods (use_tsam)")
             if inv_specs:
                 unsupported.append("user investment constraints (custom_constraints)")
+            if self.budget_scope == "total":
+                unsupported.append("an investment-and-operation budget (budget_scope: total)")
             if unsupported:
                 logger.warning(
                     "Benders decomposition does not support "

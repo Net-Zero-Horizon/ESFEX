@@ -206,7 +206,7 @@ Click the system name in the Element Tree. The form has three tabs.
 
 ### Cost Limits
 
-Max Annual System Cost and Life Extension Cost Factor.
+Max Annual Investment, Budget Scope, Max Annual Operating Cost and Life Extension Cost Factor.
 
 ### Penalties
 

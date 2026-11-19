@@ -1557,22 +1557,25 @@ function add_transmission_symmetry_constraints!(
 end
 
 """
-    add_budget_constraints!(model, vars, input)
+    add_budget_constraints!(model, vars, input; operating=nothing)
 
-Annual investment budget, at each investment-period start: the overnight
-cost of the technologies, battery technologies (power and energy),
-transmission corridors and reservoirs built that year
-(`master_investment_terms`, base costs) stays within
-`max_annual_investment` plus the slack `slack_budget`. The budget limits the
-capital committed in the build year, not the annuities the objective
-charges. The slack is priced at `BUDGET_SLACK_PENALTY` per unit over the
-budget (`master_slack_cost`), so the budget binds unless keeping it would
-cost more than that, and never makes the master infeasible.
+Annual budget, at each investment-period start: the overnight cost of the
+technologies, battery technologies (power and energy), transmission
+corridors and reservoirs built that year (`master_investment_terms`, base
+costs) stays within `max_annual_investment` plus the slack `slack_budget`.
+The budget limits the capital committed in the build year, not the
+annuities the objective charges. With `operating` (year index =>
+expression, `budget_operating_cost`; `budget_scope: total`) the year's
+operating cost counts against the same budget. The slack is priced at
+`BUDGET_SLACK_PENALTY` per unit over the budget (`master_slack_cost`), so
+the budget binds unless keeping it would cost more than that, and never
+makes the master infeasible.
 """
 function add_budget_constraints!(
     model::Model,
     vars::MasterProblemVariables,
-    input::MasterProblemInput
+    input::MasterProblemInput;
+    operating::Union{Nothing, AbstractDict} = nothing
 )
     annual_cost = Dict{Int, AffExpr}(y => AffExpr(0.0)
         for y in 1:vars.years_per_inv_period:length(input.years))
@@ -1580,12 +1583,63 @@ function add_budget_constraints!(
         t.kind in BUDGET_KINDS || continue
         add_to_expression!(annual_cost[t.year], t.var, t.cost)
     end
+    if operating !== nothing
+        for (y_idx, cost) in annual_cost
+            op = get(operating, y_idx, nothing)
+            op === nothing || add_to_expression!(cost, op)
+        end
+    end
     for (y_idx, cost) in sort(collect(annual_cost); by = first)
         @constraint(model,
             cost <= input.max_annual_investment + vars.slack_budget[y_idx],
             base_name = "budget_y$(y_idx)"
         )
     end
+end
+
+"""
+    record_year_operating_cost!(model, scenario_idx, y_idx, day_costs)
+
+Keep the year's representative-day (or TSAM-period) operating cost, scaled
+to the year, on the model (`model.ext[:year_operating_cost]`, by
+(scenario, year)) for the `budget_scope: total` budget
+(`budget_operating_cost`).
+"""
+function record_year_operating_cost!(model::Model, scenario_idx::Int, y_idx::Int,
+                                     day_costs::AbstractVector)
+    total = AffExpr(0.0)
+    foreach(c -> add_to_expression!(total, c), day_costs)
+    get!(() -> Dict{Tuple{Int,Int}, AffExpr}(), model.ext,
+         :year_operating_cost)[(scenario_idx, y_idx)] = total
+    return nothing
+end
+
+"""
+    budget_operating_cost(model, vars, input; scenarios=nothing) -> Dict{Int, AffExpr}
+
+Each year's operating cost as the master values it, for the
+`budget_scope: total` budget (`add_budget_constraints!`): the
+representative days' (or TSAM periods') operating cost scaled to the year
+(`record_year_operating_cost!`) plus the year's asset costs
+(`build_annual_asset_cost`: fixed O&M, life extension, decommissioning).
+The annual RE-shortfall, curtailment-excess and CO2-budget penalties are
+left out. With stochastic `scenarios`, each scenario's cost (its own
+multipliers) weighted by its probability.
+"""
+function budget_operating_cost(model::Model, vars::MasterProblemVariables,
+                               input::MasterProblemInput;
+                               scenarios = nothing)
+    recorded = get(model.ext, :year_operating_cost, Dict{Tuple{Int,Int}, AffExpr}())
+    out = Dict{Int, AffExpr}()
+    cases = scenarios === nothing ? [(0, 1.0, nothing)] :
+        [(k, sc.probability, sc.multipliers) for (k, sc) in enumerate(scenarios)]
+    for y_idx in eachindex(input.years), (k, prob, mult) in cases
+        cost = get!(out, y_idx, AffExpr(0.0))
+        add_to_expression!(cost, build_annual_asset_cost(vars, input, y_idx; mult = mult), prob)
+        day = get(recorded, (k, y_idx), nothing)
+        day === nothing || add_to_expression!(cost, day, prob)
+    end
+    return out
 end
 
 """
@@ -4692,6 +4746,7 @@ function add_representative_days_validation!(
                         start_hour, hours, scale)
         end
 
+        record_year_operating_cost!(model, scenario_idx, y_idx, vars.operational_costs[y_idx])
         push!(vars.operational_costs[y_idx],
             add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx))
         push!(vars.operational_costs[y_idx],
@@ -4973,6 +5028,7 @@ function add_tsam_periods_validation!(
                         start_hour, hours, tres * weight)
         end
 
+        record_year_operating_cost!(model, scenario_idx, y_idx, vars.operational_costs[y_idx])
         push!(vars.operational_costs[y_idx],
             add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx))
         push!(vars.operational_costs[y_idx],
@@ -5000,6 +5056,9 @@ Create the Master Problem optimization model.
 - `capacity_states::Bool`: hourly rows reference per-year capacity state
                            variables (`add_capacity_states!`, default) instead
                            of the investment sums; the same LP either way
+- `defer_budget::Bool`: with `input.budget_total`, leave the budget out (the
+                        stochastic master adds it once its scenarios'
+                        operating costs exist)
 
 # Returns
 - `model::Model`: JuMP model
@@ -5010,7 +5069,8 @@ function create_master_problem(
     input::MasterProblemInput;
     use_representative_days::Bool = true,
     custom_constraints = nothing,
-    capacity_states::Bool = true
+    capacity_states::Bool = true,
+    defer_budget::Bool = false
 )
     # Create model with optimizer
     model = Model(create_optimizer(
@@ -5032,7 +5092,8 @@ function create_master_problem(
 
     # Add constraints
     add_investment_constraints!(model, vars, input)
-    add_budget_constraints!(model, vars, input)
+    # budget_scope: total needs the years' operating cost (below)
+    input.budget_total || add_budget_constraints!(model, vars, input)
     # Retirement cascade constraints - ensures once retired, stays retired
     add_retirement_cascade_constraints!(model, vars, input)
     add_capacity_adequacy_constraints!(model, vars, input)
@@ -5052,6 +5113,13 @@ function create_master_problem(
     # the representative days / TSAM periods (add_re_target_constraints!),
     # which hold the renewable and total generation (define_re_share!)
     define_re_share!(model, vars, input)
+
+    # Investment and operating cost of each year against one budget
+    # (budget_scope: total); a stochastic master adds it over its scenarios
+    if input.budget_total && !defer_budget
+        add_budget_constraints!(model, vars, input;
+            operating = budget_operating_cost(model, vars, input))
+    end
 
     # User-defined investment constraints (declarative config + plugin overlays).
     apply_user_constraints!(model, vars, input, custom_constraints)
@@ -5444,7 +5512,8 @@ function create_stochastic_master_problem(input::StochasticMasterInput;
 
     # Investment structure only; the operation is added per scenario below.
     model, vars, targets = create_master_problem(base_input;
-        use_representative_days=false, custom_constraints=custom_constraints)
+        use_representative_days=false, custom_constraints=custom_constraints,
+        defer_budget=true)
 
     scenario_costs = Dict{Int, Vector{AffExpr}}[]
     first_soc = nothing
@@ -5475,6 +5544,12 @@ function create_stochastic_master_problem(input::StochasticMasterInput;
         for c in costs
             add_to_expression!(expected, c, scenario.probability)
         end
+    end
+
+    if base_input.budget_total
+        add_budget_constraints!(model, vars, base_input;
+            operating = budget_operating_cost(model, vars, base_input;
+                                              scenarios = input.scenarios))
     end
 
     build_stochastic_objective!(model, vars, base_input, input.scenarios, scenario_costs)

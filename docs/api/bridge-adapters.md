@@ -126,6 +126,15 @@ Converts Python configuration into a Julia `PowerSystemInput` struct. Steps:
 7. Builds network, temporal, penalty, and solver configuration Julia structs.
 8. Constructs the final `ESFEX.PowerSystemInput(...)` with all fields.
 
+### add_operating_budget
+
+```python
+def add_operating_budget(self, budget: float, keep_steps: int | None = None,
+                         primary_energy: PrimaryEnergyAdapter | None = None) -> None
+```
+
+Cap the operating spending (fuel, maintenance, fixed O&M; with `primary_energy`, the fuel bought and transported) of the window's first `keep_steps` steps at `budget` ($), soft at 1000 $ per $ over it ([COST-1](../formulation/operational-dispatch.md#annual-operating-budget), `ESFEX.add_operating_budget!`). Call it after `build_model` and the primary-energy integration, before `solve`. The runner calls it for each window when the system sets `max_annual_operating_cost`, with the window's share of what is left of the year's budget.
+
 ### solve
 
 ```python
@@ -216,6 +225,7 @@ class MasterProblemAdapter:
         demand_growth: float = 0.0,
         discount_rate: float = 0.05,
         max_annual_investment: float = 1e9,
+        budget_scope: str = "investment",
         target_re_penetration: float = 0.5,
         initial_re_penetration: float = 0.1,
         min_re_increment: float = 0.0,
@@ -257,7 +267,8 @@ class MasterProblemAdapter:
 | `demand` | `np.ndarray` | Demand array `(hours, nodes)` holding every planning year, one block per year. |
 | `demand_growth` | `float` | Extra annual growth applied on top of each year's block (default `0.0`; the runner always passes 0). |
 | `discount_rate` | `float` | Discount rate for NPV calculations (e.g., 0.05 = 5%). |
-| `max_annual_investment` | `float` | Maximum annual investment budget in $. |
+| `max_annual_investment` | `float` | Maximum annual investment budget in $ (the system's `max_annual_investment`). |
+| `budget_scope` | `str` | `"investment"`: the budget caps each build year's overnight investment; `"total"`: that investment plus the year's operating cost as the master values it. With `"total"`, `solver_method: benders` solves the monolithic master instead (warning). |
 | `target_re_penetration` | `float` | Target RE penetration ratio by the final year (0-1). |
 | `initial_re_penetration` | `float` | Starting RE penetration ratio (auto-calculated from existing RE capacity). |
 | `temporal_resolution_hours` | `int` | Hours per timestep for representative days (e.g., 24). |
