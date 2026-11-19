@@ -19,6 +19,8 @@ def test_legacy_cost_breakdown_with_npv_penalty_still_loads(tmp_path):
                        npv_penalty_cost=0.0, total=1200.0)
     with h5py.File(path, "r") as f:
         wf = DashboardLoader({}, {})._read_cost_breakdown(f, "", [2025])
-    assert {s["label"] for s in wf["steps"]} == {"Fuel", "Fixed O&M"}
+    # Steps are identified by component key; the label is display text in
+    # the current language (an earlier test may leave the GUI in Spanish).
+    assert {s["id"] for s in wf["steps"]} == {"fuel_cost", "fixed_om_cost"}
     assert wf["total"] == pytest.approx(1200.0)
     assert "npv_penalty_cost" not in dict(DashboardLoader._COST_COMPONENTS)

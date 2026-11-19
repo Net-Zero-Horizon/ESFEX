@@ -15,6 +15,8 @@ import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
+from esfex.visualization.i18n import tr
+
 
 # ──────────────────────────────────────────────────────────────
 # Color palette (consistent across all financial charts)
@@ -62,7 +64,7 @@ class WaterfallChart(FigureCanvasQTAgg):
         self,
         labels: list[str],
         values: list[float],
-        title: str = "NPV Waterfall ($)",
+        title: Optional[str] = None,
         last_is_total: bool = True,
     ):
         """Render a waterfall.
@@ -73,6 +75,7 @@ class WaterfallChart(FigureCanvasQTAgg):
         deltas; with a complete decomposition their running sum lands exactly
         on the total bar.
         """
+        title = title or tr("wizard_financial.chart_waterfall")
         self.ax.clear()
         n = len(labels)
         if n == 0:
@@ -146,7 +149,8 @@ class StackedBarChart(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
 
-    def update_chart(self, cash_flows: pd.DataFrame, title: str = "Annual Cash Flows"):
+    def update_chart(self, cash_flows: pd.DataFrame, title: Optional[str] = None):
+        title = title or tr("wizard_financial.chart_annual_cf")
         self.ax.clear()
         if cash_flows.empty:
             self.draw()
@@ -161,9 +165,9 @@ class StackedBarChart(FigureCanvasQTAgg):
         itc = cash_flows.get("itc_benefit", np.zeros(len(years))).values
         pos_bottom = np.zeros(len(years))
         for vals, label, color in [
-            (rev, "Revenue", _COLORS["revenue"]),
-            (ptc, "PTC Benefit", _COLORS["ptc"]),
-            (itc, "ITC Benefit", _COLORS["salvage"]),
+            (rev, tr("wizard_financial.cf_revenue"), _COLORS["revenue"]),
+            (ptc, tr("wizard_financial.cf_ptc_benefit"), _COLORS["ptc"]),
+            (itc, tr("wizard_financial.cf_itc_benefit"), _COLORS["salvage"]),
         ]:
             self.ax.bar(
                 x, vals, bottom=pos_bottom, label=label,
@@ -182,13 +186,13 @@ class StackedBarChart(FigureCanvasQTAgg):
 
         neg_bottom = np.zeros(len(years))
         for vals, label, color in [
-            (fuel, "Fuel", _COLORS["fuel"]),
-            (om, "O&M", _COLORS["om"]),
-            (ins, "Insurance", _COLORS["insurance"]),
-            (carbon, "Carbon", _COLORS["penalties"]),
-            (penalties, "Penalties", _COLORS["negative"]),
-            (capex, "CAPEX", _COLORS["capex"]),
-            (tax, "Tax", _COLORS["tax"]),
+            (fuel, tr("wizard_financial.wf_fuel"), _COLORS["fuel"]),
+            (om, tr("wizard_financial.wf_om"), _COLORS["om"]),
+            (ins, tr("wizard_financial.cf_insurance"), _COLORS["insurance"]),
+            (carbon, tr("wizard_financial.chart_carbon"), _COLORS["penalties"]),
+            (penalties, tr("wizard_financial.wf_penalties"), _COLORS["negative"]),
+            (capex, tr("wizard_financial.wf_capex"), _COLORS["capex"]),
+            (tax, tr("wizard_financial.wf_tax"), _COLORS["tax"]),
         ]:
             self.ax.bar(
                 x - 0.4, -vals, bottom=-neg_bottom, label=label,
@@ -198,7 +202,8 @@ class StackedBarChart(FigureCanvasQTAgg):
 
         # Net cash flow line
         net = cash_flows.get("net_cash_flow", np.zeros(len(years))).values
-        self.ax.plot(x, net, "ko-", markersize=4, label="Net Cash Flow", linewidth=1.5)
+        self.ax.plot(x, net, "ko-", markersize=4, label=tr("wizard_financial.cf_net_cash_flow"),
+                     linewidth=1.5)
 
         self.ax.set_xticks(x)
         self.ax.set_xticklabels(years, rotation=45, fontsize=8)
@@ -223,12 +228,14 @@ class CostPieChart(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
 
-    def update_chart(self, labels: list[str], values: list[float], title: str = "Cost Breakdown"):
+    def update_chart(self, labels: list[str], values: list[float], title: Optional[str] = None):
+        title = title or tr("wizard_financial.chart_cost_breakdown")
         self.ax.clear()
         # Filter out zero/negative values
         filtered = [(l, v) for l, v in zip(labels, values) if v > 0]
         if not filtered:
-            self.ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            self.ax.text(0.5, 0.5, tr("wizard_financial.chart_no_data"),
+                         ha="center", va="center")
             self.draw()
             return
         labs, vals = zip(*filtered)
@@ -258,8 +265,9 @@ class TornadoDiagram(FigureCanvasQTAgg):
         self,
         tornado: dict[str, tuple[float, float]],
         base_npv: float,
-        title: str = "Tornado Diagram — NPV Sensitivity",
+        title: Optional[str] = None,
     ):
+        title = title or tr("wizard_financial.chart_tornado")
         self.ax.clear()
         if not tornado:
             self.draw()
@@ -286,11 +294,14 @@ class TornadoDiagram(FigureCanvasQTAgg):
             color=[_COLORS["negative"] if l < h else _COLORS["positive"] for l, h in zip(lows, highs)],
             edgecolor="white",
         )
-        self.ax.axvline(base_npv, color="#333", linewidth=1.2, linestyle="--", label=f"Base NPV: ${base_npv/1e6:.1f}M")
+        self.ax.axvline(
+            base_npv, color="#333", linewidth=1.2, linestyle="--",
+            label=tr("wizard_financial.chart_base_npv", value=f"{base_npv/1e6:.1f}"),
+        )
 
         self.ax.set_yticks(y)
         self.ax.set_yticklabels(labels, fontsize=9)
-        self.ax.set_xlabel("NPV ($)")
+        self.ax.set_xlabel(tr("wizard_financial.chart_axis_npv"))
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.legend(fontsize=8)
         self.ax.grid(axis="x", alpha=0.3)
@@ -314,8 +325,9 @@ class SpiderPlot(FigureCanvasQTAgg):
         self,
         sweeps: dict[str, list[tuple]],
         base_npv: float,
-        title: str = "Sensitivity Spider Plot",
+        title: Optional[str] = None,
     ):
+        title = title or tr("wizard_financial.chart_spider")
         self.ax.clear()
         if not sweeps:
             self.draw()
@@ -336,8 +348,8 @@ class SpiderPlot(FigureCanvasQTAgg):
 
         self.ax.axhline(base_npv, color="#555", linewidth=0.5, linestyle="--")
         self.ax.axvline(0, color="#555", linewidth=0.5, linestyle="--")
-        self.ax.set_xlabel("% Change from Base", fontsize=9)
-        self.ax.set_ylabel("NPV ($)", fontsize=9)
+        self.ax.set_xlabel(tr("wizard_financial.chart_axis_pct_change"), fontsize=9)
+        self.ax.set_ylabel(tr("wizard_financial.chart_axis_npv"), fontsize=9)
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.legend(fontsize=7, loc="best")
         self.ax.grid(alpha=0.3)
@@ -360,13 +372,14 @@ class BubbleChart(FigureCanvasQTAgg):
     def update_chart(
         self,
         tech_financials: dict,
-        title: str = "Technology Comparison",
+        title: Optional[str] = None,
     ):
         """
         Parameters
         ----------
         tech_financials : dict[str, TechnologyFinancials]
         """
+        title = title or tr("wizard_financial.chart_tech_comparison")
         self.ax.clear()
         if not tech_financials:
             self.draw()
@@ -389,7 +402,8 @@ class BubbleChart(FigureCanvasQTAgg):
             colors.append(_TECH_PALETTE[i % len(_TECH_PALETTE)])
 
         if not names:
-            self.ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            self.ax.text(0.5, 0.5, tr("wizard_financial.chart_no_data"),
+                         ha="center", va="center")
             self.draw()
             return
 
@@ -397,7 +411,7 @@ class BubbleChart(FigureCanvasQTAgg):
         for i, name in enumerate(names):
             self.ax.annotate(name, (cfs[i], lcoes[i]), fontsize=7, ha="center", va="bottom")
 
-        self.ax.set_xlabel("Capacity Factor (%)", fontsize=9)
+        self.ax.set_xlabel(tr("wizard_financial.chart_axis_cf"), fontsize=9)
         self.ax.set_ylabel("LCOE ($/MWh)", fontsize=9)
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.grid(alpha=0.3)
@@ -417,7 +431,8 @@ class DSCRTimeline(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
 
-    def update_chart(self, years: list[int], dscr: np.ndarray, title: str = "Debt Service Coverage Ratio"):
+    def update_chart(self, years: list[int], dscr: np.ndarray, title: Optional[str] = None):
+        title = title or tr("wizard_financial.chart_dscr")
         self.ax.clear()
         n = len(years)
         if n == 0:
@@ -429,7 +444,7 @@ class DSCRTimeline(FigureCanvasQTAgg):
         colors = [_COLORS["positive"] if d >= 1.2 else _COLORS["negative"] for d in dscr_display]
 
         self.ax.bar(x, dscr_display, color=colors, edgecolor="white", width=0.6)
-        self.ax.axhline(1.2, color="#e74c3c", linewidth=1.5, linestyle="--", label="Min DSCR (1.2×)")
+        self.ax.axhline(1.2, color="#e74c3c", linewidth=1.5, linestyle="--", label=tr("wizard_financial.chart_min_dscr"))
         self.ax.axhline(1.0, color="#555", linewidth=0.5, linestyle=":")
 
         self.ax.set_xticks(x)
@@ -459,8 +474,9 @@ class NPVHistogram(FigureCanvasQTAgg):
         npv_samples: np.ndarray,
         var_5: float = 0.0,
         cvar_5: float = 0.0,
-        title: str = "NPV Distribution (Monte Carlo)",
+        title: Optional[str] = None,
     ):
+        title = title or tr("wizard_financial.chart_npv_dist")
         self.ax.clear()
         if len(npv_samples) == 0:
             self.draw()
@@ -474,21 +490,24 @@ class NPVHistogram(FigureCanvasQTAgg):
         # VaR and CVaR lines
         self.ax.axvline(
             var_5 / 1e6, color=_COLORS["negative"], linewidth=1.5,
-            linestyle="--", label=f"VaR 5%: ${var_5/1e6:.1f}M",
+            linestyle="--",
+            label=tr("wizard_financial.chart_var5", value=f"{var_5/1e6:.1f}"),
         )
         self.ax.axvline(
             cvar_5 / 1e6, color="#c0392b", linewidth=1.5,
-            linestyle=":", label=f"CVaR 5%: ${cvar_5/1e6:.1f}M",
+            linestyle=":",
+            label=tr("wizard_financial.chart_cvar5", value=f"{cvar_5/1e6:.1f}"),
         )
 
         mean = float(np.mean(npv_samples))
         self.ax.axvline(
             mean / 1e6, color=_COLORS["positive"], linewidth=1.5,
-            linestyle="-", label=f"Mean: ${mean/1e6:.1f}M",
+            linestyle="-",
+            label=tr("wizard_financial.chart_mean_npv", value=f"{mean/1e6:.1f}"),
         )
 
-        self.ax.set_xlabel("NPV ($M)", fontsize=9)
-        self.ax.set_ylabel("Frequency", fontsize=9)
+        self.ax.set_xlabel(tr("wizard_financial.chart_axis_npv_musd"), fontsize=9)
+        self.ax.set_ylabel(tr("wizard_financial.chart_axis_frequency"), fontsize=9)
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.legend(fontsize=8)
         self.ax.grid(alpha=0.3)
@@ -508,7 +527,8 @@ class PriceDurationCurve(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
 
-    def update_chart(self, prices: np.ndarray, title: str = "Price Duration Curve"):
+    def update_chart(self, prices: np.ndarray, title: Optional[str] = None):
+        title = title or tr("wizard_financial.chart_price_duration")
         self.ax.clear()
         if len(prices) == 0:
             self.draw()
@@ -518,8 +538,8 @@ class PriceDurationCurve(FigureCanvasQTAgg):
         x = np.linspace(0, 100, len(sorted_prices))
         self.ax.fill_between(x, sorted_prices, alpha=0.3, color=_COLORS["revenue"])
         self.ax.plot(x, sorted_prices, color=_COLORS["revenue"], linewidth=1.5)
-        self.ax.set_xlabel("% of Time", fontsize=9)
-        self.ax.set_ylabel("Price ($/MWh)", fontsize=9)
+        self.ax.set_xlabel(tr("wizard_financial.chart_axis_pct_time"), fontsize=9)
+        self.ax.set_ylabel(tr("wizard_financial.chart_axis_price"), fontsize=9)
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.grid(alpha=0.3)
         self.draw()
@@ -538,7 +558,8 @@ class TechRevenueVsCostChart(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
 
-    def update_chart(self, tech_financials: dict, title: str = "Revenue vs Cost by Technology"):
+    def update_chart(self, tech_financials: dict, title: Optional[str] = None):
+        title = title or tr("wizard_financial.chart_rev_cost")
         self.ax.clear()
         if not tech_financials:
             self.draw()
@@ -560,8 +581,10 @@ class TechRevenueVsCostChart(FigureCanvasQTAgg):
 
         x = np.arange(len(names))
         w = 0.35
-        self.ax.bar(x - w / 2, revenues, w, label="Revenue", color=_COLORS["revenue"])
-        self.ax.bar(x + w / 2, costs, w, label="Total Cost", color=_COLORS["fuel"])
+        self.ax.bar(x - w / 2, revenues, w, label=tr("wizard_financial.cf_revenue"),
+                    color=_COLORS["revenue"])
+        self.ax.bar(x + w / 2, costs, w, label=tr("wizard_financial.chart_total_cost"),
+                    color=_COLORS["fuel"])
         self.ax.set_xticks(x)
         self.ax.set_xticklabels(names, rotation=30, ha="right", fontsize=8)
         self.ax.set_ylabel("$M")
@@ -584,7 +607,8 @@ class CumulativeNPVChart(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
 
-    def update_chart(self, cash_flows: pd.DataFrame, title: str = "Cumulative NPV"):
+    def update_chart(self, cash_flows: pd.DataFrame, title: Optional[str] = None):
+        title = title or tr("wizard_financial.chart_cum_npv")
         self.ax.clear()
         if cash_flows.empty or "cumulative_npv" not in cash_flows.columns:
             self.draw()
@@ -598,8 +622,8 @@ class CumulativeNPVChart(FigureCanvasQTAgg):
         self.ax.plot(years, cum_npv, "o-", color=_COLORS["net_cf"], markersize=4, linewidth=1.5)
         self.ax.axhline(0, color="#555", linewidth=0.5)
 
-        self.ax.set_xlabel("Year", fontsize=9)
-        self.ax.set_ylabel("Cumulative NPV ($M)", fontsize=9)
+        self.ax.set_xlabel(tr("wizard_financial.cf_year"), fontsize=9)
+        self.ax.set_ylabel(tr("wizard_financial.chart_axis_cum_npv"), fontsize=9)
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.grid(alpha=0.3)
         self.draw()
@@ -622,8 +646,9 @@ class IRRHistogram(FigureCanvasQTAgg):
         self,
         irr_samples: np.ndarray,
         wacc: float = 0.0,
-        title: str = "IRR Distribution (Monte Carlo)",
+        title: Optional[str] = None,
     ):
+        title = title or tr("wizard_financial.chart_irr_dist")
         self.ax.clear()
         if len(irr_samples) == 0:
             self.draw()
@@ -638,15 +663,16 @@ class IRRHistogram(FigureCanvasQTAgg):
         if wacc > 0:
             self.ax.axvline(
                 wacc * 100, color=_COLORS["negative"], linewidth=1.5,
-                linestyle="--", label=f"WACC: {wacc:.1%}",
+                linestyle="--",
+                label=tr("wizard_financial.chart_wacc", value=f"{wacc:.1%}"),
             )
         mean_irr = float(np.mean(irr_samples))
         self.ax.axvline(
             mean_irr * 100, color=_COLORS["positive"], linewidth=1.5,
-            label=f"Mean IRR: {mean_irr:.1%}",
+            label=tr("wizard_financial.chart_mean_irr", value=f"{mean_irr:.1%}"),
         )
-        self.ax.set_xlabel("IRR (%)", fontsize=9)
-        self.ax.set_ylabel("Frequency", fontsize=9)
+        self.ax.set_xlabel(tr("wizard_financial.chart_axis_irr"), fontsize=9)
+        self.ax.set_ylabel(tr("wizard_financial.chart_axis_frequency"), fontsize=9)
         self.ax.set_title(title, fontsize=11, fontweight="bold")
         self.ax.legend(fontsize=8)
         self.ax.grid(alpha=0.3)

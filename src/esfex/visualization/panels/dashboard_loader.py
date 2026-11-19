@@ -22,6 +22,7 @@ import h5py
 import numpy as np
 
 from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.visualization.i18n import tr
 
 from esfex.visualization.panels.results_charts import (
     _SlicedScenarioView,
@@ -548,18 +549,23 @@ class DashboardLoader:
             "demand_mw": [float(v) for v in demand],
         }
 
+        # ``id`` is the stable series identity (the RE-share KPI keys on
+        # it); ``label`` is what the legend shows: the technology bucket
+        # as is, the non-generation series in the current language.
         series = []
         for label, vals in sorted(
             tech_series.items(), key=lambda kv: -float(_np.mean(kv[1]))
         ):
             series.append({
+                "id": label,
                 "label": label,
                 "color": _color_for(label),
                 "values": [float(v) for v in vals],
             })
         if bat_discharge.size and bat_discharge.any():
             series.append({
-                "label": "Battery (discharge)",
+                "id": "battery_discharge",
+                "label": tr("dashboard_loader.battery_discharge"),
                 "color": "rgba(155, 89, 182, 0.85)",
                 "values": [float(v) for v in bat_discharge],
             })
@@ -567,19 +573,22 @@ class DashboardLoader:
         series_neg = []
         if bat_charge.size and bat_charge.any():
             series_neg.append({
-                "label": "Battery (charge)",
+                "id": "battery_charge",
+                "label": tr("dashboard_loader.battery_charge"),
                 "color": "rgba(155, 89, 182, 0.45)",
                 "values": [float(v) for v in bat_charge],
             })
         if curtailment.size and curtailment.any():
             series_neg.append({
-                "label": "Curtailment",
+                "id": "curtailment",
+                "label": tr("dashboard_loader.curtailment"),
                 "color": "rgba(241, 196, 15, 0.7)",
                 "values": [float(v) for v in curtailment],
             })
         if load_shed.size and load_shed.any():
             series.append({
-                "label": "Load shed",
+                "id": "load_shed",
+                "label": tr("dashboard_loader.load_shed"),
                 "color": "rgba(231, 76, 60, 0.85)",
                 "values": [float(v) for v in load_shed],
             })
@@ -644,11 +653,12 @@ class DashboardLoader:
         # planning mix's labels.
         re_gen = total_gen = 0.0
         for s in series_pos:
-            if s.get("label") in self._NOT_GENERATION_LABELS:
+            sid = self._series_id(s)
+            if sid in self._NOT_GENERATION_LABELS:
                 continue
             v = _np.asarray(s.get("values", []), dtype=float).sum() * tres
             total_gen += v
-            if s.get("label") in self._RENEWABLE_MIX_LABELS:
+            if sid in self._RENEWABLE_MIX_LABELS:
                 re_gen += v
         if mix.get("re_mw") is not None:
             re_gen = float(_np.sum(mix["re_mw"])) * tres
@@ -684,20 +694,22 @@ class DashboardLoader:
         kpis = {
             "cost": _card(
                 _fmt_compact_usd(cost_v) if cost_v is not None else None,
-                "Operational cost (horizon)"),
+                tr("dashboard_loader.kpi_cost_note")),
             "avg_lmp": _card(
                 f"{avg_lmp:,.1f} USD/MWh" if avg_lmp is not None else None,
-                "Demand-weighted average"),
+                tr("dashboard_loader.kpi_avg_lmp_note")),
             "ens": _card(
-                f"{ens_mwh:,.0f} MWh ({ens_pct:.1f}% demand)"
+                tr("dashboard_loader.kpi_ens_value",
+                   mwh=f"{ens_mwh:,.0f}", pct=f"{ens_pct:.1f}")
                 if dem_mwh > 0 else None,
-                "Unserved energy"),
+                tr("dashboard_loader.kpi_ens_note")),
             "re_share": _card(
                 f"{re_share * 100:.1f}%" if re_share is not None else None,
-                "Renewable share of generation"),
+                tr("dashboard_loader.kpi_re_share_note")),
             "battery_cycles": _card(
-                f"{cycles:.2f} eq. full cycles" if cap_mwh > 0 else "No batteries",
-                "Throughput / capacity"),
+                tr("dashboard_loader.kpi_cycles_value", cycles=f"{cycles:.2f}")
+                if cap_mwh > 0 else tr("dashboard_loader.kpi_no_batteries"),
+                tr("dashboard_loader.kpi_cycles_note")),
         }
         return kpis
 
@@ -714,10 +726,20 @@ class DashboardLoader:
         "Wind", "Solar", "Hydro", "Biomass", "OTEC",
         "Geothermal", "Hydrogen",
     })
-    # Mix series that are not generation (left out of the RE share's total)
+    # Mix series that are not generation (left out of the RE share's total),
+    # by series id (``battery_discharge`` / ``load_shed``) or, for payloads
+    # without one, the English label they used to carry
     _NOT_GENERATION_LABELS = frozenset({
+        "battery_discharge", "load_shed",
         "Battery (discharge)", "Battery discharge", "Battery", "Load shed",
     })
+
+    @staticmethod
+    def _series_id(s: dict) -> Optional[str]:
+        """Stable identity of a mix series: its ``id``, else its label
+        (planning series and older payloads carry only the label, which
+        is then the technology bucket)."""
+        return s.get("id") or s.get("label")
 
     @classmethod
     def _mix_year_re(cls, mix: dict, i: int) -> tuple[float, float]:
@@ -732,7 +754,7 @@ class DashboardLoader:
                 continue
             v = float(vals[i])
             tot += v
-            if s.get("label") in cls._RENEWABLE_MIX_LABELS:
+            if cls._series_id(s) in cls._RENEWABLE_MIX_LABELS:
                 ren += v
         re_gwh = mix.get("re_gwh") or []
         if i < len(re_gwh) and re_gwh[i] is not None:
@@ -908,10 +930,9 @@ class DashboardLoader:
             "re_gwh": re_gwh,
         }
 
-    # Cost-breakdown component → display label + sign convention.
-    # ``benefit`` flag marks components that *reduce* the objective
-    # (revenue / avoided cost) — they're stored positive in the HDF5
-    # but should subtract in the waterfall.
+    # Cost-breakdown component → English label. The waterfall shows
+    # ``dashboard_loader.cost_<component>`` in the current language
+    # (``_cost_label``); each step also carries the component key as ``id``.
     _COST_COMPONENTS = [
         ("fuel_cost",                "Fuel"),
         ("co2_emission_cost",        "CO₂ emissions"),
@@ -939,6 +960,13 @@ class DashboardLoader:
         ("demand_shift_cost",        "Demand shift"),
         ("operating_budget_penalty", "Operating budget excess"),
     ]
+
+    @classmethod
+    def _cost_label(cls, key: str) -> str:
+        """Display label of cost component ``key`` (unknown keys as is)."""
+        if key in dict(cls._COST_COMPONENTS):
+            return tr(f"dashboard_loader.cost_{key}")
+        return key
 
     def _read_cost_breakdown(self, f: h5py.File, bp: str,
                              years: list[int]) -> Optional[dict]:
@@ -976,12 +1004,10 @@ class DashboardLoader:
                     else:
                         comp_sum_recon[k] = comp_sum_recon.get(k, 0.0) + float(v)
             if recon_found:
-                # Translate component keys to the same human labels the
-                # legacy path produces so the JS waterfall renders the
-                # same legend regardless of which path provided the data.
-                label_by_key = dict(self._COST_COMPONENTS)
+                # Same labels as the legacy path, so the JS waterfall
+                # renders the same legend whichever path provided the data.
                 steps = [
-                    {"label": label_by_key.get(k, k), "value": v}
+                    {"id": k, "label": self._cost_label(k), "value": v}
                     for k, v in comp_sum_recon.items() if abs(v) >= 1.0
                 ]
                 if steps:
@@ -1028,9 +1054,8 @@ class DashboardLoader:
         if not found:
             return None
 
-        label_by_key = dict(self._COST_COMPONENTS)
         steps = [
-            {"label": label_by_key[k], "value": v}
+            {"id": k, "label": self._cost_label(k), "value": v}
             for k, v in comp_sum.items() if abs(v) >= 1.0
         ]
         if not steps:
