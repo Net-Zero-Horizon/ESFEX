@@ -3,12 +3,15 @@ Time-Series Aggregation Method (TSAM) for representative period selection.
 
 Replaces peak-demand-based representative day selection with data-driven
 clustering (k-medoids or k-means) that produces weighted representative
-periods with optional inter-period SOC linking for seasonal storage.
+periods, with the period each day of the year belongs to for the master's
+seasonal storage (inter-period linking, Kotzur et al. 2018).
 
 References:
     Nahmmacher et al. (2016). Carpe diem: A novel approach to select
     representative days for long-term power system planning models.
     Energy, 112, 430-442.
+    Kotzur et al. (2018). Time series aggregation for energy system design:
+    modeling seasonal storage. Applied Energy, 213, 123-135.
 """
 
 from __future__ import annotations
@@ -31,14 +34,17 @@ class TSAMResult:
             period within the annual demand array.
         period_weights: Number of original periods each representative period
             stands for (cluster sizes). sum(weights) == total_periods.
-        chronological_order: Indices into period_start_hours sorted by their
-            position in the year (ascending day-of-year).
+        day_period: The representative period (index into
+            period_start_hours) of each period of the year, in calendar order
+            (365 entries for daily periods). The master's seasonal storage
+            runs through the year on it; each period's count in it equals its
+            weight.
         num_periods: Number of representative periods (K).
     """
 
     period_start_hours: list[int]
     period_weights: list[float]
-    chronological_order: list[int]
+    day_period: list[int]
     num_periods: int
     # Indices of the periods modelled as they are (the critical days): the
     # renewable profiles are rescaled on the other periods only
@@ -74,7 +80,7 @@ def compute_tsam_periods(
             weights are unaffected (only the representative changes).
 
     Returns:
-        TSAMResult with period start hours, weights, and chronological order.
+        TSAMResult with period start hours, weights and the day-to-period map.
     """
     total_timesteps = demand.shape[0]
     num_possible_periods = total_timesteps // period_length_hours
@@ -91,7 +97,7 @@ def compute_tsam_periods(
         return TSAMResult(
             period_start_hours=[0],
             period_weights=[float(num_possible_periods)],
-            chronological_order=[0],
+            day_period=[0] * num_possible_periods,
             num_periods=1,
         )
 
@@ -154,18 +160,12 @@ def compute_tsam_periods(
             medoid_indices = list(medoid_indices)
             medoid_indices[peak_label] = peak_period_idx
 
-    # --- Compute weights (cluster sizes) ---
-    weights = []
-    for k in range(num_periods):
-        cluster_size = int(np.sum(labels == k))
-        weights.append(float(max(cluster_size, 1)))
+    # --- Weights: cluster sizes, each day in exactly one cluster ---
+    labels, medoid_indices = _own_medoids(labels, medoid_indices, features_normalized)
+    weights = [float(np.sum(labels == k)) for k in range(num_periods)]
 
     # --- Map medoid indices to start hours ---
     period_start_hours = [int(idx * period_length_hours) for idx in medoid_indices]
-
-    # --- Chronological ordering (sort by day-of-year) ---
-    sorted_indices = sorted(range(num_periods), key=lambda i: medoid_indices[i])
-    chronological_order = sorted_indices
 
     logger.info(
         f"TSAM: {num_periods} representative periods selected via {method}. "
@@ -175,9 +175,56 @@ def compute_tsam_periods(
     return TSAMResult(
         period_start_hours=period_start_hours,
         period_weights=weights,
-        chronological_order=chronological_order,
+        day_period=[int(k) for k in labels],
         num_periods=num_periods,
     )
+
+
+def with_critical_days(result: TSAMResult, critical_starts: Sequence[int],
+                       period_length: int) -> TSAMResult:
+    """*result* with the critical days (first steps, 0-based within the
+    year, ``period_length`` steps each) appended as periods of their own.
+    Each critical day leaves its cluster and maps to its own period in
+    ``day_period``; every weight is the period's count of days, so the
+    weights that scale the periods' costs and energy are the days the
+    seasonal storage runs through (a critical day stands for 1 day, its
+    cluster for one day less)."""
+    day_period = list(result.day_period)
+    k0 = len(result.period_start_hours)
+    for j, start in enumerate(critical_starts):
+        day = int(start) // max(1, int(period_length))
+        if not 0 <= day < len(day_period):
+            raise ValueError(f"critical day starting at step {start} is outside the year")
+        day_period[day] = k0 + j
+    starts = list(result.period_start_hours) + [int(s) for s in critical_starts]
+    counts = np.bincount(np.asarray(day_period, dtype=int), minlength=len(starts))
+    return TSAMResult(
+        period_start_hours=starts,
+        period_weights=[float(c) for c in counts],
+        day_period=day_period,
+        num_periods=len(starts),
+        critical_periods=list(range(k0, len(starts))))
+
+
+def _own_medoids(labels: np.ndarray, medoids: Sequence[int],
+                 features: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    """*labels* with every representative day in its own cluster, so each
+    cluster has at least one day and its size (the period's weight) is the
+    number of days the year maps to it. A k-means cluster can come out empty
+    (its representative is the day nearest its centroid, labelled to another
+    cluster), and two clusters can share a representative: the later one
+    takes the nearest day no other cluster represents."""
+    labels = np.asarray(labels, dtype=int).copy()
+    medoids = [int(m) for m in medoids]
+    taken: set[int] = set()
+    for k, m in enumerate(medoids):
+        if m in taken:
+            order = np.argsort(np.linalg.norm(features - features[m], axis=1), kind="stable")
+            m = next(int(d) for d in order if int(d) not in taken)
+            medoids[k] = m
+        taken.add(m)
+        labels[m] = k
+    return labels, medoids
 
 
 def _scale_capped(values: np.ndarray, weights: np.ndarray, energy: float,

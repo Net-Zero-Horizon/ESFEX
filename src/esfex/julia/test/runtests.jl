@@ -884,8 +884,7 @@ import Ipopt
             # TSAM periods
             tinp = g20(use_tsam = true,
                        tsam_period_start_hours = [[1], [8761], [17521]],
-                       tsam_period_weights = [[365.0], [365.0], [365.0]],
-                       tsam_chronological_order = [[1], [1], [1]])
+                       tsam_period_weights = [[365.0], [365.0], [365.0]])
             tm, tv, tres = solve_g20(tinp)
             @test tres.re_penetration_by_year ≈ cap atol = 1e-6
             # Benders: the same plan and cost
@@ -948,8 +947,7 @@ import Ipopt
             # TSAM periods, stochastic scenarios and a myopic year too
             xtm, _, xtres = solve_g20(g20(existing_pv = 30.0, use_tsam = true,
                 tsam_period_start_hours = [[1], [8761], [17521]],
-                tsam_period_weights = [[365.0], [365.0], [365.0]],
-                tsam_chronological_order = [[1], [1], [1]]))
+                tsam_period_weights = [[365.0], [365.0], [365.0]]))
             @test xtres.re_penetration_by_year ≈ cap atol = 1e-6
             @test all(value(x) < 1e-6 for x in values(xtm.ext[:re_cap_slack]))
             xsm, xsv, _, _ = create_stochastic_master_problem(
@@ -1040,8 +1038,7 @@ import Ipopt
             # TSAM periods and stochastic scenarios too
             _, _, tbtres = solve_g20(tb(true; use_tsam = true,
                 tsam_period_start_hours = [[1], [8761], [17521]],
-                tsam_period_weights = [[365.0], [365.0], [365.0]],
-                tsam_chronological_order = [[1], [1], [1]]))
+                tsam_period_weights = [[365.0], [365.0], [365.0]]))
             @test tbtres.total_investment_by_year ≈ [50.0, 0.0, 0.0] atol = 1e-6
             tsm, tsv, _, _ = create_stochastic_master_problem(StochasticMasterInput(tb(true), sc, true))
             ESFEX.set_silent(tsm)
@@ -3774,7 +3771,6 @@ import Ipopt
                     use_tsam = use_tsam,
                     tsam_period_start_hours = use_tsam ? [[1]] : Vector{Int}[],
                     tsam_period_weights = use_tsam ? [[365.0]] : Vector{Float64}[],
-                    tsam_chronological_order = use_tsam ? [[1]] : Vector{Int}[],
                     verbose = false)
                 model, _, _ = create_master_problem(inp; use_representative_days = true)
                 obj = objective_function(model)
@@ -4121,7 +4117,6 @@ import Ipopt
                     use_tsam = use_tsam,
                     tsam_period_start_hours = use_tsam ? [[1]] : Vector{Int}[],
                     tsam_period_weights = use_tsam ? [[365.0]] : Vector{Float64}[],
-                    tsam_chronological_order = use_tsam ? [[1]] : Vector{Int}[],
                     fuel_co2 = Dict("Coal" => 0.5),   # / η 0.5 = 1 t/MWh_e
                     co2_budget_groups = [CO2BudgetGroup("A", [1], budget, pen)],
                     verbose = false)
@@ -4328,7 +4323,7 @@ import Ipopt
                 target_re_penetration = 0.0, initial_re_penetration = 0.0,
                 use_tsam = true, tsam_inter_period_linking = true,
                 tsam_period_start_hours = [[1, H24 + 1]], tsam_period_weights = [[1.0, 1.0]],
-                tsam_chronological_order = [[1, 2]], verbose = false)
+                tsam_day_period = [[1, 2]], hours_per_year = [2 * H24], verbose = false)
             inp = tinp(hydro())
             model, mvars = master1(inp)
             res = extract_master_solution(model, mvars, inp)
@@ -4860,7 +4855,7 @@ import Ipopt
                 reserve_static_default_ratio = 0.0,
                 use_tsam = true, tsam_inter_period_linking = true,
                 tsam_period_start_hours = [[1, H24 + 1]], tsam_period_weights = [[1.0, 1.0]],
-                tsam_chronological_order = [[1, 2]], verbose = false)
+                tsam_day_period = [[1, 2]], hours_per_year = [2 * H24], verbose = false)
             old = ESFEX.with_fields(mkbat(); life_time = [5.0], initial_age = [10.0],
                                     invest_cost_power = [1.0e-7])
             model, mvars = master1(tinp(old))
@@ -4870,10 +4865,10 @@ import Ipopt
             # 60 MWh discharged at 95 %: day 2 starts with at least 63.2 MWh
             # carried across the boundary (it was held at 0)
             @test value(mvars.inter_period_soc[1][(1, 1, 1)]) >= 60.0 / 0.95 - 1e-6
-            # The boundary bound is the period's SOC bound: life-extended MW
+            # The inter-day bound is the period's SOC bound: life-extended MW
             # at the battery's 100 MWh / 20 MW ratio
             cap_con(m) = first(c for c in all_constraints(m; include_variable_in_set_constraints = false)
-                               if name(c) == "soc_bnd_cap_y1_b1_n1_p1")
+                               if name(c) == "soc_inter_y1_b1_n1_max_d1")
             @test ESFEX.JuMP.normalized_coefficient(cap_con(model), ext) ≈ -5.0
 
             # Within its lifetime, with degradation: the boundary bound is the
@@ -5113,6 +5108,130 @@ import Ipopt
             u = ESFEX.UnitNPV("battery", 1, 1, "", -1.0, 1.0, true)
             @test only(ESFEX.retire_units(inp, [u]).npv_retired_units).decommissioned_mw ≈
                   20.0 * f
+        end
+
+        @testset "TSAM seasonal storage counts each period as often as its weight (K44)" begin
+            # Three TSAM periods standing for 300, 60 and 5 days: a dark day
+            # with 30 MW of load on 1e-3 diesel, a neutral one, and a sunny
+            # one (100 MW PV). The old chain linked each period once, in
+            # chronological order, while its cost and energy balance counted
+            # × weight: the battery charged on the 5-day period and
+            # discharged the same energy on each of the 300 dark days (free
+            # energy). Kotzur et al. (2018): the inter-day state runs through
+            # all 365 days on the day → period map, so the weighted change of
+            # the stored energy over the year is zero.
+            H3 = 3 * H24
+            w = [300.0, 60.0, 5.0]
+            dmap = vcat(fill(1, 300), fill(2, 60), fill(3, 5))
+            pv_av = zeros(H3, 1); pv_av[2 * H24 + 1:end, 1] .= 1.0
+            pv = mkgen("PV", "Renewable", "Solar", [100.0], [0.0], pv_av; nb = 1, H = H3)
+            diesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                           ones(H3, 1); nb = 1, H = H3)
+            sinp(gens, bats; kw...) = MasterProblemInput(;
+                years = [2025], network = net1, generators = gens, batteries = bats,
+                base_demand = fill(30.0, H3, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                loss_of_load_penalty = 0.01, reserve_margin = 0.0,
+                reserve_static_default_ratio = 0.0, max_curtailment_ratio = 1.0,
+                use_tsam = true, tsam_inter_period_linking = true,
+                tsam_period_start_hours = [[1, H24 + 1, 2 * H24 + 1]],
+                tsam_period_weights = [w], tsam_day_period = [dmap], verbose = false, kw...)
+            per(m, pfx) = [sum(mvals(m, "op_y1_d$(k)_$(pfx)")) for k in 1:3]
+
+            # Battery: weighted discharge = η_c·η_d × weighted charge
+            bm, bv = master1(sinp([pv, diesel], [mkbat()]))
+            ch, dch = w' * per(bm, "bat_ch["), w' * per(bm, "bat_dch[")
+            @test ch > 1.0   # it does shift energy from the sunny days
+            @test dch <= 0.95 * 0.95 * ch + 1e-6
+            Δ = [value(variable_by_name(bm, "soc_delta_y1_b1_n1_p$k")) for k in 1:3]
+            @test w' * Δ ≈ 0.0 atol = 1e-6
+            # The inter-day state: one per day, year-cyclic, within [0, 100]
+            S = [value(bv.inter_period_soc[1][(1, 1, d)]) for d in 0:364]
+            @test length(bv.inter_period_soc[1]) == 365
+            @test S[1] ≈ S[365] + Δ[dmap[365]] atol = 1e-6
+            @test all(-1e-6 .<= S .<= 100.0 + 1e-6)
+
+            # Reservoir: 100 MW-eq of inflow on the sunny period only; the
+            # weighted turbine output cannot exceed the weighted inflow
+            hydro = ESFEX.with_fields(
+                mkgen("Hydro", "Renewable", "Water", [50.0], [0.0], ones(H3, 1); nb = 1, H = H3);
+                reservoir_capacity = [5000.0], reservoir_initial_level = [0.5],
+                reservoir_min_level = [0.0], reservoir_max_level = [1.0],
+                reservoir_inflow = reshape(vcat(zeros(2 * H24), fill(100.0, H24)), H3, 1),
+                reservoir_turbine_efficiency = [1.0], reservoir_evaporation_rate = [0.0],
+                reservoir_pump_capacity = [0.0], reservoir_pump_efficiency = [1.0],
+                reservoir_spillage_allowed = true)
+            rm, rv = master1(sinp([hydro, diesel], BatteryConfig[]))
+            turb = w' * per(rm, "gen[1,")
+            inflow = 5.0 * 100.0 * H24
+            @test turb > 1.0
+            @test turb <= inflow + 1e-6
+            Δr = [value(variable_by_name(rm, "reslvl_delta_y1_g1_n1_p$k")) for k in 1:3]
+            @test w' * Δr ≈ 0.0 atol = 1e-6
+            Sr = [value(rv.inter_period_reservoir[1][(1, 1, d)]) for d in 0:364]
+            @test all(-1e-6 .<= Sr .<= 5000.0 + 1e-6)
+
+            # Evaporation: the stored water decays day by day; the chain
+            # carries ρ = (1 - e)^24 of each day's start level
+            evap = ESFEX.with_fields(hydro; reservoir_evaporation_rate = [1.0e-4])
+            em, ev = master1(sinp([evap, diesel], BatteryConfig[]))
+            Se = [value(ev.inter_period_reservoir[1][(1, 1, d)]) for d in 0:364]
+            Δe = [value(variable_by_name(em, "reslvl_delta_y1_g1_n1_p$k")) for k in 1:3]
+            ρ = (1.0 - 1.0e-4)^H24
+            @test all(isapprox(Se[mod1(d + 1, 365)], ρ * Se[d] + Δe[dmap[d]]; atol = 1e-6)
+                      for d in 1:365)
+            @test w' * per(em, "gen[1,") <= turb + 1e-6
+
+            # A 30-day year of three day types in seasonal blocks (10 sunny,
+            # 15 dark, 5 mild) and a 400 MWh battery: three periods with the
+            # exact day map give the full year's plan (every day its own
+            # period). The old chain gave a cost 27 % lower and an RE share
+            # of 47.1 % against the year's 39.5 %.
+            Dy = 30
+            types = vcat(fill(1, 10), fill(2, 15), fill(3, 5))
+            sunday = [max(0.0, sin(pi * (h - 6) / 12)) for h in 0:23]
+            dayav = Dict(1 => sunday, 2 => 0.1 .* sunday, 3 => 0.5 .* sunday)
+            yav = reshape(reduce(vcat, [dayav[t] for t in types]), Dy * H24, 1)
+            ypv = mkgen("PV", "Renewable", "Solar", [120.0], [0.0], yav; nb = 1, H = Dy * H24)
+            ydiesel = mkgen("Diesel", "Non-renewable", "Diesel", [100.0], [1.0e-3],
+                            ones(Dy * H24, 1); nb = 1, H = Dy * H24)
+            yinp(starts, weights, dmap) = MasterProblemInput(;
+                years = [2025], network = net1, generators = [ypv, ydiesel],
+                batteries = [mkbat(cap = 400.0)], base_demand = fill(30.0, Dy * H24, 1),
+                target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                loss_of_load_penalty = 0.01, reserve_margin = 0.0,
+                reserve_static_default_ratio = 0.0, max_curtailment_ratio = 1.0,
+                hours_per_year = [Dy * H24], use_tsam = true, tsam_inter_period_linking = true,
+                tsam_period_start_hours = [starts], tsam_period_weights = [weights],
+                tsam_day_period = [dmap], verbose = false)
+            function yplan(i)
+                m, v = master1(i)
+                return objective_value(m), extract_master_solution(m, v, i).re_penetration_by_year[1]
+            end
+            full = yplan(yinp([(d - 1) * H24 + 1 for d in 1:Dy], ones(Dy), collect(1:Dy)))
+            agg = yplan(yinp([1, 10 * H24 + 1, 25 * H24 + 1], [10.0, 15.0, 5.0], types))
+            @test agg[1] ≈ full[1] rtol = 1e-6
+            @test agg[2] ≈ full[2] atol = 1e-6
+            @test full[2] ≈ 0.3946 atol = 1e-3
+
+            # The day map must describe the year the weights count
+            bad(; kw...) = sinp([pv, diesel], [mkbat()]; kw...)
+            msg(inp) = try
+                create_master_problem(inp; use_representative_days = true); ""
+            catch e
+                sprint(showerror, e)
+            end
+            @test occursin("has 364 days; the year has 365",
+                           msg(bad(tsam_day_period = [dmap[1:364]])))
+            @test occursin("not one of the 3 periods",
+                           msg(bad(tsam_day_period = [vcat(dmap[1:364], 4)])))
+            @test occursin("stands for 300.0 days (its weight) but tsam_day_period gives it 299",
+                           msg(bad(tsam_day_period = [vcat(dmap[1:299], 2, dmap[301:365])])))
+            @test occursin("needs tsam_day_period",
+                           msg(bad(tsam_day_period = Vector{Int}[])))
+            # Without linking (or storage) no map is needed
+            @test msg(bad(tsam_day_period = Vector{Int}[], tsam_inter_period_linking = false)) == ""
+            @test msg(sinp([pv, diesel], BatteryConfig[]; tsam_day_period = Vector{Int}[])) == ""
         end
 
         @testset "battery technologies: fixed cost, ramp and availability (master, Benders)" begin
@@ -5611,7 +5730,7 @@ import Ipopt
             # days curtails 3.1 % of the year's renewable output, for 300
             # days 15.9 %
             tsam(w) = mk(use_tsam = true, tsam_period_start_hours = [[1, 25]],
-                         tsam_period_weights = [w], tsam_chronological_order = [[1, 2]])
+                         tsam_period_weights = [w])
             master1(tsam([65.0, 300.0]))
             # Day 1 standing for 300 days curtails 72 000 MWh/yr against a
             # limit of 45 360 (10 % of 453 600 MWh/yr): the existing PV
@@ -6254,7 +6373,7 @@ import Ipopt
             @test res.re_penetration_by_system["global"][1] ≈ 0.2 rtol = 1e-6
             # The same with TSAM periods (weight 1 each) and with Benders
             tinp = re_inp(use_tsam = true, tsam_period_start_hours = [[1, 25]],
-                          tsam_period_weights = [[1.0, 1.0]], tsam_chronological_order = [[1, 2]])
+                          tsam_period_weights = [[1.0, 1.0]])
             tm, tv = solve_master(tinp)
             @test objective_value(tm) ≈ objective_value(m) rtol = 1e-9
             @test value(tv.tech_investment[1][1][1]) ≈ 40.0 rtol = 1e-6

@@ -139,6 +139,10 @@ def test_myopic_tsam_periods_chosen_once(tmp_path):
     assert len(starts) == 3 and starts[0] == starts[1] == starts[2]
     assert weights[0] == weights[1] == weights[2]
     assert sum(weights[0][0]) == pytest.approx(365)
+    # The seasonal storage's day map (1-indexed): each period as often as its weight
+    dmap = [c["tsam_day_period"] for c in captured]
+    assert dmap[0] == dmap[1] == dmap[2] and len(dmap[0]) == 1 and len(dmap[0][0]) == 365
+    assert np.bincount(dmap[0][0], minlength=5)[1:].tolist() == weights[0][0]
     assert all(c["rep_day_offsets"] is None for c in captured)
 
 
@@ -152,3 +156,8 @@ def test_foresight_tsam_periods_chosen_once(tmp_path):
     assert [h + HOURS_STD_YEAR for h in s1] == s2
     w1, w2 = captured["tsam_period_weights"]
     assert w1 == w2
+    m1, m2 = captured["tsam_day_period"]
+    assert m1 == m2 and len(m1) == 365
+    assert np.bincount(m1, minlength=5)[1:].tolist() == w1
+    # Each period's own day is in it
+    assert all(m1[(h - 1) // 24] == k + 1 for k, h in enumerate(s1))

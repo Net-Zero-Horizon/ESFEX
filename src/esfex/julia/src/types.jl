@@ -2506,7 +2506,10 @@ struct MasterProblemInput
     use_tsam::Bool
     tsam_period_start_hours::Vector{Vector{Int}}     # [year_idx] => [period start hours]
     tsam_period_weights::Vector{Vector{Float64}}      # [year_idx] => [weight per period]
-    tsam_chronological_order::Vector{Vector{Int}}     # [year_idx] => [period indices in chrono order]
+    # [year_idx] => the period (1..K) of each day of the year, in calendar
+    # order: the inter-day storage state runs through it (Kotzur et al.
+    # 2018); each period's count equals its weight (tsam_day_map)
+    tsam_day_period::Vector{Vector{Int}}
     tsam_inter_period_linking::Bool
 
     # Life extension (NOTE: Julia-only feature, may be removed for Python parity)
@@ -2643,7 +2646,7 @@ function MasterProblemInput(;
     use_tsam::Bool = false,
     tsam_period_start_hours::Vector{Vector{Int}} = Vector{Int}[],
     tsam_period_weights::Vector{Vector{Float64}} = Vector{Float64}[],
-    tsam_chronological_order::Vector{Vector{Int}} = Vector{Int}[],
+    tsam_day_period::Vector{Vector{Int}} = Vector{Int}[],
     tsam_inter_period_linking::Bool = true,
     life_extension_cost_factor::Float64 = 0.05,
     decommissioning_cost_factor::Float64 = 0.10,
@@ -2707,7 +2710,7 @@ function MasterProblemInput(;
         temporal_resolution_hours, representative_days_per_year, min_day_separation,
         investment_resolution_hours,
         use_tsam, tsam_period_start_hours, tsam_period_weights,
-        tsam_chronological_order, tsam_inter_period_linking,
+        tsam_day_period, tsam_inter_period_linking,
         life_extension_cost_factor, decommissioning_cost_factor,
         sectoral_demand, sectoral_criticality,
         reserve_margin, npv_annual_return_rate,
@@ -2800,15 +2803,16 @@ mutable struct MasterProblemVariables
     slack_capacity::Dict{Tuple{Int,Int}, VariableRef}  # (year, node) => slack
     slack_budget::Dict{Int, VariableRef}
 
-    # Inter-period SOC linking (TSAM): year_idx => (bat_idx, node_idx, period_boundary) => VariableRef
-    # period_boundary = 0..K where 0 = year start, K = after last period
+    # Inter-period SOC linking (TSAM, Kotzur et al. 2018): year_idx =>
+    # (bat_idx, node_idx, day) => the inter-day state, the SOC (MWh) at the
+    # start of day `day` (0-based, 0..D-1) of the year; year-cyclic
     inter_period_soc::Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}
 
     # Inter-period reservoir-level linking (TSAM seasonal hydro): year_idx =>
-    # (gen_idx, node_idx, period_boundary) => VariableRef. Same chronological
-    # chain as inter_period_soc, but tracks reservoir energy (MWh-eq) so water
-    # can be carried across representative periods (e.g. filled in spring and
-    # drawn down in summer) instead of being cyclic within each period.
+    # (gen_idx, node_idx, day) => the reservoir energy (MWh-eq) at the start
+    # of each day of the year, the same inter-day state as inter_period_soc,
+    # so water can be carried across seasons (filled in spring and drawn down
+    # in summer) instead of being cyclic within each period.
     inter_period_reservoir::Dict{Int, Dict{Tuple{Int,Int,Int}, VariableRef}}
 
     # Reservoir capacity investment: year => gen_idx => Vector{VariableRef} (per node, MWh)

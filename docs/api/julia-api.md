@@ -239,7 +239,7 @@ struct MasterProblemInput
     use_tsam::Bool
     tsam_period_start_hours::Vector{Vector{Int}}
     tsam_period_weights::Vector{Vector{Float64}}
-    tsam_chronological_order::Vector{Vector{Int}}
+    tsam_day_period::Vector{Vector{Int}}     # period of each day of the year (counts = weights)
     tsam_inter_period_linking::Bool
     # Penalty coefficients
     loss_of_load_penalty::Float64          # also prices the adequacy shortfall
@@ -519,7 +519,7 @@ In the master problem, each representative day starts and ends at the initial SO
 @constraint(model, bat_tech_soc[bt, b, hours] == en_cap * initial_soc_frac)
 ```
 
-With TSAM inter-period linking, the period boundaries are chained instead (`inter_period_soc`), and the chain is cyclic over the year. This prevents batteries from acting as free generators by accumulating energy across periods. In the operational model, rolling windows pass SOC on through boundary conditions; see `add_battery_constraints!` above.
+With TSAM inter-period linking, an existing battery's period starts at a free level and ends at that level plus the period's change, and an inter-day SOC (`inter_period_soc[y][(b, n, d)]`, the SOC at the start of day `d` = 0…364) runs through the year on the period of each day (`tsam_day_period`), cyclic over the year (Kotzur et al. 2018; `add_inter_day_state!`, `tsam_day_map`). Each period then counts in the storage as often as in the costs and energy balance (its weight), so a battery cannot act as a free generator across periods. Reservoirs use the same state (`inter_period_reservoir`). In the operational model, rolling windows pass SOC on through boundary conditions; see `add_battery_constraints!` above.
 
 ### Curtailment Limit
 
