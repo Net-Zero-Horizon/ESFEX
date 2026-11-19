@@ -55,6 +55,10 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │       └── year_YYYY_threshold_0/
 │           └── power_flow/{A}_to_{B}  # Multi-system runs only
 ├── npv_retirements/               # Only when npv_retirement is on
+├── diagnostics/
+│   └── master/                    # Binding constraints, duals, paid slacks per master solve
+│       ├── year_YYYY/{binding,top,slacks}
+│       └── all/{binding,top,slacks}   # Perfect foresight: rows without a year
 ├── mga/                           # Only when MGA / SPORES is enabled
 └── plugins/{name}/                # Optional, written by plugins in post_year
 ```
@@ -702,6 +706,58 @@ Written when the system setting `npv_retirement` is on (empty datasets when no u
 | `share` | float | That MW's share of the unit's configured MW over all nodes |
 
 Attributes: `threshold` (`npv_retirement_threshold`, $) and `max_iterations`. The retired generators also count in the `retirement_gen_{g}` attributes of `detailed_results` from `year` on (their nodes fully retired), which the dashboard's retirement chart reads. Batteries have no retirement attribute; this group is where their retirements are listed. The retired units' capacity in the dispatch, and the `rated_power` (MW in service) of their `generation/` and `battery_discharge/` datasets, is 0 from `year` on.
+
+## diagnostics/master/
+
+Written after the master problem (development mode, monolithic solver, not with MGA/SPORES or Benders): which constraint families bind in each master solve, what they cost at the margin and which slack or penalty variables the plan pays for. A myopic run has one group per year (`year_YYYY`, each from that year's master); a perfect-foresight run splits its single solve by the year in the rows' names (`..._y{y}`), and puts the rows without one (the operational rows of the representative days, the horizon-wide build limits) in `all`. Files written before this group existed, and runs that do not write it, simply lack it: readers must tolerate its absence. See [Why did the master build this?](../user-guide/master-problem.md#why-did-the-master-build-this-binding-constraints-and-duals) for how to read it.
+
+Attributes of `diagnostics/master`: `schema` (`esfex.master_diagnostics/1`), `planning_mode`, `description`. Attributes of each year group: `year` (absent on `all`), `duals_available` (false when the solver returned no duals, e.g. a MIP: the binding counts then come from the tight rows alone and the dual columns are NaN) and `status` (the solver's termination status).
+
+Each group holds three compound datasets (one row per record; strings are UTF-8):
+
+**`binding`**: one row per constraint family (all families of the model, binding or not):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `family` | str | Family id (`re_target`, `budget`, `curtailment_cap`, `adequacy`, `co2_budget`, `tech_build_limit`, `tech_capacity`, `unnamed`, `user:<name>`, …; see the [Constraint Catalog](constraint-catalog.md#families-in-the-binding-report)) |
+| `label` | str | Readable name ("RE target", "Annual budget (investment)", …) |
+| `code` | str | The [Constraint Catalog](constraint-catalog.md) family code (`RE-2`, `BUD-1`, …; empty when none) |
+| `kind` | str | `policy`, `build_limit`, `operation`, `structural` (definitions and dynamics, always tight) or `other` |
+| `units` | str | Unit of the duals (`$/MWh`, `$/MW`, `$/$`, `$/t`, `$/unit`) |
+| `count_binding` | int | Rows that bind: an inequality at its bound (within 1e-6 relative) or any row with a nonzero dual; an equality only by its dual |
+| `count_priced` | int | Rows with a nonzero dual (|dual| > 1e-9 in the model's M$) |
+| `count_total` | int | Rows of the family in the group |
+| `max_abs_dual` | float | Largest |dual| ($ per unit) |
+| `sum_abs_dual` | float | Sum of the |duals| |
+
+**`top`**: the rows with the largest |dual| outside the structural families (at most 20 per group, 5 per family, each name once): `name` (the row's name), `family`, `label`, `dual` (signed), `units`.
+
+**`slacks`**: the slack and penalty variables with a value above 1e-6, largest cost first:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | str | Variable name (`slack_re_s1_y1`, `curtailment_excess_s1_y1`, `slack_budget_y1`, `slack_cap_y1_node2`, `co2_budget_violation_y1_<group>`), or for the representative days' variables a pattern `op_y{y}_d*_<kind>` (`load_shed`, `reserve_static_shortfall`, `reserve_dynamic_shortfall`, `inertia_shortfall`, `load_shed_sector_<sector>`; `sc{k}_` in front per stochastic scenario) |
+| `family` | str | The family whose penalty it is (`re_target`, `budget`, …, `load_shed`) |
+| `label` | str | Readable name ("RE target shortfall", "Budget overrun", …) |
+| `value` | float | Amount, in `value_units`: `$` (budget overrun), `MW` (adequacy shortfall), `MWh/yr` (RE shortfall, growth-cap excess, curtailment above the cap, the representative days' shed and shortfalls scaled to the year), `t` (CO2 above the budget) |
+| `value_units` | str | Unit of `value` |
+| `unit_cost` | float | Price per unit of `value` as the objective charges it ($) |
+| `cost` | float | `value × unit_cost` ($) |
+| `count` | int | Variables summed (1 for an annual slack; the steps with a value for a representative-day kind) |
+
+**Sign and units of the duals.** A dual is the cost of tightening the row by one unit of its right-hand side (for an equality row, of raising it): `−shadow_price` in JuMP's convention, ≥ 0 for a binding inequality of the minimised cost. Money is in $ (the master's M$ × 10⁶). A row tagged with a year is in that year's own money: the objective's discount factor `(1 + discount_rate)^-(y-1)` is taken off, so the RE target's dual compares directly with `FRE_penetration_loss` (an unattainable target binds at exactly that penalty). In the `all` group the rows of different years keep the discounting of the objective. A row with its own slack (RE target and growth cap, curtailment cap, budget, adequacy, CO2 budget) is measured per unit of that slack: the curtailment cap per MWh/yr of curtailment, although its row is scaled down by the largest day weight. The hourly rows of the representative days carry the days' weight (the days of the year each stands for), so their duals are per MW over the year. A stochastic master's scenario rows carry the scenario's probability.
+
+```python
+from esfex.io.master_diagnostics import read_master_diagnostics
+
+groups = read_master_diagnostics("results.h5")   # {} when absent
+for name, g in groups.items():
+    for r in g["binding"]:
+        if r["count_priced"] and r["kind"] == "policy":
+            print(name, r["label"], r["max_abs_dual"], r["units"])
+    for s in g["slacks"]:
+        print(name, s["label"], s["value"], s["value_units"], s["cost"])
+```
 
 ## MGA/SPORES Results
 

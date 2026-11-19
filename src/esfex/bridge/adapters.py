@@ -4137,6 +4137,27 @@ class MasterProblemAdapter:
             logger.debug(f"No conflict for the master: {e}")
             return []
 
+    def diagnostics(self, top_n: int = 20) -> Optional[Dict[str, dict]]:
+        """Binding constraint families, top duals and paid slacks of the
+        solved master (Julia ``master_diagnostics``), as
+        :func:`esfex.io.master_diagnostics.from_julia` groups keyed by
+        ``year_{YYYY}`` (``all``: rows without a year in a master of several
+        years). ``None`` under Benders, without a solved model, or when the
+        extraction fails (it never fails the run)."""
+        if self._jl_model is None or self.solver_method == "benders":
+            return None
+        from esfex.io.master_diagnostics import from_julia
+        try:
+            ESFEX = get_esfex_module()
+            if not bool(ESFEX.JuMP.has_values(self._jl_model)):
+                return None
+            diag = ESFEX.master_diagnostics(
+                self._jl_model, self._jl_vars, self._jl_input, top_n=top_n)
+            return from_julia(diag, self.years)
+        except Exception as e:  # diagnosis only: never fail the run
+            logger.warning(f"Master diagnostics skipped: {e}")
+            return None
+
     def _solve_benders(self) -> int:
         """Solve the master problem by Benders decomposition.
 

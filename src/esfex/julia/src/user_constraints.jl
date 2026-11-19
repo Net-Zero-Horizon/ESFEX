@@ -64,6 +64,8 @@ function _linear_constraint_hook!(model::Model, vars, input, spec)
 
     rhs = Float64(spec["rhs"])
     sense = String(spec["sense"])
+    # Its own family in the master's binding report (master_diagnostics)
+    push!(get!(() -> Set{String}(), model.ext, :user_constraint_names), name)
     if sense == "<="
         @constraint(model, expr <= rhs, base_name = name)
     elseif sense == ">="
