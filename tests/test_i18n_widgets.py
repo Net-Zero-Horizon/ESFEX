@@ -111,3 +111,12 @@ def test_no_raw_key_on_screen(_app, lang, window):
         assert not raw, f"raw keys shown in {window} ({lang}): {raw}"
     finally:
         w.deleteLater()
+
+
+def test_fragility_intro_counts_the_library():
+    # It said "49 built-in curves" long after the library had grown.
+    from esfex.models.hazard_assessment import FragilityLibrary
+    from esfex.visualization.workflows.risk_panels import _fragility_intro_text
+    init_i18n("en")
+    n = len(FragilityLibrary().get_all_curves())
+    assert f"{n} built-in curves" in _fragility_intro_text()

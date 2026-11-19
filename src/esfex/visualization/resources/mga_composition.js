@@ -21,7 +21,7 @@ function refresh() {
         if (!data || data.error) {
             showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
-        try { render(data); hideStatus(); }
+        try { hideStatus(); render(data); }   // render() may show its own empty state
         catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
