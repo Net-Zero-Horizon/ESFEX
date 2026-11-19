@@ -8,16 +8,19 @@ All commands are accessed through the `esfex` entry point, built with [Typer](ht
 |---------|-------------|
 | `esfex run` | Run the optimization model |
 | `esfex validate` | Load and validate a configuration file |
+| `esfex summary` | Summarise a results file: per-year costs, RE share, shedding, builds, warnings |
 | `esfex export` | Export an HDF5 results file to CSV, Excel or JSON |
 | `esfex studio` | Launch the GIS-based Studio |
 | `esfex precompile` | Build a Julia sysimage for faster startup |
-| `esfex info` | Show version, Julia and sysimage status, and a quick solver check |
+| `esfex info` | Show version, Julia and sysimage status, solvers and data |
 | `esfex add-solver` | Install an optional solver (Gurobi, CPLEX, CBC, SCIP, Xpress) |
 | `esfex remove-solver` | Remove an optional solver installed with `add-solver` |
 | `esfex list-solvers` | Show which solvers ESFEX can use |
 | `esfex plugin` | Manage plugins (list, install, trust, uninstall, enable, disable) |
 | `esfex train-demand-model` | Train the demand-estimation ML model |
 | `esfex build-demand-dataset` | Download and consolidate hourly demand data |
+
+`run`, `validate`, `summary` and `info` take `--json` to print one JSON object for scripts and agents instead of text; see [Using ESFEX from Scripts and Agents](scripts-and-agents.md).
 
 `pip install esfex` also creates `esfex-studio`, a launcher equivalent to `esfex studio` with no options. On Windows it opens the Studio without a console window.
 
@@ -41,7 +44,8 @@ esfex run -c CONFIG [OPTIONS]
 | `--years` | `-y` | Integer | `25` | Number of years to simulate. `unit_commitment` mode always runs a single year. |
 | `--start-year` | | Integer | year of `date_start` | Label of the first simulated year. The date labels then start on `date_start`'s day and time in this year. Demand is still read from the first row, and the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar |
 | `--verbose` | `-v` | Flag | off | Debug-level console logging, solver output on, and the configuration summary table |
-| `--dry-run` | | Flag | off | Load and validate the configuration, then exit without starting Julia |
+| `--dry-run` | | Flag | off | Load and validate the configuration and check that its data files exist, then exit without starting Julia |
+| `--json` | | Flag | off | At the end print one JSON object on stdout (status, results file, wall time, warnings, KPIs of the last year); everything else goes to stderr. See [Using ESFEX from Scripts and Agents](scripts-and-agents.md#esfex-run-json) |
 
 `--mode` and `--solver` must be one of the values listed (the solver name is case-insensitive); anything else stops the command with exit code 2 before the configuration is loaded. The CLI does not check that the solver is installed: one that is not (see [`list-solvers`](#esfex-list-solvers)) fails when the first model is solved.
 
@@ -127,11 +131,22 @@ Optimization completed successfully!
 Results saved to: results
 ```
 
+Before that, a run that logged warnings or errors prints a summary of them, grouped by kind, most frequent first. It shows in the `basic` console mode too, which hides the warnings themselves:
+
+```
+The run logged 9 warnings in 7 kinds:
+  3× [WARNING] esfex.bridge.adapters: Generator 'island__solar' has invest_cost 0 and no candidate technology ...
+  1× [WARNING] esfex.config.loader: 2 generator(s) have ramp_up/ramp_down = 0 where they have capacity: ...
+  … and 2 more kinds (see /diagnostics/warnings or `esfex summary --section warnings`)
+```
+
+The same groups are written to `/diagnostics/warnings` in the results file (see [The Run's Warnings](scripts-and-agents.md#the-runs-warnings)).
+
 A run that does not finish its work ends instead with `Optimization failed: …` (for instance when the master problem of a `development` run finds no plan: nothing is dispatched) or, when some operational windows of a year failed to solve, with `Optimization finished with errors: operational windows of year(s) … failed to solve and have no dispatch` (the results of the other hours are saved). Both exit with code 1.
 
 #### Dry-Run Output
 
-`--dry-run` loads the configuration (the same checks as [`esfex validate`](#esfex-validate)) and exits. It does not start Julia and does not compute windows or subproblems. Without `-v` it prints only the closing line; add `-v` to also see the header and summary table:
+`--dry-run` loads the configuration and checks its data files (the same checks as [`esfex validate`](#esfex-validate)) and exits, with code 1 if a data file is missing. It does not start Julia and does not compute windows or subproblems. Without `-v` it prints only the closing line; add `-v` to also see the header and summary table:
 
 ```
 Dry run mode - not executing optimization
@@ -142,7 +157,7 @@ Dry run mode - not executing optimization
 | Code | Meaning |
 |------|---------|
 | `0` | Success (or dry run completed) |
-| `1` | Configuration error or optimization failure: the master problem found no plan, every window of a year failed, or some windows of a year failed (partial results) |
+| `1` | Configuration error (or, with `--dry-run`, a missing data file) or optimization failure: the master problem found no plan, every window of a year failed, or some windows of a year failed (partial results) |
 | `2` | Usage error (missing `-c`, file not found, unknown option) |
 
 
@@ -154,7 +169,7 @@ Dry run mode - not executing optimization
 Loads the configuration exactly as `esfex run` would, without running anything.
 
 ```bash
-esfex validate -c CONFIG
+esfex validate -c CONFIG [--json]
 ```
 
 ### Options
@@ -162,6 +177,7 @@ esfex validate -c CONFIG
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--config` | `-c` | Path | *required* | Path to the YAML configuration file |
+| `--json` | | Flag | off | Print one JSON object (`esfex.validate/1`): each error with its YAML key path, code and a hint, the warnings, a description of the case. See [Using ESFEX from Scripts and Agents](scripts-and-agents.md#esfex-validate-json) |
 
 ### What Is Checked
 
@@ -169,12 +185,13 @@ esfex validate -c CONFIG
 - Every generator and battery under `generators:` / `batteries:` has all required fields (for example `min_power` and `fuel_cost` for a generator, `capacity` and `MaxChargePower` for a battery; see the [Configuration Guide](configuration.md)).
 - Pydantic types, ranges and allowed values (e.g. `solver.gap` between 0 and 1, `simulation_mode`, `power_flow_mode`).
 - Every system listed in `meta_network.systems` is defined under `systems`.
+- The demand files (`demand_path`, `demand_paths`) and the `availability_file` of every generator, technology, battery and battery technology exist, resolved as the run resolves them: relative paths under the configuration's directory. A run stops on a missing one.
 - Unknown or misspelled keys are listed after `Configuration is valid!`, each with its full path (for example `systems.island.generators.diesel.min_up_time`). They are ignored, so they do not make the file invalid.
 
 What is **not** checked:
 
 - Per-node array lengths (a `rated_power` list longer than the number of nodes is accepted).
-- Whether the demand and availability files exist. A missing demand file fails the run when demand is loaded. A missing availability file only logs a warning and the run continues; an investment technology without its profile is then treated as available in every hour.
+- The contents of the data files (columns, length).
 - Unknown generator `type` values. They are replaced by `Non-renewable` with a logged warning.
 
 Julia is not started, so a successful validation says nothing about the Julia backend or the installed solvers. Use [`esfex info`](#esfex-info) and [`esfex list-solvers`](#esfex-list-solvers) for that.
@@ -213,7 +230,7 @@ A generator without `min_power`:
 ```
 Validating: broken_config.yaml
 Validation failed:
-Failed to load configuration: 'min_power'
+Failed to load configuration: systems.island.generators.diesel.min_power: Required key 'min_power' is missing
 ```
 
 An out-of-range value:
@@ -221,10 +238,19 @@ An out-of-range value:
 ```
 Validating: broken_config.yaml
 Validation failed:
-Configuration validation failed:
+Configuration validation failed at solver:
 1 validation error for SolverConfig
 gap
   Input should be less than or equal to 1
+```
+
+A data file that is not there:
+
+```
+Validating: broken_config.yaml
+Validation failed: 1 data file(s) the run reads cannot be found:
+  systems.island.generators.solar.availability_file: File not found: profiles/solar.csv
+  (Relative paths resolve against the configuration's directory (cases); correct the path or copy the file there.)
 ```
 
 Exits with code `1` on failure, suitable for CI pipelines.
@@ -307,6 +333,31 @@ The file attributes (`metadata`), the `summary_results` datasets (`summary`), an
 ---
 
 
+## `esfex summary`
+
+Summarises a results file without opening it in the Studio: per year the cost and its components (with a check that they add up to the total), the RE share against the target, load shedding, curtailment, emissions, what the master built and retired, capacity in service, storage and transmission losses; then the run's warnings and the master's binding constraints when the file records them.
+
+```bash
+esfex summary RESULTS.h5 [--year Y ...] [--section S,...] [--json]
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `RESULTS` | Path | *required* | HDF5 file written by `esfex run` |
+| `--year` | Integer, repeatable | all years | Only these years |
+| `--section` | String, repeatable or comma-separated | all | `costs`, `re`, `shedding`, `curtailment`, `emissions`, `builds`, `capacity`, `storage`, `losses`, `warnings`, `binding` |
+| `--json` | Flag | off | One JSON object (`esfex.summary/1`); see [Using ESFEX from Scripts and Agents](scripts-and-agents.md#esfex-summary-json) for the fields |
+
+It reads attributes and two small datasets per year, never the generation time series, so it is quick on multi-GB files. Files written by older versions are read too; what they do not record is listed as a note. Exit code 0 when the file was read, 1 when it is not an ESFEX results file, 2 for an unknown section or a file that does not exist.
+
+```bash
+esfex summary results/island_19112026_1030.h5 --year 2030 --section costs,re
+```
+
+
+---
+
+
 ## `esfex studio`
 
 Opens the GIS-based Studio (PySide6 with a Leaflet.js / OpenStreetMap map) for building and editing configurations.
@@ -382,8 +433,13 @@ Exits with code `1` if the build fails.
 Shows the ESFEX and Python versions, whether `juliacall` can be imported, the sysimage status, and a quick check of three solvers.
 
 ```bash
-esfex info
+esfex info [--json] [--probe/--no-probe]
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | off | One JSON object (`esfex.info/1`): versions, Julia, every solver with `installed` and `licensed`, data assets, paths. See [Using ESFEX from Scripts and Agents](scripts-and-agents.md#esfex-info-json) |
+| `--probe/--no-probe` | on for the text output, off with `--json` | Start Julia and load the solvers. Without it the solvers are found from the Julia project files and the Gurobi and Xpress licences from where their licence file is, which takes a fraction of a second; the licence files are never read |
 
 ### Example Output
 

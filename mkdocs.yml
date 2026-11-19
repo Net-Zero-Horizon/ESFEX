@@ -108,6 +108,7 @@ nav:
     - GUI Workflow: tutorials/gui-workflow.md
   - User Guide:
     - CLI Reference: user-guide/cli.md
+    - Scripts and Agents: user-guide/scripts-and-agents.md
     - Configuration: user-guide/configuration.md
     - Master Problem: user-guide/master-problem.md
     - Demand Data: user-guide/demand-data.md
