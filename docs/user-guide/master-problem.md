@@ -422,6 +422,29 @@ See [Results Export](results-export.md) and the [HDF5 Output Schema](../referenc
 | Old units never retiring | Expected only if extension is cheap | Check existing units' `invest_cost` (life extension is free when it is 0) |
 | Solve time | Seconds to minutes | Hours: fewer representative days or a coarser `resolution_hours` |
 
+### Why did the master build this? Binding constraints and duals
+
+After each master solve the run records which constraint families bind, what they cost at the margin (their duals) and which slack or penalty variables the plan pays for, without debug flags or an LP export. A few INFO lines in the log sum it up (one set per year in a myopic run):
+
+```
+Master 2030 binding: RE target (41 $/MWh); Annual budget (investment) (10 $/$, at its penalty); Technology build limit (182,000 $/MW)
+Master 2030 operation binding: Technology capacity (hourly) 96/240 rows (max 43,800 $/MW)
+Master 2030 paid slacks: Budget overrun $11,000,000 at 10 $/$ ($110,000,000)
+Master 2030 not binding: CO2 budget, Capacity adequacy (reserve margin), Curtailment cap
+```
+
+The full record is in the results file under [`/diagnostics/master`](../reference/hdf5-output-schema.md#diagnosticsmaster), per year: per constraint family how many rows bind and the largest and summed dual, the rows with the largest duals by name, and the paid slacks with their amount, price and cost. Read it with `esfex.io.master_diagnostics.read_master_diagnostics(path)`.
+
+How to read it:
+
+- **A dual is the cost of tightening the constraint by one unit**, in $ of that year: what the plan would save if the RE target were 1 MWh lower, the budget $1 higher, the build limit 1 MW higher. Zero means the constraint does not shape the plan (it may still be met exactly).
+- **"at its penalty"** marks a family whose slack is paid: the constraint could not be met by building or operating, and its dual equals its penalty (`FRE_penetration_loss` for the RE target, 10 $/$ for the budget, VOLL × peak hours for adequacy, 10⁴ $/MWh or more for the curtailment cap, the group's `co2_budget_violation_penalty`). A shortfall here is a case limit, not a solver problem: raise the build limits or relax the target to remove it.
+- **An RE target dual below its penalty** is the extra cost per MWh of renewable energy the target forces on the least-cost plan; the budget's dual is how much a dollar more of budget would save.
+- **Build limits that bind** (`invest_max_power`, node limits, storage duration bounds) mean the master wanted more of that technology there; their dual is the value of one more MW.
+- **Operation families** (hourly capacity, reserves, storage) bind on the representative days; their duals carry the days' weight, so they are per MW over the year.
+
+The record is written for the monolithic master (perfect foresight and myopic, deterministic or stochastic), not for Benders or MGA/SPORES runs. A master with integer variables has no duals: it reports the tight rows only. Rows without a name (the power balance, line capacities) are grouped as `unnamed`; perfect foresight puts the rows whose names carry no year (the representative days' operation, horizon-wide limits) in a group `all`. The families and their catalogue codes are listed in the [Constraint Catalog](../reference/constraint-catalog.md#families-in-the-binding-report).
+
 
 ---
 

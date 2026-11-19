@@ -321,6 +321,65 @@ Seasonal storage by the superposition of inter- and intra-period states (Kotzur 
 
 In the stochastic master these names carry a scenario tag.
 
+### Families in the binding report
+
+After each master solve the rows are grouped into these families for the binding-constraint report (`master_diagnostics.jl`, written to [`/diagnostics/master`](hdf5-output-schema.md#diagnosticsmaster); see [Why did the master build this?](../user-guide/master-problem.md#why-did-the-master-build-this-binding-constraints-and-duals)). A row belongs to the family with the longest matching name prefix; a build limit counts both as a row over the horizon and as the upper bound of the year's investment variable (a one-year master holds it twice, and either may carry the dual). The kind decides how the report shows it: `policy` and `build_limit` families are named in the log digest, `operation` families are summarised by the number of rows they bind, `structural` ones (definitions and dynamics, always tight) are counted but left out of the top rows. Other rows fall back to a family named after the row without its index tokens (`s1`, `y2`, `ts5`…), kind `other`; a user-defined constraint is its own family `user:<name>`; rows without a name (the power balance, the DC line capacities, the unit-commitment relaxation rows) are family `unnamed`.
+
+| Family | Label | Rows | Catalogue | Kind | Dual unit |
+|--------|-------|------|-----------|------|-----------|
+| `re_target` | RE target | `re_target*` | RE-2 | policy | $/MWh |
+| `re_growth_cap` | RE growth cap (max_re_increment) | `re_max_increment*` | RE-3b | policy | $/MWh |
+| `curtailment_cap` | Curtailment cap | `max_curtailment*` | CURT-1 | policy | $/MWh |
+| `budget` | Annual budget | `budget_y*` | BUD-1 | policy | $/$ |
+| `adequacy` | Capacity adequacy (reserve margin) | `cap_adequacy*` | CAP-1 | policy | $/MW |
+| `adequacy_import` | Adequacy import limit | `cap_import_max*` | CAP-3 | policy | $/MW |
+| `adequacy_storage_firm` | Storage firm capacity | `bat_tech_firm_power*`, `bat_tech_firm_energy*` | CAP-5b | policy | $/MW |
+| `co2_budget` | CO2 budget | `co2_budget*` | CO2-1 | policy | $/t |
+| `tech_build_limit` | Technology build limit | `cumul_tech*`; upper bound of `tech_inv*` | TECH-1 | build_limit | $/MW |
+| `tech_node_build_limit` | Technology build limit (node) | `cumul_node_tech*` | TECH-4 | build_limit | $/MW |
+| `storage_power_build_limit` | Storage power build limit | `cumul_bat_tech_pow*`; upper bound of `bat_tech_pow_inv*` | TECH-2 | build_limit | $/MW |
+| `storage_energy_build_limit` | Storage energy build limit | `cumul_bat_tech_cap*`; upper bound of `bat_tech_cap_inv*` | TECH-2 | build_limit | $/MWh |
+| `storage_power_node_build_limit` | Storage power build limit (node) | `cumul_node_bat_tech_pow*` | TECH-4 | build_limit | $/MW |
+| `storage_energy_node_build_limit` | Storage energy build limit (node) | `cumul_node_bat_tech_cap*` | TECH-4 | build_limit | $/MWh |
+| `storage_duration` | Storage duration (E/P) bounds | `bat_tech_min_dur*`, `bat_tech_max_dur*` | TECH-3 | build_limit | $/MWh |
+| `reservoir_build_limit` | Reservoir build limit | `cumul_res*`; upper bound of `res_inv*` | TECH-5 | build_limit | $/MWh |
+| `converter_build_limit` | Converter build limit | `cumul_conv*`; upper bound of `conv_inv*` |  | build_limit | $/MW |
+| `electrolyzer_build_limit` | Electrolyzer build limit | `elz_inv_total*`; upper bound of `elz_inv*` |  | build_limit | $/MW |
+| `fuel_storage_build_limit` | Fuel storage build limit | `fuel_storage_inv_total*`; upper bound of `fuel_storage_inv*` |  | build_limit | $/unit |
+| `fuel_transport_build_limit` | Fuel transport build limit | `fuel_transport_inv_total*`; upper bound of `fuel_transport_inv*` |  | build_limit | $/unit |
+| `retirement_cascade` | Retirement cascade | `cascade_gen*`, `cascade_bat*` | RET-2 | build_limit | $/MW |
+| `tech_capacity` | Technology capacity (hourly) | `tech_cap*`, `tech_seg_cap*` | OP-1, OP-1b | operation | $/MW |
+| `storage_power` | Storage power (hourly) | `bt_dis_cap*`, `bt_ch_cap*` | OP-2a | operation | $/MW |
+| `storage_energy` | Storage energy (hourly) | `bt_soc_cap*` | OP-2a | operation | $/MWh |
+| `load_shed_limit` | Load shed at most the demand | `max_load_shed*` | PB-1b | operation | $/MW |
+| `reserve_headroom` | Reserve headroom | `reserve_headroom*` | RES-3 | operation | $/MW |
+| `reserve_static` | Static reserve requirement | `reserve_static*` | RES-1 | operation | $/MW |
+| `reserve_dynamic` | Dynamic reserve | `reserve_dynamic_req*`, `reserve_dynamic_avail*` | RES-2b, RES-2a | operation | $/MW |
+| `inertia` | Inertia floor | `inertia*` | INE-1 | operation | $/MWs |
+| `sector_load_shed_limit` | Sectoral load shed limit | `lol_sec_ub*` | OP-5 | operation | $/MW |
+| `storage_inter_day` | Storage inter-day level | `soc_inter*` | TSAM-CAP | operation | $/MWh |
+| `reservoir_inter_day` | Reservoir inter-day level | `reslvl_inter*` | TSAM-CAP | operation | $/MWh |
+| `reservoir_level` | Reservoir level bounds | `res_max_level*`, `res_min_level*` | RES-3 | operation | $/MWh |
+| `reservoir_min_release` | Reservoir minimum release | `res_min_release*` | RES-7 | operation | $/MW |
+| `fuel_coupling` | Fuel for power | `pe_coupling*` | PE-8 | operation | $/MWh |
+| `fuel_supply` | Fuel supply limit | `pp_max_supply*` | PE-1 | operation | $/unit |
+| `fuel_transport` | Fuel transport capacity | `pp_transport_cap*` | PE-2 | operation | $/unit |
+| `fuel_tank` | Fuel tank capacity | `hr_storage_max*` | PE-5 | operation | $/unit |
+| `capacity_state` | Capacity state definitions | `def_*` | CUM-5 | structural | $/MW |
+| `transmission_symmetry` | Transmission symmetry | `trans_sym*` | TXN-1 | structural | $/MW |
+| `storage_soc` | Storage SOC (initial, dynamics, cyclic) | `bt_soc_init*`, `bt_soc_dyn*`, `bt_soc_cyc*` | OP-2b | structural | $/MWh |
+| `storage_zero` | Storage fixed to 0 | `bt_soc_zero*`, `bt_dis_zero*`, `bt_ch_zero*` | OP-2c | structural | $/unit |
+| `battery_soc` | Battery SOC links | `bat_soc*` | BAT-M | structural | $/MWh |
+| `sector_load_shed_split` | Sectoral load shed split | `lol_sec_sum*`, `lol_sec_residual*` | OP-5 | structural | $/MW |
+| `reserve_share` | Reserve held per node | `reserve_static_held*`, `reserve_dynamic_held*`, `reserve_dynamic_zero*` | RES-1, RES-2b, RES-2c | structural | $/MW |
+| `flow_angle` | Flow-angle coupling | `flow_angle*`, `flow_zero*` | DC-2, DC-2z | structural | $/MW |
+| `reservoir_dynamics` | Reservoir water balance | `res_dynamics*` | RES-2 | structural | $/MWh |
+| `fuel_tank_balance` | Fuel tank balance | `hr_storage_balance*` | PE-4 | structural | $/unit |
+| `transmission_build_limit` | Transmission build limit | upper bound of `trans_inv*` |  | build_limit | $/MW |
+| `life_extension_limit` | Life extension up to the rating | upper bound of `gen_life_ext*`, `bat_life_ext*` | RET-1 | build_limit | $/MW |
+
+The slack families of the same report (`slacks` dataset): `budget` (`slack_budget_y{y}`, $), `adequacy` (`slack_cap_y{y}_node{n}`, MW), `re_target` (`slack_re_s{s}_y{y}`, MWh/yr), `re_growth_cap` (`slack_re_cap_s{s}_y{y}`, MWh/yr), `curtailment_cap` (`curtailment_excess_s{s}_y{y}`, MWh/yr), `co2_budget` (`co2_budget_violation_y{y}_{group}`, t), and on the representative days, scaled to the year: `load_shed` (`op_y{y}_d{d}_ll`), `load_shed_sector_<sector>` (`op_y{y}_d{d}_lol_<sector>`, part of the load shed), `reserve_static_shortfall` (`_rs_loss`), `reserve_dynamic_shortfall` (`_rd_loss`) and `inertia_shortfall` (`_inertia_loss`).
+
 
 ## benders.jl --- Benders Decomposition
 

@@ -107,6 +107,7 @@ include("primary_energy.jl")
 include("committed_steps.jl")
 include("master_problem.jl")
 include("master_fuel.jl")   # fuel block of the master (#89)
+include("master_diagnostics.jl")   # binding constraints, duals, paid slacks
 include("benders.jl")
 include("mga.jl")
 include("electrolyzer.jl")
@@ -190,6 +191,9 @@ export build_master_objective!, extract_master_solution, optimize_master!, optim
 # Fuel block of the master (#89)
 export MasterFuelInput, MasterFuelVariables, add_master_fuel_day!
 export extract_master_fuel_solution, master_fuel_keys
+
+# Binding constraints, duals and paid slacks of a solved master
+export master_diagnostics, master_paid_slacks
 
 # Benders decomposition (optional master-problem solver)
 export BendersResult, run_benders_decomposition
