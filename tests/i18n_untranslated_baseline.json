@@ -244,10 +244,6 @@
   "Select LP File",
   "Starting..."
  ],
- "esfex/visualization/panels/simulation_dialog.py": [
-  "Operational Dispatch — Year {} ({}/{})",
-  "Window {}/"
- ],
  "esfex/visualization/panels/technology_form.py": [
   "Chart display color",
   "Color"
