@@ -782,7 +782,7 @@
     "budget_scope_investment": "Investment only",
     "budget_scope_total": "Investment + operation",
     "max_annual_operating_cost_tip": "Annual budget of the dispatch for fuel, maintenance and fixed O&M. Spending above it costs 1000 $ per $, so unaffordable fuel becomes unserved energy. 0 = off",
-    "budget_scope_tip": "Investment only: the budget caps each build year's overnight investment. Investment + operation: it also covers that year's operating cost as the master values it",
+    "budget_scope_tip": "Investment only: the budget caps each build year's overnight investment. Investment + operation: it also covers the money that year spends on operation (fuel, maintenance, fixed O&M; no penalties, no CO2 price)",
     "life_ext_factor": "Life Extension Cost Factor (x):",
     "penalty_loss_of_load": "Loss of Load:",
     "penalty_reserve_static": "Loss Reserve (Static):",

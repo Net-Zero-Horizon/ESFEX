@@ -23,8 +23,11 @@ COST_SCALE = 1e-6    # $ → M$  (multiply when sending to Julia)
 COST_UNSCALE = 1e6   # M$ → $  (multiply when extracting from Julia)
 
 # Dispatch cost-breakdown entries a window spends against the operating
-# budget (max_annual_operating_cost; the Julia OPERATING_BUDGET_COSTS).
-OPERATING_BUDGET_COSTS = ("fuel_cost", "maintenance_cost", "fixed_om_cost",
+# budget (max_annual_operating_cost; the Julia OPERATING_BUDGET_COSTS): the
+# money paid, no modelling penalty, no battery degradation, no CO2 price.
+OPERATING_BUDGET_COSTS = ("fuel_cost", "maintenance_cost", "startup_cost",
+                          "battery_maintenance_cost", "fixed_om_cost",
+                          "electrolyzer_cost", "converter_cost", "line_flow_cost",
                           "pe_supply_cost", "pe_transport_cost")
 
 # Cost-breakdown entries that are not costs of their own: the total, the

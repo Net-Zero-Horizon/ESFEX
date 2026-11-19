@@ -3440,15 +3440,23 @@ any higher would only widen the objective's coefficient range.
 const OPERATING_BUDGET_PENALTY = 1000.0
 
 """
-The dispatch's operating spending for the operating budget, as entries of
-`model.ext[:cost_expressions]` (with `true` for a per-step energy cost,
-× step length): the generators' fuel and maintenance, the window's share
-of the fixed O&M and, with primary energy, the fuel bought and its
-transport (a fuel-coupled unit pays its fuel there, not in `fuel_cost`).
+The dispatch's operating spending for the operating budget: the money it
+pays, as entries of `model.ext[:cost_expressions]` (with `true` for a
+per-step energy cost, × step length): the generators' fuel, maintenance and
+start-ups, the batteries' maintenance, the window's share of the fixed O&M,
+the electrolyzers' cost, converter and line-flow costs and, with primary
+energy, the fuel bought and its transport (a fuel-coupled unit pays its
+fuel there, not in `fuel_cost`). The master's `budget_scope: total` budget
+counts the same categories (`day_operating_spend`). Modelling penalties
+(unserved energy, reserve, inertia, N-1, curtailment, RE shortfall, SOC,
+spillage, fuel shortfall), battery degradation and the CO2 price (a
+transfer to the state) are not spending.
 """
 const OPERATING_BUDGET_COSTS = ((:fuel_cost, true), (:maintenance_cost, true),
-                                (:fixed_om_cost, false), (:pe_supply_cost, false),
-                                (:pe_transport_cost, false))
+                                (:startup_cost, false), (:battery_maintenance_cost, true),
+                                (:fixed_om_cost, false), (:electrolyzer_cost, true),
+                                (:converter_cost, true), (:line_flow_cost, true),
+                                (:pe_supply_cost, false), (:pe_transport_cost, false))
 
 """
     add_operating_budget!(model, budget; committed=nothing) -> VariableRef

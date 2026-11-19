@@ -803,7 +803,7 @@
     "budget_scope_investment": "Solo inversión",
     "budget_scope_total": "Inversión + operación",
     "max_annual_operating_cost_tip": "Presupuesto anual del despacho para combustible, mantenimiento y O&M fijo. Gastar por encima cuesta 1000 $ por $, así que el combustible que no se puede pagar se convierte en energía no servida. 0 = desactivado",
-    "budget_scope_tip": "Solo inversión: el presupuesto limita la inversión de cada año de construcción. Inversión + operación: cubre también el costo operativo de ese año según lo valora el maestro",
+    "budget_scope_tip": "Solo inversión: el presupuesto limita la inversión de cada año de construcción. Inversión + operación: cubre también el dinero que ese año gasta en operación (combustible, mantenimiento, O&M fijo; sin penalizaciones ni precio del CO2)",
     "life_ext_factor": "Factor Costo Extensión de Vida (x):",
     "penalty_loss_of_load": "Pérdida de Carga:",
     "penalty_reserve_static": "Pérdida de Reserva (Estática):",
