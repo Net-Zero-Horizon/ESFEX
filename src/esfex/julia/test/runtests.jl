@@ -5748,7 +5748,8 @@ import Ipopt
             @test (ex.system, ex.year, ex.scenario) == ("global", 2025, 0)
             exc = only(tm.ext[:curtailment_excess]).excess
             @test name(exc) == "curtailment_excess_s1_y1"
-            # Priced in the objective at CURTAILMENT_EXCESS_PENALTY (10⁴ $/MWh)
+            # Priced in the objective at curtailment_excess_penalty (its floor
+            # CURTAILMENT_EXCESS_PENALTY, 10⁴ $/MWh)
             obj = objective_value(tm)
             fix(exc, 26640.0 + 1000.0; force = true)
             optimize!(tm)
@@ -5809,6 +5810,41 @@ import Ipopt
             @test ESFEX.solve_benders_subproblem!(y2; penalty = pen) === :infeasible
             @test occursin("breaks the annual curtailment limit: curtails 43.8 GWh/yr",
                            ESFEX.benders_curtailment_report(y2, 0.05))
+        end
+
+        @testset "Curtailment excess beats the RE shortfall price (M44)" begin
+            # The excess above the annual limit was priced at a fixed 10⁴ $/MWh:
+            # with a dearer RE shortfall price (fre_penetration_loss above it,
+            # or a stochastic scenario's multiplier) the master curtailed above
+            # the limit to meet its RE target. One day, 50 MW of load, cheap
+            # candidate PV under a 12-hour sun and a 50 % RE target: meeting it
+            # takes 200 MW of PV curtailing two thirds of its output. Within
+            # the 5 % limit PV stops near 50 MW and the shortfall is paid.
+            o = [0.0]
+            sun = reshape(vcat(zeros(6), [0.25, 0.5, 0.75], ones(6), [0.75, 0.5, 0.25],
+                               zeros(6)), H24, 1)
+            pv = TechnologyConfig("PV", "Renewable", "Sun", [1.0e-3], [1000.0], sun,
+                                  [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                                  [25.0], o, o, 50.0, "AC", false, [1.0])
+            gas = mkgen("Gas", "Non-renewable", "Gas", [100.0], [1.0e-4], ones(H24, 1);
+                        nb = 1, H = H24)
+            mk(fre) = MasterProblemInput(years = [2025], network = net1, generators = [gas],
+                batteries = BatteryConfig[], technologies = [pv],
+                base_demand = fill(50.0, H24, 1), target_re_penetration = 0.5,
+                initial_re_penetration = 0.5, re_target_override = Dict((1, 1) => 0.5),
+                representative_days_per_year = 1, min_day_separation = 1,
+                fre_penetration_loss_penalty = fre, curtailment_cost = 1.0e-5,
+                reserve_static_default_ratio = 0.0, max_curtailment_ratio = 0.05,
+                verbose = false)
+            # 1e6 $/MWh of shortfall: the excess costs 100 × that
+            @test ESFEX.curtailment_excess_penalty(mk(1.0)) ≈ 100.0
+            @test ESFEX.curtailment_excess_penalty(mk(1.0e-4)) == ESFEX.CURTAILMENT_EXCESS_PENALTY
+            for (fre, mult) in ((1.0, nothing),
+                                (1.0e-3, ScenarioMultipliers(penalty_fre_penetration = 1000.0)))
+                m, v = master1(mk(fre); mult)
+                @test isempty(ESFEX.curtailment_excess(m))
+                @test value(v.tech_investment[1][1][1]) < 60.0
+            end
         end
 
         @testset "RE share = renewable / total generation everywhere (R27)" begin
