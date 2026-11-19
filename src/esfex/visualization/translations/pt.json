@@ -4237,6 +4237,225 @@
         "axis_cumulative": "Acum. (MWh)",
         "axis_hour": "Hora",
         "axis_curtailment": "Corte de produção (MW)"
+      },
+      "helpers": {
+        "mga_cat_solar": "Solar",
+        "mga_cat_wind": "Eólica",
+        "mga_cat_other_re": "Outras ER",
+        "mga_cat_storage": "Armazenamento",
+        "mga_cat_thermal": "Térmica",
+        "mga_cat_other": "Outros",
+        "mga_cat_all": "Tudo"
+      },
+      "inter_node_flows": {
+        "no_data": "Sem dados de fluxos de potência",
+        "hover_hour": "Hora %{x}: %{y:,.1f} MW",
+        "note_positive": "Positivo = importação líquida",
+        "note_negative": "Negativo = exportação líquida",
+        "axis_hour": "Hora",
+        "axis_net_flow": "Fluxo líquido (MW)",
+        "extra_imports": "{node} · importações",
+        "extra_exports": "{node} · exportações",
+        "axis_year": "Ano",
+        "axis_energy": "Energia (GWh)"
+      },
+      "uc_dispatch_stack": {
+        "no_data": "Sem dados de despacho",
+        "hover_hour": "Hora %{x}: %{y:,.1f} MW",
+        "hover_hour_abs": "Hora %{x}: %{customdata:,.1f} MW",
+        "battery_discharge": "Bateria (descarga)",
+        "battery_charge": "Bateria (carga)",
+        "load_shed": "Deslastre de carga",
+        "curtailment": "Corte de produção",
+        "demand": "Procura",
+        "axis_hour": "Hora",
+        "axis_power": "Potência (MW)"
+      },
+      "uc_lmp_by_node": {
+        "no_data": "Sem dados nodais",
+        "hover_cell": "Nó %{y}<br>Hora %{x}<br>LMP: %{z:,.1f} USD/MWh",
+        "hover_mean": "%{x}: média %{y:,.1f} USD/MWh",
+        "hover_hour": "Hora %{x}: %{y:,.1f} USD/MWh",
+        "system_avg": "Média do sistema",
+        "spread_constrained": "Dispersão entre nós (média máx. − mín.): {spread} USD/MWh — restrições de transmissão ativas",
+        "spread_uniform": "Dispersão entre nós (média máx. − mín.): {spread} USD/MWh — preço uniforme",
+        "axis_node": "Nó",
+        "axis_mean_lmp": "LMP médio",
+        "axis_hour": "Hora"
+      },
+      "uc_netload_duration": {
+        "no_data": "Sem procura",
+        "hover_top": "%{x:.1f} % das horas mais elevadas: %{y:,.0f} MW",
+        "gross_demand": "Procura bruta",
+        "extra_gross": "Bruta",
+        "net_load": "Carga líquida (procura − ER)",
+        "extra_net": "Líquida",
+        "surplus_share": "{pct} % das horas têm excedente de ER (carga líquida &lt; 0)",
+        "no_surplus": "A carga líquida mantém-se positiva — o sistema nunca tem excedente de ER",
+        "peak_gross": "Pico bruto {mw} MW",
+        "peak_net": "Pico líquido {mw} MW",
+        "min_net": "Mín. líquido {mw} MW",
+        "axis_top_hours": "X % das horas mais elevadas",
+        "axis_power": "Potência (MW)"
+      },
+      "fuel_supply": {
+        "total_generation": "Produção total",
+        "extra_total": "Total",
+        "total_fuel_cost": "Custo total de combustível",
+        "title_a": "a) Produção por tipo de combustível",
+        "title_b": "b) Custo de combustível por tipo",
+        "axis_generation": "Produção (GWh)",
+        "axis_year": "Ano",
+        "axis_fuel_cost": "Custo de combustível (M$)"
+      },
+      "price_duration": {
+        "no_data": "Sem dados de preços",
+        "hover_duration": "%{x:.1f} % mais elevados<br>Preço: %{y:,.1f} $/MWh",
+        "energy_component": "Componente de energia",
+        "extra_energy": "Energia",
+        "congestion_premium": "Prémio de congestionamento",
+        "extra_congestion": "Congestionamento",
+        "title_a": "a) Curva de duração dos preços",
+        "title_b": "b) Energia vs congestionamento (média mensal)",
+        "axis_cum_hours": "% acumulada de horas",
+        "axis_price": "Preço ($/MWh)",
+        "axis_month": "Mês"
+      },
+      "revenue_profitability": {
+        "no_data": "Sem dados de receitas",
+        "total_revenue": "Receita total",
+        "extra_total": "Total",
+        "avg_selling_price": "Preço de venda médio",
+        "extra_selling_price": "Preço de venda",
+        "title_a": "a) Receita por tecnologia",
+        "title_b": "b) Preço de venda vs LCOE (margem de lucro %)",
+        "axis_year": "Ano",
+        "axis_revenue": "Receita (M$)",
+        "axis_technology": "Tecnologia"
+      },
+      "uc_price_duration": {
+        "no_data": "Sem preços",
+        "hover_top": "%{x:.1f} % das horas mais elevadas: %{y:,.1f} USD/MWh",
+        "stat_mean": "Média {value}",
+        "stat_median": "Mediana {value}",
+        "stat_p95": "P95 {value} USD/MWh",
+        "stat_scarcity": "{hours} h acima de {threshold} (escassez)",
+        "zone_peak": "Ponta",
+        "zone_mid": "Intermédia",
+        "zone_base": "Base",
+        "axis_top_hours": "X % das horas mais elevadas",
+        "axis_lmp": "LMP (USD/MWh)"
+      },
+      "battery_operation": {
+        "no_data": "Sem dados de baterias",
+        "charge": "Carga",
+        "discharge": "Descarga",
+        "losses_spillage": "Perdas (descarte)",
+        "extra_losses": "Perdas",
+        "res_hourly": "Horário",
+        "res_daily": "Diário",
+        "res_monthly": "Mensal",
+        "res_yearly": "Anual",
+        "axis_energy": "Energia (GWh)"
+      },
+      "mga_composition": {
+        "no_data": "Sem dados de composição.",
+        "alt_label": "Alt. {id}",
+        "subtitle": "área de cada bloco = MW adicionados · agrupado por categoria e depois por tecnologia"
+      },
+      "uc_marginal_tech": {
+        "no_data": "Sem dados de tecnologia marginal",
+        "row_label": "Tecnologia marginal",
+        "hover_cell": "Hora: %{x}<br>Tecnologia: %{customdata[0]}<br>LMP: %{customdata[1]:,.1f} USD/MWh",
+        "subtitle": "Que tecnologia define o preço do sistema em cada hora",
+        "axis_hour": "Hora",
+        "axis_technology": "Tecnologia",
+        "axis_hours_marginal": "Horas como marginal"
+      },
+      "uc_storage_soc": {
+        "no_data": "Não há baterias nesta execução",
+        "hover_soc": "Hora %{x}: SOC %{y:.1f} %",
+        "cycles_name": "{battery} (ciclos)",
+        "hover_cycles": "Dia %{x}: %{y:.2f} ciclos",
+        "cycles_total": "{battery}: {ratio} ciclos completos equiv. no total",
+        "axis_hour": "Hora",
+        "axis_soc": "SOC (%)",
+        "axis_day": "Dia",
+        "axis_cycles": "Ciclos completos equiv. / dia"
+      },
+      "mga_annotated_dendrogram": {
+        "no_data": "São necessárias pelo menos duas alternativas para um dendrograma.",
+        "alt_label": "Alt. {id}",
+        "legend_objective": "{objective} (anel 2)",
+        "legend_peak_re": "Quota máx. de ER (anel 2)",
+        "legend_cost_premium": "Sobrecusto (anel 3)",
+        "subtitle": "árvore = agrupamento por ligação média · anéis = composição · ER máx. · sobrecusto",
+        "obj_cost_optimal": "Ótimo em custo",
+        "obj_hsj_diversity": "Diversidade HSJ",
+        "obj_min_total_build": "Construção total mín.",
+        "obj_max_tech_equity": "Equidade tecnológica",
+        "obj_max_regional_equity": "Equidade regional",
+        "obj_evolutionary_dist": "Dist. evolutiva"
+      },
+      "system_metrics": {
+        "no_data": "Sem métricas disponíveis",
+        "colorbar_year": "Ano",
+        "hover_point": "Ano %{marker.color}<br>Valor: %{customdata}",
+        "tick_min": "Mín.",
+        "tick_max": "Máx.",
+        "axis_range": "Intervalo normalizado da métrica (escala individual)"
+      },
+      "uc_hourly_price": {
+        "no_data": "Sem dados de preços",
+        "nodal_min": "Mín. nodal",
+        "nodal_range": "Intervalo nodal",
+        "hover_max": "Hora %{x}: máx. %{y:,.1f} USD/MWh",
+        "system_average": "Média do sistema",
+        "hover_avg": "Hora %{x}: %{y:,.2f} USD/MWh",
+        "axis_hour": "Hora",
+        "axis_lmp": "LMP (USD/MWh)"
+      },
+      "mga_decision_factors": {
+        "no_data": "Sem fatores de decisão para mostrar.",
+        "no_columns": "Esta vista não tem colunas de fatores acima do limiar de 1 MW.",
+        "alt_label": "Alt. {id}",
+        "hover_category": "categoria: %{customdata[2]}",
+        "subtitle_tech": "linhas agrupadas por distância euclidiana · colunas agrupadas por correlação de coinvestimento · cor da célula = MW investidos · tecnologia (agregada entre nós)",
+        "subtitle_tech_node": "linhas agrupadas por distância euclidiana · colunas agrupadas por correlação de coinvestimento · cor da célula = MW investidos · localização tecnologia × nó"
+      },
+      "mga_similarity": {
+        "no_data": "São necessárias pelo menos duas alternativas para calcular a similaridade.",
+        "alt_label": "Alt. {id}",
+        "colorbar_distance": "Distância",
+        "hover_distance": "distância = %{z:,.1f}",
+        "subtitle": "distância euclidiana no espaço de decisão · linhas / colunas reordenadas pelo dendrograma acima"
+      },
+      "mga_pathway": {
+        "no_data": "Sem dados de trajetórias.",
+        "alt_label": "Alt. {id}",
+        "subtitle": "MW instalados acumulados por alternativa · empilhados por categoria"
+      },
+      "uc_ramp_distribution": {
+        "no_data": "Sem dados de rampas",
+        "hover_p95": "%{x} P95: %{y:,.1f} MW",
+        "note_metric": "|ΔP| de uma hora para a seguinte, MW",
+        "note_p95": "losango vermelho = P95",
+        "axis_technology": "Tecnologia",
+        "axis_ramp": "|ΔP| por hora (MW)"
+      },
+      "uc_commitment_heatmap": {
+        "no_data": "Não há unidades comprometíveis (as renováveis não são mostradas aqui)",
+        "hover_cell": "Unidade: %{y}<br>Hora: %{x}<br>Unidades em serviço: %{text}",
+        "state_on": "Ligada",
+        "state_off": "Desligada",
+        "axis_hour": "Hora"
+      },
+      "mga_parcoords": {
+        "no_data": "Sem dados de coordenadas paralelas.",
+        "subtitle": "cada linha = uma alternativa · vermelho = ótima · arraste sobre os eixos para filtrar"
+      },
+      "custom_chart": {
+        "no_series": "Adicione pelo menos uma variável"
       }
     }
   }
