@@ -3,7 +3,7 @@
 
 The density model predicts hourly MW/km² per node so the per-node forecast is
 genuinely spatial instead of collapsing to total/num_nodes. These tests cover
-the area partition, the feature builder, and (when the model file is present)
+the cell grid and its domain clip, the feature builder, and (when the model file is present)
 the end-to-end build producing a DIFFERENTIATED, calibrated per-node demand.
 """
 
@@ -16,11 +16,7 @@ from esfex.models.demand_density_ml import (
     DemandDensityModel,
     allocate_demand_capacitated,
     build_density_features,
-    compute_node_areas_km2,
     gdp_density_point,
-    sample_node_densities,
-    sample_node_gdp_density,
-    sample_node_pop_and_area,
     _normalize_ssp,
 )
 
@@ -126,38 +122,6 @@ class TestCapacitatedAllocation:
         assert served.sum() == pytest.approx(0.0)
 
 
-class TestNodeAreas:
-    def test_single_node_gets_whole_region(self):
-        areas = compute_node_areas_km2([21.0], [-80.0],
-                                       bounds=(20.0, -84.0, 23.0, -74.0))
-        assert len(areas) == 1 and areas[0] > 0
-
-    def test_areas_sum_to_region(self):
-        bounds = (20.0, -84.0, 23.0, -74.0)
-        one = compute_node_areas_km2([21.5], [-79.0], bounds=bounds)[0]
-        areas = compute_node_areas_km2(
-            [21.0, 22.0, 21.5], [-82.0, -76.0, -79.0], bounds=bounds)
-        assert len(areas) == 3
-        assert sum(areas) == pytest.approx(one, rel=0.02)  # same total region
-
-    def test_interior_node_gets_smaller_cell(self):
-        # Three colinear, evenly-spaced nodes in a wide box: the middle node's
-        # Voronoi cell is bounded by both bisectors (narrow), while the outer
-        # nodes' cells extend to the box edges (wide).
-        bounds = (15.0, -10.0, 25.0, 20.0)
-        areas = compute_node_areas_km2(
-            [20.0, 20.0, 20.0], [0.0, 5.0, 10.0], bounds=bounds)
-        assert areas[1] < areas[0] and areas[1] < areas[2]
-
-    def test_polygon_overrides_bounds(self):
-        # A small triangle polygon → smaller total area than the wide bbox.
-        poly = [(21.0, -80.0), (21.0, -79.0), (22.0, -79.5)]
-        a_poly = compute_node_areas_km2([21.3], [-79.5], polygon_latlon=poly)[0]
-        a_bbox = compute_node_areas_km2([21.3], [-79.5],
-                                        bounds=(20.0, -84.0, 23.0, -74.0))[0]
-        assert 0 < a_poly < a_bbox
-
-
 class TestCellGrid:
     def test_cell_area_decreases_toward_poles(self):
         from esfex.models.demand_density_ml import cell_area_km2
@@ -190,7 +154,7 @@ class TestCellGrid:
 
 
 class TestMultiRingDomainClip:
-    """Cells and node areas clip to a multi-ring (archipelago) domain, so an
+    """Cells clip to a multi-ring (archipelago) domain, so an
     island nation's border nodes don't absorb a neighbouring country's cells.
     Regression for the Japan demand: western nodes swallowed ~45 M of South
     Korea + ~24 M of China, inflating their load ~10x (Kitakyushu 42 GW)."""
@@ -214,21 +178,6 @@ class TestMultiRingDomainClip:
         # Strictly fewer than the full bounding box (which spans the gap).
         latb, _, _, _ = region_cells_025(bounds=(0.0, 0.0, 1.0, 11.0))
         assert len(lats) < len(latb)
-
-    def test_node_area_partition_respects_multiring(self):
-        from esfex.models.demand_density_ml import compute_node_areas_km2
-        multi = [self.ISLAND_A, self.ISLAND_B]
-        # One node on each island: each gets ~half the (two-island) land area,
-        # not a bbox-inflated share spanning the gap.
-        areas = compute_node_areas_km2(
-            [0.5, 0.5], [0.5, 10.5], polygon_latlon=multi, grid=120)
-        assert len(areas) == 2
-        assert areas[0] > 0 and areas[1] > 0
-        # Total land ≈ two 1°×1° boxes, far less than the 1°×11° bbox.
-        bbox_area = compute_node_areas_km2(
-            [0.5], [5.5], bounds=(0.0, 0.0, 1.0, 11.0))[0]
-        assert sum(areas) < 0.5 * bbox_area
-
 
 class TestLandOverlapWeight:
     """A cell the region boundary crosses counts with the share of its land
@@ -290,17 +239,6 @@ class TestLandOverlapWeight:
         assert wb == pytest.approx(0.625)
         assert wa + wb == pytest.approx(1.0)
 
-    def test_node_areas_count_coastal_samples(self):
-        # A large island and a thin one (lat 1.46–1.5) that no sample point
-        # falls strictly inside with grid=16 (rows every 0.1°): the thin
-        # island's node must still get its share of the area (0.04 / 0.84),
-        # not the one-sample floor.
-        multi = [self._box(0.0, 0.0, 0.8, 1.0), self._box(1.46, 0.0, 1.5, 1.0)]
-        areas = compute_node_areas_km2([0.4, 1.48], [0.5, 0.5],
-                                       polygon_latlon=multi, grid=16)
-        assert areas[1] / sum(areas) == pytest.approx(0.04 / 0.84, rel=0.02)
-
-
 class TestDensityFeatures:
     def test_shape_and_order(self):
         temp = np.full(8760, 28.0)
@@ -360,35 +298,6 @@ class TestDensityFeatures:
 class TestRasterSampling:
     _CUBA = (19.8, -85.0, 23.3, -74.0)
 
-    def test_pop_density_sampled_per_cell(self):
-        out = sample_node_densities(
-            [23.1, 20.3], [-82.4, -77.0], year=2025, bounds=self._CUBA, grid=60)
-        assert len(out) == 2 and all(o is not None for o in out)
-        # Dense (Havana) cell vs sparser eastern cell → different densities.
-        assert out[0]["pop_density"] != out[1]["pop_density"]
-        assert all(o["pop_density"] > 0 for o in out)
-
-    @pytest.mark.skipif(
-        not DemandDensityModel.is_available(),
-        reason="density model not present",
-    )
-    def test_populated_area_excludes_ocean(self):
-        # An ocean-padded bbox: the populated area summed over nodes must be a
-        # small fraction of the full region (most of the Cuba bbox is sea), so
-        # sparse island/coastal nodes are not over-forecast.
-        from esfex.models.demand_density_ml import (
-            _region_ring, _polygon_area_km2,
-        )
-        lats = [23.1, 21.7]; lons = [-82.4, -82.8]  # Havana, Isla de la Juventud
-        pa = sample_node_pop_and_area(lats, lons, 2025, bounds=self._CUBA, grid=120)
-        assert len(pa) == 2
-        pop_area_total = sum(a for _d, a in pa)
-        _clip, _bbox, _ml, region_area = _region_ring(lats, lons, None, self._CUBA)
-        # Inhabited land is a small slice of the ocean-heavy bbox.
-        assert 0 < pop_area_total < 0.5 * region_area
-        # Each node has a positive population density.
-        assert all(d and d > 0 for d, _a in pa)
-
     def test_raster_breaks_even_split_with_equal_weights(self):
         # With equal proxy weights the population-derived path collapses to an
         # exact even split (total/num_nodes); raster-sampled density must not.
@@ -440,12 +349,6 @@ class TestSSPGdpTrajectory:
         # SSP2 GDP grows; an interpolated year sits between its bracketing steps.
         assert v25 < v30
         assert v25 < v27 < v30
-
-    def test_node_gdp_density_differentiated(self):
-        out = sample_node_gdp_density(
-            [23.1, 20.3], [-82.4, -77.0], 2035, "ssp2", bounds=self._CUBA, grid=50)
-        assert all(o and o > 0 for o in out)
-        assert out[0] != out[1]
 
     @pytest.mark.skipif(
         not DemandDensityModel.is_available(), reason="density model not present")
@@ -617,3 +520,14 @@ def test_missing_density_model_is_reported(monkeypatch):
     finally:
         init_i18n(lang)
     assert "reinstall" in text and str(BUNDLED_MODELS_DIR) in text
+
+
+def test_unused_node_samplers_removed():
+    """The per-node area split and raster samplers had no caller outside the
+    tests (the demand build works on the 0.25° cells); removed (round 44)."""
+    import esfex.models.demand_density_ml as ddm
+
+    for name in ("compute_node_areas_km2", "sample_node_densities",
+                 "sample_node_pop_density", "sample_node_gdp_density",
+                 "sample_node_pop_and_area"):
+        assert not hasattr(ddm, name), name
