@@ -2892,7 +2892,9 @@ class MasterProblemAdapter:
         use_tsam: bool = False,
         tsam_period_start_hours: Optional[List[List[int]]] = None,
         tsam_period_weights: Optional[List[List[float]]] = None,
-        tsam_chronological_order: Optional[List[List[int]]] = None,
+        # Per year, the period (1-indexed) of each day of the year: the
+        # seasonal storage's day map (each period's count = its weight)
+        tsam_day_period: Optional[List[List[int]]] = None,
         tsam_inter_period_linking: bool = True,
         # Periods (0-based indices) kept as they are when the renewable
         # profiles are rescaled to each year's energy: the critical days
@@ -2992,9 +2994,14 @@ class MasterProblemAdapter:
                 when ``rep_day_offsets`` is None
             use_tsam: Enable TSAM clustering
             tsam_period_start_hours: Per-year list of period start hours (1-indexed)
-            tsam_period_weights: Per-year list of period weights
-            tsam_chronological_order: Per-year list of chronological period indices (1-indexed)
-            tsam_inter_period_linking: Enable inter-period SOC linking
+            tsam_period_weights: Per-year list of period weights (days of the
+                year each period stands for)
+            tsam_day_period: Per-year list of the period (1-indexed) of each
+                day of the year, in calendar order; each period's count must
+                equal its weight
+            tsam_inter_period_linking: Seasonal storage across the TSAM
+                periods (Kotzur et al. 2018 inter-day state through
+                ``tsam_day_period``)
             tsam_critical_periods: Indices (0-based) of the TSAM periods that
                 are critical days, kept as they are when the renewable
                 profiles are rescaled to each year's energy
@@ -3115,7 +3122,7 @@ class MasterProblemAdapter:
         self.use_tsam = use_tsam
         self.tsam_period_start_hours = tsam_period_start_hours or []
         self.tsam_period_weights = tsam_period_weights or []
-        self.tsam_chronological_order = tsam_chronological_order or []
+        self.tsam_day_period = tsam_day_period or []
         self.tsam_inter_period_linking = tsam_inter_period_linking
         self.tsam_critical_periods = list(tsam_critical_periods or [])
         self.use_stochastic = use_stochastic
@@ -3524,7 +3531,7 @@ class MasterProblemAdapter:
             use_tsam=self.use_tsam,
             tsam_period_start_hours=_py_nested_list_to_julia_vec_vec(jl, self.tsam_period_start_hours, "Int"),
             tsam_period_weights=_py_nested_list_to_julia_vec_vec(jl, self.tsam_period_weights, "Float64"),
-            tsam_chronological_order=_py_nested_list_to_julia_vec_vec(jl, self.tsam_chronological_order, "Int"),
+            tsam_day_period=_py_nested_list_to_julia_vec_vec(jl, self.tsam_day_period, "Int"),
             tsam_inter_period_linking=self.tsam_inter_period_linking,
             life_extension_cost_factor=self.life_extension_cost_factor,
             decommissioning_cost_factor=self.decommissioning_cost_factor,

@@ -1862,7 +1862,10 @@ class MasterProblemConfig(BaseModel):
     )
     tsam_inter_period_linking: bool = Field(
         default=True,
-        description="Enable inter-period SOC linking for seasonal storage representation.",
+        description=(
+            "Seasonal storage across the TSAM periods: battery SOC and reservoir "
+            "levels carried through every day of the year (Kotzur et al. 2018)."
+        ),
     )
 
     # Operational dispatch mode

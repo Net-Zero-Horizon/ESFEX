@@ -46,7 +46,7 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 | `res_pump_limit_g{g}_b{b}_t{t}`, `res_no_pump_g{g}_b{b}_t{t}` | RES-4 | Pump-back power limit (0 without pump) |
 | `res_no_spill_g{g}_b{b}_t{t}` | RES-5 | No spillage when spillage is not allowed |
 | `res_end_lower_g{g}_b{b}`, `res_end_upper_g{g}_b{b}` | RES-6 | End level within `soc_end_tolerance` of the start level |
-| `res_end_seasonal_g{g}_b{b}` | RES-9 | End level equals the next TSAM boundary (seasonal linking) |
+| `res_end_seasonal_g{g}_b{b}` | RES-9 | End level equals the period's start level after evaporation plus its intra-period change (TSAM seasonal linking, TSAM-SOC1) |
 | `res_min_release_g{g}_b{b}_t{t}` | RES-7 | Minimum environmental flow: `output/eta_t + spillage >= min_release` |
 | `res_head_limit_g{g}_b{b}_t{t}` | RES-8 | Head-dependent power limit |
 | `res_zero_spill_*`, `res_zero_pump_*`, `res_zero_level_*` | RES-0 | Reservoir variables fixed to 0 where the unit has no reservoir |
@@ -69,7 +69,7 @@ The objective applies per-segment marginal costs: `cost += marginal_cost_k * gse
 | `bat_min_cycling_{bi}_{b}` | BAT-7 | Minimum cycling requirement over period, capped at what the battery can charge in the window (none when it cannot charge); shortfall `bat_min_cycling_short_{bi}_{b}` priced at 10 % of VOLL per MWh |
 | `spillage <= MaxDischargePower` | BAT-8 | Spillage power limit (batteries with `spillage = true`) |
 | `±(charge[t] - charge[t-1]) <= ramp × Δt × MaxChargePower`, likewise discharge | BAT-9 | Ramp limits (`ramp_up` rising, `ramp_down` falling; none when 0 or ramp × Δt ≥ 1); at t = 1 from the previous window, `bat_charge_bi{bi}_b{b}_ramp_{up,down}_seam`, `bat_discharge_bi{bi}_b{b}_ramp_{up,down}_seam` |
-| `bat_soc_link_{bi}_{b}` | BAT-M1 | Master/TSAM: end SOC equals the next inter-period boundary |
+| `bat_soc_link_{bi}_{b}` | BAT-M1 | Master/TSAM: end SOC equals the period's start level plus its intra-period change (TSAM-SOC1) |
 | `bat_soc_cyclic_{bi}_{b}` | BAT-M2 | Master: end SOC equals initial SOC on each representative day |
 
 ### PWL Cost Curve Constraints (Batteries)
@@ -307,12 +307,17 @@ The days reuse the dispatch constraints above (generators with capacity override
 
 ### TSAM Inter-Period Linking
 
+Seasonal storage by the superposition of inter- and intra-period states (Kotzur et al. 2018), [capacity expansion §8.5.3](../formulation/capacity-expansion.md#853-seasonal-storage-inter-period-linking).
+
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `soc_bnd_y{y}_b{b}_n{n}_p{p}`, `soc_bnd_cap_y{y}_b{b}_n{n}_p{p}` | TSAM-SOC | SOC boundary chain and capacity bound (the battery's energy in service that year, life-extended energy included, as the period's SOC bound) |
-| `soc_year_cyclic_y{y}_b{b}_n{n}` | TSAM-CYC | Year-end SOC boundary equals year start |
-| `reslvl_bnd_y{y}_g{g}_n{n}_p{p}` | TSAM-RES | Reservoir level boundary chain |
-| `reslvl_year_cyclic_y{y}_g{g}_n{n}` | TSAM-RCYC | Year-cyclic reservoir level |
+| unnamed rows on `soc_intra_max_y{y}_b{b}_n{n}_p{p}`, `soc_intra_min_y{y}_b{b}_n{n}_p{p}` | TSAM-SOC2 | The period's highest and lowest SOC relative to its start (`soc_start_*`; its change `soc_delta_*`) |
+| `soc_inter_y{y}_b{b}_n{n}_chain_d{d}` | TSAM-CHAIN | Inter-day SOC: start of day d+1 = start of day d + the change of day d's period (year-cyclic, d = 0…364) |
+| `soc_inter_y{y}_b{b}_n{n}_max_d{d}`, `soc_inter_y{y}_b{b}_n{n}_min_d{d}` | TSAM-CAP | Day d's SOC within [0, the battery's energy in service that year] (life-extended energy included, as the period's SOC bound) |
+| unnamed rows on `reslvl_intra_max_y{y}_g{g}_n{n}_p{p}`, `reslvl_intra_min_y{y}_g{g}_n{n}_p{p}` | TSAM-SOC2 | The period's highest and lowest reservoir level relative to its (evaporating) start (`reslvl_start_*`; its change `reslvl_delta_*`) |
+| `reslvl_inter_y{y}_g{g}_n{n}_chain_d{d}` | TSAM-CHAIN | Inter-day reservoir level, decayed by the period's evaporation, plus the change of day d's period (year-cyclic) |
+| `reslvl_inter_y{y}_g{g}_n{n}_max_d{d}`, `reslvl_inter_y{y}_g{g}_n{n}_min_d{d}` | TSAM-CAP | Day d's levels within [min level, max level] × the in-service reservoir capacity |
+| `reslvl_inter_y{y}_g{g}_n{n}_head_d{d}` | TSAM-HEAD | With head dependence: the period's start level ≤ the inter-day level of each of its days |
 
 In the stochastic master these names carry a scenario tag.
 

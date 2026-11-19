@@ -577,7 +577,7 @@ Days chosen to match the year's mean energy (RD-1) miss the days on which renewa
 
 with \(\bar{D}_t\) the horizon-mean system demand, \(\bar{a}_{p,t}\) the horizon-mean renewable availability profiles of §8.1 and \(c_p\) the capacity behind each (MW: rated power of the existing renewable units plus `invest_max_power` of the renewable candidate technologies that use it; equal relative weights when there is none), \(\langle \cdot \rangle\) the annual mean. The renewable supply is thus weighted by the energy each profile can give and scaled to the annual demand; \(\nu_d\) is the share of the day's demand that renewables leave uncovered. The critical days are the days with the largest \(\nu_d\), skipping the representative days and at least `min_day_separation` days from each other (relaxed to distinct days when the year leaves too few), the most critical first.
 
-**Weights** (`representative_day_weights`). Each critical day stands for one day (\(\omega_c = 1\)). The representative days start from their prior weights \(p^0\) (equal, or the TSAM cluster sizes) summing to the year's days \(Y\), scaled to \(p = p^0 (Y - N_c)/Y\), then corrected by \(\delta = p \circ z\) with \(\sum \delta = 0\), \(z\) minimising
+**Weights** (`representative_day_weights`). Each critical day stands for one day (\(\omega_c = 1\)). With TSAM the critical day leaves its cluster instead, so every weight stays a count of days (§8.5.2). The representative days start from their prior weights \(p^0\) (equal) summing to the year's days \(Y\), scaled to \(p = p^0 (Y - N_c)/Y\), then corrected by \(\delta = p \circ z\) with \(\sum \delta = 0\), \(z\) minimising
 
 \[
 \Big\| \frac{1}{Y}\Big( X_r (p + \delta) + X_c \mathbf{1} - X_r p^0 \Big) \Big\|^2 + 10^{-4} \|z\|^2 \tag{CD-2}
@@ -657,7 +657,7 @@ E^{day}_{b,n,t+1} = E^{day}_{b,n,t} + \left( \eta^{ch}_{b,n} P^{ch,day}_{b,n,t} 
 E^{day}_{b,n,1} = E^{day}_{b,n,H+1} = \max(E^0_{b,n}, \underline{E}_{b,n}) \cdot \bar{E}^{cum}_{y,b,n} \tag{BAT-3}
 \]
 
-The day starts and ends at the initial SOC (`bat_soc_initial_*`, `bat_soc_cyclic_*`); with TSAM inter-period linking the end is the next boundary value instead (`bat_soc_link_*`). There is no self-discharge, spillage, SOC minimum or charge/discharge exclusivity in the master.
+The day starts and ends at the initial SOC (`bat_soc_initial_*`, `bat_soc_cyclic_*`); with TSAM inter-period linking the period starts at a free level and ends at that level plus its intra-period change instead (`bat_soc_link_*`, §8.5.3). There is no self-discharge, spillage, SOC minimum or charge/discharge exclusivity in the master.
 
 Battery technologies have the same structure (`add_battery_tech_day!`: `bt_dis_cap_*`, `bt_ch_cap_*`, `bt_soc_cap_*`, `bt_soc_init_*`, `bt_soc_dyn_*`, `bt_soc_cyc_*`), with power bounded by \(\bar{P}^{bt}\) × the technology's availability, the technology's ramp limits on charge and discharge (BAT-9 with \(\bar{P}^{bt}\)), SOC by \(\bar{E}^{bt}\), and cyclic SOC at `soc_initial` × \(\bar{E}^{bt}\); their SOC dynamics are multiplied by \(\Delta t\) as in BAT-2. A `reservable` battery technology holds reserve as the battery it becomes in the dispatch (§8.3.4).
 
@@ -785,7 +785,7 @@ with \(\omega_d = (H_{year}/24)/D_r\) for every day without critical days (§8.1
 ### 8.5 Time-Series Aggregation Method (TSAM)
 
 
-When `use_tsam = true`, the peak-demand-based day selection (Section 8.1) is replaced by data-driven clustering with inter-period SOC linking. As the representative days, the periods are chosen once, by clustering the horizon-mean demand and renewable availability, and every year (and every annual master of a myopic run) uses the same periods and weights with its own demand and profiles. The critical days (§8.1b) are added as periods of weight 1, in their chronological place; the cluster weights are scaled down and corrected by CD-2.
+When `use_tsam = true`, the peak-demand-based day selection (Section 8.1) is replaced by data-driven clustering with seasonal storage (inter-period linking). As the representative days, the periods are chosen once, by clustering the horizon-mean demand and renewable availability, and every year (and every annual master of a myopic run) uses the same periods, weights and day map with its own demand and profiles. The critical days (§8.1b) are added as periods of weight 1: each leaves its cluster, whose weight drops by one day (`with_critical_days`).
 
 **Python function**: `compute_tsam_periods()` in `models/tsam.py`
 **Julia function**: `add_tsam_periods_validation!(model, vars, input, targets)`
@@ -798,15 +798,17 @@ The annual demand series is reshaped into daily blocks and clustered using k-med
 2. Optionally concatenate normalized availability profiles as additional features
 3. Standardize features (zero mean, unit variance)
 4. Apply k-medoids: select \(K\) cluster medoids as representative periods
-5. Assign each original day to the nearest cluster
+5. Assign each original day to the nearest cluster; each medoid belongs to its own cluster (a k-means cluster left empty takes its representative day), so no cluster is empty
 
 #### 8.5.2 Period Weights
 
-Each representative period \(p\) has a weight equal to its cluster size:
+Each representative period \(p\) has a weight equal to its cluster size, the number of days of the year that map to it:
 
 \[
-w_p = |\mathcal{C}_p|, \qquad \sum_{p=1}^{K} w_p = 365 \tag{TSAM-W}
+w_p = |\mathcal{C}_p| = \big|\{d : k(d) = p\}\big|, \qquad \sum_{p=1}^{K} w_p = 365 \tag{TSAM-W}
 \]
+
+with \(k(d)\) the period of day \(d\) (`TSAMResult.day_period`, passed to Julia as `tsam_day_period`). A critical day is a period of its own (\(w_c = 1\)) and leaves its cluster (\(w_p\) one less). Earlier versions corrected the TSAM weights with CD-2 into fractions; the seasonal storage (§8.5.3) needs them to be the day counts, and the renewable energy is matched by TSAM-R instead.
 
 The operational cost scaling becomes:
 
@@ -820,7 +822,7 @@ This replaces the uniform \(365/N\) scaling (SCALE-1). Only the scaling differs:
 
 **Python functions**: `rescale_profile_periods()`, `rescale_periods_to_year()` in `models/tsam.py`; `MasterProblemAdapter._tsam_energy_matched()`
 
-The medoids minimise the clustering distance, not the energy error: weighted by the cluster sizes, the periods can hold more or less sun and wind than the year (Cuba, 12 periods: PV × 1.08, wind × 0.87, demand × 1.003). Once the periods and their weights are fixed (the critical days included, with the weights of CD-2), each renewable availability profile the master reads (renewable generators and renewable candidate technologies; the profile of each node, for each modelled year: the year's block of a multi-year profile, once for a one-year profile) is rescaled on the periods so that its weighted energy is the year's:
+The medoids minimise the clustering distance, not the energy error: weighted by the cluster sizes, the periods can hold more or less sun and wind than the year (Cuba, 12 periods: PV × 1.08, wind × 0.87, demand × 1.003). Once the periods and their weights are fixed (the critical days included, TSAM-W), each renewable availability profile the master reads (renewable generators and renewable candidate technologies; the profile of each node, for each modelled year: the year's block of a multi-year profile, once for a one-year profile) is rescaled on the periods so that its weighted energy is the year's:
 
 \[
 \sum_{p \notin \mathcal{C}} w_p \sum_{t \in p} \min\!\big(s \, \alpha_t,\ \bar{\alpha}\big) + \sum_{c \in \mathcal{C}} w_c \sum_{t \in c} \alpha_t = \frac{\sum_p w_p T_p}{T_{year}} \sum_{t \in year} \alpha_t \tag{TSAM-R}
@@ -830,35 +832,47 @@ with \(\alpha_t\) the original availability, \(\mathcal{C}\) the critical days, 
 
 The runner logs the weighted mean of each profile on the periods over its annual mean before the rescaling ("TSAM periods (before rescaling the renewable profiles) mean / annual mean: …") and after it ("TSAM periods with the renewable profiles rescaled to the year's energy, mean / annual mean: …", 1.000 unless the cap stopped a profile, named in a separate line). The demand is not rescaled: the demand is the main clustering feature and its periods stay close to the year (Cuba: × 1.003 over the horizon, at most 0.9 % off in any year). A series still off by more than 10 % after the rescaling (the demand, or a profile held back by the cap) gives a warning that advises more TSAM periods (`tsam_num_periods`). The adequacy credit (CAP) reads the same profiles: the minimum of a variable renewable's profile, or a dispatchable renewable's mean over the peak steps, may move slightly when those steps fall on a period.
 
-#### 8.5.3 Inter-Period SOC Linking
+#### 8.5.3 Seasonal Storage (Inter-Period Linking)
 
-To enable seasonal storage representation, inter-period SOC boundary variables are introduced:
+Each period's cost, energy balance, CO2, RE target and curtailment count \(w_p\) times in the year; its storage must count as often. The master uses the superposition of inter- and intra-period states of Kotzur et al. [**[85]**](../reference/bibliography.md#ref85) for every existing battery (at a bus where it has energy in service that year) and every reservoir, per year (and per scenario of a stochastic master):
 
-**Variables**: \(\text{SOC}^{bnd}_{y,b,n,p}\) for \(p = 0, 1, \ldots, K\), where \(p=0\) represents the year start.
-
-**SOC chain** (periods ordered chronologically):
+**Intra-period state.** Period \(p\) keeps its own trajectory \(E^{(p)}_{t}\), \(t = 1 \ldots H+1\) (BAT-2, or the reservoir balance RES-1), from a free start level \(s_p \ge 0\) (`soc_start_*`, `reslvl_start_*`) to
 
 \[
-\text{SOC}_{b,n,1}^{(p)} = \text{SOC}^{bnd}_{y,b,n,p-1} + \eta^{ch} \cdot p^{ch}_{b,n,1} - \frac{p^{dis}_{b,n,1}}{\eta^{dis}} \tag{TSAM-SOC1}
+E^{(p)}_{H+1} = \rho_p \, s_p + \Delta_p \tag{TSAM-SOC1}
+\]
+
+with \(\Delta_p\) free (`soc_delta_*`, `reslvl_delta_*`), the period's change of a storage started empty, and \(\rho_p = (1-\epsilon)^{H}\) the decay of a level over the period by the reservoir's evaporation \(\epsilon\) per step (1 for a battery: the master has no self-discharge). The period's highest and lowest level relative to its start:
+
+\[
+l_p \le E^{(p)}_{t} - (1-\epsilon)^{t-1} s_p \le u_p \quad t = 2 \ldots H+1, \qquad l_p \le 0 \le u_p \tag{TSAM-SOC2}
+\]
+
+(`soc_intra_max_*`, `soc_intra_min_*`, `reslvl_intra_max_*`, `reslvl_intra_min_*`).
+
+**Inter-day state.** \(S_d\) (`soc_inter_*_d{d}`, `reslvl_inter_*_d{d}`), the level at the start of day \(d = 0 \ldots 364\), runs through every day of the year on the period of that day, year-cyclic:
+
+\[
+S_{d+1} = \rho_{k(d)} \, S_d + \Delta_{k(d)}, \qquad S_{365} \equiv S_0 \tag{TSAM-CHAIN}
 \]
 
 \[
-\text{SOC}_{b,n,T}^{(p)} = \text{SOC}^{bnd}_{y,b,n,p} \tag{TSAM-SOC2}
+S_d + u_{k(d)} \le \overline{E}, \qquad \rho_{k(d)} \, S_d + l_{k(d)} \ge \underline{E} \tag{TSAM-CAP}
 \]
 
-**Year-cyclic constraint**:
+so the level within each day, \(S_d\) plus the period's swing, stays within the storage's range: \([0, \bar{E}^{cum}_{y,b,n}]\) for a battery (its energy in service that year, CUM-2, the period's own SOC bound BAT-1: the rated energy within its lifetime, afterwards the life-extended energy, `battery_energy_in_service`), \([\underline{\ell}, \overline{\ell}] \times\) the in-service reservoir capacity (existing + built, `reservoir_in_service`) for a reservoir. With evaporation the two rows are sufficient conditions (the decay of \(S_d\) within the day lies between 1 and \(\rho\)); without, they are exact. Summing TSAM-CHAIN over the year (no losses):
 
 \[
-\text{SOC}^{bnd}_{y,b,n,K} = \text{SOC}^{bnd}_{y,b,n,0} \tag{TSAM-CYC}
+\sum_{d} \Delta_{k(d)} = \sum_{p} w_p \, \Delta_p = 0
 \]
 
-**Capacity bound**:
+the weighted net charge of each storage is zero, as for a real year: a battery's weighted discharge is \(\eta^{ch}\eta^{dis}\) times its weighted charge, a reservoir's weighted release equals its weighted inflow minus spill. This holds only because each period's count in the day map equals its weight; `tsam_day_map` checks it (one period per day of the year, every value a period, counts = weights) and raises otherwise.
 
-\[
-0 \leq \text{SOC}^{bnd}_{y,b,n,p} \leq \bar{E}^{cum}_{y,b,n} \quad \forall p \tag{TSAM-CAP}
-\]
+A reservoir whose turbine power depends on its head (`reservoir_head_min_factor` < 1) reads the head from the period's own level. Each period's start level is then bounded by the inter-day state of each of its days, \(s_p \le S_d\) for \(k(d) = p\) (`reslvl_inter_*_head_d{d}`), so the period's level never exceeds the reservoir's on any day it stands for and the head is not overstated.
 
-\(\bar{E}^{cum}_{y,b,n}\) is the battery's energy in service that year (CUM-2), the same bound as the period's SOC (BAT-1): the rated energy within its lifetime, afterwards the life-extended energy (`battery_energy_in_service`). Earlier versions bounded the boundary SOC by the rated energy within the lifetime only, so a battery the master kept past its lifetime had its boundary SOC held at 0 and could not carry energy from one period to the next.
+Size per linked storage and year: \(D\) inter-day variables and \(3D\) rows (\(D\) = 365; \(4D\) with head dependence), plus 4 variables and \(2H\) rows per period. The master's candidate battery technologies stay cyclic within each period (no seasonal shift, no free energy either).
+
+Earlier versions chained the \(K\) periods once each, in chronological order, between \(K+1\) boundary levels, while their costs and energy balances counted \(w_p\) times. A period that discharged on the chain counted that discharge \(w_p\) times in the energy balance, and the one that recharged it counted it its own \(w\) times: \(\sum_p w_p \Delta_p \ne 0\), energy from nowhere. In the Cuba 2049 master (12 periods + 3 critical days) the weighted change of stored energy was −1.28 TWh/yr, and an existing battery's weighted net discharge +170 GWh/yr, making the master's renewable share several points higher than the dispatch's.
 
 When `tsam_inter_period_linking = false`, each period is cyclic on its own (BAT-3), and only the weighted cost scaling is active.
 
