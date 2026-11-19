@@ -1564,6 +1564,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **Texts built in Python are translated too.** Labels the Studio's Python
+  code builds stayed English in every language. They are now translated
+  (about 660 new keys):
+  - the result charts' data (month names, cash-flow components, Sankey
+    nodes, MGA objectives and axes, unit-commitment buckets, system metrics,
+    error messages);
+  - the dashboard's series and cost components, the map's risk and results
+    legends, the single-line diagram's load labels and N-1 descriptions;
+  - the financial charts and the wind and solar analysis progress;
+  - the validation messages, with their categories and actions in the
+    validation dialog;
+  - the Grid Builder's build report, warnings, voltage decisions and
+    progress.
+
+  English text is word for word what it was. Messages from core modules
+  that the CLI and agents also use (hazard and sensitivity progress) stay
+  English. `tr()` now returns English before any language is set, so Studio
+  modules used outside the Studio read English, not raw keys. Spanish uses
+  "tensión" for voltage throughout.
+
 - **The map, single-line diagram, dashboard and result charts are
   translated.** These web views showed English in every language. Their text
   now comes from the `web` section of the translation files (about 570 new
