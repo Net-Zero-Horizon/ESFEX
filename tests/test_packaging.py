@@ -95,8 +95,11 @@ def test_bundled_third_party_files_are_not_declared_apache():
 
 def test_data_sources_ship_with_the_package():
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    license_files = set(meta["tool"]["setuptools"]["license-files"])
+    license_files = set(meta["project"]["license-files"])
     assert {"LICENSE", "LICENSES/*.txt", "DATA_SOURCES.md"} <= license_files
+    # The package licence is an SPDX expression naming every shipped licence.
+    assert set(_spdx_ids(meta["project"]["license"])) == {
+        f.stem for f in (ROOT / "LICENSES").glob("*.txt")}
     manifest = (ROOT / "MANIFEST.in").read_text()
     assert "DATA_SOURCES.md" in manifest and "graft LICENSES" in manifest
     recipe = (ROOT / "recipe" / "meta.yaml").read_text()

@@ -82,7 +82,7 @@ about:
     N-1 security, frequency stability, battery storage, sector coupling
     (electrolyzer, primary energy, EV/V2G, rooftop solar), MGA/SPORES,
     stochastic programming, Sobol sensitivity, and a GIS-based Studio.
-  license: Apache-2.0
+  license: Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND EPL-2.0 AND CC-BY-4.0 AND CC0-1.0 AND LicenseRef-NaturalEarth-PublicDomain AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain
   license_family: APACHE
   license_file:
     - LICENSE

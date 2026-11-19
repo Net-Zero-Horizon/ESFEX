@@ -143,7 +143,7 @@ In `src/esfex/visualization/resources/`:
 | `elk.bundled.js` | elkjs (Eclipse Layout Kernel) | 2017 Kiel University and others | EPL-2.0 |
 | `leaflet.js`, `leaflet.css`, `images/layers*.png`, `images/marker-*.png` | Leaflet 1.9.4 | 2010-2023 Vladimir Agafonkin, 2010-2011 CloudMade | BSD-2-Clause |
 | `leaflet.draw.js`, `leaflet.draw.css`, `images/spritesheet*` | Leaflet.draw 1.0.4 | 2012-2017 Jacob Toye, Jon West, Smartrak, Leaflet | MIT |
-| `plotly.min.js` | plotly.js 2.35.2 | 2012-2024 Plotly, Inc. | MIT |
+| `plotly.min.js` | plotly.js 2.35.2 (bundled dependencies in `plotly.min.js.LICENSE.txt`) | 2012-2024 Plotly, Inc., and the dependencies' authors | MIT AND BSD-3-Clause |
 | `xterm.js`, `xterm.css`, `xterm-addon-fit.js` | xterm.js and its fit add-on | 2014 The xterm.js authors, 2012-2013 Christopher Jeffrey | MIT |
 
 ## Documentation

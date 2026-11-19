@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,12 @@ name = "esfex"
 version = "0.3.0"
 description = "ESFEX: Energy System Flexibility — Power System Optimization"
 readme = "README.md"
-license = {text = "Apache-2.0"}
+# ESFEX code is Apache-2.0; the package also ships third-party JavaScript
+# libraries and data files under their own licences (REUSE.toml, DATA_SOURCES.md).
+license = "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND EPL-2.0 AND CC-BY-4.0 AND CC0-1.0 AND LicenseRef-NaturalEarth-PublicDomain AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
+# Shipped in the sdist and in the wheel's metadata next to LICENSE: the
+# third-party licence texts (LICENSES/) and the data attributions.
+license-files = ["LICENSE", "LICENSES/*.txt", "DATA_SOURCES.md"]
 authors = [
     {name = "Manuel Soto Calvo"},
     {name = "Han Soo Lee"},
@@ -19,7 +24,6 @@ requires-python = ">=3.10,<3.14"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -119,11 +123,6 @@ esfex-studio = "esfex.cli:_studio_entrypoint"
 Homepage = "https://github.com/Net-Zero-Horizon/ESFEX"
 Documentation = "https://github.com/Net-Zero-Horizon/ESFEX#readme"
 Repository = "https://github.com/Net-Zero-Horizon/ESFEX"
-
-[tool.setuptools]
-# Shipped in the sdist and in the wheel's metadata next to LICENSE: the
-# third-party licence texts (LICENSES/) and the data attributions.
-license-files = ["LICENSE", "LICENSES/*.txt", "DATA_SOURCES.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
