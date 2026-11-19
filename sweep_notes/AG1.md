@@ -1,5 +1,3 @@
-# AG1 changelog notes (round 45: esfex.api, `esfex summary`, `--json`, run warnings)
-
 ### Added
 
 - **ESFEX can be driven from scripts and agents.** `esfex validate`, `esfex run`
