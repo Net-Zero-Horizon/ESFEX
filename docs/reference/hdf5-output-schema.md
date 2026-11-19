@@ -258,7 +258,7 @@ Node axes are at node level: when the operational network has buses that differ 
 | `total_demand` | float | Total energy demand (MWh) |
 | `load_shed` | float | Total unserved energy (MWh) |
 | `transmission_losses` | float | Energy lost on the lines (MWh), the sum of `line_losses` × `temporal_resolution_hours` |
-| `master_re_target` | float | RE penetration target from the master problem for this year |
+| `master_re_target` | float | RE penetration target the dispatch used this year: the master's trajectory value, capped at what the year's fixed plan can deliver (the master's own target can be higher) |
 | `master_loss_repair_lower_bound` | float | Objective ($) of the first solve of the master that planned this year, with the PWL loss model: lines may lose more than the PWL loss of their flow, a relaxation, so a lower bound of the master with exact PWL losses. The same value for every year a solve planned (all years of a perfect-foresight master). Written when the master has PWL or linear losses and its first solve was optimal; not under MGA or Benders |
 | `master_loss_repair_objective` | float | Objective ($) of that master after the loss repair: an upper bound of it, within the 2 % tolerance of the linearised losses |
 | `master_loss_repair_gap` | float | (objective − lower bound) / \|objective\|, 0 when no line over-lost |

@@ -601,7 +601,7 @@ class YearResults:
     total_generation: float = 0.0
     total_demand: float = 0.0
     transmission_losses: float = 0.0  # MWh lost on the lines (DC loss model)
-    master_re_target: float = 0.0  # Master problem RE penetration target for this year
+    master_re_target: float = 0.0  # Operational RE target: the master trajectory capped at what the plan can deliver
     # Line-loss repair bounds ($): of the master solve that planned this
     # year, and of the year's dispatch windows summed (adapters.loss_repair_bounds)
     master_loss_repair: Optional[dict] = None
