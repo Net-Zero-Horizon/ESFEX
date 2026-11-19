@@ -3783,6 +3783,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Removed
 
+- **The Bokeh and Plotly results-chart modules.** `results_charts_bokeh.py`
+  and `results_charts_plotly.py` (about 3,200 lines) were not used: the
+  results viewer and panel take their charts from `results_charts.py`, and
+  Bokeh was not even a dependency. Their four tests went with them.
+
 - The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
   (and their tests). Profiles are computed by `solarex` / `windrex` and, in
   the Grid Builder, by `open_meteo_weather`.
