@@ -1,8 +1,7 @@
 """Demand estimation ML engine — unified hourly prediction.
 
-Supports pluggable backends (XGBoost / TFT) with a single interface.
-Both models predict hourly shape factors directly — no 3h aggregation
-or Fourier reconstruction needed.
+The XGBoost model predicts hourly shape factors directly — no 3h
+aggregation or Fourier reconstruction needed.
 
 The model predicts dimensionless shape factors: demand_hour / annual_avg_MW.
 Multiply by the annual average demand (MW) to get absolute MW values.
@@ -28,12 +27,8 @@ logger = logging.getLogger(__name__)
 _XGB_FILENAME = "demand_model.xgb"
 _XGB_BUNDLED = "demand_model.ubj"          # the shipped copy (same booster)
 
-# TFT is intentionally disabled for ESFEX demand estimation: the use case is
-# FORWARD per-node hourly generation over a multi-year horizon with no observed
-# demand, for which the direct XGBoost shape predictor (all inputs known for any
-# future hour) is the right tool. The TFT code path is kept intact and can be
-# re-enabled by flipping this flag.
-_TFT_ENABLED = False
+# The engines DemandMLModel accepts: XGBoost is the only one ("auto" names it).
+_ENGINES = ("auto", "xgboost")
 
 # FEATURE_COLS: the 29-feature non-AR schema of the bundled demand_model.ubj
 # (84 countries). shape_lag_* are excluded: forward per-node generation has no
@@ -71,8 +66,7 @@ def load_country_map() -> dict[str, int]:
 
 def country_id_for(iso3: str, country_map: Optional[dict] = None) -> float:
     """The model's ``country_id`` for *iso3*. A country the model was not
-    trained on gets ``len(map)``, an id no training row had (as the ECVI
-    backend does), with a warning: the model then has no country effect to
+    trained on gets ``len(map)``, an id no training row had, with a warning: the model then has no country effect to
     apply, only its other features."""
     cmap = load_country_map() if country_map is None else country_map
     code = (iso3 or "").upper()
@@ -206,17 +200,19 @@ def build_hourly_features(
     return X
 
 
-# ── Unified model class ─────────────────────────────────────────────────────
+# ── Model class ─────────────────────────────────────────────────────────────
+
+def _check_engine(engine: str) -> None:
+    if engine not in _ENGINES:
+        raise ValueError(f"Unknown demand engine {engine!r}; use 'xgboost'.")
+
 
 class DemandMLModel:
-    """Unified demand model with pluggable backends (XGBoost / TFT).
+    """Hourly demand-shape model (XGBoost gradient-boosted trees).
 
     Predicts hourly shape factors (demand / annual_avg_MW, mean ≈ 1.0).
-
-    Engines:
-      - 'auto': TFT if available, else XGBoost
-      - 'tft': Temporal Fusion Transformer (deep learning)
-      - 'xgboost': Gradient boosted trees
+    ``engine`` is ``'xgboost'`` or ``'auto'`` (the same model); any other
+    value raises ``ValueError``.
     """
 
     def __init__(self, engine: str = "xgboost"):
@@ -229,61 +225,32 @@ class DemandMLModel:
 
     @classmethod
     def is_available(cls, engine: str = "auto") -> bool:
-        if not _TFT_ENABLED and engine == "tft":
-            engine = "xgboost"  # TFT disabled → resolve to XGBoost
-        if _TFT_ENABLED and engine in ("auto", "tft"):
-            try:
-                from esfex.models.demand_tft import DemandTFTModel
-                if DemandTFTModel.is_available():
-                    return True
-            except ImportError:
-                pass
-        if engine in ("auto", "xgboost"):
-            if model_path(_XGB_FILENAME, _XGB_BUNDLED).exists():
-                return True
-        return False
+        _check_engine(engine)
+        return model_path(_XGB_FILENAME, _XGB_BUNDLED).exists()
 
     @classmethod
     def load_bundled(cls, engine: str = "auto") -> "DemandMLModel":
-        """Load the bundled model. With TFT disabled (default), resolves to
-        XGBoost; TFT is loaded only when ``_TFT_ENABLED`` is True."""
-        if not _TFT_ENABLED and engine == "tft":
-            engine = "xgboost"  # TFT disabled → resolve any tft request to XGBoost
-        if _TFT_ENABLED and engine in ("auto", "tft"):
-            try:
-                from esfex.models.demand_tft import DemandTFTModel
-                if DemandTFTModel.is_available():
-                    tft = DemandTFTModel.load_bundled()
-                    instance = cls(engine="tft")
-                    instance._model = tft
-                    logger.info("Loaded TFT demand model")
-                    return instance
-            except (ImportError, Exception) as exc:
-                if engine == "tft":
-                    raise
-                logger.debug("TFT not available: %s", exc)
-
-        if engine in ("auto", "xgboost"):
-            mpath = model_path(_XGB_FILENAME, _XGB_BUNDLED)
-            if not mpath.exists():
-                raise FileNotFoundError(
-                    f"No trained model at {mpath}. "
-                    "Run 'esfex train-demand-model' to train one."
-                )
-            try:
-                import xgboost as xgb
-            except ImportError:
-                raise ImportError(
-                    "xgboost required. It ships with esfex; reinstall with: "
-                    "pip install --upgrade --force-reinstall esfex"
-                )
-            instance = cls(engine="xgboost")
-            instance._model = xgb.Booster()
-            instance._model.load_model(str(mpath))
-            logger.info("Loaded XGBoost demand model from %s", mpath)
-            return instance
-
-        raise FileNotFoundError(f"No model available for engine '{engine}'.")
+        """Load the XGBoost model (a retrained one in the models directory,
+        else the shipped one)."""
+        _check_engine(engine)
+        mpath = model_path(_XGB_FILENAME, _XGB_BUNDLED)
+        if not mpath.exists():
+            raise FileNotFoundError(
+                f"No trained model at {mpath}. "
+                "Run 'esfex train-demand-model' to train one."
+            )
+        try:
+            import xgboost as xgb
+        except ImportError:
+            raise ImportError(
+                "xgboost required. It ships with esfex; reinstall with: "
+                "pip install --upgrade --force-reinstall esfex"
+            )
+        instance = cls(engine="xgboost")
+        instance._model = xgb.Booster()
+        instance._model.load_model(str(mpath))
+        logger.info("Loaded XGBoost demand model from %s", mpath)
+        return instance
 
     def predict(self, features: np.ndarray) -> np.ndarray:
         """Predict hourly demand shape factors.
@@ -317,8 +284,6 @@ class DemandMLModel:
             from esfex.models.xgb_device import predict as _xgb_predict
             predictions = _xgb_predict(
                 self._model, features, feature_names=FEATURE_COLS)
-        elif self._engine == "tft":
-            predictions = self._model.predict_hourly_features(features)
         else:
             raise ValueError(f"Unknown engine: {self._engine}")
 
@@ -327,11 +292,8 @@ class DemandMLModel:
     def save(self, path: Path) -> None:
         if self._model is None:
             raise ValueError("No model to save.")
-        if self._engine == "xgboost":
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._model.save_model(str(path))
-        elif self._engine == "tft":
-            self._model.save(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._model.save_model(str(path))
 
     def set_booster(self, booster) -> None:
         """Set XGBoost booster (used during training)."""

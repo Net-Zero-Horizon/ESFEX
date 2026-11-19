@@ -115,7 +115,7 @@ class DemandEstimationConfig:
 
     # ML engine control
     force_archetype: bool = False   # True → skip ML even if model available
-    ml_engine: str = "auto"         # "auto" | "tft" | "xgboost"
+    ml_engine: str = "auto"         # "auto" | "xgboost" (the same model)
     # Prefer the spatial demand-DENSITY model (predicts MW/km² per node) over
     # the national-shape model when it is available. This is what makes the
     # per-node forecast genuinely spatial instead of ~total/num_nodes.
@@ -873,11 +873,8 @@ class DemandProfileBuilder:
             self._cfg.num_nodes = num_nodes
         years = self._cfg.simulation_years
 
-        engine_map = {"auto": "auto", "tft": "tft", "xgboost": "xgboost", "ml": "xgboost"}
-        engine = engine_map.get(getattr(self._cfg, "ml_engine", "auto"), "auto")
-
-        emit(5, f"Loading ML model ({engine})…")
-        model = DemandMLModel.load_bundled(engine=engine)
+        emit(5, "Loading ML model (xgboost)…")
+        model = DemandMLModel.load_bundled(engine="xgboost")
 
         emit(10, "Computing spatial weights…")
         w_spatial = self._compute_spatial_weights(proxy)

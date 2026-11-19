@@ -7,7 +7,7 @@
 - **pip 21.0+** or **conda** package manager.
 - **Julia 1.9+**: managed by `juliacall`. If a suitable Julia is on your `PATH` it is used; otherwise `juliacall` downloads one on first use. A `julia` executable on `PATH` is needed only for [`esfex precompile`](../user-guide/cli.md#esfex-precompile).
 - **At least 4 GB of free RAM** for typical simulations. Large multi-node, multi-year studies may require 8--16 GB.
-- **Several GB of free disk space**: the Python dependencies include PyTorch, and the Julia environment, compiled packages and an optional sysimage add more.
+- **Several GB of free disk space**: the Python dependencies include the GIS stack and Qt WebEngine, and the Julia environment, compiled packages and an optional sysimage add more.
 
 ### Checking Python Version
 
@@ -45,9 +45,9 @@ All runtime functionality ships as **core dependencies**; there are no feature e
 | windrex, solarex, rooftex, evrex, otex | Companion packages for wind, solar PV, rooftop solar, EV and OTEC workflows |
 | pvlib, geopandas, rasterio, atlite, duckdb, shapely, osmium, overpy, xarray, gcsfs, zarr, scikit-learn | Resource-assessment and grid-mapping workflows |
 | pypsa, pandapower, pypower, matpower | Benchmarking and AC power-flow analysis |
-| xgboost, torch, pytorch-lightning, pytorch-forecasting | Demand-estimation models |
+| xgboost | Demand-estimation models |
 
-The full list is in `pyproject.toml`. Because of PyTorch and the GIS stack, the installation is large.
+The full list is in `pyproject.toml`. Because of the GIS stack and Qt WebEngine, the installation is large.
 
 ### Conda / Mamba
 
