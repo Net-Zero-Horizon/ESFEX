@@ -23,6 +23,12 @@ from PySide6.QtCore import QThread, Signal
 
 logger = logging.getLogger(__name__)
 
+# Voltage tag parsing (see _parse_voltage_tag).
+_VOLT_CIRCUITS = re.compile(r"\b\d+\s*[x×*]\s*(?=\d)", re.IGNORECASE)
+# One decimal only ("13,8 kV"): "33,11 kV" is a list of 33 and 11 kV.
+_VOLT_DECIMAL_COMMA = re.compile(r"(\d),(\d)(?=\s*k?v\b)", re.IGNORECASE)
+_VOLT_TOKEN = re.compile(r"(\d+(?:\.\d+)?)|(?<=[\d\s])(kv|v)\b", re.IGNORECASE)
+
 # Upper bound of medium voltage (IEC: distribution up to 36 kV; 52 kV
 # equipment). Levels below it are distribution, at or above it sub-transmission.
 _MV_CEILING_KV = 60.0
@@ -83,20 +89,32 @@ def _normalize_voltage_kv(value: float) -> float:
 def _parse_voltage_tag(raw: str) -> list[float]:
     """Parse an OSM ``voltage`` tag that may be semicolon-separated.
 
-    Returns a list of voltages in kV (descending order).
+    Returns the distinct voltages in kV, highest first.
     E.g. ``"220000;110000"`` → ``[220.0, 110.0]``.
+
+    Mappers also write units and other separators, which PyPSA-Eur's and
+    PyPSA-Earth's OSM cleaning accept too: ``"110 kV"``, ``"220/110 kV"``
+    (the unit applies to the whole list), ``"13,8 kV"``, ``"220000/110000"``,
+    ``"2x220000"`` (circuits × voltage). A number without a unit is in volts
+    above 1 200, else kV. Words (``"medium"``, ``"high"``) give nothing: the
+    builder infers the level instead of taking a fixed number for them.
     """
+    s = _VOLT_DECIMAL_COMMA.sub(r"\1.\2", _VOLT_CIRCUITS.sub("", str(raw or "")))
     voltages: list[float] = []
-    for part in raw.replace(",", ";").split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            voltages.append(_normalize_voltage_kv(float(part)))
-        except ValueError:
-            continue
-    voltages.sort(reverse=True)
-    return voltages
+    pending: list[float] = []
+    for num, unit in _VOLT_TOKEN.findall(s):
+        if num:
+            pending.append(float(num))
+        elif pending:
+            scale = 1.0 if unit.lower() == "kv" else 0.001
+            voltages += [x * scale for x in pending]
+            pending = []
+    voltages += [_normalize_voltage_kv(x) for x in pending]
+    out: list[float] = []
+    for v in sorted((round(v, 3) for v in voltages if v > 0), reverse=True):
+        if not out or v != out[-1]:
+            out.append(v)
+    return out
 
 
 def _parse_year_tag(raw: str) -> int:

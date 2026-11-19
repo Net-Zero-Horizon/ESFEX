@@ -2364,6 +2364,32 @@ class TestVoltagesFromTheData:
             lat=0.5, lng=0.5, osm_id="way/1")
         assert feat.voltage_kv == 0.0
 
+    @pytest.mark.parametrize("tag,levels", [
+        ("220000", [220.0]),
+        ("220000;110000", [220.0, 110.0]),
+        ("400000,220000", [400.0, 220.0]),
+        ("33000; 13200", [33.0, 13.2]),
+        # forms PyPSA's OSM cleaning also accepts
+        ("110 kV", [110.0]),
+        ("13.8kV", [13.8]),
+        ("13,8 kV", [13.8]),
+        ("33,11 kV", [33.0, 11.0]),
+        ("220/110 kV", [220.0, 110.0]),
+        ("220000/110000", [220.0, 110.0]),
+        ("400 kV; 220 kV", [400.0, 220.0]),
+        ("220000V", [220.0]),
+        ("2x220000", [220.0]),
+        ("2*220000", [220.0]),
+        ("220000;220000", [220.0]),
+        # words stay unknown: the builder infers the level
+        ("medium", []), ("high", []), ("", []),
+    ])
+    def test_voltage_tag_forms(self, tag, levels):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            _parse_voltage_tag,
+        )
+        assert _parse_voltage_tag(tag) == levels
+
     def test_untagged_transformer_secondary_and_converter_stay_unknown(self):
         f = self._fetcher()
         tr = f._process_element(tags={"power": "transformer",

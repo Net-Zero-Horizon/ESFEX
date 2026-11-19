@@ -1554,6 +1554,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **OSM voltage tags with units are read.** The Grid Builder read only plain
+  numbers in the `voltage` tag, so `110 kV`, `13.8kV`, `220/110 kV`,
+  `220000/110000` or `2x220000` counted as untagged. It now accepts units
+  (applied to a whole list), the `/` separator, a decimal comma before `kV`,
+  circuit prefixes and repeated levels, as PyPSA-Eur and PyPSA-Earth do.
+  Words such as `medium` stay unknown, for the builder to infer.
+
 - **Clicking a bus in the single-line diagram opens its form.** The SLD
   sent its layout key (`bus_<id>`) instead of the bus id, so the bus form
   opened empty (no system, bus ID, name or parent node), and selecting a bus
