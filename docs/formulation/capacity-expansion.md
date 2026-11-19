@@ -845,8 +845,10 @@ To enable seasonal storage representation, inter-period SOC boundary variables a
 **Capacity bound**:
 
 \[
-0 \leq \text{SOC}^{bnd}_{y,b,n,p} \leq \bar{E}^{total}_{b,n,y} \quad \forall p \tag{TSAM-CAP}
+0 \leq \text{SOC}^{bnd}_{y,b,n,p} \leq \bar{E}^{cum}_{y,b,n} \quad \forall p \tag{TSAM-CAP}
 \]
+
+\(\bar{E}^{cum}_{y,b,n}\) is the battery's energy in service that year (CUM-2), the same bound as the period's SOC (BAT-1): the rated energy within its lifetime, afterwards the life-extended energy (`battery_energy_in_service`). Earlier versions bounded the boundary SOC by the rated energy within the lifetime only, so a battery the master kept past its lifetime had its boundary SOC held at 0 and could not carry energy from one period to the next.
 
 When `tsam_inter_period_linking = false`, each period is cyclic on its own (BAT-3), and only the weighted cost scaling is active.
 

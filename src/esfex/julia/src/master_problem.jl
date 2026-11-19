@@ -1224,6 +1224,47 @@ function reservoir_in_service(vars::MasterProblemVariables, gen, g::Int, b::Int,
 end
 
 """
+    battery_power_in_service(vars, bat, bi, b, year_idx) -> AffExpr
+    battery_energy_in_service(vars, bat, bi, b, year_idx) -> AffExpr
+
+Discharge power (MW) and energy capacity (MWh) of existing battery `bat`
+(index `bi`) at bus `b` in service in year `year_idx`: its rated values while
+younger than its `life_time`; afterwards the MW the master extends its life
+by (`bat_life_extension`), the energy at the battery's own energy-to-power
+ratio; 0 if not extended. The master does not degrade batteries. Every
+master constraint on an existing battery's size (the day's power and SOC
+bounds, the TSAM boundary SOC, the reported capacity) uses these.
+"""
+function battery_power_in_service(vars::MasterProblemVariables, bat, bi::Int, b::Int,
+                                  year_idx::Int)
+    cap = AffExpr(0.0)
+    base_power = bat.max_discharge_power[b]
+    base_power > 0 || return cap
+    if bat.initial_age[b] + (year_idx - 1) < bat.life_time[b]
+        add_to_expression!(cap, base_power)
+    else
+        ext = vars.bat_life_extension[year_idx][bi][b]
+        ext === nothing || add_to_expression!(cap, ext)
+    end
+    return cap
+end
+
+function battery_energy_in_service(vars::MasterProblemVariables, bat, bi::Int, b::Int,
+                                   year_idx::Int)
+    cap = AffExpr(0.0)
+    base_cap = bat.capacity[b]
+    base_cap > 0 || return cap
+    base_power = bat.max_discharge_power[b]
+    if bat.initial_age[b] + (year_idx - 1) < bat.life_time[b]
+        add_to_expression!(cap, base_cap)
+    elseif base_power > 0
+        ext = vars.bat_life_extension[year_idx][bi][b]
+        ext === nothing || add_to_expression!(cap, ext, base_cap / base_power)
+    end
+    return cap
+end
+
+"""
     converter_capacity(vars, conv, key, year_idx)
 
 Converter capacity in year `year_idx`: its rated power plus the MW built at
@@ -2623,63 +2664,15 @@ function build_cumulative_capacity_expressions(
     end
     result["gen"] = gen_cap
 
-    # Battery power capacity: unified retirement
-    bat_pow = Dict{Int, Vector{AffExpr}}()
-    for b in 1:n_bat
-        bat = input.batteries[b]
-        bat_pow[b] = Vector{AffExpr}(undef, n_buses)
-
-        for n in 1:n_buses
-            base_power = bat.max_discharge_power[n]
-            lifetime = bat.life_time[n]
-            initial_age = bat.initial_age[n]
-            age_at_year = initial_age + (year_idx - 1)
-
-            cap = AffExpr(0.0)
-            if age_at_year < lifetime && base_power > 0
-                add_to_expression!(cap, base_power)
-            elseif base_power > 0
-                life_ext_var = vars.bat_life_extension[year_idx][b][n]
-                if life_ext_var !== nothing
-                    add_to_expression!(cap, life_ext_var)
-                end
-            end
-            bat_pow[b][n] = cap
-        end
-    end
-    result["bat_power"] = bat_pow
-
-    # Battery energy capacity: unified retirement
-    bat_cap = Dict{Int, Vector{AffExpr}}()
-    for b in 1:n_bat
-        bat = input.batteries[b]
-        bat_cap[b] = Vector{AffExpr}(undef, n_buses)
-
-        for n in 1:n_buses
-            base_cap = bat.capacity[n]
-            lifetime = bat.life_time[n]
-            initial_age = bat.initial_age[n]
-            age_at_year = initial_age + (year_idx - 1)
-
-            cap = AffExpr(0.0)
-            if age_at_year < lifetime && base_cap > 0
-                add_to_expression!(cap, base_cap)
-            elseif base_cap > 0
-                life_ext_var = vars.bat_life_extension[year_idx][b][n]
-                if life_ext_var !== nothing
-                    # Scale energy capacity proportional to power life extension
-                    bat_config = input.batteries[b]
-                    base_power = bat_config.max_discharge_power[n]
-                    if base_power > 0
-                        ratio = base_cap / base_power
-                        add_to_expression!(cap, life_ext_var, ratio)
-                    end
-                end
-            end
-            bat_cap[b][n] = cap
-        end
-    end
-    result["bat_capacity"] = bat_cap
+    # Battery power and energy capacity in service (unified retirement)
+    result["bat_power"] = Dict{Int, Vector{AffExpr}}(
+        b => [battery_power_in_service(vars, input.batteries[b], b, n, year_idx)
+              for n in 1:n_buses]
+        for b in 1:n_bat)
+    result["bat_capacity"] = Dict{Int, Vector{AffExpr}}(
+        b => [battery_energy_in_service(vars, input.batteries[b], b, n, year_idx)
+              for n in 1:n_buses]
+        for b in 1:n_bat)
 
     # Technology and battery technology capacity built and in service
     # (sums over the investment variables: the objective's fixed O&M)
@@ -3749,34 +3742,8 @@ function add_day_operational_constraints!(
     for bi in 1:n_bat
         bat = input.batteries[bi]
         for b in ps_vars.buses_of_bat[bi]
-            pow_cap = AffExpr(0.0)
-            base_power = bat.max_discharge_power[b]
-            lifetime = bat.life_time[b]
-            initial_age = bat.initial_age[b]
-            age_at_year = initial_age + (year_idx - 1)
-
-            if age_at_year < lifetime && base_power > 0
-                add_to_expression!(pow_cap, base_power)
-            elseif base_power > 0
-                life_ext_var = vars.bat_life_extension[year_idx][bi][b]
-                if life_ext_var !== nothing
-                    add_to_expression!(pow_cap, life_ext_var)
-                end
-            end
-            total_cap_bat_power[(bi, b)] = pow_cap
-
-            en_cap = AffExpr(0.0)
-            base_cap = bat.capacity[b]
-            if age_at_year < lifetime && base_cap > 0
-                add_to_expression!(en_cap, base_cap)
-            elseif base_cap > 0 && base_power > 0
-                life_ext_var = vars.bat_life_extension[year_idx][bi][b]
-                if life_ext_var !== nothing
-                    ratio = base_cap / base_power
-                    add_to_expression!(en_cap, life_ext_var, ratio)
-                end
-            end
-            total_cap_bat_energy[(bi, b)] = en_cap
+            total_cap_bat_power[(bi, b)] = battery_power_in_service(vars, bat, bi, b, year_idx)
+            total_cap_bat_energy[(bi, b)] = battery_energy_in_service(vars, bat, bi, b, year_idx)
         end
     end
 
@@ -4816,16 +4783,10 @@ function add_tsam_periods_validation!(
             for b in 1:n_bat
                 bat = input.batteries[b]
                 for n in 1:n_buses
-                    # Compute total capacity (existing + invested) at this year
-                    base_cap = bat.capacity[n]
-                    lifetime = bat.life_time[n]
-                    initial_age = bat.initial_age[n]
-                    age_at_year = initial_age + (y_idx - 1)
-
-                    total_cap = AffExpr(0.0)
-                    if age_at_year < lifetime && base_cap > 0
-                        add_to_expression!(total_cap, base_cap)
-                    end
+                    # The energy capacity the period's SOC bounds use: a
+                    # battery the master keeps past its lifetime carries
+                    # its life-extended energy across periods too
+                    total_cap = battery_energy_in_service(vars, bat, b, n, y_idx)
 
                     # Create K+1 boundary variables (0=year start, 1..K=after each period)
                     for p in 0:K
