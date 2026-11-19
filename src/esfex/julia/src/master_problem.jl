@@ -1118,11 +1118,28 @@ tech_capacity_built(vars::MasterProblemVariables, input::MasterProblemInput,
     end
 
 """
+    bat_tech_degradation_factor(btech, b, age) -> Float64
+
+Share of the power and energy of battery technology `btech` built at bus `b`
+left `age` years after its build year: `(1 − degradation_rate)^age`, the
+convention of `battery_degradation_factor` (age 0 in the build year, as an
+existing battery of `initial_age` 0 in year 1).
+"""
+function bat_tech_degradation_factor(btech, b::Int, age::Real)::Float64
+    d = length(btech.degradation_rate) >= b ? btech.degradation_rate[b] : 0.0
+    d > 0 || return 1.0
+    return (1.0 - d)^age
+end
+
+"""
     bat_tech_power_built(vars, input, bt, b, year_idx) -> AffExpr
     bat_tech_energy_built(vars, input, bt, b, year_idx) -> AffExpr
 
 Discharge power (MW) and energy (MWh) of battery technology `bt` at bus `b`
-built up to year `year_idx` and still within its `life_time`.
+in service in year `year_idx`: each build at an investment-period start up
+to that year, degraded by its age (`bat_tech_degradation_factor`, as the
+dispatch ages the battery it becomes), while younger than the technology's
+`life_time`. Charge power equals discharge power.
 """
 bat_tech_power_built(vars::MasterProblemVariables, input::MasterProblemInput,
                      bt::Int, b::Int, year_idx::Int; state::Bool = true) =
@@ -1136,11 +1153,26 @@ bat_tech_energy_built(vars::MasterProblemVariables, input::MasterProblemInput,
         _bat_tech_built(vars, input, bt, b, year_idx, vars.bat_tech_capacity_investment)
     end
 
-function _bat_tech_built(vars, input, bt, b, year_idx, inv)
+"""
+    bat_tech_power_rated(vars, input, bt, b, year_idx) -> AffExpr
+
+Rated (not degraded) discharge power of battery technology `bt` at bus `b`
+built up to year `year_idx` and still within its `life_time`: what its
+fixed O&M is charged on, as for an existing battery.
+"""
+bat_tech_power_rated(vars::MasterProblemVariables, input::MasterProblemInput,
+                     bt::Int, b::Int, year_idx::Int) =
+    _bat_tech_built(vars, input, bt, b, year_idx, vars.bat_tech_power_investment;
+                    degraded = false)
+
+function _bat_tech_built(vars, input, bt, b, year_idx, inv; degraded::Bool = true)
+    btech = input.battery_technologies[bt]
     cap = AffExpr(0.0)
     for y in 1:vars.years_per_inv_period:year_idx
-        year_idx - y < input.battery_technologies[bt].life_time[b] || continue
-        add_to_expression!(cap, inv[y][bt][b])
+        age = year_idx - y
+        age < btech.life_time[b] || continue
+        add_to_expression!(cap, inv[y][bt][b],
+                           degraded ? bat_tech_degradation_factor(btech, b, age) : 1.0)
     end
     return cap
 end
@@ -2992,8 +3024,9 @@ their lifetime, (incremental, LP-linear) decommissioning, the fixed cost
   gives (existing units within their lifetime, degraded; life-extended MW;
   technology MW built, degraded and not yet retired), the capacity the
   dispatch receives;
-- batteries: rated discharge power of existing ones within their lifetime,
-  life-extended MW, and battery-technology power built and not yet retired.
+- batteries: rated (not degraded) discharge power of existing ones within
+  their lifetime, life-extended MW, and the rated battery-technology power
+  built and not yet retired.
 A stochastic scenario's `mult` scales the generator and battery
 decommissioning costs, and `gen_fixed_cost` scales every fixed O&M.
 Units the NPV iteration retired (`input.npv_retired_units`) pay their
@@ -3080,8 +3113,7 @@ function build_annual_asset_cost(
     for (bt, btech) in enumerate(input.battery_technologies), n in 1:n_buses
         fc = btech.fixed_cost[n] * m_fixed
         fc > 0 || continue
-        add_to_expression!(annual_cost,
-            bat_tech_power_built(vars, input, bt, n, y_idx; state = false), fc)
+        add_to_expression!(annual_cost, bat_tech_power_rated(vars, input, bt, n, y_idx), fc)
     end
 
     # Fixed cost of the converter capacity built up to this year
@@ -5374,8 +5406,9 @@ function extract_master_solution(
                 for y in 1:vars.years_per_inv_period:y_idx
                     inv_age = y_idx - y
                     if inv_age < btech.life_time[n]
-                        cumul_bat_tech_pow[y_idx][bt][n] += capacity_value(vars.bat_tech_power_investment[y][bt][n])
-                        cumul_bat_tech_cap[y_idx][bt][n] += capacity_value(vars.bat_tech_capacity_investment[y][bt][n])
+                        deg = bat_tech_degradation_factor(btech, n, inv_age)
+                        cumul_bat_tech_pow[y_idx][bt][n] += capacity_value(vars.bat_tech_power_investment[y][bt][n]) * deg
+                        cumul_bat_tech_cap[y_idx][bt][n] += capacity_value(vars.bat_tech_capacity_investment[y][bt][n]) * deg
                     end
                 end
             end

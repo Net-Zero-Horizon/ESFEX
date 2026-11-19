@@ -1668,6 +1668,22 @@ function battery_power_limits(bat, b::Int, input)
 end
 
 """
+    battery_charge_ratio(bat, b) -> Float64
+
+Charge power per MW of discharge power of battery `bat` at bus `b`:
+`max_charge_power / max_discharge_power` (1.0 without discharge power).
+Degradation and life extension scale both ratings alike
+([`battery_power_limits`](@ref), the runner's life extension), so a master
+that holds a battery's discharge power in service (degraded, life-extended)
+holds `battery_charge_ratio` × that as its charge power.
+"""
+function battery_charge_ratio(bat, b::Int)::Float64
+    dis = bat.max_discharge_power[b]
+    dis > 0 || return 1.0
+    return max(bat.max_charge_power[b], 0.0) / dis
+end
+
+"""
     add_storage_ramp_constraints!(model, power, rated, prev, ramp_up, ramp_down,
                                   tres, hours; seam_name="") -> Vector
 
@@ -1703,7 +1719,9 @@ end
     add_battery_constraints!(model, vars::PowerSystemVariables, input::PowerSystemInput)
 
 Add battery storage constraints: SOC dynamics, charge/discharge limits
-(× availability and scheduled outages), ramp limits.
+(× availability and scheduled outages), ramp limits. With
+`capacity_override_power` (a master: the discharge power in service per
+(battery, bus)) the charge power is that × [`battery_charge_ratio`](@ref).
 """
 function add_battery_constraints!(model, vars::PowerSystemVariables, input;
     capacity_override_power::Union{Dict{Tuple{Int,Int}, Any}, Nothing} = nothing,
@@ -1731,10 +1749,12 @@ function add_battery_constraints!(model, vars::PowerSystemVariables, input;
 
         for b in vars.buses_of_bat[bi]
             # When capacity overrides provided (master problem), use precomputed capacity
-            # and skip degradation, investment logic, SOC bounds, spillage, mutex, min cycling
+            # and skip degradation, investment logic, SOC bounds, spillage, mutex, min cycling.
+            # The override is the discharge power; the charge power goes with
+            # it at the battery's own MaxChargePower / MaxDischargePower
             if has_override && haskey(capacity_override_power, (bi, b))
-                effective_max_charge = capacity_override_power[(bi, b)]
                 effective_max_discharge = capacity_override_power[(bi, b)]
+                effective_max_charge = effective_max_discharge * battery_charge_ratio(bat, b)
                 effective_capacity = capacity_override_energy[(bi, b)]
 
                 η_charge = bat.charge_efficiency[b]

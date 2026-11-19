@@ -961,7 +961,7 @@ function evaluate_fixed_capacities(
         end
     end
 
-    # Battery technology cumulative investment
+    # Battery technology capacity in service: each build degraded by its age
     bt_pow = Dict{Tuple{Int,Int}, Float64}()
     bt_en = Dict{Tuple{Int,Int}, Float64}()
     for bt in 1:n_bat_tech
@@ -973,8 +973,9 @@ function evaluate_fixed_capacities(
             for y in 1:ypp:year_idx
                 inv_age = year_idx - y
                 if inv_age < bt_lifetime
-                    pow += val(vars.bat_tech_power_investment[y][bt][b])
-                    en += val(vars.bat_tech_capacity_investment[y][bt][b])
+                    deg = bat_tech_degradation_factor(btech, b, inv_age)
+                    pow += val(vars.bat_tech_power_investment[y][bt][b]) * deg
+                    en += val(vars.bat_tech_capacity_investment[y][bt][b]) * deg
                 end
             end
             if pow > 1e-8
@@ -1789,7 +1790,7 @@ function build_optimality_cut(
         end
     end
 
-    # Battery tech power gradients
+    # Battery tech power gradients: each build degraded by its age, as above
     bt_pow_grads = Dict{Tuple{Int,Int}, Float64}()
     for ((bt, b), pi) in bt_pow_duals
         btech = input.battery_technologies[bt]
@@ -1798,7 +1799,8 @@ function build_optimality_cut(
             inv_age = year_idx - y
             if inv_age < bt_lifetime
                 grad_key = (bt * 1000 + y, b)
-                bt_pow_grads[grad_key] = get(bt_pow_grads, grad_key, 0.0) + pi
+                bt_pow_grads[grad_key] = get(bt_pow_grads, grad_key, 0.0) +
+                    pi * bat_tech_degradation_factor(btech, b, inv_age)
             end
         end
     end
@@ -1812,7 +1814,8 @@ function build_optimality_cut(
             inv_age = year_idx - y
             if inv_age < bt_lifetime
                 grad_key = (bt * 1000 + y, b)
-                bt_cap_grads[grad_key] = get(bt_cap_grads, grad_key, 0.0) + pi
+                bt_cap_grads[grad_key] = get(bt_cap_grads, grad_key, 0.0) +
+                    pi * bat_tech_degradation_factor(btech, b, inv_age)
             end
         end
     end

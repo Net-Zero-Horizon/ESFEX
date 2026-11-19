@@ -210,10 +210,10 @@ C^{asset}_y = \sum_{g,n} \phi^{ext} c^{inv}_{g,n} X_{y,g,n} + \sum_{b,n} \phi^{e
 \]
 
 \[
-C^{fix}_y = \sum_{g,n} c^{fix}_{g,n} \bar{P}^{cum}_{y,g,n} + \sum_{k,n} c^{fix}_{k,n} \bar{P}^{tech}_{y,k,n} + \sum_{b,n} c^{fix}_{b,n} \bar{P}^{bat,cum}_{y,b,n} + \sum_{k,n} c^{fix}_{k,n} \bar{P}^{bt}_{y,k,n} \tag{OBJ-3c}
+C^{fix}_y = \sum_{g,n} c^{fix}_{g,n} \bar{P}^{cum}_{y,g,n} + \sum_{k,n} c^{fix}_{k,n} \bar{P}^{tech}_{y,k,n} + \sum_{b,n} c^{fix}_{b,n} \hat{P}^{bat}_{y,b,n} + \sum_{k,n} c^{fix}_{k,n} \hat{P}^{bt}_{y,k,n} \tag{OBJ-3c}
 \]
 
-\(C^{fix}_y\) is the fixed O&M of the capacity in service in year \(y\), each unit at its `fixed_cost` (\$/MW/year), whether or not it runs: existing generators within their lifetime at their degraded power, their life-extended MW after it (CUM-1), the technology MW built, degraded and not yet retired (CUM-1b), an existing battery's `MaxDischargePower` within its lifetime (its life-extended MW after it, CUM-2), and the power built from each battery technology and not yet retired (CUM-3). These are the MW the dispatch receives as rated power, and the dispatch charges the same cost prorated to each window (OBJ-1a and OBJ-3c of the [Operational Dispatch](operational-dispatch.md)): the master's yearly fixed O&M is \(H_{year}/(T\Delta t)\) times a window's. Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\). The Benders master has the same \(C^{asset}_y\). Fixed O&M was charged per MWh generated in \(C^{day}\) in earlier versions.
+\(C^{fix}_y\) is the fixed O&M of the capacity in service in year \(y\), each unit at its `fixed_cost` (\$/MW/year), whether or not it runs: existing generators within their lifetime at their degraded power, their life-extended MW after it (CUM-1), the technology MW built, degraded and not yet retired (CUM-1b), \(\hat{P}^{bat}_{y,b,n}\), an existing battery's rated `MaxDischargePower` within its lifetime (its life-extended MW after it, CUM-2), and \(\hat{P}^{bt}_{y,k,n}\), the rated power built from each battery technology and not yet retired (CUM-3 without its degradation factor): a battery's fixed O&M is on its rated power, built or existing, not on its degraded power. The dispatch charges the same cost prorated to each window (OBJ-1a and OBJ-3c of the [Operational Dispatch](operational-dispatch.md)): the master's yearly fixed O&M is \(H_{year}/(T\Delta t)\) times a window's. A battery the master built reaches the dispatch at its degraded power, with its `fixed_cost` scaled by rated / degraded power so that it still pays on the rated power. Built converter capacity also pays its `fixed_cost` (\$/MW/year) every year, included in \(C^{asset}_y\). The Benders master has the same \(C^{asset}_y\). Fixed O&M was charged per MWh generated in \(C^{day}\) in earlier versions.
 
 Every MW kept past its lifetime pays \(\phi^{ext}\) (`life_extension_cost_factor`) times its investment cost each year. \(C^{dec}_y\) is the decommissioning cost: in a unit's first retirement year, \(c^{dec}\) times its (degraded) capacity minus the extended capacity; in later years, \(c^{dec}\) times the drop in extended capacity, \(X_{y-1} - X_y\).
 
@@ -306,11 +306,13 @@ Existing batteries degrade as the operational dispatch degrades them in the same
 
 `battery_power_in_service` and `battery_energy_in_service` hold CUM-2, and every master row on an existing battery's size uses them: the day's (or TSAM period's) charge, discharge and SOC bounds, the TSAM boundary SOC, the firm capacity (CAP-5), the reserve headroom and the reported capacity. The fixed O&M stays on the rated `MaxDischargePower` within the lifetime, as the dispatch charges it (OBJ-3c). Earlier versions did not degrade existing batteries in the master, so the plan counted on more storage than the dispatch of the same year had.
 
-Battery technologies accumulate their investments without degradation:
+Battery technologies accumulate their investments, each degraded by its age from its build year at the technology's `degradation_rate` \(\delta_{k,n}\), as candidate technologies (CUM-1b) and as an existing battery of the same age (CUM-2):
 
 \[
-\bar{P}^{bt}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} I^{bat,P}_{y',k,n}, \qquad \bar{E}^{bt}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} I^{bat,E}_{y',k,n} \tag{CUM-3}
+\bar{P}^{bt}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} (1 - \delta_{k,n})^{y-y'} \, I^{bat,P}_{y',k,n}, \qquad \bar{E}^{bt}_{y,k,n} = \sum_{\substack{y' \in \mathcal{Y}^{inv},\, y' \leq y \\ y - y' < \tau_{k,n}}} (1 - \delta_{k,n})^{y-y'} \, I^{bat,E}_{y',k,n} \tag{CUM-3}
 \]
+
+A build is age 0 in its build year. `bat_tech_power_built` and `bat_tech_energy_built` hold CUM-3, for the day's (or TSAM period's) charge, discharge and SOC bounds (charge power = discharge power for a battery technology), the reserve headroom, the firm capacity (CAP-5) and the reported `cumulative_bat_tech_power` / `cumulative_bat_tech_capacity`; Benders' copies and cut gradients degrade each build the same way. The dispatch receives these degraded MW and MWh with no further degradation (perfect foresight), or, in a later myopic year, the build as an existing battery of its age with the technology's rate, which CUM-2 and the dispatch degrade alike. The fixed O&M stays on the rated power built (OBJ-3c). Earlier versions never degraded what the master built, in the master or in the dispatch, so a battery technology's `degradation_rate` had no effect.
 
 ### 6.4 Transmission Cumulative Capacity
 
@@ -646,10 +648,10 @@ where \(t' = \text{mod1}(\text{start\_hour} + t - 1,\; T_{avail})\) maps the rep
 For existing batteries (via `add_battery_constraints!` with capacity overrides):
 
 \[
-P^{ch,day}_{b,n,t},\; P^{dis,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}, \qquad E^{day}_{b,n,t} \leq \bar{E}^{cum}_{y,b,n} \tag{BAT-1}
+P^{dis,day}_{b,n,t} \leq \bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}, \qquad P^{ch,day}_{b,n,t} \leq \frac{\bar{P}^{ch}_{b,n}}{\bar{P}^{bat}_{b,n}} \, \bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}, \qquad E^{day}_{b,n,t} \leq \bar{E}^{cum}_{y,b,n} \tag{BAT-1}
 \]
 
-with \(a^{bat}\) the battery's availability profile at the day's step \(t'\) (1 without one). Charge and discharge follow the dispatch's ramp limits (BAT-9) within the day, the battery's power \(\bar{P}^{bat,cum}_{y,b,n}\) standing for both ratings, and only `reservable` batteries hold reserve, up to \(\bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}\) (§8.3.4).
+with \(a^{bat}\) the battery's availability profile at the day's step \(t'\) (1 without one) and \(\bar{P}^{ch}_{b,n}\) its `MaxChargePower`. The charge power is the discharge power in service (CUM-2: degraded, or life-extended) times the battery's own charge-to-discharge ratio (`battery_charge_ratio`), as the dispatch degrades both ratings alike and the life extension scales `MaxChargePower` with the MW kept. Earlier versions bounded the charge by the discharge power, so a battery that charges slower than it discharges recharged faster in the master than in the dispatch. Charge and discharge follow the dispatch's ramp limits (BAT-9) within the day, each on its own rating, and only `reservable` batteries hold reserve, up to \(\bar{P}^{bat,cum}_{y,b,n} \, a^{bat}_{b,n,t'}\) (§8.3.4).
 
 \[
 E^{day}_{b,n,t+1} = E^{day}_{b,n,t} + \left( \eta^{ch}_{b,n} P^{ch,day}_{b,n,t} - \frac{P^{dis,day}_{b,n,t}}{\eta^{dis}_{b,n}} \right) \Delta t \tag{BAT-2}
@@ -1485,6 +1487,8 @@ Technology investments become **virtual generators** (and virtual batteries) for
 2. Creates synthetic generator entries with `rated_power = cumulative_investment`
 3. Passes these virtual generators to the operational dispatch adapter
 4. Gives them the availability profile and cost parameters of the technology, including its `fuel_cost_curve` (per bus), so the dispatch prices built capacity with the same bidding curve the master planned with (see the note on cost curves above)
+
+The cumulative capacity is the master's, each build already degraded by its age (CUM-1b, CUM-3), so the virtual units get no further degradation. A virtual battery's `fixed_cost` is scaled by its rated / degraded power, so its fixed O&M stays on the power built, as the master charges it (OBJ-3c).
 
 ---
 

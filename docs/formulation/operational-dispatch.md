@@ -220,7 +220,7 @@ Represents the wear cost of cycling energy through the battery, modelling the ec
 Z^{\text{bat,fix}} = \sum_{b,n} c^{\text{fix}}_{b,n} \, P^{\text{dis}}_{b,n} \tag{OBJ-3c}
 \]
 
-with \(c^{\text{fix}}_{b,n}\) the battery's `fixed_cost` ($ per MW per year) and \(P^{\text{dis}}_{b,n}\) its rated `MaxDischargePower` (not degraded; none when BAT-1's degraded rating is 0, past its `life_time`). An annual term, prorated to the window in (OBJ); it is reported with the generators' fixed O&M (OBJ-1a, `fixed_om_cost`). The master problem charges it each year on the discharge power in service.
+with \(c^{\text{fix}}_{b,n}\) the battery's `fixed_cost` ($ per MW per year) and \(P^{\text{dis}}_{b,n}\) its rated `MaxDischargePower` (not degraded; none when BAT-1's degraded rating is 0, past its `life_time`). An annual term, prorated to the window in (OBJ); it is reported with the generators' fixed O&M (OBJ-1a, `fixed_om_cost`). The master problem charges it each year on the rated discharge power in service. A battery the master built arrives at its degraded power with no further degradation; its `fixed_cost` is scaled by rated / degraded power, so it too pays on its rated power.
 
 ### 3.4 Penalty Costs
 
