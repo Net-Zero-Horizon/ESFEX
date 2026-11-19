@@ -1695,6 +1695,41 @@ Per-release notes are also published on the
 
 ### Fixed
 
+- **Risk workbench texts are current.** The fragility library editor said
+  "49 built-in curves from NHESS-2024 and PNNL-33587"; the library has 170
+  curves from several more sources. The count and the main sources are now
+  read from the library. The two warnings for missing node coordinates sent
+  the user to a "Site & Screening" tab that no longer exists; they now say
+  that the system's nodes and elements have no location and how to give them
+  one.
+
+- **MGA charts show their empty-state messages.** Nine MGA result pages
+  (composition, pathway, parallel coordinates, dendrogram, decision factors,
+  similarity, projection, spatial, robustness frontier) wrote "no data"-type
+  messages from their drawing code and then hid the status line as soon as
+  drawing returned, so an empty chart showed nothing. The status line is now
+  hidden before drawing.
+
+- **Texts built in Python are translated too.** Labels the Studio's Python
+  code builds stayed English in every language. They are now translated
+  (about 660 new keys):
+  - the result charts' data (month names, cash-flow components, Sankey
+    nodes, MGA objectives and axes, unit-commitment buckets, system metrics,
+    error messages);
+  - the dashboard's series and cost components, the map's risk and results
+    legends, the single-line diagram's load labels and N-1 descriptions;
+  - the financial charts and the wind and solar analysis progress;
+  - the validation messages, with their categories and actions in the
+    validation dialog;
+  - the Grid Builder's build report, warnings, voltage decisions and
+    progress.
+
+  English text is word for word what it was. Messages from core modules
+  that the CLI and agents also use (hazard and sensitivity progress) stay
+  English. `tr()` now returns English before any language is set, so Studio
+  modules used outside the Studio read English, not raw keys. Spanish uses
+  "tensión" for voltage throughout.
+
 - **The map, single-line diagram, dashboard and result charts are
   translated.** These web views showed English in every language. Their text
   now comes from the `web` section of the translation files (about 570 new
@@ -4112,6 +4147,11 @@ Per-release notes are also published on the
   shapefile at, and the file is not looked for again.
 
 ### Removed
+
+- **The Bokeh and Plotly results-chart modules.** `results_charts_bokeh.py`
+  and `results_charts_plotly.py` (about 3,200 lines) were not used: the
+  results viewer and panel take their charts from `results_charts.py`, and
+  Bokeh was not even a dependency. Their four tests went with them.
 
 - The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
   (and their tests). Profiles are computed by `solarex` / `windrex` and, in
