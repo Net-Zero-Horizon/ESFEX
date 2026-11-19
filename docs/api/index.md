@@ -7,6 +7,7 @@
 | [`esfex.config.schema`](config-schema.md) | Pydantic configuration models | `ESFEXConfig`, `SystemConfig`, `GeneratorConfig`, `BatteryConfig` |
 | [`esfex.config.loader`](config-loader.md) | YAML configuration loading | `load_config()`, `load_yaml()`, `load_system_config()` |
 | [`esfex.runner`](runner.md) | Simulation orchestrator | `Orchestrator`, `SimulationState`, `YearResults` |
+| [`esfex.api`](../user-guide/scripts-and-agents.md) | Plain-Python interface for scripts and agents (no Qt, no Julia at import) | `validate_case()`, `summary()`, `system_info()`, `collect_warnings()`, `read_warnings()` |
 | [`esfex.bridge.adapters`](bridge-adapters.md) | Julia optimization model wrappers | `PowerSystemAdapter`, `MasterProblemAdapter`, `MGAAdapter` |
 | [`esfex.bridge.julia_setup`](bridge-julia-setup.md) | Julia runtime initialization | `initialize_julia()`, `get_julia()`, `get_esfex_module()` |
 | [`esfex.io.demand`](io-demand.md) | Demand data loading | `load_demand_data()`, `create_sectoral_demand()`, `DemandDataManager` |

@@ -55,11 +55,12 @@ The runner writes one HDF5 file per run, named `<config_stem>_<ddmmyyyy>_<HHMM>.
 │       └── year_YYYY_threshold_0/
 │           └── power_flow/{A}_to_{B}  # Multi-system runs only
 ├── npv_retirements/               # Only when npv_retirement is on
+├── mga/                           # Only when MGA / SPORES is enabled
 ├── diagnostics/
+│   ├── warnings/                  # The run's warnings, grouped by kind
 │   └── master/                    # Binding constraints, duals, paid slacks per master solve
 │       ├── year_YYYY/{binding,top,slacks}
 │       └── all/{binding,top,slacks}   # Perfect foresight: rows without a year
-├── mga/                           # Only when MGA / SPORES is enabled
 └── plugins/{name}/                # Optional, written by plugins in post_year
 ```
 
@@ -76,6 +77,9 @@ A group can be present and empty, for example the battery groups in a run withou
 | `temporal_resolution_hours` | int | Time step (hours) |
 | `simulation_mode` | string | `"development"` or `"unit_commitment"` |
 | `years_range` | string | `"YYYY-ZZZZ"`, first and last simulated year |
+| `esfex_version` | string | ESFEX version that wrote the file |
+| `solver` | string | `solver.name` of the run |
+| `config_file` | string | Absolute path of the configuration file (`""` for a run started without one) |
 | `num_systems` | int | Number of systems in the meta-network |
 | `subsystem_names` | string[] | System names, in node order |
 | `subsystem_offsets` | int[] | First node index of each system |
@@ -83,6 +87,8 @@ A group can be present and empty, for example the battery groups in a run withou
 | `export_complete` | bool | `True` once the run finished and the file was finalized |
 | `last_update` | string | ISO 8601 timestamp of the last year written |
 | `export_timestamp` | string | ISO 8601 timestamp of finalization |
+
+`esfex_version`, `solver` and `config_file` are missing in files written before ESFEX 0.4.
 
 The `subsystem_*` attributes are written for single-system runs too. Readers use them to slice a system's nodes out of the global node axis.
 
@@ -707,7 +713,35 @@ Written when the system setting `npv_retirement` is on (empty datasets when no u
 
 Attributes: `threshold` (`npv_retirement_threshold`, $) and `max_iterations`. The retired generators also count in the `retirement_gen_{g}` attributes of `detailed_results` from `year` on (their nodes fully retired), which the dashboard's retirement chart reads. Batteries have no retirement attribute; this group is where their retirements are listed. The retired units' capacity in the dispatch, and the `rated_power` (MW in service) of their `generation/` and `battery_discharge/` datasets, is 0 from `year` on.
 
-## diagnostics/master/
+## diagnostics/
+
+Written at the end of the run, also when it fails. Files written before ESFEX 0.4 have no `diagnostics/` group; readers (`esfex summary`, `esfex.api`) treat a missing group as "not recorded".
+
+### diagnostics/warnings
+
+The WARNING and ERROR records the run logged (ESFEX's own and the Julia models' `@warn` lines; with `esfex run`, those of the configuration load too), grouped by kind: the logger plus the first line of the message with quoted names replaced by `'*'` and numbers by `#`.
+
+| Content | Kind | Description |
+|---------|------|-------------|
+| `records` | compound dataset, one row per kind | Fields `time` (ISO 8601, first record of the kind), `level` (the highest: `WARNING`, `ERROR`, `CRITICAL`), `logger`, `category` (the kind), `message` (the first record's full message), `count` (int64); most frequent first. Strings are variable-length UTF-8 |
+| `count_by_category` | attribute (JSON string) | `{category: count}` |
+| `total` | attribute (int) | Number of records |
+| `kinds` | attribute (int) | Number of kinds |
+
+Readers also accept `records` written as a string dataset with one JSON object per row.
+
+```python
+import json, h5py
+
+with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
+    if "diagnostics/warnings" in f:
+        for row in f["diagnostics/warnings/records"][()]:
+            print(row["count"], row["level"].decode(), row["message"].decode())
+```
+
+Text that Julia or a solver prints directly (the solver log) is not a log record and is not collected.
+
+### diagnostics/master
 
 Written after the master problem (development mode, monolithic solver, not with MGA/SPORES or Benders): which constraint families bind in each master solve, what they cost at the margin and which slack or penalty variables the plan pays for. A myopic run has one group per year (`year_YYYY`, each from that year's master); a perfect-foresight run splits its single solve by the year in the rows' names (`..._y{y}`), and puts the rows without one (the operational rows of the representative days, the horizon-wide build limits) in `all`. Files written before this group existed, and runs that do not write it, simply lack it: readers must tolerate its absence. See [Why did the master build this?](../user-guide/master-problem.md#why-did-the-master-build-this-binding-constraints-and-duals) for how to read it.
 
@@ -994,6 +1028,8 @@ with h5py.File("isla_juventud_15012026_1030.h5", "r") as f:
 Multiply sums by `temporal_resolution_hours` to get MWh.
 
 ### With the CLI
+
+`esfex summary results/isla_juventud_15012026_1030.h5` prints the per-year KPIs, the run's warnings and the master's binding constraints (`--json` for a JSON object; see [Using ESFEX from Scripts and Agents](../user-guide/scripts-and-agents.md)).
 
 ```bash
 # Export to CSV (one folder per scenario under ./csv_results/)
