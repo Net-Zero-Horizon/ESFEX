@@ -3729,6 +3729,193 @@ Per-release notes are also published on the
   power and energy in service. As before, the master does not degrade
   batteries.
 
+- **The batteries the master builds degrade.** A battery technology's
+  `degradation_rate` had no effect: what the master built kept the power
+  and energy it was built with for its whole lifetime, in the master and in
+  the dispatch, and a myopic year carried earlier builds at 0 %/yr. Each
+  build now shrinks by `(1 − degradation_rate)^age`, age counted from its
+  build year (0 in that year), exactly as an existing battery of that age:
+  in the master's capacity state (`cap_bt_pow_*`, `cap_bt_en_*`), so the
+  day's (or TSAM period's) charge, discharge and SOC bounds, the reserve
+  headroom and the firm capacity of the adequacy constraint see it; in the
+  reported `cumulative_bat_tech_power` / `cumulative_bat_tech_capacity`,
+  which the dispatch receives as the built battery's power and energy (no
+  further degradation); and in a later myopic year, which holds the build
+  as an existing battery of its age at the technology's rate. Benders'
+  copies and cut gradients degrade each build the same way. Fixed O&M stays
+  on the power built, in the master and in the dispatch (the built
+  battery's `fixed_cost` is scaled by rated / degraded power). With a
+  non-zero rate the master now builds more storage, or builds it later, to
+  hold the same power in later years, and the reported capacity of built
+  storage falls year by year.
+- **The master problem honours `MaxChargePower`.** The master bounded an
+  existing battery's charge by its discharge power, so a battery that
+  charges slower than it discharges (`MaxChargePower` < `MaxDischargePower`)
+  recharged faster in the plan than in the dispatch. The charge is now
+  bounded by the discharge power in service times the battery's own
+  `MaxChargePower` / `MaxDischargePower` (degraded and life-extended alike,
+  as the dispatch and the runner's life extension scale both ratings), in
+  every master that builds the day from the dispatch's battery constraints
+  (monolithic, TSAM, stochastic, MGA, myopic, Benders subproblems). Battery
+  technologies have one power rating, so their charge power equals their
+  discharge power, as before.
+
+- **The master problem degrades existing batteries as the dispatch does.**
+  An existing battery with a `degradation_rate` kept its rated power and
+  energy in every master (monolithic, TSAM, stochastic, MGA, myopic,
+  Benders), while the operational dispatch of the same year held it at
+  `(1 − degradation_rate)^age` of its ratings, so the plan counted on
+  storage the dispatch did not have (a 20 MW / 100 MWh battery aged 10 at
+  5 %/yr: 20 MW in the plan, 12 MW in the dispatch). The master now ages
+  it the same way (age = `initial_age` + years since the first planning
+  year) in one place, `battery_power_in_service` /
+  `battery_energy_in_service`, used by the day's (or TSAM period's) charge,
+  discharge and SOC bounds, the TSAM boundary SOC, the reserve headroom,
+  the firm capacity of the adequacy constraint and the reported capacity
+  (`cumulative_bat_power`, `cumulative_bat_capacity`). Past its lifetime
+  the master can keep at most the degraded power (it could keep the full
+  rated power), the energy at the battery's own ratio, and a battery that
+  retires pays its decommissioning on its degraded power, as generators
+  do; the reported life-extension share is over the degraded power. The
+  NPV of a battery degrades its revenue and operating cost over a myopic
+  year's later years, and an NPV retirement decommissions its degraded
+  power. Fixed O&M stays on the rated `MaxDischargePower`, as the dispatch
+  charges it. Capacity built from a battery technology is still not
+  degraded (as before), so a myopic year now carries earlier builds with
+  no degradation, as perfect foresight counts them.
+
+- **TSAM seasonal storage no longer creates energy.** With `use_tsam` and
+  `tsam_inter_period_linking` (the default), the master chained its TSAM
+  periods once each, in calendar order, between boundary levels of every
+  existing battery and reservoir, while each period's cost, energy balance,
+  RE target and curtailment counted as many times as the days it stands for
+  (its weight, up to ~40 days in Cuba). A period that discharged on the
+  chain had that discharge counted for all its days, and the period that
+  recharged it counted its own, so over the year the master's batteries
+  could discharge more than they charged and its reservoirs release more
+  water than flowed in. In the Cuba 2049 master (12 periods + 3 critical
+  days) the weighted change of stored energy was −1.28 TWh/yr and one
+  existing battery delivered +170 GWh/yr net, which explains 2–5.5 of the
+  3.4–7 point gap between the master's renewable share and the dispatch's.
+  On a test year of three day types the old chain put the renewable share
+  at 47.1 % against the full year's 39.5 %; the new formulation gives the
+  full year's plan exactly.
+  The master now uses the superposition of Kotzur et al. (2018, *Applied
+  Energy* 213:123–135): each period keeps its own storage trajectory from a
+  free start level, and an inter-day level, one per day of the year and
+  year-cyclic, moves by the change of the period that day belongs to and
+  keeps every day within the storage's range (batteries: 0 to the energy in
+  service; reservoirs: minimum to maximum level of the in-service capacity,
+  with the evaporation decaying the level day by day). Each period then
+  counts in the storage exactly as often as in the costs and balances:
+  over the year a battery discharges its charge less its losses, and a
+  reservoir releases its inflow less spill and evaporation. A reservoir
+  with head-dependent power reads its head from a period start held at or
+  below the reservoir's level on each of the period's days. Candidate
+  battery technologies stay cyclic within each period, as before.
+  `MasterProblemVariables.inter_period_soc` / `inter_period_reservoir` now
+  hold the level at the start of each day of the year (keys
+  `(unit, bus, day)`, day 0…364) instead of the K+1 period boundaries. The
+  master grows by about 3 × 365 rows and 365 columns per battery bus and
+  reservoir per year (plus 2 rows per hour of each period).
+
+- **TSAM weights are the periods' day counts.** The clustering now returns
+  the period of every day of the year (`TSAMResult.day_period`, which
+  replaces `chronological_order`), passed to Julia per year as
+  `tsam_day_period` (`MasterProblemInput.tsam_day_period` replaces
+  `tsam_chronological_order`; the adapter's keyword likewise). Each period's
+  weight is the number of days the map sends to it: a k-means cluster left
+  empty takes its representative day instead of a weight of 1 that no day
+  backed, and a critical day leaves its cluster (one day less) instead of
+  the clusters being rescaled into fractions by the least-change correction,
+  which still applies to representative days. The renewable profiles are
+  then rescaled to each year's energy on these weights, as before. The
+  master checks the map before building the seasonal storage (one entry
+  per day of the year, every entry a period, each period's count equal to
+  its weight) and stops with an error naming the year and period when it
+  does not hold.
+
+- **Curtailment above the annual limit stays the last resort whatever the
+  penalties.** The master priced curtailment above `max_curtailment_ratio` at
+  a fixed 10⁴ $/MWh, not scaled by a stochastic scenario's multipliers. With
+  an RE shortfall price above it (`penalties.fre_penetration_loss`, or a
+  scenario's `penalty_fre_penetration` multiplier) the master built
+  renewables that curtailed far above the limit to meet its RE target. The
+  excess is now priced at `curtailment_excess_penalty`: at least 10⁴ $/MWh
+  and 100 × the dearer of the RE shortfall price and the curtailment cost of
+  the scenario, so the limit keeps its priority. With the default penalties
+  the price is unchanged.
+- **The financial analysis values fuel at each year's price.** Fuel was
+  valued at the flat `fuel_cost` in every year, while the dispatch grows it
+  with its fuel's `price_growth_rate` (`fuels` block). The results file now
+  records the growth rates and the base year
+  (`system_configuration/fuel_price_growth`), and the financial analysis
+  (per-technology report, investment metrics and the cost recalculation of
+  files without a cost breakdown) grows each unit's `fuel_cost` by
+  `(1 + rate)^(year − base_year)`, as the dispatch does. Older files keep
+  the flat price, with a note in the log.
+- **Fixed O&M of the batteries the master built is on their rated power in
+  the financial analysis.** Since built batteries degrade, the power
+  recorded for them in the results (`rated_power` of their
+  `battery_discharge` dataset) was the degraded one, and the financial
+  analysis charged their fixed O&M on it. The results now record their
+  rated power, as for the configured batteries, so fixed O&M stays on the
+  power built. Installed-capacity charts now show a built battery at its
+  rated power, like the configured ones.
+- **The financial analysis pays for every build.** The capex of the units
+  the master built was booked on the year-on-year growth of their power in
+  service: a build that only replaced retired or degraded capacity (a
+  battery rebuilt as it degrades, a fleet kept constant) cost nothing. It
+  is now each year's builds from the master's build records in the results
+  file × the technology's investment cost, in the system cash flows, the
+  investment metrics and the per-technology report (which booked no capex
+  for built units). Files without build records keep the old estimate.
+- **Preferences accept "no time limit".** The solver time limit in
+  *File > Preferences… > Solver & Simulation* only took 60 to 86 400 s,
+  although 0 means no limit (as in the project's Global Settings). It now
+  takes 0 (shown as "No limit") and limits of more than a day.
+- **A self-crossing zone outline has an area.** The Zone form measured a
+  drawn development zone with the shoelace formula on the raw outline, so
+  the lobes of a self-crossing ("bowtie") outline cancelled and a symmetric
+  one showed 0 km². The outline is now repaired first (as the demand
+  model's domain clip already did) and the areas of its parts are added.
+- **`esfex.workflows.tsam_cluster` works.** It passed `n_periods` to
+  `compute_tsam_periods`, which takes `num_periods` (TypeError), did not
+  accept the 1-D demand series it documented, and described result fields
+  (`representative_days`, `weights`, `mapping`) that do not exist. It now
+  clusters an hourly series or an hours × nodes matrix and documents the
+  real `TSAMResult` fields (`period_start_hours`, `period_weights`,
+  `day_period`, `num_periods`, `critical_periods`).
+- **XGBoost demand training into a new directory.** `train_xgboost` created
+  the `cv_predictions` folder next to the model without its parents, so an
+  output directory that did not exist yet stopped the training
+  (FileNotFoundError) before the model was saved. It is created with its
+  parents now.
+
+
+- The Grid Builder page called the Natural Earth admin-1 boundaries used to
+  name nodes offline "bundled". They are neither shipped nor downloaded on
+  demand: the page now says where to put the shapefile
+  (`$ESFEX_DATA_ROOT/data/gridded/shapefiles/ne_10m_admin_1/`) and that the
+  step is skipped without it.
+
+- **Coastal and border cells count in the density demand forecast.** The
+  density engine (Grid Builder and Demand Forecast) used a 0.25° cell only
+  when its centre was inside the study domain, so coastal cells centred at
+  sea were dropped whole: Cuba lost about a third of its cells and 7 % of
+  its population, and coastal cities lost part of their share even when the
+  total was scaled to a national figure. Every cell that overlaps the domain
+  is now used, and its demand covers the share of its land inside the domain
+  (density × land area × `w`, `w = min(1, area(cell ∩ domain) / land area)`):
+  a coastal cell whose land the domain covers counts whole, and a cell on a
+  land border is split between the countries on either side. The model's
+  predictors are unchanged (densities stay per km² of the cell's land). For
+  Cuba the population covered rises from 10.4 to 11.0 M (11.2 M with a
+  detailed coastline) and the unscaled annual demand by about 4 %. The
+  per-node area split of the study region weighs its samples the same way.
+  `region_cells_025` now also returns each cell's fraction inside the domain,
+  and `land_overlap_weight` gives the weight.
+
 ### Removed
 
 - The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
@@ -3745,6 +3932,40 @@ Per-release notes are also published on the
   `export_esfex_assets.py`, which writes them from the article's outputs.
 - Clipping of the density model's inputs to their training range (a tree
   model is flat beyond its outermost split; the article does not clip).
+
+- The unused `SimulationDialog` (`panels/simulation_dialog.py`) and the
+  preferences `simulation.default_output_dir` and `advanced.cache_dir`,
+  which were defined and translated but never shown nor read, with their
+  translation strings.
+- The unused per-node samplers of the demand-density model
+  (`compute_node_areas_km2`, `sample_node_densities`,
+  `sample_node_pop_density`, `sample_node_gdp_density`,
+  `sample_node_pop_and_area`) and their private helpers: nothing outside the
+  tests called them (the demand build works on the 0.25° cells).
+
+
+- **The TFT demand engine, the gridded ECVI and the PyTorch dependencies.**
+  XGBoost is now the only demand engine. The Temporal Fusion Transformer
+  (`models/demand_tft.py`, `models/tft_inference.py`) had been disabled
+  for some time (every TFT request already resolved to XGBoost), and the
+  gridded ECVI (`models/ecvi_gridded.py`, with the script that prepared its
+  CMIP6 sub-daily inputs, `models/download_cmip6_subdaily.py`) and the
+  `GlobalDemandProjector` batch projector of `models/demand_projection.py`
+  (with its CMIP6 / ERA5 point fetchers, annual trajectory and GDP
+  elasticity) had no users. `torch`, `pytorch-lightning` and
+  `pytorch-forecasting` are no longer dependencies, which takes about
+  4 GB out of a Linux install (torch itself 1.6 GB plus some 2.5 GB of
+  CUDA libraries it pulls in).
+- The `--engine` / `-e` option of `esfex train-demand-model` (its only
+  remaining value was `xgboost`), and the `engine` and extra keyword
+  arguments of `demand_training.train_demand_model`. The command trains
+  the XGBoost hourly shape model; `--engine` is now an unknown option.
+  `DemandMLModel` accepts only `engine="xgboost"` or `"auto"` (the same
+  model); any other engine raises `ValueError`.
+- The unused demand-shape autoregressive lag columns (`shape_lag_1h`,
+  `shape_lag_24h`, `shape_lag_168h`) of the training dataset frame, which
+  only the TFT comparison read. The XGBoost features and model are
+  unchanged.
 
 ## [0.3.0] — 2026-08-27
 
