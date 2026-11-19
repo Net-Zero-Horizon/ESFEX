@@ -163,7 +163,7 @@ In `development` mode, generator commitment is relaxed to continuous, keeping th
 
 6. **Soft constraints.** Policy and reliability constraints — demand satisfaction, reserves, RE targets, CO\(_2\) budgets — are enforced through penalty-based slack variables. This guarantees feasibility and allows the modeler to identify binding constraints through non-zero slack values.
 
-7. **Exponential degradation.** Generator and battery capacity degrades as \(\bar{P} \cdot (1 - \delta)^{\text{age}}\), applied uniformly to rated power, charge/discharge power, and energy capacity (the Master Problem does not degrade batteries).
+7. **Exponential degradation.** Generator and battery capacity degrades as \(\bar{P} \cdot (1 - \delta)^{\text{age}}\), applied uniformly to rated power, charge/discharge power, and energy capacity, by the Master Problem and the operational dispatch alike (the same age in the same year). Capacity built from a battery technology does not degrade.
 
 
 ## Data Flow

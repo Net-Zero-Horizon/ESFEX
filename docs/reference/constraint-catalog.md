@@ -287,12 +287,12 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| Age-based: `age_at_year >= lifetime -> capacity = life_extension` | RET-1 | Existing units past their lifetime keep only `gen_life_ext_*` / `bat_life_ext_*`; investments retire after `lifetime` |
+| Age-based: `age_at_year >= lifetime -> capacity = life_extension` | RET-1 | Existing units within their lifetime count their rating degraded by age (generators and batteries, power and energy, CUM-1/CUM-2); past it they keep only `gen_life_ext_*` / `bat_life_ext_*`, each at most that degraded rating; investments retire after `lifetime` |
 | `cascade_gen_g{g}_n{n}_y{y}`, `cascade_bat_b{bi}_n{n}_y{y}` | RET-2 | Life extension can only decrease over time |
 
 ### Operational Validation (Representative Days)
 
-The days reuse the dispatch constraints above (generators with capacity overrides, batteries, reservoirs, reserves, inertia, power balance, curtailment), with names prefixed per day, plus:
+The days reuse the dispatch constraints above (generators and batteries with capacity overrides: their capacity in service that year, degraded by age as the dispatch degrades it, or life-extended; reservoirs, reserves, inertia, power balance, curtailment), with names prefixed per day, plus:
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|

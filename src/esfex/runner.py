@@ -4562,8 +4562,8 @@ class Orchestrator:
           their technology's parameters (:func:`technology_unit_fields`), at
           the nodes where it was built, one unit per technology and build
           year, aged from the build year with the technology's degradation
-          and retired at its lifetime, as perfect foresight counts its
-          investments. On a bus-level master (a system with buses: one node,
+          (none for a battery technology) and retired at its lifetime, as
+          perfect foresight counts its investments. On a bus-level master (a system with buses: one node,
           or development zones) each bus with capacity gets its own unit,
           pinned to that bus (``bus_id_per_node``); the adapter would place a
           node-level unit at the node's first bus;
@@ -4683,7 +4683,10 @@ class Orchestrator:
                     rated_power=pow_list,
                     life_time=[bat_tech.lifetime] * n,
                     initial_age=[age] * n,
-                    degradation_rate=rep(bat_tech.degradation_rate),
+                    # Perfect foresight does not degrade battery-technology
+                    # builds (only existing batteries degrade, in the master
+                    # and the dispatch), so neither does a later year
+                    degradation_rate=zeros,
                     # Life extension is priced like a new build
                     invest_cost=rep(bat_tech.invest_cost_power),
                     invest_max_power=zeros,
