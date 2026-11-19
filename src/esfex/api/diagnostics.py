@@ -171,6 +171,32 @@ class WarningsCollector(logging.Handler):
             self._groups.clear()
             self._total = 0
 
+    def merge(self, summary: Union["WarningsSummary", dict, None]) -> None:
+        """Add the groups of an earlier *summary* (a :class:`WarningsSummary`
+        or its ``to_dict()``): a resumed run goes on counting from the
+        warnings of the run it resumes."""
+        if not summary:
+            return
+        if isinstance(summary, WarningsSummary):
+            summary = summary.to_dict()
+        with self._glock:
+            for g in summary.get("groups") or []:
+                count = int(g.get("count", 1))
+                cur = self._groups.get(g["category"])
+                if cur is None:
+                    self._groups[g["category"]] = WarningGroup(
+                        category=g["category"], level=g.get("level", "WARNING"),
+                        logger=g.get("logger", ""), message=g.get("message", ""),
+                        time=g.get("time", ""), count=count)
+                else:
+                    cur.count += count
+                    if logging.getLevelName(g.get("level", "WARNING")) > \
+                            logging.getLevelName(cur.level):
+                        cur.level = g["level"]
+                    if g.get("time", "") and g["time"] < cur.time:
+                        cur.time, cur.message = g["time"], g.get("message", cur.message)
+            self._total += int(summary.get("total", 0))
+
 
 _active: list[WarningsCollector] = []
 _active_lock = threading.Lock()

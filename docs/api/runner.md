@@ -36,6 +36,7 @@ class Orchestrator:
 | `state` | `Optional[SimulationState]` | Current simulation state (set during `run()`) |
 | `results` | `list[YearResults]` | Accumulated results across years |
 | `master_solution` | `Optional[dict]` | Master problem decisions after `run(master_only=True)` (`investments`, `retirements`, `cumulative_capacities`, `re_targets`, each keyed by year); `None` otherwise |
+| `resume_plan` | `Optional[ResumePlan]` | After `run(resume_from=...)`: the checked checkpoint the run resumed from (`phase`, `resume_year`, `master_years`, `dispatch_years`, `forced`, `to_dict()`; see `esfex.io.checkpoint`); `None` otherwise |
 | `warnings_summary` | `Optional[WarningsSummary]` | After `run()` (also a failed one): the warnings and errors the run logged, grouped by kind (`total`, `kinds`, `groups`, `text()`, `to_dict()`; see `esfex.api.diagnostics`) |
 
 When development zones are configured, `run()` replaces `primary_system` and `master_system` with the zone-expanded systems.
@@ -65,6 +66,8 @@ def run(
     start_year: Optional[int] = None,
     master_only: bool = False,
     dispatch_years: Optional[Iterable[int]] = None,
+    resume_from: Optional[Union[str, Path]] = None,
+    force_resume: bool = False,
 ) -> list[YearResults]
 ```
 
@@ -79,8 +82,10 @@ Execute the full simulation: Master Problem (capacity expansion) followed by yea
 | `start_year` | `Optional[int]` | year of `date_start` | Label of the first simulated year. When given, the date labels start on `date_start`'s day and time in this year. It only relabels: it does not select demand rows, and the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar |
 | `dispatch_years` | `Optional[Iterable[int]]` | all years | Run the operational dispatch only for these horizon years (labels); the others are skipped, each year keeps its own data block (year index × 8760 h) and the master problem still plans the whole horizon; the transmission and converter capacity it builds in skipped years still reaches the dispatched ones. In `unit_commitment` mode the first of them is dispatched instead of the first horizon year. `ValueError` for a year outside the horizon. Without it, the `ESFEX_OPS_ONLY_YEARS` environment variable is read |
 | `master_only` | `bool` | `False` | Stop after the Master Problem (step 10 below): the decisions are left in `master_solution`, the HDF5 file (system configuration only) is finalized, plugins are torn down and an empty list is returned. Needs `simulation_mode: development` (`ValueError` otherwise) |
+| `resume_from` | `Optional[str \| Path]` | `None` | Results file of an interrupted myopic `development` run to continue (see [Resuming an Interrupted Run](../user-guide/cli.md#resuming-an-interrupted-run)): the run takes the years, start year and dispatch years of that run (`years` / `start_year` may be left out; given, they must match), drops the unfinished year from the file, restores the state from its checkpoint and continues from the first year not completed, appending to that file. Not with `master_only` or `dispatch_years` (`ValueError`) |
+| `force_resume` | `bool` | `False` | With `resume_from`: continue although the configuration, its input files or the ESFEX version changed since the checkpoint was written (each difference is logged as a warning) |
 
-**Returns:** `list[YearResults]` -- One result object per simulated year.
+**Returns:** `list[YearResults]` -- One result object per simulated year (resumed: per year this call dispatched).
 
 In `unit_commitment` mode only the first year is run, whatever `years` is.
 
@@ -89,8 +94,11 @@ In `unit_commitment` mode only the first year is run, whatever `years` is.
 - Raises `RunAbortedError` (a `RuntimeError`, in `esfex.runner`) if the Master Problem finds no plan; plugins are torn down and nothing is dispatched. It used to return an empty list, so `esfex run` reported success and exited 0.
 - Raises `RuntimeError` if no operational window of a year solves.
 - Any other exception raised while running a year is logged and re-raised.
+- Raises `esfex.io.checkpoint.ResumeError` (its `errors` are `ApiError` records with the codes listed under [Resuming an Interrupted Run](../user-guide/cli.md#resuming-an-interrupted-run)) when `resume_from` cannot be resumed; nothing is loaded or written.
 
-**Warnings:** the WARNING and ERROR records logged during the run (the Julia models' `@warn` lines included) are grouped by kind. At the end, after a failure too, `run()` logs a summary as a milestone (shown by the `basic` console, which hides warnings), keeps it in `warnings_summary` and writes it to [`/diagnostics/warnings`](../reference/hdf5-output-schema.md#diagnosticswarnings). Inside `esfex run` the collection starts with the configuration load and those warnings are included.
+**Checkpoints:** a myopic `development` run (not `master_only`) writes `<results stem>.checkpoint.json` next to its results file when it starts, after every master year, when the plan is complete, after every dispatched year and at the end (see [Checkpoint of a Myopic Run](../reference/hdf5-output-schema.md#checkpoint-of-a-myopic-run)). The case's fingerprint (configuration hash, input files' SHA-256) is taken in the constructor, before plugins adjust the configuration. A checkpoint that cannot be written is logged as a warning and the run goes on.
+
+**Warnings:** the WARNING and ERROR records logged during the run (the Julia models' `@warn` lines included) are grouped by kind. At the end, after a failure too, `run()` logs a summary as a milestone (shown by the `basic` console, which hides warnings), keeps it in `warnings_summary` and writes it to [`/diagnostics/warnings`](../reference/hdf5-output-schema.md#diagnosticswarnings). Inside `esfex run` the collection starts with the configuration load and those warnings are included. A resumed run starts from the counts its checkpoint holds.
 
 **Workflow** (plugins are already loaded by the constructor):
 

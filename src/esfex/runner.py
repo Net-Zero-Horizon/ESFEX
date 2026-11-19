@@ -53,6 +53,8 @@ from esfex.models.ev import (
     generate_ev_profiles,
     generate_v2g_availability,
 )
+from esfex.api._common import ApiError
+from esfex.io.checkpoint import PHASE_COMPLETE, PHASE_DISPATCH, PHASE_MASTER, ResumeError
 from esfex.io.demand import _read_tabular, create_sectoral_demand, read_hourly_table
 from esfex.utils import aggregate_demand_to_resolution
 from esfex.utils.per_unit import derived_reactance_pu, line_reactance_pu, system_s_base
@@ -477,6 +479,22 @@ class MasterDayPlan:
     storage_firm_hours: float
     # TSAM periods with the critical days appended; None without TSAM
     tsam: Any = None
+
+
+def _day_plan_digest(plan: MasterDayPlan) -> dict:
+    """The days a :class:`MasterDayPlan` models, as plain data: a resumed
+    myopic run checks that it plans on the interrupted run's days."""
+    tsam = plan.tsam
+    return {
+        "rep_day_offsets": None if plan.rep_day_offsets is None else [int(d) for d in plan.rep_day_offsets],
+        "critical_day_offsets": [int(d) for d in plan.critical_day_offsets],
+        "rep_day_weights": [float(w) for w in plan.rep_day_weights],
+        "storage_firm_hours": float(plan.storage_firm_hours),
+        "tsam_period_start_hours": (None if tsam is None else
+                                    [int(h) for h in tsam.period_start_hours]),
+        "tsam_period_weights": (None if tsam is None else
+                                [float(w) for w in tsam.period_weights]),
+    }
 
 
 @dataclass
@@ -964,6 +982,20 @@ class Orchestrator:
         logger.debug(f"Orchestrator initialized for system: {self.system_name}")
         logger.debug(f"Mode: {config.simulation_mode}")
         logger.debug(f"Solver: {config.solver.name}")
+
+        # What a myopic run's checkpoint identifies the case by (hash of the
+        # configuration and its input files), taken before the plugins
+        # adjust the configuration, as `esfex run --dry-run --resume` sees it
+        self._case_fingerprint: Optional[dict] = None
+        if (config.simulation_mode == "development"
+                and getattr(config.master_problem, "planning_mode", None) == "myopic"):
+            from esfex.io.checkpoint import fingerprint
+
+            try:
+                self._case_fingerprint = fingerprint(config, self.config_path)
+            except Exception as e:  # never fail a run over its checkpoint
+                logger.warning(f"This run writes no checkpoint and cannot be resumed: "
+                               f"fingerprinting the case failed ({type(e).__name__}: {e})")
 
         # Plugin manager (runtime overlays — never modifies core source)
         from esfex.plugins import get_plugin_manager
@@ -1993,6 +2025,8 @@ class Orchestrator:
         start_year: Optional[int] = None,
         master_only: bool = False,
         dispatch_years: Optional[Iterable[int]] = None,
+        resume_from: Optional[Union[str, Path]] = None,
+        force_resume: bool = False,
     ) -> list[YearResults]:
         """
         Run the full simulation.
@@ -2019,30 +2053,73 @@ class Orchestrator:
                 ``unit_commitment`` mode the first of them is dispatched
                 instead of the first horizon year. Default: every year (or
                 the ``ESFEX_OPS_ONLY_YEARS`` environment variable).
+            resume_from: Results file of an interrupted myopic development
+                run to continue (:mod:`esfex.io.checkpoint`): the run starts
+                at the first year its checkpoint does not list as completed,
+                with the years, start year and dispatch years of that run,
+                and appends to that file. *years* and *start_year* may be
+                left out (given, they must match).
+            force_resume: Resume although the case, its input files or the
+                ESFEX version changed since the checkpoint was written (each
+                difference is logged as a warning).
 
         Returns:
-            List of YearResults for each simulated year
+            List of YearResults for each simulated year (resumed: the years
+            this call solved)
 
         Raises:
             RunAbortedError: the master problem (development mode) found no
                 plan, so nothing was dispatched.
+            esfex.io.checkpoint.ResumeError: *resume_from* cannot be resumed
+                (its ``errors`` say why); nothing was run or written.
 
         The WARNING and ERROR records logged meanwhile (Julia's ``@warn``
         included) are grouped by kind: at the end, also after a failure,
         a summary is logged, kept in ``self.warnings_summary``
         (:class:`esfex.api.diagnostics.WarningsSummary`) and written to
-        ``/diagnostics/warnings`` of the results file.
+        ``/diagnostics/warnings`` of the results file. A resumed run adds
+        its records to those of the run it resumes.
+
+        A myopic development run writes a checkpoint next to its results
+        file after every master year and every dispatched year (see
+        :mod:`esfex.io.checkpoint`), so it can be resumed.
         """
         from esfex.api.diagnostics import collect_warnings
 
         self._hdf5_path = None
         self.warnings_summary = None
+        self.resume_plan = None
         with collect_warnings() as collector:
             try:
+                if resume_from is not None:
+                    if master_only or dispatch_years is not None:
+                        raise ValueError("resume_from cannot be combined with master_only "
+                                         "or dispatch_years: the resumed run keeps its own")
+                    self.resume_plan = self._check_resume(
+                        resume_from, years, start_year, force_resume)
+                    collector.merge(self.resume_plan.doc.get("warnings"))
                 return self._run(years=years, start_year=start_year,
                                  master_only=master_only, dispatch_years=dispatch_years)
             finally:
                 self._finish_warnings(collector)
+
+    def _check_resume(self, results, years, start_year, force: bool):
+        """The checked :class:`~esfex.io.checkpoint.ResumePlan` of *results*
+        (raises ``ResumeError``); a forced difference is logged loudly."""
+        from esfex.io.checkpoint import check_resume
+
+        plan = check_resume(results, self.config, self.config_path,
+                            years=years, start_year=start_year, force=force,
+                            case=self._case_fingerprint)
+        for change in plan.forced:
+            logger.warning(f"--force-resume: {change}. The years already solved keep the "
+                           "results of the case as it was; the rest use the case as it is now.")
+        at = (f"at {plan.resume_year}" if plan.resume_year is not None
+              else "to finish the file")
+        logger.info(f"Resuming {plan.results.name} {at} ({len(plan.master_years)} master "
+                    f"and {len(plan.dispatch_years)} dispatch years completed)",
+                    extra={"milestone": True})
+        return plan
 
     def _finish_warnings(self, collector) -> None:
         """The run's warnings: summary logged (a milestone, so the basic
@@ -2076,6 +2153,13 @@ class Orchestrator:
         self.master_solution = None
         self.master_diagnostics = {}
         reset_run_warnings()
+        plan = getattr(self, "resume_plan", None)
+        if plan is not None:
+            # The resumed run's own horizon and dispatch years
+            years = int(plan.doc["run"]["years"])
+            start_year = int(plan.doc["run"]["start_year"])
+            stored = plan.doc["run"].get("dispatch_years")
+            dispatch_years = stored if stored is not None else range(start_year, start_year + years)
         years = years or DEFAULT_RUN_YEARS
         self._start_date = self._resolve_start_date(start_year)
         start_year = self._start_date.year
@@ -2353,22 +2437,34 @@ class Orchestrator:
 
         # Initialize HDF5 output file
         # Build results filename: <config_stem>_<ddmmyyyy>_<HHMM>.h5
-        _cfg_stem = self.config_path.stem if self.config_path else self.system_name
-        _now = datetime.now()
-        _ts = _now.strftime("%d%m%Y_%H%M")
-        hdf5_path = self.output_dir / f"{_cfg_stem}_{_ts}.h5"
+        if plan is not None:
+            # A resumed run appends to its own file, without what the
+            # interrupted run wrote of the year it did not finish
+            from esfex.io.checkpoint import truncate_results
+
+            hdf5_path = plan.results
+            dropped = truncate_results(hdf5_path, set(plan.dispatch_years))
+            if dropped:
+                logger.info(f"Dropped the unfinished year(s) {dropped} from {hdf5_path.name}")
+        else:
+            _cfg_stem = self.config_path.stem if self.config_path else self.system_name
+            _now = datetime.now()
+            _ts = _now.strftime("%d%m%Y_%H%M")
+            hdf5_path = self.output_dir / f"{_cfg_stem}_{_ts}.h5"
         # Stash on self so deeper methods (MGA export inside the master
         # problem solver) can reach the same file without threading the
         # path through several function signatures.
         self._hdf5_path = hdf5_path
-        self._initialize_hdf5(
-            hdf5_path,
-            num_nodes=num_nodes,
-            # Years actually dispatched (unit_commitment runs only one)
-            num_years=len(run_years),
-            start_year=run_years[0],
-            end_year=run_years[-1] + 1,
-        )
+        if plan is None:
+            self._initialize_hdf5(
+                hdf5_path,
+                num_nodes=num_nodes,
+                # Years actually dispatched (unit_commitment runs only one)
+                num_years=len(run_years),
+                start_year=run_years[0],
+                end_year=run_years[-1] + 1,
+            )
+        self._start_checkpoints(hdf5_path, master_only, years_range, ops_only)
 
         # ============================================================
         # STEP 1: SOLVE MASTER PROBLEM (only in development mode)
@@ -2378,7 +2474,21 @@ class Orchestrator:
         master_cumulative_caps = {}
         master_re_targets = {}
 
-        if self.config.simulation_mode == "development":
+        resume_dispatch = plan is not None and plan.phase == PHASE_DISPATCH
+
+        if self.config.simulation_mode == "development" and resume_dispatch:
+            # Every master year was solved before the interruption
+            (master_investments, master_retirements, master_cumulative_caps,
+             master_re_targets) = self._restore_master_plan(plan.state)
+            logger.info(f"Master plan of {len(master_investments)} years restored from "
+                        f"{plan.checkpoint.name}")
+            self._pm.call_hook(
+                "post_master_problem",
+                investments=master_investments,
+                retirements=master_retirements,
+                config=self.config,
+            )
+        elif self.config.simulation_mode == "development":
             logger.info("Step 1: Solving Master Investment Problem for ALL years")
             self._pm.call_hook("pre_master_problem", config=self.config, years=years_range)
 
@@ -2420,6 +2530,9 @@ class Orchestrator:
 
             self._write_npv_retirements(hdf5_path)
             self._write_master_diagnostics(hdf5_path)
+            self._master_plan = (master_investments, master_retirements,
+                                 master_cumulative_caps, master_re_targets)
+            self._write_checkpoint(PHASE_DISPATCH, run_years[0])
             self._pm.call_hook(
                 "post_master_problem",
                 investments=master_investments,
@@ -2479,8 +2592,14 @@ class Orchestrator:
                 "[dim]Windows[/dim]", total=1, visible=False
             )
 
+            # Years an interrupted run dispatched (resumed run): their
+            # results are in the file; the carry-over is where they ended
+            done = set(plan.dispatch_years) if resume_dispatch else set()
+            if done:
+                self._restore_dispatch_state(plan.state)
+                progress.update(year_task, advance=len(done & set(run_years)))
             for year_idx, year in enumerate(years_range):
-                if ops_only is not None and year not in ops_only:
+                if (ops_only is not None and year not in ops_only) or year in done:
                     # The master's builds are per-year increments: a
                     # skipped year's must still reach the later years.
                     self._apply_master_builds(master_investments.get(year, {}))
@@ -2638,6 +2757,9 @@ class Orchestrator:
                             config=self.config,
                         )
 
+                    nxt = [y for y in run_years if y > year]
+                    self._write_checkpoint(PHASE_DISPATCH, nxt[0] if nxt else None,
+                                           completed=year_result)
                     logger.info(f"Year {year} completed: objective=${year_result.objective:,.0f}")
                     logger.info(
                         f"  → RE={year_result.re_penetration:.1%} | "
@@ -2660,6 +2782,7 @@ class Orchestrator:
 
         # Finalize HDF5 file
         self._finalize_hdf5(hdf5_path)
+        self._write_checkpoint(PHASE_COMPLETE, None)
 
         # Plugin hook: post_simulation
         self._pm.call_hook(
@@ -4028,7 +4151,39 @@ class Orchestrator:
             annuity_streams: list[tuple[int, float, float]] = []
             self.myopic_year_costs = {}
 
+            # A resumed run: the loop state where the interrupted run's
+            # last completed year left it (written below, after each year)
+            plan = getattr(self, "resume_plan", None)
+            carried = (plan.state.get("master") if plan is not None
+                       and plan.phase == PHASE_MASTER else None)
+            first_idx = 0
+            if carried:
+                if carried.get("day_plan") != _day_plan_digest(day_plan):
+                    raise ResumeError([ApiError(
+                        "day_plan_changed",
+                        "The master's representative days differ from the interrupted "
+                        "run's: the remaining years would not plan on the same days",
+                        key="master_problem", fix="Start a new run.")])
+                investments_by_year = carried["investments_by_year"]
+                retirements_by_year = carried["retirements_by_year"]
+                cumulative_caps_by_year = carried["cumulative_caps_by_year"]
+                built = carried["built"]
+                elz_builds = carried["elz_builds"]
+                current_re = carried["current_re"]
+                current_re_per_system = carried["current_re_per_system"]
+                npv_retired = list(carried["npv_retired"])
+                annuity_streams = list(carried["annuity_streams"])
+                self.myopic_year_costs = carried["myopic_year_costs"]
+                self._master_fuel_by_year = carried["master_fuel_by_year"]
+                self._npv_retirements = list(carried["npv_retirements"])
+                self.master_diagnostics = carried["master_diagnostics"]
+                first_idx = len(investments_by_year)
+                logger.info(f"Myopic master: years {years_range[0]}-{years_range[first_idx - 1]} "
+                            "restored from the checkpoint")
+
             for y_idx, year in enumerate(years_range):
+                if y_idx < first_idx:
+                    continue
                 logger.debug(f"\n--- Myopic: Year {year} ({y_idx+1}/{num_years}) ---")
 
                 # 1. This year's RE target on the horizon trajectory
@@ -4248,6 +4403,25 @@ class Orchestrator:
                     f"RE achieved: {current_re:.2%}{re_sys_str}"
                 )
 
+                # 13. Checkpoint: what the next year starts from
+                last = y_idx + 1 == num_years
+                self._write_checkpoint(
+                    PHASE_MASTER, None if last else years_range[y_idx + 1],
+                    master_year=year, master_state={
+                        "day_plan": _day_plan_digest(day_plan),
+                        "investments_by_year": investments_by_year,
+                        "retirements_by_year": retirements_by_year,
+                        "cumulative_caps_by_year": cumulative_caps_by_year,
+                        "built": built, "elz_builds": elz_builds,
+                        "current_re": current_re,
+                        "current_re_per_system": current_re_per_system,
+                        "npv_retired": npv_retired, "annuity_streams": annuity_streams,
+                        "myopic_year_costs": self.myopic_year_costs,
+                        "master_fuel_by_year": getattr(self, "_master_fuel_by_year", None) or {},
+                        "npv_retirements": self._npv_retirements,
+                        "master_diagnostics": self.master_diagnostics,
+                    })
+
             # Summary
             total_inv = sum(len(v) for v in investments_by_year.values())
             total_ret = sum(len(v) for v in retirements_by_year.values())
@@ -4267,6 +4441,8 @@ class Orchestrator:
 
             return investments_by_year, retirements_by_year, cumulative_caps_by_year, re_targets_by_year
 
+        except ResumeError:
+            raise
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -5654,6 +5830,146 @@ class Orchestrator:
                 planning_mode=str(getattr(master_cfg, "planning_mode", "perfect_foresight")))
         except Exception as e:  # diagnosis only: never fail the run
             logger.warning(f"Writing the master diagnostics failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Checkpoints of a myopic run (esfex.io.checkpoint)
+    # ------------------------------------------------------------------
+    def _start_checkpoints(self, hdf5_path: Path, master_only: bool,
+                           years_range: list[int], ops_only: Optional[set]) -> None:
+        """Checkpoint this run (``self._ckpt``) when it is a myopic
+        development run: the case's fingerprint and the run's years now,
+        then after every master year and every dispatched year
+        (:meth:`_write_checkpoint`). A resumed run continues the checkpoint
+        of the run it resumes."""
+        from esfex.io.checkpoint import checkpoint_path
+
+        self._ckpt = None
+        master_cfg = getattr(self.config, "master_problem", None)
+        case = getattr(self, "_case_fingerprint", None)
+        if (master_only or case is None or self.config.simulation_mode != "development"
+                or getattr(master_cfg, "planning_mode", None) != "myopic"):
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        plan = getattr(self, "resume_plan", None)
+        if plan is not None:
+            ckpt = {k: deepcopy(v) for k, v in plan.doc.items() if k != "state"}
+            ckpt["case"] = case
+            ckpt["resumes"] = list(ckpt.get("resumes") or []) + [
+                {"time": now, "from_year": plan.resume_year, "phase": plan.phase,
+                 "forced": list(plan.forced)}]
+        else:
+            ckpt = {
+                "status": "running", "phase": PHASE_MASTER, "created": now,
+                "results_file": hdf5_path.name,
+                "config_file": str(Path(self.config_path).resolve()) if self.config_path else "",
+                "case": case,
+                "run": {"years": len(years_range), "start_year": years_range[0],
+                        "dispatch_years": sorted(ops_only) if ops_only is not None else None},
+                "master": {"completed_years": []},
+                "dispatch": {"completed": []},
+            }
+        self._ckpt = ckpt
+        self._ckpt_path = checkpoint_path(hdf5_path)
+        self._ckpt_dispatch_start = min(ops_only) if ops_only else years_range[0]
+        try:
+            import h5py
+
+            with h5py.File(hdf5_path, "a") as f:
+                f.attrs["checkpoint"] = self._ckpt_path.name
+        except Exception as e:
+            logger.debug(f"Could not name the checkpoint in {hdf5_path}: {e}")
+        if plan is None:
+            self._write_checkpoint(PHASE_MASTER, years_range[0])
+
+    def _write_checkpoint(self, phase: str, resume_year: Optional[int], *,
+                          completed: Optional["YearResults"] = None,
+                          master_year: Optional[int] = None,
+                          master_state: Optional[dict] = None) -> None:
+        """Rewrite the run's checkpoint (nothing when it keeps none): *phase*
+        reached, the year a resume starts at (*resume_year*; None after the
+        last master year: the first dispatch year; after the last dispatched
+        year: none left), the master year or
+        dispatched year (*completed*) just finished, and the state the next
+        year needs: the myopic master loop's (*master_state*) in phase
+        ``master``, the master plan and the dispatch carry-over in phase
+        ``dispatch``, none once complete. A failed write is logged and the
+        run goes on: a resume then repeats the years after the last
+        checkpoint written."""
+        ckpt = getattr(self, "_ckpt", None)
+        if ckpt is None:
+            return
+        from esfex.api.diagnostics import active_collector
+        from esfex.io.checkpoint import write_checkpoint
+
+        if master_year is not None:
+            ckpt["master"]["completed_years"].append(int(master_year))
+        if completed is not None:
+            ckpt["dispatch"]["completed"].append({
+                "year": int(completed.year), "feasible": bool(completed.feasible),
+                "objective": float(completed.objective)})
+        done = ckpt["dispatch"]["completed"]
+        ckpt["phase"] = phase
+        ckpt["status"] = "complete" if phase == PHASE_COMPLETE else "running"
+        ckpt["last_completed_year"] = done[-1]["year"] if done else None
+        if resume_year is not None:
+            ckpt["resume_at"] = {"phase": phase, "year": int(resume_year)}
+        elif phase == PHASE_MASTER:
+            ckpt["resume_at"] = {"phase": PHASE_DISPATCH, "year": self._ckpt_dispatch_start}
+        else:
+            ckpt["resume_at"] = None
+        collector = active_collector()
+        ckpt["warnings"] = collector.summary().to_dict() if collector is not None else None
+        if phase == PHASE_DISPATCH:
+            state = self._dispatch_checkpoint_state()
+        elif phase == PHASE_COMPLETE:
+            state = None
+        else:
+            state = {"master": master_state} if master_state is not None else None
+        try:
+            write_checkpoint(self._ckpt_path, dict(ckpt, state=state))
+        except Exception as e:  # never fail a run over its checkpoint
+            logger.warning(f"Checkpoint not written ({type(e).__name__}: {e}); a resumed "
+                           f"run would repeat the years after the previous one")
+
+    def _dispatch_checkpoint_state(self) -> dict:
+        """What the dispatch of the remaining years needs: the master plan
+        of every year and what the master recorded besides (fuel capacity,
+        NPV retirements, yearly costs, diagnostics), and the carry-over of
+        the last dispatched year (``state.boundary_conditions``: fuel tank
+        levels and fuel in transit; the unit-indexed entries are reset at
+        each year's start)."""
+        investments, retirements, caps, re_targets = self._master_plan
+        return {
+            "master_plan": {"investments": investments, "retirements": retirements,
+                            "cumulative_caps": caps, "re_targets": re_targets},
+            "master_fuel_by_year": getattr(self, "_master_fuel_by_year", None) or {},
+            "npv_retirements": self._npv_retirements,
+            "myopic_year_costs": self.myopic_year_costs,
+            "master_diagnostics": self.master_diagnostics,
+            "boundary_conditions": self.state.boundary_conditions if self.state else {},
+            "primary_energy_capacities": (self.state.primary_energy_capacities
+                                          if self.state else {}),
+        }
+
+    def _restore_master_plan(self, state: dict) -> tuple:
+        """The master plan a dispatch-phase checkpoint holds, with what the
+        master recorded besides restored on ``self``: ``(investments,
+        retirements, cumulative capacities, RE targets)`` by year."""
+        mp = state["master_plan"]
+        self._master_fuel_by_year = state.get("master_fuel_by_year") or {}
+        self._npv_retirements = list(state.get("npv_retirements") or [])
+        self.myopic_year_costs = state.get("myopic_year_costs") or {}
+        self.master_diagnostics = state.get("master_diagnostics") or {}
+        self._master_plan = (mp["investments"], mp["retirements"],
+                             mp["cumulative_caps"], mp["re_targets"])
+        return self._master_plan
+
+    def _restore_dispatch_state(self, state: dict) -> None:
+        """The carry-over of the last year a dispatch-phase checkpoint lists."""
+        self.state.boundary_conditions = state.get("boundary_conditions") or {}
+        pe = state.get("primary_energy_capacities")
+        if pe:
+            self.state.primary_energy_capacities = pe
 
     def _write_npv_retirements(self, path: Optional[Path]) -> None:
         """Write the NPV-based retirements to the results file, group
@@ -8554,6 +8870,9 @@ class Orchestrator:
             f.attrs["temporal_resolution_hours"] = temporal_resolution
             f.attrs["export_complete"] = False
             f.attrs["simulation_mode"] = self.config.simulation_mode
+            if self.config.simulation_mode == "development":
+                f.attrs["planning_mode"] = str(getattr(
+                    self.config.master_problem, "planning_mode", "perfect_foresight"))
             f.attrs["years_range"] = f"{start_year}-{end_year - 1}"
             # What produced the file, for readers such as `esfex summary`
             try:
