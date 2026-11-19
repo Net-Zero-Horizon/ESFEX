@@ -41,3 +41,18 @@ def test_baseline_only_lists_text_still_untranslated():
         stale += [f"{f}: {t!r}" for t in (Counter(texts) - Counter(now.get(f, []))).elements()]
     assert not stale, ("translated, so remove from the baseline "
                        "(python tests/js_i18n_audit.py):\n" + "\n".join(stale))
+
+
+def test_audit_tells_text_from_markup():
+    # The exclusions must not hide real text.
+    visible = ["Total cost by year", "<b>Price ($/MWh)</b>", "Load shed",
+               "Year range", "%{x}: %{y:,.1f} GWh<extra>Energy</extra>",
+               "Connection {id}"]
+    technical = ["y3 domain", "top to bottom", "Viridis", "grid-line month",
+                 "Segoe UI, Roboto, sans-serif", ' style="filter:drop-shadow(0 1px 2px)">',
+                 "background:white;padding:8px;", "%{x}: %{y:,.1f} GWh<extra>",
+                 "&copy; Esri", ") rotate(", "use strict"]
+    assert all(js_i18n_audit._visible(s) for s in visible), [
+        s for s in visible if not js_i18n_audit._visible(s)]
+    assert not any(js_i18n_audit._visible(s) for s in technical), [
+        s for s in technical if js_i18n_audit._visible(s)]
