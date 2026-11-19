@@ -135,3 +135,18 @@ def test_max_geocode_cap():
     name_positions_by_region(
         pos, geocode=g, rate_limit_s=0.0, time_budget_s=None, max_geocode=7)
     assert calls["n"] == 7
+
+
+def test_docs_give_the_admin1_shapefile_location():
+    """The Natural Earth admin-1 boundaries are read from ESFEX_DATA_ROOT
+    (paths.ADMIN1_SHP), not shipped: the Grid Builder page called them
+    "bundled" (round 44, M44). It states where to put them."""
+    from pathlib import Path
+
+    from esfex import paths
+
+    page = (Path(__file__).resolve().parents[1] / "docs" / "workflows"
+            / "grid-auto-mapping.md").read_text(encoding="utf-8")
+    assert "bundled Natural Earth admin-1" not in page
+    rel = paths.ADMIN1_SHP.relative_to(paths.DATA_ROOT).as_posix()
+    assert f"$ESFEX_DATA_ROOT/{rel}" in page
