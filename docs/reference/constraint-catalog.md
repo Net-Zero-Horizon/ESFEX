@@ -253,7 +253,7 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 | `bat_tech_min_dur_bt{bt}_b{b}_y{y}`, `bat_tech_max_dur_bt{bt}_b{b}_y{y}` | TECH-3 | Battery-technology E/P ratio per period |
 | `cumul_node_tech_t{t}_n{ni}`, `cumul_node_bat_tech_pow_bt{bt}_n{ni}`, `cumul_node_bat_tech_cap_bt{bt}_n{ni}` | TECH-4 | Node-aggregate limits (nodes with several buses) |
 | `cumul_res_g{g}_b{b}` | TECH-5 | Cumulative reservoir investment limit |
-| `def_cap_tech_y{y}_t{t}_b{b}`, `def_cap_bt_pow_y{y}_bt{bt}_b{b}`, `def_cap_bt_en_y{y}_bt{bt}_b{b}`, `def_cap_trans_y{y}_{i}_{j}`, `def_cap_res_y{y}_g{g}_b{b}`, `def_cap_conv_y{y}_{kind}{c}`, `def_cap_fuel_y{y}_{kind}_{name}_{i}` | CUM-5 | Capacity state variable `cap_*` of year `y` = the capacity built and in service (CUM-1b, CUM-3, CUM-4, reservoirs, converters, fuel builds); the representative-day rows use `cap_*` |
+| `def_cap_tech_y{y}_t{t}_b{b}`, `def_cap_bt_pow_y{y}_bt{bt}_b{b}`, `def_cap_bt_en_y{y}_bt{bt}_b{b}`, `def_cap_trans_y{y}_{i}_{j}`, `def_cap_res_y{y}_g{g}_b{b}`, `def_cap_conv_y{y}_{kind}{c}`, `def_cap_fuel_y{y}_{kind}_{name}_{i}` | CUM-5 | Capacity state variable `cap_*` of year `y` = the capacity built and in service (CUM-1b, CUM-3, CUM-4, reservoirs, converters, fuel builds; technology and battery-technology builds degraded by age); the representative-day rows use `cap_*` |
 
 ### Budget
 
@@ -292,7 +292,7 @@ Investment variables are per technology and battery technology (`tech_inv_y*_t*`
 
 ### Operational Validation (Representative Days)
 
-The days reuse the dispatch constraints above (generators and batteries with capacity overrides: their capacity in service that year, degraded by age as the dispatch degrades it, or life-extended; reservoirs, reserves, inertia, power balance, curtailment), with names prefixed per day, plus:
+The days reuse the dispatch constraints above (generators and batteries with capacity overrides: their capacity in service that year, degraded by age as the dispatch degrades it, or life-extended; a battery's charge power is that discharge power × its `MaxChargePower` / `MaxDischargePower`; reservoirs, reserves, inertia, power balance, curtailment), with names prefixed per day, plus:
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|

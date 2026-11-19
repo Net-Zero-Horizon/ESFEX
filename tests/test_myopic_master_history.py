@@ -102,11 +102,11 @@ def test_year_system_holds_aged_units_builds_and_reduced_limits(tmp_path):
     bat = year_sys.batteries["B__li__built_y1"]
     assert bat.MaxDischargePower == [0.0, 10.0] and bat.capacity == [0.0, 40.0]
     assert bat.initial_age == [2, 2] and bat.life_time == [15, 15]
-    # Not degraded, as perfect foresight counts a battery technology's
-    # builds; the master degrades existing batteries, so the technology's
-    # 1 %/yr would have shrunk this one in later myopic years only
+    # Degraded at the technology's 1 %/yr from its build year (round 44: it
+    # was held at 0, since perfect foresight did not degrade builds either);
+    # the master and the dispatch of year 3 hold it at 0.99^2
     assert base.battery_technologies["B__li"].degradation_rate == [0.0, 0.01]
-    assert bat.degradation_rate == [0.0, 0.0]
+    assert bat.degradation_rate == [0.0, 0.01]
     bt = year_sys.battery_technologies["B__li"]
     assert bt.invest_max_power == [0.0, 190.0]
     assert bt.invest_max_capacity == [0.0, 760.0]
@@ -332,3 +332,132 @@ def test_myopic_carry_drops_solver_noise(tmp_path):
     assert year_sys.technologies["B__gas_new"].invest_max_power == [0.0, 0.0]
     bt = year_sys.battery_technologies["B__li"]
     assert bt.invest_max_power == [0.0, 0.0] and bt.invest_max_capacity == [0.0, 0.0]
+
+
+# ── Round 44: the batteries the master builds degrade ─────────────────
+
+def test_rated_battery_technology_power_counts_live_builds():
+    from esfex.runner import rated_bat_tech_power
+
+    builds = {1: {1: [10.0]}, 3: {1: np.array([5.0]), 2: [7.0]}}
+    assert list(rated_bat_tech_power(builds, 1, [2, 15])[1]) == [10.0]
+    assert list(rated_bat_tech_power(builds, 2, [2, 15])[1]) == [10.0]
+    # Year 1's build is 2 years old in year 3: past its 2-year lifetime
+    at3 = rated_bat_tech_power(builds, 3, [2, 15])
+    assert list(at3[1]) == [5.0] and list(at3[2]) == [7.0]
+    assert list(rated_bat_tech_power(builds, 3, [2])) == [1]
+
+
+def _fake_battery_master(captured, built_mw=10.0):
+    """A stand-in master whose first year builds *built_mw* MW / 4 h of the
+    battery technology at node B, which the next year reports 1 % smaller."""
+
+    class FakeMaster:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        def build_model(self, **_):
+            pass
+
+        def solve(self):
+            return 1
+
+        def get_solution_values(self):
+            year = captured[-1]["years"][0]
+            first = len(captured) == 1
+            n_bat = len(captured[-1]["system_config"].batteries)
+            built = np.array([0.0, built_mw if first else 0.0])
+            out = {
+                "solution": {year: {
+                    "bat_tech_power_investment": (
+                        {"bat_tech_investment_power_1_1": built_mw} if first else {}),
+                    "bat_tech_capacity_investment": (
+                        {"bat_tech_investment_capacity_1_1": 4 * built_mw} if first else {})}},
+                "bat_tech_power_investment": {1: {1: np.zeros(2), 2: built}},
+                "cumulative_bat_tech_power": {1: {1: np.zeros(2), 2: built}},
+                "cumulative_bat_tech_capacity": {1: {1: np.zeros(2), 2: 4 * built}},
+                "re_penetration_by_year": [0.0],
+            }
+            if not first:
+                # The year-1 battery, an existing unit now, a year older
+                out["cumulative_bat_power"] = {1: {n_bat: np.array([0.0, 0.99 * built_mw])}}
+                out["cumulative_bat_capacity"] = {
+                    1: {n_bat: np.array([0.0, 0.99 * 4 * built_mw])}}
+            return out
+
+    return FakeMaster
+
+
+def test_myopic_built_battery_degrades_and_keeps_rated_fixed_om(tmp_path):
+    """A battery built in year 1 is a year old in year 2: an existing unit
+    at the technology's 1 %/yr there (it was held at 0 %/yr), and the
+    dispatch gets the master's degraded power with the rated power as the
+    base of its fixed O&M."""
+    orch = _two_systems(tmp_path)
+    captured = []
+    demand = np.full((2 * HOURS_STD_YEAR, 2), 10.0)
+    with patch("esfex.bridge.adapters.MasterProblemAdapter", _fake_battery_master(captured)):
+        _, _, caps, _ = orch._solve_master_problem_myopic(
+            years_range=[2025, 2026], demand=demand[:HOURS_STD_YEAR],
+            hours=HOURS_STD_YEAR, num_nodes=2, total_demand=demand)
+
+    bat = captured[1]["system_config"].batteries["B__li__built_y1"]
+    assert bat.degradation_rate == [0.0, 0.01] and bat.initial_age == [1, 1]
+    assert list(caps[2025]["bat_tech_power"][2]) == [0.0, 10.0]
+    assert list(caps[2025]["bat_tech_power_rated"][2]) == [0.0, 10.0]
+    assert list(caps[2026]["bat_tech_power"][2]) == pytest.approx([0.0, 9.9])
+    assert list(caps[2026]["bat_tech_capacity"][2]) == pytest.approx([0.0, 39.6])
+    assert list(caps[2026]["bat_tech_power_rated"][2]) == [0.0, 10.0]
+
+
+def test_perfect_foresight_dispatch_gets_degraded_battery_and_rated_om_base(tmp_path):
+    """The dispatch's battery of a perfect-foresight build: the master's
+    degraded MW and MWh, no further degradation, and its fixed O&M on the
+    rated power, as the master charges it."""
+    sysc = _system("Island", tmp_path)
+    orch = Orchestrator(_make_esfex_config(sysc), output_dir=tmp_path / "out")
+    orch._availability_cache = {}
+
+    class FakeMaster:
+        def __init__(self, **kwargs):
+            pass
+
+        def build_model(self, **_):
+            pass
+
+        def solve(self):
+            return 1
+
+        def get_solution_values(self):
+            return {
+                "solution": {2025: {"bat_tech_power_investment": {
+                    "bat_tech_investment_power_0_0": 10.0}}, 2026: {}},
+                "bat_tech_power_investment": {1: {1: np.array([10.0])},
+                                              2: {1: np.array([0.0])}},
+                "cumulative_bat_tech_power": {1: {1: np.array([10.0])},
+                                              2: {1: np.array([9.9])}},
+                "cumulative_bat_tech_capacity": {1: {1: np.array([40.0])},
+                                                 2: {1: np.array([39.6])}},
+                "re_penetration_by_year": [0.0, 0.0],
+            }
+
+    demand = np.full((2 * HOURS_STD_YEAR, 1), 10.0)
+    with patch("esfex.runner.MasterProblemAdapter", FakeMaster):
+        _, _, caps, _ = orch._solve_master_problem(
+            years_range=[2025, 2026], demand=demand[:HOURS_STD_YEAR],
+            hours=HOURS_STD_YEAR, num_nodes=1, total_demand=demand)
+    assert list(caps[2026]["bat_tech_power"][1]) == pytest.approx([9.9])
+    assert list(caps[2026]["bat_tech_power_rated"][1]) == [10.0]
+
+    li = orch.primary_system.battery_technologies["li"]
+    orch.primary_system.battery_technologies["li"] = li.model_copy(
+        update={"fixed_cost": [1000.0]})
+    bat = orch._build_config_from_cumulative({}, caps[2026])["inv_li"]
+    assert bat["MaxDischargePower"] == pytest.approx([9.9])
+    assert bat["MaxChargePower"] == pytest.approx([9.9])
+    assert bat["capacity"] == pytest.approx([39.6])
+    assert bat["degradation_rate"] == [0.0]
+    assert bat["fixed_cost"][0] * bat["MaxDischargePower"][0] == pytest.approx(1000.0 * 10.0)
+    # Without the rated power the fixed cost is the technology's
+    caps0 = {k: v for k, v in caps[2026].items() if k != "bat_tech_power_rated"}
+    assert orch._build_config_from_cumulative({}, caps0)["inv_li"]["fixed_cost"] == [1000.0]
