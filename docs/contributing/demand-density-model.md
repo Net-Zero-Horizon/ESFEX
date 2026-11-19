@@ -50,6 +50,10 @@ The article's cross-validation (`cv/summary.csv` of its pipeline, copied into `m
 
 R² hourly is of hourly `log10` density; R² level of each series' mean; R² hourly shape of the hourly anomalies about that mean; the last column correlates the sensitivity of the held-out predictions with that of the observed series (fixed-effects estimate, 164 series). A place unlike any in the archive is best described by the country and region rows.
 
+## Data sources and licences
+
+The boosters and `meta.json` are the ESFEX authors' work (Apache-2.0). The shipped grids and the country table are derived from third-party data that keep their own terms: NEX-GDDP-CMIP6 (`t_mean`, `t_range`; CC0), WorldPop 2020 (`pop_2020`; CC BY 4.0), Natural Earth (`land_km2`; public domain), and the UN energy balances on UNdata, Statistics Canada table 25-10-0029-01 and EIA SEDS (`hh_elec_share`, `bld_share_elec`). [Data Sources and Licences](../reference/data-sources.md) gives the licence, attribution and citation of each; work that uses or redistributes these files should carry them. The training data of the boosters are described in the article's Data availability statement.
+
 ## Updating the shipped model
 
 After a new fit of the article's model:
