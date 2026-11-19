@@ -317,19 +317,20 @@ class _ConfigSaveWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, states, base_config, path, links, global_settings,
-                 scenarios, geo_assets, parent=None, data_base_dir=None):
+                 scenarios, geo_assets, parent=None, data_base_dir=None,
+                 last_results_file=None):
         super().__init__(parent)
         self._args = (states, base_config, path, links, global_settings,
-                      scenarios, geo_assets, data_base_dir)
+                      scenarios, geo_assets, data_base_dir, last_results_file)
 
     def run(self):
         try:
             from esfex.visualization.data.serializer import gui_state_to_yaml
-            states, base, path, links, gs, scen, geo, data_base = self._args
+            states, base, path, links, gs, scen, geo, data_base, results = self._args
             gui_state_to_yaml(
                 states, base, path, inter_system_links=links,
                 global_settings=gs, stochastic_scenarios=scen, geo_assets=geo,
-                data_base_dir=data_base)
+                data_base_dir=data_base, last_results_file=results)
             self.done.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -429,6 +430,9 @@ class MainWindow(QMainWindow):
         # would overwrite the user's file with an empty placeholder system.
         self._project_load_pending: bool = False
         self._last_output_dir: str = ""
+        # Absolute path of the results file the project remembers (saved as
+        # the GUI-only ``_last_results`` key); "" when it remembers none.
+        self._project_results_file: str = ""
         self._all_states: dict[str, object] = {}  # system_name -> GuiSystemState
         self._current_system_name: str = ""
         self._suppress_fit_bounds: bool = False
@@ -2951,6 +2955,12 @@ class MainWindow(QMainWindow):
         self._config_path = None
         self._load_base_dir = None
         self._last_output_dir = ""
+        self._last_results_file = ""
+        self._project_results_file = ""
+        self._invalidate_results_dialog_cache()
+        self._close_results_offer()
+        self.toolbar.set_results_enabled(False)
+        self.toolbar.set_sensitivity_enabled(False)
         self._validated_ok = False
         self.toolbar.set_run_enabled(False)
 
@@ -3285,6 +3295,7 @@ class MainWindow(QMainWindow):
                 stochastic_scenarios=self.model.stochastic_scenarios,
                 geo_assets=self._geo_assets,
                 data_base_dir=self._data_base_dir(),
+                last_results_file=self._project_results_file or None,
             )
             self.statusBar().showMessage(f"Autosaved to {target}", 3000)
         except Exception:
@@ -3432,6 +3443,10 @@ class MainWindow(QMainWindow):
             return
         if not path.endswith(PROJECT_SUFFIX):
             path += PROJECT_SUFFIX
+        include_results = self._ask_include_results()
+        if include_results is None:
+            return
+        results_file = self._existing_project_results() if include_results else None
 
         # Relative data paths resolve against the folder the project was
         # loaded from, not the save target (``studio -c a/cfg.yaml -o b/out``).
@@ -3456,6 +3471,7 @@ class MainWindow(QMainWindow):
                     project_name=Path(path).stem,
                     src_base=src_base,
                     geo_assets=self._geo_assets,
+                    results_file=results_file,
                 ), self)
             worker.done.connect(lambda r: result.update(report=r))
             worker.failed.connect(lambda m: result.update(error=m))
@@ -3477,6 +3493,8 @@ class MainWindow(QMainWindow):
         report = result["report"]
 
         msg = tr("messages.export_project_done", n=len(report.bundled), path=path)
+        if report.results:
+            msg += "\n\n" + tr("messages.export_project_results", path=report.results)
         if report.missing:
             msg += "\n\n" + tr(
                 "messages.export_project_missing",
@@ -3533,6 +3551,118 @@ class MainWindow(QMainWindow):
             tr("messages.import_project_done", path=str(dest_dir)))
 
     # ------------------------------------------------------------------
+    # Project results (output folder, remembered results file)
+    # ------------------------------------------------------------------
+
+    def _existing_project_results(self) -> Optional[str]:
+        """The project's remembered results file, or ``None`` when it
+        remembers none or the file is gone."""
+        p = self._project_results_file
+        return p if p and Path(p).is_file() else None
+
+    def _remember_results_file(self, path) -> None:
+        """Make ``path`` the project's results file. The project is marked
+        modified when the file changes: it is saved with the project."""
+        path = str(Path(path).resolve()) if path else ""
+        if path != self._project_results_file:
+            self._project_results_file = path
+            self._mark_modified()
+
+    def _ask_include_results(self) -> Optional[bool]:
+        """Ask whether Export Project bundles the results file (off by
+        default, the file can be GBs). ``False`` without asking when the
+        project has no results; ``None`` when the user cancels."""
+        from PySide6.QtWidgets import QCheckBox
+
+        from esfex.visualization.data.project_results import format_size
+
+        results = self._existing_project_results()
+        if results is None:
+            return False
+        p = Path(results)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(tr("menu.export_project"))
+        box.setText(tr("messages.export_results_question"))
+        check = QCheckBox(tr("messages.export_include_results",
+                             name=p.name, size=format_size(p.stat().st_size)))
+        check.setChecked(False)
+        box.setCheckBox(check)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok
+                               | QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            return None
+        return check.isChecked()
+
+    def _restore_project_results(self, raw_dict, base_dir) -> None:
+        """Point the results views at the project after a load: its
+        remembered results file when that still exists (Results enabled, the
+        file is not loaded), else its run output folder. A missing file is
+        forgotten silently."""
+        from esfex.visualization.data.project_results import (
+            project_output_dir, remembered_results,
+        )
+
+        self._invalidate_results_dialog_cache()
+        self._close_results_offer()
+        found = remembered_results(raw_dict, base_dir)
+        self._project_results_file = str(found) if found else ""
+        if found is not None:
+            self._last_output_dir = str(found.parent)
+            self._last_results_file = str(found)
+        else:
+            self._last_output_dir = str(project_output_dir(self._config_path))
+            self._last_results_file = ""
+        self.toolbar.set_results_enabled(found is not None)
+        self.toolbar.set_sensitivity_enabled(found is not None)
+
+    def _offer_project_results(self) -> None:
+        """Offer, without blocking, to open the remembered results file.
+        Nothing is loaded unless the user accepts: the file can be GBs."""
+        from esfex.visualization.data.project_results import format_size
+
+        results = self._existing_project_results()
+        if results is None:
+            return
+        p = Path(results)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(tr("messages.project_results_title"))
+        box.setText(tr("messages.project_results_offer", name=p.name,
+                       size=format_size(p.stat().st_size)))
+        open_btn = box.addButton(tr("messages.project_results_open"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(tr("messages.project_results_later"),
+                      QMessageBox.ButtonRole.RejectRole)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.buttonClicked.connect(
+            lambda btn: self._open_project_results() if btn is open_btn else None)
+        self._close_results_offer()
+        self._results_offer = box
+        box.show()
+
+    def _close_results_offer(self) -> None:
+        """Close the open-results offer of a previous project, if still shown."""
+        box = getattr(self, "_results_offer", None)
+        self._results_offer = None
+        if box is not None:
+            try:
+                box.close()
+            except RuntimeError:  # already deleted (WA_DeleteOnClose)
+                pass
+
+    def _open_project_results(self) -> None:
+        """Open the remembered results file in the results viewer."""
+        results = self._existing_project_results()
+        if results is None:
+            return
+        self._last_output_dir = str(Path(results).parent)
+        self._last_results_file = results
+        self._results_panel.set_output_dir(self._last_output_dir)
+        self._show_results()
+
+    # ------------------------------------------------------------------
     # Map bridge slots
     # ------------------------------------------------------------------
 
@@ -3582,6 +3712,11 @@ class MainWindow(QMainWindow):
                 config=self._loaded_config, state=self.model.state,
             )
             self.statusBar().clearMessage()
+            # Remembered results resolve against the folder the file was
+            # read from (``studio -c in/cfg.yaml -o out/cfg.yaml``).
+            self._restore_project_results(
+                self._raw_config_dict, self._data_base_dir())
+            self._offer_project_results()
         finally:
             # Saving is allowed again even if populating failed: the
             # empty-project guard in _save_config_file still stops a
@@ -7454,13 +7589,11 @@ class MainWindow(QMainWindow):
                 self._raw_config_dict = raw_dict
                 self._config_path = path
                 self._load_base_dir = base_dir
-                # Mirror the CLI's default (``output or Path("./results")``,
-                # cli.py:218) so the panel looks where the runner actually
-                # writes.
-                self._last_output_dir = "results"
-                # A new config implies a new run pool — drop any cached
-                # Results dialog tied to the previous config.
-                self._invalidate_results_dialog_cache()
+                # Runs write to <project folder>/results; the project's
+                # remembered results file (if it still exists) re-enables
+                # Results. Also drops any cached Results dialog of the
+                # previous project.
+                self._restore_project_results(raw_dict, base_dir)
 
                 self._populate_from_config(
                     config, raw_dict=raw_dict, base_dir=base_dir, states=states,
@@ -7507,6 +7640,8 @@ class MainWindow(QMainWindow):
                 )
         finally:
             progress.close()
+        # Reached only when the load succeeded (failures return above).
+        self._offer_project_results()
 
     def _save_config_file(self, path: str):
         """Export current GUI state to YAML."""
@@ -7565,7 +7700,8 @@ class MainWindow(QMainWindow):
                     self._all_states, self._loaded_config, path,
                     self.model.inter_system_links, self.model.global_settings,
                     self.model.stochastic_scenarios, self._geo_assets, self,
-                    data_base_dir=self._data_base_dir())
+                    data_base_dir=self._data_base_dir(),
+                    last_results_file=self._project_results_file or None)
                 err: dict = {}
                 worker.failed.connect(lambda m: err.update(msg=m))
                 loop = QEventLoop()
@@ -7713,14 +7849,21 @@ class MainWindow(QMainWindow):
         if self._current_system_name:
             self._all_states[self._current_system_name] = self.model.state
 
-        # Use previously saved output directory, or fall back to the
-        # CLI's default ``./results`` (cli.py:218) so the panel and the
-        # runner agree on the location regardless of where the config
-        # file lives.
-        if not hasattr(self, "_last_output_dir") or not self._last_output_dir:
-            self._last_output_dir = "results"
+        # Runs write to <project folder>/results (an unsaved project: the
+        # ESFEX cache dir), never to the CWD's ``results`` (the CLI default):
+        # the project finds its results again whatever directory the Studio
+        # is started from.
+        import time
 
-        output_dir = self._last_output_dir
+        from esfex.visualization.data.project_results import project_output_dir
+
+        output_dir = str(project_output_dir(self._config_path))
+        msg_key = ("messages.run_output_dir" if self._config_path
+                   else "messages.run_output_dir_unsaved")
+        self.statusBar().showMessage(tr(msg_key, path=output_dir))
+        logging.getLogger(__name__).info("Run output folder: %s", output_dir)
+        self._run_output_dir = output_dir
+        self._run_started_at = time.time()
 
         # Save config to a temporary YAML file
         try:
@@ -7866,6 +8009,7 @@ class MainWindow(QMainWindow):
             self.toolbar.set_sensitivity_enabled(True)
             self._run_completed = True
             self.toolbar.set_run_enabled(False)
+            self._remember_run_results()
             # Pre-set output dir on results panel so it's ready
             output_dir = getattr(self, "_last_output_dir", "")
             if output_dir:
@@ -7876,6 +8020,22 @@ class MainWindow(QMainWindow):
         else:
             # Re-enable Run so the user can retry after fixing issues
             self.toolbar.set_run_enabled(True)
+
+    def _remember_run_results(self):
+        """After a successful run, point the results views at the run's
+        output folder and remember the results file it wrote."""
+        from esfex.visualization.data.project_results import newest_results_file
+
+        run_dir = getattr(self, "_run_output_dir", "")
+        if not run_dir:
+            return
+        self._last_output_dir = run_dir
+        # 2 s of slack for file systems with coarse modification times.
+        since = getattr(self, "_run_started_at", None)
+        found = newest_results_file(run_dir, since=since - 2 if since else None)
+        if found is not None:
+            self._last_results_file = str(found)
+            self._remember_results_file(found)
 
     def _on_load_results(self):
         """Open a file picker to load previous HDF5 results."""
@@ -7890,6 +8050,7 @@ class MainWindow(QMainWindow):
         d = str(Path(path).parent)
         self._last_output_dir = d
         self._last_results_file = path
+        self._remember_results_file(path)
         self.toolbar.set_results_enabled(True)
         self.toolbar.set_sensitivity_enabled(True)
         # Point the map results panel at the specific file

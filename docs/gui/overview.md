@@ -179,12 +179,12 @@ Typical session steps:
 | Import Configuration… | `Ctrl+O` | Load a YAML configuration. Replaces the current project. |
 | Add System from Config… | -- | Add the systems of another YAML to the current project. See [System Management](system-management.md#adding-systems-from-another-configuration). |
 | Import Geo Asset… | -- | Load a GeoJSON, Shapefile, KML, KMZ, or GeoPackage file as a reference overlay. See [Map Editor](map-editor.md#importing-geographic-data). |
-| Import Project… | -- | Extract a `.esfexp` project bundle into a folder you choose and open its configuration. |
+| Import Project… | -- | Extract a `.esfexp` project bundle into a folder you choose and open its configuration. A bundle exported with its results restores them, and the project remembers them. |
 | Save | `Ctrl+S` | Write the configuration to the current file. If the project has no file yet, Save behaves like Export As. |
 | Export As… | `Ctrl+Shift+S` | Choose a path and write the configuration there. The file becomes the current file. |
-| Export Project… | -- | Write a portable `.esfexp` bundle: a zip with `config.yaml`, `manifest.json`, and copies of every referenced data file in `demand/`, `availability/`, `inflow/`, and `systems/`, with the paths in the config rewritten to those folders. |
+| Export Project… | -- | Write a portable `.esfexp` bundle: a zip with `config.yaml`, `manifest.json`, and copies of every referenced data file in `demand/`, `availability/`, `inflow/`, and `systems/`, with the paths in the config rewritten to those folders. When the project has a results file, a dialog offers **Include results** (off by default, with the file size); the file then goes into `results/`, uncompressed. |
 | Open Recent | -- | Reopen a recently used configuration. |
-| Load Results… | `Ctrl+R` | Open an existing HDF5 results file and show it in the results viewer. |
+| Load Results… | `Ctrl+R` | Open an existing HDF5 results file and show it in the results viewer. The project remembers the file. |
 
 Save and Export As write the same YAML, which includes map coordinates, line waypoints, and marker styles. The file can be run with `esfex run` as is. Before writing, both run an automatic validation; if it finds errors, a dialog asks "Save anyway?".
 
@@ -196,6 +196,12 @@ Some saves are refused to protect your files:
 - An empty project (no system, or only an empty placeholder system with at most one node and no generators, storage, lines or technologies) is not saved over a file that already defines systems.
 
 **Autosave** (File > Preferences… > General, off by default) writes only to `~/.cache/esfex/autosave.yaml`, never to your configuration file, and the window keeps showing unsaved changes until you save with Save or Export As.
+
+### Projects and their results
+
+A project remembers its last results file: the file of its last successful run, or the one opened with Load Results…. The path is saved in the configuration as the top-level key `_last_results`, relative to the configuration's folder when the file lies under it (absolute otherwise). Only the Studio reads this key; `esfex run` ignores it and does not report it as unknown. A new run or Load Results… marks the project as changed, so Save keeps the new file.
+
+When you open a project whose remembered file still exists, **Results** and **Sensitivity** are enabled and a message offers **Open Results**. Nothing is loaded until you accept: a results file can be several GB. If the file no longer exists, the project opens without results and without an error, and the next save drops the key.
 
 
 ---
@@ -274,10 +280,10 @@ Validation covers the systems in Global Settings > Systems to Simulate. When it 
 
 ## Running a Simulation
 
-**Run** writes the project to a temporary YAML file and starts `python -m esfex.cli run --config <tmp> --output results` (with `--verbose` when Global Settings > Console Verbose is High) in the **Run Output** tab. The `results` folder is relative to the directory the Studio was started from.
+**Run** writes the project to a temporary YAML file and starts `python -m esfex.cli run --config <tmp> --output <folder>` (with `--verbose` when Global Settings > Console Verbose is High) in the **Run Output** tab. The output folder is `results` in the project's folder (the folder of the saved configuration), wherever the Studio was started from. A project that was never saved writes to `~/.cache/esfex/studio_results`; the status bar shows the folder when the run starts. `esfex run` on the command line keeps its own default, `./results` relative to the current directory.
 
 - **■ Stop** in the tab corner, or `Ctrl+C` in the Run Output tab, sends an interrupt so the run can stop cleanly. Pressing Stop again force-kills the process.
-- When the run finishes successfully, **Results** and **Sensitivity** are enabled, and the results viewer opens if Preferences > General > *Auto-open results after simulation* is on (the default).
+- When the run finishes successfully, **Results** and **Sensitivity** are enabled, the project remembers the new results file (see [Projects and their results](#projects-and-their-results)), and the results viewer opens if Preferences > General > *Auto-open results after simulation* is on (the default).
 
 
 ---
@@ -290,7 +296,7 @@ Validation covers the systems in Global Settings > Systems to Simulate. When it 
 - **Results dialog** -- Charts grouped in Generation, Storage, Economics, System, UC Operations, Near-Optimal (MGA), and Custom.
 - **Map Results** panel (on the map) -- System, Year, Alternative, and Variable selectors and a Screenshot button. Variables include Installed Capacity Mix, Generation Mix, and RE vs Non-RE (pie charts); Total Generation, RE Penetration, Nodal Prices (LMP), Load Shedding, CO2 Emissions, Curtailment, Gen. Investment, and Bat. Investment (node circles); Power Flow and Fuel Transport Flow (lines); and three risk overlays.
 
-**File > Load Results…** (`Ctrl+R`) opens a results file from an earlier run.
+**File > Load Results…** (`Ctrl+R`) opens a results file from an earlier run. Reopening a project offers to open its last results (see [Projects and their results](#projects-and-their-results)).
 
 
 ---
