@@ -68,9 +68,9 @@ def test_meteo_shares_one_series_per_zone():
 
 def _rasters_available() -> bool:
     try:
-        from esfex.models.demand_density_ml import DemandDensityModel, gdp_density_point
+        from esfex.models.demand_density_ml import DemandDensityModel, _ssp_gdp_total_nearest
         return (DemandDensityModel.is_available()
-                and gdp_density_point(23.1, -82.4, 2030, "ssp2") is not None)
+                and _ssp_gdp_total_nearest(23.1, -82.4, 2030, "ssp2") is not None)
     except Exception:
         return False
 

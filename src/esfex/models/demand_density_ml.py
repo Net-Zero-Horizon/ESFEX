@@ -565,11 +565,6 @@ def _make_poly(polygon):
     return polys[0] if len(polys) == 1 else MultiPolygon(polys)
 
 
-# GDP pixel area (the 0.25° GDP raster), matching pixel_features.
-def _gdp_pixel_km2(lat: float) -> float:
-    return (0.25 ** 2) * math.cos(math.radians(lat)) * 111.0 ** 2
-
-
 # SSP GDP rasters: GDP{year}_ssp{N}.tif at 5-year steps, 2025–2100.
 _SSP_GDP_STEP = 5
 _SSP_GDP_MIN = 2025
@@ -583,50 +578,6 @@ def _normalize_ssp(ssp) -> str:
         if ch in "12345":
             return ch
     return "2"
-
-
-def gdp_density_point(lat: float, lon: float, year: int, ssp: str = "ssp2") -> Optional[float]:
-    """GDP density (USD/km²) at a point for a given year and SSP scenario.
-
-    For future years uses the IIASA SSP GDP rasters (``GDP{Y}_ssp{N}.tif``,
-    5-year steps) with linear interpolation between steps. For years before the
-    SSP range, falls back to the historical GDP raster (``GDP{Y}.tif``)."""
-    try:
-        from esfex.models.pixel_features import (
-            _open_raster, _sample_point, sample_gdp_total,
-        )
-        from esfex.paths import GRIDDED_GDP_025_DIR as GDP_DIR
-    except Exception:
-        return None
-
-    sn = _normalize_ssp(ssp)
-
-    from esfex.data_assets import ensure
-
-    def _at_step(step_year: int) -> Optional[float]:
-        path = GDP_DIR / f"GDP{step_year}_ssp{sn}.tif"
-        if not ensure(path):
-            return None
-        v = _sample_point(_open_raster(str(path)), lat, lon)
-        if v is None or v <= 0:
-            return None
-        return v / _gdp_pixel_km2(lat)
-
-    if year < _SSP_GDP_MIN:
-        gt = sample_gdp_total(lat, lon, year)
-        return (gt / _gdp_pixel_km2(lat)) if (gt and gt > 0) else None
-    if year >= _SSP_GDP_MAX:
-        return _at_step(_SSP_GDP_MAX)
-
-    lo_year = (year // _SSP_GDP_STEP) * _SSP_GDP_STEP
-    hi_year = lo_year + _SSP_GDP_STEP
-    v_lo, v_hi = _at_step(lo_year), _at_step(hi_year)
-    if v_lo is None:
-        return v_hi
-    if v_hi is None:
-        return v_lo
-    f = (year - lo_year) / float(_SSP_GDP_STEP)
-    return v_lo * (1.0 - f) + v_hi * f
 
 
 # ──────────────────────────────────────────────────────────────────────────────
