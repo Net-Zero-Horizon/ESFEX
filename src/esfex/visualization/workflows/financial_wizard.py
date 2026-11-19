@@ -42,23 +42,24 @@ from esfex.visualization.workflows.financial_steps import (
     SensitivityStep,
     TechnologyEconomicsStep,
 )
+from esfex.visualization.i18n import tr
 
 logger = logging.getLogger(__name__)
 
 
-# Phase names
+# Step-name translation keys (section ``wizard_financial``)
 _PHASE_A_NAMES = [
-    "Load & Configure",
-    "Cost Decomposition",
-    "Technology Economics",
-    "Market Analysis",
+    "step_load",
+    "step_cost",
+    "step_tech",
+    "step_market",
 ]
 
 _PHASE_B_NAMES = [
-    "Cash Flows",
-    "Investment Metrics",
-    "Sensitivity & MC",
-    "Report & Export",
+    "step_cashflow",
+    "step_metrics",
+    "step_sensitivity",
+    "step_report",
 ]
 
 _PHASE_A_COUNT = len(_PHASE_A_NAMES)
@@ -73,7 +74,7 @@ class FinancialWizard(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Financial Analysis")
+        self.setWindowTitle(tr("wizard_financial.title"))
         self.setMinimumSize(850, 650)
         self.resize(1100, 800)
         self.setModal(False)
@@ -108,7 +109,8 @@ class FinancialWizard(QDialog):
         phase_a_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._indicator_bar_a.addWidget(phase_a_lbl)
 
-        for i, name in enumerate(_PHASE_A_NAMES):
+        for i, key in enumerate(_PHASE_A_NAMES):
+            name = tr(f"wizard_financial.{key}")
             lbl = QLabel(f"  {i+1}. {name}  ")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setStyleSheet(self._step_style(is_current=(i == 0), is_done=False))
@@ -137,7 +139,8 @@ class FinancialWizard(QDialog):
         phase_b_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._indicator_bar_b.addWidget(phase_b_lbl)
 
-        for j, name in enumerate(_PHASE_B_NAMES):
+        for j, key in enumerate(_PHASE_B_NAMES):
+            name = tr(f"wizard_financial.{key}")
             idx = _PHASE_A_COUNT + j
             lbl = QLabel(f"  {idx+1}. {name}  ")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -186,17 +189,17 @@ class FinancialWizard(QDialog):
         # Button row
         btn_layout = QHBoxLayout()
 
-        self._btn_cancel = QPushButton("Close")
+        self._btn_cancel = QPushButton(tr("common.close"))
         self._btn_cancel.clicked.connect(self.reject)
         btn_layout.addWidget(self._btn_cancel)
 
         btn_layout.addStretch()
 
-        self._btn_back = QPushButton("← Back")
+        self._btn_back = QPushButton(tr("wizard_common.back"))
         self._btn_back.clicked.connect(self._go_back)
         btn_layout.addWidget(self._btn_back)
 
-        self._btn_next = QPushButton("Next →")
+        self._btn_next = QPushButton(tr("wizard_common.next"))
         self._btn_next.clicked.connect(self._go_next)
         btn_layout.addWidget(self._btn_next)
 
@@ -286,7 +289,7 @@ class FinancialWizard(QDialog):
         self._btn_back.setVisible(idx > 0)
 
         if idx == n - 1:
-            self._btn_next.setText("Finish")
+            self._btn_next.setText(tr("wizard_financial.finish"))
             try:
                 self._btn_next.clicked.disconnect()
             except RuntimeError:
@@ -294,7 +297,7 @@ class FinancialWizard(QDialog):
             self._btn_next.clicked.connect(self.accept)
         elif idx == 0:
             # Step 1: Next only enabled after analysis completes
-            self._btn_next.setText("Next →")
+            self._btn_next.setText(tr("wizard_common.next"))
             self._btn_next.setEnabled(self._step_load.is_valid())
             try:
                 self._btn_next.clicked.disconnect()
@@ -302,7 +305,7 @@ class FinancialWizard(QDialog):
                 pass
             self._btn_next.clicked.connect(self._go_next)
         else:
-            self._btn_next.setText("Next →")
+            self._btn_next.setText(tr("wizard_common.next"))
             try:
                 self._btn_next.clicked.disconnect()
             except RuntimeError:
