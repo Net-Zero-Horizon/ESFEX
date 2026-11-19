@@ -30,6 +30,15 @@ _DIALOG_CALLS = {
 }
 _DIALOG_OWNERS = {"QMessageBox", "QInputDialog", "QFileDialog"}
 _WORD = re.compile(r"[A-Za-z]{2,}")
+# Proper names and symbols shown as they are in every language.
+UNTRANSLATED_OK = {
+    "XGBoost", "Microsoft ML", "Overture Maps", "Google Open Buildings",
+    "ESFEX", "ESFEX Studio", "OTEC Studio", "OpenStreetMap", "GridFinder",
+    "ERA5", "NASA POWER", "PyPSA", "HDF5", "CSV", "SVG", "PNG", "JSON", "YAML",
+    "LCOE", "NPV", "IRR", "MW", "MWh", "GWh", "kV", "Hz", "AC", "DC",
+}
+# Calls whose later positional arguments are data, not text.
+_TEXT_ARG_ONLY = {"addItem": 0, "insertItem": 1, "addRow": 0}
 
 
 def _literal_text(node):
@@ -48,10 +57,17 @@ def _literal_text(node):
     return None
 
 
+def _call_name(node):
+    fn = node.func
+    return fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
+
+
 def _visible(text):
-    if not text or not _WORD.search(text):
+    if not text or not _WORD.search(re.sub(r"<[^>]*>|&\w+;", "", text)):
         return False
     s = text.strip()
+    if s in UNTRANSLATED_OK:
+        return False
     if re.fullmatch(r"[\w./-]+\.(png|svg|ico|json|csv|ya?ml|h5|html|js|css)", s):
         return False
     if s.startswith(("font-", "color:", "QWidget", "background", "padding",
@@ -96,8 +112,14 @@ def hardcoded_texts():
                 continue
             if name not in _UI_CALLS and name not in _DIALOG_CALLS:
                 continue
-            args = list(node.args) + [k.value for k in node.keywords
-                                      if k.arg in ("text", "title", "toolTip", "label")]
+            if name in _TEXT_ARG_ONLY:
+                pos = _TEXT_ARG_ONLY[name]
+                args = [a for a in node.args[pos:pos + 2]
+                        if not (isinstance(a, ast.Call) and _call_name(a) == "QIcon")][:1]
+            else:
+                args = list(node.args)
+            args += [k.value for k in node.keywords
+                     if k.arg in ("text", "title", "toolTip", "label")]
             for a in args:
                 if isinstance(a, ast.Call):
                     continue

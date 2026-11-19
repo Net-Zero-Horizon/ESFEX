@@ -1554,6 +1554,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **The Grid Builder is translated.** About 60 of its texts were written in
+  English in the code (the step tabs, the Back/Next/Cancel buttons, the
+  filter labels, every table header, the warnings and the status messages),
+  so they stayed English in every language. The fetch summary also listed the
+  feature types by their internal names (`fuel_entry(s)`). All are now
+  translated in the five languages.
+
 - **No raw translation keys in the Studio.** Sixteen texts showed their key
   instead of a translation, in every language: the advanced Solar PV
   wizard's resource and financial results (`wizard_solar_pv.lcoe`, `.npv`,

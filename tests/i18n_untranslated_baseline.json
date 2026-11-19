@@ -98,12 +98,7 @@
   "VSC | LCC"
  ],
  "esfex/visualization/panels/analysis_panel.py": [
-  "Gen: {} MW | Demand: {} MW | Balance: {} MW",
-  "ac",
-  "dc",
-  "droop",
-  "pro_rata",
-  "sc"
+  "Gen: {} MW | Demand: {} MW | Balance: {} MW"
  ],
  "esfex/visualization/panels/battery_form.py": [
   "AC | DC",
@@ -132,40 +127,16 @@
   "CSV (*.csv);;All (*)",
   "CSV (*.csv);;All (*)",
   "Geographic risk derating factor (0-1). Computed from hazard exposure and component fragility via the Risk Workbench. 1.0 = no derating.",
-  "Non-renewable",
-  "Renewable",
   "flat | linear | stepwise | exponential"
  ],
  "esfex/visualization/panels/global_settings_form.py": [
   "Enable UC",
   "Solver Options",
   "auto",
-  "basic",
-  "benders",
-  "copula",
-  "cvar",
-  "development",
-  "droop",
-  "expected",
-  "high",
-  "independent",
-  "kmedoids | kmeans",
-  "largest_unit",
-  "linear",
-  "log",
-  "mcda",
-  "mga",
-  "minimax_regret",
-  "monolithic",
-  "percentage",
-  "pro_rata",
-  "spores",
-  "sqrt",
-  "unit_commitment"
+  "kmedoids | kmeans"
  ],
  "esfex/visualization/panels/inter_system_link_form.py": [
   "  ({} kV)",
-  "<b>{}</b> ({})<br>{}: {}  {}  {}: ",
   "AC | DC",
   "Auto",
   "Economic",
@@ -205,11 +176,7 @@
   "HiGHS | Gurobi | CPLEX | SCIP | Xpress | CBC | GLPK",
   "High",
   "Light | GitHub Light | VS Code Dark+ | Dracula | One Dark Pro",
-  "OpenStreetMap | Satellite | Terrain | Dark | Offline",
-  "basic",
-  "development",
-  "high",
-  "unit_commitment"
+  "OpenStreetMap | Satellite | Terrain | Dark | Offline"
  ],
  "esfex/visualization/panels/python_console.py": [
   "Clear console"
@@ -226,8 +193,6 @@
   "VOLL ($/MWh)",
   "Year:",
   "Year:",
-  "__time__",
-  "__time__",
   "a) Net Load",
   "b) Ramp",
   "hourly | daily | monthly | yearly"
@@ -265,14 +230,6 @@
   "Failed to save screenshot.",
   "PNG (*.png);;JPEG (*.jpg);;All Files (*)"
  ],
- "esfex/visualization/panels/rooftop_solar_form.py": [
-  "high",
-  "high",
-  "low",
-  "low",
-  "medium",
-  "normal"
- ],
  "esfex/visualization/panels/script_editor.py": [
   "Open Python Script",
   "Python Files (*.py);;All Files (*)",
@@ -290,10 +247,6 @@
  "esfex/visualization/panels/simulation_dialog.py": [
   "Operational Dispatch — Year {} ({}/{})",
   "Window {}/"
- ],
- "esfex/visualization/panels/system_form.py": [
-  "investment",
-  "total"
  ],
  "esfex/visualization/panels/technology_form.py": [
   "Chart display color",
@@ -335,21 +288,11 @@
  ],
  "esfex/visualization/workflows/demand_distribution_steps.py": [
   " (Node {})",
-  " MW",
   "CSV Files (*.csv)",
   "DBSCAN",
   "Error: ",
   "Error: ",
-  "Google Open Buildings",
   "KMeans",
-  "Microsoft ML",
-  "Overture Maps",
-  "agglomerative",
-  "dbscan",
-  "google",
-  "kmeans",
-  "microsoft",
-  "overture",
   "ward | complete | average"
  ],
  "esfex/visualization/workflows/ev_advanced_steps.py": [
@@ -470,80 +413,6 @@
   "Next →",
   "← Back"
  ],
- "esfex/visualization/workflows/grid_mapping_steps.py": [
-  " countries detected — select one",
-  " node(s) with observed data — metrics compare the base year against your series.",
-  " of {} features selected for import",
-  "<b>System total:</b> Peak={} MW, Annual={} GWh, LF={} &mdash; Source: ",
-  "<b>System total:</b> Peak={} MW, Annual={} GWh, LF={} &mdash; Source: ",
-  "<br>",
-  "A system named '{}' already exists.",
-  "All Types | Substations | Generators | Batteries | Lines | Transformers | Converters | Fuel Entries | Fuel Storage",
-  "Archetype (no ML)",
-  "Auto (XGBoost)",
-  "Auto-estimate",
-  "Classification failed: ",
-  "Classified {} buildings ({}; total weight: {}). Assigned to {} buses.",
-  "Clustering error: ",
-  "Correction applied to {} node(s); growth preserved.",
-  "Could not read the file:\n",
-  "Country detection failed: ",
-  "Country: {} ({})",
-  "Created {} nodes via {} clustering.",
-  "Demand distribution: {} bus fraction(s) across {} multi-bus + {} single-bus node(s) from {} demand cells.",
-  "Demand files (*.csv *.xlsx *.xls);;All files (*)",
-  "Drop isolated <",
-  "Duplicate Name",
-  "Enter the new system name:",
-  "Error: ",
-  "Error: ",
-  "Error: ",
-  "Fetch error: ",
-  "Forecast error: ",
-  "Found {} features:   (fetch {}s)",
-  "Google Open Buildings",
-  "Include | Source | Type | Name | Voltage (kV) | Capacity (MW) | Fuel",
-  "Load failed",
-  "Load observed demand CSV",
-  "Loaded {} building footprints. Classifying...",
-  "Maximum nodes:",
-  "Microsoft ML",
-  "Min gen capacity:",
-  "Min voltage:",
-  "Minimum nodes:",
-  "Name | Lat | Lng",
-  "New System",
-  "No Criterion",
-  "No Nodes",
-  "No System",
-  "No nodes exist in the system. Enable auto-create nodes or create nodes manually before building.",
-  "Node | Bus | Buildings | Old Fraction | New Fraction",
-  "Node | MAPE % | RMSE (MW) | Peak err % | Energy err % | Corr",
-  "Node | Peak (MW) | Annual (GWh) | Load Factor",
-  "Overture Maps",
-  "Select a target system or create a new one.",
-  "Select at least one clustering criterion.",
-  "Simplification level:",
-  "Type Name | Area Min (m²) | Area Max (m²) | Weight/m²",
-  "WB: GDP/cap=${}, Pop={}, kWh/cap={}. ERA5: {} hours ({}).",
-  "WB: GDP/cap=${}, Pop={}. Fetching ERA5 temperature...",
-  "XGBoost",
-  "archetype",
-  "auto",
-  "google",
-  "microsoft",
-  "overture",
-  "spatial",
-  "xgboost"
- ],
- "esfex/visualization/workflows/grid_mapping_wizard.py": [
-  "Back",
-  "Cancel",
-  "Close",
-  "Grid Builder",
-  "Next",
-  "Next"
- ],
  "esfex/visualization/workflows/node_demand_forecast.py": [
   "Close",
   "Demand forecast — "
@@ -622,8 +491,6 @@
   "Warm seasonal ±:"
  ],
  "esfex/visualization/workflows/otec_studio/optimization_panel.py": [
-  " MW",
-  " MW",
   "CW depth min / max:",
   "Choose two different axes for the surface.",
   "Cold-water T:",
@@ -729,7 +596,6 @@
   "Export failed",
   "Export scenario comparison",
   "New",
-  "OTEC Studio",
   "Planned in milestone ",
   "Remove",
   "Saved to ",
@@ -922,19 +788,9 @@
   "CSV (*.csv)",
   "CSV (*.csv)",
   "PNG (*.png)",
-  "all",
-  "all",
-  "capacity_factor",
-  "capex_per_kw",
-  "custom",
-  "discount_rate",
-  "electricity_price",
-  "floating",
-  "ground_mount",
   "matplotlib not available"
  ],
  "esfex/visualization/workflows/solar_pv_steps.py": [
-  " MW",
   " kWh/m²/yr",
   " zone(s) added",
   "<b>Domain:</b> ({}, {}) to ({}, {})<br><b>Module:</b> {} | <b>Efficiency:</b> {}%<br><b>Orientation:</b> {} | <b>Tracking:</b> {}<br><b>Year:</b> {} | <b>Grid:</b> {}° | <b>Type:</b> {}<br><b>Data Source:</b> {}<br><b>MCDA Method:</b> {} | <b>Criteria:</b> ",
@@ -970,12 +826,7 @@
   "Error: ",
   "Loaded {} buildings ({} with height data)",
   "Loaded {} hourly records from ",
-  "Ready to analyze {} buildings using solar data from {}.\nPanel: {}W, eff={}, PR={}, losses={}\nRoof: {} suitable, min area={} m², shading=",
-  "google",
-  "microsoft",
-  "nsrdb",
-  "overture",
-  "pvgis"
+  "Ready to analyze {} buildings using solar data from {}.\nPanel: {}W, eff={}, PR={}, losses={}\nRoof: {} suitable, min area={} m², shading="
  ],
  "esfex/visualization/workflows/wind_advanced_steps.py": [
   "(matplotlib not available)",
@@ -984,19 +835,9 @@
   "CSV (*.csv)",
   "CSV (*.csv)",
   "PNG (*.png)",
-  "all",
-  "all",
-  "capacity_factor",
-  "capex_per_kw",
-  "custom",
-  "discount_rate",
-  "electricity_price",
-  "matplotlib not available",
-  "offshore",
-  "onshore"
+  "matplotlib not available"
  ],
  "esfex/visualization/workflows/wind_steps.py": [
-  " MW",
   " zone(s) added",
   "<b>Domain:</b> ({}, {}) to ({}, {})<br><b>Turbine:</b> {} | <b>Hub Height:</b> {} m<br><b>Year:</b> {} | <b>Grid:</b> {}° | <b>Type:</b> {}<br><b>Data Source:</b> {}<br><b>MCDA Method:</b> {} | <b>Criteria:</b> ",
   "<i>Select a turbine from the table above to see its details.</i>",
