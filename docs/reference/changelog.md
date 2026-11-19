@@ -1564,6 +1564,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **Risk workbench texts are current.** The fragility library editor said
+  "49 built-in curves from NHESS-2024 and PNNL-33587"; the library has 170
+  curves from several more sources. The count and the main sources are now
+  read from the library. The two warnings for missing node coordinates sent
+  the user to a "Site & Screening" tab that no longer exists; they now say
+  that the system's nodes and elements have no location and how to give them
+  one.
+
 - **MGA charts show their empty-state messages.** Nine MGA result pages
   (composition, pathway, parallel coordinates, dendrogram, decision factors,
   similarity, projection, spatial, robustness frontier) wrote "no data"-type

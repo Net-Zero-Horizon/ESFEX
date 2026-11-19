@@ -270,7 +270,7 @@ class _ScenarioWorker(QThread):
 
 
 # =====================================================================
-# Panel 1: Site & Screening
+# Hazard data panel (once the 'Site & Screening' step)
 # =====================================================================
 
 
@@ -746,6 +746,20 @@ class HazardDataPanel(QWidget):
 # =====================================================================
 
 
+def _fragility_intro_text() -> str:
+    """The library editor's intro, with the built-in curves counted and their
+    main sources named from the library itself (a hard-coded "49 curves"
+    went stale as the library grew)."""
+    from collections import Counter
+
+    from esfex.models.hazard_assessment import FragilityLibrary
+    curves = FragilityLibrary().get_all_curves()
+    sources = Counter(c.source for c in curves
+                      if c.source and c.source != "expert-judgment")
+    names = ", ".join(s for s, _ in sources.most_common(3))
+    return tr("risk_panels.fragility_intro", count=len(curves), sources=names)
+
+
 class FragilityLibraryPanel(QWidget):
     """Editable fragility curve browser with live CDF preview.
 
@@ -763,7 +777,7 @@ class FragilityLibraryPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(tr("risk_panels.fragility_intro")))
+        layout.addWidget(QLabel(_fragility_intro_text()))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 

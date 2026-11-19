@@ -8,7 +8,8 @@ plan for the Risk & Resilience Analysis module:
    FIRMS, Smithsonian GVP, NASA AR6, ThinkHazard!).
 
 2. **FragilityLibrary** — lognormal CDF fragility curves for power system
-   components, with ~40 built-in defaults from NHESS-2024 and PNNL-33587.
+   components, with built-in defaults from published sources (NHESS-2024,
+   PNNL-33587, Suppasri-2013, HAZUS-MH-MR5 and others).
 
 3. **CompositeRiskAssessment** — overlay multiple hazard layers to compute
    per-node composite risk indices and Expected Annual Loss (EAL).
