@@ -31,6 +31,7 @@ _LANGUAGE_NAMES: dict[str, str] = {
 
 _current_lang: str = "en"
 _strings: dict[str, str] = {}
+_initialized: bool = False      # set by init_i18n (even when a file is missing)
 
 
 class _LanguageNotifier(QObject):
@@ -59,8 +60,9 @@ def _flatten(d: dict, prefix: str = "") -> dict[str, str]:
 
 def init_i18n(lang: str = "en") -> None:
     """Load a language file.  Call once before creating any widgets."""
-    global _current_lang, _strings
+    global _current_lang, _strings, _initialized
     _current_lang = lang
+    _initialized = True
 
     path = _TRANSLATIONS_DIR / f"{lang}.json"
     if not path.exists():
@@ -121,7 +123,13 @@ def tr(key: str, **kwargs) -> str:
     str
         Translated string, or *key* itself if not found (makes missing
         translations easy to spot in the UI).
+
+    Before any :func:`init_i18n` (scripts, tests, the headless use of
+    Studio modules) the English strings are loaded, so translated messages
+    read as English there instead of as raw keys.
     """
+    if not _strings and not _initialized:
+        init_i18n("en")
     text = _strings.get(key, key)
     if kwargs:
         try:
