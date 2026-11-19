@@ -37,6 +37,8 @@ UNTRANSLATED_OK = {
     "ERA5", "NASA POWER", "PyPSA", "HDF5", "CSV", "SVG", "PNG", "JSON", "YAML",
     "LCOE", "NPV", "IRR", "MW", "MWh", "GWh", "kV", "Hz", "AC", "DC",
     "IM", "LHS",
+    "DBSCAN", "KMeans", "NMC", "LFP", "kWp", "./availability/",
+    "CSV (*.csv)", "PNG (*.png)", "JSON (*.json)", "YAML (*.yaml *.yml)",
 }
 # Calls whose later positional arguments are data, not text.
 _TEXT_ARG_ONLY = {"addItem": 0, "insertItem": 1, "addRow": 0}

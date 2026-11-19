@@ -55,6 +55,13 @@ from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
+# Charging scenario id -> translation key of its display name
+_SCENARIO_KEYS = {
+    "uncontrolled": "wizard_ev.scenario_uncontrolled",
+    "tou_shifted": "wizard_ev.scenario_tou_shifted",
+    "optimized": "wizard_ev.scenario_optimized",
+}
+
 # Default EV technical parameters per category
 _DEFAULT_EV_PARAMS: dict[str, dict] = {
     "light": {
@@ -199,11 +206,12 @@ class EVChargingDemandStep(QWidget):
                     if len(values) >= 24:
                         break
             self._base_demand_24h = values[:24]
-            self._lbl_demand.setText(
-                f"Loaded: peak={max(self._base_demand_24h):.0f} MW"
-            )
+            self._lbl_demand.setText(tr(
+                "wizard_ev.demand_loaded_peak",
+                mw=f"{max(self._base_demand_24h):.0f}",
+            ))
         except Exception as exc:
-            QMessageBox.warning(self, "CSV Error", str(exc))
+            QMessageBox.warning(self, tr("wizard_ev.csv_error_title"), str(exc))
 
     def _get_fleet_at_year(self) -> dict[str, int]:
         """Extract fleet per category at selected year from curve."""
@@ -244,7 +252,7 @@ class EVChargingDemandStep(QWidget):
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
         except ImportError:
-            self._chart_container.addWidget(QLabel("matplotlib not available"))
+            self._chart_container.addWidget(QLabel(tr("wizard_ev.no_matplotlib")))
             return
 
         while self._chart_container.count():
@@ -262,11 +270,7 @@ class EVChargingDemandStep(QWidget):
             "tou_shifted": "#f39c12",
             "optimized": "#27ae60",
         }
-        labels = {
-            "uncontrolled": "Uncontrolled",
-            "tou_shifted": "Time-of-Use Shifted",
-            "optimized": "Optimized",
-        }
+        labels = {k: tr(v) for k, v in _SCENARIO_KEYS.items()}
 
         for name, scenario in self._scenarios.items():
             ax.plot(
@@ -278,13 +282,13 @@ class EVChargingDemandStep(QWidget):
         if self._base_demand_24h:
             ax.plot(
                 hours, self._base_demand_24h[:24],
-                label="Base Demand", color="#3498db",
+                label=tr("wizard_ev.legend_base_demand"), color="#3498db",
                 linewidth=1.5, linestyle="--", alpha=0.6,
             )
 
-        ax.set_xlabel("Hour of Day")
-        ax.set_ylabel("Charging Demand (MW)")
-        ax.set_title(f"EV Charging Profiles — Year {self._spin_year.value()}")
+        ax.set_xlabel(tr("wizard_ev.axis_hour_of_day"))
+        ax.set_ylabel(tr("wizard_ev.axis_charging_demand"))
+        ax.set_title(tr("wizard_ev.chart_charging_profiles", year=self._spin_year.value()))
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_xticks(range(0, 24, 2))
@@ -293,7 +297,7 @@ class EVChargingDemandStep(QWidget):
 
     def _build_summary(self):
         scenario_order = ["uncontrolled", "tou_shifted", "optimized"]
-        labels = ["Uncontrolled", "Time-of-Use Shifted", "Optimized"]
+        labels = [tr(_SCENARIO_KEYS[k]) for k in scenario_order]
         self._summary_table.setRowCount(3)
 
         for row, (key, label) in enumerate(zip(scenario_order, labels)):
@@ -407,7 +411,8 @@ class EVV2GPotentialStep(QWidget):
         pf.addRow(tr("wizard_ev.v2g_cycles_per_day"), self._spin_cycles)
 
         self._combo_chemistry = QComboBox()
-        self._combo_chemistry.addItems(["NMC", "LFP"])
+        self._combo_chemistry.addItem("NMC", "NMC")
+        self._combo_chemistry.addItem("LFP", "LFP")
         pf.addRow(tr("wizard_ev.battery_chemistry"), self._combo_chemistry)
 
         self._spin_bat_cap = QDoubleSpinBox()
@@ -491,7 +496,7 @@ class EVV2GPotentialStep(QWidget):
             v2g_cycles_per_day=self._spin_cycles.value(),
             battery_capacity_kwh=self._spin_bat_cap.value(),
             depth_of_discharge=dod,
-            chemistry=self._combo_chemistry.currentText(),
+            chemistry=self._combo_chemistry.currentData(),
         )
 
         self._build_chart()
@@ -503,7 +508,7 @@ class EVV2GPotentialStep(QWidget):
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
         except ImportError:
-            self._chart_container.addWidget(QLabel("matplotlib not available"))
+            self._chart_container.addWidget(QLabel(tr("wizard_ev.no_matplotlib")))
             return
 
         while self._chart_container.count():
@@ -522,25 +527,26 @@ class EVV2GPotentialStep(QWidget):
         # V2G power availability
         ax1.fill_between(
             hours, self._v2g.max_v2g_power_mw,
-            alpha=0.4, color="#2ecc71", label="Max V2G Power",
+            alpha=0.4, color="#2ecc71", label=tr("wizard_ev.legend_max_v2g"),
         )
         ax1.plot(
             hours, self._v2g.max_v2g_power_mw,
             color="#27ae60", linewidth=2,
         )
-        ax1.set_xlabel("Hour of Day")
-        ax1.set_ylabel("V2G Power (MW)")
-        ax1.set_title("V2G Discharge Capacity")
+        ax1.set_xlabel(tr("wizard_ev.axis_hour_of_day"))
+        ax1.set_ylabel(tr("wizard_ev.axis_v2g_power"))
+        ax1.set_title(tr("wizard_ev.chart_v2g_capacity"))
         ax1.legend(fontsize=8)
         ax1.grid(True, alpha=0.3)
         ax1.set_xticks(range(0, 24, 4))
 
         # Connected fraction
         connected = self._v2g.hourly_connected_fraction
-        ax2.bar(hours, connected, color="#3498db", alpha=0.7, label="Connected")
-        ax2.set_xlabel("Hour of Day")
-        ax2.set_ylabel("Fraction Connected")
-        ax2.set_title("Fleet Connected Profile")
+        ax2.bar(hours, connected, color="#3498db", alpha=0.7,
+                label=tr("wizard_ev.legend_connected"))
+        ax2.set_xlabel(tr("wizard_ev.axis_hour_of_day"))
+        ax2.set_ylabel(tr("wizard_ev.axis_fraction_connected"))
+        ax2.set_title(tr("wizard_ev.chart_fleet_connected"))
         ax2.set_ylim(0, 1.0)
         ax2.legend(fontsize=8)
         ax2.grid(True, alpha=0.3)
@@ -555,15 +561,16 @@ class EVV2GPotentialStep(QWidget):
 
         d = self._degradation
         v = self._v2g
-        text = (
-            f"<b>{d.chemistry}</b> — "
-            f"Total degradation: {d.total_degradation_pct_per_year:.2f} %/year "
-            f"(cycle: {d.total_degradation_pct_per_year - d.calendar_aging_pct_per_year:.2f}% "
-            f"+ calendar: {d.calendar_aging_pct_per_year:.1f}%)<br>"
-            f"Degradation cost: <b>${d.degradation_cost_per_kwh:.4f}/kWh</b> | "
-            f"Break-even compensation: <b>${d.breakeven_compensation:.1f}/MWh</b><br>"
-            f"Daily V2G energy: {v.daily_v2g_energy_mwh:.1f} MWh | "
-            f"Annual V2G potential: {v.annual_v2g_potential_gwh:.2f} GWh"
+        text = tr(
+            "wizard_ev.degradation_summary",
+            chem=d.chemistry,
+            total=f"{d.total_degradation_pct_per_year:.2f}",
+            cycle=f"{d.total_degradation_pct_per_year - d.calendar_aging_pct_per_year:.2f}",
+            calendar=f"{d.calendar_aging_pct_per_year:.1f}",
+            cost=f"{d.degradation_cost_per_kwh:.4f}",
+            breakeven=f"{d.breakeven_compensation:.1f}",
+            daily=f"{v.daily_v2g_energy_mwh:.1f}",
+            annual=f"{v.annual_v2g_potential_gwh:.2f}",
         )
         self._deg_summary.setText(text)
 
@@ -609,9 +616,8 @@ class EVGridImpactStep(QWidget):
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel(tr("wizard_ev.charging_scenario")))
         self._combo_scenario = QComboBox()
-        self._combo_scenario.addItems([
-            "Uncontrolled", "Time-of-Use Shifted", "Optimized",
-        ])
+        for _key in ("uncontrolled", "tou_shifted", "optimized"):
+            self._combo_scenario.addItem(tr(_SCENARIO_KEYS[_key]), _key)
         self._combo_scenario.setCurrentIndex(2)
         sel_row.addWidget(self._combo_scenario)
 
@@ -682,8 +688,7 @@ class EVGridImpactStep(QWidget):
         self._base_demand = base_demand
 
     def _get_selected_scenario_key(self) -> str:
-        idx = self._combo_scenario.currentIndex()
-        return ["uncontrolled", "tou_shifted", "optimized"][idx]
+        return self._combo_scenario.currentData() or "optimized"
 
     def _run_analysis(self):
         key = self._get_selected_scenario_key()
@@ -728,7 +733,7 @@ class EVGridImpactStep(QWidget):
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
         except ImportError:
-            self._chart_container.addWidget(QLabel("matplotlib not available"))
+            self._chart_container.addWidget(QLabel(tr("wizard_ev.no_matplotlib")))
             return
 
         while self._chart_container.count():
@@ -751,13 +756,17 @@ class EVGridImpactStep(QWidget):
         v2g = np.array(r.v2g_discharge_24h)
         net = np.array(r.net_load_24h)
 
-        ax1.fill_between(hours, 0, base, alpha=0.4, color="#3498db", label="Base Demand")
-        ax1.fill_between(hours, base, base + ev, alpha=0.4, color="#e74c3c", label="EV Charging")
-        ax1.fill_between(hours, base + ev, net, alpha=0.4, color="#2ecc71", label="V2G Discharge")
-        ax1.plot(hours, net, color="#2c3e50", linewidth=2, label="Net Load")
-        ax1.set_xlabel("Hour of Day")
-        ax1.set_ylabel("Power (MW)")
-        ax1.set_title("Net Load Profile")
+        ax1.fill_between(hours, 0, base, alpha=0.4, color="#3498db",
+                         label=tr("wizard_ev.legend_base_demand"))
+        ax1.fill_between(hours, base, base + ev, alpha=0.4, color="#e74c3c",
+                         label=tr("wizard_ev.legend_ev_charging"))
+        ax1.fill_between(hours, base + ev, net, alpha=0.4, color="#2ecc71",
+                         label=tr("wizard_ev.legend_v2g_discharge"))
+        ax1.plot(hours, net, color="#2c3e50", linewidth=2,
+                 label=tr("wizard_ev.legend_net_load"))
+        ax1.set_xlabel(tr("wizard_ev.axis_hour_of_day"))
+        ax1.set_ylabel(tr("wizard_ev.axis_power_mw"))
+        ax1.set_title(tr("wizard_ev.chart_net_load"))
         ax1.legend(fontsize=7, loc="upper left")
         ax1.grid(True, alpha=0.3)
         ax1.set_xticks(range(0, 24, 4))
@@ -767,12 +776,15 @@ class EVGridImpactStep(QWidget):
         with_ev_sorted = np.sort(base + ev)[::-1]
         net_sorted = np.sort(net)[::-1]
 
-        ax2.plot(range(24), base_sorted, label="Base", color="#3498db", linewidth=2)
-        ax2.plot(range(24), with_ev_sorted, label="Base + EV", color="#e74c3c", linewidth=2)
-        ax2.plot(range(24), net_sorted, label="Net (+ V2G)", color="#2ecc71", linewidth=2)
-        ax2.set_xlabel("Hours (sorted)")
-        ax2.set_ylabel("Power (MW)")
-        ax2.set_title("Load Duration Curve")
+        ax2.plot(range(24), base_sorted, label=tr("wizard_ev.legend_base"),
+                 color="#3498db", linewidth=2)
+        ax2.plot(range(24), with_ev_sorted, label=tr("wizard_ev.legend_base_ev"),
+                 color="#e74c3c", linewidth=2)
+        ax2.plot(range(24), net_sorted, label=tr("wizard_ev.legend_net_v2g"),
+                 color="#2ecc71", linewidth=2)
+        ax2.set_xlabel(tr("wizard_ev.axis_hours_sorted"))
+        ax2.set_ylabel(tr("wizard_ev.axis_power_mw"))
+        ax2.set_title(tr("wizard_ev.chart_load_duration"))
         ax2.legend(fontsize=8)
         ax2.grid(True, alpha=0.3)
 
@@ -805,17 +817,18 @@ class EVGridImpactStep(QWidget):
             return
 
         r = self._result
-        self._econ_label.setText(
-            f"<b>Arbitrage revenue (annual):</b> ${r.arbitrage_revenue_annual:,.0f}<br>"
-            f"<b>Avoided grid reinforcement:</b> ${r.avoided_reinforcement:,.0f}<br>"
-            f"<b>Net V2G program value:</b> ${r.net_v2g_value:,.0f}"
-        )
+        self._econ_label.setText(tr(
+            "wizard_ev.econ_summary",
+            arbitrage=f"{r.arbitrage_revenue_annual:,.0f}",
+            avoided=f"{r.avoided_reinforcement:,.0f}",
+            net=f"{r.net_v2g_value:,.0f}",
+        ))
 
     def _export_csv(self):
         if self._result is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Grid Impact", "grid_impact.csv", "CSV (*.csv)",
+            self, tr("wizard_ev.export_grid_title"), "grid_impact.csv", "CSV (*.csv)",
         )
         if not path:
             return
@@ -987,7 +1000,7 @@ class EVIntegrationStep(QWidget):
 
     def _update_preview(self):
         if not self._ev_config:
-            self._preview.setPlainText("No configuration generated.")
+            self._preview.setPlainText(tr("wizard_ev.no_config_generated"))
             return
 
         try:
@@ -1002,13 +1015,19 @@ class EVIntegrationStep(QWidget):
             text = json.dumps(self._ev_config, indent=2, default=str)
 
         # Add summary header
-        header = "# EV & V2G Configuration for ESFEX\n"
-        header += f"# Method: {self._ev_config.get('method', 'unknown')}\n"
-        header += f"# Period: {self._ev_config.get('base_year', '?')}"
-        header += f" - {self._ev_config.get('target_year', '?')}\n"
+        header = "# " + tr("wizard_ev.preview_title") + "\n"
+        header += "# " + tr("wizard_ev.preview_method",
+                            method=self._ev_config.get("method", "unknown")) + "\n"
+        header += "# " + tr("wizard_ev.preview_period",
+                            start=self._ev_config.get("base_year", "?"),
+                            end=self._ev_config.get("target_year", "?")) + "\n"
         if self._degradation:
-            header += f"# Degradation cost: ${self._degradation.degradation_cost_per_kwh:.4f}/kWh\n"
-            header += f"# Break-even V2G: ${self._degradation.breakeven_compensation:.1f}/MWh\n"
+            header += "# " + tr(
+                "wizard_ev.preview_deg_cost",
+                cost=f"{self._degradation.degradation_cost_per_kwh:.4f}") + "\n"
+            header += "# " + tr(
+                "wizard_ev.preview_breakeven",
+                v=f"{self._degradation.breakeven_compensation:.1f}") + "\n"
         header += "#\n"
 
         self._preview.setPlainText(header + text)
@@ -1066,12 +1085,12 @@ class EVIntegrationStep(QWidget):
             logger.exception("Failed to apply EV config")
             QMessageBox.critical(
                 self, tr("wizard_ev.title"),
-                f"{tr('wizard_ev.apply_error')}: {exc}",
+                tr("wizard_ev.apply_error_detail", e=exc),
             )
 
     def _export_yaml(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export YAML", "ev_config.yaml", "YAML (*.yaml *.yml)",
+            self, tr("wizard_ev.export_yaml_title"), "ev_config.yaml", "YAML (*.yaml *.yml)",
         )
         if not path:
             return
@@ -1089,9 +1108,9 @@ class EVIntegrationStep(QWidget):
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump({"ev_config": self._ev_config}, f, indent=2, default=str)
 
-            self._status.setText(f"Exported to {path}")
+            self._status.setText(tr("wizard_ev.exported_to", path=path))
         except Exception as exc:
-            QMessageBox.warning(self, "Export Error", str(exc))
+            QMessageBox.warning(self, tr("wizard_ev.export_error_title"), str(exc))
 
     def _export_all(self):
         directory = QFileDialog.getExistingDirectory(
@@ -1176,11 +1195,11 @@ class EVIntegrationStep(QWidget):
                         "breakeven_compensation_per_mwh": d.breakeven_compensation,
                     }, f, indent=2)
 
-            self._status.setText(f"All results exported to {directory}")
+            self._status.setText(tr("wizard_ev.all_exported_to", path=directory))
 
         except Exception as exc:
             logger.exception("Export error")
-            QMessageBox.warning(self, "Export Error", str(exc))
+            QMessageBox.warning(self, tr("wizard_ev.export_error_title"), str(exc))
 
     def is_valid(self) -> bool:
         return bool(self._ev_config)
