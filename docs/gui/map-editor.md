@@ -111,6 +111,8 @@ Development zones define geographic areas where new generation capacity may be i
 3. Close the polygon by clicking the first vertex.
 4. The Properties Panel opens the Zone form. Configure the technology, node, interconnection costs, target bus, and allowed technologies.
 
+The Zone form shows the polygon's vertex count and area (km²). An outline that crosses itself (a "bowtie") is repaired before its area is measured, so both of its lobes count.
+
 Zones are drawn with a semi-transparent fill. Overlapping zones are allowed.
 
 
