@@ -23,6 +23,10 @@ from PySide6.QtCore import QThread, Signal
 
 logger = logging.getLogger(__name__)
 
+# Upper bound of medium voltage (IEC: distribution up to 36 kV; 52 kV
+# equipment). Levels below it are distribution, at or above it sub-transmission.
+_MV_CEILING_KV = 60.0
+
 # ── Normalized intermediate format ───────────────────────────────────
 
 _RENEWABLE_SOURCES = frozenset({
@@ -1787,15 +1791,11 @@ class OSMGridFetcher(QThread):
             voltages = _parse_voltage_tag(tags.get("voltage", ""))
             v1 = voltages[0] if voltages else 0.0
             v2 = voltages[1] if len(voltages) > 1 else 0.0
-            if not v1:
-                # Infer from substation type
-                sub_type = tags.get("substation", "")
-                if sub_type == "transmission":
-                    v1 = 220.0
-                elif sub_type == "sub_transmission":
-                    v1 = 110.0
-                elif sub_type == "distribution":
-                    v1 = 33.0
+            # No ``voltage`` tag → 0 (unknown); the builder infers it from the
+            # connected lines (_propagate_voltage). Reading the level off the
+            # ``substation`` role (transmission → 220 kV, ...) put the same
+            # fixed numbers on every country — an island's MV station became
+            # 220 kV — and, being "known", kept the inference from running.
             freq = _parse_frequency(tags.get("frequency", ""), lat, lng)
             operator = tags.get("operator", "")
             feat_name = name
@@ -1938,8 +1938,10 @@ class OSMGridFetcher(QThread):
         # --- Transformer ---
         if power == "transformer":
             voltages = _parse_voltage_tag(tags.get("voltage", ""))
-            v1 = voltages[0] if voltages else 220.0
-            v2 = voltages[1] if len(voltages) > 1 else 110.0
+            # Unknown sides stay 0 for the builder to infer; a fixed 220/110
+            # gave a 34.5 kV unit a 110 kV secondary above its primary.
+            v1 = voltages[0] if voltages else 0.0
+            v2 = voltages[1] if len(voltages) > 1 else 0.0
             cap_raw = tags.get("rating", tags.get("transformer:output", ""))
             capacity = _parse_capacity_tag(cap_raw)
             operator = tags.get("operator", "")
@@ -1962,7 +1964,7 @@ class OSMGridFetcher(QThread):
         # --- Converter ---
         if power == "converter":
             voltages = _parse_voltage_tag(tags.get("voltage", ""))
-            v = voltages[0] if voltages else 220.0
+            v = voltages[0] if voltages else 0.0       # unknown: inferred later
             cap_raw = tags.get("rating", "")
             capacity = _parse_capacity_tag(cap_raw)
             operator = tags.get("operator", "")
@@ -2212,6 +2214,13 @@ class OSMGridFetcher(QThread):
             # Voltage filter: applies to substations, lines, transformers
             if f.feature_type in ("substation", "line", "transformer"):
                 if f.voltage_kv > 0 and f.voltage_kv < self.min_voltage_kv:
+                    continue
+                # A substation declared distribution is below any HV floor even
+                # when it carries no voltage tag.
+                if (f.feature_type == "substation" and f.voltage_kv <= 0
+                        and self.min_voltage_kv > _MV_CEILING_KV
+                        and (f.raw_tags or {}).get("substation") in (
+                            "distribution", "minor_distribution")):
                     continue
             # Capacity filter + rooftop-PV drop: applies to generators
             if f.feature_type == "generator":

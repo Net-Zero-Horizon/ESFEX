@@ -1554,6 +1554,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **Grid Builder voltages come from the data, not fixed numbers.** The OSM
+  reader filled a missing `voltage` tag from the substation role
+  (`transmission` 220 kV, `sub_transmission` 110 kV, `distribution` 33 kV),
+  gave an untagged transformer secondary 110 kV and an untagged converter
+  220 kV, and the builder set anything still unknown to 220 kV, in every
+  country. In Cuba this made Isla de la Juventud, a 34.5 kV system, a 220 kV
+  one (its equivalent line rated about 2,000 MW), and stations tagged 132 or
+  138 kV, levels no Cuban line carries, put 132 kV buses and lines into the
+  220/110 kV grid. Unknown voltages are now inferred from the lines; a bus no
+  tagged line reaches gets the medium-voltage level the data tags most (else
+  33 kV at 50 Hz, 34.5 kV at 60 Hz), and the voltage floor keeps those not
+  connected to any tagged voltage, such as an island's grid. Station tags
+  are checked against the lines at 60 kV and above: a station whose own
+  lines all carry another single level takes it, and a level no line
+  carries is snapped to the nearest line level within 30 %. Every decision is
+  listed in the build summary and returned as `ParseResult.voltage_decisions`.
+
 - **Myopic planning remembers earlier years.** Each one-year master in
   `planning_mode: myopic` planned from the base-year fleet: the aged units
   and the capacity built in earlier years were applied to a copy of the

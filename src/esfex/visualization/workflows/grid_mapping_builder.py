@@ -386,7 +386,8 @@ def _create_fuels_and_technologies(
 # ── Public entry point ───────────────────────────────────────────────
 
 
-def _enforce_min_voltage(state, min_voltage_kv: float, result) -> dict:
+def _enforce_min_voltage(state, min_voltage_kv: float, result,
+                         exempt: set | frozenset = frozenset()) -> dict:
     """Collapse the sub-``min_voltage_kv`` (distribution) layer into the
     transmission network so the built model only contains buses at or above
     the voltage floor.
@@ -409,11 +410,15 @@ def _enforce_min_voltage(state, min_voltage_kv: float, result) -> dict:
     Nothing is discarded — generation is preserved (relocated); only the
     distribution *topology* is removed. Demand is (re)distributed onto the
     surviving buses by the later role/demand phase.
+
+    Buses in ``exempt`` (isolated systems with no HV layer, such as an
+    island's MV grid) are kept: moving their generation to the nearest HV bus
+    would join them to a grid they are not part of.
     """
     if not min_voltage_kv or min_voltage_kv <= 0:
         return {}
     low = {bid for bid, b in state.buses.items()
-           if 0 < (b.voltage_kv or 0) < min_voltage_kv}
+           if 0 < (b.voltage_kv or 0) < min_voltage_kv and bid not in exempt}
     if not low:
         return {}
     hv = [(b.latitude, b.longitude, bid, b.parent_node)
@@ -536,6 +541,14 @@ def build_grid_from_features(
     converters = [f for f in active if f.feature_type == "converter"]
     fuel_entries = [f for f in active if f.feature_type == "fuel_entry"]
     fuel_storages = [f for f in active if f.feature_type == "fuel_storage"]
+
+    # Station tags the lines contradict, and levels no line carries, are
+    # corrected before any bus exists (see _reconcile_station_voltages).
+    substations = _reconcile_station_voltages(
+        substations, lines, station_radius_km, result.voltage_decisions)
+    transformers = _reconcile_station_voltages(
+        transformers, lines, station_radius_km, result.voltage_decisions)
+    mv_level_kv = _country_mv_level(active)
 
     # ── Phase 1: Substations → Buses ──────────────────────────────
     # Maps osm_id → list of bus_ids created for that substation
@@ -689,14 +702,19 @@ def build_grid_from_features(
     # floor, whereas the old 220 kV default survived it and corrupted the
     # network's capacity/impedance.
     try:
-        vc = _propagate_voltage(model.state)
+        vc = _propagate_voltage(model.state, mv_level_kv,
+                                result.voltage_decisions)
         if vc:
             result.warnings.append(
-                f"Voltage inference: resolved {vc} untagged bus/line "
-                f"voltage(s) from tagged neighbours (was defaulting to 220 kV)."
+                f"Voltage inference: assigned {vc} untagged bus/line "
+                f"voltage(s) (see Voltage decisions)."
             )
     except Exception as exc:
         result.warnings.append(f"Voltage inference: {exc}")
+    # Isolated systems (an island's grid) have no HV layer above them for the
+    # floor to collapse them into; they stay.
+    floor_exempt = {d["id"] for d in result.voltage_decisions
+                    if d.get("rule") == "isolated_mv"}
 
     # ── Phase 8.5: Enforce the voltage floor (transmission-only model) ──
     # Drop the distribution layer that leaked in below ``min_voltage_kv``
@@ -706,7 +724,8 @@ def build_grid_from_features(
     # surviving transmission buses. Honours the fetch scope — it does not
     # fabricate connectivity.
     if min_voltage_kv and min_voltage_kv > 0:
-        mv = _enforce_min_voltage(model.state, min_voltage_kv, result)
+        mv = _enforce_min_voltage(model.state, min_voltage_kv, result,
+                                  exempt=floor_exempt)
         if mv.get("buses_removed"):
             result.warnings.append(
                 f"Voltage floor {min_voltage_kv:.0f} kV: collapsed "
@@ -929,7 +948,156 @@ def _line_pu_params(voltage_kv: float, length_km: float,
     return r_pu / n, x_pu / n, b_pu * n
 
 
-def _propagate_voltage(state) -> int:
+# ── Voltage levels the data itself uses ──────────────────────────────
+
+# Two tagged levels this close are one level (rounding, 230 vs 220 aside).
+_SAME_LEVEL_RATIO = 1.02
+# A station's HV level no line carries is snapped to a line level this close.
+_OFF_STANDARD_RATIO = 1.30
+# A station's tag is overruled by its lines only when this many agree.
+_MIN_CONSENSUS_LINES = 2
+
+
+def _tag_levels(feat: GridFeature) -> list[float]:
+    """Every voltage level a feature's ``voltage`` tag lists (kV)."""
+    from esfex.visualization.workflows.grid_mapping_fetchers import (
+        _parse_voltage_tag,
+    )
+    raw = (getattr(feat, "raw_tags", None) or {}).get("voltage", "")
+    levels = _parse_voltage_tag(str(raw)) if raw else []
+    if not levels:
+        levels = [v for v in (feat.voltage_kv, feat.voltage_kv_secondary)
+                  if (v or 0) > 0]
+    return levels
+
+
+def _same_level(a: float, b: float, ratio: float = _SAME_LEVEL_RATIO) -> bool:
+    return a > 0 and b > 0 and max(a, b) / min(a, b) <= ratio
+
+
+def _country_mv_level(features) -> float:
+    """The medium-voltage level the fetched data uses most (lines, stations,
+    transformers), or 0 when it tags none."""
+    from collections import Counter
+
+    from esfex.visualization.workflows.grid_mapping_fetchers import _MV_CEILING_KV
+    counts: Counter = Counter()
+    for f in features:
+        if f.feature_type in ("line", "substation", "transformer"):
+            for v in _tag_levels(f):
+                if 10.0 <= v < _MV_CEILING_KV:
+                    counts[round(v, 1)] += 1
+    return counts.most_common(1)[0][0] if counts else 0.0
+
+
+def _reconcile_station_voltages(stations, lines, station_radius_km: float,
+                                decisions: list) -> list:
+    """Make substations' and transformers' HV levels agree with the lines.
+
+    Lines are the most numerous and most consistently tagged OSM power
+    features, so where a station's tag disagrees with them the lines win:
+
+    * **line consensus**: a station tagged with one HV level whose own lines
+      (at least two whose end lies within ``station_radius_km`` and nearer to
+      it than to any other station) all carry another single level, none of
+      them its own, takes the lines' level;
+    * **off-standard level**: an HV level no line in the data carries (e.g.
+      132 kV in a 220/110 kV country) is snapped to the nearest level lines
+      do carry, when within 30 %.
+
+    Medium voltage (below 60 kV) is left as tagged: generator terminals and
+    distribution levels legitimately have no lines in a transmission fetch.
+    Returns the station list with corrected copies; inputs are not mutated.
+    Each correction is appended to ``decisions``.
+    """
+    import dataclasses
+    from collections import defaultdict
+
+    from esfex.visualization.workflows.grid_mapping_fetchers import _MV_CEILING_KV
+
+    line_levels: list[list[float]] = []
+    line_ends: list[tuple] = []
+    carried: set[float] = set()
+    for ln in lines:
+        lv = [round(v, 1) for v in _tag_levels(ln) if v >= _MV_CEILING_KV]
+        if lv:
+            line_levels.append(lv)
+            coords = ln.line_coords or []
+            line_ends.append((coords[0], coords[-1]) if coords else ())
+            carried.update(lv)
+    if not carried:
+        return list(stations)
+
+    # Each line end belongs to the nearest station within the radius, so a
+    # 110 kV station does not borrow the 220 kV lines of the station next door.
+    cell = max(station_radius_km, 0.1) / 111.0
+    grid: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for si, st in enumerate(stations):
+        grid[(int(st.latitude // cell), int(st.longitude // cell))].append(si)
+    lines_of: dict[int, set[int]] = defaultdict(set)
+    for k, pair in enumerate(line_ends):
+        for la, lo in pair:
+            ci, cj = int(la // cell), int(lo // cell)
+            best, best_d = None, station_radius_km
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    for si in grid.get((ci + di, cj + dj), ()):
+                        d = _haversine_km(la, lo, stations[si].latitude,
+                                          stations[si].longitude)
+                        if d <= best_d:
+                            best, best_d = si, d
+            if best is not None:
+                lines_of[best].add(k)
+
+    def _nearest_carried(v):
+        best = min(carried, key=lambda c: abs(math.log(c / v)))
+        return best if max(best, v) / min(best, v) <= _OFF_STANDARD_RATIO else 0.0
+
+    out = []
+    for si, st in enumerate(stations):
+        levels = [v for v in (st.voltage_kv, st.voltage_kv_secondary)
+                  if (v or 0) > 0]
+        new_levels = list(levels)
+        for i, v in enumerate(levels):
+            if v < _MV_CEILING_KV:
+                continue
+            rule, nv, detail = "", v, ""
+            # Line consensus: only for a station tagged with this one level.
+            if len(levels) == 1:
+                ks = lines_of.get(si, set())
+                sets = {tuple(sorted(line_levels[k])) for k in ks}
+                if (len(ks) >= _MIN_CONSENSUS_LINES and len(sets) == 1
+                        and len(next(iter(sets))) == 1):
+                    w = next(iter(sets))[0]
+                    if not _same_level(v, w, 1.10):
+                        rule, nv = "line_consensus", w
+                        detail = f"{len(ks)} line(s) at {w:g} kV end here"
+            if not rule and not any(_same_level(v, c) for c in carried):
+                w = _nearest_carried(v)
+                if w:
+                    rule, nv = "off_standard_level", w
+                    detail = ("no line in the data carries this level; lines "
+                              "carry " + ", ".join(
+                                  f"{c:g}" for c in sorted(carried, reverse=True))
+                              + " kV")
+            if rule:
+                new_levels[i] = nv
+                decisions.append({
+                    "element": st.feature_type, "id": st.osm_id or st.name,
+                    "name": st.name, "lat": st.latitude, "lng": st.longitude,
+                    "kv": nv, "was": v, "rule": rule, "detail": detail})
+        if new_levels != levels:
+            hi = max(new_levels)
+            lo = min(new_levels) if len(new_levels) > 1 else 0.0
+            st = dataclasses.replace(
+                st, voltage_kv=hi,
+                voltage_kv_secondary=0.0 if _same_level(hi, lo) else lo)
+        out.append(st)
+    return out
+
+
+def _propagate_voltage(state, mv_level_kv: float = 0.0,
+                       decisions: list | None = None) -> int:
     """Infer voltage for buses/lines OSM left untagged, from their tagged
     neighbours — instead of defaulting every unknown to 220 kV.
 
@@ -942,9 +1110,17 @@ def _propagate_voltage(state) -> int:
     voltage and terminates on same-voltage buses, so an untagged bus takes the
     voltage of the lines on it; the value then flows along untagged lines to
     the next bus (a fixed-point relaxation). Every line whose voltage is
-    resolved has its rating and impedance recomputed to match. A bus reaching
-    no tagged neighbour keeps a conservative fallback.
+    resolved has its rating and impedance recomputed to match.
 
+    A bus no tagged line reaches gets medium voltage (``mv_level_kv``, the
+    country's most common MV level, else 33 kV at 50 Hz / 34.5 kV at 60 Hz):
+    OSM tags nearly every transmission line (94 % in Cuba), so what stays
+    untagged and unreached is distribution, or an insular grid such as an
+    island's. Where its whole component (lines, transformers, converters)
+    knows no voltage at all, it is an isolated system; those buses are
+    recorded with rule ``isolated_mv`` so the voltage floor keeps them.
+
+    ``decisions`` collects one dict per bus whose voltage was assigned.
     Returns the number of buses + lines whose voltage was assigned.
     """
     from collections import defaultdict
@@ -954,6 +1130,7 @@ def _propagate_voltage(state) -> int:
     )
 
     buses = state.buses
+    notes = decisions if decisions is not None else []
     inc: dict[str, list] = defaultdict(list)
     for ln in state.transmission_lines:
         if getattr(ln, "decorative", False):
@@ -962,6 +1139,17 @@ def _propagate_voltage(state) -> int:
             inc[ln.from_bus].append(ln)
         if ln.to_bus in buses:
             inc[ln.to_bus].append(ln)
+
+    nodes = getattr(state, "nodes", None) or []
+
+    def _note(bid, kv, rule, detail=""):
+        b = buses[bid]
+        pn = b.parent_node
+        node = (nodes[pn].name if isinstance(pn, int) and 0 <= pn < len(nodes)
+                else "")
+        notes.append({"element": "bus", "id": bid, "name": b.name,
+                      "node": node, "lat": b.latitude, "lng": b.longitude,
+                      "kv": kv, "was": 0.0, "rule": rule, "detail": detail})
 
     # Fixed-point relaxation: an untagged bus takes the highest voltage among
     # the elements it touches (line's own voltage, else the neighbour bus).
@@ -980,10 +1168,49 @@ def _propagate_voltage(state) -> int:
                     nv.append(v)
             if nv:
                 b.voltage_kv = max(nv)
+                _note(bid, b.voltage_kv, "inferred_from_lines")
                 changed += 1
                 progressed = True
         if not progressed:
             break
+
+    # Buses no tagged line reaches → medium voltage. Components over every
+    # branch kind tell an isolated system from distribution under a known grid.
+    unknown = [bid for bid, b in buses.items() if (b.voltage_kv or 0) <= 0]
+    if unknown:
+        adj: dict[str, set] = defaultdict(set)
+        for br in (list(state.transmission_lines) + list(state.transformers)
+                   + list(getattr(state, "acdc_converters", []) or [])
+                   + list(getattr(state, "freq_converters", []) or [])):
+            if getattr(br, "decorative", False):
+                continue
+            u, v = getattr(br, "from_bus", None), getattr(br, "to_bus", None)
+            if u in buses and v in buses and u != v:
+                adj[u].add(v)
+                adj[v].add(u)
+        seen: set = set()
+        for start in unknown:
+            if start in seen:
+                continue
+            comp, stack = [], [start]
+            while stack:
+                x = stack.pop()
+                if x in seen:
+                    continue
+                seen.add(x)
+                comp.append(x)
+                stack.extend(adj[x] - seen)
+            isolated = all((buses[x].voltage_kv or 0) <= 0 for x in comp)
+            for x in comp:
+                b = buses[x]
+                if (b.voltage_kv or 0) > 0:
+                    continue
+                kv = mv_level_kv or (34.5 if round(b.frequency_hz or 50) == 60
+                                     else 33.0)
+                b.voltage_kv = kv
+                _note(x, kv, "isolated_mv" if isolated else "unreached_mv",
+                      f"{len(comp)} bus(es) in its component")
+                changed += 1
 
     # Resolve untagged line voltages from their endpoints and recompute the
     # rating + impedance from the now-known level.
@@ -992,9 +1219,7 @@ def _propagate_voltage(state) -> int:
             continue
         ev = [buses[e].voltage_kv for e in (ln.from_bus, ln.to_bus)
               if e in buses and (buses[e].voltage_kv or 0) > 0]
-        if not ev:
-            continue
-        v = max(ev)
+        v = max(ev) if ev else (mv_level_kv or 33.0)
         ln.voltage_kv = v
         ln.capacity_mw = estimate_line_capacity_mw(
             v, getattr(ln, "num_circuits", 1) or 1)
@@ -1004,21 +1229,20 @@ def _propagate_voltage(state) -> int:
                 system_base_mva(state))
         changed += 1
 
-    # Conservative fallback for anything still unknown (an all-untagged pocket
-    # with no tagged neighbour anywhere): keep the legacy default so it is not
-    # left at 0 kV, but this now applies to a handful of isolated buses rather
-    # than the whole network.
-    for b in buses.values():
-        if (b.voltage_kv or 0) <= 0:
-            b.voltage_kv = 220.0
-            changed += 1
-    for ln in state.transmission_lines:
-        if getattr(ln, "decorative", False) or (ln.voltage_kv or 0) > 0:
-            continue
-        ln.voltage_kv = 220.0
-        ln.capacity_mw = estimate_line_capacity_mw(
-            220.0, getattr(ln, "num_circuits", 1) or 1)
-        changed += 1
+    # Transformer and converter ratings follow the buses they now sit on.
+    for tr in state.transformers:
+        for side, attr in (("from_bus", "from_voltage_kv"),
+                           ("to_bus", "to_voltage_kv")):
+            b = buses.get(getattr(tr, side, None))
+            if b is not None and (getattr(tr, attr, 0) or 0) <= 0:
+                setattr(tr, attr, b.voltage_kv)
+    for cv in getattr(state, "acdc_converters", []) or []:
+        ac, dc = buses.get(cv.from_bus), buses.get(cv.to_bus)
+        if ac is not None and (cv.from_voltage_kv or 0) <= 0:
+            cv.from_voltage_kv = ac.voltage_kv
+        if (cv.dc_voltage_kv or 0) <= 0:
+            cv.dc_voltage_kv = (dc.voltage_kv if dc is not None
+                                else cv.from_voltage_kv)
     return changed
 
 
@@ -1858,8 +2082,9 @@ def _create_transformer(
     force_node: int | None,
 ) -> None:
     """Create a transformer from a GridFeature."""
-    v_high = tr.voltage_kv if tr.voltage_kv > 0 else 220.0
-    v_low = tr.voltage_kv_secondary if tr.voltage_kv_secondary > 0 else 110.0
+    # 0 = unknown: the bus takes its level from its lines (_propagate_voltage).
+    v_high = tr.voltage_kv if tr.voltage_kv > 0 else 0.0
+    v_low = tr.voltage_kv_secondary if tr.voltage_kv_secondary > 0 else 0.0
 
     # HV side bus
     props_hv = {"voltage_kv": v_high}
@@ -1881,14 +2106,16 @@ def _create_transformer(
     )
 
     if from_bus == to_bus:
-        # Both sides snapped to the same existing bus (typically when
-        # the source feature has no usable voltage info so HV and LV
-        # default to 220/110 but the snap matches an existing nearby
-        # bus on either side). A transformer with both terminals on
-        # the same bus is electrically meaningless.
+        # Both sides snapped to the same existing bus (typically when a
+        # side's voltage is unknown, so its snap is voltage-agnostic and
+        # finds the other side's bus). A transformer with both terminals
+        # on the same bus is electrically meaningless.
+        why = (" (one side's voltage is untagged; the station's levels are "
+               "tied by its auto-transformer instead)"
+               if v_high <= 0 or v_low <= 0 else "")
         result.warnings.append(
             f"Transformer '{tr.name}': both sides snapped to "
-            f"{from_bus}, skipped (self-loop)"
+            f"{from_bus}, skipped (self-loop){why}"
         )
         return
 
@@ -1924,7 +2151,7 @@ def _create_converter(
     force_node: int | None,
 ) -> None:
     """Create an AC/DC converter from a GridFeature."""
-    v = conv.voltage_kv if conv.voltage_kv > 0 else 220.0
+    v = conv.voltage_kv if conv.voltage_kv > 0 else 0.0   # 0: inferred later
 
     # AC side bus
     props_ac = {"voltage_kv": v, "current_type": "AC"}
