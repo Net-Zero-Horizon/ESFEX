@@ -27,8 +27,8 @@ function refresh() {
         try {
             currentData = data;
             currentMethod = data.method || "pca";
+            hideStatus();                       // render() may show its own empty state
             render(currentData, currentMethod);
-            hideStatus();
         } catch (e) {
             showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e);
         }

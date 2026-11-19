@@ -40,8 +40,8 @@ function refresh() {
             currentData = data;
             currentCmap = data.colormap || "Viridis";
             currentGranularity = data.granularity || "tech";
+            hideStatus();                       // render() may show its own empty state
             render(currentData, currentCmap, currentGranularity);
-            hideStatus();
         } catch (e) {
             showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e);
         }
