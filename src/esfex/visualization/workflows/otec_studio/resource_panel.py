@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.otec_studio import resource as rsrc
 from esfex.visualization.workflows.otec_studio.workers import (
     ClimateDeltaWorker,
@@ -41,7 +42,27 @@ from esfex.visualization.workflows.otec_studio.workers import (
 
 logger = logging.getLogger(__name__)
 
+# Site fields shown in the table → translation key of their header.
 _COLS = ["name", "longitude", "latitude", "t_ww", "t_cw", "dist_shore"]
+_COL_KEYS = {
+    "name": "otec_studio.res_col_name",
+    "longitude": "otec_studio.res_col_lon",
+    "latitude": "otec_studio.res_col_lat",
+    "t_ww": "otec_studio.res_col_warm_t",
+    "t_cw": "otec_studio.res_col_cold_t",
+    "dist_shore": "otec_studio.res_col_dist",
+}
+# Hazard columns appended after enrichment → translation key of their header.
+_HAZARD_KEYS = {
+    "in_mpa_strict": "otec_studio.res_hazard_in_mpa_strict",
+    "ais_density_pct": "otec_studio.res_hazard_ais_density_pct",
+    "pga": "otec_studio.res_hazard_pga",
+    "cyclone_freq_per_yr": "otec_studio.res_hazard_cyclone_freq_per_yr",
+}
+
+
+def _site_name(n: int) -> str:
+    return tr("otec_studio.res_site_name", number=n)
 
 
 class ResourcePanel(QWidget):
@@ -50,7 +71,7 @@ class ResourcePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._project = None
-        self._sites = [rsrc.make_site("Site 1", -158.0, 21.0, 26.0, 5.0)]
+        self._sites = [rsrc.make_site(_site_name(1), -158.0, 21.0, 26.0, 5.0)]
         self._worker = None
         self._build_ui()
         self._refresh_table()
@@ -63,29 +84,25 @@ class ResourcePanel(QWidget):
         root = QVBoxLayout(self)
 
         # ── Site table ──
-        tgrp = QGroupBox("Candidate sites")
+        tgrp = QGroupBox(tr("otec_studio.res_sites_group"))
         tl = QVBoxLayout(tgrp)
         self._table = QTableWidget()
         self._table.setColumnCount(len(_COLS))
-        self._table.setHorizontalHeaderLabels(
-            ["Name", "Lon", "Lat", "Warm T", "Cold T", "Dist (km)"]
-        )
+        self._table.setHorizontalHeaderLabels([tr(_COL_KEYS[c]) for c in _COLS])
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
         self._table.itemSelectionChanged.connect(self._on_select)
         tl.addWidget(self._table)
 
         btns = QHBoxLayout()
-        b_add = QPushButton("Add site"); b_add.clicked.connect(self._add_site)
+        b_add = QPushButton(tr("otec_studio.res_add_site")); b_add.clicked.connect(self._add_site)
         btns.addWidget(b_add)
-        b_del = QPushButton("Remove"); b_del.clicked.connect(self._remove_site)
+        b_del = QPushButton(tr("common.remove")); b_del.clicked.connect(self._remove_site)
         btns.addWidget(b_del)
-        b_use = QPushButton("Use as active resource →")
+        b_use = QPushButton(tr("otec_studio.res_use_as_resource"))
         b_use.setStyleSheet(
             "background-color: #2980b9; color: white; font-weight: bold; padding: 6px;")
-        b_use.setToolTip(
-            "Push the selected site into the project so Optimization / Economics "
-            "/ Operation auto-fill from it")
+        b_use.setToolTip(tr("otec_studio.res_use_as_resource_tip"))
         b_use.clicked.connect(self._use_as_resource)
         btns.addWidget(b_use)
         btns.addStretch()
@@ -93,33 +110,31 @@ class ResourcePanel(QWidget):
         root.addWidget(tgrp, 1)
 
         # ── Climate scenario ──
-        cgrp = QGroupBox("Climate scenario (CMIP6 / SSP)  —  network")
+        cgrp = QGroupBox(tr("otec_studio.res_climate_group"))
         cl = QHBoxLayout(cgrp)
-        cl.addWidget(QLabel("Scenario:"))
+        cl.addWidget(QLabel(tr("otec_studio.res_scenario")))
         self._scn = QComboBox(); self._scn.addItems(rsrc.SSP_SCENARIOS)
         self._scn.setCurrentText("ssp245")
         cl.addWidget(self._scn)
-        cl.addWidget(QLabel("Year:"))
+        cl.addWidget(QLabel(tr("otec_studio.res_year")))
         self._year = QSpinBox(); self._year.setRange(2030, 2100); self._year.setValue(2050)
         cl.addWidget(self._year)
-        cl.addWidget(QLabel("CW depth:"))
+        cl.addWidget(QLabel(tr("otec_studio.cw_depth")))
         self._depth = QDoubleSpinBox(); self._depth.setRange(100, 2000)
         self._depth.setValue(1000.0); self._depth.setSuffix(" m")
         cl.addWidget(self._depth)
-        self._b_clim = QPushButton("Fetch & apply delta")
+        self._b_clim = QPushButton(tr("otec_studio.res_fetch_delta"))
         self._b_clim.clicked.connect(self._fetch_climate)
         cl.addWidget(self._b_clim)
         cl.addStretch()
         root.addWidget(cgrp)
 
         # ── Resource characterization (ported from OTEC Analysis) ──
-        chgrp = QGroupBox("Resource characterization (seasonal ΔT, Carnot)")
+        chgrp = QGroupBox(tr("otec_studio.res_char_group"))
         chl = QVBoxLayout(chgrp)
         crow = QHBoxLayout()
-        b_char = QPushButton("Characterize selected site")
-        b_char.setToolTip(
-            "Monthly ΔT / temperature pattern + Carnot ceiling for the site "
-            "(synthetic seasonal series when no CMEMS daily data is attached)")
+        b_char = QPushButton(tr("otec_studio.res_characterize"))
+        b_char.setToolTip(tr("otec_studio.res_characterize_tip"))
         b_char.clicked.connect(self._characterize)
         crow.addWidget(b_char)
         self._char_info = QLabel("")
@@ -134,9 +149,9 @@ class ResourcePanel(QWidget):
         root.addWidget(chgrp)
 
         # ── Hazard enrichment ──
-        hgrp = QGroupBox("Siting hazards (MPA / AIS / seismic / cyclone)  —  network")
+        hgrp = QGroupBox(tr("otec_studio.res_hazards_group"))
         hl = QHBoxLayout(hgrp)
-        self._b_haz = QPushButton("Enrich hazards for all sites")
+        self._b_haz = QPushButton(tr("otec_studio.res_enrich"))
         self._b_haz.clicked.connect(self._enrich)
         hl.addWidget(self._b_haz)
         hl.addStretch()
@@ -172,14 +187,14 @@ class ResourcePanel(QWidget):
                 return it.text() if it else default
             try:
                 sites.append(rsrc.make_site(
-                    cell(0, f"Site {r+1}"),
+                    cell(0, _site_name(r + 1)),
                     float(cell(1, 0)), float(cell(2, 0)),
                     float(cell(3, 26)), float(cell(4, 5)),
                     float(cell(5, 20)),
                 ))
             except ValueError:
                 sites.append(self._sites[r] if r < len(self._sites) else
-                             rsrc.make_site(f"Site {r+1}", 0, 0, 26, 5))
+                             rsrc.make_site(_site_name(r + 1), 0, 0, 26, 5))
         self._sites = sites
         return sites
 
@@ -199,7 +214,7 @@ class ResourcePanel(QWidget):
     def _add_site(self):
         self._read_table()
         n = len(self._sites) + 1
-        self._sites.append(rsrc.make_site(f"Site {n}", -158.0, 21.0, 26.0, 5.0))
+        self._sites.append(rsrc.make_site(_site_name(n), -158.0, 21.0, 26.0, 5.0))
         self._refresh_table()
 
     def _remove_site(self):
@@ -220,11 +235,9 @@ class ResourcePanel(QWidget):
             window = self.window()
             if hasattr(window, "_sync_panels"):
                 window._sync_panels()
-        self._status.setText(
-            f"Active resource set to '{site['name']}' "
-            f"(T_WW={site['t_ww']:g}°C, T_CW={site['t_cw']:g}°C) — "
-            f"other panels now read this site."
-        )
+        self._status.setText(tr(
+            "otec_studio.res_active_set", name=site["name"],
+            t_ww=f"{site['t_ww']:g}", t_cw=f"{site['t_cw']:g}"))
         self._status.setStyleSheet("color: #2ecc71;")
 
     def _characterize(self):
@@ -234,19 +247,24 @@ class ResourcePanel(QWidget):
         s = self._sites[self._selected_row()]
         daily = eng.synthetic_daily(s["t_ww"], s["t_cw"])
         mc = eng.monthly_characterization(daily)
-        self._char_info.setText(
-            f"ΔT {mc['dt_min']:.1f}–{mc['dt_max']:.1f} K · "
-            f"Carnot {mc['carnot_mean'] * 100:.2f}%")
+        self._char_info.setText(tr(
+            "otec_studio.res_char_info", dt_min=f"{mc['dt_min']:.1f}",
+            dt_max=f"{mc['dt_max']:.1f}",
+            carnot=f"{mc['carnot_mean'] * 100:.2f}"))
         ax = self._char_ax
         ax.clear()
         m = mc["months"]
-        ax.plot(m, mc["mean_warm"], "o-", color="#e67e22", ms=3, label="warm")
-        ax.plot(m, mc["mean_cold"], "o-", color="#3498db", ms=3, label="cold")
+        ax.plot(m, mc["mean_warm"], "o-", color="#e67e22", ms=3,
+                label=tr("otec_studio.res_legend_warm"))
+        ax.plot(m, mc["mean_cold"], "o-", color="#3498db", ms=3,
+                label=tr("otec_studio.res_legend_cold"))
         ax2 = ax.twinx()
         ax2.bar(m, mc["mean_dt"], alpha=0.2, color="#2ecc71")
         ax2.set_ylabel("ΔT (K)")
-        ax.set_xlabel("Month"); ax.set_ylabel("Temperature (°C)")
-        ax.set_title("Seasonal resource", fontsize=10, fontweight="bold")
+        ax.set_xlabel(tr("otec_studio.res_axis_month"))
+        ax.set_ylabel(tr("otec_studio.axis_temperature_c"))
+        ax.set_title(tr("otec_studio.res_seasonal_title"), fontsize=10,
+                     fontweight="bold")
         ax.legend(fontsize=7, loc="center left")
         ax.set_xticks(list(m))
         self._char_canvas.draw()
@@ -261,9 +279,9 @@ class ResourcePanel(QWidget):
         site = self._sites[r]
         self._b_clim.setEnabled(False)
         self._progress.setVisible(True)
-        self._status.setText(
-            f"Fetching {self._scn.currentText()} delta @ {self._year.value()} "
-            f"(network)…")
+        self._status.setText(tr(
+            "otec_studio.res_fetching", scenario=self._scn.currentText(),
+            year=self._year.value()))
         self._status.setStyleSheet("color: #888;")
         self._clim_row = r
         self._worker = ClimateDeltaWorker(
@@ -286,9 +304,9 @@ class ResourcePanel(QWidget):
         )
         self._sites.append(new)
         self._refresh_table()
-        self._status.setText(
-            f"Applied Δ={delta:+.2f}°C ({label}) → added shifted site "
-            f"'{new['name']}'.")
+        self._status.setText(tr(
+            "otec_studio.res_delta_applied", delta=f"{delta:+.2f}",
+            label=label, name=new["name"]))
         self._status.setStyleSheet("color: #2ecc71;")
 
     # ── hazards (network) ──
@@ -296,7 +314,7 @@ class ResourcePanel(QWidget):
         sites = self._read_table()
         self._b_haz.setEnabled(False)
         self._progress.setVisible(True)
-        self._status.setText("Enriching siting hazard layers (network)…")
+        self._status.setText(tr("otec_studio.res_enriching"))
         self._status.setStyleSheet("color: #888;")
         self._worker = HazardEnrichWorker(sites)
         self._worker.finished.connect(self._on_hazards)
@@ -312,18 +330,20 @@ class ResourcePanel(QWidget):
         self._table.setColumnCount(base + len(present))
         for j, c in enumerate(present):
             self._table.setHorizontalHeaderItem(
-                base + j, QTableWidgetItem(c))
+                base + j, QTableWidgetItem(tr(_HAZARD_KEYS[c]) if c in _HAZARD_KEYS
+                                           else c))
             for r in range(min(len(df), self._table.rowCount())):
                 val = df.iloc[r][c]
                 text = f"{val:g}" if isinstance(val, float) else str(val)
                 self._table.setItem(r, base + j, QTableWidgetItem(text))
-        self._status.setText(f"Enriched: {', '.join(present)}.")
+        self._status.setText(tr(
+            "otec_studio.res_enriched",
+            columns=", ".join(tr(_HAZARD_KEYS.get(c, c)) for c in present)))
         self._status.setStyleSheet("color: #2ecc71;")
 
     def _on_net_error(self, msg):
         self._progress.setVisible(False)
         self._b_clim.setEnabled(True)
         self._b_haz.setEnabled(True)
-        self._status.setText(
-            f"Network operation unavailable (offline / no credentials): {msg}")
+        self._status.setText(tr("otec_studio.res_network_unavailable", error=msg))
         self._status.setStyleSheet("color: #e67e22;")
