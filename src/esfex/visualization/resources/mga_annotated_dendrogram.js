@@ -82,10 +82,14 @@ function objectiveLabel(obj, fallback) {
     return names[obj] || fallback || obj;
 }
 
-// Leaf labels come as "Alt <id>" from Python.
-function altLeafText(text) {
-    const m = /^Alt (\S+)$/.exec(String(text));
-    return m ? _t("web.charts.mga_annotated_dendrogram.alt_label", { id: m[1] }) : text;
+// Leaf labels carry the alternative id (alt_id); older payloads only
+// the English "Alt <id>" text, any other text is shown as sent.
+function altLeafText(lab) {
+    if (lab.alt_id !== undefined && lab.alt_id !== null) {
+        return _t("web.charts.mga_annotated_dendrogram.alt_label", { id: lab.alt_id });
+    }
+    const m = /^Alt (\S+)$/.exec(String(lab.text));
+    return m ? _t("web.charts.mga_annotated_dendrogram.alt_label", { id: m[1] }) : lab.text;
 }
 
 function render(data) {
@@ -135,7 +139,7 @@ function render(data) {
         traces.push({
             type: "scatter", mode: "text",
             x: [lab.x], y: [lab.y],
-            text: [(lab.is_optimal ? "★ " : "") + altLeafText(lab.text)],
+            text: [(lab.is_optimal ? "★ " : "") + altLeafText(lab)],
             textposition: textPos,
             textangle: ang,
             textfont: {

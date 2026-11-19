@@ -179,10 +179,13 @@ function renderMix(data) {
     // tech's legendgroup, no entry of their own.
     for (const s of (data.retirements || [])) {
         const neg = (s.values_gw || []).map(v => -Math.abs(v || 0));
-        // Retirement labels arrive with a " (retired)" suffix from
-        // the payload builder; group with the parent tech entry so
-        // a click on "Solar PV" toggles the retirements too.
-        const parentLabel = s.label.replace(/\s*\(retired\)\s*$/, "");
+        // The payload builder sends the technology's own label as
+        // parent_label (the shown label is translated, e.g. "Solar PV
+        // (retired)"); group with that entry so a click on "Solar PV"
+        // toggles the retirements too. Older payloads only carry the
+        // English " (retired)" suffix.
+        const parentLabel = s.parent_label
+            || s.label.replace(/\s*\(retired\)\s*$/, "");
         traces.push({
             x: yearLabels, y: neg,
             type: "bar",

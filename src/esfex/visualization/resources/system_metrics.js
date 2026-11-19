@@ -8,8 +8,8 @@
  *
  * Payload contract (see SystemMetricsEvolutionChart._build_payload):
  *   { years_min, years_max, years: [...],
- *     categories: [{name, color}],   // ordered
- *     metrics: [{label, category, values_str:[...], normalized:[...],
+ *     categories: [{id, name, color}],   // ordered; name is shown
+ *     metrics: [{label, category (an id), values_str:[...], normalized:[...],
  *                min_str, max_str}] }
  */
 "use strict";
@@ -141,7 +141,12 @@ function renderMetrics(data) {
     // Walk the metrics array; whenever the category changes we know
     // the bounds of the previous category's strip.
     const catMap = {};
-    (data.categories || []).forEach((c, idx) => { catMap[c.name] = c.color; });
+    const catName = {};
+    (data.categories || []).forEach(c => {
+        const id = c.id || c.name;
+        catMap[id] = c.color;
+        catName[id] = c.name;
+    });
     let runStart = 0;
     let runCat = metrics[0] ? metrics[0].category : "";
     for (let i = 1; i <= N; i++) {
@@ -158,7 +163,7 @@ function renderMetrics(data) {
                 x: 1.0, y: (runStart + i - 1) / 2,
                 xanchor: "left", yanchor: "middle",
                 xshift: 60,
-                text: "<b>" + runCat + "</b>",
+                text: "<b>" + (catName[runCat] || runCat) + "</b>",
                 showarrow: false, font: { size: 10, color: "#2C3E50" },
                 textangle: 90,
             });
