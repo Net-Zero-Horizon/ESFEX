@@ -137,11 +137,12 @@ Compute system-level financial analysis from simulation results.
 
 1. Load system configuration (generators, batteries, technologies) and year list from HDF5.
 2. For each year, load generation output, investment decisions, and electricity prices.
-3. Compute annual costs: if `/cost_breakdown/year_YYYY/` exists, read directly; otherwise recalculate from generation × unit cost parameters.
-4. Compute annual revenue from energy sales (PPA or nodal prices), carbon credits, RECs, and capacity payments.
-5. Compute WACC, depreciation schedule, debt service, and tax.
-6. Build the annual cash flow table and discount all flows to NPV.
-7. Compute IRR, MIRR, payback, DSCR, LLCR, and system LCOE.
+3. Compute annual costs: if `/cost_breakdown/year_YYYY/` exists, read directly; otherwise recalculate from generation × unit cost parameters. A unit's `fuel_cost` grows with its fuel's `price_growth_rate`, `(1 + rate)^(year − base_year)`, as the dispatch charges it (`system_configuration/fuel_price_growth`; files written without it are valued at the flat `fuel_cost`, with a note in the log).
+4. Capital cost of the units the master built: each year's builds (the `investment_*` attributes of the year's results group) × their technology's `invest_cost` (batteries: `invest_cost_power` and `invest_cost_energy`), so a build that replaces retired or degraded capacity is paid for. Files without build records book it on the growth of the built units' MW in service.
+5. Compute annual revenue from energy sales (PPA or nodal prices), carbon credits, RECs, and capacity payments.
+6. Compute WACC, depreciation schedule, debt service, and tax.
+7. Build the annual cash flow table and discount all flows to NPV.
+8. Compute IRR, MIRR, payback, DSCR, LLCR, and system LCOE.
 
 **Example:**
 

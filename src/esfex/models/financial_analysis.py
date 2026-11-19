@@ -460,7 +460,9 @@ def _load_system_from_h5(h5_path: Path | str) -> dict:
 
     Returns dict with keys: gen_configs, bat_configs, tech_configs,
     bat_tech_configs, years, scenarios, temporal_res, num_nodes,
-    discount_rate, penalties.
+    discount_rate, penalties, fuel_price_growth (``{fuel: annual rate}``)
+    and fuel_price_base_year (None for a file written before they were
+    recorded, see :func:`_fuel_price_factor`).
     """
     import h5py
 
@@ -476,6 +478,8 @@ def _load_system_from_h5(h5_path: Path | str) -> dict:
         "num_nodes": 1,
         "discount_rate": 0.08,
         "penalties": {},
+        "fuel_price_growth": {},
+        "fuel_price_base_year": None,
     }
 
     with h5py.File(h5_path, "r") as f:
@@ -530,7 +534,113 @@ def _load_system_from_h5(h5_path: Path | str) -> dict:
                 if btk in bt_grp:
                     info["bat_tech_configs"].append(dict(bt_grp[btk].attrs))
 
+        # Fuel price growth of the fuels block (base year + rate per fuel)
+        if "system_configuration/fuel_price_growth" in f:
+            fg = f["system_configuration/fuel_price_growth"].attrs
+            info["fuel_price_base_year"] = int(fg.get("base_year", 0)) or None
+            info["fuel_price_growth"] = {
+                str(k): float(v) for k, v in fg.items() if k != "base_year"}
+
     return info
+
+
+def _fuel_price_factor(info: dict, fuel, year: int) -> float:
+    """Growth of *fuel*'s price from the run's base year to *year*, as the
+    dispatch charges a unit's ``fuel_cost``: ``(1 + price_growth_rate) **
+    (year - base_year)`` of the fuels block (``fuel_price_factor`` in the
+    config schema and in Julia); 1 for a fuel without growth and for a file
+    that does not record it (:func:`_note_flat_fuel_prices`)."""
+    base = info.get("fuel_price_base_year")
+    rate = info.get("fuel_price_growth", {}).get(str(fuel or "").strip(), 0.0)
+    if base is None or not rate:
+        return 1.0
+    return (1.0 + rate) ** (int(year) - base)
+
+
+_FLAT_FUEL_NOTED: set[str] = set()
+
+
+def _note_flat_fuel_prices(info: dict, h5_path) -> None:
+    """Note (once per file) that a results file written before the fuel
+    price growth was recorded has its fuel valued at the flat
+    ``fuel_cost``."""
+    key = str(Path(h5_path).resolve())
+    if info.get("fuel_price_base_year") is None and key not in _FLAT_FUEL_NOTED:
+        _FLAT_FUEL_NOTED.add(key)
+        logger.info(
+            "%s does not record the fuel price growth (written by an older "
+            "ESFEX): fuel is valued at the flat fuel_cost of every year",
+            Path(h5_path).name)
+
+
+# Build records of a year (root scenario attrs): MW or MWh the master built
+# that year per technology index and node, by the attr's prefix
+_BUILD_ATTRS = (
+    ("tech", "investment_tech_investment_power_", 3),
+    ("bat_power", "investment_bat_tech_investment_power_", 4),
+    ("bat_energy", "investment_bat_tech_investment_capacity_", 4),
+)
+
+
+def _year_builds(h5_path: Path | str, scenario_key: str) -> dict[str, dict[int, dict[int, float]]]:
+    """What the master built in one year: ``{"tech" | "bat_power" |
+    "bat_energy": {technology index: {node: MW or MWh}}}``, from the
+    ``investment_*`` attrs of the year's results group (the build year's
+    master investments, see the runner's export); empty without builds."""
+    import h5py
+
+    out: dict[str, dict[int, dict[int, float]]] = {k: {} for k, _, _ in _BUILD_ATTRS}
+    with h5py.File(h5_path, "r") as f:
+        attrs = f[f"detailed_results/{scenario_key}"].attrs
+        for attr_key, val in attrs.items():
+            for kind, prefix, _ in _BUILD_ATTRS:
+                if not attr_key.startswith(prefix):
+                    continue
+                parts = attr_key[len(prefix):].split("_")
+                try:
+                    t_idx, n_idx = int(parts[0]), int(parts[1])
+                    mw = float(val)
+                except (IndexError, ValueError, TypeError):
+                    break
+                if mw > 0:
+                    per_node = out[kind].setdefault(t_idx, {})
+                    per_node[n_idx] = per_node.get(n_idx, 0.0) + mw
+                break
+    return out
+
+
+def _build_capex(builds: dict, info: dict) -> dict[str, float]:
+    """Capex of one year's builds (:func:`_year_builds`) per built unit
+    (``"Investment <technology>"``): MW (MWh) built at each node × the
+    technology's ``invest_cost`` (``invest_cost_power`` /
+    ``invest_cost_energy``) at that node."""
+    out: dict[str, float] = {}
+
+    def _add(configs, kind, field):
+        for t_idx, per_node in builds.get(kind, {}).items():
+            if not 0 <= t_idx < len(configs):
+                continue
+            cfg = configs[t_idx]
+            size = max([info.get("num_nodes", 1)] + [n + 1 for n in per_node])
+            cost = _as_array(cfg.get(field, 0.0), size)
+            name = INVESTMENT_PREFIX + _h5safe(str(cfg.get("name", "")).strip())
+            out[name] = out.get(name, 0.0) + sum(
+                mw * float(cost[n]) for n, mw in per_node.items() if n >= 0)
+
+    _add(info["tech_configs"], "tech", "invest_cost")
+    _add(info["bat_tech_configs"], "bat_power", "invest_cost_power")
+    _add(info["bat_tech_configs"], "bat_energy", "invest_cost_energy")
+    return out
+
+
+def _load_year_builds(h5_path: Path | str, info: dict) -> dict[int, dict] | None:
+    """The build records of every year (:func:`_year_builds`), or None when
+    the file records none (no master builds, or a file written without
+    them): capex then falls back to the growth of the built units' power."""
+    builds = {year: _year_builds(h5_path, key) for year, key in info["scenarios"].items()}
+    if not any(any(b.values()) for b in builds.values()):
+        return None
+    return builds
 
 
 def _load_year_data(h5_path: Path | str, scenario_key: str) -> dict:
@@ -652,13 +762,16 @@ def _recalculate_costs(
     temporal_res: int,
     tech_configs: list[dict] | None = None,
     bat_tech_configs: list[dict] | None = None,
+    fuel_factor=None,
 ) -> dict:
     """Reconstruct cost components from generation × config unit costs.
 
     Used when /cost_breakdown/ is not present in HDF5. The units the
     master built are costed with their technology's config; fixed O&M is
     charged on each unit's MW in service (``year_data["power_in_service"]``,
-    the configured rating for older files).
+    the configured rating for older files). *fuel_factor* (fuel name →
+    factor, see :func:`_fuel_price_factor`) grows each unit's ``fuel_cost``
+    to the year's price; flat without it.
     """
     tech_by_name = _index_configs_by_name(tech_configs or [])
     bat_tech_by_name = _index_configs_by_name(bat_tech_configs or [])
@@ -689,6 +802,8 @@ def _recalculate_costs(
 
         # Get per-node cost arrays (stored as scalar or list in HDF5 attrs)
         fuel_cost = _as_array(cfg.get("fuel_cost", 0.0), gen_output.shape[0])
+        if fuel_factor is not None:
+            fuel_cost = fuel_cost * fuel_factor(cfg.get("fuel", cfg.get("fuel_type")))
         fixed_cost = _as_array(cfg.get("fixed_cost", 0.0), gen_output.shape[0])
         rated = _as_array(cfg.get("rated_power", 0.0), gen_output.shape[0])
         maint_cost = _as_array(cfg.get("maintenance_cost", 0.0), gen_output.shape[0])
@@ -827,7 +942,8 @@ def _index_configs_by_name(configs: list[dict]) -> dict[str, dict]:
 # names them after their candidate technology. Every unit's generation (and
 # battery_discharge) dataset carries its MW in service that year, per node,
 # in this attr: the units the master built, and the existing units after
-# retirement, life extension and degradation.
+# retirement, life extension and degradation. A battery's is its rated
+# discharge power, not degraded (its fixed O&M base).
 INVESTMENT_PREFIX = "Investment "
 POWER_IN_SERVICE_ATTR = "rated_power"
 
@@ -978,6 +1094,12 @@ def compute_system_financials(
     inv_generation = np.zeros(n_years)
     fuel_opex = _fuel_opex_map(info["gen_configs"], info["num_nodes"])
     bat_maint_rate = _battery_opex_rate(info["bat_configs"], info["num_nodes"])
+    _note_flat_fuel_prices(info, h5_path)
+    # Capex of the units the master built: from its build records (what it
+    # built each year); files without them use the growth of the units'
+    # power, which misses a build that only replaces degraded or retired
+    # capacity
+    year_builds = _load_year_builds(h5_path, info)
     # True for years whose CO2 was already priced by the optimizer
     # (cost_breakdown.co2_emission_cost) — a user carbon price is NOT
     # re-applied to those years to avoid double counting.
@@ -1025,6 +1147,7 @@ def compute_system_financials(
                 year_data, info["gen_configs"], info["bat_configs"],
                 info["temporal_res"], info["tech_configs"],
                 info["bat_tech_configs"],
+                fuel_factor=lambda fuel: _fuel_price_factor(info, fuel, year),
             )
             annual_fuel[y_idx] = recalc["fuel_cost"]
             annual_om[y_idx] = recalc["om_cost"] + recalc["battery_cost"]
@@ -1084,11 +1207,19 @@ def compute_system_financials(
                 annual_capex[y_idx] += inv_cost
                 total_capex += inv_cost
 
+        # The master's builds of the year × their technologies' invest_cost
+        if year_builds is not None:
+            build_cost = sum(_build_capex(year_builds.get(year, {}), info).values())
+            annual_capex[y_idx] += build_cost
+            total_capex += build_cost
+            inv_capex_stream[y_idx] += build_cost
+
         # Capacity expansion expressed as "Investment <tech>" generation series
         # (runs without a gen_investment_power group). The installed MW per
         # node is the MW in service the runner records on the dataset (older
-        # files: the peak generation); CAPEX is booked on the INCREMENTAL
-        # capacity added each year × the technology's per-node invest_cost.
+        # files: the peak generation). Files without build records book
+        # CAPEX on the INCREMENTAL capacity added each year × the
+        # technology's per-node invest_cost.
         gen_in_service = year_data.get("power_in_service", {}).get("generation", {})
         for ds_name, gen_arr in year_data.get("generation", {}).items():
             if not ds_name.startswith(INVESTMENT_PREFIX):
@@ -1100,19 +1231,21 @@ def compute_system_financials(
             inv_cost_node = _as_array(tcfg.get("invest_cost", 0.0), n_g)
             mw_node = (_as_array(gen_in_service[ds_name], n_g) if ds_name in gen_in_service
                        else np.max(gen_arr, axis=1))
-            prev = invest_installed_mw.get(ds_name, np.zeros(n_g))
-            incremental = np.maximum(mw_node - prev, 0.0)
-            inv_cost = float(np.sum(incremental * inv_cost_node))
-            annual_capex[y_idx] += inv_cost
-            total_capex += inv_cost
-            invest_installed_mw[ds_name] = np.maximum(mw_node, prev)
+            if year_builds is None:
+                prev = invest_installed_mw.get(ds_name, np.zeros(n_g))
+                incremental = np.maximum(mw_node - prev, 0.0)
+                inv_cost = float(np.sum(incremental * inv_cost_node))
+                annual_capex[y_idx] += inv_cost
+                total_capex += inv_cost
+                invest_installed_mw[ds_name] = np.maximum(mw_node, prev)
+                inv_capex_stream[y_idx] += inv_cost
 
             # New-investment cash-flow stream: revenue + opex of this unit.
-            inv_capex_stream[y_idx] += inv_cost
             energy_node = np.sum(gen_arr, axis=1) * info["temporal_res"]
             inv_generation[y_idx] += float(np.sum(energy_node))
             fc_node, fx_node, mc_node = _technology_opex(
                 tcfg, fuel_opex, n_g)
+            fc_node = fc_node * _fuel_price_factor(info, tcfg.get("fuel"), year)
             inv_fuel[y_idx] += float(np.sum(energy_node * fc_node))
             # Fixed O&M ($/MW·yr) on the MW in service over the simulated hours
             inv_om[y_idx] += float(np.sum(energy_node * mc_node)) + float(np.sum(
@@ -1132,10 +1265,11 @@ def compute_system_financials(
                     inv_revenue[y_idx] += float(np.sum(out_e * inv_sys_p))
 
         # Battery capacity expansion as "Investment <bat>" series in
-        # battery_discharge/charge/soc. Power MW = the MW in service the runner
+        # battery_discharge/charge/soc. Power MW = the rated MW the runner
         # records (older files: peak max(charge, discharge)) per node; energy
-        # MWh = peak SOC per node. CAPEX = power × invest_cost_power + energy ×
-        # invest_cost_energy, booked on incremental capacity.
+        # MWh = peak SOC per node. Files without build records book CAPEX =
+        # power × invest_cost_power + energy × invest_cost_energy on
+        # incremental capacity.
         bat_in_service = year_data.get("power_in_service", {}).get("battery_discharge", {})
         for ds_name, dis_arr in year_data.get("battery_discharge", {}).items():
             if not ds_name.startswith(INVESTMENT_PREFIX):
@@ -1157,20 +1291,21 @@ def compute_system_financials(
                 power_node = np.maximum(dis_peak, chg_peak)
             energy_node = (np.max(soc_arr, axis=1) if soc_arr is not None
                            else np.zeros(n_b))
-            prev_p = invest_installed_power.get(ds_name, np.zeros(n_b))
-            prev_e = invest_installed_energy.get(ds_name, np.zeros(n_b))
-            incr_p = np.maximum(power_node - prev_p, 0.0)
-            incr_e = np.maximum(energy_node - prev_e, 0.0)
-            cap_cost = float(np.sum(incr_p * cost_p) + np.sum(incr_e * cost_e))
-            annual_capex[y_idx] += cap_cost
-            total_capex += cap_cost
-            invest_installed_power[ds_name] = np.maximum(power_node, prev_p)
-            invest_installed_energy[ds_name] = np.maximum(energy_node, prev_e)
+            if year_builds is None:
+                prev_p = invest_installed_power.get(ds_name, np.zeros(n_b))
+                prev_e = invest_installed_energy.get(ds_name, np.zeros(n_b))
+                incr_p = np.maximum(power_node - prev_p, 0.0)
+                incr_e = np.maximum(energy_node - prev_e, 0.0)
+                cap_cost = float(np.sum(incr_p * cost_p) + np.sum(incr_e * cost_e))
+                annual_capex[y_idx] += cap_cost
+                total_capex += cap_cost
+                invest_installed_power[ds_name] = np.maximum(power_node, prev_p)
+                invest_installed_energy[ds_name] = np.maximum(energy_node, prev_e)
+                inv_capex_stream[y_idx] += cap_cost
 
             # Investment stream: arbitrage revenue, throughput O&M, discharge.
             # O&M from the battery technology, or (files whose technology
             # configs carry none) from the existing batteries.
-            inv_capex_stream[y_idx] += cap_cost
             if "maintenance_cost" in btcfg:
                 bat_maint = _as_array(btcfg["maintenance_cost"], n_b)
             else:
@@ -1193,7 +1328,7 @@ def compute_system_financials(
                     if chg_arr is not None else 0.0
                 )
                 inv_om[y_idx] += float(np.sum(throughput)) * bat_maint[n]
-            # Fixed O&M ($/MW·yr) on the power in service
+            # Fixed O&M ($/MW·yr) on the rated power
             inv_om[y_idx] += float(np.sum(bat_fixed * power_node)) * _year_share(
                 dis_arr, info["temporal_res"])
 
@@ -1440,12 +1575,16 @@ def compute_technology_financials(
 
     # Accumulate across years
     tech_acc: dict[str, dict] = {}
+    _note_flat_fuel_prices(info, h5_path)
+    year_builds = _load_year_builds(h5_path, info) or {}
 
     for y_idx, year in enumerate(years):
         scenario_key = info["scenarios"].get(year)
         if not scenario_key:
             continue
         year_data = _load_year_data(h5_path, scenario_key)
+        # Capex of the master's builds of the year, per built unit
+        build_capex = _build_capex(year_builds.get(year, {}), info)
 
         gen_names = sorted(year_data.get("generation", {}).keys())
         nodal_prices = year_data.get("nodal_prices")
@@ -1483,7 +1622,8 @@ def compute_technology_financials(
             acc["rated_power"] = max(acc["rated_power"], float(np.max(rated)))
             # Per-node costs (a merged system's lists are zero at the other
             # systems' nodes, so the first entry is not the unit's cost)
-            fc_n = _as_array(cfg.get("fuel_cost", 0.0), n_g)
+            fc_n = _as_array(cfg.get("fuel_cost", 0.0), n_g) * _fuel_price_factor(
+                info, cfg.get("fuel", cfg.get("fuel_type")), year)
             fxc_n = _as_array(cfg.get("fixed_cost", 0.0), n_g)
             mc_n = _as_array(cfg.get("maintenance_cost", 0.0), n_g)
 
@@ -1510,6 +1650,7 @@ def compute_technology_financials(
                 elif sys_prices is not None:
                     acc["revenue"][y_idx] += float(np.sum(energy * sys_prices))
 
+            acc["capex"] += build_capex.get(gen_name, 0.0)
             # Investments — at this generator's own technology cost
             inv = year_data.get("gen_investment_power", {}).get(gen_name)
             if inv is not None:
@@ -1550,6 +1691,7 @@ def compute_technology_financials(
                 }
 
             acc = tech_acc[bat_name]
+            acc["capex"] += build_capex.get(bat_name, 0.0)
             for n in range(discharge.shape[0]):
                 dis_energy = discharge[n, :] * info["temporal_res"]
                 acc["generation"][y_idx] += float(np.sum(dis_energy))
@@ -1574,7 +1716,7 @@ def compute_technology_financials(
                 throughput = dis_energy
                 if charge is not None:
                     throughput = throughput + charge[n, :] * info["temporal_res"]
-                # Fixed O&M ($/MW·yr) on the discharge power
+                # Fixed O&M ($/MW·yr) on the rated discharge power
                 fxc = float(_as_array(bat_cfg.get("fixed_cost", 0.0), n_b)[n])
                 power = float(_as_array(bat_cfg.get("MaxDischargePower", 0.0), n_b)[n])
                 acc["om_cost"][y_idx] += float(np.sum(throughput)) * mc + (
