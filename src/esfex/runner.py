@@ -957,6 +957,9 @@ class Orchestrator:
         self.master_solution: Optional[dict] = None  # set by run(master_only=True)
         # Myopic runs: {year: {"objective", "earlier_annuities", "total"}} ($)
         self.myopic_year_costs: dict = {}
+        # Binding constraints, duals and paid slacks of each master solve
+        # ({"year_{YYYY}" | "all": group}, esfex.io.master_diagnostics)
+        self.master_diagnostics: dict[str, dict] = {}
 
         logger.debug(f"Orchestrator initialized for system: {self.system_name}")
         logger.debug(f"Mode: {config.simulation_mode}")
@@ -2029,6 +2032,7 @@ class Orchestrator:
                 "master_only needs simulation_mode 'development' "
                 f"(got {self.config.simulation_mode!r})")
         self.master_solution = None
+        self.master_diagnostics = {}
         reset_run_warnings()
         years = years or DEFAULT_RUN_YEARS
         self._start_date = self._resolve_start_date(start_year)
@@ -2360,6 +2364,8 @@ class Orchestrator:
 
             if master_investments is None:
                 logger.error("Master problem failed. Aborting simulation.")
+                # What the years solved before the failure bound
+                self._write_master_diagnostics(hdf5_path)
                 self._pm.teardown_all()
                 raise RunAbortedError(
                     "the master problem found no plan (see the log above); "
@@ -2371,6 +2377,7 @@ class Orchestrator:
             logger.info(f"Master problem solved for {len(years_range)} years")
 
             self._write_npv_retirements(hdf5_path)
+            self._write_master_diagnostics(hdf5_path)
             self._pm.call_hook(
                 "post_master_problem",
                 investments=master_investments,
@@ -4137,6 +4144,7 @@ class Orchestrator:
                     self._report_myopic_failure(master, year, years_range[:y_idx])
                     return None, None, None, None
 
+                self._record_master_diagnostics(master, f"Master {year}")
                 result = master.get_solution_values()
                 self._report_myopic_year_cost(year, y_idx, result, annuity_streams)
                 self._store_master_fuel(master, result, [year], carried=fuel_carried)
@@ -5109,6 +5117,7 @@ class Orchestrator:
                     logger.error(f"Master problem not optimal (status={status})")
                     return None, None
 
+                self._record_master_diagnostics(master, "Master")
                 # Extract investment decisions for each year
                 result = master.get_solution_values()
 
@@ -5572,6 +5581,37 @@ class Orchestrator:
                     vals = [float(x) for x in _per_node_list(unit.get(f, [0.0]), num_nodes)]
                     vals[node] = 0.0
                     unit[f] = vals
+
+    def _record_master_diagnostics(self, master, prefix: str) -> None:
+        """Keep the solved *master*'s binding constraints, duals and paid
+        slacks (:meth:`MasterProblemAdapter.diagnostics`) in
+        ``master_diagnostics`` and log their digest (a few INFO lines).
+        Nothing under Benders or when the extraction fails."""
+        from esfex.io.master_diagnostics import digest_lines
+
+        diagnostics = getattr(master, "diagnostics", None)
+        groups = diagnostics() if callable(diagnostics) else None
+        if not groups:
+            return
+        self.master_diagnostics.update(groups)
+        for line in digest_lines(groups, prefix=prefix):
+            logger.info(line)
+
+    def _write_master_diagnostics(self, path: Optional[Path]) -> None:
+        """Write ``master_diagnostics`` under ``/diagnostics/master`` of the
+        results file (``esfex.io.master_diagnostics``); nothing without
+        any."""
+        if path is None or not self.master_diagnostics:
+            return
+        from esfex.io.master_diagnostics import write_master_diagnostics
+
+        master_cfg = getattr(self.config, "master_problem", None)
+        try:
+            write_master_diagnostics(
+                path, self.master_diagnostics,
+                planning_mode=str(getattr(master_cfg, "planning_mode", "perfect_foresight")))
+        except Exception as e:  # diagnosis only: never fail the run
+            logger.warning(f"Writing the master diagnostics failed: {e}")
 
     def _write_npv_retirements(self, path: Optional[Path]) -> None:
         """Write the NPV-based retirements to the results file, group

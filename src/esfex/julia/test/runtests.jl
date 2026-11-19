@@ -1049,6 +1049,154 @@ import Ipopt
                         all_constraints(tsm; include_variable_in_set_constraints = false)) == 3
         end
 
+        @testset "master diagnostics: binding constraints, duals, paid slacks" begin
+            # One bus, 50 MW of load, a gas unit and a PV candidate. Each case
+            # makes one known family bind and checks its dual (the cost of
+            # tightening it by one unit, in $) and the slack it pays.
+            H = 8760
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            o = [0.0]
+            pvt(cost, mx; Hy = H) = TechnologyConfig("PV", "Renewable", "Sun", [cost], [mx],
+                ones(Hy, 1), [1.0], [1.0], [1.0], [1.0], o, o, o, o, o, o, o, o,
+                [25.0], o, o, 50.0, "AC", false, [1.0])
+            gasg(mw; Hy = H) = mkgen("Gas", "Non-renewable", "Gas", [mw], [1.0e-4],
+                                     ones(Hy, 1); nb = 1, H = Hy)
+            mk(; years = [2025], kw...) = MasterProblemInput(; years = years, network = net,
+                generators = [gasg(100.0; Hy = 8760 * length(years))],
+                batteries = BatteryConfig[],
+                technologies = [pvt(1.0, 500.0; Hy = 8760 * length(years))],
+                base_demand = fill(50.0, 8760 * length(years), 1),
+                target_re_penetration = 0.6, initial_re_penetration = 0.05,
+                min_re_increment = 0.0, max_re_increment = 1.0,
+                representative_days_per_year = 1, min_day_separation = 1,
+                loss_of_load_penalty = 0.01, max_curtailment_ratio = 0.05,
+                reserve_static_default_ratio = 0.0, verbose = false, kw...)
+            function diag(inp; kw...)
+                m, v, _ = create_master_problem(inp; use_representative_days = true)
+                ESFEX.set_silent(m)
+                optimize!(m)
+                @test string(termination_status(m)) == "OPTIMAL"
+                return m, v, master_diagnostics(m, v, inp; kw...)
+            end
+            fam(d, id; year = 1) = only(r for r in d.binding if r.family == id && r.year == year)
+            slack(d, id) = only(r for r in d.slacks if r.family == id)
+
+            # RE target out of reach (nothing can be built): it binds at its
+            # penalty (100 $/MWh) and the shortfall is paid at that price
+            m, v, d = diag(mk(technologies = [pvt(1.0, 0.0)]))
+            @test d.duals_available
+            re = fam(d, "re_target")
+            @test (re.code, re.kind, re.units) == ("RE-2", "policy", "\$/MWh")
+            @test re.count_binding == 1 && re.count_priced == 1 && re.count_total == 1
+            @test re.max_abs_dual ≈ 100.0 rtol = 1e-6
+            s = slack(d, "re_target")
+            @test s.name == "slack_re_s1_y1"
+            @test s.value ≈ value(v.slack_re_target[(0, 1, 1)]) rtol = 1e-9
+            @test s.value > 0
+            @test s.unit_cost ≈ 100.0 rtol = 1e-6
+            @test s.cost ≈ 100.0 * s.value rtol = 1e-6
+            # The build limit of the PV (a bound at 0 MW) binds; the
+            # adequacy and the budget do not
+            @test fam(d, "tech_build_limit").count_priced >= 1
+            @test fam(d, "adequacy").count_binding == 0
+            @test fam(d, "budget").count_binding == 0
+            @test fam(d, "budget").max_abs_dual == 0.0
+            @test any(t.name == "re_target_s1_y1" && t.dual ≈ 100.0 for t in d.top)
+
+            # Within reach but dear PV: the target binds below its penalty,
+            # nothing is paid
+            _, _, d = diag(mk(target_re_penetration = 0.3, initial_re_penetration = 0.3,
+                              technologies = [pvt(20.0, 500.0)]))
+            re = fam(d, "re_target")
+            @test re.count_priced == 1
+            @test 0.0 < re.max_abs_dual < 100.0
+            @test isempty(d.slacks)
+
+            # Annual budget (4 M$ for cheap PV): binds, $ per $, no overrun
+            _, _, d = diag(mk(max_annual_investment = 4.0, target_re_penetration = 0.0,
+                              initial_re_penetration = 0.0))
+            b = fam(d, "budget")
+            @test b.count_priced == 1 && b.units == "\$/\$"
+            @test b.label == "Annual budget (investment)"
+            @test b.max_abs_dual > 0
+            @test !any(r.family == "budget" for r in d.slacks)
+            @test fam(d, "re_target").count_priced == 0
+
+            # Curtailment cap: 200 MW of existing PV on 50 MW of load must
+            # curtail above the 5 % cap; the row is priced per MWh of its
+            # excess (its row is divided by the largest day weight)
+            pvold = mkgen("PVold", "Renewable", "Sun", [200.0], [0.0], ones(H, 1); nb = 1, H = H)
+            cinp = mk(target_re_penetration = 0.0, initial_re_penetration = 0.0,
+                      generators = [gasg(100.0), pvold], technologies = TechnologyConfig[])
+            _, _, d = diag(cinp)
+            c = fam(d, "curtailment_cap")
+            @test c.code == "CURT-1" && c.count_priced == 1
+            @test c.max_abs_dual ≈ ESFEX.curtailment_excess_penalty(cinp) * 1e6 rtol = 1e-6
+            cs = slack(d, "curtailment_cap")
+            @test cs.name == "curtailment_excess_s1_y1"
+            @test cs.unit_cost ≈ c.max_abs_dual rtol = 1e-6
+
+            # Load shed on the representative days, scaled to the year: 10 MW
+            # short every hour at VOLL (10 000 $/MWh); the adequacy slack too
+            _, _, d = diag(mk(generators = [gasg(40.0)], technologies = TechnologyConfig[],
+                              target_re_penetration = 0.0, initial_re_penetration = 0.0))
+            ls = slack(d, "load_shed")
+            @test ls.value ≈ 10.0 * 8760 rtol = 1e-6
+            @test ls.value_units == "MWh/yr"
+            @test ls.unit_cost ≈ 1e4 rtol = 1e-6
+            @test ls.count == 24
+            @test slack(d, "adequacy").value > 0
+            @test fam(d, "adequacy").count_priced == 1
+
+            # Two years: year-tagged rows per year, the others in year 0;
+            # top rows at most per_family_top per family, no name twice
+            _, _, d = diag(mk(years = [2025, 2026], max_annual_investment = 4.0);
+                           top_n = 6, per_family_top = 2)
+            @test fam(d, "budget"; year = 1).count_total == 1
+            @test fam(d, "budget"; year = 2).count_total == 1
+            @test fam(d, "tech_build_limit"; year = 0).count_total == 1   # cumul_tech_t1_b1
+            for y in (1, 2)
+                ty = [t for t in d.top if t.year == y]
+                @test length(ty) <= 6
+                @test all(count(t -> t.family == f, ty) <= 2 for f in unique(t.family for t in ty))
+                @test allunique(t.name for t in ty)
+            end
+
+            # No duals (a MIP): binding counts from the tight rows, no dual
+            # statistics, no top rows; the slacks are still reported
+            mm, mv, _ = create_master_problem(mk(technologies = [pvt(1.0, 0.0)]);
+                                              use_representative_days = true)
+            ESFEX.set_silent(mm)
+            ESFEX.JuMP.set_integer(mv.tech_investment[1][1][1])
+            optimize!(mm)
+            md = master_diagnostics(mm, mv, mk(technologies = [pvt(1.0, 0.0)]))
+            @test !md.duals_available
+            @test isempty(md.top)
+            mre = fam(md, "re_target")
+            @test mre.count_binding == 1 && mre.count_priced == 0
+            @test isnan(mre.max_abs_dual)
+            @test slack(md, "re_target").value > 0
+
+            # Family lookup: catalogue prefixes, the generic fallback, years
+            idx = ESFEX.CONSTRAINT_FAMILY_INDEX
+            @test ESFEX.constraint_family("re_target_sc2_s1_y3", idx).id == "re_target"
+            @test ESFEX.constraint_family("cumul_node_bat_tech_cap_bt1_n2", idx).id ==
+                  "storage_energy_node_build_limit"
+            @test ESFEX.constraint_family("", idx).id == "unnamed"
+            @test ESFEX.constraint_family("my_cap_y2_b3", idx).id == "my_cap"
+            @test ESFEX.constraint_family("solar_min", idx;
+                                          user_names = Set(["solar_min"])).id == "user:solar_min"
+            @test ESFEX.constraint_family("tech_out_y1_d1[1]", ESFEX.BOUND_FAMILY_INDEX;
+                                          generic = false) === nothing
+            @test ESFEX.name_year("tech_cap_t1_b1_ts5_y12_d3") == 12
+            @test ESFEX.name_year("tech_inv_y3_t1[2]") == 3
+            @test ESFEX.name_year("reserve_static_1_1") == 0
+        end
+
         @testset "master: conditioning and capacity noise (round 36)" begin
             # The RE ratio was defined by a row `demand × ratio == energy`:
             # the year's demand (MWh) as a coefficient next to the day
