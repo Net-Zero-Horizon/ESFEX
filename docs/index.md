@@ -213,7 +213,7 @@ If you use ESFEX in academic work, please cite:
 
 ## License
 
-Released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+Released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). Third-party data and libraries shipped with ESFEX keep their own licences: see [Data Sources and Licences](reference/data-sources.md).
 
 
 ---

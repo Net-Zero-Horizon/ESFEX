@@ -4,3 +4,8 @@
 # package. docs/ lives at the repo root (for MkDocs/ReadTheDocs and the README
 # links), outside the package, so it is not picked up automatically.
 graft docs
+
+# Licence texts of the bundled third-party code and data, the attributions
+# their terms ask for, and the machine-readable licensing of every file.
+graft LICENSES
+include DATA_SOURCES.md REUSE.toml
