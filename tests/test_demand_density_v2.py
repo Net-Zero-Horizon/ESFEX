@@ -328,6 +328,35 @@ def test_leap_year_forecast_has_8760_rows_without_feb29(monkeypatch):
     assert np.asarray(res.demand).shape == (8760, 1)
 
 
+def test_coastal_cell_demand_covers_its_land_in_the_region(monkeypatch, model):
+    """A domain that covers the western 40 % of Havana's 0.25° cell (centre
+    outside it): the cell is used, its demand covers its land in the domain
+    (land_km2 × w), and its predictors stay per km² of the cell's land."""
+    from esfex.visualization.workflows import demand_estimation_analysis as dea
+
+    monkeypatch.setattr(ddm, "fetch_cmip6_node_temps", lambda la, *a, **k: [None] * len(la))
+    monkeypatch.setattr(ddm, "_ssp_gdp_total_nearest", lambda *a, **k: 1e10)
+    captured = {}
+
+    def stub(model, lats, lons, areas, lpd, lgd, lgpc, *a, **k):
+        captured.update(lats=np.array(lats), areas=np.array(areas), lpd=np.array(lpd))
+        return np.ones((len(lats), 8760))
+
+    monkeypatch.setattr(ddm, "predict_region_cell_demand", stub)
+    cfg = dea.DemandEstimationConfig(base_year=2025, simulation_years=1, num_nodes=1,
+                                     national_demand_gwh=0.0)
+    box = [(23.0, -82.5), (23.0, -82.4), (23.25, -82.4), (23.25, -82.5)]
+    proxy = dea.ProxyData(node_lats=[23.1], node_lons=[-82.45], node_names=["Havana"],
+                          area_polygon=box)
+    dea.DemandProfileBuilder(cfg).build(proxy, dea.MacroData(country_iso="CUB"),
+                                        dea.MeteoData())
+    pop, land = model.context.population_and_land([23.125], [-82.375])
+    cell = float(ddm.cell_area_km2(23.125))
+    assert list(captured["lats"]) == [23.125]
+    assert captured["areas"][0] == pytest.approx(min(1.0, 0.4 * cell / land[0]) * land[0])
+    assert captured["lpd"][0] == pytest.approx(np.log10(pop[0] / land[0]))
+
+
 # ── Temperature on UTC hours ───────────────────────────────────────────
 
 
