@@ -14,6 +14,7 @@ from esfex.visualization.data.gui_model import (
     GuiSystemState,
     RENEWABLE_FUELS,
 )
+from esfex.visualization.i18n import tr
 
 if TYPE_CHECKING:
     from esfex.visualization.data.gui_model import GuiModel
@@ -171,6 +172,19 @@ _CATEGORY_VALIDATORS: dict[str, list[str]] = {
     "realism": ["_validate_realism"],
 }
 
+# Progress label of each category (translation keys)
+_CATEGORY_PROGRESS_KEYS: dict[str, str] = {
+    "structural": "validation.progress_cat_structural",
+    "configuration": "validation.progress_cat_configuration",
+    "electrical": "validation.progress_cat_electrical",
+    "demand": "validation.progress_cat_demand",
+    "generation": "validation.progress_cat_generation",
+    "fuel_network": "validation.progress_cat_fuel_network",
+    "connectivity": "validation.progress_cat_connectivity",
+    "realism": "validation.progress_cat_realism",
+    "topology_audit": "validation.progress_cat_topology_audit",
+}
+
 # All category keys in display order
 CATEGORY_ORDER: list[str] = [
     "structural",
@@ -236,7 +250,7 @@ def validate_state(
         if cat not in categories:
             continue
         for func_name in _CATEGORY_VALIDATORS[cat]:
-            display = cat.replace("_", " ").title()
+            display = tr(_CATEGORY_PROGRESS_KEYS[cat])
             validator_funcs.append((display, func_name))
 
     total = len(validator_funcs)
@@ -244,12 +258,13 @@ def validate_state(
 
     for step, (display, func_name) in enumerate(validator_funcs):
         if progress_callback:
-            progress_callback(step, total, f"Checking {display}...")
+            progress_callback(step, total,
+                              tr("validation.progress_checking", category=display))
         func = globals()[func_name]
         issues.extend(func(state))
 
     if progress_callback:
-        progress_callback(total, total, "Validation complete")
+        progress_callback(total, total, tr("validation.progress_done"))
 
     return issues
 
@@ -262,8 +277,7 @@ def _validate_config_keys(state: GuiSystemState) -> list[ValidationIssue]:
     return [
         ValidationIssue(
             severity="warning", category="Configuration",
-            message=f"Unknown key {key} is ignored (misspelt or obsolete?) "
-                    "and is not kept when the project is saved",
+            message=tr("validation.msg_unknown_key", config_key=key),
         )
         for key in getattr(state, "unknown_config_keys", None) or []
     ]
@@ -275,9 +289,13 @@ def _validate_re_increments(state: GuiSystemState) -> list[ValidationIssue]:
     s = getattr(state, "settings", None)
     if s is None:
         return []
-    msg = re_increment_conflict(s.min_annual_increment, s.max_annual_increment)
+    if not re_increment_conflict(s.min_annual_increment, s.max_annual_increment):
+        return []
+    msg = tr("validation.msg_re_increment_conflict",
+             min_inc=f"{s.min_annual_increment:g}",
+             max_inc=f"{s.max_annual_increment:g}")
     return [ValidationIssue(severity="warning", category="Configuration",
-                            message=msg)] if msg else []
+                            message=msg)]
 
 
 def _validate_nodes(state: GuiSystemState) -> list[ValidationIssue]:
@@ -286,7 +304,7 @@ def _validate_nodes(state: GuiSystemState) -> list[ValidationIssue]:
     if not state.nodes:
         issues.append(ValidationIssue(
             severity="error", category="Node",
-            message="System has no nodes defined",
+            message=tr("validation.msg_no_nodes"),
         ))
         return issues
 
@@ -295,7 +313,7 @@ def _validate_nodes(state: GuiSystemState) -> list[ValidationIssue]:
         issues.append(ValidationIssue(
             severity="error",
             category="Node",
-            message="Duplicate node indices detected",
+            message=tr("validation.msg_duplicate_node_indices"),
         ))
 
     # Nodes with no buses
@@ -303,7 +321,8 @@ def _validate_nodes(state: GuiSystemState) -> list[ValidationIssue]:
         if not any(b.parent_node == node.index for b in state.buses.values()):
             issues.append(ValidationIssue(
                 severity="warning", category="Node",
-                message=f"Node {node.index} ({node.name}): has no buses",
+                message=tr("validation.msg_node_no_buses",
+                           node=node.index, name=node.name),
                 element_type="node", element_id=str(node.index),
             ))
 
@@ -341,7 +360,7 @@ def _validate_lines(state: GuiSystemState) -> list[ValidationIssue]:
         if ln.line_id in seen_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Line",
-                message=f"Duplicate line ID: {ln.line_id}",
+                message=tr("validation.msg_duplicate_line_id", line=ln.line_id),
                 element_type="line", element_id=ln.line_id,
             ))
         seen_ids.add(ln.line_id)
@@ -363,25 +382,28 @@ def _validate_lines(state: GuiSystemState) -> list[ValidationIssue]:
             if is_real_self_loop:
                 issues.append(ValidationIssue(
                     severity="error", category="Line",
-                    message=f"Line {lid}: self-loop (from_bus == to_bus == {ln.from_bus})",
+                    message=tr("validation.msg_line_self_loop", line=lid,
+                               bus=ln.from_bus),
                     element_type="line", element_id=lid,
                 ))
         if ln.from_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Line",
-                message=f"Line {lid}: from_bus '{ln.from_bus}' does not exist",
+                message=tr("validation.msg_line_from_bus_missing", line=lid,
+                           bus=ln.from_bus),
                 element_type="line", element_id=lid,
             ))
         if ln.to_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Line",
-                message=f"Line {lid}: to_bus '{ln.to_bus}' does not exist",
+                message=tr("validation.msg_line_to_bus_missing", line=lid,
+                           bus=ln.to_bus),
                 element_type="line", element_id=lid,
             ))
         if ln.capacity_mw <= 0:
             issues.append(ValidationIssue(
                 severity="warning", category="Line",
-                message=f"Line {lid}: capacity is zero or negative",
+                message=tr("validation.msg_line_capacity_nonpositive", line=lid),
                 element_type="line", element_id=lid,
             ))
     return issues
@@ -390,7 +412,7 @@ def _validate_lines(state: GuiSystemState) -> list[ValidationIssue]:
 def _validate_line_connections(state: GuiSystemState) -> list[ValidationIssue]:
     """Validate that transmission line endpoints follow connection rules."""
     from esfex.visualization.data.connectivity_rules import (
-        get_connection_error_message,
+        CONNECTION_RULES,
         is_valid_connection,
     )
 
@@ -405,11 +427,24 @@ def _validate_line_connections(state: GuiSystemState) -> list[ValidationIssue]:
         to_type = ln.to_endpoint.element_type
 
         if not is_valid_connection(from_type, to_type):
+            # Same text as connectivity_rules.get_connection_error_message.
+            valid_targets = CONNECTION_RULES.get(from_type, set())
+            if valid_targets:
+                message = tr("validation.msg_line_bad_connection",
+                             line=ln.line_id, from_type=from_type,
+                             to_type=to_type,
+                             from_type_cap=from_type.capitalize(),
+                             targets=", ".join(sorted(valid_targets)))
+            else:
+                message = tr("validation.msg_line_bad_connection_none",
+                             line=ln.line_id, from_type=from_type,
+                             to_type=to_type,
+                             from_type_cap=from_type.capitalize())
             issues.append(
                 ValidationIssue(
                     severity="error",
                     category="Connectivity",
-                    message=f"Line {ln.line_id}: {get_connection_error_message(from_type, to_type)}",
+                    message=message,
                     element_type="line",
                     element_id=ln.line_id,
                 )
@@ -432,7 +467,8 @@ def _validate_buses(state: GuiSystemState) -> list[ValidationIssue]:
         if bus.parent_node not in node_indices:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=f"Bus '{bus.name}' ({bus_id}): parent node {bus.parent_node} does not exist",
+                message=tr("validation.msg_bus_parent_missing", name=bus.name,
+                           bus=bus_id, node=bus.parent_node),
                 element_type="bus", element_id=bus_id,
             ))
 
@@ -455,7 +491,7 @@ def _validate_buses(state: GuiSystemState) -> list[ValidationIssue]:
         if not has_equip and not has_conn and bus.demand_fraction <= 0:
             issues.append(ValidationIssue(
                 severity="warning", category="Bus",
-                message=f"Bus '{bus.name}' ({bus_id}): no equipment, no connections, no demand",
+                message=tr("validation.msg_bus_unused", name=bus.name, bus=bus_id),
                 element_type="bus", element_id=bus_id,
             ))
 
@@ -463,10 +499,8 @@ def _validate_buses(state: GuiSystemState) -> list[ValidationIssue]:
         if bus.role == "connection" and bus.demand_fraction != 0:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=(
-                    f"Bus '{bus.name}' ({bus_id}): role='connection' requires "
-                    f"demand_fraction=0 (got {bus.demand_fraction})"
-                ),
+                message=tr("validation.msg_bus_connection_df", name=bus.name,
+                           bus=bus_id, df=bus.demand_fraction),
                 element_type="bus", element_id=bus_id,
             ))
 
@@ -484,10 +518,8 @@ def _validate_buses(state: GuiSystemState) -> list[ValidationIssue]:
                 # sum=2 incident: previously reported as warning and ignored.)
                 issues.append(ValidationIssue(
                     severity="error", category="Bus",
-                    message=(
-                        f"Node {node.index} ({node.name}): "
-                        f"load bus demand fractions sum to {total_frac:.4f}, expected 1.0"
-                    ),
+                    message=tr("validation.msg_node_df_sum", node=node.index,
+                               name=node.name, total=f"{total_frac:.4f}"),
                     element_type="node", element_id=str(node.index),
                 ))
 
@@ -496,34 +528,39 @@ def _validate_buses(state: GuiSystemState) -> list[ValidationIssue]:
         if inst.bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=f"Generator '{inst.name}' ({inst_id}): bus '{inst.bus}' does not exist",
+                message=tr("validation.msg_gen_bus_missing", name=inst.name,
+                           id=inst_id, bus=inst.bus),
                 element_type="generator", element_id=inst_id,
             ))
     for inst_id, inst in state.batteries.items():
         if inst.bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=f"Battery '{inst.name}' ({inst_id}): bus '{inst.bus}' does not exist",
+                message=tr("validation.msg_bat_bus_missing", name=inst.name,
+                           id=inst_id, bus=inst.bus),
                 element_type="battery", element_id=inst_id,
             ))
     for inst_id, inst in state.electrolyzers.items():
         if inst.bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=f"Electrolyzer '{inst.name}' ({inst_id}): bus '{inst.bus}' does not exist",
+                message=tr("validation.msg_elz_bus_missing", name=inst.name,
+                           id=inst_id, bus=inst.bus),
                 element_type="electrolyzer", element_id=inst_id,
             ))
     for ln in state.transmission_lines:
         if ln.from_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=f"Line {ln.line_id}: from_bus '{ln.from_bus}' does not exist",
+                message=tr("validation.msg_line_from_bus_missing",
+                           line=ln.line_id, bus=ln.from_bus),
                 element_type="line", element_id=ln.line_id,
             ))
         if ln.to_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Bus",
-                message=f"Line {ln.line_id}: to_bus '{ln.to_bus}' does not exist",
+                message=tr("validation.msg_line_to_bus_missing",
+                           line=ln.line_id, bus=ln.to_bus),
                 element_type="line", element_id=ln.line_id,
             ))
 
@@ -537,7 +574,8 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
         if gen.bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Generator",
-                message=f"Generator '{gen.name}' ({inst_id}): bus '{gen.bus}' does not exist",
+                message=tr("validation.msg_gen_bus_missing", name=gen.name,
+                           id=inst_id, bus=gen.bus),
                 element_type="generator", element_id=inst_id,
             ))
         else:
@@ -546,10 +584,9 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
             if bus.parent_node != gen.node:
                 issues.append(ValidationIssue(
                     severity="warning", category="Generator",
-                    message=(
-                        f"Generator '{gen.name}' ({inst_id}): node={gen.node} "
-                        f"doesn't match bus '{gen.bus}' parent_node={bus.parent_node}"
-                    ),
+                    message=tr("validation.msg_gen_node_mismatch", name=gen.name,
+                               id=inst_id, node=gen.node, bus=gen.bus,
+                               parent=bus.parent_node),
                     element_type="generator", element_id=inst_id,
                 ))
 
@@ -557,7 +594,8 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
         if gen.rated_power < 0:
             issues.append(ValidationIssue(
                 severity="error", category="Generator",
-                message=f"Generator '{gen.name}' ({inst_id}): negative rated_power ({gen.rated_power})",
+                message=tr("validation.msg_gen_negative_power", name=gen.name,
+                           id=inst_id, power=gen.rated_power),
                 element_type="generator", element_id=inst_id,
             ))
 
@@ -566,20 +604,17 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
         if not 0.0 <= gen.min_power <= 1.0:
             issues.append(ValidationIssue(
                 severity="error", category="Generator",
-                message=(
-                    f"Generator '{gen.name}' ({inst_id}): min_power={gen.min_power} "
-                    "is outside 0–1 (fraction of rated power)"
-                ),
+                message=tr("validation.msg_gen_min_power", name=gen.name,
+                           id=inst_id, value=gen.min_power),
                 element_type="generator", element_id=inst_id,
             ))
         for attr in ("ramp_up", "ramp_down"):
             if getattr(gen, attr) < 0:
                 issues.append(ValidationIssue(
                     severity="error", category="Generator",
-                    message=(
-                        f"Generator '{gen.name}' ({inst_id}): {attr}={getattr(gen, attr)} "
-                        "is negative (fraction of rated power per hour; 0 = no limit)"
-                    ),
+                    message=tr("validation.msg_gen_negative_ramp", name=gen.name,
+                               id=inst_id, attr=attr,
+                               value=getattr(gen, attr)),
                     element_type="generator", element_id=inst_id,
                 ))
 
@@ -588,10 +623,8 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
             if gen.eff_at_rated > 1.0 or (gen.rated_power > 0 and gen.eff_at_rated <= 0):
                 issues.append(ValidationIssue(
                     severity="warning", category="Generator",
-                    message=(
-                        f"Generator '{gen.name}' ({inst_id}): "
-                        f"eff_at_rated={gen.eff_at_rated} out of valid range (0, 1]"
-                    ),
+                    message=tr("validation.msg_gen_eff_range", name=gen.name,
+                               id=inst_id, value=gen.eff_at_rated),
                     element_type="generator", element_id=inst_id,
                 ))
 
@@ -599,11 +632,9 @@ def _validate_generators(state: GuiSystemState) -> list[ValidationIssue]:
         if gen.rated_power > 0 and gen.initial_age >= gen.life_time:
             issues.append(ValidationIssue(
                 severity="warning", category="Generator",
-                message=(
-                    f"Generator '{gen.name}' ({inst_id}): "
-                    f"initial_age ({gen.initial_age}) >= life_time ({gen.life_time}), "
-                    "unit starts retired"
-                ),
+                message=tr("validation.msg_gen_retired", name=gen.name,
+                           id=inst_id, age=gen.initial_age,
+                           life=gen.life_time),
                 element_type="generator", element_id=inst_id,
             ))
 
@@ -617,7 +648,8 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
         if bat.bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Battery",
-                message=f"Battery '{bat.name}' ({inst_id}): bus '{bat.bus}' does not exist",
+                message=tr("validation.msg_bat_bus_missing", name=bat.name,
+                           id=inst_id, bus=bat.bus),
                 element_type="battery", element_id=inst_id,
             ))
         else:
@@ -626,10 +658,9 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
             if bus.parent_node != bat.node:
                 issues.append(ValidationIssue(
                     severity="warning", category="Battery",
-                    message=(
-                        f"Battery '{bat.name}' ({inst_id}): node={bat.node} "
-                        f"doesn't match bus '{bat.bus}' parent_node={bus.parent_node}"
-                    ),
+                    message=tr("validation.msg_bat_node_mismatch", name=bat.name,
+                               id=inst_id, node=bat.node, bus=bat.bus,
+                               parent=bus.parent_node),
                     element_type="battery", element_id=inst_id,
                 ))
 
@@ -637,7 +668,8 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
         if bat.rated_power < 0:
             issues.append(ValidationIssue(
                 severity="error", category="Battery",
-                message=f"Battery '{bat.name}' ({inst_id}): negative rated_power ({bat.rated_power})",
+                message=tr("validation.msg_bat_negative_power", name=bat.name,
+                           id=inst_id, power=bat.rated_power),
                 element_type="battery", element_id=inst_id,
             ))
 
@@ -645,19 +677,17 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
         if bat.efficiency_charge > 1.0 or bat.efficiency_charge <= 0:
             issues.append(ValidationIssue(
                 severity="error", category="Battery",
-                message=(
-                    f"Battery '{bat.name}' ({inst_id}): "
-                    f"efficiency_charge={bat.efficiency_charge} out of valid range (0, 1]"
-                ),
+                message=tr("validation.msg_bat_eff_range", name=bat.name,
+                           id=inst_id, attr="efficiency_charge",
+                           value=bat.efficiency_charge),
                 element_type="battery", element_id=inst_id,
             ))
         if bat.efficiency_discharge > 1.0 or bat.efficiency_discharge <= 0:
             issues.append(ValidationIssue(
                 severity="error", category="Battery",
-                message=(
-                    f"Battery '{bat.name}' ({inst_id}): "
-                    f"efficiency_discharge={bat.efficiency_discharge} out of valid range (0, 1]"
-                ),
+                message=tr("validation.msg_bat_eff_range", name=bat.name,
+                           id=inst_id, attr="efficiency_discharge",
+                           value=bat.efficiency_discharge),
                 element_type="battery", element_id=inst_id,
             ))
 
@@ -665,11 +695,9 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
         if bat.rated_power > 0 and bat.capacity > 0 and bat.capacity < bat.rated_power:
             issues.append(ValidationIssue(
                 severity="warning", category="Battery",
-                message=(
-                    f"Battery '{bat.name}' ({inst_id}): "
-                    f"capacity ({bat.capacity} MWh) < rated_power ({bat.rated_power} MW), "
-                    "less than 1 hour at full power"
-                ),
+                message=tr("validation.msg_bat_short_duration", name=bat.name,
+                           id=inst_id, capacity=bat.capacity,
+                           power=bat.rated_power),
                 element_type="battery", element_id=inst_id,
             ))
 
@@ -677,11 +705,9 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
         if bat.rated_power > 0 and bat.initial_age >= bat.life_time:
             issues.append(ValidationIssue(
                 severity="warning", category="Battery",
-                message=(
-                    f"Battery '{bat.name}' ({inst_id}): "
-                    f"initial_age ({bat.initial_age}) >= life_time ({bat.life_time}), "
-                    "unit starts retired"
-                ),
+                message=tr("validation.msg_bat_retired", name=bat.name,
+                           id=inst_id, age=bat.initial_age,
+                           life=bat.life_time),
                 element_type="battery", element_id=inst_id,
             ))
 
@@ -691,49 +717,50 @@ def _validate_batteries(state: GuiSystemState) -> list[ValidationIssue]:
 def _validate_transformers(state: GuiSystemState) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     bus_ids = set(state.buses.keys())
-    for i, tr in enumerate(state.transformers):
-        if tr.from_bus not in bus_ids:
+    for i, xf in enumerate(state.transformers):
+        if xf.from_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Transformer",
-                message=f"Transformer '{tr.name}': from_bus '{tr.from_bus}' does not exist",
+                message=tr("validation.msg_tr_from_bus_missing", name=xf.name,
+                           bus=xf.from_bus),
                 element_type="transformer", element_id=str(i),
             ))
-        if tr.to_bus not in bus_ids:
+        if xf.to_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Transformer",
-                message=f"Transformer '{tr.name}': to_bus '{tr.to_bus}' does not exist",
+                message=tr("validation.msg_tr_to_bus_missing", name=xf.name,
+                           bus=xf.to_bus),
                 element_type="transformer", element_id=str(i),
             ))
 
         # Self-loop
-        if tr.from_bus == tr.to_bus:
+        if xf.from_bus == xf.to_bus:
             issues.append(ValidationIssue(
                 severity="error", category="Transformer",
-                message=f"Transformer '{tr.name}': self-loop (from_bus == to_bus == {tr.from_bus})",
+                message=tr("validation.msg_tr_self_loop", name=xf.name,
+                           bus=xf.from_bus),
                 element_type="transformer", element_id=str(i),
             ))
 
         # Same voltage on both sides — resolve from buses if available,
         # since the transformer's own voltage fields may be stale.
-        from_bus_obj = state.buses.get(tr.from_bus)
-        to_bus_obj = state.buses.get(tr.to_bus)
-        from_v = from_bus_obj.voltage_kv if from_bus_obj else tr.from_voltage_kv
-        to_v = to_bus_obj.voltage_kv if to_bus_obj else tr.to_voltage_kv
+        from_bus_obj = state.buses.get(xf.from_bus)
+        to_bus_obj = state.buses.get(xf.to_bus)
+        from_v = from_bus_obj.voltage_kv if from_bus_obj else xf.from_voltage_kv
+        to_v = to_bus_obj.voltage_kv if to_bus_obj else xf.to_voltage_kv
         if from_v > 0 and to_v > 0 and from_v == to_v:
             issues.append(ValidationIssue(
                 severity="warning", category="Transformer",
-                message=(
-                    f"Transformer '{tr.name}': same voltage on both sides "
-                    f"({from_v} kV)"
-                ),
+                message=tr("validation.msg_tr_same_voltage", name=xf.name,
+                           kv=from_v),
                 element_type="transformer", element_id=str(i),
             ))
 
         # Zero or negative rated power
-        if tr.rated_power_mva <= 0:
+        if xf.rated_power_mva <= 0:
             issues.append(ValidationIssue(
                 severity="warning", category="Transformer",
-                message=f"Transformer '{tr.name}': rated_power_mva is zero or negative",
+                message=tr("validation.msg_tr_power_nonpositive", name=xf.name),
                 element_type="transformer", element_id=str(i),
             ))
 
@@ -743,66 +770,78 @@ def _validate_transformers(state: GuiSystemState) -> list[ValidationIssue]:
 def _validate_converters(state: GuiSystemState) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     bus_ids = set(state.buses.keys())
+    kind = tr("validation.kind_acdc_converter")
     for i, conv in enumerate(state.acdc_converters):
         if conv.from_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="AC/DC Converter",
-                message=f"AC/DC Converter '{conv.name}': from_bus '{conv.from_bus}' does not exist",
+                message=tr("validation.msg_conv_from_bus_missing", kind=kind,
+                           name=conv.name, bus=conv.from_bus),
                 element_type="acdc_converter", element_id=str(i),
             ))
         if conv.to_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="AC/DC Converter",
-                message=f"AC/DC Converter '{conv.name}': to_bus '{conv.to_bus}' does not exist",
+                message=tr("validation.msg_conv_to_bus_missing", kind=kind,
+                           name=conv.name, bus=conv.to_bus),
                 element_type="acdc_converter", element_id=str(i),
             ))
         if conv.from_bus == conv.to_bus:
             issues.append(ValidationIssue(
                 severity="error", category="AC/DC Converter",
-                message=f"AC/DC Converter '{conv.name}': self-loop (from_bus == to_bus == {conv.from_bus})",
+                message=tr("validation.msg_conv_self_loop", kind=kind,
+                           name=conv.name, bus=conv.from_bus),
                 element_type="acdc_converter", element_id=str(i),
             ))
         if conv.efficiency_rectify <= 0 or conv.efficiency_invert <= 0:
             issues.append(ValidationIssue(
                 severity="error", category="AC/DC Converter",
-                message=f"AC/DC Converter '{conv.name}': efficiency must be > 0",
+                message=tr("validation.msg_conv_eff_nonpositive", kind=kind,
+                           name=conv.name),
                 element_type="acdc_converter", element_id=str(i),
             ))
         if conv.efficiency_rectify > 1.0 or conv.efficiency_invert > 1.0:
             issues.append(ValidationIssue(
                 severity="error", category="AC/DC Converter",
-                message=f"AC/DC Converter '{conv.name}': efficiency > 1.0 is not physical",
+                message=tr("validation.msg_conv_eff_above_one", kind=kind,
+                           name=conv.name),
                 element_type="acdc_converter", element_id=str(i),
             ))
+    kind = tr("validation.kind_freq_converter")
     for i, conv in enumerate(state.freq_converters):
         if conv.from_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Freq. Converter",
-                message=f"Freq. Converter '{conv.name}': from_bus '{conv.from_bus}' does not exist",
+                message=tr("validation.msg_conv_from_bus_missing", kind=kind,
+                           name=conv.name, bus=conv.from_bus),
                 element_type="freq_converter", element_id=str(i),
             ))
         if conv.to_bus not in bus_ids:
             issues.append(ValidationIssue(
                 severity="error", category="Freq. Converter",
-                message=f"Freq. Converter '{conv.name}': to_bus '{conv.to_bus}' does not exist",
+                message=tr("validation.msg_conv_to_bus_missing", kind=kind,
+                           name=conv.name, bus=conv.to_bus),
                 element_type="freq_converter", element_id=str(i),
             ))
         if conv.from_bus == conv.to_bus:
             issues.append(ValidationIssue(
                 severity="error", category="Freq. Converter",
-                message=f"Freq. Converter '{conv.name}': self-loop (from_bus == to_bus == {conv.from_bus})",
+                message=tr("validation.msg_conv_self_loop", kind=kind,
+                           name=conv.name, bus=conv.from_bus),
                 element_type="freq_converter", element_id=str(i),
             ))
         if conv.efficiency_a_to_b <= 0 or conv.efficiency_b_to_a <= 0:
             issues.append(ValidationIssue(
                 severity="error", category="Freq. Converter",
-                message=f"Freq. Converter '{conv.name}': efficiency must be > 0",
+                message=tr("validation.msg_conv_eff_nonpositive", kind=kind,
+                           name=conv.name),
                 element_type="freq_converter", element_id=str(i),
             ))
         if conv.efficiency_a_to_b > 1.0 or conv.efficiency_b_to_a > 1.0:
             issues.append(ValidationIssue(
                 severity="error", category="Freq. Converter",
-                message=f"Freq. Converter '{conv.name}': efficiency > 1.0 is not physical",
+                message=tr("validation.msg_conv_eff_above_one", kind=kind,
+                           name=conv.name),
                 element_type="freq_converter", element_id=str(i),
             ))
     return issues
@@ -910,10 +949,8 @@ def _validate_demand(state: GuiSystemState) -> list[ValidationIssue]:
         if has_equipment and not has_demand:
             issues.append(ValidationIssue(
                 severity="warning", category="Demand",
-                message=(
-                    f"Node {node.index} ({node.name}): "
-                    "has generation equipment but no demand data"
-                ),
+                message=tr("validation.msg_node_gen_no_demand",
+                           node=node.index, name=node.name),
                 element_type="node", element_id=str(node.index),
             ))
 
@@ -922,17 +959,15 @@ def _validate_demand(state: GuiSystemState) -> list[ValidationIssue]:
         if node.demand.csv_path and not node.demand.data:
             issues.append(ValidationIssue(
                 severity="warning", category="Demand",
-                message=(
-                    f"Node {node.index} ({node.name}): "
-                    "demand CSV path set but data could not be loaded"
-                ),
+                message=tr("validation.msg_node_demand_unloaded",
+                           node=node.index, name=node.name),
                 element_type="node", element_id=str(node.index),
             ))
 
     if total_system_demand <= 0 and state.nodes:
         issues.append(ValidationIssue(
             severity="error", category="Demand",
-            message="System has zero total peak demand across all nodes",
+            message=tr("validation.msg_zero_peak_demand"),
         ))
 
     # Demand time series length mismatch across nodes
@@ -949,7 +984,7 @@ def _validate_demand(state: GuiSystemState) -> list[ValidationIssue]:
         )
         issues.append(ValidationIssue(
             severity="warning", category="Demand",
-            message=f"Demand time series have different lengths: {detail}",
+            message=tr("validation.msg_demand_lengths_differ", detail=detail),
         ))
 
     # Negative demand values
@@ -959,10 +994,9 @@ def _validate_demand(state: GuiSystemState) -> list[ValidationIssue]:
             if min_val < 0:
                 issues.append(ValidationIssue(
                     severity="error", category="Demand",
-                    message=(
-                        f"Node {node.index} ({node.name}): "
-                        f"demand data contains negative values (min={min_val:.2f} MW)"
-                    ),
+                    message=tr("validation.msg_node_negative_demand",
+                               node=node.index, name=node.name,
+                               min=f"{min_val:.2f}"),
                     element_type="node", element_id=str(node.index),
                 ))
 
@@ -989,11 +1023,10 @@ def _validate_generation(state: GuiSystemState) -> list[ValidationIssue]:
         if adequacy < 1.0:
             issues.append(ValidationIssue(
                 severity="warning", category="Generation",
-                message=(
-                    f"Total installed + investable capacity "
-                    f"({total_gen + total_bat:.0f} MW) < peak demand "
-                    f"({total_peak:.0f} MW). Adequacy ratio: {adequacy:.2f}"
-                ),
+                message=tr("validation.msg_adequacy",
+                           capacity=f"{total_gen + total_bat:.0f}",
+                           peak=f"{total_peak:.0f}",
+                           ratio=f"{adequacy:.2f}"),
             ))
 
     from pathlib import Path
@@ -1003,29 +1036,24 @@ def _validate_generation(state: GuiSystemState) -> list[ValidationIssue]:
             if not gen.availability_file:
                 issues.append(ValidationIssue(
                     severity="warning", category="Generation",
-                    message=(
-                        f"Generator '{gen.name}' ({inst_id}): "
-                        "renewable with rated_power > 0 but no availability file"
-                    ),
+                    message=tr("validation.msg_gen_no_availability",
+                               name=gen.name, id=inst_id),
                     element_type="generator", element_id=inst_id,
                 ))
             elif not Path(gen.availability_file).is_file():
                 issues.append(ValidationIssue(
                     severity="warning", category="Generation",
-                    message=(
-                        f"Generator '{gen.name}' ({inst_id}): "
-                        f"availability file not found: {gen.availability_file}"
-                    ),
+                    message=tr("validation.msg_gen_availability_missing",
+                               name=gen.name, id=inst_id,
+                               path=gen.availability_file),
                     element_type="generator", element_id=inst_id,
                 ))
 
         if gen.rated_power <= 0:
             issues.append(ValidationIssue(
                 severity="info", category="Generation",
-                message=(
-                    f"Generator '{gen.name}' ({inst_id}): "
-                    "zero rated power"
-                ),
+                message=tr("validation.msg_gen_zero_power", name=gen.name,
+                           id=inst_id),
                 element_type="generator", element_id=inst_id,
             ))
 
@@ -1068,11 +1096,8 @@ def _validate_fuel_catalog(state: GuiSystemState) -> list[ValidationIssue]:
             if not gen.fuel or gen.fuel == "None":
                 issues.append(ValidationIssue(
                     severity="error", category="Fuel Network",
-                    message=(
-                        f"Generator '{gen.name}' ({gid}): non-renewable "
-                        f"unit has empty fuel — the LP would see fuel_cost=0 "
-                        f"and 0 emissions, dispatching it as free"
-                    ),
+                    message=tr("validation.msg_gen_empty_fuel", name=gen.name,
+                               id=gid),
                     element_type="generator", element_id=gid,
                 ))
                 continue
@@ -1089,10 +1114,8 @@ def _validate_fuel_catalog(state: GuiSystemState) -> list[ValidationIssue]:
         seen_missing.add(key)
         issues.append(ValidationIssue(
             severity="warning", category="Fuel Network",
-            message=(
-                f"Generator '{gen.name}' ({gid}): fuel '{gen.fuel}' "
-                f"is not registered in the system fuel catalog"
-            ),
+            message=tr("validation.msg_gen_fuel_unregistered", name=gen.name,
+                       id=gid, fuel=gen.fuel),
             element_type="generator", element_id=gid,
         ))
 
@@ -1103,10 +1126,8 @@ def _validate_fuel_catalog(state: GuiSystemState) -> list[ValidationIssue]:
         if tid and tid not in tech_ids:
             issues.append(ValidationIssue(
                 severity="warning", category="Fuel Network",
-                message=(
-                    f"Generator '{gen.name}' ({gid}): technology "
-                    f"'{tid}' is not registered in the system catalog"
-                ),
+                message=tr("validation.msg_gen_tech_unregistered",
+                           name=gen.name, id=gid, tech=tid),
                 element_type="generator", element_id=gid,
             ))
 
@@ -1122,11 +1143,8 @@ def _validate_fuel_catalog(state: GuiSystemState) -> list[ValidationIssue]:
             if tcat != "renewable":
                 issues.append(ValidationIssue(
                     severity="error", category="Fuel Network",
-                    message=(
-                        f"Technology '{getattr(tech, 'name', tid)}' ({tid}): "
-                        f"non-renewable tech has empty fuel — investments built "
-                        f"from this tech will dispatch as free with 0 emissions"
-                    ),
+                    message=tr("validation.msg_tech_empty_fuel",
+                               name=getattr(tech, "name", tid), id=tid),
                     element_type="technology", element_id=tid,
                 ))
             continue
@@ -1138,10 +1156,8 @@ def _validate_fuel_catalog(state: GuiSystemState) -> list[ValidationIssue]:
         seen_tech_missing.add(tkey)
         issues.append(ValidationIssue(
             severity="warning", category="Fuel Network",
-            message=(
-                f"Technology '{getattr(tech, 'name', tid)}' ({tid}): "
-                f"fuel '{tfuel}' is not in the system fuel catalog"
-            ),
+            message=tr("validation.msg_tech_fuel_unregistered",
+                       name=getattr(tech, "name", tid), id=tid, fuel=tfuel),
             element_type="technology", element_id=tid,
         ))
 
@@ -1155,7 +1171,8 @@ def _validate_fuel_entries(state: GuiSystemState) -> list[ValidationIssue]:
         if fe.node not in node_indices:
             issues.append(ValidationIssue(
                 severity="error", category="Fuel Entry",
-                message=f"Fuel entry '{fe.name}': node {fe.node} does not exist",
+                message=tr("validation.msg_fuel_entry_node_missing",
+                           name=fe.name, node=fe.node),
                 element_type="fuel_entry", element_id=str(i),
             ))
     return issues
@@ -1191,10 +1208,8 @@ def _validate_fuel_network(state: GuiSystemState) -> list[ValidationIssue]:
     if missing:
         issues.append(ValidationIssue(
             severity="warning", category="Fuel Network",
-            message=(
-                "Fuels used by generators but not supplied by any fuel entry: "
-                + ", ".join(sorted(missing))
-            ),
+            message=tr("validation.msg_fuels_unsupplied",
+                       fuels=", ".join(sorted(missing))),
         ))
 
     # Fuel entries with no fuels assigned
@@ -1202,7 +1217,7 @@ def _validate_fuel_network(state: GuiSystemState) -> list[ValidationIssue]:
         if not fe.fuels:
             issues.append(ValidationIssue(
                 severity="warning", category="Fuel Network",
-                message=f"Fuel entry '{fe.name}': no fuels assigned",
+                message=tr("validation.msg_fuel_entry_no_fuels", name=fe.name),
                 element_type="fuel_entry", element_id=str(i),
             ))
 
@@ -1212,13 +1227,15 @@ def _validate_fuel_network(state: GuiSystemState) -> list[ValidationIssue]:
         if rt.from_node not in node_indices:
             issues.append(ValidationIssue(
                 severity="error", category="Fuel Network",
-                message=f"Fuel route '{rt.route_id}': from_node {rt.from_node} does not exist",
+                message=tr("validation.msg_route_from_node_missing",
+                           route=rt.route_id, node=rt.from_node),
                 element_type="fuel_route", element_id=rt.route_id,
             ))
         if rt.to_node not in node_indices:
             issues.append(ValidationIssue(
                 severity="error", category="Fuel Network",
-                message=f"Fuel route '{rt.route_id}': to_node {rt.to_node} does not exist",
+                message=tr("validation.msg_route_to_node_missing",
+                           route=rt.route_id, node=rt.to_node),
                 element_type="fuel_route", element_id=rt.route_id,
             ))
         # Intra-node routes (from_node == to_node) are valid — they model
@@ -1226,7 +1243,8 @@ def _validate_fuel_network(state: GuiSystemState) -> list[ValidationIssue]:
         if rt.capacity <= 0 and not rt.fuel_params:
             issues.append(ValidationIssue(
                 severity="warning", category="Fuel Network",
-                message=f"Fuel route '{rt.route_id}': zero or negative capacity",
+                message=tr("validation.msg_route_capacity_nonpositive",
+                           route=rt.route_id),
                 element_type="fuel_route", element_id=rt.route_id,
             ))
 
@@ -1235,7 +1253,8 @@ def _validate_fuel_network(state: GuiSystemState) -> list[ValidationIssue]:
         if not fs.fuels:
             issues.append(ValidationIssue(
                 severity="warning", category="Fuel Network",
-                message=f"Fuel storage '{fs.name}' ({sid}): no fuels assigned",
+                message=tr("validation.msg_fuel_storage_no_fuels", name=fs.name,
+                           id=sid),
                 element_type="fuel_storage", element_id=sid,
             ))
 
@@ -1245,10 +1264,8 @@ def _validate_fuel_network(state: GuiSystemState) -> list[ValidationIssue]:
             if _normalize_fuel_key(ned.fuel) not in fuels_supplied:
                 issues.append(ValidationIssue(
                     severity="warning", category="Fuel Network",
-                    message=(
-                        f"Non-electric demand '{ned_id}': "
-                        f"fuel '{ned.fuel}' not supplied by any fuel entry"
-                    ),
+                    message=tr("validation.msg_ned_fuel_unsupplied", id=ned_id,
+                               fuel=ned.fuel),
                 ))
 
     return issues
@@ -1321,10 +1338,8 @@ def _validate_connectivity(state: GuiSystemState) -> list[ValidationIssue]:
         sizes = sorted((len(c) for c in components), reverse=True)
         issues.append(ValidationIssue(
             severity="info", category="Connectivity",
-            message=(
-                f"Network has {len(components)} disconnected sub-networks "
-                f"(sizes: {sizes}), {comps_with_demand} with demand"
-            ),
+            message=tr("validation.msg_subnetworks", n=len(components),
+                       sizes=sizes, with_demand=comps_with_demand),
         ))
 
     isolated = node_indices - visited
@@ -1341,16 +1356,18 @@ def _validate_connectivity(state: GuiSystemState) -> list[ValidationIssue]:
         if has_gen or has_bat or has_tr or has_fe:
             equipment = []
             if has_gen:
-                equipment.append("generators")
+                equipment.append(tr("validation.equip_generators"))
             if has_bat:
-                equipment.append("batteries")
+                equipment.append(tr("validation.equip_batteries"))
             if has_tr:
-                equipment.append("transformers")
+                equipment.append(tr("validation.equip_transformers"))
             if has_fe:
-                equipment.append("fuel entries")
+                equipment.append(tr("validation.equip_fuel_entries"))
             issues.append(ValidationIssue(
                 severity="warning", category="Connectivity",
-                message=f"Node {idx} ({name}) is isolated but has {', '.join(equipment)}",
+                message=tr("validation.msg_node_isolated_with_equipment",
+                           node=idx, name=name,
+                           equipment=tr("validation.list_sep").join(equipment)),
                 element_type="node", element_id=str(idx),
             ))
 
@@ -1484,7 +1501,7 @@ def _find_dead_end_buses(
         if progress_callback:
             progress_callback(
                 iteration, max_iterations,
-                f"Electrical dead-end scan iteration {iteration + 1}...",
+                tr("validation.progress_dead_end_scan", n=iteration + 1),
             )
 
         adj = _build_bus_adjacency(state, active_buses, removed_lines)
@@ -1507,14 +1524,14 @@ def _find_dead_end_buses(
                     actions.append(SimplificationAction(
                         action_type="remove_line",
                         element_id=ln.line_id,
-                        reason=f"Stub line to dead-end bus '{bus_name}'",
+                        reason=tr("validation.reason_stub_line", bus=bus_name),
                     ))
                     removed_lines.add(ln.line_id)
 
             actions.append(SimplificationAction(
                 action_type="remove_bus",
                 element_id=bus_id,
-                reason="Dead-end bus: no generation, no demand, leaf connection",
+                reason=tr("validation.reason_dead_end_bus"),
             ))
 
             active_buses.discard(bus_id)
@@ -1588,7 +1605,7 @@ def _find_dead_end_fuel_elements(
         if progress_callback:
             progress_callback(
                 iteration, max_iterations,
-                f"Fuel dead-end scan iteration {iteration + 1}...",
+                tr("validation.progress_fuel_dead_end_scan", n=iteration + 1),
             )
 
         adj = _build_fuel_adjacency(state, active_nodes, removed_routes)
@@ -1614,7 +1631,8 @@ def _find_dead_end_fuel_elements(
                         actions.append(SimplificationAction(
                             action_type="remove_fuel_route",
                             element_id=rt.route_id,
-                            reason=f"Stub route to dead-end fuel node '{node_name}'",
+                            reason=tr("validation.reason_stub_route",
+                                      node=node_name),
                         ))
                         removed_routes.add(rt.route_id)
 
@@ -1624,10 +1642,8 @@ def _find_dead_end_fuel_elements(
                     actions.append(SimplificationAction(
                         action_type="remove_fuel_entry",
                         element_id=str(fe_idx),
-                        reason=(
-                            f"Fuel entry '{fe.name}' at dead-end fuel node "
-                            f"'{node_name}' (no fuel consumers)"
-                        ),
+                        reason=tr("validation.reason_dead_end_fuel_entry",
+                                  name=fe.name, node=node_name),
                     ))
 
             # Remove fuel storages at this dead-end node
@@ -1636,10 +1652,8 @@ def _find_dead_end_fuel_elements(
                     actions.append(SimplificationAction(
                         action_type="remove_fuel_storage",
                         element_id=sid,
-                        reason=(
-                            f"Fuel storage '{fs.name}' at dead-end fuel node "
-                            f"'{node_name}' (no fuel consumers)"
-                        ),
+                        reason=tr("validation.reason_dead_end_fuel_storage",
+                                  name=fs.name, node=node_name),
                     ))
 
             active_nodes.discard(node_idx)
@@ -2031,15 +2045,15 @@ def find_infrastructure_simplifications(
             )
 
         desc_parts = [
-            f"Merge {len(gids)} {fuel} {gen_type} generators → 1",
-            f"({total_power:.1f} MW total)",
+            tr("validation.desc_merge_generators", n=len(gids), fuel=fuel,
+               gen_type=gen_type, power=f"{total_power:.1f}"),
         ]
         if buses_rm:
-            desc_parts.append(f", remove {len(buses_rm)} empty bus(es)")
+            desc_parts.append(tr("validation.desc_rm_buses", n=len(buses_rm)))
         if lines_rm:
-            desc_parts.append(f", {len(lines_rm)} line(s)")
+            desc_parts.append(tr("validation.desc_rm_lines", n=len(lines_rm)))
         if trafos_rm:
-            desc_parts.append(f", {len(trafos_rm)} transformer(s)")
+            desc_parts.append(tr("validation.desc_rm_trafos", n=len(trafos_rm)))
 
         suggestions.append(InfrastructureSuggestion(
             level=level,
@@ -2103,15 +2117,15 @@ def find_infrastructure_simplifications(
             )
 
         desc_parts = [
-            f"Merge {len(bids)} batteries → 1",
-            f"({total_power:.1f} MW / {total_capacity:.1f} MWh)",
+            tr("validation.desc_merge_batteries", n=len(bids),
+               power=f"{total_power:.1f}", energy=f"{total_capacity:.1f}"),
         ]
         if buses_rm:
-            desc_parts.append(f", remove {len(buses_rm)} empty bus(es)")
+            desc_parts.append(tr("validation.desc_rm_buses", n=len(buses_rm)))
         if lines_rm:
-            desc_parts.append(f", {len(lines_rm)} line(s)")
+            desc_parts.append(tr("validation.desc_rm_lines", n=len(lines_rm)))
         if trafos_rm:
-            desc_parts.append(f", {len(trafos_rm)} transformer(s)")
+            desc_parts.append(tr("validation.desc_rm_trafos", n=len(trafos_rm)))
 
         suggestions.append(InfrastructureSuggestion(
             level=level,
@@ -2753,11 +2767,9 @@ def _find_parallel_lines(
         suggestions.append(TopologySuggestion(
             action_type="parallel_line_merge",
             level=1,
-            description=(
-                f"Merge {len(lines)} parallel lines "
-                f"{key[0]}↔{key[1]} → 1 "
-                f"({equiv['capacity_mw']:.1f} MW{x_str})"
-            ),
+            description=tr("validation.desc_merge_parallel_lines",
+                           n=len(lines), bus_a=key[0], bus_b=key[1],
+                           mw=f"{equiv['capacity_mw']:.1f}", x=x_str),
             lines_to_remove=lines_to_remove,
             lines_to_create=[new_line_spec],
             elements_removed=len(lines) - 1,
@@ -3310,10 +3322,11 @@ def _find_radial_buses(
             suggestions.append(TopologySuggestion(
                 action_type="radial_prune",
                 level=2,
-                description=(
-                    f"Prune radial bus {bus_id} "
-                    f"(connected to {neighbor} via {edge_type})"
-                ),
+                description=tr(
+                    "validation.desc_prune_radial_via_transformer"
+                    if edge_type == "transformer"
+                    else "validation.desc_prune_radial_via_line",
+                    bus=bus_id, neighbor=neighbor),
                 buses_to_remove=[bus_id],
                 lines_to_remove=lines_rm,
                 transformers_to_remove=trafos_rm,
@@ -3425,10 +3438,9 @@ def _find_series_buses(
             suggestions.append(TopologySuggestion(
                 action_type="series_eliminate",
                 level=2,
-                description=(
-                    f"Eliminate pass-through bus {bus_id} "
-                    f"({bus_a}↔{bus_b}, {eq_cap:.1f} MW{x_str})"
-                ),
+                description=tr("validation.desc_eliminate_series_bus",
+                               bus=bus_id, bus_a=bus_a, bus_b=bus_b,
+                               mw=f"{eq_cap:.1f}", x=x_str),
                 buses_to_remove=[bus_id],
                 lines_to_remove=[ln_a.line_id, ln_b.line_id],
                 lines_to_create=[new_line_spec],
@@ -3543,13 +3555,14 @@ def _merge_bus_into_suggestion(
     v_surv = surviving_bus.voltage_kv if surviving_bus else "?"
     n_equip = len(equipment_reassignment)
     desc_parts = [
-        f"Collapse bus {removed_bus_id} ({v_rm} kV) "
-        f"into {surviving_bus_id} ({v_surv} kV)",
+        tr("validation.desc_collapse_bus", bus=removed_bus_id, kv=v_rm,
+           into=surviving_bus_id, into_kv=v_surv),
     ]
     if n_equip:
-        desc_parts.append(f", reassign {n_equip} unit(s)")
+        desc_parts.append(tr("validation.desc_reassign_units", n=n_equip))
     if lines_to_create:
-        desc_parts.append(f", reterminate {len(lines_to_create)} line(s)")
+        desc_parts.append(tr("validation.desc_reterminate_lines",
+                             n=len(lines_to_create)))
 
     return TopologySuggestion(
         action_type="voltage_collapse",
@@ -3755,12 +3768,11 @@ def _find_small_generators(
             suggestions.append(TopologySuggestion(
                 action_type="small_gen_absorb",
                 level=4,
-                description=(
-                    f"Absorb {small.name or small_id} "
-                    f"({small.rated_power:.1f} MW {fuel}) into "
-                    f"{absorber.name or absorber_id} "
-                    f"({absorber.rated_power:.1f} MW)"
-                ),
+                description=tr("validation.desc_absorb_small_gen",
+                               small=small.name or small_id,
+                               small_mw=f"{small.rated_power:.1f}", fuel=fuel,
+                               target=absorber.name or absorber_id,
+                               target_mw=f"{absorber.rated_power:.1f}"),
                 elements_removed=1,
                 # Store IDs for the apply function to handle
                 buses_to_merge={},
@@ -3826,7 +3838,7 @@ def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
     except Exception as exc:  # never block validation on the heuristics
         return [ValidationIssue(
             severity="info", category="Realism",
-            message=f"Realism checks skipped: {exc}")]
+            message=tr("validation.msg_realism_skipped", error=exc))]
 
     for d in rep.duplicates:
         extra = d["total_mw"] - d["total_mw"] / d["count"]
@@ -3835,33 +3847,27 @@ def _validate_realism(state: GuiSystemState) -> list[ValidationIssue]:
         issues.append(ValidationIssue(
             severity="info", category="Realism",
             element_type="generator", element_id=d["members"][0],
-            message=(
-                f"Probable duplicate plant: {d['count']} {d['fuel']} units "
-                f"named like '{d['name']}' close together "
-                f"({', '.join(d['members'][:5])}"
-                f"{', ...' if d['count'] > 5 else ''}); if they are the same "
-                f"plant, capacity is over-counted by ~{extra:.0f} MW"),
+            message=tr("validation.msg_duplicate_plant", count=d["count"],
+                       fuel=d["fuel"], name=d["name"],
+                       members=(", ".join(d["members"][:5])
+                                + (", ..." if d["count"] > 5 else "")),
+                       extra=f"{extra:.0f}"),
         ))
     if rep.reserve_margin is not None and rep.reserve_margin > 1.0:
         issues.append(ValidationIssue(
             severity="info", category="Realism",
-            message=(
-                f"Installed capacity {rep.total_capacity_mw:.0f} MW is "
-                f"{rep.reserve_margin:.0%} above peak demand ({peak:.0f} MW). "
-                "Plausible with a lot of solar/wind; otherwise check for "
-                "duplicate or retired units"),
+            message=tr("validation.msg_high_reserve_margin",
+                       capacity=f"{rep.total_capacity_mw:.0f}",
+                       margin=f"{rep.reserve_margin:.0%}", peak=f"{peak:.0f}"),
         ))
     feas = rep.feasibility or {}
     if feas and not feas.get("feasible", True):
         issues.append(ValidationIssue(
             severity="warning", category="Realism",
-            message=(
-                f"Transmission bottleneck: only {feas['deliverable_mw']:.0f} of "
-                f"{feas['peak_demand_mw']:.0f} MW peak demand can be delivered "
-                f"through the line/transformer ratings; "
-                f"{feas['unservable_mw']:.0f} MW that the installed "
-                "generation could serve is cut off behind "
-                "under-sized corridors (max-flow check)"),
+            message=tr("validation.msg_bottleneck",
+                       deliverable=f"{feas['deliverable_mw']:.0f}",
+                       peak=f"{feas['peak_demand_mw']:.0f}",
+                       unservable=f"{feas['unservable_mw']:.0f}"),
         ))
     return issues
 
@@ -3902,10 +3908,8 @@ def _validate_topology_audit(
         )
         issues.append(ValidationIssue(
             severity="error", category="Topology Audit",
-            message=(
-                f"Topology audit crashed ({type(exc).__name__}: {exc}); "
-                "topology integrity could not be checked. See log for trace."
-            ),
+            message=tr("validation.msg_topology_audit_crashed",
+                       error_type=type(exc).__name__, error=exc),
             element_type="system", element_id="topology_audit",
         ))
         return issues
@@ -3913,11 +3917,7 @@ def _validate_topology_audit(
     for lid in rep.lines_dropped_unresolved:
         issues.append(ValidationIssue(
             severity="error", category="Topology Audit",
-            message=(
-                f"Line '{lid}': from_bus / to_bus unresolved — the "
-                "solver will silently drop this line. Run auto-fix or "
-                "set the endpoints manually."
-            ),
+            message=tr("validation.msg_audit_line_unresolved", line=lid),
             element_type="line", element_id=lid,
         ))
     for bid in rep.orphan_buses:
@@ -3927,29 +3927,19 @@ def _validate_topology_audit(
         # results. Consistent with orphan_generators below (already error).
         issues.append(ValidationIssue(
             severity="error", category="Topology Audit",
-            message=(
-                f"Bus '{bid}' has no electrical edges (no lines, "
-                "transformers, or converters). It forms a one-bus "
-                "island; remove it or connect it to the grid."
-            ),
+            message=tr("validation.msg_audit_orphan_bus", bus=bid),
             element_type="bus", element_id=bid,
         ))
     for gid in rep.orphan_generators:
         issues.append(ValidationIssue(
             severity="error", category="Topology Audit",
-            message=(
-                f"Generator '{gid}': bus reference points to a bus that "
-                "no longer exists. Solver will drop this generator."
-            ),
+            message=tr("validation.msg_audit_orphan_gen", id=gid),
             element_type="generator", element_id=gid,
         ))
     for bid_eq in rep.orphan_batteries:
         issues.append(ValidationIssue(
             severity="error", category="Topology Audit",
-            message=(
-                f"Battery '{bid_eq}': bus reference is invalid. Solver "
-                "will drop this battery."
-            ),
+            message=tr("validation.msg_audit_orphan_bat", id=bid_eq),
             element_type="battery", element_id=bid_eq,
         ))
     # ── Surplus components (gen but no demand reachable) ────────
@@ -3978,18 +3968,12 @@ def _validate_topology_audit(
             for gid, g in trapped_gens[:3]
         )
         if len(trapped_gens) > 3:
-            gen_names += f", +{len(trapped_gens) - 3} more"
+            gen_names += tr("validation.msg_and_more", n=len(trapped_gens) - 3)
         any_bus = next(iter(comp))
         issues.append(ValidationIssue(
             severity=sev, category="Topology Audit",
-            message=(
-                f"Electrical island of {len(comp)} bus(es) "
-                f"({total_mw:.1f} MW gen): {gen_names}. These buses are "
-                "interconnected but the whole group has no line, transformer "
-                "or converter reaching any demand bus — often a real network "
-                "gap where the link to the main grid was not mapped. Connect "
-                "the island to the grid or remove the generator(s)."
-            ),
+            message=tr("validation.msg_audit_surplus_island", n=len(comp),
+                       mw=f"{total_mw:.1f}", gens=gen_names),
             element_type="bus", element_id=any_bus,
         ))
         # Also create one issue per stranded generator so they're
@@ -3997,13 +3981,9 @@ def _validate_topology_audit(
         for gid, g in trapped_gens:
             issues.append(ValidationIssue(
                 severity=sev, category="Topology Audit",
-                message=(
-                    f"Generator '{g.name or gid}' ({g.rated_power:.1f} "
-                    f"MW, {g.fuel}) on bus '{g.bus}' is part of a "
-                    f"{len(comp)}-bus electrical island with no path to any "
-                    "demand bus. The bus itself is connected locally, but the "
-                    "island as a whole does not reach the main grid."
-                ),
+                message=tr("validation.msg_audit_island_gen",
+                           name=g.name or gid, mw=f"{g.rated_power:.1f}",
+                           fuel=g.fuel, bus=g.bus, n=len(comp)),
                 element_type="generator", element_id=gid,
             ))
 
@@ -4023,13 +4003,8 @@ def _validate_topology_audit(
         any_bus = demand_buses[0] if demand_buses else next(iter(comp))
         issues.append(ValidationIssue(
             severity="error", category="Topology Audit",
-            message=(
-                f"Isolated load island of {len(comp)} bus(es) around "
-                f"'{any_bus}' ({len(demand_buses)} demand bus(es)): carries "
-                "demand but has no generation and no path to any generator. "
-                "The solver can only shed this demand. Connect it to the grid "
-                "or remove the demand."
-            ),
+            message=tr("validation.msg_audit_load_island", n=len(comp),
+                       bus=any_bus, n_demand=len(demand_buses)),
             element_type="bus", element_id=any_bus,
         ))
 
@@ -4039,11 +4014,8 @@ def _validate_topology_audit(
         any_bus = next(iter(comp), "?")
         issues.append(ValidationIssue(
             severity="info", category="Topology Audit",
-            message=(
-                f"Component containing bus '{any_bus}' ({len(comp)} "
-                "buses) has neither generation nor demand — it has no "
-                "effect on dispatch."
-            ),
+            message=tr("validation.msg_audit_inert_component", bus=any_bus,
+                       n=len(comp)),
             element_type="bus", element_id=any_bus,
         ))
     return issues
@@ -4062,7 +4034,7 @@ def repair_network(state: GuiSystemState) -> list[str]:
     ]
     removed_lines = before - len(state.transmission_lines)
     if removed_lines:
-        log.append(f"Removed {removed_lines} line(s) with invalid bus references")
+        log.append(tr("validation.log_removed_bad_ref_lines", n=removed_lines))
 
     # 2. Remove self-loop lines
     before = len(state.transmission_lines)
@@ -4072,7 +4044,7 @@ def repair_network(state: GuiSystemState) -> list[str]:
     ]
     removed_loops = before - len(state.transmission_lines)
     if removed_loops:
-        log.append(f"Removed {removed_loops} self-loop line(s)")
+        log.append(tr("validation.log_removed_loop_lines", n=removed_loops))
 
     # 3. Remove transformers referencing non-existent buses
     before = len(state.transformers)
@@ -4082,7 +4054,7 @@ def repair_network(state: GuiSystemState) -> list[str]:
     ]
     removed_tr = before - len(state.transformers)
     if removed_tr:
-        log.append(f"Removed {removed_tr} transformer(s) with invalid bus references")
+        log.append(tr("validation.log_removed_bad_ref_trafos", n=removed_tr))
 
     # 3b. Remove self-loop transformers / converters (post-merge artefact)
     before = len(state.transformers)
@@ -4091,14 +4063,14 @@ def repair_network(state: GuiSystemState) -> list[str]:
     ]
     n = before - len(state.transformers)
     if n:
-        log.append(f"Removed {n} self-loop transformer(s)")
+        log.append(tr("validation.log_removed_loop_trafos", n=n))
     before = len(state.acdc_converters)
     state.acdc_converters = [
         c for c in state.acdc_converters if c.from_bus != c.to_bus
     ]
     n = before - len(state.acdc_converters)
     if n:
-        log.append(f"Removed {n} self-loop AC/DC converter(s)")
+        log.append(tr("validation.log_removed_loop_acdc", n=n))
     if hasattr(state, "freq_converters"):
         before = len(state.freq_converters)
         state.freq_converters = [
@@ -4106,7 +4078,7 @@ def repair_network(state: GuiSystemState) -> list[str]:
         ]
         n = before - len(state.freq_converters)
         if n:
-            log.append(f"Removed {n} self-loop freq. converter(s)")
+            log.append(tr("validation.log_removed_loop_freq", n=n))
 
     # 4-6. Reassign orphaned equipment to a valid bus, preferring buses
     # on the equipment's existing ``node`` field (so renderer keeps
@@ -4122,27 +4094,25 @@ def repair_network(state: GuiSystemState) -> list[str]:
         if gen.bus not in bus_ids:
             fallback = _pick_fallback_bus(getattr(gen, "node", None))
             if fallback:
-                log.append(
-                    f"Reassigned generator '{gen.name or gid}' "
-                    f"from '{gen.bus}' to '{fallback}'"
-                )
+                log.append(tr("validation.log_reassigned_gen",
+                              name=gen.name or gid, bus=gen.bus,
+                              to=fallback))
                 gen.bus = fallback
             else:
                 state.generators.pop(gid)
-                log.append(f"Removed orphaned generator '{gen.name or gid}'")
+                log.append(tr("validation.log_removed_orphan_gen", name=gen.name or gid))
 
     for bid, bat in list(state.batteries.items()):
         if bat.bus not in bus_ids:
             fallback = _pick_fallback_bus(getattr(bat, "node", None))
             if fallback:
-                log.append(
-                    f"Reassigned battery '{bat.name or bid}' "
-                    f"from '{bat.bus}' to '{fallback}'"
-                )
+                log.append(tr("validation.log_reassigned_bat",
+                              name=bat.name or bid, bus=bat.bus,
+                              to=fallback))
                 bat.bus = fallback
             else:
                 state.batteries.pop(bid)
-                log.append(f"Removed orphaned battery '{bat.name or bid}'")
+                log.append(tr("validation.log_removed_orphan_bat", name=bat.name or bid))
 
     if hasattr(state, "electrolyzers"):
         for eid, elec in list(state.electrolyzers.items()):
@@ -4151,7 +4121,7 @@ def repair_network(state: GuiSystemState) -> list[str]:
                 fallback = _pick_fallback_bus(getattr(elec, "node", None))
                 if fallback:
                     elec.bus = fallback
-                    log.append(f"Reassigned electrolyzer '{eid}' to '{fallback}'")
+                    log.append(tr("validation.log_reassigned_elz", id=eid, to=fallback))
 
     # 7. Normalize demand_fraction per node — only over load/mixed buses.
     # Connection buses have df=0 by definition and don't participate.
@@ -4164,17 +4134,13 @@ def repair_network(state: GuiSystemState) -> list[str]:
             for bus in state.buses.values():
                 if bus.parent_node == node_idx and bus.role in ("load", "mixed"):
                     bus.demand_fraction /= total
-            log.append(
-                f"Renormalized demand_fraction for node {node_idx} "
-                f"(was {total:.3f})"
-            )
+            log.append(tr("validation.log_renormalized_df", node=node_idx,
+                          total=f"{total:.3f}"))
 
     # Heal disconnected demand within nodes
     healed = _heal_disconnected_demand(state)
     if healed:
-        log.append(
-            f"Healed {healed} bus(es) with disconnected demand"
-        )
+        log.append(tr("validation.log_healed_demand", n=healed))
 
     # Sync stale EndpointRefs against the (now-repaired) bus dict.
     # This is the last line of defence against the "orphan line"
@@ -4182,7 +4148,7 @@ def repair_network(state: GuiSystemState) -> list[str]:
     # corresponding EndpointRef still points to a deleted bus.
     n_synced = _sync_endpoints_to_buses(state)
     if n_synced:
-        log.append(f"Re-anchored {n_synced} stale endpoint(s)")
+        log.append(tr("validation.log_reanchored_endpoints", n=n_synced))
 
     return log
 
@@ -5524,18 +5490,18 @@ def apply_simplification_level(
     # reduction runs once after the L0/L1 fixpoint converges.
     _reduce = level >= 2
 
-    all_log.append(
-        f"── Initial: {len(state.buses)} buses, "
-        f"{len(state.transmission_lines)} lines, "
-        f"{len(state.generators)} gens, "
-        f"{len(state.batteries)} bats, "
-        f"{len(state.transformers)} trafos ──"
-    )
+    def _counts() -> str:
+        return tr("validation.log_counts", buses=len(state.buses),
+                  lines=len(state.transmission_lines),
+                  gens=len(state.generators), bats=len(state.batteries),
+                  trafos=len(state.transformers))
+
+    all_log.append(tr("validation.log_initial", counts=_counts()))
 
     # Phase 0: Initial repair
     repair_log = repair_network(state)
     if repair_log:
-        all_log.append("── Initial Repair ──")
+        all_log.append(tr("validation.log_initial_repair"))
         all_log.extend(f"  {line}" for line in repair_log)
 
     for iteration in range(max_iterations):
@@ -5547,21 +5513,21 @@ def apply_simplification_level(
         # touch the electrical graph.
         n_fuel = _cleanup_fuel_infrastructure(state, model)
         if n_fuel:
-            round_log.append(f"Removed {n_fuel} orphaned fuel element(s)")
+            round_log.append(tr("validation.log_removed_fuel", n=n_fuel))
             changes += n_fuel
 
         # Step 1: Parallel line consolidation (L1+)
         if level >= 1:
             n = _consolidate_parallel_lines(state)
             if n:
-                round_log.append(f"Consolidated {n} parallel line(s)")
+                round_log.append(tr("validation.log_consolidated_lines", n=n))
                 changes += n
 
         # Step 2: Equipment aggregation (L1+)
         if level >= 1:
             n = _aggregate_equipment(state, model)
             if n:
-                round_log.append(f"Aggregated {n} equipment group(s)")
+                round_log.append(tr("validation.log_aggregated", n=n))
                 changes += n
 
         # Step 3: Radial bus pruning (legacy L2+ pruning — superseded by the
@@ -5569,14 +5535,14 @@ def apply_simplification_level(
         if level >= 2 and not _reduce:
             n = _prune_radial_buses(state)
             if n:
-                round_log.append(f"Pruned {n} radial bus(es)")
+                round_log.append(tr("validation.log_pruned_radial", n=n))
                 changes += n
 
         # Step 4: Series bus elimination (legacy L2+ pruning).
         if level >= 2 and not _reduce:
             n = _eliminate_series_buses(state)
             if n:
-                round_log.append(f"Eliminated {n} series bus(es)")
+                round_log.append(tr("validation.log_eliminated_series", n=n))
                 changes += n
 
         # Step 5: Intra-node voltage collapse (legacy L3+ pruning).
@@ -5586,9 +5552,8 @@ def apply_simplification_level(
                 apply_topology_suggestion(model, s)
                 changes += 1
             if suggestions:
-                round_log.append(
-                    f"Collapsed {len(suggestions)} voltage level(s)"
-                )
+                round_log.append(tr("validation.log_collapsed_voltage",
+                                    n=len(suggestions)))
 
         # Step 6: Full node collapse (legacy L4+ pruning).
         if level >= 4 and not _reduce:
@@ -5597,22 +5562,21 @@ def apply_simplification_level(
                 apply_topology_suggestion(model, s)
                 changes += 1
             if suggestions:
-                round_log.append(
-                    f"Collapsed {len(suggestions)} node bus(es)"
-                )
+                round_log.append(tr("validation.log_collapsed_node",
+                                    n=len(suggestions)))
             absorb = _find_small_generators(state, config)
             for s in absorb:
                 _apply_small_gen_absorb(model, s)
                 changes += 1
             if absorb:
-                round_log.append(
-                    f"Absorbed {len(absorb)} small generator(s)"
-                )
+                round_log.append(tr("validation.log_absorbed_small",
+                                    n=len(absorb)))
 
         # Step 7: Repair artifacts
         repair_log = repair_network(state)
         if repair_log:
-            round_log.extend(f"Repair: {r}" for r in repair_log)
+            round_log.extend(tr("validation.log_repair_entry", entry=r)
+                             for r in repair_log)
 
         # Step 8: Sweep fully-orphaned buses. After equipment migration
         # and line cleanup, some buses may have nothing connected to
@@ -5621,27 +5585,22 @@ def apply_simplification_level(
         # appear as floating dots on the map. Drop them.
         n_orphan = _drop_fully_orphan_buses(state)
         if n_orphan:
-            round_log.append(f"Dropped {n_orphan} orphan bus(es)")
+            round_log.append(tr("validation.log_dropped_orphan_buses",
+                                n=n_orphan))
             changes += n_orphan
 
         # Snapshot
-        round_log.append(
-            f"→ {len(state.buses)} buses, "
-            f"{len(state.transmission_lines)} lines, "
-            f"{len(state.generators)} gens, "
-            f"{len(state.batteries)} bats, "
-            f"{len(state.transformers)} trafos"
-        )
+        round_log.append(f"→ {_counts()}")
 
         if round_log:
-            all_log.append(f"── Iteration {iteration + 1} ──")
+            all_log.append(tr("validation.log_iteration", n=iteration + 1))
             all_log.extend(f"  {line}" for line in round_log)
 
         if changes == 0:
-            all_log.append(f"Converged after {iteration + 1} iteration(s)")
+            all_log.append(tr("validation.log_converged", n=iteration + 1))
             break
     else:
-        all_log.append(f"Reached max iterations ({max_iterations})")
+        all_log.append(tr("validation.log_max_iterations", n=max_iterations))
 
     # L2+: canonical equivalent-network reduction. After the L0/L1 faithful
     # fixpoint, collapse to a node-level mesh so generation is co-located with
@@ -5652,13 +5611,11 @@ def apply_simplification_level(
             nb_before = len(state.buses)
             n_nodes = reduce_to_node_mesh(state)
             repair_network(state)
-            all_log.append(
-                f"Equivalent-network reduction (PyPSA-style): {nb_before} "
-                f"buses → {n_nodes}-node mesh with {len(state.transmission_lines)} "
-                f"equivalent branch(es); generation + demand co-located per node."
-            )
+            all_log.append(tr("validation.log_reduction", buses=nb_before,
+                              nodes=n_nodes,
+                              branches=len(state.transmission_lines)))
         except Exception as exc:
-            all_log.append(f"Equivalent-network reduction failed: {exc}")
+            all_log.append(tr("validation.log_reduction_failed", error=exc))
 
     # Rebuild visual wire-lines so transformers / equipment render
     # connected to their buses on the map. Simplification frequently
@@ -5667,16 +5624,14 @@ def apply_simplification_level(
     # transformers showing as disconnected dots between 390 buses).
     n_wires = _rebuild_visual_wire_lines(state)
     if n_wires:
-        all_log.append(f"Rebuilt {n_wires} visual wire-line(s)")
+        all_log.append(tr("validation.log_rebuilt_wires", n=n_wires))
 
     # Final validation
     remaining = validate_network_integrity(state)
     if not remaining:
-        all_log.append("Final validation: OK")
+        all_log.append(tr("validation.log_final_ok"))
     else:
-        all_log.append(
-            f"Final validation: {len(remaining)} issue(s) remaining"
-        )
+        all_log.append(tr("validation.log_final_remaining", n=len(remaining)))
         for issue in remaining:
             all_log.append(f"  [{issue.severity}] {issue.message}")
 
@@ -5717,15 +5672,15 @@ def validate_network_integrity(
         if gen.bus not in bus_ids:
             issues.append(NetworkIssue(
                 "error",
-                f"Generator '{gen.name or gid}' references non-existent "
-                f"bus '{gen.bus}'",
+                tr("validation.net_gen_bus_missing", name=gen.name or gid,
+                   bus=gen.bus),
             ))
     for bid, bat in state.batteries.items():
         if bat.bus not in bus_ids:
             issues.append(NetworkIssue(
                 "error",
-                f"Battery '{bat.name or bid}' references non-existent "
-                f"bus '{bat.bus}'",
+                tr("validation.net_bat_bus_missing", name=bat.name or bid,
+                   bus=bat.bus),
             ))
     if hasattr(state, "electrolyzers"):
         for eid, elec in state.electrolyzers.items():
@@ -5733,31 +5688,33 @@ def validate_network_integrity(
             if b and b not in bus_ids:
                 issues.append(NetworkIssue(
                     "error",
-                    f"Electrolyzer '{eid}' references non-existent bus '{b}'",
+                    tr("validation.net_elz_bus_missing", id=eid, bus=b),
                 ))
     for ln in state.transmission_lines:
         if ln.from_bus not in bus_ids:
             issues.append(NetworkIssue(
                 "error",
-                f"Line '{ln.line_id}' from_bus '{ln.from_bus}' does not exist",
+                tr("validation.net_line_from_bus_missing", line=ln.line_id,
+                   bus=ln.from_bus),
             ))
         if ln.to_bus not in bus_ids:
             issues.append(NetworkIssue(
                 "error",
-                f"Line '{ln.line_id}' to_bus '{ln.to_bus}' does not exist",
+                tr("validation.net_line_to_bus_missing", line=ln.line_id,
+                   bus=ln.to_bus),
             ))
-    for idx, tr in enumerate(state.transformers):
-        if tr.from_bus not in bus_ids:
+    for xf in state.transformers:
+        if xf.from_bus not in bus_ids:
             issues.append(NetworkIssue(
                 "error",
-                f"Transformer '{tr.name}' from_bus '{tr.from_bus}' "
-                f"does not exist",
+                tr("validation.net_tr_from_bus_missing", name=xf.name,
+                   bus=xf.from_bus),
             ))
-        if tr.to_bus not in bus_ids:
+        if xf.to_bus not in bus_ids:
             issues.append(NetworkIssue(
                 "error",
-                f"Transformer '{tr.name}' to_bus '{tr.to_bus}' "
-                f"does not exist",
+                tr("validation.net_tr_to_bus_missing", name=xf.name,
+                   bus=xf.to_bus),
             ))
 
     # 2. Self-loop lines (exclude wire lines — equipment→bus self-loops
@@ -5766,7 +5723,8 @@ def validate_network_integrity(
         if ln.from_bus == ln.to_bus and not _is_wire_line(ln):
             issues.append(NetworkIssue(
                 "warning",
-                f"Line '{ln.line_id}' is a self-loop on bus '{ln.from_bus}'",
+                tr("validation.net_line_self_loop", line=ln.line_id,
+                   bus=ln.from_bus),
             ))
 
     # 3. Demand fraction consistency
@@ -5778,8 +5736,8 @@ def validate_network_integrity(
         if total > 0 and abs(total - 1.0) > 0.01:
             issues.append(NetworkIssue(
                 "warning",
-                f"Node '{node.name}' (idx={node.index}): demand_fraction "
-                f"sum = {total:.3f} (expected ~1.0)",
+                tr("validation.net_node_df_sum", name=node.name,
+                   node=node.index, total=f"{total:.3f}"),
             ))
 
     # 4. Empty nodes (no buses)
@@ -5790,7 +5748,8 @@ def validate_network_integrity(
         if node_bus_count.get(node.index, 0) == 0:
             issues.append(NetworkIssue(
                 "error",
-                f"Node '{node.name}' (idx={node.index}) has no buses",
+                tr("validation.net_node_no_buses", name=node.name,
+                   node=node.index),
             ))
 
     # 5. Connectivity: demand buses reachable from generation
@@ -5851,15 +5810,15 @@ def validate_network_integrity(
             bus_list = ", ".join(sorted(comp)[:5])
             issues.append(NetworkIssue(
                 "error",
-                f"Disconnected demand: buses [{bus_list}] have demand "
-                f"(frac={comp_demand_frac:.2f}) but no generation capacity",
+                tr("validation.net_disconnected_demand", buses=bus_list,
+                   frac=f"{comp_demand_frac:.2f}"),
             ))
         elif comp_has_gen and not comp_has_demand and comp_gen_cap > 1.0:
             bus_list = ", ".join(sorted(comp)[:5])
             issues.append(NetworkIssue(
                 "warning",
-                f"Isolated generation: buses [{bus_list}] have "
-                f"{comp_gen_cap:.1f} MW generation but no demand",
+                tr("validation.net_isolated_generation", buses=bus_list,
+                   mw=f"{comp_gen_cap:.1f}"),
             ))
 
     # 6. Capacity adequacy per component with demand
@@ -5899,9 +5858,9 @@ def validate_network_integrity(
                 if total_cap > 0 and peak_in_comp > total_cap * 1.1:
                     issues.append(NetworkIssue(
                         "warning",
-                        f"Capacity deficit in component: peak demand "
-                        f"~{peak_in_comp:.1f} MW > capacity "
-                        f"{total_cap:.1f} MW",
+                        tr("validation.net_capacity_deficit",
+                           peak=f"{peak_in_comp:.1f}",
+                           capacity=f"{total_cap:.1f}"),
                     ))
 
     return issues
@@ -5957,10 +5916,11 @@ def _find_aggregatable_equipment(
             total_rated_power=total_power,
             total_capacity=0.0,
             reduction=len(gids) - 1,
-            description=(
-                f"Absorb {len(gids)-1} {fuel} {target.gen_type} generator(s) "
-                f"into {target.name or target_id} ({total_power:.1f} MW total)"
-            ),
+            description=tr("validation.desc_absorb_generators",
+                           n=len(gids) - 1, fuel=fuel,
+                           gen_type=target.gen_type,
+                           target=target.name or target_id,
+                           power=f"{total_power:.1f}"),
         ))
 
     # Batteries
@@ -5994,11 +5954,11 @@ def _find_aggregatable_equipment(
             total_rated_power=total_power,
             total_capacity=total_cap,
             reduction=len(bids) - 1,
-            description=(
-                f"Absorb {len(bids)-1} {fuel} battery(ies) into "
-                f"{target.name or target_id} "
-                f"({total_power:.1f} MW / {total_cap:.1f} MWh)"
-            ),
+            description=tr("validation.desc_absorb_batteries",
+                           n=len(bids) - 1, fuel=fuel,
+                           target=target.name or target_id,
+                           power=f"{total_power:.1f}",
+                           energy=f"{total_cap:.1f}"),
         ))
 
     return suggestions
@@ -6138,27 +6098,24 @@ def validate_inter_system_links(
             issues.append(ValidationIssue(
                 severity="error", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: from_system {lk.from_system!r} not loaded "
-                    f"(silently dropped by runner)"),
+                message=tr("validation.msg_link_from_system_missing", link=lid,
+                           system=repr(lk.from_system)),
             ))
             continue
         if lk.to_system not in states_by_name:
             issues.append(ValidationIssue(
                 severity="error", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: to_system {lk.to_system!r} not loaded "
-                    f"(silently dropped by runner)"),
+                message=tr("validation.msg_link_to_system_missing", link=lid,
+                           system=repr(lk.to_system)),
             ))
             continue
         if lk.from_system == lk.to_system:
             issues.append(ValidationIssue(
                 severity="error", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: from_system == to_system ({lk.from_system!r}); "
-                    "use an intra-system transmission line instead"),
+                message=tr("validation.msg_link_same_system", link=lid,
+                           system=repr(lk.from_system)),
             ))
             continue
 
@@ -6170,17 +6127,15 @@ def validate_inter_system_links(
             issues.append(ValidationIssue(
                 severity="error", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: from_node {lk.from_node} out of range "
-                    f"[0, {len(from_st.nodes)})"),
+                message=tr("validation.msg_link_from_node_range", link=lid,
+                           node=lk.from_node, n=len(from_st.nodes)),
             ))
         if lk.to_node < 0 or lk.to_node >= len(to_st.nodes):
             issues.append(ValidationIssue(
                 severity="error", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: to_node {lk.to_node} out of range "
-                    f"[0, {len(to_st.nodes)})"),
+                message=tr("validation.msg_link_to_node_range", link=lid,
+                           node=lk.to_node, n=len(to_st.nodes)),
             ))
 
         # Non-negative scalars
@@ -6192,7 +6147,8 @@ def validate_inter_system_links(
                 issues.append(ValidationIssue(
                     severity="error", category="Inter-System",
                     element_type="inter_system_link", element_id=lid,
-                    message=f"Link {lid}: {fname}={val} must be ≥ 0",
+                    message=tr("validation.msg_link_negative", link=lid,
+                               field=fname, value=val),
                 ))
 
         # Loss factor in [0, 1]
@@ -6201,7 +6157,7 @@ def validate_inter_system_links(
             issues.append(ValidationIssue(
                 severity="error", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=f"Link {lid}: loss_factor={lf} must be in [0, 1]",
+                message=tr("validation.msg_link_loss_factor", link=lid, value=lf),
             ))
 
         # Endpoint bus references (when persisted) resolve in the right state
@@ -6210,20 +6166,20 @@ def validate_inter_system_links(
                 issues.append(ValidationIssue(
                     severity="warning", category="Inter-System",
                     element_type="inter_system_link", element_id=lid,
-                    message=(
-                        f"Link {lid}: from_endpoint bus "
-                        f"{lk.from_endpoint.element_id!r} not in "
-                        f"system {lk.from_system!r} (polyline may not render)"),
+                    message=tr("validation.msg_link_from_endpoint_missing",
+                               link=lid,
+                               bus=repr(lk.from_endpoint.element_id),
+                               system=repr(lk.from_system)),
                 ))
         if lk.to_endpoint and lk.to_endpoint.element_type == "bus":
             if lk.to_endpoint.element_id not in to_st.buses:
                 issues.append(ValidationIssue(
                     severity="warning", category="Inter-System",
                     element_type="inter_system_link", element_id=lid,
-                    message=(
-                        f"Link {lid}: to_endpoint bus "
-                        f"{lk.to_endpoint.element_id!r} not in "
-                        f"system {lk.to_system!r} (polyline may not render)"),
+                    message=tr("validation.msg_link_to_endpoint_missing",
+                               link=lid,
+                               bus=repr(lk.to_endpoint.element_id),
+                               system=repr(lk.to_system)),
                 ))
 
         # Capacity for an active transmission link sanity-check
@@ -6231,19 +6187,14 @@ def validate_inter_system_links(
             issues.append(ValidationIssue(
                 severity="warning", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: capacity_mw is 0 — the link will exist "
-                    "in the topology but carry no power; set capacity or "
-                    "max_investment > 0"),
+                message=tr("validation.msg_link_zero_capacity", link=lid),
             ))
 
         if lk.link_type == "fuel_route" and not (lk.fuel or "").strip():
             issues.append(ValidationIssue(
                 severity="warning", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: fuel route has no fuel — the run "
-                    "ignores it; choose the fuel it carries"),
+                message=tr("validation.msg_link_route_no_fuel", link=lid),
             ))
 
         # Duplicate detection (same ordered endpoints and kind: a power line
@@ -6256,14 +6207,11 @@ def validate_inter_system_links(
             issues.append(ValidationIssue(
                 severity="warning", category="Inter-System",
                 element_type="inter_system_link", element_id=lid,
-                message=(
-                    f"Link {lid}: duplicate of an earlier "
-                    f"{'fuel route' if is_fuel else 'link'} "
-                    f"({lk.from_system}:{lk.from_node} → "
-                    f"{lk.to_system}:{lk.to_node}); "
-                    + ("merge the two routes into one" if is_fuel else
-                       "merged adjacency uses max() so the second entry "
-                       "is silently ignored")),
+                message=tr("validation.msg_link_duplicate_route" if is_fuel
+                           else "validation.msg_link_duplicate",
+                           link=lid,
+                           ends=(f"{lk.from_system}:{lk.from_node} → "
+                                 f"{lk.to_system}:{lk.to_node}")),
             ))
         else:
             seen.add(key)

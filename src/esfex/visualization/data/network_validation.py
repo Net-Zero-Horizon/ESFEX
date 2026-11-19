@@ -400,6 +400,8 @@ class NetworkValidationReport:
 def validate_network(state, peak_demand_mw: float = 0.0,
                      ref_capacity_mw: float | None = None) -> NetworkValidationReport:
     """Run the statistical (3) + operability (2) checks and collect red flags."""
+    from esfex.visualization.i18n import tr
+
     rep = NetworkValidationReport()
     rep.capacity_by_fuel = capacity_by_fuel(state)
     rep.total_capacity_mw = sum(rep.capacity_by_fuel.values())
@@ -414,31 +416,28 @@ def validate_network(state, peak_demand_mw: float = 0.0,
     # Red flags.
     dup_mw = sum(d["total_mw"] - d["total_mw"] / d["count"] for d in rep.duplicates)
     if rep.duplicates:
-        rep.flags.append(
-            f"{len(rep.duplicates)} probable duplicate plant(s) inflating "
-            f"capacity by ~{dup_mw:.0f} MW (same plant counted more than once).")
+        rep.flags.append(tr("validation.flag_duplicates", n=len(rep.duplicates),
+                            mw=f"{dup_mw:.0f}"))
     if rep.reserve_margin is not None:
         if rep.reserve_margin < 0:
-            rep.flags.append(
-                f"Installed capacity ({rep.total_capacity_mw:.0f} MW) is BELOW "
-                f"peak demand ({peak_demand_mw:.0f} MW) — the system cannot "
-                "meet load (reserve margin {:.0%}).".format(rep.reserve_margin))
+            rep.flags.append(tr("validation.flag_capacity_below_peak",
+                                capacity=f"{rep.total_capacity_mw:.0f}",
+                                peak=f"{peak_demand_mw:.0f}",
+                                margin=f"{rep.reserve_margin:.0%}"))
         elif rep.reserve_margin > 1.0:
-            rep.flags.append(
-                f"Reserve margin is {rep.reserve_margin:.0%} — implausibly high "
-                "for a real system (typically 15–40%); capacity is likely "
-                "over-counted (duplicates / non-operational units).")
+            rep.flags.append(tr("validation.flag_high_reserve_margin",
+                                margin=f"{rep.reserve_margin:.0%}"))
     if ref_capacity_mw and ref_capacity_mw > 0:
         ratio = rep.total_capacity_mw / ref_capacity_mw
         if ratio > 1.3 or ratio < 0.7:
-            rep.flags.append(
-                f"Installed capacity {rep.total_capacity_mw:.0f} MW is "
-                f"{ratio:.1f}× the reference {ref_capacity_mw:.0f} MW.")
+            rep.flags.append(tr("validation.flag_reference_ratio",
+                                capacity=f"{rep.total_capacity_mw:.0f}",
+                                ratio=f"{ratio:.1f}",
+                                reference=f"{ref_capacity_mw:.0f}"))
     if rep.feasibility and not rep.feasibility.get("feasible", True):
         fz = rep.feasibility
-        rep.flags.append(
-            f"Transmission bottleneck: only {fz['deliverable_mw']:.0f} of "
-            f"{fz['peak_demand_mw']:.0f} MW peak demand is deliverable — "
-            f"{fz['unservable_mw']:.0f} MW that generation could serve is "
-            "stranded behind under-capacity corridors (max-flow < demand).")
+        rep.flags.append(tr("validation.flag_bottleneck",
+                            deliverable=f"{fz['deliverable_mw']:.0f}",
+                            peak=f"{fz['peak_demand_mw']:.0f}",
+                            unservable=f"{fz['unservable_mw']:.0f}"))
     return rep
