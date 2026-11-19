@@ -186,7 +186,8 @@ export add_investment_constraints!, add_budget_constraints!
 export add_retirement_cascade_constraints!, add_re_target_constraints!
 export add_re_growth_cap!, define_re_share!
 export add_capacity_adequacy_constraints!, add_transmission_symmetry_constraints!
-export build_master_objective!, extract_master_solution, optimize_master!, optimize_dispatch!
+export build_master_objective!, extract_master_solution, optimize_master!, optimize_dispatch!,
+       loss_repair_bounds
 
 # Fuel block of the master (#89)
 export MasterFuelInput, MasterFuelVariables, add_master_fuel_day!

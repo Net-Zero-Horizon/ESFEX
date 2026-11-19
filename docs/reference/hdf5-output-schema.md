@@ -257,6 +257,20 @@ Node axes are at node level: when the operational network has buses that differ 
 | `load_shed` | float | Total unserved energy (MWh) |
 | `transmission_losses` | float | Energy lost on the lines (MWh), the sum of `line_losses` × `temporal_resolution_hours` |
 | `master_re_target` | float | RE penetration target from the master problem for this year |
+| `master_loss_repair_lower_bound` | float | Objective ($) of the first solve of the master that planned this year, with the PWL loss model: lines may lose more than the PWL loss of their flow, a relaxation, so a lower bound of the master with exact PWL losses. The same value for every year a solve planned (all years of a perfect-foresight master). Written when the master has PWL or linear losses and its first solve was optimal; not under MGA or Benders |
+| `master_loss_repair_objective` | float | Objective ($) of that master after the loss repair: an upper bound of it, within the 2 % tolerance of the linearised losses |
+| `master_loss_repair_gap` | float | (objective − lower bound) / \|objective\|, 0 when no line over-lost |
+| `master_loss_repair_rounds` | int | Repair rounds (re-solves) of that solve |
+| `master_loss_repair_linearised` | int | Line-steps held in one direction at the end |
+| `master_loss_repair_released` | int | Held line-steps the direction check released |
+| `dispatch_loss_repair_lower_bound` | float | Sum over the year's dispatch windows of the objective ($) of their first, PWL, solve (whole windows, look-ahead steps included, so not comparable to `total_cost`). Written when the dispatch has PWL or linear losses |
+| `dispatch_loss_repair_objective` | float | Sum over the windows of their repaired objective ($), on the same steps |
+| `dispatch_loss_repair_gap` | float | Gap of the two sums |
+| `dispatch_loss_repair_gap_max` | float | Largest gap of a window |
+| `dispatch_loss_repair_rounds`, `dispatch_loss_repair_linearised`, `dispatch_loss_repair_released` | int | Summed over the windows, as for the master |
+| `dispatch_loss_repair_windows`, `dispatch_loss_repair_windows_repaired` | int | Windows with bounds, and those with at least one repair round |
+
+See [Bounds of the repair](../formulation/dc-power-flow.md#bounds-of-the-repair). Files written before this version have none of the `*_loss_repair_*` attributes.
 
 Investment and retirement decisions of the master problem for this year are stored as scalar attributes. Keys use 0-based technology, node and generator *indices*, not names:
 
