@@ -36,6 +36,7 @@ class Orchestrator:
 | `state` | `Optional[SimulationState]` | Current simulation state (set during `run()`) |
 | `results` | `list[YearResults]` | Accumulated results across years |
 | `master_solution` | `Optional[dict]` | Master problem decisions after `run(master_only=True)` (`investments`, `retirements`, `cumulative_capacities`, `re_targets`, each keyed by year); `None` otherwise |
+| `warnings_summary` | `Optional[WarningsSummary]` | After `run()` (also a failed one): the warnings and errors the run logged, grouped by kind (`total`, `kinds`, `groups`, `text()`, `to_dict()`; see `esfex.api.diagnostics`) |
 
 When development zones are configured, `run()` replaces `primary_system` and `master_system` with the zone-expanded systems.
 
@@ -88,6 +89,8 @@ In `unit_commitment` mode only the first year is run, whatever `years` is.
 - Raises `RunAbortedError` (a `RuntimeError`, in `esfex.runner`) if the Master Problem finds no plan; plugins are torn down and nothing is dispatched. It used to return an empty list, so `esfex run` reported success and exited 0.
 - Raises `RuntimeError` if no operational window of a year solves.
 - Any other exception raised while running a year is logged and re-raised.
+
+**Warnings:** the WARNING and ERROR records logged during the run (the Julia models' `@warn` lines included) are grouped by kind. At the end, after a failure too, `run()` logs a summary as a milestone (shown by the `basic` console, which hides warnings), keeps it in `warnings_summary` and writes it to [`/diagnostics/warnings`](../reference/hdf5-output-schema.md#diagnosticswarnings). Inside `esfex run` the collection starts with the configuration load and those warnings are included.
 
 **Workflow** (plugins are already loaded by the constructor):
 
