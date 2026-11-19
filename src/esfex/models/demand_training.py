@@ -212,6 +212,83 @@ def _temperature_lag_features(temp_hourly: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
+def hourly_feature_columns(
+    iso3: str,
+    year: int,
+    latitude: float,
+    longitude: float,
+    temperature: np.ndarray,
+    *,
+    log_gdp_per_cap: float,
+    log_pop_density: float,
+    urbanization: float,
+    hdd: Optional[np.ndarray] = None,
+    cdd: Optional[np.ndarray] = None,
+    hdd_base: float = 18.0,
+    cdd_base: float = 24.0,
+) -> dict[str, Any]:
+    """Every column of ``FEATURE_COLS`` but ``country_id`` for one year of a
+    series at (*latitude*, *longitude*) in country *iso3*.
+
+    *temperature* is the year's hourly temperature (°C) on the local civil
+    time of the series, the clock of the calendar features (29 February
+    dropped). *hdd*/*cdd* default to the degree hours of *temperature*
+    below/above the bases. The static features are scalars; the others are
+    arrays of ``len(temperature)``. The training dataset
+    (:func:`build_unified_dataset`) and the inference features
+    (``demand_ml.build_hourly_features``) are both built here, so the model
+    sees at inference the features it was trained on.
+    """
+    temperature = np.asarray(temperature, dtype=np.float64)
+    n = len(temperature)
+    if hdd is None:
+        hdd = np.maximum(hdd_base - temperature, 0.0)
+    if cdd is None:
+        cdd = np.maximum(temperature - cdd_base, 0.0)
+
+    # Rows are local wall hours of the series' location, and so are the
+    # calendar features (the real date of each row, 29 February skipped).
+    stamps = year_row_dates(year, n)
+    hour_of_day = np.asarray(stamps.hour, dtype=np.int64)
+    dow = np.asarray(stamps.dayofweek, dtype=np.int64)
+    month = np.asarray(stamps.month, dtype=np.int64) - 1
+
+    h_sin, h_cos = _cyclical(hour_of_day.astype(float), 24.0)
+    d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
+    m_sin, m_cos = _cyclical(month.astype(float), 12.0)
+
+    is_hday, d_next_hday, d_prev_hday = _holiday_features(iso3, year, hours=n)
+
+    return {
+        # Static pixel features (constant across the rows of the year)
+        "log_gdp_per_cap": log_gdp_per_cap,
+        "log_pop_density": log_pop_density,
+        "urbanization": urbanization,
+        # Time-varying thermal features
+        "temperature": temperature,
+        "hdd": np.asarray(hdd)[:n],
+        "cdd": np.asarray(cdd)[:n],
+        # Calendar features
+        "hour_of_day": hour_of_day,
+        "month": month,
+        "day_of_week": dow,
+        "hour_sin": h_sin,
+        "hour_cos": h_cos,
+        "dow_sin": d_sin,
+        "dow_cos": d_cos,
+        "month_sin": m_sin,
+        "month_cos": m_cos,
+        "is_weekend": (dow >= 5).astype(float),
+        "is_holiday": is_hday,
+        "days_to_next_holiday": d_next_hday,
+        "days_from_prev_holiday": d_prev_hday,
+        "latitude": latitude,
+        "longitude": longitude,
+        # Temperature lag features (daily-resolution, broadcast to hourly)
+        **_temperature_lag_features(temperature),
+    }
+
+
 def build_unified_dataset(
     dataset_dir: Path,
     hdd_base: float = 18.0,
@@ -350,62 +427,25 @@ def build_unified_dataset(
             hdd_base=hdd_base, cdd_base=cdd_base,
             zone=zone,
         )
-        temp = feats.temperature
-
         # Parquet rows are local wall hours of the series' location
         # (demand_dataset), and so are the calendar features; the
         # temperature is that of the same instants.
         n = 8760
-        hours = np.arange(n)
-        stamps = year_row_dates(yr, n)
-        hour_of_day = np.asarray(stamps.hour, dtype=np.int64)
-        dow = np.asarray(stamps.dayofweek, dtype=np.int64)
-        month = np.asarray(stamps.month, dtype=np.int64) - 1
-
-        h_sin, h_cos = _cyclical(hour_of_day.astype(float), 24.0)
-        d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
-        m_sin, m_cos = _cyclical(month.astype(float), 12.0)
-
-        is_hday, d_next_hday, d_prev_hday = _holiday_features(iso3, yr, hours=n)
-
-        # Temperature lag features (daily-res, broadcast to hourly)
-        lag_feats = _temperature_lag_features(feats.temperature[:n])
-
         row = pd.DataFrame({
             "group_id": (f"{iso3}_{zone}_{yr}" if zone else f"{iso3}_{yr}"),
             "country": iso3,
             "zone": zone if zone else "",
             "year": yr,
-            "time_idx": hours,
+            "time_idx": np.arange(n),
             TARGET_COL: shape,
             "demand_mw": demand[:n],
             "annual_mean_mw": annual_mean,
-            # Static pixel features (constant across the 8760 rows of this CY)
-            "log_gdp_per_cap": feats.log_gdp_per_cap,
-            "log_pop_density": feats.log_pop_density,
-            "urbanization": feats.urbanization,
-            # Time-varying thermal features
-            "temperature": feats.temperature[:n],
-            "hdd": feats.hdd[:n],
-            "cdd": feats.cdd[:n],
-            # Calendar features
-            "hour_of_day": hour_of_day,
-            "month": month,
-            "day_of_week": dow,
-            "hour_sin": h_sin,
-            "hour_cos": h_cos,
-            "dow_sin": d_sin,
-            "dow_cos": d_cos,
-            "month_sin": m_sin,
-            "month_cos": m_cos,
-            "is_weekend": (dow >= 5).astype(float),
-            "is_holiday": is_hday,
-            "days_to_next_holiday": d_next_hday,
-            "days_from_prev_holiday": d_prev_hday,
-            "latitude": lat,
-            "longitude": lon,
-            # Temperature lag features (daily-resolution, broadcast to hourly)
-            **lag_feats,
+            **hourly_feature_columns(
+                iso3, yr, lat, lon, feats.temperature[:n],
+                log_gdp_per_cap=feats.log_gdp_per_cap,
+                log_pop_density=feats.log_pop_density,
+                urbanization=feats.urbanization,
+                hdd=feats.hdd[:n], cdd=feats.cdd[:n]),
         })
         dfs.append(row)
 
