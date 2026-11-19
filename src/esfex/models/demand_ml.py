@@ -177,6 +177,8 @@ def build_hourly_features(
                 f"temperature_hourly has {len(temp)} hours; the demand model "
                 f"needs a year of {hpy}.")
         temp = temp[:hpy]
+        if not np.isfinite(temp).all():
+            raise ValueError("temperature_hourly has missing (non-finite) hours.")
 
     statics = dict(static_features if static_features is not None
                    else static_features_at(latitude, longitude, base_year))
